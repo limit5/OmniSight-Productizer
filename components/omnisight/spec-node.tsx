@@ -127,57 +127,6 @@ interface SpecNodeProps {
   onRemoveItem?: (sectionKey: string, itemKey: string) => void
 }
 
-const sampleSpec: SpecValue[] = [
-  {
-    key: "hardware",
-    type: "hardware",
-    value: [
-      { key: "soc", value: "RK3588", type: "hardware", editable: true, options: ["RK3588", "RK3568", "RK3566", "RK3399", "Amlogic_A311D", "Amlogic_S905X4", "BCM2712", "i.MX8M_Plus", "Jetson_Orin_Nano"] },
-      { key: "cpu_cores", value: "8-core (4xA76+4xA55)", type: "hardware", editable: true, options: ["4-core (4xA55)", "6-core (2xA76+4xA55)", "8-core (4xA76+4xA55)", "8-core (4xA78+4xA55)"] },
-      { key: "npu", value: "6_TOPS", type: "hardware", editable: true, options: ["None", "0.8_TOPS", "1_TOPS", "2_TOPS", "6_TOPS", "8_TOPS", "40_TOPS"] },
-      { key: "memory", value: "8GB_LPDDR4X", type: "hardware", editable: true, options: ["2GB_LPDDR4", "4GB_LPDDR4", "4GB_LPDDR4X", "8GB_LPDDR4X", "16GB_LPDDR5", "32GB_LPDDR5"] },
-      { key: "storage", value: "64GB_eMMC", type: "hardware", editable: true, options: ["8GB_eMMC", "16GB_eMMC", "32GB_eMMC", "64GB_eMMC", "128GB_eMMC", "256GB_NVMe", "512GB_NVMe"] },
-      { key: "usb", value: "USB3.0x2_USB2.0x2", type: "hardware", editable: true, options: ["USB2.0x1", "USB2.0x2", "USB3.0x1", "USB3.0x2", "USB3.0x2_USB2.0x2", "USB3.1x1_USB2.0x2", "USB-C_3.2x1"] },
-      { key: "ethernet", value: "GbE_RTL8211F", type: "hardware", editable: true, options: ["100Mbps", "GbE_RTL8211F", "GbE_RTL8125", "2.5GbE_RTL8125BG", "Dual_GbE", "PoE_GbE"] },
-      { key: "wifi", value: "WiFi6_AX200", type: "hardware", editable: true, options: ["None", "WiFi4_RTL8188", "WiFi5_RTL8822", "WiFi6_AX200", "WiFi6_AX210", "WiFi6E_AX211", "WiFi7_BE200"] },
-      { key: "bluetooth", value: "BT5.2", type: "hardware", editable: true, options: ["None", "BT4.2", "BT5.0", "BT5.2", "BT5.3"] },
-      { key: "sensor", value: "Sony_IMX335", type: "hardware", editable: true, options: ["Sony_IMX335", "Sony_IMX678", "Sony_IMX585", "OmniVision_OV5693", "Samsung_S5K3L6"] },
-      { key: "resolution", value: "2592x1944", type: "hardware", editable: true, options: ["1920x1080", "2592x1944", "3840x2160", "4096x2160"] },
-      { key: "fps_target", value: 30, type: "hardware", editable: true, step: 5, min: 15, max: 120 },
-      { key: "lens_mount", value: "M12", type: "hardware", editable: true, options: ["M12", "CS", "C", "S-Mount"] },
-      { key: "ir_cut", value: true, type: "hardware", editable: true },
-    ]
-  },
-  {
-    key: "firmware",
-    type: "software",
-    value: [
-      { key: "isp_pipeline", value: "v3.2.1", type: "software" },
-      { key: "encoder", value: "H.265_HEVC", type: "software", editable: true, options: ["H.264_AVC", "H.265_HEVC", "MJPEG"] },
-      { key: "bitrate_max", value: 8000, type: "software", editable: true, step: 1000, min: 1000, max: 50000 },
-      { key: "ai_model", value: "YOLOv8n_INT8", type: "software", editable: true, options: ["YOLOv8n_INT8", "YOLOv8s_INT8", "MobileNetV3", "Custom"] },
-    ]
-  },
-  {
-    key: "network",
-    type: "config",
-    value: [
-      { key: "protocol", value: "RTSP", type: "config", editable: true, options: ["RTSP", "RTMP", "WebRTC", "HLS"] },
-      { key: "port", value: 554, type: "config", editable: true, step: 1, min: 1, max: 65535 },
-      { key: "encryption", value: "TLS_1.3", type: "config" },
-    ]
-  },
-  {
-    key: "requirements",
-    type: "software",
-    value: [
-      { key: "customer_id", value: "ACME_CORP", type: "software" },
-      { key: "delivery_date", value: "2025-02-15", type: "software" },
-      { key: "certification", value: "FCC_CE_RoHS", type: "software" },
-    ]
-  }
-]
-
 function getTypeColor(type: string): string {
   switch (type) {
     case "hardware": return "var(--hardware-orange)"
@@ -535,7 +484,7 @@ export function SpecNode({
   onAddItem,
   onRemoveItem
 }: SpecNodeProps) {
-  const [internalSpec, setInternalSpec] = useState<SpecValue[]>(sampleSpec)
+  const [internalSpec, setInternalSpec] = useState<SpecValue[]>([])
   const [showAddSectionMenu, setShowAddSectionMenu] = useState(false)
   
   // Use external spec if provided, otherwise use internal state

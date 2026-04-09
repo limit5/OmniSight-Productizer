@@ -67,6 +67,7 @@ interface OrchestratorAIProps {
   onCompleteTask?: (taskId: string) => void
   externalMessages?: OrchestratorMessage[]
   onSendCommand?: (command: string) => void
+  tokenUsage?: import("./token-usage-stats").ModelTokenUsage[]
 }
 
 // Helper to get agent icon component
@@ -108,16 +109,17 @@ function getStatusLabel(status: AgentStatus): string {
   }
 }
 
-export function OrchestratorAI({ 
-  agents, 
-  tasks, 
-  onAssignTask, 
-  onSpawnAgent, 
+export function OrchestratorAI({
+  agents,
+  tasks,
+  onAssignTask,
+  onSpawnAgent,
   onForceAssign,
   onUpdateAgentStatus,
   onCompleteTask,
   externalMessages = [],
-  onSendCommand
+  onSendCommand,
+  tokenUsage,
 }: OrchestratorAIProps) {
   const [messages, setMessages] = useState<OrchestratorMessage[]>([
     {
@@ -524,7 +526,7 @@ export function OrchestratorAI({
       </div>
       
       {/* Token Usage Statistics */}
-      <TokenUsageStats />
+      <TokenUsageStats externalUsage={tokenUsage} />
       
       {/* Suggestions Panel */}
       {pendingSuggestions.length > 0 && (

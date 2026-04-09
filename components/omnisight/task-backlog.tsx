@@ -58,6 +58,7 @@ export interface ChatMessage {
 
 interface TaskBacklogProps {
   agents: Agent[]
+  tasks?: Task[]
   onAssignTask?: (taskId: string, agentId: string) => void
   onCreateAgent?: (type: Agent["type"], taskId?: string) => void
   onUpdateAgentStatus?: (agentId: string, status: AgentStatus, thoughtChain?: string) => void
@@ -129,61 +130,27 @@ function analyzeTask(task: Task, agents: Agent[]): { analysis: string; suggested
   return { analysis, suggestedType, existingAgent }
 }
 
-// Sample tasks
-const sampleTasks: Task[] = [
-  {
-    id: "task-001",
-    title: "Build IMX335 sensor driver",
-    description: "Compile and flash the IMX335 sensor driver for the new camera module",
-    priority: "high",
-    status: "in_progress",
-    assignedAgentId: "fw-agent",
-    createdAt: "14:20:00",
-    suggestedAgentType: "firmware"
-  },
-  {
-    id: "task-002", 
-    title: "Optimize H.265 encoder bitrate",
-    description: "Tune encoder parameters to achieve 8Mbps target while maintaining quality",
-    priority: "medium",
-    status: "completed",
-    assignedAgentId: "codec-agent",
-    createdAt: "14:15:00",
-    completedAt: "14:32:14",
-    suggestedAgentType: "software"
-  },
-  {
-    id: "task-003",
-    title: "Validate power consumption",
-    description: "Run power profiling tests on the complete camera pipeline",
-    priority: "high",
-    status: "assigned",
-    assignedAgentId: "validator-agent",
-    createdAt: "14:10:00",
-    suggestedAgentType: "validator"
-  },
-  {
-    id: "task-004",
-    title: "Generate compliance report",
-    priority: "low",
-    status: "backlog",
-    createdAt: "14:05:00",
-    suggestedAgentType: "reporter"
-  }
-]
+// Empty defaults — real data from backend via useEngine
+const emptyTasks: Task[] = []
 
-// Sample chat history
 const initialChatHistory: ChatMessage[] = [
   {
     id: "msg-sys-1",
     role: "system",
-    content: "ORCHESTRATOR initialized. Ready to analyze tasks and coordinate agent assignments.",
-    timestamp: "14:00:00"
+    content: "Task backlog initialized. Awaiting data from backend...",
+    timestamp: "--:--:--"
   }
 ]
 
-export function TaskBacklog({ agents, onAssignTask, onCreateAgent, onUpdateAgentStatus }: TaskBacklogProps) {
-  const [tasks, setTasks] = useState<Task[]>(sampleTasks)
+export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCreateAgent, onUpdateAgentStatus }: TaskBacklogProps) {
+  const [tasks, setTasks] = useState<Task[]>(externalTasks ?? emptyTasks)
+
+  // Sync when external tasks change (from backend)
+  useEffect(() => {
+    if (externalTasks && externalTasks.length > 0) {
+      setTasks(externalTasks)
+    }
+  }, [externalTasks])
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(initialChatHistory)
   const [inputValue, setInputValue] = useState("")
   const [newTaskTitle, setNewTaskTitle] = useState("")

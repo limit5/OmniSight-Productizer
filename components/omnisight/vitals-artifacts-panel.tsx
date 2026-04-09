@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, Signal, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2 } from "lucide-react"
+import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, Signal, Wifi, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2 } from "lucide-react"
 
 export type StreamType = "uvc" | "rtsp"
 
@@ -38,66 +38,21 @@ interface LogEntry {
   level: "info" | "warn" | "error"
 }
 
-const sampleVitals: VitalsData = {
-  fps: 29.7,
-  fpsTarget: 30,
-  latency: 42,
-  bitrate: 7.8,
-  resolution: "2592x1944",
-  encoding: "H.265",
-  protocol: "UVC"
+// Defaults used only when backend is not connected (empty = no streams detected)
+const emptyVitals: VitalsData = {
+  fps: 0,
+  fpsTarget: 0,
+  latency: 0,
+  bitrate: 0,
+  resolution: "--",
+  encoding: "--",
+  protocol: "--"
 }
 
-const defaultStreamSources: StreamSource[] = [
-  { 
-    id: "uvc-001", 
-    name: "IMX335_CAM_01", 
-    type: "uvc", 
-    deviceId: "usb-001",
-    status: "online" 
-  },
-  { 
-    id: "uvc-002", 
-    name: "OV5647_CAM_02", 
-    type: "uvc", 
-    deviceId: "usb-003",
-    status: "offline" 
-  },
-  { 
-    id: "rtsp-001", 
-    name: "AXIS_P3245", 
-    type: "rtsp", 
-    url: "rtsp://192.168.1.100:554/stream1",
-    status: "online" 
-  },
-  { 
-    id: "rtsp-002", 
-    name: "HIKVISION_DS2CD", 
-    type: "rtsp", 
-    url: "rtsp://192.168.1.101:554/live",
-    status: "online" 
-  },
-  { 
-    id: "rtsp-003", 
-    name: "DAHUA_IPC", 
-    type: "rtsp", 
-    url: "rtsp://192.168.1.102:554/cam/realmonitor",
-    status: "connecting" 
-  },
-]
-
-const sampleArtifacts: Artifact[] = [
-  { id: "1", name: "firmware_manifest_v3.2.1.pdf", type: "pdf", timestamp: "00:38:12", size: "2.4 MB" },
-  { id: "2", name: "test_report_IMX335.md", type: "markdown", timestamp: "00:35:44", size: "128 KB" },
-  { id: "3", name: "calibration_data.json", type: "json", timestamp: "00:32:08", size: "64 KB" },
-]
-
-const sampleLogs: LogEntry[] = [
-  { timestamp: "00:42:15", message: "Parsing sensor manifest changes...", level: "info" },
-  { timestamp: "00:42:14", message: "Detected spec modification: sensor -> Sony_IMX335", level: "warn" },
-  { timestamp: "00:42:12", message: "Sync pulse received from INVOKE", level: "info" },
-  { timestamp: "00:42:10", message: "Reporter analysis complete", level: "info" },
-  { timestamp: "00:42:08", message: "Generating diff report...", level: "info" },
+const noStreamSources: StreamSource[] = []
+const noArtifacts: Artifact[] = []
+const noLogs: LogEntry[] = [
+  { timestamp: "--:--:--", message: "Awaiting backend connection...", level: "info" }
 ]
 
 interface StreamPreviewProps {
@@ -107,9 +62,9 @@ interface StreamPreviewProps {
   onSourceChange?: (sourceId: string) => void
 }
 
-function StreamPreview({ 
-  vitals, 
-  sources = defaultStreamSources,
+function StreamPreview({
+  vitals,
+  sources = noStreamSources,
   selectedSourceId,
   onSourceChange
 }: StreamPreviewProps) {
@@ -414,18 +369,48 @@ function ReporterVortex({ logs, artifacts }: { logs: LogEntry[]; artifacts: Arti
       
       {/* Log Stream */}
       <div className="flex-1 overflow-auto p-3 space-y-1 min-h-0">
-        {logs.map((log, i) => (
-          <div key={i} className="flex items-start gap-2 font-mono text-xs">
-            <span className="text-[var(--muted-foreground)] shrink-0">{log.timestamp}</span>
-            <span className={
-              log.level === "warn" ? "text-[var(--hardware-orange)]" :
-              log.level === "error" ? "text-[var(--critical-red)]" :
-              "text-[var(--foreground)]"
-            }>
-              {log.message}
-            </span>
-          </div>
-        ))}
+        {logs.map((log, i) => {
+          // Tag-based color extraction
+          const tagMatch = log.message.match(/^\[([A-Z]+)\]/)
+          const tag = tagMatch?.[1] || ""
+
+          // Level color (highest priority)
+          const levelColor =
+            log.level === "error" ? "text-[var(--critical-red)]" :
+            log.level === "warn" ? "text-[var(--hardware-orange)]" :
+            ""
+
+          // Tag color (when level is info)
+          const tagColor = !levelColor ? (
+            tag === "AGENT"     ? "text-[var(--neural-blue)]" :
+            tag === "TOOL"      ? "text-[var(--validation-emerald)]" :
+            tag === "PIPELINE"  ? "text-[var(--artifact-purple)]" :
+            tag === "TASK"      ? "text-[var(--hardware-orange)]" :
+            tag === "WORKSPACE" ? "text-cyan-400" :
+            tag === "DOCKER"    ? "text-sky-400" :
+            tag === "INVOKE"    ? "text-yellow-300" :
+            tag === "REPORT"    ? "text-pink-400" :
+            "text-[var(--foreground)] opacity-70"
+          ) : ""
+
+          // Split message into tag part + rest for dual coloring
+          const msgBody = tagMatch ? log.message.slice(tagMatch[0].length) : log.message
+          const tagLabel = tagMatch?.[0] || ""
+
+          return (
+            <div key={i} className="flex items-start gap-2 font-mono text-xs leading-relaxed">
+              <span className="text-[var(--muted-foreground)] shrink-0 opacity-60">{log.timestamp}</span>
+              {levelColor ? (
+                <span className={levelColor}>{log.message}</span>
+              ) : (
+                <span>
+                  {tagLabel && <span className={`${tagColor} font-semibold`}>{tagLabel}</span>}
+                  <span className="text-[var(--foreground)] opacity-80">{msgBody}</span>
+                </span>
+              )}
+            </div>
+          )
+        })}
       </div>
       
       {/* Artifacts */}
@@ -647,10 +632,10 @@ function AddFeedButton({
 }
 
 export function VitalsArtifactsPanel({ 
-  vitals = sampleVitals, 
-  logs = sampleLogs,
-  artifacts = sampleArtifacts,
-  streamSources = defaultStreamSources,
+  vitals = emptyVitals,
+  logs = noLogs,
+  artifacts = noArtifacts,
+  streamSources = noStreamSources,
   selectedStreamId,
   onStreamChange
 }: VitalsArtifactsPanelProps) {

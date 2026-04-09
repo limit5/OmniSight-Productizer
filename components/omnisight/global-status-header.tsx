@@ -17,11 +17,11 @@ interface StatusHeaderProps {
 }
 
 export function GlobalStatusHeader({
-  finished = 32,
-  total = 48,
-  inProgress = 3,
-  wslStatus = "OK",
-  usbStatus = "Dev_01 USB Attached",
+  finished = 0,
+  total = 0,
+  inProgress = 0,
+  wslStatus = "OFFLINE",
+  usbStatus = "Detecting...",
   onEmergencyStop,
   onResume,
   isHalted = false,

@@ -45,53 +45,22 @@ interface HostInfo {
   uptime: string
 }
 
+// Placeholder — replaced by real data from backend GET /system/info
 const defaultHostInfo: HostInfo = {
-  hostname: "OMNI-DEV-01",
-  os: "Ubuntu 22.04 LTS (WSL2)",
-  kernel: "5.15.146.1-microsoft-standard-WSL2",
-  arch: "x86_64",
-  cpuModel: "AMD Ryzen 9 5900X",
-  cpuCores: 12,
-  cpuUsage: 34,
-  memoryTotal: 32768,
-  memoryUsed: 12456,
-  uptime: "4d 12h 34m"
+  hostname: "loading...",
+  os: "--",
+  kernel: "--",
+  arch: "--",
+  cpuModel: "Detecting...",
+  cpuCores: 0,
+  cpuUsage: 0,
+  memoryTotal: 0,
+  memoryUsed: 0,
+  uptime: "--"
 }
 
-const defaultDevices: Device[] = [
-  { 
-    id: "usb-001", 
-    name: "Sony IMX335 Module", 
-    type: "camera", 
-    status: "connected",
-    vendorId: "054C",
-    productId: "0C34",
-    speed: "USB 3.0"
-  },
-  { 
-    id: "usb-002", 
-    name: "NVIDIA Jetson Nano", 
-    type: "usb", 
-    status: "connected",
-    vendorId: "0955",
-    productId: "7020",
-    speed: "USB 2.0"
-  },
-  { 
-    id: "storage-001", 
-    name: "NVMe SSD 512GB", 
-    type: "storage", 
-    status: "connected",
-    mountPoint: "/dev/nvme0n1"
-  },
-  { 
-    id: "net-001", 
-    name: "eth0 (10GbE)", 
-    type: "network", 
-    status: "connected",
-    speed: "10 Gbps"
-  },
-]
+// Empty — replaced by real data from backend GET /system/devices
+const defaultDevices: Device[] = []
 
 function getDeviceIcon(type: Device["type"]) {
   switch (type) {
@@ -285,93 +254,33 @@ export function HostDevicePanel({
   const [devices, setDevices] = useState<Device[]>(initialDevices)
   const [isScanning, setIsScanning] = useState(false)
   const [hostData, setHostData] = useState(hostInfo)
-  
-  // Simulate dynamic CPU/Memory updates
+
+  // Sync props → internal state when backend pushes new data
   useEffect(() => {
-    const interval = setInterval(() => {
-      setHostData(prev => ({
-        ...prev,
-        cpuUsage: Math.max(10, Math.min(90, prev.cpuUsage + (Math.random() - 0.5) * 10)),
-        memoryUsed: Math.max(8000, Math.min(28000, prev.memoryUsed + (Math.random() - 0.5) * 500))
-      }))
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [])
+    setHostData(hostInfo)
+  }, [hostInfo])
+
+  useEffect(() => {
+    setDevices(initialDevices)
+  }, [initialDevices])
   
-  // Simulate hot-plug detection
+  // Real device scan — triggers a backend refresh via parent
   const handleScan = useCallback(() => {
     setIsScanning(true)
-    
-    // Simulate detecting new device
-    setTimeout(() => {
-      const deviceTypes: Device["type"][] = ["usb", "camera", "storage"]
-      const randomType = deviceTypes[Math.floor(Math.random() * deviceTypes.length)]
-      const newDevice: Device = {
-        id: `device-${Date.now()}`,
-        name: randomType === "camera" 
-          ? `Camera Module ${Math.floor(Math.random() * 100)}` 
-          : randomType === "usb"
-          ? `USB Device ${Math.floor(Math.random() * 100)}`
-          : `Storage Device ${Math.floor(Math.random() * 100)}`,
-        type: randomType,
-        status: "detecting",
-        vendorId: Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, "0"),
-        productId: Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, "0"),
-        speed: randomType === "storage" ? undefined : Math.random() > 0.5 ? "USB 3.0" : "USB 2.0",
-        mountPoint: randomType === "storage" ? `/dev/sd${String.fromCharCode(97 + devices.length)}` : undefined
-      }
-      
-      setDevices(prev => [...prev, newDevice])
-      
-      // Simulate detection complete
-      setTimeout(() => {
-        setDevices(prev => prev.map(d => 
-          d.id === newDevice.id ? { ...d, status: "connected" as DeviceStatus } : d
-        ))
-        setIsScanning(false)
-        onDeviceChange?.(devices)
-      }, 1500)
-    }, 1000)
-  }, [devices, onDeviceChange])
-  
+    // The parent (page.tsx) re-fetches devices via useEngine every 5s.
+    // Show scanning animation for 2s then settle.
+    setTimeout(() => setIsScanning(false), 2000)
+  }, [])
+
   const handleRemoveDevice = useCallback((id: string) => {
-    // Simulate disconnection animation
-    setDevices(prev => prev.map(d => 
+    setDevices(prev => prev.map(d =>
       d.id === id ? { ...d, status: "disconnected" as DeviceStatus } : d
     ))
-    
-    // Remove after animation
     setTimeout(() => {
       setDevices(prev => prev.filter(d => d.id !== id))
       onDeviceChange?.(devices.filter(d => d.id !== id))
     }, 500)
   }, [devices, onDeviceChange])
-  
-  // Simulate random hot-plug events
-  useEffect(() => {
-    const interval = setInterval(() => {
-      // 10% chance of a hot-plug event
-      if (Math.random() < 0.1 && devices.length > 0) {
-        const randomIndex = Math.floor(Math.random() * devices.length)
-        const device = devices[randomIndex]
-        
-        if (device.status === "connected" && Math.random() < 0.3) {
-          // Simulate brief disconnection and reconnection
-          setDevices(prev => prev.map((d, i) => 
-            i === randomIndex ? { ...d, status: "detecting" as DeviceStatus } : d
-          ))
-          
-          setTimeout(() => {
-            setDevices(prev => prev.map((d, i) => 
-              i === randomIndex ? { ...d, status: "connected" as DeviceStatus } : d
-            ))
-          }, 800)
-        }
-      }
-    }, 5000)
-    
-    return () => clearInterval(interval)
-  }, [devices])
   
   const connectedCount = devices.filter(d => d.status === "connected").length
   const detectingCount = devices.filter(d => d.status === "detecting").length

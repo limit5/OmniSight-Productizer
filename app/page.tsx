@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef } from "react"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
 import { GlobalStatusHeader } from "@/components/omnisight/global-status-header"
 import { SpecNode } from "@/components/omnisight/spec-node"
@@ -9,9 +9,10 @@ import { VitalsArtifactsPanel } from "@/components/omnisight/vitals-artifacts-pa
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
 import { SourceControlMatrix, type Repository } from "@/components/omnisight/source-control-matrix"
-import { TaskBacklog, type Task } from "@/components/omnisight/task-backlog"
-import { OrchestratorAI, type OrchestratorMessage } from "@/components/omnisight/orchestrator-ai"
+import { TaskBacklog } from "@/components/omnisight/task-backlog"
+import { OrchestratorAI } from "@/components/omnisight/orchestrator-ai"
 import { MobileNav, TabletNav, type PanelId } from "@/components/omnisight/mobile-nav"
+import { useEngine } from "@/hooks/use-engine"
 
 const agentTemplates: Record<string, Partial<Agent>> = {
   firmware: { type: "firmware", thoughtChain: "Initializing firmware build pipeline...", status: "booting" },
@@ -21,125 +22,69 @@ const agentTemplates: Record<string, Partial<Agent>> = {
   custom: { type: "custom", thoughtChain: "Custom agent initialized...", status: "idle" },
 }
 
-// Default tasks for orchestrator
-const defaultTasks: Task[] = [
-  {
-    id: "task-1",
-    title: "Build IMX335 camera driver",
-    description: "Compile and test firmware for Sony IMX335 sensor",
-    priority: "high",
-    status: "backlog",
-    createdAt: new Date().toISOString(),
-    suggestedAgentType: "firmware"
-  },
-  {
-    id: "task-2",
-    title: "Run validation suite",
-    description: "Execute full test coverage for ISP pipeline",
-    priority: "medium",
-    status: "backlog",
-    createdAt: new Date().toISOString(),
-    suggestedAgentType: "validator"
-  },
-  {
-    id: "task-3",
-    title: "Generate compliance report",
-    description: "Create FCC/CE certification documentation",
-    priority: "low",
-    status: "backlog",
-    createdAt: new Date().toISOString(),
-    suggestedAgentType: "reporter"
-  }
-]
-
-// Helper to format time consistently
-function formatTime(): string {
-  const date = new Date()
-  const hours = date.getHours().toString().padStart(2, "0")
-  const minutes = date.getMinutes().toString().padStart(2, "0")
-  const seconds = date.getSeconds().toString().padStart(2, "0")
-  return `${hours}:${minutes}:${seconds}`
-}
-
 export default function Home() {
+  const engine = useEngine()
   const [syncCount, setSyncCount] = useState(0)
-  const [agents, setAgents] = useState<Agent[]>(defaultAgents)
-  const [tasks, setTasks] = useState<Task[]>(defaultTasks)
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
-  const [orchestratorMessages, setOrchestratorMessages] = useState<OrchestratorMessage[]>([])
 
-  const handleInvoke = () => {
+  // Use engine state (backed by API when connected)
+  const {
+    agents, tasks, messages: orchestratorMessages,
+    systemStatus, systemInfo, devices: sysDevices,
+    spec, repos, logs, tokenUsage,
+  } = engine
+
+  // INVOKE ref: capture the current command input text
+  const invokeCommandRef = useRef("")
+
+  const handleInvoke = useCallback(async () => {
     setSyncCount(c => c + 1)
-    // Simulate some agents starting work
-    setAgents(prev => prev.map(agent => 
-      agent.status === "idle" ? { ...agent, status: "running" as AgentStatus, thoughtChain: "Task invoked, processing..." } : agent
-    ))
-  }
+    // If there's text in the command input, send it as a priority command
+    // Otherwise, perform context-aware singularity sync
+    const cmd = invokeCommandRef.current.trim() || undefined
+    await engine.invoke(cmd)
+  }, [engine])
 
-  const handleAddAgent = useCallback(() => {
+  const handleAddAgent = useCallback(async () => {
     const types = Object.keys(agentTemplates)
-    const randomType = types[Math.floor(Math.random() * types.length)]
-    const template = agentTemplates[randomType]
-    const id = `agent-${Date.now()}`
-    const newAgent: Agent = {
-      id,
-      name: `${randomType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
-      type: template.type as Agent["type"],
-      status: template.status as AgentStatus,
-      progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
-      thoughtChain: template.thoughtChain || "Initializing...",
-    }
-    setAgents(prev => [...prev, newAgent])
-  }, [])
+    const randomType = types[Math.floor(Math.random() * types.length)] as Agent["type"]
+    await engine.addAgent(randomType)
+  }, [engine])
 
-  const handleRemoveAgent = useCallback((id: string) => {
-    setAgents(prev => prev.filter(agent => agent.id !== id))
-  }, [])
+  const handleRemoveAgent = useCallback(async (id: string) => {
+    await engine.removeAgent(id)
+  }, [engine])
 
   const handleConfirmAgent = useCallback((id: string) => {
-    setAgents(prev => prev.map(agent => 
-      agent.id === id 
-        ? { 
-            ...agent, 
-            status: "success" as AgentStatus, 
-            requiresConfirmation: false,
-            thoughtChain: "User confirmed. Operations approved and finalized."
-          } 
-        : agent
-    ))
-  }, [])
+    engine.patchAgentLocal(id, {
+      status: "success" as AgentStatus,
+      requiresConfirmation: false,
+      thoughtChain: "User confirmed. Operations approved and finalized.",
+    })
+  }, [engine])
 
   const handleRejectAgent = useCallback((id: string) => {
-    setAgents(prev => prev.map(agent => 
-      agent.id === id 
-        ? { 
-            ...agent, 
-            status: "error" as AgentStatus, 
-            requiresConfirmation: false,
-            thoughtChain: "User rejected. Rolling back operations..."
-          } 
-        : agent
-    ))
-  }, [])
+    engine.patchAgentLocal(id, {
+      status: "error" as AgentStatus,
+      requiresConfirmation: false,
+      thoughtChain: "User rejected. Rolling back operations...",
+    })
+  }, [engine])
 
   const handleRetryAgent = useCallback((id: string) => {
-    setAgents(prev => prev.map(agent => 
-      agent.id === id 
-        ? { 
-            ...agent, 
-            status: "running" as AgentStatus,
-            progress: { current: 0, total: agent.progress.total },
-            thoughtChain: "Retrying operations from checkpoint..."
-          } 
-        : agent
-    ))
-  }, [])
+    const agent = agents.find(a => a.id === id)
+    engine.patchAgentLocal(id, {
+      status: "running" as AgentStatus,
+      progress: { current: 0, total: agent?.progress.total ?? 5 },
+      thoughtChain: "Retrying operations from checkpoint...",
+    })
+  }, [engine, agents])
 
+  // Emergency stop / resume
   const [isHalted, setIsHalted] = useState(false)
   const [haltedAgentStates, setHaltedAgentStates] = useState<Map<string, { status: AgentStatus; thoughtChain: string }>>(new Map())
 
   const handleEmergencyStop = useCallback(() => {
-    // Store the current states of running agents for potential resume
     const statesToSave = new Map<string, { status: AgentStatus; thoughtChain: string }>()
     agents.forEach(agent => {
       if (agent.status === "running" || agent.status === "booting") {
@@ -148,174 +93,92 @@ export default function Home() {
     })
     setHaltedAgentStates(statesToSave)
     setIsHalted(true)
-    
-    setAgents(prev => prev.map(agent => ({
+
+    engine.setAgents(prev => prev.map(agent => ({
       ...agent,
       status: agent.status === "running" || agent.status === "booting" ? "warning" as AgentStatus : agent.status,
-      thoughtChain: agent.status === "running" || agent.status === "booting" 
-        ? "HALTED - Operations suspended. Click RESUME to continue." 
-        : agent.thoughtChain
+      thoughtChain: agent.status === "running" || agent.status === "booting"
+        ? "HALTED - Operations suspended. Click RESUME to continue."
+        : agent.thoughtChain,
     })))
-  }, [agents])
+  }, [agents, engine])
 
   const handleResume = useCallback(() => {
-    setAgents(prev => prev.map(agent => {
+    engine.setAgents(prev => prev.map(agent => {
       const savedState = haltedAgentStates.get(agent.id)
       if (savedState && agent.status === "warning") {
-        return {
-          ...agent,
-          status: savedState.status,
-          thoughtChain: `Resuming: ${savedState.thoughtChain}`
-        }
+        return { ...agent, status: savedState.status, thoughtChain: `Resuming: ${savedState.thoughtChain}` }
       }
       return agent
     }))
     setHaltedAgentStates(new Map())
     setIsHalted(false)
-  }, [haltedAgentStates])
+  }, [haltedAgentStates, engine])
 
   const hasRunningAgents = agents.some(a => a.status === "running" || a.status === "booting")
 
   // Source Control handlers
   const handleTether = useCallback((repoId: string, agentId: string) => {
-    // Update agent to show tethered workspace
-    setAgents(prev => prev.map(agent => 
-      agent.id === agentId 
-        ? { ...agent, thoughtChain: `Workspace tethered: ${repoId}. Running git clone...` }
-        : agent
-    ))
-  }, [])
+    engine.patchAgentLocal(agentId, { thoughtChain: `Workspace tethered: ${repoId}. Running git clone...` })
+  }, [engine])
 
   const handleDetether = useCallback((repoId: string) => {
-    // Find and update the agent that was tethered to this repo
-    setAgents(prev => prev.map(agent => ({
+    engine.setAgents(prev => prev.map(agent => ({
       ...agent,
-      thoughtChain: agent.thoughtChain.includes(repoId) 
-        ? "Workspace detethered. Standing by..."
-        : agent.thoughtChain
+      thoughtChain: agent.thoughtChain.includes(repoId) ? "Workspace detethered. Standing by..." : agent.thoughtChain,
     })))
-  }, [])
+  }, [engine])
 
   const handleCreateRepo = useCallback((name: string, targetAgentId?: string) => {
     if (targetAgentId) {
-      setAgents(prev => prev.map(agent => 
-        agent.id === targetAgentId 
-          ? { 
-              ...agent, 
-              status: "running" as AgentStatus,
-              thoughtChain: `Genesis initialized: ${name}. Generating project structure...` 
-            }
-          : agent
-      ))
+      engine.patchAgentLocal(targetAgentId, {
+        status: "running" as AgentStatus,
+        thoughtChain: `Genesis initialized: ${name}. Generating project structure...`,
+      })
     }
-  }, [])
+  }, [engine])
 
   const handleAddRepo = useCallback((repo: Repository) => {
-    // Log for external integration
-    console.log("[v0] Repository added:", repo.name, repo.url)
+    console.log("[Engine] Repository added:", repo.name, repo.url)
   }, [])
 
   const handleRemoveRepo = useCallback((repoId: string) => {
-    // Log for external integration  
-    console.log("[v0] Repository removed:", repoId)
+    console.log("[Engine] Repository removed:", repoId)
   }, [])
 
-  // Task Backlog handlers
-  const handleAssignTask = useCallback((taskId: string, agentId: string) => {
-    // Update agent
-    setAgents(prev => prev.map(agent => 
-      agent.id === agentId 
-        ? { 
-            ...agent, 
-            status: "running" as AgentStatus,
-            thoughtChain: `Task assigned: Processing task ${taskId}...`
-          }
-        : agent
-    ))
-    // Update task
-    setTasks(prev => prev.map(task =>
-      task.id === taskId
-        ? { ...task, status: "assigned" as Task["status"], assignedAgentId: agentId }
-        : task
-    ))
-  }, [])
+  // Task handlers — delegates to engine (API-backed)
+  const handleAssignTask = useCallback(async (taskId: string, agentId: string) => {
+    await engine.assignTask(taskId, agentId)
+  }, [engine])
 
-  const handleCreateAgentForTask = useCallback((type: Agent["type"], taskId?: string) => {
-    const id = `agent-${Date.now()}`
-    const newAgent: Agent = {
-      id,
-      name: `${type.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
-      type,
-      status: taskId ? "running" : "idle",
-      progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
-      thoughtChain: taskId ? `Spawned for task ${taskId}. Initializing...` : "Agent spawned. Awaiting task assignment...",
+  const handleCreateAgentForTask = useCallback(async (type: Agent["type"], taskId?: string) => {
+    const agent = await engine.addAgent(type)
+    if (taskId && agent) {
+      await engine.assignTask(taskId, agent.id)
     }
-    setAgents(prev => [...prev, newAgent])
-    
-    // If spawned for a task, assign it
-    if (taskId) {
-      setTasks(prev => prev.map(task =>
-        task.id === taskId
-          ? { ...task, status: "assigned" as Task["status"], assignedAgentId: id }
-          : task
-      ))
-    }
-  }, [])
-  
-  // Orchestrator-specific handlers
-  const handleForceAssign = useCallback((taskId: string, agentId: string) => {
-    // Force assignment overrides any current agent state
-    setAgents(prev => prev.map(agent => 
-      agent.id === agentId 
-        ? { 
-            ...agent, 
-            status: "running" as AgentStatus,
-            thoughtChain: `FORCE ASSIGNED: Task ${taskId} - Priority override by user.`
-          }
-        : agent
-    ))
-    setTasks(prev => prev.map(task =>
-      task.id === taskId
-        ? { ...task, status: "assigned" as Task["status"], assignedAgentId: agentId }
-        : task
-    ))
-  }, [])
-  
-  const handleCompleteTask = useCallback((taskId: string) => {
-    setTasks(prev => prev.map(task =>
-      task.id === taskId
-        ? { ...task, status: "completed" as Task["status"], completedAt: new Date().toISOString() }
-        : task
-    ))
-  }, [])
+  }, [engine])
+
+  const handleForceAssign = useCallback(async (taskId: string, agentId: string) => {
+    await engine.forceAssign(taskId, agentId)
+  }, [engine])
+
+  const handleCompleteTask = useCallback(async (taskId: string) => {
+    await engine.completeTask(taskId)
+  }, [engine])
 
   const handleUpdateAgentFromTask = useCallback((agentId: string, status: AgentStatus, thoughtChain?: string) => {
-    setAgents(prev => prev.map(agent => 
-      agent.id === agentId 
-        ? { 
-            ...agent, 
-            status,
-            thoughtChain: thoughtChain || agent.thoughtChain
-          }
-        : agent
-    ))
+    engine.patchAgentLocal(agentId, { status, ...(thoughtChain ? { thoughtChain } : {}) })
+  }, [engine])
+
+  // Materialization handlers
+  const handleMaterializeAgent = useCallback((_type: Agent["type"]): string => {
+    return `agent-${Date.now()}`
   }, [])
 
-  // Digital Materialization handlers
-  const handleMaterializeAgent = useCallback((type: Agent["type"]): string => {
-    const id = `agent-${Date.now()}`
-    // Agent will be fully created by MaterializingAgentCard
-    return id
-  }, [])
-
-  const handleMaterializeComplete = useCallback((agentId: string) => {
-    // Find the type from the agentId pattern (we stored it temporarily)
-    // For now, we'll create a default agent when materialization completes
+  const handleMaterializeComplete = useCallback(async (agentId: string) => {
     const types: Agent["type"][] = ["firmware", "software", "validator", "reporter"]
     const randomType = types[Math.floor(Math.random() * types.length)]
-    const template = agentTemplates[randomType] || agentTemplates.custom
-    
-    const newAgent: Agent = {
+    const agent: Agent = {
       id: agentId,
       name: `${randomType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
       type: randomType,
@@ -323,171 +186,64 @@ export default function Home() {
       progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
       thoughtChain: "Materialization complete. Standing by for orders...",
     }
-    setAgents(prev => [...prev, newAgent])
-  }, [])
+    engine.setAgents(prev => [...prev, agent])
+  }, [engine])
 
-  // Helper to add message to orchestrator
-  const addOrchestratorMessage = (role: OrchestratorMessage["role"], content: string) => {
-    const message: OrchestratorMessage = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      role,
-      content,
-      timestamp: formatTime()
-    }
-    setOrchestratorMessages(prev => [...prev, message])
-  }
-
-  const handleCommand = (command: string) => {
+  // Command handler — sends to backend via engine
+  const handleCommand = useCallback(async (command: string) => {
     const cmd = command.toLowerCase().trim()
-    
-    // Add user command to orchestrator
-    addOrchestratorMessage("user", command)
-    
-    // Semantic agent generation - detect intent from natural language
-    const detectAgentType = (text: string): Agent["type"] => {
-      if (text.includes("firmware") || text.includes("driver") || text.includes("hardware") || text.includes("flash") || text.includes("embedded")) {
-        return "firmware"
-      }
-      if (text.includes("test") || text.includes("validat") || text.includes("check") || text.includes("verify") || text.includes("qa")) {
-        return "validator"
-      }
-      if (text.includes("report") || text.includes("document") || text.includes("summary") || text.includes("analyze") || text.includes("metrics")) {
-        return "reporter"
-      }
-      if (text.includes("code") || text.includes("software") || text.includes("build") || text.includes("compile") || text.includes("algorithm")) {
-        return "software"
-      }
-      return "custom"
-    }
-    
-    // Parse commands for agent management
-    if (cmd.startsWith("add ") || cmd.startsWith("spawn ") || cmd.startsWith("create ")) {
-      // Check for specific type first
-      const typePart = cmd.split(" ")[1]
-      let agentType: Agent["type"]
-      let thoughtChain: string
-      
-      if (agentTemplates[typePart]) {
-        agentType = typePart as Agent["type"]
-        thoughtChain = agentTemplates[typePart].thoughtChain || "Initializing..."
-      } else {
-        // Semantic detection from the full command
-        agentType = detectAgentType(cmd)
-        thoughtChain = `Semantic spawn: "${command}". Initializing ${agentType} protocols...`
-      }
-      
-      const id = `agent-${Date.now()}`
-      const agentName = `${agentType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`
-      const newAgent: Agent = {
-        id,
-        name: agentName,
-        type: agentType,
-        status: "booting" as AgentStatus,
-        progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
-        thoughtChain,
-      }
-      setAgents(prev => [...prev, newAgent])
-      
-      // Send orchestrator response
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `Spawning ${agentType.toUpperCase()} agent: ${agentName}. Initializing boot sequence...`)
-      }, 200)
-      
-      // Transition to running after boot
-      setTimeout(() => {
-        setAgents(prev => prev.map(a => 
-          a.id === id ? { ...a, status: "running" as AgentStatus, thoughtChain: `Processing: ${command}` } : a
-        ))
-        addOrchestratorMessage("system", `Agent ${agentName} is now ONLINE and processing task.`)
-      }, 1500)
-      
-    } else if (cmd.startsWith("remove ") || cmd.startsWith("kill ") || cmd.startsWith("terminate ")) {
-      const namePart = cmd.split(" ").slice(1).join(" ").toUpperCase()
-      const removedAgents = agents.filter(agent => agent.name.includes(namePart))
-      setAgents(prev => prev.filter(agent => !agent.name.includes(namePart)))
-      
-      setTimeout(() => {
-        if (removedAgents.length > 0) {
-          addOrchestratorMessage("orchestrator", `Terminated ${removedAgents.length} agent(s): ${removedAgents.map(a => a.name).join(", ")}`)
-        } else {
-          addOrchestratorMessage("orchestrator", `No agents found matching "${namePart}". No agents terminated.`)
-        }
-      }, 200)
-      
-    } else if (cmd === "clear" || cmd === "reset") {
-      const count = agents.length
-      setAgents([])
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `All ${count} agents have been terminated. System reset complete.`)
-      }, 200)
-      
-    } else if (cmd === "restore" || cmd === "default") {
-      setAgents(defaultAgents)
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `System restored to default configuration. ${defaultAgents.length} agents initialized.`)
-      }, 200)
-      
-    } else if (cmd.includes("agent") && (cmd.includes("test") || cmd.includes("wifi") || cmd.includes("throughput") || cmd.includes("responsible"))) {
-      // Natural language agent creation
-      const agentType = detectAgentType(cmd)
-      const id = `agent-${Date.now()}`
-      const agentName = `${agentType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`
-      const newAgent: Agent = {
-        id,
-        name: agentName,
-        type: agentType,
-        status: "booting" as AgentStatus,
-        progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
-        thoughtChain: `Orchestrator detected: "${command}". Spawning ${agentType} agent...`,
-      }
-      setAgents(prev => [...prev, newAgent])
-      
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `Intent recognized. Spawning ${agentType.toUpperCase()} agent: ${agentName} to handle: "${command}"`)
-      }, 200)
-      
-      setTimeout(() => {
-        setAgents(prev => prev.map(a => 
-          a.id === id ? { ...a, status: "running" as AgentStatus, thoughtChain: `Task initialized: ${command}` } : a
-        ))
-        addOrchestratorMessage("system", `Agent ${agentName} is now ONLINE.`)
-      }, 1500)
-      
-    } else if (cmd === "status" || cmd === "info") {
-      const running = agents.filter(a => a.status === "running").length
-      const idle = agents.filter(a => a.status === "idle").length
-      const errors = agents.filter(a => a.status === "error").length
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `System Status: ${agents.length} total agents | ${running} running | ${idle} idle | ${errors} errors | ${tasks.filter(t => t.status === "backlog").length} pending tasks`)
-      }, 200)
-      
-    } else if (cmd === "help") {
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `Available commands:\n• spawn/add/create [type] - Create new agent\n• remove/kill [name] - Terminate agent\n• clear/reset - Remove all agents\n• restore/default - Restore default agents\n• status/info - Show system status\n• help - Show this message\n\nAgent types: firmware, software, validator, reporter, custom`)
-      }, 200)
-      
-    } else {
-      // Unknown command
-      setTimeout(() => {
-        addOrchestratorMessage("orchestrator", `Command not recognized: "${command}". Type "help" for available commands, or describe what you need in natural language.`)
-      }, 200)
-    }
-  }
 
-  const handleSpecChange = (path: string[], newValue: string | number) => {
-    console.log("[v0] Spec changed:", path.join("."), "=", newValue)
+    // Local-only commands that don't need the backend
+    if (cmd === "clear" || cmd === "reset") {
+      engine.setAgents([])
+      return
+    }
+    if (cmd === "restore" || cmd === "default") {
+      engine.setAgents(defaultAgents)
+      return
+    }
+
+    // Send everything else to the backend orchestrator
+    await engine.sendCommand(command)
+  }, [engine])
+
+  const handleSpecChange = (path: string[], newValue: string | number | boolean) => {
+    console.log("[Engine] Spec changed:", path.join("."), "=", newValue)
   }
 
   // Render panel based on active selection (for mobile/tablet)
   const renderPanel = (panelId: PanelId) => {
     switch (panelId) {
       case "host":
-        return <HostDevicePanel />
+        return <HostDevicePanel
+          hostInfo={systemInfo ? {
+            hostname: systemInfo.hostname,
+            os: systemInfo.os,
+            kernel: systemInfo.kernel,
+            arch: systemInfo.arch,
+            cpuModel: systemInfo.cpu_model,
+            cpuCores: systemInfo.cpu_cores,
+            cpuUsage: systemInfo.cpu_usage,
+            memoryTotal: systemInfo.memory_total,
+            memoryUsed: systemInfo.memory_used,
+            uptime: systemInfo.uptime,
+          } : undefined}
+          devices={sysDevices.length > 0 ? sysDevices.map(d => ({
+            id: d.id,
+            name: d.name,
+            type: d.type,
+            status: d.status,
+            vendorId: d.vendorId,
+            productId: d.productId,
+            speed: d.speed ?? undefined,
+            mountPoint: d.mountPoint,
+          })) : undefined}
+        />
       case "spec":
-        return <SpecNode onSpecChange={handleSpecChange} />
+        return <SpecNode spec={spec.length > 0 ? (spec as never) : undefined} onSpecChange={handleSpecChange} />
       case "agents":
         return (
-          <AgentMatrixWall 
+          <AgentMatrixWall
             agents={agents}
             onAddAgent={handleAddAgent}
             onRemoveAgent={handleRemoveAgent}
@@ -510,12 +266,23 @@ export default function Home() {
             onCompleteTask={handleCompleteTask}
             externalMessages={orchestratorMessages}
             onSendCommand={handleCommand}
+            tokenUsage={tokenUsage.length > 0 ? tokenUsage.map(t => ({
+              model: t.model as never,
+              inputTokens: t.input_tokens,
+              outputTokens: t.output_tokens,
+              totalTokens: t.total_tokens,
+              cost: t.cost,
+              requestCount: t.request_count,
+              avgLatency: t.avg_latency,
+              lastUsed: t.last_used,
+            })) : undefined}
           />
         )
       case "tasks":
         return (
           <TaskBacklog
             agents={agents}
+            tasks={tasks}
             onAssignTask={handleAssignTask}
             onCreateAgent={handleCreateAgentForTask}
             onUpdateAgentStatus={handleUpdateAgentFromTask}
@@ -523,8 +290,13 @@ export default function Home() {
         )
       case "source":
         return (
-          <SourceControlMatrix 
+          <SourceControlMatrix
             agents={agents}
+            repositories={repos.length > 0 ? repos.map(r => ({
+              id: r.id, name: r.name, url: r.url, branch: r.branch,
+              status: r.status, lastCommit: r.lastCommit,
+              lastCommitTime: r.lastCommitTime, tetheredAgentId: r.tetheredAgentId ?? undefined,
+            })) : undefined}
             onTether={handleTether}
             onDetether={handleDetether}
             onCreateRepo={handleCreateRepo}
@@ -533,7 +305,7 @@ export default function Home() {
           />
         )
       case "vitals":
-        return <VitalsArtifactsPanel />
+        return <VitalsArtifactsPanel logs={logs.length > 0 ? logs : undefined} />
       default:
         return null
     }
@@ -543,29 +315,29 @@ export default function Home() {
     <div className="relative min-h-screen flex flex-col overflow-hidden">
       {/* Neural Grid Background */}
       <NeuralGrid />
-      
+
       {/* Main Content */}
       <div className="relative z-10 flex flex-col h-screen">
         {/* Global Status Header */}
         <GlobalStatusHeader
-          finished={32 + syncCount}
-          total={48}
-          inProgress={agents.filter(a => a.status === "running").length}
-          wslStatus="OK"
-          usbStatus="Dev_01 USB Attached"
+          finished={systemStatus?.tasks_completed ?? syncCount}
+          total={systemStatus?.tasks_total ?? tasks.length}
+          inProgress={systemStatus?.agents_running ?? agents.filter(a => a.status === "running").length}
+          wslStatus={systemStatus?.wsl_status === "OK" ? "OK" : "OFFLINE"}
+          usbStatus={systemStatus?.usb_status ?? "Detecting..."}
           onEmergencyStop={handleEmergencyStop}
           onResume={handleResume}
           isHalted={isHalted}
           hasRunningAgents={hasRunningAgents || isHalted}
         />
-        
+
         {/* ===== MOBILE LAYOUT (< 768px) ===== */}
         <main className="flex-1 flex flex-col md:hidden min-h-0 pb-24">
           <div className="flex-1 p-3 overflow-auto">
             {renderPanel(activePanel)}
           </div>
         </main>
-        
+
         {/* ===== TABLET LAYOUT (768px - 1023px) ===== */}
         <main className="hidden md:flex lg:hidden flex-1 min-h-0">
           <TabletNav activePanel={activePanel} onPanelChange={setActivePanel} />
@@ -573,22 +345,45 @@ export default function Home() {
             {renderPanel(activePanel)}
           </div>
         </main>
-        
+
         {/* ===== DESKTOP LAYOUT (>= 1024px) ===== */}
         <main className="hidden lg:grid flex-1 grid-cols-[200px_220px_1fr_280px_220px_220px_280px] gap-3 p-4 min-h-0">
           {/* Far Left: Host & Devices */}
           <aside className="min-h-0 overflow-hidden">
-            <HostDevicePanel />
+            <HostDevicePanel
+              hostInfo={systemInfo ? {
+                hostname: systemInfo.hostname,
+                os: systemInfo.os,
+                kernel: systemInfo.kernel,
+                arch: systemInfo.arch,
+                cpuModel: systemInfo.cpu_model,
+                cpuCores: systemInfo.cpu_cores,
+                cpuUsage: systemInfo.cpu_usage,
+                memoryTotal: systemInfo.memory_total,
+                memoryUsed: systemInfo.memory_used,
+                uptime: systemInfo.uptime,
+              } : undefined}
+              devices={sysDevices.length > 0 ? sysDevices.map(d => ({
+                id: d.id,
+                name: d.name,
+                type: d.type,
+                status: d.status,
+                vendorId: d.vendorId,
+                productId: d.productId,
+                speed: d.speed ?? undefined,
+                mountPoint: d.mountPoint,
+              })) : undefined}
+            />
           </aside>
-          
+
           {/* Left: SPEC Node */}
           <aside className="min-h-0">
-            <SpecNode onSpecChange={handleSpecChange} />
+            <SpecNode spec={spec.length > 0 ? (spec as never) : undefined} onSpecChange={handleSpecChange} />
           </aside>
-          
+
           {/* Center: Agent Matrix Wall */}
           <section className="min-h-0 overflow-hidden">
-            <AgentMatrixWall 
+            <AgentMatrixWall
               agents={agents}
               onAddAgent={handleAddAgent}
               onRemoveAgent={handleRemoveAgent}
@@ -599,7 +394,7 @@ export default function Home() {
               onMaterializeComplete={handleMaterializeComplete}
             />
           </section>
-          
+
           {/* Orchestrator AI - Central Coordinator & Command Hub */}
           <aside className="min-h-0 overflow-hidden">
             <OrchestratorAI
@@ -614,7 +409,7 @@ export default function Home() {
               onCompleteTask={handleCompleteTask}
             />
           </aside>
-          
+
           {/* Task Backlog */}
           <aside className="min-h-0 overflow-hidden">
             <TaskBacklog
@@ -624,10 +419,10 @@ export default function Home() {
               onUpdateAgentStatus={handleUpdateAgentFromTask}
             />
           </aside>
-          
+
           {/* Source Control Matrix */}
           <aside className="min-h-0 overflow-hidden">
-            <SourceControlMatrix 
+            <SourceControlMatrix
               agents={agents}
               onTether={handleTether}
               onDetether={handleDetether}
@@ -636,24 +431,24 @@ export default function Home() {
               onRemoveRepo={handleRemoveRepo}
             />
           </aside>
-          
+
           {/* Far Right: Vitals & Artifacts */}
           <aside className="min-h-0 overflow-hidden">
-            <VitalsArtifactsPanel />
+            <VitalsArtifactsPanel logs={logs.length > 0 ? logs : undefined} />
           </aside>
         </main>
-        
+
         {/* Bottom: Invoke Core - Desktop */}
         <footer className="relative z-20 hidden lg:block">
-          <InvokeCore onInvoke={handleInvoke} onCommand={handleCommand} />
+          <InvokeCore onInvoke={handleInvoke} onCommand={handleCommand} onCommandChange={(v) => { invokeCommandRef.current = v }} />
         </footer>
-        
+
         {/* Bottom: Invoke Core - Mobile/Tablet (above navigation) */}
         <footer className="relative z-20 lg:hidden mb-20 md:mb-0">
-          <InvokeCore onInvoke={handleInvoke} onCommand={handleCommand} />
+          <InvokeCore onInvoke={handleInvoke} onCommand={handleCommand} onCommandChange={(v) => { invokeCommandRef.current = v }} />
         </footer>
       </div>
-      
+
       {/* Mobile Bottom Navigation */}
       <MobileNav activePanel={activePanel} onPanelChange={setActivePanel} />
     </div>

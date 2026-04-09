@@ -1,0 +1,63 @@
+# OmniSight Hardware Manifest — Source of Truth
+# This file drives the entire auto-generation pipeline.
+
+project:
+  name: "OmniSight-CAM-01"
+  version: "1.0.0"
+  target_platform: "linux-arm64"
+
+sensor:
+  model: "Sony IMX335"
+  interface: "MIPI-CSI2"
+  resolution: "2592x1944"
+  max_fps: 30
+  pixel_format: "RGGB"
+  i2c:
+    address: "0x1A"
+    bus: 2
+    speed_khz: 400
+  registers:
+    - { addr: "0x3000", value: "0x00", desc: "Standby" }
+    - { addr: "0x3001", value: "0x01", desc: "Stream start" }
+    - { addr: "0x3002", value: "0x00", desc: "Master mode" }
+
+isp:
+  pipeline:
+    - "black_level_correction"
+    - "lens_shading_compensation"
+    - "demosaic_bilinear"
+    - "color_correction_matrix"
+    - "gamma_correction"
+    - "noise_reduction_2d"
+    - "edge_enhancement"
+    - "auto_white_balance"
+  output_format: "NV12"
+  output_resolution: "1920x1080"
+
+uvc:
+  vendor_id: "0x1D6B"
+  product_id: "0x0102"
+  device_name: "OmniSight AI Camera"
+  streaming:
+    formats:
+      - { type: "MJPEG", width: 1920, height: 1080, fps: [30, 15] }
+      - { type: "H264",  width: 1920, height: 1080, fps: [30] }
+      - { type: "YUY2",  width: 640,  height: 480,  fps: [30, 15] }
+
+build:
+  toolchain: "aarch64-linux-gnu-gcc"
+  kernel_version: "5.15"
+  cross_compile_prefix: "aarch64-linux-gnu-"
+  output_dir: "build/output"
+  flags:
+    - "-O2"
+    - "-Wall"
+    - "-Werror"
+    - "-DIMX335_SENSOR"
+
+compliance:
+  certifications:
+    - "FCC Part 15B"
+    - "CE EN 55032"
+    - "RoHS"
+  emc_class: "B"

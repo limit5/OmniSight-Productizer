@@ -52,46 +52,8 @@ interface SourceControlMatrixProps {
   onReposChange?: (repos: Repository[]) => void
 }
 
-const defaultRepos: Repository[] = [
-  {
-    id: "repo-001",
-    name: "uvc_driver_v2",
-    url: "git@github.com:omnisight/uvc_driver_v2.git",
-    branch: "main",
-    status: "synced",
-    lastCommit: "a3f7b2c",
-    lastCommitTime: "2h ago"
-  },
-  {
-    id: "repo-002",
-    name: "isp_pipeline",
-    url: "git@github.com:omnisight/isp_pipeline.git",
-    branch: "develop",
-    status: "synced",
-    lastCommit: "8d4e1f9",
-    lastCommitTime: "5h ago",
-    tetheredAgentId: "fw-agent"
-  },
-  {
-    id: "repo-003",
-    name: "codec_optimizer",
-    url: "git@github.com:omnisight/codec_optimizer.git",
-    branch: "feature/h265",
-    status: "syncing",
-    lastCommit: "c2b9a1e",
-    lastCommitTime: "1d ago",
-    tetheredAgentId: "codec-agent"
-  },
-  {
-    id: "repo-004",
-    name: "validation_suite",
-    url: "git@github.com:omnisight/validation_suite.git",
-    branch: "main",
-    status: "synced",
-    lastCommit: "f1e8d3a",
-    lastCommitTime: "3h ago"
-  }
-]
+// Empty default — real repos come from backend via GET /system/repos
+const defaultRepos: Repository[] = []
 
 export function SourceControlMatrix({ 
   agents, 
@@ -114,10 +76,19 @@ export function SourceControlMatrix({
     }
     onReposChange?.(newRepos)
   }, [repositories, repos, onReposChange])
-  const [pipelines, setPipelines] = useState<DataPipeline[]>([
-    { id: "pipe-1", repoId: "repo-002", agentId: "fw-agent", status: "active" },
-    { id: "pipe-2", repoId: "repo-003", agentId: "codec-agent", status: "transferring" }
-  ])
+  // Build pipelines dynamically from repos with tethered agents
+  const [pipelines, setPipelines] = useState<DataPipeline[]>([])
+  useEffect(() => {
+    const pipes = repos
+      .filter(r => r.tetheredAgentId)
+      .map((r, i) => ({
+        id: `pipe-${i}`,
+        repoId: r.id,
+        agentId: r.tetheredAgentId!,
+        status: "active" as const,
+      }))
+    setPipelines(pipes)
+  }, [repos])
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [tetheringMode, setTetheringMode] = useState(false)
   const [showGenesisModal, setShowGenesisModal] = useState(false)
@@ -144,15 +115,13 @@ export function SourceControlMatrix({
       status: "establishing"
     }])
     
-    // Simulate git clone and setup
-    setTimeout(() => {
-      setPipelines(prev => prev.map(p => 
-        p.id === pipelineId ? { ...p, status: "active" } : p
-      ))
-      setRepos(prev => prev.map(r => 
-        r.id === repoId ? { ...r, tetheredAgentId: agentId } : r
-      ))
-    }, 2000)
+    // Update pipeline and repo state
+    setPipelines(prev => prev.map(p =>
+      p.id === pipelineId ? { ...p, status: "active" } : p
+    ))
+    setRepos(prev => prev.map(r =>
+      r.id === repoId ? { ...r, tetheredAgentId: agentId } : r
+    ))
     
     setSelectedRepo(null)
     setTetheringMode(false)
@@ -174,43 +143,27 @@ export function SourceControlMatrix({
     if (!newRepoName.trim()) return
     
     setIsCreating(true)
-    
-    // Simulate repo creation
-    setTimeout(() => {
-      const newRepo: Repository = {
-        id: `repo-${Date.now()}`,
-        name: newRepoName.toLowerCase().replace(/\s+/g, "_"),
-        url: `git@github.com:omnisight/${newRepoName.toLowerCase().replace(/\s+/g, "_")}.git`,
-        branch: "main",
-        status: "syncing",
-        lastCommit: "initial",
-        lastCommitTime: "now"
-      }
-      
-      setRepos(prev => [...prev, newRepo])
-      
-      // If target agent selected, auto-tether after creation
-      if (targetAgent) {
-        setTimeout(() => {
-          handleTether(newRepo.id, targetAgent)
-          setRepos(prev => prev.map(r => 
-            r.id === newRepo.id ? { ...r, status: "synced" } : r
-          ))
-        }, 1500)
-      } else {
-        setTimeout(() => {
-          setRepos(prev => prev.map(r => 
-            r.id === newRepo.id ? { ...r, status: "synced" } : r
-          ))
-        }, 1500)
-      }
-      
-      setIsCreating(false)
-      setShowGenesisModal(false)
-      setNewRepoName("")
-      setTargetAgent("")
-      onCreateRepo?.(newRepoName, targetAgent || undefined)
-    }, 2000)
+
+    const newRepo: Repository = {
+      id: `repo-${Date.now()}`,
+      name: newRepoName.toLowerCase().replace(/\s+/g, "_"),
+      url: `local://${newRepoName.toLowerCase().replace(/\s+/g, "_")}`,
+      branch: "main",
+      status: "synced",
+      lastCommit: "initial",
+      lastCommitTime: "now"
+    }
+
+    setRepos(prev => [...prev, newRepo])
+    if (targetAgent) {
+      handleTether(newRepo.id, targetAgent)
+    }
+
+    setIsCreating(false)
+    setShowGenesisModal(false)
+    setNewRepoName("")
+    setTargetAgent("")
+    onCreateRepo?.(newRepoName, targetAgent || undefined)
   }, [newRepoName, targetAgent, handleTether, onCreateRepo])
 
   // Handle manual repo addition
@@ -234,25 +187,13 @@ export function SourceControlMatrix({
       lastCommitTime: "now"
     }
     
-    // Simulate cloning
-    setTimeout(() => {
-      setRepos(prev => [...prev, newRepo])
-      onAddRepo?.(newRepo)
-      
-      // Simulate sync completion
-      setTimeout(() => {
-        setRepos(prev => prev.map(r => 
-          r.id === newRepo.id 
-            ? { ...r, status: "synced", lastCommit: "HEAD", lastCommitTime: "just now" } 
-            : r
-        ))
-      }, 2000)
-      
-      setIsCloning(false)
-      setShowAddRepoModal(false)
-      setNewRepoUrl("")
-      setNewRepoBranch("main")
-    }, 1500)
+    setRepos(prev => [...prev, newRepo])
+    onAddRepo?.(newRepo)
+
+    setIsCloning(false)
+    setShowAddRepoModal(false)
+    setNewRepoUrl("")
+    setNewRepoBranch("main")
   }, [newRepoUrl, newRepoBranch, setRepos, onAddRepo])
 
   // Handle repo removal

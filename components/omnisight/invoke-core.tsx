@@ -6,9 +6,10 @@ import { Send, Zap } from "lucide-react"
 interface InvokeCoreProps {
   onInvoke?: () => void
   onCommand?: (command: string) => void
+  onCommandChange?: (command: string) => void
 }
 
-export function InvokeCore({ onInvoke, onCommand }: InvokeCoreProps) {
+export function InvokeCore({ onInvoke, onCommand, onCommandChange }: InvokeCoreProps) {
   const [command, setCommand] = useState("")
   const [isInvoking, setIsInvoking] = useState(false)
   const [showBeams, setShowBeams] = useState(false)
@@ -28,11 +29,12 @@ export function InvokeCore({ onInvoke, onCommand }: InvokeCoreProps) {
     }, 800)
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (command.trim()) {
       onCommand?.(command)
       setCommand("")
+      onCommandChange?.("")
     }
   }
 
@@ -131,7 +133,7 @@ export function InvokeCore({ onInvoke, onCommand }: InvokeCoreProps) {
                 ref={inputRef}
                 type="text"
                 value={command}
-                onChange={e => setCommand(e.target.value)}
+                onChange={e => { setCommand(e.target.value); onCommandChange?.(e.target.value) }}
                 placeholder="> enter command..."
                 className="w-full fui-input px-3 py-2 pr-10 font-mono text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] transition-colors"
               />

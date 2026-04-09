@@ -1,0 +1,376 @@
+"""Real system information endpoints — replaces all frontend mock data.
+
+Reads actual host metrics: CPU, memory, disk, kernel, uptime, USB devices.
+Also serves spec (from hardware_manifest.yaml), logs, and token usage.
+"""
+
+import asyncio
+import os
+import platform
+import re
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/system", tags=["system"])
+
+_BASH_TIMEOUT = 5
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+async def _sh(cmd: str) -> str:
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_BASH_TIMEOUT)
+        return out.decode(errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _parse_uptime(seconds: float) -> str:
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    mins = int((seconds % 3600) // 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    parts.append(f"{mins}m")
+    return " ".join(parts)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  System Info
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.get("/info")
+async def get_system_info():
+    cpu_model = (await _sh("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2")).strip() or platform.processor()
+    cpu_cores = os.cpu_count() or 1
+
+    s1 = await _sh("grep 'cpu ' /proc/stat | awk '{u=$2+$4; t=$2+$4+$5; print u, t}'")
+    await asyncio.sleep(0.2)
+    s2 = await _sh("grep 'cpu ' /proc/stat | awk '{u=$2+$4; t=$2+$4+$5; print u, t}'")
+    cpu_usage = 0.0
+    try:
+        u1, t1 = map(int, s1.split()); u2, t2 = map(int, s2.split())
+        if t2 - t1 > 0:
+            cpu_usage = round((u2 - u1) / (t2 - t1) * 100, 1)
+    except (ValueError, IndexError):
+        pass
+
+    mem_info = await _sh("grep -E 'MemTotal|MemAvailable' /proc/meminfo")
+    mem_total = mem_used = 0
+    try:
+        for line in mem_info.splitlines():
+            v = int(re.search(r"(\d+)", line).group(1)) // 1024
+            if "MemTotal" in line:
+                mem_total = v
+            elif "MemAvailable" in line:
+                mem_used = mem_total - v
+    except (AttributeError, ValueError):
+        pass
+
+    disk = await _sh("df -BM / | tail -1 | awk '{print $2, $3, $5}'")
+    disk_total = disk_used = 0
+    disk_pct = ""
+    try:
+        p = disk.split(); disk_total = int(p[0].rstrip("M")); disk_used = int(p[1].rstrip("M")); disk_pct = p[2]
+    except (IndexError, ValueError):
+        pass
+
+    uptime_raw = await _sh("cat /proc/uptime | awk '{print $1}'")
+    uptime_str = _parse_uptime(float(uptime_raw)) if uptime_raw else "unknown"
+
+    kernel = await _sh("uname -r")
+    hostname = await _sh("hostname")
+    os_info = await _sh("grep PRETTY_NAME /etc/os-release | cut -d'\"' -f2")
+    if kernel and "microsoft" in kernel.lower() and "WSL" not in (os_info or ""):
+        os_info = f"{os_info} (WSL2)"
+
+    return {
+        "hostname": hostname or platform.node(),
+        "os": os_info or f"{platform.system()} {platform.release()}",
+        "kernel": kernel or platform.release(),
+        "arch": platform.machine(),
+        "cpu_model": cpu_model or "Unknown",
+        "cpu_cores": cpu_cores,
+        "cpu_usage": cpu_usage,
+        "memory_total": mem_total,
+        "memory_used": mem_used,
+        "disk_total_mb": disk_total,
+        "disk_used_mb": disk_used,
+        "disk_use_pct": disk_pct,
+        "uptime": uptime_str,
+        "wsl": "microsoft" in (kernel or "").lower(),
+        "docker": bool(await _sh("docker info --format '{{.ServerVersion}}' 2>/dev/null")),
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Devices
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.get("/devices")
+async def get_devices():
+    devices = []
+
+    lsusb = await _sh("lsusb 2>/dev/null")
+    for line in lsusb.splitlines():
+        m = re.match(r"Bus (\d+) Device (\d+): ID (\w+):(\w+)\s+(.*)", line)
+        if m:
+            bus, dev, vid, pid, name = m.groups()
+            devices.append({
+                "id": f"usb-{bus}-{dev}", "name": name.strip() or f"USB {vid}:{pid}",
+                "type": "camera" if any(k in name.lower() for k in ["cam", "video", "uvc", "webcam"]) else "usb",
+                "status": "connected", "vendorId": vid, "productId": pid, "speed": None,
+            })
+
+    lsblk = await _sh("lsblk -dno NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null")
+    for line in lsblk.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] in ("disk", "part"):
+            devices.append({
+                "id": f"storage-{parts[0]}", "name": f"{parts[0]} ({parts[1]})",
+                "type": "storage", "status": "connected",
+                "mountPoint": parts[3] if len(parts) > 3 else f"/dev/{parts[0]}",
+            })
+
+    ip_out = await _sh("ip -o link show | awk '{print $2, $9}'")
+    for line in ip_out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            iface = parts[0].rstrip(":")
+            if iface == "lo":
+                continue
+            speed = await _sh(f"cat /sys/class/net/{iface}/speed 2>/dev/null")
+            devices.append({
+                "id": f"net-{iface}", "name": iface, "type": "network",
+                "status": "connected" if parts[1] == "UP" else "disconnected",
+                "speed": f"{speed} Mbps" if speed and speed != "-1" else None,
+            })
+
+    return devices
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  System Status (for header)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.get("/status")
+async def get_system_status():
+    from backend.routers.agents import _agents
+    from backend.routers.tasks import _tasks
+    from backend.models import TaskStatus, AgentStatus
+    from backend.workspace import list_workspaces
+    from backend.container import list_containers
+
+    agents = list(_agents.values())
+    tasks = list(_tasks.values())
+    kernel = await _sh("uname -r")
+    usb_count = (await _sh("lsusb 2>/dev/null | wc -l")).strip()
+    mem_raw = await _sh("free -m | awk 'NR==2{printf \"%d/%dMB (%.0f%%)\", $3,$2,$3*100/$2}'")
+
+    return {
+        "tasks_completed": sum(1 for t in tasks if t.status == TaskStatus.completed),
+        "tasks_total": len(tasks),
+        "agents_running": sum(1 for a in agents if a.status == AgentStatus.running),
+        "wsl_status": "OK" if "microsoft" in (kernel or "").lower() else "N/A",
+        "usb_status": f"{usb_count} USB device(s)" if usb_count != "0" else "No USB",
+        "memory_summary": mem_raw or "N/A",
+        "workspaces_active": len(list_workspaces()),
+        "containers_active": len(list_containers()),
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Spec — reads hardware_manifest.yaml
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _yaml_to_spec(data: dict, parent_type: str = "hardware") -> list[dict]:
+    """Convert nested YAML dict to SpecValue[] structure for the frontend."""
+    result = []
+    for key, val in data.items():
+        if isinstance(val, dict):
+            result.append({"key": key, "value": _yaml_to_spec(val, parent_type)})
+        elif isinstance(val, list):
+            if val and isinstance(val[0], dict):
+                result.append({"key": key, "value": [
+                    {"key": f"{key}[{i}]", "value": _yaml_to_spec(item) if isinstance(item, dict) else str(item)}
+                    for i, item in enumerate(val)
+                ]})
+            else:
+                result.append({"key": key, "value": ", ".join(str(v) for v in val)})
+        elif isinstance(val, bool):
+            result.append({"key": key, "value": val})
+        elif isinstance(val, (int, float)):
+            result.append({"key": key, "value": val})
+        else:
+            result.append({"key": key, "value": str(val)})
+    return result
+
+
+@router.get("/spec")
+async def get_spec():
+    """Load spec from hardware_manifest.yaml (or return empty if not found)."""
+    manifest = _PROJECT_ROOT / "test_fixtures" / "hardware_manifest.yaml"
+    if not manifest.exists():
+        return []
+    raw = manifest.read_text(encoding="utf-8")
+    data = yaml.safe_load(raw) or {}
+    return _yaml_to_spec(data)
+
+
+@router.put("/spec")
+async def update_spec_field(path: list[str], value: str | int | float | bool):
+    """Update a single field in hardware_manifest.yaml."""
+    manifest = _PROJECT_ROOT / "test_fixtures" / "hardware_manifest.yaml"
+    if not manifest.exists():
+        return {"error": "Manifest not found"}
+    raw = manifest.read_text(encoding="utf-8")
+    data = yaml.safe_load(raw) or {}
+
+    # Navigate to parent
+    node = data
+    for key in path[:-1]:
+        if isinstance(node, dict) and key in node:
+            node = node[key]
+        else:
+            return {"error": f"Path not found: {'.'.join(path)}"}
+    node[path[-1]] = value
+
+    manifest.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True), encoding="utf-8")
+    return {"status": "updated", "path": ".".join(path), "value": value}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Repos — real git data from workspaces
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.get("/repos")
+async def get_repos():
+    """List real git repositories: the main repo + any agent worktrees."""
+    repos = []
+
+    # Main repo
+    branch = await _sh(f"git -C {_PROJECT_ROOT} rev-parse --abbrev-ref HEAD")
+    commit = await _sh(f"git -C {_PROJECT_ROOT} log -1 --format='%h' 2>/dev/null")
+    commit_time = await _sh(f"git -C {_PROJECT_ROOT} log -1 --format='%cr' 2>/dev/null")
+    remote = await _sh(f"git -C {_PROJECT_ROOT} remote get-url origin 2>/dev/null")
+    repos.append({
+        "id": "main-repo",
+        "name": _PROJECT_ROOT.name,
+        "url": remote or str(_PROJECT_ROOT),
+        "branch": branch or "master",
+        "status": "synced",
+        "lastCommit": commit or "",
+        "lastCommitTime": commit_time or "",
+        "tetheredAgentId": None,
+    })
+
+    # Agent worktrees
+    from backend.workspace import list_workspaces
+    for ws in list_workspaces():
+        ws_branch = await _sh(f"git -C {ws.path} rev-parse --abbrev-ref HEAD 2>/dev/null")
+        ws_commit = await _sh(f"git -C {ws.path} log -1 --format='%h' 2>/dev/null")
+        ws_time = await _sh(f"git -C {ws.path} log -1 --format='%cr' 2>/dev/null")
+        repos.append({
+            "id": f"ws-{ws.agent_id}",
+            "name": f"{ws.agent_id} workspace",
+            "url": str(ws.path),
+            "branch": ws_branch or ws.branch,
+            "status": "synced",
+            "lastCommit": ws_commit or "",
+            "lastCommitTime": ws_time or "",
+            "tetheredAgentId": ws.agent_id,
+        })
+
+    return repos
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Logs — real system log ring buffer
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_log_buffer: deque[dict] = deque(maxlen=200)
+
+
+def add_system_log(message: str, level: str = "info") -> None:
+    """Add a log entry (called from other modules)."""
+    _log_buffer.append({
+        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "message": message,
+        "level": level,
+    })
+
+
+# Seed with startup log
+add_system_log("OmniSight Engine started", "info")
+add_system_log(f"Python {platform.python_version()} on {platform.system()}", "info")
+
+
+@router.get("/logs")
+async def get_logs(limit: int = 50):
+    """Return recent system logs."""
+    return list(_log_buffer)[-limit:]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Token usage tracking
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_token_usage: dict[str, dict] = {}
+
+
+def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: int) -> None:
+    """Track token usage for a model (called from LLM calls)."""
+    if model not in _token_usage:
+        _token_usage[model] = {
+            "model": model,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost": 0.0,
+            "request_count": 0,
+            "avg_latency": 0,
+            "last_used": "",
+        }
+    u = _token_usage[model]
+    u["input_tokens"] += input_tokens
+    u["output_tokens"] += output_tokens
+    u["total_tokens"] = u["input_tokens"] + u["output_tokens"]
+    u["request_count"] += 1
+    # Running average latency
+    u["avg_latency"] = int((u["avg_latency"] * (u["request_count"] - 1) + latency_ms) / u["request_count"])
+    u["last_used"] = datetime.now().strftime("%H:%M:%S")
+    # Cost estimate (rough)
+    pricing = {
+        "claude-sonnet-4-20250514": (3.0, 15.0),
+        "claude-opus-4-20250514": (15.0, 75.0),
+        "gpt-4o": (5.0, 15.0),
+        "gemini-1.5-pro": (0.5, 1.5),
+        "grok-3-mini": (2.0, 10.0),
+        "llama-3.3-70b-versatile": (0.6, 0.6),
+        "deepseek-chat": (0.14, 0.28),
+    }
+    inp_rate, out_rate = pricing.get(model, (1.0, 3.0))
+    u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
+
+
+@router.get("/tokens")
+async def get_token_usage():
+    """Return token usage stats per model."""
+    return list(_token_usage.values())
+
+
+@router.delete("/tokens")
+async def reset_token_usage():
+    """Reset all token usage counters."""
+    _token_usage.clear()
+    return {"status": "reset"}

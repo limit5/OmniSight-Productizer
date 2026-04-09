@@ -19,6 +19,17 @@ yarn-error.log*
 # env files
 .env*
 
+# python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# build artifacts
+/build/
+
+# agent isolated workspaces
+.agent_workspaces/
+
 # vercel
 .vercel
 

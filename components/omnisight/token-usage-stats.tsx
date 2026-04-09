@@ -40,60 +40,9 @@ const MODEL_PRICING: Record<AIModel, { input: number; output: number }> = {
   "llama-4": { input: 0.2, output: 0.6 },
 }
 
-// Generate sample usage data
-function generateSampleUsage(): ModelTokenUsage[] {
-  return [
-    {
-      model: "claude-opus-4.6",
-      inputTokens: 125840,
-      outputTokens: 48320,
-      totalTokens: 174160,
-      cost: 5.51,
-      requestCount: 47,
-      avgLatency: 2340,
-      lastUsed: "2 min ago"
-    },
-    {
-      model: "gpt-5.4",
-      inputTokens: 89420,
-      outputTokens: 34210,
-      totalTokens: 123630,
-      cost: 0.96,
-      requestCount: 32,
-      avgLatency: 1820,
-      lastUsed: "5 min ago"
-    },
-    {
-      model: "gemini-3.1",
-      inputTokens: 156780,
-      outputTokens: 62340,
-      totalTokens: 219120,
-      cost: 0.17,
-      requestCount: 68,
-      avgLatency: 980,
-      lastUsed: "1 min ago"
-    },
-    {
-      model: "claude-sonnet-4.8",
-      inputTokens: 67230,
-      outputTokens: 28450,
-      totalTokens: 95680,
-      cost: 0.63,
-      requestCount: 24,
-      avgLatency: 1540,
-      lastUsed: "8 min ago"
-    },
-    {
-      model: "grok-3",
-      inputTokens: 34560,
-      outputTokens: 15230,
-      totalTokens: 49790,
-      cost: 0.22,
-      requestCount: 15,
-      avgLatency: 1120,
-      lastUsed: "12 min ago"
-    },
-  ]
+// Empty state — no LLM calls made yet
+function emptyUsage(): ModelTokenUsage[] {
+  return []
 }
 
 // Format large numbers with K/M suffix
@@ -117,26 +66,23 @@ function formatCost(cost: number): string {
 
 interface TokenUsageStatsProps {
   className?: string
+  externalUsage?: ModelTokenUsage[]
 }
 
-export function TokenUsageStats({ className = "" }: TokenUsageStatsProps) {
+export function TokenUsageStats({ className = "", externalUsage }: TokenUsageStatsProps) {
   const [expanded, setExpanded] = useState(true)
-  const [usageData, setUsageData] = useState<ModelTokenUsage[]>(generateSampleUsage())
+  const [usageData, setUsageData] = useState<ModelTokenUsage[]>(externalUsage ?? emptyUsage())
   const [selectedModel, setSelectedModel] = useState<AIModel | null>(null)
-  
-  // Simulate real-time updates
+
+  // Sync from backend when available
   useEffect(() => {
-    const interval = setInterval(() => {
-      setUsageData(prev => prev.map(item => ({
-        ...item,
-        inputTokens: item.inputTokens + Math.floor(Math.random() * 500),
-        outputTokens: item.outputTokens + Math.floor(Math.random() * 200),
-        totalTokens: item.inputTokens + item.outputTokens + Math.floor(Math.random() * 700),
-        requestCount: item.requestCount + (Math.random() > 0.7 ? 1 : 0),
-        cost: item.cost + (Math.random() * 0.02),
-      })))
-    }, 5000)
-    return () => clearInterval(interval)
+    if (externalUsage && externalUsage.length > 0) {
+      setUsageData(externalUsage)
+    }
+  }, [externalUsage])
+
+  // No simulation — real data comes from backend via externalUsage prop
+  useEffect(() => {
   }, [])
   
   // Calculate totals
