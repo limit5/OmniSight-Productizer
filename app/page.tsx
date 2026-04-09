@@ -10,7 +10,7 @@ import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
 import { SourceControlMatrix, type Repository } from "@/components/omnisight/source-control-matrix"
 import { TaskBacklog, type Task } from "@/components/omnisight/task-backlog"
-import { OrchestratorAI } from "@/components/omnisight/orchestrator-ai"
+import { OrchestratorAI, type OrchestratorMessage } from "@/components/omnisight/orchestrator-ai"
 import { MobileNav, TabletNav, type PanelId } from "@/components/omnisight/mobile-nav"
 
 const agentTemplates: Record<string, Partial<Agent>> = {
@@ -52,11 +52,21 @@ const defaultTasks: Task[] = [
   }
 ]
 
+// Helper to format time consistently
+function formatTime(): string {
+  const date = new Date()
+  const hours = date.getHours().toString().padStart(2, "0")
+  const minutes = date.getMinutes().toString().padStart(2, "0")
+  const seconds = date.getSeconds().toString().padStart(2, "0")
+  return `${hours}:${minutes}:${seconds}`
+}
+
 export default function Home() {
   const [syncCount, setSyncCount] = useState(0)
   const [agents, setAgents] = useState<Agent[]>(defaultAgents)
   const [tasks, setTasks] = useState<Task[]>(defaultTasks)
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
+  const [orchestratorMessages, setOrchestratorMessages] = useState<OrchestratorMessage[]>([])
 
   const handleInvoke = () => {
     setSyncCount(c => c + 1)
@@ -316,8 +326,22 @@ export default function Home() {
     setAgents(prev => [...prev, newAgent])
   }, [])
 
+  // Helper to add message to orchestrator
+  const addOrchestratorMessage = (role: OrchestratorMessage["role"], content: string) => {
+    const message: OrchestratorMessage = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      role,
+      content,
+      timestamp: formatTime()
+    }
+    setOrchestratorMessages(prev => [...prev, message])
+  }
+
   const handleCommand = (command: string) => {
     const cmd = command.toLowerCase().trim()
+    
+    // Add user command to orchestrator
+    addOrchestratorMessage("user", command)
     
     // Semantic agent generation - detect intent from natural language
     const detectAgentType = (text: string): Agent["type"] => {
@@ -353,9 +377,10 @@ export default function Home() {
       }
       
       const id = `agent-${Date.now()}`
+      const agentName = `${agentType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`
       const newAgent: Agent = {
         id,
-        name: `${agentType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
+        name: agentName,
         type: agentType,
         status: "booting" as AgentStatus,
         progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
@@ -363,28 +388,53 @@ export default function Home() {
       }
       setAgents(prev => [...prev, newAgent])
       
+      // Send orchestrator response
+      setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `Spawning ${agentType.toUpperCase()} agent: ${agentName}. Initializing boot sequence...`)
+      }, 200)
+      
       // Transition to running after boot
       setTimeout(() => {
         setAgents(prev => prev.map(a => 
           a.id === id ? { ...a, status: "running" as AgentStatus, thoughtChain: `Processing: ${command}` } : a
         ))
+        addOrchestratorMessage("system", `Agent ${agentName} is now ONLINE and processing task.`)
       }, 1500)
       
     } else if (cmd.startsWith("remove ") || cmd.startsWith("kill ") || cmd.startsWith("terminate ")) {
       const namePart = cmd.split(" ").slice(1).join(" ").toUpperCase()
+      const removedAgents = agents.filter(agent => agent.name.includes(namePart))
       setAgents(prev => prev.filter(agent => !agent.name.includes(namePart)))
+      
+      setTimeout(() => {
+        if (removedAgents.length > 0) {
+          addOrchestratorMessage("orchestrator", `Terminated ${removedAgents.length} agent(s): ${removedAgents.map(a => a.name).join(", ")}`)
+        } else {
+          addOrchestratorMessage("orchestrator", `No agents found matching "${namePart}". No agents terminated.`)
+        }
+      }, 200)
+      
     } else if (cmd === "clear" || cmd === "reset") {
+      const count = agents.length
       setAgents([])
+      setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `All ${count} agents have been terminated. System reset complete.`)
+      }, 200)
+      
     } else if (cmd === "restore" || cmd === "default") {
       setAgents(defaultAgents)
+      setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `System restored to default configuration. ${defaultAgents.length} agents initialized.`)
+      }, 200)
+      
     } else if (cmd.includes("agent") && (cmd.includes("test") || cmd.includes("wifi") || cmd.includes("throughput") || cmd.includes("responsible"))) {
       // Natural language agent creation
-      // e.g., "Add an Agent responsible for testing Wi-Fi throughput"
       const agentType = detectAgentType(cmd)
       const id = `agent-${Date.now()}`
+      const agentName = `${agentType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`
       const newAgent: Agent = {
         id,
-        name: `${agentType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
+        name: agentName,
         type: agentType,
         status: "booting" as AgentStatus,
         progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
@@ -393,10 +443,34 @@ export default function Home() {
       setAgents(prev => [...prev, newAgent])
       
       setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `Intent recognized. Spawning ${agentType.toUpperCase()} agent: ${agentName} to handle: "${command}"`)
+      }, 200)
+      
+      setTimeout(() => {
         setAgents(prev => prev.map(a => 
           a.id === id ? { ...a, status: "running" as AgentStatus, thoughtChain: `Task initialized: ${command}` } : a
         ))
+        addOrchestratorMessage("system", `Agent ${agentName} is now ONLINE.`)
       }, 1500)
+      
+    } else if (cmd === "status" || cmd === "info") {
+      const running = agents.filter(a => a.status === "running").length
+      const idle = agents.filter(a => a.status === "idle").length
+      const errors = agents.filter(a => a.status === "error").length
+      setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `System Status: ${agents.length} total agents | ${running} running | ${idle} idle | ${errors} errors | ${tasks.filter(t => t.status === "backlog").length} pending tasks`)
+      }, 200)
+      
+    } else if (cmd === "help") {
+      setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `Available commands:\n• spawn/add/create [type] - Create new agent\n• remove/kill [name] - Terminate agent\n• clear/reset - Remove all agents\n• restore/default - Restore default agents\n• status/info - Show system status\n• help - Show this message\n\nAgent types: firmware, software, validator, reporter, custom`)
+      }, 200)
+      
+    } else {
+      // Unknown command
+      setTimeout(() => {
+        addOrchestratorMessage("orchestrator", `Command not recognized: "${command}". Type "help" for available commands, or describe what you need in natural language.`)
+      }, 200)
     }
   }
 
@@ -434,6 +508,8 @@ export default function Home() {
             onForceAssign={handleForceAssign}
             onUpdateAgentStatus={handleUpdateAgentFromTask}
             onCompleteTask={handleCompleteTask}
+            externalMessages={orchestratorMessages}
+            onSendCommand={handleCommand}
           />
         )
       case "tasks":
@@ -524,7 +600,7 @@ export default function Home() {
             />
           </section>
           
-          {/* Orchestrator AI - Central Coordinator */}
+          {/* Orchestrator AI - Central Coordinator & Command Hub */}
           <aside className="min-h-0 overflow-hidden">
             <OrchestratorAI
               agents={agents}
@@ -533,6 +609,8 @@ export default function Home() {
               onSpawnAgent={handleCreateAgentForTask}
               onForceAssign={handleForceAssign}
               onUpdateAgentStatus={handleUpdateAgentFromTask}
+              externalMessages={orchestratorMessages}
+              onSendCommand={handleCommand}
               onCompleteTask={handleCompleteTask}
             />
           </aside>

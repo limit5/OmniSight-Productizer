@@ -65,6 +65,8 @@ interface OrchestratorAIProps {
   onForceAssign: (taskId: string, agentId: string) => void
   onUpdateAgentStatus?: (agentId: string, status: AgentStatus) => void
   onCompleteTask?: (taskId: string) => void
+  externalMessages?: OrchestratorMessage[]
+  onSendCommand?: (command: string) => void
 }
 
 // Helper to get agent icon component
@@ -113,7 +115,9 @@ export function OrchestratorAI({
   onSpawnAgent, 
   onForceAssign,
   onUpdateAgentStatus,
-  onCompleteTask
+  onCompleteTask,
+  externalMessages = [],
+  onSendCommand
 }: OrchestratorAIProps) {
   const [messages, setMessages] = useState<OrchestratorMessage[]>([
     {
@@ -129,6 +133,17 @@ export function OrchestratorAI({
       timestamp: formatTime()
     }
   ])
+  
+  // Merge external messages into local state
+  useEffect(() => {
+    if (externalMessages.length > 0) {
+      const lastExternal = externalMessages[externalMessages.length - 1]
+      // Check if this message is already in our state
+      if (!messages.find(m => m.id === lastExternal.id)) {
+        setMessages(prev => [...prev, lastExternal])
+      }
+    }
+  }, [externalMessages, messages])
   
   const [suggestions, setSuggestions] = useState<AISuggestion[]>([])
   const [inputValue, setInputValue] = useState("")
@@ -318,7 +333,20 @@ export function OrchestratorAI({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!inputValue.trim()) return
-    processCommand(inputValue)
+    
+    // If external command handler is available, use it for agent-related commands
+    const cmd = inputValue.toLowerCase().trim()
+    if (onSendCommand && (
+      cmd.startsWith("add ") || 
+      cmd.startsWith("spawn ") || 
+      cmd.startsWith("create ") ||
+      cmd.startsWith("remove ") ||
+      cmd.startsWith("stop ")
+    )) {
+      onSendCommand(inputValue)
+    } else {
+      processCommand(inputValue)
+    }
     setInputValue("")
   }
   
