@@ -219,7 +219,7 @@ def _yaml_to_spec(data: dict, parent_type: str = "hardware") -> list[dict]:
 @router.get("/spec")
 async def get_spec():
     """Load spec from hardware_manifest.yaml (or return empty if not found)."""
-    manifest = _PROJECT_ROOT / "test_fixtures" / "hardware_manifest.yaml"
+    manifest = _PROJECT_ROOT / "configs" / "hardware_manifest.yaml"
     if not manifest.exists():
         return []
     raw = manifest.read_text(encoding="utf-8")
@@ -230,7 +230,7 @@ async def get_spec():
 @router.put("/spec")
 async def update_spec_field(path: list[str], value: str | int | float | bool):
     """Update a single field in hardware_manifest.yaml."""
-    manifest = _PROJECT_ROOT / "test_fixtures" / "hardware_manifest.yaml"
+    manifest = _PROJECT_ROOT / "configs" / "hardware_manifest.yaml"
     if not manifest.exists():
         return {"error": "Manifest not found"}
     raw = manifest.read_text(encoding="utf-8")

@@ -1,0 +1,15 @@
+{
+  "_comment": "OmniSight Client Specification — SSOT for customer requirements",
+  "client": {
+    "id": "",
+    "name": "",
+    "contact": ""
+  },
+  "requirements": {
+    "delivery_date": "",
+    "certifications": [],
+    "quantity": 0,
+    "custom_features": []
+  },
+  "acceptance_criteria": []
+}

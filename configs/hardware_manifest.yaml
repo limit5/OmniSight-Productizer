@@ -1,0 +1,53 @@
+# ============================================================
+# OmniSight Hardware Manifest — Single Source of Truth (SSOT)
+# ============================================================
+# This file drives the entire auto-generation pipeline.
+# Any change here triggers global dependency analysis
+# and automatic code regeneration across all agents.
+#
+# Location: configs/hardware_manifest.yaml
+# Used by:  GET /api/v1/system/spec
+#           Firmware Agent (driver generation)
+#           Validator Agent (test matrix)
+#           Reporter Agent (compliance docs)
+# ============================================================
+
+project:
+  name: ""
+  version: ""
+  target_platform: ""
+
+sensor:
+  model: ""
+  interface: ""
+  resolution: ""
+  max_fps: 0
+  pixel_format: ""
+  i2c:
+    address: ""
+    bus: 0
+    speed_khz: 0
+  registers: []
+
+isp:
+  pipeline: []
+  output_format: ""
+  output_resolution: ""
+
+uvc:
+  vendor_id: ""
+  product_id: ""
+  device_name: ""
+  streaming:
+    formats: []
+
+build:
+  toolchain: ""
+  kernel_version: ""
+  cross_compile_prefix: ""
+  output_dir: "build/output"
+  flags: []
+
+compliance:
+  certifications: []
+  emc_class: ""

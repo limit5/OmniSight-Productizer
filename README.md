@@ -297,8 +297,11 @@ OmniSight-Productizer/
 |   |   +-- state.py              Graph state schema
 |   +-- routers/                  9 API routers (41 endpoints)
 |   +-- docker/Dockerfile.agent   aarch64 cross-compile image
-+-- test_fixtures/
-|   +-- hardware_manifest.yaml    Sony IMX335 spec (source of truth)
++-- configs/                      SSOT (Single Source of Truth)
+|   +-- hardware_manifest.yaml    Hardware spec (drives all agents)
+|   +-- client_spec.json          Customer requirements
++-- test_fixtures/                E2E testing only
+|   +-- hardware_manifest.yaml    Sample spec for testing
 |   +-- mock_compile.sh           Build simulation script
 +-- .env.example                  Environment variable template
 ```
