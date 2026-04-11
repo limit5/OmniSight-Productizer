@@ -108,11 +108,11 @@ class TestErrorCheckNode:
                 ToolResult(tool_name="read_file", output="file content", success=True),
             ],
             retry_count=0,
-            max_retries=2,
+            max_retries=3,
         )
         update = error_check_node(state)
-        # Clears last_error to signal "no retry needed"
-        assert update == {"last_error": ""}
+        assert update["last_error"] == ""
+        assert update["rtk_bypass"] is False
 
     def test_error_triggers_retry(self):
         state = GraphState(
@@ -144,7 +144,7 @@ class TestErrorCheckNode:
         assert update["actions"][0].status == "awaiting_confirmation"
 
     def test_retries_exhausted_no_errors_passes_through(self):
-        """When retries exhausted but no errors, go to summarizer."""
+        """When retries exhausted but no errors, go to summarizer and reset bypass."""
         state = GraphState(
             tool_results=[
                 ToolResult(tool_name="read_file", output="ok", success=True),
@@ -153,7 +153,8 @@ class TestErrorCheckNode:
             max_retries=3,
         )
         update = error_check_node(state)
-        assert update == {"last_error": ""}
+        assert update["last_error"] == ""
+        assert update["rtk_bypass"] is False
 
     def test_should_retry_routes_to_specialist(self):
         """After error_check sets last_error, should retry the specialist."""

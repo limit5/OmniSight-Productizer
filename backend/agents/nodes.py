@@ -464,8 +464,8 @@ def error_check_node(state: GraphState) -> dict:
                     )
                 ],
             }
-        # No errors — proceed to summarizer
-        return {"last_error": ""}
+        # No errors — proceed to summarizer, reset compression bypass
+        return {"last_error": "", "rtk_bypass": False}
 
     error_summary = "; ".join(
         f"{r.tool_name}: {r.output[:200]}" for r in failed
