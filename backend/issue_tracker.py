@@ -302,16 +302,20 @@ async def _sync_jira(issue_url: str, status: str, comment: str) -> dict:
             transition_id = t["id"]
             break
 
-    if transition_id:
-        do_url = f"{base}/rest/api/2/issue/{issue_key}/transitions"
-        proc = await asyncio.create_subprocess_exec(
-            "curl", "-s", "-X", "POST", do_url,
-            "-H", f"Authorization: Bearer {token}",
-            "-H", "Content-Type: application/json",
-            "-d", json.dumps({"transition": {"id": transition_id}}),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(proc.communicate(), timeout=10)
+    if not transition_id:
+        available = [t.get("name", "?") for t in transitions]
+        logger.warning("Jira: no transition found for '%s' on %s. Available: %s", target_name, issue_key, available)
+        return {"status": "error", "message": f"No Jira transition for '{target_name}'. Available: {available}"}
+
+    do_url = f"{base}/rest/api/2/issue/{issue_key}/transitions"
+    proc = await asyncio.create_subprocess_exec(
+        "curl", "-s", "-X", "POST", do_url,
+        "-H", f"Authorization: Bearer {token}",
+        "-H", "Content-Type: application/json",
+        "-d", json.dumps({"transition": {"id": transition_id}}),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    await asyncio.wait_for(proc.communicate(), timeout=10)
 
     if comment:
         await _comment_jira(issue_url, comment)
