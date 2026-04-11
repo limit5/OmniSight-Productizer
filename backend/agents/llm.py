@@ -38,20 +38,23 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._start = time.time()
 
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:  # noqa: ANN003
-        from backend.routers.system import track_tokens
+        try:
+            from backend.routers.system import track_tokens
 
-        latency_ms = int((time.time() - self._start) * 1000)
-        usage: dict = {}
-        if response.llm_output:
-            usage = response.llm_output.get("token_usage", {})
-            if not usage:
-                usage = response.llm_output.get("usage", {})
-        track_tokens(
-            self.model_name,
-            usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
-            usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
-            latency_ms,
-        )
+            latency_ms = int((time.time() - self._start) * 1000)
+            usage: dict = {}
+            if response.llm_output:
+                usage = response.llm_output.get("token_usage", {})
+                if not usage:
+                    usage = response.llm_output.get("usage", {})
+            track_tokens(
+                self.model_name,
+                usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
+                usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
+                latency_ms,
+            )
+        except Exception as exc:
+            logger.warning("Token tracking failed for %s: %s", self.model_name, exc)
 
 # Cache to avoid re-creating LLM instances
 _cache: dict[str, BaseChatModel] = {}

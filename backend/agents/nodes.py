@@ -388,36 +388,36 @@ async def tool_executor_node(state: GraphState) -> dict:
         set_active_workspace(None, agent_id=None)
         emit_pipeline_phase("tool_execution", f"Executing {len(state.tool_calls)} tool(s)")
 
-    for i, tc in enumerate(state.tool_calls):
-        tool_fn = TOOL_MAP.get(tc.tool_name)
-        if not tool_fn:
-            output = f"[ERROR] Unknown tool: {tc.tool_name}"
-            emit_tool_progress(tc.tool_name, "error", output)
-            results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
-            tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
-            continue
+    try:
+        for i, tc in enumerate(state.tool_calls):
+            tool_fn = TOOL_MAP.get(tc.tool_name)
+            if not tool_fn:
+                output = f"[ERROR] Unknown tool: {tc.tool_name}"
+                emit_tool_progress(tc.tool_name, "error", output)
+                results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
+                tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+                continue
 
-        emit_tool_progress(tc.tool_name, "start", f"Running {tc.tool_name}({tc.arguments})", index=i)
+            emit_tool_progress(tc.tool_name, "start", f"Running {tc.tool_name}({tc.arguments})", index=i)
 
-        try:
-            output = await tool_fn.ainvoke(tc.arguments)
-            # Detect error strings returned by tools (not just exceptions)
-            _ERROR_PREFIXES = ("[ERROR]", "[BLOCKED]", "[TIMEOUT]")
-            success = not any(output.startswith(p) for p in _ERROR_PREFIXES)
-            status_label = "done" if success else "error"
-            emit_tool_progress(tc.tool_name, status_label, output, index=i, success=success)
-            results.append(ToolResult(tool_name=tc.tool_name, output=output, success=success))
-            tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
-        except Exception as exc:
-            output = f"[ERROR] {tc.tool_name} failed: {exc}"
-            emit_tool_progress(tc.tool_name, "error", output, index=i, success=False)
-            results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
-            tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+            try:
+                output = await tool_fn.ainvoke(tc.arguments)
+                _ERROR_PREFIXES = ("[ERROR]", "[BLOCKED]", "[TIMEOUT]")
+                success = not any(output.startswith(p) for p in _ERROR_PREFIXES)
+                status_label = "done" if success else "error"
+                emit_tool_progress(tc.tool_name, status_label, output, index=i, success=success)
+                results.append(ToolResult(tool_name=tc.tool_name, output=output, success=success))
+                tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+            except Exception as exc:
+                output = f"[ERROR] {tc.tool_name} failed: {exc}"
+                emit_tool_progress(tc.tool_name, "error", output, index=i, success=False)
+                results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
+                tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+    finally:
+        # Always reset workspace context, even if loop is interrupted
+        set_active_workspace(None, agent_id=None)
 
     emit_pipeline_phase("tool_complete", f"{len(results)} tool(s) finished")
-
-    # Reset workspace context
-    set_active_workspace(None, agent_id=None)
 
     return {
         "tool_results": results,
