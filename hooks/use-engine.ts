@@ -34,6 +34,10 @@ function mapTask(t: api.ApiTask): Task {
     completedAt: t.completed_at ?? undefined,
     aiAnalysis: t.ai_analysis ?? undefined,
     suggestedAgentType: t.suggested_agent_type as Agent["type"] | undefined,
+    externalIssueId: t.external_issue_id ?? undefined,
+    issueUrl: t.issue_url ?? undefined,
+    acceptanceCriteria: t.acceptance_criteria ?? undefined,
+    labels: t.labels ?? [],
   }
 }
 

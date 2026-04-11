@@ -122,6 +122,10 @@ export interface ApiTask {
   completed_at: string | null
   ai_analysis: string | null
   suggested_agent_type: string | null
+  external_issue_id: string | null
+  issue_url: string | null
+  acceptance_criteria: string | null
+  labels: string[]
 }
 
 export async function listTasks() {
@@ -133,6 +137,10 @@ export async function createTask(body: {
   description?: string
   priority?: string
   suggested_agent_type?: string
+  external_issue_id?: string
+  issue_url?: string
+  acceptance_criteria?: string
+  labels?: string[]
 }) {
   return request<ApiTask>("/tasks", {
     method: "POST",

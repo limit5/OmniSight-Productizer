@@ -27,7 +27,7 @@ import type { Agent, AgentStatus } from "./agent-matrix-wall"
 
 // Task types
 export type TaskPriority = "critical" | "high" | "medium" | "low"
-export type TaskStatus = "backlog" | "analyzing" | "assigned" | "in_progress" | "completed" | "blocked"
+export type TaskStatus = "backlog" | "analyzing" | "assigned" | "in_progress" | "in_review" | "completed" | "blocked"
 
 export interface Task {
   id: string
@@ -40,6 +40,10 @@ export interface Task {
   completedAt?: string
   aiAnalysis?: string
   suggestedAgentType?: Agent["type"]
+  externalIssueId?: string
+  issueUrl?: string
+  acceptanceCriteria?: string
+  labels?: string[]
 }
 
 // Chat message types
@@ -80,6 +84,7 @@ function getPriorityColor(priority: TaskPriority): string {
 function getStatusColor(status: TaskStatus): string {
   switch (status) {
     case "completed": return "var(--validation-emerald)"
+    case "in_review": return "#f59e0b"
     case "in_progress": return "var(--neural-blue)"
     case "assigned": return "var(--artifact-purple)"
     case "analyzing": return "var(--hardware-orange)"
