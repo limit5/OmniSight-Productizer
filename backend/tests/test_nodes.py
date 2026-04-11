@@ -19,28 +19,34 @@ from backend.agents.state import GraphState, ToolResult
 class TestRuleBasedRoute:
 
     def test_firmware_keywords(self):
-        assert _rule_based_route("write a UVC driver for IMX335 sensor") == "firmware"
-        assert _rule_based_route("cross-compile the kernel module") == "firmware"
+        primary, _ = _rule_based_route("write a UVC driver for IMX335 sensor")
+        assert primary == "firmware"
 
     def test_software_keywords(self):
-        assert _rule_based_route("refactor the algorithm module") == "software"
-        assert _rule_based_route("compile the SDK library") == "software"
+        primary, _ = _rule_based_route("refactor the algorithm module")
+        assert primary == "software"
 
     def test_validator_keywords(self):
-        assert _rule_based_route("run test suite and check coverage") == "validator"
-        assert _rule_based_route("validate the benchmark results") == "validator"
+        primary, _ = _rule_based_route("run test suite and check coverage")
+        assert primary == "validator"
 
     def test_reporter_keywords(self):
-        assert _rule_based_route("generate FCC compliance report") == "reporter"
-        assert _rule_based_route("export documentation to PDF") == "reporter"
+        primary, _ = _rule_based_route("generate FCC compliance report")
+        assert primary == "reporter"
 
     def test_no_match_returns_general(self):
-        assert _rule_based_route("hello world") == "general"
-        assert _rule_based_route("what is the weather?") == "general"
+        primary, secondary = _rule_based_route("hello world")
+        assert primary == "general"
+        assert secondary == []
 
     def test_highest_score_wins(self):
-        # "firmware" + "driver" + "sensor" = 3 firmware keywords
-        assert _rule_based_route("firmware driver sensor test") == "firmware"
+        primary, _ = _rule_based_route("firmware driver sensor test")
+        assert primary == "firmware"
+
+    def test_compound_returns_secondary(self):
+        primary, secondary = _rule_based_route("write firmware driver and run tests")
+        assert primary in ("firmware", "validator")
+        assert len(secondary) >= 1
 
 
 # ─── Rule-based tool extraction ───

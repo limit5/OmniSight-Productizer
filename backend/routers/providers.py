@@ -57,6 +57,14 @@ async def switch_provider(body: SwitchProviderRequest):
     }
 
 
+async def _do_switch_provider(provider: str, model: str = "") -> None:
+    """Internal helper to switch provider (called by auto-downgrade)."""
+    from backend.agents.llm import _cache
+    settings.llm_provider = provider
+    settings.llm_model = model
+    _cache.clear()  # Force re-init with new provider
+
+
 @router.get("/test")
 async def test_provider():
     """Quick test of the current LLM provider."""

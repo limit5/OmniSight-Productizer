@@ -72,6 +72,12 @@ def get_llm(
     Returns:
         A LangChain chat model, or None if the provider can't be initialized.
     """
+    # Check token freeze — return None to trigger rule-based fallback
+    from backend.routers.system import token_frozen
+    if token_frozen:
+        logger.info("Token budget frozen — LLM disabled, using rule-based fallback")
+        return None
+
     provider = provider or settings.llm_provider
     model = model or (settings.get_model_name() if provider == settings.llm_provider else None)
 
@@ -81,8 +87,24 @@ def get_llm(
 
     try:
         llm = _create_llm(provider, model)
+
+        # Failover: if primary fails, try fallback chain
         if llm is None:
-            return None
+            chain = [p.strip() for p in settings.llm_fallback_chain.split(",") if p.strip()]
+            for fallback_provider in chain:
+                if fallback_provider == provider:
+                    continue  # Skip the one that already failed
+                llm = _create_llm(fallback_provider, None)
+                if llm is not None:
+                    provider = fallback_provider
+                    model = None
+                    logger.info("Failover: %s → %s", settings.llm_provider, fallback_provider)
+                    break
+            if llm is None:
+                from backend.events import emit_token_warning
+                emit_token_warning("all_providers_failed", "All LLM providers failed. Using rule-based fallback.")
+                return None
+
         # Inject token tracking callback (graceful if provider doesn't support it)
         model_name = model or (llm.model_name if hasattr(llm, "model_name") else f"{provider}:default")
         try:

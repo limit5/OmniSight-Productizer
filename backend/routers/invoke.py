@@ -7,6 +7,7 @@ the highest-value action to perform. Streams progress via SSE.
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 
@@ -16,7 +17,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend.agents.graph import run_graph
 from backend.routers.agents import _agents, _persist as _persist_agent
 from backend.routers.tasks import _tasks, _persist as _persist_task
-from backend.models import AgentStatus, AgentWorkspace, TaskStatus
+from backend.models import AgentStatus, AgentWorkspace, Task, TaskStatus
 from backend.workspace import provision as ws_provision, get_workspace
 from backend.handoff import load_handoff_for_task
 from fastapi.responses import JSONResponse
@@ -91,7 +92,69 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
         logger.error("Agent task failed: agent=%s task=%s error=%s", agent.id, task.id, exc)
 
     await _persist_agent(agent)
+    # Mark task as completed and check parent
+    task.status = TaskStatus.completed
+    await _persist_task(task)
+    await _check_parent_completion(task.id)
     emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
+
+
+# ─── Task decomposition ───
+
+_SPLIT_PATTERNS = re.compile(
+    r"\b(?:and then|then|and|之後|然後|並且|以及|接著)\b", re.IGNORECASE,
+)
+
+
+async def _maybe_decompose_task(task) -> list:
+    """Split a compound task into sub-tasks if it contains conjunctions.
+
+    Returns a list of new child Task objects (empty if no decomposition needed).
+    """
+    from backend.agents.nodes import _rule_based_route
+
+    text = f"{task.title}. {task.description or ''}"
+    parts = _SPLIT_PATTERNS.split(text)
+    parts = [p.strip().rstrip(".").strip() for p in parts if p.strip()]
+
+    if len(parts) <= 1:
+        return []  # Single task, no decomposition
+
+    # Create child tasks
+    children = []
+    for i, part in enumerate(parts):
+        route, _ = _rule_based_route(part)
+        child_id = f"{task.id}-sub{i + 1}"
+        child = Task(
+            id=child_id,
+            title=part,
+            description=f"Sub-task of: {task.title}",
+            priority=task.priority,
+            status=TaskStatus.backlog,
+            suggested_agent_type=route if route != "general" else task.suggested_agent_type,
+            parent_task_id=task.id,
+        )
+        children.append(child)
+
+    return children
+
+
+async def _check_parent_completion(task_id: str) -> None:
+    """If task has a parent, check if all siblings are done → update parent."""
+    task = _tasks.get(task_id)
+    if not task or not task.parent_task_id:
+        return
+    parent = _tasks.get(task.parent_task_id)
+    if not parent:
+        return
+
+    siblings = [t for t in _tasks.values() if t.parent_task_id == parent.id]
+    if all(s.status == TaskStatus.completed for s in siblings):
+        parent.status = TaskStatus.completed
+        await _persist_task(parent)
+    elif any(s.status == TaskStatus.blocked for s in siblings):
+        parent.status = TaskStatus.blocked
+        await _persist_task(parent)
 
 
 # ─── State analysis ───
@@ -147,29 +210,24 @@ def _plan_actions(state: dict, command: str | None) -> list[dict]:
             "agent_name": agent.name,
         })
 
-    # Priority 2: Unassigned tasks → auto-assign to matching idle agents
-    idle_by_type: dict[str, list] = {}
-    for agent in state["idle_agents"]:
-        idle_by_type.setdefault(agent.type, []).append(agent)
+    # Priority 2: Unassigned tasks → auto-assign to best matching idle agent
+    remaining_idle = list(state["idle_agents"])
 
     for task in sorted(state["unassigned"], key=lambda t: _priority_rank(t.priority)):
-        # Find a matching idle agent
-        preferred_type = task.suggested_agent_type or "custom"
-        candidates = idle_by_type.get(preferred_type, [])
-        if not candidates:
-            # Try any idle agent
-            for atype, alist in idle_by_type.items():
-                if alist:
-                    candidates = alist
-                    break
-        if candidates:
-            agent = candidates.pop(0)
+        if not remaining_idle:
+            break
+        # Score all idle agents for this task, pick best
+        scored = [(a, _score_agent_for_task(a, task)) for a in remaining_idle]
+        scored.sort(key=lambda x: -x[1])
+        best_agent, best_score = scored[0]
+        if best_score > 0:
+            remaining_idle.remove(best_agent)
             actions.append({
                 "type": "assign",
                 "task_id": task.id,
                 "task_title": task.title,
-                "agent_id": agent.id,
-                "agent_name": agent.name,
+                "agent_id": best_agent.id,
+                "agent_name": best_agent.name,
             })
 
     # Priority 3: Completed tasks → generate report
@@ -196,6 +254,40 @@ def _plan_actions(state: dict, command: str | None) -> list[dict]:
 
 def _priority_rank(priority: str) -> int:
     return {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(priority, 4)
+
+
+def _score_agent_for_task(agent, task) -> int:
+    """Score how well an agent matches a task. Higher is better.
+
+    Scoring:
+      - type match (10): agent.type == task.suggested_agent_type
+      - sub_type keyword match (up to 5): agent's role keywords appear in task text
+      - ai_model bonus (1): agent has a specific LLM configured
+      - fallback (2): any agent can do any task at low priority
+    """
+    score = 2  # Base: any idle agent is better than none
+
+    task_type = task.suggested_agent_type
+    if task_type:
+        task_type_str = task_type.value if hasattr(task_type, "value") else str(task_type)
+        agent_type_str = agent.type.value if hasattr(agent.type, "value") else str(agent.type)
+        if agent_type_str == task_type_str:
+            score += 10
+
+    # sub_type keyword matching
+    if agent.sub_type:
+        from backend.prompt_loader import get_role_keywords
+        agent_type_str = agent.type.value if hasattr(agent.type, "value") else str(agent.type)
+        keywords = get_role_keywords(agent_type_str, agent.sub_type)
+        task_text = f"{task.title} {task.description or ''}".lower()
+        hits = sum(1 for kw in keywords if kw in task_text)
+        score += min(hits * 2, 5)
+
+    # Prefer agents with explicit model configured
+    if agent.ai_model:
+        score += 1
+
+    return score
 
 
 # ─── Action execution ───
@@ -415,6 +507,18 @@ async def invoke_stream(command: str | None = None):
             status_code=409,
             content={"detail": "Invoke already in progress"},
         )
+
+    # Pre-step: decompose compound tasks before planning
+    for task in list(_tasks.values()):
+        if task.status == TaskStatus.backlog and not task.child_task_ids:
+            children = await _maybe_decompose_task(task)
+            if children:
+                for child in children:
+                    _tasks[child.id] = child
+                    await _persist_task(child)
+                task.child_task_ids = [c.id for c in children]
+                task.status = TaskStatus.in_progress  # Parent waits for children
+                await _persist_task(task)
 
     state = _analyze_state()
     actions = _plan_actions(state, command)

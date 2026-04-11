@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     gitlab_token: str = ""  # GitLab Personal Access Token
     gitlab_url: str = ""  # Self-hosted GitLab URL (empty = gitlab.com)
 
+    # ── Token Budget & Resilience ──
+    token_budget_daily: float = 0.0  # USD per day (0 = unlimited)
+    token_warn_threshold: float = 0.8  # 80% → emit warning
+    token_downgrade_threshold: float = 0.9  # 90% → auto switch to cheaper model
+    token_freeze_threshold: float = 1.0  # 100% → stop all LLM calls
+    token_fallback_provider: str = "ollama"  # Provider to downgrade to at 90%
+    token_fallback_model: str = "llama3.1"  # Model to downgrade to at 90%
+    llm_fallback_chain: str = "anthropic,openai,google,groq,ollama"  # Failover priority
+
     # ── Gerrit Code Review ──
     gerrit_enabled: bool = False  # Master switch for Gerrit integration
     gerrit_url: str = ""  # Web UI URL, e.g. "https://gerrit.sora.services"

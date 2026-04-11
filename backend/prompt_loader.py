@@ -165,6 +165,22 @@ def list_available_models() -> list[dict]:
     return models
 
 
+_role_keywords_cache: dict[str, list[str]] = {}
+
+
+def get_role_keywords(category: str, role_id: str) -> list[str]:
+    """Get keywords for a role from its skill file frontmatter. Cached."""
+    cache_key = f"{category}/{role_id}"
+    if cache_key in _role_keywords_cache:
+        return _role_keywords_cache[cache_key]
+
+    path = _ROLES_DIR / category / f"{role_id}.skill.md"
+    meta = _parse_frontmatter(path)
+    keywords = meta.get("keywords", [])
+    _role_keywords_cache[cache_key] = keywords
+    return keywords
+
+
 def _parse_frontmatter(path: Path) -> dict:
     """Extract YAML frontmatter as a dict. Returns {} if none found."""
     try:

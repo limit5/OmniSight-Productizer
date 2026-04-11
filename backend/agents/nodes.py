@@ -61,43 +61,79 @@ _ROUTE_KEYWORDS = {
 }
 
 
-def _rule_based_route(text: str) -> str:
+def _rule_based_route(text: str) -> tuple[str, list[str]]:
+    """Route to best specialist(s) based on keyword scoring.
+
+    Returns ``(primary_route, secondary_routes)`` where secondary_routes
+    lists other specialists that also scored > 0 (for compound commands).
+    """
     text_lower = text.lower()
+
+    # Merge built-in keywords with skill file keywords
+    all_keywords: dict[str, list[str]] = dict(_ROUTE_KEYWORDS)
+    try:
+        from backend.prompt_loader import list_available_roles
+        for role in list_available_roles():
+            cat = role["category"]
+            kws = role.get("keywords", [])
+            if cat in all_keywords:
+                all_keywords[cat] = list(set(all_keywords[cat] + kws))
+    except Exception:
+        pass
+
     scores = {
         agent: sum(1 for kw in keywords if kw in text_lower)
-        for agent, keywords in _ROUTE_KEYWORDS.items()
+        for agent, keywords in all_keywords.items()
     }
-    best = max(scores, key=scores.get)  # type: ignore[arg-type]
-    return best if scores[best] > 0 else "general"
+    sorted_agents = sorted(scores.items(), key=lambda x: -x[1])
+    if not sorted_agents or sorted_agents[0][1] == 0:
+        return "general", []
+
+    primary = sorted_agents[0][0]
+    secondary = [a for a, s in sorted_agents[1:] if s > 0]
+    return primary, secondary
 
 
 def orchestrator_node(state: GraphState) -> dict:
     """Parse the user command, decide which specialist to route to."""
     cmd = state.user_command
 
+    secondary: list[str] = []
     llm = _get_llm()
     if llm:
         sys = SystemMessage(content=(
             "You are the OmniSight Orchestrator. Given a user command about "
-            "embedded AI camera development, decide which specialist agent "
-            "should handle it. Reply with EXACTLY one word: firmware, software, "
-            "validator, reporter, reviewer, or general."
+            "embedded AI camera development, decide which specialist agents "
+            "should handle it. If the command involves multiple domains, list them "
+            "separated by commas (primary first). "
+            "Valid agents: firmware, software, validator, reporter, reviewer, general. "
+            "Example: firmware,validator"
         ))
         try:
             resp = llm.invoke([sys, *state.messages])
-            route = resp.content.strip().lower()  # type: ignore[union-attr]
-            if route not in ("firmware", "software", "validator", "reporter", "reviewer", "general"):
-                route = _rule_based_route(cmd)
+            raw = resp.content.strip().lower()  # type: ignore[union-attr]
+            parts = [p.strip() for p in raw.split(",")]
+            valid = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
+            valid_parts = [p for p in parts if p in valid]
+            if valid_parts:
+                route = valid_parts[0]
+                secondary = valid_parts[1:]
+            else:
+                route, secondary = _rule_based_route(cmd)
         except Exception as exc:
             logger.warning("LLM routing failed: %s — falling back", exc)
-            route = _rule_based_route(cmd)
+            route, secondary = _rule_based_route(cmd)
     else:
-        route = _rule_based_route(cmd)
+        route, secondary = _rule_based_route(cmd)
 
-    emit_pipeline_phase("routing", f"Routing to {route.upper()} specialist")
+    detail = f"Routing to {route.upper()} specialist"
+    if secondary:
+        detail += f" (also relevant: {', '.join(s.upper() for s in secondary)})"
+    emit_pipeline_phase("routing", detail)
     return {
         "routed_to": route,
-        "messages": [AIMessage(content=f"[ORCHESTRATOR] Routing to {route.upper()} specialist.")],
+        "secondary_routes": secondary,
+        "messages": [AIMessage(content=f"[ORCHESTRATOR] {detail}")],
     }
 
 
@@ -489,6 +525,11 @@ def summarizer_node(state: GraphState) -> dict:
         if len(result.output) > 500:
             output_preview += "..."
         lines.append(f"  [{status}] {result.tool_name}:\n{output_preview}\n")
+
+    # Append multi-agent recommendation if secondary routes exist
+    if state.secondary_routes:
+        others = ", ".join(s.upper() for s in state.secondary_routes)
+        lines.append(f"\n[RECOMMENDATION] Related work may benefit from: {others} agent(s).")
 
     answer = "\n".join(lines)
     return {"answer": answer, "messages": [AIMessage(content=answer)]}

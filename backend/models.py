@@ -104,6 +104,9 @@ class Task(BaseModel):
     completed_at: Optional[str] = None
     ai_analysis: Optional[str] = None
     suggested_agent_type: Optional[AgentType] = None
+    suggested_sub_type: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    child_task_ids: list[str] = Field(default_factory=list)
 
 
 class TaskCreate(BaseModel):
@@ -111,6 +114,8 @@ class TaskCreate(BaseModel):
     description: Optional[str] = None
     priority: TaskPriority = TaskPriority.medium
     suggested_agent_type: Optional[AgentType] = None
+    suggested_sub_type: Optional[str] = None
+    parent_task_id: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):

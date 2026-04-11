@@ -45,7 +45,8 @@ class GraphState(BaseModel):
     user_command: str = ""
 
     # Which specialist should handle the request (set by the router)
-    routed_to: Literal["firmware", "software", "validator", "reporter", "reviewer", "general"] = "general"
+    routed_to: str = "general"
+    secondary_routes: list[str] = Field(default_factory=list)
 
     # Tool calling
     tool_calls: list[ToolCall] = Field(default_factory=list)

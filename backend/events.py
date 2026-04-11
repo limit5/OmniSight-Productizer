@@ -143,3 +143,19 @@ def emit_invoke(action_type: str, detail: str = "", **extra: Any) -> None:
         **extra,
     })
     _log(f"[INVOKE] {action_type}: {detail}")
+
+
+def emit_token_warning(level: str, message: str, usage: float = 0, budget: float = 0, **extra: Any) -> None:
+    """Token budget warning events.
+
+    Levels: ``warn`` (80%), ``downgrade`` (90%), ``frozen`` (100%), ``reset``, ``all_providers_failed``.
+    """
+    bus.publish("token_warning", {
+        "level": level,
+        "message": message,
+        "usage": usage,
+        "budget": budget,
+        **extra,
+    })
+    level_label = {"warn": "warn", "downgrade": "warn", "frozen": "error", "reset": "info"}.get(level, "warn")
+    _log(f"[TOKEN] {level.upper()}: {message}", level=level_label)

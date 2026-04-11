@@ -39,6 +39,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     # Collect existing columns per table
     migrations = [
         ("agents", "sub_type", "TEXT NOT NULL DEFAULT ''"),
+        ("tasks", "suggested_sub_type", "TEXT"),
+        ("tasks", "parent_task_id", "TEXT"),
+        ("tasks", "child_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
     ]
     for table, column, typedef in migrations:
         try:
@@ -90,7 +93,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at        TEXT,
     ai_analysis         TEXT,
-    suggested_agent_type TEXT
+    suggested_agent_type TEXT,
+    suggested_sub_type  TEXT,
+    parent_task_id      TEXT,
+    child_task_ids      TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -199,13 +205,14 @@ async def get_task(task_id: str) -> dict | None:
 
 async def upsert_task(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id, created_at, completed_at, ai_analysis, suggested_agent_type)
-           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id, :created_at, :completed_at, :ai_analysis, :suggested_agent_type)
+        """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id, created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type, parent_task_id, child_task_ids)
+           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id, :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type, :parent_task_id, :child_task_ids)
            ON CONFLICT(id) DO UPDATE SET
              title=excluded.title, description=excluded.description, priority=excluded.priority,
              status=excluded.status, assigned_agent_id=excluded.assigned_agent_id,
              completed_at=excluded.completed_at, ai_analysis=excluded.ai_analysis,
-             suggested_agent_type=excluded.suggested_agent_type
+             suggested_agent_type=excluded.suggested_agent_type, suggested_sub_type=excluded.suggested_sub_type,
+             parent_task_id=excluded.parent_task_id, child_task_ids=excluded.child_task_ids
         """,
         {
             "id": data["id"],
@@ -218,6 +225,9 @@ async def upsert_task(data: dict) -> None:
             "completed_at": data.get("completed_at"),
             "ai_analysis": data.get("ai_analysis"),
             "suggested_agent_type": data.get("suggested_agent_type"),
+            "suggested_sub_type": data.get("suggested_sub_type"),
+            "parent_task_id": data.get("parent_task_id"),
+            "child_task_ids": json.dumps(data.get("child_task_ids", [])),
         },
     )
     await _conn().commit()

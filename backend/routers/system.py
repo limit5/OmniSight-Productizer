@@ -373,11 +373,12 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
     inp_rate, out_rate = _PRICING.get(model, (1.0, 3.0))
     u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
 
-    # Persist asynchronously (fire-and-forget)
+    # Persist asynchronously (fire-and-forget) + check budget
     import asyncio
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_persist_token_usage(u.copy()))
+        loop.create_task(_check_token_budget())
     except RuntimeError:
         pass  # No event loop — skip persistence (e.g. during tests)
 
@@ -388,6 +389,50 @@ async def _persist_token_usage(data: dict) -> None:
         await db.upsert_token_usage(data)
     except Exception as exc:
         logger.warning("Token usage DB persist failed: %s", exc)
+
+
+# ── Token budget enforcement ──
+
+token_frozen: bool = False
+_last_budget_level: str = ""  # Track to avoid repeat events
+
+
+def get_daily_cost() -> float:
+    """Sum all model costs for the current session."""
+    return round(sum(u.get("cost", 0) for u in _token_usage.values()), 4)
+
+
+async def _check_token_budget() -> None:
+    """Check if daily cost exceeds budget thresholds. Called after each track_tokens."""
+    global token_frozen, _last_budget_level
+    from backend.config import settings
+    from backend.events import emit_token_warning
+
+    budget = settings.token_budget_daily
+    if budget <= 0:
+        return  # Unlimited
+
+    cost = get_daily_cost()
+    ratio = cost / budget
+
+    if ratio >= settings.token_freeze_threshold and _last_budget_level != "frozen":
+        token_frozen = True
+        _last_budget_level = "frozen"
+        emit_token_warning("frozen", f"Token budget exhausted (${cost:.4f}/${budget:.2f}). All LLM calls frozen.", cost, budget)
+
+    elif ratio >= settings.token_downgrade_threshold and _last_budget_level not in ("downgrade", "frozen"):
+        _last_budget_level = "downgrade"
+        # Auto-switch to cheaper provider
+        try:
+            from backend.routers.providers import _do_switch_provider
+            await _do_switch_provider(settings.token_fallback_provider, settings.token_fallback_model)
+        except Exception:
+            pass
+        emit_token_warning("downgrade", f"Token budget at {ratio:.0%} (${cost:.4f}/${budget:.2f}). Auto-downgraded to {settings.token_fallback_provider}.", cost, budget)
+
+    elif ratio >= settings.token_warn_threshold and _last_budget_level not in ("warn", "downgrade", "frozen"):
+        _last_budget_level = "warn"
+        emit_token_warning("warn", f"Token budget at {ratio:.0%} (${cost:.4f}/${budget:.2f}).", cost, budget)
 
 
 async def load_token_usage_from_db() -> None:
@@ -406,10 +451,72 @@ async def get_token_usage():
 @router.delete("/tokens")
 async def reset_token_usage():
     """Reset all token usage counters."""
+    global token_frozen, _last_budget_level
     _token_usage.clear()
+    token_frozen = False
+    _last_budget_level = ""
     from backend import db
     await db.clear_token_usage()
+    from backend.events import emit_token_warning
+    emit_token_warning("reset", "Token usage and freeze state cleared.")
     return {"status": "reset"}
+
+
+@router.get("/token-budget")
+async def get_token_budget():
+    """Return current budget settings, daily usage, and freeze status."""
+    from backend.config import settings
+    cost = get_daily_cost()
+    budget = settings.token_budget_daily
+    return {
+        "budget": budget,
+        "usage": cost,
+        "ratio": round(cost / budget, 4) if budget > 0 else 0,
+        "frozen": token_frozen,
+        "level": _last_budget_level or "normal",
+        "warn_threshold": settings.token_warn_threshold,
+        "downgrade_threshold": settings.token_downgrade_threshold,
+        "freeze_threshold": settings.token_freeze_threshold,
+        "fallback_provider": settings.token_fallback_provider,
+        "fallback_model": settings.token_fallback_model,
+    }
+
+
+@router.put("/token-budget")
+async def update_token_budget(
+    budget: float | None = None,
+    warn_threshold: float | None = None,
+    downgrade_threshold: float | None = None,
+    freeze_threshold: float | None = None,
+    fallback_provider: str | None = None,
+    fallback_model: str | None = None,
+):
+    """Update token budget settings at runtime."""
+    from backend.config import settings
+    if budget is not None:
+        settings.token_budget_daily = budget
+    if warn_threshold is not None:
+        settings.token_warn_threshold = warn_threshold
+    if downgrade_threshold is not None:
+        settings.token_downgrade_threshold = downgrade_threshold
+    if freeze_threshold is not None:
+        settings.token_freeze_threshold = freeze_threshold
+    if fallback_provider is not None:
+        settings.token_fallback_provider = fallback_provider
+    if fallback_model is not None:
+        settings.token_fallback_model = fallback_model
+    return await get_token_budget()
+
+
+@router.post("/token-budget/reset")
+async def reset_token_freeze():
+    """Reset the token freeze state (human intervention)."""
+    global token_frozen, _last_budget_level
+    token_frozen = False
+    _last_budget_level = ""
+    from backend.events import emit_token_warning
+    emit_token_warning("reset", "Token freeze manually cleared by operator.")
+    return {"status": "unfrozen"}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
