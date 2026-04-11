@@ -635,17 +635,159 @@ GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add
 BASH_TOOLS = [run_bash]
 REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
 
-ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  6. Issue tracking wrapper tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@tool
+async def get_next_task(label_filter: str = "") -> str:
+    """Get the next pending task from the backlog.
+
+    Returns a simplified summary with title, acceptance criteria, and
+    recent comments — optimized for LLM context window.
+
+    Args:
+        label_filter: Only return tasks with this label (e.g. "ai-assigned").
+    """
+    from backend.routers.tasks import _tasks
+    from backend import db
+
+    candidates = [
+        t for t in _tasks.values()
+        if t.status.value == "backlog"
+        and (not label_filter or label_filter in (t.labels or []))
+    ]
+    if not candidates:
+        return "[NO TASKS] No pending tasks in backlog" + (f" with label '{label_filter}'" if label_filter else "") + "."
+
+    # Sort by priority
+    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    candidates.sort(key=lambda t: rank.get(t.priority.value if hasattr(t.priority, "value") else t.priority, 4))
+    task = candidates[0]
+
+    # Build concise summary (context window protection)
+    lines = [
+        f"Task ID: {task.id}",
+        f"Title: {task.title}",
+        f"Priority: {task.priority.value if hasattr(task.priority, 'value') else task.priority}",
+    ]
+    if task.description:
+        lines.append(f"Description: {task.description[:300]}")
+    if task.acceptance_criteria:
+        lines.append(f"Acceptance Criteria: {task.acceptance_criteria[:500]}")
+    if task.suggested_agent_type:
+        lines.append(f"Suggested Agent: {task.suggested_agent_type}")
+    if task.external_issue_id:
+        lines.append(f"External Issue: {task.external_issue_id}")
+    if task.issue_url:
+        lines.append(f"Issue URL: {task.issue_url}")
+
+    # Include up to 3 recent comments
+    try:
+        comments = await db.list_task_comments(task.id, limit=3)
+        if comments:
+            lines.append("Recent Comments:")
+            for c in comments:
+                lines.append(f"  [{c['author']}] {c['content'][:100]}")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+@tool
+async def update_task_status(task_id: str, status: str) -> str:
+    """Update a task's status with state machine validation.
+
+    Only transitions allowed by the state machine are accepted.
+    Use get_next_task() first to see which task to work on.
+
+    Args:
+        task_id: The task ID to update.
+        status: New status (backlog, assigned, in_progress, in_review, completed, blocked).
+    """
+    from backend.routers.tasks import _tasks, _persist
+    from backend.models import TaskStatus, TASK_TRANSITIONS
+    from backend.events import emit_task_update
+
+    task = _tasks.get(task_id)
+    if not task:
+        return f"[ERROR] Task not found: {task_id}"
+
+    current = task.status.value if hasattr(task.status, "value") else task.status
+    allowed = TASK_TRANSITIONS.get(current, set())
+    if status not in allowed:
+        return f"[ERROR] Invalid transition: {current} → {status}. Allowed: {sorted(allowed)}"
+
+    # Fact gate: in_review requires commits
+    if status == "in_review" and task.assigned_agent_id:
+        from backend.workspace import get_workspace
+        ws = get_workspace(task.assigned_agent_id)
+        if ws and ws.commit_count == 0:
+            return "[ERROR] Cannot move to in_review: no commits in workspace. Push code first."
+
+    task.status = TaskStatus(status)
+    if status == "completed":
+        from datetime import datetime
+        task.completed_at = datetime.now().isoformat()
+    await _persist(task)
+    emit_task_update(task_id, task.status, task.assigned_agent_id)
+    return f"[OK] Task {task_id} status updated: {current} → {status}"
+
+
+@tool
+async def add_task_comment(task_id: str, content: str) -> str:
+    """Add a comment to a task's discussion thread.
+
+    Use this to report progress, share Gerrit links, or note blockers.
+
+    Args:
+        task_id: The task to comment on.
+        content: Comment text.
+    """
+    from backend.routers.tasks import _tasks
+    from backend import db
+    import uuid as _uuid
+
+    if task_id not in _tasks:
+        return f"[ERROR] Task not found: {task_id}"
+    if not content.strip():
+        return "[ERROR] Comment cannot be empty"
+
+    # Use the active agent ID as author
+    author = get_active_agent_id() or "agent"
+    comment = {
+        "id": f"comment-{_uuid.uuid4().hex[:8]}",
+        "task_id": task_id,
+        "author": author,
+        "content": content,
+        "timestamp": __import__("datetime").datetime.now().isoformat(),
+    }
+    try:
+        await db.insert_task_comment(comment)
+    except Exception as exc:
+        return f"[ERROR] Failed to save comment: {exc}"
+    return f"[OK] Comment added to task {task_id} by {author}"
+
+
+FILE_TOOLS = [read_file, write_file, list_directory, read_yaml, write_yaml, search_in_files]
+GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push, git_remote_list, create_pr, git_add_remote]
+BASH_TOOLS = [run_bash]
+REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
+TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
+
+ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
     "firmware":  ALL_TOOLS,
     "software":  ALL_TOOLS,
-    "validator":  FILE_TOOLS + GIT_TOOLS + [run_bash],
-    "reporter":   FILE_TOOLS + GIT_TOOLS,
-    "reviewer":   [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS,
-    "general":    FILE_TOOLS + GIT_TOOLS + BASH_TOOLS,
+    "validator":  FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS,
+    "reporter":   FILE_TOOLS + GIT_TOOLS + TASK_TOOLS,
+    "reviewer":   [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment],
+    "general":    ALL_TOOLS,
     "custom":     ALL_TOOLS,
     "devops":     ALL_TOOLS,
 }
