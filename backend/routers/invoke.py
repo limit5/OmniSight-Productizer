@@ -334,13 +334,20 @@ async def _execute_actions(actions: list[dict], state: dict):
                 }),
             }
             try:
-                # Find a running agent to use its model/role config
+                # Find a running agent to use its model/role config + handoff
                 running = state.get("running_agents", [])
                 _agent_ctx = running[0] if running else None
+                _handoff = ""
+                if _agent_ctx and _agent_ctx.workspace and _agent_ctx.workspace.task_id:
+                    try:
+                        _handoff = await load_handoff_for_task(_agent_ctx.workspace.task_id)
+                    except Exception:
+                        pass
                 result = await run_graph(
                     action["command"],
                     model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
                     agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
+                    handoff_context=_handoff,
                 )
                 yield {
                     "event": "action",
@@ -604,10 +611,17 @@ async def invoke_sync(command: str | None = None):
                 try:
                     running = state.get("running_agents", [])
                     _agent_ctx = running[0] if running else None
+                    _handoff = ""
+                    if _agent_ctx and _agent_ctx.workspace and _agent_ctx.workspace.task_id:
+                        try:
+                            _handoff = await load_handoff_for_task(_agent_ctx.workspace.task_id)
+                        except Exception:
+                            pass
                     result = await run_graph(
                         action["command"],
                         model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
                         agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
+                        handoff_context=_handoff,
                     )
                     results.append({
                         "type": "command",
