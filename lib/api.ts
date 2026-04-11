@@ -409,6 +409,19 @@ export async function getTokenUsage() {
   return request<TokenUsage[]>("/system/tokens")
 }
 
+export interface CompressionStats {
+  total_original_bytes: number
+  total_compressed_bytes: number
+  compression_count: number
+  total_lines_removed: number
+  avg_ratio: number
+  estimated_tokens_saved: number
+}
+
+export async function getCompressionStats() {
+  return request<CompressionStats>("/system/compression")
+}
+
 // ─── Token Budget ───
 
 export interface TokenBudgetInfo {

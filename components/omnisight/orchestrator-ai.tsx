@@ -72,6 +72,7 @@ interface OrchestratorAIProps {
   onResetFreeze?: () => void
   onUpdateBudget?: (updates: Record<string, number | string>) => void
   onRefresh?: () => void
+  compressionStats?: { total_original_bytes: number; total_compressed_bytes: number; compression_count: number; total_lines_removed: number; avg_ratio: number; estimated_tokens_saved: number } | null
   activeProvider?: string
   activeModel?: string
   providers?: { id: string; name: string; models: string[]; configured: boolean }[]
@@ -132,6 +133,7 @@ export function OrchestratorAI({
   onResetFreeze,
   onUpdateBudget,
   onRefresh,
+  compressionStats,
   activeProvider,
   activeModel,
   providers,
@@ -562,6 +564,40 @@ export function OrchestratorAI({
       
       {/* Token Usage Statistics */}
       <TokenUsageStats externalUsage={tokenUsage} budgetInfo={tokenBudget} onResetFreeze={onResetFreeze} onUpdateBudget={onUpdateBudget} />
+
+      {/* RTK Compression Stats */}
+      {compressionStats && compressionStats.compression_count > 0 && (
+        <div className="border-b border-[var(--border)] px-4 py-2">
+          <p className="font-mono text-[10px] text-[var(--muted-foreground)] mb-1.5 uppercase tracking-wider flex items-center gap-1.5">
+            <Zap size={10} className="text-[var(--validation-emerald)]" />
+            OUTPUT COMPRESSION
+          </p>
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="p-1.5 rounded bg-[var(--secondary)]">
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)] block">Tokens Saved</span>
+              <span className="font-mono text-sm font-semibold text-[var(--validation-emerald)]">
+                {compressionStats.estimated_tokens_saved > 1000
+                  ? `${(compressionStats.estimated_tokens_saved / 1000).toFixed(1)}K`
+                  : compressionStats.estimated_tokens_saved}
+              </span>
+            </div>
+            <div className="p-1.5 rounded bg-[var(--secondary)]">
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)] block">Avg Ratio</span>
+              <span className="font-mono text-sm font-semibold text-[var(--validation-emerald)]">
+                {(compressionStats.avg_ratio * 100).toFixed(0)}%
+              </span>
+            </div>
+            <div className="p-1.5 rounded bg-[var(--secondary)]">
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)] block">Compressions</span>
+              <span className="font-mono text-xs text-[var(--foreground)]">{compressionStats.compression_count}</span>
+            </div>
+            <div className="p-1.5 rounded bg-[var(--secondary)]">
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)] block">Lines Removed</span>
+              <span className="font-mono text-xs text-[var(--foreground)]">{compressionStats.total_lines_removed}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* LLM Provider / Model Selector */}
       {providers && providers.length > 0 && onSwitchProvider && (

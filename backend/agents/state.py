@@ -71,6 +71,7 @@ class GraphState(BaseModel):
     retry_count: int = 0
     max_retries: int = 3
     last_error: str = ""
+    rtk_bypass: bool = False  # When True, skip output compression (fallback for debug)
 
     # Final answer text to return to the frontend
     answer: str = ""

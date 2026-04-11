@@ -465,6 +465,17 @@ async def get_token_usage():
     return list(_token_usage.values())
 
 
+@router.get("/compression")
+async def get_compression_stats():
+    """Return RTK output compression statistics."""
+    from backend.output_compressor import get_compression_stats as _get_stats
+    stats = _get_stats()
+    # Estimate token savings (rough: 1 token ≈ 4 bytes)
+    stats["estimated_tokens_saved"] = stats.get("total_original_bytes", 0) - stats.get("total_compressed_bytes", 0)
+    stats["estimated_tokens_saved"] //= 4
+    return stats
+
+
 @router.delete("/tokens")
 async def reset_token_usage():
     """Reset all token usage counters."""

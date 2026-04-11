@@ -28,6 +28,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
+# ── RTK (Rust Token Killer) for output compression ──
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh || true
+RUN rtk init --global 2>/dev/null || true
+
 # ── Git configuration ──
 RUN git config --system init.defaultBranch main \
  && git config --system safe.directory '*'

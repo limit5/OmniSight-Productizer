@@ -101,6 +101,7 @@ export function useEngine() {
   const [tokenBudget, setTokenBudget] = useState<api.TokenBudgetInfo | null>(null)
   const [notifications, setNotifications] = useState<api.NotificationItem[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
+  const [compressionStats, setCompressionStats] = useState<api.CompressionStats | null>(null)
   const initRef = useRef(false)
 
   // Fetch initial data and subscribe to SSE event stream
@@ -114,7 +115,7 @@ export function useEngine() {
 
     async function fetchSystemData() {
       try {
-        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes, unreadRes] = await Promise.all([
+        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes, unreadRes, compressRes] = await Promise.all([
           api.getSystemStatus(),
           api.getSystemInfo(),
           api.getDevices(),
@@ -124,6 +125,7 @@ export function useEngine() {
           api.getTokenUsage(),
           api.getTokenBudget(),
           api.getUnreadCount(),
+          api.getCompressionStats(),
         ])
         setSystemStatus(statusRes)
         setSystemInfo(infoRes)
@@ -134,6 +136,7 @@ export function useEngine() {
         setTokenUsage(tokensRes)
         setTokenBudget(budgetRes)
         setUnreadCount(unreadRes.count)
+        setCompressionStats(compressRes)
         console.log("[Engine] System data loaded:", infoRes.hostname, infoRes.cpu_model)
       } catch (e) {
         console.warn("[Engine] System data fetch failed:", e)
@@ -555,6 +558,7 @@ export function useEngine() {
     logs,
     tokenUsage,
     tokenBudget,
+    compressionStats,
     notifications,
     unreadCount,
     setUnreadCount,

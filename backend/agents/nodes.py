@@ -402,6 +402,11 @@ async def tool_executor_node(state: GraphState) -> dict:
 
             try:
                 output = await tool_fn.ainvoke(tc.arguments)
+                # Compress output to save tokens (covers ALL tools)
+                # Bypass compression if rtk_bypass is set (retry debug mode)
+                if not state.rtk_bypass:
+                    from backend.output_compressor import compress_output
+                    output, _bytes_saved = await compress_output(output, tc.tool_name)
                 _ERROR_PREFIXES = ("[ERROR]", "[BLOCKED]", "[TIMEOUT]")
                 success = not any(output.startswith(p) for p in _ERROR_PREFIXES)
                 status_label = "done" if success else "error"
@@ -467,11 +472,14 @@ def error_check_node(state: GraphState) -> dict:
         "retry",
         f"Tool error detected (attempt {state.retry_count + 1}/{state.max_retries}): {error_summary[:120]}",
     )
+    new_retry = state.retry_count + 1
     return {
-        "retry_count": state.retry_count + 1,
+        "retry_count": new_retry,
         "last_error": error_summary,
         "tool_calls": [],
         "tool_results": [],
+        # After 2 consecutive failures, bypass RTK compression to get full uncompressed output
+        "rtk_bypass": new_retry >= 2,
     }
 
 

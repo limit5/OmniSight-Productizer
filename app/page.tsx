@@ -295,6 +295,7 @@ export default function Home() {
             onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
             onUpdateBudget={async (updates) => { await api.updateTokenBudget(updates as Record<string, number>); engine.refresh() }}
             onRefresh={() => engine.refresh()}
+            compressionStats={engine.compressionStats}
             activeProvider={providerData?.active_provider}
             activeModel={providerData?.active_model}
             providers={providerData?.providers}
@@ -445,6 +446,7 @@ export default function Home() {
               onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
               onUpdateBudget={async (updates) => { await api.updateTokenBudget(updates as Record<string, number>); engine.refresh() }}
               onRefresh={() => engine.refresh()}
+            compressionStats={engine.compressionStats}
               activeProvider={providerData?.active_provider}
               activeModel={providerData?.active_model}
               providers={providerData?.providers}

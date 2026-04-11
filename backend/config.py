@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     token_fallback_model: str = "llama3.1"  # Model to downgrade to at 90%
     llm_fallback_chain: str = "anthropic,openai,google,groq,ollama"  # Failover priority
 
+    # ── RTK Output Compression ──
+    rtk_enabled: bool = True  # Enable output compression for token savings
+    rtk_compression_threshold: int = 1000  # Only compress outputs > this many bytes
+    rtk_binary_timeout: float = 2.0  # Timeout for RTK binary (seconds)
+    rtk_dedup_lines: bool = True  # Remove duplicate consecutive lines (Python fallback)
+    rtk_strip_progress: bool = True  # Remove progress bars and spinner lines
+    rtk_track_savings: bool = True  # Track compression metrics
+
     # ── Notification Routing ──
     notification_slack_webhook: str = ""  # Slack Incoming Webhook URL
     notification_slack_mention: str = ""  # Slack user ID to @ for L3 events
