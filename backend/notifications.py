@@ -116,12 +116,12 @@ async def _send_slack(notif: Notification) -> None:
         payload["text"] += f"\n<{notif.action_url}|{notif.action_label or 'View'}>"
 
     import json
-    env = {**os.environ, "_SLACK_URL": url, "_SLACK_PAYLOAD": json.dumps(payload)}
-    proc = await asyncio.create_subprocess_shell(
-        'curl -s -X POST "$_SLACK_URL" -H "Content-Type: application/json" -d "$_SLACK_PAYLOAD"',
+    proc = await asyncio.create_subprocess_exec(
+        "curl", "-s", "-X", "POST", url,
+        "-H", "Content-Type: application/json",
+        "-d", json.dumps(payload),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=env,
     )
     await asyncio.wait_for(proc.communicate(), timeout=10)
     if proc.returncode != 0:
@@ -136,7 +136,7 @@ async def _send_jira(notif: Notification) -> None:
     if not all([url, token, project]):
         return
 
-    import json, os
+    import json
     payload = json.dumps({
         "fields": {
             "project": {"key": project},
@@ -146,12 +146,14 @@ async def _send_jira(notif: Notification) -> None:
             "priority": {"name": "Highest" if notif.level == "critical" else "High"},
         }
     })
-    env = {**os.environ, "_JIRA_URL": f"{url}/rest/api/2/issue", "_JIRA_TOKEN": token, "_JIRA_PAYLOAD": payload}
-    proc = await asyncio.create_subprocess_shell(
-        'curl -s -X POST "$_JIRA_URL" -H "Content-Type: application/json" -H "Authorization: Bearer $_JIRA_TOKEN" -d "$_JIRA_PAYLOAD"',
+    api_url = f"{url}/rest/api/2/issue"
+    proc = await asyncio.create_subprocess_exec(
+        "curl", "-s", "-X", "POST", api_url,
+        "-H", "Content-Type: application/json",
+        "-H", f"Authorization: Bearer {token}",
+        "-d", payload,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=env,
     )
     await asyncio.wait_for(proc.communicate(), timeout=15)
     if proc.returncode != 0:
@@ -164,7 +166,7 @@ async def _send_pagerduty(notif: Notification) -> None:
     if not key:
         return
 
-    import json, os
+    import json
     payload = json.dumps({
         "routing_key": key,
         "event_action": "trigger",
@@ -174,12 +176,13 @@ async def _send_pagerduty(notif: Notification) -> None:
             "source": f"omnisight:{notif.source}",
         },
     })
-    env = {**os.environ, "_PD_PAYLOAD": payload}
-    proc = await asyncio.create_subprocess_shell(
-        'curl -s -X POST "https://events.pagerduty.com/v2/enqueue" -H "Content-Type: application/json" -d "$_PD_PAYLOAD"',
+    proc = await asyncio.create_subprocess_exec(
+        "curl", "-s", "-X", "POST",
+        "https://events.pagerduty.com/v2/enqueue",
+        "-H", "Content-Type: application/json",
+        "-d", payload,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=env,
     )
     await asyncio.wait_for(proc.communicate(), timeout=10)
     if proc.returncode != 0:
