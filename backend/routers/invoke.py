@@ -106,8 +106,15 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                        message=str(exc)[:200], source=f"agent:{agent.id}")
 
     await _persist_agent(agent)
-    # Mark task as completed and check parent
-    task.status = TaskStatus.completed
+    # Update task status based on agent outcome
+    if agent.status == AgentStatus.success:
+        task.status = TaskStatus.completed
+        from datetime import datetime as _dt
+        task.completed_at = _dt.now().isoformat()
+    elif agent.status == AgentStatus.error:
+        task.status = TaskStatus.blocked
+    elif agent.status == AgentStatus.awaiting_confirmation:
+        task.status = TaskStatus.blocked
     await _persist_task(task)
     await _check_parent_completion(task.id)
     emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
