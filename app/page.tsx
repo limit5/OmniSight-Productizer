@@ -13,6 +13,7 @@ import { TaskBacklog } from "@/components/omnisight/task-backlog"
 import { OrchestratorAI } from "@/components/omnisight/orchestrator-ai"
 import { MobileNav, TabletNav, type PanelId } from "@/components/omnisight/mobile-nav"
 import { useEngine } from "@/hooks/use-engine"
+import * as api from "@/lib/api"
 
 const agentTemplates: Record<string, Partial<Agent>> = {
   firmware: { type: "firmware", thoughtChain: "Initializing firmware build pipeline...", status: "booting" },
@@ -84,7 +85,7 @@ export default function Home() {
   const [isHalted, setIsHalted] = useState(false)
   const [haltedAgentStates, setHaltedAgentStates] = useState<Map<string, { status: AgentStatus; thoughtChain: string }>>(new Map())
 
-  const handleEmergencyStop = useCallback(() => {
+  const handleEmergencyStop = useCallback(async () => {
     const statesToSave = new Map<string, { status: AgentStatus; thoughtChain: string }>()
     agents.forEach(agent => {
       if (agent.status === "running" || agent.status === "booting") {
@@ -93,6 +94,9 @@ export default function Home() {
     })
     setHaltedAgentStates(statesToSave)
     setIsHalted(true)
+
+    // Notify backend to halt any running INVOKE
+    try { await api.haltInvoke() } catch { /* backend may not be reachable */ }
 
     engine.setAgents(prev => prev.map(agent => ({
       ...agent,
@@ -103,7 +107,10 @@ export default function Home() {
     })))
   }, [agents, engine])
 
-  const handleResume = useCallback(() => {
+  const handleResume = useCallback(async () => {
+    // Notify backend to resume
+    try { await api.resumeInvoke() } catch { /* backend may not be reachable */ }
+
     engine.setAgents(prev => prev.map(agent => {
       const savedState = haltedAgentStates.get(agent.id)
       if (savedState && agent.status === "warning") {

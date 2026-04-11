@@ -1,6 +1,6 @@
 """LangGraph topology for the OmniSight multi-agent system.
 
-Graph structure (with tool calling):
+Graph structure (with tool calling and self-healing loop):
 
     ┌──────────┐
     │  START   │
@@ -23,6 +23,14 @@ Graph structure (with tool calling):
     │  Check   │────►│  Tool    │
     │ToolCalls │     │ Executor │
     └────┬─────┘     └────┬─────┘
+         │                │
+         │           ┌────▼─────┐
+         │           │  Error   │  ← self-healing gate
+         │           │  Check   │
+         │           └─┬──────┬─┘
+         │     retry ◄─┘      └─► no error / retries exhausted
+         │       │
+         │  (back to specialist)
          │                │
          │◄───────────────┘
          ▼
@@ -49,6 +57,8 @@ from backend.agents.nodes import (
     reporter_node,
     general_node,
     tool_executor_node,
+    error_check_node,
+    _should_retry,
     summarizer_node,
 )
 
@@ -77,6 +87,7 @@ def build_graph() -> StateGraph:
     builder.add_node("reporter", reporter_node)
     builder.add_node("general", general_node)
     builder.add_node("tool_executor", tool_executor_node)
+    builder.add_node("error_check", error_check_node)
     builder.add_node("summarizer", summarizer_node)
 
     # ── Edges ──
@@ -108,8 +119,22 @@ def build_graph() -> StateGraph:
             },
         )
 
-    # Tool executor → summarizer (tools done, produce final answer)
-    builder.add_edge("tool_executor", "summarizer")
+    # Tool executor → error_check (self-healing gate)
+    builder.add_edge("tool_executor", "error_check")
+
+    # Error check → retry specialist or proceed to summarizer
+    builder.add_conditional_edges(
+        "error_check",
+        _should_retry,
+        {
+            "firmware": "firmware",
+            "software": "software",
+            "validator": "validator",
+            "reporter": "reporter",
+            "general": "general",
+            "summarizer": "summarizer",
+        },
+    )
 
     # Summarizer → END
     builder.add_edge("summarizer", END)

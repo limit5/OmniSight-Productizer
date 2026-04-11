@@ -30,6 +30,15 @@ __pycache__/
 # agent isolated workspaces
 .agent_workspaces/
 
+# SQLite database
+data/
+
+# pytest
+.pytest_cache/
+
+# repomix
+repomix-output.xml
+
 # vercel
 .vercel
 

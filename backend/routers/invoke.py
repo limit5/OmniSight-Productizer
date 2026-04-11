@@ -14,13 +14,22 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.agents.graph import run_graph
 from backend.agents.llm import get_llm
-from backend.routers.agents import _agents
-from backend.routers.tasks import _tasks
+from backend.routers.agents import _agents, _persist as _persist_agent
+from backend.routers.tasks import _tasks, _persist as _persist_task
 from backend.models import AgentStatus, AgentWorkspace, TaskStatus
 from backend.workspace import provision as ws_provision, get_workspace
+from fastapi.responses import JSONResponse
+
 from backend.events import emit_invoke
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
+
+# Concurrency guard — only one INVOKE at a time
+_invoke_lock = asyncio.Lock()
+
+# Halt flag — checked between actions to support emergency stop
+_halted = asyncio.Event()
+_halted.set()  # starts in "running" (not halted) state
 
 
 def _now() -> str:
@@ -143,6 +152,18 @@ async def _execute_actions(actions: list[dict], state: dict):
     results = []
 
     for action in actions:
+        # Check halt flag between actions
+        if not _halted.is_set():
+            yield {
+                "event": "done",
+                "data": json.dumps({
+                    "action_count": len(results),
+                    "results": results + ["HALTED by emergency stop"],
+                    "timestamp": _now(),
+                }),
+            }
+            return
+
         if action["type"] == "command":
             # Route command through LangGraph pipeline
             yield {
@@ -187,6 +208,7 @@ async def _execute_actions(actions: list[dict], state: dict):
                 agent.status = AgentStatus.running
                 agent.thought_chain = "Auto-retry initiated by INVOKE sync."
                 agent.progress.current = 0
+                await _persist_agent(agent)
             yield {
                 "event": "action",
                 "data": json.dumps({
@@ -232,6 +254,9 @@ async def _execute_actions(actions: list[dict], state: dict):
                     workspace_path = str(ws_info.path)
                 except Exception as exc:
                     agent.thought_chain = f"Task assigned (no workspace: {exc}). Processing..."
+
+                await _persist_agent(agent)
+                await _persist_task(task)
 
             yield {
                 "event": "action",
@@ -315,89 +340,122 @@ async def invoke_stream(command: str | None = None):
     Query param `command` is optional; if provided, it takes priority
     and is routed through the LangGraph pipeline.
     """
-    state = _analyze_state()
-    actions = _plan_actions(state, command)
+    if _invoke_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "Invoke already in progress"},
+        )
 
-    async def event_generator():
-        # Opening event with analysis
-        yield {
-            "event": "analysis",
-            "data": json.dumps({
-                "agents_total": len(state["agents"]),
-                "agents_idle": len(state["idle_agents"]),
-                "agents_running": len(state["running_agents"]),
-                "agents_error": len(state["error_agents"]),
-                "tasks_unassigned": len(state["unassigned"]),
-                "tasks_in_progress": len(state["in_progress"]),
-                "tasks_completed": len(state["completed"]),
-                "planned_actions": len(actions),
-                "action_types": [a["type"] for a in actions],
-            }),
-        }
-        await asyncio.sleep(0.05)
+    async with _invoke_lock:
+        state = _analyze_state()
+        actions = _plan_actions(state, command)
 
-        # Execute actions
-        async for event in _execute_actions(actions, state):
-            yield event
+        async def event_generator():
+            # Opening event with analysis
+            yield {
+                "event": "analysis",
+                "data": json.dumps({
+                    "agents_total": len(state["agents"]),
+                    "agents_idle": len(state["idle_agents"]),
+                    "agents_running": len(state["running_agents"]),
+                    "agents_error": len(state["error_agents"]),
+                    "tasks_unassigned": len(state["unassigned"]),
+                    "tasks_in_progress": len(state["in_progress"]),
+                    "tasks_completed": len(state["completed"]),
+                    "planned_actions": len(actions),
+                    "action_types": [a["type"] for a in actions],
+                }),
+            }
+            await asyncio.sleep(0.05)
 
-    return EventSourceResponse(event_generator())
+            # Execute actions
+            async for event in _execute_actions(actions, state):
+                yield event
+
+        return EventSourceResponse(event_generator())
+
+
+@router.post("/halt")
+async def invoke_halt():
+    """Emergency stop — halt any running INVOKE between actions."""
+    _halted.clear()
+    emit_invoke("halt", "INVOKE halted by emergency stop")
+    return {"status": "halted"}
+
+
+@router.post("/resume")
+async def invoke_resume():
+    """Resume INVOKE after emergency stop."""
+    _halted.set()
+    emit_invoke("resume", "INVOKE resumed")
+    return {"status": "resumed"}
 
 
 @router.post("")
 async def invoke_sync(command: str | None = None):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
-    state = _analyze_state()
-    actions = _plan_actions(state, command)
-    results: list[dict] = []
+    if _invoke_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "Invoke already in progress"},
+        )
 
-    for action in actions:
-        if action["type"] == "command":
-            try:
-                result = await run_graph(action["command"])
-                results.append({
-                    "type": "command",
-                    "routed_to": result.routed_to,
-                    "answer": result.answer,
-                })
-            except Exception as exc:
-                results.append({"type": "command", "error": str(exc)})
+    async with _invoke_lock:
+        state = _analyze_state()
+        actions = _plan_actions(state, command)
+        results: list[dict] = []
 
-        elif action["type"] == "retry":
-            agent = _agents.get(action["agent_id"])
-            if agent:
-                agent.status = AgentStatus.running
-                agent.thought_chain = "Auto-retry initiated by INVOKE sync."
-                agent.progress.current = 0
-            results.append({"type": "retry", **action})
-
-        elif action["type"] == "assign":
-            task = _tasks.get(action["task_id"])
-            agent = _agents.get(action["agent_id"])
-            ws_branch = None
-            if task and agent:
-                task.status = TaskStatus.assigned
-                task.assigned_agent_id = action["agent_id"]
-                agent.status = AgentStatus.running
+        for action in actions:
+            if action["type"] == "command":
                 try:
-                    ws_info = await ws_provision(action["agent_id"], action["task_id"])
-                    agent.workspace = AgentWorkspace(
-                        branch=ws_info.branch, path=str(ws_info.path),
-                        status="active", task_id=ws_info.task_id,
-                    )
-                    ws_branch = ws_info.branch
-                    agent.thought_chain = f"Workspace ready: {ws_info.branch}. Processing..."
-                except Exception:
-                    agent.thought_chain = f"Task assigned: {task.title}. Processing..."
-            results.append({**action, "type": "assign", "workspace_branch": ws_branch})
+                    result = await run_graph(action["command"])
+                    results.append({
+                        "type": "command",
+                        "routed_to": result.routed_to,
+                        "answer": result.answer,
+                    })
+                except Exception as exc:
+                    results.append({"type": "command", "error": str(exc)})
 
-        elif action["type"] == "report":
-            results.append({"type": "report", "summary": _build_report(action)})
+            elif action["type"] == "retry":
+                agent = _agents.get(action["agent_id"])
+                if agent:
+                    agent.status = AgentStatus.running
+                    agent.thought_chain = "Auto-retry initiated by INVOKE sync."
+                    agent.progress.current = 0
+                    await _persist_agent(agent)
+                results.append({"type": "retry", **action})
 
-        elif action["type"] == "health":
-            results.append({"type": "health", **action})
+            elif action["type"] == "assign":
+                task = _tasks.get(action["task_id"])
+                agent = _agents.get(action["agent_id"])
+                ws_branch = None
+                if task and agent:
+                    task.status = TaskStatus.assigned
+                    task.assigned_agent_id = action["agent_id"]
+                    agent.status = AgentStatus.running
+                    try:
+                        ws_info = await ws_provision(action["agent_id"], action["task_id"])
+                        agent.workspace = AgentWorkspace(
+                            branch=ws_info.branch, path=str(ws_info.path),
+                            status="active", task_id=ws_info.task_id,
+                        )
+                        ws_branch = ws_info.branch
+                        agent.thought_chain = f"Workspace ready: {ws_info.branch}. Processing..."
+                    except Exception:
+                        agent.thought_chain = f"Task assigned: {task.title}. Processing..."
+                    await _persist_agent(agent)
+                    await _persist_task(task)
+                results.append({**action, "type": "assign", "workspace_branch": ws_branch})
 
-    return {
-        "action_count": len(actions),
-        "results": results,
-        "timestamp": _now(),
-    }
+            elif action["type"] == "report":
+                results.append({"type": "report", "summary": _build_report(action)})
+
+            elif action["type"] == "health":
+                results.append({"type": "health", **action})
+
+        return {
+            "action_count": len(actions),
+            "results": results,
+            "timestamp": _now(),
+        }

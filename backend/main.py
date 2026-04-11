@@ -1,15 +1,30 @@
 """OmniSight Engine — FastAPI entry point."""
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
 from backend.routers import agents, chat, events, health, invoke, providers, system, tasks, tools, workspaces
+from backend import db
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await db.init()
+    # Seed defaults if DB is empty, or reload from DB
+    await agents.seed_defaults_if_empty()
+    await tasks.seed_defaults_if_empty()
+    await system.load_token_usage_from_db()
+    yield
+    await db.close()
+
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     description="Multi-Agent orchestration engine for embedded AI camera development.",
+    lifespan=lifespan,
 )
 
 # CORS — allow Next.js frontend (dev: multiple origins)

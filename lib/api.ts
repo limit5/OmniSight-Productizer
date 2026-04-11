@@ -433,6 +433,14 @@ export type InvokeEvent =
 /**
  * SSE streaming invoke — yields events as the system analyses and acts.
  */
+export async function haltInvoke(): Promise<{ status: string }> {
+  return request<{ status: string }>("/invoke/halt", { method: "POST" })
+}
+
+export async function resumeInvoke(): Promise<{ status: string }> {
+  return request<{ status: string }>("/invoke/resume", { method: "POST" })
+}
+
 export async function* streamInvoke(
   command?: string
 ): AsyncGenerator<InvokeEvent> {

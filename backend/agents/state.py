@@ -57,5 +57,10 @@ class GraphState(BaseModel):
     # Isolated workspace path (set when agent has a provisioned workspace)
     workspace_path: str | None = None
 
+    # Self-healing loop: retry tracking
+    retry_count: int = 0
+    max_retries: int = 2
+    last_error: str = ""
+
     # Final answer text to return to the frontend
     answer: str = ""

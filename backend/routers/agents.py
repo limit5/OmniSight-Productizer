@@ -1,20 +1,27 @@
-"""Agent management endpoints."""
+"""Agent management endpoints — persisted to SQLite."""
 
 import uuid
 
 from fastapi import APIRouter, HTTPException
 
-from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus
+from backend.models import Agent, AgentCreate, AgentProgress, AgentStatus, AgentWorkspace
 from backend.events import emit_agent_update
+from backend import db
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
-# In-memory store (will be replaced by DB / LangGraph state in Phase 3.3)
+# ── In-memory mirror (kept in sync with DB for fast access by invoke/chat) ──
 _agents: dict[str, Agent] = {}
 
 
-def _seed_defaults() -> None:
-    """Seed default agents matching frontend's defaultAgents."""
+async def seed_defaults_if_empty() -> None:
+    """Seed default agents if the database is empty (called at startup)."""
+    if await db.agent_count() > 0:
+        # Reload from DB into memory
+        for row in await db.list_agents():
+            _agents[row["id"]] = _row_to_agent(row)
+        return
+
     defaults = [
         ("firmware-alpha", "Firmware Alpha", "firmware", "idle"),
         ("software-beta", "Software Beta", "software", "idle"),
@@ -22,7 +29,7 @@ def _seed_defaults() -> None:
         ("reporter-delta", "Reporter Delta", "reporter", "idle"),
     ]
     for aid, name, atype, status in defaults:
-        _agents[aid] = Agent(
+        agent = Agent(
             id=aid,
             name=name,
             type=atype,
@@ -30,9 +37,43 @@ def _seed_defaults() -> None:
             progress=AgentProgress(current=0, total=0),
             thought_chain="Standing by.",
         )
+        _agents[aid] = agent
+        await db.upsert_agent(_agent_to_row(agent))
 
 
-_seed_defaults()
+def _row_to_agent(row: dict) -> Agent:
+    ws = row.get("workspace", {})
+    return Agent(
+        id=row["id"],
+        name=row["name"],
+        type=row["type"],
+        status=row["status"],
+        progress=AgentProgress(**row.get("progress", {"current": 0, "total": 0})),
+        thought_chain=row.get("thought_chain", ""),
+        ai_model=row.get("ai_model"),
+        sub_tasks=row.get("sub_tasks", []),
+        workspace=AgentWorkspace(**ws) if isinstance(ws, dict) and ws else AgentWorkspace(),
+    )
+
+
+def _agent_to_row(agent: Agent) -> dict:
+    return {
+        "id": agent.id,
+        "name": agent.name,
+        "type": agent.type.value if hasattr(agent.type, "value") else agent.type,
+        "status": agent.status.value if hasattr(agent.status, "value") else agent.status,
+        "progress": agent.progress.model_dump(),
+        "thought_chain": agent.thought_chain,
+        "ai_model": agent.ai_model,
+        "sub_tasks": [st.model_dump() for st in agent.sub_tasks],
+        "workspace": agent.workspace.model_dump(),
+    }
+
+
+async def _persist(agent: Agent) -> None:
+    """Write agent state to both memory and DB."""
+    _agents[agent.id] = agent
+    await db.upsert_agent(_agent_to_row(agent))
 
 
 @router.get("", response_model=list[Agent])
@@ -59,7 +100,7 @@ async def create_agent(body: AgentCreate):
         thought_chain="Initializing...",
         ai_model=body.ai_model,
     )
-    _agents[agent_id] = agent
+    await _persist(agent)
     emit_agent_update(agent_id, agent.status, agent.thought_chain)
     return agent
 
@@ -69,6 +110,7 @@ async def update_agent_status(agent_id: str, status: AgentStatus):
     if agent_id not in _agents:
         raise HTTPException(status_code=404, detail="Agent not found")
     _agents[agent_id].status = status
+    await _persist(_agents[agent_id])
     emit_agent_update(agent_id, status, _agents[agent_id].thought_chain)
     return _agents[agent_id]
 
@@ -79,3 +121,4 @@ async def delete_agent(agent_id: str):
         raise HTTPException(status_code=404, detail="Agent not found")
     emit_agent_update(agent_id, "terminated", "Agent removed")
     del _agents[agent_id]
+    await db.delete_agent(agent_id)

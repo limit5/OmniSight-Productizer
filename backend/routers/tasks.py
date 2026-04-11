@@ -1,4 +1,4 @@
-"""Task management endpoints."""
+"""Task management endpoints — persisted to SQLite."""
 
 import uuid
 from datetime import datetime
@@ -7,21 +7,28 @@ from fastapi import APIRouter, HTTPException
 
 from backend.models import Task, TaskCreate, TaskStatus, TaskUpdate
 from backend.events import emit_task_update
+from backend import db
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
-# In-memory store
+# ── In-memory mirror (kept in sync with DB for fast access by invoke) ──
 _tasks: dict[str, Task] = {}
 
 
-def _seed_defaults() -> None:
+async def seed_defaults_if_empty() -> None:
+    """Seed default tasks if the database is empty (called at startup)."""
+    if await db.task_count() > 0:
+        for row in await db.list_tasks():
+            _tasks[row["id"]] = Task(**row)
+        return
+
     defaults = [
         ("task-1", "Build IMX335 camera driver", "Compile and test firmware for Sony IMX335 sensor", "high", "firmware"),
         ("task-2", "Run validation suite", "Execute full test coverage for ISP pipeline", "medium", "validator"),
         ("task-3", "Generate compliance report", "Create FCC/CE certification documentation", "low", "reporter"),
     ]
     for tid, title, desc, priority, agent_type in defaults:
-        _tasks[tid] = Task(
+        task = Task(
             id=tid,
             title=title,
             description=desc,
@@ -29,9 +36,14 @@ def _seed_defaults() -> None:
             status=TaskStatus.backlog,
             suggested_agent_type=agent_type,
         )
+        _tasks[tid] = task
+        await db.upsert_task(task.model_dump())
 
 
-_seed_defaults()
+async def _persist(task: Task) -> None:
+    """Write task state to both memory and DB."""
+    _tasks[task.id] = task
+    await db.upsert_task(task.model_dump())
 
 
 @router.get("", response_model=list[Task])
@@ -56,7 +68,7 @@ async def create_task(body: TaskCreate):
         priority=body.priority,
         suggested_agent_type=body.suggested_agent_type,
     )
-    _tasks[task_id] = task
+    await _persist(task)
     return task
 
 
@@ -70,6 +82,7 @@ async def update_task(task_id: str, body: TaskUpdate):
         update_data["completed_at"] = datetime.now().isoformat()
     for field, value in update_data.items():
         setattr(task, field, value)
+    await _persist(task)
     emit_task_update(task_id, task.status, task.assigned_agent_id)
     return task
 
@@ -79,3 +92,4 @@ async def delete_task(task_id: str):
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     del _tasks[task_id]
+    await db.delete_task(task_id)

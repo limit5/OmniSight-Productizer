@@ -12,9 +12,12 @@ Usage:
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.outputs import LLMResult
 
 from backend.config import settings
 
@@ -22,6 +25,33 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+class TokenTrackingCallback(BaseCallbackHandler):
+    """LangChain callback that feeds token usage into the system tracker."""
+
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
+        self._start: float = 0
+
+    def on_llm_start(self, *args, **kwargs) -> None:  # noqa: ANN002
+        self._start = time.time()
+
+    def on_llm_end(self, response: LLMResult, **kwargs) -> None:  # noqa: ANN003
+        from backend.routers.system import track_tokens
+
+        latency_ms = int((time.time() - self._start) * 1000)
+        usage: dict = {}
+        if response.llm_output:
+            usage = response.llm_output.get("token_usage", {})
+            if not usage:
+                usage = response.llm_output.get("usage", {})
+        track_tokens(
+            self.model_name,
+            usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
+            usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
+            latency_ms,
+        )
 
 # Cache to avoid re-creating LLM instances
 _cache: dict[str, BaseChatModel] = {}
@@ -53,6 +83,9 @@ def get_llm(
         llm = _create_llm(provider, model)
         if llm is None:
             return None
+        # Inject token tracking callback
+        model_name = model or llm.model_name if hasattr(llm, "model_name") else f"{provider}:default"
+        llm = llm.with_config(callbacks=[TokenTrackingCallback(model_name)])
         if bind_tools:
             llm = llm.bind_tools(bind_tools)
         _cache[cache_key] = llm

@@ -185,7 +185,15 @@ def _specialist_node_factory(agent_type: str):
 
         # ── LLM mode: let the model decide which tools to call ──
         if llm and agent_type in _SPECIALIST_PROMPTS:
-            sys = SystemMessage(content=_SPECIALIST_PROMPTS[agent_type])
+            prompt = _SPECIALIST_PROMPTS[agent_type]
+            if state.last_error:
+                prompt = (
+                    f"PREVIOUS ATTEMPT FAILED (retry {state.retry_count}/{state.max_retries}):\n"
+                    f"{state.last_error}\n\n"
+                    "Adjust your approach to avoid the same error.\n\n"
+                    + prompt
+                )
+            sys = SystemMessage(content=prompt)
             try:
                 resp = llm.invoke([sys, *state.messages])
 
@@ -361,8 +369,12 @@ async def tool_executor_node(state: GraphState) -> dict:
 
         try:
             output = await tool_fn.ainvoke(tc.arguments)
-            emit_tool_progress(tc.tool_name, "done", output, index=i, success=True)
-            results.append(ToolResult(tool_name=tc.tool_name, output=output, success=True))
+            # Detect error strings returned by tools (not just exceptions)
+            _ERROR_PREFIXES = ("[ERROR]", "[BLOCKED]", "[TIMEOUT]")
+            success = not any(output.startswith(p) for p in _ERROR_PREFIXES)
+            status_label = "done" if success else "error"
+            emit_tool_progress(tc.tool_name, status_label, output, index=i, success=success)
+            results.append(ToolResult(tool_name=tc.tool_name, output=output, success=success))
             tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
         except Exception as exc:
             output = f"[ERROR] {tc.tool_name} failed: {exc}"
@@ -380,6 +392,44 @@ async def tool_executor_node(state: GraphState) -> dict:
         "tool_calls": [],
         "messages": tool_messages,
     }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Error check node — self-healing loop gate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def error_check_node(state: GraphState) -> dict:
+    """Check tool results for failures and decide whether to retry.
+
+    If any tool failed and retries remain, route back to the specialist
+    with error context.  Otherwise, pass through to the summarizer.
+    """
+    failed = [r for r in state.tool_results if not r.success]
+    if not failed or state.retry_count >= state.max_retries:
+        # No errors or retries exhausted — proceed to summarizer
+        return {}
+
+    error_summary = "; ".join(
+        f"{r.tool_name}: {r.output[:200]}" for r in failed
+    )
+    emit_pipeline_phase(
+        "retry",
+        f"Tool error detected (attempt {state.retry_count + 1}/{state.max_retries}): {error_summary[:120]}",
+    )
+    return {
+        "retry_count": state.retry_count + 1,
+        "last_error": error_summary,
+        "tool_calls": [],
+        "tool_results": [],
+    }
+
+
+def _should_retry(state: GraphState) -> str:
+    """Conditional edge after error_check: retry specialist or summarize."""
+    failed = [r for r in state.tool_results if not r.success]
+    if not failed or state.retry_count >= state.max_retries:
+        return "summarizer"
+    return state.routed_to
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

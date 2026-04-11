@@ -322,14 +322,24 @@ async def get_logs(limit: int = 50):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Token usage tracking
+#  Token usage tracking (in-memory + SQLite)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _token_usage: dict[str, dict] = {}
 
+_PRICING = {
+    "claude-sonnet-4-20250514": (3.0, 15.0),
+    "claude-opus-4-20250514": (15.0, 75.0),
+    "gpt-4o": (5.0, 15.0),
+    "gemini-1.5-pro": (0.5, 1.5),
+    "grok-3-mini": (2.0, 10.0),
+    "llama-3.3-70b-versatile": (0.6, 0.6),
+    "deepseek-chat": (0.14, 0.28),
+}
+
 
 def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: int) -> None:
-    """Track token usage for a model (called from LLM calls)."""
+    """Track token usage for a model (called synchronously from LLM callback)."""
     if model not in _token_usage:
         _token_usage[model] = {
             "model": model,
@@ -346,21 +356,33 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
     u["output_tokens"] += output_tokens
     u["total_tokens"] = u["input_tokens"] + u["output_tokens"]
     u["request_count"] += 1
-    # Running average latency
     u["avg_latency"] = int((u["avg_latency"] * (u["request_count"] - 1) + latency_ms) / u["request_count"])
     u["last_used"] = datetime.now().strftime("%H:%M:%S")
-    # Cost estimate (rough)
-    pricing = {
-        "claude-sonnet-4-20250514": (3.0, 15.0),
-        "claude-opus-4-20250514": (15.0, 75.0),
-        "gpt-4o": (5.0, 15.0),
-        "gemini-1.5-pro": (0.5, 1.5),
-        "grok-3-mini": (2.0, 10.0),
-        "llama-3.3-70b-versatile": (0.6, 0.6),
-        "deepseek-chat": (0.14, 0.28),
-    }
-    inp_rate, out_rate = pricing.get(model, (1.0, 3.0))
+    inp_rate, out_rate = _PRICING.get(model, (1.0, 3.0))
     u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
+
+    # Persist asynchronously (fire-and-forget)
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_token_usage(u.copy()))
+    except RuntimeError:
+        pass  # No event loop — skip persistence (e.g. during tests)
+
+
+async def _persist_token_usage(data: dict) -> None:
+    from backend import db
+    try:
+        await db.upsert_token_usage(data)
+    except Exception:
+        pass  # DB not ready yet — in-memory data is still valid
+
+
+async def load_token_usage_from_db() -> None:
+    """Load persisted token data into memory (called at startup)."""
+    from backend import db
+    for row in await db.list_token_usage():
+        _token_usage[row["model"]] = row
 
 
 @router.get("/tokens")
@@ -373,4 +395,6 @@ async def get_token_usage():
 async def reset_token_usage():
     """Reset all token usage counters."""
     _token_usage.clear()
+    from backend import db
+    await db.clear_token_usage()
     return {"status": "reset"}

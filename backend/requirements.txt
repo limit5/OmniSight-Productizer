@@ -13,3 +13,9 @@ langchain-openai==1.1.12
 langchain-groq==1.1.2
 langchain-together==0.4.0
 langchain-ollama==1.1.0
+# Persistence
+aiosqlite==0.21.0
+# Testing
+pytest==8.3.5
+pytest-asyncio==1.0.0
+httpx==0.28.1
