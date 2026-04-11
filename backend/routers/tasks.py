@@ -136,11 +136,13 @@ async def update_task(task_id: str, body: TaskUpdate, force: bool = False):
     await _persist(task)
     emit_task_update(task_id, task.status, task.assigned_agent_id)
 
-    # Sync to external issue tracker (non-blocking)
+    # Sync to external issue tracker (non-blocking, capture URL before async dispatch)
     if "status" in update_data and task.issue_url:
         import asyncio
-        new_str = task.status.value if hasattr(task.status, "value") else task.status
-        asyncio.create_task(_sync_external_issue(task.issue_url, new_str, task.id))
+        _sync_url = task.issue_url  # Capture now to avoid race if URL changes later
+        _sync_status = task.status.value if hasattr(task.status, "value") else task.status
+        _sync_id = task.id
+        asyncio.create_task(_sync_external_issue(_sync_url, _sync_status, _sync_id))
 
     return task
 
