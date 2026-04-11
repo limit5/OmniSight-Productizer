@@ -82,8 +82,9 @@ def get_llm(
     model = model or (settings.get_model_name() if provider == settings.llm_provider else None)
 
     cache_key = f"{provider}:{model}:{id(bind_tools) if bind_tools else 'none'}"
-    if cache_key in _cache:
-        return _cache[cache_key]
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         llm = _create_llm(provider, model)
