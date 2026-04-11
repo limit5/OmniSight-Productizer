@@ -77,20 +77,13 @@ async def _create_github_pr(
     if settings.github_token:
         env["GITHUB_TOKEN"] = settings.github_token
 
-    safe_title = title.replace('"', '\\"')
-    safe_desc = description.replace('"', '\\"')
-
-    cmd = (
-        f'gh pr create'
-        f' --repo "{repo_slug}"'
-        f' --head "{source_branch}"'
-        f' --base "{target_branch}"'
-        f' --title "{safe_title}"'
-        f' --body "{safe_desc}"'
-    )
-
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "create",
+        "--repo", repo_slug,
+        "--head", source_branch,
+        "--base", target_branch,
+        "--title", title,
+        "--body", description,
         cwd=repo_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
