@@ -349,6 +349,13 @@ async def insert_notification(data: dict) -> None:
     await _conn().commit()
 
 
+def _notification_row_to_dict(row) -> dict:
+    d = dict(row)
+    d["read"] = bool(d.get("read", 0))
+    d["auto_resolved"] = bool(d.get("auto_resolved", 0))
+    return d
+
+
 async def list_notifications(limit: int = 50, level: str = "") -> list[dict]:
     query = "SELECT * FROM notifications"
     params: list = []
@@ -359,7 +366,7 @@ async def list_notifications(limit: int = 50, level: str = "") -> list[dict]:
     params.append(limit)
     async with _conn().execute(query, params) as cur:
         rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return [_notification_row_to_dict(r) for r in rows]
 
 
 async def mark_notification_read(notification_id: str) -> bool:
