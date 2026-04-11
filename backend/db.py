@@ -51,8 +51,11 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         try:
             await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
             logger.info("Migration: added %s.%s", table, column)
-        except Exception:
-            pass  # Column already exists
+        except Exception as exc:
+            if "duplicate column" in str(exc).lower() or "already exists" in str(exc).lower():
+                pass  # Column already exists — expected
+            else:
+                logger.warning("Migration %s.%s failed: %s", table, column, exc)
 
 
 async def close() -> None:
