@@ -163,12 +163,19 @@ async def _check_parent_completion(task_id: str) -> None:
         return
 
     siblings = [t for t in _tasks.values() if t.parent_task_id == parent.id]
+    if not siblings:
+        return
     if all(s.status == TaskStatus.completed for s in siblings):
         parent.status = TaskStatus.completed
         await _persist_task(parent)
     elif any(s.status == TaskStatus.blocked for s in siblings):
         parent.status = TaskStatus.blocked
         await _persist_task(parent)
+    elif any(s.status in (TaskStatus.in_review, TaskStatus.in_progress, TaskStatus.assigned) for s in siblings):
+        # At least one child still in progress — parent stays in_progress
+        if parent.status != TaskStatus.in_progress:
+            parent.status = TaskStatus.in_progress
+            await _persist_task(parent)
 
 
 # ─── State analysis ───
