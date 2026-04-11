@@ -64,9 +64,12 @@ from backend.agents.nodes import (
 )
 
 
+_VALID_SPECIALISTS = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
+
+
 def _route_to_specialist(state: GraphState) -> str:
     """Conditional edge: pick the specialist based on orchestrator's routing."""
-    return state.routed_to
+    return state.routed_to if state.routed_to in _VALID_SPECIALISTS else "general"
 
 
 def _check_tool_calls(state: GraphState) -> str:
