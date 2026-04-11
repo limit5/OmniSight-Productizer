@@ -150,8 +150,11 @@ export function useEngine() {
         setTasks(tasksRes.map(mapTask))
         setConnected(true)
 
-        // Subscribe to persistent SSE for real-time state changes
-        eventSource = api.subscribeEvents((event) => {
+        // Subscribe to persistent SSE for real-time state changes (with auto-reconnect)
+        let reconnectAttempts = 0
+        function connectSSE() {
+          eventSource = api.subscribeEvents((event) => {
+            reconnectAttempts = 0  // Reset on successful event
           // ── Push ALL events into REPORTER VORTEX logs ──
           if (event.event !== "heartbeat") {
             const d = event.data as Record<string, unknown>
@@ -257,10 +260,17 @@ export function useEngine() {
               timestamp: d.timestamp,
             }])
           }
-        }, () => {
-          // On SSE error — don't crash, just log
-          console.warn("[Engine] SSE connection lost, will auto-reconnect")
-        })
+          }, (err) => {
+            // On SSE error — reconnect with backoff
+            if (eventSource?.readyState === EventSource.CLOSED && reconnectAttempts < 5) {
+              reconnectAttempts++
+              const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
+              console.warn(`[Engine] SSE closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
+              setTimeout(connectSSE, delay)
+            }
+          })
+        }
+        connectSSE()
       } catch {
         console.warn("[Engine] Backend unavailable, using offline mode")
         setConnected(false)
