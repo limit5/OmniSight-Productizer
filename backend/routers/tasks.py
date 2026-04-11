@@ -67,24 +67,103 @@ async def create_task(body: TaskCreate):
         description=body.description,
         priority=body.priority,
         suggested_agent_type=body.suggested_agent_type,
+        suggested_sub_type=body.suggested_sub_type,
+        parent_task_id=body.parent_task_id,
+        external_issue_id=body.external_issue_id,
+        issue_url=body.issue_url,
+        acceptance_criteria=body.acceptance_criteria,
+        labels=body.labels,
     )
     await _persist(task)
     return task
 
 
+@router.get("/{task_id}/transitions")
+async def get_transitions(task_id: str):
+    """Return the list of valid next statuses for a task (state machine)."""
+    if task_id not in _tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    current = _tasks[task_id].status
+    current_str = current.value if hasattr(current, "value") else current
+    from backend.models import TASK_TRANSITIONS
+    allowed = sorted(TASK_TRANSITIONS.get(current_str, set()))
+    return {"task_id": task_id, "current_status": current_str, "allowed_transitions": allowed}
+
+
 @router.patch("/{task_id}", response_model=Task)
-async def update_task(task_id: str, body: TaskUpdate):
+async def update_task(task_id: str, body: TaskUpdate, force: bool = False):
+    """Update a task. Status changes are validated against the state machine.
+
+    Pass ``force=true`` to bypass transition validation (for system/human use).
+    """
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = _tasks[task_id]
     update_data = body.model_dump(exclude_unset=True)
-    if "status" in update_data and update_data["status"] == TaskStatus.completed:
-        update_data["completed_at"] = datetime.now().isoformat()
+
+    # State machine validation
+    if "status" in update_data and not force:
+        new_status = update_data["status"]
+        new_str = new_status.value if hasattr(new_status, "value") else new_status
+        current_str = task.status.value if hasattr(task.status, "value") else task.status
+        from backend.models import TASK_TRANSITIONS
+        allowed = TASK_TRANSITIONS.get(current_str, set())
+        if new_str not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid transition: {current_str} → {new_str}. Allowed: {sorted(allowed)}",
+            )
+
+        # Fact-based gating: verify workspace has commits before in_review/completed
+        if new_str in ("in_review", "completed") and task.assigned_agent_id:
+            from backend.workspace import get_workspace
+            ws = get_workspace(task.assigned_agent_id)
+            if ws and ws.commit_count == 0 and new_str == "in_review":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot move to in_review: no commits in workspace. Push code first.",
+                )
+
+    if "status" in update_data:
+        s = update_data["status"]
+        s_str = s.value if hasattr(s, "value") else s
+        if s_str == "completed":
+            update_data["completed_at"] = datetime.now().isoformat()
+
     for field, value in update_data.items():
         setattr(task, field, value)
     await _persist(task)
     emit_task_update(task_id, task.status, task.assigned_agent_id)
     return task
+
+
+# ── Task Comments ──
+
+@router.get("/{task_id}/comments")
+async def get_task_comments(task_id: str, limit: int = 20):
+    """Get comment thread for a task."""
+    if task_id not in _tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return await db.list_task_comments(task_id, limit=limit)
+
+
+@router.post("/{task_id}/comments")
+async def add_task_comment(task_id: str, author: str = "human", content: str = ""):
+    """Add a comment to a task."""
+    if task_id not in _tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="Comment content cannot be empty")
+    import uuid as _uuid
+    comment = {
+        "id": f"comment-{_uuid.uuid4().hex[:8]}",
+        "task_id": task_id,
+        "author": author,
+        "content": content,
+        "timestamp": datetime.now().isoformat(),
+    }
+    await db.insert_task_comment(comment)
+    return comment
 
 
 @router.delete("/{task_id}", status_code=204)

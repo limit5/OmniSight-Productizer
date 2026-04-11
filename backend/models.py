@@ -89,8 +89,29 @@ class TaskStatus(str, Enum):
     analyzing = "analyzing"
     assigned = "assigned"
     in_progress = "in_progress"
+    in_review = "in_review"
     completed = "completed"
     blocked = "blocked"
+
+
+# Valid state transitions (from → set of allowed destinations)
+TASK_TRANSITIONS: dict[str, set[str]] = {
+    "backlog":     {"analyzing", "assigned", "in_progress", "blocked"},
+    "analyzing":   {"assigned", "backlog", "blocked"},
+    "assigned":    {"in_progress", "backlog", "blocked"},
+    "in_progress": {"in_review", "completed", "blocked"},
+    "in_review":   {"in_progress", "completed", "blocked"},  # in_progress = revision needed
+    "completed":   {"backlog"},  # reopen
+    "blocked":     {"backlog", "assigned", "in_progress"},
+}
+
+
+class TaskComment(BaseModel):
+    id: str
+    task_id: str
+    author: str  # agent_id or "human"
+    content: str
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
 class Task(BaseModel):
@@ -107,6 +128,11 @@ class Task(BaseModel):
     suggested_sub_type: Optional[str] = None
     parent_task_id: Optional[str] = None
     child_task_ids: list[str] = Field(default_factory=list)
+    # Issue tracking integration
+    external_issue_id: Optional[str] = None  # e.g. "OMNI-123", "42"
+    issue_url: Optional[str] = None  # e.g. "https://jira.company.com/browse/OMNI-123"
+    acceptance_criteria: Optional[str] = None
+    labels: list[str] = Field(default_factory=list)
 
 
 class TaskCreate(BaseModel):
@@ -116,6 +142,10 @@ class TaskCreate(BaseModel):
     suggested_agent_type: Optional[AgentType] = None
     suggested_sub_type: Optional[str] = None
     parent_task_id: Optional[str] = None
+    external_issue_id: Optional[str] = None
+    issue_url: Optional[str] = None
+    acceptance_criteria: Optional[str] = None
+    labels: list[str] = Field(default_factory=list)
 
 
 class TaskUpdate(BaseModel):
@@ -127,6 +157,10 @@ class TaskUpdate(BaseModel):
     suggested_sub_type: Optional[str] = None
     parent_task_id: Optional[str] = None
     child_task_ids: Optional[list[str]] = None
+    external_issue_id: Optional[str] = None
+    issue_url: Optional[str] = None
+    acceptance_criteria: Optional[str] = None
+    labels: Optional[list[str]] = None
 
 
 # ---------- Chat / Orchestrator ----------

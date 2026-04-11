@@ -42,6 +42,10 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("tasks", "suggested_sub_type", "TEXT"),
         ("tasks", "parent_task_id", "TEXT"),
         ("tasks", "child_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
+        ("tasks", "external_issue_id", "TEXT"),
+        ("tasks", "issue_url", "TEXT"),
+        ("tasks", "acceptance_criteria", "TEXT"),
+        ("tasks", "labels", "TEXT NOT NULL DEFAULT '[]'"),
     ]
     for table, column, typedef in migrations:
         try:
@@ -96,7 +100,19 @@ CREATE TABLE IF NOT EXISTS tasks (
     suggested_agent_type TEXT,
     suggested_sub_type  TEXT,
     parent_task_id      TEXT,
-    child_task_ids      TEXT NOT NULL DEFAULT '[]'
+    child_task_ids      TEXT NOT NULL DEFAULT '[]',
+    external_issue_id   TEXT,
+    issue_url           TEXT,
+    acceptance_criteria TEXT,
+    labels              TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS task_comments (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    author      TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -206,8 +222,9 @@ def _agent_row_to_dict(row) -> dict:
 
 def _task_row_to_dict(row) -> dict:
     d = dict(row)
-    if isinstance(d.get("child_task_ids"), str):
-        d["child_task_ids"] = json.loads(d["child_task_ids"])
+    for json_field in ("child_task_ids", "labels"):
+        if isinstance(d.get(json_field), str):
+            d[json_field] = json.loads(d[json_field])
     return d
 
 
@@ -225,14 +242,16 @@ async def get_task(task_id: str) -> dict | None:
 
 async def upsert_task(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id, created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type, parent_task_id, child_task_ids)
-           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id, :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type, :parent_task_id, :child_task_ids)
+        """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id, created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type, parent_task_id, child_task_ids, external_issue_id, issue_url, acceptance_criteria, labels)
+           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id, :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type, :parent_task_id, :child_task_ids, :external_issue_id, :issue_url, :acceptance_criteria, :labels)
            ON CONFLICT(id) DO UPDATE SET
              title=excluded.title, description=excluded.description, priority=excluded.priority,
              status=excluded.status, assigned_agent_id=excluded.assigned_agent_id,
              completed_at=excluded.completed_at, ai_analysis=excluded.ai_analysis,
              suggested_agent_type=excluded.suggested_agent_type, suggested_sub_type=excluded.suggested_sub_type,
-             parent_task_id=excluded.parent_task_id, child_task_ids=excluded.child_task_ids
+             parent_task_id=excluded.parent_task_id, child_task_ids=excluded.child_task_ids,
+             external_issue_id=excluded.external_issue_id, issue_url=excluded.issue_url,
+             acceptance_criteria=excluded.acceptance_criteria, labels=excluded.labels
         """,
         {
             "id": data["id"],
@@ -248,9 +267,33 @@ async def upsert_task(data: dict) -> None:
             "suggested_sub_type": data.get("suggested_sub_type"),
             "parent_task_id": data.get("parent_task_id"),
             "child_task_ids": json.dumps(data.get("child_task_ids", [])),
+            "external_issue_id": data.get("external_issue_id"),
+            "issue_url": data.get("issue_url"),
+            "acceptance_criteria": data.get("acceptance_criteria"),
+            "labels": json.dumps(data.get("labels", [])),
         },
     )
     await _conn().commit()
+
+
+# ── Task comments ──
+
+async def insert_task_comment(data: dict) -> None:
+    await _conn().execute(
+        """INSERT INTO task_comments (id, task_id, author, content, timestamp)
+           VALUES (:id, :task_id, :author, :content, :timestamp)""",
+        data,
+    )
+    await _conn().commit()
+
+
+async def list_task_comments(task_id: str, limit: int = 20) -> list[dict]:
+    async with _conn().execute(
+        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (task_id, limit),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def delete_task(task_id: str) -> bool:
