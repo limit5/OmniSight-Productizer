@@ -105,8 +105,8 @@ class TestErrorCheckNode:
             max_retries=2,
         )
         update = error_check_node(state)
-        # Empty update means pass-through to summarizer
-        assert update == {}
+        # Clears last_error to signal "no retry needed"
+        assert update == {"last_error": ""}
 
     def test_error_triggers_retry(self):
         state = GraphState(
@@ -122,46 +122,62 @@ class TestErrorCheckNode:
         assert update["tool_calls"] == []
         assert update["tool_results"] == []
 
-    def test_retries_exhausted_passes_through(self):
-        state = GraphState(
-            tool_results=[
-                ToolResult(tool_name="run_bash", output="[ERROR] compile failed", success=False),
-            ],
-            retry_count=2,
-            max_retries=2,
-        )
-        update = error_check_node(state)
-        assert update == {}
-
-    def test_should_retry_routes_to_specialist(self):
+    def test_retries_exhausted_escalates(self):
+        """When retries exhausted with errors, escalate to human."""
         state = GraphState(
             routed_to="firmware",
             tool_results=[
-                ToolResult(tool_name="run_bash", output="[ERROR]", success=False),
+                ToolResult(tool_name="run_bash", output="[ERROR] compile failed", success=False),
             ],
-            retry_count=0,
+            retry_count=3,
+            max_retries=3,
+        )
+        update = error_check_node(state)
+        assert update["last_error"] == ""
+        assert len(update["actions"]) == 1
+        assert update["actions"][0].status == "awaiting_confirmation"
+
+    def test_retries_exhausted_no_errors_passes_through(self):
+        """When retries exhausted but no errors, go to summarizer."""
+        state = GraphState(
+            tool_results=[
+                ToolResult(tool_name="read_file", output="ok", success=True),
+            ],
+            retry_count=3,
+            max_retries=3,
+        )
+        update = error_check_node(state)
+        assert update == {"last_error": ""}
+
+    def test_should_retry_routes_to_specialist(self):
+        """After error_check sets last_error, should retry the specialist."""
+        state = GraphState(
+            routed_to="firmware",
+            tool_results=[],
+            last_error="run_bash: [ERROR] compile failed",
+            retry_count=1,
             max_retries=2,
         )
         assert _should_retry(state) == "firmware"
 
     def test_should_retry_routes_to_summarizer_on_success(self):
+        """After error_check clears last_error (no errors), go to summarizer."""
         state = GraphState(
             routed_to="firmware",
-            tool_results=[
-                ToolResult(tool_name="read_file", output="ok", success=True),
-            ],
+            tool_results=[],
+            last_error="",
             retry_count=0,
             max_retries=2,
         )
         assert _should_retry(state) == "summarizer"
 
     def test_should_retry_routes_to_summarizer_when_exhausted(self):
+        """When retries exhausted, error_check clears last_error → summarizer."""
         state = GraphState(
             routed_to="firmware",
-            tool_results=[
-                ToolResult(tool_name="run_bash", output="[ERROR]", success=False),
-            ],
-            retry_count=2,
-            max_retries=2,
+            tool_results=[],
+            last_error="",
+            retry_count=3,
+            max_retries=3,
         )
         assert _should_retry(state) == "summarizer"

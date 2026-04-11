@@ -6,6 +6,7 @@ the highest-value action to perform. Streams progress via SSE.
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime
 
@@ -13,11 +14,11 @@ from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
 from backend.agents.graph import run_graph
-from backend.agents.llm import get_llm
 from backend.routers.agents import _agents, _persist as _persist_agent
 from backend.routers.tasks import _tasks, _persist as _persist_task
 from backend.models import AgentStatus, AgentWorkspace, TaskStatus
 from backend.workspace import provision as ws_provision, get_workspace
+from backend.handoff import load_handoff_for_task
 from fastapi.responses import JSONResponse
 
 from backend.events import emit_invoke
@@ -25,11 +26,13 @@ from backend.events import emit_invoke
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
 # Concurrency guard — only one INVOKE at a time
-_invoke_lock = asyncio.Lock()
+_invoke_busy = False
 
 # Halt flag — checked between actions to support emergency stop
 _halted = asyncio.Event()
 _halted.set()  # starts in "running" (not halted) state
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -38,6 +41,57 @@ def _now() -> str:
 
 def _uid() -> str:
     return uuid.uuid4().hex[:6]
+
+
+# ─── Background task execution ───
+
+
+async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
+    """Execute a task through LangGraph in the background.
+
+    Updates agent status and sub_tasks via SSE events as work progresses.
+    """
+    from backend.models import SubTask
+
+    handoff_ctx = ""
+    try:
+        handoff_ctx = await load_handoff_for_task(task.id)
+    except Exception:
+        pass
+
+    task_command = f"{task.title}. {task.description or ''}"
+    try:
+        graph_result = await run_graph(
+            task_command,
+            workspace_path=workspace_path,
+            model_name=agent.ai_model or "",
+            agent_sub_type=agent.sub_type or "",
+            handoff_context=handoff_ctx,
+        )
+        agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
+        agent.status = AgentStatus.success
+
+        # Extract sub_tasks from graph actions
+        if graph_result.actions:
+            for act in graph_result.actions:
+                if act.detail and act.detail.startswith("{"):
+                    try:
+                        detail_data = json.loads(act.detail)
+                        if "sub_tasks" in detail_data:
+                            agent.sub_tasks = [SubTask(**st) for st in detail_data["sub_tasks"]]
+                            for st in agent.sub_tasks:
+                                matching = [tr for tr in graph_result.tool_results if st.label.startswith(tr.tool_name)]
+                                if matching:
+                                    st.status = "completed" if matching[0].success else "error"
+                    except (json.JSONDecodeError, Exception):
+                        pass
+    except Exception as exc:
+        agent.thought_chain = f"Execution error: {exc}"
+        agent.status = AgentStatus.error
+        logger.error("Agent task failed: agent=%s task=%s error=%s", agent.id, task.id, exc)
+
+    await _persist_agent(agent)
+    emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
 
 
 # ─── State analysis ───
@@ -174,7 +228,14 @@ async def _execute_actions(actions: list[dict], state: dict):
                 }),
             }
             try:
-                result = await run_graph(action["command"])
+                # Find a running agent to use its model/role config
+                running = state.get("running_agents", [])
+                _agent_ctx = running[0] if running else None
+                result = await run_graph(
+                    action["command"],
+                    model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
+                    agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
+                )
                 yield {
                     "event": "action",
                     "data": json.dumps({
@@ -258,6 +319,14 @@ async def _execute_actions(actions: list[dict], state: dict):
                 await _persist_agent(agent)
                 await _persist_task(task)
 
+            # Launch task execution in background (non-blocking SSE)
+            if task and agent:
+                asyncio.create_task(_run_agent_task(
+                    agent=agent,
+                    task=task,
+                    workspace_path=workspace_path,
+                ))
+
             yield {
                 "event": "action",
                 "data": json.dumps({
@@ -340,17 +409,20 @@ async def invoke_stream(command: str | None = None):
     Query param `command` is optional; if provided, it takes priority
     and is routed through the LangGraph pipeline.
     """
-    if _invoke_lock.locked():
+    global _invoke_busy
+    if _invoke_busy:
         return JSONResponse(
             status_code=409,
             content={"detail": "Invoke already in progress"},
         )
 
-    async with _invoke_lock:
-        state = _analyze_state()
-        actions = _plan_actions(state, command)
+    state = _analyze_state()
+    actions = _plan_actions(state, command)
 
-        async def event_generator():
+    async def event_generator():
+        global _invoke_busy
+        _invoke_busy = True
+        try:
             # Opening event with analysis
             yield {
                 "event": "analysis",
@@ -371,8 +443,10 @@ async def invoke_stream(command: str | None = None):
             # Execute actions
             async for event in _execute_actions(actions, state):
                 yield event
+        finally:
+            _invoke_busy = False
 
-        return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator())
 
 
 @router.post("/halt")
@@ -394,13 +468,15 @@ async def invoke_resume():
 @router.post("")
 async def invoke_sync(command: str | None = None):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
-    if _invoke_lock.locked():
+    global _invoke_busy
+    if _invoke_busy:
         return JSONResponse(
             status_code=409,
             content={"detail": "Invoke already in progress"},
         )
 
-    async with _invoke_lock:
+    _invoke_busy = True
+    try:
         state = _analyze_state()
         actions = _plan_actions(state, command)
         results: list[dict] = []
@@ -408,7 +484,13 @@ async def invoke_sync(command: str | None = None):
         for action in actions:
             if action["type"] == "command":
                 try:
-                    result = await run_graph(action["command"])
+                    running = state.get("running_agents", [])
+                    _agent_ctx = running[0] if running else None
+                    result = await run_graph(
+                        action["command"],
+                        model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
+                        agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
+                    )
                     results.append({
                         "type": "command",
                         "routed_to": result.routed_to,
@@ -446,6 +528,13 @@ async def invoke_sync(command: str | None = None):
                         agent.thought_chain = f"Task assigned: {task.title}. Processing..."
                     await _persist_agent(agent)
                     await _persist_task(task)
+                # Launch execution in background
+                if task and agent:
+                    asyncio.create_task(_run_agent_task(
+                        agent=agent,
+                        task=task,
+                        workspace_path=str(agent.workspace.path) if agent.workspace.path else None,
+                    ))
                 results.append({**action, "type": "assign", "workspace_branch": ws_branch})
 
             elif action["type"] == "report":
@@ -459,3 +548,5 @@ async def invoke_sync(command: str | None = None):
             "results": results,
             "timestamp": _now(),
         }
+    finally:
+        _invoke_busy = False

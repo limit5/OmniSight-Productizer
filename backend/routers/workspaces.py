@@ -9,6 +9,8 @@ from backend.workspace import (
     cleanup,
     get_workspace,
     list_workspaces,
+    _detect_default_remote,
+    _detect_base_branch,
 )
 from backend.container import (
     start_container,
@@ -27,6 +29,7 @@ class ProvisionRequest(BaseModel):
     agent_id: str
     task_id: str
     repo_url: str | None = None  # None = use main project repo
+    remote_name: str = "origin"  # which remote to target for push/PR
 
 
 @router.post("/provision")
@@ -47,6 +50,8 @@ async def provision_workspace(body: ProvisionRequest):
         path=str(info.path),
         status="active",
         task_id=info.task_id,
+        remote_name=body.remote_name,
+        repo_url=body.repo_url,
     )
 
     return {
@@ -89,6 +94,53 @@ async def cleanup_workspace(agent_id: str):
         agent.workspace = AgentWorkspace()
 
     return {"status": "cleaned", "agent_id": agent_id}
+
+
+class CreatePRRequest(BaseModel):
+    remote: str = ""  # auto-detect if empty
+    title: str = ""  # auto-generate if empty
+    description: str = ""
+    target_branch: str = ""  # auto-detect if empty
+
+
+@router.post("/create-pr/{agent_id}")
+async def create_pr_for_workspace(agent_id: str, body: CreatePRRequest):
+    """Create a PR (GitHub) or MR (GitLab) for an agent's workspace."""
+    from backend.git_platform import create_merge_request
+
+    info = get_workspace(agent_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="No workspace for this agent")
+    if info.status != "finalized":
+        raise HTTPException(status_code=400, detail="Workspace must be finalized before creating PR/MR")
+
+    remote = body.remote or await _detect_default_remote(info.path)
+    target = body.target_branch or await _detect_base_branch(info.path)
+    title = body.title or f"[Agent {agent_id}] Task {info.task_id}"
+
+    result = await create_merge_request(
+        repo_path=info.path,
+        remote=remote,
+        source_branch=info.branch,
+        target_branch=target,
+        title=title,
+        description=body.description,
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return result
+
+
+@router.get("/handoff/{task_id}")
+async def get_task_handoff(task_id: str):
+    """Retrieve the handoff document for a task."""
+    from backend import db
+    content = await db.get_handoff(task_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="No handoff found for this task")
+    return {"task_id": task_id, "content": content}
 
 
 @router.get("")

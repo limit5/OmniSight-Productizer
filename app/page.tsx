@@ -46,10 +46,12 @@ export default function Home() {
     await engine.invoke(cmd)
   }, [engine])
 
-  const handleAddAgent = useCallback(async () => {
-    const types = Object.keys(agentTemplates)
-    const randomType = types[Math.floor(Math.random() * types.length)] as Agent["type"]
-    await engine.addAgent(randomType)
+  const handleAddAgent = useCallback(async (type?: Agent["type"], _tools?: string[], subType?: string, aiModel?: string) => {
+    const agentType = type || (() => {
+      const types = Object.keys(agentTemplates)
+      return types[Math.floor(Math.random() * types.length)] as Agent["type"]
+    })()
+    await engine.addAgent(agentType, undefined, subType, aiModel)
   }, [engine])
 
   const handleRemoveAgent = useCallback(async (id: string) => {
@@ -120,7 +122,8 @@ export default function Home() {
     }))
     setHaltedAgentStates(new Map())
     setIsHalted(false)
-  }, [haltedAgentStates, engine])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- haltedAgentStates is read inside setAgents callback
+  }, [engine])
 
   const hasRunningAgents = agents.some(a => a.status === "running" || a.status === "booting")
 
@@ -178,23 +181,8 @@ export default function Home() {
   }, [engine])
 
   // Materialization handlers
-  const handleMaterializeAgent = useCallback((_type: Agent["type"]): string => {
-    return `agent-${Date.now()}`
-  }, [])
-
-  const handleMaterializeComplete = useCallback(async (agentId: string) => {
-    const types: Agent["type"][] = ["firmware", "software", "validator", "reporter"]
-    const randomType = types[Math.floor(Math.random() * types.length)]
-    const agent: Agent = {
-      id: agentId,
-      name: `${randomType.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
-      type: randomType,
-      status: "idle" as AgentStatus,
-      progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
-      thoughtChain: "Materialization complete. Standing by for orders...",
-    }
-    engine.setAgents(prev => [...prev, agent])
-  }, [engine])
+  // Materialization handlers removed — all agent creation goes through
+  // handleAddAgent → engine.addAgent() → backend API for consistency.
 
   // Command handler — sends to backend via engine
   const handleCommand = useCallback(async (command: string) => {
@@ -214,9 +202,14 @@ export default function Home() {
     await engine.sendCommand(command)
   }, [engine])
 
-  const handleSpecChange = (path: string[], newValue: string | number | boolean) => {
-    console.log("[Engine] Spec changed:", path.join("."), "=", newValue)
-  }
+  const handleSpecChange = useCallback(async (path: string[], newValue: string | number | boolean) => {
+    try {
+      await api.updateSpec(path, newValue)
+      engine.refresh()
+    } catch (e) {
+      console.error("[Engine] Spec update failed:", e)
+    }
+  }, [engine])
 
   // Render panel based on active selection (for mobile/tablet)
   const renderPanel = (panelId: PanelId) => {
@@ -257,8 +250,6 @@ export default function Home() {
             onConfirmAgent={handleConfirmAgent}
             onRejectAgent={handleRejectAgent}
             onRetryAgent={handleRetryAgent}
-            onMaterializeAgent={handleMaterializeAgent}
-            onMaterializeComplete={handleMaterializeComplete}
           />
         )
       case "orchestrator":
@@ -397,8 +388,6 @@ export default function Home() {
               onConfirmAgent={handleConfirmAgent}
               onRejectAgent={handleRejectAgent}
               onRetryAgent={handleRetryAgent}
-              onMaterializeAgent={handleMaterializeAgent}
-              onMaterializeComplete={handleMaterializeComplete}
             />
           </section>
 

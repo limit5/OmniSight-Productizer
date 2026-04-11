@@ -5,12 +5,15 @@ Also serves spec (from hardware_manifest.yaml), logs, and token usage.
 """
 
 import asyncio
+import logging
 import os
 import platform
 import re
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import yaml
 from fastapi import APIRouter
@@ -262,15 +265,24 @@ async def get_repos():
     branch = await _sh(f"git -C {_PROJECT_ROOT} rev-parse --abbrev-ref HEAD")
     commit = await _sh(f"git -C {_PROJECT_ROOT} log -1 --format='%h' 2>/dev/null")
     commit_time = await _sh(f"git -C {_PROJECT_ROOT} log -1 --format='%cr' 2>/dev/null")
-    remote = await _sh(f"git -C {_PROJECT_ROOT} remote get-url origin 2>/dev/null")
+    # Gather all remotes
+    remotes_raw = await _sh(f"git -C {_PROJECT_ROOT} remote -v 2>/dev/null")
+    remotes: dict[str, str] = {}
+    for line in (remotes_raw or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] not in remotes:
+            remotes[parts[0]] = parts[1]
+    primary_url = remotes.get("origin", next(iter(remotes.values()), str(_PROJECT_ROOT)))
+
     repos.append({
         "id": "main-repo",
         "name": _PROJECT_ROOT.name,
-        "url": remote or str(_PROJECT_ROOT),
+        "url": primary_url,
         "branch": branch or "master",
         "status": "synced",
         "lastCommit": commit or "",
         "lastCommitTime": commit_time or "",
+        "remotes": remotes,
         "tetheredAgentId": None,
     })
 
@@ -374,8 +386,8 @@ async def _persist_token_usage(data: dict) -> None:
     from backend import db
     try:
         await db.upsert_token_usage(data)
-    except Exception:
-        pass  # DB not ready yet — in-memory data is still valid
+    except Exception as exc:
+        logger.warning("Token usage DB persist failed: %s", exc)
 
 
 async def load_token_usage_from_db() -> None:
@@ -398,3 +410,22 @@ async def reset_token_usage():
     from backend import db
     await db.clear_token_usage()
     return {"status": "reset"}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Roles & Model Rules registry
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.get("/roles")
+async def get_available_roles():
+    """List all available agent roles from configs/roles/."""
+    from backend.prompt_loader import list_available_roles
+    return list_available_roles()
+
+
+@router.get("/model-rules")
+async def get_available_model_rules():
+    """List all available model rule definitions from configs/models/."""
+    from backend.prompt_loader import list_available_models
+    return list_available_models()

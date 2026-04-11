@@ -13,11 +13,12 @@ function mapAgent(a: api.ApiAgent): Agent {
     id: a.id,
     name: a.name,
     type: a.type as Agent["type"],
+    subType: a.sub_type || undefined,
     status: a.status as AgentStatus,
     progress: a.progress,
     thoughtChain: a.thought_chain,
-    aiModel: a.ai_model ? ({ id: a.ai_model, name: a.ai_model, provider: "custom" } as Agent["aiModel"]) : undefined,
-    subTasks: a.sub_tasks?.map(s => ({ id: s.id, label: s.label, status: s.status as "pending" | "running" | "completed" | "failed" })),
+    aiModel: a.ai_model || undefined,
+    subTasks: a.sub_tasks?.map(s => ({ id: s.id, name: s.label, status: (s.status === "completed" ? "done" : s.status) as "pending" | "running" | "done" | "error" })),
   }
 }
 
@@ -242,11 +243,11 @@ export function useEngine() {
 
   // ── Agent operations ──
 
-  const addAgent = useCallback(async (type: Agent["type"], name?: string) => {
+  const addAgent = useCallback(async (type: Agent["type"], name?: string, subType?: string, aiModel?: string) => {
     const agentName = name || `${type.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`
     if (connected) {
       try {
-        const res = await api.createAgent({ name: agentName, type })
+        const res = await api.createAgent({ name: agentName, type, sub_type: subType, ai_model: aiModel })
         setAgents(prev => [...prev, mapAgent(res)])
         return mapAgent(res)
       } catch (e) {
@@ -258,9 +259,11 @@ export function useEngine() {
       id: `agent-${Date.now()}`,
       name: agentName,
       type,
+      subType,
       status: "booting",
       progress: { current: 0, total: 5 },
       thoughtChain: "Initializing...",
+      aiModel: aiModel || undefined,
     }
     setAgents(prev => [...prev, fallback])
     return fallback

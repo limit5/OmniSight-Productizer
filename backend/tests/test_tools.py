@@ -15,6 +15,9 @@ from backend.agents.tools import (
     search_in_files,
     run_bash,
     git_push,
+    git_remote_list,
+    git_add_remote,
+    create_pr,
     set_active_workspace,
 )
 
@@ -173,3 +176,44 @@ class TestGitPush:
     async def test_push_blocked_for_master(self, workspace: Path):
         result = await git_push.ainvoke({"remote": "origin", "branch": "master"})
         assert result.startswith("[BLOCKED]")
+
+
+# ─── PR creation restriction ───
+
+
+class TestCreatePR:
+
+    @pytest.mark.asyncio
+    async def test_pr_blocked_for_non_agent_branch(self, workspace: Path):
+        # Init a git repo so rev-parse works
+        import subprocess
+        subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "main"], cwd=workspace, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=workspace, capture_output=True)
+        result = await create_pr.ainvoke({"remote": "origin", "title": "test"})
+        assert "[BLOCKED]" in result
+
+
+# ─── Git remote tools ───
+
+
+class TestGitRemoteTools:
+
+    @pytest.mark.asyncio
+    async def test_remote_list_in_repo(self, workspace: Path):
+        import subprocess
+        subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/test/repo.git"], cwd=workspace, capture_output=True)
+        result = await git_remote_list.ainvoke({})
+        assert "origin" in result
+        assert "github.com" in result
+
+    @pytest.mark.asyncio
+    async def test_add_remote(self, workspace: Path):
+        import subprocess
+        subprocess.run(["git", "init"], cwd=workspace, capture_output=True)
+        result = await git_add_remote.ainvoke({"name": "gitlab", "url": "https://gitlab.com/org/repo.git"})
+        assert not result.startswith("[ERROR]")
+        # Verify it was added
+        check = await git_remote_list.ainvoke({})
+        assert "gitlab" in check

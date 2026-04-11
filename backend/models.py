@@ -16,6 +16,7 @@ class AgentType(str, Enum):
     software = "software"
     reporter = "reporter"
     validator = "validator"
+    reviewer = "reviewer"
     custom = "custom"
 
 
@@ -47,12 +48,15 @@ class AgentWorkspace(BaseModel):
     status: str = "none"  # none | active | finalized | cleaned
     commit_count: int = 0
     task_id: Optional[str] = None
+    remote_name: str = "origin"
+    repo_url: Optional[str] = None
 
 
 class Agent(BaseModel):
     id: str
     name: str
     type: AgentType
+    sub_type: str = ""  # Role specialization (bsp, isp, sdet, etc.)
     status: AgentStatus = AgentStatus.idle
     progress: AgentProgress = Field(default_factory=AgentProgress)
     thought_chain: str = ""
@@ -67,6 +71,7 @@ class Agent(BaseModel):
 class AgentCreate(BaseModel):
     name: str
     type: AgentType
+    sub_type: str = ""
     ai_model: Optional[str] = None
 
 

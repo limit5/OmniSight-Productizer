@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, MessageSquare, CheckCircle2, XCircle, Clock, FileText, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, Settings } from "lucide-react"
+import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, MessageSquare, CheckCircle2, XCircle, Clock, FileText, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, Settings, Eye } from "lucide-react"
 
 export type AgentStatus = "idle" | "running" | "success" | "error" | "warning" | "booting" | "awaiting_confirmation" | "materializing"
 
@@ -31,34 +31,67 @@ export interface AgentHistoryEntry {
 
 export type MaterializationPhase = "idle" | "ejection" | "wireframe" | "components" | "bootup" | "complete"
 
-// Available AI models that can power agents
-export type AIModel = 
-  | "claude-opus-4.6" 
-  | "claude-sonnet-4.8" 
-  | "gpt-5.4" 
-  | "gemini-3.1" 
-  | "gemma-4" 
-  | "grok-3" 
-  | "codex-2"
-  | "mistral-large"
-  | "llama-4"
+// AI model display — supports both known models and dynamic strings from backend
+export type AIModel = string
 
-export const AI_MODEL_INFO: Record<AIModel, { label: string; shortLabel: string; provider: string; color: string }> = {
-  "claude-opus-4.6": { label: "Claude Opus 4.6", shortLabel: "Opus", provider: "Anthropic", color: "#d97706" },
-  "claude-sonnet-4.8": { label: "Claude Sonnet 4.8", shortLabel: "Sonnet", provider: "Anthropic", color: "#f59e0b" },
-  "gpt-5.4": { label: "GPT-5.4", shortLabel: "GPT-5", provider: "OpenAI", color: "#10b981" },
-  "gemini-3.1": { label: "Gemini 3.1", shortLabel: "Gemini", provider: "Google", color: "#3b82f6" },
-  "gemma-4": { label: "Gemma 4", shortLabel: "Gemma", provider: "Google", color: "#6366f1" },
-  "grok-3": { label: "Grok 3", shortLabel: "Grok", provider: "xAI", color: "#ec4899" },
-  "codex-2": { label: "Codex 2", shortLabel: "Codex", provider: "OpenAI", color: "#14b8a6" },
-  "mistral-large": { label: "Mistral Large", shortLabel: "Mistral", provider: "Mistral", color: "#f97316" },
-  "llama-4": { label: "Llama 4", shortLabel: "Llama", provider: "Meta", color: "#8b5cf6" },
+interface ModelDisplayInfo { label: string; shortLabel: string; provider: string; color: string }
+
+const KNOWN_MODELS: Record<string, ModelDisplayInfo> = {
+  "claude-opus":   { label: "Claude Opus",   shortLabel: "Opus",    provider: "Anthropic", color: "#d97706" },
+  "claude-sonnet": { label: "Claude Sonnet", shortLabel: "Sonnet",  provider: "Anthropic", color: "#f59e0b" },
+  "claude-mythos": { label: "Claude Mythos", shortLabel: "Mythos",  provider: "Anthropic", color: "#b45309" },
+  "claude-haiku":  { label: "Claude Haiku",  shortLabel: "Haiku",   provider: "Anthropic", color: "#fbbf24" },
+  "gpt-5.4":       { label: "GPT-5.4",       shortLabel: "GPT-5.4", provider: "OpenAI",    color: "#10b981" },
+  "gpt-5.3":       { label: "GPT-5.3",       shortLabel: "GPT-5.3", provider: "OpenAI",    color: "#34d399" },
+  "gpt-5.2":       { label: "GPT-5.2",       shortLabel: "GPT-5.2", provider: "OpenAI",    color: "#6ee7b7" },
+  "gpt-4o":        { label: "GPT-4o",        shortLabel: "GPT-4o",  provider: "OpenAI",    color: "#059669" },
+  "gemini-3.1-pro":      { label: "Gemini 3.1 Pro",      shortLabel: "Gemini Pro",   provider: "Google", color: "#3b82f6" },
+  "gemini-3.1-thinking": { label: "Gemini 3.1 Thinking", shortLabel: "Gemini Think", provider: "Google", color: "#2563eb" },
+  "gemini-3.1-fast":     { label: "Gemini 3.1 Fast",     shortLabel: "Gemini Fast",  provider: "Google", color: "#60a5fa" },
+  "gemini-1.5-pro":      { label: "Gemini 1.5 Pro",      shortLabel: "Gemini 1.5",   provider: "Google", color: "#93c5fd" },
+  "grok-3":        { label: "Grok 3",        shortLabel: "Grok",    provider: "xAI",      color: "#ec4899" },
+  "grok-3-mini":   { label: "Grok 3 Mini",   shortLabel: "Grok-m",  provider: "xAI",      color: "#f472b6" },
+  "mistral-large": { label: "Mistral Large",  shortLabel: "Mistral", provider: "Mistral",  color: "#f97316" },
+  "llama-3":       { label: "Llama 3",        shortLabel: "Llama",   provider: "Meta",     color: "#8b5cf6" },
+  "deepseek-chat": { label: "DeepSeek Chat",  shortLabel: "DeepSeek", provider: "DeepSeek", color: "#06b6d4" },
+  "ollama":        { label: "Ollama (Local)",  shortLabel: "Ollama",  provider: "Local",    color: "#a3a3a3" },
 }
+
+/** Resolve display info for any model string — fuzzy matches known models, falls back to generic. */
+export function getModelInfo(model: unknown): ModelDisplayInfo {
+  if (!model || typeof model !== "string") return { label: "", shortLabel: "", provider: "", color: "#737373" }
+  const lower = model.toLowerCase()
+  // Exact match
+  if (KNOWN_MODELS[lower]) return KNOWN_MODELS[lower]
+  // Prefix match (e.g. "claude-sonnet-4-20250514" → "claude-sonnet")
+  const sorted = Object.keys(KNOWN_MODELS).sort((a, b) => b.length - a.length)
+  for (const key of sorted) {
+    if (lower.startsWith(key)) return KNOWN_MODELS[key]
+  }
+  // Provider detection from string
+  if (lower.includes("claude")) return { label: model, shortLabel: "Claude", provider: "Anthropic", color: "#f59e0b" }
+  if (lower.includes("gpt")) return { label: model, shortLabel: "GPT", provider: "OpenAI", color: "#10b981" }
+  if (lower.includes("gemini")) return { label: model, shortLabel: "Gemini", provider: "Google", color: "#3b82f6" }
+  if (lower.includes("grok")) return { label: model, shortLabel: "Grok", provider: "xAI", color: "#ec4899" }
+  if (lower.includes("llama")) return { label: model, shortLabel: "Llama", provider: "Meta", color: "#8b5cf6" }
+  if (lower.includes("deepseek")) return { label: model, shortLabel: "DeepSeek", provider: "DeepSeek", color: "#06b6d4" }
+  // Unknown model — generic display
+  return { label: model, shortLabel: model.split("-")[0], provider: "", color: "#737373" }
+}
+
+// Backwards compat — old code references AI_MODEL_INFO[agent.aiModel]
+export const AI_MODEL_INFO = new Proxy({} as Record<string, ModelDisplayInfo>, {
+  get: (_target, prop) => {
+    if (typeof prop !== "string") return undefined
+    return getModelInfo(prop)
+  },
+})
 
 export interface Agent {
   id: string
   name: string
-  type: "firmware" | "software" | "reporter" | "validator" | "custom"
+  type: "firmware" | "software" | "reporter" | "validator" | "reviewer" | "custom"
+  subType?: string
   status: AgentStatus
   progress: { current: number; total: number }
   thoughtChain: string
@@ -100,9 +133,16 @@ export const AGENT_TYPES = {
     description: "Documentation & reporting",
     tools: ["Generator", "Formatter", "Publisher"]
   },
-  custom: { 
-    icon: Settings, 
-    label: "CUSTOM", 
+  reviewer: {
+    icon: Eye,
+    label: "REVIEWER",
+    color: "#f472b6",
+    description: "Code review & quality gate",
+    tools: ["Diff", "Comment", "Score"]
+  },
+  custom: {
+    icon: Settings,
+    label: "CUSTOM",
     color: "var(--muted-foreground)",
     description: "User-defined agent type",
     tools: ["Configurable"]
@@ -266,22 +306,36 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
           )}
         </div>
         
-        {/* Row 2: AI Model */}
-        {agent.aiModel && (
-          <div className="flex items-center gap-2 mb-2">
-            <span 
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
-              style={{ 
-                backgroundColor: `color-mix(in srgb, ${AI_MODEL_INFO[agent.aiModel].color} 20%, transparent)`,
-                color: AI_MODEL_INFO[agent.aiModel].color
-              }}
-            >
-              <Sparkles size={8} />
-              {AI_MODEL_INFO[agent.aiModel].label}
-            </span>
-            <span className="text-[10px] font-mono text-[var(--muted-foreground)]">
-              {AI_MODEL_INFO[agent.aiModel].provider}
-            </span>
+        {/* Row 2: Role (subType) + AI Model */}
+        {(agent.subType || agent.aiModel) && (
+          <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+            {agent.subType && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+                style={{
+                  backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'} 15%, transparent)`,
+                  color: AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'
+                }}
+              >
+                <Shield size={8} />
+                {agent.subType}
+              </span>
+            )}
+            {agent.aiModel && (() => {
+              const info = getModelInfo(agent.aiModel)
+              return (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
+                  style={{
+                    backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
+                    color: info.color
+                  }}
+                >
+                  <Sparkles size={8} />
+                  {info.shortLabel}
+                </span>
+              )
+            })()}
           </div>
         )}
         
@@ -407,20 +461,84 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
 
 // Shadow Node - Placeholder for spawning new agents
 interface ShadowNodeProps {
-  onSpawn: (type: Agent["type"], tools?: string[]) => void
+  onSpawn: (type: Agent["type"], tools?: string[], subType?: string, aiModel?: string) => void
   disabled?: boolean
+}
+
+// Role and model options for the spawn menu
+interface RoleOption { role_id: string; category: string; label: string }
+
+const MODEL_OPTIONS = [
+  { id: "", label: "Default (System)", color: "#737373" },
+  { id: "claude-sonnet-4-20250514", label: "Claude Sonnet", color: "#f59e0b" },
+  { id: "claude-opus-4-20250514", label: "Claude Opus", color: "#d97706" },
+  { id: "gpt-4o", label: "GPT-4o", color: "#10b981" },
+  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", color: "#3b82f6" },
+  { id: "grok-3-mini", label: "Grok 3 Mini", color: "#ec4899" },
+  { id: "deepseek-chat", label: "DeepSeek", color: "#06b6d4" },
+]
+
+// Static role options grouped by category (mirrors configs/roles/)
+const ROLE_OPTIONS: Record<string, RoleOption[]> = {
+  firmware:  [
+    { role_id: "", category: "firmware", label: "General Firmware" },
+    { role_id: "bsp", category: "firmware", label: "BSP 平台工程師" },
+    { role_id: "isp", category: "firmware", label: "ISP/3A 調優" },
+    { role_id: "hal", category: "firmware", label: "HAL 抽象層" },
+  ],
+  software: [
+    { role_id: "", category: "software", label: "General Software" },
+    { role_id: "algorithm", category: "software", label: "影像演算法" },
+    { role_id: "ai-deploy", category: "software", label: "AI 部署優化" },
+    { role_id: "middleware", category: "software", label: "通訊中間件" },
+  ],
+  validator: [
+    { role_id: "", category: "validator", label: "General Validator" },
+    { role_id: "sdet", category: "validator", label: "自動化測試 SDET" },
+    { role_id: "security", category: "validator", label: "資安防護" },
+  ],
+  reporter: [
+    { role_id: "", category: "reporter", label: "General Reporter" },
+    { role_id: "compliance", category: "reporter", label: "合規認證" },
+    { role_id: "documentation", category: "reporter", label: "技術文件" },
+  ],
+  reviewer: [
+    { role_id: "", category: "reviewer", label: "General Reviewer" },
+    { role_id: "code-review", category: "reviewer", label: "程式碼審查" },
+  ],
+  custom: [
+    { role_id: "", category: "custom", label: "Custom Agent" },
+  ],
 }
 
 function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
   const [isHovered, setIsHovered] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [selectedType, setSelectedType] = useState<Agent["type"] | null>(null)
-  
+  const [selectedRole, setSelectedRole] = useState("")
+  const [selectedModel, setSelectedModel] = useState("")
+
   const handleSelectType = (type: Agent["type"]) => {
     if (disabled) return
     setSelectedType(type)
+    setSelectedRole("")
+    setSelectedModel("")
+  }
+
+  const handleSpawn = () => {
+    if (!selectedType) return
+    onSpawn(selectedType, AGENT_TYPES[selectedType].tools, selectedRole || undefined, selectedModel || undefined)
     setShowMenu(false)
-    onSpawn(type, AGENT_TYPES[type].tools)
+    setSelectedType(null)
+    setSelectedRole("")
+    setSelectedModel("")
+  }
+
+  const handleCancel = () => {
+    setShowMenu(false)
+    setSelectedType(null)
+    setSelectedRole("")
+    setSelectedModel("")
   }
   
   // Disabled state - max agents reached
@@ -490,51 +608,133 @@ function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
         </div>
       </button>
       
-      {/* Holographic Type Selection Menu */}
+      {/* Holographic Spawn Menu */}
       {showMenu && (
         <div className="absolute left-0 right-0 top-full mt-1 z-50 holo-menu-appear">
           <div className="holo-glass-simple rounded overflow-hidden border border-[var(--artifact-purple)]/50">
-            <div className="px-2 py-1.5 bg-[var(--artifact-purple)]/10 border-b border-[var(--border)]">
-              <p className="font-mono text-[10px] text-[var(--artifact-purple)]">SELECT AGENT TYPE</p>
-            </div>
-            <div className="p-1.5 space-y-0.5">
-              {(Object.entries(AGENT_TYPES) as [Agent["type"], typeof AGENT_TYPES[Agent["type"]]][]).map(([type, config]) => {
-                const IconComponent = config.icon
-                return (
-                  <button
-                    key={type}
-                    onClick={() => handleSelectType(type)}
-                    className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-[var(--secondary)] transition-all group"
-                  >
-                    <div 
-                      className="w-6 h-6 rounded flex items-center justify-center transition-all group-hover:scale-110 shrink-0"
-                      style={{ 
-                        backgroundColor: `color-mix(in srgb, ${config.color} 20%, transparent)`,
-                        color: config.color
-                      }}
-                    >
-                      <IconComponent size={12} />
-                    </div>
-                    <div className="flex-1 text-left min-w-0">
-                      <p className="font-mono text-[10px] font-semibold truncate" style={{ color: config.color }}>
-                        {config.label}
-                      </p>
-                    </div>
-                    <div className="flex gap-0.5 shrink-0">
-                      {config.tools.slice(0, 1).map(tool => (
-                        <span 
-                          key={tool}
-                          className="px-1 py-0.5 rounded text-[9px] font-mono bg-[var(--secondary)]"
-                          style={{ color: config.color }}
+
+            {/* Step 1: Type selection (or show selected type header) */}
+            {!selectedType ? (
+              <>
+                <div className="px-2 py-1.5 bg-[var(--artifact-purple)]/10 border-b border-[var(--border)]">
+                  <p className="font-mono text-[10px] text-[var(--artifact-purple)]">SELECT AGENT TYPE</p>
+                </div>
+                <div className="p-1.5 space-y-0.5">
+                  {(Object.entries(AGENT_TYPES) as [Agent["type"], typeof AGENT_TYPES[Agent["type"]]][]).map(([type, config]) => {
+                    const IconComponent = config.icon
+                    return (
+                      <button
+                        key={type}
+                        onClick={() => handleSelectType(type)}
+                        className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-[var(--secondary)] transition-all group"
+                      >
+                        <div
+                          className="w-6 h-6 rounded flex items-center justify-center transition-all group-hover:scale-110 shrink-0"
+                          style={{
+                            backgroundColor: `color-mix(in srgb, ${config.color} 20%, transparent)`,
+                            color: config.color
+                          }}
                         >
-                          {tool}
-                        </span>
+                          <IconComponent size={12} />
+                        </div>
+                        <div className="flex-1 text-left min-w-0">
+                          <p className="font-mono text-[10px] font-semibold truncate" style={{ color: config.color }}>
+                            {config.label}
+                          </p>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Selected type header */}
+                <div className="px-2 py-1.5 border-b border-[var(--border)] flex items-center gap-2"
+                  style={{ backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[selectedType].color} 10%, transparent)` }}
+                >
+                  <button onClick={() => setSelectedType(null)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                    <ChevronUp size={12} />
+                  </button>
+                  <span className="font-mono text-[10px] font-semibold" style={{ color: AGENT_TYPES[selectedType].color }}>
+                    {AGENT_TYPES[selectedType].label}
+                  </span>
+                </div>
+
+                <div className="p-2 space-y-2">
+                  {/* Role selection */}
+                  <div>
+                    <p className="font-mono text-[9px] text-[var(--muted-foreground)] mb-1 uppercase tracking-wider">Role</p>
+                    <div className="space-y-0.5">
+                      {(ROLE_OPTIONS[selectedType] || []).map(role => (
+                        <button
+                          key={role.role_id}
+                          onClick={() => setSelectedRole(role.role_id)}
+                          className={`w-full text-left px-2 py-1 rounded text-[10px] font-mono transition-all ${
+                            selectedRole === role.role_id
+                              ? "bg-[var(--artifact-purple)]/20 text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--secondary)]"
+                          }`}
+                        >
+                          {role.role_id ? (
+                            <span className="flex items-center gap-1.5">
+                              <Shield size={9} style={{ color: AGENT_TYPES[selectedType].color }} />
+                              <span className="uppercase">{role.role_id}</span>
+                              <span className="text-[var(--muted-foreground)] text-[9px]">{role.label}</span>
+                            </span>
+                          ) : (
+                            <span className="text-[var(--muted-foreground)]">{role.label}</span>
+                          )}
+                        </button>
                       ))}
                     </div>
-                  </button>
-                )
-              })}
-            </div>
+                  </div>
+
+                  {/* Model selection */}
+                  <div>
+                    <p className="font-mono text-[9px] text-[var(--muted-foreground)] mb-1 uppercase tracking-wider">AI Model</p>
+                    <div className="space-y-0.5">
+                      {MODEL_OPTIONS.map(m => (
+                        <button
+                          key={m.id}
+                          onClick={() => setSelectedModel(m.id)}
+                          className={`w-full text-left px-2 py-1 rounded text-[10px] font-mono transition-all ${
+                            selectedModel === m.id
+                              ? "bg-[var(--artifact-purple)]/20 text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:bg-[var(--secondary)]"
+                          }`}
+                        >
+                          <span className="flex items-center gap-1.5">
+                            <Sparkles size={9} style={{ color: m.color }} />
+                            <span>{m.label}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Spawn button */}
+                  <div className="flex gap-1.5 pt-1 border-t border-[var(--border)]">
+                    <button
+                      onClick={handleCancel}
+                      className="flex-1 py-1.5 rounded text-[10px] font-mono text-[var(--muted-foreground)] hover:bg-[var(--secondary)] transition-colors"
+                    >
+                      CANCEL
+                    </button>
+                    <button
+                      onClick={handleSpawn}
+                      className="flex-1 py-1.5 rounded text-[10px] font-mono font-semibold transition-all"
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[selectedType].color} 25%, transparent)`,
+                        color: AGENT_TYPES[selectedType].color
+                      }}
+                    >
+                      SPAWN
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -680,7 +880,7 @@ function MaterializingAgentCard({ agent, onComplete }: MaterializingAgentProps) 
 
 interface AgentMatrixWallProps {
   agents: Agent[]
-  onAddAgent?: (type?: Agent["type"], tools?: string[]) => void
+  onAddAgent?: (type?: Agent["type"], tools?: string[], subType?: string, aiModel?: string) => void
   onRemoveAgent?: (id: string) => void
   onConfirmAgent?: (id: string) => void
   onRejectAgent?: (id: string) => void
@@ -707,24 +907,25 @@ export function AgentMatrixWall({
   const materializingCount = materializingAgents.length
   
   // Handle spawning a new agent via Shadow Node
-  const handleSpawnAgent = useCallback((type: Agent["type"], tools?: string[]) => {
+  const handleSpawnAgent = useCallback((type: Agent["type"], tools?: string[], subType?: string, aiModel?: string) => {
     if (onMaterializeAgent) {
       // Use parent's materialization handler
       const newId = onMaterializeAgent(type)
-      const config = AGENT_TYPES[type]
       const newAgent: Agent = {
         id: newId,
         name: `${type.toUpperCase()}_AGENT_${Math.floor(Math.random() * 100).toString().padStart(2, "0")}`,
         type,
+        subType,
         status: "materializing",
         progress: { current: 0, total: Math.floor(Math.random() * 6) + 4 },
         thoughtChain: "Initializing neural pathways...",
+        aiModel: aiModel || undefined,
         materializationPhase: "ejection"
       }
       setMaterializingAgents(prev => [...prev, newAgent])
     } else if (onAddAgent) {
       // Fallback to simple add
-      onAddAgent(type, tools)
+      onAddAgent(type, tools, subType, aiModel)
     }
   }, [onMaterializeAgent, onAddAgent])
   

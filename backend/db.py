@@ -28,8 +28,24 @@ async def init() -> None:
     _db = await aiosqlite.connect(str(_DB_PATH))
     _db.row_factory = aiosqlite.Row
     await _db.executescript(_SCHEMA)
+    # Run lightweight migrations for schema evolution
+    await _migrate(_db)
     await _db.commit()
     logger.info("Database ready: %s", _DB_PATH)
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Add columns that may be missing in older databases."""
+    # Collect existing columns per table
+    migrations = [
+        ("agents", "sub_type", "TEXT NOT NULL DEFAULT ''"),
+    ]
+    for table, column, typedef in migrations:
+        try:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+            logger.info("Migration: added %s.%s", table, column)
+        except Exception:
+            pass  # Column already exists
 
 
 async def close() -> None:
@@ -54,6 +70,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     type        TEXT NOT NULL,
+    sub_type    TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'idle',
     progress    TEXT NOT NULL DEFAULT '{"current":0,"total":0}',
     thought_chain TEXT NOT NULL DEFAULT '',
@@ -74,6 +91,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at        TEXT,
     ai_analysis         TEXT,
     suggested_agent_type TEXT
+);
+
+CREATE TABLE IF NOT EXISTS handoffs (
+    task_id     TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS token_usage (
@@ -107,10 +131,10 @@ async def get_agent(agent_id: str) -> dict | None:
 
 async def upsert_agent(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO agents (id, name, type, status, progress, thought_chain, ai_model, sub_tasks, workspace)
-           VALUES (:id, :name, :type, :status, :progress, :thought_chain, :ai_model, :sub_tasks, :workspace)
+        """INSERT INTO agents (id, name, type, sub_type, status, progress, thought_chain, ai_model, sub_tasks, workspace)
+           VALUES (:id, :name, :type, :sub_type, :status, :progress, :thought_chain, :ai_model, :sub_tasks, :workspace)
            ON CONFLICT(id) DO UPDATE SET
-             name=excluded.name, type=excluded.type, status=excluded.status,
+             name=excluded.name, type=excluded.type, sub_type=excluded.sub_type, status=excluded.status,
              progress=excluded.progress, thought_chain=excluded.thought_chain,
              ai_model=excluded.ai_model, sub_tasks=excluded.sub_tasks, workspace=excluded.workspace
         """,
@@ -118,6 +142,7 @@ async def upsert_agent(data: dict) -> None:
             "id": data["id"],
             "name": data["name"],
             "type": data["type"],
+            "sub_type": data.get("sub_type", ""),
             "status": data.get("status", "idle"),
             "progress": json.dumps(data.get("progress", {"current": 0, "total": 0})),
             "thought_chain": data.get("thought_chain", ""),
@@ -146,6 +171,7 @@ def _agent_row_to_dict(row) -> dict:
         "id": row["id"],
         "name": row["name"],
         "type": row["type"],
+        "sub_type": row["sub_type"] if "sub_type" in row.keys() else "",
         "status": row["status"],
         "progress": json.loads(row["progress"]),
         "thought_chain": row["thought_chain"],
@@ -237,3 +263,32 @@ async def upsert_token_usage(data: dict) -> None:
 async def clear_token_usage() -> None:
     await _conn().execute("DELETE FROM token_usage")
     await _conn().commit()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Handoffs
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def upsert_handoff(task_id: str, agent_id: str, content: str) -> None:
+    await _conn().execute(
+        """INSERT INTO handoffs (task_id, agent_id, content)
+           VALUES (?, ?, ?)
+           ON CONFLICT(task_id) DO UPDATE SET
+             agent_id=excluded.agent_id, content=excluded.content,
+             created_at=datetime('now')
+        """,
+        (task_id, agent_id, content),
+    )
+    await _conn().commit()
+
+
+async def get_handoff(task_id: str) -> str:
+    async with _conn().execute("SELECT content FROM handoffs WHERE task_id = ?", (task_id,)) as cur:
+        row = await cur.fetchone()
+    return row["content"] if row else ""
+
+
+async def list_handoffs() -> list[dict]:
+    async with _conn().execute("SELECT task_id, agent_id, created_at FROM handoffs ORDER BY created_at DESC") as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]

@@ -226,14 +226,25 @@ async def search_in_files(pattern: str, path: str = ".", glob: str = "*") -> str
 #  2. Git tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def _git(cmd: str, cwd: Path | None = None) -> str:
-    """Run a git command in the active workspace."""
+async def _git(cmd: str, cwd: Path | None = None, auth_for_url: str | None = None) -> str:
+    """Run a git command in the active workspace.
+
+    If *auth_for_url* is provided, injects authentication env vars for
+    that remote URL (supports GitHub/GitLab tokens and SSH keys).
+    """
     work = cwd or get_active_workspace()
+    env = None
+    if auth_for_url:
+        from backend.git_auth import get_auth_env
+        extra = get_auth_env(auth_for_url)
+        if extra:
+            env = {**os.environ, **extra}
     proc = await asyncio.create_subprocess_shell(
         f"git {cmd}",
         cwd=work,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BASH_TIMEOUT)
     out = stdout.decode(errors="replace").strip()
@@ -241,6 +252,19 @@ async def _git(cmd: str, cwd: Path | None = None) -> str:
     if proc.returncode != 0:
         return f"[GIT ERROR] {err or out}"
     return out or err or "[OK]"
+
+
+async def _get_remote_url(remote: str = "origin", cwd: Path | None = None) -> str:
+    """Get the URL of a git remote."""
+    work = cwd or get_active_workspace()
+    proc = await asyncio.create_subprocess_shell(
+        f'git remote get-url "{remote}"',
+        cwd=work,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    return stdout.decode(errors="replace").strip() if proc.returncode == 0 else ""
 
 
 @tool
@@ -336,19 +360,37 @@ async def git_checkout_branch(branch: str, create: bool = False) -> str:
 
 
 @tool
-async def git_push(remote: str = "origin", branch: str = "") -> str:
+async def git_push(remote: str = "", branch: str = "", target_branch: str = "main") -> str:
     """Push current branch to remote. Only agent/* branches are allowed.
 
+    When Gerrit is enabled and the remote is a Gerrit server, automatically
+    pushes to ``refs/for/{target_branch}`` for code review.
+
     Args:
-        remote: Remote name (default: origin).
+        remote: Remote name (auto-detect if empty).
         branch: Branch to push (default: current branch).
+        target_branch: Target branch for Gerrit review (default: main).
     """
     if not branch:
-        # Get current branch name
         branch = (await _git("rev-parse --abbrev-ref HEAD")).strip()
     if not branch.startswith("agent/"):
         return "[BLOCKED] Push is only allowed to agent/* branches for safety."
-    return await _git(f"push {remote} {branch}")
+    # Auto-detect remote if not specified
+    if not remote:
+        remotes_out = await _git("remote")
+        remotes = [r.strip() for r in remotes_out.splitlines() if r.strip() and not r.startswith("[")]
+        remote = "origin" if "origin" in remotes else (remotes[0] if remotes else "origin")
+    # Get remote URL for auth injection
+    remote_url = await _get_remote_url(remote)
+
+    # Gerrit mode: push to refs/for/{target} for code review
+    from backend.config import settings
+    from backend.git_auth import detect_platform
+    if settings.gerrit_enabled and detect_platform(remote_url) == "gerrit":
+        refspec = f"HEAD:refs/for/{target_branch}"
+        return await _git(f"push {remote} {refspec}", auth_for_url=remote_url)
+
+    return await _git(f"push {remote} {branch}", auth_for_url=remote_url)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -430,18 +472,180 @@ async def run_bash(command: str) -> str:
 #  Tool registry
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+@tool
+async def git_remote_list() -> str:
+    """List all git remotes and their URLs."""
+    return await _git("remote -v")
+
+
+@tool
+async def create_pr(remote: str = "", title: str = "", description: str = "") -> str:
+    """Create a Pull Request (GitHub) or Merge Request (GitLab).
+
+    Auto-detects platform from the remote URL.
+
+    Args:
+        remote: Remote name (auto-detect if empty).
+        title: PR/MR title (auto-generated from branch name if empty).
+        description: PR/MR description body.
+    """
+    from backend.git_platform import create_merge_request
+    from backend.workspace import _detect_base_branch
+
+    workspace = get_active_workspace()
+
+    # Get current branch
+    branch = (await _git("rev-parse --abbrev-ref HEAD")).strip()
+    if not branch.startswith("agent/"):
+        return "[BLOCKED] PR/MR creation is only allowed from agent/* branches."
+
+    # Auto-detect remote
+    if not remote:
+        remotes_out = await _git("remote")
+        remotes = [r.strip() for r in remotes_out.splitlines() if r.strip() and not r.startswith("[")]
+        remote = "origin" if "origin" in remotes else (remotes[0] if remotes else "origin")
+
+    # Auto-detect target branch
+    target = await _detect_base_branch(workspace)
+
+    # Auto-generate title if empty
+    if not title:
+        title = f"[Agent] {branch.split('/')[-1]}"
+
+    result = await create_merge_request(
+        repo_path=workspace,
+        remote=remote,
+        source_branch=branch,
+        target_branch=target,
+        title=title,
+        description=description,
+    )
+
+    if "error" in result:
+        return f"[ERROR] {result['error']}"
+
+    platform = result.get("platform", "unknown")
+    url = result.get("url", "")
+    return f"[OK] {platform.upper()} {'PR' if platform == 'github' else 'MR'} created: {url}"
+
+
+@tool
+async def git_add_remote(name: str, url: str) -> str:
+    """Add a new git remote to the workspace.
+
+    Args:
+        name: Remote name (e.g. 'github', 'gitlab', 'upstream').
+        url: Remote URL (HTTPS or SSH).
+    """
+    if not re.match(r"^[a-zA-Z0-9._-]+$", name):
+        return "[ERROR] Invalid remote name"
+    # Remove existing remote with same name (idempotent)
+    await _git(f'remote remove "{name}" 2>/dev/null')
+    return await _git(f'remote add "{name}" "{url}"')
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  5. Gerrit Code Review tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@tool
+async def gerrit_get_diff(commit: str = "") -> str:
+    """Get the diff of a Gerrit patchset for code review.
+
+    If no commit is specified, uses the latest commit in the workspace.
+
+    Args:
+        commit: Git commit SHA (optional, defaults to HEAD).
+    """
+    from backend.config import settings
+    if not settings.gerrit_enabled:
+        return "[ERROR] Gerrit integration not enabled"
+    workspace = get_active_workspace()
+    target = commit or "HEAD"
+    # Try parent diff first; fall back to --root for initial commits
+    proc = await asyncio.create_subprocess_shell(
+        f"git diff {target}~1..{target} 2>/dev/null || git diff --root {target}",
+        cwd=workspace,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BASH_TIMEOUT)
+    out = stdout.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        return f"[ERROR] {stderr.decode(errors='replace').strip()}"
+    if len(out) > 20_000:
+        return out[:20_000] + "\n... [diff truncated at 20 KB]"
+    return out or "[EMPTY DIFF]"
+
+
+@tool
+async def gerrit_post_comment(commit: str, file: str, line: int, message: str) -> str:
+    """Post an inline comment on a Gerrit patchset.
+
+    Args:
+        commit: Git commit SHA of the patchset.
+        file: File path to comment on.
+        line: Line number.
+        message: Comment text.
+    """
+    from backend.config import settings
+    from backend.gerrit import gerrit_client
+    if not settings.gerrit_enabled:
+        return "[ERROR] Gerrit integration not enabled"
+    result = await gerrit_client.post_inline_comments(
+        commit=commit,
+        comments={file: [{"line": line, "message": message}]},
+    )
+    if "error" in result:
+        return f"[ERROR] {result['error']}"
+    return f"[OK] Comment posted on {file}:{line}"
+
+
+@tool
+async def gerrit_submit_review(commit: str, score: int, message: str = "") -> str:
+    """Submit a Code-Review score on a Gerrit patchset.
+
+    AI Reviewers can only give +1 (approve) or -1 (request changes).
+
+    Args:
+        commit: Git commit SHA of the patchset.
+        score: Code-Review score (+1 or -1 only).
+        message: Review summary message.
+    """
+    from backend.config import settings
+    from backend.gerrit import gerrit_client
+    if not settings.gerrit_enabled:
+        return "[ERROR] Gerrit integration not enabled"
+    # AI agents are limited to +1/-1
+    if score not in (-1, 1):
+        return "[BLOCKED] AI reviewers can only give Code-Review +1 or -1. +2 and Submit are reserved for human maintainers."
+    result = await gerrit_client.post_review(
+        commit=commit,
+        message=message,
+        labels={"Code-Review": score},
+    )
+    if "error" in result:
+        return f"[ERROR] {result['error']}"
+    return f"[OK] Code-Review {'+' if score > 0 else ''}{score} submitted for {commit[:8]}"
+
+
 FILE_TOOLS = [read_file, write_file, list_directory, read_yaml, write_yaml, search_in_files]
-GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push]
+GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push, git_remote_list, create_pr, git_add_remote]
 BASH_TOOLS = [run_bash]
+REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
 
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS
 
-TOOL_MAP = {t.name: t for t in ALL_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
     "firmware":  ALL_TOOLS,
     "software":  ALL_TOOLS,
     "validator":  FILE_TOOLS + GIT_TOOLS + [run_bash],
     "reporter":   FILE_TOOLS + GIT_TOOLS,
+    "reviewer":   [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS,
     "general":    FILE_TOOLS + GIT_TOOLS + BASH_TOOLS,
+    "custom":     ALL_TOOLS,
+    "devops":     ALL_TOOLS,
 }

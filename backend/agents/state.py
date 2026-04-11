@@ -45,7 +45,7 @@ class GraphState(BaseModel):
     user_command: str = ""
 
     # Which specialist should handle the request (set by the router)
-    routed_to: Literal["firmware", "software", "validator", "reporter", "general"] = "general"
+    routed_to: Literal["firmware", "software", "validator", "reporter", "reviewer", "general"] = "general"
 
     # Tool calling
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -57,9 +57,18 @@ class GraphState(BaseModel):
     # Isolated workspace path (set when agent has a provisioned workspace)
     workspace_path: str | None = None
 
+    # Per-agent model and role context
+    model_name: str = ""
+    agent_sub_type: str = ""
+    handoff_context: str = ""
+
+    # Gerrit Code Review context
+    gerrit_change_id: str = ""
+    gerrit_commit: str = ""
+
     # Self-healing loop: retry tracking
     retry_count: int = 0
-    max_retries: int = 2
+    max_retries: int = 3
     last_error: str = ""
 
     # Final answer text to return to the frontend

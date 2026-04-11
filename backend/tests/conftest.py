@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 # Ensure workspace root points to a temp directory for all tool tests
 _tmp = tempfile.mkdtemp(prefix="omnisight_test_")
 os.environ["OMNISIGHT_WORKSPACE"] = _tmp
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Clean up the module-level temp directory after all tests."""
+    shutil.rmtree(_tmp, ignore_errors=True)
 
 
 @pytest.fixture()
@@ -37,18 +41,19 @@ def sample_files(workspace: Path) -> Path:
 
 
 @pytest.fixture()
-def event_loop():
-    """Create an event loop for async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture()
 async def client():
-    """Provide an async HTTP test client against the FastAPI app."""
-    from backend.main import app
+    """Provide an async HTTP test client against the FastAPI app.
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+    Initializes the database so lifespan dependencies are met.
+    """
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    await db.init()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+    finally:
+        await db.close()

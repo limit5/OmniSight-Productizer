@@ -76,6 +76,7 @@ export interface ApiAgent {
   id: string
   name: string
   type: string
+  sub_type: string
   status: string
   progress: { current: number; total: number }
   thought_chain: string
@@ -91,7 +92,7 @@ export async function getAgent(id: string) {
   return request<ApiAgent>(`/agents/${id}`)
 }
 
-export async function createAgent(body: { name: string; type: string; ai_model?: string }) {
+export async function createAgent(body: { name: string; type: string; sub_type?: string; ai_model?: string }) {
   return request<ApiAgent>("/agents", {
     method: "POST",
     body: JSON.stringify(body),
@@ -340,6 +341,13 @@ export interface SpecValue {
 
 export async function getSpec() {
   return request<SpecValue[]>("/system/spec")
+}
+
+export async function updateSpec(path: string[], value: string | number | boolean) {
+  return request<{ status: string }>("/system/spec", {
+    method: "PUT",
+    body: JSON.stringify({ path, value }),
+  })
 }
 
 // ─── Repos ───

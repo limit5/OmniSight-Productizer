@@ -55,6 +55,7 @@ from backend.agents.nodes import (
     software_node,
     validator_node,
     reporter_node,
+    reviewer_node,
     general_node,
     tool_executor_node,
     error_check_node,
@@ -85,6 +86,7 @@ def build_graph() -> StateGraph:
     builder.add_node("software", software_node)
     builder.add_node("validator", validator_node)
     builder.add_node("reporter", reporter_node)
+    builder.add_node("reviewer", reviewer_node)
     builder.add_node("general", general_node)
     builder.add_node("tool_executor", tool_executor_node)
     builder.add_node("error_check", error_check_node)
@@ -104,12 +106,13 @@ def build_graph() -> StateGraph:
             "software": "software",
             "validator": "validator",
             "reporter": "reporter",
+            "reviewer": "reviewer",
             "general": "general",
         },
     )
 
     # All specialists → check if tools are needed (conditional)
-    for specialist in ("firmware", "software", "validator", "reporter", "general"):
+    for specialist in ("firmware", "software", "validator", "reporter", "reviewer", "general"):
         builder.add_conditional_edges(
             specialist,
             _check_tool_calls,
@@ -131,6 +134,7 @@ def build_graph() -> StateGraph:
             "software": "software",
             "validator": "validator",
             "reporter": "reporter",
+            "reviewer": "reviewer",
             "general": "general",
             "summarizer": "summarizer",
         },
@@ -146,17 +150,29 @@ def build_graph() -> StateGraph:
 agent_graph = build_graph()
 
 
-async def run_graph(user_command: str, workspace_path: str | None = None) -> GraphState:
+async def run_graph(
+    user_command: str,
+    workspace_path: str | None = None,
+    model_name: str = "",
+    agent_sub_type: str = "",
+    handoff_context: str = "",
+) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
     Args:
         user_command: The user's instruction.
         workspace_path: If set, tools will operate in this isolated workspace.
+        model_name: LLM model name (for model-specific prompt rules).
+        agent_sub_type: Role sub-type (for role-specific skill loading).
+        handoff_context: Previous task handoff content (injected into prompt).
     """
     initial_state = GraphState(
         user_command=user_command,
         messages=[HumanMessage(content=user_command)],
         workspace_path=workspace_path,
+        model_name=model_name,
+        agent_sub_type=agent_sub_type,
+        handoff_context=handoff_context,
     )
     result = await agent_graph.ainvoke(initial_state)
     if isinstance(result, dict):

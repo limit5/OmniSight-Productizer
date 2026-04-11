@@ -12,6 +12,7 @@ Tool integration:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -21,6 +22,7 @@ from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_agent_update
+from backend.prompt_loader import build_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,10 @@ _ROUTE_KEYWORDS = {
         "report", "document", "summary", "cert", "compliance",
         "fcc", "ce", "log", "export", "pdf", "markdown",
     ],
+    "reviewer": [
+        "review", "code-review", "patch", "patchset", "gerrit",
+        "diff", "comment", "approve", "reject", "inline",
+    ],
 }
 
 
@@ -75,12 +81,12 @@ def orchestrator_node(state: GraphState) -> dict:
             "You are the OmniSight Orchestrator. Given a user command about "
             "embedded AI camera development, decide which specialist agent "
             "should handle it. Reply with EXACTLY one word: firmware, software, "
-            "validator, reporter, or general."
+            "validator, reporter, reviewer, or general."
         ))
         try:
             resp = llm.invoke([sys, *state.messages])
             route = resp.content.strip().lower()  # type: ignore[union-attr]
-            if route not in ("firmware", "software", "validator", "reporter", "general"):
+            if route not in ("firmware", "software", "validator", "reporter", "reviewer", "general"):
                 route = _rule_based_route(cmd)
         except Exception as exc:
             logger.warning("LLM routing failed: %s — falling back", exc)
@@ -98,38 +104,6 @@ def orchestrator_node(state: GraphState) -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Specialist nodes — plan & request tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_SPECIALIST_PROMPTS = {
-    "firmware": (
-        "You are the Firmware Agent for embedded AI cameras. "
-        "You handle UVC/RTSP drivers, Linux kernel modules, I2C/SPI sensor "
-        "initialization, ISP pipeline configuration, Makefile cross-compilation, "
-        "and flash operations.\n\n"
-        "You have access to tools for reading/writing files, running git commands, "
-        "and executing bash commands. Use them when the user's request requires "
-        "inspecting or modifying the project. Always check existing files before "
-        "writing new ones."
-    ),
-    "software": (
-        "You are the Software Agent. You handle algorithm implementation, "
-        "SDK/API development, C/C++ library integration, code refactoring, "
-        "and build system maintenance.\n\n"
-        "You have access to tools for reading/writing files, running git commands, "
-        "and executing bash commands. Use them to inspect and modify code."
-    ),
-    "validator": (
-        "You are the Validator Agent. You design and run test suites, "
-        "coverage analysis, regression checks, benchmarks, and QA processes "
-        "for embedded camera systems.\n\n"
-        "You have access to tools for reading files, checking git status, "
-        "and running test commands via bash."
-    ),
-    "reporter": (
-        "You are the Reporter Agent. You generate compliance documentation "
-        "(FCC/CE), test summaries, project reports, and exportable artifacts.\n\n"
-        "You have access to tools for reading files and checking git history."
-    ),
-}
 
 # Rule-based tool selection when no LLM is available
 _RULE_TOOL_PATTERNS: list[tuple[re.Pattern, str, dict]] = [
@@ -176,6 +150,14 @@ def _rule_based_tool_calls(cmd: str) -> list[ToolCall]:
     return calls
 
 
+def _build_sub_tasks(tool_calls: list[ToolCall]) -> list[dict]:
+    """Generate sub-task breakdown from tool calls for UI display."""
+    return [
+        {"id": f"st-{i}", "label": f"{tc.tool_name}({', '.join(f'{k}={v}' for k, v in list(tc.arguments.items())[:2])})", "status": "pending"}
+        for i, tc in enumerate(tool_calls)
+    ]
+
+
 def _specialist_node_factory(agent_type: str):
     """Create a specialist node that can request tool calls."""
 
@@ -184,8 +166,13 @@ def _specialist_node_factory(agent_type: str):
         llm = _get_llm(bind_tools_for=agent_type)
 
         # ── LLM mode: let the model decide which tools to call ──
-        if llm and agent_type in _SPECIALIST_PROMPTS:
-            prompt = _SPECIALIST_PROMPTS[agent_type]
+        if llm:
+            prompt = build_system_prompt(
+                model_name=state.model_name,
+                agent_type=agent_type,
+                sub_type=state.agent_sub_type,
+                handoff_context=state.handoff_context,
+            )
             if state.last_error:
                 prompt = (
                     f"PREVIOUS ATTEMPT FAILED (retry {state.retry_count}/{state.max_retries}):\n"
@@ -214,7 +201,7 @@ def _specialist_node_factory(agent_type: str):
                                 type="update_status",
                                 agent_type=agent_type,
                                 status="running",
-                                detail=f"Executing {len(tool_calls)} tool(s)...",
+                                detail=json.dumps({"sub_tasks": _build_sub_tasks(tool_calls)}),
                             )
                         ],
                     }
@@ -263,7 +250,7 @@ def _specialist_node_factory(agent_type: str):
                         type="update_status",
                         agent_type=agent_type,
                         status="running",
-                        detail=f"Executing tools: {', '.join(tc.tool_name for tc in tool_calls)}",
+                        detail=json.dumps({"sub_tasks": _build_sub_tasks(tool_calls)}),
                     )
                 ],
             }
@@ -320,9 +307,18 @@ _FALLBACK_ANSWERS = {
         "4. Export in requested format\n"
         "Awaiting data sources."
     ),
+    "reviewer": (
+        "[REVIEWER AGENT] Acknowledged. Preparing code review:\n"
+        "1. Fetch patchset diff from Gerrit\n"
+        "2. Analyze for memory safety, pointer issues, thread safety\n"
+        "3. Check coding style and conventions\n"
+        "4. Post inline comments on findings\n"
+        "5. Submit Code-Review score (+1 or -1)\n"
+        "Standing by for patchset."
+    ),
     "general": (
         "[ORCHESTRATOR] Command received. No specific specialist matched.\n"
-        "Available specialists: firmware, software, validator, reporter.\n"
+        "Available specialists: firmware, software, validator, reporter, reviewer.\n"
         "Please refine your request or type 'help' for guidance."
     ),
 }
@@ -406,8 +402,27 @@ def error_check_node(state: GraphState) -> dict:
     """
     failed = [r for r in state.tool_results if not r.success]
     if not failed or state.retry_count >= state.max_retries:
-        # No errors or retries exhausted — proceed to summarizer
-        return {}
+        # Retries exhausted with errors → escalate to human
+        if failed and state.retry_count >= state.max_retries:
+            agent_type = state.routed_to
+            emit_pipeline_phase(
+                "escalation",
+                f"Max retries ({state.max_retries}) exhausted. Freezing agent for human review.",
+            )
+            # Signal escalation via action
+            return {
+                "last_error": "",
+                "actions": [
+                    AgentAction(
+                        type="update_status",
+                        agent_type=agent_type,
+                        status="awaiting_confirmation",
+                        detail=f"Frozen after {state.max_retries} failed retries. @Human intervention required.",
+                    )
+                ],
+            }
+        # No errors — proceed to summarizer
+        return {"last_error": ""}
 
     error_summary = "; ".join(
         f"{r.tool_name}: {r.output[:200]}" for r in failed
@@ -425,11 +440,15 @@ def error_check_node(state: GraphState) -> dict:
 
 
 def _should_retry(state: GraphState) -> str:
-    """Conditional edge after error_check: retry specialist or summarize."""
-    failed = [r for r in state.tool_results if not r.success]
-    if not failed or state.retry_count >= state.max_retries:
-        return "summarizer"
-    return state.routed_to
+    """Conditional edge after error_check: retry specialist or summarize.
+
+    Uses ``last_error`` (set by error_check_node when errors found) and
+    ``retry_count`` vs ``max_retries`` to decide.  Cannot rely on
+    ``tool_results`` because error_check_node clears it before this runs.
+    """
+    if state.last_error and state.retry_count < state.max_retries:
+        return state.routed_to
+    return "summarizer"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -483,4 +502,5 @@ firmware_node = _specialist_node_factory("firmware")
 software_node = _specialist_node_factory("software")
 validator_node = _specialist_node_factory("validator")
 reporter_node = _specialist_node_factory("reporter")
+reviewer_node = _specialist_node_factory("reviewer")
 general_node = _specialist_node_factory("general")

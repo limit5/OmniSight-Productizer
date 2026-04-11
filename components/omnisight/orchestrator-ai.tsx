@@ -24,7 +24,7 @@ import {
 } from "lucide-react"
 import type { Agent, AgentStatus, AIModel } from "./agent-matrix-wall"
 import type { Task, TaskStatus } from "./task-backlog"
-import { AGENT_TYPES, AI_MODEL_INFO } from "./agent-matrix-wall"
+import { AGENT_TYPES, AI_MODEL_INFO, getModelInfo } from "./agent-matrix-wall"
 import { TokenUsageStats } from "./token-usage-stats"
 
 // Orchestrator message types
@@ -494,23 +494,42 @@ export function OrchestratorAI({
                       </span>
                     </div>
                     
-                    {/* Progress + AI Model */}
-                    <div className="flex items-center gap-2 mt-1">
+                    {/* Progress */}
+                    <div className="flex items-center gap-1.5 mt-1">
                       <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
                         {agent.progress.current}/{agent.progress.total} tasks
                       </span>
-                      {agent.aiModel && (
-                        <span 
-                          className="font-mono text-[10px] px-1 py-0.5 rounded"
-                          style={{ 
-                            backgroundColor: `color-mix(in srgb, ${AI_MODEL_INFO[agent.aiModel].color} 15%, transparent)`,
-                            color: AI_MODEL_INFO[agent.aiModel].color
-                          }}
-                        >
-                          {AI_MODEL_INFO[agent.aiModel].label}
-                        </span>
-                      )}
                     </div>
+                    {/* Role + AI Model (separate row) */}
+                    {(agent.subType || agent.aiModel) && (
+                      <div className="flex items-center gap-1.5 mt-1">
+                        {agent.subType && (
+                          <span
+                            className="font-mono text-[10px] px-1 py-0.5 rounded uppercase"
+                            style={{
+                              backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'} 12%, transparent)`,
+                              color: AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'
+                            }}
+                          >
+                            {agent.subType}
+                          </span>
+                        )}
+                        {agent.aiModel && (() => {
+                          const info = getModelInfo(agent.aiModel)
+                          return (
+                            <span
+                              className="font-mono text-[10px] px-1 py-0.5 rounded"
+                              style={{
+                                backgroundColor: `color-mix(in srgb, ${info.color} 15%, transparent)`,
+                                color: info.color
+                              }}
+                            >
+                              {info.shortLabel}
+                            </span>
+                          )
+                        })()}
+                      </div>
+                    )}
                   </div>
                   
                   {/* Status Indicator Dot */}
@@ -602,17 +621,25 @@ export function OrchestratorAI({
                 style={{ color: AGENT_TYPES[agent.type].color }}
               >
                 <span>{agent.name}</span>
-                {agent.aiModel && (
-                  <span 
-                    className="text-[9px] px-1 py-0.5 rounded"
-                    style={{ 
-                      backgroundColor: `color-mix(in srgb, ${AI_MODEL_INFO[agent.aiModel].color} 20%, transparent)`,
-                      color: AI_MODEL_INFO[agent.aiModel].color 
-                    }}
-                  >
-                    {AI_MODEL_INFO[agent.aiModel].shortLabel}
+                {agent.subType && (
+                  <span className="text-[9px] px-1 py-0.5 rounded uppercase" style={{ color: AGENT_TYPES[agent.type]?.color }}>
+                    {agent.subType}
                   </span>
                 )}
+                {agent.aiModel && (() => {
+                  const info = getModelInfo(agent.aiModel)
+                  return (
+                    <span
+                      className="text-[9px] px-1 py-0.5 rounded"
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
+                        color: info.color
+                      }}
+                    >
+                      {info.shortLabel}
+                    </span>
+                  )
+                })()}
               </button>
             ))}
             <button

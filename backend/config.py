@@ -32,6 +32,20 @@ class Settings(BaseSettings):
     # LLM parameters
     llm_temperature: float = 0.3
 
+    # ── Git Authentication ──
+    git_ssh_key_path: str = "~/.ssh/id_ed25519"  # SSH key for private repos
+    github_token: str = ""  # GitHub Personal Access Token
+    gitlab_token: str = ""  # GitLab Personal Access Token
+    gitlab_url: str = ""  # Self-hosted GitLab URL (empty = gitlab.com)
+
+    # ── Gerrit Code Review ──
+    gerrit_enabled: bool = False  # Master switch for Gerrit integration
+    gerrit_url: str = ""  # Web UI URL, e.g. "https://gerrit.sora.services"
+    gerrit_ssh_host: str = ""  # SSH host for push + CLI, e.g. "gerrit.sora.services"
+    gerrit_ssh_port: int = 29418  # Gerrit SSH port (default 29418)
+    gerrit_project: str = ""  # Project path, e.g. "project/omnisight-core"
+    gerrit_replication_targets: str = ""  # Comma-separated remote names for post-merge push
+
     # Docker isolation
     docker_enabled: bool = True  # enable container execution for agents
     docker_image: str = "omnisight-agent:latest"

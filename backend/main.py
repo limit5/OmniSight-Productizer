@@ -6,16 +6,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.routers import agents, chat, events, health, invoke, providers, system, tasks, tools, workspaces
+from backend.routers import agents, chat, events, health, invoke, providers, system, tasks, tools, webhooks, workspaces
 from backend import db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await db.init()
-    # Seed defaults if DB is empty, or reload from DB
-    await agents.seed_defaults_if_empty()
-    await tasks.seed_defaults_if_empty()
-    await system.load_token_usage_from_db()
+    import logging
+    _log = logging.getLogger(__name__)
+    try:
+        await db.init()
+        await agents.seed_defaults_if_empty()
+        await tasks.seed_defaults_if_empty()
+        await system.load_token_usage_from_db()
+    except Exception as exc:
+        _log.error("Startup failed: %s", exc, exc_info=True)
+        raise
     yield
     await db.close()
 
@@ -52,6 +57,7 @@ app.include_router(providers.router, prefix=settings.api_prefix)
 app.include_router(invoke.router, prefix=settings.api_prefix)
 app.include_router(events.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
+app.include_router(webhooks.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 
 

@@ -83,9 +83,12 @@ def get_llm(
         llm = _create_llm(provider, model)
         if llm is None:
             return None
-        # Inject token tracking callback
-        model_name = model or llm.model_name if hasattr(llm, "model_name") else f"{provider}:default"
-        llm = llm.with_config(callbacks=[TokenTrackingCallback(model_name)])
+        # Inject token tracking callback (graceful if provider doesn't support it)
+        model_name = model or (llm.model_name if hasattr(llm, "model_name") else f"{provider}:default")
+        try:
+            llm = llm.with_config(callbacks=[TokenTrackingCallback(model_name)])
+        except (AttributeError, NotImplementedError):
+            logger.warning("Provider %s does not support with_config — token tracking disabled", provider)
         if bind_tools:
             llm = llm.bind_tools(bind_tools)
         _cache[cache_key] = llm

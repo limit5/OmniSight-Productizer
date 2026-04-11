@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -51,13 +52,17 @@ class WorkspaceInfo:
 _workspaces: dict[str, WorkspaceInfo] = {}
 
 
-async def _run(cmd: str, cwd: Path | None = None) -> tuple[int, str, str]:
+async def _run(cmd: str, cwd: Path | None = None, extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
     """Run a shell command, return (returncode, stdout, stderr)."""
+    env = None
+    if extra_env:
+        env = {**os.environ, **extra_env}
     proc = await asyncio.create_subprocess_shell(
         cmd,
         cwd=cwd or _MAIN_REPO,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=PROVISION_TIMEOUT)
     return (
@@ -86,8 +91,15 @@ async def provision(
 
     emit_pipeline_phase("workspace_provision", f"Creating workspace for {agent_id}")
 
+    from backend.config import settings as _settings
     source = repo_source or str(_MAIN_REPO)
-    is_local = not source.startswith("http")
+    is_local = not source.startswith("http") and not source.startswith("ssh://") and not source.startswith("git@")
+
+    # Gerrit mode: use fresh clone even for local repos (full isolation)
+    if _settings.gerrit_enabled and not repo_source:
+        gerrit_url = f"ssh://{_settings.gerrit_ssh_host}:{_settings.gerrit_ssh_port}/{_settings.gerrit_project}"
+        source = gerrit_url
+        is_local = False
 
     if is_local and Path(source).is_dir():
         # Use git worktree (fast, shares object store)
@@ -106,10 +118,13 @@ async def provision(
 
         logger.info("Workspace provisioned (worktree): %s → %s", agent_id, ws_path)
     else:
-        # Clone external repo
+        # Clone external repo (with authentication)
+        from backend.git_auth import get_auth_env
+        auth_env = get_auth_env(source)
+
         if ws_path.exists():
             shutil.rmtree(ws_path, ignore_errors=True)
-        rc, out, err = await _run(f'git clone "{source}" "{ws_path}"')
+        rc, out, err = await _run(f'git clone "{source}" "{ws_path}"', extra_env=auth_env)
         if rc != 0:
             raise RuntimeError(f"Failed to clone: {err or out}")
         # Create and checkout branch
@@ -165,31 +180,50 @@ async def finalize(agent_id: str) -> dict:
     await _run(f'git commit -m "{commit_msg}"', cwd=ws)
     info.commit_count += 1
 
+    # Detect base branch for diff
+    base = await _detect_base_branch(ws)
+
     # Generate summary
     _, log_out, _ = await _run(
-        f"git log --oneline main..{info.branch} 2>/dev/null || git log --oneline -5",
+        f"git log --oneline {base}..{info.branch} 2>/dev/null || git log --oneline -5",
         cwd=ws,
     )
     _, diff_stat, _ = await _run(
-        f"git diff --stat main..{info.branch} 2>/dev/null || git diff --stat HEAD~1",
+        f"git diff --stat {base}..{info.branch} 2>/dev/null || git diff --stat HEAD~1",
         cwd=ws,
     )
     _, files_out, _ = await _run(
-        f"git diff --name-only main..{info.branch} 2>/dev/null || git diff --name-only HEAD~1",
+        f"git diff --name-only {base}..{info.branch} 2>/dev/null || git diff --name-only HEAD~1",
         cwd=ws,
     )
 
     info.status = "finalized"
-    emit_workspace(agent_id, "finalized", f"{info.commit_count} commit(s), {len([f for f in files_out.splitlines() if f.strip()])} file(s)")
+    files_changed = [f.strip() for f in files_out.splitlines() if f.strip()]
+    emit_workspace(agent_id, "finalized", f"{info.commit_count} commit(s), {len(files_changed)} file(s)")
     emit_agent_update(agent_id, "success", f"Work finalized on branch {info.branch}")
 
-    return {
+    result = {
         "branch": info.branch,
         "commit_count": info.commit_count,
         "commits": log_out,
         "diff_summary": diff_stat,
-        "files_changed": [f.strip() for f in files_out.splitlines() if f.strip()],
+        "files_changed": files_changed,
     }
+
+    # Auto-generate handoff document
+    try:
+        from backend.handoff import generate_handoff, save_handoff
+        handoff_content = generate_handoff(
+            agent_id=agent_id,
+            task_id=info.task_id,
+            finalize_result=result,
+        )
+        await save_handoff(agent_id, info.task_id, handoff_content, workspace_path=ws)
+        result["handoff"] = handoff_content
+    except Exception as exc:
+        logger.warning("Handoff generation failed: %s", exc)
+
+    return result
 
 
 async def cleanup(agent_id: str) -> bool:
@@ -224,6 +258,32 @@ def get_workspace_path(agent_id: str) -> Path | None:
     """Get the filesystem path for an agent's workspace."""
     info = _workspaces.get(agent_id)
     return info.path if info else None
+
+
+async def _detect_default_remote(repo_path: Path) -> str:
+    """Detect the primary remote (prefer 'origin', fallback to first)."""
+    rc, out, _ = await _run("git remote", cwd=repo_path)
+    if rc != 0 or not out.strip():
+        return "origin"
+    remotes = [r.strip() for r in out.splitlines() if r.strip()]
+    return "origin" if "origin" in remotes else (remotes[0] if remotes else "origin")
+
+
+async def _detect_base_branch(repo_path: Path) -> str:
+    """Detect the default branch (main, master, develop, etc.)."""
+    remote = await _detect_default_remote(repo_path)
+    # Try symbolic-ref (most reliable)
+    rc, out, _ = await _run(
+        f"git symbolic-ref refs/remotes/{remote}/HEAD 2>/dev/null", cwd=repo_path,
+    )
+    if rc == 0 and out.strip():
+        return out.strip().split("/")[-1]
+    # Fallback: check common names
+    for candidate in ("main", "master", "develop"):
+        rc, _, _ = await _run(f"git rev-parse --verify {candidate} 2>/dev/null", cwd=repo_path)
+        if rc == 0:
+            return candidate
+    return "main"
 
 
 def list_workspaces() -> list[WorkspaceInfo]:
