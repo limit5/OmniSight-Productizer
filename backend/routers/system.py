@@ -541,6 +541,14 @@ async def reset_token_freeze():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+@router.get("/notifications/unread-count")
+async def unread_count():
+    """Count unread notifications (L2+)."""
+    from backend import db
+    count = await db.count_unread_notifications("warning")
+    return {"count": count}
+
+
 @router.get("/notifications")
 async def get_notifications(limit: int = 50, level: str = ""):
     """List notifications, optionally filtered by level."""
@@ -554,14 +562,6 @@ async def mark_read(notification_id: str):
     from backend import db
     ok = await db.mark_notification_read(notification_id)
     return {"status": "ok" if ok else "not_found"}
-
-
-@router.get("/notifications/unread-count")
-async def unread_count():
-    """Count unread notifications (L2+)."""
-    from backend import db
-    count = await db.count_unread_notifications("warning")
-    return {"count": count}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
