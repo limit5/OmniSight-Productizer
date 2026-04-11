@@ -36,7 +36,7 @@ class TestGerritPlatformDetection:
 
 class TestGerritClient:
 
-    def test_ssh_base_command(self):
+    def test_ssh_args(self):
         from backend.config import settings
         orig_host = settings.gerrit_ssh_host
         orig_port = settings.gerrit_ssh_port
@@ -44,10 +44,10 @@ class TestGerritClient:
             settings.gerrit_ssh_host = "review.example.com"
             settings.gerrit_ssh_port = 29418
             client = GerritClient()
-            base = client._ssh_base
-            assert "review.example.com" in base
-            assert "29418" in base
-            assert "BatchMode=yes" in base
+            args = client._ssh_args
+            assert "review.example.com" in args
+            assert "29418" in args
+            assert "BatchMode=yes" in args
         finally:
             settings.gerrit_ssh_host = orig_host
             settings.gerrit_ssh_port = orig_port

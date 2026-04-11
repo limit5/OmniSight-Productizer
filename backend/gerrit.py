@@ -28,20 +28,26 @@ class GerritClient:
     """Gerrit operations via SSH CLI (port 29418)."""
 
     @property
-    def _ssh_base(self) -> str:
+    def _ssh_args(self) -> list[str]:
+        """Build the base SSH argument list."""
+        args = ["ssh"]
         key_path = settings.git_ssh_key_path
-        key_flag = f"-i {Path(key_path).expanduser()}" if key_path else ""
-        return (
-            f"ssh {key_flag} -p {settings.gerrit_ssh_port}"
-            f" -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-            f" {settings.gerrit_ssh_host}"
-        )
+        if key_path:
+            args.extend(["-i", str(Path(key_path).expanduser())])
+        args.extend([
+            "-p", str(settings.gerrit_ssh_port),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+            settings.gerrit_ssh_host,
+        ])
+        return args
 
     async def _ssh(self, cmd: str) -> tuple[int, str, str]:
-        """Execute a Gerrit SSH command."""
-        full_cmd = f"{self._ssh_base} {cmd}"
-        proc = await asyncio.create_subprocess_shell(
-            full_cmd,
+        """Execute a Gerrit SSH command (shell-free)."""
+        import shlex
+        args = self._ssh_args + shlex.split(cmd)
+        proc = await asyncio.create_subprocess_exec(
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -159,11 +165,10 @@ class GerritClient:
             },
         })
 
-        # Pass JSON via stdin: echo '<json>' | ssh gerrit review --json -
-        import shlex
-        ssh_cmd = f"{self._ssh_base} gerrit review --project {shlex.quote(proj)} --json - {commit}"
-        proc = await asyncio.create_subprocess_shell(
-            ssh_cmd,
+        # Pass JSON via stdin (shell-free)
+        args = self._ssh_args + ["gerrit", "review", "--project", proj, "--json", "-", commit]
+        proc = await asyncio.create_subprocess_exec(
+            *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
