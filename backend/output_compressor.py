@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 
 from backend.config import settings
 
@@ -21,11 +22,12 @@ logger = logging.getLogger(__name__)
 
 # Patterns for strippable noise
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-_PROGRESS_BAR = re.compile(r"^.*[\[=>#\-]{5,}.*\d+%.*$", re.MULTILINE)
+_PROGRESS_BAR = re.compile(r"^\s*[\[|(][\s=>#\-\.]{5,}[\]|)]\s*\d+%", re.MULTILINE)
 _SPINNER_LINE = re.compile(r"^.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏|/\-\\]{1,3}\s.*$", re.MULTILINE)
 _BLANK_RUNS = re.compile(r"\n{3,}", re.MULTILINE)
 
-# Track compression metrics (module-level accumulator)
+# Track compression metrics (module-level accumulator, thread-safe)
+_stats_lock = threading.Lock()
 _compression_stats = {
     "total_original_bytes": 0,
     "total_compressed_bytes": 0,
@@ -36,7 +38,8 @@ _compression_stats = {
 
 def get_compression_stats() -> dict:
     """Return current compression statistics."""
-    stats = dict(_compression_stats)
+    with _stats_lock:
+        stats = dict(_compression_stats)
     if stats["total_original_bytes"] > 0:
         stats["avg_ratio"] = round(1 - stats["total_compressed_bytes"] / stats["total_original_bytes"], 4)
     else:
@@ -46,8 +49,9 @@ def get_compression_stats() -> dict:
 
 def reset_compression_stats() -> None:
     """Reset compression statistics."""
-    for k in _compression_stats:
-        _compression_stats[k] = 0
+    with _stats_lock:
+        for k in _compression_stats:
+            _compression_stats[k] = 0
 
 
 async def compress_output(text: str, tool_name: str = "") -> tuple[str, int]:
@@ -75,9 +79,10 @@ async def compress_output(text: str, tool_name: str = "") -> tuple[str, int]:
 
         bytes_saved = original_len - len(compressed)
         if bytes_saved > 0 and settings.rtk_track_savings:
-            _compression_stats["total_original_bytes"] += original_len
-            _compression_stats["total_compressed_bytes"] += len(compressed)
-            _compression_stats["compression_count"] += 1
+            with _stats_lock:
+                _compression_stats["total_original_bytes"] += original_len
+                _compression_stats["total_compressed_bytes"] += len(compressed)
+                _compression_stats["compression_count"] += 1
 
         return compressed, max(bytes_saved, 0)
 
@@ -124,7 +129,8 @@ def _python_compress(text: str) -> str:
             else:
                 if dup_count > 0:
                     deduped.append(f"  ... ({dup_count} identical line(s) removed)")
-                    _compression_stats["total_lines_removed"] += dup_count
+                    with _stats_lock:
+                        _compression_stats["total_lines_removed"] += dup_count
                 deduped.append(line)
                 prev = stripped
                 dup_count = 0
