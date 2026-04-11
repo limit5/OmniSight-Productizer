@@ -13,7 +13,7 @@ import {
   ArrowUpRight,
   ArrowDownRight
 } from "lucide-react"
-import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
+import { AI_MODEL_INFO, getModelInfo, type AIModel } from "./agent-matrix-wall"
 
 // Token usage data per model
 export interface ModelTokenUsage {
@@ -25,19 +25,6 @@ export interface ModelTokenUsage {
   requestCount: number
   avgLatency: number // ms
   lastUsed: string
-}
-
-// Pricing per 1M tokens (input/output)
-const MODEL_PRICING: Record<AIModel, { input: number; output: number }> = {
-  "claude-opus-4.6": { input: 15, output: 75 },
-  "claude-sonnet-4.8": { input: 3, output: 15 },
-  "gpt-5.4": { input: 5, output: 15 },
-  "gemini-3.1": { input: 0.5, output: 1.5 },
-  "gemma-4": { input: 0.1, output: 0.3 },
-  "grok-3": { input: 2, output: 10 },
-  "codex-2": { input: 3, output: 12 },
-  "mistral-large": { input: 2, output: 6 },
-  "llama-4": { input: 0.2, output: 0.6 },
 }
 
 // Empty state — no LLM calls made yet
@@ -64,15 +51,42 @@ function formatCost(cost: number): string {
   return "$" + cost.toFixed(3)
 }
 
+export interface TokenBudgetInfo {
+  budget: number
+  usage: number
+  ratio: number
+  frozen: boolean
+  level: string
+  warn_threshold: number
+  downgrade_threshold: number
+  freeze_threshold: number
+  fallback_provider: string
+  fallback_model: string
+}
+
 interface TokenUsageStatsProps {
   className?: string
   externalUsage?: ModelTokenUsage[]
+  budgetInfo?: TokenBudgetInfo | null
+  onResetFreeze?: () => void
+  onUpdateBudget?: (updates: Record<string, number | string>) => void
 }
 
-export function TokenUsageStats({ className = "", externalUsage }: TokenUsageStatsProps) {
+export function TokenUsageStats({ className = "", externalUsage, budgetInfo, onResetFreeze, onUpdateBudget }: TokenUsageStatsProps) {
   const [expanded, setExpanded] = useState(true)
   const [usageData, setUsageData] = useState<ModelTokenUsage[]>(externalUsage ?? emptyUsage())
   const [selectedModel, setSelectedModel] = useState<AIModel | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
+  const [localWarn, setLocalWarn] = useState(budgetInfo?.warn_threshold ?? 0.8)
+  const [localDegrade, setLocalDegrade] = useState(budgetInfo?.downgrade_threshold ?? 0.9)
+
+  // Sync local slider values when props change (from polling)
+  useEffect(() => {
+    if (budgetInfo) {
+      setLocalWarn(budgetInfo.warn_threshold)
+      setLocalDegrade(budgetInfo.downgrade_threshold)
+    }
+  }, [budgetInfo?.warn_threshold, budgetInfo?.downgrade_threshold])
 
   // Sync from backend when available
   useEffect(() => {
@@ -80,10 +94,6 @@ export function TokenUsageStats({ className = "", externalUsage }: TokenUsageSta
       setUsageData(externalUsage)
     }
   }, [externalUsage])
-
-  // No simulation — real data comes from backend via externalUsage prop
-  useEffect(() => {
-  }, [])
   
   // Calculate totals
   const totals = usageData.reduce((acc, item) => ({
@@ -117,6 +127,122 @@ export function TokenUsageStats({ className = "", externalUsage }: TokenUsageSta
       
       {expanded && (
         <div className="px-3 pb-3">
+          {/* Budget Bar */}
+          {budgetInfo && (
+            <div className="mb-3">
+              {/* Frozen Banner */}
+              {budgetInfo.frozen && (
+                <div className="mb-2 p-2 rounded bg-[var(--critical-red)]/20 border border-[var(--critical-red)]/50 flex items-center justify-between animate-pulse">
+                  <span className="font-mono text-[10px] text-[var(--critical-red)] font-semibold">
+                    TOKEN BUDGET EXHAUSTED — LLM FROZEN
+                  </span>
+                  {onResetFreeze && (
+                    <button
+                      onClick={onResetFreeze}
+                      className="px-2 py-0.5 rounded text-[9px] font-mono font-semibold bg-[var(--critical-red)]/30 hover:bg-[var(--critical-red)]/50 text-[var(--critical-red)] transition-colors"
+                    >
+                      RESET
+                    </button>
+                  )}
+                </div>
+              )}
+              {/* Budget Progress */}
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-mono text-[10px] text-[var(--muted-foreground)]">DAILY BUDGET</span>
+                <span className={`font-mono text-[10px] font-semibold ${
+                  budgetInfo.level === "frozen" ? "text-[var(--critical-red)]" :
+                  budgetInfo.level === "downgrade" ? "text-[var(--hardware-orange)]" :
+                  budgetInfo.level === "warn" ? "text-yellow-500" :
+                  "text-[var(--validation-emerald)]"
+                }`}>
+                  ${budgetInfo.usage.toFixed(4)} / {budgetInfo.budget > 0 ? `$${budgetInfo.budget.toFixed(2)}` : "Unlimited"}
+                </span>
+              </div>
+              {budgetInfo.budget > 0 && (
+                <div className="h-2.5 rounded-full bg-[var(--border)] overflow-hidden relative">
+                  {/* Threshold markers */}
+                  <div className="absolute top-0 bottom-0 border-r border-yellow-500/50" style={{ left: `${budgetInfo.warn_threshold * 100}%` }} />
+                  <div className="absolute top-0 bottom-0 border-r border-[var(--hardware-orange)]/50" style={{ left: `${budgetInfo.downgrade_threshold * 100}%` }} />
+                  {/* Fill */}
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${
+                      budgetInfo.level === "frozen" ? "bg-[var(--critical-red)]" :
+                      budgetInfo.level === "downgrade" ? "bg-[var(--hardware-orange)]" :
+                      budgetInfo.level === "warn" ? "bg-yellow-500" :
+                      "bg-[var(--validation-emerald)]"
+                    }`}
+                    style={{ width: `${Math.min(budgetInfo.ratio * 100, 100)}%` }}
+                  />
+                </div>
+              )}
+              <div className="flex items-center justify-between mt-1">
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                  {budgetInfo.budget > 0 ? `${(budgetInfo.ratio * 100).toFixed(1)}% used` : "No limit set"}
+                </span>
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="font-mono text-[9px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+                >
+                  {showSettings ? "▲ HIDE SETTINGS" : "▼ SETTINGS"}
+                </button>
+              </div>
+              {/* Settings Panel */}
+              {showSettings && onUpdateBudget && (
+                <div className="mt-2 p-2 rounded bg-[var(--secondary)] space-y-2.5 overflow-hidden">
+                  {/* Budget input — preset buttons */}
+                  <div>
+                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] mb-1 block">$/day</label>
+                    <div className="flex flex-wrap gap-1">
+                      {[0, 1, 5, 10, 50, 100].map(val => (
+                        <button
+                          key={val}
+                          onClick={() => onUpdateBudget({ budget: val })}
+                          className={`px-2 py-0.5 rounded font-mono text-[9px] transition-colors ${
+                            budgetInfo.budget === val
+                              ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                              : "bg-[var(--background)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                          }`}
+                        >
+                          {val === 0 ? "∞" : `$${val}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Threshold sliders — local state for smooth drag, commit on release */}
+                  <div className="flex items-center gap-1.5">
+                    <label className="font-mono text-[9px] text-yellow-500 w-16 shrink-0">Warn</label>
+                    <input
+                      type="range" min="0.5" max={localDegrade} step="0.05"
+                      value={localWarn}
+                      className="flex-1 h-1 accent-yellow-500 min-w-0"
+                      onChange={(e) => setLocalWarn(Math.min(parseFloat(e.target.value), localDegrade))}
+                      onMouseUp={() => onUpdateBudget({ warn_threshold: localWarn })}
+                      onTouchEnd={() => onUpdateBudget({ warn_threshold: localWarn })}
+                    />
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-7 text-right shrink-0">{(localWarn * 100).toFixed(0)}%</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <label className="font-mono text-[9px] text-[var(--hardware-orange)] w-16 shrink-0">Degrade</label>
+                    <input
+                      type="range" min={localWarn} max="1" step="0.05"
+                      value={localDegrade}
+                      className="flex-1 h-1 accent-[var(--hardware-orange)] min-w-0"
+                      onChange={(e) => setLocalDegrade(Math.max(parseFloat(e.target.value), localWarn))}
+                      onMouseUp={() => onUpdateBudget({ downgrade_threshold: localDegrade })}
+                      onTouchEnd={() => onUpdateBudget({ downgrade_threshold: localDegrade })}
+                    />
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-7 text-right shrink-0">{(localDegrade * 100).toFixed(0)}%</span>
+                  </div>
+                  {/* Fallback info */}
+                  <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--border)]/50">
+                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-16 shrink-0">Fallback</label>
+                    <span className="font-mono text-[9px] text-[var(--foreground)] truncate">{budgetInfo.fallback_provider} / {budgetInfo.fallback_model}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Summary Stats - Vertical Stack */}
           <div className="space-y-2 mb-3">
             {/* Total Tokens */}
@@ -294,18 +420,10 @@ export function TokenUsageStats({ className = "", externalUsage }: TokenUsageSta
                   </div>
                   
                   {/* Expanded Details */}
-                  {isSelected && (
+                  {isSelected && item.requestCount > 0 && (
                     <div className="mt-3 pt-3 border-t border-[var(--border)]">
-                      <p className="font-mono text-[10px] text-[var(--muted-foreground)] mb-2 uppercase tracking-wider">Pricing Details</p>
+                      <p className="font-mono text-[10px] text-[var(--muted-foreground)] mb-2 uppercase tracking-wider">Details</p>
                       <div className="grid grid-cols-1 gap-1.5 text-[11px] font-mono">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--muted-foreground)]">Input Price (per 1M tokens):</span>
-                          <span className="text-[var(--foreground)]">${MODEL_PRICING[item.model].input.toFixed(2)}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--muted-foreground)]">Output Price (per 1M tokens):</span>
-                          <span className="text-[var(--foreground)]">${MODEL_PRICING[item.model].output.toFixed(2)}</span>
-                        </div>
                         <div className="flex items-center justify-between">
                           <span className="text-[var(--muted-foreground)]">Average Tokens per Request:</span>
                           <span className="text-[var(--foreground)]">{Math.round(item.totalTokens / item.requestCount).toLocaleString()}</span>
@@ -314,10 +432,12 @@ export function TokenUsageStats({ className = "", externalUsage }: TokenUsageSta
                           <span className="text-[var(--muted-foreground)]">Average Cost per Request:</span>
                           <span className="text-[var(--foreground)]">{formatCost(item.cost / item.requestCount)}</span>
                         </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[var(--muted-foreground)]">Input/Output Ratio:</span>
-                          <span className="text-[var(--foreground)]">{(item.inputTokens / item.outputTokens).toFixed(2)}:1</span>
-                        </div>
+                        {item.outputTokens > 0 && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-[var(--muted-foreground)]">Input/Output Ratio:</span>
+                            <span className="text-[var(--foreground)]">{(item.inputTokens / item.outputTokens).toFixed(2)}:1</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

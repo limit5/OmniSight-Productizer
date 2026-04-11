@@ -68,6 +68,14 @@ interface OrchestratorAIProps {
   externalMessages?: OrchestratorMessage[]
   onSendCommand?: (command: string) => void
   tokenUsage?: import("./token-usage-stats").ModelTokenUsage[]
+  tokenBudget?: import("./token-usage-stats").TokenBudgetInfo | null
+  onResetFreeze?: () => void
+  onUpdateBudget?: (updates: Record<string, number | string>) => void
+  onRefresh?: () => void
+  activeProvider?: string
+  activeModel?: string
+  providers?: { id: string; name: string; models: string[]; configured: boolean }[]
+  onSwitchProvider?: (provider: string, model?: string) => void
 }
 
 // Helper to get agent icon component
@@ -120,6 +128,14 @@ export function OrchestratorAI({
   externalMessages = [],
   onSendCommand,
   tokenUsage,
+  tokenBudget,
+  onResetFreeze,
+  onUpdateBudget,
+  onRefresh,
+  activeProvider,
+  activeModel,
+  providers,
+  onSwitchProvider,
 }: OrchestratorAIProps) {
   const [messages, setMessages] = useState<OrchestratorMessage[]>([
     {
@@ -422,8 +438,8 @@ export function OrchestratorAI({
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { setIsAnalyzing(true); generateSuggestions(); setTimeout(() => setIsAnalyzing(false), 1000); }}
-              className={`p-1.5 rounded transition-colors ${isAnalyzing ? "bg-[var(--artifact-purple)]/40 text-[var(--artifact-purple)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)]"}`}
+              onClick={(e) => { e.stopPropagation(); setIsAnalyzing(true); generateSuggestions(); onRefresh?.(); setTimeout(() => setIsAnalyzing(false), 1000); }}
+              className={`relative z-20 p-1.5 rounded transition-colors cursor-pointer ${isAnalyzing ? "bg-[var(--artifact-purple)]/40 text-[var(--artifact-purple)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)]"}`}
               title="Analyze and suggest"
             >
               <RefreshCw size={12} className={isAnalyzing ? "animate-spin" : ""} />
@@ -545,8 +561,50 @@ export function OrchestratorAI({
       </div>
       
       {/* Token Usage Statistics */}
-      <TokenUsageStats externalUsage={tokenUsage} />
-      
+      <TokenUsageStats externalUsage={tokenUsage} budgetInfo={tokenBudget} onResetFreeze={onResetFreeze} onUpdateBudget={onUpdateBudget} />
+
+      {/* LLM Provider / Model Selector */}
+      {providers && providers.length > 0 && onSwitchProvider && (
+        <div className="border-b border-[var(--border)] px-4 py-2">
+          <p className="font-mono text-[10px] text-[var(--muted-foreground)] mb-1.5 uppercase tracking-wider flex items-center gap-1.5">
+            <Sparkles size={10} className="text-[var(--neural-blue)]" />
+            LLM MODEL
+          </p>
+          <div className="space-y-1.5">
+            {providers.filter(p => p.configured).map(p => {
+              const isActive = p.id === activeProvider
+              return (
+                <div key={p.id}>
+                  <div className="flex flex-wrap gap-1">
+                    {p.models.map(m => {
+                      const isCurrent = isActive && m === activeModel
+                      const info = getModelInfo(m)
+                      return (
+                        <button
+                          key={m}
+                          onClick={() => onSwitchProvider(p.id, m)}
+                          className={`px-1.5 py-0.5 rounded font-mono text-[9px] transition-all ${
+                            isCurrent
+                              ? "ring-1 ring-[var(--neural-blue)] text-[var(--foreground)]"
+                              : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                          }`}
+                          style={isCurrent ? {
+                            backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
+                            color: info.color,
+                          } : {}}
+                        >
+                          {info.shortLabel}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Suggestions Panel */}
       {pendingSuggestions.length > 0 && (
         <div className="border-b border-[var(--border)] p-3 space-y-2 max-h-48 overflow-auto">

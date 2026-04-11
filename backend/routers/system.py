@@ -378,7 +378,7 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_persist_token_usage(u.copy()))
-        loop.create_task(_check_token_budget())
+        loop.create_task(_safe_check_budget())
     except RuntimeError:
         pass  # No event loop — skip persistence (e.g. during tests)
 
@@ -400,6 +400,13 @@ _last_budget_level: str = ""  # Track to avoid repeat events
 def get_daily_cost() -> float:
     """Sum all model costs for the current session."""
     return round(sum(u.get("cost", 0) for u in _token_usage.values()), 4)
+
+
+async def _safe_check_budget() -> None:
+    try:
+        await asyncio.wait_for(_check_token_budget(), timeout=2.0)
+    except Exception as exc:
+        logger.warning("Token budget check failed: %s", exc)
 
 
 async def _check_token_budget() -> None:

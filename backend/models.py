@@ -124,6 +124,9 @@ class TaskUpdate(BaseModel):
     priority: Optional[TaskPriority] = None
     status: Optional[TaskStatus] = None
     assigned_agent_id: Optional[str] = None
+    suggested_sub_type: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    child_task_ids: Optional[list[str]] = None
 
 
 # ---------- Chat / Orchestrator ----------

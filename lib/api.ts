@@ -19,6 +19,7 @@ export type SSEEvent =
   | { event: "workspace"; data: { agent_id: string; action: string; detail: string; timestamp: string } }
   | { event: "container"; data: { agent_id: string; action: string; detail: string; timestamp: string } }
   | { event: "invoke"; data: { action_type: string; detail: string; timestamp: string } }
+  | { event: "token_warning"; data: { level: string; message: string; usage: number; budget: number; timestamp: string } }
   | { event: "heartbeat"; data: { subscribers: number } }
 
 /**
@@ -33,7 +34,7 @@ export function subscribeEvents(
   const eventsUrl = API_V1.startsWith("http") ? `${API_V1}/events` : `${window.location.origin}${API_V1}/events`
   const es = new EventSource(eventsUrl)
 
-  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "heartbeat"]) {
+  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "heartbeat"]) {
     es.addEventListener(eventType, (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data)
@@ -394,6 +395,44 @@ export interface TokenUsage {
 
 export async function getTokenUsage() {
   return request<TokenUsage[]>("/system/tokens")
+}
+
+// ─── Token Budget ───
+
+export interface TokenBudgetInfo {
+  budget: number
+  usage: number
+  ratio: number
+  frozen: boolean
+  level: string  // "normal" | "warn" | "downgrade" | "frozen"
+  warn_threshold: number
+  downgrade_threshold: number
+  freeze_threshold: number
+  fallback_provider: string
+  fallback_model: string
+}
+
+export async function getTokenBudget() {
+  return request<TokenBudgetInfo>("/system/token-budget")
+}
+
+export async function updateTokenBudget(updates: {
+  budget?: number
+  warn_threshold?: number
+  downgrade_threshold?: number
+  freeze_threshold?: number
+  fallback_provider?: string
+  fallback_model?: string
+}) {
+  const params = new URLSearchParams()
+  for (const [key, val] of Object.entries(updates)) {
+    if (val !== undefined) params.set(key, String(val))
+  }
+  return request<TokenBudgetInfo>(`/system/token-budget?${params.toString()}`, { method: "PUT" })
+}
+
+export async function resetTokenFreeze() {
+  return request<{ status: string }>("/system/token-budget/reset", { method: "POST" })
 }
 
 // ─── Invoke (Singularity Sync) ───

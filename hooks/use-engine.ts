@@ -94,6 +94,7 @@ export function useEngine() {
   const [repos, setRepos] = useState<api.RepoInfo[]>([])
   const [logs, setLogs] = useState<api.LogEntry[]>([])
   const [tokenUsage, setTokenUsage] = useState<api.TokenUsage[]>([])
+  const [tokenBudget, setTokenBudget] = useState<api.TokenBudgetInfo | null>(null)
   const initRef = useRef(false)
 
   // Fetch initial data and subscribe to SSE event stream
@@ -107,7 +108,7 @@ export function useEngine() {
 
     async function fetchSystemData() {
       try {
-        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes] = await Promise.all([
+        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes] = await Promise.all([
           api.getSystemStatus(),
           api.getSystemInfo(),
           api.getDevices(),
@@ -115,6 +116,7 @@ export function useEngine() {
           api.getRepos(),
           api.getLogs(),
           api.getTokenUsage(),
+          api.getTokenBudget(),
         ])
         setSystemStatus(statusRes)
         setSystemInfo(infoRes)
@@ -123,6 +125,7 @@ export function useEngine() {
         setRepos(reposRes)
         setLogs(logsRes)
         setTokenUsage(tokensRes)
+        setTokenBudget(budgetRes)
         console.log("[Engine] System data loaded:", infoRes.hostname, infoRes.cpu_model)
       } catch (e) {
         console.warn("[Engine] System data fetch failed:", e)
@@ -177,6 +180,18 @@ export function useEngine() {
               logMsg = `[DOCKER] ${d.agent_id} ${d.action}: ${d.detail}`
             } else if (event.event === "invoke") {
               logMsg = `[INVOKE] ${d.action_type}: ${d.detail}`
+            } else if (event.event === "token_warning") {
+              const level = d.level as string
+              logMsg = `[TOKEN] ${level.toUpperCase()}: ${d.message}`
+              logLevel = level === "frozen" ? "error" : level === "downgrade" ? "warn" : "warn"
+              // Update budget state from event data
+              setTokenBudget(prev => prev ? {
+                ...prev,
+                usage: (d.usage as number) || prev.usage,
+                ratio: prev.budget > 0 ? ((d.usage as number) || prev.usage) / prev.budget : 0,
+                level,
+                frozen: level === "frozen",
+              } : prev)
             }
 
             if (logMsg) {
@@ -507,6 +522,7 @@ export function useEngine() {
     repos,
     logs,
     tokenUsage,
+    tokenBudget,
     // Setters (for local-only operations like emergency stop)
     setAgents,
     setTasks,

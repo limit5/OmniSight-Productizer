@@ -191,16 +191,23 @@ def _agent_row_to_dict(row) -> dict:
 #  Task CRUD
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _task_row_to_dict(row) -> dict:
+    d = dict(row)
+    if isinstance(d.get("child_task_ids"), str):
+        d["child_task_ids"] = json.loads(d["child_task_ids"])
+    return d
+
+
 async def list_tasks() -> list[dict]:
     async with _conn().execute("SELECT * FROM tasks") as cur:
         rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return [_task_row_to_dict(r) for r in rows]
 
 
 async def get_task(task_id: str) -> dict | None:
     async with _conn().execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
         row = await cur.fetchone()
-    return dict(row) if row else None
+    return _task_row_to_dict(row) if row else None
 
 
 async def upsert_task(data: dict) -> None:

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
+import { createPortal } from "react-dom"
 import { 
   Plus, 
   Send, 
@@ -62,6 +63,7 @@ interface TaskBacklogProps {
   onAssignTask?: (taskId: string, agentId: string) => void
   onCreateAgent?: (type: Agent["type"], taskId?: string) => void
   onUpdateAgentStatus?: (agentId: string, status: AgentStatus, thoughtChain?: string) => void
+  onAddTask?: (title: string, priority: string) => void
 }
 
 // Priority colors
@@ -142,7 +144,7 @@ const initialChatHistory: ChatMessage[] = [
   }
 ]
 
-export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCreateAgent, onUpdateAgentStatus }: TaskBacklogProps) {
+export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCreateAgent, onUpdateAgentStatus, onAddTask }: TaskBacklogProps) {
   const [tasks, setTasks] = useState<Task[]>(externalTasks ?? emptyTasks)
 
   // Sync when external tasks change (from backend)
@@ -184,22 +186,25 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
   // Add new task
   const handleAddTask = useCallback(() => {
     if (!newTaskTitle.trim()) return
-    
-    const newTask: Task = {
-      id: `task-${Date.now()}`,
-      title: newTaskTitle,
-      priority: newTaskPriority,
-      status: "backlog",
-      createdAt: new Date().toTimeString().slice(0, 8)
+
+    // Call backend API if available
+    if (onAddTask) {
+      onAddTask(newTaskTitle, newTaskPriority)
+    } else {
+      // Fallback: local only
+      const newTask: Task = {
+        id: `task-${Date.now()}`,
+        title: newTaskTitle,
+        priority: newTaskPriority,
+        status: "backlog",
+        createdAt: new Date().toTimeString().slice(0, 8)
+      }
+      setTasks(prev => [newTask, ...prev])
     }
-    
-    setTasks(prev => [newTask, ...prev])
+
     setNewTaskTitle("")
     setShowAddTask(false)
-    
-    // Auto-analyze new task
-    setTimeout(() => analyzeAndSuggest(newTask.id), 500)
-  }, [newTaskTitle, newTaskPriority])
+  }, [newTaskTitle, newTaskPriority, onAddTask])
 
   // Analyze task and add AI message
   const analyzeAndSuggest = useCallback((taskId: string) => {
@@ -470,8 +475,8 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
             </h2>
           </div>
           <button
-            onClick={() => setShowAddTask(true)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono bg-[var(--hardware-orange)]/20 hover:bg-[var(--hardware-orange)]/40 text-[var(--hardware-orange)] transition-colors"
+            onClick={(e) => { e.stopPropagation(); setShowAddTask(true) }}
+            className="relative z-20 flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono bg-[var(--hardware-orange)]/20 hover:bg-[var(--hardware-orange)]/40 text-[var(--hardware-orange)] transition-colors cursor-pointer"
           >
             <Plus size={12} />
             ADD
@@ -755,8 +760,8 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
         )}
       </div>
       
-      {/* Add Task Modal */}
-      {showAddTask && (
+      {/* Add Task Modal — rendered via portal to escape backdrop-filter containment */}
+      {showAddTask && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="w-full max-w-sm holo-glass rounded-lg overflow-hidden animate-in fade-in zoom-in-95 duration-300">
             <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
@@ -831,7 +836,8 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

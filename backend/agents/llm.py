@@ -73,8 +73,8 @@ def get_llm(
         A LangChain chat model, or None if the provider can't be initialized.
     """
     # Check token freeze — return None to trigger rule-based fallback
-    from backend.routers.system import token_frozen
-    if token_frozen:
+    from backend.routers import system as _sys_mod
+    if _sys_mod.token_frozen:
         logger.info("Token budget frozen — LLM disabled, using rule-based fallback")
         return None
 

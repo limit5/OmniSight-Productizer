@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
 import { GlobalStatusHeader } from "@/components/omnisight/global-status-header"
 import { SpecNode } from "@/components/omnisight/spec-node"
@@ -27,6 +27,12 @@ export default function Home() {
   const engine = useEngine()
   const [syncCount, setSyncCount] = useState(0)
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
+  const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
+
+  // Fetch provider list once on mount
+  useEffect(() => {
+    api.getProviders().then(setProviderData).catch(() => {})
+  }, [])
 
   // Use engine state (backed by API when connected)
   const {
@@ -176,6 +182,15 @@ export default function Home() {
     await engine.completeTask(taskId)
   }, [engine])
 
+  const handleAddTask = useCallback(async (title: string, priority: string) => {
+    try {
+      await api.createTask({ title, priority })
+      engine.refresh()
+    } catch (e) {
+      console.error("Failed to create task:", e)
+    }
+  }, [engine])
+
   const handleUpdateAgentFromTask = useCallback((agentId: string, status: AgentStatus, thoughtChain?: string) => {
     engine.patchAgentLocal(agentId, { status, ...(thoughtChain ? { thoughtChain } : {}) })
   }, [engine])
@@ -274,6 +289,14 @@ export default function Home() {
               avgLatency: t.avg_latency,
               lastUsed: t.last_used,
             })) : undefined}
+            tokenBudget={engine.tokenBudget}
+            onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
+            onUpdateBudget={async (updates) => { await api.updateTokenBudget(updates as Record<string, number>); engine.refresh() }}
+            onRefresh={() => engine.refresh()}
+            activeProvider={providerData?.active_provider}
+            activeModel={providerData?.active_model}
+            providers={providerData?.providers}
+            onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()) } catch (e) { console.error("Switch provider failed:", e) } }}
           />
         )
       case "tasks":
@@ -284,6 +307,7 @@ export default function Home() {
             onAssignTask={handleAssignTask}
             onCreateAgent={handleCreateAgentForTask}
             onUpdateAgentStatus={handleUpdateAgentFromTask}
+            onAddTask={handleAddTask}
           />
         )
       case "source":
@@ -392,7 +416,7 @@ export default function Home() {
           </section>
 
           {/* Orchestrator AI - Central Coordinator & Command Hub */}
-          <aside className="min-h-0 overflow-hidden">
+          <aside className="min-h-0 overflow-auto">
             <OrchestratorAI
               agents={agents}
               tasks={tasks}
@@ -403,16 +427,36 @@ export default function Home() {
               externalMessages={orchestratorMessages}
               onSendCommand={handleCommand}
               onCompleteTask={handleCompleteTask}
+              tokenUsage={tokenUsage.length > 0 ? tokenUsage.map(t => ({
+                model: t.model as never,
+                inputTokens: t.input_tokens,
+                outputTokens: t.output_tokens,
+                totalTokens: t.total_tokens,
+                cost: t.cost,
+                requestCount: t.request_count,
+                avgLatency: t.avg_latency,
+                lastUsed: t.last_used,
+              })) : undefined}
+              tokenBudget={engine.tokenBudget}
+              onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
+              onUpdateBudget={async (updates) => { await api.updateTokenBudget(updates as Record<string, number>); engine.refresh() }}
+              onRefresh={() => engine.refresh()}
+              activeProvider={providerData?.active_provider}
+              activeModel={providerData?.active_model}
+              providers={providerData?.providers}
+              onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()) } catch (e) { console.error("Switch provider failed:", e) } }}
             />
           </aside>
 
           {/* Task Backlog */}
-          <aside className="min-h-0 overflow-hidden">
+          <aside className="min-h-0 overflow-auto">
             <TaskBacklog
               agents={agents}
+              tasks={tasks}
               onAssignTask={handleAssignTask}
               onCreateAgent={handleCreateAgentForTask}
               onUpdateAgentStatus={handleUpdateAgentFromTask}
+              onAddTask={handleAddTask}
             />
           </aside>
 
