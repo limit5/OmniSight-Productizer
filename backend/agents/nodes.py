@@ -445,18 +445,7 @@ def error_check_node(state: GraphState) -> dict:
                 "escalation",
                 f"Max retries ({state.max_retries}) exhausted. Freezing agent for human review.",
             )
-            # L3 notification: human intervention required
-            import asyncio
-            try:
-                from backend.notifications import notify
-                asyncio.get_running_loop().create_task(notify(
-                    "action", f"Agent {agent_type} frozen — retries exhausted",
-                    message=f"Failed {state.max_retries} times. Human review required.",
-                    source=f"agent:{agent_type}",
-                ))
-            except RuntimeError:
-                pass
-            # Signal escalation via action
+            # Signal escalation via action (notification sent by invoke.py when it sees this action)
             return {
                 "last_error": "",
                 "actions": [

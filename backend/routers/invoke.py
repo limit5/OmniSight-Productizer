@@ -72,9 +72,10 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
         agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
         agent.status = AgentStatus.success
 
-        # Extract sub_tasks from graph actions
+        # Extract sub_tasks and check for escalation actions
         if graph_result.actions:
             for act in graph_result.actions:
+                # Sub-task extraction
                 if act.detail and act.detail.startswith("{"):
                     try:
                         detail_data = json.loads(act.detail)
@@ -86,6 +87,15 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                                     st.status = "completed" if matching[0].success else "error"
                     except (json.JSONDecodeError, Exception):
                         pass
+                # Escalation: retries exhausted → notify L3
+                if act.status == "awaiting_confirmation":
+                    agent.status = AgentStatus.awaiting_confirmation
+                    from backend.notifications import notify as _notify
+                    await _notify(
+                        "action", f"Agent {agent.id} frozen — retries exhausted",
+                        message=act.detail[:200] if act.detail else "Human review required.",
+                        source=f"agent:{agent.id}",
+                    )
     except Exception as exc:
         agent.thought_chain = f"Execution error: {exc}"
         agent.status = AgentStatus.error
