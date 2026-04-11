@@ -56,6 +56,9 @@ async def compress_output(text: str, tool_name: str = "") -> tuple[str, int]:
     Returns ``(compressed_text, bytes_saved)``.
     Falls back gracefully if compression fails.
     """
+    if not isinstance(text, str) or not text:
+        return str(text) if text else "", 0
+
     if not settings.rtk_enabled:
         return text, 0
 
