@@ -121,8 +121,15 @@ def load_role_skill(category: str, role_id: str) -> str:
     return content
 
 
+_roles_cache: list[dict] | None = None
+
+
 def list_available_roles() -> list[dict]:
-    """Scan configs/roles/ and return all available role definitions."""
+    """Scan configs/roles/ and return all available role definitions. Cached after first call."""
+    global _roles_cache
+    if _roles_cache is not None:
+        return list(_roles_cache)  # Return copy to prevent mutation
+
     roles: list[dict] = []
     if not _ROLES_DIR.is_dir():
         return roles
@@ -133,7 +140,6 @@ def list_available_roles() -> list[dict]:
         category = category_dir.name
         for skill_file in sorted(category_dir.glob("*.skill.md")):
             role_id = skill_file.stem.replace(".skill", "")
-            # Parse frontmatter for metadata
             meta = _parse_frontmatter(skill_file)
             roles.append({
                 "role_id": role_id,
@@ -143,7 +149,8 @@ def list_available_roles() -> list[dict]:
                 "keywords": meta.get("keywords", []),
                 "tools": meta.get("tools", []),
             })
-    return roles
+    _roles_cache = roles
+    return list(roles)
 
 
 def list_available_models() -> list[dict]:
