@@ -82,16 +82,25 @@ async def _dispatch_external(notif: Notification) -> None:
     level = notif.level
 
     # L2+: IM (Slack/Teams)
-    if level in ("warning", "action", "critical") and settings.notification_slack_webhook:
-        await _send_slack(notif)
+    if level in ("warning", "action", "critical"):
+        if settings.notification_slack_webhook:
+            await _send_slack(notif)
+        else:
+            logger.debug("Slack webhook not configured — skipping L2+ notification dispatch")
 
     # L3+: Issue tracker
-    if level in ("action", "critical") and settings.notification_jira_url:
-        await _send_jira(notif)
+    if level in ("action", "critical"):
+        if settings.notification_jira_url:
+            await _send_jira(notif)
+        else:
+            logger.debug("Jira not configured — skipping L3+ issue creation")
 
     # L4: PagerDuty
-    if level == "critical" and settings.notification_pagerduty_key:
-        await _send_pagerduty(notif)
+    if level == "critical":
+        if settings.notification_pagerduty_key:
+            await _send_pagerduty(notif)
+        else:
+            logger.warning("PagerDuty not configured — CRITICAL notification not escalated: %s", notif.title)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -39,6 +39,25 @@ class TestStateMachine:
         for status in TaskStatus:
             assert status.value in TASK_TRANSITIONS, f"Missing transitions for {status.value}"
 
+    def test_invalid_transition_backlog_to_completed(self):
+        """Cannot jump from backlog directly to completed."""
+        assert "completed" not in TASK_TRANSITIONS["backlog"]
+
+    def test_invalid_transition_backlog_to_in_review(self):
+        """Cannot jump from backlog directly to in_review."""
+        assert "in_review" not in TASK_TRANSITIONS["backlog"]
+
+    def test_invalid_transition_completed_to_in_progress(self):
+        """Completed can only reopen to backlog, not jump to in_progress."""
+        assert "in_progress" not in TASK_TRANSITIONS["completed"]
+
+    def test_bidirectional_block_unblock(self):
+        """Any active state can block, and blocked can unblock."""
+        for state in ("assigned", "in_progress", "in_review"):
+            assert "blocked" in TASK_TRANSITIONS[state], f"{state} cannot be blocked"
+        for target in ("backlog", "in_progress"):
+            assert target in TASK_TRANSITIONS["blocked"], f"blocked cannot transition to {target}"
+
 
 class TestTaskModel:
 

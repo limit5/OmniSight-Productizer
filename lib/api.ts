@@ -122,6 +122,9 @@ export interface ApiTask {
   completed_at: string | null
   ai_analysis: string | null
   suggested_agent_type: string | null
+  suggested_sub_type: string | null
+  parent_task_id: string | null
+  child_task_ids: string[]
   external_issue_id: string | null
   issue_url: string | null
   acceptance_criteria: string | null
