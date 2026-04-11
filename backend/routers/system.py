@@ -422,24 +422,34 @@ async def _check_token_budget() -> None:
     cost = get_daily_cost()
     ratio = cost / budget
 
+    from backend.notifications import notify
+
     if ratio >= settings.token_freeze_threshold and _last_budget_level != "frozen":
         token_frozen = True
         _last_budget_level = "frozen"
         emit_token_warning("frozen", f"Token budget exhausted (${cost:.4f}/${budget:.2f}). All LLM calls frozen.", cost, budget)
+        await notify("critical", "Token budget exhausted — LLM frozen",
+                      message=f"Daily cost ${cost:.4f} exceeded budget ${budget:.2f}. All LLM calls disabled.",
+                      source="token_budget")
 
     elif ratio >= settings.token_downgrade_threshold and _last_budget_level not in ("downgrade", "frozen"):
         _last_budget_level = "downgrade"
-        # Auto-switch to cheaper provider
         try:
             from backend.routers.providers import _do_switch_provider
             await _do_switch_provider(settings.token_fallback_provider, settings.token_fallback_model)
         except Exception:
             pass
         emit_token_warning("downgrade", f"Token budget at {ratio:.0%} (${cost:.4f}/${budget:.2f}). Auto-downgraded to {settings.token_fallback_provider}.", cost, budget)
+        await notify("action", f"Token budget at {ratio:.0%} — auto-downgraded",
+                      message=f"Switched to {settings.token_fallback_provider}. Cost: ${cost:.4f}/${budget:.2f}.",
+                      source="token_budget")
 
     elif ratio >= settings.token_warn_threshold and _last_budget_level not in ("warn", "downgrade", "frozen"):
         _last_budget_level = "warn"
         emit_token_warning("warn", f"Token budget at {ratio:.0%} (${cost:.4f}/${budget:.2f}).", cost, budget)
+        await notify("warning", f"Token budget at {ratio:.0%}",
+                      message=f"Daily cost: ${cost:.4f} / ${budget:.2f}.",
+                      source="token_budget")
 
 
 async def load_token_usage_from_db() -> None:
@@ -524,6 +534,34 @@ async def reset_token_freeze():
     from backend.events import emit_token_warning
     emit_token_warning("reset", "Token freeze manually cleared by operator.")
     return {"status": "unfrozen"}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Notifications
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.get("/notifications")
+async def get_notifications(limit: int = 50, level: str = ""):
+    """List notifications, optionally filtered by level."""
+    from backend import db
+    return await db.list_notifications(limit=limit, level=level)
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_read(notification_id: str):
+    """Mark a notification as read."""
+    from backend import db
+    ok = await db.mark_notification_read(notification_id)
+    return {"status": "ok" if ok else "not_found"}
+
+
+@router.get("/notifications/unread-count")
+async def unread_count():
+    """Count unread notifications (L2+)."""
+    from backend import db
+    count = await db.count_unread_notifications("warning")
+    return {"count": count}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

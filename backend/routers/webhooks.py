@@ -71,6 +71,16 @@ async def _on_patchset_created(event: dict) -> None:
         change_id, change_subject, commit[:8], uploader,
     )
 
+    # L2 notification: new patchset for review
+    from backend.notifications import notify
+    await notify(
+        "warning", f"New patchset: {change_subject}",
+        message=f"Change {change_id} by {uploader} — commit {commit[:8]}",
+        source="gerrit",
+        action_url=f"{settings.gerrit_url}/c/{change_id}" if settings.gerrit_url else None,
+        action_label="Review in Gerrit",
+    )
+
     # Create a review task
     from backend.routers.tasks import _tasks, _persist as _persist_task
     task_id = f"review-{uuid.uuid4().hex[:6]}"
@@ -161,6 +171,14 @@ async def _on_comment_added(event: dict) -> None:
         if approval.get("type") == "Code-Review" and approval.get("value") == "-1":
             logger.info("Code-Review -1 on change %s — coder should iterate", change_id)
             emit_invoke("review_rejected", f"Change {change_id} received Code-Review -1")
+            # L2 notification
+            from backend.notifications import notify
+            import asyncio
+            asyncio.create_task(notify(
+                "warning", f"Code-Review -1: {change.get('subject', change_id)}",
+                message=f"Change {change_id} needs revision",
+                source="gerrit",
+            ))
             break
 
 
@@ -172,6 +190,10 @@ async def _on_change_merged(event: dict) -> None:
 
     logger.info("Change merged: %s — %s", change_id, subject)
     emit_invoke("merged", f"Change {change_id} merged: {subject}")
+
+    # L1 notification: merge + replication
+    from backend.notifications import notify
+    await notify("info", f"Merged: {subject}", source="gerrit")
 
     # Trigger replication
     targets = [t.strip() for t in settings.gerrit_replication_targets.split(",") if t.strip()]

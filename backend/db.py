@@ -99,6 +99,19 @@ CREATE TABLE IF NOT EXISTS tasks (
     child_task_ids      TEXT NOT NULL DEFAULT '[]'
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+    id              TEXT PRIMARY KEY,
+    level           TEXT NOT NULL DEFAULT 'info',
+    title           TEXT NOT NULL,
+    message         TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT '',
+    timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+    read            INTEGER NOT NULL DEFAULT 0,
+    action_url      TEXT,
+    action_label    TEXT,
+    auto_resolved   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS handoffs (
     task_id     TEXT PRIMARY KEY,
     agent_id    TEXT NOT NULL,
@@ -309,3 +322,60 @@ async def list_handoffs() -> list[dict]:
     async with _conn().execute("SELECT task_id, agent_id, created_at FROM handoffs ORDER BY created_at DESC") as cur:
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Notifications
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_notification(data: dict) -> None:
+    await _conn().execute(
+        """INSERT INTO notifications (id, level, title, message, source, timestamp, read, action_url, action_label, auto_resolved)
+           VALUES (:id, :level, :title, :message, :source, :timestamp, :read, :action_url, :action_label, :auto_resolved)
+        """,
+        {
+            "id": data["id"],
+            "level": data["level"],
+            "title": data["title"],
+            "message": data.get("message", ""),
+            "source": data.get("source", ""),
+            "timestamp": data.get("timestamp", ""),
+            "read": 1 if data.get("read") else 0,
+            "action_url": data.get("action_url"),
+            "action_label": data.get("action_label"),
+            "auto_resolved": 1 if data.get("auto_resolved") else 0,
+        },
+    )
+    await _conn().commit()
+
+
+async def list_notifications(limit: int = 50, level: str = "") -> list[dict]:
+    query = "SELECT * FROM notifications"
+    params: list = []
+    if level:
+        query += " WHERE level = ?"
+        params.append(level)
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    async with _conn().execute(query, params) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def mark_notification_read(notification_id: str) -> bool:
+    cur = await _conn().execute("UPDATE notifications SET read = 1 WHERE id = ?", (notification_id,))
+    await _conn().commit()
+    return cur.rowcount > 0
+
+
+async def count_unread_notifications(min_level: str = "warning") -> int:
+    levels = {"info": 0, "warning": 1, "action": 2, "critical": 3}
+    min_rank = levels.get(min_level, 1)
+    valid_levels = [l for l, r in levels.items() if r >= min_rank]
+    placeholders = ",".join("?" * len(valid_levels))
+    async with _conn().execute(
+        f"SELECT COUNT(*) FROM notifications WHERE read = 0 AND level IN ({placeholders})",
+        valid_levels,
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else 0

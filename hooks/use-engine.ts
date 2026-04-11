@@ -95,6 +95,8 @@ export function useEngine() {
   const [logs, setLogs] = useState<api.LogEntry[]>([])
   const [tokenUsage, setTokenUsage] = useState<api.TokenUsage[]>([])
   const [tokenBudget, setTokenBudget] = useState<api.TokenBudgetInfo | null>(null)
+  const [notifications, setNotifications] = useState<api.NotificationItem[]>([])
+  const [unreadCount, setUnreadCount] = useState(0)
   const initRef = useRef(false)
 
   // Fetch initial data and subscribe to SSE event stream
@@ -108,7 +110,7 @@ export function useEngine() {
 
     async function fetchSystemData() {
       try {
-        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes] = await Promise.all([
+        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes, unreadRes] = await Promise.all([
           api.getSystemStatus(),
           api.getSystemInfo(),
           api.getDevices(),
@@ -117,6 +119,7 @@ export function useEngine() {
           api.getLogs(),
           api.getTokenUsage(),
           api.getTokenBudget(),
+          api.getUnreadCount(),
         ])
         setSystemStatus(statusRes)
         setSystemInfo(infoRes)
@@ -126,6 +129,7 @@ export function useEngine() {
         setLogs(logsRes)
         setTokenUsage(tokensRes)
         setTokenBudget(budgetRes)
+        setUnreadCount(unreadRes.count)
         console.log("[Engine] System data loaded:", infoRes.hostname, infoRes.cpu_model)
       } catch (e) {
         console.warn("[Engine] System data fetch failed:", e)
@@ -180,6 +184,20 @@ export function useEngine() {
               logMsg = `[DOCKER] ${d.agent_id} ${d.action}: ${d.detail}`
             } else if (event.event === "invoke") {
               logMsg = `[INVOKE] ${d.action_type}: ${d.detail}`
+            } else if (event.event === "notification") {
+              const level = d.level as string
+              logMsg = `[NOTIFY:${level.toUpperCase()}] ${d.title}`
+              if (d.message) logMsg += `: ${(d.message as string).slice(0, 60)}`
+              logLevel = level === "critical" || level === "action" ? "error" : level === "warning" ? "warn" : "info"
+              // Add to notifications list and increment unread
+              setNotifications(prev => [{
+                id: d.id as string, level: level as api.NotificationItem["level"],
+                title: d.title as string, message: (d.message as string) || "",
+                source: (d.source as string) || "", timestamp: ts,
+                read: false, action_url: d.action_url as string | undefined,
+                action_label: d.action_label as string | undefined,
+              }, ...prev.slice(0, 49)])
+              setUnreadCount(prev => prev + 1)
             } else if (event.event === "token_warning") {
               const level = d.level as string
               logMsg = `[TOKEN] ${level.toUpperCase()}: ${d.message}`
@@ -523,6 +541,9 @@ export function useEngine() {
     logs,
     tokenUsage,
     tokenBudget,
+    notifications,
+    unreadCount,
+    setUnreadCount,
     // Setters (for local-only operations like emergency stop)
     setAgents,
     setTasks,

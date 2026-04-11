@@ -90,6 +90,10 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
         agent.thought_chain = f"Execution error: {exc}"
         agent.status = AgentStatus.error
         logger.error("Agent task failed: agent=%s task=%s error=%s", agent.id, task.id, exc)
+        # L3 notification: agent error
+        from backend.notifications import notify as _notify
+        await _notify("action", f"Agent {agent.id} failed on task {task.id}",
+                       message=str(exc)[:200], source=f"agent:{agent.id}")
 
     await _persist_agent(agent)
     # Mark task as completed and check parent

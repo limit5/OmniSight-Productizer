@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from "react"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
+import { NotificationCenter } from "@/components/omnisight/notification-center"
 import { GlobalStatusHeader } from "@/components/omnisight/global-status-header"
 import { SpecNode } from "@/components/omnisight/spec-node"
 import { AgentMatrixWall, defaultAgents, type Agent, type AgentStatus } from "@/components/omnisight/agent-matrix-wall"
@@ -28,6 +29,7 @@ export default function Home() {
   const [syncCount, setSyncCount] = useState(0)
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
   const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
+  const [showNotifications, setShowNotifications] = useState(false)
 
   // Fetch provider list once on mount
   useEffect(() => {
@@ -351,6 +353,8 @@ export default function Home() {
           onResume={handleResume}
           isHalted={isHalted}
           hasRunningAgents={hasRunningAgents || isHalted}
+          unreadNotifications={engine.unreadCount}
+          onToggleNotifications={() => setShowNotifications(prev => !prev)}
         />
 
         {/* ===== MOBILE LAYOUT (< 768px) ===== */}
@@ -491,6 +495,17 @@ export default function Home() {
 
       {/* Mobile Bottom Navigation */}
       <MobileNav activePanel={activePanel} onPanelChange={setActivePanel} />
+
+      {/* Notification Center Panel */}
+      <NotificationCenter
+        open={showNotifications}
+        onClose={() => setShowNotifications(false)}
+        notifications={engine.notifications}
+        onMarkRead={async (id) => {
+          await api.markNotificationRead(id)
+          engine.setUnreadCount(prev => Math.max(0, prev - 1))
+        }}
+      />
     </div>
   )
 }

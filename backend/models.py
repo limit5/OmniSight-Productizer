@@ -165,3 +165,25 @@ class ChatResponse(BaseModel):
     message: OrchestratorMessage
     agents: list[Agent] = Field(default_factory=list)
     tasks: list[Task] = Field(default_factory=list)
+
+
+# ---------- Notifications ----------
+
+class NotificationLevel(str, Enum):
+    info = "info"          # L1: silent log
+    warning = "warning"    # L2: badge + IM
+    action = "action"      # L3: banner + ticket
+    critical = "critical"  # L4: fullscreen + pager
+
+
+class Notification(BaseModel):
+    id: str
+    level: NotificationLevel
+    title: str
+    message: str
+    source: str = ""         # e.g. "agent:firmware-alpha", "gerrit", "token_budget"
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    read: bool = False
+    action_url: Optional[str] = None   # e.g. Gerrit change URL
+    action_label: Optional[str] = None  # e.g. "Review in Gerrit"
+    auto_resolved: bool = False

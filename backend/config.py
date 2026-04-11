@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     token_fallback_model: str = "llama3.1"  # Model to downgrade to at 90%
     llm_fallback_chain: str = "anthropic,openai,google,groq,ollama"  # Failover priority
 
+    # ── Notification Routing ──
+    notification_slack_webhook: str = ""  # Slack Incoming Webhook URL
+    notification_slack_mention: str = ""  # Slack user ID to @ for L3 events
+    notification_jira_url: str = ""  # Jira base URL (e.g. https://jira.company.com)
+    notification_jira_token: str = ""  # Jira API token
+    notification_jira_project: str = ""  # Jira project key (e.g. OMNI)
+    notification_pagerduty_key: str = ""  # PagerDuty Events API v2 routing key
+
     # ── Gerrit Code Review ──
     gerrit_enabled: bool = False  # Master switch for Gerrit integration
     gerrit_url: str = ""  # Web UI URL, e.g. "https://gerrit.sora.services"

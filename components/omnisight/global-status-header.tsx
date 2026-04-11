@@ -14,6 +14,8 @@ interface StatusHeaderProps {
   onResume?: () => void
   isHalted?: boolean
   hasRunningAgents?: boolean
+  unreadNotifications?: number
+  onToggleNotifications?: () => void
 }
 
 export function GlobalStatusHeader({
@@ -24,6 +26,8 @@ export function GlobalStatusHeader({
   usbStatus = "Detecting...",
   onEmergencyStop,
   onResume,
+  unreadNotifications = 0,
+  onToggleNotifications,
   isHalted = false,
   hasRunningAgents = false
 }: StatusHeaderProps) {
@@ -167,9 +171,25 @@ export function GlobalStatusHeader({
           {/* Separator */}
           <div className="w-px h-8 bg-[var(--border)]" />
           
+          {/* Notification Bell */}
+          {onToggleNotifications && (
+            <button
+              onClick={onToggleNotifications}
+              className="relative z-20 p-1.5 rounded transition-colors bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] cursor-pointer"
+              title="Notifications"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+              {unreadNotifications > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[16px] h-4 flex items-center justify-center rounded-full bg-[var(--critical-red)] text-white text-[9px] font-mono font-bold px-1">
+                  {unreadNotifications > 99 ? "99+" : unreadNotifications}
+                </span>
+              )}
+            </button>
+          )}
+
           {/* Emergency Stop / Resume Button */}
           {onEmergencyStop && (
-            <EmergencyStop 
+            <EmergencyStop
               onStop={onEmergencyStop}
               onResume={onResume}
               isHalted={isHalted}

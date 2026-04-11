@@ -20,6 +20,7 @@ export type SSEEvent =
   | { event: "container"; data: { agent_id: string; action: string; detail: string; timestamp: string } }
   | { event: "invoke"; data: { action_type: string; detail: string; timestamp: string } }
   | { event: "token_warning"; data: { level: string; message: string; usage: number; budget: number; timestamp: string } }
+  | { event: "notification"; data: { id: string; level: string; title: string; message: string; source: string; timestamp: string; action_url?: string; action_label?: string } }
   | { event: "heartbeat"; data: { subscribers: number } }
 
 /**
@@ -34,7 +35,7 @@ export function subscribeEvents(
   const eventsUrl = API_V1.startsWith("http") ? `${API_V1}/events` : `${window.location.origin}${API_V1}/events`
   const es = new EventSource(eventsUrl)
 
-  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "heartbeat"]) {
+  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "heartbeat"]) {
     es.addEventListener(eventType, (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data)
@@ -433,6 +434,34 @@ export async function updateTokenBudget(updates: {
 
 export async function resetTokenFreeze() {
   return request<{ status: string }>("/system/token-budget/reset", { method: "POST" })
+}
+
+// ─── Notifications ───
+
+export interface NotificationItem {
+  id: string
+  level: "info" | "warning" | "action" | "critical"
+  title: string
+  message: string
+  source: string
+  timestamp: string
+  read: boolean
+  action_url?: string
+  action_label?: string
+}
+
+export async function getNotifications(limit: number = 50, level?: string) {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (level) params.set("level", level)
+  return request<NotificationItem[]>(`/system/notifications?${params.toString()}`)
+}
+
+export async function markNotificationRead(id: string) {
+  return request<{ status: string }>(`/system/notifications/${id}/read`, { method: "POST" })
+}
+
+export async function getUnreadCount() {
+  return request<{ count: number }>("/system/notifications/unread-count")
 }
 
 // ─── Invoke (Singularity Sync) ───
