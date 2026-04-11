@@ -130,11 +130,32 @@ async def update_task(task_id: str, body: TaskUpdate, force: bool = False):
         if s_str == "completed":
             update_data["completed_at"] = datetime.now().isoformat()
 
+    old_status = task.status
     for field, value in update_data.items():
         setattr(task, field, value)
     await _persist(task)
     emit_task_update(task_id, task.status, task.assigned_agent_id)
+
+    # Sync to external issue tracker (non-blocking)
+    if "status" in update_data and task.issue_url:
+        import asyncio
+        new_str = task.status.value if hasattr(task.status, "value") else task.status
+        asyncio.create_task(_sync_external_issue(task.issue_url, new_str, task.id))
+
     return task
+
+
+async def _sync_external_issue(issue_url: str, status: str, task_id: str) -> None:
+    """Background: sync task status to external issue tracker."""
+    try:
+        from backend.issue_tracker import sync_issue_status
+        result = await sync_issue_status(issue_url, status, comment=f"OmniSight task {task_id} status → {status}")
+        if result.get("status") == "error":
+            import logging
+            logging.getLogger(__name__).warning("External sync failed for %s: %s", task_id, result.get("message"))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("External sync error for %s: %s", task_id, exc)
 
 
 # ── Task Comments ──
