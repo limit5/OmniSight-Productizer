@@ -291,6 +291,9 @@ class Notification(BaseModel):
     action_url: Optional[str] = None   # e.g. Gerrit change URL
     action_label: Optional[str] = None  # e.g. "Review in Gerrit"
     auto_resolved: bool = False
+    dispatch_status: str = "pending"  # pending, sent, failed, skipped
+    send_attempts: int = 0
+    last_error: Optional[str] = None
 
 
 # ---------- Simulations ----------
