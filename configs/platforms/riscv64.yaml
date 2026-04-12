@@ -1,0 +1,14 @@
+# OmniSight Platform Profile: RISC-V 64-bit
+platform: riscv64
+label: "RISC-V 64-bit"
+
+toolchain: riscv64-linux-gnu-gcc
+cross_prefix: riscv64-linux-gnu-
+qemu: qemu-riscv64-static
+arch_flags: -march=rv64gc -mabi=lp64d
+kernel_arch: riscv
+
+docker_packages:
+  - gcc-riscv64-linux-gnu
+  - g++-riscv64-linux-gnu
+  - binutils-riscv64-linux-gnu

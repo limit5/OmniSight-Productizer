@@ -164,6 +164,24 @@ CREATE TABLE IF NOT EXISTS token_usage (
     avg_latency     INTEGER NOT NULL DEFAULT 0,
     last_used       TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS simulations (
+    id              TEXT PRIMARY KEY,
+    task_id         TEXT,
+    agent_id        TEXT,
+    track           TEXT NOT NULL,
+    module          TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'running',
+    tests_total     INTEGER NOT NULL DEFAULT 0,
+    tests_passed    INTEGER NOT NULL DEFAULT 0,
+    tests_failed    INTEGER NOT NULL DEFAULT 0,
+    coverage_pct    REAL NOT NULL DEFAULT 0.0,
+    valgrind_errors INTEGER NOT NULL DEFAULT 0,
+    duration_ms     INTEGER NOT NULL DEFAULT 0,
+    report_json     TEXT NOT NULL DEFAULT '{}',
+    artifact_id     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -512,4 +530,61 @@ async def save_npi_state(data: dict) -> None:
            ON CONFLICT(id) DO UPDATE SET data=excluded.data""",
         {"data": json.dumps(data)},
     )
+    await _conn().commit()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Simulations
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_simulation(data: dict) -> None:
+    await _conn().execute(
+        """INSERT INTO simulations
+           (id, task_id, agent_id, track, module, status,
+            tests_total, tests_passed, tests_failed,
+            coverage_pct, valgrind_errors, duration_ms,
+            report_json, artifact_id, created_at)
+           VALUES (:id, :task_id, :agent_id, :track, :module, :status,
+                   :tests_total, :tests_passed, :tests_failed,
+                   :coverage_pct, :valgrind_errors, :duration_ms,
+                   :report_json, :artifact_id, :created_at)""",
+        data,
+    )
+    await _conn().commit()
+
+
+async def get_simulation(sim_id: str) -> dict | None:
+    async with _conn().execute("SELECT * FROM simulations WHERE id = ?", (sim_id,)) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def list_simulations(
+    task_id: str = "", agent_id: str = "", status: str = "", limit: int = 50,
+) -> list[dict]:
+    query = "SELECT * FROM simulations"
+    conditions: list[str] = []
+    params: list = []
+    if task_id:
+        conditions.append("task_id = ?")
+        params.append(task_id)
+    if agent_id:
+        conditions.append("agent_id = ?")
+        params.append(agent_id)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with _conn().execute(query, params) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def update_simulation(sim_id: str, data: dict) -> None:
+    sets = ", ".join(f"{k} = :{k}" for k in data)
+    data["_id"] = sim_id
+    await _conn().execute(f"UPDATE simulations SET {sets} WHERE id = :_id", data)
     await _conn().commit()

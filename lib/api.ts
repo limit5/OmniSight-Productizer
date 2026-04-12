@@ -22,6 +22,7 @@ export type SSEEvent =
   | { event: "token_warning"; data: { level: string; message: string; usage: number; budget: number; timestamp: string } }
   | { event: "notification"; data: { id: string; level: string; title: string; message: string; source: string; timestamp: string; action_url?: string; action_label?: string } }
   | { event: "artifact_created"; data: { id: string; name: string; type: string; task_id: string; agent_id: string; size: number } }
+  | { event: "simulation"; data: { sim_id: string; action: "start" | "progress" | "result"; detail: string; status?: string; track?: string; module?: string; tests_total?: number; tests_passed?: number; timestamp: string } }
   | { event: "heartbeat"; data: { subscribers: number } }
 
 /**
@@ -36,7 +37,7 @@ export function subscribeEvents(
   const eventsUrl = API_V1.startsWith("http") ? `${API_V1}/events` : `${window.location.origin}${API_V1}/events`
   const es = new EventSource(eventsUrl)
 
-  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "artifact_created", "heartbeat"]) {
+  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "artifact_created", "simulation", "heartbeat"]) {
     es.addEventListener(eventType, (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data)
@@ -421,6 +422,43 @@ export interface CompressionStats {
 
 export async function getCompressionStats() {
   return request<CompressionStats>("/system/compression")
+}
+
+// ─── Simulations ───
+
+export interface SimulationItem {
+  id: string
+  task_id: string | null
+  agent_id: string | null
+  track: "algo" | "hw"
+  module: string
+  status: "running" | "pass" | "fail" | "error"
+  tests_total: number
+  tests_passed: number
+  tests_failed: number
+  coverage_pct: number
+  valgrind_errors: number
+  duration_ms: number
+  report_json?: Record<string, unknown>
+  created_at: string
+}
+
+export async function listSimulations(params?: { task_id?: string; status?: string }): Promise<SimulationItem[]> {
+  const qs = new URLSearchParams()
+  if (params?.task_id) qs.set("task_id", params.task_id)
+  if (params?.status) qs.set("status", params.status)
+  return request<SimulationItem[]>(`/simulations?${qs.toString()}`)
+}
+
+export async function getSimulation(simId: string): Promise<SimulationItem> {
+  return request<SimulationItem>(`/simulations/${simId}`)
+}
+
+export async function triggerSimulation(body: { track: string; module: string; input_data?: string; mock?: boolean; platform?: string }): Promise<{ result: string }> {
+  return request<{ result: string }>("/simulations", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
 }
 
 // ─── Artifacts ───

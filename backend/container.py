@@ -22,11 +22,25 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import hashlib
+
 from backend.events import emit_agent_update, emit_pipeline_phase, emit_container
 
 logger = logging.getLogger(__name__)
 
-DOCKER_IMAGE = "omnisight-agent:latest"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DOCKERFILE = _PROJECT_ROOT / "backend" / "docker" / "Dockerfile.agent"
+
+
+def _dockerfile_hash() -> str:
+    """SHA256 of Dockerfile content → deterministic image tag."""
+    try:
+        return hashlib.sha256(_DOCKERFILE.read_bytes()).hexdigest()[:12]
+    except FileNotFoundError:
+        return "latest"
+
+
+DOCKER_IMAGE = f"omnisight-agent:{_dockerfile_hash()}"
 DOCKER_TIMEOUT = 60  # seconds for commands
 BUILD_TIMEOUT = 300  # seconds for image build
 
@@ -106,11 +120,20 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     if not await ensure_image():
         raise RuntimeError(f"Docker image {DOCKER_IMAGE} not available")
 
+    # Build mount list — workspace always, test_assets/simulate.sh conditionally (:ro)
+    mounts = f"-v {workspace_path.resolve()}:/workspace "
+    test_assets_path = _PROJECT_ROOT / "test_assets"
+    if test_assets_path.is_dir() and any(test_assets_path.iterdir()):
+        mounts += f"-v {test_assets_path.resolve()}:/workspace/test_assets:ro "
+    scripts_path = _PROJECT_ROOT / "scripts" / "simulate.sh"
+    if scripts_path.is_file():
+        mounts += f"-v {scripts_path.resolve()}:/opt/omnisight/simulate.sh:ro "
+
     # Start container with workspace mounted
     rc, out, err = await _run(
         f"docker run -d "
         f"--name {container_name} "
-        f"-v {workspace_path.resolve()}:/workspace "
+        f"{mounts}"
         f"-w /workspace "
         f"--network none "  # no network access by default (security)
         f"{DOCKER_IMAGE}"

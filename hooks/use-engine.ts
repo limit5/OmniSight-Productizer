@@ -103,6 +103,7 @@ export function useEngine() {
   const [unreadCount, setUnreadCount] = useState(0)
   const [compressionStats, setCompressionStats] = useState<api.CompressionStats | null>(null)
   const [artifacts, setArtifacts] = useState<api.ArtifactItem[]>([])
+  const [simulations, setSimulations] = useState<api.SimulationItem[]>([])
   const [npiData, setNpiData] = useState<api.NPIData | null>(null)
   const initRef = useRef(false)
 
@@ -117,7 +118,7 @@ export function useEngine() {
 
     async function fetchSystemData() {
       try {
-        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes, unreadRes, compressRes] = await Promise.all([
+        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes, unreadRes, compressRes, simsRes] = await Promise.all([
           api.getSystemStatus(),
           api.getSystemInfo(),
           api.getDevices(),
@@ -128,6 +129,7 @@ export function useEngine() {
           api.getTokenBudget(),
           api.getUnreadCount(),
           api.getCompressionStats(),
+          api.listSimulations(),
         ])
         setSystemStatus(statusRes)
         setSystemInfo(infoRes)
@@ -139,6 +141,7 @@ export function useEngine() {
         setTokenBudget(budgetRes)
         setUnreadCount(unreadRes.count)
         setCompressionStats(compressRes)
+        setSimulations(simsRes)
         console.log("[Engine] System data loaded:", infoRes.hostname, infoRes.cpu_model)
       } catch (e) {
         console.warn("[Engine] System data fetch failed:", e)
@@ -239,6 +242,39 @@ export function useEngine() {
                 level,
                 frozen: level === "frozen",
               } : prev)
+            } else if (event.event === "simulation") {
+              const action = d.action as string
+              const simId = d.sim_id as string
+              logMsg = `[SIM] ${(d.track as string || "").toUpperCase()}/${d.module}: ${d.detail}`
+              logLevel = (d.status as string) === "fail" || (d.status as string) === "error" ? "error" : "info"
+              if (action === "start") {
+                setSimulations(prev => [{
+                  id: simId,
+                  task_id: null,
+                  agent_id: null,
+                  track: (d.track as "algo" | "hw") || "algo",
+                  module: (d.module as string) || "",
+                  status: "running",
+                  tests_total: (d.tests_total as number) || 0,
+                  tests_passed: 0,
+                  tests_failed: 0,
+                  coverage_pct: 0,
+                  valgrind_errors: 0,
+                  duration_ms: 0,
+                  created_at: (d.timestamp as string) || new Date().toISOString(),
+                }, ...prev.slice(0, 49)])
+              } else if (action === "result") {
+                setSimulations(prev => prev.map(s =>
+                  s.id === simId
+                    ? {
+                        ...s,
+                        status: (d.status as "pass" | "fail" | "error") || s.status,
+                        tests_passed: (d.tests_passed as number) ?? s.tests_passed,
+                        tests_total: (d.tests_total as number) ?? s.tests_total,
+                      }
+                    : s
+                ))
+              }
             }
 
             if (logMsg) {
@@ -580,6 +616,8 @@ export function useEngine() {
     tokenBudget,
     compressionStats,
     artifacts,
+    simulations,
+    setSimulations,
     npiData,
     setNpiData,
     notifications,

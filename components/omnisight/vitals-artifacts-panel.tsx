@@ -1,7 +1,8 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, Signal, Wifi, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2 } from "lucide-react"
+import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, Signal, Wifi, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2, Cpu, Play, ToggleLeft, ToggleRight } from "lucide-react"
+import type { SimulationItem } from "@/lib/api"
 
 export type StreamType = "uvc" | "rtsp"
 
@@ -354,7 +355,179 @@ function StreamPreview({
   )
 }
 
-function ReporterVortex({ logs, artifacts }: { logs: LogEntry[]; artifacts: Artifact[] }) {
+function SimulationResults({
+  simulations,
+  onTriggerSimulation,
+}: {
+  simulations: SimulationItem[]
+  onTriggerSimulation?: (track: string, module: string, mock: boolean) => void
+}) {
+  const [collapsed, setCollapsed] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [formTrack, setFormTrack] = useState<"algo" | "hw">("algo")
+  const [formModule, setFormModule] = useState("")
+  const [formMock, setFormMock] = useState(true)
+
+  return (
+    <div className="border-b border-[var(--border)]">
+      {/* Header */}
+      <button
+        onClick={() => setCollapsed(!collapsed)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-[var(--secondary)] transition-colors"
+      >
+        <Cpu size={12} className="text-[var(--neural-blue)]" />
+        <span className="font-mono text-[9px] font-semibold tracking-fui text-[var(--neural-blue)] flex-1 text-left">
+          SIMULATION RESULTS
+        </span>
+        <span className="font-mono text-[9px] text-[var(--muted-foreground)]">{simulations.length}</span>
+        <ChevronDown size={10} className={`text-[var(--muted-foreground)] transition-transform ${collapsed ? "-rotate-90" : ""}`} />
+      </button>
+
+      {!collapsed && (
+        <div className="px-3 pb-2 space-y-1.5">
+          {/* Simulation items */}
+          {simulations.map(sim => {
+            const statusColor =
+              sim.status === "pass" ? "text-[var(--validation-emerald)]" :
+              sim.status === "fail" ? "text-[var(--critical-red)]" :
+              sim.status === "running" ? "text-[var(--hardware-orange)]" :
+              "text-[var(--critical-red)]"
+            const statusBg =
+              sim.status === "pass" ? "bg-[var(--validation-emerald)]/15" :
+              sim.status === "fail" ? "bg-[var(--critical-red)]/15" :
+              sim.status === "running" ? "bg-[var(--hardware-orange)]/15" :
+              "bg-[var(--critical-red)]/15"
+
+            return (
+              <div key={sim.id} className="flex items-center gap-1.5 p-1.5 rounded bg-[var(--secondary)] hover:bg-[var(--secondary-foreground)]/10 transition-colors">
+                {/* Track icon */}
+                <Cpu size={10} className={sim.track === "algo" ? "text-[var(--neural-blue)]" : "text-[var(--hardware-orange)]"} />
+                {/* Module */}
+                <span className="font-mono text-[9px] text-[var(--foreground)] flex-1 truncate">{sim.module}</span>
+                {/* Status badge */}
+                <span className={`font-mono text-[8px] font-semibold px-1.5 py-0.5 rounded ${statusColor} ${statusBg}`}>
+                  {sim.status.toUpperCase()}
+                </span>
+                {/* Test count */}
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                  {sim.tests_passed}/{sim.tests_total}
+                </span>
+                {/* Duration */}
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                  {sim.duration_ms}ms
+                </span>
+                {/* Valgrind errors */}
+                {sim.valgrind_errors > 0 && (
+                  <span className="font-mono text-[8px] text-[var(--critical-red)] font-semibold">
+                    V:{sim.valgrind_errors}
+                  </span>
+                )}
+              </div>
+            )
+          })}
+
+          {simulations.length === 0 && (
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-2 text-center opacity-60">
+              No simulation results yet
+            </div>
+          )}
+
+          {/* RUN button / inline form */}
+          {!showForm ? (
+            <button
+              onClick={() => setShowForm(true)}
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded border border-dashed border-[var(--border)] hover:border-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/5 transition-all group"
+            >
+              <Play size={10} className="text-[var(--muted-foreground)] group-hover:text-[var(--neural-blue)]" />
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)] group-hover:text-[var(--neural-blue)]">RUN</span>
+            </button>
+          ) : (
+            <div className="space-y-1.5 p-2 rounded border border-[var(--border)] bg-[var(--background)]">
+              {/* Track selector */}
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-10">TRACK</span>
+                <div className="flex gap-1 flex-1">
+                  <button
+                    onClick={() => setFormTrack("algo")}
+                    className={`flex-1 font-mono text-[9px] py-1 rounded transition-colors ${
+                      formTrack === "algo"
+                        ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)] border border-[var(--neural-blue)]"
+                        : "bg-[var(--secondary)] text-[var(--muted-foreground)] border border-[var(--border)]"
+                    }`}
+                  >
+                    ALGO
+                  </button>
+                  <button
+                    onClick={() => setFormTrack("hw")}
+                    className={`flex-1 font-mono text-[9px] py-1 rounded transition-colors ${
+                      formTrack === "hw"
+                        ? "bg-[var(--hardware-orange)]/20 text-[var(--hardware-orange)] border border-[var(--hardware-orange)]"
+                        : "bg-[var(--secondary)] text-[var(--muted-foreground)] border border-[var(--border)]"
+                    }`}
+                  >
+                    HW
+                  </button>
+                </div>
+              </div>
+              {/* Module input */}
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-10">MOD</span>
+                <input
+                  type="text"
+                  value={formModule}
+                  onChange={(e) => setFormModule(e.target.value)}
+                  placeholder="module name"
+                  className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                />
+              </div>
+              {/* Mock toggle */}
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-10">MOCK</span>
+                <button
+                  onClick={() => setFormMock(!formMock)}
+                  className="flex items-center gap-1"
+                >
+                  {formMock ? (
+                    <ToggleRight size={16} className="text-[var(--validation-emerald)]" />
+                  ) : (
+                    <ToggleLeft size={16} className="text-[var(--muted-foreground)]" />
+                  )}
+                  <span className={`font-mono text-[9px] ${formMock ? "text-[var(--validation-emerald)]" : "text-[var(--muted-foreground)]"}`}>
+                    {formMock ? "ON" : "OFF"}
+                  </span>
+                </button>
+              </div>
+              {/* Submit / Cancel */}
+              <div className="flex gap-1.5 pt-1">
+                <button
+                  onClick={() => {
+                    if (formModule.trim() && onTriggerSimulation) {
+                      onTriggerSimulation(formTrack, formModule.trim(), formMock)
+                      setFormModule("")
+                      setShowForm(false)
+                    }
+                  }}
+                  disabled={!formModule.trim()}
+                  className="flex-1 font-mono text-[9px] py-1.5 rounded bg-[var(--neural-blue)] text-black font-semibold hover:opacity-90 transition-opacity disabled:opacity-30"
+                >
+                  EXECUTE
+                </button>
+                <button
+                  onClick={() => setShowForm(false)}
+                  className="font-mono text-[9px] py-1.5 px-3 rounded border border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--secondary)] transition-colors"
+                >
+                  CANCEL
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation }: { logs: LogEntry[]; artifacts: Artifact[]; simulations?: SimulationItem[]; onTriggerSimulation?: (track: string, module: string, mock: boolean) => void }) {
   return (
     <div className="holo-glass-simple rounded flex-1 flex flex-col overflow-hidden">
       {/* Header */}
@@ -413,6 +586,9 @@ function ReporterVortex({ logs, artifacts }: { logs: LogEntry[]; artifacts: Arti
         })}
       </div>
       
+      {/* Simulation Results */}
+      <SimulationResults simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
+
       {/* Artifacts */}
       <div className="border-t border-[var(--border)] p-3">
         <div className="font-mono text-xs text-[var(--muted-foreground)] mb-2">GENERATED ARTIFACTS</div>
@@ -450,6 +626,8 @@ interface VitalsArtifactsPanelProps {
   streamSources?: StreamSource[]
   selectedStreamId?: string
   onStreamChange?: (streamId: string) => void
+  simulations?: SimulationItem[]
+  onTriggerSimulation?: (track: string, module: string, mock: boolean) => void
 }
 
 // Compact feed card for multi-view
@@ -631,13 +809,15 @@ function AddFeedButton({
   )
 }
 
-export function VitalsArtifactsPanel({ 
+export function VitalsArtifactsPanel({
   vitals = emptyVitals,
   logs = noLogs,
   artifacts = noArtifacts,
   streamSources = noStreamSources,
   selectedStreamId,
-  onStreamChange
+  onStreamChange,
+  simulations = [],
+  onTriggerSimulation,
 }: VitalsArtifactsPanelProps) {
   // Track multiple active feeds (0-8)
   const [activeFeeds, setActiveFeeds] = useState<string[]>(() => {
@@ -766,7 +946,7 @@ export function VitalsArtifactsPanel({
       
       {/* Reporter Vortex - Collapsible when many feeds */}
       {activeFeeds.length <= 4 && (
-        <ReporterVortex logs={logs} artifacts={artifacts} />
+        <ReporterVortex logs={logs} artifacts={artifacts} simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
       )}
     </div>
   )

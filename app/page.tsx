@@ -359,6 +359,10 @@ export default function Home() {
                 timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
                 size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
               })) : undefined}
+              simulations={engine.simulations}
+              onTriggerSimulation={async (track, module, mock) => {
+                try { await api.triggerSimulation({ track, module, mock }) } catch (e) { console.error("Trigger simulation failed:", e) }
+              }}
             />
       default:
         return null
@@ -538,6 +542,10 @@ export default function Home() {
                 timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
                 size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
               })) : undefined}
+              simulations={engine.simulations}
+              onTriggerSimulation={async (track, module, mock) => {
+                try { await api.triggerSimulation({ track, module, mock }) } catch (e) { console.error("Trigger simulation failed:", e) }
+              }}
             />
           </aside>
         </main>

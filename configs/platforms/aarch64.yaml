@@ -1,0 +1,14 @@
+# OmniSight Platform Profile: AArch64 (ARM 64-bit)
+platform: aarch64
+label: "ARM 64-bit (AArch64)"
+
+toolchain: aarch64-linux-gnu-gcc
+cross_prefix: aarch64-linux-gnu-
+qemu: qemu-aarch64-static
+arch_flags: -march=armv8-a
+kernel_arch: arm64
+
+docker_packages:
+  - gcc-aarch64-linux-gnu
+  - g++-aarch64-linux-gnu
+  - binutils-aarch64-linux-gnu

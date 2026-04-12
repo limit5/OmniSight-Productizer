@@ -172,6 +172,11 @@ _RULE_TOOL_PATTERNS: list[tuple[re.Pattern, str, dict]] = [
     # Report generation
     (re.compile(r"(?:generate|create)\s+(?:a\s+)?(\w+)\s+report", re.I), "generate_artifact_report",
      lambda m: {"template": m.group(1).strip().lower(), "title": f"{m.group(1).strip()} Report"}),
+    # Simulation
+    (re.compile(r"(?:run|execute|start)\s+(?:a\s+)?(?:simulation|sim)\s+(?:for\s+)?(\w+)", re.I), "run_simulation",
+     lambda m: {"track": "algo", "module": m.group(1).strip()}),
+    (re.compile(r"simulate\s+(\w+)", re.I), "run_simulation",
+     lambda m: {"track": "algo", "module": m.group(1).strip()}),
 ]
 
 

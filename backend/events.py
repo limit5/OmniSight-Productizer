@@ -159,3 +159,15 @@ def emit_token_warning(level: str, message: str, usage: float = 0, budget: float
     })
     level_label = {"warn": "warn", "downgrade": "warn", "frozen": "error", "reset": "info"}.get(level, "warn")
     _log(f"[TOKEN] {level.upper()}: {message}", level=level_label)
+
+
+def emit_simulation(sim_id: str, action: str, detail: str = "", **extra: Any) -> None:
+    """Simulation lifecycle events: start, progress, result."""
+    bus.publish("simulation", {
+        "sim_id": sim_id,
+        "action": action,
+        "detail": detail,
+        **extra,
+    })
+    level_label = "error" if action == "result" and extra.get("status") == "fail" else "info"
+    _log(f"[SIM] {sim_id} {action}: {detail}", level=level_label)

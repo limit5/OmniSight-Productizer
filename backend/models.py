@@ -291,3 +291,44 @@ class Notification(BaseModel):
     action_url: Optional[str] = None   # e.g. Gerrit change URL
     action_label: Optional[str] = None  # e.g. "Review in Gerrit"
     auto_resolved: bool = False
+
+
+# ---------- Simulations ----------
+
+class SimulationTrack(str, Enum):
+    algo = "algo"
+    hw = "hw"
+
+
+class SimulationStatus(str, Enum):
+    running = "running"
+    passed = "pass"
+    failed = "fail"
+    error = "error"
+
+
+class Simulation(BaseModel):
+    id: str
+    task_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    track: SimulationTrack
+    module: str
+    status: SimulationStatus = SimulationStatus.running
+    tests_total: int = 0
+    tests_passed: int = 0
+    tests_failed: int = 0
+    coverage_pct: float = 0.0
+    valgrind_errors: int = 0
+    duration_ms: int = 0
+    report_json: dict = Field(default_factory=dict)
+    artifact_id: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class SimulationRequest(BaseModel):
+    track: SimulationTrack
+    module: str
+    input_data: Optional[str] = None
+    mock: bool = True
+    platform: str = "aarch64"
+    task_id: Optional[str] = None

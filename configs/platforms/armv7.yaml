@@ -1,0 +1,14 @@
+# OmniSight Platform Profile: ARMv7 (ARM 32-bit)
+platform: armv7
+label: "ARM 32-bit (ARMv7-A)"
+
+toolchain: arm-linux-gnueabihf-gcc
+cross_prefix: arm-linux-gnueabihf-
+qemu: qemu-arm-static
+arch_flags: -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard
+kernel_arch: arm
+
+docker_packages:
+  - gcc-arm-linux-gnueabihf
+  - g++-arm-linux-gnueabihf
+  - binutils-arm-linux-gnueabihf

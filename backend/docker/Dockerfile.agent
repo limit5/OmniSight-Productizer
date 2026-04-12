@@ -22,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils-aarch64-linux-gnu \
     # Kernel headers for module builds
     linux-libc-dev \
+    # Simulation & verification
+    valgrind \
+    qemu-user-static \
     # Utility
     file \
     tree \
@@ -35,6 +38,10 @@ RUN rtk init --global 2>/dev/null || true
 # ── Git configuration ──
 RUN git config --system init.defaultBranch main \
  && git config --system safe.directory '*'
+
+# ── Simulation script ──
+COPY scripts/simulate.sh /opt/omnisight/simulate.sh
+RUN chmod +x /opt/omnisight/simulate.sh
 
 # ── Working directory ──
 WORKDIR /workspace

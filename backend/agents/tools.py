@@ -415,6 +415,10 @@ async def run_bash(command: str) -> str:
         else:
             return "[BLOCKED] Command contains a dangerous pattern and was not executed."
 
+    # Redirect simulate.sh calls to the dedicated run_simulation tool
+    if "simulate.sh" in command:
+        return "[REDIRECT] Please use the run_simulation tool instead of calling simulate.sh directly. It provides structured JSON parsing, DB tracking, and proper timeout (120s)."
+
     # Try container execution first
     agent_id = get_active_agent_id()
     if agent_id:
@@ -809,6 +813,146 @@ async def generate_artifact_report(template: str, title: str = "", context_json:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  8. Simulation tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SIMULATION_TIMEOUT = 120  # seconds — Valgrind/QEMU are slow
+
+
+@tool
+async def run_simulation(track: str, module: str, input_data: str = "", mock: bool = True, platform: str = "aarch64") -> str:
+    """Run dual-track simulation for a firmware or algorithm module.
+
+    Args:
+        track: 'algo' (data-driven) or 'hw' (peripheral mock/QEMU).
+        module: Module name under src/ (e.g. 'core_algorithm').
+        input_data: Optional input file path relative to test_assets/.
+        mock: For hw track, True=mock sysfs, False=QEMU cross-run.
+        platform: Target platform profile (aarch64, armv7, riscv64).
+    """
+    import json as _json
+    import uuid
+    from datetime import datetime as _dt
+
+    from backend import db
+    from backend.events import emit_simulation
+
+    if track not in ("algo", "hw"):
+        return "[ERROR] track must be 'algo' or 'hw'"
+
+    sim_id = f"sim-{uuid.uuid4().hex[:8]}"
+    now = _dt.now().isoformat()
+
+    # Insert running record
+    await db.insert_simulation({
+        "id": sim_id, "task_id": "", "agent_id": get_active_agent_id() or "",
+        "track": track, "module": module, "status": "running",
+        "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
+        "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+        "report_json": "{}", "artifact_id": None, "created_at": now,
+    })
+    emit_simulation(sim_id, "start", f"{track}/{module} on {platform}")
+
+    # Build command
+    cmd_parts = [
+        "/opt/omnisight/simulate.sh",
+        f"--type={track}",
+        f"--module={module}",
+        f"--platform={platform}",
+        f"--mock={'true' if mock else 'false'}",
+        "--coverage-check=true",
+    ]
+    if input_data:
+        cmd_parts.append(f"--input={input_data}")
+    cmd = " ".join(cmd_parts)
+
+    # Execute in container or host
+    raw_output = ""
+    try:
+        agent_id = get_active_agent_id()
+        if agent_id:
+            try:
+                from backend.container import get_container, exec_in_container
+                container = get_container(agent_id)
+                if container:
+                    rc, raw_output = await exec_in_container(
+                        container.container_id, cmd, timeout=SIMULATION_TIMEOUT
+                    )
+                else:
+                    raise RuntimeError("No container")
+            except Exception:
+                # Fallback to host
+                workspace = get_active_workspace()
+                proc = await asyncio.create_subprocess_shell(
+                    cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    cwd=workspace,
+                )
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=SIMULATION_TIMEOUT
+                )
+                raw_output = (stdout or b"").decode(errors="replace")
+        else:
+            workspace = get_active_workspace()
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=workspace,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=SIMULATION_TIMEOUT
+            )
+            raw_output = (stdout or b"").decode(errors="replace")
+    except asyncio.TimeoutError:
+        await db.update_simulation(sim_id, {"status": "error", "report_json": '{"errors":["Timeout"]}'})
+        emit_simulation(sim_id, "result", "Timeout", status="error")
+        return f"[TIMEOUT] Simulation {sim_id} timed out after {SIMULATION_TIMEOUT}s"
+
+    # Parse JSON report from stdout
+    report = {}
+    try:
+        report = _json.loads(raw_output.strip())
+    except (ValueError, _json.JSONDecodeError):
+        await db.update_simulation(sim_id, {
+            "status": "error",
+            "report_json": _json.dumps({"errors": ["Failed to parse JSON output"], "raw": raw_output[:500]}),
+        })
+        emit_simulation(sim_id, "result", "JSON parse error", status="error")
+        return f"[ERROR] Simulation {sim_id}: failed to parse JSON output. Raw: {raw_output[:300]}"
+
+    # Extract structured fields
+    status = report.get("status", "error")
+    tests = report.get("tests", {})
+    coverage = report.get("coverage", {})
+    valgrind = report.get("valgrind", {})
+
+    await db.update_simulation(sim_id, {
+        "status": status,
+        "tests_total": tests.get("total", 0),
+        "tests_passed": tests.get("passed", 0),
+        "tests_failed": tests.get("failed", 0),
+        "coverage_pct": coverage.get("percentage", 0.0),
+        "valgrind_errors": valgrind.get("errors", 0),
+        "duration_ms": report.get("duration_ms", 0),
+        "report_json": _json.dumps(report),
+    })
+
+    emit_simulation(sim_id, "result", f"{status}: {tests.get('passed', 0)}/{tests.get('total', 0)} tests",
+                    status=status, track=track, module=module,
+                    tests_total=tests.get("total", 0), tests_passed=tests.get("passed", 0))
+
+    # Return concise summary (not full JSON — save tokens)
+    errors = report.get("errors", [])
+    error_str = f" Errors: {'; '.join(str(e) for e in errors[:3])}" if errors else ""
+    valgrind_str = f" Valgrind: {valgrind.get('errors', 0)} error(s)." if valgrind.get("ran") else ""
+    return (
+        f"[{'PASS' if status == 'pass' else 'FAIL'}] Simulation {sim_id} ({track}/{module}): "
+        f"{tests.get('passed', 0)}/{tests.get('total', 0)} tests passed, "
+        f"coverage {coverage.get('percentage', 0):.0f}%, "
+        f"duration {report.get('duration_ms', 0)}ms."
+        f"{valgrind_str}{error_str}"
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Tool registry
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -818,15 +962,16 @@ BASH_TOOLS = [run_bash]
 REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
 REPORT_TOOLS = [generate_artifact_report]
+SIMULATION_TOOLS = [run_simulation]
 
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
-    "firmware":       ALL_TOOLS,
-    "software":       ALL_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS,
+    "firmware":       ALL_TOOLS + SIMULATION_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS,
+    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment],
     "general":        ALL_TOOLS,
