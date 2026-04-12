@@ -16,7 +16,7 @@ import json
 import logging
 import re
 
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
@@ -854,21 +854,26 @@ def context_compression_gate(state: GraphState) -> dict:
                      if any(k in l for k in ("[OK]", "[FAIL]", "[ERROR]", "AGENT]", "decided", "completed"))]
         summary = "\n".join(key_lines[:10]) if key_lines else old_text[:600]
 
-    # Replace old messages with a single compressed message
+    # Use RemoveMessage to delete old messages, then append compressed digest.
+    # The add_messages reducer processes RemoveMessage by ID, so this correctly
+    # removes old entries and appends the new compressed message.
+    remove_ops = []
+    for m in old_messages:
+        if hasattr(m, "id") and m.id:
+            remove_ops.append(RemoveMessage(id=m.id))
+
     compressed_msg = AIMessage(content=f"[L2 COMPRESSED HISTORY]\n{summary}")
-    new_messages = [compressed_msg] + recent_messages
 
     logger.info(
-        "L2 context compressed: %d messages → %d (saved ~%d tokens)",
-        len(messages), len(new_messages),
-        est_tokens - (_estimate_context_tokens(GraphState(messages=new_messages))),
+        "L2 context compressed: removing %d old messages, adding 1 digest (%d chars)",
+        len(remove_ops), len(summary),
     )
     emit_pipeline_phase(
         "l2_compress",
         f"Compressed {len(old_messages)} old messages into digest ({len(summary)} chars)",
     )
 
-    return {"messages": new_messages}
+    return {"messages": remove_ops + [compressed_msg]}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
