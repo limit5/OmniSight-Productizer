@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_slash_command(command: str, args: str) -> str | None:
-    """Handle a slash command. Returns response text or None to fall through to LLM."""
+    """Handle a slash command. Returns response text or None for non-/ input."""
+    if not command:
+        return "Type `/help` to see available commands."
     handler = _HANDLERS.get(command)
     if handler:
         try:
@@ -22,7 +24,9 @@ async def handle_slash_command(command: str, args: str) -> str | None:
         except Exception as exc:
             logger.warning("Slash command /%s failed: %s", command, exc)
             return f"[ERROR] /{command} failed: {exc}"
-    return None  # Unknown command — let LLM handle it
+    # Unknown slash command — return error instead of falling through to LLM
+    known = ", ".join(f"/{n}" for n in sorted(_HANDLERS.keys())[:10])
+    return f"Unknown command: `/{command}`. Available: {known}... Type `/help` for full list."
 
 
 async def _status(args: str) -> str:
@@ -177,26 +181,120 @@ async def _sdks(args: str) -> str:
     return "\n".join(lines)
 
 
+async def _platform(args: str) -> str:
+    from backend.agents.tools import get_platform_config
+    platform = args.strip() or "aarch64"
+    result = await get_platform_config.ainvoke({"platform": platform})
+    return result
+
+
+async def _spawn(args: str) -> str:
+    agent_type = args.strip().lower() or "general"
+    from backend.routers.agents import _agents, _persist
+    from backend.models import Agent, AgentType, AgentStatus
+    import uuid
+    valid = {e.value for e in AgentType}
+    if agent_type not in valid:
+        return f"[ERROR] Unknown agent type: {agent_type}. Valid: {', '.join(sorted(valid))}"
+    agent = Agent(
+        id=f"{agent_type}-{uuid.uuid4().hex[:6]}",
+        name=f"{agent_type.title()} Agent",
+        type=AgentType(agent_type),
+        status=AgentStatus.idle,
+    )
+    _agents[agent.id] = agent
+    try:
+        await _persist(agent)
+    except Exception:
+        pass
+    return f"Agent spawned: **{agent.name}** (`{agent.id}`) — status: idle"
+
+
+async def _switch(args: str) -> str:
+    parts = args.strip().split()
+    provider = parts[0] if parts else ""
+    model = parts[1] if len(parts) > 1 else ""
+    if not provider:
+        return "[ERROR] Usage: /switch [provider] [model]"
+    from backend.routers.providers import switch_provider, SwitchProviderRequest
+    try:
+        result = await switch_provider(SwitchProviderRequest(provider=provider, model=model or None))
+        return f"Switched to **{result['provider']}** ({result['model']}). LLM active: {result['llm_active']}"
+    except Exception as exc:
+        return f"[ERROR] Switch failed: {exc}"
+
+
+async def _build(args: str) -> str:
+    module = args.strip() or "firmware"
+    return f"[ROUTE TO LLM] Build request for `{module}`. This command will be processed by the agent pipeline.\n\n_Tip: Use INVOKE to auto-dispatch build tasks._"
+
+
+async def _test(args: str) -> str:
+    module = args.strip() or "all"
+    return f"[ROUTE TO LLM] Test request for `{module}`. This command will be processed by the agent pipeline."
+
+
+async def _simulate(args: str) -> str:
+    module = args.strip()
+    if not module:
+        return "[ERROR] Usage: /simulate [module_name]"
+    return f"[ROUTE TO LLM] Simulation request for `{module}`. Agent will call run_simulation tool."
+
+
+async def _review(args: str) -> str:
+    return "[ROUTE TO LLM] Code review request. Agent will use Gerrit tools to review pending changes."
+
+
+async def _assign(args: str) -> str:
+    if not args.strip():
+        return "[ERROR] Usage: /assign [task_id or title] [agent_id or name]"
+    return f"[ROUTE TO LLM] Assignment request: `{args.strip()}`. Orchestrator will match task to best agent."
+
+
+async def _clear(args: str) -> str:
+    return "[CLEAR] Chat history cleared."
+
+
+async def _refresh(args: str) -> str:
+    return "[REFRESH] System data refresh requested. Frontend will reload all state."
+
+
+async def _invoke(args: str) -> str:
+    cmd = args.strip()
+    if cmd:
+        return f"[INVOKE] Singularity sync with command: `{cmd}`. Press the INVOKE button or use the frontend."
+    return "[INVOKE] Singularity sync requested. Press the ⚡ INVOKE button to execute."
+
+
 async def _help(args: str) -> str:
-    lines = ["**Available Commands**\n"]
-    categories = {}
-    for name, handler in sorted(_HANDLERS.items()):
-        # Group by first letter for simple display
-        lines.append(f"  `/{name}`")
+    categories = {
+        "System": ["status", "info", "debug", "logs", "devices"],
+        "Development": ["build", "test", "simulate", "review", "platform"],
+        "Agent": ["spawn", "agents", "tasks", "assign", "invoke"],
+        "Provider": ["provider", "switch", "budget"],
+        "NPI": ["npi", "sdks"],
+        "Tools": ["help", "clear", "refresh"],
+    }
+    lines = ["**Available Commands**"]
+    for cat, cmds in categories.items():
+        lines.append(f"\n**{cat}**")
+        for c in cmds:
+            if c in _HANDLERS:
+                lines.append(f"  `/{c}`")
     return "\n".join(lines)
 
 
 _HANDLERS: dict[str, object] = {
-    "status": _status,
-    "info": _info,
-    "debug": _debug,
-    "logs": _logs,
-    "devices": _devices,
-    "agents": _agents,
-    "tasks": _tasks,
-    "provider": _provider,
-    "budget": _budget,
-    "npi": _npi,
-    "sdks": _sdks,
-    "help": _help,
+    # System
+    "status": _status, "info": _info, "debug": _debug, "logs": _logs, "devices": _devices,
+    # Development
+    "build": _build, "test": _test, "simulate": _simulate, "review": _review, "platform": _platform,
+    # Agent
+    "spawn": _spawn, "agents": _agents, "tasks": _tasks, "assign": _assign, "invoke": _invoke,
+    # Provider
+    "provider": _provider, "switch": _switch, "budget": _budget,
+    # NPI
+    "npi": _npi, "sdks": _sdks,
+    # Tools
+    "help": _help, "clear": _clear, "refresh": _refresh,
 }

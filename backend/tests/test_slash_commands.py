@@ -46,10 +46,18 @@ class TestSlashCommandHandler:
         assert "SDK" in result or "platform" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_unknown_command_returns_none(self):
+    async def test_unknown_command_returns_error(self):
         from backend.slash_commands import handle_slash_command
         result = await handle_slash_command("nonexistent_xyz", "")
-        assert result is None
+        assert result is not None
+        assert "Unknown command" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_command_returns_help_hint(self):
+        from backend.slash_commands import handle_slash_command
+        result = await handle_slash_command("", "")
+        assert result is not None
+        assert "/help" in result
 
 
 class TestSlashCommandsWithDB:
