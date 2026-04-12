@@ -206,6 +206,13 @@ CREATE TABLE IF NOT EXISTS simulations (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS event_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type      TEXT NOT NULL,
+    data_json       TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL,
@@ -702,3 +709,46 @@ async def update_debug_finding(finding_id: str, status: str) -> bool:
     )
     await _conn().commit()
     return cur.rowcount > 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Event Log (Persistence)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_event(event_type: str, data_json: str) -> None:
+    await _conn().execute(
+        "INSERT INTO event_log (event_type, data_json) VALUES (?, ?)",
+        (event_type, data_json),
+    )
+    await _conn().commit()
+
+
+async def list_events(
+    since: str = "", event_types: list[str] | None = None, limit: int = 200,
+) -> list[dict]:
+    query = "SELECT * FROM event_log"
+    conditions: list[str] = []
+    params: list = []
+    if since:
+        conditions.append("created_at >= ?")
+        params.append(since)
+    if event_types:
+        placeholders = ",".join("?" * len(event_types))
+        conditions.append(f"event_type IN ({placeholders})")
+        params.extend(event_types)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    async with _conn().execute(query, params) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def cleanup_old_events(days: int = 7) -> int:
+    cur = await _conn().execute(
+        "DELETE FROM event_log WHERE created_at < datetime('now', ?)",
+        (f"-{days} days",),
+    )
+    await _conn().commit()
+    return cur.rowcount

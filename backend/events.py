@@ -28,14 +28,21 @@ def _log(message: str, level: str = "info") -> None:
     _log_fn(message, level)
 
 
+# Event types worth persisting to DB (skip high-frequency transient events)
+_PERSIST_EVENT_TYPES = frozenset({
+    "agent_update", "task_update", "simulation",
+    "debug_finding", "notification", "invoke",
+})
+
+
 class EventBus:
-    """Simple pub/sub for SSE events."""
+    """Pub/sub for SSE events with optional persistence."""
 
     def __init__(self) -> None:
         self._subscribers: list[asyncio.Queue] = []
 
     def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._subscribers.append(q)
         return q
 
@@ -44,7 +51,8 @@ class EventBus:
 
     def publish(self, event: str, data: dict[str, Any]) -> None:
         data.setdefault("timestamp", datetime.now().isoformat())
-        msg = {"event": event, "data": json.dumps(data)}
+        data_json = json.dumps(data)
+        msg = {"event": event, "data": data_json}
         dead: list[asyncio.Queue] = []
         for q in self._subscribers:
             try:
@@ -54,9 +62,26 @@ class EventBus:
         for q in dead:
             self._subscribers.remove(q)
 
+        # Persist important events asynchronously
+        if event in _PERSIST_EVENT_TYPES:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_persist_event(event, data_json))
+            except RuntimeError:
+                pass  # No running loop (sync context)
+
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+
+async def _persist_event(event_type: str, data_json: str) -> None:
+    """Write event to DB (best-effort, non-blocking)."""
+    try:
+        from backend import db
+        await db.insert_event(event_type, data_json)
+    except Exception:
+        pass  # Don't let persistence failures affect event delivery
 
 
 # Singleton
