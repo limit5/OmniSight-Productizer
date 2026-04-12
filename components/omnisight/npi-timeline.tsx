@@ -94,47 +94,48 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="px-3 py-3 holo-glass-simple mb-2 corner-brackets data-stream">
+      <div className="px-3 py-2 holo-glass-simple mb-2 corner-brackets data-stream">
+        {/* Row 1: Title + percentage */}
         <div className="flex items-center justify-between relative z-10">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-[var(--neural-blue)] pulse-blue pulse-ring" />
-            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">NPI LIFECYCLE</h2>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <div className="w-2 h-2 rounded-full bg-[var(--neural-blue)] pulse-blue pulse-ring shrink-0" />
+            <h2 className="font-sans text-xs font-semibold tracking-fui text-[var(--neural-blue)] truncate">NPI LIFECYCLE</h2>
           </div>
-          <div className="flex items-center gap-1 relative z-20">
-            {/* Sci-fi mode toggle */}
-            <div className="flex rounded-sm overflow-hidden border border-[var(--border)]">
-              <button
-                onClick={(e) => { e.stopPropagation(); setViewMode("timeline") }}
-                className={`px-1.5 py-1 cursor-pointer transition-all duration-200 ${
-                  viewMode === "timeline"
-                    ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
-                    : "text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] hover:bg-[var(--secondary)]"
-                }`}
-                title="Timeline View"
-              >
-                <List size={10} />
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); setViewMode("gantt") }}
-                className={`px-1.5 py-1 cursor-pointer transition-all duration-200 border-l border-[var(--border)] ${
-                  viewMode === "gantt"
-                    ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
-                    : "text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] hover:bg-[var(--secondary)]"
-                }`}
-                title="Gantt View"
-              >
-                <BarChart3 size={10} />
-              </button>
-            </div>
-            <span className="font-mono text-[10px] text-[var(--validation-emerald)] tabular-nums">{progressPercent}%</span>
-          </div>
+          <span className="font-mono text-[10px] text-[var(--validation-emerald)] tabular-nums shrink-0">{progressPercent}%</span>
         </div>
-        {/* Progress bar */}
-        <div className="h-1 rounded-full bg-[var(--border)] mt-2 overflow-hidden relative z-10">
-          <div
-            className="h-full rounded-full bg-[var(--validation-emerald)] transition-all duration-500"
-            style={{ width: `${progressPercent}%` }}
-          />
+        {/* Row 2: Progress bar + view toggle */}
+        <div className="flex items-center gap-2 mt-1.5 relative z-20">
+          <div className="h-1 flex-1 rounded-full bg-[var(--border)] overflow-hidden">
+            <div
+              className="h-full rounded-full bg-[var(--validation-emerald)] transition-all duration-500"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+          {/* View mode toggle */}
+          <div className="flex rounded-sm overflow-hidden border border-[var(--border)] shrink-0">
+            <button
+              onClick={(e) => { e.stopPropagation(); setViewMode("timeline") }}
+              className={`px-1 py-0.5 cursor-pointer transition-all duration-200 ${
+                viewMode === "timeline"
+                  ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--neural-blue)]"
+              }`}
+              title="Timeline View"
+            >
+              <List size={9} />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setViewMode("gantt") }}
+              className={`px-1 py-0.5 cursor-pointer transition-all duration-200 border-l border-[var(--border)] ${
+                viewMode === "gantt"
+                  ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--neural-blue)]"
+              }`}
+              title="Gantt View"
+            >
+              <BarChart3 size={9} />
+            </button>
+          </div>
         </div>
       </div>
 
