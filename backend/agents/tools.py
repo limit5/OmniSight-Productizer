@@ -829,7 +829,62 @@ async def generate_artifact_report(template: str, title: str = "", context_json:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  8. Simulation tools
+#  8. Platform / Vendor SDK tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@tool
+async def get_platform_config(platform: str = "") -> str:
+    """Get build parameters (ARCH, CROSS_COMPILE, sysroot, cmake) for a platform.
+
+    Args:
+        platform: Platform profile name (e.g. 'aarch64', 'vendor-example').
+                 If empty, reads from workspace .omnisight/platform hint.
+    """
+    from pathlib import Path as _Path
+
+    if not platform:
+        ws = get_active_workspace()
+        hint = ws / ".omnisight" / "platform"
+        platform = hint.read_text().strip() if hint.exists() else "aarch64"
+
+    profile = _Path(__file__).resolve().parent.parent.parent / "configs" / "platforms" / f"{platform}.yaml"
+    if not profile.exists():
+        return f"[ERROR] Platform profile not found: {platform}"
+
+    try:
+        import yaml
+        data = yaml.safe_load(profile.read_text())
+    except Exception as exc:
+        return f"[ERROR] Failed to parse platform YAML: {exc}"
+
+    lines = [
+        f"PLATFORM={data.get('platform', platform)}",
+        f"ARCH={data.get('kernel_arch', 'arm64')}",
+        f"CROSS_COMPILE={data.get('cross_prefix', '')}",
+        f"TOOLCHAIN={data.get('toolchain', 'gcc')}",
+        f"ARCH_FLAGS={data.get('arch_flags', '')}",
+        f"QEMU={data.get('qemu', '')}",
+    ]
+    vendor = data.get("vendor_id", "")
+    if vendor:
+        lines.append(f"VENDOR_ID={vendor}")
+        lines.append(f"SDK_VERSION={data.get('sdk_version', '')}")
+    sysroot = data.get("sysroot_path", "")
+    if sysroot:
+        lines.append(f"SYSROOT={sysroot}")
+    cmake_tc = data.get("cmake_toolchain_file", "")
+    if cmake_tc:
+        lines.append(f"CMAKE_TOOLCHAIN_FILE={cmake_tc}")
+
+    return "[OK] Platform config:\n" + "\n".join(lines)
+
+
+PLATFORM_TOOLS = [get_platform_config]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  9. Simulation tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SIMULATION_TIMEOUT = 120  # seconds — Valgrind/QEMU are slow
@@ -992,11 +1047,11 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
-    "firmware":       ALL_TOOLS + SIMULATION_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS,
+    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
     "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment],
