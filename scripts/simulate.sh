@@ -49,6 +49,24 @@ if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ]; then
   exit 1
 fi
 
+# ── Input sanitization (prevent shell injection + path traversal) ──
+validate_name() {
+  local name="$1" label="$2"
+  if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "{\"version\":\"1.0\",\"status\":\"error\",\"errors\":[\"Invalid ${label}: only alphanumeric, dash, underscore allowed\"]}"
+    exit 1
+  fi
+}
+validate_name "$MODULE" "module"
+validate_name "$PLATFORM" "platform"
+if [ -n "$INPUT_DATA" ]; then
+  # INPUT_DATA may include subdirectory path but no .. or absolute paths
+  if [[ "$INPUT_DATA" == /* ]] || [[ "$INPUT_DATA" == *..* ]]; then
+    echo '{"version":"1.0","status":"error","errors":["Invalid input_data: no absolute paths or .. allowed"]}'
+    exit 1
+  fi
+fi
+
 # ── Platform profile ──
 TOOLCHAIN="gcc"
 CROSS_PREFIX=""
