@@ -368,13 +368,16 @@ export function OrchestratorAI({
     e.preventDefault()
     if (!inputValue.trim()) return
 
+    // Clear autocomplete immediately
+    setSlashSuggestions([])
+
     const cmd = inputValue.toLowerCase().trim()
 
     // Fast local-only commands (no LLM needed)
-    if (cmd === "help" || cmd === "?" || cmd === "clear") {
+    if (cmd === "help" || cmd === "?") {
       processCommand(inputValue)
     }
-    // Everything else → send to backend LLM (conversations, questions, commands)
+    // All / commands and everything else → send to backend (slash handler or LLM)
     else if (onSendCommand) {
       onSendCommand(inputValue)
     } else {
