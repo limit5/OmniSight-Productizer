@@ -1,0 +1,36 @@
+# OmniSight CODEOWNERS — maps file patterns to agent types/sub_types
+# Format: <glob pattern>  <agent_type>[/<sub_type>]
+# Agents outside their scope get a WARNING but are NOT blocked (soft enforcement).
+# Use "!" prefix to hard-block modifications.
+#
+# Examples:
+#   src/hal/**           firmware/hal
+#   src/algorithm/**     software/algorithm
+#   !configs/templates/** reporter          # Only reporter can touch templates
+
+# Firmware domain
+src/hal/**               firmware/hal
+src/drivers/**           firmware/bsp
+src/isp/**               firmware/isp
+*.dts                    firmware/bsp
+*.dtsi                   firmware/bsp
+Makefile                 firmware
+
+# Software domain
+src/algorithm/**         software/algorithm
+src/middleware/**        software/middleware
+src/ai/**               software/ai-deploy
+
+# Test & validation
+test_assets/**           validator
+tests/**                 validator
+
+# Reports & documentation
+configs/templates/**     reporter
+docs/**                  reporter
+
+# Build & DevOps
+Dockerfile*              devops
+*.yml                    devops
+backend/docker/**        devops
+scripts/**               devops

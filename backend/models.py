@@ -63,6 +63,7 @@ class Agent(BaseModel):
     ai_model: Optional[str] = None
     sub_tasks: list[SubTask] = Field(default_factory=list)
     workspace: AgentWorkspace = Field(default_factory=AgentWorkspace)
+    file_scope: list[str] = Field(default_factory=list)  # Glob patterns from CODEOWNERS
 
     class Config:
         populate_by_name = True
