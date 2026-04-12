@@ -34,6 +34,7 @@ for arg in "$@"; do
     --mock=*)       MOCK="${arg#*=}" ;;
     --coverage-check=*) COVERAGE_CHECK="${arg#*=}" ;;
     --platform=*)   PLATFORM="${arg#*=}" ;;
+    --toolchain-file=*) CMAKE_TOOLCHAIN_FILE="${arg#*=}" ;;
     *) ;;
   esac
 done
@@ -72,6 +73,8 @@ TOOLCHAIN="gcc"
 CROSS_PREFIX=""
 QEMU_BIN=""
 ARCH_FLAGS=""
+CMAKE_TOOLCHAIN_FILE="${CMAKE_TOOLCHAIN_FILE:-}"
+VENDOR_SYSROOT=""
 
 if [ -f "${PLATFORM_DIR}/${PLATFORM}.yaml" ]; then
   # Simple YAML parsing (no dependency on python/yq)
@@ -79,11 +82,27 @@ if [ -f "${PLATFORM_DIR}/${PLATFORM}.yaml" ]; then
   CROSS_PREFIX=$(grep 'cross_prefix:' "${PLATFORM_DIR}/${PLATFORM}.yaml" 2>/dev/null | head -1 | sed 's/.*cross_prefix:\s*//' | tr -d '"' || echo "")
   QEMU_BIN=$(grep 'qemu:' "${PLATFORM_DIR}/${PLATFORM}.yaml" 2>/dev/null | head -1 | sed 's/.*qemu:\s*//' | tr -d '"' || echo "")
   ARCH_FLAGS=$(grep 'arch_flags:' "${PLATFORM_DIR}/${PLATFORM}.yaml" 2>/dev/null | head -1 | sed 's/.*arch_flags:\s*//' | tr -d '[]"' || echo "")
+  # Vendor SDK fields (may be empty for generic platforms)
+  if [ -z "$CMAKE_TOOLCHAIN_FILE" ]; then
+    CMAKE_TOOLCHAIN_FILE=$(grep 'cmake_toolchain_file:' "${PLATFORM_DIR}/${PLATFORM}.yaml" 2>/dev/null | head -1 | sed 's/.*cmake_toolchain_file:\s*//' | tr -d '"' || echo "")
+  fi
+  VENDOR_SYSROOT=$(grep 'sysroot_path:' "${PLATFORM_DIR}/${PLATFORM}.yaml" 2>/dev/null | head -1 | sed 's/.*sysroot_path:\s*//' | tr -d '"' || echo "")
 elif [ "$PLATFORM" = "aarch64" ]; then
   TOOLCHAIN="aarch64-linux-gnu-gcc"
   CROSS_PREFIX="aarch64-linux-gnu-"
   QEMU_BIN="qemu-aarch64-static"
   ARCH_FLAGS="-march=armv8-a"
+fi
+
+# Build CMAKE_FLAGS if toolchain file is available
+CMAKE_FLAGS=""
+if [ -n "$CMAKE_TOOLCHAIN_FILE" ] && [ -f "$CMAKE_TOOLCHAIN_FILE" ]; then
+  CMAKE_FLAGS="-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+  log "  Vendor CMake toolchain: ${CMAKE_TOOLCHAIN_FILE}"
+fi
+if [ -n "$VENDOR_SYSROOT" ] && [ -d "$VENDOR_SYSROOT" ]; then
+  CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_SYSROOT=${VENDOR_SYSROOT}"
+  log "  Vendor sysroot: ${VENDOR_SYSROOT}"
 fi
 
 # ── Working directories ──
