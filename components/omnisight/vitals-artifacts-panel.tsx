@@ -385,7 +385,8 @@ function SimulationResults({
 
       {!collapsed && (
         <div className="px-3 pb-2 space-y-1.5">
-          {/* Simulation items */}
+          {/* Simulation items — scrollable when list is long */}
+          <div className="max-h-[120px] overflow-y-auto space-y-1">
           {simulations.map(sim => {
             const statusColor =
               sim.status === "pass" ? "text-[var(--validation-emerald)]" :
@@ -431,6 +432,7 @@ function SimulationResults({
               No simulation results yet
             </div>
           )}
+          </div>
 
           {/* RUN button / inline form */}
           {!showForm ? (
@@ -540,6 +542,9 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
         </div>
       </div>
       
+      {/* Simulation Results — above log stream so it's always visible */}
+      <SimulationResults simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
+
       {/* Log Stream */}
       <div className="flex-1 overflow-auto p-3 space-y-1 min-h-0">
         {logs.map((log, i) => {
@@ -585,9 +590,6 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
           )
         })}
       </div>
-      
-      {/* Simulation Results */}
-      <SimulationResults simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
 
       {/* Artifacts */}
       <div className="border-t border-[var(--border)] p-3">
