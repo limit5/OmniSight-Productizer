@@ -14,6 +14,27 @@ logger = logging.getLogger(__name__)
 
 _CODEOWNERS_PATH = Path(__file__).resolve().parent.parent / "configs" / "CODEOWNERS"
 
+
+def _match_codeowner_pattern(file_path: str, pattern: str) -> bool:
+    """Match a file path against a CODEOWNERS-style glob pattern.
+
+    Rules:
+    - Pattern with ``/`` → directory prefix match (e.g. ``src/hal/**`` matches ``src/hal/foo.c``)
+    - Pattern without ``/`` → filename-only match (e.g. ``*.dts`` matches only ``foo.dts``, not ``a/b/foo.dts``)
+    - ``**`` in directory patterns means any depth
+    """
+    if "/" in pattern:
+        # Directory-based pattern: prefix match
+        prefix = pattern.replace("**", "").replace("*", "").rstrip("/")
+        if prefix and file_path.startswith(prefix):
+            return True
+        # Exact directory+file match (e.g., "backend/docker/*")
+        return fnmatch.fnmatch(file_path, pattern.replace("**", "*"))
+    else:
+        # Filename-only pattern (e.g., "*.dts", "Makefile")
+        filename = Path(file_path).name
+        return fnmatch.fnmatch(filename, pattern)
+
 # Parsed rules: list of (glob_pattern, agent_type, sub_type, hard_block)
 _rules: list[tuple[str, str, str, bool]] | None = None
 
@@ -53,9 +74,7 @@ def get_file_owners(file_path: str) -> list[tuple[str, str, bool]]:
     rules = _load_rules()
     owners = []
     for pattern, agent_type, sub_type, hard_block in rules:
-        # Support ** for recursive matching (fnmatch doesn't natively)
-        pat = pattern.replace("**", "*")
-        if fnmatch.fnmatch(file_path, pat):
+        if _match_codeowner_pattern(file_path, pattern):
             owners.append((agent_type, sub_type, hard_block))
     return owners
 

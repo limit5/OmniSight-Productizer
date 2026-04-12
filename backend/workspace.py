@@ -206,18 +206,18 @@ async def finalize(agent_id: str) -> dict:
 
     # Pre-merge conflict check: test if branch can merge cleanly into base
     conflict_files: list[str] = []
-    rc_merge, merge_out, _ = await _run(
-        f'git merge --no-commit --no-ff {base} 2>&1 || true', cwd=ws,
-    )
-    if "CONFLICT" in (merge_out or ""):
-        # Extract conflicting file names
-        for line in merge_out.splitlines():
-            if "CONFLICT" in line and ":" in line:
-                conflict_files.append(line.split(":")[-1].strip())
-        await _run("git merge --abort 2>/dev/null || true", cwd=ws)
-        logger.warning("Merge conflict detected for agent %s: %s", agent_id, conflict_files)
-    else:
-        # Clean up test merge
+    # Verify base branch exists before attempting merge test
+    rc_check, _, _ = await _run(f'git rev-parse --verify {base} 2>/dev/null', cwd=ws)
+    if rc_check == 0:
+        rc_merge, merge_out, _ = await _run(
+            f'git merge --no-commit --no-ff {base} 2>&1 || true', cwd=ws,
+        )
+        if "CONFLICT" in (merge_out or ""):
+            for line in merge_out.splitlines():
+                if "CONFLICT" in line and ":" in line:
+                    conflict_files.append(line.split(":")[-1].strip())
+            logger.warning("Merge conflict detected for agent %s: %s", agent_id, conflict_files)
+        # Always abort test merge
         await _run("git merge --abort 2>/dev/null || true", cwd=ws)
 
     # Generate summary
