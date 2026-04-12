@@ -1,17 +1,15 @@
-"""Persistent SSE endpoint — frontend subscribes once, receives all state changes.
+"""SSE event streaming + event replay API.
 
-Events:
-  - agent_update:   Agent status/thoughtChain changed
-  - task_update:    Task status/assignment changed
-  - tool_progress:  Tool execution start/done/error
-  - pipeline:       LangGraph pipeline phase changes
-  - heartbeat:      Keep-alive every 15 seconds
+Real-time:
+  GET /events — persistent SSE connection for all state changes
+Replay:
+  GET /events/replay — query persisted events by time range and type
 """
 
 import asyncio
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 
 from backend.events import bus
@@ -33,7 +31,6 @@ async def event_stream():
                     msg = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
                     yield msg
                 except asyncio.TimeoutError:
-                    # Keep-alive heartbeat
                     yield {
                         "event": "heartbeat",
                         "data": json.dumps({"subscribers": bus.subscriber_count}),
@@ -44,3 +41,32 @@ async def event_stream():
             bus.unsubscribe(queue)
 
     return EventSourceResponse(generator())
+
+
+@router.get("/events/replay")
+async def replay_events(
+    since: str = Query("", description="ISO timestamp — return events after this time"),
+    types: str = Query("", description="Comma-separated event types to filter"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Replay persisted events from the event_log table.
+
+    Used by frontend after SSE reconnect to fill gaps.
+    """
+    from backend import db
+    event_types = [t.strip() for t in types.split(",") if t.strip()] or None
+    events = await db.list_events(since=since, event_types=event_types, limit=limit)
+    # Parse data_json back to dict for each event
+    result = []
+    for ev in events:
+        try:
+            data = json.loads(ev.get("data_json", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        result.append({
+            "id": ev.get("id"),
+            "event": ev.get("event_type"),
+            "data": data,
+            "timestamp": ev.get("created_at"),
+        })
+    return result
