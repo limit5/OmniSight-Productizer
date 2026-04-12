@@ -546,7 +546,7 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
       <SimulationResults simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
 
       {/* Log Stream */}
-      <div className="flex-1 overflow-auto p-3 space-y-1 min-h-0">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-1 min-h-0">
         {logs.map((log, i) => {
           // Tag-based color extraction
           const tagMatch = log.message.match(/^\[([A-Z]+)\]/)
@@ -900,7 +900,7 @@ export function VitalsArtifactsPanel({
       </div>
       
       {/* Multi-Feed Grid */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         {activeFeeds.length === 0 ? (
           /* Empty State */
           <div className="flex flex-col items-center justify-center h-full min-h-[200px] text-center px-4">

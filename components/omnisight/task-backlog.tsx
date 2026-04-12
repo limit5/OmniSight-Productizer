@@ -525,7 +525,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
       <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         {expandedView === "tasks" ? (
           /* Task List */
-          <div className="flex-1 overflow-auto space-y-2 pr-1">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden space-y-2 pr-1">
             {tasks.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center py-8">
                 <Target size={24} className="text-[var(--muted-foreground)] opacity-30 mb-2" />
@@ -684,7 +684,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
           /* AI Orchestrator Chat */
           <div className="flex-1 flex flex-col min-h-0">
             {/* Chat Messages */}
-            <div className="flex-1 overflow-auto space-y-3 pr-1 mb-3">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden space-y-3 pr-1 mb-3">
               {chatMessages.map(msg => (
                 <div
                   key={msg.id}

@@ -393,7 +393,7 @@ export default function Home() {
 
         {/* ===== MOBILE LAYOUT (< 768px) ===== */}
         <main className="flex-1 flex flex-col md:hidden min-h-0 pb-24">
-          <div className="flex-1 p-3 overflow-auto">
+          <div className="flex-1 p-3 overflow-y-auto overflow-x-hidden">
             {renderPanel(activePanel)}
           </div>
         </main>
@@ -401,7 +401,7 @@ export default function Home() {
         {/* ===== TABLET LAYOUT (768px - 1023px) ===== */}
         <main className="hidden md:flex lg:hidden flex-1 min-h-0">
           <TabletNav activePanel={activePanel} onPanelChange={setActivePanel} />
-          <div className="flex-1 p-3 overflow-auto">
+          <div className="flex-1 p-3 overflow-y-auto overflow-x-hidden">
             {renderPanel(activePanel)}
           </div>
         </main>
@@ -454,7 +454,7 @@ export default function Home() {
           </section>
 
           {/* Orchestrator AI - Central Coordinator & Command Hub */}
-          <aside className="min-h-0 overflow-auto">
+          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
             <OrchestratorAI
               agents={agents}
               tasks={tasks}
@@ -488,7 +488,7 @@ export default function Home() {
           </aside>
 
           {/* Task Backlog */}
-          <aside className="min-h-0 overflow-auto">
+          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
             <TaskBacklog
               agents={agents}
               tasks={tasks}
@@ -512,7 +512,7 @@ export default function Home() {
           </aside>
 
           {/* NPI Lifecycle Timeline */}
-          <aside className="min-h-0 overflow-auto">
+          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
             <NPITimeline
               data={engine.npiData}
               onBusinessModelChange={async (model) => {
@@ -532,7 +532,7 @@ export default function Home() {
           </aside>
 
           {/* Far Right: Vitals & Artifacts */}
-          <aside className="min-h-0 overflow-auto">
+          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
             <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
               artifacts={engine.artifacts.length > 0 ? engine.artifacts.map(a => ({
