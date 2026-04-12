@@ -447,15 +447,15 @@ export async function listSimulations(params?: { task_id?: string; status?: stri
   const qs = new URLSearchParams()
   if (params?.task_id) qs.set("task_id", params.task_id)
   if (params?.status) qs.set("status", params.status)
-  return request<SimulationItem[]>(`/simulations?${qs.toString()}`)
+  return request<SimulationItem[]>(`/system/simulations?${qs.toString()}`)
 }
 
 export async function getSimulation(simId: string): Promise<SimulationItem> {
-  return request<SimulationItem>(`/simulations/${simId}`)
+  return request<SimulationItem>(`/system/simulations/${simId}`)
 }
 
 export async function triggerSimulation(body: { track: string; module: string; input_data?: string; mock?: boolean; platform?: string }): Promise<{ result: string }> {
-  return request<{ result: string }>("/simulations", {
+  return request<{ result: string }>("/system/simulations", {
     method: "POST",
     body: JSON.stringify(body),
   })
