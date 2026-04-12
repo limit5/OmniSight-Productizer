@@ -100,15 +100,33 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
             <div className="w-2 h-2 rounded-full bg-[var(--neural-blue)] pulse-blue pulse-ring" />
             <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">NPI LIFECYCLE</h2>
           </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={(e) => { e.stopPropagation(); setViewMode(viewMode === "timeline" ? "gantt" : "timeline") }}
-              className="relative z-20 p-1.5 rounded bg-[var(--secondary)] hover:bg-[var(--neural-blue)]/20 transition-colors cursor-pointer"
-              title={viewMode === "timeline" ? "Switch to Gantt View" : "Switch to Timeline View"}
-            >
-              {viewMode === "timeline" ? <BarChart3 size={12} className="text-[var(--neural-blue)]" /> : <List size={12} className="text-[var(--neural-blue)]" />}
-            </button>
-            <span className="font-mono text-[10px] text-[var(--validation-emerald)]">{progressPercent}%</span>
+          <div className="flex items-center gap-1 relative z-20">
+            {/* Sci-fi mode toggle */}
+            <div className="flex rounded-sm overflow-hidden border border-[var(--border)]">
+              <button
+                onClick={(e) => { e.stopPropagation(); setViewMode("timeline") }}
+                className={`px-1.5 py-1 cursor-pointer transition-all duration-200 ${
+                  viewMode === "timeline"
+                    ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                    : "text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] hover:bg-[var(--secondary)]"
+                }`}
+                title="Timeline View"
+              >
+                <List size={10} />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setViewMode("gantt") }}
+                className={`px-1.5 py-1 cursor-pointer transition-all duration-200 border-l border-[var(--border)] ${
+                  viewMode === "gantt"
+                    ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                    : "text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] hover:bg-[var(--secondary)]"
+                }`}
+                title="Gantt View"
+              >
+                <BarChart3 size={10} />
+              </button>
+            </div>
+            <span className="font-mono text-[10px] text-[var(--validation-emerald)] tabular-nums">{progressPercent}%</span>
           </div>
         </div>
         {/* Progress bar */}
