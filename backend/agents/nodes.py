@@ -216,6 +216,7 @@ def _specialist_node_factory(agent_type: str):
                 agent_type=agent_type,
                 sub_type=state.agent_sub_type,
                 handoff_context=state.handoff_context,
+                task_skill_context=state.task_skill_context,
             )
             if state.last_error:
                 prompt = (

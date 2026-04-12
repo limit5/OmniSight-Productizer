@@ -62,6 +62,7 @@ class GraphState(BaseModel):
     model_name: str = ""
     agent_sub_type: str = ""
     handoff_context: str = ""
+    task_skill_context: str = ""  # Anthropic SKILL.md content for task-specific guidance
 
     # Gerrit Code Review context
     gerrit_change_id: str = ""

@@ -107,6 +107,16 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
             pass
 
         task_command = f"{task.title}. {task.description or ''}"
+        # Auto-match task skill from Anthropic SKILL.md library
+        task_skill = ""
+        try:
+            from backend.prompt_loader import match_task_skill, load_task_skill
+            matched = match_task_skill(task_command)
+            if matched:
+                task_skill = load_task_skill(matched)
+                logger.info("Task skill matched: %s for task %s", matched, task.id)
+        except Exception:
+            pass
         try:
             graph_result = await run_graph(
                 task_command,
@@ -114,6 +124,7 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 model_name=agent.ai_model or "",
                 agent_sub_type=agent.sub_type or "",
                 handoff_context=handoff_ctx,
+                task_skill_context=task_skill,
             )
             agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
             agent.status = AgentStatus.success

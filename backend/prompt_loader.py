@@ -25,10 +25,12 @@ logger = logging.getLogger(__name__)
 _CONFIGS_ROOT = Path(__file__).resolve().parent.parent / "configs"
 _MODELS_DIR = _CONFIGS_ROOT / "models"
 _ROLES_DIR = _CONFIGS_ROOT / "roles"
+_SKILLS_DIR = _CONFIGS_ROOT / "skills"
 
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
 _MAX_MODEL_RULES = 3000
 _MAX_ROLE_SKILL = 6000
+_MAX_TASK_SKILL = 4000
 _MAX_HANDOFF = 4000
 
 
@@ -120,6 +122,74 @@ def load_role_skill(category: str, role_id: str) -> str:
         logger.debug("Loaded role skill: %s/%s", category, role_id)
     return content
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Task skill loading (Anthropic SKILL.md format)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_task_skills_cache: dict[str, dict] | None = None
+
+
+def load_task_skill(task_type: str) -> str:
+    """Load a task-specific skill definition (Anthropic format).
+
+    Looks for ``configs/skills/{task_type}/SKILL.md``.
+
+    Args:
+        task_type: Task skill identifier (e.g. 'webapp-testing', 'pdf-generation').
+
+    Returns:
+        Skill content (markdown body without frontmatter), or "" if not found.
+    """
+    if not task_type:
+        return ""
+    path = _SKILLS_DIR / task_type / "SKILL.md"
+    content = _read_md(path, _MAX_TASK_SKILL)
+    if content:
+        logger.debug("Loaded task skill: %s", task_type)
+    return content
+
+
+def match_task_skill(task_title: str) -> str:
+    """Match a task title against available task skills using keywords.
+
+    Returns the task_type of the best-matching skill, or "" if no match.
+    """
+    if not task_title:
+        return ""
+    title_lower = task_title.lower()
+    skills = list_available_task_skills()
+    best_type = ""
+    best_score = 0
+    for skill in skills:
+        score = sum(1 for kw in skill.get("keywords", []) if kw in title_lower)
+        if score > best_score:
+            best_score = score
+            best_type = skill["name"]
+    return best_type if best_score > 0 else ""
+
+
+def list_available_task_skills() -> list[dict]:
+    """Scan configs/skills/ and return all available task skill definitions. Cached."""
+    global _task_skills_cache
+    if _task_skills_cache is not None:
+        return list(_task_skills_cache.values())
+    _task_skills_cache = {}
+    if not _SKILLS_DIR.is_dir():
+        return []
+    for skill_dir in sorted(_SKILLS_DIR.iterdir()):
+        skill_file = skill_dir / "SKILL.md"
+        if skill_dir.is_dir() and skill_file.exists():
+            meta = _parse_frontmatter(skill_file)
+            if meta.get("name"):
+                _task_skills_cache[meta["name"]] = meta
+    logger.info("Loaded %d task skill definitions", len(_task_skills_cache))
+    return list(_task_skills_cache.values())
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Role listing & keywords
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _roles_cache: list[dict] | None = None
 
@@ -257,8 +327,9 @@ def build_system_prompt(
     agent_type: str = "general",
     sub_type: str = "",
     handoff_context: str = "",
+    task_skill_context: str = "",
 ) -> str:
-    """Assemble the full system prompt from model rules + role skill + handoff.
+    """Assemble the full system prompt from model rules + role skill + task skill + handoff.
 
     Falls back to built-in prompts if config files are missing.
     """
@@ -269,12 +340,11 @@ def build_system_prompt(
     if model_rules:
         sections.append(f"# Model Behavior Rules\n\n{model_rules}")
 
-    # 2. Role skill
+    # 2. Role skill (defines agent behavior)
     role_skill = load_role_skill(agent_type, sub_type)
     if role_skill:
         sections.append(f"# Role: {sub_type or agent_type}\n\n{role_skill}")
     elif agent_type in _BUILTIN_PROMPTS:
-        # Fallback to built-in prompt
         sections.append(_BUILTIN_PROMPTS[agent_type])
     else:
         sections.append(
@@ -283,7 +353,13 @@ def build_system_prompt(
             "Use them to complete the user's request."
         )
 
-    # 3. Handoff context (truncated if too long)
+    # 3. Task skill (defines task execution steps — Anthropic SKILL.md format)
+    if task_skill_context:
+        if len(task_skill_context) > _MAX_TASK_SKILL:
+            task_skill_context = task_skill_context[:_MAX_TASK_SKILL] + "\n... [task skill truncated]"
+        sections.append(f"# Task Skill\n\n{task_skill_context}")
+
+    # 4. Handoff context (truncated if too long)
     if handoff_context:
         if len(handoff_context) > _MAX_HANDOFF:
             handoff_context = handoff_context[:_MAX_HANDOFF] + "\n... [handoff truncated]"

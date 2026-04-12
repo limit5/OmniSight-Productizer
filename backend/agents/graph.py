@@ -162,6 +162,7 @@ async def run_graph(
     model_name: str = "",
     agent_sub_type: str = "",
     handoff_context: str = "",
+    task_skill_context: str = "",
 ) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
@@ -171,6 +172,7 @@ async def run_graph(
         model_name: LLM model name (for model-specific prompt rules).
         agent_sub_type: Role sub-type (for role-specific skill loading).
         handoff_context: Previous task handoff content (injected into prompt).
+        task_skill_context: Anthropic SKILL.md content for task-specific guidance.
     """
     import asyncio
 
@@ -181,6 +183,7 @@ async def run_graph(
         model_name=model_name,
         agent_sub_type=agent_sub_type,
         handoff_context=handoff_context,
+        task_skill_context=task_skill_context,
     )
     try:
         result = await asyncio.wait_for(
@@ -195,6 +198,7 @@ async def run_graph(
             model_name=model_name,
             agent_sub_type=agent_sub_type,
             handoff_context=handoff_context,
+            task_skill_context=task_skill_context,
             answer=f"[TIMEOUT] Graph execution exceeded {GRAPH_TIMEOUT}s",
             last_error="Graph execution timeout",
         )
