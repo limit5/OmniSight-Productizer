@@ -635,9 +635,15 @@ async def update_npi_state(
     return state
 
 
+_VALID_PHASE_STATUSES = {"pending", "active", "completed", "blocked"}
+_VALID_MILESTONE_STATUSES = {"pending", "in_progress", "completed", "blocked"}
+
+
 @router.patch("/npi/phases/{phase_id}")
 async def update_npi_phase(phase_id: str, status: str | None = None, target_date: str | None = None):
     """Update a specific NPI phase."""
+    if status is not None and status not in _VALID_PHASE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid phase status: {status}. Must be one of {_VALID_PHASE_STATUSES}")
     from backend import db
     state = await db.get_npi_state()
     if not state:
@@ -656,6 +662,8 @@ async def update_npi_phase(phase_id: str, status: str | None = None, target_date
 @router.patch("/npi/milestones/{milestone_id}")
 async def update_npi_milestone(milestone_id: str, status: str | None = None, due_date: str | None = None):
     """Update a specific NPI milestone."""
+    if status is not None and status not in _VALID_MILESTONE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid milestone status: {status}. Must be one of {_VALID_MILESTONE_STATUSES}")
     from backend import db
     state = await db.get_npi_state()
     if not state:
