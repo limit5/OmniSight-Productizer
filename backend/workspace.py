@@ -94,8 +94,7 @@ async def provision(
     from backend.config import settings as _settings
 
     # Disk space check
-    import shutil as _shutil
-    free_bytes = _shutil.disk_usage(str(_WORKSPACES_ROOT)).free
+    free_bytes = shutil.disk_usage(str(_WORKSPACES_ROOT)).free
     if free_bytes < 100 * 1024 * 1024:  # 100MB minimum
         raise RuntimeError(f"Insufficient disk space: {free_bytes // 1024 // 1024}MB free")
 

@@ -140,6 +140,7 @@ def emit_invoke(action_type: str, detail: str = "", **extra: Any) -> None:
     bus.publish("invoke", {
         "action_type": action_type,
         "detail": detail,
+        "timestamp": datetime.now().isoformat(),
         **extra,
     })
     _log(f"[INVOKE] {action_type}: {detail}")
@@ -167,6 +168,7 @@ def emit_simulation(sim_id: str, action: str, detail: str = "", **extra: Any) ->
         "sim_id": sim_id,
         "action": action,
         "detail": detail,
+        "timestamp": datetime.now().isoformat(),
         **extra,
     })
     level_label = "error" if action == "result" and extra.get("status") == "fail" else "info"

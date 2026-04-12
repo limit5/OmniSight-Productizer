@@ -243,7 +243,7 @@ async def cleanup_orphaned_containers() -> int:
     for name in out.strip().splitlines():
         name = name.strip()
         if name:
-            await _run(f"docker rm -f {name}", timeout=15)
+            await _run(f'docker rm -f "{name}"', timeout=15)
             count += 1
             logger.info("Removed orphaned container: %s", name)
     return count
