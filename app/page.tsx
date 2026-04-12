@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from "react"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
 import { NotificationCenter } from "@/components/omnisight/notification-center"
+import { NPITimeline } from "@/components/omnisight/npi-timeline"
 import { GlobalStatusHeader } from "@/components/omnisight/global-status-header"
 import { SpecNode } from "@/components/omnisight/spec-node"
 import { AgentMatrixWall, defaultAgents, type Agent, type AgentStatus } from "@/components/omnisight/agent-matrix-wall"
@@ -383,7 +384,7 @@ export default function Home() {
         </main>
 
         {/* ===== DESKTOP LAYOUT (>= 1024px) ===== */}
-        <main className="hidden lg:grid flex-1 grid-cols-[200px_220px_1fr_280px_220px_220px_280px] gap-3 p-4 min-h-0">
+        <main className="hidden lg:grid flex-1 grid-cols-[200px_200px_1fr_260px_200px_200px_220px_260px] gap-2 p-3 min-h-0">
           {/* Far Left: Host & Devices */}
           <aside className="min-h-0 overflow-hidden">
             <HostDevicePanel
@@ -487,8 +488,28 @@ export default function Home() {
             />
           </aside>
 
+          {/* NPI Lifecycle Timeline */}
+          <aside className="min-h-0 overflow-auto">
+            <NPITimeline
+              data={engine.npiData}
+              onBusinessModelChange={async (model) => {
+                try {
+                  const updated = await api.updateNPIState({ business_model: model })
+                  engine.setNpiData(updated)
+                } catch {}
+              }}
+              onMilestoneStatusChange={async (msId, status) => {
+                try {
+                  await api.updateNPIMilestone(msId, status)
+                  const updated = await api.getNPIState()
+                  engine.setNpiData(updated)
+                } catch {}
+              }}
+            />
+          </aside>
+
           {/* Far Right: Vitals & Artifacts */}
-          <aside className="min-h-0 overflow-hidden">
+          <aside className="min-h-0 overflow-auto">
             <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
               artifacts={engine.artifacts.length > 0 ? engine.artifacts.map(a => ({

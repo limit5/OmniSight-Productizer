@@ -103,6 +103,7 @@ export function useEngine() {
   const [unreadCount, setUnreadCount] = useState(0)
   const [compressionStats, setCompressionStats] = useState<api.CompressionStats | null>(null)
   const [artifacts, setArtifacts] = useState<api.ArtifactItem[]>([])
+  const [npiData, setNpiData] = useState<api.NPIData | null>(null)
   const initRef = useRef(false)
 
   // Fetch initial data and subscribe to SSE event stream
@@ -142,6 +143,14 @@ export function useEngine() {
       } catch (e) {
         console.warn("[Engine] System data fetch failed:", e)
       }
+    }
+
+    // Fetch NPI data once (not on interval — rarely changes)
+    async function fetchNPI() {
+      try {
+        const npi = await api.getNPIState()
+        setNpiData(npi)
+      } catch { /* NPI not configured */ }
     }
 
     async function init() {
@@ -294,6 +303,7 @@ export function useEngine() {
       }
     }
     init()
+    fetchNPI()
 
     return () => {
       eventSource?.close()
@@ -570,6 +580,8 @@ export function useEngine() {
     tokenBudget,
     compressionStats,
     artifacts,
+    npiData,
+    setNpiData,
     notifications,
     unreadCount,
     setUnreadCount,

@@ -447,6 +447,48 @@ export async function getArtifactDownloadUrl(id: string): Promise<string> {
   return `${API_V1}/artifacts/${id}/download`
 }
 
+// ─── NPI Lifecycle ───
+
+export interface NPIMilestone {
+  id: string
+  title: string
+  track: "engineering" | "design" | "market"
+  status: "pending" | "in_progress" | "completed" | "blocked"
+  due_date?: string
+  jira_tag?: string
+}
+
+export interface NPIPhase {
+  id: string
+  name: string
+  short_name: string
+  order: number
+  status: "pending" | "active" | "completed" | "blocked"
+  milestones: NPIMilestone[]
+}
+
+export interface NPIData {
+  business_model: "odm" | "oem" | "jdm" | "obm"
+  current_phase_id?: string
+  phases: NPIPhase[]
+}
+
+export async function getNPIState() {
+  return request<NPIData>("/system/npi")
+}
+
+export async function updateNPIState(updates: { business_model?: string; current_phase_id?: string }) {
+  const params = new URLSearchParams()
+  for (const [k, v] of Object.entries(updates)) {
+    if (v !== undefined) params.set(k, v)
+  }
+  return request<NPIData>(`/system/npi?${params.toString()}`, { method: "PUT" })
+}
+
+export async function updateNPIMilestone(milestoneId: string, status: string) {
+  return request<NPIMilestone>(`/system/npi/milestones/${milestoneId}?status=${status}`, { method: "PATCH" })
+}
+
 // ─── Token Budget ───
 
 export interface TokenBudgetInfo {
