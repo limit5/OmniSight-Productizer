@@ -260,3 +260,80 @@ _TESTERS = {
     "jira": _test_jira,
     "slack": _test_slack,
 }
+
+
+# ── Vendor SDK CRUD ──
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
+
+
+class VendorSDKCreate(BaseModel):
+    platform: str  # Profile name (filename without .yaml)
+    label: str
+    vendor_id: str
+    soc_model: str = ""
+    sdk_version: str = ""
+    toolchain: str = "aarch64-linux-gnu-gcc"
+    cross_prefix: str = "aarch64-linux-gnu-"
+    kernel_arch: str = "arm64"
+    arch_flags: str = "-march=armv8-a"
+    qemu: str = "qemu-aarch64-static"
+    sysroot_path: str = ""
+    cmake_toolchain_file: str = ""
+    npu_enabled: bool = False
+    deploy_method: str = "ssh"
+    deploy_target_ip: str = ""
+
+
+@router.post("/vendor/sdks")
+async def create_vendor_sdk(body: VendorSDKCreate):
+    """Create a new vendor SDK platform profile."""
+    import re
+    if not re.match(r'^[a-zA-Z0-9_-]+$', body.platform):
+        raise HTTPException(400, "Platform name must be alphanumeric/dash/underscore")
+    profile_path = _PLATFORMS_DIR / f"{body.platform}.yaml"
+    if profile_path.exists():
+        raise HTTPException(409, f"Platform profile already exists: {body.platform}")
+
+    import yaml
+    data = {
+        "platform": body.platform,
+        "label": body.label,
+        "vendor_id": body.vendor_id,
+        "soc_model": body.soc_model,
+        "sdk_version": body.sdk_version,
+        "toolchain": body.toolchain,
+        "cross_prefix": body.cross_prefix,
+        "kernel_arch": body.kernel_arch,
+        "arch_flags": body.arch_flags,
+        "qemu": body.qemu,
+        "sysroot_path": body.sysroot_path,
+        "cmake_toolchain_file": body.cmake_toolchain_file,
+        "npu_enabled": body.npu_enabled,
+        "deploy_method": body.deploy_method,
+        "deploy_target_ip": body.deploy_target_ip,
+        "docker_packages": [
+            f"gcc-{body.cross_prefix.rstrip('-')}",
+            f"g++-{body.cross_prefix.rstrip('-')}",
+            f"binutils-{body.cross_prefix.rstrip('-')}",
+        ],
+    }
+    profile_path.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True))
+    logger.info("Created vendor SDK profile: %s", body.platform)
+    return {"status": "created", "platform": body.platform, "path": str(profile_path)}
+
+
+@router.delete("/vendor/sdks/{platform}")
+async def delete_vendor_sdk(platform: str):
+    """Delete a vendor SDK platform profile."""
+    profile_path = _PLATFORMS_DIR / f"{platform}.yaml"
+    if not profile_path.exists():
+        raise HTTPException(404, f"Platform profile not found: {platform}")
+    # Prevent deleting built-in profiles
+    builtin = {"aarch64", "armv7", "riscv64"}
+    if platform in builtin:
+        raise HTTPException(403, f"Cannot delete built-in platform: {platform}")
+    profile_path.unlink()
+    logger.info("Deleted vendor SDK profile: %s", platform)
+    return {"status": "deleted", "platform": platform}
