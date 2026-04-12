@@ -22,8 +22,8 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "configs" / "templates
 
 _jinja_env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(_TEMPLATES_DIR)),
-    undefined=jinja2.Undefined,
-    autoescape=False,
+    undefined=jinja2.ChainableUndefined,  # Works with |default() filter, raises on direct access without default
+    autoescape=False,  # Markdown output — no HTML escaping. Context must not contain untrusted user input.
 )
 
 

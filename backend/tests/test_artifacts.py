@@ -7,6 +7,45 @@ import pytest
 from backend.models import Artifact, ArtifactType
 
 
+class TestArtifactDB:
+
+    @pytest.mark.asyncio
+    async def test_insert_and_list(self):
+        import uuid
+        from backend import db
+        await db.init()
+        try:
+            art_id = f"art-test-{uuid.uuid4().hex[:6]}"
+            await db.insert_artifact({
+                "id": art_id, "task_id": "t-test", "agent_id": "a1",
+                "name": "test.md", "type": "markdown", "file_path": "/tmp/test.md",
+                "size": 100, "created_at": "2026-01-01T00:00:00",
+            })
+            arts = await db.list_artifacts(task_id="t-test")
+            assert any(a["id"] == art_id for a in arts)
+        finally:
+            await db.close()
+
+    @pytest.mark.asyncio
+    async def test_delete(self):
+        import uuid
+        from backend import db
+        await db.init()
+        try:
+            art_id = f"art-del-{uuid.uuid4().hex[:6]}"
+            await db.insert_artifact({
+                "id": art_id, "task_id": "t-test", "agent_id": "a1",
+                "name": "del.md", "type": "markdown", "file_path": "/tmp/del.md",
+                "size": 50, "created_at": "2026-01-01T00:00:00",
+            })
+            ok = await db.delete_artifact(art_id)
+            assert ok
+            gone = await db.get_artifact(art_id)
+            assert gone is None
+        finally:
+            await db.close()
+
+
 class TestArtifactModel:
 
     def test_defaults(self):
@@ -107,6 +146,25 @@ class TestArtifactTool:
                 "title": "Test",
             })
             assert "[ERROR]" in result
+        finally:
+            await db.close()
+
+    @pytest.mark.asyncio
+    async def test_tool_with_task_id(self):
+        from backend.agents.tools import generate_artifact_report
+        from backend import db
+        await db.init()
+        try:
+            result = await generate_artifact_report.ainvoke({
+                "template": "compliance_report",
+                "title": "Task Report",
+                "task_id": "task-42",
+            })
+            assert "[OK]" in result
+            # Verify artifact has task_id
+            arts = await db.list_artifacts(task_id="task-42")
+            assert len(arts) >= 1
+            assert arts[0]["task_id"] == "task-42"
         finally:
             await db.close()
 
