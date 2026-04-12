@@ -128,6 +128,7 @@ class Task(BaseModel):
     suggested_sub_type: Optional[str] = None
     parent_task_id: Optional[str] = None
     child_task_ids: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)  # Task IDs that must complete before this task
     # Issue tracking integration
     external_issue_id: Optional[str] = None  # e.g. "OMNI-123", "42"
     issue_url: Optional[str] = None  # e.g. "https://jira.company.com/browse/OMNI-123"

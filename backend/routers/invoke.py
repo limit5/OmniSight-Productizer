@@ -304,6 +304,11 @@ def _plan_actions(state: dict, command: str | None) -> list[dict]:
     for task in sorted(state["unassigned"], key=lambda t: _priority_rank(t.priority)):
         if not remaining_idle:
             break
+        # Dependency check: skip tasks whose dependencies haven't completed
+        if task.depends_on:
+            blocking = [_tasks.get(dep_id) for dep_id in task.depends_on]
+            if any(t and t.status != TaskStatus.completed for t in blocking):
+                continue
         # Score all idle agents for this task, pick best
         scored = [(a, _score_agent_for_task(a, task)) for a in remaining_idle]
         scored.sort(key=lambda x: -x[1])

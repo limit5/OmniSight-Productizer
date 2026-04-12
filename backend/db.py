@@ -56,6 +56,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("tasks", "issue_url", "TEXT"),
         ("tasks", "acceptance_criteria", "TEXT"),
         ("tasks", "labels", "TEXT NOT NULL DEFAULT '[]'"),
+        ("tasks", "depends_on", "TEXT NOT NULL DEFAULT '[]'"),
         ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
         ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("notifications", "last_error", "TEXT"),
