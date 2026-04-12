@@ -102,11 +102,11 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
           </div>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => setViewMode(viewMode === "timeline" ? "gantt" : "timeline")}
-              className="p-1 rounded hover:bg-[var(--secondary)] transition-colors"
-              title={viewMode === "timeline" ? "Gantt View" : "Timeline View"}
+              onClick={(e) => { e.stopPropagation(); setViewMode(viewMode === "timeline" ? "gantt" : "timeline") }}
+              className="relative z-20 p-1.5 rounded bg-[var(--secondary)] hover:bg-[var(--neural-blue)]/20 transition-colors cursor-pointer"
+              title={viewMode === "timeline" ? "Switch to Gantt View" : "Switch to Timeline View"}
             >
-              {viewMode === "timeline" ? <BarChart3 size={10} className="text-[var(--neural-blue)]" /> : <List size={10} className="text-[var(--neural-blue)]" />}
+              {viewMode === "timeline" ? <BarChart3 size={12} className="text-[var(--neural-blue)]" /> : <List size={12} className="text-[var(--neural-blue)]" />}
             </button>
             <span className="font-mono text-[10px] text-[var(--validation-emerald)]">{progressPercent}%</span>
           </div>
