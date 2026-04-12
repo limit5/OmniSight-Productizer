@@ -94,14 +94,16 @@ elif [ "$PLATFORM" = "aarch64" ]; then
   ARCH_FLAGS="-march=armv8-a"
 fi
 
-# Build CMAKE_FLAGS if toolchain file is available
+# Build CMAKE_FLAGS (for cmake) and GCC_VENDOR_FLAGS (for direct gcc/g++)
 CMAKE_FLAGS=""
+GCC_VENDOR_FLAGS=""
 if [ -n "$CMAKE_TOOLCHAIN_FILE" ] && [ -f "$CMAKE_TOOLCHAIN_FILE" ]; then
   CMAKE_FLAGS="-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
   log "  Vendor CMake toolchain: ${CMAKE_TOOLCHAIN_FILE}"
 fi
 if [ -n "$VENDOR_SYSROOT" ] && [ -d "$VENDOR_SYSROOT" ]; then
   CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_SYSROOT=${VENDOR_SYSROOT}"
+  GCC_VENDOR_FLAGS="--sysroot=${VENDOR_SYSROOT}"
   log "  Vendor sysroot: ${VENDOR_SYSROOT}"
 fi
 
@@ -208,7 +210,7 @@ run_algo() {
   fi
 
   local binary="${BUILD_DIR}/${MODULE}_test"
-  if ! $compiler $std_flag -O2 -Wall -Werror -g -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
+  if ! $compiler $std_flag -O2 -Wall -Werror -g $GCC_VENDOR_FLAGS -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
     local compile_err
     compile_err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ')
     add_error "Compilation failed: ${compile_err}"
@@ -366,7 +368,7 @@ run_hw() {
     local binary="${BUILD_DIR}/${MODULE}_mock"
 
     if ! $compiler -O2 -Wall -g -DMOCK_ENV -DMOCK_SYSFS_ROOT="\"${mock_sysfs}\"" \
-         -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
+         $GCC_VENDOR_FLAGS -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
       local err
       err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ')
       add_error "Mock compilation failed: ${err}"
@@ -419,7 +421,7 @@ run_hw() {
     fi
 
     local binary="${BUILD_DIR}/${MODULE}_cross"
-    if ! $TOOLCHAIN -O2 -Wall -static $ARCH_FLAGS \
+    if ! $TOOLCHAIN -O2 -Wall -static $ARCH_FLAGS $GCC_VENDOR_FLAGS \
          -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
       local err
       err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ')
