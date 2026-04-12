@@ -638,7 +638,7 @@ async def update_simulation(sim_id: str, data: dict) -> None:
 
 async def insert_debug_finding(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO debug_findings
+        """INSERT OR IGNORE INTO debug_findings
            (id, task_id, agent_id, finding_type, severity, content, context, status, created_at)
            VALUES (:id, :task_id, :agent_id, :finding_type, :severity, :content, :context, :status, :created_at)""",
         data,

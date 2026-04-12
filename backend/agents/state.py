@@ -71,6 +71,8 @@ class GraphState(BaseModel):
     gerrit_commit: str = ""
 
     # Self-healing loop: retry tracking + loop detection
+    # Note: error_history uses LangGraph default (REPLACE, not append).
+    # This is intentional — each error_check_node returns the full accumulated list.
     retry_count: int = 0
     max_retries: int = 3
     last_error: str = ""

@@ -297,6 +297,10 @@ export function useEngine() {
                   }, ...prev.slice(0, 49)]
                 })
               }
+            } else if (event.event === "debug_finding") {
+              const severity = (d.severity as string) || "info"
+              logMsg = `[DEBUG] ${(d.finding_type as string || "").toUpperCase()}: ${d.message}`
+              logLevel = severity === "error" || severity === "critical" ? "error" : severity === "warn" ? "warn" : "info"
             }
 
             if (logMsg) {

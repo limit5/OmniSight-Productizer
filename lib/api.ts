@@ -23,6 +23,7 @@ export type SSEEvent =
   | { event: "notification"; data: { id: string; level: string; title: string; message: string; source: string; timestamp: string; action_url?: string; action_label?: string } }
   | { event: "artifact_created"; data: { id: string; name: string; type: string; task_id: string; agent_id: string; size: number } }
   | { event: "simulation"; data: { sim_id: string; action: "start" | "progress" | "result"; detail: string; status?: string; track?: string; module?: string; tests_total?: number; tests_passed?: number; timestamp: string } }
+  | { event: "debug_finding"; data: { id: string; task_id: string; agent_id: string; finding_type: string; severity: string; message: string; timestamp: string } }
   | { event: "heartbeat"; data: { subscribers: number } }
 
 /**
@@ -37,7 +38,7 @@ export function subscribeEvents(
   const eventsUrl = API_V1.startsWith("http") ? `${API_V1}/events` : `${window.location.origin}${API_V1}/events`
   const es = new EventSource(eventsUrl)
 
-  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "artifact_created", "simulation", "heartbeat"]) {
+  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "artifact_created", "simulation", "debug_finding", "heartbeat"]) {
     es.addEventListener(eventType, (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data)
