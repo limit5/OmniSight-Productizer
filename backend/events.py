@@ -177,17 +177,53 @@ def emit_simulation(sim_id: str, action: str, detail: str = "", **extra: Any) ->
 
 def emit_debug_finding(
     task_id: str, agent_id: str, finding_type: str, severity: str, message: str,
-    **extra: Any,
+    context: dict | None = None, **extra: Any,
 ) -> None:
-    """Debug discovery events: stuck loops, repeated errors, loop breaker triggers."""
+    """Debug discovery events: stuck loops, repeated errors, loop breaker triggers.
+
+    Publishes SSE event AND persists to DB asynchronously.
+    """
+    import json as _json
+    import uuid as _uuid
+
+    now = datetime.now().isoformat()
+    finding_id = f"dbg-{_uuid.uuid4().hex[:8]}"
+    context_json = _json.dumps(context or {})
+
+    # SSE event for real-time frontend display
     bus.publish("debug_finding", {
+        "id": finding_id,
         "task_id": task_id,
         "agent_id": agent_id,
         "finding_type": finding_type,
         "severity": severity,
         "message": message,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": now,
         **extra,
     })
+
+    # Persist to DB asynchronously (fire-and-forget)
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_debug_finding({
+            "id": finding_id, "task_id": task_id, "agent_id": agent_id,
+            "finding_type": finding_type, "severity": severity,
+            "content": message, "context": context_json,
+            "status": "open", "created_at": now,
+        }))
+    except RuntimeError:
+        pass  # No running loop — skip DB persistence (e.g., in sync tests)
+
     level_label = "error" if severity in ("error", "critical") else "warn" if severity == "warn" else "info"
     _log(f"[DEBUG] {finding_type.upper()} ({agent_id}): {message}", level=level_label)
+
+
+async def _persist_debug_finding(data: dict) -> None:
+    """Write debug finding to DB (best-effort, non-blocking)."""
+    try:
+        from backend import db
+        await db.insert_debug_finding(data)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to persist debug finding: %s", exc)
