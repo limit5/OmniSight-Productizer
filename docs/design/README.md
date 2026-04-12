@@ -13,7 +13,8 @@ This directory contains all design specifications and architecture documents for
 | [organization_role_map.md](organization_role_map.md) | Agent role hierarchy and skill mapping | Phase 7 |
 | [rust_token_killer.md](rust_token_killer.md) | RTK output compression for LLM token optimization | Phase 12 |
 | [tiered-notification-routing-system.md](tiered-notification-routing-system.md) | 4-tier notification routing (L1-L4) | Phase 10 |
-| [multi-agent-patterns.md](multi-agent-patterns.md) | 5 multi-agent collaboration patterns (Generator-Verifier, Orchestrator-Subagent, Agent Teams, Message Bus, Shared State) | Future |
+| [multi-agent-patterns.md](multi-agent-patterns.md) | 5 multi-agent collaboration patterns (Generator-Verifier, Orchestrator-Subagent, Agent Teams, Message Bus, Shared State) | Phase 20-24 |
+| [soc-sdk-integration-development-automation.md](soc-sdk-integration-development-automation.md) | SoC SDK/EVK 三軌並行整合（Infra + Software + Hardware → HVT 匯集） | Phase 28 |
 
 ## Adding New Documents
 
