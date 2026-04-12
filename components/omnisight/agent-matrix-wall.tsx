@@ -290,8 +290,8 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
           >
             <StatusIcon status={agent.status} />
           </span>
-          <span 
-            className="font-mono text-xs font-semibold flex-1 min-w-0"
+          <span
+            className="font-mono text-xs font-semibold flex-1 min-w-0 truncate"
             style={{ color: getStatusColor(agent.status) }}
           >
             {agent.name}
@@ -343,7 +343,7 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
         <TaskDots progress={agent.progress} status={agent.status} />
         
         {/* Row 4: Current Status Text */}
-        <p className="font-mono text-xs text-[var(--muted-foreground)] mt-2 leading-relaxed">
+        <p className="font-mono text-xs text-[var(--muted-foreground)] mt-2 leading-relaxed line-clamp-3 break-all">
           {agent.thoughtChain}
         </p>
         

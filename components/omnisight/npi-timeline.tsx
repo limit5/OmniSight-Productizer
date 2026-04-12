@@ -49,10 +49,10 @@ const PHASE_STATUS_CONFIG = {
 }
 
 const BIZ_MODELS = [
-  { id: "odm", label: "ODM", desc: "委託設計", tracks: 1 },
-  { id: "oem", label: "OEM", desc: "委託製造", tracks: 1 },
-  { id: "jdm", label: "JDM", desc: "聯合設計", tracks: 1 },
-  { id: "obm", label: "OBM", desc: "自有品牌", tracks: 3 },
+  { id: "odm", label: "ODM", desc: "委託設計", tracks: 1, color: "var(--hardware-orange)" },
+  { id: "oem", label: "OEM", desc: "委託製造", tracks: 1, color: "var(--validation-emerald)" },
+  { id: "jdm", label: "JDM", desc: "聯合設計", tracks: 1, color: "var(--artifact-purple)" },
+  { id: "obm", label: "OBM", desc: "自有品牌", tracks: 3, color: "var(--neural-blue)" },
 ]
 
 function getPhaseIcon(shortName: string) {
@@ -118,9 +118,15 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
               onClick={() => onBusinessModelChange?.(bm.id)}
               className={`relative z-20 flex-1 py-1 rounded font-mono text-[9px] transition-all cursor-pointer ${
                 data.business_model === bm.id
-                  ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)] ring-1 ring-[var(--neural-blue)]/50"
+                  ? "ring-1"
                   : "text-[var(--muted-foreground)] hover:text-[var(--foreground)] bg-[var(--secondary)]"
               }`}
+              style={data.business_model === bm.id ? {
+                backgroundColor: `color-mix(in srgb, ${bm.color} 20%, transparent)`,
+                color: bm.color,
+                ringColor: bm.color,
+                boxShadow: `0 0 6px color-mix(in srgb, ${bm.color} 30%, transparent)`,
+              } : undefined}
               title={bm.desc}
             >
               {bm.label}

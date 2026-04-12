@@ -471,26 +471,28 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="px-4 py-3 holo-glass-simple mb-3 corner-brackets data-stream">
-        <div className="flex items-center justify-between relative z-10">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-[var(--hardware-orange)] pulse-orange pulse-ring" />
-            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--hardware-orange)]">
-              TASK BACKLOG
-            </h2>
+      <div className="px-3 py-3 holo-glass-simple mb-2 corner-brackets data-stream">
+        {/* Row 1: Title */}
+        <div className="flex items-center gap-2 relative z-10">
+          <div className="w-2 h-2 rounded-full bg-[var(--hardware-orange)] pulse-orange pulse-ring shrink-0" />
+          <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--hardware-orange)]">
+            TASK BACKLOG
+          </h2>
+        </div>
+        {/* Row 2: Stats + ADD button */}
+        <div className="flex items-center justify-between mt-2 relative z-10">
+          <div className="flex items-center gap-2 text-[10px] font-mono">
+            <span className="text-[var(--muted-foreground)]">{tasks.length} TASKS</span>
+            <span className="text-[var(--neural-blue)]">{tasks.filter(t => t.status === "in_progress").length} ACTIVE</span>
+            <span className="text-[var(--validation-emerald)]">{tasks.filter(t => t.status === "completed").length} DONE</span>
           </div>
           <button
             onClick={(e) => { e.stopPropagation(); setShowAddTask(true) }}
-            className="relative z-20 flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono bg-[var(--hardware-orange)]/20 hover:bg-[var(--hardware-orange)]/40 text-[var(--hardware-orange)] transition-colors cursor-pointer"
+            className="relative z-20 shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-[var(--hardware-orange)]/20 hover:bg-[var(--hardware-orange)]/40 text-[var(--hardware-orange)] transition-colors cursor-pointer"
           >
-            <Plus size={12} />
+            <Plus size={10} />
             ADD
           </button>
-        </div>
-        <div className="flex items-center gap-3 mt-2 text-xs font-mono">
-          <span className="text-[var(--muted-foreground)]">{tasks.length} TASKS</span>
-          <span className="text-[var(--neural-blue)]">{tasks.filter(t => t.status === "in_progress").length} ACTIVE</span>
-          <span className="text-[var(--validation-emerald)]">{tasks.filter(t => t.status === "completed").length} DONE</span>
         </div>
       </div>
       

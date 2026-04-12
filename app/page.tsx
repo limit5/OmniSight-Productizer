@@ -384,7 +384,7 @@ export default function Home() {
         </main>
 
         {/* ===== DESKTOP LAYOUT (>= 1024px) ===== */}
-        <main className="hidden lg:grid flex-1 grid-cols-[200px_200px_1fr_260px_200px_200px_220px_260px] gap-2 p-3 min-h-0">
+        <main className="hidden lg:grid flex-1 grid-cols-[180px_180px_1fr_240px_180px_180px_200px_240px] gap-2 p-3 min-h-0">
           {/* Far Left: Host & Devices */}
           <aside className="min-h-0 overflow-hidden">
             <HostDevicePanel
