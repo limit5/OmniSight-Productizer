@@ -29,8 +29,9 @@ export function GlobalStatusHeader({
   unreadNotifications = 0,
   onToggleNotifications,
   isHalted = false,
-  hasRunningAgents = false
-}: StatusHeaderProps) {
+  hasRunningAgents = false,
+  settingsButton,
+}: StatusHeaderProps & { settingsButton?: React.ReactNode }) {
   const [time, setTime] = useState("")
   
   useEffect(() => {
@@ -171,6 +172,9 @@ export function GlobalStatusHeader({
           {/* Separator */}
           <div className="w-px h-8 bg-[var(--border)]" />
           
+          {/* Settings Button */}
+          {settingsButton}
+
           {/* Notification Bell */}
           {onToggleNotifications && (
             <button

@@ -9,6 +9,7 @@ import { SpecNode } from "@/components/omnisight/spec-node"
 import { AgentMatrixWall, defaultAgents, type Agent, type AgentStatus } from "@/components/omnisight/agent-matrix-wall"
 import { VitalsArtifactsPanel } from "@/components/omnisight/vitals-artifacts-panel"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
+import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
 import { SourceControlMatrix, type Repository } from "@/components/omnisight/source-control-matrix"
 import { TaskBacklog } from "@/components/omnisight/task-backlog"
@@ -32,6 +33,7 @@ export default function Home() {
   const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
   const [providerHealth, setProviderHealth] = useState<api.ProviderHealthResponse | null>(null)
   const [handoffs, setHandoffs] = useState<api.HandoffItem[]>([])
+  const [showSettings, setShowSettings] = useState(false)
   const [showNotifications, setShowNotifications] = useState(false)
 
   // Fetch provider list + health on mount and periodically
@@ -398,7 +400,9 @@ export default function Home() {
           hasRunningAgents={hasRunningAgents || isHalted}
           unreadNotifications={engine.unreadCount}
           onToggleNotifications={() => setShowNotifications(prev => !prev)}
+          settingsButton={<SettingsButton onClick={() => setShowSettings(true)} />}
         />
+        <IntegrationSettings open={showSettings} onClose={() => setShowSettings(false)} />
 
         {/* ===== MOBILE LAYOUT (< 768px) ===== */}
         <main className="flex-1 flex flex-col md:hidden min-h-0 pb-24">

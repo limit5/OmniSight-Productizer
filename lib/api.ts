@@ -537,6 +537,34 @@ export async function triggerSimulation(body: { track: string; module: string; i
   })
 }
 
+// ─── Integration Settings ───
+
+export async function getSettings(): Promise<Record<string, Record<string, unknown>>> {
+  return request<Record<string, Record<string, unknown>>>("/system/settings")
+}
+
+export async function updateSettings(updates: Record<string, string | number | boolean>): Promise<{ status: string; applied: string[]; rejected: Record<string, string> }> {
+  return request<{ status: string; applied: string[]; rejected: Record<string, string> }>("/system/settings", {
+    method: "PUT",
+    body: JSON.stringify({ updates }),
+  })
+}
+
+export async function testIntegration(type: string): Promise<{ status: string; message?: string; [key: string]: unknown }> {
+  return request<{ status: string; message?: string }>(`/system/test/${type}`, { method: "POST" })
+}
+
+export async function createVendorSDK(body: Record<string, unknown>): Promise<{ status: string; platform: string }> {
+  return request<{ status: string; platform: string }>("/system/vendor/sdks", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteVendorSDK(platform: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/system/vendor/sdks/${platform}`, { method: "DELETE" })
+}
+
 // ─── Event Replay ───
 
 export interface ReplayEvent {
