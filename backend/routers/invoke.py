@@ -77,6 +77,24 @@ async def run_watchdog():
                     except Exception:
                         pass
 
+            # Dynamic reallocation: blocked tasks → reassign to better idle agent
+            idle_agents = [a for a in _agents.values() if a.status == AgentStatus.idle]
+            if idle_agents:
+                for t in list(_tasks.values()):
+                    if t.status != TaskStatus.blocked or not t.assigned_agent_id:
+                        continue
+                    if not idle_agents:
+                        break
+                    scored = [(a, _score_agent_for_task(a, t)) for a in idle_agents]
+                    scored.sort(key=lambda x: -x[1])
+                    best_agent, best_score = scored[0]
+                    if best_score > 2:  # Must be better than base score
+                        t.status = TaskStatus.backlog
+                        t.assigned_agent_id = None
+                        await _persist_task(t)
+                        idle_agents.remove(best_agent)
+                        logger.info("[WATCHDOG] Reallocated blocked task %s to backlog for reassignment", t.id)
+
 
 def _now() -> str:
     return datetime.now().isoformat()
