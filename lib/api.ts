@@ -72,8 +72,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       clearTimeout(timer)
       if (!res.ok) {
         const body = await res.text().catch(() => "")
-        // 5xx errors are retryable; 4xx are not
-        if (res.status >= 500 && attempt < MAX_RETRIES) {
+        // Only retry idempotent methods (GET/HEAD/OPTIONS) on 5xx
+        const method = (init?.method || "GET").toUpperCase()
+        const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(method)
+        if (res.status >= 500 && isIdempotent && attempt < MAX_RETRIES) {
           lastError = new Error(`API ${res.status}: ${body}`)
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
           continue
@@ -85,8 +87,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch (e) {
       clearTimeout(timer)
       if (e instanceof DOMException && e.name === "AbortError") {
+        const method = (init?.method || "GET").toUpperCase()
+        const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(method)
         lastError = new Error(`Request timeout: ${path}`)
-        if (attempt < MAX_RETRIES) {
+        if (isIdempotent && attempt < MAX_RETRIES) {
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
           continue
         }
