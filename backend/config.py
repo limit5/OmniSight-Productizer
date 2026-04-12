@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     gerrit_project: str = ""  # Project path, e.g. "project/omnisight-core"
     gerrit_replication_targets: str = ""  # Comma-separated remote names for post-merge push
 
+    # ── Webhook Secrets (External → Internal) ──
+    github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
+    gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
+    jira_webhook_secret: str = ""       # Bearer token verification
+
+    # ── CI/CD Pipeline Triggers ──
+    ci_github_actions_enabled: bool = False
+    ci_jenkins_enabled: bool = False
+    ci_jenkins_url: str = ""
+    ci_jenkins_user: str = ""
+    ci_jenkins_api_token: str = ""
+    ci_gitlab_enabled: bool = False
+
     # Docker isolation
     docker_enabled: bool = True  # enable container execution for agents
     docker_image: str = "omnisight-agent:latest"

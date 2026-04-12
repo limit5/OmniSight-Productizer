@@ -133,6 +133,8 @@ class Task(BaseModel):
     # Issue tracking integration
     external_issue_id: Optional[str] = None  # e.g. "OMNI-123", "42"
     issue_url: Optional[str] = None  # e.g. "https://jira.company.com/browse/OMNI-123"
+    external_issue_platform: Optional[str] = None  # "github" | "gitlab" | "jira"
+    last_external_sync_at: Optional[str] = None  # ISO timestamp — debounce sync loops
     acceptance_criteria: Optional[str] = None
     labels: list[str] = Field(default_factory=list)
 
