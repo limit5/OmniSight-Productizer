@@ -27,7 +27,7 @@ async def init() -> None:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _db = await aiosqlite.connect(str(_DB_PATH))
     _db.row_factory = aiosqlite.Row
-    # SQLite hardening
+    # SQLite hardening (pragmas must be set before schema creation)
     await _db.execute("PRAGMA journal_mode=WAL")
     await _db.execute("PRAGMA busy_timeout=5000")
     await _db.execute("PRAGMA foreign_keys=ON")
@@ -36,6 +36,7 @@ async def init() -> None:
         row = await cur.fetchone()
         if row and row[0] != "ok":
             logger.critical("Database integrity check FAILED: %s", row[0])
+    await _db.commit()  # Commit pragmas before executescript (which does implicit COMMIT)
     await _db.executescript(_SCHEMA)
     # Run lightweight migrations for schema evolution
     await _migrate(_db)
