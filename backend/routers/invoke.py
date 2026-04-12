@@ -106,20 +106,24 @@ def _uid() -> str:
 
 # ─── Pre-fetch retrieval ───
 
+_PREFETCH_STOP_WORDS = frozenset({
+    "the", "a", "an", "is", "are", "for", "to", "and", "or", "in", "of", "on", "with",
+    "this", "that", "it", "be", "do", "not", "can", "will", "should", "must",
+})
+_PREFETCH_SUFFIXES = frozenset({".c", ".h", ".cpp", ".py", ".yaml", ".yml", ".md", ".json"})
+_PREFETCH_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".next", "build", ".agent_workspaces"})
+
 
 async def _prefetch_codebase_context(task_text: str, workspace_path: str | None) -> str:
     """Search the codebase for files relevant to the task (retrieval subagent).
 
-    Extracts keywords from the task title/description, searches for matching
-    files, and returns a concise summary of relevant code locations.
+    Runs filesystem I/O in a thread to avoid blocking the event loop.
     """
     import re as _re
     from pathlib import Path
 
-    # Extract meaningful keywords (skip common words)
-    _STOP_WORDS = frozenset({"the", "a", "an", "is", "are", "for", "to", "and", "or", "in", "of", "on", "with"})
     words = _re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", task_text)
-    keywords = [w.lower() for w in words if w.lower() not in _STOP_WORDS][:8]
+    keywords = [w.lower() for w in words if w.lower() not in _PREFETCH_STOP_WORDS][:8]
     if not keywords:
         return ""
 
@@ -127,37 +131,39 @@ async def _prefetch_codebase_context(task_text: str, workspace_path: str | None)
     if not search_root.is_dir():
         return ""
 
-    # Search for keyword matches in source files
     pattern = _re.compile("|".join(_re.escape(kw) for kw in keywords), _re.IGNORECASE)
-    matches: list[str] = []
-    skip_dirs = {".git", "node_modules", "__pycache__", ".next", "build", ".agent_workspaces"}
 
-    for fpath in sorted(search_root.rglob("*")):
-        if not fpath.is_file() or fpath.stat().st_size > 256_000:
-            continue
-        if any(part in skip_dirs for part in fpath.parts):
-            continue
-        if fpath.suffix not in (".c", ".h", ".cpp", ".py", ".yaml", ".yml", ".md", ".json"):
-            continue
-        try:
-            text = fpath.read_text(errors="replace")
-            hit_lines = [
-                (i, line.strip())
-                for i, line in enumerate(text.splitlines(), 1)
-                if pattern.search(line)
-            ]
-            if hit_lines:
-                rel = fpath.relative_to(search_root)
-                for line_no, line_text in hit_lines[:3]:
-                    matches.append(f"{rel}:{line_no}: {line_text[:120]}")
-            if len(matches) >= 30:
-                break
-        except Exception:
-            continue
+    def _search_sync() -> str:
+        """Synchronous search — runs in thread pool."""
+        matches: list[str] = []
+        for fpath in search_root.rglob("*"):
+            if fpath.suffix not in _PREFETCH_SUFFIXES:
+                continue
+            if not fpath.is_file() or fpath.stat().st_size > 256_000:
+                continue
+            if any(part in _PREFETCH_SKIP_DIRS for part in fpath.parts):
+                continue
+            try:
+                text = fpath.read_text(errors="replace")
+                hit_lines = [
+                    (i, line.strip())
+                    for i, line in enumerate(text.splitlines(), 1)
+                    if pattern.search(line)
+                ]
+                if hit_lines:
+                    rel = fpath.relative_to(search_root)
+                    for line_no, line_text in hit_lines[:3]:
+                        matches.append(f"{rel}:{line_no}: {line_text[:120]}")
+                if len(matches) >= 30:
+                    break
+            except Exception:
+                continue
+        if not matches:
+            return ""
+        return f"Found {len(matches)} relevant code references:\n" + "\n".join(matches)
 
-    if not matches:
-        return ""
-    return f"Found {len(matches)} relevant code references:\n" + "\n".join(matches)
+    # Run sync search in thread pool to avoid blocking the event loop
+    return await asyncio.to_thread(_search_sync)
 
 
 # ─── Background task execution ───
@@ -387,8 +393,11 @@ def _plan_actions(state: dict, command: str | None) -> list[dict]:
             break
         # Dependency check: skip tasks whose dependencies haven't completed
         if task.depends_on:
-            blocking = [_tasks.get(dep_id) for dep_id in task.depends_on]
-            if any(t and t.status != TaskStatus.completed for t in blocking):
+            deps = [(dep_id, _tasks.get(dep_id)) for dep_id in task.depends_on]
+            # Missing dependency (deleted/typo) blocks the task (safe default)
+            if any(t is None for _, t in deps):
+                continue
+            if any(t.status != TaskStatus.completed for _, t in deps if t):
                 continue
         # Score all idle agents for this task, pick best
         scored = [(a, _score_agent_for_task(a, task)) for a in remaining_idle]
