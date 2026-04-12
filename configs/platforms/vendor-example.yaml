@@ -1,0 +1,42 @@
+# OmniSight Platform Profile: Vendor SoC Example
+# Copy and customize this template for each new SoC vendor integration.
+#
+# Usage: ./simulate.sh --type=hw --module=sensor --platform=vendor-example
+
+platform: vendor-example
+label: "Example Vendor SoC (ARM Cortex-A75)"
+
+# Vendor identification
+vendor_id: example-vendor
+sdk_version: "1.0.0"
+soc_model: "Example SoC EVK v1"
+supported_boards:
+  - example-evk-v1
+  - example-ref-design
+
+# Vendor SDK paths (mounted :ro into container at runtime)
+sysroot_path: /opt/example-vendor/sysroot
+cmake_toolchain_file: /opt/example-vendor/toolchain.cmake
+
+# Toolchain (vendor-specific or standard cross-compiler)
+toolchain: aarch64-linux-gnu-gcc
+cross_prefix: aarch64-linux-gnu-
+qemu: qemu-aarch64-static
+arch_flags: -march=armv8-a -mtune=cortex-a75
+kernel_arch: arm64
+
+# NPU/DSP acceleration (if applicable)
+npu_enabled: false
+npu_type: ""
+
+# Docker packages needed for this vendor
+docker_packages:
+  - gcc-aarch64-linux-gnu
+  - g++-aarch64-linux-gnu
+  - binutils-aarch64-linux-gnu
+
+# Deployment settings (for HVT phase)
+deploy_method: ssh        # ssh | serial | fastboot
+deploy_target_ip: ""      # EVK static IP (set during Track 3)
+deploy_user: root
+deploy_path: /opt/app

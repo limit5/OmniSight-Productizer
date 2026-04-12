@@ -41,10 +41,23 @@ uvc:
   streaming:
     formats: []
 
+vendor:
+  vendor_id: ""
+  soc_model: ""
+  sdk_version: ""
+  platform_profile: ""       # maps to configs/platforms/{profile}.yaml
+  sysroot_path: ""
+  cmake_toolchain_file: ""
+  npu_enabled: false
+  npu_type: ""
+  board_reference: ""
+
 build:
   toolchain: ""
   kernel_version: ""
   cross_compile_prefix: ""
+  sysroot_path: ""
+  cmake_toolchain_file: ""
   output_dir: "build/output"
   flags: []
 

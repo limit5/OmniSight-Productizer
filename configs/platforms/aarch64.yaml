@@ -2,6 +2,13 @@
 platform: aarch64
 label: "ARM 64-bit (AArch64)"
 
+# Vendor info (optional — empty = generic platform)
+vendor_id: ""
+sdk_version: ""
+sysroot_path: ""
+cmake_toolchain_file: ""
+
+# Toolchain
 toolchain: aarch64-linux-gnu-gcc
 cross_prefix: aarch64-linux-gnu-
 qemu: qemu-aarch64-static
