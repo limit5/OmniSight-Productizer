@@ -1052,12 +1052,12 @@ TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULAT
 AGENT_TOOLS: dict[str, list] = {
     "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
     "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS,
+    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment],
     "general":        ALL_TOOLS,
     "custom":         ALL_TOOLS,
-    "devops":         ALL_TOOLS,
+    "devops":         ALL_TOOLS + PLATFORM_TOOLS,
     "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS,
     "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS,
 }

@@ -164,9 +164,9 @@ async def provision(
         manifest = _MAIN_REPO / "configs" / "hardware_manifest.yaml"
         if manifest.is_file():
             import yaml
-            mdata = yaml.safe_load(manifest.read_text())
-            platform = (mdata.get("vendor", {}) or {}).get("platform_profile", "") or \
-                       (mdata.get("project", {}) or {}).get("target_platform", "aarch64")
+            mdata = yaml.safe_load(manifest.read_text()) or {}
+            platform = mdata.get("vendor", {}).get("platform_profile", "") or \
+                       mdata.get("project", {}).get("target_platform", "aarch64")
             if platform:
                 (omnisight_dir / "platform").write_text(platform)
     except Exception:

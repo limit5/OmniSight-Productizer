@@ -145,8 +145,8 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
                 cmake_tc = pdata.get("cmake_toolchain_file", "")
                 if cmake_tc and Path(cmake_tc).is_file():
                     mounts += f'-v "{Path(cmake_tc).resolve()}":/opt/toolchain.cmake:ro '
-        except Exception:
-            pass  # Vendor mount is best-effort
+        except Exception as exc:
+            logger.warning("Vendor SDK mount (best-effort) failed: %s", exc)
 
     # Start container with workspace mounted + resource limits
     from backend.config import settings as _settings
