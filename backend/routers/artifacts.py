@@ -40,7 +40,10 @@ async def download_artifact(artifact_id: str):
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    file_path = Path(artifact["file_path"])
+    file_path = Path(artifact["file_path"]).resolve()
+    artifacts_root = get_artifacts_root().resolve()
+    if not str(file_path).startswith(str(artifacts_root)):
+        raise HTTPException(status_code=403, detail="Access denied: file outside artifact storage")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Artifact file missing from disk")
 
