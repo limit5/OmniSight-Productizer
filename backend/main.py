@@ -58,6 +58,10 @@ async def lifespan(app: FastAPI):
     watchdog_task = asyncio.create_task(invoke.run_watchdog())
     yield
     watchdog_task.cancel()
+    try:
+        await watchdog_task
+    except asyncio.CancelledError:
+        pass
     await db.close()
 
 
