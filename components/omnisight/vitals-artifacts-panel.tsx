@@ -944,10 +944,8 @@ export function VitalsArtifactsPanel({
         )}
       </div>
       
-      {/* Reporter Vortex - Collapsible when many feeds */}
-      {activeFeeds.length <= 4 && (
-        <ReporterVortex logs={logs} artifacts={artifacts} simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
-      )}
+      {/* Reporter Vortex - Always visible (contains simulation results, artifacts, logs) */}
+      <ReporterVortex logs={logs} artifacts={artifacts} simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
     </div>
   )
 }

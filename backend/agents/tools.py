@@ -985,6 +985,6 @@ AGENT_TOOLS: dict[str, list] = {
     "general":        ALL_TOOLS,
     "custom":         ALL_TOOLS,
     "devops":         ALL_TOOLS,
-    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS,
-    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS,
+    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS,
+    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS,
 }

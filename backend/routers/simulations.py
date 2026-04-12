@@ -33,13 +33,21 @@ async def get_simulation(sim_id: str):
 @router.post("")
 async def trigger_simulation(req: SimulationRequest):
     """Manually trigger a simulation run (from UI or external API)."""
-    from backend.agents.tools import run_simulation
+    from pathlib import Path
 
-    result = await run_simulation.ainvoke({
-        "track": req.track.value,
-        "module": req.module,
-        "input_data": req.input_data or "",
-        "mock": req.mock,
-        "platform": req.platform,
-    })
+    from backend.agents.tools import run_simulation, set_active_workspace
+
+    # Set workspace to project root so simulate.sh can find source files
+    project_root = Path(__file__).resolve().parent.parent.parent
+    set_active_workspace(project_root)
+    try:
+        result = await run_simulation.ainvoke({
+            "track": req.track.value,
+            "module": req.module,
+            "input_data": req.input_data or "",
+            "mock": req.mock,
+            "platform": req.platform,
+        })
+    finally:
+        set_active_workspace(None)
     return {"result": result}
