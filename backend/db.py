@@ -583,8 +583,20 @@ async def list_simulations(
     return [dict(r) for r in rows]
 
 
+_SIMULATION_COLUMNS = frozenset({
+    "status", "tests_total", "tests_passed", "tests_failed",
+    "coverage_pct", "valgrind_errors", "duration_ms",
+    "report_json", "artifact_id",
+})
+
+
 async def update_simulation(sim_id: str, data: dict) -> None:
-    sets = ", ".join(f"{k} = :{k}" for k in data)
-    data["_id"] = sim_id
-    await _conn().execute(f"UPDATE simulations SET {sets} WHERE id = :_id", data)
+    if not data:
+        return
+    safe = {k: v for k, v in data.items() if k in _SIMULATION_COLUMNS}
+    if not safe:
+        return
+    sets = ", ".join(f"{k} = :{k}" for k in safe)
+    safe["_id"] = sim_id
+    await _conn().execute(f"UPDATE simulations SET {sets} WHERE id = :_id", safe)
     await _conn().commit()
