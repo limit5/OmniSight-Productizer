@@ -416,11 +416,21 @@ async def _execute_actions(actions: list[dict], state: dict):
                         _handoff = await load_handoff_for_task(_agent_ctx.workspace.task_id)
                     except Exception:
                         pass
+                # Auto-match task skill for command
+                _task_skill = ""
+                try:
+                    from backend.prompt_loader import match_task_skill, load_task_skill
+                    _matched = match_task_skill(action["command"])
+                    if _matched:
+                        _task_skill = load_task_skill(_matched)
+                except Exception:
+                    pass
                 result = await run_graph(
                     action["command"],
                     model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
                     agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
                     handoff_context=_handoff,
+                    task_skill_context=_task_skill,
                 )
                 yield {
                     "event": "action",
@@ -711,11 +721,20 @@ async def invoke_sync(command: str | None = None):
                             _handoff = await load_handoff_for_task(_agent_ctx.workspace.task_id)
                         except Exception:
                             pass
+                    _task_skill = ""
+                    try:
+                        from backend.prompt_loader import match_task_skill as _mts, load_task_skill as _lts
+                        _m = _mts(action["command"])
+                        if _m:
+                            _task_skill = _lts(_m)
+                    except Exception:
+                        pass
                     result = await run_graph(
                         action["command"],
                         model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
                         agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
                         handoff_context=_handoff,
+                        task_skill_context=_task_skill,
                     )
                     results.append({
                         "type": "command",
