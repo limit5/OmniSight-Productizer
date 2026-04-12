@@ -205,6 +205,53 @@ class ChatResponse(BaseModel):
 
 # ---------- Artifacts ----------
 
+# ---------- NPI Lifecycle ----------
+
+class BusinessModel(str, Enum):
+    odm = "odm"
+    oem = "oem"
+    jdm = "jdm"
+    obm = "obm"
+
+
+class NPITrackType(str, Enum):
+    engineering = "engineering"
+    design = "design"
+    market = "market"
+
+
+class NPIMilestone(BaseModel):
+    id: str
+    title: str
+    track: NPITrackType = NPITrackType.engineering
+    status: str = "pending"  # pending | in_progress | completed | blocked
+    due_date: Optional[str] = None
+    completed_date: Optional[str] = None
+    assigned_agent_type: Optional[str] = None
+    jira_tag: Optional[str] = None  # e.g. "[HW]", "[MKT]", "[ID]"
+
+
+class NPIPhase(BaseModel):
+    id: str
+    name: str
+    short_name: str  # e.g. "PRD", "EIV", "POC"
+    order: int = 0
+    status: str = "pending"  # pending | active | completed | blocked
+    start_date: Optional[str] = None
+    target_date: Optional[str] = None
+    completed_date: Optional[str] = None
+    milestones: list[NPIMilestone] = Field(default_factory=list)
+
+
+class NPIProject(BaseModel):
+    """Top-level NPI lifecycle state."""
+    business_model: BusinessModel = BusinessModel.odm
+    phases: list[NPIPhase] = Field(default_factory=list)
+    current_phase_id: Optional[str] = None
+
+
+# ---------- Artifacts ----------
+
 class ArtifactType(str, Enum):
     pdf = "pdf"
     markdown = "markdown"

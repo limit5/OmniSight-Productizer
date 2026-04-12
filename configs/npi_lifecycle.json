@@ -1,0 +1,81 @@
+{
+  "business_model": "odm",
+  "current_phase_id": "phase-0",
+  "phases": [
+    {
+      "id": "phase-0", "name": "概念成型與規格定義", "short_name": "PRD", "order": 0, "status": "pending",
+      "milestones": [
+        {"id": "m-0-1", "title": "完成產品需求文件 (PRD) 簽核", "track": "engineering", "status": "pending", "jira_tag": "[Doc]"},
+        {"id": "m-0-2", "title": "確立目標 BOM Cost 上限", "track": "engineering", "status": "pending", "jira_tag": "[Biz]"},
+        {"id": "m-0-3", "title": "完成 NRE 報價與合約簽署", "track": "engineering", "status": "pending", "jira_tag": "[Biz]"},
+        {"id": "m-0-4", "title": "完成競品價格與規格矩陣分析", "track": "market", "status": "pending", "jira_tag": "[MKT]"},
+        {"id": "m-0-5", "title": "產出 3 款外觀概念圖", "track": "design", "status": "pending", "jira_tag": "[ID]"}
+      ]
+    },
+    {
+      "id": "phase-1", "name": "早期技術與選型評估", "short_name": "EIV", "order": 1, "status": "pending",
+      "milestones": [
+        {"id": "m-1-1", "title": "CPU 算力與功耗評估報告", "track": "engineering", "status": "pending", "jira_tag": "[HW]"},
+        {"id": "m-1-2", "title": "Initial BOM 表與成本預估", "track": "engineering", "status": "pending", "jira_tag": "[HW]"},
+        {"id": "m-1-3", "title": "第三方演算法授權與相容性評估", "track": "engineering", "status": "pending", "jira_tag": "[SW]"},
+        {"id": "m-1-4", "title": "高仿真外觀 Mockup", "track": "design", "status": "pending", "jira_tag": "[ID]"},
+        {"id": "m-1-5", "title": "App 低保真線框圖 (Wireframe)", "track": "design", "status": "pending", "jira_tag": "[UX]"}
+      ]
+    },
+    {
+      "id": "phase-2", "name": "概念驗證", "short_name": "POC", "order": 2, "status": "pending",
+      "milestones": [
+        {"id": "m-2-1", "title": "EVB 基礎影像推流 (UVC) 跑通", "track": "engineering", "status": "pending", "jira_tag": "[SW]"},
+        {"id": "m-2-2", "title": "核心演算法 ARM CPU 佔用率 < 40%", "track": "engineering", "status": "pending", "jira_tag": "[AI]"},
+        {"id": "m-2-3", "title": "散熱方案與 ID 設計相容性評估", "track": "design", "status": "pending", "jira_tag": "[EE/ID]"}
+      ]
+    },
+    {
+      "id": "phase-3", "name": "硬體架構驗證", "short_name": "HVT", "order": 3, "status": "pending",
+      "milestones": [
+        {"id": "m-3-1", "title": "PCB Layout 發包與 PCBA 回板點亮", "track": "engineering", "status": "pending", "jira_tag": "[HW]"},
+        {"id": "m-3-2", "title": "電源樹穩定性與高速訊號完整性", "track": "engineering", "status": "pending", "jira_tag": "[HW]"},
+        {"id": "m-3-3", "title": "Bootloader 與基礎驅動正常運作", "track": "engineering", "status": "pending", "jira_tag": "[FW]"}
+      ]
+    },
+    {
+      "id": "phase-4", "name": "工程驗證測試", "short_name": "EVT", "order": 4, "status": "pending",
+      "milestones": [
+        {"id": "m-4-1", "title": "修復 24h 連續運行 Memory Leak", "track": "engineering", "status": "pending", "jira_tag": "[SW]"},
+        {"id": "m-4-2", "title": "補光燈 PWM 影像閃爍優化", "track": "engineering", "status": "pending", "jira_tag": "[FW]"},
+        {"id": "m-4-3", "title": "外殼干涉修正", "track": "engineering", "status": "pending", "jira_tag": "[ME]"},
+        {"id": "m-4-4", "title": "內部 Alpha 試用 50 份 UX 回饋", "track": "design", "status": "pending", "jira_tag": "[QA]"},
+        {"id": "m-4-5", "title": "產品包裝與快速入門指南設計", "track": "market", "status": "pending", "jira_tag": "[MKT]"}
+      ]
+    },
+    {
+      "id": "phase-5", "name": "設計驗證測試", "short_name": "DVT", "order": 5, "status": "pending",
+      "milestones": [
+        {"id": "m-5-1", "title": "通過 ESD 8KV/15KV 靜電測試", "track": "engineering", "status": "pending", "jira_tag": "[QA]"},
+        {"id": "m-5-2", "title": "高溫 60°C 熱噪點問題修復", "track": "engineering", "status": "pending", "jira_tag": "[HW]"},
+        {"id": "m-5-3", "title": "取得 FCC/CE/RoHS 認證", "track": "engineering", "status": "pending", "jira_tag": "[Cert]"},
+        {"id": "m-5-4", "title": "Beta 封閉測試完成", "track": "design", "status": "pending", "jira_tag": "[UX]"},
+        {"id": "m-5-5", "title": "宣傳影片拍攝與後製完成", "track": "market", "status": "pending", "jira_tag": "[MKT]"}
+      ]
+    },
+    {
+      "id": "phase-6", "name": "生產驗證測試", "short_name": "PVT", "order": 6, "status": "pending",
+      "milestones": [
+        {"id": "m-6-1", "title": "產線自動化測試程式 (MFC)", "track": "engineering", "status": "pending", "jira_tag": "[MFG]"},
+        {"id": "m-6-2", "title": "試產良率 ≥ 95%", "track": "engineering", "status": "pending", "jira_tag": "[QA]"},
+        {"id": "m-6-3", "title": "首批物流排程確認", "track": "market", "status": "pending", "jira_tag": "[Sales]"},
+        {"id": "m-6-4", "title": "官網 Landing Page 上線", "track": "market", "status": "pending", "jira_tag": "[MKT]"}
+      ]
+    },
+    {
+      "id": "phase-7", "name": "量產與產品發布", "short_name": "MP", "order": 7, "status": "pending",
+      "milestones": [
+        {"id": "m-7-1", "title": "大批量生產穩定出貨", "track": "engineering", "status": "pending", "jira_tag": "[MFG]"},
+        {"id": "m-7-2", "title": "Second Source 替代料驗證", "track": "engineering", "status": "pending", "jira_tag": "[HW]"},
+        {"id": "m-7-3", "title": "Day 1 OTA 緊急修復包準備", "track": "engineering", "status": "pending", "jira_tag": "[SW]"},
+        {"id": "m-7-4", "title": "產品發布會與媒體評測解禁", "track": "market", "status": "pending", "jira_tag": "[PR]"},
+        {"id": "m-7-5", "title": "RMA 售後追蹤機制啟動", "track": "market", "status": "pending", "jira_tag": "[Support]"}
+      ]
+    }
+  ]
+}

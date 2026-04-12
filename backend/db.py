@@ -118,6 +118,11 @@ CREATE TABLE IF NOT EXISTS task_comments (
     timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS npi_state (
+    id          TEXT PRIMARY KEY DEFAULT 'current',
+    data        TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS artifacts (
     id          TEXT PRIMARY KEY,
     task_id     TEXT,
@@ -487,3 +492,24 @@ async def delete_artifact(artifact_id: str) -> bool:
     cur = await _conn().execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
     await _conn().commit()
     return cur.rowcount > 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  NPI Lifecycle
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def get_npi_state() -> dict:
+    async with _conn().execute("SELECT data FROM npi_state WHERE id = 'current'") as cur:
+        row = await cur.fetchone()
+    if row:
+        return json.loads(row["data"])
+    return {}
+
+
+async def save_npi_state(data: dict) -> None:
+    await _conn().execute(
+        """INSERT INTO npi_state (id, data) VALUES ('current', :data)
+           ON CONFLICT(id) DO UPDATE SET data=excluded.data""",
+        {"data": json.dumps(data)},
+    )
+    await _conn().commit()

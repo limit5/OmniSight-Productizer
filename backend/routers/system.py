@@ -16,7 +16,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 import yaml
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -592,3 +592,89 @@ async def get_available_model_rules():
     """List all available model rule definitions from configs/models/."""
     from backend.prompt_loader import list_available_models
     return list_available_models()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  NPI Lifecycle
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_NPI_CONFIG = Path(__file__).resolve().parent.parent.parent / "configs" / "npi_lifecycle.json"
+
+
+@router.get("/npi")
+async def get_npi_state():
+    """Return the current NPI lifecycle state."""
+    from backend import db
+    state = await db.get_npi_state()
+    if state:
+        return state
+    # First load: read from SSOT config file
+    if _NPI_CONFIG.exists():
+        import json as _json
+        data = _json.loads(_NPI_CONFIG.read_text(encoding="utf-8"))
+        await db.save_npi_state(data)
+        return data
+    return {"business_model": "odm", "phases": [], "current_phase_id": None}
+
+
+@router.put("/npi")
+async def update_npi_state(
+    business_model: str | None = None,
+    current_phase_id: str | None = None,
+):
+    """Update NPI project-level settings."""
+    from backend import db
+    state = await db.get_npi_state()
+    if not state:
+        state = {"business_model": "odm", "phases": [], "current_phase_id": None}
+    if business_model is not None:
+        state["business_model"] = business_model
+    if current_phase_id is not None:
+        state["current_phase_id"] = current_phase_id
+    await db.save_npi_state(state)
+    return state
+
+
+@router.patch("/npi/phases/{phase_id}")
+async def update_npi_phase(phase_id: str, status: str | None = None, target_date: str | None = None):
+    """Update a specific NPI phase."""
+    from backend import db
+    state = await db.get_npi_state()
+    if not state:
+        raise HTTPException(status_code=404, detail="NPI state not initialized")
+    for phase in state.get("phases", []):
+        if phase["id"] == phase_id:
+            if status is not None:
+                phase["status"] = status
+            if target_date is not None:
+                phase["target_date"] = target_date
+            await db.save_npi_state(state)
+            return phase
+    raise HTTPException(status_code=404, detail=f"Phase {phase_id} not found")
+
+
+@router.patch("/npi/milestones/{milestone_id}")
+async def update_npi_milestone(milestone_id: str, status: str | None = None, due_date: str | None = None):
+    """Update a specific NPI milestone."""
+    from backend import db
+    state = await db.get_npi_state()
+    if not state:
+        raise HTTPException(status_code=404, detail="NPI state not initialized")
+    for phase in state.get("phases", []):
+        for ms in phase.get("milestones", []):
+            if ms["id"] == milestone_id:
+                if status is not None:
+                    ms["status"] = status
+                if due_date is not None:
+                    ms["due_date"] = due_date
+                # Auto-compute phase status
+                all_ms = phase.get("milestones", [])
+                if all(m["status"] == "completed" for m in all_ms):
+                    phase["status"] = "completed"
+                elif any(m["status"] == "blocked" for m in all_ms):
+                    phase["status"] = "blocked"
+                elif any(m["status"] in ("in_progress", "completed") for m in all_ms):
+                    phase["status"] = "active"
+                await db.save_npi_state(state)
+                return ms
+    raise HTTPException(status_code=404, detail=f"Milestone {milestone_id} not found")
