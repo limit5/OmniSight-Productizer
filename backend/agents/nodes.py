@@ -256,19 +256,19 @@ def _specialist_node_factory(agent_type: str):
                 handoff_context=state.handoff_context,
                 task_skill_context=state.task_skill_context,
             )
-            if state.last_error:
-                prompt = (
-                    f"PREVIOUS ATTEMPT FAILED (retry {state.retry_count}/{state.max_retries}):\n"
-                    f"{state.last_error}\n\n"
-                    "Adjust your approach to avoid the same error.\n\n"
-                    + prompt
-                )
             if state.last_verification_failure:
                 prompt = (
                     f"VERIFICATION FAILED (iteration {state.verification_loop_iteration}/{state.max_verification_iterations}):\n"
                     f"{state.last_verification_failure}\n\n"
                     "Analyze the test/simulation failures above. Fix the code to pass the failing tests, "
                     "then re-run the simulation to verify.\n\n"
+                    + prompt
+                )
+            elif state.last_error:
+                prompt = (
+                    f"PREVIOUS ATTEMPT FAILED (retry {state.retry_count}/{state.max_retries}):\n"
+                    f"{state.last_error}\n\n"
+                    "Adjust your approach to avoid the same error.\n\n"
                     + prompt
                 )
             sys = SystemMessage(content=prompt)
@@ -515,12 +515,16 @@ def error_check_node(state: GraphState) -> dict:
 
     Detects stuck loops via error_history comparison.
     """
-    # Check for verification failures: tool succeeded but reported [FAIL]
+    # Separate tool execution errors from verification failures
+    tool_errors = [r for r in state.tool_results if not r.success]
     verification_failed = [
         r for r in state.tool_results
         if r.success and r.output.strip().startswith("[FAIL]")
     ]
-    if verification_failed:
+
+    # Verification failures only processed if there are NO tool errors
+    # (tool errors take priority — fix the crash first, then verify)
+    if verification_failed and not tool_errors:
         v_iter = state.verification_loop_iteration + 1
         if v_iter > state.max_verification_iterations:
             emit_pipeline_phase(
@@ -548,8 +552,8 @@ def error_check_node(state: GraphState) -> dict:
             "tool_calls": [], "tool_results": [],
         }
 
-    # Clear verification state on success
-    failed = [r for r in state.tool_results if not r.success]
+    # Process tool execution errors (existing retry logic)
+    failed = tool_errors
 
     if not failed or state.retry_count >= state.max_retries:
         if failed and state.retry_count >= state.max_retries:
@@ -575,7 +579,7 @@ def error_check_node(state: GraphState) -> dict:
                     )
                 ],
             }
-        return {"last_error": "", "rtk_bypass": False}
+        return {"last_error": "", "last_verification_failure": "", "rtk_bypass": False}
 
     error_summary = "; ".join(
         f"{r.tool_name}: {r.output[:200]}" for r in failed
@@ -636,7 +640,7 @@ def _should_retry(state: GraphState) -> str:
         return "summarizer"
     if state.last_error and state.retry_count < state.max_retries:
         return state.routed_to
-    if state.last_verification_failure and state.verification_loop_iteration <= state.max_verification_iterations:
+    if state.last_verification_failure and state.verification_loop_iteration < state.max_verification_iterations:
         return state.routed_to
     return "summarizer"
 
