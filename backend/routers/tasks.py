@@ -189,6 +189,21 @@ async def add_task_comment(task_id: str, author: str = "human", content: str = "
     return comment
 
 
+@router.get("/{task_id}/handoffs")
+async def get_task_handoffs(task_id: str):
+    """Get handoff chain for a task — shows agent-to-agent transitions."""
+    all_handoffs = await db.list_handoffs()
+    chain = [h for h in all_handoffs if h.get("task_id") == task_id]
+    return chain
+
+
+@router.get("/handoffs/recent")
+async def get_recent_handoffs(limit: int = 20):
+    """Get recent handoffs across all tasks."""
+    handoffs = await db.list_handoffs()
+    return handoffs[:limit]
+
+
 @router.delete("/{task_id}", status_code=204)
 async def delete_task(task_id: str):
     if task_id not in _tasks:

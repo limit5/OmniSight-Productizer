@@ -201,6 +201,22 @@ export async function deleteTask(id: string) {
   return request<void>(`/tasks/${id}`, { method: "DELETE" })
 }
 
+// ─── Handoffs ───
+
+export interface HandoffItem {
+  task_id: string
+  agent_id: string
+  created_at: string
+}
+
+export async function getTaskHandoffs(taskId: string): Promise<HandoffItem[]> {
+  return request<HandoffItem[]>(`/tasks/${taskId}/handoffs`)
+}
+
+export async function getRecentHandoffs(limit: number = 20): Promise<HandoffItem[]> {
+  return request<HandoffItem[]>(`/tasks/handoffs/recent?limit=${limit}`)
+}
+
 // ─── Chat ───
 
 export interface ApiChatMessage {
