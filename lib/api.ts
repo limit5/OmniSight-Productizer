@@ -300,6 +300,32 @@ export async function getProviders() {
   return request<ProvidersResponse>("/providers")
 }
 
+export interface ProviderHealth {
+  id: string
+  name: string
+  configured: boolean
+  is_active: boolean
+  last_failure: number | null
+  cooldown_remaining: number
+  status: "active" | "cooldown" | "available" | "unconfigured"
+}
+
+export interface ProviderHealthResponse {
+  chain: string[]
+  health: ProviderHealth[]
+}
+
+export async function getProviderHealth(): Promise<ProviderHealthResponse> {
+  return request<ProviderHealthResponse>("/providers/health")
+}
+
+export async function updateFallbackChain(chain: string[]): Promise<{ status: string; chain: string[] }> {
+  return request<{ status: string; chain: string[] }>("/providers/fallback-chain", {
+    method: "PUT",
+    body: JSON.stringify({ chain }),
+  })
+}
+
 export async function switchProvider(provider: string, model?: string) {
   return request<{ status: string; provider: string; model: string }>(
     "/providers/switch",

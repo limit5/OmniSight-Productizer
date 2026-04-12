@@ -30,11 +30,17 @@ export default function Home() {
   const [syncCount, setSyncCount] = useState(0)
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
   const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
+  const [providerHealth, setProviderHealth] = useState<api.ProviderHealthResponse | null>(null)
   const [showNotifications, setShowNotifications] = useState(false)
 
-  // Fetch provider list once on mount
+  // Fetch provider list + health on mount and periodically
   useEffect(() => {
     api.getProviders().then(setProviderData).catch(() => {})
+    api.getProviderHealth().then(setProviderHealth).catch(() => {})
+    const healthInterval = setInterval(() => {
+      api.getProviderHealth().then(setProviderHealth).catch(() => {})
+    }, 10000)
+    return () => clearInterval(healthInterval)
   }, [])
 
   // Use engine state (backed by API when connected)
@@ -300,7 +306,9 @@ export default function Home() {
             activeProvider={providerData?.active_provider}
             activeModel={providerData?.active_model}
             providers={providerData?.providers}
-            onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()) } catch (e) { console.error("Switch provider failed:", e) } }}
+            providerHealth={providerHealth}
+            onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Switch provider failed:", e) } }}
+            onUpdateFallbackChain={async (chain) => { try { await api.updateFallbackChain(chain); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Update chain failed:", e) } }}
           />
         )
       case "tasks":
@@ -483,7 +491,9 @@ export default function Home() {
               activeProvider={providerData?.active_provider}
               activeModel={providerData?.active_model}
               providers={providerData?.providers}
-              onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()) } catch (e) { console.error("Switch provider failed:", e) } }}
+              providerHealth={providerHealth}
+              onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Switch provider failed:", e) } }}
+              onUpdateFallbackChain={async (chain) => { try { await api.updateFallbackChain(chain); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Update chain failed:", e) } }}
             />
           </aside>
 
