@@ -335,7 +335,7 @@ export default function Home() {
               artifacts={engine.artifacts.length > 0 ? engine.artifacts.map(a => ({
                 id: a.id,
                 name: a.name,
-                type: a.type as "pdf" | "markdown" | "json" | "log",
+                type: a.type as "pdf" | "markdown" | "json" | "log" | "html",
                 timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
                 size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
               })) : undefined}
@@ -494,7 +494,7 @@ export default function Home() {
               artifacts={engine.artifacts.length > 0 ? engine.artifacts.map(a => ({
                 id: a.id,
                 name: a.name,
-                type: a.type as "pdf" | "markdown" | "json" | "log",
+                type: a.type as "pdf" | "markdown" | "json" | "log" | "html",
                 timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
                 size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
               })) : undefined}

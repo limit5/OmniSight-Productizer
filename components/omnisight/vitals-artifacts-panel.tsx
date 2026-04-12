@@ -27,7 +27,7 @@ interface VitalsData {
 interface Artifact {
   id: string
   name: string
-  type: "pdf" | "markdown" | "json" | "log"
+  type: "pdf" | "markdown" | "json" | "log" | "html"
   timestamp: string
   size: string
 }
