@@ -844,13 +844,16 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
     now = _dt.now().isoformat()
 
     # Insert running record
-    await db.insert_simulation({
-        "id": sim_id, "task_id": "", "agent_id": get_active_agent_id() or "",
-        "track": track, "module": module, "status": "running",
-        "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
-        "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
-        "report_json": "{}", "artifact_id": None, "created_at": now,
-    })
+    try:
+        await db.insert_simulation({
+            "id": sim_id, "task_id": "", "agent_id": get_active_agent_id() or "",
+            "track": track, "module": module, "status": "running",
+            "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
+            "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+            "report_json": "{}", "artifact_id": None, "created_at": now,
+        })
+    except Exception as exc:
+        return f"[ERROR] Failed to initialize simulation record: {exc}"
     emit_simulation(sim_id, "start", f"{track}/{module} on {platform}")
 
     # Build command
@@ -891,6 +894,8 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
                     proc.communicate(), timeout=SIMULATION_TIMEOUT
                 )
                 raw_output = (stdout or b"").decode(errors="replace")
+                if not raw_output.strip() and stderr:
+                    raw_output = (stderr or b"").decode(errors="replace")
         else:
             workspace = get_active_workspace()
             proc = await asyncio.create_subprocess_shell(
@@ -901,6 +906,8 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
                 proc.communicate(), timeout=SIMULATION_TIMEOUT
             )
             raw_output = (stdout or b"").decode(errors="replace")
+            if not raw_output.strip() and stderr:
+                raw_output = (stderr or b"").decode(errors="replace")
     except asyncio.TimeoutError:
         await db.update_simulation(sim_id, {"status": "error", "report_json": '{"errors":["Timeout"]}'})
         emit_simulation(sim_id, "result", "Timeout", status="error")
@@ -937,7 +944,8 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
 
     emit_simulation(sim_id, "result", f"{status}: {tests.get('passed', 0)}/{tests.get('total', 0)} tests",
                     status=status, track=track, module=module,
-                    tests_total=tests.get("total", 0), tests_passed=tests.get("passed", 0))
+                    tests_total=tests.get("total", 0), tests_passed=tests.get("passed", 0),
+                    tests_failed=tests.get("failed", 0))
 
     # Return concise summary (not full JSON — save tokens)
     errors = report.get("errors", [])

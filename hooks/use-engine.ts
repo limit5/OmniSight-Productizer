@@ -264,16 +264,35 @@ export function useEngine() {
                   created_at: (d.timestamp as string) || new Date().toISOString(),
                 }, ...prev.slice(0, 49)])
               } else if (action === "result") {
-                setSimulations(prev => prev.map(s =>
-                  s.id === simId
-                    ? {
-                        ...s,
-                        status: (d.status as "pass" | "fail" | "error") || s.status,
-                        tests_passed: (d.tests_passed as number) ?? s.tests_passed,
-                        tests_total: (d.tests_total as number) ?? s.tests_total,
-                      }
-                    : s
-                ))
+                setSimulations(prev => {
+                  const exists = prev.some(s => s.id === simId)
+                  if (exists) {
+                    return prev.map(s =>
+                      s.id === simId
+                        ? {
+                            ...s,
+                            status: (d.status as "pass" | "fail" | "error") || s.status,
+                            tests_passed: (d.tests_passed as number) ?? s.tests_passed,
+                            tests_total: (d.tests_total as number) ?? s.tests_total,
+                            tests_failed: (d.tests_failed as number) ?? ((d.tests_total as number ?? 0) - (d.tests_passed as number ?? 0)),
+                          }
+                        : s
+                    )
+                  }
+                  // Result arrived before start — create entry
+                  return [{
+                    id: simId,
+                    task_id: null, agent_id: null,
+                    track: (d.track as "algo" | "hw") || "algo",
+                    module: (d.module as string) || "",
+                    status: (d.status as "pass" | "fail" | "error") || "error",
+                    tests_total: (d.tests_total as number) || 0,
+                    tests_passed: (d.tests_passed as number) || 0,
+                    tests_failed: (d.tests_failed as number) || 0,
+                    coverage_pct: 0, valgrind_errors: 0, duration_ms: 0,
+                    created_at: (d.timestamp as string) || new Date().toISOString(),
+                  }, ...prev.slice(0, 49)]
+                })
               }
             }
 

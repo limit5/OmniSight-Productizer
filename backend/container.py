@@ -121,13 +121,14 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
         raise RuntimeError(f"Docker image {DOCKER_IMAGE} not available")
 
     # Build mount list — workspace always, test_assets/simulate.sh conditionally (:ro)
-    mounts = f"-v {workspace_path.resolve()}:/workspace "
+    ws_abs = str(workspace_path.resolve())
+    mounts = f'-v "{ws_abs}":/workspace '
     test_assets_path = _PROJECT_ROOT / "test_assets"
     if test_assets_path.is_dir() and any(test_assets_path.iterdir()):
-        mounts += f"-v {test_assets_path.resolve()}:/workspace/test_assets:ro "
+        mounts += f'-v "{test_assets_path.resolve()}":/workspace/test_assets:ro '
     scripts_path = _PROJECT_ROOT / "scripts" / "simulate.sh"
     if scripts_path.is_file():
-        mounts += f"-v {scripts_path.resolve()}:/opt/omnisight/simulate.sh:ro "
+        mounts += f'-v "{scripts_path.resolve()}":/opt/omnisight/simulate.sh:ro '
 
     # Start container with workspace mounted
     rc, out, err = await _run(
