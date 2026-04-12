@@ -33,12 +33,25 @@ async def gerrit_webhook(request: Request):
     """Receive Gerrit events and trigger appropriate actions.
 
     Gerrit sends JSON events via its webhook plugin or stream-events.
+    Supports optional HMAC-SHA256 signature via X-Gerrit-Signature header.
     """
     if not settings.gerrit_enabled:
         return JSONResponse(status_code=503, content={"detail": "Gerrit integration disabled"})
 
+    # Authenticate if secret is configured
+    raw_body = await request.body()
+    if settings.gerrit_webhook_secret:
+        import hashlib
+        import hmac as _hmac
+        signature = request.headers.get("X-Gerrit-Signature", "")
+        expected = _hmac.new(
+            settings.gerrit_webhook_secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        if not _hmac.compare_digest(signature, expected):
+            return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+
     try:
-        body = await request.json()
+        body = json.loads(raw_body)
     except Exception:
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
 

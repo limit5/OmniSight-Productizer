@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     gerrit_replication_targets: str = ""  # Comma-separated remote names for post-merge push
 
     # ── Webhook Secrets (External → Internal) ──
+    gerrit_webhook_secret: str = ""     # Shared secret for Gerrit webhook auth
     github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
     gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
     jira_webhook_secret: str = ""       # Bearer token verification
