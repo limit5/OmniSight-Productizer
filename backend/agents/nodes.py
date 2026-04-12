@@ -263,6 +263,14 @@ def _specialist_node_factory(agent_type: str):
                     "Adjust your approach to avoid the same error.\n\n"
                     + prompt
                 )
+            if state.last_verification_failure:
+                prompt = (
+                    f"VERIFICATION FAILED (iteration {state.verification_loop_iteration}/{state.max_verification_iterations}):\n"
+                    f"{state.last_verification_failure}\n\n"
+                    "Analyze the test/simulation failures above. Fix the code to pass the failing tests, "
+                    "then re-run the simulation to verify.\n\n"
+                    + prompt
+                )
             sys = SystemMessage(content=prompt)
             try:
                 resp = llm.invoke([sys, *state.messages])
@@ -500,10 +508,47 @@ def _extract_error_key(error_summary: str) -> str:
 def error_check_node(state: GraphState) -> dict:
     """Check tool results for failures with loop detection.
 
-    Detects stuck loops: if the same tool fails 2+ consecutive times,
-    triggers the loop breaker to escalate immediately instead of wasting
-    retries on the same error.
+    Two separate loops:
+    1. Tool execution errors (retry_count) — tool crashed or timed out
+    2. Verification failures (verification_loop_iteration) — tool ran OK but
+       returned [FAIL] (e.g., simulation tests failed)
+
+    Detects stuck loops via error_history comparison.
     """
+    # Check for verification failures: tool succeeded but reported [FAIL]
+    verification_failed = [
+        r for r in state.tool_results
+        if r.success and r.output.strip().startswith("[FAIL]")
+    ]
+    if verification_failed:
+        v_iter = state.verification_loop_iteration + 1
+        if v_iter > state.max_verification_iterations:
+            emit_pipeline_phase(
+                "verification_exhausted",
+                f"Verification failed {v_iter} times — escalating to human",
+            )
+            from backend.events import emit_debug_finding
+            emit_debug_finding(
+                task_id=state.task_id or "", agent_id=state.routed_to or "",
+                finding_type="verification_exhausted", severity="error",
+                message=f"Verification loop exhausted after {v_iter} iterations",
+            )
+            return {
+                "last_verification_failure": "",
+                "tool_calls": [], "tool_results": [],
+            }
+        v_msg = "; ".join(f"{r.tool_name}: {r.output[:200]}" for r in verification_failed)
+        emit_pipeline_phase(
+            "verification_failure",
+            f"Verification failed (iteration {v_iter}/{state.max_verification_iterations}): {v_msg[:120]}",
+        )
+        return {
+            "verification_loop_iteration": v_iter,
+            "last_verification_failure": v_msg,
+            "tool_calls": [], "tool_results": [],
+        }
+
+    # Clear verification state on success
     failed = [r for r in state.tool_results if not r.success]
 
     if not failed or state.retry_count >= state.max_retries:
@@ -581,11 +626,17 @@ def error_check_node(state: GraphState) -> dict:
 def _should_retry(state: GraphState) -> str:
     """Conditional edge after error_check: retry specialist or summarize.
 
-    If loop breaker triggered, escalate immediately instead of retrying.
+    Three paths:
+    1. Loop breaker → summarizer (stuck pattern detected)
+    2. Tool error + retries left → retry specialist
+    3. Verification [FAIL] + iterations left → retry specialist (fix code)
+    4. Otherwise → summarizer
     """
     if state.loop_breaker_triggered:
         return "summarizer"
     if state.last_error and state.retry_count < state.max_retries:
+        return state.routed_to
+    if state.last_verification_failure and state.verification_loop_iteration <= state.max_verification_iterations:
         return state.routed_to
     return "summarizer"
 

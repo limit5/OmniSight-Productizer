@@ -81,5 +81,11 @@ class GraphState(BaseModel):
     loop_breaker_triggered: bool = False
     rtk_bypass: bool = False  # When True, skip output compression (fallback for debug)
 
+    # Verification loop: separate from retry_count (which tracks tool execution errors)
+    # This tracks "generate → verify → [FAIL] → fix → verify" iterations
+    verification_loop_iteration: int = 0
+    max_verification_iterations: int = 2
+    last_verification_failure: str = ""
+
     # Final answer text to return to the frontend
     answer: str = ""

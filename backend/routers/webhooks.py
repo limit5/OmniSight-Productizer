@@ -162,22 +162,57 @@ async def _run_review(reviewer: Agent, change_id: str, commit: str, subject: str
 
 
 async def _on_comment_added(event: dict) -> None:
-    """A review comment was added — check if it includes -1 for coder to fix."""
+    """Code-Review -1 received → auto-create fix task for agent to iterate."""
     approvals = event.get("approvals", [])
     change = event.get("change", {})
     change_id = change.get("id", "")
+    subject = change.get("subject", change_id)
 
     for approval in approvals:
         if approval.get("type") == "Code-Review" and approval.get("value") == "-1":
-            logger.info("Code-Review -1 on change %s — coder should iterate", change_id)
-            emit_invoke("review_rejected", f"Change {change_id} received Code-Review -1")
+            logger.info("Code-Review -1 on change %s — creating fix task", change_id)
+
+            # Extract reviewer feedback
+            review_feedback = approval.get("message", "")
+            if not review_feedback:
+                review_feedback = event.get("comment", "No specific feedback provided.")
+
+            # Create a fix task for INVOKE to pick up
+            import uuid
+            from backend.models import Task, TaskPriority, TaskStatus
+            from backend.routers.tasks import _tasks
+            from backend import db
+
+            fix_task_id = f"fix-{uuid.uuid4().hex[:6]}"
+            fix_task = Task(
+                id=fix_task_id,
+                title=f"Fix Gerrit review: {subject[:60]}",
+                description=(
+                    f"Code-Review -1 on change {change_id}.\n\n"
+                    f"Reviewer feedback:\n{review_feedback}\n\n"
+                    f"Analyze the feedback, fix the code, and push a new patchset."
+                ),
+                priority=TaskPriority.high,
+                status=TaskStatus.backlog,
+                suggested_agent_type="software",
+                labels=["gerrit-review-fix"],
+                external_issue_id=change_id,
+            )
+            _tasks[fix_task_id] = fix_task
+            try:
+                await db.upsert_task(fix_task.model_dump())
+            except Exception:
+                pass
+
+            emit_invoke("review_rejected", f"Change {change_id} received -1 — fix task {fix_task_id} created")
+
             # L2 notification
             from backend.notifications import notify
-            import asyncio
             asyncio.create_task(notify(
-                "warning", f"Code-Review -1: {change.get('subject', change_id)}",
-                message=f"Change {change_id} needs revision",
+                "warning", f"Code-Review -1: {subject[:60]}",
+                message=f"Fix task {fix_task_id} created. Agent will iterate.",
                 source="gerrit",
+                action_label="View Change",
             ))
             break
 
