@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -327,6 +328,8 @@ async def create_vendor_sdk(body: VendorSDKCreate):
 @router.delete("/vendor/sdks/{platform}")
 async def delete_vendor_sdk(platform: str):
     """Delete a vendor SDK platform profile."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', platform):
+        raise HTTPException(400, "Invalid platform name (alphanumeric, hyphens, underscores only)")
     profile_path = _PLATFORMS_DIR / f"{platform}.yaml"
     if not profile_path.exists():
         raise HTTPException(404, f"Platform profile not found: {platform}")
