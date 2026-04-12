@@ -94,37 +94,75 @@ def _rule_based_route(text: str) -> tuple[str, list[str]]:
     return primary, secondary
 
 
+_QUESTION_PATTERNS = re.compile(
+    r"(\?|什麼|怎麼|如何|為什麼|為何|哪|嗎|呢|建議|介紹|說明|解釋"
+    r"|^what\b|^how\b|^why\b|^when\b|^where\b|^which\b|^can\b|^could\b"
+    r"|^is\b|^are\b|^do\b|^does\b|^tell\b|^explain\b|^describe\b|^suggest\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_question(text: str) -> bool:
+    """Heuristic: detect if text is a question/inquiry rather than a task command."""
+    return bool(_QUESTION_PATTERNS.search(text))
+
+
 def orchestrator_node(state: GraphState) -> dict:
-    """Parse the user command, decide which specialist to route to."""
+    """Parse the user command: conversation vs task, then route accordingly."""
     cmd = state.user_command
 
     secondary: list[str] = []
+    is_conv = False
+    route = "general"
+
     llm = _get_llm()
     if llm:
         sys = SystemMessage(content=(
-            "You are the OmniSight Orchestrator. Given a user command about "
-            "embedded AI camera development, decide which specialist agents "
-            "should handle it. If the command involves multiple domains, list them "
-            "separated by commas (primary first). "
+            "You are the OmniSight Orchestrator. Determine the user's intent:\n"
+            "1. If the user is asking a QUESTION, requesting advice, or inquiring about "
+            "status (NOT asking to execute/build/compile/test/deploy), respond ONLY with: CONVERSATIONAL\n"
+            "2. Otherwise, decide which specialist agent should handle the task. "
             "Valid agents: firmware, software, validator, reporter, reviewer, general. "
-            "Example: firmware,validator"
+            "Respond with agent name(s) comma-separated (primary first).\n"
+            "Examples:\n"
+            "- 'What is ISP tuning?' → CONVERSATIONAL\n"
+            "- 'How many agents are running?' → CONVERSATIONAL\n"
+            "- 'Compile the firmware driver' → firmware\n"
+            "- 'Run tests and generate report' → validator,reporter"
         ))
         try:
             resp = llm.invoke([sys, *state.messages])
             raw = resp.content.strip().lower()  # type: ignore[union-attr]
-            parts = [p.strip() for p in raw.split(",")]
-            valid = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
-            valid_parts = [p for p in parts if p in valid]
-            if valid_parts:
-                route = valid_parts[0]
-                secondary = valid_parts[1:]
+            if "conversational" in raw:
+                is_conv = True
             else:
-                route, secondary = _rule_based_route(cmd)
+                parts = [p.strip() for p in raw.split(",")]
+                valid = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
+                valid_parts = [p for p in parts if p in valid]
+                if valid_parts:
+                    route = valid_parts[0]
+                    secondary = valid_parts[1:]
+                else:
+                    route, secondary = _rule_based_route(cmd)
         except Exception as exc:
             logger.warning("LLM routing failed: %s — falling back", exc)
-            route, secondary = _rule_based_route(cmd)
+            if _is_question(cmd):
+                is_conv = True
+            else:
+                route, secondary = _rule_based_route(cmd)
     else:
-        route, secondary = _rule_based_route(cmd)
+        # Rule-based: detect questions first, then route tasks
+        if _is_question(cmd):
+            is_conv = True
+        else:
+            route, secondary = _rule_based_route(cmd)
+
+    if is_conv:
+        emit_pipeline_phase("routing", "Conversational mode — answering directly")
+        return {
+            "is_conversational": True,
+            "messages": [AIMessage(content="[ORCHESTRATOR] Entering conversational mode")],
+        }
 
     detail = f"Routing to {route.upper()} specialist"
     if secondary:
@@ -509,6 +547,79 @@ def _should_retry(state: GraphState) -> str:
     if state.last_error and state.retry_count < state.max_retries:
         return state.routed_to
     return "summarizer"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Conversation node — direct Q&A without tool execution
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _build_state_summary() -> str:
+    """Build a concise system state summary for conversational context."""
+    try:
+        from backend.routers.invoke import _agents, _tasks
+        agents_list = list(_agents.values())
+        tasks_list = list(_tasks.values())
+        running = sum(1 for a in agents_list if a.status.value == "running")
+        idle = sum(1 for a in agents_list if a.status.value == "idle")
+        errors = sum(1 for a in agents_list if a.status.value == "error")
+        pending = sum(1 for t in tasks_list if t.status.value == "backlog")
+        in_prog = sum(1 for t in tasks_list if t.status.value in ("assigned", "in_progress"))
+        completed = sum(1 for t in tasks_list if t.status.value == "completed")
+        blocked = sum(1 for t in tasks_list if t.status.value == "blocked")
+        return (
+            f"Agents: {len(agents_list)} total ({running} running, {idle} idle, {errors} error)\n"
+            f"Tasks: {len(tasks_list)} total ({pending} pending, {in_prog} in progress, "
+            f"{completed} completed, {blocked} blocked)"
+        )
+    except Exception:
+        return "System state unavailable."
+
+
+def conversation_node(state: GraphState) -> dict:
+    """Answer general questions without tool execution.
+
+    This node is the conversational path — parallel to specialist nodes.
+    It injects system state context and calls LLM without tool bindings.
+    """
+    state_summary = _build_state_summary()
+    llm = _get_llm(bind_tools_for=None)
+
+    if not llm:
+        # Offline fallback: return state summary directly
+        emit_pipeline_phase("conversation", "Offline mode — returning state summary")
+        return {
+            "answer": f"[OFFLINE] I can't process your question without an LLM provider.\n\nCurrent state:\n{state_summary}",
+            "messages": [AIMessage(content=state_summary)],
+        }
+
+    sys_prompt = SystemMessage(content=(
+        "You are the OmniSight Conversational Assistant — an expert in embedded AI camera development. "
+        "Answer questions about ISP tuning, sensor optimization, firmware architecture, Linux drivers, "
+        "image processing pipelines, NPI lifecycle, and system status.\n\n"
+        f"Current System State:\n{state_summary}\n\n"
+        "Guidelines:\n"
+        "- Be conversational, helpful, and concise.\n"
+        "- Use markdown for formatting when appropriate.\n"
+        "- If the user wants to execute a task (compile, test, deploy), suggest: "
+        "'Try typing a command like \"compile firmware\" or create a task via the Task Backlog.'\n"
+        "- Answer in the same language as the user's question."
+    ))
+
+    emit_pipeline_phase("conversation", "Generating conversational response")
+    try:
+        resp = llm.invoke([sys_prompt, *state.messages])
+        answer = resp.content  # type: ignore[union-attr]
+        return {
+            "answer": answer,
+            "messages": [AIMessage(content=answer)],
+        }
+    except Exception as exc:
+        logger.warning("Conversation LLM failed: %s", exc)
+        return {
+            "answer": f"I'm having trouble responding right now.\n\nSystem state:\n{state_summary}",
+            "messages": [AIMessage(content=f"Conversation error: {exc}")],
+        }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

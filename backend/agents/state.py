@@ -63,6 +63,7 @@ class GraphState(BaseModel):
     agent_sub_type: str = ""
     handoff_context: str = ""
     task_skill_context: str = ""  # Anthropic SKILL.md content for task-specific guidance
+    is_conversational: bool = False  # True = conversation mode (no tools), False = task execution
 
     # Gerrit Code Review context
     gerrit_change_id: str = ""

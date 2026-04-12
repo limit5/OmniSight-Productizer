@@ -353,16 +353,15 @@ export function OrchestratorAI({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!inputValue.trim()) return
-    
-    // If external command handler is available, use it for agent-related commands
+
     const cmd = inputValue.toLowerCase().trim()
-    if (onSendCommand && (
-      cmd.startsWith("add ") || 
-      cmd.startsWith("spawn ") || 
-      cmd.startsWith("create ") ||
-      cmd.startsWith("remove ") ||
-      cmd.startsWith("stop ")
-    )) {
+
+    // Fast local-only commands (no LLM needed)
+    if (cmd === "help" || cmd === "?" || cmd === "clear") {
+      processCommand(inputValue)
+    }
+    // Everything else → send to backend LLM (conversations, questions, commands)
+    else if (onSendCommand) {
       onSendCommand(inputValue)
     } else {
       processCommand(inputValue)

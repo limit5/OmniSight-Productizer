@@ -51,6 +51,7 @@ from langchain_core.messages import HumanMessage
 from backend.agents.state import GraphState
 from backend.agents.nodes import (
     orchestrator_node,
+    conversation_node,
     firmware_node,
     software_node,
     validator_node,
@@ -67,8 +68,10 @@ from backend.agents.nodes import (
 _VALID_SPECIALISTS = {"firmware", "software", "validator", "reporter", "reviewer", "general"}
 
 
-def _route_to_specialist(state: GraphState) -> str:
-    """Conditional edge: pick the specialist based on orchestrator's routing."""
+def _route_after_orchestrator(state: GraphState) -> str:
+    """Conditional edge: conversation mode or specialist routing."""
+    if state.is_conversational:
+        return "conversation"
     return state.routed_to if state.routed_to in _VALID_SPECIALISTS else "general"
 
 
@@ -93,6 +96,7 @@ def build_graph() -> StateGraph:
     builder.add_node("general", general_node)
     builder.add_node("tool_executor", tool_executor_node)
     builder.add_node("error_check", error_check_node)
+    builder.add_node("conversation", conversation_node)
     builder.add_node("summarizer", summarizer_node)
 
     # ── Edges ──
@@ -100,11 +104,12 @@ def build_graph() -> StateGraph:
     # Entry
     builder.set_entry_point("orchestrator")
 
-    # Orchestrator → specialist (conditional)
+    # Orchestrator → conversation or specialist (conditional)
     builder.add_conditional_edges(
         "orchestrator",
-        _route_to_specialist,
+        _route_after_orchestrator,
         {
+            "conversation": "conversation",
             "firmware": "firmware",
             "software": "software",
             "validator": "validator",
@@ -113,6 +118,9 @@ def build_graph() -> StateGraph:
             "general": "general",
         },
     )
+
+    # Conversation → summarizer (direct, no tools)
+    builder.add_edge("conversation", "summarizer")
 
     # All specialists → check if tools are needed (conditional)
     for specialist in ("firmware", "software", "validator", "reporter", "reviewer", "general"):
