@@ -29,9 +29,10 @@ def _log(message: str, level: str = "info") -> None:
 
 
 # Event types worth persisting to DB (skip high-frequency transient events)
+# debug_finding excluded: has its own dedicated persistence in emit_debug_finding()
+# notification excluded: already persisted by notify() → db.insert_notification()
 _PERSIST_EVENT_TYPES = frozenset({
-    "agent_update", "task_update", "simulation",
-    "debug_finding", "notification", "invoke",
+    "agent_update", "task_update", "simulation", "invoke",
 })
 
 

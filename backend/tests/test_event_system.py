@@ -108,7 +108,10 @@ class TestEventBusQueueLimit:
         assert "agent_update" in _PERSIST_EVENT_TYPES
         assert "task_update" in _PERSIST_EVENT_TYPES
         assert "simulation" in _PERSIST_EVENT_TYPES
-        assert "debug_finding" in _PERSIST_EVENT_TYPES
+        assert "invoke" in _PERSIST_EVENT_TYPES
+        # debug_finding and notification have their own dedicated persistence
+        assert "debug_finding" not in _PERSIST_EVENT_TYPES
+        assert "notification" not in _PERSIST_EVENT_TYPES
         # High-frequency events should NOT be persisted
         assert "tool_progress" not in _PERSIST_EVENT_TYPES
         assert "heartbeat" not in _PERSIST_EVENT_TYPES
