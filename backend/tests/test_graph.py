@@ -22,6 +22,7 @@ class TestGraphStructure:
             "general",
             "tool_executor",
             "error_check",
+            "context_gate",
             "summarizer",
         }
         assert expected.issubset(nodes)

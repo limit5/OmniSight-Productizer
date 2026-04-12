@@ -256,9 +256,53 @@ async def _on_change_merged(event: dict) -> None:
         except Exception as exc:
             logger.error("Replication to %s error: %s", target, exc)
 
-    # Trigger CI/CD pipelines after merge
+    # L3 Episodic Memory: auto-save solution from merged change
     import asyncio as _asyncio
+    _asyncio.create_task(_save_merged_solution_to_l3(change_id, subject))
+
+    # Trigger CI/CD pipelines after merge
     _asyncio.create_task(_trigger_ci_pipelines())
+
+
+async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
+    """Save a merged change's solution to L3 episodic memory if it fixed a bug.
+
+    Only saves if the change has associated debug findings (indicating it was a bug fix).
+    This ensures L3 only contains verified, human-approved solutions (Gerrit +2).
+    """
+    try:
+        from backend import db
+        # Find debug findings linked to this change's task
+        findings = await db.list_debug_findings(status="open", limit=20)
+        # Match findings by looking for the change subject in task context
+        related = [f for f in findings if subject and (
+            subject.lower() in f.get("content", "").lower()
+            or change_id in f.get("context", "")
+        )]
+
+        if not related:
+            return
+
+        for finding in related[:3]:  # Max 3 memories per merge
+            memory_id = f"mem-{uuid.uuid4().hex[:12]}"
+            await db.insert_episodic_memory({
+                "id": memory_id,
+                "error_signature": finding.get("content", "")[:500],
+                "solution": f"Fix: {subject}",
+                "soc_vendor": "",  # Can be enriched from platform config
+                "sdk_version": "",
+                "gerrit_change_id": change_id,
+                "source_task_id": finding.get("task_id", ""),
+                "source_agent_id": finding.get("agent_id", ""),
+                "tags": [finding.get("finding_type", "fix")],
+                "quality_score": 1.0,  # Merged = verified
+            })
+            # Mark the finding as resolved
+            await db.update_debug_finding(finding["id"], "resolved")
+            logger.info("L3: Saved merged solution %s for finding %s", memory_id, finding["id"])
+
+    except Exception as exc:
+        logger.warning("L3 auto-save on merge failed (non-critical): %s", exc)
 
 
 async def _trigger_ci_pipelines() -> None:

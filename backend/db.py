@@ -38,6 +38,16 @@ async def init() -> None:
             logger.critical("Database integrity check FAILED: %s", row[0])
     await _db.commit()  # Commit pragmas before executescript (which does implicit COMMIT)
     await _db.executescript(_SCHEMA)
+    # FTS5 virtual table for L3 episodic memory full-text search
+    # (Must be created separately — FTS5 can fail if extension not loaded)
+    try:
+        await _db.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS episodic_memory_fts
+            USING fts5(error_signature, solution, soc_vendor, tags, content='episodic_memory', content_rowid='rowid')
+        """)
+        await _db.commit()
+    except Exception as exc:
+        logger.warning("FTS5 not available (L3 search will use LIKE fallback): %s", exc)
     # Run lightweight migrations for schema evolution
     await _migrate(_db)
     await _db.commit()
@@ -214,6 +224,24 @@ CREATE TABLE IF NOT EXISTS event_log (
     event_type      TEXT NOT NULL,
     data_json       TEXT NOT NULL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- L3 Episodic Memory: long-term knowledge base for cross-project learning
+CREATE TABLE IF NOT EXISTS episodic_memory (
+    id              TEXT PRIMARY KEY,
+    error_signature TEXT NOT NULL,
+    solution        TEXT NOT NULL,
+    soc_vendor      TEXT NOT NULL DEFAULT '',
+    sdk_version     TEXT NOT NULL DEFAULT '',
+    hardware_rev    TEXT NOT NULL DEFAULT '',
+    source_task_id  TEXT,
+    source_agent_id TEXT,
+    gerrit_change_id TEXT,
+    tags            TEXT NOT NULL DEFAULT '[]',
+    quality_score   REAL NOT NULL DEFAULT 0.0,
+    access_count    INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS debug_findings (
@@ -755,3 +783,160 @@ async def cleanup_old_events(days: int = 7) -> int:
     )
     await _conn().commit()
     return cur.rowcount
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L3 Episodic Memory
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_episodic_memory(data: dict) -> None:
+    """Insert a new episodic memory entry (L3)."""
+    await _conn().execute(
+        """INSERT INTO episodic_memory
+           (id, error_signature, solution, soc_vendor, sdk_version, hardware_rev,
+            source_task_id, source_agent_id, gerrit_change_id, tags, quality_score, created_at, updated_at)
+           VALUES (:id, :error_signature, :solution, :soc_vendor, :sdk_version, :hardware_rev,
+                   :source_task_id, :source_agent_id, :gerrit_change_id, :tags, :quality_score,
+                   datetime('now'), datetime('now'))""",
+        {
+            "id": data["id"],
+            "error_signature": data["error_signature"],
+            "solution": data["solution"],
+            "soc_vendor": data.get("soc_vendor", ""),
+            "sdk_version": data.get("sdk_version", ""),
+            "hardware_rev": data.get("hardware_rev", ""),
+            "source_task_id": data.get("source_task_id"),
+            "source_agent_id": data.get("source_agent_id"),
+            "gerrit_change_id": data.get("gerrit_change_id"),
+            "tags": json.dumps(data.get("tags", [])),
+            "quality_score": data.get("quality_score", 0.0),
+        },
+    )
+    # Update FTS5 index
+    try:
+        await _conn().execute(
+            """INSERT INTO episodic_memory_fts(rowid, error_signature, solution, soc_vendor, tags)
+               SELECT rowid, error_signature, solution, soc_vendor, tags
+               FROM episodic_memory WHERE id = ?""",
+            (data["id"],),
+        )
+    except Exception:
+        pass  # FTS5 not available — LIKE fallback will work
+    await _conn().commit()
+
+
+async def search_episodic_memory(
+    query: str, soc_vendor: str = "", sdk_version: str = "", limit: int = 5,
+) -> list[dict]:
+    """Search L3 episodic memory using FTS5 (with LIKE fallback).
+
+    Returns matching memories sorted by relevance, filtered by vendor/SDK if provided.
+    """
+    results: list[dict] = []
+
+    # Try FTS5 first
+    try:
+        fts_query = query.replace('"', '""')  # Escape quotes for FTS5
+        sql = """
+            SELECT em.*, rank
+            FROM episodic_memory_fts fts
+            JOIN episodic_memory em ON em.rowid = fts.rowid
+            WHERE episodic_memory_fts MATCH ?
+        """
+        params: list = [f'"{fts_query}"']
+        if soc_vendor:
+            sql += " AND em.soc_vendor = ?"
+            params.append(soc_vendor)
+        if sdk_version:
+            sql += " AND em.sdk_version = ?"
+            params.append(sdk_version)
+        sql += " ORDER BY rank LIMIT ?"
+        params.append(limit)
+        async with _conn().execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        results = [_episodic_row_to_dict(r) for r in rows]
+    except Exception:
+        # FTS5 not available — use LIKE fallback
+        pass
+
+    if not results:
+        sql = "SELECT * FROM episodic_memory WHERE (error_signature LIKE ? OR solution LIKE ?)"
+        like_param = f"%{query}%"
+        params = [like_param, like_param]
+        if soc_vendor:
+            sql += " AND soc_vendor = ?"
+            params.append(soc_vendor)
+        if sdk_version:
+            sql += " AND sdk_version = ?"
+            params.append(sdk_version)
+        sql += " ORDER BY quality_score DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        async with _conn().execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        results = [_episodic_row_to_dict(r) for r in rows]
+
+    # Increment access count for returned results
+    for r in results:
+        try:
+            await _conn().execute(
+                "UPDATE episodic_memory SET access_count = access_count + 1 WHERE id = ?",
+                (r["id"],),
+            )
+        except Exception:
+            pass
+    if results:
+        await _conn().commit()
+
+    return results
+
+
+async def get_episodic_memory(memory_id: str) -> dict | None:
+    async with _conn().execute("SELECT * FROM episodic_memory WHERE id = ?", (memory_id,)) as cur:
+        row = await cur.fetchone()
+    return _episodic_row_to_dict(row) if row else None
+
+
+async def list_episodic_memories(
+    soc_vendor: str = "", limit: int = 50,
+) -> list[dict]:
+    sql = "SELECT * FROM episodic_memory"
+    params: list = []
+    if soc_vendor:
+        sql += " WHERE soc_vendor = ?"
+        params.append(soc_vendor)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with _conn().execute(sql, params) as cur:
+        rows = await cur.fetchall()
+    return [_episodic_row_to_dict(r) for r in rows]
+
+
+async def delete_episodic_memory(memory_id: str) -> bool:
+    # Remove from FTS5 first
+    try:
+        await _conn().execute(
+            """INSERT INTO episodic_memory_fts(episodic_memory_fts, rowid, error_signature, solution, soc_vendor, tags)
+               SELECT 'delete', rowid, error_signature, solution, soc_vendor, tags
+               FROM episodic_memory WHERE id = ?""",
+            (memory_id,),
+        )
+    except Exception:
+        pass
+    cur = await _conn().execute("DELETE FROM episodic_memory WHERE id = ?", (memory_id,))
+    await _conn().commit()
+    return cur.rowcount > 0
+
+
+async def episodic_memory_count() -> int:
+    async with _conn().execute("SELECT COUNT(*) FROM episodic_memory") as cur:
+        row = await cur.fetchone()
+    return row[0] if row else 0
+
+
+def _episodic_row_to_dict(row) -> dict:
+    d = dict(row)
+    if isinstance(d.get("tags"), str):
+        d["tags"] = json.loads(d["tags"])
+    # Remove FTS5 rank column if present
+    d.pop("rank", None)
+    return d

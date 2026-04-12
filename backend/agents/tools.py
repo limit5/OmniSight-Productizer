@@ -1013,7 +1013,120 @@ MEMORY_TOOLS = [summarize_state]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  10. Simulation tools
+#  10. L3 Episodic Memory tools — long-term knowledge base
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@tool
+async def search_past_solutions(
+    error_signature: str,
+    soc_vendor: str = "",
+    sdk_version: str = "",
+    limit: int = 3,
+) -> str:
+    """Search L3 episodic memory for past solutions to similar errors.
+
+    Call this tool when encountering an unfamiliar error — especially linker errors,
+    SDK-specific build failures, or hardware configuration issues. The L3 memory
+    stores solutions from previously merged Gerrit patchsets.
+
+    IMPORTANT: Always verify that the returned solution's soc_vendor and sdk_version
+    match your current environment before applying it.
+
+    Args:
+        error_signature: The error message or pattern to search for.
+        soc_vendor: Filter by SoC vendor (e.g. 'rockchip', 'fullhan').
+        sdk_version: Filter by SDK version (e.g. '1.2', '3.0').
+        limit: Max number of results to return.
+    """
+    from backend import db
+
+    try:
+        results = await db.search_episodic_memory(
+            query=error_signature,
+            soc_vendor=soc_vendor,
+            sdk_version=sdk_version,
+            limit=limit,
+        )
+    except Exception as exc:
+        return f"[ERROR] L3 search failed: {exc}"
+
+    if not results:
+        return f"[L3] No past solutions found for: {error_signature[:100]}"
+
+    lines = [f"[L3] Found {len(results)} past solution(s):\n"]
+    for i, r in enumerate(results, 1):
+        vendor_info = f" | vendor={r['soc_vendor']}" if r.get("soc_vendor") else ""
+        sdk_info = f" | sdk={r['sdk_version']}" if r.get("sdk_version") else ""
+        hw_info = f" | hw={r['hardware_rev']}" if r.get("hardware_rev") else ""
+        score = f" | quality={r.get('quality_score', 0):.1f}"
+        lines.append(
+            f"  {i}. Error: {r['error_signature'][:120]}\n"
+            f"     Solution: {r['solution'][:300]}\n"
+            f"     Meta:{vendor_info}{sdk_info}{hw_info}{score}\n"
+        )
+    return "\n".join(lines)
+
+
+@tool
+async def save_solution(
+    error_signature: str,
+    solution: str,
+    soc_vendor: str = "",
+    sdk_version: str = "",
+    hardware_rev: str = "",
+    gerrit_change_id: str = "",
+    tags: list[str] | None = None,
+) -> str:
+    """Save a verified solution to L3 episodic memory.
+
+    IMPORTANT: This should ONLY be called after a solution has been verified
+    (e.g., Gerrit +2 merge, all tests passing). Do NOT save unverified attempts,
+    failed fixes, or speculative solutions.
+
+    Args:
+        error_signature: The error message or pattern this solution addresses.
+        solution: The fix description (what was changed and why).
+        soc_vendor: SoC vendor (e.g. 'rockchip', 'fullhan', 'ambarella').
+        sdk_version: SDK version this solution applies to.
+        hardware_rev: Hardware revision / EVK board version.
+        gerrit_change_id: Gerrit change ID (for traceability).
+        tags: Classification tags (e.g. ['linker', 'v4l2', 'cmake']).
+    """
+    import uuid
+    from backend import db
+
+    if not error_signature or not solution:
+        return "[ERROR] Both error_signature and solution are required."
+
+    memory_id = f"mem-{uuid.uuid4().hex[:12]}"
+    try:
+        await db.insert_episodic_memory({
+            "id": memory_id,
+            "error_signature": error_signature,
+            "solution": solution,
+            "soc_vendor": soc_vendor,
+            "sdk_version": sdk_version,
+            "hardware_rev": hardware_rev,
+            "gerrit_change_id": gerrit_change_id,
+            "tags": tags or [],
+            "quality_score": 1.0 if gerrit_change_id else 0.5,
+        })
+    except Exception as exc:
+        return f"[ERROR] Failed to save to L3: {exc}"
+
+    return (
+        f"[L3] Solution saved (id={memory_id}): "
+        f"{error_signature[:60]} → {solution[:60]}... "
+        f"(vendor={soc_vendor or 'any'}, sdk={sdk_version or 'any'})"
+    )
+
+
+EPISODIC_TOOLS = [search_past_solutions, save_solution]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  11. Simulation tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SIMULATION_TIMEOUT = 120  # seconds — Valgrind/QEMU are slow
@@ -1176,17 +1289,17 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
-    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
+    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
-    "general":        ALL_TOOLS + MEMORY_TOOLS,
-    "custom":         ALL_TOOLS + MEMORY_TOOLS,
-    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
+    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
     "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
     "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
 }

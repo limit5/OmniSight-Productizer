@@ -615,6 +615,45 @@ def error_check_node(state: GraphState) -> dict:
         "retry",
         f"Tool error (attempt {new_retry}/{state.max_retries}): {error_summary[:120]}",
     )
+
+    # L3 episodic memory query: on first retry, search for past solutions
+    l3_hint_messages = []
+    if new_retry == 1:
+        try:
+            import asyncio
+            from backend import db
+            # Extract error text for search query (first 100 chars of first error)
+            search_query = failed[0].output[:100] if failed else error_summary[:100]
+            # Run async search (we're in a sync node, use event loop)
+            loop = asyncio.get_event_loop()
+            l3_results = loop.run_until_complete(
+                db.search_episodic_memory(query=search_query, limit=2)
+            ) if loop.is_running() else []
+            # Fallback: try creating a new task for running coroutine
+            if not l3_results:
+                try:
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        l3_results = pool.submit(
+                            lambda: asyncio.run(db.search_episodic_memory(query=search_query, limit=2))
+                        ).result(timeout=3)
+                except Exception:
+                    l3_results = []
+
+            if l3_results:
+                hint_parts = ["[L3 HINT] Past solutions for similar errors:"]
+                for r in l3_results[:2]:
+                    hint_parts.append(
+                        f"  - Error: {r['error_signature'][:80]}\n"
+                        f"    Fix: {r['solution'][:200]}"
+                        f" (vendor={r.get('soc_vendor', '?')}, sdk={r.get('sdk_version', '?')})"
+                    )
+                hint_text = "\n".join(hint_parts)
+                l3_hint_messages = [AIMessage(content=hint_text)]
+                emit_pipeline_phase("l3_query", f"Found {len(l3_results)} past solution(s) for retry hint")
+        except Exception as exc:
+            logger.debug("L3 query in error_check failed (non-critical): %s", exc)
+
     return {
         "retry_count": new_retry,
         "last_error": error_summary,
@@ -624,6 +663,7 @@ def error_check_node(state: GraphState) -> dict:
         "tool_calls": [],
         "tool_results": [],
         "rtk_bypass": new_retry >= 2,
+        **({"messages": l3_hint_messages} if l3_hint_messages else {}),
     }
 
 
