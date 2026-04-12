@@ -82,17 +82,23 @@ export function InvokeCore({ onInvoke, onCommand, onCommandChange }: InvokeCoreP
     }
   }, [suggestions, selectedIdx, command, selectSuggestion])
 
-  // Focus input on "/" key (global)
+  // Focus input on "/" key (global) — only when no input/textarea is focused
   useEffect(() => {
     const handleGlobalKey = (e: KeyboardEvent) => {
-      if (e.key === "/" && document.activeElement !== inputRef.current) {
+      if (e.key === "/" && !(document.activeElement instanceof HTMLInputElement) && !(document.activeElement instanceof HTMLTextAreaElement)) {
         e.preventDefault()
         inputRef.current?.focus()
+        // Inject "/" into the input to trigger autocomplete
+        setCommand("/")
+        onCommandChange?.("/")
+        const matches = matchCommands("/")
+        setSuggestions(matches.slice(0, 8))
+        setSelectedIdx(0)
       }
     }
     window.addEventListener("keydown", handleGlobalKey)
     return () => window.removeEventListener("keydown", handleGlobalKey)
-  }, [])
+  }, [onCommandChange])
 
   return (
     <div className="relative">
