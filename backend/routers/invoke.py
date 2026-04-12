@@ -86,6 +86,62 @@ def _uid() -> str:
     return uuid.uuid4().hex[:6]
 
 
+# ─── Pre-fetch retrieval ───
+
+
+async def _prefetch_codebase_context(task_text: str, workspace_path: str | None) -> str:
+    """Search the codebase for files relevant to the task (retrieval subagent).
+
+    Extracts keywords from the task title/description, searches for matching
+    files, and returns a concise summary of relevant code locations.
+    """
+    import re as _re
+    from pathlib import Path
+
+    # Extract meaningful keywords (skip common words)
+    _STOP_WORDS = frozenset({"the", "a", "an", "is", "are", "for", "to", "and", "or", "in", "of", "on", "with"})
+    words = _re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", task_text)
+    keywords = [w.lower() for w in words if w.lower() not in _STOP_WORDS][:8]
+    if not keywords:
+        return ""
+
+    search_root = Path(workspace_path) if workspace_path else Path(".")
+    if not search_root.is_dir():
+        return ""
+
+    # Search for keyword matches in source files
+    pattern = _re.compile("|".join(_re.escape(kw) for kw in keywords), _re.IGNORECASE)
+    matches: list[str] = []
+    skip_dirs = {".git", "node_modules", "__pycache__", ".next", "build", ".agent_workspaces"}
+
+    for fpath in sorted(search_root.rglob("*")):
+        if not fpath.is_file() or fpath.stat().st_size > 256_000:
+            continue
+        if any(part in skip_dirs for part in fpath.parts):
+            continue
+        if fpath.suffix not in (".c", ".h", ".cpp", ".py", ".yaml", ".yml", ".md", ".json"):
+            continue
+        try:
+            text = fpath.read_text(errors="replace")
+            hit_lines = [
+                (i, line.strip())
+                for i, line in enumerate(text.splitlines(), 1)
+                if pattern.search(line)
+            ]
+            if hit_lines:
+                rel = fpath.relative_to(search_root)
+                for line_no, line_text in hit_lines[:3]:
+                    matches.append(f"{rel}:{line_no}: {line_text[:120]}")
+            if len(matches) >= 30:
+                break
+        except Exception:
+            continue
+
+    if not matches:
+        return ""
+    return f"Found {len(matches)} relevant code references:\n" + "\n".join(matches)
+
+
 # ─── Background task execution ───
 
 
@@ -115,6 +171,13 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
             if matched:
                 task_skill = load_task_skill(matched)
                 logger.info("Task skill matched: %s for task %s", matched, task.id)
+        except Exception:
+            pass
+        # Pre-fetch retrieval: search codebase for relevant context
+        try:
+            pre_ctx = await _prefetch_codebase_context(task_command, workspace_path)
+            if pre_ctx:
+                handoff_ctx = f"## Pre-Fetched Codebase Context\n\n{pre_ctx}\n\n{handoff_ctx}"
         except Exception:
             pass
         try:
