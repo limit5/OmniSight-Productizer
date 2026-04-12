@@ -255,3 +255,182 @@ async def _on_change_merged(event: dict) -> None:
                 logger.warning("Replication to %s failed: %s", target, err)
         except Exception as exc:
             logger.error("Replication to %s error: %s", target, exc)
+
+    # Trigger CI/CD pipelines after merge
+    import asyncio as _asyncio
+    _asyncio.create_task(_trigger_ci_pipelines())
+
+
+async def _trigger_ci_pipelines() -> None:
+    """Trigger configured CI/CD pipelines after a Gerrit merge."""
+    import asyncio
+    if settings.ci_github_actions_enabled and settings.github_token:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "gh", "workflow", "run", "ci.yml", "-r", "main",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode == 0:
+                emit_invoke("ci_triggered", "GitHub Actions workflow triggered")
+            else:
+                logger.warning("GitHub Actions trigger failed (rc=%d)", proc.returncode)
+        except Exception as exc:
+            logger.warning("GitHub Actions trigger error: %s", exc)
+
+    if settings.ci_jenkins_enabled and settings.ci_jenkins_url:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-X", "POST",
+                f"{settings.ci_jenkins_url}/build",
+                "-u", f"{settings.ci_jenkins_user}:{settings.ci_jenkins_api_token}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode == 0:
+                emit_invoke("ci_triggered", "Jenkins build triggered")
+            else:
+                logger.warning("Jenkins trigger failed (rc=%d)", proc.returncode)
+        except Exception as exc:
+            logger.warning("Jenkins trigger error: %s", exc)
+
+    if settings.ci_gitlab_enabled and settings.gitlab_token:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-X", "POST",
+                f"{settings.gitlab_url}/api/v4/projects/{settings.gerrit_project.replace('/', '%2F')}/pipeline",
+                "-H", f"PRIVATE-TOKEN: {settings.gitlab_token}",
+                "-d", "ref=main",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode == 0:
+                emit_invoke("ci_triggered", "GitLab CI pipeline triggered")
+            else:
+                logger.warning("GitLab CI trigger failed (rc=%d)", proc.returncode)
+        except Exception as exc:
+            logger.warning("GitLab CI trigger error: %s", exc)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  External → Internal Webhook Sync
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _find_task_by_issue_url(url: str):
+    """Find internal task matching an external issue URL or ID."""
+    from backend.routers.tasks import _tasks
+    for t in _tasks.values():
+        if t.issue_url and t.issue_url == url:
+            return t
+        if t.external_issue_id and t.external_issue_id in url:
+            return t
+    return None
+
+
+async def _sync_external_to_task(task, new_status: str, platform: str) -> dict:
+    """Apply external status change to internal task with debounce."""
+    from datetime import datetime as _dt
+    from backend.routers.tasks import _persist
+
+    # Debounce: skip if synced < 5s ago (prevent sync loops)
+    if task.last_external_sync_at:
+        try:
+            last = _dt.fromisoformat(task.last_external_sync_at)
+            if (_dt.now() - last).total_seconds() < 5:
+                return {"status": "debounced"}
+        except Exception:
+            pass
+
+    old_status = task.status.value if hasattr(task.status, "value") else str(task.status)
+    if new_status in TaskStatus.__members__:
+        task.status = TaskStatus[new_status]
+    task.last_external_sync_at = _dt.now().isoformat()
+    task.external_issue_platform = platform
+    await _persist(task)
+    emit_task_update(task.id, task.status.value, task.assigned_agent_id)
+    logger.info("[EXT→INT] Task %s: %s → %s (via %s)", task.id, old_status, new_status, platform)
+    return {"status": "synced", "task_id": task.id, "new_status": new_status}
+
+
+@router.post("/github")
+async def github_webhook(request: Request):
+    """Receive GitHub issue/PR webhooks — sync status to internal tasks."""
+    import hashlib, hmac as _hmac
+    if not settings.github_webhook_secret:
+        return JSONResponse(503, {"detail": "GitHub webhooks not configured"})
+
+    body = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    expected = "sha256=" + _hmac.new(settings.github_webhook_secret.encode(), body, hashlib.sha256).hexdigest()
+    if not _hmac.compare_digest(expected, sig):
+        return JSONResponse(401, {"detail": "Invalid signature"})
+
+    event = json.loads(body)
+    event_type = request.headers.get("X-GitHub-Event", "")
+    issue = event.get("issue", {})
+    issue_url = issue.get("html_url", "")
+
+    task = _find_task_by_issue_url(issue_url)
+    if not task:
+        return {"status": "ok", "message": "No matching task"}
+
+    if event_type == "issues":
+        state = issue.get("state", "")
+        new_status = "completed" if state == "closed" else "in_progress"
+        return await _sync_external_to_task(task, new_status, "github")
+
+    return {"status": "ok", "event": event_type}
+
+
+@router.post("/gitlab")
+async def gitlab_webhook(request: Request):
+    """Receive GitLab issue webhooks — sync status to internal tasks."""
+    import hmac as _hmac
+    if not settings.gitlab_webhook_secret:
+        return JSONResponse(503, {"detail": "GitLab webhooks not configured"})
+
+    token = request.headers.get("X-Gitlab-Token", "")
+    if not _hmac.compare_digest(token, settings.gitlab_webhook_secret):
+        return JSONResponse(401, {"detail": "Invalid token"})
+
+    event = await request.json()
+    attrs = event.get("object_attributes", {})
+    issue_url = attrs.get("url", "")
+
+    task = _find_task_by_issue_url(issue_url)
+    if not task:
+        return {"status": "ok", "message": "No matching task"}
+
+    state = attrs.get("state", "")
+    new_status = "completed" if state == "closed" else "in_progress"
+    return await _sync_external_to_task(task, new_status, "gitlab")
+
+
+@router.post("/jira")
+async def jira_webhook(request: Request):
+    """Receive Jira issue webhooks — sync status to internal tasks."""
+    import hmac as _hmac
+    if not settings.jira_webhook_secret:
+        return JSONResponse(503, {"detail": "Jira webhooks not configured"})
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or not _hmac.compare_digest(auth[7:], settings.jira_webhook_secret):
+        return JSONResponse(401, {"detail": "Invalid token"})
+
+    event = await request.json()
+    issue_key = event.get("issue", {}).get("key", "")
+
+    task = _find_task_by_issue_url(issue_key)
+    if not task:
+        return {"status": "ok", "message": "No matching task"}
+
+    # Extract status change from changelog
+    for item in event.get("changelog", {}).get("items", []):
+        if item.get("field") == "status":
+            jira_status = item.get("toString", "")
+            status_map = {"Done": "completed", "In Progress": "in_progress",
+                          "In Review": "in_review", "Blocked": "blocked", "To Do": "backlog"}
+            new_status = status_map.get(jira_status, "in_progress")
+            return await _sync_external_to_task(task, new_status, "jira")
+
+    return {"status": "ok", "event": "no_status_change"}
