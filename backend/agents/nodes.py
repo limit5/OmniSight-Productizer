@@ -491,7 +491,10 @@ async def tool_executor_node(state: GraphState) -> dict:
 
 def _extract_error_key(error_summary: str) -> str:
     """Extract the tool name from an error summary for loop detection."""
-    return error_summary.split(":")[0].strip() if ":" in error_summary else error_summary[:50]
+    if not error_summary or not error_summary.strip():
+        return "_empty_error"
+    key = error_summary.split(":")[0].strip() if ":" in error_summary else ""
+    return key if key else error_summary[:50] or "_unknown"
 
 
 def error_check_node(state: GraphState) -> dict:
