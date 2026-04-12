@@ -31,6 +31,7 @@ export default function Home() {
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
   const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
   const [providerHealth, setProviderHealth] = useState<api.ProviderHealthResponse | null>(null)
+  const [handoffs, setHandoffs] = useState<api.HandoffItem[]>([])
   const [showNotifications, setShowNotifications] = useState(false)
 
   // Fetch provider list + health on mount and periodically
@@ -494,6 +495,8 @@ export default function Home() {
               providerHealth={providerHealth}
               onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Switch provider failed:", e) } }}
               onUpdateFallbackChain={async (chain) => { try { await api.updateFallbackChain(chain); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Update chain failed:", e) } }}
+            handoffs={handoffs}
+            onLoadHandoffs={async () => { try { setHandoffs(await api.getRecentHandoffs()) } catch {} }}
             />
           </aside>
 

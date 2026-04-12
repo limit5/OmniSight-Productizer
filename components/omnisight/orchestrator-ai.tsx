@@ -21,11 +21,13 @@ import {
   ChevronDown,
   ChevronUp,
   Crown,
-  Shield
+  Shield,
+  DownloadCloud
 } from "lucide-react"
 import type { Agent, AgentStatus, AIModel } from "./agent-matrix-wall"
 import type { Task, TaskStatus } from "./task-backlog"
 import { AGENT_TYPES, AI_MODEL_INFO, getModelInfo } from "./agent-matrix-wall"
+import { HandoffTimeline } from "./handoff-timeline"
 import { TokenUsageStats } from "./token-usage-stats"
 
 // Orchestrator message types
@@ -80,6 +82,8 @@ interface OrchestratorAIProps {
   providerHealth?: { chain: string[]; health: { id: string; name: string; configured: boolean; is_active: boolean; cooldown_remaining: number; status: string }[] } | null
   onSwitchProvider?: (provider: string, model?: string) => void
   onUpdateFallbackChain?: (chain: string[]) => void
+  handoffs?: { task_id: string; agent_id: string; created_at: string }[]
+  onLoadHandoffs?: () => void
 }
 
 // Helper to get agent icon component
@@ -143,6 +147,8 @@ export function OrchestratorAI({
   providerHealth,
   onSwitchProvider,
   onUpdateFallbackChain,
+  handoffs,
+  onLoadHandoffs,
 }: OrchestratorAIProps) {
   const [messages, setMessages] = useState<OrchestratorMessage[]>([
     {
@@ -702,6 +708,9 @@ export function OrchestratorAI({
           </div>
         </div>
       )}
+
+      {/* Handoff Chain */}
+      <HandoffTimeline handoffs={handoffs} onLoadHandoffs={onLoadHandoffs} />
 
       {/* Suggestions Panel */}
       {pendingSuggestions.length > 0 && (
