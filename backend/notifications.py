@@ -146,7 +146,7 @@ async def _send_with_retry(notif: Notification, sender, channel: str) -> bool:
                 channel, attempt, max_retries, exc,
             )
             if attempt < max_retries:
-                await asyncio.sleep(backoff * attempt)
+                await asyncio.sleep(backoff * (2 ** (attempt - 1)))  # exponential: 30, 60, 120
     return False
 
 

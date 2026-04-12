@@ -62,7 +62,7 @@ async def replay_events(
         try:
             data = json.loads(ev.get("data_json", "{}"))
         except (json.JSONDecodeError, TypeError):
-            data = {}
+            continue  # Skip malformed entries instead of returning empty data
         result.append({
             "id": ev.get("id"),
             "event": ev.get("event_type"),

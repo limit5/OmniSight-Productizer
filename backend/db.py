@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS simulations (
 );
 
 CREATE TABLE IF NOT EXISTS event_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              INTEGER PRIMARY KEY,
     event_type      TEXT NOT NULL,
     data_json       TEXT NOT NULL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
