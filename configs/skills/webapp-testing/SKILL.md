@@ -1,7 +1,7 @@
 ---
 name: webapp-testing
 description: Test web applications using Playwright automation. Use when tasks mention testing UI, frontend, web app, browser testing, or E2E.
-keywords: [test, playwright, browser, e2e, ui-test, web, frontend, selenium, cypress]
+keywords: [playwright, browser, e2e, ui-test, web-test, frontend-test, selenium, cypress, webapp, web]
 ---
 
 # Web Application Testing

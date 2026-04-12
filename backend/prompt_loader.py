@@ -276,7 +276,8 @@ def _parse_frontmatter(path: Path) -> dict:
     import yaml
     try:
         return yaml.safe_load(match.group(1)) or {}
-    except Exception:
+    except Exception as exc:
+        logger.warning("Invalid YAML frontmatter in %s: %s", path, exc)
         return {}
 
 
