@@ -204,6 +204,22 @@ async def finalize(agent_id: str) -> dict:
     # Detect base branch for diff
     base = await _detect_base_branch(ws)
 
+    # Pre-merge conflict check: test if branch can merge cleanly into base
+    conflict_files: list[str] = []
+    rc_merge, merge_out, _ = await _run(
+        f'git merge --no-commit --no-ff {base} 2>&1 || true', cwd=ws,
+    )
+    if "CONFLICT" in (merge_out or ""):
+        # Extract conflicting file names
+        for line in merge_out.splitlines():
+            if "CONFLICT" in line and ":" in line:
+                conflict_files.append(line.split(":")[-1].strip())
+        await _run("git merge --abort 2>/dev/null || true", cwd=ws)
+        logger.warning("Merge conflict detected for agent %s: %s", agent_id, conflict_files)
+    else:
+        # Clean up test merge
+        await _run("git merge --abort 2>/dev/null || true", cwd=ws)
+
     # Generate summary
     _, log_out, _ = await _run(
         f"git log --oneline {base}..{info.branch} 2>/dev/null || git log --oneline -5",
@@ -229,6 +245,7 @@ async def finalize(agent_id: str) -> dict:
         "commits": log_out,
         "diff_summary": diff_stat,
         "files_changed": files_changed,
+        "conflict_files": conflict_files,
     }
 
     # Auto-generate handoff document
