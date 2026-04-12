@@ -427,28 +427,26 @@ export function OrchestratorAI({
   return (
     <div className="holo-glass h-full flex flex-col min-h-0 overflow-hidden corner-brackets-full holo-flicker">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-[var(--border)] relative">
+      <div className="px-3 py-2 border-b border-[var(--border)] relative">
         {/* Subtle holographic shimmer */}
         <div className="absolute inset-0 holo-shimmer opacity-20 pointer-events-none" />
-        <div className="flex items-center justify-between relative z-10">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-[var(--artifact-purple)] pulse-purple pulse-ring" />
-            <Crown size={14} className="text-[var(--artifact-purple)] text-glow-purple" />
-            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--artifact-purple)]">
+        <div className="flex items-center justify-between gap-1 relative z-10">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <div className="w-2 h-2 rounded-full bg-[var(--artifact-purple)] pulse-purple pulse-ring shrink-0" />
+            <Crown size={12} className="text-[var(--artifact-purple)] text-glow-purple shrink-0" />
+            <h2 className="font-sans text-xs font-semibold tracking-fui text-[var(--artifact-purple)] truncate">
               ORCHESTRATOR
             </h2>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={(e) => { e.stopPropagation(); setIsAnalyzing(true); generateSuggestions(); onRefresh?.(); setTimeout(() => setIsAnalyzing(false), 1000); }}
-              className={`relative z-20 p-1.5 rounded transition-colors cursor-pointer ${isAnalyzing ? "bg-[var(--artifact-purple)]/40 text-[var(--artifact-purple)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)]"}`}
-              title="Analyze and suggest"
-            >
-              <RefreshCw size={12} className={isAnalyzing ? "animate-spin" : ""} />
-            </button>
-          </div>
+          <button
+            onClick={(e) => { e.stopPropagation(); setIsAnalyzing(true); generateSuggestions(); onRefresh?.(); setTimeout(() => setIsAnalyzing(false), 1000); }}
+            className={`relative z-20 p-1.5 rounded transition-colors cursor-pointer shrink-0 ${isAnalyzing ? "bg-[var(--artifact-purple)]/40 text-[var(--artifact-purple)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)]"}`}
+            title="Analyze and suggest"
+          >
+            <RefreshCw size={12} className={isAnalyzing ? "animate-spin" : ""} />
+          </button>
         </div>
-        <p className="font-mono text-xs text-[var(--muted-foreground)] mt-1">
+        <p className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5">
           Central AI Coordinator
         </p>
       </div>
