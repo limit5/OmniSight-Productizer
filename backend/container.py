@@ -130,6 +130,24 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     if scripts_path.is_file():
         mounts += f'-v "{scripts_path.resolve()}":/opt/omnisight/simulate.sh:ro '
 
+    # Vendor SDK mount: read platform hint from workspace, mount sysroot + toolchain :ro
+    platform_hint = workspace_path / ".omnisight" / "platform"
+    if platform_hint.is_file():
+        try:
+            import yaml
+            platform_name = platform_hint.read_text().strip()
+            platform_yaml = _PROJECT_ROOT / "configs" / "platforms" / f"{platform_name}.yaml"
+            if platform_yaml.is_file():
+                pdata = yaml.safe_load(platform_yaml.read_text())
+                sysroot = pdata.get("sysroot_path", "")
+                if sysroot and Path(sysroot).is_dir():
+                    mounts += f'-v "{Path(sysroot).resolve()}":/opt/vendor_sysroot:ro '
+                cmake_tc = pdata.get("cmake_toolchain_file", "")
+                if cmake_tc and Path(cmake_tc).is_file():
+                    mounts += f'-v "{Path(cmake_tc).resolve()}":/opt/toolchain.cmake:ro '
+        except Exception:
+            pass  # Vendor mount is best-effort
+
     # Start container with workspace mounted + resource limits
     from backend.config import settings as _settings
     mem = _settings.docker_memory_limit or "1g"

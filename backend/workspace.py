@@ -156,6 +156,22 @@ async def provision(
             f.write("\n".join([""] + additions + [""]))
         logger.debug("Added %s to .gitignore in %s", additions, ws_path)
 
+    # Write platform hint for container SDK mount detection
+    omnisight_dir = ws_path / ".omnisight"
+    omnisight_dir.mkdir(exist_ok=True)
+    try:
+        # Read target platform from hardware_manifest if available
+        manifest = _MAIN_REPO / "configs" / "hardware_manifest.yaml"
+        if manifest.is_file():
+            import yaml
+            mdata = yaml.safe_load(manifest.read_text())
+            platform = (mdata.get("vendor", {}) or {}).get("platform_profile", "") or \
+                       (mdata.get("project", {}) or {}).get("target_platform", "aarch64")
+            if platform:
+                (omnisight_dir / "platform").write_text(platform)
+    except Exception:
+        pass
+
     info = WorkspaceInfo(
         agent_id=agent_id,
         task_id=task_id,
