@@ -28,6 +28,7 @@ import type { Agent, AgentStatus, AIModel } from "./agent-matrix-wall"
 import type { Task, TaskStatus } from "./task-backlog"
 import { AGENT_TYPES, AI_MODEL_INFO, getModelInfo } from "./agent-matrix-wall"
 import { HandoffTimeline } from "./handoff-timeline"
+import { matchCommands as slashMatchCommands, CATEGORY_COLORS as slashCategoryColors, type SlashCommand } from "@/lib/slash-commands"
 import { TokenUsageStats } from "./token-usage-stats"
 
 // Orchestrator message types
@@ -182,6 +183,8 @@ export function OrchestratorAI({
   const [showForceAssign, setShowForceAssign] = useState(false)
   const [forceAssignTask, setForceAssignTask] = useState<string | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [slashSuggestions, setSlashSuggestions] = useState<SlashCommand[]>([])
+  const [slashSelectedIdx, setSlashSelectedIdx] = useState(0)
   const [showAgentGrid, setShowAgentGrid] = useState(true)
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -855,25 +858,67 @@ export function OrchestratorAI({
       
       </div>{/* End Scrollable Content Area */}
       
-      {/* Command Input */}
+      {/* Command Input with Slash Autocomplete */}
       <div className="p-2 border-t border-[var(--border)] shrink-0 bg-[var(--background)]">
-        <form onSubmit={handleSubmit} className="flex items-center gap-1.5 fui-input px-2 py-1.5">
-          <span className="font-mono text-xs text-[var(--muted-foreground)] shrink-0">{">"}</span>
-          <input
-            ref={inputRef}
-            type="text"
-            value={inputValue}
-            onChange={e => setInputValue(e.target.value)}
-            placeholder="Ask orchestrator ..."
-            className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none"
-          />
-          <button
-            type="submit"
-            className="p-1.5 rounded bg-[var(--artifact-purple)] text-white hover:bg-[var(--artifact-purple)]/80 transition-colors shrink-0"
-          >
-            <Send size={12} />
-          </button>
-        </form>
+        <div className="relative">
+          {/* Autocomplete dropdown (above input) */}
+          {slashSuggestions.length > 0 && (
+            <div className="absolute left-0 right-0 bottom-full mb-1 z-50 bg-[var(--card)] border border-[var(--border)] rounded-md shadow-lg overflow-hidden max-h-[180px] overflow-y-auto">
+              {slashSuggestions.map((cmd, idx) => {
+                const catColor = slashCategoryColors[cmd.category] || "var(--muted-foreground)"
+                return (
+                  <button
+                    key={cmd.name}
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); setInputValue(`/${cmd.name} `); setSlashSuggestions([]) }}
+                    className={`w-full flex items-center gap-1.5 px-2 py-1 text-left transition-colors ${
+                      idx === slashSelectedIdx ? "bg-[var(--neural-blue)]/10" : "hover:bg-[var(--secondary)]"
+                    }`}
+                  >
+                    <span className="font-mono text-[8px] px-1 rounded" style={{ color: catColor }}>{cmd.category.slice(0, 3).toUpperCase()}</span>
+                    <span className="font-mono text-[10px] text-[var(--neural-blue)]">/{cmd.name}</span>
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] ml-auto truncate max-w-[50%]">{cmd.description}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          <form onSubmit={handleSubmit} className="flex items-center gap-1.5 fui-input px-2 py-1.5">
+            <span className="font-mono text-xs text-[var(--muted-foreground)] shrink-0">{">"}</span>
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputValue}
+              onChange={e => {
+                setInputValue(e.target.value)
+                if (e.target.value.startsWith("/")) {
+                  const matches = slashMatchCommands(e.target.value)
+                  setSlashSuggestions(matches.slice(0, 6))
+                  setSlashSelectedIdx(0)
+                } else {
+                  setSlashSuggestions([])
+                }
+              }}
+              onKeyDown={e => {
+                if (slashSuggestions.length > 0) {
+                  if (e.key === "ArrowDown") { e.preventDefault(); setSlashSelectedIdx(i => Math.min(i + 1, slashSuggestions.length - 1)) }
+                  else if (e.key === "ArrowUp") { e.preventDefault(); setSlashSelectedIdx(i => Math.max(i - 1, 0)) }
+                  else if (e.key === "Tab") { e.preventDefault(); setInputValue(`/${slashSuggestions[slashSelectedIdx]?.name} `); setSlashSuggestions([]) }
+                  else if (e.key === "Escape") { setSlashSuggestions([]) }
+                }
+              }}
+              onBlur={() => setTimeout(() => setSlashSuggestions([]), 150)}
+              placeholder="Ask or type /command ..."
+              className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none"
+            />
+            <button
+              type="submit"
+              className="p-1.5 rounded bg-[var(--artifact-purple)] text-white hover:bg-[var(--artifact-purple)]/80 transition-colors shrink-0"
+            >
+              <Send size={12} />
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   )
