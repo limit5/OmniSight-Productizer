@@ -125,6 +125,7 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 agent_sub_type=agent.sub_type or "",
                 handoff_context=handoff_ctx,
                 task_skill_context=task_skill,
+                task_id=task.id,
             )
             agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
             agent.status = AgentStatus.success

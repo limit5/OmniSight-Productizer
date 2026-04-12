@@ -171,6 +171,7 @@ async def run_graph(
     agent_sub_type: str = "",
     handoff_context: str = "",
     task_skill_context: str = "",
+    task_id: str | None = None,
 ) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
@@ -181,6 +182,7 @@ async def run_graph(
         agent_sub_type: Role sub-type (for role-specific skill loading).
         handoff_context: Previous task handoff content (injected into prompt).
         task_skill_context: Anthropic SKILL.md content for task-specific guidance.
+        task_id: Associated task ID for debug finding tracking.
     """
     import asyncio
 
@@ -189,6 +191,7 @@ async def run_graph(
         messages=[HumanMessage(content=user_command)],
         workspace_path=workspace_path,
         model_name=model_name,
+        task_id=task_id,
         agent_sub_type=agent_sub_type,
         handoff_context=handoff_context,
         task_skill_context=task_skill_context,
@@ -204,6 +207,7 @@ async def run_graph(
             messages=initial_state.messages,
             workspace_path=workspace_path,
             model_name=model_name,
+            task_id=task_id,
             agent_sub_type=agent_sub_type,
             handoff_context=handoff_context,
             task_skill_context=task_skill_context,
