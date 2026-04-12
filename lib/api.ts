@@ -495,6 +495,22 @@ export async function triggerSimulation(body: { track: string; module: string; i
   })
 }
 
+// ─── Event Replay ───
+
+export interface ReplayEvent {
+  id: number
+  event: string
+  data: Record<string, unknown>
+  timestamp: string
+}
+
+export async function replayEvents(since: string, limit: number = 200): Promise<ReplayEvent[]> {
+  const qs = new URLSearchParams()
+  if (since) qs.set("since", since)
+  qs.set("limit", String(limit))
+  return request<ReplayEvent[]>(`/events/replay?${qs.toString()}`)
+}
+
 // ─── Artifacts ───
 
 export interface ArtifactItem {

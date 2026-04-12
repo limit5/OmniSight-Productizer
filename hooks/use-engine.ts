@@ -113,6 +113,7 @@ export function useEngine() {
     initRef.current = true
 
     let eventSource: EventSource | null = null
+    let lastEventTimestamp: string = ""
 
     let sysInterval: ReturnType<typeof setInterval> | null = null
 
@@ -178,6 +179,8 @@ export function useEngine() {
         function connectSSE() {
           eventSource = api.subscribeEvents((event) => {
             reconnectAttempts = 0  // Reset on successful event
+          const evtTimestamp = (event.data as Record<string, unknown>)?.timestamp as string
+          if (evtTimestamp) lastEventTimestamp = evtTimestamp
           // ── Push ALL events into REPORTER VORTEX logs ──
           if (event.event !== "heartbeat") {
             const d = event.data as Record<string, unknown>
@@ -349,12 +352,25 @@ export function useEngine() {
             }])
           }
           }, (err) => {
-            // On SSE error — reconnect with backoff
+            // On SSE error — reconnect with backoff + replay missed events
             if (eventSource?.readyState === EventSource.CLOSED && reconnectAttempts < 5) {
               reconnectAttempts++
               const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
               console.warn(`[Engine] SSE closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
-              setTimeout(connectSSE, delay)
+              setTimeout(async () => {
+                connectSSE()
+                // Replay missed events from gap period
+                if (lastEventTimestamp) {
+                  try {
+                    const missed = await api.replayEvents(lastEventTimestamp, 200)
+                    if (missed.length > 0) {
+                      console.log(`[Engine] Replayed ${missed.length} missed events`)
+                    }
+                  } catch {
+                    // Replay is best-effort
+                  }
+                }
+              }, delay)
             }
           })
         }
