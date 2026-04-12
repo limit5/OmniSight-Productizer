@@ -169,6 +169,9 @@ _RULE_TOOL_PATTERNS: list[tuple[re.Pattern, str, dict]] = [
     # Bare bash command patterns
     (re.compile(r"^(which|whoami|uname|cat|echo|pwd|env)\b(.+)?", re.I), "run_bash",
      lambda m: {"command": m.group(0).strip()}),
+    # Report generation
+    (re.compile(r"(?:generate|create)\s+(?:a\s+)?(\w+)\s+report", re.I), "generate_artifact_report",
+     lambda m: {"template": m.group(1).strip().lower(), "title": f"{m.group(1).strip()} Report"}),
 ]
 
 
@@ -400,8 +403,13 @@ async def tool_executor_node(state: GraphState) -> dict:
 
             emit_tool_progress(tc.tool_name, "start", f"Running {tc.tool_name}({tc.arguments})", index=i)
 
+            # Inject task_id from state for report tools if not already set
+            args = tc.arguments
+            if tc.tool_name == "generate_artifact_report" and not args.get("task_id") and state.task_id:
+                args = {**args, "task_id": state.task_id}
+
             try:
-                output = await tool_fn.ainvoke(tc.arguments)
+                output = await tool_fn.ainvoke(args)
                 # Compress output to save tokens (covers ALL tools)
                 if not state.rtk_bypass:
                     try:
