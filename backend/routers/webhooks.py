@@ -8,6 +8,7 @@ Currently supports Gerrit Code Review events:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -129,7 +130,6 @@ async def _on_patchset_created(event: dict) -> None:
     emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
 
     # Execute review in background (webhook must return fast)
-    import asyncio
     asyncio.create_task(_run_review(reviewer, change_id, commit, change_subject))
 
 
@@ -257,11 +257,10 @@ async def _on_change_merged(event: dict) -> None:
             logger.error("Replication to %s error: %s", target, exc)
 
     # L3 Episodic Memory: auto-save solution from merged change
-    import asyncio as _asyncio
-    _asyncio.create_task(_save_merged_solution_to_l3(change_id, subject))
+    asyncio.create_task(_save_merged_solution_to_l3(change_id, subject))
 
     # Trigger CI/CD pipelines after merge
-    _asyncio.create_task(_trigger_ci_pipelines())
+    asyncio.create_task(_trigger_ci_pipelines())
 
 
 async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
@@ -307,7 +306,6 @@ async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
 
 async def _trigger_ci_pipelines() -> None:
     """Trigger configured CI/CD pipelines after a Gerrit merge."""
-    import asyncio
     if settings.ci_github_actions_enabled and settings.github_token:
         try:
             proc = await asyncio.create_subprocess_exec(
