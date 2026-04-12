@@ -357,13 +357,13 @@ async def github_webhook(request: Request):
     """Receive GitHub issue/PR webhooks — sync status to internal tasks."""
     import hashlib, hmac as _hmac
     if not settings.github_webhook_secret:
-        return JSONResponse(503, {"detail": "GitHub webhooks not configured"})
+        return JSONResponse(status_code=503, content={"detail": "GitHub webhooks not configured"})
 
     body = await request.body()
     sig = request.headers.get("X-Hub-Signature-256", "")
     expected = "sha256=" + _hmac.new(settings.github_webhook_secret.encode(), body, hashlib.sha256).hexdigest()
     if not _hmac.compare_digest(expected, sig):
-        return JSONResponse(401, {"detail": "Invalid signature"})
+        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
 
     event = json.loads(body)
     event_type = request.headers.get("X-GitHub-Event", "")
@@ -387,11 +387,11 @@ async def gitlab_webhook(request: Request):
     """Receive GitLab issue webhooks — sync status to internal tasks."""
     import hmac as _hmac
     if not settings.gitlab_webhook_secret:
-        return JSONResponse(503, {"detail": "GitLab webhooks not configured"})
+        return JSONResponse(status_code=503, content={"detail": "GitLab webhooks not configured"})
 
     token = request.headers.get("X-Gitlab-Token", "")
     if not _hmac.compare_digest(token, settings.gitlab_webhook_secret):
-        return JSONResponse(401, {"detail": "Invalid token"})
+        return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
     event = await request.json()
     attrs = event.get("object_attributes", {})
@@ -411,11 +411,11 @@ async def jira_webhook(request: Request):
     """Receive Jira issue webhooks — sync status to internal tasks."""
     import hmac as _hmac
     if not settings.jira_webhook_secret:
-        return JSONResponse(503, {"detail": "Jira webhooks not configured"})
+        return JSONResponse(status_code=503, content={"detail": "Jira webhooks not configured"})
 
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer ") or not _hmac.compare_digest(auth[7:], settings.jira_webhook_secret):
-        return JSONResponse(401, {"detail": "Invalid token"})
+        return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
     event = await request.json()
     issue_key = event.get("issue", {}).get("key", "")
