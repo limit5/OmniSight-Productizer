@@ -812,7 +812,7 @@ async def insert_episodic_memory(data: dict) -> None:
             "quality_score": data.get("quality_score", 0.0),
         },
     )
-    # Update FTS5 index
+    # Update FTS5 index (same transaction — committed together)
     try:
         await _conn().execute(
             """INSERT INTO episodic_memory_fts(rowid, error_signature, solution, soc_vendor, tags)
@@ -820,9 +820,34 @@ async def insert_episodic_memory(data: dict) -> None:
                FROM episodic_memory WHERE id = ?""",
             (data["id"],),
         )
-    except Exception:
-        pass  # FTS5 not available — LIKE fallback will work
+    except Exception as exc:
+        logger.warning("FTS5 index update failed for %s (search will use LIKE fallback): %s", data["id"], exc)
     await _conn().commit()
+
+
+async def rebuild_episodic_fts() -> int:
+    """Rebuild the FTS5 index from the episodic_memory content table.
+
+    Call this if the FTS5 index becomes out of sync (e.g., after a crash).
+    Returns the number of rows reindexed.
+    """
+    try:
+        # Drop and rebuild FTS content
+        await _conn().execute("DELETE FROM episodic_memory_fts")
+        await _conn().execute(
+            """INSERT INTO episodic_memory_fts(rowid, error_signature, solution, soc_vendor, tags)
+               SELECT rowid, error_signature, solution, soc_vendor, tags
+               FROM episodic_memory"""
+        )
+        await _conn().commit()
+        async with _conn().execute("SELECT COUNT(*) FROM episodic_memory") as cur:
+            row = await cur.fetchone()
+        count = row[0] if row else 0
+        logger.info("Rebuilt FTS5 index: %d entries", count)
+        return count
+    except Exception as exc:
+        logger.error("FTS5 rebuild failed: %s", exc)
+        return 0
 
 
 async def search_episodic_memory(
@@ -920,8 +945,8 @@ async def delete_episodic_memory(memory_id: str) -> bool:
                FROM episodic_memory WHERE id = ?""",
             (memory_id,),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("FTS5 delete failed for %s: %s", memory_id, exc)
     cur = await _conn().execute("DELETE FROM episodic_memory WHERE id = ?", (memory_id,))
     await _conn().commit()
     return cur.rowcount > 0
