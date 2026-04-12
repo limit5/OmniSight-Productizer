@@ -1,7 +1,8 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ChevronDown, ChevronUp, Target, Zap, Shield, Package, Rocket, CheckCircle2, Clock, AlertTriangle } from "lucide-react"
+import { ChevronDown, ChevronUp, Target, Zap, Shield, Package, Rocket, CheckCircle2, Clock, AlertTriangle, BarChart3, List } from "lucide-react"
+import { NPIGantt } from "./npi-gantt"
 
 // Types matching backend
 interface NPIMilestone {
@@ -65,6 +66,7 @@ function getPhaseIcon(shortName: string) {
 
 export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChange, onPhaseStatusChange }: NPITimelineProps) {
   const [expandedPhase, setExpandedPhase] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<"timeline" | "gantt">("timeline")
 
   if (!data || !data.phases.length) {
     return (
@@ -98,7 +100,16 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
             <div className="w-2 h-2 rounded-full bg-[var(--neural-blue)] pulse-blue pulse-ring" />
             <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">NPI LIFECYCLE</h2>
           </div>
-          <span className="font-mono text-[10px] text-[var(--validation-emerald)]">{progressPercent}%</span>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setViewMode(viewMode === "timeline" ? "gantt" : "timeline")}
+              className="p-1 rounded hover:bg-[var(--secondary)] transition-colors"
+              title={viewMode === "timeline" ? "Gantt View" : "Timeline View"}
+            >
+              {viewMode === "timeline" ? <BarChart3 size={10} className="text-[var(--neural-blue)]" /> : <List size={10} className="text-[var(--neural-blue)]" />}
+            </button>
+            <span className="font-mono text-[10px] text-[var(--validation-emerald)]">{progressPercent}%</span>
+          </div>
         </div>
         {/* Progress bar */}
         <div className="h-1 rounded-full bg-[var(--border)] mt-2 overflow-hidden relative z-10">
@@ -148,7 +159,15 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
         )}
       </div>
 
-      {/* Timeline */}
+      {/* Gantt View */}
+      {viewMode === "gantt" && (
+        <div className="flex-1 overflow-y-auto px-3 pb-2">
+          <NPIGantt phases={data.phases} isOBM={isOBM} />
+        </div>
+      )}
+
+      {/* Timeline View */}
+      {viewMode === "timeline" && (
       <div className="flex-1 overflow-y-auto px-3 pb-2">
         <div className="relative">
           {/* Vertical line */}
@@ -278,6 +297,7 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
           })}
         </div>
       </div>
+      )}
     </div>
   )
 }
