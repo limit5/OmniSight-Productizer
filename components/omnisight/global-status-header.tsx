@@ -44,8 +44,8 @@ export function GlobalStatusHeader({
     return () => clearInterval(interval)
   }, [])
 
-  const progressPercent = (finished / total) * 100
-  const inProgressPercent = (inProgress / total) * 100
+  const progressPercent = total > 0 ? (finished / total) * 100 : 0
+  const inProgressPercent = total > 0 ? (inProgress / total) * 100 : 0
 
   return (
     <header className="holo-glass-simple relative z-10 px-3 md:px-6 py-2 md:py-3 safe-area-top corner-brackets-full holo-flicker scanlines">
