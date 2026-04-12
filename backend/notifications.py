@@ -78,29 +78,76 @@ async def notify(
 
 
 async def _dispatch_external(notif: Notification) -> None:
-    """Send notification to external channels. Errors are logged, never raised."""
+    """Send notification to external channels with retry on failure.
+
+    Tracks dispatch status in DB. Failed dispatches are retried up to
+    notification_max_retries with exponential backoff.
+    """
+    from backend import db
     level = notif.level
+    errors: list[str] = []
+    any_required = False
 
     # L2+: IM (Slack/Teams)
-    if level in ("warning", "action", "critical"):
-        if settings.notification_slack_webhook:
-            await _send_slack(notif)
-        else:
-            logger.debug("Slack webhook not configured — skipping L2+ notification dispatch")
+    if level in ("warning", "action", "critical") and settings.notification_slack_webhook:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_slack, "slack")
+        if not ok:
+            errors.append("slack")
 
     # L3+: Issue tracker
-    if level in ("action", "critical"):
-        if settings.notification_jira_url:
-            await _send_jira(notif)
-        else:
-            logger.debug("Jira not configured — skipping L3+ issue creation")
+    if level in ("action", "critical") and settings.notification_jira_url:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_jira, "jira")
+        if not ok:
+            errors.append("jira")
 
     # L4: PagerDuty
-    if level == "critical":
-        if settings.notification_pagerduty_key:
-            await _send_pagerduty(notif)
+    if level == "critical" and settings.notification_pagerduty_key:
+        any_required = True
+        ok = await _send_with_retry(notif, _send_pagerduty, "pagerduty")
+        if not ok:
+            errors.append("pagerduty")
+
+    if not any_required:
+        # No external channels configured for this level
+        try:
+            await db.update_notification_dispatch(notif.id, "skipped")
+        except Exception:
+            pass
+        return
+
+    # Update dispatch status in DB
+    try:
+        if errors:
+            await db.update_notification_dispatch(
+                notif.id, "failed",
+                attempts=settings.notification_max_retries,
+                error=f"Failed channels: {', '.join(errors)}",
+            )
         else:
-            logger.warning("PagerDuty not configured — CRITICAL notification not escalated: %s", notif.title)
+            await db.update_notification_dispatch(notif.id, "sent", attempts=1)
+    except Exception as exc:
+        logger.warning("Failed to update dispatch status for %s: %s", notif.id, exc)
+
+
+async def _send_with_retry(notif: Notification, sender, channel: str) -> bool:
+    """Retry a sender function with exponential backoff. Returns True on success."""
+    max_retries = settings.notification_max_retries
+    backoff = settings.notification_retry_backoff
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            await sender(notif)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Dispatch to %s failed (attempt %d/%d): %s",
+                channel, attempt, max_retries, exc,
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(backoff * attempt)
+    return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -134,7 +181,7 @@ async def _send_slack(notif: Notification) -> None:
     )
     await asyncio.wait_for(proc.communicate(), timeout=10)
     if proc.returncode != 0:
-        logger.warning("Slack webhook failed for notification %s", notif.id)
+        raise RuntimeError(f"Slack webhook failed (rc={proc.returncode}) for {notif.id}")
 
 
 async def _send_jira(notif: Notification) -> None:
@@ -166,7 +213,7 @@ async def _send_jira(notif: Notification) -> None:
     )
     await asyncio.wait_for(proc.communicate(), timeout=15)
     if proc.returncode != 0:
-        logger.warning("Jira issue creation failed for notification %s", notif.id)
+        raise RuntimeError(f"Jira issue creation failed (rc={proc.returncode}) for {notif.id}")
 
 
 async def _send_pagerduty(notif: Notification) -> None:
@@ -195,4 +242,4 @@ async def _send_pagerduty(notif: Notification) -> None:
     )
     await asyncio.wait_for(proc.communicate(), timeout=10)
     if proc.returncode != 0:
-        logger.warning("PagerDuty trigger failed for notification %s", notif.id)
+        raise RuntimeError(f"PagerDuty trigger failed (rc={proc.returncode}) for {notif.id}")

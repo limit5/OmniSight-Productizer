@@ -56,6 +56,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("tasks", "issue_url", "TEXT"),
         ("tasks", "acceptance_criteria", "TEXT"),
         ("tasks", "labels", "TEXT NOT NULL DEFAULT '[]'"),
+        ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("notifications", "last_error", "TEXT"),
     ]
     for table, column, typedef in migrations:
         try:
@@ -161,7 +164,10 @@ CREATE TABLE IF NOT EXISTS notifications (
     read            INTEGER NOT NULL DEFAULT 0,
     action_url      TEXT,
     action_label    TEXT,
-    auto_resolved   INTEGER NOT NULL DEFAULT 0
+    auto_resolved   INTEGER NOT NULL DEFAULT 0,
+    dispatch_status TEXT NOT NULL DEFAULT 'pending',
+    send_attempts   INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -496,6 +502,25 @@ async def count_unread_notifications(min_level: str = "warning") -> int:
     ) as cur:
         row = await cur.fetchone()
     return row[0] if row else 0
+
+
+async def update_notification_dispatch(
+    notification_id: str, status: str, attempts: int = 0, error: str | None = None,
+) -> None:
+    await _conn().execute(
+        "UPDATE notifications SET dispatch_status = ?, send_attempts = ?, last_error = ? WHERE id = ?",
+        (status, attempts, error, notification_id),
+    )
+    await _conn().commit()
+
+
+async def list_failed_notifications(limit: int = 50) -> list[dict]:
+    async with _conn().execute(
+        "SELECT * FROM notifications WHERE dispatch_status = 'failed' ORDER BY timestamp DESC LIMIT ?",
+        (limit,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [_notification_row_to_dict(r) for r in rows]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

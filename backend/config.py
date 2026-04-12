@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     notification_jira_token: str = ""  # Jira API token
     notification_jira_project: str = ""  # Jira project key (e.g. OMNI)
     notification_pagerduty_key: str = ""  # PagerDuty Events API v2 routing key
+    notification_max_retries: int = 3     # Max retry attempts for failed dispatches
+    notification_retry_backoff: int = 30  # Seconds between retry attempts (exponential)
 
     # ── Gerrit Code Review ──
     gerrit_enabled: bool = False  # Master switch for Gerrit integration
