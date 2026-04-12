@@ -76,6 +76,25 @@ async def _run_pipeline(user_msg: str) -> OrchestratorMessage:
         )
 
 
+async def _try_slash_command(message: str) -> OrchestratorMessage | None:
+    """Intercept /command before LLM pipeline. Returns reply or None."""
+    if not message.startswith("/"):
+        return None
+    parts = message[1:].strip().split(None, 1)
+    cmd_name = parts[0].lower() if parts else ""
+    cmd_args = parts[1] if len(parts) > 1 else ""
+    from backend.slash_commands import handle_slash_command
+    result = await handle_slash_command(cmd_name, cmd_args)
+    if result is None:
+        return None  # Unknown command — fall through to LLM
+    return OrchestratorMessage(
+        id=f"msg-{uuid.uuid4().hex[:6]}",
+        role=MessageRole.orchestrator,
+        content=result,
+        timestamp=_now(),
+    )
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(body: ChatRequest):
     user_message = OrchestratorMessage(
@@ -85,6 +104,11 @@ async def chat(body: ChatRequest):
         timestamp=_now(),
     )
     _history.append(user_message)
+    # Slash command interception — skip LLM if handled
+    slash_reply = await _try_slash_command(body.message)
+    if slash_reply:
+        _history.append(slash_reply)
+        return ChatResponse(message=slash_reply)
     reply = await _run_pipeline(body.message)
     _history.append(reply)
     return ChatResponse(message=reply)
@@ -94,7 +118,9 @@ async def chat(body: ChatRequest):
 async def chat_stream(body: ChatRequest):
     """SSE streaming — pipeline runs with real-time events pushed via event bus,
     then the final answer is streamed token-by-token here."""
-    reply = await _run_pipeline(body.message)
+    # Slash command interception
+    slash_reply = await _try_slash_command(body.message)
+    reply = slash_reply if slash_reply else await _run_pipeline(body.message)
 
     _history.append(OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
