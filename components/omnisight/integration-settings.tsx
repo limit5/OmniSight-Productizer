@@ -156,7 +156,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
     }
   }
 
-  if (!open) return null
+  if (!open || typeof document === "undefined") return null
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center">

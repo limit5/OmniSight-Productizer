@@ -30,6 +30,8 @@ export function NotificationCenter({ open, onClose, notifications, onMarkRead }:
 
   const unreadCount = notifications.filter(n => !n.read).length
 
+  if (typeof document === "undefined") return null
+
   return createPortal(
     <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
       {/* Backdrop */}

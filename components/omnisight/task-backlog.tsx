@@ -768,7 +768,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
       </div>
       
       {/* Add Task Modal — rendered via portal to escape backdrop-filter containment */}
-      {showAddTask && createPortal(
+      {showAddTask && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="w-full max-w-sm holo-glass rounded-lg overflow-hidden animate-in fade-in zoom-in-95 duration-300">
             <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
