@@ -113,6 +113,22 @@ async def write_file(path: str, content: str) -> str:
         path: Relative path from workspace root.
         content: Full file content to write.
     """
+    # CODEOWNERS check: warn or block if agent doesn't own this file
+    agent_id = get_active_agent_id()
+    if agent_id:
+        try:
+            from backend.codeowners import check_file_permission
+            from backend.routers.agents import _agents
+            agent = _agents.get(agent_id)
+            if agent:
+                allowed, reason = check_file_permission(path, agent.type.value, agent.sub_type)
+                if not allowed:
+                    return f"[BLOCKED] {reason}"
+                if reason:
+                    import logging
+                    logging.getLogger(__name__).info("CODEOWNERS: %s", reason)
+        except Exception:
+            pass  # CODEOWNERS check is best-effort
     target = _safe_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
