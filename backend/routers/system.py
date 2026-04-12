@@ -611,9 +611,13 @@ async def get_npi_state():
     # First load: read from SSOT config file
     if _NPI_CONFIG.exists():
         import json as _json
-        data = _json.loads(_NPI_CONFIG.read_text(encoding="utf-8"))
-        await db.save_npi_state(data)
-        return data
+        try:
+            data = _json.loads(_NPI_CONFIG.read_text(encoding="utf-8"))
+            await db.save_npi_state(data)
+            return data
+        except (ValueError, OSError) as exc:
+            import logging
+            logging.getLogger(__name__).error("Failed to load NPI config %s: %s", _NPI_CONFIG, exc)
     return {"business_model": "odm", "phases": [], "current_phase_id": None}
 
 
