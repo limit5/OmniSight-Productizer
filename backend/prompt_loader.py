@@ -216,6 +216,7 @@ def list_available_roles() -> list[dict]:
                 "category": category,
                 "label": meta.get("label", role_id),
                 "label_en": meta.get("label_en", ""),
+                "description": meta.get("description", ""),
                 "keywords": meta.get("keywords", []),
                 "tools": meta.get("tools", []),
             })
