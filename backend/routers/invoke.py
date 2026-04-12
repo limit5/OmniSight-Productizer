@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 _running_tasks: dict[str, tuple[asyncio.Task, float]] = {}  # agent_id → (task_handle, start_time)
 TASK_TIMEOUT = 1800  # 30 minutes
 
+# Lock to prevent watchdog and request handlers from modifying _agents/_tasks concurrently
+_state_lock = asyncio.Lock()
+
 
 async def run_watchdog():
     """Periodic scan for stuck background tasks and stale assignments."""
@@ -46,32 +49,33 @@ async def run_watchdog():
     while True:
         await asyncio.sleep(60)
         now = _time.time()
-        # Check background tasks
-        for agent_id, (task_handle, started) in list(_running_tasks.items()):
-            if now - started > TASK_TIMEOUT:
-                logger.warning("[WATCHDOG] Agent %s timed out after %ds — cancelling", agent_id, TASK_TIMEOUT)
-                task_handle.cancel()
-                agent = _agents.get(agent_id)
-                if agent:
-                    agent.status = AgentStatus.error
-                    agent.thought_chain = f"[WATCHDOG] Task timed out after {TASK_TIMEOUT}s"
+        async with _state_lock:
+            # Check background tasks
+            for agent_id, (task_handle, started) in list(_running_tasks.items()):
+                if now - started > TASK_TIMEOUT:
+                    logger.warning("[WATCHDOG] Agent %s timed out after %ds — cancelling", agent_id, TASK_TIMEOUT)
+                    task_handle.cancel()
+                    agent = _agents.get(agent_id)
+                    if agent:
+                        agent.status = AgentStatus.error
+                        agent.thought_chain = f"[WATCHDOG] Task timed out after {TASK_TIMEOUT}s"
+                        try:
+                            await _persist_agent(agent)
+                        except Exception:
+                            pass
+                        emit_agent_update(agent_id, "error", agent.thought_chain)
+                    _running_tasks.pop(agent_id, None)
+            # Check tasks stuck in assigned/in_progress > 2 hours
+            for t in list(_tasks.values()):
+                if t.status in (TaskStatus.assigned, TaskStatus.in_progress):
                     try:
-                        await _persist_agent(agent)
+                        created = datetime.fromisoformat(t.created_at)
+                        if (datetime.now() - created).total_seconds() > 7200:
+                            t.status = TaskStatus.blocked
+                            await _persist_task(t)
+                            logger.warning("[WATCHDOG] Task %s stuck > 2h, set to blocked", t.id)
                     except Exception:
                         pass
-                    emit_agent_update(agent_id, "error", agent.thought_chain)
-                _running_tasks.pop(agent_id, None)
-        # Check tasks stuck in assigned/in_progress > 2 hours
-        for t in list(_tasks.values()):
-            if t.status in (TaskStatus.assigned, TaskStatus.in_progress):
-                try:
-                    created = datetime.fromisoformat(t.created_at)
-                    if (datetime.now() - created).total_seconds() > 7200:
-                        t.status = TaskStatus.blocked
-                        await _persist_task(t)
-                        logger.warning("[WATCHDOG] Task %s stuck > 2h, set to blocked", t.id)
-                except Exception:
-                    pass
 
 
 def _now() -> str:
