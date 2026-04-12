@@ -179,6 +179,30 @@ class TestSimulateScript:
         assert output["status"] == "error"
         assert any("must be algo or hw" in e for e in output["errors"])
 
+    def test_module_injection_rejected(self):
+        import subprocess
+        script = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "simulate.sh")
+        result = subprocess.run(
+            ["bash", script, "--type=algo", "--module=../etc/passwd"],
+            capture_output=True, text=True, timeout=10
+        )
+        output = json.loads(result.stdout)
+        assert output["status"] == "error"
+        assert any("Invalid module" in e for e in output["errors"])
+
+    def test_nonexistent_module_returns_valid_json(self):
+        import subprocess
+        script = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "simulate.sh")
+        result = subprocess.run(
+            ["bash", script, "--type=algo", "--module=nonexistent"],
+            capture_output=True, text=True, timeout=10
+        )
+        output = json.loads(result.stdout)  # Must be valid JSON
+        assert output["status"] == "fail"
+        assert output["track"] == "algo"
+        assert output["module"] == "nonexistent"
+        assert any("not found" in e.lower() for e in output["errors"])
+
 
 class TestPlatformProfiles:
 

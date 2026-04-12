@@ -972,8 +972,10 @@ TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
 REPORT_TOOLS = [generate_artifact_report]
 SIMULATION_TOOLS = [run_simulation]
 
+# Base tools available to most agents (excludes specialist tools: review, report, simulation)
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
+# Complete registry of every tool for executor lookup (must include ALL tool categories)
 TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
