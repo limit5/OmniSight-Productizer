@@ -667,14 +667,17 @@ async def update_npi_milestone(milestone_id: str, status: str | None = None, due
                     ms["status"] = status
                 if due_date is not None:
                     ms["due_date"] = due_date
-                # Auto-compute phase status
+                # Auto-compute phase status from milestones
                 all_ms = phase.get("milestones", [])
-                if all(m["status"] == "completed" for m in all_ms):
-                    phase["status"] = "completed"
-                elif any(m["status"] == "blocked" for m in all_ms):
-                    phase["status"] = "blocked"
-                elif any(m["status"] in ("in_progress", "completed") for m in all_ms):
-                    phase["status"] = "active"
+                if all_ms:
+                    if all(m["status"] == "completed" for m in all_ms):
+                        phase["status"] = "completed"
+                    elif any(m["status"] == "blocked" for m in all_ms):
+                        phase["status"] = "blocked"
+                    elif any(m["status"] in ("in_progress", "completed") for m in all_ms):
+                        phase["status"] = "active"
+                    else:
+                        phase["status"] = "pending"
                 await db.save_npi_state(state)
                 return ms
     raise HTTPException(status_code=404, detail=f"Milestone {milestone_id} not found")
