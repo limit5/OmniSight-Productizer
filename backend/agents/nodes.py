@@ -505,7 +505,7 @@ def _extract_error_key(error_summary: str) -> str:
     return key if key else error_summary[:50] or "_unknown"
 
 
-def error_check_node(state: GraphState) -> dict:
+async def error_check_node(state: GraphState) -> dict:
     """Check tool results for failures with loop detection.
 
     Two separate loops:
@@ -620,25 +620,9 @@ def error_check_node(state: GraphState) -> dict:
     l3_hint_messages = []
     if new_retry == 1:
         try:
-            import asyncio
             from backend import db
-            # Extract error text for search query (first 100 chars of first error)
             search_query = failed[0].output[:100] if failed else error_summary[:100]
-            # Run async search (we're in a sync node, use event loop)
-            loop = asyncio.get_event_loop()
-            l3_results = loop.run_until_complete(
-                db.search_episodic_memory(query=search_query, limit=2)
-            ) if loop.is_running() else []
-            # Fallback: try creating a new task for running coroutine
-            if not l3_results:
-                try:
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        l3_results = pool.submit(
-                            lambda: asyncio.run(db.search_episodic_memory(query=search_query, limit=2))
-                        ).result(timeout=3)
-                except Exception:
-                    l3_results = []
+            l3_results = await db.search_episodic_memory(query=search_query, limit=2)
 
             if l3_results:
                 hint_parts = ["[L3 HINT] Past solutions for similar errors:"]

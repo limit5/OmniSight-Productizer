@@ -75,7 +75,8 @@ class TestShouldRetryWithVerification:
 
 class TestErrorCheckNodeVerification:
 
-    def test_fail_prefix_detected(self):
+    @pytest.mark.asyncio
+    async def test_fail_prefix_detected(self):
         """[FAIL] in tool output triggers verification loop, not retry loop."""
         from backend.agents.nodes import error_check_node
         from backend.agents.state import GraphState, ToolResult
@@ -87,12 +88,13 @@ class TestErrorCheckNodeVerification:
             verification_loop_iteration=0,
             max_verification_iterations=2,
         )
-        result = error_check_node(state)
+        result = await error_check_node(state)
         assert result.get("verification_loop_iteration") == 1
         assert result.get("last_verification_failure")
         assert "run_simulation" in result["last_verification_failure"]
 
-    def test_pass_prefix_not_verification_failure(self):
+    @pytest.mark.asyncio
+    async def test_pass_prefix_not_verification_failure(self):
         """[PASS] should not trigger verification loop."""
         from backend.agents.nodes import error_check_node
         from backend.agents.state import GraphState, ToolResult
@@ -102,11 +104,12 @@ class TestErrorCheckNodeVerification:
                 ToolResult(tool_name="run_simulation", output="[PASS] 5/5 tests passed", success=True),
             ],
         )
-        result = error_check_node(state)
+        result = await error_check_node(state)
         assert result.get("verification_loop_iteration", 0) == 0
         assert not result.get("last_verification_failure")
 
-    def test_verification_exhausted(self):
+    @pytest.mark.asyncio
+    async def test_verification_exhausted(self):
         """After max iterations, verification stops."""
         from backend.agents.nodes import error_check_node
         from backend.agents.state import GraphState, ToolResult
@@ -118,6 +121,6 @@ class TestErrorCheckNodeVerification:
             verification_loop_iteration=2,
             max_verification_iterations=2,
         )
-        result = error_check_node(state)
+        result = await error_check_node(state)
         # Should NOT increment further; clears failure state for summarizer
         assert result.get("last_verification_failure") == ""

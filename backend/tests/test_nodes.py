@@ -102,7 +102,8 @@ class TestRuleBasedToolCalls:
 
 class TestErrorCheckNode:
 
-    def test_no_errors_passes_through(self):
+    @pytest.mark.asyncio
+    async def test_no_errors_passes_through(self):
         state = GraphState(
             tool_results=[
                 ToolResult(tool_name="read_file", output="file content", success=True),
@@ -110,11 +111,12 @@ class TestErrorCheckNode:
             retry_count=0,
             max_retries=3,
         )
-        update = error_check_node(state)
+        update = await error_check_node(state)
         assert update["last_error"] == ""
         assert update["rtk_bypass"] is False
 
-    def test_error_triggers_retry(self):
+    @pytest.mark.asyncio
+    async def test_error_triggers_retry(self):
         state = GraphState(
             tool_results=[
                 ToolResult(tool_name="read_file", output="[ERROR] File not found", success=False),
@@ -122,13 +124,14 @@ class TestErrorCheckNode:
             retry_count=0,
             max_retries=2,
         )
-        update = error_check_node(state)
+        update = await error_check_node(state)
         assert update["retry_count"] == 1
         assert "read_file" in update["last_error"]
         assert update["tool_calls"] == []
         assert update["tool_results"] == []
 
-    def test_retries_exhausted_escalates(self):
+    @pytest.mark.asyncio
+    async def test_retries_exhausted_escalates(self):
         """When retries exhausted with errors, escalate to human."""
         state = GraphState(
             routed_to="firmware",
@@ -138,12 +141,13 @@ class TestErrorCheckNode:
             retry_count=3,
             max_retries=3,
         )
-        update = error_check_node(state)
+        update = await error_check_node(state)
         assert update["last_error"] == ""
         assert len(update["actions"]) == 1
         assert update["actions"][0].status == "awaiting_confirmation"
 
-    def test_retries_exhausted_no_errors_passes_through(self):
+    @pytest.mark.asyncio
+    async def test_retries_exhausted_no_errors_passes_through(self):
         """When retries exhausted but no errors, go to summarizer and reset bypass."""
         state = GraphState(
             tool_results=[
@@ -152,7 +156,7 @@ class TestErrorCheckNode:
             retry_count=3,
             max_retries=3,
         )
-        update = error_check_node(state)
+        update = await error_check_node(state)
         assert update["last_error"] == ""
         assert update["rtk_bypass"] is False
 
