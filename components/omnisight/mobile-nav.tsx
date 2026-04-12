@@ -1,21 +1,22 @@
 "use client"
 
 import { useState } from "react"
-import { 
-  Monitor, 
-  Cpu, 
-  Bot, 
-  Brain, 
-  ListTodo, 
-  GitBranch, 
+import {
+  Monitor,
+  Cpu,
+  Bot,
+  Brain,
+  ListTodo,
+  GitBranch,
   Activity,
+  Rocket,
   Menu,
   X,
   ChevronLeft,
   ChevronRight
 } from "lucide-react"
 
-export type PanelId = "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "vitals"
+export type PanelId = "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -29,6 +30,7 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "orchestrator", label: "Orchestrator AI", shortLabel: "AI", icon: Brain, color: "var(--artifact-purple)" },
   { id: "tasks", label: "Task Backlog", shortLabel: "Tasks", icon: ListTodo, color: "var(--neural-blue)" },
   { id: "source", label: "Source Control", shortLabel: "Git", icon: GitBranch, color: "var(--validation-emerald)" },
+  { id: "npi", label: "NPI Lifecycle", shortLabel: "NPI", icon: Rocket, color: "var(--artifact-purple)" },
   { id: "vitals", label: "Vitals & Artifacts", shortLabel: "Vitals", icon: Activity, color: "var(--hardware-orange)" },
 ]
 

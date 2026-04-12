@@ -330,6 +330,25 @@ export default function Home() {
             onRemoveRepo={handleRemoveRepo}
           />
         )
+      case "npi":
+        return (
+          <NPITimeline
+            data={engine.npiData}
+            onBusinessModelChange={async (model) => {
+              try {
+                const updated = await api.updateNPIState({ business_model: model })
+                engine.setNpiData(updated)
+              } catch {}
+            }}
+            onMilestoneStatusChange={async (msId, status) => {
+              try {
+                await api.updateNPIMilestone(msId, status)
+                const updated = await api.getNPIState()
+                engine.setNpiData(updated)
+              } catch {}
+            }}
+          />
+        )
       case "vitals":
         return <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
