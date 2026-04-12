@@ -58,6 +58,8 @@ class TokenTrackingCallback(BaseCallbackHandler):
 
 # Cache to avoid re-creating LLM instances
 _cache: dict[str, BaseChatModel] = {}
+_provider_failures: dict[str, float] = {}  # provider → last_failure_timestamp
+PROVIDER_COOLDOWN = 300  # 5 minutes — don't retry a failed provider within this window
 
 
 def get_llm(
@@ -92,18 +94,29 @@ def get_llm(
     try:
         llm = _create_llm(provider, model)
 
-        # Failover: if primary fails, try fallback chain
+        # Failover: if primary fails, try fallback chain with cooldown
         if llm is None:
             chain = [p.strip() for p in settings.llm_fallback_chain.split(",") if p.strip()]
             for fallback_provider in chain:
                 if fallback_provider == provider:
                     continue  # Skip the one that already failed
-                llm = _create_llm(fallback_provider, None)
+                # Circuit breaker: skip providers that failed recently
+                last_fail = _provider_failures.get(fallback_provider, 0)
+                if time.time() - last_fail < PROVIDER_COOLDOWN:
+                    logger.debug("Skipping %s (cooldown, failed %ds ago)", fallback_provider, int(time.time() - last_fail))
+                    continue
+                try:
+                    llm = _create_llm(fallback_provider, None)
+                except Exception:
+                    _provider_failures[fallback_provider] = time.time()
+                    continue
                 if llm is not None:
                     provider = fallback_provider
                     model = None
                     logger.info("Failover: %s → %s", settings.llm_provider, fallback_provider)
                     break
+                else:
+                    _provider_failures[fallback_provider] = time.time()
             if llm is None:
                 from backend.events import emit_token_warning
                 emit_token_warning("all_providers_failed", "All LLM providers failed. Using rule-based fallback.")

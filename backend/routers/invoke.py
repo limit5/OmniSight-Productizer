@@ -22,7 +22,7 @@ from backend.workspace import provision as ws_provision, get_workspace
 from backend.handoff import load_handoff_for_task
 from fastapi.responses import JSONResponse
 
-from backend.events import emit_invoke
+from backend.events import emit_agent_update, emit_invoke
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
@@ -34,6 +34,44 @@ _halted = asyncio.Event()
 _halted.set()  # starts in "running" (not halted) state
 
 logger = logging.getLogger(__name__)
+
+# Background task registry for watchdog
+_running_tasks: dict[str, tuple[asyncio.Task, float]] = {}  # agent_id → (task_handle, start_time)
+TASK_TIMEOUT = 1800  # 30 minutes
+
+
+async def run_watchdog():
+    """Periodic scan for stuck background tasks and stale assignments."""
+    import time as _time
+    while True:
+        await asyncio.sleep(60)
+        now = _time.time()
+        # Check background tasks
+        for agent_id, (task_handle, started) in list(_running_tasks.items()):
+            if now - started > TASK_TIMEOUT:
+                logger.warning("[WATCHDOG] Agent %s timed out after %ds — cancelling", agent_id, TASK_TIMEOUT)
+                task_handle.cancel()
+                agent = _agents.get(agent_id)
+                if agent:
+                    agent.status = AgentStatus.error
+                    agent.thought_chain = f"[WATCHDOG] Task timed out after {TASK_TIMEOUT}s"
+                    try:
+                        await _persist_agent(agent)
+                    except Exception:
+                        pass
+                    emit_agent_update(agent_id, "error", agent.thought_chain)
+                _running_tasks.pop(agent_id, None)
+        # Check tasks stuck in assigned/in_progress > 2 hours
+        for t in list(_tasks.values()):
+            if t.status in (TaskStatus.assigned, TaskStatus.in_progress):
+                try:
+                    created = datetime.fromisoformat(t.created_at)
+                    if (datetime.now() - created).total_seconds() > 7200:
+                        t.status = TaskStatus.blocked
+                        await _persist_task(t)
+                        logger.warning("[WATCHDOG] Task %s stuck > 2h, set to blocked", t.id)
+                except Exception:
+                    pass
 
 
 def _now() -> str:
@@ -51,8 +89,12 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
     """Execute a task through LangGraph in the background.
 
     Updates agent status and sub_tasks via SSE events as work progresses.
+    Registered in _running_tasks for watchdog monitoring.
     """
+    import time as _time
     from backend.models import SubTask
+
+    _running_tasks[agent.id] = (asyncio.current_task(), _time.time())
 
     handoff_ctx = ""
     try:
@@ -118,6 +160,7 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
     await _persist_task(task)
     await _check_parent_completion(task.id)
     emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
+    _running_tasks.pop(agent.id, None)
 
 
 # ─── Task decomposition ───
@@ -590,10 +633,31 @@ async def invoke_stream(command: str | None = None):
 
 @router.post("/halt")
 async def invoke_halt():
-    """Emergency stop — halt any running INVOKE between actions."""
+    """Emergency stop — cancel background tasks, stop containers, halt INVOKE."""
     _halted.clear()
-    emit_invoke("halt", "INVOKE halted by emergency stop")
-    return {"status": "halted"}
+    # Cancel all tracked background tasks
+    cancelled = 0
+    for agent_id, (task_handle, _) in list(_running_tasks.items()):
+        task_handle.cancel()
+        cancelled += 1
+        agent = _agents.get(agent_id)
+        if agent and agent.status == AgentStatus.running:
+            agent.status = AgentStatus.warning
+            agent.thought_chain = "[HALT] Emergency stop activated"
+            try:
+                await _persist_agent(agent)
+            except Exception:
+                pass
+    _running_tasks.clear()
+    # Stop all Docker containers
+    containers_stopped = 0
+    try:
+        from backend.container import stop_all_containers
+        containers_stopped = await stop_all_containers()
+    except Exception:
+        pass
+    emit_invoke("halt", f"INVOKE halted: {cancelled} tasks cancelled, {containers_stopped} containers stopped")
+    return {"status": "halted", "tasks_cancelled": cancelled, "containers_stopped": containers_stopped}
 
 
 @router.post("/resume")

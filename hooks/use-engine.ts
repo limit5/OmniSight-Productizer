@@ -118,31 +118,33 @@ export function useEngine() {
 
     async function fetchSystemData() {
       try {
-        const [statusRes, infoRes, devicesRes, specRes, reposRes, logsRes, tokensRes, budgetRes, unreadRes, compressRes, simsRes] = await Promise.all([
-          api.getSystemStatus(),
-          api.getSystemInfo(),
-          api.getDevices(),
-          api.getSpec(),
-          api.getRepos(),
-          api.getLogs(),
-          api.getTokenUsage(),
-          api.getTokenBudget(),
-          api.getUnreadCount(),
-          api.getCompressionStats(),
-          api.listSimulations(),
+        const results = await Promise.allSettled([
+          api.getSystemStatus(),   // 0
+          api.getSystemInfo(),     // 1
+          api.getDevices(),        // 2
+          api.getSpec(),           // 3
+          api.getRepos(),          // 4
+          api.getLogs(),           // 5
+          api.getTokenUsage(),     // 6
+          api.getTokenBudget(),    // 7
+          api.getUnreadCount(),    // 8
+          api.getCompressionStats(), // 9
+          api.listSimulations(),   // 10
         ])
-        setSystemStatus(statusRes)
-        setSystemInfo(infoRes)
-        setDevices(devicesRes)
-        setSpec(specRes)
-        setRepos(reposRes)
-        setLogs(logsRes)
-        setTokenUsage(tokensRes)
-        setTokenBudget(budgetRes)
-        setUnreadCount(unreadRes.count)
-        setCompressionStats(compressRes)
-        setSimulations(simsRes)
-        console.log("[Engine] System data loaded:", infoRes.hostname, infoRes.cpu_model)
+        // Only update state for successful fetches — stale data is better than no data
+        if (results[0].status === "fulfilled") setSystemStatus(results[0].value)
+        if (results[1].status === "fulfilled") setSystemInfo(results[1].value)
+        if (results[2].status === "fulfilled") setDevices(results[2].value)
+        if (results[3].status === "fulfilled") setSpec(results[3].value)
+        if (results[4].status === "fulfilled") setRepos(results[4].value)
+        if (results[5].status === "fulfilled") setLogs(results[5].value)
+        if (results[6].status === "fulfilled") setTokenUsage(results[6].value)
+        if (results[7].status === "fulfilled") setTokenBudget(results[7].value)
+        if (results[8].status === "fulfilled") setUnreadCount(results[8].value.count)
+        if (results[9].status === "fulfilled") setCompressionStats(results[9].value)
+        if (results[10].status === "fulfilled") setSimulations(results[10].value)
+        const failCount = results.filter(r => r.status === "rejected").length
+        if (failCount > 0) console.warn(`[Engine] ${failCount}/${results.length} system data fetches failed`)
       } catch (e) {
         console.warn("[Engine] System data fetch failed:", e)
       }

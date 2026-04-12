@@ -136,6 +136,30 @@ async def unfreeze_agent(agent_id: str):
     return agent
 
 
+@router.post("/{agent_id}/reset", response_model=Agent)
+async def force_reset_agent(agent_id: str):
+    """Force reset any agent to idle, cleaning up workspace and container."""
+    if agent_id not in _agents:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = _agents[agent_id]
+    agent.status = AgentStatus.idle
+    agent.thought_chain = "[RESET] Force reset by operator"
+    await _persist(agent)
+    emit_agent_update(agent_id, agent.status, agent.thought_chain)
+    # Best-effort cleanup of workspace and container
+    try:
+        from backend.workspace import cleanup
+        await cleanup(agent_id)
+    except Exception:
+        pass
+    try:
+        from backend.container import stop_container
+        await stop_container(agent_id)
+    except Exception:
+        pass
+    return agent
+
+
 @router.delete("/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str):
     if agent_id not in _agents:

@@ -352,6 +352,7 @@ _PRICING = {
 
 def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: int) -> None:
     """Track token usage for a model (called synchronously from LLM callback)."""
+    _maybe_reset_daily_budget()
     if model not in _token_usage:
         _token_usage[model] = {
             "model": model,
@@ -395,6 +396,22 @@ async def _persist_token_usage(data: dict) -> None:
 
 token_frozen: bool = False
 _last_budget_level: str = ""  # Track to avoid repeat events
+_token_daily_reset_date: str = ""
+
+
+def _maybe_reset_daily_budget() -> None:
+    """Auto-reset token freeze at midnight (new day)."""
+    global token_frozen, _last_budget_level, _token_daily_reset_date
+    from datetime import datetime as _dt
+    today = _dt.now().strftime("%Y-%m-%d")
+    if today != _token_daily_reset_date:
+        _token_daily_reset_date = today
+        if token_frozen:
+            token_frozen = False
+            _last_budget_level = "normal"
+            from backend.events import emit_token_warning
+            emit_token_warning("reset", "Daily token budget auto-reset")
+            logger.info("Daily token budget auto-reset")
 
 
 def get_daily_cost() -> float:

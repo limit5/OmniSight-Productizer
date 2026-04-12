@@ -9,19 +9,55 @@ from backend.config import settings
 from backend.routers import agents, artifacts, chat, events, health, invoke, providers, simulations, system, tasks, tools, webhooks, workspaces
 from backend import db
 
+async def _startup_cleanup(log):
+    """Reset stuck states left over from a previous crash."""
+    # 1. Reset agents stuck in "running" for over 1 hour
+    n = await db.execute_raw(
+        "UPDATE agents SET status='idle', thought_chain='[RECOVERY] Reset on startup' "
+        "WHERE status='running' AND datetime(created_at) < datetime('now', '-1 hour')"
+    )
+    if n:
+        log.warning("Startup cleanup: reset %d stuck agents to idle", n)
+    # 2. Reset simulations stuck in "running"
+    n = await db.execute_raw(
+        "UPDATE simulations SET status='error' WHERE status='running'"
+    )
+    if n:
+        log.warning("Startup cleanup: marked %d stuck simulations as error", n)
+    # 3. Clean orphaned Docker containers
+    try:
+        from backend.container import cleanup_orphaned_containers
+        removed = await cleanup_orphaned_containers()
+        if removed:
+            log.warning("Startup cleanup: removed %d orphaned containers", removed)
+    except Exception:
+        pass  # Docker may not be available
+    # 4. Clean stale git lock files
+    try:
+        from backend.workspace import cleanup_stale_locks
+        await cleanup_stale_locks()
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
     _log = logging.getLogger(__name__)
     try:
         await db.init()
+        await _startup_cleanup(_log)
         await agents.seed_defaults_if_empty()
         await tasks.seed_defaults_if_empty()
         await system.load_token_usage_from_db()
     except Exception as exc:
         _log.error("Startup failed: %s", exc, exc_info=True)
         raise
+    # Start watchdog for stuck agent detection
+    import asyncio
+    watchdog_task = asyncio.create_task(invoke.run_watchdog())
     yield
+    watchdog_task.cancel()
     await db.close()
 
 

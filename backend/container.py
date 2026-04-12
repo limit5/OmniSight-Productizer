@@ -130,13 +130,17 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     if scripts_path.is_file():
         mounts += f'-v "{scripts_path.resolve()}":/opt/omnisight/simulate.sh:ro '
 
-    # Start container with workspace mounted
+    # Start container with workspace mounted + resource limits
+    from backend.config import settings as _settings
+    mem = _settings.docker_memory_limit or "1g"
+    cpus = _settings.docker_cpu_limit or "2"
     rc, out, err = await _run(
         f"docker run -d "
         f"--name {container_name} "
         f"{mounts}"
         f"-w /workspace "
-        f"--network none "  # no network access by default (security)
+        f"--network none "
+        f"--memory={mem} --cpus={cpus} --pids-limit=256 "
         f"{DOCKER_IMAGE}"
     )
     if rc != 0:
@@ -225,3 +229,33 @@ async def container_exec_tool(agent_id: str, command: str) -> str:
     if rc != 0 and not output:
         output = f"[CONTAINER EXIT CODE: {rc}]"
     return output
+
+
+async def cleanup_orphaned_containers() -> int:
+    """Remove any omnisight-agent-* containers left from a previous crash."""
+    rc, out, _ = await _run(
+        "docker ps -a --filter name=omnisight-agent- --format '{{.Names}}'",
+        timeout=15,
+    )
+    if rc != 0 or not out.strip():
+        return 0
+    count = 0
+    for name in out.strip().splitlines():
+        name = name.strip()
+        if name:
+            await _run(f"docker rm -f {name}", timeout=15)
+            count += 1
+            logger.info("Removed orphaned container: %s", name)
+    return count
+
+
+async def stop_all_containers() -> int:
+    """Stop all tracked containers (used by emergency halt)."""
+    count = 0
+    for agent_id in list(_containers.keys()):
+        try:
+            await stop_container(agent_id)
+            count += 1
+        except Exception:
+            pass
+    return count

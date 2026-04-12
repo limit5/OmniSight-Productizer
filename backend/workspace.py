@@ -92,7 +92,20 @@ async def provision(
     emit_pipeline_phase("workspace_provision", f"Creating workspace for {agent_id}")
 
     from backend.config import settings as _settings
+
+    # Disk space check
+    import shutil as _shutil
+    free_bytes = _shutil.disk_usage(str(_WORKSPACES_ROOT)).free
+    if free_bytes < 100 * 1024 * 1024:  # 100MB minimum
+        raise RuntimeError(f"Insufficient disk space: {free_bytes // 1024 // 1024}MB free")
+
     source = repo_source or str(_MAIN_REPO)
+
+    # Clean stale git lock before worktree operations
+    source_lock = Path(source) / ".git" / "index.lock"
+    if source_lock.exists():
+        source_lock.unlink()
+        logger.warning("Removed stale git lock before provision: %s", source_lock)
     is_local = not source.startswith("http") and not source.startswith("ssh://") and not source.startswith("git@")
 
     # Gerrit mode: use fresh clone even for local repos (full isolation)
@@ -233,6 +246,24 @@ async def finalize(agent_id: str) -> dict:
         logger.warning("Handoff generation failed: %s", exc)
 
     return result
+
+
+async def cleanup_stale_locks():
+    """Remove .git/index.lock files left from interrupted operations."""
+    # Main repo
+    main_lock = _MAIN_REPO / ".git" / "index.lock"
+    if main_lock.exists():
+        main_lock.unlink()
+        logger.warning("Removed stale git lock: %s", main_lock)
+    # Agent workspaces
+    if _WORKSPACES_ROOT.exists():
+        for ws_dir in _WORKSPACES_ROOT.iterdir():
+            if ws_dir.is_dir():
+                for lock_name in ("index.lock", "HEAD.lock"):
+                    lock = ws_dir / ".git" / lock_name
+                    if lock.exists():
+                        lock.unlink()
+                        logger.warning("Removed stale lock: %s", lock)
 
 
 async def cleanup(agent_id: str) -> bool:

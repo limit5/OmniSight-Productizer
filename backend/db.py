@@ -27,11 +27,20 @@ async def init() -> None:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _db = await aiosqlite.connect(str(_DB_PATH))
     _db.row_factory = aiosqlite.Row
+    # SQLite hardening
+    await _db.execute("PRAGMA journal_mode=WAL")
+    await _db.execute("PRAGMA busy_timeout=5000")
+    await _db.execute("PRAGMA foreign_keys=ON")
+    # Quick integrity check
+    async with _db.execute("PRAGMA quick_check") as cur:
+        row = await cur.fetchone()
+        if row and row[0] != "ok":
+            logger.critical("Database integrity check FAILED: %s", row[0])
     await _db.executescript(_SCHEMA)
     # Run lightweight migrations for schema evolution
     await _migrate(_db)
     await _db.commit()
-    logger.info("Database ready: %s", _DB_PATH)
+    logger.info("Database ready (WAL mode): %s", _DB_PATH)
 
 
 async def _migrate(conn: aiosqlite.Connection) -> None:
@@ -63,6 +72,13 @@ async def close() -> None:
     if _db:
         await _db.close()
         _db = None
+
+
+async def execute_raw(sql: str, params: tuple = ()) -> int:
+    """Execute raw SQL and return rows affected. For startup cleanup."""
+    cur = await _conn().execute(sql, params)
+    await _conn().commit()
+    return cur.rowcount
 
 
 def _conn() -> aiosqlite.Connection:

@@ -153,6 +153,9 @@ def build_graph() -> StateGraph:
 agent_graph = build_graph()
 
 
+GRAPH_TIMEOUT = 300  # 5 minutes max per graph execution
+
+
 async def run_graph(
     user_command: str,
     workspace_path: str | None = None,
@@ -169,6 +172,8 @@ async def run_graph(
         agent_sub_type: Role sub-type (for role-specific skill loading).
         handoff_context: Previous task handoff content (injected into prompt).
     """
+    import asyncio
+
     initial_state = GraphState(
         user_command=user_command,
         messages=[HumanMessage(content=user_command)],
@@ -177,7 +182,22 @@ async def run_graph(
         agent_sub_type=agent_sub_type,
         handoff_context=handoff_context,
     )
-    result = await agent_graph.ainvoke(initial_state)
+    try:
+        result = await asyncio.wait_for(
+            agent_graph.ainvoke(initial_state),
+            timeout=GRAPH_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return GraphState(
+            user_command=user_command,
+            messages=initial_state.messages,
+            workspace_path=workspace_path,
+            model_name=model_name,
+            agent_sub_type=agent_sub_type,
+            handoff_context=handoff_context,
+            answer=f"[TIMEOUT] Graph execution exceeded {GRAPH_TIMEOUT}s",
+            last_error="Graph execution timeout",
+        )
     if isinstance(result, dict):
         return GraphState(**result)
     return result

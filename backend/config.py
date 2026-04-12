@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     docker_enabled: bool = True  # enable container execution for agents
     docker_image: str = "omnisight-agent:latest"
     docker_network: str = "none"  # none = no network (secure), bridge = allow network
+    docker_memory_limit: str = "1g"    # container memory cap
+    docker_cpu_limit: str = "2"        # container CPU cap
 
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 

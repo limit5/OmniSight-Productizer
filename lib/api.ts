@@ -55,17 +55,46 @@ export function subscribeEvents(
 
 // ─── Helpers ───
 
+const FETCH_TIMEOUT = 15_000 // 15 seconds
+const MAX_RETRIES = 2
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_V1}${path}`, {
-    headers: { "Content-Type": "application/json", ...init?.headers },
-    ...init,
-  })
-  if (!res.ok) {
-    const body = await res.text().catch(() => "")
-    throw new Error(`API ${res.status}: ${body}`)
+  let lastError: Error | null = null
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
+    try {
+      const res = await fetch(`${API_V1}${path}`, {
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json", ...init?.headers },
+        ...init,
+      })
+      clearTimeout(timer)
+      if (!res.ok) {
+        const body = await res.text().catch(() => "")
+        // 5xx errors are retryable; 4xx are not
+        if (res.status >= 500 && attempt < MAX_RETRIES) {
+          lastError = new Error(`API ${res.status}: ${body}`)
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
+          continue
+        }
+        throw new Error(`API ${res.status}: ${body}`)
+      }
+      if (res.status === 204) return undefined as T
+      return res.json()
+    } catch (e) {
+      clearTimeout(timer)
+      if (e instanceof DOMException && e.name === "AbortError") {
+        lastError = new Error(`Request timeout: ${path}`)
+        if (attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
+          continue
+        }
+      }
+      throw lastError || e
+    }
   }
-  if (res.status === 204) return undefined as T
-  return res.json()
+  throw lastError!
 }
 
 // ─── Health ───
