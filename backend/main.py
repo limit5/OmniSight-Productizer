@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.routers import agents, artifacts, chat, events, health, invoke, providers, simulations, system, tasks, tools, webhooks, workspaces
+from backend.routers import agents, artifacts, chat, events, health, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workspaces
 from backend import db
 
 async def _startup_cleanup(log):
@@ -100,6 +100,7 @@ app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)
 app.include_router(simulations.router, prefix=settings.api_prefix)
+app.include_router(integration.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 
 
