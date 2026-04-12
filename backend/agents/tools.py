@@ -777,7 +777,7 @@ async def add_task_comment(task_id: str, content: str) -> str:
 
 
 @tool
-async def generate_artifact_report(template: str, title: str = "", context_json: str = "{}") -> str:
+async def generate_artifact_report(template: str, title: str = "", context_json: str = "{}", task_id: str = "") -> str:
     """Generate a report from a template and save as an artifact.
 
     Available templates: compliance_report, test_summary.
@@ -787,6 +787,7 @@ async def generate_artifact_report(template: str, title: str = "", context_json:
         template: Template name (e.g. "compliance_report", "test_summary").
         title: Report title.
         context_json: JSON string of template variables.
+        task_id: Associated task ID for artifact tracking.
     """
     import json as _json
     from backend.report_generator import generate_report as _gen, list_templates
@@ -800,7 +801,7 @@ async def generate_artifact_report(template: str, title: str = "", context_json:
         ctx["title"] = title
 
     agent_id = get_active_agent_id() or "reporter"
-    result = await _gen(template, ctx, task_id="", agent_id=agent_id)
+    result = await _gen(template, ctx, task_id=task_id, agent_id=agent_id)
     if "error" in result:
         return f"[ERROR] {result['error']}"
 
