@@ -613,21 +613,18 @@ def _build_state_summary() -> str:
             f"Tasks: {len(tasks_list)} total ({pending} pending, {in_prog} in progress, "
             f"{completed} completed, {blocked} blocked)"
         )
-        # Append recent debug findings if any issues exist
+        # Append recent debug entries from system log (no async DB needed)
         if errors > 0 or blocked > 0:
             try:
-                import asyncio
-                from backend import db
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Can't await in sync context — skip DB lookup
-                    pass
-                else:
-                    findings = loop.run_until_complete(db.list_debug_findings(status="open", limit=5))
-                    if findings:
-                        summary += "\n\nDebug Findings (open):"
-                        for f in findings:
-                            summary += f"\n  [{f.get('severity', '?').upper()}] {f.get('content', '')[:80]}"
+                from backend.routers.system import get_recent_logs
+                debug_lines = [
+                    log["message"] for log in get_recent_logs(20)
+                    if "[DEBUG]" in log.get("message", "")
+                ]
+                if debug_lines:
+                    summary += "\n\nRecent Debug Alerts:"
+                    for line in debug_lines[:5]:
+                        summary += f"\n  {line[:100]}"
             except Exception:
                 pass
         return summary

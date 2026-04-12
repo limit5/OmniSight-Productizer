@@ -356,6 +356,11 @@ def add_system_log(message: str, level: str = "info") -> None:
     })
 
 
+def get_recent_logs(limit: int = 50) -> list[dict]:
+    """Return recent log entries (most recent first). Used by conversation node."""
+    return list(reversed(list(_log_buffer)))[:limit]
+
+
 # Seed with startup log
 add_system_log("OmniSight Engine started", "info")
 add_system_log(f"Python {platform.python_version()} on {platform.system()}", "info")
