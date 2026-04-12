@@ -734,6 +734,120 @@ def conversation_node(state: GraphState) -> dict:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L2 Memory: Context compression gate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Context budget thresholds (in estimated tokens)
+_L2_WARN_THRESHOLD = 0.80   # 80% → log warning
+_L2_COMPRESS_THRESHOLD = 0.90  # 90% → auto-compress old messages
+_CHARS_PER_TOKEN = 3  # Conservative for mixed EN/CJK
+
+# Default context windows per provider family (tokens)
+_DEFAULT_CONTEXT_WINDOWS = {
+    "claude": 200_000,
+    "gpt": 128_000,
+    "gemini": 1_000_000,
+    "groq": 32_000,
+    "deepseek": 64_000,
+    "ollama": 8_000,
+}
+
+
+def _estimate_context_tokens(state: GraphState) -> int:
+    """Estimate total tokens in the current message history."""
+    total_chars = sum(len(m.content) for m in state.messages if hasattr(m, "content"))
+    return total_chars // _CHARS_PER_TOKEN
+
+
+def _get_context_window() -> int:
+    """Get the context window size for the active model."""
+    try:
+        from backend.config import settings
+        model = (settings.llm_model or "").lower()
+        for prefix, window in _DEFAULT_CONTEXT_WINDOWS.items():
+            if prefix in model:
+                return window
+    except Exception:
+        pass
+    return 128_000  # Safe default
+
+
+def context_compression_gate(state: GraphState) -> dict:
+    """L2 Memory gate: compress conversation history if context budget is exceeded.
+
+    Runs before the summarizer. If messages exceed 90% of context window,
+    compresses older messages (keeping the most recent 4) into a digest.
+    """
+    est_tokens = _estimate_context_tokens(state)
+    ctx_window = _get_context_window()
+    usage_ratio = est_tokens / ctx_window if ctx_window > 0 else 0
+
+    if usage_ratio >= _L2_WARN_THRESHOLD:
+        emit_pipeline_phase(
+            "l2_memory",
+            f"Context usage: {usage_ratio:.0%} ({est_tokens}/{ctx_window} tokens)",
+        )
+
+    if usage_ratio < _L2_COMPRESS_THRESHOLD:
+        return {}  # No compression needed
+
+    # Compress: keep last 4 messages, summarize the rest
+    messages = list(state.messages)
+    if len(messages) <= 6:
+        return {}  # Too few messages to compress
+
+    keep_recent = 4
+    old_messages = messages[:-keep_recent]
+    recent_messages = messages[-keep_recent:]
+
+    # Build text from old messages for summarization
+    old_text_parts = []
+    for m in old_messages:
+        role = getattr(m, "type", "unknown")
+        content = getattr(m, "content", "")
+        if content:
+            old_text_parts.append(f"[{role}] {content[:500]}")
+    old_text = "\n".join(old_text_parts)
+
+    # Try LLM summarization
+    summary = ""
+    llm = _get_llm()
+    if llm:
+        try:
+            sys = SystemMessage(content=(
+                "Compress this conversation history into a concise digest (max 300 tokens). "
+                "Focus on: what was asked, what tools ran, what succeeded/failed, current status. "
+                "Use terse technical language."
+            ))
+            resp = llm.invoke([sys, AIMessage(content=old_text[:6000])])
+            summary = resp.content  # type: ignore[union-attr]
+        except Exception as exc:
+            logger.warning("L2 compression LLM failed: %s", exc)
+
+    if not summary:
+        # Rule-based fallback: extract key lines
+        key_lines = [l for l in old_text.split("\n")
+                     if any(k in l for k in ("[OK]", "[FAIL]", "[ERROR]", "AGENT]", "decided", "completed"))]
+        summary = "\n".join(key_lines[:10]) if key_lines else old_text[:600]
+
+    # Replace old messages with a single compressed message
+    compressed_msg = AIMessage(content=f"[L2 COMPRESSED HISTORY]\n{summary}")
+    new_messages = [compressed_msg] + recent_messages
+
+    logger.info(
+        "L2 context compressed: %d messages → %d (saved ~%d tokens)",
+        len(messages), len(new_messages),
+        est_tokens - (_estimate_context_tokens(GraphState(messages=new_messages))),
+    )
+    emit_pipeline_phase(
+        "l2_compress",
+        f"Compressed {len(old_messages)} old messages into digest ({len(summary)} chars)",
+    )
+
+    return {"messages": new_messages}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Summarizer node — produces final answer from tool results
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

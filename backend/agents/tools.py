@@ -884,7 +884,136 @@ PLATFORM_TOOLS = [get_platform_config]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  9. Simulation tools
+#  9. L2 Memory tools — context summarization
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Rough token estimate: 1 token ≈ 4 chars (English) / 2 chars (CJK)
+_CHARS_PER_TOKEN = 3  # Conservative average for mixed EN/CJK content
+_SUMMARY_TARGET_TOKENS = 300
+_SUMMARY_TARGET_CHARS = _SUMMARY_TARGET_TOKENS * _CHARS_PER_TOKEN
+
+
+@tool
+async def summarize_state(
+    conversation_text: str,
+    max_summary_chars: int = _SUMMARY_TARGET_CHARS,
+    include_system_state: bool = True,
+) -> str:
+    """Compress L2 working memory: summarize long conversation history into a concise digest.
+
+    Call this tool when the context window is approaching capacity (80%+ usage).
+    It produces a compact summary of what happened, decisions made, and current status,
+    replacing verbose multi-turn history with a ~300-token digest.
+
+    Args:
+        conversation_text: The conversation history or context to summarize.
+        max_summary_chars: Maximum characters for the output summary (default ~900).
+        include_system_state: If True, append current system state snapshot.
+    """
+    if not conversation_text or not conversation_text.strip():
+        return "[L2 SUMMARY] No conversation content to summarize."
+
+    # Attempt LLM-based summarization
+    try:
+        from backend.agents.llm import get_llm
+        llm = get_llm()
+        if llm:
+            from langchain_core.messages import SystemMessage, HumanMessage
+            sys = SystemMessage(content=(
+                "You are a concise summarizer for an embedded AI camera development system. "
+                "Compress the following conversation into a structured digest with these sections:\n"
+                "1. OBJECTIVE: What was the user trying to accomplish (1 line)\n"
+                "2. ACTIONS TAKEN: Key tool executions and their results (bullet list, max 5)\n"
+                "3. DECISIONS: Important decisions or conclusions reached\n"
+                "4. CURRENT STATUS: Where things stand right now\n"
+                "5. PENDING: What still needs to be done\n\n"
+                f"Keep the entire summary under {max_summary_chars} characters. "
+                "Use terse, technical language. No filler words."
+            ))
+            resp = llm.invoke([sys, HumanMessage(content=conversation_text[:8000])])
+            summary = resp.content  # type: ignore[union-attr]
+            if len(summary) > max_summary_chars:
+                summary = summary[:max_summary_chars] + "..."
+            result = f"[L2 SUMMARY]\n{summary}"
+            if include_system_state:
+                state_snap = _get_system_snapshot()
+                if state_snap:
+                    result += f"\n\n[SYSTEM STATE]\n{state_snap}"
+            return result
+    except Exception as exc:
+        logger.warning("L2 summarize LLM failed, falling back to rule-based: %s", exc)
+
+    # Rule-based fallback: extract key patterns from conversation text
+    summary_parts = []
+    lines = conversation_text.strip().split("\n")
+
+    # Extract tool results
+    tool_results = [l.strip() for l in lines if l.strip().startswith(("[OK]", "[PASS]", "[FAIL]", "[ERROR]"))]
+    if tool_results:
+        summary_parts.append("Tool Results:")
+        for tr in tool_results[:5]:
+            summary_parts.append(f"  {tr[:120]}")
+
+    # Extract decisions / key statements
+    decision_markers = ["decided", "conclusion", "agreed", "confirmed", "chosen", "selected", "fixed", "resolved"]
+    decisions = [l.strip() for l in lines if any(m in l.lower() for m in decision_markers)]
+    if decisions:
+        summary_parts.append("Decisions:")
+        for d in decisions[:3]:
+            summary_parts.append(f"  {d[:120]}")
+
+    # Extract errors
+    errors = [l.strip() for l in lines if "[ERROR]" in l or "error:" in l.lower()]
+    if errors:
+        summary_parts.append("Errors:")
+        for e in errors[:3]:
+            summary_parts.append(f"  {e[:120]}")
+
+    if not summary_parts:
+        # Last resort: take first and last N lines
+        head = lines[:3]
+        tail = lines[-3:] if len(lines) > 6 else []
+        summary_parts = [l[:120] for l in head]
+        if tail:
+            summary_parts.append("...")
+            summary_parts.extend(l[:120] for l in tail)
+
+    result = "[L2 SUMMARY] (rule-based)\n" + "\n".join(summary_parts)
+    if len(result) > max_summary_chars:
+        result = result[:max_summary_chars] + "..."
+
+    if include_system_state:
+        state_snap = _get_system_snapshot()
+        if state_snap:
+            result += f"\n\n[SYSTEM STATE]\n{state_snap}"
+
+    return result
+
+
+def _get_system_snapshot() -> str:
+    """Get a compact system state snapshot for L2 context injection."""
+    try:
+        from backend.routers.invoke import _agents, _tasks
+        agents_list = list(_agents.values())
+        tasks_list = list(_tasks.values())
+        running = sum(1 for a in agents_list if a.status.value == "running")
+        idle = sum(1 for a in agents_list if a.status.value == "idle")
+        pending = sum(1 for t in tasks_list if t.status.value == "backlog")
+        in_prog = sum(1 for t in tasks_list if t.status.value in ("assigned", "in_progress"))
+        completed = sum(1 for t in tasks_list if t.status.value == "completed")
+        return (
+            f"Agents: {len(agents_list)} ({running} running, {idle} idle) | "
+            f"Tasks: {len(tasks_list)} ({pending} pending, {in_prog} active, {completed} done)"
+        )
+    except Exception:
+        return ""
+
+
+MEMORY_TOOLS = [summarize_state]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  10. Simulation tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SIMULATION_TIMEOUT = 120  # seconds — Valgrind/QEMU are slow
@@ -1047,17 +1176,17 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
-    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS,
-    "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS,
-    "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment],
-    "general":        ALL_TOOLS,
-    "custom":         ALL_TOOLS,
-    "devops":         ALL_TOOLS + PLATFORM_TOOLS,
-    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS,
-    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS,
+    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
+    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
+    "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS,
+    "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
+    "general":        ALL_TOOLS + MEMORY_TOOLS,
+    "custom":         ALL_TOOLS + MEMORY_TOOLS,
+    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS,
+    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
+    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
 }

@@ -61,6 +61,7 @@ from backend.agents.nodes import (
     tool_executor_node,
     error_check_node,
     _should_retry,
+    context_compression_gate,
     summarizer_node,
 )
 
@@ -79,7 +80,7 @@ def _check_tool_calls(state: GraphState) -> str:
     """After a specialist runs, check if it requested tool calls."""
     if state.tool_calls:
         return "tool_executor"
-    return "summarizer"
+    return "context_gate"
 
 
 def build_graph() -> StateGraph:
@@ -97,6 +98,7 @@ def build_graph() -> StateGraph:
     builder.add_node("tool_executor", tool_executor_node)
     builder.add_node("error_check", error_check_node)
     builder.add_node("conversation", conversation_node)
+    builder.add_node("context_gate", context_compression_gate)
     builder.add_node("summarizer", summarizer_node)
 
     # ── Edges ──
@@ -119,8 +121,8 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Conversation → summarizer (direct, no tools)
-    builder.add_edge("conversation", "summarizer")
+    # Conversation → context_gate → summarizer (direct, no tools)
+    builder.add_edge("conversation", "context_gate")
 
     # All specialists → check if tools are needed (conditional)
     for specialist in ("firmware", "software", "validator", "reporter", "reviewer", "general"):
@@ -129,14 +131,14 @@ def build_graph() -> StateGraph:
             _check_tool_calls,
             {
                 "tool_executor": "tool_executor",
-                "summarizer": "summarizer",
+                "context_gate": "context_gate",
             },
         )
 
     # Tool executor → error_check (self-healing gate)
     builder.add_edge("tool_executor", "error_check")
 
-    # Error check → retry specialist or proceed to summarizer
+    # Error check → retry specialist or proceed to context_gate → summarizer
     builder.add_conditional_edges(
         "error_check",
         _should_retry,
@@ -147,11 +149,12 @@ def build_graph() -> StateGraph:
             "reporter": "reporter",
             "reviewer": "reviewer",
             "general": "general",
-            "summarizer": "summarizer",
+            "summarizer": "context_gate",
         },
     )
 
-    # Summarizer → END
+    # Context compression gate → summarizer → END
+    builder.add_edge("context_gate", "summarizer")
     builder.add_edge("summarizer", END)
 
     return builder.compile()
