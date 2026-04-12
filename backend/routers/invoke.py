@@ -99,72 +99,73 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
     from backend.models import SubTask
 
     _running_tasks[agent.id] = (asyncio.current_task(), _time.time())
-
-    handoff_ctx = ""
     try:
-        handoff_ctx = await load_handoff_for_task(task.id)
-    except Exception:
-        pass
+        handoff_ctx = ""
+        try:
+            handoff_ctx = await load_handoff_for_task(task.id)
+        except Exception:
+            pass
 
-    task_command = f"{task.title}. {task.description or ''}"
-    try:
-        graph_result = await run_graph(
-            task_command,
-            workspace_path=workspace_path,
-            model_name=agent.ai_model or "",
-            agent_sub_type=agent.sub_type or "",
-            handoff_context=handoff_ctx,
-        )
-        agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
-        agent.status = AgentStatus.success
+        task_command = f"{task.title}. {task.description or ''}"
+        try:
+            graph_result = await run_graph(
+                task_command,
+                workspace_path=workspace_path,
+                model_name=agent.ai_model or "",
+                agent_sub_type=agent.sub_type or "",
+                handoff_context=handoff_ctx,
+            )
+            agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
+            agent.status = AgentStatus.success
 
-        # Extract sub_tasks and check for escalation actions
-        if graph_result.actions:
-            for act in graph_result.actions:
-                # Sub-task extraction
-                if act.detail and act.detail.startswith("{"):
-                    try:
-                        detail_data = json.loads(act.detail)
-                        if "sub_tasks" in detail_data:
-                            agent.sub_tasks = [SubTask(**st) for st in detail_data["sub_tasks"]]
-                            for st in agent.sub_tasks:
-                                matching = [tr for tr in graph_result.tool_results if st.label.startswith(tr.tool_name)]
-                                if matching:
-                                    st.status = "completed" if matching[0].success else "error"
-                    except (json.JSONDecodeError, Exception):
-                        pass
-                # Escalation: retries exhausted → notify L3
-                if act.status == "awaiting_confirmation":
-                    agent.status = AgentStatus.awaiting_confirmation
-                    from backend.notifications import notify as _notify
-                    await _notify(
-                        "action", f"Agent {agent.id} frozen — retries exhausted",
-                        message=act.detail[:200] if act.detail else "Human review required.",
-                        source=f"agent:{agent.id}",
-                    )
-    except Exception as exc:
-        agent.thought_chain = f"Execution error: {exc}"
-        agent.status = AgentStatus.error
-        logger.error("Agent task failed: agent=%s task=%s error=%s", agent.id, task.id, exc)
-        # L3 notification: agent error
-        from backend.notifications import notify as _notify
-        await _notify("action", f"Agent {agent.id} failed on task {task.id}",
-                       message=str(exc)[:200], source=f"agent:{agent.id}")
+            # Extract sub_tasks and check for escalation actions
+            if graph_result.actions:
+                for act in graph_result.actions:
+                    # Sub-task extraction
+                    if act.detail and act.detail.startswith("{"):
+                        try:
+                            detail_data = json.loads(act.detail)
+                            if "sub_tasks" in detail_data:
+                                agent.sub_tasks = [SubTask(**st) for st in detail_data["sub_tasks"]]
+                                for st in agent.sub_tasks:
+                                    matching = [tr for tr in graph_result.tool_results if st.label.startswith(tr.tool_name)]
+                                    if matching:
+                                        st.status = "completed" if matching[0].success else "error"
+                        except (json.JSONDecodeError, Exception):
+                            pass
+                    # Escalation: retries exhausted → notify L3
+                    if act.status == "awaiting_confirmation":
+                        agent.status = AgentStatus.awaiting_confirmation
+                        from backend.notifications import notify as _notify
+                        await _notify(
+                            "action", f"Agent {agent.id} frozen — retries exhausted",
+                            message=act.detail[:200] if act.detail else "Human review required.",
+                            source=f"agent:{agent.id}",
+                        )
+        except Exception as exc:
+            agent.thought_chain = f"Execution error: {exc}"
+            agent.status = AgentStatus.error
+            logger.error("Agent task failed: agent=%s task=%s error=%s", agent.id, task.id, exc)
+            # L3 notification: agent error
+            from backend.notifications import notify as _notify
+            await _notify("action", f"Agent {agent.id} failed on task {task.id}",
+                           message=str(exc)[:200], source=f"agent:{agent.id}")
 
-    await _persist_agent(agent)
-    # Update task status based on agent outcome
-    if agent.status == AgentStatus.success:
-        task.status = TaskStatus.completed
-        from datetime import datetime as _dt
-        task.completed_at = _dt.now().isoformat()
-    elif agent.status == AgentStatus.error:
-        task.status = TaskStatus.blocked
-    elif agent.status == AgentStatus.awaiting_confirmation:
-        task.status = TaskStatus.blocked
-    await _persist_task(task)
-    await _check_parent_completion(task.id)
-    emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
-    _running_tasks.pop(agent.id, None)
+        await _persist_agent(agent)
+        # Update task status based on agent outcome
+        if agent.status == AgentStatus.success:
+            task.status = TaskStatus.completed
+            from datetime import datetime as _dt
+            task.completed_at = _dt.now().isoformat()
+        elif agent.status == AgentStatus.error:
+            task.status = TaskStatus.blocked
+        elif agent.status == AgentStatus.awaiting_confirmation:
+            task.status = TaskStatus.blocked
+        await _persist_task(task)
+        await _check_parent_completion(task.id)
+        emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
+    finally:
+        _running_tasks.pop(agent.id, None)
 
 
 # ─── Task decomposition ───
