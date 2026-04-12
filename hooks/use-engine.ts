@@ -358,6 +358,8 @@ export function useEngine() {
               const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
               console.warn(`[Engine] SSE closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
               setTimeout(async () => {
+                // Close leaked old EventSource before creating new one
+                eventSource?.close()
                 connectSSE()
                 // Replay missed events from gap period
                 if (lastEventTimestamp) {
