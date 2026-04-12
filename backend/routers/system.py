@@ -166,6 +166,40 @@ async def get_devices():
 #  System Status (for header)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+@router.get("/debug")
+async def get_debug_state():
+    """Comprehensive debug state: agent errors, blocked tasks, debug findings."""
+    from backend import db
+    from backend.routers.agents import _agents
+    from backend.routers.tasks import _tasks
+    from backend.models import AgentStatus, TaskStatus
+
+    agents = list(_agents.values())
+    tasks = list(_tasks.values())
+    findings = await db.list_debug_findings(limit=50)
+
+    agent_errors = [
+        {"id": a.id, "name": a.name, "status": a.status.value, "thought_chain": a.thought_chain[:200]}
+        for a in agents if a.status in (AgentStatus.error, AgentStatus.warning, AgentStatus.awaiting_confirmation)
+    ]
+    blocked_tasks = [
+        {"id": t.id, "title": t.title, "status": t.status.value, "assigned_agent_id": t.assigned_agent_id}
+        for t in tasks if t.status == TaskStatus.blocked
+    ]
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "agent_errors": agent_errors,
+        "blocked_tasks": blocked_tasks,
+        "total_findings": len(findings),
+        "findings_by_type": {
+            ft: sum(1 for f in findings if f.get("finding_type") == ft)
+            for ft in ("stuck_loop", "error_repeated", "retries_exhausted", "timeout")
+        },
+        "recent_findings": findings[:20],
+    }
+
+
 @router.get("/status")
 async def get_system_status():
     from backend.routers.agents import _agents

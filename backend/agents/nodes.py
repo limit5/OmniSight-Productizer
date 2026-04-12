@@ -489,22 +489,33 @@ async def tool_executor_node(state: GraphState) -> dict:
 #  Error check node — self-healing loop gate
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def error_check_node(state: GraphState) -> dict:
-    """Check tool results for failures and decide whether to retry.
+def _extract_error_key(error_summary: str) -> str:
+    """Extract the tool name from an error summary for loop detection."""
+    return error_summary.split(":")[0].strip() if ":" in error_summary else error_summary[:50]
 
-    If any tool failed and retries remain, route back to the specialist
-    with error context.  Otherwise, pass through to the summarizer.
+
+def error_check_node(state: GraphState) -> dict:
+    """Check tool results for failures with loop detection.
+
+    Detects stuck loops: if the same tool fails 2+ consecutive times,
+    triggers the loop breaker to escalate immediately instead of wasting
+    retries on the same error.
     """
     failed = [r for r in state.tool_results if not r.success]
+
     if not failed or state.retry_count >= state.max_retries:
-        # Retries exhausted with errors → escalate to human
         if failed and state.retry_count >= state.max_retries:
             agent_type = state.routed_to
             emit_pipeline_phase(
                 "escalation",
                 f"Max retries ({state.max_retries}) exhausted. Freezing agent for human review.",
             )
-            # Signal escalation via action (notification sent by invoke.py when it sees this action)
+            from backend.events import emit_debug_finding
+            emit_debug_finding(
+                task_id=state.task_id or "", agent_id=state.routed_to or "",
+                finding_type="retries_exhausted", severity="error",
+                message=f"Max retries exhausted after {state.max_retries} attempts",
+            )
             return {
                 "last_error": "",
                 "actions": [
@@ -516,23 +527,50 @@ def error_check_node(state: GraphState) -> dict:
                     )
                 ],
             }
-        # No errors — proceed to summarizer, reset compression bypass
         return {"last_error": "", "rtk_bypass": False}
 
     error_summary = "; ".join(
         f"{r.tool_name}: {r.output[:200]}" for r in failed
     )
+
+    # Loop detection: compare error key with previous errors
+    error_key = _extract_error_key(error_summary)
+    updated_history = list(state.error_history) + [error_key]
+    same_count = state.same_error_count
+    loop_triggered = state.loop_breaker_triggered
+
+    if len(updated_history) >= 2 and updated_history[-1] == updated_history[-2]:
+        same_count += 1
+    else:
+        same_count = 0
+
+    # If same error repeated 2+ times → trigger loop breaker
+    if same_count >= 2 and not loop_triggered:
+        loop_triggered = True
+        emit_pipeline_phase(
+            "loop_detection",
+            f"Same error repeated {same_count + 1}x — loop breaker triggered",
+        )
+        from backend.events import emit_debug_finding
+        emit_debug_finding(
+            task_id=state.task_id or "", agent_id=state.routed_to or "",
+            finding_type="stuck_loop", severity="error",
+            message=f"Tool '{failed[0].tool_name}' failed {same_count + 1} consecutive times — stuck loop detected",
+        )
+
+    new_retry = state.retry_count + 1
     emit_pipeline_phase(
         "retry",
-        f"Tool error detected (attempt {state.retry_count + 1}/{state.max_retries}): {error_summary[:120]}",
+        f"Tool error (attempt {new_retry}/{state.max_retries}): {error_summary[:120]}",
     )
-    new_retry = state.retry_count + 1
     return {
         "retry_count": new_retry,
         "last_error": error_summary,
+        "error_history": updated_history,
+        "same_error_count": same_count,
+        "loop_breaker_triggered": loop_triggered,
         "tool_calls": [],
         "tool_results": [],
-        # After 2 consecutive failures, bypass RTK compression to get full uncompressed output
         "rtk_bypass": new_retry >= 2,
     }
 
@@ -540,10 +578,10 @@ def error_check_node(state: GraphState) -> dict:
 def _should_retry(state: GraphState) -> str:
     """Conditional edge after error_check: retry specialist or summarize.
 
-    Uses ``last_error`` (set by error_check_node when errors found) and
-    ``retry_count`` vs ``max_retries`` to decide.  Cannot rely on
-    ``tool_results`` because error_check_node clears it before this runs.
+    If loop breaker triggered, escalate immediately instead of retrying.
     """
+    if state.loop_breaker_triggered:
+        return "summarizer"
     if state.last_error and state.retry_count < state.max_retries:
         return state.routed_to
     return "summarizer"
@@ -555,7 +593,7 @@ def _should_retry(state: GraphState) -> str:
 
 
 def _build_state_summary() -> str:
-    """Build a concise system state summary for conversational context."""
+    """Build a concise system state summary including debug findings."""
     try:
         from backend.routers.invoke import _agents, _tasks
         agents_list = list(_agents.values())
@@ -567,11 +605,29 @@ def _build_state_summary() -> str:
         in_prog = sum(1 for t in tasks_list if t.status.value in ("assigned", "in_progress"))
         completed = sum(1 for t in tasks_list if t.status.value == "completed")
         blocked = sum(1 for t in tasks_list if t.status.value == "blocked")
-        return (
+        summary = (
             f"Agents: {len(agents_list)} total ({running} running, {idle} idle, {errors} error)\n"
             f"Tasks: {len(tasks_list)} total ({pending} pending, {in_prog} in progress, "
             f"{completed} completed, {blocked} blocked)"
         )
+        # Append recent debug findings if any issues exist
+        if errors > 0 or blocked > 0:
+            try:
+                import asyncio
+                from backend import db
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Can't await in sync context — skip DB lookup
+                    pass
+                else:
+                    findings = loop.run_until_complete(db.list_debug_findings(status="open", limit=5))
+                    if findings:
+                        summary += "\n\nDebug Findings (open):"
+                        for f in findings:
+                            summary += f"\n  [{f.get('severity', '?').upper()}] {f.get('content', '')[:80]}"
+            except Exception:
+                pass
+        return summary
     except Exception:
         return "System state unavailable."
 

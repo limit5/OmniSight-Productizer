@@ -332,3 +332,18 @@ class SimulationRequest(BaseModel):
     mock: bool = True
     platform: str = "aarch64"
     task_id: Optional[str] = None
+
+
+# ---------- Debug Blackboard ----------
+
+class DebugFinding(BaseModel):
+    id: str
+    task_id: str
+    agent_id: str
+    finding_type: str  # error_repeated, stuck_loop, timeout, loop_breaker_trigger
+    severity: str = "info"  # info, warn, error, critical
+    content: str
+    context: dict = Field(default_factory=dict)
+    status: str = "open"  # open, acknowledged, resolved
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    resolved_at: Optional[str] = None

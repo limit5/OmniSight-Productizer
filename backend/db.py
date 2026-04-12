@@ -199,6 +199,19 @@ CREATE TABLE IF NOT EXISTS simulations (
     artifact_id     TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS debug_findings (
+    id              TEXT PRIMARY KEY,
+    task_id         TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    finding_type    TEXT NOT NULL,
+    severity        TEXT NOT NULL DEFAULT 'info',
+    content         TEXT NOT NULL,
+    context         TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'open',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at     TEXT
+);
 """
 
 
@@ -617,3 +630,50 @@ async def update_simulation(sim_id: str, data: dict) -> None:
     safe["_id"] = sim_id
     await _conn().execute(f"UPDATE simulations SET {sets} WHERE id = :_id", safe)
     await _conn().commit()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Debug Findings (Shared Blackboard)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_debug_finding(data: dict) -> None:
+    await _conn().execute(
+        """INSERT INTO debug_findings
+           (id, task_id, agent_id, finding_type, severity, content, context, status, created_at)
+           VALUES (:id, :task_id, :agent_id, :finding_type, :severity, :content, :context, :status, :created_at)""",
+        data,
+    )
+    await _conn().commit()
+
+
+async def list_debug_findings(
+    task_id: str = "", agent_id: str = "", status: str = "", limit: int = 50,
+) -> list[dict]:
+    query = "SELECT * FROM debug_findings"
+    conditions: list[str] = []
+    params: list = []
+    if task_id:
+        conditions.append("task_id = ?")
+        params.append(task_id)
+    if agent_id:
+        conditions.append("agent_id = ?")
+        params.append(agent_id)
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with _conn().execute(query, params) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def update_debug_finding(finding_id: str, status: str) -> bool:
+    cur = await _conn().execute(
+        "UPDATE debug_findings SET status = ?, resolved_at = datetime('now') WHERE id = ?",
+        (status, finding_id),
+    )
+    await _conn().commit()
+    return cur.rowcount > 0

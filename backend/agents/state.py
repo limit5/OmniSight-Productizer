@@ -43,6 +43,7 @@ class GraphState(BaseModel):
 
     # The original user command (kept for easy reference)
     user_command: str = ""
+    task_id: str | None = None  # Associated task ID (for debug findings + artifact tracking)
 
     # Which specialist should handle the request (set by the router)
     routed_to: str = "general"
@@ -69,10 +70,13 @@ class GraphState(BaseModel):
     gerrit_change_id: str = ""
     gerrit_commit: str = ""
 
-    # Self-healing loop: retry tracking
+    # Self-healing loop: retry tracking + loop detection
     retry_count: int = 0
     max_retries: int = 3
     last_error: str = ""
+    error_history: list[str] = Field(default_factory=list)
+    same_error_count: int = 0
+    loop_breaker_triggered: bool = False
     rtk_bypass: bool = False  # When True, skip output compression (fallback for debug)
 
     # Final answer text to return to the frontend

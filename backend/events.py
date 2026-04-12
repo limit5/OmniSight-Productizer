@@ -173,3 +173,21 @@ def emit_simulation(sim_id: str, action: str, detail: str = "", **extra: Any) ->
     })
     level_label = "error" if action == "result" and extra.get("status") == "fail" else "info"
     _log(f"[SIM] {sim_id} {action}: {detail}", level=level_label)
+
+
+def emit_debug_finding(
+    task_id: str, agent_id: str, finding_type: str, severity: str, message: str,
+    **extra: Any,
+) -> None:
+    """Debug discovery events: stuck loops, repeated errors, loop breaker triggers."""
+    bus.publish("debug_finding", {
+        "task_id": task_id,
+        "agent_id": agent_id,
+        "finding_type": finding_type,
+        "severity": severity,
+        "message": message,
+        "timestamp": datetime.now().isoformat(),
+        **extra,
+    })
+    level_label = "error" if severity in ("error", "critical") else "warn" if severity == "warn" else "info"
+    _log(f"[DEBUG] {finding_type.upper()} ({agent_id}): {message}", level=level_label)
