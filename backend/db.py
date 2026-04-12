@@ -303,7 +303,7 @@ def _agent_row_to_dict(row) -> dict:
 
 def _task_row_to_dict(row) -> dict:
     d = dict(row)
-    for json_field in ("child_task_ids", "labels"):
+    for json_field in ("child_task_ids", "labels", "depends_on"):
         if isinstance(d.get(json_field), str):
             d[json_field] = json.loads(d[json_field])
     return d
