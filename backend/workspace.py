@@ -135,6 +135,15 @@ async def provision(
     await _run(f'git config user.name "Agent-{agent_id}"', cwd=ws_path)
     await _run(f'git config user.email "{agent_id}@omnisight.local"', cwd=ws_path)
 
+    # Ensure :ro bind-mount directories are gitignored (prevents git add -A issues)
+    gitignore = ws_path / ".gitignore"
+    existing = gitignore.read_text().splitlines() if gitignore.exists() else []
+    additions = [e for e in ["/test_assets/"] if e not in existing]
+    if additions:
+        with open(gitignore, "a") as f:
+            f.write("\n".join([""] + additions + [""]))
+        logger.debug("Added %s to .gitignore in %s", additions, ws_path)
+
     info = WorkspaceInfo(
         agent_id=agent_id,
         task_id=task_id,

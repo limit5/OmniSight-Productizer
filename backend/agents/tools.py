@@ -415,8 +415,8 @@ async def run_bash(command: str) -> str:
         else:
             return "[BLOCKED] Command contains a dangerous pattern and was not executed."
 
-    # Redirect simulate.sh calls to the dedicated run_simulation tool
-    if "simulate.sh" in command:
+    # Redirect direct simulate.sh invocations to the dedicated run_simulation tool
+    if re.search(r'(?:^|[/\s])simulate\.sh\b', command):
         return "[REDIRECT] Please use the run_simulation tool instead of calling simulate.sh directly. It provides structured JSON parsing, DB tracking, and proper timeout (120s)."
 
     # Try container execution first

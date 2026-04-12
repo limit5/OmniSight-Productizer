@@ -302,8 +302,8 @@ class SimulationTrack(str, Enum):
 
 class SimulationStatus(str, Enum):
     running = "running"
-    passed = "pass"
-    failed = "fail"
+    passed = "passed"
+    failed = "failed"
     error = "error"
 
 
