@@ -78,9 +78,13 @@ _SAFE_PUSH_PATTERN = re.compile(r"git\s+push\s+\S+\s+agent/", re.IGNORECASE)
 
 def _safe_path(rel: str) -> Path:
     """Resolve a relative path inside the active workspace. Raise on escape."""
-    root = get_active_workspace()
+    root = get_active_workspace().resolve()
     target = (root / rel).resolve()
-    if not str(target).startswith(str(root.resolve())):
+    # Use is_relative_to for safe path component comparison
+    # (string startswith is vulnerable: /home/user/work allows /home/user/workspace)
+    try:
+        target.relative_to(root)
+    except ValueError:
         raise PermissionError(f"Path escapes workspace: {rel}")
     return target
 
