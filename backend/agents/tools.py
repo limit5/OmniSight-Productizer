@@ -771,21 +771,62 @@ async def add_task_comment(task_id: str, content: str) -> str:
     return f"[OK] Comment added to task {task_id} by {author}"
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  7. Report generation tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@tool
+async def generate_artifact_report(template: str, title: str = "", context_json: str = "{}") -> str:
+    """Generate a report from a template and save as an artifact.
+
+    Available templates: compliance_report, test_summary.
+    The context_json provides template variables as a JSON string.
+
+    Args:
+        template: Template name (e.g. "compliance_report", "test_summary").
+        title: Report title.
+        context_json: JSON string of template variables.
+    """
+    import json as _json
+    from backend.report_generator import generate_report as _gen, list_templates
+
+    try:
+        ctx = _json.loads(context_json)
+    except _json.JSONDecodeError:
+        ctx = {}
+
+    if title:
+        ctx["title"] = title
+
+    agent_id = get_active_agent_id() or "reporter"
+    result = await _gen(template, ctx, task_id="", agent_id=agent_id)
+    if "error" in result:
+        return f"[ERROR] {result['error']}"
+
+    return f"[OK] Report generated: {result['name']} ({result['size']} bytes). Available templates: {list_templates()}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Tool registry
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 FILE_TOOLS = [read_file, write_file, list_directory, read_yaml, write_yaml, search_in_files]
 GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push, git_remote_list, create_pr, git_add_remote]
 BASH_TOOLS = [run_bash]
 REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
+REPORT_TOOLS = [generate_artifact_report]
 
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
     "firmware":  ALL_TOOLS,
     "software":  ALL_TOOLS,
     "validator":  FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS,
-    "reporter":   FILE_TOOLS + GIT_TOOLS + TASK_TOOLS,
+    "reporter":   FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS,
     "reviewer":   [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment],
     "general":    ALL_TOOLS,
     "custom":     ALL_TOOLS,

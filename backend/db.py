@@ -118,6 +118,17 @@ CREATE TABLE IF NOT EXISTS task_comments (
     timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS artifacts (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT,
+    agent_id    TEXT,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL DEFAULT 'markdown',
+    file_path   TEXT NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS notifications (
     id              TEXT PRIMARY KEY,
     level           TEXT NOT NULL DEFAULT 'info',
@@ -432,3 +443,47 @@ async def count_unread_notifications(min_level: str = "warning") -> int:
     ) as cur:
         row = await cur.fetchone()
     return row[0] if row else 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Artifacts
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_artifact(data: dict) -> None:
+    await _conn().execute(
+        """INSERT INTO artifacts (id, task_id, agent_id, name, type, file_path, size, created_at)
+           VALUES (:id, :task_id, :agent_id, :name, :type, :file_path, :size, :created_at)""",
+        data,
+    )
+    await _conn().commit()
+
+
+async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = 50) -> list[dict]:
+    query = "SELECT * FROM artifacts"
+    conditions: list[str] = []
+    params: list = []
+    if task_id:
+        conditions.append("task_id = ?")
+        params.append(task_id)
+    if agent_id:
+        conditions.append("agent_id = ?")
+        params.append(agent_id)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    async with _conn().execute(query, params) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def get_artifact(artifact_id: str) -> dict | None:
+    async with _conn().execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def delete_artifact(artifact_id: str) -> bool:
+    cur = await _conn().execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+    await _conn().commit()
+    return cur.rowcount > 0

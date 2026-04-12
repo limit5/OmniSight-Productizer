@@ -14,6 +14,9 @@ langchain-openai==1.1.12
 langchain-groq==1.1.2
 langchain-together==0.4.0
 langchain-ollama==1.1.0
+# Report generation
+jinja2>=3.0
+markdown>=3.5
 # Persistence
 aiosqlite==0.21.0
 # Testing

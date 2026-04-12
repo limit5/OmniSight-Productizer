@@ -21,6 +21,7 @@ export type SSEEvent =
   | { event: "invoke"; data: { action_type: string; detail: string; timestamp: string } }
   | { event: "token_warning"; data: { level: string; message: string; usage: number; budget: number; timestamp: string } }
   | { event: "notification"; data: { id: string; level: string; title: string; message: string; source: string; timestamp: string; action_url?: string; action_label?: string } }
+  | { event: "artifact_created"; data: { id: string; name: string; type: string; task_id: string; agent_id: string; size: number } }
   | { event: "heartbeat"; data: { subscribers: number } }
 
 /**
@@ -35,7 +36,7 @@ export function subscribeEvents(
   const eventsUrl = API_V1.startsWith("http") ? `${API_V1}/events` : `${window.location.origin}${API_V1}/events`
   const es = new EventSource(eventsUrl)
 
-  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "heartbeat"]) {
+  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "artifact_created", "heartbeat"]) {
     es.addEventListener(eventType, (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data)
@@ -420,6 +421,30 @@ export interface CompressionStats {
 
 export async function getCompressionStats() {
   return request<CompressionStats>("/system/compression")
+}
+
+// ─── Artifacts ───
+
+export interface ArtifactItem {
+  id: string
+  task_id: string | null
+  agent_id: string | null
+  name: string
+  type: "pdf" | "markdown" | "json" | "log" | "html"
+  file_path: string
+  size: number
+  created_at: string
+}
+
+export async function listArtifacts(taskId?: string, agentId?: string) {
+  const params = new URLSearchParams()
+  if (taskId) params.set("task_id", taskId)
+  if (agentId) params.set("agent_id", agentId)
+  return request<ArtifactItem[]>(`/artifacts?${params.toString()}`)
+}
+
+export async function getArtifactDownloadUrl(id: string): Promise<string> {
+  return `${API_V1}/artifacts/${id}/download`
 }
 
 // ─── Token Budget ───

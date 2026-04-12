@@ -31,6 +31,9 @@ __pycache__/
 # agent isolated workspaces
 .agent_workspaces/
 
+# generated artifacts
+.artifacts/
+
 # SQLite database
 data/
 

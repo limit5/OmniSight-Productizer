@@ -102,6 +102,7 @@ export function useEngine() {
   const [notifications, setNotifications] = useState<api.NotificationItem[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
   const [compressionStats, setCompressionStats] = useState<api.CompressionStats | null>(null)
+  const [artifacts, setArtifacts] = useState<api.ArtifactItem[]>([])
   const initRef = useRef(false)
 
   // Fetch initial data and subscribe to SSE event stream
@@ -194,6 +195,15 @@ export function useEngine() {
               logMsg = `[DOCKER] ${d.agent_id} ${d.action}: ${d.detail}`
             } else if (event.event === "invoke") {
               logMsg = `[INVOKE] ${d.action_type}: ${d.detail}`
+            } else if (event.event === "artifact_created") {
+              logMsg = `[ARTIFACT] ${d.name} (${d.type}, ${d.size} bytes)`
+              setArtifacts(prev => [{
+                id: d.id as string, task_id: (d.task_id as string) || null,
+                agent_id: (d.agent_id as string) || null, name: d.name as string,
+                type: (d.type as string) as api.ArtifactItem["type"],
+                file_path: "", size: d.size as number,
+                created_at: ts,
+              }, ...prev.slice(0, 49)])
             } else if (event.event === "notification") {
               const level = d.level as string
               logMsg = `[NOTIFY:${level.toUpperCase()}] ${d.title}`
@@ -559,6 +569,7 @@ export function useEngine() {
     tokenUsage,
     tokenBudget,
     compressionStats,
+    artifacts,
     notifications,
     unreadCount,
     setUnreadCount,

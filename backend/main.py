@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.routers import agents, chat, events, health, invoke, providers, system, tasks, tools, webhooks, workspaces
+from backend.routers import agents, artifacts, chat, events, health, invoke, providers, system, tasks, tools, webhooks, workspaces
 from backend import db
 
 @asynccontextmanager
@@ -57,6 +57,7 @@ app.include_router(providers.router, prefix=settings.api_prefix)
 app.include_router(invoke.router, prefix=settings.api_prefix)
 app.include_router(events.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
+app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 

@@ -203,6 +203,29 @@ class ChatResponse(BaseModel):
 
 # ---------- Notifications ----------
 
+# ---------- Artifacts ----------
+
+class ArtifactType(str, Enum):
+    pdf = "pdf"
+    markdown = "markdown"
+    json_doc = "json"
+    log = "log"
+    html = "html"
+
+
+class Artifact(BaseModel):
+    id: str
+    task_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    name: str
+    type: ArtifactType = ArtifactType.markdown
+    file_path: str = ""
+    size: int = 0  # bytes
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+# ---------- Notifications ----------
+
 class NotificationLevel(str, Enum):
     info = "info"          # L1: silent log
     warning = "warning"    # L2: badge + IM
