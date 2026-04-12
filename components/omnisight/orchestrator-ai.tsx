@@ -20,7 +20,8 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronUp,
-  Crown
+  Crown,
+  Shield
 } from "lucide-react"
 import type { Agent, AgentStatus, AIModel } from "./agent-matrix-wall"
 import type { Task, TaskStatus } from "./task-backlog"
@@ -76,7 +77,9 @@ interface OrchestratorAIProps {
   activeProvider?: string
   activeModel?: string
   providers?: { id: string; name: string; models: string[]; configured: boolean }[]
+  providerHealth?: { chain: string[]; health: { id: string; name: string; configured: boolean; is_active: boolean; cooldown_remaining: number; status: string }[] } | null
   onSwitchProvider?: (provider: string, model?: string) => void
+  onUpdateFallbackChain?: (chain: string[]) => void
 }
 
 // Helper to get agent icon component
@@ -137,7 +140,9 @@ export function OrchestratorAI({
   activeProvider,
   activeModel,
   providers,
+  providerHealth,
   onSwitchProvider,
+  onUpdateFallbackChain,
 }: OrchestratorAIProps) {
   const [messages, setMessages] = useState<OrchestratorMessage[]>([
     {
@@ -631,6 +636,66 @@ export function OrchestratorAI({
                       )
                     })}
                   </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Fallback Chain + Health Status */}
+      {providerHealth && providerHealth.health.length > 0 && (
+        <div className="border-b border-[var(--border)] px-3 py-2">
+          <p className="font-mono text-[10px] text-[var(--muted-foreground)] mb-1.5 uppercase tracking-wider flex items-center gap-1.5">
+            <Shield size={10} className="text-[var(--hardware-orange)]" />
+            FAILOVER CHAIN
+          </p>
+          <div className="space-y-0.5">
+            {providerHealth.health.map((h, idx) => {
+              const statusColor = h.status === "active" ? "var(--validation-emerald)"
+                : h.status === "available" ? "var(--neural-blue)"
+                : h.status === "cooldown" ? "var(--hardware-orange)"
+                : "var(--muted-foreground)"
+              return (
+                <div key={h.id} className="flex items-center gap-1.5 py-0.5">
+                  <span className="font-mono text-[8px] text-[var(--muted-foreground)] w-3 text-right">{idx + 1}</span>
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
+                  <span className="font-mono text-[9px] flex-1 min-w-0 truncate" style={{ color: statusColor }}>{h.name}</span>
+                  {h.status === "cooldown" && (
+                    <span className="font-mono text-[8px] text-[var(--hardware-orange)]">{h.cooldown_remaining}s</span>
+                  )}
+                  {h.status === "unconfigured" && (
+                    <span className="font-mono text-[8px] text-[var(--muted-foreground)]">N/A</span>
+                  )}
+                  {/* Move up/down buttons */}
+                  {onUpdateFallbackChain && (
+                    <div className="flex gap-0.5 shrink-0">
+                      <button
+                        disabled={idx === 0}
+                        onClick={() => {
+                          const chain = [...providerHealth.chain]
+                          if (idx > 0) { [chain[idx - 1], chain[idx]] = [chain[idx], chain[idx - 1]] }
+                          onUpdateFallbackChain(chain)
+                        }}
+                        className="p-0.5 rounded text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] disabled:opacity-20 transition-colors"
+                        title="Move up"
+                      >
+                        <ChevronUp size={8} />
+                      </button>
+                      <button
+                        disabled={idx === providerHealth.health.length - 1}
+                        onClick={() => {
+                          const chain = [...providerHealth.chain]
+                          if (idx < chain.length - 1) { [chain[idx], chain[idx + 1]] = [chain[idx + 1], chain[idx]] }
+                          onUpdateFallbackChain(chain)
+                        }}
+                        className="p-0.5 rounded text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] disabled:opacity-20 transition-colors"
+                        title="Move down"
+                      >
+                        <ChevronDown size={8} />
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
             })}
