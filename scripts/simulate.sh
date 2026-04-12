@@ -100,9 +100,15 @@ log() { echo >&2 "$@"; }
 now_ms() { date +%s%N | cut -b1-13; }
 START_MS=$(now_ms)
 
+# JSON string escape: backslash, double-quote, newline, tab, carriage return
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' '
+}
+
 # JSON building helpers
 json_test_detail() {
-  local name="$1" status="$2" duration="$3" msg="$4"
+  local name="$1" status="$2" duration="$3" msg
+  msg=$(json_escape "$4")
   printf '{"name":"%s","status":"%s","duration_ms":%s,"message":"%s"}' \
     "$name" "$status" "$duration" "$msg"
 }
@@ -125,8 +131,10 @@ WALL_TIME_MS=0
 ERRORS=""
 
 add_error() {
+  local escaped
+  escaped=$(json_escape "$1")
   if [ -n "$ERRORS" ]; then ERRORS="${ERRORS},"; fi
-  ERRORS="${ERRORS}\"$1\""
+  ERRORS="${ERRORS}\"${escaped}\""
 }
 
 add_test_detail() {
@@ -183,7 +191,7 @@ run_algo() {
   local binary="${BUILD_DIR}/${MODULE}_test"
   if ! $compiler $std_flag -O2 -Wall -Werror -g -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
     local compile_err
-    compile_err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ' | sed 's/"/\\"/g')
+    compile_err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ')
     add_error "Compilation failed: ${compile_err}"
     log "[ERROR] Compilation failed"
     cat >&2 "${BUILD_DIR}/compile.log"
@@ -236,7 +244,7 @@ run_algo() {
         else
           TESTS_FAILED=$((TESTS_FAILED + 1))
           local diff_msg
-          diff_msg=$(diff --brief "$output_file" "$expected_file" 2>&1 | head -1 | sed 's/"/\\"/g')
+          diff_msg=$(diff --brief "$output_file" "$expected_file" 2>&1 | head -1)
           add_test_detail "$(json_test_detail "$tname" "fail" "$t_dur" "Output mismatch: ${diff_msg}")"
           add_error "Test ${tname}: output mismatch"
           log "       [FAIL] ${tname} — output mismatch"
@@ -251,7 +259,7 @@ run_algo() {
       local t_dur=$(( $(now_ms) - t_start ))
       TESTS_FAILED=$((TESTS_FAILED + 1))
       local err_msg
-      err_msg=$(head -3 "${BUILD_DIR}/stderr_${tname}" 2>/dev/null | tr '\n' ' ' | sed 's/"/\\"/g')
+      err_msg=$(head -3 "${BUILD_DIR}/stderr_${tname}" 2>/dev/null | tr '\n' ' ')
       add_test_detail "$(json_test_detail "$tname" "fail" "$t_dur" "Runtime error: ${err_msg}")"
       add_error "Test ${tname}: runtime error"
       log "       [FAIL] ${tname} — runtime error"
@@ -275,7 +283,7 @@ run_algo() {
     else
       # Parse XML for error count
       VALGRIND_ERRORS=$(grep -c '<error>' "$valgrind_xml" 2>/dev/null || echo "0")
-      VALGRIND_DEFINITELY_LOST=$(grep -oP '(?<=<definitelylost>)\d+' "$valgrind_xml" 2>/dev/null | head -1 || echo "0")
+      VALGRIND_DEFINITELY_LOST=$(grep -oP '(?<=<leakedbytes>)\d+' "$valgrind_xml" 2>/dev/null | awk '{s+=$1} END {print s+0}' || echo "0")
       VALGRIND_SUMMARY="${VALGRIND_ERRORS} error(s), ${VALGRIND_DEFINITELY_LOST} bytes definitely lost"
       add_error "Valgrind: ${VALGRIND_SUMMARY}"
       log "       [WARN] ${VALGRIND_SUMMARY}"
@@ -341,7 +349,7 @@ run_hw() {
     if ! $compiler -O2 -Wall -g -DMOCK_ENV -DMOCK_SYSFS_ROOT="\"${mock_sysfs}\"" \
          -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
       local err
-      err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ' | sed 's/"/\\"/g')
+      err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ')
       add_error "Mock compilation failed: ${err}"
       log "[ERROR] Compilation failed"
       return 1
@@ -395,7 +403,7 @@ run_hw() {
     if ! $TOOLCHAIN -O2 -Wall -static $ARCH_FLAGS \
          -o "$binary" "$src_file" -lm 2>"${BUILD_DIR}/compile.log"; then
       local err
-      err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ' | sed 's/"/\\"/g')
+      err=$(head -5 "${BUILD_DIR}/compile.log" | tr '\n' ' ')
       add_error "Cross-compilation failed: ${err}"
       log "[ERROR] Cross-compilation failed"
       return 1
@@ -465,8 +473,8 @@ log "  Platform: ${PLATFORM} | Mock: ${MOCK}"
 log "============================================"
 
 case "$TYPE" in
-  algo) run_algo ;;
-  hw)   run_hw ;;
+  algo) run_algo || true ;;
+  hw)   run_hw || true ;;
 esac
 
 # ── Coverage check ──
