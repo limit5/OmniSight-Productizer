@@ -22,16 +22,36 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_CONFIGS_ROOT = Path(__file__).resolve().parent.parent / "configs"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CONFIGS_ROOT = _PROJECT_ROOT / "configs"
 _MODELS_DIR = _CONFIGS_ROOT / "models"
 _ROLES_DIR = _CONFIGS_ROOT / "roles"
 _SKILLS_DIR = _CONFIGS_ROOT / "skills"
+_CLAUDE_MD = _PROJECT_ROOT / "CLAUDE.md"
 
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
+_MAX_CORE_RULES = 2000
 _MAX_MODEL_RULES = 3000
 _MAX_ROLE_SKILL = 6000
 _MAX_TASK_SKILL = 4000
 _MAX_HANDOFF = 4000
+
+# L1 Core Rules cache (loaded once)
+_core_rules_cache: str | None = None
+
+
+def load_core_rules() -> str:
+    """Load CLAUDE.md core rules (L1 Memory). Cached after first call."""
+    global _core_rules_cache
+    if _core_rules_cache is not None:
+        return _core_rules_cache
+    if _CLAUDE_MD.is_file():
+        content = _read_md(_CLAUDE_MD, _MAX_CORE_RULES)
+        _core_rules_cache = content
+        logger.info("Loaded L1 core rules from CLAUDE.md (%d chars)", len(content))
+        return content
+    _core_rules_cache = ""
+    return ""
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -339,6 +359,11 @@ def build_system_prompt(
     Falls back to built-in prompts if config files are missing.
     """
     sections: list[str] = []
+
+    # 0. L1 Core Rules (CLAUDE.md — immutable, always first)
+    core_rules = load_core_rules()
+    if core_rules:
+        sections.append(f"# Core Rules (Immutable)\n\n{core_rules}")
 
     # 1. Model rules
     model_rules = load_model_rules(model_name)
