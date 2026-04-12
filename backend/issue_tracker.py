@@ -309,13 +309,21 @@ async def _sync_jira(issue_url: str, status: str, comment: str) -> dict:
 
     do_url = f"{base}/rest/api/2/issue/{issue_key}/transitions"
     proc = await asyncio.create_subprocess_exec(
-        "curl", "-s", "-X", "POST", do_url,
+        "curl", "-s", "-w", "\n%{http_code}", "-X", "POST", do_url,
         "-H", f"Authorization: Bearer {token}",
         "-H", "Content-Type: application/json",
         "-d", json.dumps({"transition": {"id": transition_id}}),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    await asyncio.wait_for(proc.communicate(), timeout=10)
+    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    out = stdout.decode(errors="replace").strip()
+    # Last line is HTTP status code from -w flag
+    lines = out.rsplit("\n", 1)
+    http_code = lines[-1].strip() if len(lines) > 1 else "0"
+    if not http_code.startswith("2"):
+        body = lines[0] if len(lines) > 1 else out
+        logger.warning("Jira transition failed for %s: HTTP %s — %s", issue_key, http_code, body[:200])
+        return {"status": "error", "message": f"Jira transition HTTP {http_code}"}
 
     if comment:
         await _comment_jira(issue_url, comment)
