@@ -143,7 +143,10 @@ def load_task_skill(task_type: str) -> str:
     """
     if not task_type:
         return ""
-    path = _SKILLS_DIR / task_type / "SKILL.md"
+    path = (_SKILLS_DIR / task_type / "SKILL.md").resolve()
+    if not str(path).startswith(str(_SKILLS_DIR.resolve())):
+        logger.warning("Task skill path traversal blocked: %s", task_type)
+        return ""
     content = _read_md(path, _MAX_TASK_SKILL)
     if content:
         logger.debug("Loaded task skill: %s", task_type)
