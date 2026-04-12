@@ -6,6 +6,7 @@ label_en: "ISP & Image Quality Engineer"
 keywords: [isp, 3a, awb, aec, autofocus, color, gamma, denoise, sensor, calibration, iq]
 tools: [all]
 priority_tools: [read_file, write_file, read_yaml, run_bash]
+description: "ISP & 3A tuning engineer for image signal processing pipeline and sensor calibration"
 ---
 
 # ISP & Image Quality Engineer

@@ -6,6 +6,7 @@ label_en: "DevOps Engineer"
 keywords: [devops, ci, cd, pipeline, docker, kubernetes, build, deploy, automation, github-actions, gitlab-ci]
 tools: [all]
 priority_tools: [run_bash, read_file, write_file, git_status, git_commit]
+description: "CI/CD pipeline engineer for build automation, deployment, and release management"
 ---
 
 # DevOps Engineer

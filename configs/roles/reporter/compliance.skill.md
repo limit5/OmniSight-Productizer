@@ -6,6 +6,7 @@ label_en: "Compliance & Certification Expert"
 keywords: [compliance, certification, fcc, ce, rohs, emc, iso, iec, report, regulatory]
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log, git_diff, git_branch]
 priority_tools: [read_file, read_yaml, search_in_files]
+description: "Compliance reporter for FCC/CE/RoHS certification documentation"
 ---
 
 # Compliance & Certification Expert

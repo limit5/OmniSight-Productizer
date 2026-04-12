@@ -6,6 +6,7 @@ label_en: "Technical Documentation Writer"
 keywords: [document, documentation, api-doc, readme, changelog, manual, guide, spec]
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log, git_diff, git_branch]
 priority_tools: [read_file, search_in_files, git_log]
+description: "Technical writer for API docs, user guides, and developer documentation"
 ---
 
 # Technical Documentation Writer

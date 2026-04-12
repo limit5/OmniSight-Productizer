@@ -6,6 +6,7 @@ label_en: "Software Development Engineer in Test"
 keywords: [test, qa, sdet, automation, regression, coverage, pytest, gtest, ci, pipeline]
 tools: [read_file, write_file, list_directory, read_yaml, write_yaml, search_in_files, git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push, git_remote_list, create_pr, git_add_remote, run_bash]
 priority_tools: [run_bash, read_file, search_in_files, write_file]
+description: "Software test engineer for test automation, coverage analysis, and CI integration"
 ---
 
 # Software Development Engineer in Test (SDET)

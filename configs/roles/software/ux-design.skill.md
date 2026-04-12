@@ -5,6 +5,7 @@ label: "UI/UX 設計師"
 label_en: "UI/UX Designer"
 keywords: [ux, ui, wireframe, prototype, figma, user-experience, interaction, usability, flow]
 tools: [read_file, list_directory, search_in_files]
+description: "UX design engineer for embedded device UI/UX and configuration interfaces"
 ---
 
 # UI/UX Designer (OBM)

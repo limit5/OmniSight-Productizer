@@ -6,6 +6,7 @@ label_en: "Connectivity Middleware Engineer"
 keywords: [middleware, protocol, mqtt, grpc, protobuf, network, communication, streaming]
 tools: [all]
 priority_tools: [read_file, write_file, run_bash, search_in_files]
+description: "Middleware engineer for UVC/RTSP streaming, codec integration, and system services"
 ---
 
 # Connectivity Middleware Engineer

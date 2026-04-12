@@ -5,6 +5,7 @@ label: "行銷企劃"
 label_en: "Marketing Specialist"
 keywords: [marketing, mkt, campaign, launch, landing, packaging, branding, pr, media, social]
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log]
+description: "Marketing content creator for product datasheets and promotional materials"
 ---
 
 # Marketing Specialist (OBM)

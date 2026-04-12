@@ -6,6 +6,7 @@ label_en: "Hardware Abstraction Layer Engineer"
 keywords: [hal, abstraction, interface, portable, cross-platform, api, driver-interface]
 tools: [all]
 priority_tools: [read_file, write_file, search_in_files]
+description: "Hardware Abstraction Layer engineer for portable C/C++ interfaces across SoC platforms"
 ---
 
 # Hardware Abstraction Layer Engineer

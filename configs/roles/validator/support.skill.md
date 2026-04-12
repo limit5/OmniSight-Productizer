@@ -5,6 +5,7 @@ label: "客戶服務工程師"
 label_en: "Customer Support Engineer"
 keywords: [support, rma, customer, issue, troubleshoot, warranty, return, feedback]
 tools: [read_file, list_directory, search_in_files, git_status, git_log, run_bash]
+description: "Technical support engineer for issue triage, troubleshooting, and customer escalation"
 ---
 
 # Customer Support Engineer

@@ -6,6 +6,7 @@ label_en: "BSP Platform Engineer"
 keywords: [bsp, kernel, dtb, devicetree, uboot, bootloader, dts, defconfig, linux, driver]
 tools: [all]
 priority_tools: [run_bash, read_file, write_file, git_commit]
+description: "Board Support Package engineer for Linux kernel, device tree, U-Boot, and peripheral drivers"
 ---
 
 # BSP Platform Engineer

@@ -6,6 +6,7 @@ label_en: "AI Deployment & Optimization Engineer"
 keywords: [ai, model, quantization, pruning, npu, tflite, onnx, tensorrt, deploy, inference]
 tools: [all]
 priority_tools: [run_bash, read_file, write_file]
+description: "AI deployment engineer for model optimization, quantization, and edge inference"
 ---
 
 # AI Deployment & Optimization Engineer

@@ -6,6 +6,7 @@ label_en: "AI Code Reviewer"
 keywords: [review, code-review, patch, patchset, gerrit, diff, comment, approve, reject]
 tools: [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review, read_file, search_in_files]
 priority_tools: [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
+description: "Code reviewer for embedded C/C++ quality, security, and Gerrit integration"
 ---
 
 # AI Code Reviewer

@@ -5,6 +5,7 @@ label: "機械與結構工程師"
 label_en: "Mechanical / Structural Engineer"
 keywords: [mechanical, structure, enclosure, thermal, heatsink, mold, injection, dfm, assembly, tolerance]
 tools: [all]
+description: "Mechanical design engineer for enclosure, thermal management, and hardware integration"
 ---
 
 # Mechanical / Structural Engineer

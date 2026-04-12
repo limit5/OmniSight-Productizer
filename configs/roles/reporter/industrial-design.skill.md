@@ -5,6 +5,7 @@ label: "工業設計師"
 label_en: "Industrial Designer"
 keywords: [industrial, design, id, cmf, rendering, mockup, prototype, appearance, ergonomics]
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log]
+description: "Industrial design reporter for product aesthetics and CMF specifications"
 ---
 
 # Industrial Designer (OBM)

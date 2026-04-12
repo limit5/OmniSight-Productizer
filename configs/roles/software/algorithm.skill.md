@@ -6,6 +6,7 @@ label_en: "Imaging Algorithm Engineer"
 keywords: [algorithm, image, processing, c, cpp, neon, simd, optimization, opencv, filter]
 tools: [all]
 priority_tools: [read_file, write_file, run_bash, search_in_files]
+description: "Algorithm engineer for computer vision, signal processing, and edge computing"
 ---
 
 # Imaging Algorithm Engineer

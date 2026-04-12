@@ -6,6 +6,7 @@ label_en: "Cybersecurity Expert"
 keywords: [security, vulnerability, cve, tls, encryption, audit, owasp, pen-test, secure-boot]
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log, git_diff, git_branch, run_bash]
 priority_tools: [search_in_files, read_file, run_bash]
+description: "Security engineer for vulnerability assessment, penetration testing, and hardening"
 ---
 
 # Cybersecurity Expert

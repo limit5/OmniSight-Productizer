@@ -5,6 +5,7 @@ label: "製造工程師"
 label_en: "Manufacturing Engineer"
 keywords: [manufacturing, mfg, production, smt, assembly, sop, yield, fixture, burn-in, mfc]
 tools: [all]
+description: "Manufacturing process engineer for production line setup and yield optimization"
 ---
 
 # Manufacturing Engineer

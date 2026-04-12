@@ -5,6 +5,7 @@ label: "業務經理"
 label_en: "Sales / Account Manager"
 keywords: [sales, account, channel, distribution, logistics, inventory, pricing, quote, nre]
 tools: [read_file, list_directory, read_yaml, search_in_files]
+description: "Sales engineer for customer proposals, pricing, and technical requirements"
 ---
 
 # Sales / Account Manager (OBM)
