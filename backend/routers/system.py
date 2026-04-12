@@ -264,6 +264,35 @@ async def get_spec():
     return _yaml_to_spec(data)
 
 
+@router.get("/vendor/sdks")
+async def list_vendor_sdks():
+    """List available vendor SDK platform profiles and their mount status."""
+    platforms_dir = _PROJECT_ROOT / "configs" / "platforms"
+    if not platforms_dir.is_dir():
+        return []
+    results = []
+    for f in sorted(platforms_dir.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(f.read_text()) or {}
+            vendor_id = data.get("vendor_id", "")
+            sysroot = data.get("sysroot_path", "")
+            cmake_tc = data.get("cmake_toolchain_file", "")
+            results.append({
+                "platform": data.get("platform", f.stem),
+                "label": data.get("label", f.stem),
+                "vendor_id": vendor_id,
+                "sdk_version": data.get("sdk_version", ""),
+                "soc_model": data.get("soc_model", ""),
+                "npu_enabled": data.get("npu_enabled", False),
+                "sysroot_mounted": bool(sysroot and Path(sysroot).is_dir()),
+                "toolchain_available": bool(cmake_tc and Path(cmake_tc).is_file()),
+                "status": "ready" if (not vendor_id) or (sysroot and Path(sysroot).is_dir()) else "not_installed",
+            })
+        except Exception:
+            continue
+    return results
+
+
 @router.put("/spec")
 async def update_spec_field(path: list[str], value: str | int | float | bool):
     """Update a single field in hardware_manifest.yaml."""
