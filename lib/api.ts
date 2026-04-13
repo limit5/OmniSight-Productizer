@@ -603,10 +603,12 @@ export interface ArtifactItem {
   task_id: string | null
   agent_id: string | null
   name: string
-  type: "pdf" | "markdown" | "json" | "log" | "html"
+  type: "pdf" | "markdown" | "json" | "log" | "html" | "binary" | "firmware" | "kernel_module" | "sdk" | "model" | "archive"
   file_path: string
   size: number
   created_at: string
+  version?: string
+  checksum?: string
 }
 
 export async function listArtifacts(taskId?: string, agentId?: string) {
