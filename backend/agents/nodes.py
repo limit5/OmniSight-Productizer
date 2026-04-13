@@ -264,6 +264,79 @@ def _build_sub_tasks(tool_calls: list[ToolCall]) -> list[dict]:
     ]
 
 
+def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict | None:
+    """Handle LLM errors with classification, backoff, failover, and SSE notification.
+
+    Returns a dict (answer for the user) if handled, or None to fall through to rule-based.
+    """
+    import asyncio
+    import time
+
+    from backend.llm_errors import classify_llm_error, LLMErrorCategory
+
+    err = classify_llm_error(exc)
+    category = err["category"]
+
+    # Emit SSE notification for visibility
+    try:
+        emit_pipeline_phase(
+            "llm_error",
+            f"{agent_type} [{category}] {err['message'][:80]}",
+        )
+    except Exception:
+        pass
+
+    logger.warning(
+        "%s LLM error [%s] (status=%s, retryable=%s, failover=%s): %s",
+        agent_type, category, err["status_code"], err["retryable"], err["failover"], err["message"][:120],
+    )
+
+    # Permanent failures — mark provider and notify user
+    if err["provider_action"] == "permanent_disable":
+        provider = model_name.split(":")[0] if ":" in model_name else ""
+        if provider:
+            from backend.agents.llm import _provider_failures
+            _provider_failures[provider] = time.time() + 86400  # 24h cooldown for auth/billing
+        try:
+            from backend.events import emit_token_warning
+            if category == LLMErrorCategory.AUTH_FAILED:
+                emit_token_warning("warn", f"Provider auth failed: {err['message'][:100]}. Check API key in Settings.")
+            elif category == LLMErrorCategory.BILLING_EXHAUSTED:
+                emit_token_warning("warn", f"Provider billing exhausted: {err['message'][:100]}. Add credits or switch provider.")
+        except Exception:
+            pass
+        return None  # Fall through to failover/rule-based
+
+    # Retryable with backoff — attempt retry with exponential delay
+    if err["retryable"] and err["max_retries"] > 0:
+        base_delay = err["retry_after"] or err["base_delay"]
+        for attempt in range(1, err["max_retries"] + 1):
+            delay = base_delay * (2 ** (attempt - 1))
+            delay = min(delay, 30)  # Cap at 30 seconds
+            logger.info("LLM retry %d/%d for %s (waiting %.1fs)", attempt, err["max_retries"], category, delay)
+            try:
+                emit_pipeline_phase("llm_retry", f"{agent_type} retry {attempt}/{err['max_retries']} in {delay:.0f}s ({category})")
+            except Exception:
+                pass
+            time.sleep(delay)  # Sync sleep — acceptable for short backoff
+            try:
+                llm = _get_llm(bind_tools_for=agent_type, model_name=model_name)
+                if llm:
+                    return None  # LLM recovered — caller will re-invoke on next graph cycle
+            except Exception:
+                continue
+        logger.warning("LLM retries exhausted for %s after %d attempts", category, err["max_retries"])
+
+    # Cooldown the provider for failover
+    if err["provider_action"] == "cooldown":
+        provider = model_name.split(":")[0] if ":" in model_name else ""
+        if provider:
+            from backend.agents.llm import _provider_failures
+            _provider_failures[provider] = time.time()
+
+    return None  # Fall through to rule-based fallback
+
+
 def _specialist_node_factory(agent_type: str):
     """Create a specialist node that can request tool calls."""
 
@@ -341,7 +414,10 @@ def _specialist_node_factory(agent_type: str):
                 }
 
             except Exception as exc:
-                logger.warning("%s LLM failed: %s", agent_type, exc)
+                # Classify the error and attempt intelligent recovery
+                resp = _handle_llm_error(exc, agent_type, state.model_name)
+                if resp is not None:
+                    return resp
                 # Fall through to rule-based
 
         # ── Rule-based mode: pattern-match tool calls from the command ──
@@ -774,7 +850,7 @@ def conversation_node(state: GraphState) -> dict:
             "messages": [AIMessage(content=answer)],
         }
     except Exception as exc:
-        logger.warning("Conversation LLM failed: %s", exc)
+        _handle_llm_error(exc, "conversation", state.model_name)
         return {
             "answer": f"I'm having trouble responding right now.\n\nSystem state:\n{state_summary}",
             "messages": [AIMessage(content=f"Conversation error: {exc}")],
