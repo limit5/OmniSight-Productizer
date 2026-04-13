@@ -43,6 +43,7 @@ class WorkspaceInfo:
     branch: str
     path: Path
     repo_source: str  # path or url of the source repo
+    repo_id: str | None = None  # credential registry ID (for multi-repo lookup)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     commit_count: int = 0
     status: str = "active"  # active | finalized | cleaned
@@ -187,12 +188,23 @@ async def provision(
     except Exception:
         pass
 
+    # Resolve repo_id from credential registry
+    _repo_id = None
+    try:
+        from backend.git_credentials import find_credential_for_url
+        cred = find_credential_for_url(source)
+        if cred:
+            _repo_id = cred.get("id")
+    except Exception:
+        pass
+
     info = WorkspaceInfo(
         agent_id=agent_id,
         task_id=task_id,
         branch=branch,
         path=ws_path,
         repo_source=source,
+        repo_id=_repo_id,
     )
     _workspaces[agent_id] = info
 

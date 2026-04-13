@@ -496,15 +496,16 @@ async def update_spec_field(path: list[str], value: str | int | float | bool):
 
 @router.get("/repos")
 async def get_repos():
-    """List real git repositories: the main repo + any agent worktrees."""
+    """List git repositories: main repo + credential registry + agent worktrees."""
     repos = []
+    from backend.git_auth import detect_platform
 
-    # Main repo
-    branch = await _sh(f"git -C {_PROJECT_ROOT} rev-parse --abbrev-ref HEAD")
-    commit = await _sh(f"git -C {_PROJECT_ROOT} log -1 --format='%h' 2>/dev/null")
-    commit_time = await _sh(f"git -C {_PROJECT_ROOT} log -1 --format='%cr' 2>/dev/null")
-    # Gather all remotes
-    remotes_raw = await _sh(f"git -C {_PROJECT_ROOT} remote -v 2>/dev/null")
+    # Main repo (shell paths quoted for safety)
+    pr = str(_PROJECT_ROOT)
+    branch = await _sh(f'git -C "{pr}" rev-parse --abbrev-ref HEAD')
+    commit = await _sh(f'git -C "{pr}" log -1 --format="%h" 2>/dev/null')
+    commit_time = await _sh(f'git -C "{pr}" log -1 --format="%cr" 2>/dev/null')
+    remotes_raw = await _sh(f'git -C "{pr}" remote -v 2>/dev/null')
     remotes: dict[str, str] = {}
     for line in (remotes_raw or "").splitlines():
         parts = line.split()
@@ -522,23 +523,57 @@ async def get_repos():
         "lastCommitTime": commit_time or "",
         "remotes": remotes,
         "tetheredAgentId": None,
+        "platform": detect_platform(primary_url),
+        "repoId": "main-repo",
+        "authStatus": "ok",
     })
+
+    # Credential registry repos (not yet cloned)
+    try:
+        from backend.git_credentials import get_credential_registry
+        seen_urls = {primary_url.lower()}
+        for cred in get_credential_registry():
+            cred_url = cred.get("url", "")
+            if not cred_url or cred_url.lower() in seen_urls:
+                continue
+            seen_urls.add(cred_url.lower())
+            has_auth = bool(cred.get("token") or cred.get("ssh_key"))
+            repos.append({
+                "id": cred.get("id", ""),
+                "name": cred.get("id", cred_url.split("/")[-1]),
+                "url": cred_url,
+                "branch": "",
+                "status": "unconfigured",
+                "lastCommit": "",
+                "lastCommitTime": "",
+                "tetheredAgentId": None,
+                "platform": cred.get("platform", detect_platform(cred_url)),
+                "repoId": cred.get("id", ""),
+                "authStatus": "ok" if has_auth else "no_token",
+            })
+    except Exception:
+        pass
 
     # Agent worktrees
     from backend.workspace import list_workspaces
     for ws in list_workspaces():
-        ws_branch = await _sh(f"git -C {ws.path} rev-parse --abbrev-ref HEAD 2>/dev/null")
-        ws_commit = await _sh(f"git -C {ws.path} log -1 --format='%h' 2>/dev/null")
-        ws_time = await _sh(f"git -C {ws.path} log -1 --format='%cr' 2>/dev/null")
+        wp = str(ws.path)
+        ws_branch = await _sh(f'git -C "{wp}" rev-parse --abbrev-ref HEAD 2>/dev/null')
+        ws_commit = await _sh(f'git -C "{wp}" log -1 --format="%h" 2>/dev/null')
+        ws_time = await _sh(f'git -C "{wp}" log -1 --format="%cr" 2>/dev/null')
+        ws_url = ws.repo_source if (ws.repo_source.startswith("http") or ws.repo_source.startswith("git@")) else str(ws.path)
         repos.append({
             "id": f"ws-{ws.agent_id}",
             "name": f"{ws.agent_id} workspace",
-            "url": str(ws.path),
+            "url": ws_url,
             "branch": ws_branch or ws.branch,
             "status": "synced",
             "lastCommit": ws_commit or "",
             "lastCommitTime": ws_time or "",
             "tetheredAgentId": ws.agent_id,
+            "platform": detect_platform(ws_url),
+            "repoId": ws.repo_id or "",
+            "authStatus": "ok",
         })
 
     return repos

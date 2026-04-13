@@ -467,10 +467,14 @@ export interface RepoInfo {
   name: string
   url: string
   branch: string
-  status: "synced" | "syncing" | "error" | "detached"
+  status: "synced" | "syncing" | "error" | "detached" | "unconfigured"
   lastCommit: string
   lastCommitTime: string
   tetheredAgentId: string | null
+  platform?: "github" | "gitlab" | "gerrit" | "unknown"
+  repoId?: string
+  remotes?: Record<string, string>
+  authStatus?: "ok" | "no_token" | "no_key" | "unknown"
 }
 
 export async function getRepos() {
