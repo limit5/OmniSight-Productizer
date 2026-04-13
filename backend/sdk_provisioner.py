@@ -67,23 +67,27 @@ async def provision_sdk(platform: str) -> dict:
     emit_pipeline_phase("sdk_provision", f"Cloning SDK for {platform} from {sdk_url}")
 
     # Clone or update SDK repo
+    proc = None
     try:
         _SDK_ROOT.mkdir(parents=True, exist_ok=True)
         if sdk_path.exists() and (sdk_path / ".git").exists():
-            # Update existing clone
             emit_pipeline_phase("sdk_provision", f"Updating existing SDK: {platform}")
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", str(sdk_path), "pull", "--ff-only",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise
             if proc.returncode != 0:
                 logger.warning("SDK pull failed, re-cloning: %s", stderr.decode()[:100])
                 import shutil
                 shutil.rmtree(sdk_path, ignore_errors=True)
 
         if not sdk_path.exists():
-            # Fresh clone with auth
             from backend.git_auth import get_auth_env
             auth_env = get_auth_env(sdk_url)
             import os
@@ -93,14 +97,31 @@ async def provision_sdk(platform: str) -> dict:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                # Cleanup partial clone — leaving it confuses next run
+                import shutil
+                shutil.rmtree(sdk_path, ignore_errors=True)
+                raise
             if proc.returncode != 0:
+                # Cleanup partial clone (Batch 5 issue C11 partial fix here)
+                import shutil
+                shutil.rmtree(sdk_path, ignore_errors=True)
                 return {"status": "error", "details": f"Clone failed: {stderr.decode()[:200]}"}
 
         emit_pipeline_phase("sdk_provision", f"SDK cloned: {sdk_path}")
     except asyncio.TimeoutError:
         return {"status": "error", "details": "SDK clone timed out (300s)"}
     except Exception as exc:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
         return {"status": "error", "details": str(exc)[:200]}
 
     # Run install script if configured. Reject absolute paths and
@@ -125,15 +146,27 @@ async def provision_sdk(platform: str) -> dict:
     if script_path is not None:
         if script_path.exists():
             emit_pipeline_phase("sdk_provision", f"Running install script: {install_script}")
+            install_proc = None
             try:
-                proc = await asyncio.create_subprocess_exec(
+                install_proc = await asyncio.create_subprocess_exec(
                     "bash", str(script_path),
                     cwd=sdk_path,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
-                await asyncio.wait_for(proc.communicate(), timeout=120)
+                try:
+                    await asyncio.wait_for(install_proc.communicate(), timeout=120)
+                except asyncio.TimeoutError:
+                    install_proc.kill()
+                    await install_proc.wait()
+                    raise
             except Exception as exc:
                 logger.warning("SDK install script failed: %s", exc)
+                if install_proc is not None and install_proc.returncode is None:
+                    try:
+                        install_proc.kill()
+                        await install_proc.wait()
+                    except ProcessLookupError:
+                        pass
 
     # Scan for toolchain files
     scan = scan_sdk_repo(sdk_path)

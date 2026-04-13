@@ -16,7 +16,15 @@
   - SDK scan 拒絕 symlink，避免惡意 repo 注入外部路徑
   - `_validate_platform_name` 統一守門 platform 名稱（拒絕 path traversal）
   - DISK_FULL 清理改為 whitelist + 1h in-flight 保護 + symlink TOCTOU 重檢
-- Batches 2-6：pending
+- **Batch 2（完成）**：Resource leaks & exception swallowing — N3/H19/H20/L4/M11/N5/N7
+  - `EventBus._subscribers` 改 `set`（O(1) discard）+ backpressure 計數器 + warning log
+  - `_persist_event` 失敗改 `logger.debug` 而非 silent swallow
+  - `invoke.py` watchdog 三處 bare except 改為 narrow + log
+  - `sdk_provisioner` clone/pull/install_script 全部 timeout 後強制 `proc.kill()` + 部分 clone 自動清理
+  - `permission_errors.check_environment` docker/git subprocess `try/finally proc.kill()`
+  - `_provider_failures` dict 上限 256，>24h 條目自動修剪（防 OOM）
+  - `error_history` cap=50（防 LangGraph state 膨脹）
+- Batches 3-6：pending
 
 ---
 

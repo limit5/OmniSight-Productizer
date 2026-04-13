@@ -60,6 +60,26 @@ class TokenTrackingCallback(BaseCallbackHandler):
 _cache: dict[str, BaseChatModel] = {}
 _provider_failures: dict[str, float] = {}  # provider → last_failure_timestamp
 PROVIDER_COOLDOWN = 300  # 5 minutes — don't retry a failed provider within this window
+_PROVIDER_FAILURES_MAX = 256  # cap to bound memory
+
+
+def _record_provider_failure(provider: str, ts: float | None = None) -> None:
+    """Record a provider failure timestamp; prune stale entries to bound size.
+
+    Without this, a steady stream of unique provider names (config typos,
+    misrouted models) could grow the dict without bound.
+    """
+    import time as _t
+    now = _t.time()
+    _provider_failures[provider] = ts if ts is not None else now
+    if len(_provider_failures) > _PROVIDER_FAILURES_MAX:
+        # Drop entries older than 24h, then if still oversized drop oldest
+        cutoff = now - 86400
+        for k in [k for k, v in _provider_failures.items() if v < cutoff]:
+            _provider_failures.pop(k, None)
+        while len(_provider_failures) > _PROVIDER_FAILURES_MAX:
+            oldest = min(_provider_failures, key=_provider_failures.get)
+            _provider_failures.pop(oldest, None)
 
 
 def get_llm(
@@ -108,7 +128,7 @@ def get_llm(
                 try:
                     llm = _create_llm(fallback_provider, None)
                 except Exception:
-                    _provider_failures[fallback_provider] = time.time()
+                    _record_provider_failure(fallback_provider)
                     continue
                 if llm is not None:
                     provider = fallback_provider
@@ -116,7 +136,7 @@ def get_llm(
                     logger.info("Failover: %s → %s", settings.llm_provider, fallback_provider)
                     break
                 else:
-                    _provider_failures[fallback_provider] = time.time()
+                    _record_provider_failure(fallback_provider)
             if llm is None:
                 from backend.events import emit_token_warning
                 emit_token_warning("all_providers_failed", "All LLM providers failed. Using rule-based fallback.")

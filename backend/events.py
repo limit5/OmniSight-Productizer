@@ -40,49 +40,67 @@ class EventBus:
     """Pub/sub for SSE events with optional persistence."""
 
     def __init__(self) -> None:
-        self._subscribers: list[asyncio.Queue] = []
+        self._subscribers: set[asyncio.Queue] = set()
+        self._dropped_events: int = 0  # backpressure telemetry
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        self._subscribers.append(q)
+        self._subscribers.add(q)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
-        self._subscribers = [s for s in self._subscribers if s is not q]
+        # set.discard is O(1) and safe for missing elements
+        self._subscribers.discard(q)
 
     def publish(self, event: str, data: dict[str, Any]) -> None:
         data.setdefault("timestamp", datetime.now().isoformat())
         data_json = json.dumps(data)
         msg = {"event": event, "data": data_json}
         dead: list[asyncio.Queue] = []
-        for q in self._subscribers:
+        # Snapshot to allow safe mutation during iteration
+        for q in list(self._subscribers):
             try:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
+                # Backpressure: drop slowest subscriber rather than block
+                # publishers. Surface count via subscriber_dropped for telemetry.
+                self._dropped_events += 1
                 dead.append(q)
+                logger.warning(
+                    "EventBus: dropping subscriber (queue full, event=%s, total_dropped=%d)",
+                    event, self._dropped_events,
+                )
         for q in dead:
-            self._subscribers.remove(q)
+            self._subscribers.discard(q)
 
         # Persist important events asynchronously
         if event in _PERSIST_EVENT_TYPES:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(_persist_event(event, data_json))
             except RuntimeError:
-                pass  # No running loop (sync context)
+                return  # No running loop (sync context) — skip persistence
+            loop.create_task(_persist_event(event, data_json))
 
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
 
+    @property
+    def subscriber_dropped(self) -> int:
+        return self._dropped_events
+
 
 async def _persist_event(event_type: str, data_json: str) -> None:
-    """Write event to DB (best-effort, non-blocking)."""
+    """Write event to DB (best-effort, non-blocking).
+
+    Failures are logged at debug level — DB unavailability must not break
+    SSE delivery, but silent failure also shouldn't hide chronic outages.
+    """
     try:
         from backend import db
         await db.insert_event(event_type, data_json)
-    except Exception:
-        pass  # Don't let persistence failures affect event delivery
+    except Exception as exc:  # pragma: no cover — DB-dependent
+        logger.debug("event persist failed (%s): %s", event_type, exc)
 
 
 # Singleton

@@ -331,13 +331,19 @@ async def check_environment(workspace_path: str = "") -> list[dict]:
     except Exception:
         pass
 
-    # 2. Docker availability
+    # 2. Docker availability — guarantee subprocess is reaped on timeout
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "docker", "info", "--format", "{{.ServerVersion}}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
         if proc.returncode != 0:
             err = stderr.decode()[:100]
             if "permission denied" in err.lower():
@@ -361,15 +367,28 @@ async def check_environment(workspace_path: str = "") -> list[dict]:
             "detail": "Docker command not found",
             "suggestion": "Install Docker or disable container isolation",
         })
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, AttributeError):
+                pass
 
     # 3. Git available
+    git_proc = None
     try:
-        proc = await asyncio.create_subprocess_exec(
+        git_proc = await asyncio.create_subprocess_exec(
             "git", "--version",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        await asyncio.wait_for(proc.communicate(), timeout=3)
-        if proc.returncode != 0:
+        try:
+            await asyncio.wait_for(git_proc.communicate(), timeout=3)
+        except asyncio.TimeoutError:
+            git_proc.kill()
+            await git_proc.wait()
+            raise
+        if git_proc.returncode != 0:
             issues.append({
                 "check": "git",
                 "status": "error",
@@ -381,6 +400,13 @@ async def check_environment(workspace_path: str = "") -> list[dict]:
             "check": "git", "status": "error",
             "detail": "Git not found", "suggestion": "Install git",
         })
+    finally:
+        if git_proc is not None and git_proc.returncode is None:
+            try:
+                git_proc.kill()
+                await git_proc.wait()
+            except (ProcessLookupError, AttributeError):
+                pass
 
     # 4. SSH key exists
     from backend.config import settings

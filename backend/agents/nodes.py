@@ -738,9 +738,12 @@ async def error_check_node(state: GraphState) -> dict:
     except Exception as exc:
         logger.debug("Permission check failed (non-critical): %s", exc)
 
-    # Loop detection: compare error key with previous errors
+    # Loop detection: compare error key with previous errors.
+    # Cap history length to bound LangGraph state size during long retry loops.
     error_key = _extract_error_key(error_summary)
-    updated_history = list(state.error_history) + [error_key]
+    _ERROR_HISTORY_MAX = 50
+    _new_history = list(state.error_history) + [error_key]
+    updated_history = _new_history[-_ERROR_HISTORY_MAX:]
     same_count = state.same_error_count
     loop_triggered = state.loop_breaker_triggered
 

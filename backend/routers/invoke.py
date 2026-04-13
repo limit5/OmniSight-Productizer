@@ -64,8 +64,8 @@ async def run_watchdog():
                         agent.thought_chain = f"[WATCHDOG] Task timed out after {TASK_TIMEOUT}s"
                         try:
                             await _persist_agent(agent)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("[WATCHDOG] persist agent %s failed: %s", agent_id, exc)
                         emit_agent_update(agent_id, "error", agent.thought_chain)
                     _running_tasks.pop(agent_id, None)
             # Check tasks stuck in assigned/in_progress > 2 hours
@@ -79,8 +79,11 @@ async def run_watchdog():
                             t.status = TaskStatus.blocked
                             await _persist_task(t)
                             logger.warning("[WATCHDOG] Task %s stuck > 4h, set to blocked", t.id)
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError) as exc:
+                        # malformed timestamp — log, don't crash watchdog
+                        logger.debug("[WATCHDOG] Bad timestamp on task %s: %s", t.id, exc)
+                    except Exception as exc:
+                        logger.warning("[WATCHDOG] Stuck-task check failed for %s: %s", t.id, exc)
 
             # Dynamic reallocation: blocked tasks → reassign to better idle agent
             idle_agents = [a for a in _agents.values() if a.status == AgentStatus.idle]
@@ -188,11 +191,10 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
         handoff_ctx = ""
         try:
             handoff_ctx = await load_handoff_for_task(task.id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("handoff load failed for %s: %s", task.id, exc)
 
         task_command = f"{task.title}. {task.description or ''}"
-        # Auto-match task skill from Anthropic SKILL.md library
         task_skill = ""
         try:
             from backend.prompt_loader import match_task_skill, load_task_skill
@@ -200,15 +202,14 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
             if matched:
                 task_skill = load_task_skill(matched)
                 logger.info("Task skill matched: %s for task %s", matched, task.id)
-        except Exception:
-            pass
-        # Pre-fetch retrieval: search codebase for relevant context
+        except Exception as exc:
+            logger.debug("task skill match failed for %s: %s", task.id, exc)
         try:
             pre_ctx = await _prefetch_codebase_context(task_command, workspace_path)
             if pre_ctx:
                 handoff_ctx = f"## Pre-Fetched Codebase Context\n\n{pre_ctx}\n\n{handoff_ctx}"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("codebase prefetch failed for %s: %s", task.id, exc)
         # Smart model routing: select best model for this task
         from backend.model_router import select_model_for_task
         agent_type_str = agent.type.value if hasattr(agent.type, "value") else str(agent.type)
