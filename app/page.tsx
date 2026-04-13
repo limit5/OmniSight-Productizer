@@ -392,6 +392,10 @@ export default function Home() {
                 try { await api.triggerSimulation({ track, module, mock }) } catch (e) { console.error("Trigger simulation failed:", e) }
               }}
             />
+      case "decisions":
+        return <DecisionDashboard />
+      case "budget":
+        return <BudgetStrategyPanel />
       default:
         return null
     }

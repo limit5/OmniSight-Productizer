@@ -944,6 +944,16 @@ export interface DecisionOption {
   is_safe_default?: boolean
 }
 
+// Known keys the backend attaches to Decision.source. Other keys may
+// appear (stuck_detector passes arbitrary context), so this is a
+// narrowed-but-open interface: named fields typed, rest preserved.
+export interface DecisionSource {
+  agent_id?: string | null
+  task_id?: string | null
+  reason?: string
+  [extra: string]: unknown
+}
+
 export interface DecisionPayload {
   id: string
   kind: string
@@ -958,7 +968,7 @@ export interface DecisionPayload {
   created_at: number
   deadline_at: number | null
   resolved_at: number | null
-  source: Record<string, unknown>
+  source: DecisionSource
   timestamp?: string
 }
 

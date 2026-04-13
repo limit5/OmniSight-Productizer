@@ -102,12 +102,23 @@ export function BudgetStrategyPanel() {
       </header>
 
       {error && (
-        <div className="px-3 py-1.5 font-mono text-[10px] text-[var(--critical-red,#ef4444)]">
-          {error}
+        <div className="px-3 py-1.5 flex items-center justify-between gap-2 font-mono text-[10px] text-[var(--critical-red,#ef4444)]">
+          <span className="truncate">{error}</span>
+          <button
+            onClick={() => void refresh()}
+            className="px-1.5 py-0.5 rounded-sm border border-current hover:bg-current/10"
+          >
+            RETRY
+          </button>
         </div>
       )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 p-2">
+      <div
+        className="grid grid-cols-2 lg:grid-cols-4 gap-2 p-2"
+        role="radiogroup"
+        aria-labelledby="budget-strategy-label"
+      >
+        <span id="budget-strategy-label" className="sr-only">Budget Strategy</span>
         {ORDER.map((s) => {
           const meta = STRATEGY_META[s]
           const active = s === current

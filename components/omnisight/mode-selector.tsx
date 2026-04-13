@@ -15,11 +15,13 @@ import {
  * (mode_changed) and surfaces the current in_flight / parallel_cap.
  */
 
-const MODE_META: Record<OperationMode, { label: string; hint: string; color: string }> = {
-  manual: { label: "MANUAL", hint: "每步要人批准", color: "var(--neural-cyan, #67e8f9)" },
-  supervised: { label: "SUPERVISED", hint: "常規自動，風險要批准", color: "var(--neural-blue, #60a5fa)" },
-  full_auto: { label: "FULL AUTO", hint: "除破壞性外全自動", color: "var(--neural-amber, #fbbf24)" },
-  turbo: { label: "TURBO", hint: "倒數計時後執行一切", color: "var(--neural-red, #f87171)" },
+// Each compact label is a distinct 3-letter stem so M/S/F/T misreads
+// on mobile go away (MAN / SUP / AUT / TRB).
+const MODE_META: Record<OperationMode, { label: string; compact: string; hint: string; color: string }> = {
+  manual:     { label: "MANUAL",     compact: "MAN", hint: "每步要人批准",          color: "var(--neural-cyan, #67e8f9)" },
+  supervised: { label: "SUPERVISED", compact: "SUP", hint: "常規自動，風險要批准",  color: "var(--neural-blue, #60a5fa)" },
+  full_auto:  { label: "FULL AUTO",  compact: "AUT", hint: "除破壞性外全自動",      color: "var(--neural-amber, #fbbf24)" },
+  turbo:      { label: "TURBO",      compact: "TRB", hint: "倒數計時後執行一切",    color: "var(--neural-red, #f87171)" },
 }
 
 const MODE_ORDER: OperationMode[] = ["manual", "supervised", "full_auto", "turbo"]
@@ -104,10 +106,10 @@ export function ModeSelector({ compact = false }: Props) {
     <div
       className={`flex items-center gap-1 ${compact ? "text-[10px]" : "text-xs"}`}
       role="radiogroup"
-      aria-label="Operation Mode"
+      aria-labelledby="operation-mode-label"
       title={error ?? MODE_META[mode].hint}
     >
-      <span className="text-[var(--neural-muted, #64748b)] hidden md:inline">MODE</span>
+      <span id="operation-mode-label" className="text-[var(--neural-muted, #64748b)] hidden md:inline">MODE</span>
       <div className="flex items-center border border-[var(--neural-border, rgba(148,163,184,0.35))] rounded-sm overflow-hidden">
         {MODE_ORDER.map((m) => {
           const active = m === mode
@@ -127,7 +129,7 @@ export function ModeSelector({ compact = false }: Props) {
               style={active ? { backgroundColor: meta.color } : undefined}
               title={meta.hint}
             >
-              {compact ? meta.label[0] : meta.label}
+              <span aria-label={meta.label}>{compact ? meta.compact : meta.label}</span>
             </button>
           )
         })}

@@ -10,13 +10,19 @@ import {
   GitBranch,
   Activity,
   Rocket,
+  Zap,
+  Gauge,
   Menu,
   X,
   ChevronLeft,
   ChevronRight
 } from "lucide-react"
 
-export type PanelId = "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
+// 48-Fix B: added decisions + budget so mobile users can reach the
+// Autonomous Decision panels (previously desktop-only in the right aside).
+export type PanelId =
+  | "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
+  | "decisions" | "budget"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -32,6 +38,8 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "source", label: "Source Control", shortLabel: "Git", icon: GitBranch, color: "var(--validation-emerald)" },
   { id: "npi", label: "NPI Lifecycle", shortLabel: "NPI", icon: Rocket, color: "var(--artifact-purple)" },
   { id: "vitals", label: "Vitals & Artifacts", shortLabel: "Vitals", icon: Activity, color: "var(--hardware-orange)" },
+  { id: "decisions", label: "Decision Queue", shortLabel: "Decide", icon: Zap, color: "var(--neural-cyan, #67e8f9)" },
+  { id: "budget", label: "Budget Strategy", shortLabel: "Budget", icon: Gauge, color: "var(--neural-blue)" },
 ]
 
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
