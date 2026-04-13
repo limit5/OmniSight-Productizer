@@ -180,28 +180,54 @@ def select_model_for_task(
     # 4. Budget awareness
     budget_ratio = _get_budget_ratio()
 
+    budget_constrained = False
     if budget_ratio >= 0.9:
-        # Budget nearly exhausted — only allow free/cheap models
         max_cost = 0.5
-        logger.info("Smart routing: budget at %.0f%%, limiting to cost <= $%.1f/1M", budget_ratio * 100, max_cost)
+        budget_constrained = True
     elif budget_ratio >= 0.7:
-        # Budget getting tight — avoid premium
         max_cost = 5.0
+        budget_constrained = True
     else:
-        # Normal — allow based on complexity
         if complexity == "simple":
             max_cost = 2.0
         elif complexity == "complex":
-            max_cost = 50.0  # No limit for complex tasks
+            max_cost = 50.0
         else:
             max_cost = 10.0
 
+    # Emit SSE when budget forces a downgrade
+    if budget_constrained:
+        try:
+            from backend.events import emit_pipeline_phase
+            emit_pipeline_phase(
+                "smart_route",
+                f"Budget {budget_ratio:.0%} — limiting {agent_type} to ≤${max_cost:.1f}/1M models",
+            )
+        except Exception:
+            pass
+
     # 5. Find first available model within budget
+    top_pref = preferences[0] if preferences else "global"
     for model_spec in preferences:
-        cost = COST_TIERS.get(model_spec, 5.0)  # Default to mid-tier if unknown
+        cost = COST_TIERS.get(model_spec, 5.0)
         if cost > max_cost:
             continue
         if _is_provider_available(model_spec):
+            # Emit SSE notification showing the routing decision
+            short_model = model_spec.split(":")[-1] if ":" in model_spec else model_spec
+            short_task = task_text[:50].replace("\n", " ")
+            downgrade_note = ""
+            if model_spec != top_pref and budget_constrained:
+                top_short = top_pref.split(":")[-1] if ":" in top_pref else top_pref
+                downgrade_note = f" (downgraded from {top_short})"
+            try:
+                from backend.events import emit_pipeline_phase
+                emit_pipeline_phase(
+                    "smart_route",
+                    f"{agent_type} [{complexity}] → {short_model}{downgrade_note} | \"{short_task}\"",
+                )
+            except Exception:
+                pass
             logger.info(
                 "Smart routing: %s task [%s] → %s (cost=$%.1f/1M, budget=%.0f%%)",
                 agent_type, complexity, model_spec, cost, budget_ratio * 100,
