@@ -814,7 +814,7 @@ def _get_context_window(model_name: str = "") -> int:
         # Prefer per-agent model_name over global setting
         model = (model_name or settings.llm_model or "").lower()
         for prefix, window in _DEFAULT_CONTEXT_WINDOWS.items():
-            if prefix in model:
+            if model.startswith(prefix):
                 return window
     except Exception:
         pass

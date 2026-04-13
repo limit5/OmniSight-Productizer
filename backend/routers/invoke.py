@@ -32,6 +32,7 @@ router = APIRouter(prefix="/invoke", tags=["invoke"])
 _invoke_lock = asyncio.Lock()
 
 # Halt flag — checked between actions to support emergency stop
+# _running: set() = system running (not halted), clear() = halted
 _running = asyncio.Event()
 _running.set()  # starts in running state
 
@@ -71,11 +72,13 @@ async def run_watchdog():
             for t in list(_tasks.values()):
                 if t.status in (TaskStatus.assigned, TaskStatus.in_progress):
                     try:
+                        # Note: uses created_at as proxy since there is no assigned_at field.
+                        # Using 4h timeout to compensate for potential delay between creation and assignment.
                         created = datetime.fromisoformat(t.created_at)
-                        if (datetime.now() - created).total_seconds() > 7200:
+                        if (datetime.now() - created).total_seconds() > 14400:
                             t.status = TaskStatus.blocked
                             await _persist_task(t)
-                            logger.warning("[WATCHDOG] Task %s stuck > 2h, set to blocked", t.id)
+                            logger.warning("[WATCHDOG] Task %s stuck > 4h, set to blocked", t.id)
                     except Exception:
                         pass
 

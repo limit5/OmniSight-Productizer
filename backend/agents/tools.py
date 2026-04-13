@@ -902,7 +902,7 @@ async def register_build_artifact(
     # Determine type
     atype = artifact_type or _guess_artifact_type(src.name)
     display_name = name or src.name
-    artifact_id = f"art-{uuid.uuid4().hex[:8]}"
+    artifact_id = f"art-{uuid.uuid4().hex[:12]}"
 
     artifact_data = {
         "id": artifact_id,

@@ -61,7 +61,7 @@ async def download_artifact(artifact_id: str):
         "binary": "application/octet-stream",
         "firmware": "application/octet-stream",
         "kernel_module": "application/octet-stream",
-        "sdk": "application/gzip",
+        "sdk": "application/octet-stream",
         "model": "application/octet-stream",
         "archive": "application/gzip",
     }

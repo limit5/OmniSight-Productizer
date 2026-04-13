@@ -246,6 +246,15 @@ export default function Home() {
     }
   }, [engine])
 
+  // Pre-map artifacts to avoid duplicating the mapping in renderPanel and desktop layout
+  const mappedArtifacts = engine.artifacts.length > 0 ? engine.artifacts.map(a => ({
+    id: a.id,
+    name: a.name,
+    type: a.type as "pdf" | "markdown" | "json" | "log" | "html",
+    timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
+    size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
+  })) : undefined
+
   // Render panel based on active selection (for mobile/tablet)
   const renderPanel = (panelId: PanelId) => {
     switch (panelId) {
@@ -304,7 +313,7 @@ export default function Home() {
             externalMessages={orchestratorMessages}
             onSendCommand={handleCommand}
             tokenUsage={tokenUsage.length > 0 ? tokenUsage.map(t => ({
-              model: t.model as never,
+              model: t.model as string,
               inputTokens: t.input_tokens,
               outputTokens: t.output_tokens,
               totalTokens: t.total_tokens,
@@ -375,13 +384,7 @@ export default function Home() {
       case "vitals":
         return <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
-              artifacts={engine.artifacts.length > 0 ? engine.artifacts.map(a => ({
-                id: a.id,
-                name: a.name,
-                type: a.type as "pdf" | "markdown" | "json" | "log" | "html",
-                timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
-                size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
-              })) : undefined}
+              artifacts={mappedArtifacts}
               simulations={engine.simulations}
               onTriggerSimulation={async (track, module, mock) => {
                 try { await api.triggerSimulation({ track, module, mock }) } catch (e) { console.error("Trigger simulation failed:", e) }
@@ -495,7 +498,7 @@ export default function Home() {
               onSendCommand={handleCommand}
               onCompleteTask={handleCompleteTask}
               tokenUsage={tokenUsage.length > 0 ? tokenUsage.map(t => ({
-                model: t.model as never,
+                model: t.model as string,
                 inputTokens: t.input_tokens,
                 outputTokens: t.output_tokens,
                 totalTokens: t.total_tokens,
@@ -568,13 +571,7 @@ export default function Home() {
           <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
             <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
-              artifacts={engine.artifacts.length > 0 ? engine.artifacts.map(a => ({
-                id: a.id,
-                name: a.name,
-                type: a.type as "pdf" | "markdown" | "json" | "log" | "html",
-                timestamp: a.created_at.includes("T") ? a.created_at.split("T")[1]?.slice(0, 8) || a.created_at : a.created_at,
-                size: a.size > 1024 ? `${(a.size / 1024).toFixed(1)} KB` : `${a.size} B`,
-              })) : undefined}
+              artifacts={mappedArtifacts}
               simulations={engine.simulations}
               onTriggerSimulation={async (track, module, mock) => {
                 try { await api.triggerSimulation({ track, module, mock }) } catch (e) { console.error("Trigger simulation failed:", e) }

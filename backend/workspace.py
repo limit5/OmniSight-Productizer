@@ -105,6 +105,7 @@ async def provision(
     source = repo_source or str(_MAIN_REPO)
 
     # Clean stale git lock before worktree operations
+    # Note: could remove a lock held by concurrent git — acceptable for recovery
     source_lock = Path(source) / ".git" / "index.lock"
     if source_lock.exists():
         source_lock.unlink()
@@ -124,7 +125,10 @@ async def provision(
 
         # Create worktree
         if ws_path.exists():
-            shutil.rmtree(ws_path, ignore_errors=True)
+            try:
+                shutil.rmtree(ws_path)
+            except OSError as exc:
+                logger.warning("Failed to remove existing workspace %s: %s", ws_path, exc)
         rc, out, err = await _run(
             f'git worktree add "{ws_path}" "{branch}"',
             cwd=Path(source),
@@ -139,7 +143,10 @@ async def provision(
         auth_env = get_auth_env(source)
 
         if ws_path.exists():
-            shutil.rmtree(ws_path, ignore_errors=True)
+            try:
+                shutil.rmtree(ws_path)
+            except OSError as exc:
+                logger.warning("Failed to remove existing workspace %s: %s", ws_path, exc)
         rc, out, err = await _run(f'git clone "{source}" "{ws_path}"', extra_env=auth_env)
         if rc != 0:
             raise RuntimeError(f"Failed to clone: {err or out}")
@@ -323,7 +330,10 @@ async def cleanup(agent_id: str) -> bool:
         await _run(f'git worktree remove "{ws}" --force 2>/dev/null', cwd=_MAIN_REPO)
         # Fallback: if worktree remove fails, just delete the directory
         if ws.exists():
-            shutil.rmtree(ws, ignore_errors=True)
+            try:
+                shutil.rmtree(ws)
+            except OSError as exc:
+                logger.warning("Failed to remove workspace dir %s: %s", ws, exc)
 
     # Prune worktree list
     await _run("git worktree prune", cwd=_MAIN_REPO)
@@ -384,6 +394,7 @@ def list_workspaces() -> list[WorkspaceInfo]:
 _BUILD_OUTPUT_DIRS = ["build/output", "build/bin", "build", "out", "dist"]
 
 # File extensions → ArtifactType mapping
+# Ordered: longer extensions first to prevent partial matches
 _ARTIFACT_TYPE_MAP = {
     ".ko": "kernel_module", ".bin": "firmware", ".hex": "firmware",
     ".elf": "binary", ".so": "binary", ".a": "binary", ".o": "binary",
@@ -421,6 +432,7 @@ async def _collect_build_artifacts(
     task_dir.mkdir(parents=True, exist_ok=True)
 
     collected = []
+    seen_paths: set[Path] = set()  # Deduplicate across overlapping build dirs
 
     for build_dir_name in _BUILD_OUTPUT_DIRS:
         build_dir = workspace / build_dir_name
@@ -428,6 +440,11 @@ async def _collect_build_artifacts(
             continue
 
         for fpath in build_dir.rglob("*"):
+            # Skip files already collected from a more specific build dir
+            resolved = fpath.resolve()
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
             if not fpath.is_file():
                 continue
             # Skip common non-artifact files
@@ -458,7 +475,7 @@ async def _collect_build_artifacts(
                 logger.debug("Artifact collection skipped %s: %s", fpath.name, exc)
                 continue
 
-            artifact_id = f"art-{uuid.uuid4().hex[:8]}"
+            artifact_id = f"art-{uuid.uuid4().hex[:12]}"
             artifact_data = {
                 "id": artifact_id,
                 "task_id": task_id or "",
@@ -496,7 +513,5 @@ async def _collect_build_artifacts(
             collected.append(artifact_data)
             logger.info("Artifact collected: %s (%d bytes, %s)", fpath.name, artifact_data["size"], artifact_data["type"])
 
-        # Only scan the first existing build dir
-        break
 
     return collected

@@ -664,6 +664,7 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
                 </div>
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {/* TODO: use api.getArtifactDownloadUrl() if API prefix changes */}
                 <a
                   href={`/api/v1/artifacts/${artifact.id}/download`}
                   download={artifact.name}
