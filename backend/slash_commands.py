@@ -266,10 +266,50 @@ async def _invoke(args: str) -> str:
     return "[INVOKE] Singularity sync requested. Press the ⚡ INVOKE button to execute."
 
 
+async def _deploy(args: str) -> str:
+    """Deploy compiled artifacts to an EVK board."""
+    if not args.strip():
+        # Show EVK status
+        try:
+            from backend.agents.tools import check_evk_connection
+            result = await check_evk_connection.ainvoke({"platform": ""})
+            return f"**EVK Deploy Status**\n\n{result}\n\nUsage: `/deploy [platform] [module]` — deploy module to EVK"
+        except Exception as exc:
+            return f"[ERROR] EVK check failed: {exc}"
+    parts = args.strip().split()
+    platform = parts[0] if len(parts) >= 1 else ""
+    module = parts[1] if len(parts) >= 2 else ""
+    if not module:
+        return f"[ERROR] Usage: `/deploy {platform} [module]` — e.g. `/deploy vendor-example sensor`"
+    return f"[ROUTE TO LLM] Deploy request: module=`{module}` to platform=`{platform}`. Agent will cross-compile and transfer."
+
+
+async def _evk(args: str) -> str:
+    """Check EVK board connectivity and status."""
+    try:
+        from backend.agents.tools import check_evk_connection
+        platform = args.strip() or ""
+        result = await check_evk_connection.ainvoke({"platform": platform})
+        return f"**EVK Connection Check**\n\n{result}"
+    except Exception as exc:
+        return f"[ERROR] EVK check failed: {exc}"
+
+
+async def _stream(args: str) -> str:
+    """List UVC camera devices and streaming capabilities."""
+    try:
+        from backend.agents.tools import list_uvc_devices
+        result = await list_uvc_devices.ainvoke({})
+        return f"**UVC Camera Devices**\n\n{result}"
+    except Exception as exc:
+        return f"[ERROR] UVC device scan failed: {exc}"
+
+
 async def _help(args: str) -> str:
     categories = {
         "System": ["status", "info", "debug", "logs", "devices"],
         "Development": ["build", "test", "simulate", "review", "platform"],
+        "Hardware": ["deploy", "evk", "stream"],
         "Agent": ["spawn", "agents", "tasks", "assign", "invoke"],
         "Provider": ["provider", "switch", "budget"],
         "NPI": ["npi", "sdks"],
@@ -289,6 +329,8 @@ _HANDLERS: dict[str, object] = {
     "status": _status, "info": _info, "debug": _debug, "logs": _logs, "devices": _devices,
     # Development
     "build": _build, "test": _test, "simulate": _simulate, "review": _review, "platform": _platform,
+    # Hardware
+    "deploy": _deploy, "evk": _evk, "stream": _stream,
     # Agent
     "spawn": _spawn, "agents": _agents, "tasks": _tasks, "assign": _assign, "invoke": _invoke,
     # Provider

@@ -10,7 +10,7 @@
 export interface SlashCommand {
   name: string
   description: string
-  category: "system" | "dev" | "agent" | "provider" | "npi" | "tools"
+  category: "system" | "dev" | "hardware" | "agent" | "provider" | "npi" | "tools"
   args?: string          // e.g., "[module]", "[type]", "[provider] [model]"
   handler: "local" | "api" | "backend"
 }
@@ -29,6 +29,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "simulate",  description: "執行雙軌模��驗證",                      category: "dev",      args: "[module]", handler: "backend" },
   { name: "review",    description: "觸發 Gerrit 程式碼審查",               category: "dev",      handler: "backend" },
   { name: "platform",  description: "顯示 platform 編譯參數",               category: "dev",      args: "[name]", handler: "backend" },
+
+  // ── Hardware ──
+  { name: "deploy",    description: "部署到 EVK 開發板",                       category: "hardware", args: "[platform] [module]", handler: "backend" },
+  { name: "evk",       description: "檢查 EVK 連線狀態",                      category: "hardware", args: "[platform]", handler: "backend" },
+  { name: "stream",    description: "列出 UVC 攝影機裝置",                     category: "hardware", handler: "backend" },
 
   // ── Agent ──
   { name: "spawn",     description: "建立新 Agent",                         category: "agent",    args: "[type]", handler: "api" },
@@ -71,6 +76,7 @@ export function parseSlashCommand(input: string): { name: string; args: string }
 export const CATEGORY_LABELS: Record<string, string> = {
   system: "SYSTEM",
   dev: "DEV",
+  hardware: "HARDWARE",
   agent: "AGENT",
   provider: "PROVIDER",
   npi: "NPI",
@@ -80,6 +86,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
 export const CATEGORY_COLORS: Record<string, string> = {
   system: "var(--neural-blue)",
   dev: "var(--hardware-orange)",
+  hardware: "var(--critical-red)",
   agent: "var(--validation-emerald)",
   provider: "var(--artifact-purple)",
   npi: "var(--neural-blue)",
