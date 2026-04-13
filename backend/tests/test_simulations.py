@@ -177,7 +177,7 @@ class TestSimulateScript:
         )
         output = json.loads(result.stdout)
         assert output["status"] == "error"
-        assert any("must be algo or hw" in e for e in output["errors"])
+        assert any("must be algo" in e for e in output["errors"])
 
     def test_module_injection_rejected(self):
         import subprocess
