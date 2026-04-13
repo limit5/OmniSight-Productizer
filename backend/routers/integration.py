@@ -390,3 +390,28 @@ async def delete_vendor_sdk(platform: str):
     profile_path.unlink()
     logger.info("Deleted vendor SDK profile: %s", platform)
     return {"status": "deleted", "platform": platform}
+
+
+@router.post("/vendor/sdks/{platform}/install")
+async def install_vendor_sdk(platform: str):
+    """Clone and provision the vendor SDK for a platform.
+
+    Reads sdk_git_url from the platform YAML, clones the repo,
+    scans for toolchain/sysroot, and updates the platform profile.
+    """
+    if not re.match(r'^[a-zA-Z0-9_-]+$', platform):
+        raise HTTPException(400, "Invalid platform name")
+    from backend.sdk_provisioner import provision_sdk
+    result = await provision_sdk(platform)
+    if result["status"] == "error":
+        raise HTTPException(400, result["details"])
+    return result
+
+
+@router.get("/vendor/sdks/{platform}/validate")
+async def validate_vendor_sdk(platform: str):
+    """Validate that SDK paths in a platform profile exist on disk."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', platform):
+        raise HTTPException(400, "Invalid platform name")
+    from backend.sdk_provisioner import validate_sdk_paths
+    return validate_sdk_paths(platform)
