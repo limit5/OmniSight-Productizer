@@ -56,12 +56,15 @@ function SettingsSection({ title, integration, children }: {
         {testResult && !testing && STATUS_ICON[testResult.status as keyof typeof STATUS_ICON]}
         {testing && STATUS_ICON.testing}
         {integration && !testing && (
-          <button
+          <span
+            role="button"
+            tabIndex={0}
             onClick={(e) => { e.stopPropagation(); handleTest() }}
-            className="px-1.5 py-0.5 rounded text-[8px] font-mono bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); handleTest() } }}
+            className="px-1.5 py-0.5 rounded text-[8px] font-mono bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors cursor-pointer"
           >
             TEST
-          </button>
+          </span>
         )}
         {expanded ? <ChevronUp size={10} className="text-[var(--muted-foreground)]" /> : <ChevronDown size={10} className="text-[var(--muted-foreground)]" />}
       </button>
@@ -273,7 +276,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             })}
             <div className="flex items-center gap-2">
               <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--validation-emerald)]" />
+                <span className={`w-1.5 h-1.5 rounded-full ${providers.find(p => p.id === "ollama")?.configured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`} />
                 Ollama
               </label>
               <input

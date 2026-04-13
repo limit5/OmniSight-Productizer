@@ -478,8 +478,6 @@ const PROVIDER_COLORS: Record<string, string> = {
 // Static fallback — overridden by dynamic list when providers are fetched
 const MODEL_OPTIONS_STATIC = [
   { id: "", label: "Default (System)", color: "#737373" },
-  { id: "claude-sonnet-4-20250514", label: "Claude Sonnet", color: "#f59e0b" },
-  { id: "gpt-4o", label: "GPT-4o", color: "#10b981" },
 ]
 
 function buildModelOptions(providers: { id: string; name: string; configured: boolean; models: string[]; default_model: string }[]) {
@@ -546,11 +544,12 @@ function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
 
   // Fetch available providers to build dynamic model options
   useEffect(() => {
-    if (showMenu) {
-      import("@/lib/api").then(api =>
-        api.getProviders().then(r => setModelOptions(buildModelOptions(r.providers)))
-      ).catch(() => {})
-    }
+    if (!showMenu) return
+    let cancelled = false
+    import("@/lib/api").then(api =>
+      api.getProviders().then(r => { if (!cancelled) setModelOptions(buildModelOptions(r.providers)) })
+    ).catch(() => {})
+    return () => { cancelled = true }
   }, [showMenu])
 
   const handleSelectType = (type: Agent["type"]) => {

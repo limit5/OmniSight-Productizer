@@ -529,8 +529,10 @@ async def _check_token_budget() -> None:
     elif ratio >= settings.token_downgrade_threshold and _last_budget_level not in ("downgrade", "frozen"):
         _last_budget_level = "downgrade"
         try:
-            from backend.routers.providers import _do_switch_provider
-            await _do_switch_provider(settings.token_fallback_provider, settings.token_fallback_model)
+            from backend.agents.llm import _cache
+            settings.llm_provider = settings.token_fallback_provider
+            settings.llm_model = settings.token_fallback_model
+            _cache.clear()
         except Exception:
             pass
         emit_token_warning("downgrade", f"Token budget at {ratio:.0%} (${cost:.4f}/${budget:.2f}). Auto-downgraded to {settings.token_fallback_provider}.", cost, budget)

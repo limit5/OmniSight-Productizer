@@ -48,6 +48,9 @@ async def switch_provider(body: SwitchProviderRequest):
     else:
         settings.llm_model = ""
 
+    from backend.agents.llm import _cache
+    _cache.clear()
+
     llm_ready = llm is not None
     # Emit SSE event so other UI panels (Orchestrator, Settings) can sync
     from backend.events import emit_invoke
@@ -59,14 +62,6 @@ async def switch_provider(body: SwitchProviderRequest):
         "llm_active": llm_ready,
         "note": None if llm_ready else "No API key set — agents will use rule-based fallback.",
     }
-
-
-async def _do_switch_provider(provider: str, model: str = "") -> None:
-    """Internal helper to switch provider (called by auto-downgrade)."""
-    from backend.agents.llm import _cache
-    settings.llm_provider = provider
-    settings.llm_model = model
-    _cache.clear()  # Force re-init with new provider
 
 
 @router.get("/health", response_model=ProviderHealthResponse)

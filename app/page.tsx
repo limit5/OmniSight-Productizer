@@ -52,7 +52,7 @@ export default function Home() {
   useEffect(() => {
     engine.setProviderSwitchCallback(refetchProviders)
     return () => engine.setProviderSwitchCallback(null)
-  }, [engine, refetchProviders])
+  }, [refetchProviders])  // engine.setProviderSwitchCallback is a stable ref assignment
 
   // Use engine state (backed by API when connected)
   const {

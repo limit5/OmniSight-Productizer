@@ -262,13 +262,13 @@ async def _test_slack() -> dict:
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", "-X", "POST", settings.notification_slack_webhook,
         "-H", "Content-Type: application/json",
-        "-d", json.dumps({"text": "OmniSight integration test — connection OK"}),
+        "-d", json.dumps({"text": "[TEST] OmniSight integration test — connection OK"}),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
     response = stdout.decode().strip()
     if response == "ok":
-        return {"status": "ok", "message": "Test message sent to Slack"}
+        return {"status": "ok", "message": "Test message sent to Slack (a real message was posted to the channel)"}
     return {"status": "error", "message": f"Slack returned: {response[:100]}"}
 
 

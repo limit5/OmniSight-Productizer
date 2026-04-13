@@ -32,8 +32,8 @@ router = APIRouter(prefix="/invoke", tags=["invoke"])
 _invoke_lock = asyncio.Lock()
 
 # Halt flag — checked between actions to support emergency stop
-_halted = asyncio.Event()
-_halted.set()  # starts in "running" (not halted) state
+_running = asyncio.Event()
+_running.set()  # starts in running state
 
 logger = logging.getLogger(__name__)
 
@@ -574,7 +574,7 @@ async def _execute_actions(actions: list[dict], state: dict):
 
     for action in actions:
         # Check halt flag between actions
-        if not _halted.is_set():
+        if not _running.is_set():
             yield {
                 "event": "done",
                 "data": json.dumps({
@@ -806,16 +806,17 @@ async def invoke_stream(command: str | None = None):
         )
 
     # Pre-step: decompose compound tasks before planning
-    for task in list(_tasks.values()):
-        if task.status == TaskStatus.backlog and not task.child_task_ids:
-            children = await _maybe_decompose_task(task)
-            if children:
-                for child in children:
-                    _tasks[child.id] = child
-                    await _persist_task(child)
-                task.child_task_ids = [c.id for c in children]
-                task.status = TaskStatus.in_progress  # Parent waits for children
-                await _persist_task(task)
+    async with _state_lock:
+        for task in list(_tasks.values()):
+            if task.status == TaskStatus.backlog and not task.child_task_ids:
+                children = await _maybe_decompose_task(task)
+                if children:
+                    for child in children:
+                        _tasks[child.id] = child
+                        await _persist_task(child)
+                    task.child_task_ids = [c.id for c in children]
+                    task.status = TaskStatus.in_progress  # Parent waits for children
+                    await _persist_task(task)
 
     state = _analyze_state()
     actions = _plan_actions(state, command)
@@ -849,7 +850,7 @@ async def invoke_stream(command: str | None = None):
 @router.post("/halt", response_model=InvokeHaltResponse)
 async def invoke_halt():
     """Emergency stop — cancel background tasks, stop containers, halt INVOKE."""
-    _halted.clear()
+    _running.clear()
     # Cancel all tracked background tasks
     cancelled = 0
     for agent_id, (task_handle, _) in list(_running_tasks.items()):
@@ -878,7 +879,7 @@ async def invoke_halt():
 @router.post("/resume")
 async def invoke_resume():
     """Resume INVOKE after emergency stop."""
-    _halted.set()
+    _running.set()
     emit_invoke("resume", "INVOKE resumed")
     return {"status": "resumed"}
 

@@ -147,9 +147,20 @@ def _is_provider_available(model_spec: str) -> bool:
     try:
         from backend.agents.llm import validate_model_spec
         result = validate_model_spec(model_spec)
-        return result.get("valid", False)
+        if not result.get("valid", False):
+            return False
     except Exception:
         return False
+    # Also check cooldown
+    try:
+        from backend.agents.llm import _provider_failures, PROVIDER_COOLDOWN
+        import time
+        provider = model_spec.split(":")[0] if ":" in model_spec else ""
+        if provider and time.time() - _provider_failures.get(provider, 0) < PROVIDER_COOLDOWN:
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def select_model_for_task(
@@ -209,7 +220,7 @@ def select_model_for_task(
     # 5. Find first available model within budget
     top_pref = preferences[0] if preferences else "global"
     for model_spec in preferences:
-        cost = COST_TIERS.get(model_spec, 5.0)
+        cost = COST_TIERS.get(model_spec, 1.0)
         if cost > max_cost:
             continue
         if _is_provider_available(model_spec):

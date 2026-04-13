@@ -433,7 +433,8 @@ def validate_model_spec(model_spec: str) -> dict:
 
     if not provider:
         # No provider identified — will use global default, which is fine
-        return {"valid": True, "provider": settings.llm_provider, "model": model, "configured": True, "warning": ""}
+        return {"valid": True, "provider": settings.llm_provider, "model": model, "configured": True,
+                "warning": f"Model '{model}' not found in any provider — will use global default"}
 
     # Check if provider is known
     providers_map = {p["id"]: p for p in list_providers()}
