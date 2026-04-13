@@ -142,6 +142,14 @@ class SSEModeChanged(BaseModel):
     timestamp: str = ""
 
 
+class SSEBudgetStrategyChanged(BaseModel):
+    """budget_strategy_changed — Budget strategy switched (Phase 47C)."""
+    strategy: str
+    previous: str
+    tuning: dict
+    timestamp: str = ""
+
+
 class SSEDecision(BaseModel):
     """decision_pending / decision_auto_executed / decision_resolved / decision_undone."""
     id: str
@@ -181,6 +189,7 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "decision_auto_executed": SSEDecision,
     "decision_resolved": SSEDecision,
     "decision_undone": SSEDecision,
+    "budget_strategy_changed": SSEBudgetStrategyChanged,
 }
 
 

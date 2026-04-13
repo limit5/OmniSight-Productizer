@@ -63,3 +63,30 @@ async def get_decision(decision_id: str) -> dict[str, Any]:
     if d is None:
         return JSONResponse(status_code=404, content={"detail": "decision not found"})
     return d.to_dict()
+
+
+# ─── Phase 47C: Budget Strategy ───
+
+from backend import budget_strategy as _bs
+
+
+class StrategyRequest(BaseModel):
+    strategy: str = Field(..., description="One of quality | balanced | cost_saver | sprint")
+
+
+@router.get("/budget-strategy")
+async def get_budget_strategy() -> dict[str, Any]:
+    return {
+        "strategy": _bs.get_strategy().value,
+        "tuning": _bs.get_tuning().to_dict(),
+        "available": _bs.list_strategies(),
+    }
+
+
+@router.put("/budget-strategy")
+async def put_budget_strategy(req: StrategyRequest) -> dict[str, Any]:
+    try:
+        tuning = _bs.set_strategy(req.strategy)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+    return {"strategy": tuning.strategy.value, "tuning": tuning.to_dict()}
