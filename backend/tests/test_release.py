@@ -56,12 +56,15 @@ class TestReleaseManifest:
 
     @pytest.mark.asyncio
     async def test_manifest_with_artifacts(self, client):
+        # Use a unique id per run so re-running the suite does not collide
+        # against rows persisted by an earlier run (DB is not reset between).
+        import uuid as _uuid
         from backend import db
         from backend.release import generate_release_manifest
 
-        # Insert test artifact
+        art_id = f"art-manifest-test-{_uuid.uuid4().hex[:8]}"
         await db.insert_artifact({
-            "id": "art-manifest-test",
+            "id": art_id,
             "task_id": "t1",
             "agent_id": "fw-1",
             "name": "test.bin",
@@ -75,7 +78,7 @@ class TestReleaseManifest:
 
         manifest = await generate_release_manifest("1.0.0")
         assert manifest["artifact_count"] >= 1
-        art = next((a for a in manifest["artifacts"] if a["id"] == "art-manifest-test"), None)
+        art = next((a for a in manifest["artifacts"] if a["id"] == art_id), None)
         assert art is not None
         assert art["name"] == "test.bin"
         assert art["checksum_sha256"] == "abc123"
@@ -83,24 +86,27 @@ class TestReleaseManifest:
 
     @pytest.mark.asyncio
     async def test_manifest_filter_by_ids(self, client):
+        import uuid as _uuid
         from backend import db
         from backend.release import generate_release_manifest
 
+        a_id = f"art-filter-a-{_uuid.uuid4().hex[:8]}"
+        b_id = f"art-filter-b-{_uuid.uuid4().hex[:8]}"
         await db.insert_artifact({
-            "id": "art-filter-a", "task_id": "", "agent_id": "",
+            "id": a_id, "task_id": "", "agent_id": "",
             "name": "a.bin", "type": "binary", "file_path": "/tmp/a",
             "size": 100, "created_at": "2026-04-13T00:00:00",
         })
         await db.insert_artifact({
-            "id": "art-filter-b", "task_id": "", "agent_id": "",
+            "id": b_id, "task_id": "", "agent_id": "",
             "name": "b.bin", "type": "binary", "file_path": "/tmp/b",
             "size": 200, "created_at": "2026-04-13T00:00:00",
         })
 
-        manifest = await generate_release_manifest("1.0.0", artifact_ids=["art-filter-a"])
+        manifest = await generate_release_manifest("1.0.0", artifact_ids=[a_id])
         ids = [a["id"] for a in manifest["artifacts"]]
-        assert "art-filter-a" in ids
-        assert "art-filter-b" not in ids
+        assert a_id in ids
+        assert b_id not in ids
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -166,8 +172,10 @@ class TestBundleContents:
         test_file = test_dir / "sensor.ko"
         test_file.write_bytes(b"mock kernel module for tar test")
 
+        import uuid as _uuid
+        art_id = f"art-tar-content-{_uuid.uuid4().hex[:8]}"
         await db.insert_artifact({
-            "id": "art-tar-content",
+            "id": art_id,
             "task_id": "tar-test",
             "agent_id": "fw-1",
             "name": "sensor.ko",
@@ -181,7 +189,7 @@ class TestBundleContents:
 
         bundle = await create_release_bundle(
             version="0.0.6-artifact-tar",
-            artifact_ids=["art-tar-content"],
+            artifact_ids=[art_id],
         )
         with tarfile.open(bundle["file_path"], "r:gz") as tar:
             names = tar.getnames()

@@ -66,9 +66,31 @@ def _load_yaml_credentials() -> list[dict]:
     try:
         data = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
         repos = data.get("repositories", [])
-        if isinstance(repos, list):
-            logger.info("Loaded %d repo credentials from %s", len(repos), resolved)
-            return repos
+        if not isinstance(repos, list):
+            logger.warning(
+                "git_credentials.yaml: 'repositories' must be a list (got %s) — ignoring",
+                type(repos).__name__,
+            )
+            return []
+        # H6: schema validation — drop entries that fail required-field check
+        validated: list[dict] = []
+        required_any = ("token", "ssh_key", "webhook_secret")
+        for i, entry in enumerate(repos):
+            if not isinstance(entry, dict):
+                logger.warning("repo[%d]: not a dict — skipping", i)
+                continue
+            if not entry.get("id") and not entry.get("url") and not entry.get("ssh_host"):
+                logger.warning("repo[%d]: needs at least one of id/url/ssh_host", i)
+                continue
+            if not any(entry.get(k) for k in required_any):
+                logger.warning(
+                    "repo[%d] (%s): no token/ssh_key/webhook_secret — skipping",
+                    i, entry.get("id") or entry.get("url") or "<unknown>",
+                )
+                continue
+            validated.append(entry)
+        logger.info("Loaded %d/%d repo credentials from %s", len(validated), len(repos), resolved)
+        return validated
     except yaml.YAMLError as exc:
         # Avoid logging credential-bearing snippets — only the error type/line.
         logger.warning(
@@ -320,15 +342,22 @@ def get_ssh_key_for_url(url: str) -> str:
 def get_webhook_secret_for_host(host: str, platform: str = "") -> str:
     """Get the webhook secret for a specific host.
 
-    Falls back to scalar config secrets.
+    H5 fix: exact host equality only. The previous `host.lower() in (...)`
+    check used set-membership which was correct, but the broader registry
+    matching elsewhere used substring; lock both to exact match here so
+    `github.com` cannot match `github.company.com` and route the wrong
+    secret.
     """
+    if not host:
+        return ""
+    needle = host.strip().lower()
     registry = get_credential_registry()
     for entry in registry:
-        entry_host = (entry.get("ssh_host") or "").lower()
+        entry_host = (entry.get("ssh_host") or "").strip().lower()
         entry_url_host = ""
         if entry.get("url"):
             entry_url_host = (urlparse(entry["url"]).hostname or "").lower()
-        if host.lower() in (entry_host, entry_url_host):
+        if needle == entry_host or needle == entry_url_host:
             secret = entry.get("webhook_secret", "")
             if secret:
                 return secret

@@ -46,8 +46,14 @@ _PATTERNS: list[tuple[re.Pattern, str, bool, str]] = [
     (re.compile(r"permission denied.*docker\.sock|cannot connect to the docker daemon|dial unix.*docker", re.I),
      PermissionErrorCategory.DOCKER_SOCKET, False, "Run: sudo usermod -aG docker $USER && newgrp docker"),
 
-    # Port in use
-    (re.compile(r"address already in use|EADDRINUSE|bind.*port.*in use", re.I),
+    # Port in use — tightened (H12) so it doesn't match unrelated phrases
+    # like "the address has already been in use elsewhere". Anchor on the
+    # canonical OS error tokens.
+    (re.compile(
+        r"\baddress already in use\b|\bEADDRINUSE\b|"
+        r"\bbind\(?\)?[^\n]{0,40}\b(?:port|address)\b[^\n]{0,40}\bin use\b",
+        re.I,
+     ),
      PermissionErrorCategory.PORT_IN_USE, True, "use next available port"),
 
     # Command not found

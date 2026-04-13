@@ -191,9 +191,10 @@ async def provision(
         await _run(f'git checkout -b "{branch}"', cwd=ws_path)
         logger.info("Workspace provisioned (clone): %s → %s", agent_id, ws_path)
 
-    # Configure git user for this workspace
-    await _run(f'git config user.name "Agent-{agent_id}"', cwd=ws_path)
-    await _run(f'git config user.email "{agent_id}@omnisight.local"', cwd=ws_path)
+    # Configure git user for this workspace. H9: agent_id reaches a shell
+    # via _run() so use safe_agent (already sanitized to [A-Za-z0-9_-]).
+    await _run(f'git config user.name "Agent-{safe_agent}"', cwd=ws_path)
+    await _run(f'git config user.email "{safe_agent}@omnisight.local"', cwd=ws_path)
 
     # Ensure :ro bind-mount directories are gitignored (prevents git add -A issues)
     gitignore = ws_path / ".gitignore"

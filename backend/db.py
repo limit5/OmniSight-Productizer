@@ -90,6 +90,10 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("simulations", "model_size_kb", "INTEGER NOT NULL DEFAULT 0"),
         ("simulations", "npu_framework", "TEXT NOT NULL DEFAULT ''"),
     ]
+    # N6: critical columns the runtime hard-depends on. If post-migration
+    # any of these are still missing, fail-fast at startup rather than
+    # silently letting the ORM raise IntegrityError on every insert.
+    REQUIRED = {("tasks", "npi_phase_id"), ("agents", "sub_type")}
     for table, column, typedef in migrations:
         try:
             await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
@@ -99,6 +103,21 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
                 pass  # Column already exists — expected
             else:
                 logger.warning("Migration %s.%s failed: %s", table, column, exc)
+
+    # Verify every REQUIRED column ended up present (defends against a YAML
+    # typo or partial schema rebuild).
+    for table, column in REQUIRED:
+        try:
+            cur = await conn.execute(f"PRAGMA table_info({table})")
+            cols = {row[1] for row in await cur.fetchall()}
+            if column not in cols:
+                raise RuntimeError(
+                    f"Required column {table}.{column} missing after migration"
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Schema verify failed for %s.%s: %s", table, column, exc)
 
 
 async def close() -> None:

@@ -47,7 +47,19 @@
   - `_atomic_write_yaml`：tempfile + `os.replace()`，併發 / crash 不會留半寫 YAML
   - install script 失敗改回 `provisioned_with_warnings`（M15）+ `install_failed=True`，呼叫端可判斷
   - `_redact_url`：clone 錯誤訊息洩漏 SDK URL/host 改為 `<sdk-url>` / `<sdk-host>`
-- Batch 6：pending
+- **Batch 6（完成）**：Tests, schema guards & misc — N6/H5/H6/H9/H12/N11 + 修復 3 個 pre-existing test_release UNIQUE failures
+  - `db.py` 加 schema verify：`tasks.npi_phase_id` / `agents.sub_type` migration 失敗時 fail-fast，不再 silent warn
+  - `git_credentials.get_webhook_secret_for_host`：改為精確等於比對，杜絕 `github.com` 誤匹配 `github.company.com`
+  - YAML credential schema validation：型別 + 必要欄位（id/url/ssh_host + token/ssh_key/webhook_secret）
+  - `workspace.py` git config 改用 `safe_agent`（防 quote command injection）
+  - `permission_errors` PORT_IN_USE regex 用 word boundary，杜絕誤判
+  - 新增 3 個 Gerrit handler 子函數測試（`_on_comment_added`, `_find_task_by_external_issue_id`）
+  - 修復 3 個 pre-existing test_release UNIQUE failures：artifact id 改為 per-test uuid 後綴
+
+## Audit-Fix 總結
+- 6 個 batch、~50+ 個問題修復，commit 範圍 `67506d2..HEAD`
+- 對應的安全 / 並發 / 資源 / pipeline / SDK / schema 領域全數獲得加固
+- 後續 Phase 47 可在乾淨基礎上開展
 
 ---
 
