@@ -8,6 +8,7 @@ import { GlobalStatusHeader } from "@/components/omnisight/global-status-header"
 import { SpecNode } from "@/components/omnisight/spec-node"
 import { AgentMatrixWall, defaultAgents, type Agent, type AgentStatus } from "@/components/omnisight/agent-matrix-wall"
 import { VitalsArtifactsPanel } from "@/components/omnisight/vitals-artifacts-panel"
+import { DecisionDashboard } from "@/components/omnisight/decision-dashboard"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
@@ -567,8 +568,9 @@ export default function Home() {
             />
           </aside>
 
-          {/* Far Right: Vitals & Artifacts */}
-          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
+          {/* Far Right: Decision Engine + Vitals & Artifacts */}
+          <aside className="min-h-0 overflow-y-auto overflow-x-hidden space-y-3">
+            <DecisionDashboard />
             <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
               artifacts={mappedArtifacts}
