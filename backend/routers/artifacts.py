@@ -53,6 +53,12 @@ async def download_artifact(artifact_id: str):
         "json": "application/json",
         "log": "text/plain",
         "html": "text/html",
+        "binary": "application/octet-stream",
+        "firmware": "application/octet-stream",
+        "kernel_module": "application/octet-stream",
+        "sdk": "application/gzip",
+        "model": "application/octet-stream",
+        "archive": "application/gzip",
     }
     media = media_types.get(artifact.get("type", ""), "application/octet-stream")
     return FileResponse(file_path, media_type=media, filename=artifact["name"])

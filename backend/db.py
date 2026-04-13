@@ -72,6 +72,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
         ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("notifications", "last_error", "TEXT"),
+        # Artifact version/checksum (Phase 39)
+        ("artifacts", "version", "TEXT NOT NULL DEFAULT ''"),
+        ("artifacts", "checksum", "TEXT NOT NULL DEFAULT ''"),
         # NPU simulation fields (Phase 36)
         ("simulations", "npu_latency_ms", "REAL NOT NULL DEFAULT 0.0"),
         ("simulations", "npu_throughput_fps", "REAL NOT NULL DEFAULT 0.0"),
@@ -584,9 +587,14 @@ async def list_failed_notifications(limit: int = 50) -> list[dict]:
 
 async def insert_artifact(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO artifacts (id, task_id, agent_id, name, type, file_path, size, created_at)
-           VALUES (:id, :task_id, :agent_id, :name, :type, :file_path, :size, :created_at)""",
-        data,
+        """INSERT INTO artifacts (id, task_id, agent_id, name, type, file_path, size, created_at, version, checksum)
+           VALUES (:id, :task_id, :agent_id, :name, :type, :file_path, :size, :created_at,
+                   :version, :checksum)""",
+        {
+            **data,
+            "version": data.get("version", ""),
+            "checksum": data.get("checksum", ""),
+        },
     )
     await _conn().commit()
 

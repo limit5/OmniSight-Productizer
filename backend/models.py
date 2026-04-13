@@ -262,6 +262,13 @@ class ArtifactType(str, Enum):
     json_doc = "json"
     log = "log"
     html = "html"
+    # Binary artifact types (Phase 39)
+    binary = "binary"             # Generic compiled binary
+    firmware = "firmware"         # .bin / .hex / .elf firmware image
+    kernel_module = "kernel_module"  # .ko Linux kernel module
+    sdk = "sdk"                   # SDK package (.tar.gz, .deb)
+    model = "model"              # NPU model (.rknn, .tflite, .engine)
+    archive = "archive"          # .tar.gz / .zip bundle
 
 
 class Artifact(BaseModel):
@@ -272,6 +279,8 @@ class Artifact(BaseModel):
     type: ArtifactType = ArtifactType.markdown
     file_path: str = ""
     size: int = 0  # bytes
+    version: str = ""            # Semantic version (e.g. "1.0.0-rc1")
+    checksum: str = ""           # SHA-256 hex digest
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
