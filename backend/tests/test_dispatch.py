@@ -61,11 +61,13 @@ class TestTaskDecomposition:
 
     @pytest.mark.asyncio
     async def test_compound_task_decomposed(self):
-        task = Task(id="t1", title="write firmware driver and run validation tests", status=TaskStatus.backlog)
+        task = Task(id="t1", title="write firmware driver and then run validation tests", status=TaskStatus.backlog)
         children = await _maybe_decompose_task(task)
         assert len(children) == 2
         assert children[0].parent_task_id == "t1"
         assert children[1].parent_task_id == "t1"
+        # Auto-dependency: second sub-task depends on first
+        assert children[1].depends_on == [children[0].id]
 
     @pytest.mark.asyncio
     async def test_simple_task_not_decomposed(self):
@@ -81,7 +83,7 @@ class TestTaskDecomposition:
 
     @pytest.mark.asyncio
     async def test_child_tasks_have_suggested_type(self):
-        task = Task(id="t1", title="write firmware driver and generate compliance report", status=TaskStatus.backlog)
+        task = Task(id="t1", title="write firmware driver and then generate compliance report", status=TaskStatus.backlog)
         children = await _maybe_decompose_task(task)
         types = [c.suggested_agent_type for c in children]
         # One should be firmware-related, other reporter-related

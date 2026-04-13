@@ -206,22 +206,31 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 handoff_ctx = f"## Pre-Fetched Codebase Context\n\n{pre_ctx}\n\n{handoff_ctx}"
         except Exception:
             pass
-        # Validate agent model before dispatching
-        if agent.ai_model:
+        # Smart model routing: select best model for this task
+        from backend.model_router import select_model_for_task
+        agent_type_str = agent.type.value if hasattr(agent.type, "value") else str(agent.type)
+        selected_model = select_model_for_task(
+            agent_type=agent_type_str,
+            task_text=task_command,
+            agent_ai_model=agent.ai_model or "",
+        )
+        # Validate the selected model has API key
+        if selected_model:
             from backend.agents.llm import validate_model_spec
-            _v = validate_model_spec(agent.ai_model)
+            _v = validate_model_spec(selected_model)
             if not _v["valid"]:
                 from backend.events import emit_token_warning
                 emit_token_warning(
                     "warn",
-                    f"Agent {agent.id} model '{agent.ai_model}': {_v['warning']} — falling back to global provider",
+                    f"Agent {agent.id} model '{selected_model}': {_v['warning']} — falling back to global provider",
                 )
-                logger.warning("INVOKE: %s model '%s' not available: %s", agent.id, agent.ai_model, _v["warning"])
+                logger.warning("INVOKE: %s model '%s' not available: %s", agent.id, selected_model, _v["warning"])
+                selected_model = ""  # Fall back to global
         try:
             graph_result = await run_graph(
                 task_command,
                 workspace_path=workspace_path,
-                model_name=agent.ai_model or "",
+                model_name=selected_model,
                 agent_sub_type=agent.sub_type or "",
                 handoff_context=handoff_ctx,
                 task_skill_context=task_skill,
@@ -602,9 +611,15 @@ async def _execute_actions(actions: list[dict], state: dict):
                         _task_skill = load_task_skill(_matched)
                 except Exception:
                     pass
+                # Smart model routing for stream commands
+                _stream_model = ""
+                if _agent_ctx:
+                    from backend.model_router import select_model_for_task as _sel
+                    _at = _agent_ctx.type.value if hasattr(_agent_ctx.type, "value") else str(_agent_ctx.type)
+                    _stream_model = _sel(_at, action["command"], _agent_ctx.ai_model or "")
                 result = await run_graph(
                     action["command"],
-                    model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
+                    model_name=_stream_model,
                     agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
                     handoff_context=_handoff,
                     task_skill_context=_task_skill,
