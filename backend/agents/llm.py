@@ -153,6 +153,7 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
             anthropic_api_key=key,
             temperature=temp,
             max_tokens=4096,
+            max_retries=3,
         )
 
     if provider == "google":
@@ -177,6 +178,7 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
             model=model or "gpt-4o",
             api_key=key,
             temperature=temp,
+            max_retries=3,
         )
 
     if provider == "xai":
@@ -190,6 +192,7 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
             api_key=key,
             base_url="https://api.x.ai/v1",
             temperature=temp,
+            max_retries=3,
         )
 
     if provider == "groq":
@@ -202,6 +205,7 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
             model=model or "llama-3.3-70b-versatile",
             groq_api_key=key,
             temperature=temp,
+            max_retries=3,
         )
 
     if provider == "deepseek":
@@ -215,6 +219,7 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
             api_key=key,
             base_url="https://api.deepseek.com",
             temperature=temp,
+            max_retries=3,
         )
 
     if provider == "together":
@@ -238,6 +243,7 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
         return ChatOpenAI(
             model=model or "anthropic/claude-sonnet-4",
             api_key=key,
+            max_retries=3,
             base_url="https://openrouter.ai/api/v1",
             temperature=temp,
             default_headers={
