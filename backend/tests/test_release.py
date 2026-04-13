@@ -138,6 +138,67 @@ class TestReleaseBundle:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+class TestBundleContents:
+    """H4: Verify tar.gz actually contains manifest + artifact files."""
+
+    @pytest.mark.asyncio
+    async def test_bundle_contains_manifest(self, client):
+        import tarfile
+        from backend.release import create_release_bundle
+        bundle = await create_release_bundle(version="0.0.5-tar-test")
+        # Open and inspect the tar.gz
+        with tarfile.open(bundle["file_path"], "r:gz") as tar:
+            names = tar.getnames()
+            assert "manifest.json" in names
+
+    @pytest.mark.asyncio
+    async def test_bundle_contains_artifact_files(self, client):
+        import tarfile
+        from pathlib import Path
+        from backend import db
+        from backend.routers.artifacts import get_artifacts_root
+        from backend.release import create_release_bundle
+
+        # Create a real artifact file
+        art_root = get_artifacts_root()
+        test_dir = art_root / "tar-test"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        test_file = test_dir / "sensor.ko"
+        test_file.write_bytes(b"mock kernel module for tar test")
+
+        await db.insert_artifact({
+            "id": "art-tar-content",
+            "task_id": "tar-test",
+            "agent_id": "fw-1",
+            "name": "sensor.ko",
+            "type": "kernel_module",
+            "file_path": str(test_file),
+            "size": test_file.stat().st_size,
+            "created_at": "2026-04-13T00:00:00",
+            "version": "1.0.0",
+            "checksum": "abc",
+        })
+
+        bundle = await create_release_bundle(
+            version="0.0.6-artifact-tar",
+            artifact_ids=["art-tar-content"],
+        )
+        with tarfile.open(bundle["file_path"], "r:gz") as tar:
+            names = tar.getnames()
+            assert "manifest.json" in names
+            assert "sensor.ko" in names
+            # Read manifest and verify
+            import json
+            manifest_data = json.load(tar.extractfile("manifest.json"))
+            assert manifest_data["version"] == "0.0.6-artifact-tar"
+            assert manifest_data["artifact_count"] == 1
+
+        # Cleanup
+        test_file.unlink(missing_ok=True)
+        if test_dir.exists():
+            test_dir.rmdir()
+
+
 class TestUploadFunctions:
 
     @pytest.mark.asyncio
@@ -153,6 +214,46 @@ class TestUploadFunctions:
         result = await upload_to_gitlab("/tmp/bundle.tar.gz", "1.0.0", {})
         assert result["status"] == "skipped"
         assert "gitlab_token" in result["reason"] or "gitlab_project_id" in result["reason"]
+
+    @pytest.mark.asyncio
+    async def test_github_upload_success_mock(self):
+        """M7: Test GitHub upload with mocked token + subprocess."""
+        from unittest.mock import patch, AsyncMock
+        from backend.release import upload_to_github
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"https://github.com/owner/repo/releases/v1.0.0\n", b""))
+        mock_proc.returncode = 0
+
+        with patch("backend.config.settings") as mock_settings, \
+             patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            mock_settings.github_token = "ghp_fake_token"
+            mock_settings.github_repo = "owner/repo"
+            mock_settings.release_draft = False
+            result = await upload_to_github("/tmp/bundle.tar.gz", "1.0.0", {"artifact_count": 3})
+
+        assert result["status"] == "uploaded"
+        assert "github.com" in result["url"]
+        assert result["tag"] == "v1.0.0"
+
+    @pytest.mark.asyncio
+    async def test_github_upload_failure_mock(self):
+        from unittest.mock import patch, AsyncMock
+        from backend.release import upload_to_github
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"Not Found"))
+        mock_proc.returncode = 1
+
+        with patch("backend.config.settings") as mock_settings, \
+             patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            mock_settings.github_token = "ghp_fake"
+            mock_settings.github_repo = "owner/repo"
+            mock_settings.release_draft = True
+            result = await upload_to_github("/tmp/bundle.tar.gz", "1.0.0", {})
+
+        assert result["status"] == "error"
+        assert "Not Found" in result["error"]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
