@@ -41,7 +41,13 @@
   - `/invoke/halt` 同步將 pipeline 狀態標 `halted`，避免 race 中 advance
   - permission auto-fix 加 loop guard：同 category 已嘗試 2 次後 escalate（不再無限 fix→fail→fix）
   - permanent_disable 加 `pipeline_phase` SSE，前端 pipeline 面板可見
-- Batches 5-6：pending
+- **Batch 5（完成）**：SDK provisioner hardening — C11/H13/H15/L10/M15/N9
+  - Clone 失敗 / timeout / size-cap 超限 → 強制 `shutil.rmtree(sdk_path)`，避免損壞目錄殘留
+  - `OMNISIGHT_SDK_CLONE_MAX_MB`（預設 8GB）clone 後 size 檢查 + http.postBuffer 限制
+  - `_atomic_write_yaml`：tempfile + `os.replace()`，併發 / crash 不會留半寫 YAML
+  - install script 失敗改回 `provisioned_with_warnings`（M15）+ `install_failed=True`，呼叫端可判斷
+  - `_redact_url`：clone 錯誤訊息洩漏 SDK URL/host 改為 `<sdk-url>` / `<sdk-host>`
+- Batch 6：pending
 
 ---
 

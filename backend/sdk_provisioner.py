@@ -114,10 +114,18 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
         if not sdk_path.exists():
             from backend.git_auth import get_auth_env
             auth_env = get_auth_env(sdk_url)
-            import os
+            import os, shutil as _shutil
             env = {**os.environ, **auth_env}
+            # H13: cap clone size to avoid runaway 50 GB SDK repos filling
+            # the disk. Bound via partial clone + max-pack-size.
+            max_clone_mb = int(os.environ.get("OMNISIGHT_SDK_CLONE_MAX_MB", "8192"))
+            clone_args = [
+                "git", "clone", "--depth", "1",
+                "-c", f"http.postBuffer={max_clone_mb * 1024 * 1024}",
+                "-b", branch, sdk_url, str(sdk_path),
+            ]
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth", "1", "-b", branch, sdk_url, str(sdk_path),
+                *clone_args,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
@@ -126,15 +134,27 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                # Cleanup partial clone — leaving it confuses next run
-                import shutil
-                shutil.rmtree(sdk_path, ignore_errors=True)
+                _shutil.rmtree(sdk_path, ignore_errors=True)
                 raise
             if proc.returncode != 0:
-                # Cleanup partial clone (Batch 5 issue C11 partial fix here)
-                import shutil
-                shutil.rmtree(sdk_path, ignore_errors=True)
-                return {"status": "error", "details": f"Clone failed: {stderr.decode()[:200]}"}
+                _shutil.rmtree(sdk_path, ignore_errors=True)
+                # L10: scrub the SDK URL out of the surfaced error so we
+                # don't echo internal git hosts/paths back through the API.
+                err_redacted = _redact_url(stderr.decode(errors="replace"), sdk_url)
+                return {"status": "error", "details": f"Clone failed: {err_redacted[:200]}"}
+            # Post-clone size check (H13). If the on-disk repo exceeds the
+            # cap, abandon and clean up.
+            try:
+                clone_bytes = sum(f.stat().st_size for f in sdk_path.rglob("*") if f.is_file())
+                if clone_bytes > max_clone_mb * 1024 * 1024:
+                    _shutil.rmtree(sdk_path, ignore_errors=True)
+                    return {
+                        "status": "error",
+                        "details": f"SDK clone exceeded {max_clone_mb}MB cap "
+                                   f"({clone_bytes // (1024 * 1024)}MB) — refused",
+                    }
+            except OSError:
+                pass
 
         emit_pipeline_phase("sdk_provision", f"SDK cloned: {sdk_path}")
     except asyncio.TimeoutError:
@@ -146,7 +166,7 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
                 await proc.wait()
             except ProcessLookupError:
                 pass
-        return {"status": "error", "details": str(exc)[:200]}
+        return {"status": "error", "details": _redact_url(str(exc), sdk_url)[:200]}
 
     # Run install script if configured. Reject absolute paths and
     # path-traversal — must be a relative file inside the cloned SDK.
@@ -167,6 +187,8 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
                     logger.warning("Refusing symlinked install script: %s", cand)
             except (ValueError, OSError):
                 logger.warning("Install script outside SDK dir: %s", install_script)
+    install_failed = False
+    install_detail = ""
     if script_path is not None:
         if script_path.exists():
             emit_pipeline_phase("sdk_provision", f"Running install script: {install_script}")
@@ -178,12 +200,30 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 try:
-                    await asyncio.wait_for(install_proc.communicate(), timeout=120)
+                    _stdout, _stderr = await asyncio.wait_for(
+                        install_proc.communicate(), timeout=120
+                    )
                 except asyncio.TimeoutError:
                     install_proc.kill()
                     await install_proc.wait()
                     raise
+                # M15: previously install-script failure was silently swallowed
+                # and the function still returned `provisioned`. Now propagate.
+                if install_proc.returncode != 0:
+                    install_failed = True
+                    install_detail = (_stderr.decode(errors="replace") or
+                                       _stdout.decode(errors="replace"))[:200]
+                    logger.warning(
+                        "SDK install script exited rc=%d: %s",
+                        install_proc.returncode, install_detail,
+                    )
+                    emit_pipeline_phase(
+                        "sdk_provision_warning",
+                        f"Install script failed (rc={install_proc.returncode})",
+                    )
             except Exception as exc:
+                install_failed = True
+                install_detail = str(exc)[:200]
                 logger.warning("SDK install script failed: %s", exc)
                 if install_proc is not None and install_proc.returncode is None:
                     try:
@@ -205,19 +245,68 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
         updated = True
 
     if updated:
-        profile.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True))
+        # N9/H15: atomic write — render to temp in same dir, then os.replace().
+        # Avoids leaving a half-written YAML if the process is killed mid-write
+        # or two concurrent provisioners interleave.
+        _atomic_write_yaml(profile, data)
         emit_pipeline_phase("sdk_provision", f"Updated {platform}.yaml with discovered SDK paths")
         logger.info("SDK auto-discovery: updated %s with sysroot=%s cmake=%s",
                      platform, scan["sysroot_path"], scan["cmake_toolchain_file"])
 
+    status = "provisioned_with_warnings" if install_failed else "provisioned"
+    details = f"SDK ready at {sdk_path}"
+    if install_failed:
+        details = f"SDK cloned but install script failed: {install_detail}"
     return {
-        "status": "provisioned",
+        "status": status,
         "sdk_path": str(sdk_path),
         "sysroot_found": scan["sysroot_path"],
         "cmake_found": scan["cmake_toolchain_file"],
         "toolchain_files": scan["toolchain_files"],
-        "details": f"SDK ready at {sdk_path}",
+        "install_failed": install_failed,
+        "details": details,
     }
+
+
+def _atomic_write_yaml(target: Path, data: dict) -> None:
+    """Write *data* as YAML to *target* atomically (temp + rename)."""
+    import tempfile, os as _os
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=parent
+    )
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+            yaml.dump(data, fh, default_flow_style=False, allow_unicode=True)
+            fh.flush()
+            try:
+                _os.fsync(fh.fileno())
+            except OSError:
+                pass
+        _os.replace(tmp_name, target)
+    except Exception:
+        try:
+            _os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _redact_url(text: str, url: str) -> str:
+    """Strip the SDK URL (and credential-bearing variants) out of text."""
+    if not text or not url:
+        return text
+    out = text.replace(url, "<sdk-url>")
+    # Also redact `https://user:pass@host` form
+    try:
+        from urllib.parse import urlparse as _u
+        host = _u(url).hostname
+        if host:
+            out = out.replace(host, "<sdk-host>")
+    except Exception:
+        pass
+    return out
 
 
 def scan_sdk_repo(sdk_path: Path) -> dict:
