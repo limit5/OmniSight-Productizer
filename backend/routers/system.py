@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse,
-    Notification, Simulation, Artifact, DebugFinding,
+    Notification, Simulation, Artifact, DebugFinding, DeployRequest,
 )
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -237,23 +237,17 @@ async def get_evk_status():
 
 
 @router.post("/deploy")
-async def trigger_deploy(body: dict):
-    """Trigger deployment to an EVK board.
-
-    Body: {"platform": "vendor-example", "module": "sensor", "binary_path": "build/output"}
-    """
-    platform = body.get("platform", "")
-    module = body.get("module", "")
-    if not platform or not module:
-        raise HTTPException(400, "platform and module are required")
-
+async def trigger_deploy(body: DeployRequest):
+    """Trigger deployment to an EVK board."""
     from backend.agents.tools import deploy_to_evk
+    # Use module as binary path hint if binary_path not specified
+    binary_path = body.binary_path or f"build/{body.module}"
     result = await deploy_to_evk.ainvoke({
-        "platform": platform,
-        "binary_path": body.get("binary_path", ""),
-        "run_after_deploy": body.get("run_after_deploy", True),
+        "platform": body.platform,
+        "binary_path": binary_path,
+        "run_after_deploy": body.run_after_deploy,
     })
-    return {"result": result}
+    return {"result": result, "platform": body.platform, "module": body.module}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
