@@ -14,6 +14,8 @@ from datetime import datetime
 from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
+from backend.models import InvokeHaltResponse
+
 from backend.agents.graph import run_graph
 from backend.routers.agents import _agents, _persist as _persist_agent
 from backend.routers.tasks import _tasks, _persist as _persist_task
@@ -753,7 +755,7 @@ async def invoke_stream(command: str | None = None):
     return EventSourceResponse(event_generator())
 
 
-@router.post("/halt")
+@router.post("/halt", response_model=InvokeHaltResponse)
 async def invoke_halt():
     """Emergency stop — cancel background tasks, stop containers, halt INVOKE."""
     _halted.clear()

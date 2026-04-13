@@ -5,11 +5,12 @@ from pydantic import BaseModel
 
 from backend.agents.llm import get_llm, list_providers
 from backend.config import settings
+from backend.models import ProvidersListResponse, ProviderHealthResponse
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 
 
-@router.get("")
+@router.get("", response_model=ProvidersListResponse)
 async def get_providers():
     """List all supported LLM providers and their configuration status."""
     return {
@@ -65,7 +66,7 @@ async def _do_switch_provider(provider: str, model: str = "") -> None:
     _cache.clear()  # Force re-init with new provider
 
 
-@router.get("/health")
+@router.get("/health", response_model=ProviderHealthResponse)
 async def get_provider_health():
     """Return health status for each provider in the fallback chain."""
     import time

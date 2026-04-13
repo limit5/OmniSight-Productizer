@@ -354,3 +354,117 @@ class DebugFinding(BaseModel):
     status: str = "open"  # open, acknowledged, resolved
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
     resolved_at: Optional[str] = None
+
+
+# ---------- API Response Models ----------
+
+class HealthResponse(BaseModel):
+    status: str
+    engine: str
+    version: str
+    phase: str = ""
+
+
+class StatusResponse(BaseModel):
+    status: str
+    detail: str = ""
+
+
+class InvokeHaltResponse(BaseModel):
+    status: str
+    tasks_cancelled: int = 0
+    containers_stopped: int = 0
+
+
+class SystemInfoResponse(BaseModel):
+    hostname: str = ""
+    os: str = ""
+    kernel: str = ""
+    arch: str = ""
+    cpu_model: str = ""
+    cpu_cores: int = 0
+    cpu_usage: float = 0.0
+    memory_total: int = 0
+    memory_used: int = 0
+    disk_total_mb: int = 0
+    disk_used_mb: int = 0
+    disk_use_pct: float = 0.0
+    uptime: str = ""
+    wsl: bool = False
+    docker: bool = False
+
+    model_config = {"extra": "allow"}
+
+
+class SystemStatusResponse(BaseModel):
+    tasks_completed: int = 0
+    tasks_total: int = 0
+    agents_running: int = 0
+    wsl_status: str = "OFFLINE"
+    usb_status: str = "Detecting..."
+    cpu_summary: str = ""
+    memory_summary: str = ""
+    workspaces_active: int = 0
+    containers_active: int = 0
+
+
+class TokenBudgetResponse(BaseModel):
+    budget: float = 0.0
+    usage: float = 0.0
+    ratio: float = 0.0
+    frozen: bool = False
+    level: str = "normal"
+    warn_threshold: float = 0.8
+    downgrade_threshold: float = 0.9
+    freeze_threshold: float = 1.0
+    fallback_provider: str = ""
+    fallback_model: str = ""
+
+
+class ProviderInfo(BaseModel):
+    id: str
+    name: str
+    default_model: str = ""
+    models: list[str] = Field(default_factory=list)
+    requires_key: bool = True
+    env_var: str = ""
+    configured: bool = False
+    base_url: Optional[str] = None
+
+
+class ProvidersListResponse(BaseModel):
+    active_provider: str = ""
+    active_model: str = ""
+    providers: list[ProviderInfo] = Field(default_factory=list)
+
+
+class ProviderHealthItem(BaseModel):
+    id: str
+    name: str
+    configured: bool = False
+    is_active: bool = False
+    last_failure: Optional[str] = None
+    cooldown_remaining: int = 0
+    status: str = "unknown"
+
+
+class ProviderHealthResponse(BaseModel):
+    chain: list[str] = Field(default_factory=list)
+    health: list[ProviderHealthItem] = Field(default_factory=list)
+
+
+class EpisodicMemory(BaseModel):
+    id: str
+    error_signature: str
+    solution: str
+    soc_vendor: str = ""
+    sdk_version: str = ""
+    hardware_rev: str = ""
+    source_task_id: Optional[str] = None
+    source_agent_id: Optional[str] = None
+    gerrit_change_id: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    quality_score: float = 0.0
+    access_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""

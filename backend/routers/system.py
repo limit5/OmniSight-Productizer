@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 import yaml
 from fastapi import APIRouter, HTTPException
 
+from backend.models import (
+    SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse,
+    Notification, Simulation, Artifact, DebugFinding,
+)
+
 router = APIRouter(prefix="/system", tags=["system"])
 
 _BASH_TIMEOUT = 5
@@ -52,7 +57,7 @@ def _parse_uptime(seconds: float) -> str:
 #  System Info
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-@router.get("/info")
+@router.get("/info", response_model=SystemInfoResponse)
 async def get_system_info():
     cpu_model = (await _sh("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2")).strip() or platform.processor()
     cpu_cores = os.cpu_count() or 1
@@ -200,7 +205,7 @@ async def get_debug_state():
     }
 
 
-@router.get("/status")
+@router.get("/status", response_model=SystemStatusResponse)
 async def get_system_status():
     from backend.routers.agents import _agents
     from backend.routers.tasks import _tasks
@@ -214,12 +219,16 @@ async def get_system_status():
     usb_count = (await _sh("lsusb 2>/dev/null | wc -l")).strip()
     mem_raw = await _sh("free -m | awk 'NR==2{printf \"%d/%dMB (%.0f%%)\", $3,$2,$3*100/$2}'")
 
+    cpu_raw = await _sh("grep -c ^processor /proc/cpuinfo 2>/dev/null")
+    cpu_cores = cpu_raw.strip() if cpu_raw.strip() else str(os.cpu_count() or 1)
+
     return {
         "tasks_completed": sum(1 for t in tasks if t.status == TaskStatus.completed),
         "tasks_total": len(tasks),
         "agents_running": sum(1 for a in agents if a.status == AgentStatus.running),
         "wsl_status": "OK" if "microsoft" in (kernel or "").lower() else "N/A",
         "usb_status": f"{usb_count} USB device(s)" if usb_count != "0" else "No USB",
+        "cpu_summary": f"{cpu_cores} cores",
         "memory_summary": mem_raw or "N/A",
         "workspaces_active": len(list_workspaces()),
         "containers_active": len(list_containers()),
@@ -575,7 +584,7 @@ async def reset_token_usage():
     return {"status": "reset"}
 
 
-@router.get("/token-budget")
+@router.get("/token-budget", response_model=TokenBudgetResponse)
 async def get_token_budget():
     """Return current budget settings, daily usage, and freeze status."""
     from backend.config import settings
