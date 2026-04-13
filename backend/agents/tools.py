@@ -880,6 +880,19 @@ async def get_platform_config(platform: str = "") -> str:
     cmake_tc = data.get("cmake_toolchain_file", "")
     if cmake_tc:
         lines.append(f"CMAKE_TOOLCHAIN_FILE={cmake_tc}")
+    # NPU acceleration fields
+    if data.get("npu_enabled"):
+        lines.append("NPU_ENABLED=true")
+        lines.append(f"NPU_TYPE={data.get('npu_type', '')}")
+        npu_sdk = data.get("npu_sdk_path", "")
+        if npu_sdk:
+            lines.append(f"NPU_SDK_PATH={npu_sdk}")
+        npu_fmt = data.get("npu_model_format", "")
+        if npu_fmt:
+            lines.append(f"NPU_MODEL_FORMAT={npu_fmt}")
+        npu_ver = data.get("npu_toolchain_version", "")
+        if npu_ver:
+            lines.append(f"NPU_TOOLCHAIN_VERSION={npu_ver}")
 
     return "[OK] Platform config:\n" + "\n".join(lines)
 

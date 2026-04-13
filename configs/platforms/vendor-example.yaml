@@ -27,7 +27,11 @@ kernel_arch: arm64
 
 # NPU/DSP acceleration (if applicable)
 npu_enabled: false
-npu_type: ""
+npu_type: ""               # rknn | tflite | tensorrt | om | ""
+npu_sdk_path: ""           # e.g. /opt/rknn-toolkit2
+npu_runtime_lib: ""        # e.g. librknnrt.so
+npu_model_format: ""       # e.g. .rknn, .tflite, .engine
+npu_toolchain_version: ""  # Must match NPU driver version on EVK
 
 # Docker packages needed for this vendor
 docker_packages:
