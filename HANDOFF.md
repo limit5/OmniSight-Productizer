@@ -67,6 +67,12 @@
 - **47D（完成）**：Decision API + 30s sweep loop — `POST /decisions/{id}/approve|reject|undo` + `POST /decisions/sweep` 手動觸發 + `de.sweep_timeouts()` + `run_sweep_loop()` 於 lifespan 啟動（30s cadence, 過期 pending → timeout_default + resolver=timeout + chosen=default_option_id）
 - **Phase 47 總計**：8 API 端點、6 SSE events、4 新模組（decision_engine/stuck_detector/ambiguity/budget_strategy）、~100 新測試全綠、2 background tasks（watchdog+sweep）
 
+## Phase 47-Fix（深度審計後補修）
+- **Batch A**（`b20bc2d`）：N4 parallel_slot 改 _ModeSlot（cap 每次 acquire 重讀，mode 切換立即生效）／N5 sweep + resolve 原子化（pop+mutate+archive 同鎖）／③ watchdog 讀 agent error ring buffer (`record_agent_error`)、repeat_error 路徑復活
+- **Batch B**（`4471ec5`）：① `model_router` + `_handle_llm_error` 真正消費 `budget_strategy.get_tuning()`（tier/max_retries/downgrade 生效）／② `_apply_stuck_remediation` 執行 switch_model / spawn_alternate / escalate / retry_same（包含 backlog 掃 approved 的 decisions）／N9 halt 時 watchdog 跳過
+- **Batch C**（`de2c365`）：N7 pending cap（env `OMNISIGHT_DECISION_PENDING_MAX`，default 256）／N8 reject 用 `__rejected__` sentinel／N10 `OMNISIGHT_DECISION_BEARER` 選配 bearer token／N11 structured-only log／N12 SSEDecision 加 `source`／N13 sweep interval env（default 10s）／N14 GET mode 回傳 `in_flight`
+- **Batch D**（本 commit）：8 個 SSE round-trip 測試覆蓋 approve/reject/undo/mode/budget/sweep + schema 契約驗證
+
 ---
 
 ## 0. 專案理解與未來開發藍圖
