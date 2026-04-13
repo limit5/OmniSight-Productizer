@@ -28,8 +28,8 @@ from backend.events import emit_agent_update, emit_invoke
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
-# Concurrency guard — only one INVOKE at a time
-_invoke_busy = False
+# Concurrency guard — only one INVOKE at a time (asyncio.Lock is safe against disconnect)
+_invoke_lock = asyncio.Lock()
 
 # Halt flag — checked between actions to support emergency stop
 _halted = asyncio.Event()
@@ -797,8 +797,7 @@ async def invoke_stream(command: str | None = None):
     Query param `command` is optional; if provided, it takes priority
     and is routed through the LangGraph pipeline.
     """
-    global _invoke_busy
-    if _invoke_busy:
+    if _invoke_lock.locked():
         return JSONResponse(
             status_code=409,
             content={"detail": "Invoke already in progress"},
@@ -820,9 +819,7 @@ async def invoke_stream(command: str | None = None):
     actions = _plan_actions(state, command)
 
     async def event_generator():
-        global _invoke_busy
-        _invoke_busy = True
-        try:
+        async with _invoke_lock:
             # Opening event with analysis
             yield {
                 "event": "analysis",
@@ -843,8 +840,6 @@ async def invoke_stream(command: str | None = None):
             # Execute actions
             async for event in _execute_actions(actions, state):
                 yield event
-        finally:
-            _invoke_busy = False
 
     return EventSourceResponse(event_generator())
 
@@ -889,15 +884,13 @@ async def invoke_resume():
 @router.post("")
 async def invoke_sync(command: str | None = None):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
-    global _invoke_busy
-    if _invoke_busy:
+    if _invoke_lock.locked():
         return JSONResponse(
             status_code=409,
             content={"detail": "Invoke already in progress"},
         )
 
-    _invoke_busy = True
-    try:
+    async with _invoke_lock:
         state = _analyze_state()
         actions = _plan_actions(state, command)
         results: list[dict] = []
@@ -985,5 +978,3 @@ async def invoke_sync(command: str | None = None):
             "results": results,
             "timestamp": _now(),
         }
-    finally:
-        _invoke_busy = False
