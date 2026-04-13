@@ -14,10 +14,10 @@ router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
 # Centralized artifact storage (persists after workspace cleanup)
 _ARTIFACTS_ROOT = Path(__file__).resolve().parent.parent.parent / ".artifacts"
-_ARTIFACTS_ROOT.mkdir(exist_ok=True)
 
 
 def get_artifacts_root() -> Path:
+    _ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
     return _ARTIFACTS_ROOT
 
 

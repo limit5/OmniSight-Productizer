@@ -618,7 +618,7 @@ export async function listArtifacts(taskId?: string, agentId?: string) {
   return request<ArtifactItem[]>(`/artifacts?${params.toString()}`)
 }
 
-export async function getArtifactDownloadUrl(id: string): Promise<string> {
+export function getArtifactDownloadUrl(id: string): string {
   return `${API_V1}/artifacts/${id}/download`
 }
 

@@ -13,6 +13,8 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from backend.config import settings as _settings
+
 logger = logging.getLogger(__name__)
 
 import yaml
@@ -256,6 +258,9 @@ async def trigger_deploy(body: DeployRequest):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+_release_lock = asyncio.Lock()
+
+
 class ReleaseRequest(BaseModel):
     version: str = ""           # Override version (empty = auto-resolve from git)
     artifact_ids: list[str] = Field(default_factory=list)  # Empty = include all
@@ -285,39 +290,47 @@ async def create_release(body: ReleaseRequest):
 
     Returns bundle metadata, manifest, and upload results.
     """
-    from backend.release import create_release_bundle, upload_to_github, upload_to_gitlab
+    if not _settings.release_enabled:
+        # Allow but warn
+        logger.info("Release created (release_enabled=False — set to True for production)")
 
-    bundle = await create_release_bundle(
-        version=body.version,
-        artifact_ids=body.artifact_ids or None,
-    )
+    if _release_lock.locked():
+        raise HTTPException(status_code=409, detail="A release is already in progress")
 
-    result = {
-        "bundle": {
-            "id": bundle["id"],
-            "name": bundle["name"],
-            "version": bundle["version"],
-            "size": bundle["size"],
-            "checksum": bundle["checksum"],
-            "download_url": bundle["download_url"],
-            "artifact_count": bundle["manifest"]["artifact_count"],
-        },
-        "uploads": {},
-    }
+    async with _release_lock:
+        from backend.release import create_release_bundle, upload_to_github, upload_to_gitlab
 
-    if body.upload_github:
-        gh_result = await upload_to_github(
-            bundle["file_path"], bundle["version"], bundle["manifest"],
+        bundle = await create_release_bundle(
+            version=body.version,
+            artifact_ids=body.artifact_ids or None,
         )
-        result["uploads"]["github"] = gh_result
 
-    if body.upload_gitlab:
-        gl_result = await upload_to_gitlab(
-            bundle["file_path"], bundle["version"], bundle["manifest"],
-        )
-        result["uploads"]["gitlab"] = gl_result
+        result = {
+            "bundle": {
+                "id": bundle["id"],
+                "name": bundle["name"],
+                "version": bundle["version"],
+                "size": bundle["size"],
+                "checksum": bundle["checksum"],
+                "download_url": bundle["download_url"],
+                "artifact_count": bundle["manifest"]["artifact_count"],
+            },
+            "uploads": {},
+        }
 
-    return result
+        if body.upload_github:
+            gh_result = await upload_to_github(
+                bundle["file_path"], bundle["version"], bundle["manifest"],
+            )
+            result["uploads"]["github"] = gh_result
+
+        if body.upload_gitlab:
+            gl_result = await upload_to_gitlab(
+                bundle["file_path"], bundle["version"], bundle["manifest"],
+            )
+            result["uploads"]["gitlab"] = gl_result
+
+        return result
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

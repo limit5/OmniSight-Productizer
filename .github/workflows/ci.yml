@@ -41,5 +41,6 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit || true  # Type check (allow existing errors)
+      # TODO: Remove || true after fixing 10 pre-existing TypeScript errors
+      - run: npx tsc --noEmit || true
       - run: npm run build

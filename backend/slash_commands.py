@@ -307,6 +307,7 @@ async def _stream(args: str) -> str:
 
 async def _release(args: str) -> str:
     """Create a release bundle or show current version."""
+    from backend.config import settings
     from backend.release import resolve_version
     version = await resolve_version()
 

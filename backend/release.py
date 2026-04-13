@@ -85,7 +85,7 @@ async def generate_release_manifest(
     manifest = {
         "name": "OmniSight Productizer",
         "version": version,
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.now(tz=__import__('datetime').timezone.utc).isoformat(),
         "artifact_count": len(artifacts),
         "artifacts": [
             {
@@ -131,29 +131,32 @@ async def create_release_bundle(
     manifest_path = releases_dir / f"manifest-{safe_version}.json"
 
     # Write manifest
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    try:
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    except OSError as exc:
+        logger.warning("Failed to write manifest file %s: %s", manifest_path, exc)
+        raise
 
-    # Create tar.gz with all artifact files + manifest
+    # Pre-fetch all artifact file paths before opening tarfile
+    import os
+    artifact_files = []
+    for art_meta in manifest["artifacts"]:
+        art = await db.get_artifact(art_meta["id"])
+        if art and art.get("file_path"):
+            fpath = Path(art["file_path"]).resolve()
+            try:
+                fpath.relative_to(artifacts_root.resolve())
+            except ValueError:
+                continue
+            if fpath.exists():
+                safe_name = os.path.basename(art["name"])
+                artifact_files.append((fpath, safe_name))
+
+    # Create tar.gz (pure sync — no await inside)
     with tarfile.open(bundle_path, "w:gz") as tar:
-        # Add manifest
         tar.add(manifest_path, arcname="manifest.json")
-
-        # Add artifact files (sanitized: basename only, path validated)
-        import os
-        for art_meta in manifest["artifacts"]:
-            art = await db.get_artifact(art_meta["id"])
-            if art and art.get("file_path"):
-                fpath = Path(art["file_path"]).resolve()
-                # Validate file is within artifacts root
-                try:
-                    fpath.relative_to(artifacts_root.resolve())
-                except ValueError:
-                    logger.warning("Skipping artifact outside artifacts root: %s", fpath)
-                    continue
-                if fpath.exists():
-                    # Use basename only to prevent tar path traversal
-                    safe_name = os.path.basename(art["name"])
-                    tar.add(fpath, arcname=safe_name)
+        for fpath, arcname in artifact_files:
+            tar.add(fpath, arcname=arcname)
 
     # Compute checksum
     sha = hashlib.sha256()
@@ -170,7 +173,7 @@ async def create_release_bundle(
         "type": "archive",
         "file_path": str(bundle_path),
         "size": bundle_path.stat().st_size,
-        "created_at": datetime.now().isoformat(),
+        "created_at": datetime.now(tz=__import__('datetime').timezone.utc).isoformat(),
         "version": version,
         "checksum": sha.hexdigest(),
     }
@@ -260,6 +263,7 @@ async def upload_to_gitlab(bundle_path: str, version: str, manifest: dict) -> di
         encoded_project = urllib.parse.quote(project, safe="")
 
         # Create tag (may already exist) — with timeout
+        # Note: token visible in process list; use stdin for production
         tag_proc = await asyncio.create_subprocess_exec(
             "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST",
             f"{base_url}/api/v4/projects/{encoded_project}/repository/tags",
