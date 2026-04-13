@@ -206,6 +206,17 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 handoff_ctx = f"## Pre-Fetched Codebase Context\n\n{pre_ctx}\n\n{handoff_ctx}"
         except Exception:
             pass
+        # Validate agent model before dispatching
+        if agent.ai_model:
+            from backend.agents.llm import validate_model_spec
+            _v = validate_model_spec(agent.ai_model)
+            if not _v["valid"]:
+                from backend.events import emit_token_warning
+                emit_token_warning(
+                    "warn",
+                    f"Agent {agent.id} model '{agent.ai_model}': {_v['warning']} — falling back to global provider",
+                )
+                logger.warning("INVOKE: %s model '%s' not available: %s", agent.id, agent.ai_model, _v["warning"])
         try:
             graph_result = await run_graph(
                 task_command,

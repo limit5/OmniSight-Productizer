@@ -468,15 +468,40 @@ interface ShadowNodeProps {
 // Role and model options for the spawn menu
 interface RoleOption { role_id: string; category: string; label: string }
 
-const MODEL_OPTIONS = [
+// Provider colors for model selection UI
+const PROVIDER_COLORS: Record<string, string> = {
+  anthropic: "#f59e0b", openai: "#10b981", google: "#3b82f6",
+  xai: "#ec4899", groq: "#f97316", deepseek: "#06b6d4",
+  together: "#8b5cf6", openrouter: "#a855f7", ollama: "#737373",
+}
+
+// Static fallback — overridden by dynamic list when providers are fetched
+const MODEL_OPTIONS_STATIC = [
   { id: "", label: "Default (System)", color: "#737373" },
   { id: "claude-sonnet-4-20250514", label: "Claude Sonnet", color: "#f59e0b" },
-  { id: "claude-opus-4-20250514", label: "Claude Opus", color: "#d97706" },
   { id: "gpt-4o", label: "GPT-4o", color: "#10b981" },
-  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", color: "#3b82f6" },
-  { id: "grok-3-mini", label: "Grok 3 Mini", color: "#ec4899" },
-  { id: "deepseek-chat", label: "DeepSeek", color: "#06b6d4" },
 ]
+
+function buildModelOptions(providers: { id: string; name: string; configured: boolean; models: string[]; default_model: string }[]) {
+  const options: { id: string; label: string; color: string }[] = [
+    { id: "", label: "Default (System)", color: "#737373" },
+  ]
+  for (const p of providers) {
+    if (!p.configured) continue  // Only show providers with API keys
+    const color = PROVIDER_COLORS[p.id] || "#737373"
+    // Show top 2 models per provider to keep list manageable
+    const models = p.models.slice(0, 2)
+    for (const m of models) {
+      const shortName = m.includes("/") ? m.split("/").pop()! : m
+      options.push({
+        id: `${p.id}:${m}`,  // provider:model format for _parse_model_spec
+        label: `${shortName} (${p.name})`,
+        color,
+      })
+    }
+  }
+  return options
+}
 
 // Static role options grouped by category (mirrors configs/roles/)
 const ROLE_OPTIONS: Record<string, RoleOption[]> = {
@@ -517,6 +542,16 @@ function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
   const [selectedType, setSelectedType] = useState<Agent["type"] | null>(null)
   const [selectedRole, setSelectedRole] = useState("")
   const [selectedModel, setSelectedModel] = useState("")
+  const [modelOptions, setModelOptions] = useState(MODEL_OPTIONS_STATIC)
+
+  // Fetch available providers to build dynamic model options
+  useEffect(() => {
+    if (showMenu) {
+      import("@/lib/api").then(api =>
+        api.getProviders().then(r => setModelOptions(buildModelOptions(r.providers)))
+      ).catch(() => {})
+    }
+  }, [showMenu])
 
   const handleSelectType = (type: Agent["type"]) => {
     if (disabled) return
@@ -694,7 +729,7 @@ function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
                   <div>
                     <p className="font-mono text-[9px] text-[var(--muted-foreground)] mb-1 uppercase tracking-wider">AI Model</p>
                     <div className="space-y-0.5">
-                      {MODEL_OPTIONS.map(m => (
+                      {modelOptions.map(m => (
                         <button
                           key={m.id}
                           onClick={() => setSelectedModel(m.id)}

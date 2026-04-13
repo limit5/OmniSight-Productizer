@@ -403,3 +403,49 @@ def list_providers() -> list[dict]:
         },
     ]
     return providers
+
+
+def validate_model_spec(model_spec: str) -> dict:
+    """Validate a model spec and check if the provider has an API key configured.
+
+    Args:
+        model_spec: Model spec like "openrouter:qwen/qwen3-235b" or "claude-sonnet-4"
+
+    Returns:
+        {"valid": True/False, "provider": str, "model": str, "configured": bool, "warning": str}
+    """
+    if not model_spec:
+        return {"valid": True, "provider": "", "model": "", "configured": True, "warning": ""}
+
+    # Parse provider:model format
+    if ":" in model_spec:
+        provider, _, model = model_spec.partition(":")
+        provider = provider.strip()
+        model = model.strip()
+    else:
+        # Plain model name — check which provider it belongs to
+        provider = ""
+        model = model_spec
+        for p in list_providers():
+            if model in p.get("models", []) or model == p.get("default_model"):
+                provider = p["id"]
+                break
+
+    if not provider:
+        # No provider identified — will use global default, which is fine
+        return {"valid": True, "provider": settings.llm_provider, "model": model, "configured": True, "warning": ""}
+
+    # Check if provider is known
+    providers_map = {p["id"]: p for p in list_providers()}
+    if provider not in providers_map:
+        return {"valid": False, "provider": provider, "model": model, "configured": False,
+                "warning": f"Unknown provider: {provider}"}
+
+    # Check if provider has API key
+    p_info = providers_map[provider]
+    if p_info.get("requires_key") and not p_info.get("configured"):
+        return {"valid": False, "provider": provider, "model": model, "configured": False,
+                "warning": f"Provider '{p_info['name']}' requires an API key but none is configured. "
+                           f"Set {p_info.get('env_var', '')} in .env or enter it in Settings."}
+
+    return {"valid": True, "provider": provider, "model": model, "configured": True, "warning": ""}

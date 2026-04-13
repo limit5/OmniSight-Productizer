@@ -92,6 +92,16 @@ async def get_agent(agent_id: str):
 
 @router.post("", response_model=Agent, status_code=201)
 async def create_agent(body: AgentCreate):
+    # Validate ai_model provider has API key
+    if body.ai_model:
+        from backend.agents.llm import validate_model_spec
+        validation = validate_model_spec(body.ai_model)
+        if not validation["valid"]:
+            from backend.events import emit_token_warning
+            emit_token_warning(
+                "warn", f"Agent model warning: {validation['warning']}",
+            )
+
     type_str = body.type.value if hasattr(body.type, "value") else body.type
     agent_id = f"{type_str}-{uuid.uuid4().hex[:6]}"
     agent = Agent(
@@ -101,7 +111,7 @@ async def create_agent(body: AgentCreate):
         sub_type=body.sub_type,
         status=AgentStatus.booting,
         progress=AgentProgress(current=0, total=0),
-        thought_chain="Initializing...",
+        thought_chain="Initializing..." + (f" ⚠ {validation['warning']}" if body.ai_model and not validation.get("valid", True) else ""),
         ai_model=body.ai_model,
     )
     await _persist(agent)

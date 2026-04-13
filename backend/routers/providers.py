@@ -145,3 +145,14 @@ async def test_provider():
             "model": settings.get_model_name(),
             "error": str(exc)[:300],
         }
+
+
+@router.get("/validate/{model_spec:path}")
+async def validate_model(model_spec: str):
+    """Validate a model spec and check provider API key availability.
+
+    Examples: /providers/validate/openrouter:qwen/qwen3-235b
+              /providers/validate/claude-sonnet-4
+    """
+    from backend.agents.llm import validate_model_spec
+    return validate_model_spec(model_spec)
