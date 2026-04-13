@@ -286,6 +286,16 @@ async def _on_change_merged(event: dict) -> None:
     # Trigger CI/CD pipelines after merge
     asyncio.create_task(_trigger_ci_pipelines())
 
+    # Pipeline auto-advance: Gerrit merge = review checkpoint passed
+    try:
+        from backend.pipeline import force_advance, get_pipeline_status
+        status = get_pipeline_status()
+        if status.get("status") == "running" and status.get("current_step") == "review":
+            asyncio.create_task(force_advance())
+            logger.info("Pipeline: Gerrit merge triggered force-advance past review checkpoint")
+    except Exception:
+        pass
+
 
 async def _package_merged_artifacts(change_id: str, subject: str) -> None:
     """Create a release artifact bundle from a merged change.

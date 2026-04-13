@@ -275,6 +275,34 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
             await _notify("action", f"Agent {agent.id} failed on task {task.id}",
                            message=str(exc)[:200], source=f"agent:{agent.id}")
 
+        # Auto-finalize workspace on success (commit + collect artifacts)
+        if agent.status == AgentStatus.success and workspace_path:
+            try:
+                from backend.workspace import finalize, get_workspace
+                ws_info = get_workspace(agent.id)
+                if ws_info and ws_info.status == "active":
+                    await finalize(agent.id)
+                    logger.info("Auto-finalized workspace for %s", agent.id)
+                    # Auto-push to Gerrit if enabled
+                    from backend.config import settings as _cfg
+                    if _cfg.gerrit_enabled and _cfg.gerrit_ssh_host:
+                        try:
+                            from backend.workspace import _run
+                            from pathlib import Path
+                            gerrit_url = f"ssh://{_cfg.gerrit_ssh_host}:{_cfg.gerrit_ssh_port}/{_cfg.gerrit_project}"
+                            rc, out, err = await _run(
+                                f'git push "{gerrit_url}" HEAD:refs/for/main',
+                                cwd=Path(workspace_path),
+                            )
+                            if rc == 0:
+                                emit_invoke("gerrit_push", f"Agent {agent.id} pushed to Gerrit for review")
+                            else:
+                                logger.warning("Gerrit push failed for %s: %s", agent.id, err[:100])
+                        except Exception as exc:
+                            logger.warning("Gerrit push error: %s", exc)
+            except Exception as exc:
+                logger.warning("Auto-finalize failed for %s: %s", agent.id, exc)
+
         await _persist_agent(agent)
         # Update task status based on agent outcome
         if agent.status == AgentStatus.success:
