@@ -348,7 +348,9 @@ async def _maybe_decompose_task(task) -> list:
 async def _llm_decompose(text: str) -> list[str] | None:
     """Use LLM to decompose a compound task into atomic sub-tasks.
 
-    Returns list of sub-task titles, or None if LLM unavailable.
+    Returns:
+        list[str]: sub-task titles (2+), or [] if LLM says ATOMIC (no split),
+                   or None if LLM unavailable (triggers regex fallback).
     """
     try:
         from backend.agents.llm import get_llm
@@ -373,7 +375,7 @@ async def _llm_decompose(text: str) -> list[str] | None:
         content = resp.content.strip()  # type: ignore[union-attr]
 
         if "ATOMIC" in content:
-            return None  # LLM says no split needed
+            return []  # LLM explicitly says task is atomic — skip regex fallback
 
         # Parse numbered lines
         lines = []
