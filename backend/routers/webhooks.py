@@ -38,30 +38,58 @@ async def gerrit_webhook(request: Request):
     if not settings.gerrit_enabled:
         return JSONResponse(status_code=503, content={"detail": "Gerrit integration disabled"})
 
-    # Authenticate — per-instance secret from credential registry with scalar fallback
+    # Authenticate — verify signature BEFORE parsing payload to avoid DoS on
+    # untrusted JSON and to keep payload-derived host lookup post-verification.
     raw_body = await request.body()
-    try:
-        from backend.git_credentials import get_webhook_secret_for_host
-        # Try to identify Gerrit host from event payload or headers
-        _preview = json.loads(raw_body) if raw_body else {}
-        _gerrit_host = (_preview.get("change", {}).get("url", "") or "").split("/")[2] if "change" in _preview else ""
-        secret = get_webhook_secret_for_host(_gerrit_host, "gerrit") if _gerrit_host else settings.gerrit_webhook_secret
-    except Exception:
-        secret = settings.gerrit_webhook_secret
-    if secret:
-        import hashlib
-        import hmac as _hmac
-        signature = request.headers.get("X-Gerrit-Signature", "")
-        expected = _hmac.new(
-            secret.encode(), raw_body, hashlib.sha256
-        ).hexdigest()
+    # Reject obviously oversized payloads (DoS guard) — Gerrit events are <64KB.
+    if len(raw_body) > 1_048_576:
+        return JSONResponse(status_code=413, content={"detail": "Payload too large"})
+
+    # First pass: verify against scalar secret if configured. We re-check
+    # against per-host secret after parsing, in case the host has its own.
+    import hashlib
+    import hmac as _hmac
+    scalar_secret = settings.gerrit_webhook_secret
+    signature = request.headers.get("X-Gerrit-Signature", "")
+    if scalar_secret:
+        expected = _hmac.new(scalar_secret.encode(), raw_body, hashlib.sha256).hexdigest()
         if not _hmac.compare_digest(signature, expected):
-            return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+            # Allow per-host secret to override only if scalar fails
+            scalar_ok = False
+        else:
+            scalar_ok = True
+    else:
+        scalar_ok = False
 
     try:
         body = json.loads(raw_body)
     except Exception:
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+
+    # Now safely derive Gerrit host from parsed body
+    gerrit_host = ""
+    try:
+        change_url = (body.get("change") or {}).get("url", "") or ""
+        if change_url:
+            from urllib.parse import urlparse as _urlparse
+            gerrit_host = (_urlparse(change_url).hostname or "")
+    except Exception:
+        gerrit_host = ""
+
+    # Per-host secret check (preferred when configured)
+    host_ok = False
+    if gerrit_host:
+        try:
+            from backend.git_credentials import get_webhook_secret_for_host
+            host_secret = get_webhook_secret_for_host(gerrit_host, "gerrit")
+        except Exception:
+            host_secret = ""
+        if host_secret:
+            expected_h = _hmac.new(host_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+            host_ok = _hmac.compare_digest(signature, expected_h)
+
+    if (scalar_secret or gerrit_host) and not (scalar_ok or host_ok):
+        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
 
     event_type = body.get("type", "")
     logger.info("Gerrit webhook: type=%s", event_type)
@@ -435,37 +463,63 @@ async def _trigger_ci_pipelines() -> None:
             logger.warning("GitHub Actions trigger error: %s", exc)
 
     if settings.ci_jenkins_enabled and settings.ci_jenkins_url:
+        # Auth via stdin -K config to keep token out of argv (visible in `ps`).
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl", "-s", "-X", "POST",
                 f"{settings.ci_jenkins_url}/build",
-                "-u", f"{settings.ci_jenkins_user}:{settings.ci_jenkins_api_token}",
+                "-K", "-",
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=15)
+            user = (settings.ci_jenkins_user or "").replace('"', '\\"')
+            tok = (settings.ci_jenkins_api_token or "").replace('"', '\\"')
+            cfg = f'user = "{user}:{tok}"\n'.encode()
+            try:
+                await asyncio.wait_for(proc.communicate(input=cfg), timeout=15)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise
             if proc.returncode == 0:
                 emit_invoke("ci_triggered", "Jenkins build triggered")
             else:
                 logger.warning("Jenkins trigger failed (rc=%d)", proc.returncode)
         except Exception as exc:
             logger.warning("Jenkins trigger error: %s", exc)
+            if proc and proc.returncode is None:
+                try: proc.kill()
+                except Exception: pass
 
     if settings.ci_gitlab_enabled and settings.gitlab_token:
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl", "-s", "-X", "POST",
                 f"{settings.gitlab_url}/api/v4/projects/{settings.gerrit_project.replace('/', '%2F')}/pipeline",
-                "-H", f"PRIVATE-TOKEN: {settings.gitlab_token}",
+                "-K", "-",
                 "-d", "ref=main",
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=15)
+            tok = (settings.gitlab_token or "").replace('"', '\\"')
+            cfg = f'header = "PRIVATE-TOKEN: {tok}"\n'.encode()
+            try:
+                await asyncio.wait_for(proc.communicate(input=cfg), timeout=15)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise
             if proc.returncode == 0:
                 emit_invoke("ci_triggered", "GitLab CI pipeline triggered")
             else:
                 logger.warning("GitLab CI trigger failed (rc=%d)", proc.returncode)
         except Exception as exc:
             logger.warning("GitLab CI trigger error: %s", exc)
+            if proc and proc.returncode is None:
+                try: proc.kill()
+                except Exception: pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -969,8 +969,12 @@ async def get_platform_config(platform: str = "") -> str:
         hint = ws / ".omnisight" / "platform"
         platform = hint.read_text().strip() if hint.exists() else "aarch64"
 
-    profile = _Path(__file__).resolve().parent.parent.parent / "configs" / "platforms" / f"{platform}.yaml"
-    if not profile.exists():
+    # Validate platform name to prevent path traversal via attacker-controlled hint.
+    from backend.sdk_provisioner import _validate_platform_name, _platform_profile
+    if not _validate_platform_name(platform):
+        return f"[ERROR] Invalid platform name: {platform!r}"
+    profile = _platform_profile(platform)
+    if profile is None or not profile.exists():
         return f"[ERROR] Platform profile not found: {platform}"
 
     try:

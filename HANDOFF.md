@@ -1,8 +1,22 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
-> 撰寫時間：2026-04-13（Phase 46 完成後更新）
-> 最後 commit：`e6428ba` (master)
-> 工作目錄狀態：clean（所有變更已 commit）
+> 撰寫時間：2026-04-14（Phase 42-46 深度審計後修復進行中）
+> 最後 commit：`8d46e8b` (master) → audit-fix batches in progress
+> 工作目錄狀態：audit-fix batches 1-N 進行中
+
+## Audit-Fix 進度（Phase 42-46 深度審計後續）
+- 第二輪審計總計 ~85 個問題（13 真 CRITICAL + 4 新 CRITICAL + 21 HIGH + ...）
+- **Batch 1（完成）**：Security & path-traversal — C3/C4/C5/C6/C8/C9/C10/C12/M14/N2
+  - Jenkins/GitLab token 改走 `curl -K -` stdin，不再經 argv（`ps` 不可見）
+  - Gerrit webhook 簽名驗證提前到 payload parse 之前，並做 1MB body 上限
+  - `git_credentials.yaml` 路徑限制在 `configs/` 與 `~/.config/omnisight/`
+  - Auto-fix `_resolve_under_workspace()` + symlink 拒絕 + git-lock 60s stale-guard
+  - SSH key chmod 限制在 `~/.ssh` 或 configured key dir，並拒絕 symlink
+  - SDK install_script 強制 relative + resolve under sdk_path + 拒絕 symlink
+  - SDK scan 拒絕 symlink，避免惡意 repo 注入外部路徑
+  - `_validate_platform_name` 統一守門 platform 名稱（拒絕 path traversal）
+  - DISK_FULL 清理改為 whitelist + 1h in-flight 保護 + symlink TOCTOU 重檢
+- Batches 2-6：pending
 
 ---
 

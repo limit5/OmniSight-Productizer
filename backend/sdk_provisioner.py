@@ -22,6 +22,25 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
 _SDK_ROOT = _PROJECT_ROOT / ".sdks"  # Local SDK cache directory
 
+_PLATFORM_NAME_RE = __import__("re").compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _validate_platform_name(name: str) -> bool:
+    """Allow only safe platform identifiers (no path separators, no '..')."""
+    return bool(name) and bool(_PLATFORM_NAME_RE.match(name)) and ".." not in name
+
+
+def _platform_profile(platform: str) -> Path | None:
+    """Return the resolved platform YAML path, or None if unsafe."""
+    if not _validate_platform_name(platform):
+        return None
+    candidate = (_PLATFORMS_DIR / f"{platform}.yaml").resolve(strict=False)
+    try:
+        candidate.relative_to(_PLATFORMS_DIR.resolve())
+    except ValueError:
+        return None
+    return candidate
+
 
 async def provision_sdk(platform: str) -> dict:
     """Clone and provision the vendor SDK for a platform profile.
@@ -31,7 +50,9 @@ async def provision_sdk(platform: str) -> dict:
 
     Returns: {status, sdk_path, sysroot_found, cmake_found, details}
     """
-    profile = _PLATFORMS_DIR / f"{platform}.yaml"
+    profile = _platform_profile(platform)
+    if profile is None:
+        return {"status": "error", "details": f"Invalid platform name: {platform!r}"}
     if not profile.exists():
         return {"status": "error", "details": f"Platform profile not found: {platform}"}
 
@@ -82,10 +103,26 @@ async def provision_sdk(platform: str) -> dict:
     except Exception as exc:
         return {"status": "error", "details": str(exc)[:200]}
 
-    # Run install script if configured
+    # Run install script if configured. Reject absolute paths and
+    # path-traversal — must be a relative file inside the cloned SDK.
     install_script = data.get("sdk_install_script", "")
+    script_path: Path | None = None
     if install_script:
-        script_path = sdk_path / install_script
+        if Path(install_script).is_absolute() or ".." in Path(install_script).parts:
+            logger.warning(
+                "Refusing absolute/traversal sdk_install_script: %s", install_script
+            )
+        else:
+            try:
+                cand = (sdk_path / install_script).resolve(strict=False)
+                cand.relative_to(sdk_path.resolve())
+                if not cand.is_symlink():
+                    script_path = cand
+                else:
+                    logger.warning("Refusing symlinked install script: %s", cand)
+            except (ValueError, OSError):
+                logger.warning("Install script outside SDK dir: %s", install_script)
+    if script_path is not None:
         if script_path.exists():
             emit_pipeline_phase("sdk_provision", f"Running install script: {install_script}")
             try:
@@ -143,39 +180,53 @@ def scan_sdk_repo(sdk_path: Path) -> dict:
     if not sdk_path.is_dir():
         return {"sysroot_path": "", "cmake_toolchain_file": "", "toolchain_files": []}
 
-    # Scan for sysroot directories (max depth 3)
+    sdk_resolved = sdk_path.resolve()
+
+    def _safe_inside(p: Path) -> bool:
+        """True if p is not a symlink and stays inside sdk_resolved."""
+        try:
+            if p.is_symlink():
+                return False
+            r = p.resolve(strict=False)
+            r.relative_to(sdk_resolved)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    # Scan for sysroot directories (rejecting symlinks to prevent
+    # malicious SDK repos pointing at host paths like /etc).
     sysroot_candidates = ["sysroot", "staging", "target", "rootfs", "sdk/sysroot"]
     for candidate in sysroot_candidates:
         p = sdk_path / candidate
-        if p.is_dir():
-            # Verify it looks like a sysroot (has usr/lib or usr/include)
-            if (p / "usr" / "lib").is_dir() or (p / "usr" / "include").is_dir() or (p / "lib").is_dir():
-                sysroot_path = str(p)
-                break
-    # Deeper scan if no obvious candidate
+        if not _safe_inside(p) or not p.is_dir():
+            continue
+        if (p / "usr" / "lib").is_dir() or (p / "usr" / "include").is_dir() or (p / "lib").is_dir():
+            sysroot_path = str(p)
+            break
     if not sysroot_path:
         for p in sdk_path.rglob("usr/lib"):
-            if p.is_dir():
-                sysroot_path = str(p.parent.parent)  # usr/lib → parent of usr
-                break
+            if not _safe_inside(p) or not p.is_dir():
+                continue
+            sysroot_path = str(p.parent.parent)
+            break
 
-    # Scan for CMake toolchain files
     cmake_patterns = ["toolchain.cmake", "*-toolchain.cmake", "CMakeToolchain.cmake",
                        "cmake/toolchain.cmake", "cmake/*.toolchain.cmake"]
     for pattern in cmake_patterns:
         matches = list(sdk_path.glob(pattern))
         if not matches:
             matches = list(sdk_path.glob(f"**/{pattern}"))
-        for m in matches[:3]:  # Limit to prevent huge scans
+        for m in matches[:3]:
+            if not _safe_inside(m):
+                continue
             toolchain_files.append(str(m))
             if not cmake_file:
                 cmake_file = str(m)
 
-    # Also look for Makefile-based toolchain indicators
     for indicator in ["Makefile", "build.sh", "setup_env.sh", "environment-setup-*"]:
-        matches = list(sdk_path.glob(indicator))
-        for m in matches[:2]:
-            toolchain_files.append(str(m))
+        for m in list(sdk_path.glob(indicator))[:2]:
+            if _safe_inside(m):
+                toolchain_files.append(str(m))
 
     return {
         "sysroot_path": sysroot_path,
@@ -189,7 +240,9 @@ def validate_sdk_paths(platform: str) -> dict:
 
     Returns: {valid, missing_paths, warnings}
     """
-    profile = _PLATFORMS_DIR / f"{platform}.yaml"
+    profile = _platform_profile(platform)
+    if profile is None:
+        return {"valid": False, "missing_paths": [], "warnings": [f"Invalid platform name: {platform!r}"]}
     if not profile.exists():
         return {"valid": False, "missing_paths": [], "warnings": ["Profile not found"]}
 

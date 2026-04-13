@@ -135,9 +135,10 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     if platform_hint.is_file():
         try:
             import yaml
+            from backend.sdk_provisioner import _platform_profile
             platform_name = platform_hint.read_text().strip()
-            platform_yaml = _PROJECT_ROOT / "configs" / "platforms" / f"{platform_name}.yaml"
-            if platform_yaml.is_file():
+            platform_yaml = _platform_profile(platform_name)
+            if platform_yaml is not None and platform_yaml.is_file():
                 pdata = yaml.safe_load(platform_yaml.read_text())
                 sysroot = pdata.get("sysroot_path", "")
                 if sysroot and Path(sysroot).is_dir():

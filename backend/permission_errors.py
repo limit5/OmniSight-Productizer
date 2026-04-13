@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -104,63 +105,100 @@ async def attempt_auto_fix(category: str, error_output: str, workspace_path: str
     from pathlib import Path
 
     if category == PermissionErrorCategory.FILE_READONLY:
-        # Extract file path from error
         path = _extract_path_from_error(error_output)
-        if path and workspace_path:
-            target = Path(workspace_path) / path
-            if target.exists():
-                try:
-                    import os, stat
-                    current = target.stat().st_mode
-                    target.chmod(current | stat.S_IWUSR)
-                    return {"fixed": True, "action": "chmod u+w", "detail": str(target)}
-                except Exception as exc:
-                    return {"fixed": False, "action": "chmod failed", "detail": str(exc)}
-        return {"fixed": False, "action": "no path found", "detail": ""}
+        target = _resolve_under_workspace(path, workspace_path)
+        if not target:
+            return {"fixed": False, "action": "path outside workspace", "detail": path}
+        if target.exists() and not target.is_symlink():
+            try:
+                import stat
+                current = target.stat().st_mode
+                target.chmod(current | stat.S_IWUSR)
+                return {"fixed": True, "action": "chmod u+w", "detail": str(target)}
+            except Exception as exc:
+                return {"fixed": False, "action": "chmod failed", "detail": str(exc)}
+        return {"fixed": False, "action": "target missing or symlink", "detail": str(target)}
 
     if category == PermissionErrorCategory.DIR_NOT_WRITABLE:
         path = _extract_path_from_error(error_output)
-        if path and workspace_path:
-            target = Path(workspace_path) / path
-            parent = target.parent if not target.is_dir() else target
-            if parent.exists():
-                try:
-                    import os, stat
-                    parent.chmod(parent.stat().st_mode | stat.S_IWUSR)
-                    return {"fixed": True, "action": "chmod u+w dir", "detail": str(parent)}
-                except Exception as exc:
-                    return {"fixed": False, "action": "chmod dir failed", "detail": str(exc)}
+        target = _resolve_under_workspace(path, workspace_path)
+        if not target:
+            return {"fixed": False, "action": "path outside workspace", "detail": path}
+        parent = target.parent if not target.is_dir() else target
+        # Re-validate parent stays in workspace (parent of workspace root would escape)
+        if not _resolve_under_workspace(str(parent), workspace_path, _accept_existing=True):
+            return {"fixed": False, "action": "parent outside workspace", "detail": str(parent)}
+        if parent.exists() and not parent.is_symlink():
+            try:
+                import stat
+                parent.chmod(parent.stat().st_mode | stat.S_IWUSR)
+                return {"fixed": True, "action": "chmod u+w dir", "detail": str(parent)}
+            except Exception as exc:
+                return {"fixed": False, "action": "chmod dir failed", "detail": str(exc)}
         return {"fixed": False, "action": "no path found", "detail": ""}
 
     if category == PermissionErrorCategory.SSH_KEY_PERMISSION:
-        # Extract key path
         m = re.search(r"for '([^']+)'|for \"([^\"]+)\"|permissions.*?(/[^\s'\"]+)", error_output, re.I)
-        if m:
-            key_path = Path(m.group(1) or m.group(2) or m.group(3)).expanduser()
-            if key_path.exists():
-                try:
-                    import os, stat
-                    key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
-                    return {"fixed": True, "action": "chmod 600", "detail": str(key_path)}
-                except Exception as exc:
-                    return {"fixed": False, "action": "chmod 600 failed", "detail": str(exc)}
-        return {"fixed": False, "action": "no key path found", "detail": ""}
+        if not m:
+            return {"fixed": False, "action": "no key path found", "detail": ""}
+        raw = Path(m.group(1) or m.group(2) or m.group(3)).expanduser()
+        # Reject symlinks BEFORE resolve to prevent attacker pivoting via /tmp/key→/etc/shadow
+        if raw.is_symlink():
+            return {"fixed": False, "action": "refused: symlink", "detail": str(raw)}
+        if not _is_allowed_ssh_key_path(raw):
+            return {"fixed": False, "action": "refused: outside allowed ssh key dirs", "detail": str(raw)}
+        if raw.exists():
+            try:
+                import stat
+                raw.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
+                return {"fixed": True, "action": "chmod 600", "detail": str(raw)}
+            except Exception as exc:
+                return {"fixed": False, "action": "chmod 600 failed", "detail": str(exc)}
+        return {"fixed": False, "action": "key not found", "detail": str(raw)}
 
     if category == PermissionErrorCategory.DISK_FULL:
         try:
             from backend.routers.artifacts import get_artifacts_root
-            artifacts_root = get_artifacts_root()
-            # Remove old artifact files (keep last 20)
-            import shutil
-            all_files = sorted(artifacts_root.rglob("*"), key=lambda f: f.stat().st_mtime if f.is_file() else 0)
-            files = [f for f in all_files if f.is_file()]
+            artifacts_root = get_artifacts_root().resolve()
+            import time as _time
+            now = _time.time()
+            # Whitelist: only delete known artifact extensions/dirs
+            allowed_ext = {".tar.gz", ".tgz", ".zip", ".log", ".tmp", ".bin"}
+            candidates: list[Path] = []
+            for f in artifacts_root.rglob("*"):
+                if not f.is_file() or f.is_symlink():
+                    continue
+                # Ensure inside artifacts_root after resolve (no symlink escape)
+                try:
+                    f_resolved = f.resolve()
+                    f_resolved.relative_to(artifacts_root)
+                except (ValueError, OSError):
+                    continue
+                # Skip in-flight writes (modified within last 1h)
+                try:
+                    if now - f.stat().st_mtime < 3600:
+                        continue
+                except OSError:
+                    continue
+                # Must match whitelist or be under releases/
+                suffix = "".join(f.suffixes[-2:]) if len(f.suffixes) >= 2 else f.suffix
+                if suffix not in allowed_ext and "releases" not in f.parts:
+                    continue
+                candidates.append(f)
+            candidates.sort(key=lambda p: p.stat().st_mtime)
             removed = 0
             freed = 0
-            for f in files[:-20]:  # Keep last 20
-                size = f.stat().st_size
-                f.unlink(missing_ok=True)
-                removed += 1
-                freed += size
+            for f in candidates[:-20]:
+                try:
+                    size = f.stat().st_size
+                    # TOCTOU guard: re-check symlink right before unlink
+                    if f.is_symlink():
+                        continue
+                    f.unlink(missing_ok=True)
+                    removed += 1
+                    freed += size
+                except OSError:
+                    continue
             if removed > 0:
                 return {"fixed": True, "action": f"cleaned {removed} old artifacts", "detail": f"freed {freed // 1024}KB"}
         except Exception as exc:
@@ -178,13 +216,18 @@ async def attempt_auto_fix(category: str, error_output: str, workspace_path: str
 
     if category == PermissionErrorCategory.GIT_LOCK:
         if workspace_path:
-            lock = Path(workspace_path) / ".git" / "index.lock"
-            if lock.exists():
-                try:
+            try:
+                ws_resolved = Path(workspace_path).resolve(strict=False)
+                lock = (ws_resolved / ".git" / "index.lock")
+                if lock.exists() and not lock.is_symlink():
+                    # Stale-lock guard: only remove if older than 60s
+                    import time as _time
+                    if _time.time() - lock.stat().st_mtime < 60:
+                        return {"fixed": False, "action": "lock too fresh — likely held", "detail": str(lock)}
                     lock.unlink()
-                    return {"fixed": True, "action": "removed index.lock", "detail": str(lock)}
-                except Exception as exc:
-                    return {"fixed": False, "action": "lock removal failed", "detail": str(exc)}
+                    return {"fixed": True, "action": "removed stale index.lock", "detail": str(lock)}
+            except Exception as exc:
+                return {"fixed": False, "action": "lock removal failed", "detail": str(exc)}
         return {"fixed": False, "action": "no lock file found", "detail": ""}
 
     if category == PermissionErrorCategory.NPM_EACCES:
@@ -192,6 +235,55 @@ async def attempt_auto_fix(category: str, error_output: str, workspace_path: str
 
     # Non-fixable categories
     return {"fixed": False, "action": "requires manual intervention", "detail": ""}
+
+
+def _resolve_under_workspace(
+    rel_or_abs: str, workspace_path: str, _accept_existing: bool = False
+) -> Path | None:
+    """Resolve a path and verify it stays inside *workspace_path*.
+
+    Returns None if workspace is empty, the path escapes the workspace,
+    or the path is itself a symlink (which could be redirected).
+    """
+    if not rel_or_abs or not workspace_path:
+        return None
+    try:
+        ws = Path(workspace_path).resolve(strict=False)
+        cand = Path(rel_or_abs)
+        # If absolute, accept only when already inside workspace.
+        # If relative, resolve under workspace.
+        if cand.is_absolute():
+            target = cand.resolve(strict=False)
+        else:
+            target = (ws / cand).resolve(strict=False)
+        target.relative_to(ws)
+        if not _accept_existing and target.is_symlink():
+            return None
+        return target
+    except (ValueError, OSError):
+        return None
+
+
+def _is_allowed_ssh_key_path(p: Path) -> bool:
+    """Allow only paths under ~/.ssh or the configured git_ssh_key_path dir."""
+    try:
+        resolved = p.resolve(strict=False)
+        roots: list[Path] = [Path("~/.ssh").expanduser().resolve()]
+        try:
+            from backend.config import settings as _s
+            if _s.git_ssh_key_path:
+                roots.append(Path(_s.git_ssh_key_path).expanduser().resolve().parent)
+        except Exception:
+            pass
+        for r in roots:
+            try:
+                resolved.relative_to(r)
+                return True
+            except ValueError:
+                continue
+        return False
+    except OSError:
+        return False
 
 
 def _extract_path_from_error(output: str) -> str:

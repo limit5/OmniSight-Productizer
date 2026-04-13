@@ -111,7 +111,11 @@ class TestAutoFix:
         assert os.access(f, os.W_OK)
 
     @pytest.mark.asyncio
-    async def test_fix_ssh_key_permission(self, tmp_path):
+    async def test_fix_ssh_key_permission(self, tmp_path, monkeypatch):
+        # Auto-fix only chmods keys under allowed roots (configured key dir).
+        # Point settings.git_ssh_key_path into tmp_path so this key is allowed.
+        from backend.config import settings
+        monkeypatch.setattr(settings, "git_ssh_key_path", str(tmp_path / "id_default"))
         key = tmp_path / "id_test"
         key.write_text("fake key")
         key.chmod(0o644)
@@ -122,9 +126,22 @@ class TestAutoFix:
             "",
         )
         assert result["fixed"] is True
-        import stat
         mode = key.stat().st_mode & 0o777
         assert mode == 0o600
+
+    @pytest.mark.asyncio
+    async def test_fix_ssh_key_permission_refuses_outside_allowed(self, tmp_path):
+        # Hardening: keys outside ~/.ssh or configured dir must be refused.
+        key = tmp_path / "id_test"
+        key.write_text("fake key")
+        key.chmod(0o644)
+        result = await attempt_auto_fix(
+            PermissionErrorCategory.SSH_KEY_PERMISSION,
+            f"Permissions 0644 for '{key}' are too open",
+            "",
+        )
+        assert result["fixed"] is False
+        assert "outside" in result["action"] or "refused" in result["action"]
 
     @pytest.mark.asyncio
     async def test_fix_git_lock(self, tmp_path):
@@ -132,6 +149,10 @@ class TestAutoFix:
         git_dir.mkdir()
         lock = git_dir / "index.lock"
         lock.write_text("locked")
+        # Stale-lock guard requires lock to be >60s old.
+        import os, time
+        old = time.time() - 120
+        os.utime(lock, (old, old))
 
         result = await attempt_auto_fix(
             PermissionErrorCategory.GIT_LOCK,
@@ -140,6 +161,19 @@ class TestAutoFix:
         )
         assert result["fixed"] is True
         assert not lock.exists()
+
+    @pytest.mark.asyncio
+    async def test_fix_git_lock_refuses_fresh_lock(self, tmp_path):
+        # Hardening: don't yank a fresh lock — another git may hold it.
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock = git_dir / "index.lock"
+        lock.write_text("locked")
+        result = await attempt_auto_fix(
+            PermissionErrorCategory.GIT_LOCK, "index.lock exists", str(tmp_path),
+        )
+        assert result["fixed"] is False
+        assert lock.exists()
 
     @pytest.mark.asyncio
     async def test_fix_port_in_use(self):

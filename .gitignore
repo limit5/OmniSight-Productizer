@@ -28,6 +28,13 @@ __pycache__/
 # build artifacts
 /build/
 
+# SDK auto-discovery cache (cloned vendor SDKs)
+/.sdks/
+
+# Backend runtime / artifacts
+backend/data/
+backend/artifacts/
+
 # agent isolated workspaces
 .agent_workspaces/
 

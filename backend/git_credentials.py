@@ -25,27 +25,65 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CREDENTIALS_CACHE: list[dict] | None = None
 
 
-def _load_yaml_credentials() -> list[dict]:
-    """Load credentials from git_credentials.yaml."""
-    # Check configured path first
-    if settings.git_credentials_file:
-        path = Path(settings.git_credentials_file).expanduser()
-    else:
-        path = _PROJECT_ROOT / "configs" / "git_credentials.yaml"
+def _allowed_credential_roots() -> list[Path]:
+    """Directories from which the credentials file may be loaded."""
+    roots = [(_PROJECT_ROOT / "configs").resolve()]
+    home_ssh = (Path("~/.config/omnisight").expanduser()).resolve()
+    roots.append(home_ssh)
+    return roots
 
-    if not path.exists():
+
+def _load_yaml_credentials() -> list[dict]:
+    """Load credentials from git_credentials.yaml.
+
+    The configured path must resolve under one of the allowed roots
+    (configs/ or ~/.config/omnisight/) to prevent path-traversal abuse
+    via OMNISIGHT_GIT_CREDENTIALS_FILE.
+    """
+    if settings.git_credentials_file:
+        candidate = Path(settings.git_credentials_file).expanduser()
+    else:
+        candidate = _PROJECT_ROOT / "configs" / "git_credentials.yaml"
+
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return []
+
+    allowed = _allowed_credential_roots()
+    if not any(_is_within(resolved, root) for root in allowed):
+        logger.warning(
+            "Refusing to load credentials from %s (outside allowed roots)",
+            resolved,
+        )
+        return []
+
+    if not resolved.exists():
         return []
 
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
         repos = data.get("repositories", [])
         if isinstance(repos, list):
-            logger.info("Loaded %d repo credentials from %s", len(repos), path)
+            logger.info("Loaded %d repo credentials from %s", len(repos), resolved)
             return repos
-    except Exception as exc:
-        logger.warning("Failed to load git_credentials.yaml: %s", exc)
+    except yaml.YAMLError as exc:
+        # Avoid logging credential-bearing snippets — only the error type/line.
+        logger.warning(
+            "Failed to parse git_credentials.yaml (%s)", type(exc).__name__
+        )
+    except Exception as exc:  # pragma: no cover — unexpected I/O
+        logger.warning("Credential load I/O error: %s", type(exc).__name__)
 
     return []
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _load_json_map(json_str: str) -> dict[str, str]:
