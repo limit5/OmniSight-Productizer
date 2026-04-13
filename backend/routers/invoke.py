@@ -60,10 +60,54 @@ _state_lock = asyncio.Lock()
 async def run_watchdog():
     """Periodic scan for stuck background tasks and stale assignments."""
     import time as _time
+    from backend import stuck_detector as _stuck
+    # De-dupe: don't propose the same (agent_id, reason) again while an
+    # earlier proposal is still pending.
+    _open_proposals: dict[tuple[str, str], str] = {}
     while True:
         await asyncio.sleep(60)
         now = _time.time()
         async with _state_lock:
+            # Phase 47B: stuck-agent detection BEFORE hard cancellation, so
+            # full_auto/turbo modes can try a switch_model / spawn_alternate
+            # remediation ahead of the 30-min timeout axe.
+            for agent_id, (_, started) in list(_running_tasks.items()):
+                if now - started <= 120:
+                    continue  # too young to be stuck
+                agent = _agents.get(agent_id)
+                signal = _stuck.analyze_agent(
+                    agent_id,
+                    error_history=None,  # GraphState is in-memory only
+                    retry_count=0,
+                    started_at=started,
+                    task_id=getattr(agent, "current_task_id", None) if agent else None,
+                    now=now,
+                )
+                if signal is None:
+                    continue
+                key = (agent_id, signal.reason.value)
+                # Skip if a prior proposal is still pending
+                prior_id = _open_proposals.get(key)
+                if prior_id:
+                    try:
+                        from backend import decision_engine as _de
+                        prior = _de.get(prior_id)
+                        if prior and prior.status.value == "pending":
+                            continue
+                    except Exception:
+                        pass
+                try:
+                    dec = _stuck.propose_remediation(signal)
+                    _open_proposals[key] = dec.id
+                    logger.info(
+                        "[STUCK] %s: %s → %s (decision=%s, status=%s)",
+                        agent_id, signal.reason.value,
+                        signal.suggested_strategy.value,
+                        dec.id, dec.status.value,
+                    )
+                except Exception as exc:
+                    logger.warning("[STUCK] proposal failed: %s", exc)
+
             # Check background tasks
             for agent_id, (task_handle, started) in list(_running_tasks.items()):
                 if now - started > TASK_TIMEOUT:
