@@ -353,8 +353,14 @@ async def get_task(task_id: str) -> dict | None:
 
 async def upsert_task(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id, created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type, parent_task_id, child_task_ids, external_issue_id, issue_url, acceptance_criteria, labels)
-           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id, :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type, :parent_task_id, :child_task_ids, :external_issue_id, :issue_url, :acceptance_criteria, :labels)
+        """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id,
+             created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type,
+             parent_task_id, child_task_ids, external_issue_id, issue_url, acceptance_criteria,
+             labels, depends_on, external_issue_platform, last_external_sync_at)
+           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id,
+                   :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type,
+                   :parent_task_id, :child_task_ids, :external_issue_id, :issue_url, :acceptance_criteria,
+                   :labels, :depends_on, :external_issue_platform, :last_external_sync_at)
            ON CONFLICT(id) DO UPDATE SET
              title=excluded.title, description=excluded.description, priority=excluded.priority,
              status=excluded.status, assigned_agent_id=excluded.assigned_agent_id,
@@ -362,7 +368,9 @@ async def upsert_task(data: dict) -> None:
              suggested_agent_type=excluded.suggested_agent_type, suggested_sub_type=excluded.suggested_sub_type,
              parent_task_id=excluded.parent_task_id, child_task_ids=excluded.child_task_ids,
              external_issue_id=excluded.external_issue_id, issue_url=excluded.issue_url,
-             acceptance_criteria=excluded.acceptance_criteria, labels=excluded.labels
+             acceptance_criteria=excluded.acceptance_criteria, labels=excluded.labels,
+             depends_on=excluded.depends_on, external_issue_platform=excluded.external_issue_platform,
+             last_external_sync_at=excluded.last_external_sync_at
         """,
         {
             "id": data["id"],
@@ -382,6 +390,9 @@ async def upsert_task(data: dict) -> None:
             "issue_url": data.get("issue_url"),
             "acceptance_criteria": data.get("acceptance_criteria"),
             "labels": json.dumps(data.get("labels", [])),
+            "depends_on": json.dumps(data.get("depends_on", [])),
+            "external_issue_platform": data.get("external_issue_platform"),
+            "last_external_sync_at": data.get("last_external_sync_at"),
         },
     )
     await _conn().commit()
