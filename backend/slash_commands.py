@@ -352,11 +352,54 @@ async def _release(args: str) -> str:
     return f"[ERROR] Unknown release action: {action}. Use `create` or `upload`."
 
 
+async def _pipeline(args: str) -> str:
+    """E2E pipeline control — start, status, advance."""
+    from backend.pipeline import get_pipeline_status, run_pipeline, force_advance
+
+    if not args.strip():
+        status = get_pipeline_status()
+        step = status.get("current_step", "idle")
+        return (
+            f"**Pipeline Status**\n\n"
+            f"  Status: `{status['status']}`\n"
+            f"  Current Step: `{step}`\n"
+            f"  Steps: {' → '.join(status.get('steps', []))}\n\n"
+            f"Usage:\n"
+            f"  `/pipeline start [spec description]` — start full E2E pipeline\n"
+            f"  `/pipeline advance` — force past human checkpoint\n"
+        )
+
+    parts = args.strip().split(maxsplit=1)
+    action = parts[0].lower()
+
+    if action == "start":
+        spec = parts[1] if len(parts) > 1 else ""
+        try:
+            result = await run_pipeline(spec)
+            return (
+                f"**Pipeline Started**\n\n"
+                f"  ID: `{result.get('id', '')}`\n"
+                f"  First Step: `{result.get('current_step', '')}`\n"
+                f"  Tasks Created: {result.get('tasks_created', 0)}\n"
+            )
+        except Exception as exc:
+            return f"[ERROR] Pipeline start failed: {exc}"
+
+    if action == "advance":
+        try:
+            result = await force_advance()
+            return f"**Pipeline Advanced**\n\n  Status: `{result['status']}`\n  Step: `{result.get('step', '')}`"
+        except Exception as exc:
+            return f"[ERROR] Pipeline advance failed: {exc}"
+
+    return f"[ERROR] Unknown pipeline action: {action}. Use `start`, `advance`."
+
+
 async def _help(args: str) -> str:
     categories = {
         "System": ["status", "info", "debug", "logs", "devices"],
         "Development": ["build", "test", "simulate", "review", "platform"],
-        "Hardware": ["deploy", "evk", "stream", "release"],
+        "Hardware": ["deploy", "evk", "stream", "release", "pipeline"],
         "Agent": ["spawn", "agents", "tasks", "assign", "invoke"],
         "Provider": ["provider", "switch", "budget"],
         "NPI": ["npi", "sdks"],
@@ -378,7 +421,7 @@ _HANDLERS: dict[str, Callable[[str], Awaitable[str]]] = {
     # Development
     "build": _build, "test": _test, "simulate": _simulate, "review": _review, "platform": _platform,
     # Hardware
-    "deploy": _deploy, "evk": _evk, "stream": _stream, "release": _release,
+    "deploy": _deploy, "evk": _evk, "stream": _stream, "release": _release, "pipeline": _pipeline,
     # Agent
     "spawn": _spawn, "agents": _agents, "tasks": _tasks, "assign": _assign, "invoke": _invoke,
     # Provider

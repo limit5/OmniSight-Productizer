@@ -29,8 +29,8 @@ PIPELINE_STEPS = [
         "name": "SPEC Analysis",
         "npi_phase": "phase-1",
         "tasks": [
-            {"title": "Analyze hardware manifest and client spec", "agent_type": "general"},
-            {"title": "Generate task breakdown from requirements", "agent_type": "general"},
+            {"title": "Analyze hardware manifest and client spec", "agent_type": "software"},
+            {"title": "Generate task breakdown from requirements", "agent_type": "software"},
         ],
         "auto_advance": True,
     },
@@ -82,7 +82,7 @@ PIPELINE_STEPS = [
         "name": "Release Packaging",
         "npi_phase": "phase-6",
         "tasks": [
-            {"title": "Create release bundle with manifest", "agent_type": "general"},
+            {"title": "Create release bundle with manifest", "agent_type": "software"},
         ],
         "auto_advance": True,
     },

@@ -35,6 +35,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "evk",       description: "檢查 EVK 連線狀態",                      category: "hardware", args: "[platform]", handler: "backend" },
   { name: "stream",    description: "列出 UVC 攝影機裝置",                     category: "hardware", handler: "backend" },
   { name: "release",   description: "建立 Release 打包 / 上傳",              category: "hardware", args: "[create|upload] [version]", handler: "backend" },
+  { name: "pipeline",  description: "E2E 全流程自動化管線",                  category: "hardware", args: "[start|advance] [spec]", handler: "backend" },
 
   // ── Agent ──
   { name: "spawn",     description: "建立新 Agent",                         category: "agent",    args: "[type]", handler: "api" },

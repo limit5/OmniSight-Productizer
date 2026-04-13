@@ -254,6 +254,36 @@ async def trigger_deploy(body: DeployRequest):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  E2E Pipeline (Phase 46)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class PipelineStartRequest(BaseModel):
+    spec_context: str = ""  # Optional SPEC description to pass to pipeline tasks
+
+
+@router.get("/pipeline/status")
+async def get_pipeline_status_endpoint():
+    """Get the current E2E pipeline run status."""
+    from backend.pipeline import get_pipeline_status
+    return get_pipeline_status()
+
+
+@router.post("/pipeline/start")
+async def start_pipeline(body: PipelineStartRequest):
+    """Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs."""
+    from backend.pipeline import run_pipeline
+    return await run_pipeline(body.spec_context)
+
+
+@router.post("/pipeline/advance")
+async def advance_pipeline_endpoint():
+    """Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed)."""
+    from backend.pipeline import force_advance
+    return await force_advance()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Release Packaging (Phase 40)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
