@@ -113,13 +113,21 @@ def get_gitlab_api_url(remote_url: str) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _get_token_for_url(url: str) -> str:
-    """Return the appropriate token for a given remote URL."""
-    platform = detect_platform(url)
-    if platform == "github" and settings.github_token:
-        return settings.github_token
-    if platform == "gitlab" and settings.gitlab_token:
-        return settings.gitlab_token
-    return ""
+    """Return the appropriate token for a given remote URL.
+
+    Uses the credential registry (per-host) with scalar fallback.
+    """
+    try:
+        from backend.git_credentials import get_token_for_url
+        return get_token_for_url(url)
+    except Exception:
+        # Fallback to legacy scalar lookup
+        platform = detect_platform(url)
+        if platform == "github" and settings.github_token:
+            return settings.github_token
+        if platform == "gitlab" and settings.gitlab_token:
+            return settings.gitlab_token
+        return ""
 
 
 # Cached path to the askpass helper script
@@ -171,8 +179,12 @@ def get_auth_env(url: str) -> dict[str, str]:
     is_ssh = url.startswith("git@") or url.startswith("ssh://")
 
     if is_ssh:
-        # SSH authentication
-        key_path = settings.git_ssh_key_path
+        # SSH authentication — per-host key from registry with scalar fallback
+        try:
+            from backend.git_credentials import get_ssh_key_for_url
+            key_path = get_ssh_key_for_url(url)
+        except Exception:
+            key_path = settings.git_ssh_key_path
         if key_path and Path(key_path).expanduser().exists():
             resolved = str(Path(key_path).expanduser())
             env["GIT_SSH_COMMAND"] = (
