@@ -292,7 +292,47 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             </div>
           </SettingsSection>
 
-          <SettingsSection title="GIT & SSH" integration="ssh">
+          <SettingsSection title="GIT REPOSITORIES" integration="ssh">
+            {/* Credential Registry — per-repo entries */}
+            {(() => {
+              const creds = (settingsData["git"]?.["credentials"] as Array<Record<string, unknown>>) || []
+              return creds.length > 0 ? (
+                <div className="space-y-2">
+                  {creds.map((cred, i) => {
+                    const platform = String(cred.platform || "unknown")
+                    const platformColor = platform === "github" ? "var(--validation-emerald)" :
+                      platform === "gitlab" ? "var(--hardware-orange)" :
+                      platform === "gerrit" ? "var(--neural-blue)" : "var(--muted-foreground)"
+                    const hasToken = String(cred.token || "") !== "" && String(cred.token || "") !== "***"
+                    return (
+                      <div key={String(cred.id || i)} className="p-2 rounded border border-[var(--border)] bg-[var(--background)] space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full`} style={{ backgroundColor: hasToken || cred.has_secret ? "var(--validation-emerald)" : "var(--muted-foreground)" }} />
+                          <span className="font-mono text-[10px] font-semibold" style={{ color: platformColor }}>
+                            {platform.toUpperCase()}
+                          </span>
+                          <span className="font-mono text-[9px] text-[var(--muted-foreground)] flex-1 truncate">
+                            {String(cred.id || "")}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[9px] text-[var(--muted-foreground)] truncate pl-3.5">
+                          {String(cred.url || cred.ssh_host || "")}
+                          {cred.project ? ` / ${cred.project}` : ""}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-1 opacity-60">
+                  No repositories configured. Edit configs/git_credentials.yaml or use fields below.
+                </div>
+              )
+            })()}
+            {/* Legacy scalar fallback fields */}
+            <div className="pt-1.5 pb-0.5">
+              <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">Default Credentials (fallback)</span>
+            </div>
             <SettingField label="SSH Key" value={getVal("git", "ssh_key_path")} onChange={v => setVal("git_ssh_key_path", v)} />
             <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
             <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />

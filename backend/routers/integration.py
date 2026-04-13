@@ -25,6 +25,29 @@ def _mask(value: str) -> str:
     return value[:3] + "*" * min(len(value) - 6, 20) + value[-3:]
 
 
+def _get_masked_credentials() -> list[dict]:
+    """Get credential registry with tokens masked for API response."""
+    try:
+        from backend.git_credentials import get_credential_registry
+        registry = get_credential_registry()
+        return [
+            {
+                "id": r.get("id", ""),
+                "url": r.get("url", ""),
+                "platform": r.get("platform", "unknown"),
+                "token": _mask(r.get("token", "")),
+                "ssh_key": r.get("ssh_key", ""),
+                "ssh_host": r.get("ssh_host", ""),
+                "ssh_port": r.get("ssh_port", 0),
+                "project": r.get("project", ""),
+                "has_secret": bool(r.get("webhook_secret", "")),
+            }
+            for r in registry
+        ]
+    except Exception:
+        return []
+
+
 @router.get("/settings")
 async def get_settings():
     """Return all integration settings grouped by category. Tokens are masked."""
@@ -49,6 +72,7 @@ async def get_settings():
             "github_token": _mask(settings.github_token),
             "gitlab_token": _mask(settings.gitlab_token),
             "gitlab_url": settings.gitlab_url,
+            "credentials": _get_masked_credentials(),
         },
         "gerrit": {
             "enabled": settings.gerrit_enabled,
