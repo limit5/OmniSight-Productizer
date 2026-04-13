@@ -27,10 +27,34 @@ from backend.prompt_loader import build_system_prompt
 logger = logging.getLogger(__name__)
 
 
-def _get_llm(bind_tools_for: str | None = None):
-    """Get the configured LLM, optionally with agent-specific tools bound."""
+def _parse_model_spec(model_name: str) -> tuple[str | None, str | None]:
+    """Parse a model spec into (provider, model).
+
+    Formats:
+        ""                          → (None, None)  — use global settings
+        "claude-sonnet-4-20250514"  → (None, "claude-sonnet-4-20250514")  — override model only
+        "openrouter:qwen/qwen3-235b" → ("openrouter", "qwen/qwen3-235b")  — override both
+        "anthropic:claude-opus-4"   → ("anthropic", "claude-opus-4")
+    """
+    if not model_name:
+        return None, None
+    if ":" in model_name:
+        provider, _, model = model_name.partition(":")
+        return provider.strip(), model.strip()
+    return None, model_name
+
+
+def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
+    """Get the LLM, optionally with per-agent provider/model override.
+
+    Args:
+        bind_tools_for: Agent type for tool binding.
+        model_name: Per-agent model spec (e.g. "openrouter:qwen/qwen3-235b").
+                    If empty, uses global settings.llm_provider/model.
+    """
     tools = AGENT_TOOLS.get(bind_tools_for, []) if bind_tools_for else None
-    return get_llm(bind_tools=tools or None)
+    provider, model = _parse_model_spec(model_name)
+    return get_llm(provider=provider, model=model, bind_tools=tools or None)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -245,7 +269,7 @@ def _specialist_node_factory(agent_type: str):
 
     def node(state: GraphState) -> dict:
         cmd = state.user_command
-        llm = _get_llm(bind_tools_for=agent_type)
+        llm = _get_llm(bind_tools_for=agent_type, model_name=state.model_name)
 
         # ── LLM mode: let the model decide which tools to call ──
         if llm:
@@ -718,7 +742,7 @@ def conversation_node(state: GraphState) -> dict:
     It injects system state context and calls LLM without tool bindings.
     """
     state_summary = _build_state_summary()
-    llm = _get_llm(bind_tools_for=None)
+    llm = _get_llm(bind_tools_for=None, model_name=state.model_name)
 
     if not llm:
         # Offline fallback: return state summary directly
