@@ -211,27 +211,29 @@ class TestRetryBehavior:
 
 class TestHandleLLMError:
 
-    def test_context_overflow_returns_message(self):
+    @pytest.mark.asyncio
+    async def test_context_overflow_returns_message(self):
         from backend.agents.nodes import _handle_llm_error
-        result = _handle_llm_error(
+        result = await _handle_llm_error(
             Exception("400 maximum context length exceeded"),
             "firmware", "",
         )
         assert result is not None
         assert result.get("messages") is not None
 
-    def test_auth_failed_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_auth_failed_returns_none(self):
         from backend.agents.nodes import _handle_llm_error
-        result = _handle_llm_error(
+        result = await _handle_llm_error(
             Exception("401 Invalid API Key"),
             "firmware", "",
         )
-        # Returns None to fall through to rule-based
         assert result is None
 
-    def test_unknown_error_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_unknown_error_returns_none(self):
         from backend.agents.nodes import _handle_llm_error
-        result = _handle_llm_error(
+        result = await _handle_llm_error(
             Exception("Something weird happened"),
             "software", "",
         )

@@ -77,6 +77,9 @@ class GraphState(BaseModel):
     max_retries: int = 3
     last_error: str = ""
     error_history: list[str] = Field(default_factory=list)
+    # Auto-fix loop guard (Batch 4 H8): track which permission categories
+    # have been auto-fixed already this graph run so we don't loop forever.
+    auto_fix_history: list[str] = Field(default_factory=list)
     same_error_count: int = 0
     loop_breaker_triggered: bool = False
     rtk_bypass: bool = False  # When True, skip output compression (fallback for debug)

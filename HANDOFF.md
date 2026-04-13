@@ -31,7 +31,17 @@
   - `agents/llm._provider_failures_lock` + `_record_provider_failure()` 統一接口（節點回呼也走它）
   - `events._log_fn_lock`：lazy import 競爭防護
   - `workspace.cleanup_stale_locks` + 預清理：>=60s 才視為 stale，杜絕誤刪 active git 鎖
-- Batches 4-6：pending
+- **Batch 4（完成）**：Pipeline deadlock & error-handling resilience — C2/C14/H2/H3/H8/H16/H17/H18/M17/M21
+  - `_handle_llm_error` 改 `async`，retry 用 `asyncio.sleep` + token-freeze 中途中止
+  - `_specialist_node_factory.node` + `conversation_node` 升級為 async（LangGraph 原生支援）
+  - `_check_phase_complete` 過濾 cancelled/deleted；偵測 blocked/error/failed 時發 `pipeline_blocked` SSE 並 return False（C14 不再無限等待）
+  - `force_advance` 於跳過 stuck task 時 log + emit `pipeline_force_override` 留審計軌跡
+  - `_create_tasks_for_step` 每個 task 獨立 try/except，不會因單筆 fail 整步崩潰，emit `pipeline_task_create_failed`
+  - `_active_pipeline` 完成後移到 `_last_completed_pipeline` 釋放 in-flight slot
+  - `/invoke/halt` 同步將 pipeline 狀態標 `halted`，避免 race 中 advance
+  - permission auto-fix 加 loop guard：同 category 已嘗試 2 次後 escalate（不再無限 fix→fail→fix）
+  - permanent_disable 加 `pipeline_phase` SSE，前端 pipeline 面板可見
+- Batches 5-6：pending
 
 ---
 

@@ -104,6 +104,7 @@ PIPELINE_STEPS = [
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _active_pipeline: dict | None = None  # {id, current_step, status, started_at, tasks_created}
+_last_completed_pipeline: dict | None = None  # last finished/halted run for UI replay
 
 # Async lock for all mutations of _active_pipeline. FastAPI request handlers
 # can be reentrant under concurrent requests; on_task_completed() runs from
@@ -125,6 +126,12 @@ def _get_pipeline_lock() -> _asyncio.Lock:
 def get_pipeline_status() -> dict:
     """Get the current pipeline run status."""
     if not _active_pipeline:
+        if _last_completed_pipeline is not None:
+            return {
+                **_last_completed_pipeline,
+                "steps": [s["id"] for s in PIPELINE_STEPS],
+                "is_history": True,
+            }
         return {"status": "idle", "current_step": "", "steps": [s["id"] for s in PIPELINE_STEPS]}
     return {**_active_pipeline, "steps": [s["id"] for s in PIPELINE_STEPS]}
 
@@ -201,11 +208,15 @@ async def _advance_pipeline_locked() -> dict:
     # Auto-advance to next step
     next_idx = step_idx + 1
     if next_idx >= len(PIPELINE_STEPS):
-        # Pipeline complete!
+        # Pipeline complete — move state to history slot so memory doesn't
+        # accumulate across many runs (M17).
+        global _last_completed_pipeline
         _active_pipeline["status"] = "completed"
         _active_pipeline["completed_at"] = datetime.now().isoformat()
         emit_pipeline_phase("pipeline_complete", f"Pipeline {_active_pipeline['id']} completed!")
         emit_invoke("pipeline", "E2E pipeline completed: all phases done")
+        _last_completed_pipeline = _active_pipeline
+        _active_pipeline = None
         return {"status": "completed", "detail": "All pipeline steps finished"}
 
     # Advance
@@ -230,12 +241,40 @@ async def force_advance() -> dict:
             return {"status": "error", "detail": "No active pipeline"}
 
         step_idx = _active_pipeline["current_step_index"]
+        step = PIPELINE_STEPS[step_idx]
+
+        # Audit: log + emit if there are still blocked tasks in the current
+        # phase when the user force-advances. This is a conscious override
+        # and must leave a trail (compliance + later debugging).
+        try:
+            from backend.routers.invoke import _tasks
+            from backend.models import TaskStatus
+            stuck_names = {"blocked", "error", "failed"}
+            STUCK = {getattr(TaskStatus, n) for n in stuck_names if hasattr(TaskStatus, n)}
+            stuck = [t.id for t in _tasks.values()
+                     if getattr(t, "npi_phase_id", None) == step["npi_phase"]
+                     and t.status in STUCK]
+            if stuck:
+                logger.warning(
+                    "[FORCE-ADVANCE] User overriding %d stuck tasks in phase %s: %s",
+                    len(stuck), step["npi_phase"], stuck[:5],
+                )
+                emit_pipeline_phase(
+                    "pipeline_force_override",
+                    f"force_advance with {len(stuck)} stuck task(s) in {step['name']}",
+                )
+        except Exception as exc:
+            logger.debug("force_advance audit failed: %s", exc)
+
         next_idx = step_idx + 1
 
         if next_idx >= len(PIPELINE_STEPS):
+            global _last_completed_pipeline
             _active_pipeline["status"] = "completed"
             _active_pipeline["completed_at"] = datetime.now().isoformat()
             emit_pipeline_phase("pipeline_complete", "Pipeline completed (force-advanced)")
+            _last_completed_pipeline = _active_pipeline
+            _active_pipeline = None
             return {"status": "completed"}
 
         next_step = PIPELINE_STEPS[next_idx]
@@ -278,40 +317,82 @@ async def _create_tasks_for_step(step_idx: int, spec_context: str = "") -> None:
     step = PIPELINE_STEPS[step_idx]
     npi_phase = step["npi_phase"]
 
+    created = 0
+    failed = 0
     for tmpl in step["tasks"]:
         task_id = f"pipe-{step['id']}-{uuid.uuid4().hex[:6]}"
         desc = tmpl["title"]
         if spec_context:
             desc += f"\n\nSpec context: {spec_context[:200]}"
+        try:
+            task = Task(
+                id=task_id,
+                title=tmpl["title"],
+                description=desc,
+                priority=TaskPriority.high,
+                status=TaskStatus.backlog,
+                suggested_agent_type=tmpl.get("agent_type"),
+                suggested_sub_type=tmpl.get("sub_type"),
+                npi_phase_id=npi_phase,
+            )
+            _tasks[task_id] = task
+            await _persist_task(task)
+            emit_task_update(task_id, "backlog")
+            if _active_pipeline:
+                _active_pipeline["tasks_created"] = _active_pipeline.get("tasks_created", 0) + 1
+            created += 1
+        except Exception as exc:
+            # Don't let one bad template halt the whole step. Surface the
+            # failure to the pipeline panel and keep going so the rest of
+            # the phase still has a chance to complete.
+            failed += 1
+            logger.error("Pipeline step '%s': task %s persist failed: %s",
+                         step["name"], task_id, exc)
+            emit_pipeline_phase(
+                "pipeline_task_create_failed",
+                f"{step['name']}: {tmpl.get('title','?')} → {type(exc).__name__}",
+            )
 
-        task = Task(
-            id=task_id,
-            title=tmpl["title"],
-            description=desc,
-            priority=TaskPriority.high,
-            status=TaskStatus.backlog,
-            suggested_agent_type=tmpl.get("agent_type"),
-            suggested_sub_type=tmpl.get("sub_type"),
-            npi_phase_id=npi_phase,
-        )
-        _tasks[task_id] = task
-        await _persist_task(task)
-        emit_task_update(task_id, "backlog")
-
-        if _active_pipeline:
-            _active_pipeline["tasks_created"] = _active_pipeline.get("tasks_created", 0) + 1
-
-    logger.info("Pipeline step '%s': created %d tasks", step["name"], len(step["tasks"]))
-    emit_pipeline_phase("pipeline_tasks", f"Created {len(step['tasks'])} tasks for {step['name']}")
+    logger.info("Pipeline step '%s': created %d tasks (%d failed)",
+                step["name"], created, failed)
+    emit_pipeline_phase(
+        "pipeline_tasks",
+        f"Created {created}/{len(step['tasks'])} tasks for {step['name']}"
+        + (f" ({failed} failed)" if failed else ""),
+    )
 
 
 async def _check_phase_complete(npi_phase_id: str) -> bool:
-    """Check if all tasks linked to an NPI phase are completed."""
+    """Check if all tasks linked to an NPI phase are completed.
+
+    H17 fix: deleted/cancelled tasks no longer count toward phase membership.
+    C14 fix: any blocked / error task means the phase is *terminally stuck* —
+    we surface a `pipeline_blocked` event so the user can intervene rather
+    than hanging silently. The phase is not considered complete in that case;
+    the user must `force_advance()` (which now logs the override).
+    """
     from backend.routers.invoke import _tasks
-
-    phase_tasks = [t for t in _tasks.values() if getattr(t, "npi_phase_id", None) == npi_phase_id]
-    if not phase_tasks:
-        return True  # No tasks = phase is trivially complete
-
     from backend.models import TaskStatus
+
+    # Best-effort filter for terminal/dead states across enum revisions.
+    dead_names = {"cancelled", "deleted"}
+    DEAD = {getattr(TaskStatus, n) for n in dead_names if hasattr(TaskStatus, n)}
+    phase_tasks = [
+        t for t in _tasks.values()
+        if getattr(t, "npi_phase_id", None) == npi_phase_id and t.status not in DEAD
+    ]
+    if not phase_tasks:
+        return True
+
+    stuck_names = {"blocked", "error", "failed"}
+    STUCK = {getattr(TaskStatus, n) for n in stuck_names if hasattr(TaskStatus, n)}
+    blocked = [t for t in phase_tasks if t.status in STUCK]
+    if blocked:
+        # Surface stuck pipeline once per check (idempotent — frontend can dedupe).
+        emit_pipeline_phase(
+            "pipeline_blocked",
+            f"Phase {npi_phase_id} blocked: {len(blocked)} task(s) stuck — manual intervention required",
+        )
+        return False
+
     return all(t.status == TaskStatus.completed for t in phase_tasks)

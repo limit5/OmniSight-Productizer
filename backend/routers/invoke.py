@@ -911,8 +911,20 @@ async def invoke_halt():
     try:
         from backend.container import stop_all_containers
         containers_stopped = await stop_all_containers()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("[HALT] stop_all_containers failed: %s", exc)
+    # Mark active pipeline as halted so it does not auto-advance after resume.
+    # Without this, the in-memory pipeline state stays "running" and new task
+    # completions (race during halt) silently advance phases.
+    try:
+        from backend import pipeline as _pipeline_mod
+        if _pipeline_mod._active_pipeline and _pipeline_mod._active_pipeline.get("status") == "running":
+            _pipeline_mod._active_pipeline["status"] = "halted"
+            _pipeline_mod._active_pipeline["halted_at"] = datetime.now().isoformat()
+            from backend.events import emit_pipeline_phase as _epp
+            _epp("pipeline_halt", "Pipeline halted by /invoke/halt")
+    except Exception as exc:
+        logger.debug("[HALT] pipeline state update failed: %s", exc)
     emit_invoke("halt", f"INVOKE halted: {cancelled} tasks cancelled, {containers_stopped} containers stopped")
     return {"status": "halted", "tasks_cancelled": cancelled, "containers_stopped": containers_stopped}
 

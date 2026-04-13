@@ -264,7 +264,7 @@ def _build_sub_tasks(tool_calls: list[ToolCall]) -> list[dict]:
     ]
 
 
-def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict | None:
+async def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict | None:
     """Handle LLM errors with classification, backoff, failover, and SSE notification.
 
     Returns a dict (answer for the user) if handled, or None to fall through to rule-based.
@@ -304,6 +304,12 @@ def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict 
                 emit_token_warning("warn", f"Provider auth failed: {err['message'][:100]}. Check API key in Settings.")
             elif category == LLMErrorCategory.BILLING_EXHAUSTED:
                 emit_token_warning("warn", f"Provider billing exhausted: {err['message'][:100]}. Add credits or switch provider.")
+            # Also emit pipeline_phase warning so the frontend pipeline panel
+            # surfaces the permanent disable (not just the LLM panel).
+            emit_pipeline_phase(
+                "provider_disabled",
+                f"Provider {provider or model_name} disabled for 24h ({category})",
+            )
         except Exception:
             pass
         return None  # Fall through to failover/rule-based
@@ -334,7 +340,18 @@ def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict 
                 emit_pipeline_phase("llm_retry", f"{agent_type} retry {attempt}/{err['max_retries']} in {delay:.0f}s ({category})")
             except Exception:
                 pass
-            time.sleep(delay)  # Sync sleep — acceptable for short backoff
+            # Async sleep so the LangGraph node yields to the event loop
+            # during retry backoff, instead of starving every other coroutine
+            # for up to 30 s. Token-budget freeze is also re-checked between
+            # retries so we don't keep retrying after global cutoff.
+            await asyncio.sleep(delay)
+            try:
+                from backend.routers import system as _sys_mod
+                if getattr(_sys_mod, "token_frozen", False):
+                    logger.warning("Token budget frozen mid-retry — aborting %s", category)
+                    return None
+            except Exception:
+                pass
             try:
                 llm = _get_llm(bind_tools_for=agent_type, model_name=model_name)
                 if llm:
@@ -356,7 +373,7 @@ def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict 
 def _specialist_node_factory(agent_type: str):
     """Create a specialist node that can request tool calls."""
 
-    def node(state: GraphState) -> dict:
+    async def node(state: GraphState) -> dict:
         cmd = state.user_command
         llm = _get_llm(bind_tools_for=agent_type, model_name=state.model_name)
 
@@ -431,7 +448,7 @@ def _specialist_node_factory(agent_type: str):
 
             except Exception as exc:
                 # Classify the error and attempt intelligent recovery
-                resp = _handle_llm_error(exc, agent_type, state.model_name)
+                resp = await _handle_llm_error(exc, agent_type, state.model_name)
                 if resp is not None:
                     return resp
                 # Fall through to rule-based
@@ -701,9 +718,14 @@ async def error_check_node(state: GraphState) -> dict:
         f"{r.tool_name}: {r.output[:200]}" for r in failed
     )
 
-    # Permission/environment auto-fix — attempt before counting as retry
+    # Permission/environment auto-fix — attempt before counting as retry.
+    # Loop guard (H8): if we've already auto-fixed the same category twice in
+    # this graph run, stop trying and let the error propagate to the human.
+    # Without this, fix→same-error→fix can loop indefinitely (e.g. chmod
+    # restored to 644 by an external process between every retry).
     try:
         from backend.permission_errors import classify_permission_error, attempt_auto_fix
+        prior_fixes = list(getattr(state, "auto_fix_history", []) or [])
         for r in failed:
             perm_err = classify_permission_error(r.output)
             if perm_err:
@@ -711,7 +733,8 @@ async def error_check_node(state: GraphState) -> dict:
                     "env_error",
                     f"{perm_err['category']}: {perm_err['matched_text'][:60]}",
                 )
-                if perm_err["auto_fixable"]:
+                same_cat_attempts = sum(1 for c in prior_fixes if c == perm_err["category"])
+                if perm_err["auto_fixable"] and same_cat_attempts < 2:
                     fix_result = await attempt_auto_fix(
                         perm_err["category"], r.output, state.workspace_path or ""
                     )
@@ -721,11 +744,20 @@ async def error_check_node(state: GraphState) -> dict:
                             f"Auto-fixed {perm_err['category']}: {fix_result.get('action', '')}",
                         )
                         logger.info("Permission auto-fix: %s → %s", perm_err["category"], fix_result)
-                        # Don't count this as a retry — return to specialist to try again
                         return {
                             "last_error": f"[AUTO-FIXED] {perm_err['category']}: {fix_result.get('action', '')}. Retrying...",
                             "tool_calls": [], "tool_results": [],
+                            "auto_fix_history": (prior_fixes + [perm_err["category"]])[-20:],
                         }
+                elif same_cat_attempts >= 2:
+                    logger.warning(
+                        "Auto-fix loop guard: %s tried %d times, escalating",
+                        perm_err["category"], same_cat_attempts,
+                    )
+                    emit_pipeline_phase(
+                        "env_fix_escalated",
+                        f"Auto-fix giving up on {perm_err['category']} after {same_cat_attempts} attempts",
+                    )
                 else:
                     # Non-fixable — emit specific user guidance
                     try:
@@ -868,7 +900,7 @@ def _build_state_summary() -> str:
         return "System state unavailable."
 
 
-def conversation_node(state: GraphState) -> dict:
+async def conversation_node(state: GraphState) -> dict:
     """Answer general questions without tool execution.
 
     This node is the conversational path — parallel to specialist nodes.
@@ -907,7 +939,7 @@ def conversation_node(state: GraphState) -> dict:
             "messages": [AIMessage(content=answer)],
         }
     except Exception as exc:
-        _handle_llm_error(exc, "conversation", state.model_name)
+        await _handle_llm_error(exc, "conversation", state.model_name)
         return {
             "answer": f"I'm having trouble responding right now.\n\nSystem state:\n{state_summary}",
             "messages": [AIMessage(content=f"Conversation error: {exc}")],
