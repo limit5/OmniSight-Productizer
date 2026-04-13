@@ -8,13 +8,29 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+import os
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend import decision_engine as de
 
 router = APIRouter(tags=["decisions"])
+
+
+# N10: decision-action endpoints can destructively change agent state
+# (e.g. approving a destructive-severity decision). Gate them behind an
+# optional bearer token — if OMNISIGHT_DECISION_BEARER is unset we keep
+# the current open-posture of the codebase; if set, mutators require it.
+def _require_decision_token(authorization: str | None = Header(default=None)) -> None:
+    expected = os.environ.get("OMNISIGHT_DECISION_BEARER", "").strip()
+    if not expected:
+        return  # feature off — preserves pre-fix behavior
+    presented = (authorization or "")
+    if presented.startswith("Bearer "):
+        presented = presented[len("Bearer "):]
+    if not presented or presented != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing decision bearer token")
 
 
 class ModeRequest(BaseModel):
@@ -27,12 +43,13 @@ async def get_mode() -> dict[str, Any]:
     return {
         "mode": mode.value,
         "parallel_cap": de._PARALLEL_BUDGET[mode],
+        "in_flight": de.parallel_in_flight(),
         "modes": [m.value for m in de.OperationMode],
     }
 
 
 @router.put("/operation-mode")
-async def put_mode(req: ModeRequest) -> dict[str, Any]:
+async def put_mode(req: ModeRequest, _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
     try:
         mode = de.set_mode(req.mode)
     except ValueError as exc:
@@ -70,7 +87,8 @@ class ResolveRequest(BaseModel):
 
 
 @router.post("/decisions/{decision_id}/approve")
-async def approve_decision(decision_id: str, req: ResolveRequest) -> dict[str, Any]:
+async def approve_decision(decision_id: str, req: ResolveRequest,
+                           _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
     # Validate option_id belongs to the decision
     existing = de.get(decision_id)
     if existing is None:
@@ -87,20 +105,24 @@ async def approve_decision(decision_id: str, req: ResolveRequest) -> dict[str, A
 
 
 @router.post("/decisions/{decision_id}/reject")
-async def reject_decision(decision_id: str) -> dict[str, Any]:
+async def reject_decision(decision_id: str,
+                          _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
     existing = de.get(decision_id)
     if existing is None:
         return JSONResponse(status_code=404, content={"detail": "decision not found"})
     if existing.status != de.DecisionStatus.pending:
         return JSONResponse(status_code=409, content={"detail": f"not pending (status={existing.status.value})"})
-    # Rejection: resolve with an empty chosen id + status=rejected
-    out = de.resolve(decision_id, "", resolver="user",
+    # N8: rejection uses the sentinel "__rejected__" rather than an empty
+    # string so downstream consumers / SSE subscribers can branch on a
+    # non-null id without null-deref surprises.
+    out = de.resolve(decision_id, "__rejected__", resolver="user",
                      status=de.DecisionStatus.rejected)
     return out.to_dict() if out else {}
 
 
 @router.post("/decisions/{decision_id}/undo")
-async def undo_decision(decision_id: str) -> dict[str, Any]:
+async def undo_decision(decision_id: str,
+                        _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
     out = de.undo(decision_id)
     if out is None:
         return JSONResponse(status_code=404, content={"detail": "no resolved decision with that id"})
@@ -108,7 +130,7 @@ async def undo_decision(decision_id: str) -> dict[str, Any]:
 
 
 @router.post("/decisions/sweep")
-async def trigger_sweep() -> dict[str, Any]:
+async def trigger_sweep(_auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
     """Manually trigger the timeout sweep (testing + manual nudge)."""
     resolved = de.sweep_timeouts()
     return {"resolved": len(resolved), "ids": [d.id for d in resolved]}
@@ -133,7 +155,8 @@ async def get_budget_strategy() -> dict[str, Any]:
 
 
 @router.put("/budget-strategy")
-async def put_budget_strategy(req: StrategyRequest) -> dict[str, Any]:
+async def put_budget_strategy(req: StrategyRequest,
+                              _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
     try:
         tuning = _bs.set_strategy(req.strategy)
     except ValueError as exc:

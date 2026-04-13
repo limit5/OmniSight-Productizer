@@ -110,6 +110,14 @@ class Decision:
 _pending: dict[str, Decision] = {}
 _history: list[Decision] = []
 _HISTORY_MAX = 500
+# N7: pending queue cap — refuse new proposals when full to prevent memory
+# DoS from a runaway producer. Configurable via env for ops.
+import os as _os
+_PENDING_MAX = int(_os.environ.get("OMNISIGHT_DECISION_PENDING_MAX", "256"))
+
+
+class DecisionQueueFull(Exception):
+    """Raised when the pending-decision queue is at capacity."""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -314,6 +322,17 @@ def propose(
         return dec
 
     with _state_lock:
+        # N7: bound the pending queue. If callers exceed the cap, surface
+        # a distinct exception instead of silently growing memory.
+        if len(_pending) >= _PENDING_MAX:
+            logger.error(
+                "DecisionEngine pending queue full (%d) — refusing %s",
+                _PENDING_MAX, kind,
+            )
+            raise DecisionQueueFull(
+                f"pending queue full ({_PENDING_MAX}); "
+                "resolve outstanding decisions before submitting more"
+            )
         _pending[dec.id] = dec
     _emit("decision_pending", dec)
     return dec
@@ -422,7 +441,7 @@ def _reset_for_tests() -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-SWEEP_INTERVAL_S = 30
+SWEEP_INTERVAL_S = int(_os.environ.get("OMNISIGHT_DECISION_SWEEP_INTERVAL_S", "10"))
 
 
 def sweep_timeouts(now: float | None = None) -> list[Decision]:

@@ -165,6 +165,7 @@ class SSEDecision(BaseModel):
     created_at: float = 0.0
     deadline_at: Optional[float] = None
     resolved_at: Optional[float] = None
+    source: dict = Field(default_factory=dict)  # N12: matches Decision.to_dict()
     timestamp: str = ""
 
 

@@ -127,8 +127,12 @@ async def run_watchdog():
                 try:
                     dec = _stuck.propose_remediation(signal)
                     _open_proposals[key] = dec.id
+                    # N11: log only identifiers + enums; the decision `title`
+                    # / `detail` can carry task text (not a secret, but still
+                    # noisy in centralised log stores). Structured fields
+                    # only.
                     logger.info(
-                        "[STUCK] %s: %s → %s (decision=%s, status=%s)",
+                        "[STUCK] agent=%s reason=%s strategy=%s decision=%s status=%s",
                         agent_id, signal.reason.value,
                         signal.suggested_strategy.value,
                         dec.id, dec.status.value,
