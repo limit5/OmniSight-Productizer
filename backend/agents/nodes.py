@@ -307,6 +307,21 @@ def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict 
             pass
         return None  # Fall through to failover/rule-based
 
+    # Context overflow — trigger L2 compression and signal retry
+    if category == LLMErrorCategory.CONTEXT_OVERFLOW:
+        try:
+            emit_pipeline_phase("l2_compress", f"Context overflow detected — triggering auto-compression for {agent_type}")
+            from backend.events import emit_token_warning
+            emit_token_warning("warn", f"Context too long for {model_name or 'default model'} — auto-compressing conversation history")
+        except Exception:
+            pass
+        # Return a special signal that the graph can use to compress and retry
+        # The context_compression_gate will handle the actual compression
+        return {
+            "answer": "",
+            "messages": [AIMessage(content=f"[CONTEXT_OVERFLOW] {err['message'][:200]}")],
+        }
+
     # Retryable with backoff — attempt retry with exponential delay
     if err["retryable"] and err["max_retries"] > 0:
         base_delay = err["retry_after"] or err["base_delay"]
