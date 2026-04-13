@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Run tests
+        run: python -m pytest backend/tests/ -q --tb=short
+        env:
+          OMNISIGHT_WORKSPACE: ${{ github.workspace }}
+
+      - name: Create release bundle
+        run: |
+          python -c "
+          import asyncio
+          from backend.release import create_release_bundle
+          result = asyncio.run(create_release_bundle(version='${GITHUB_REF_NAME#v}'))
+          print(f'Bundle: {result[\"name\"]} ({result[\"size\"]} bytes)')
+          with open('BUNDLE_PATH', 'w') as f:
+              f.write(result['file_path'])
+          "
+        env:
+          OMNISIGHT_WORKSPACE: ${{ github.workspace }}
+
+      - name: Upload to GitHub Release
+        run: |
+          BUNDLE=$(cat BUNDLE_PATH)
+          gh release create ${{ github.ref_name }} \
+            --title "OmniSight ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "$BUNDLE"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

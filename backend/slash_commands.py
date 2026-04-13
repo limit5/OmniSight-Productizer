@@ -305,11 +305,57 @@ async def _stream(args: str) -> str:
         return f"[ERROR] UVC device scan failed: {exc}"
 
 
+async def _release(args: str) -> str:
+    """Create a release bundle or show current version."""
+    from backend.release import resolve_version
+    version = await resolve_version()
+
+    if not args.strip():
+        # Show version + artifact count
+        try:
+            from backend import db
+            arts = await db.list_artifacts(limit=200)
+            return (
+                f"**Release Info**\n\n"
+                f"  Version: `{version}`\n"
+                f"  Artifacts: {len(arts)}\n\n"
+                f"Usage: `/release create [version]` — create release bundle\n"
+                f"       `/release upload github` — upload to GitHub Releases"
+            )
+        except Exception as exc:
+            return f"[ERROR] {exc}"
+
+    parts = args.strip().split()
+    action = parts[0].lower()
+
+    if action == "create":
+        ver = parts[1] if len(parts) > 1 else ""
+        try:
+            from backend.release import create_release_bundle
+            bundle = await create_release_bundle(version=ver)
+            return (
+                f"**Release Bundle Created**\n\n"
+                f"  Name: `{bundle['name']}`\n"
+                f"  Version: `{bundle['version']}`\n"
+                f"  Size: {bundle['size']} bytes\n"
+                f"  Artifacts: {bundle['manifest']['artifact_count']}\n"
+                f"  Download: `GET {bundle['download_url']}`"
+            )
+        except Exception as exc:
+            return f"[ERROR] Release creation failed: {exc}"
+
+    if action == "upload":
+        target = parts[1] if len(parts) > 1 else "github"
+        return f"[ROUTE TO LLM] Upload release {version} to {target}. Use POST /system/release with upload_{target}=true."
+
+    return f"[ERROR] Unknown release action: {action}. Use `create` or `upload`."
+
+
 async def _help(args: str) -> str:
     categories = {
         "System": ["status", "info", "debug", "logs", "devices"],
         "Development": ["build", "test", "simulate", "review", "platform"],
-        "Hardware": ["deploy", "evk", "stream"],
+        "Hardware": ["deploy", "evk", "stream", "release"],
         "Agent": ["spawn", "agents", "tasks", "assign", "invoke"],
         "Provider": ["provider", "switch", "budget"],
         "NPI": ["npi", "sdks"],
@@ -331,7 +377,7 @@ _HANDLERS: dict[str, Callable[[str], Awaitable[str]]] = {
     # Development
     "build": _build, "test": _test, "simulate": _simulate, "review": _review, "platform": _platform,
     # Hardware
-    "deploy": _deploy, "evk": _evk, "stream": _stream,
+    "deploy": _deploy, "evk": _evk, "stream": _stream, "release": _release,
     # Agent
     "spawn": _spawn, "agents": _agents, "tasks": _tasks, "assign": _assign, "invoke": _invoke,
     # Provider

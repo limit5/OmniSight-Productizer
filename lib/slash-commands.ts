@@ -34,6 +34,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "deploy",    description: "部署到 EVK 開發板",                       category: "hardware", args: "[platform] [module]", handler: "backend" },
   { name: "evk",       description: "檢查 EVK 連線狀態",                      category: "hardware", args: "[platform]", handler: "backend" },
   { name: "stream",    description: "列出 UVC 攝影機裝置",                     category: "hardware", handler: "backend" },
+  { name: "release",   description: "建立 Release 打包 / 上傳",              category: "hardware", args: "[create|upload] [version]", handler: "backend" },
 
   // ── Agent ──
   { name: "spawn",     description: "建立新 Agent",                         category: "agent",    args: "[type]", handler: "api" },
