@@ -894,6 +894,14 @@ async def get_platform_config(platform: str = "") -> str:
         if npu_ver:
             lines.append(f"NPU_TOOLCHAIN_VERSION={npu_ver}")
 
+    # Deploy fields (for EVK deployment)
+    deploy_method = data.get("deploy_method", "")
+    if deploy_method:
+        lines.append(f"DEPLOY_METHOD={deploy_method}")
+        lines.append(f"DEPLOY_TARGET_IP={data.get('deploy_target_ip', '')}")
+        lines.append(f"DEPLOY_USER={data.get('deploy_user', 'root')}")
+        lines.append(f"DEPLOY_PATH={data.get('deploy_path', '/opt/app')}")
+
     return "[OK] Platform config:\n" + "\n".join(lines)
 
 

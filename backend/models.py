@@ -479,3 +479,56 @@ class EpisodicMemory(BaseModel):
     access_count: int = 0
     created_at: str = ""
     updated_at: str = ""
+
+
+# ---------- Hardware Deploy (Phase 30) ----------
+
+class DeployMethod(str, Enum):
+    ssh = "ssh"
+    serial = "serial"
+    fastboot = "fastboot"
+    adb = "adb"
+
+
+class EVKDevice(BaseModel):
+    """An EVK (Evaluation Kit) board target for deployment."""
+    platform: str                      # Platform profile name (e.g. "vendor-example")
+    board_name: str = ""               # e.g. "Rockchip RK3588 EVK v2"
+    deploy_method: str = "ssh"         # ssh | serial | fastboot | adb
+    deploy_target_ip: str = ""         # Static IP of EVK board
+    deploy_user: str = "root"
+    deploy_path: str = "/opt/app"
+    reachable: bool = False
+    last_check: str = ""
+
+
+class DeployRequest(BaseModel):
+    """Request to deploy compiled artifacts to an EVK board."""
+    platform: str                      # Target platform profile
+    module: str                        # Module to deploy (e.g. "sensor_driver")
+    workspace_path: str = ""           # Source workspace (auto-detect if empty)
+    binary_path: str = ""              # Specific binary to deploy (optional)
+    run_after_deploy: bool = True      # SSH exec after copy
+
+
+class DeployResult(BaseModel):
+    """Result of a deploy operation."""
+    status: str = "pending"            # pending | deploying | success | error
+    platform: str = ""
+    target_ip: str = ""
+    deploy_method: str = ""
+    artifacts_copied: list[str] = Field(default_factory=list)
+    remote_output: str = ""
+    duration_ms: int = 0
+    error: str = ""
+
+
+class UVCDevice(BaseModel):
+    """A UVC (USB Video Class) camera device."""
+    device_path: str                   # /dev/video0
+    name: str = ""                     # e.g. "USB Camera: HD Webcam"
+    vendor_id: str = ""
+    product_id: str = ""
+    formats: list[str] = Field(default_factory=list)  # ["MJPG", "YUYV", "H264"]
+    resolutions: list[str] = Field(default_factory=list)  # ["1920x1080", "1280x720"]
+    capabilities: list[str] = Field(default_factory=list)  # ["video_capture", "streaming"]
