@@ -325,6 +325,10 @@ class VendorSDKCreate(BaseModel):
     qemu: str = "qemu-aarch64-static"
     sysroot_path: str = ""
     cmake_toolchain_file: str = ""
+    # SDK source for auto-provisioning (Phase 45)
+    sdk_git_url: str = ""          # Git URL to clone SDK from
+    sdk_git_branch: str = "main"   # Branch to clone
+    sdk_install_script: str = ""   # Post-clone setup script
     npu_enabled: bool = False
     deploy_method: str = "ssh"
     deploy_target_ip: str = ""
@@ -354,6 +358,9 @@ async def create_vendor_sdk(body: VendorSDKCreate):
         "qemu": body.qemu,
         "sysroot_path": body.sysroot_path,
         "cmake_toolchain_file": body.cmake_toolchain_file,
+        "sdk_git_url": body.sdk_git_url,
+        "sdk_git_branch": body.sdk_git_branch,
+        "sdk_install_script": body.sdk_install_script,
         "npu_enabled": body.npu_enabled,
         "deploy_method": body.deploy_method,
         "deploy_target_ip": body.deploy_target_ip,

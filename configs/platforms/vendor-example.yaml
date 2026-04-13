@@ -14,7 +14,13 @@ supported_boards:
   - example-evk-v1
   - example-ref-design
 
+# Vendor SDK source (git repo containing sysroot + toolchain)
+sdk_git_url: ""            # e.g. https://gitlab.vendor.com/sdk/camera-sdk.git
+sdk_git_branch: "main"     # branch to clone
+sdk_install_script: ""     # optional post-clone setup script (relative to SDK root)
+
 # Vendor SDK paths (mounted :ro into container at runtime)
+# Auto-populated by SDK provisioner if sdk_git_url is set
 sysroot_path: /opt/example-vendor/sysroot
 cmake_toolchain_file: /opt/example-vendor/toolchain.cmake
 
