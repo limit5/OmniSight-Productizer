@@ -34,6 +34,15 @@ async def get_settings():
             "model": settings.get_model_name(),
             "temperature": settings.llm_temperature,
             "fallback_chain": settings.llm_fallback_chain,
+            "anthropic_api_key": _mask(settings.anthropic_api_key),
+            "google_api_key": _mask(settings.google_api_key),
+            "openai_api_key": _mask(settings.openai_api_key),
+            "xai_api_key": _mask(settings.xai_api_key),
+            "groq_api_key": _mask(settings.groq_api_key),
+            "deepseek_api_key": _mask(settings.deepseek_api_key),
+            "together_api_key": _mask(settings.together_api_key),
+            "openrouter_api_key": _mask(settings.openrouter_api_key),
+            "ollama_base_url": settings.ollama_base_url,
         },
         "git": {
             "ssh_key_path": settings.git_ssh_key_path,
@@ -88,6 +97,9 @@ class SettingsUpdate(BaseModel):
 # Whitelist of fields safe to update at runtime
 _UPDATABLE_FIELDS = frozenset({
     "llm_provider", "llm_model", "llm_temperature", "llm_fallback_chain",
+    "anthropic_api_key", "google_api_key", "openai_api_key", "xai_api_key",
+    "groq_api_key", "deepseek_api_key", "together_api_key", "openrouter_api_key",
+    "ollama_base_url",
     "github_token", "gitlab_token", "gitlab_url", "git_ssh_key_path",
     "gerrit_enabled", "gerrit_url", "gerrit_ssh_host", "gerrit_ssh_port",
     "gerrit_project", "gerrit_replication_targets",
@@ -116,8 +128,9 @@ async def update_settings(body: SettingsUpdate):
         setattr(settings, key, value)
         applied[key] = True
 
-    # Clear LLM cache if provider/model changed
-    if any(k.startswith("llm_") for k in applied):
+    # Clear LLM cache if provider/model/key changed
+    llm_related = {"llm_", "anthropic_", "google_", "openai_", "xai_", "groq_", "deepseek_", "together_", "openrouter_", "ollama_"}
+    if any(any(k.startswith(p) for p in llm_related) for k in applied):
         try:
             from backend.agents.llm import _cache
             _cache.clear()

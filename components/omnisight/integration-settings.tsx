@@ -179,6 +179,26 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
         {/* Body */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2">
 
+          <SettingsSection title="LLM PROVIDERS">
+            <SettingField label="Provider" value={getVal("llm", "provider")} onChange={v => setVal("llm_provider", v)} />
+            <SettingField label="Model" value={getVal("llm", "model")} onChange={v => setVal("llm_model", v)} />
+            <div className="pt-1 pb-0.5">
+              <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">API Keys (leave empty to disable)</span>
+            </div>
+            <SettingField label="Anthropic" value={getVal("llm", "anthropic_api_key")} type="password" onChange={v => setVal("anthropic_api_key", v)} />
+            <SettingField label="OpenAI" value={getVal("llm", "openai_api_key")} type="password" onChange={v => setVal("openai_api_key", v)} />
+            <SettingField label="Google" value={getVal("llm", "google_api_key")} type="password" onChange={v => setVal("google_api_key", v)} />
+            <SettingField label="OpenRouter" value={getVal("llm", "openrouter_api_key")} type="password" onChange={v => setVal("openrouter_api_key", v)} />
+            <SettingField label="xAI (Grok)" value={getVal("llm", "xai_api_key")} type="password" onChange={v => setVal("xai_api_key", v)} />
+            <SettingField label="Groq" value={getVal("llm", "groq_api_key")} type="password" onChange={v => setVal("groq_api_key", v)} />
+            <SettingField label="DeepSeek" value={getVal("llm", "deepseek_api_key")} type="password" onChange={v => setVal("deepseek_api_key", v)} />
+            <SettingField label="Together" value={getVal("llm", "together_api_key")} type="password" onChange={v => setVal("together_api_key", v)} />
+            <SettingField label="Ollama URL" value={getVal("llm", "ollama_base_url")} onChange={v => setVal("ollama_base_url", v)} />
+            <div className="pt-1">
+              <SettingField label="Fallback" value={getVal("llm", "fallback_chain")} onChange={v => setVal("llm_fallback_chain", v)} />
+            </div>
+          </SettingsSection>
+
           <SettingsSection title="GIT & SSH" integration="ssh">
             <SettingField label="SSH Key" value={getVal("git", "ssh_key_path")} onChange={v => setVal("git_ssh_key_path", v)} />
             <SettingField label="GitHub Token" value={getVal("git", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
