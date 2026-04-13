@@ -1150,15 +1150,22 @@ SIMULATION_TIMEOUT = 120  # seconds — Valgrind/QEMU are slow
 
 
 @tool
-async def run_simulation(track: str, module: str, input_data: str = "", mock: bool = True, platform: str = "aarch64") -> str:
-    """Run dual-track simulation for a firmware or algorithm module.
+async def run_simulation(
+    track: str, module: str, input_data: str = "", mock: bool = True,
+    platform: str = "aarch64", model_path: str = "", framework: str = "",
+    test_images: str = "",
+) -> str:
+    """Run simulation for a firmware, algorithm, or NPU inference module.
 
     Args:
-        track: 'algo' (data-driven) or 'hw' (peripheral mock/QEMU).
-        module: Module name under src/ (e.g. 'core_algorithm').
+        track: 'algo' (data-driven), 'hw' (peripheral mock/QEMU), or 'npu' (NPU model inference).
+        module: Module name under src/ (e.g. 'core_algorithm', 'detect', 'face').
         input_data: Optional input file path relative to test_assets/.
         mock: For hw track, True=mock sysfs, False=QEMU cross-run.
-        platform: Target platform profile (aarch64, armv7, riscv64).
+        platform: Target platform profile (aarch64, armv7, riscv64, vendor-xxx).
+        model_path: (npu track) Path to model file (.rknn, .tflite, .engine).
+        framework: (npu track) Inference framework: rknn, tflite, tensorrt.
+        test_images: (npu track) Path to test image dataset directory.
     """
     import json as _json
     import uuid
@@ -1167,8 +1174,8 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
     from backend import db
     from backend.events import emit_simulation
 
-    if track not in ("algo", "hw"):
-        return "[ERROR] track must be 'algo' or 'hw'"
+    if track not in ("algo", "hw", "npu"):
+        return "[ERROR] track must be 'algo', 'hw', or 'npu'"
 
     sim_id = f"sim-{uuid.uuid4().hex[:8]}"
     now = _dt.now().isoformat()
@@ -1197,6 +1204,14 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
     ]
     if input_data:
         cmd_parts.append(f"--input={input_data}")
+    # NPU-specific arguments
+    if track == "npu":
+        if model_path:
+            cmd_parts.append(f"--npu-model={model_path}")
+        if framework:
+            cmd_parts.append(f"--framework={framework}")
+        if test_images:
+            cmd_parts.append(f"--test-images={test_images}")
     cmd = " ".join(cmd_parts)
 
     # Execute in container or host
@@ -1261,7 +1276,7 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
     coverage = report.get("coverage", {})
     valgrind = report.get("valgrind", {})
 
-    await db.update_simulation(sim_id, {
+    update_data = {
         "status": status,
         "tests_total": tests.get("total", 0),
         "tests_passed": tests.get("passed", 0),
@@ -1270,7 +1285,18 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
         "valgrind_errors": valgrind.get("errors", 0),
         "duration_ms": report.get("duration_ms", 0),
         "report_json": _json.dumps(report),
-    })
+    }
+    # NPU-specific fields
+    if track == "npu":
+        npu = report.get("npu", {})
+        update_data.update({
+            "npu_latency_ms": npu.get("latency_ms", 0.0),
+            "npu_throughput_fps": npu.get("throughput_fps", 0.0),
+            "accuracy_delta": npu.get("accuracy_delta", 0.0),
+            "model_size_kb": npu.get("model_size_kb", 0),
+            "npu_framework": npu.get("framework", framework or ""),
+        })
+    await db.update_simulation(sim_id, update_data)
 
     emit_simulation(sim_id, "result", f"{status}: {tests.get('passed', 0)}/{tests.get('total', 0)} tests",
                     status=status, track=track, module=module,
@@ -1281,12 +1307,20 @@ async def run_simulation(track: str, module: str, input_data: str = "", mock: bo
     errors = report.get("errors", [])
     error_str = f" Errors: {'; '.join(str(e) for e in errors[:3])}" if errors else ""
     valgrind_str = f" Valgrind: {valgrind.get('errors', 0)} error(s)." if valgrind.get("ran") else ""
+    npu_str = ""
+    if track == "npu":
+        npu = report.get("npu", {})
+        npu_str = (
+            f" NPU: {npu.get('latency_ms', 0):.1f}ms/frame,"
+            f" {npu.get('throughput_fps', 0):.1f}fps,"
+            f" accuracy_delta={npu.get('accuracy_delta', 0):.2f}."
+        )
     return (
         f"[{'PASS' if status == 'pass' else 'FAIL'}] Simulation {sim_id} ({track}/{module}): "
         f"{tests.get('passed', 0)}/{tests.get('total', 0)} tests passed, "
         f"coverage {coverage.get('percentage', 0):.0f}%, "
         f"duration {report.get('duration_ms', 0)}ms."
-        f"{valgrind_str}{error_str}"
+        f"{valgrind_str}{npu_str}{error_str}"
     )
 
 

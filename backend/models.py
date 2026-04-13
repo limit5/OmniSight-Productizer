@@ -305,6 +305,7 @@ class Notification(BaseModel):
 class SimulationTrack(str, Enum):
     algo = "algo"
     hw = "hw"
+    npu = "npu"
 
 
 class SimulationStatus(str, Enum):
@@ -330,6 +331,12 @@ class Simulation(BaseModel):
     report_json: dict = Field(default_factory=dict)
     artifact_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    # NPU-specific fields (only populated for npu track)
+    npu_latency_ms: float = 0.0        # Average inference latency (ms/frame)
+    npu_throughput_fps: float = 0.0     # Inference throughput (frames/sec)
+    accuracy_delta: float = 0.0         # Accuracy drop from quantization (mAP diff)
+    model_size_kb: int = 0              # Model file size
+    npu_framework: str = ""             # rknn | tflite | tensorrt
 
 
 class SimulationRequest(BaseModel):
@@ -339,6 +346,10 @@ class SimulationRequest(BaseModel):
     mock: bool = True
     platform: str = "aarch64"
     task_id: Optional[str] = None
+    # NPU-specific request fields
+    model_path: str = ""                # Path to model file (.rknn, .tflite, .engine)
+    framework: str = ""                 # rknn | tflite | tensorrt
+    test_images: str = ""               # Path to test image dataset directory
 
 
 # ---------- Debug Blackboard ----------

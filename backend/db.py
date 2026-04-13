@@ -72,6 +72,12 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
         ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("notifications", "last_error", "TEXT"),
+        # NPU simulation fields (Phase 36)
+        ("simulations", "npu_latency_ms", "REAL NOT NULL DEFAULT 0.0"),
+        ("simulations", "npu_throughput_fps", "REAL NOT NULL DEFAULT 0.0"),
+        ("simulations", "accuracy_delta", "REAL NOT NULL DEFAULT 0.0"),
+        ("simulations", "model_size_kb", "INTEGER NOT NULL DEFAULT 0"),
+        ("simulations", "npu_framework", "TEXT NOT NULL DEFAULT ''"),
     ]
     for table, column, typedef in migrations:
         try:
@@ -691,6 +697,9 @@ _SIMULATION_COLUMNS = frozenset({
     "status", "tests_total", "tests_passed", "tests_failed",
     "coverage_pct", "valgrind_errors", "duration_ms",
     "report_json", "artifact_id",
+    # NPU fields (Phase 36)
+    "npu_latency_ms", "npu_throughput_fps", "accuracy_delta",
+    "model_size_kb", "npu_framework",
 })
 
 
