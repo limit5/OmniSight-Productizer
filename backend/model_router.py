@@ -1,0 +1,213 @@
+"""Smart Model Router — selects the best provider:model for each task.
+
+Uses three signals to choose:
+  1. Agent type preferences (firmware prefers strong code models)
+  2. Task complexity (simple → cheap/fast, complex → powerful)
+  3. Token budget awareness (high usage → downgrade to cheaper model)
+
+The router only suggests — it never overrides an explicit per-agent ai_model.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+
+from backend.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Cost tiers (approximate USD per 1M tokens, input+output average)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+COST_TIERS: dict[str, float] = {
+    # Tier 1: Premium ($5-30/1M)
+    "anthropic:claude-opus-4-20250514": 25.0,
+    "openai:gpt-4o": 7.5,
+    "openrouter:anthropic/claude-opus-4": 25.0,
+    "openrouter:openai/gpt-4o": 7.5,
+    # Tier 2: Standard ($1-5/1M)
+    "anthropic:claude-sonnet-4-20250514": 4.5,
+    "openrouter:anthropic/claude-sonnet-4": 4.5,
+    "google:gemini-1.5-pro": 3.5,
+    "openrouter:google/gemini-2.5-pro-preview": 3.5,
+    "openrouter:mistralai/mistral-large": 3.0,
+    "openrouter:cohere/command-r-plus": 3.0,
+    "openrouter:qwen/qwen3-235b-a22b": 2.0,
+    "deepseek:deepseek-chat": 1.0,
+    # Tier 3: Budget ($0-1/1M)
+    "anthropic:claude-haiku-4-20250506": 0.5,
+    "openai:gpt-4o-mini": 0.3,
+    "groq:llama-3.3-70b-versatile": 0.3,
+    "openrouter:google/gemini-2.5-flash-preview": 0.3,
+    "openrouter:qwen/qwen3-32b": 0.2,
+    "openrouter:meta-llama/llama-4-scout": 0.2,
+    # Tier 4: Free/Local
+    "ollama:llama3.1": 0.0,
+    "ollama:qwen2.5": 0.0,
+    "ollama:deepseek-r1": 0.0,
+}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Agent type → model preferences (ordered by priority)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MODEL_PREFERENCES: dict[str, list[str]] = {
+    "firmware": [
+        "anthropic:claude-sonnet-4-20250514",   # Best at C/C++ code
+        "openrouter:anthropic/claude-sonnet-4",
+        "openai:gpt-4o",
+        "openrouter:qwen/qwen3-235b-a22b",
+        "deepseek:deepseek-chat",
+        "groq:llama-3.3-70b-versatile",
+    ],
+    "software": [
+        "anthropic:claude-sonnet-4-20250514",
+        "openrouter:anthropic/claude-sonnet-4",
+        "openai:gpt-4o",
+        "openrouter:qwen/qwen3-235b-a22b",
+        "deepseek:deepseek-chat",
+        "groq:llama-3.3-70b-versatile",
+    ],
+    "validator": [
+        "openai:gpt-4o",                        # Strong reasoning
+        "anthropic:claude-sonnet-4-20250514",
+        "openrouter:qwen/qwen3-235b-a22b",
+        "groq:llama-3.3-70b-versatile",         # Fast for test execution
+    ],
+    "reporter": [
+        "anthropic:claude-haiku-4-20250506",     # Fast + cheap for text generation
+        "openai:gpt-4o-mini",
+        "openrouter:google/gemini-2.5-flash-preview",
+        "groq:llama-3.3-70b-versatile",
+    ],
+    "reviewer": [
+        "anthropic:claude-sonnet-4-20250514",    # Deep code understanding
+        "openrouter:anthropic/claude-sonnet-4",
+        "openai:gpt-4o",
+    ],
+    "general": [
+        "anthropic:claude-sonnet-4-20250514",
+        "openai:gpt-4o",
+        "openrouter:qwen/qwen3-235b-a22b",
+        "groq:llama-3.3-70b-versatile",
+        "ollama:llama3.1",
+    ],
+}
+
+# Complexity keywords
+_COMPLEX_KEYWORDS = re.compile(
+    r"(architect|refactor|design|optimize|security|audit|migration|integration|"
+    r"debug.*complex|race.?condition|memory.?leak|performance|NPU|量化|架構|重構|效能)",
+    re.IGNORECASE,
+)
+_SIMPLE_KEYWORDS = re.compile(
+    r"(rename|format|log|comment|typo|simple|status|list|report|summary|"
+    r"摘要|報告|列出|狀態|格式)",
+    re.IGNORECASE,
+)
+
+
+def estimate_complexity(task_text: str) -> str:
+    """Estimate task complexity from text.
+
+    Returns: "simple", "medium", or "complex"
+    """
+    complex_hits = len(_COMPLEX_KEYWORDS.findall(task_text))
+    simple_hits = len(_SIMPLE_KEYWORDS.findall(task_text))
+
+    if complex_hits >= 2:
+        return "complex"
+    if complex_hits >= 1 and simple_hits == 0:
+        return "complex"
+    if simple_hits >= 2:
+        return "simple"
+    if simple_hits >= 1 and complex_hits == 0:
+        return "simple"
+    return "medium"
+
+
+def _get_budget_ratio() -> float:
+    """Get current token budget usage ratio (0.0 - 1.0+)."""
+    try:
+        from backend.routers.system import get_daily_cost
+        budget = settings.token_budget_daily
+        if budget <= 0:
+            return 0.0  # Unlimited
+        return get_daily_cost() / budget
+    except Exception:
+        return 0.0
+
+
+def _is_provider_available(model_spec: str) -> bool:
+    """Check if a provider:model is available (has API key and not in cooldown)."""
+    try:
+        from backend.agents.llm import validate_model_spec
+        result = validate_model_spec(model_spec)
+        return result.get("valid", False)
+    except Exception:
+        return False
+
+
+def select_model_for_task(
+    agent_type: str,
+    task_text: str,
+    agent_ai_model: str = "",
+) -> str:
+    """Select the best model for a task based on agent type, complexity, and budget.
+
+    Args:
+        agent_type: The agent's type (firmware, software, validator, etc.)
+        task_text: Task title + description for complexity estimation
+        agent_ai_model: Per-agent model override — if set, returns it as-is
+
+    Returns:
+        Model spec in "provider:model" format, or "" for global default
+    """
+    # 1. Per-agent override takes absolute precedence
+    if agent_ai_model:
+        return agent_ai_model
+
+    # 2. Get preferences for this agent type
+    preferences = MODEL_PREFERENCES.get(agent_type, MODEL_PREFERENCES["general"])
+
+    # 3. Complexity-based filtering
+    complexity = estimate_complexity(task_text)
+
+    # 4. Budget awareness
+    budget_ratio = _get_budget_ratio()
+
+    if budget_ratio >= 0.9:
+        # Budget nearly exhausted — only allow free/cheap models
+        max_cost = 0.5
+        logger.info("Smart routing: budget at %.0f%%, limiting to cost <= $%.1f/1M", budget_ratio * 100, max_cost)
+    elif budget_ratio >= 0.7:
+        # Budget getting tight — avoid premium
+        max_cost = 5.0
+    else:
+        # Normal — allow based on complexity
+        if complexity == "simple":
+            max_cost = 2.0
+        elif complexity == "complex":
+            max_cost = 50.0  # No limit for complex tasks
+        else:
+            max_cost = 10.0
+
+    # 5. Find first available model within budget
+    for model_spec in preferences:
+        cost = COST_TIERS.get(model_spec, 5.0)  # Default to mid-tier if unknown
+        if cost > max_cost:
+            continue
+        if _is_provider_available(model_spec):
+            logger.info(
+                "Smart routing: %s task [%s] → %s (cost=$%.1f/1M, budget=%.0f%%)",
+                agent_type, complexity, model_spec, cost, budget_ratio * 100,
+            )
+            return model_spec
+
+    # 6. Nothing available in preferences — return "" (use global default)
+    logger.info("Smart routing: no preferred model available for %s, using global default", agent_type)
+    return ""
