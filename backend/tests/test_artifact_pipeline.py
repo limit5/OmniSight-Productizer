@@ -248,14 +248,135 @@ class TestDownloadMIME:
 
     def test_binary_types_have_mime(self):
         """New artifact types should have MIME mappings in the download endpoint."""
-        # Read the media_types dict from artifacts.py
         import importlib
         from backend.routers import artifacts as art_mod
-        importlib.reload(art_mod)  # Ensure fresh
+        importlib.reload(art_mod)
 
-        # The download endpoint constructs media_types inline,
-        # so we test by checking the source contains the mappings
         import inspect
         source = inspect.getsource(art_mod.download_artifact)
         for atype in ("binary", "firmware", "kernel_module", "sdk", "model", "archive"):
             assert f'"{atype}"' in source, f"Missing MIME mapping for {atype}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  M8: Download endpoint end-to-end
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestDownloadEndToEnd:
+
+    @pytest.mark.asyncio
+    async def test_create_and_download_artifact(self, client):
+        """Full cycle: create file → register in DB → download via API."""
+        from backend import db
+        from backend.routers.artifacts import get_artifacts_root
+
+        # Create a real artifact file
+        art_root = get_artifacts_root()
+        task_dir = art_root / "e2e-test"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        test_file = task_dir / "firmware.bin"
+        content = b"\x00\x01\x02\x03OMNISIGHT_FIRMWARE" * 5
+        test_file.write_bytes(content)
+
+        # Register in DB
+        await db.insert_artifact({
+            "id": "art-e2e-dl",
+            "task_id": "e2e-test",
+            "agent_id": "fw-1",
+            "name": "firmware.bin",
+            "type": "firmware",
+            "file_path": str(test_file),
+            "size": len(content),
+            "created_at": "2026-04-13T00:00:00",
+            "version": "1.0.0",
+            "checksum": "abc123",
+        })
+
+        # Download via API
+        resp = await client.get("/api/v1/artifacts/art-e2e-dl/download")
+        assert resp.status_code == 200
+        assert resp.content == content
+        assert "application/octet-stream" in resp.headers.get("content-type", "")
+
+        # Cleanup
+        test_file.unlink(missing_ok=True)
+        task_dir.rmdir()
+
+    @pytest.mark.asyncio
+    async def test_download_nonexistent_returns_404(self, client):
+        resp = await client.get("/api/v1/artifacts/nonexistent-xyz/download")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_removes_file_and_db(self, client):
+        """Delete should remove both file and DB record."""
+        from backend import db
+        from backend.routers.artifacts import get_artifacts_root
+
+        art_root = get_artifacts_root()
+        task_dir = art_root / "del-test"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        test_file = task_dir / "to_delete.bin"
+        test_file.write_bytes(b"delete me")
+
+        await db.insert_artifact({
+            "id": "art-del-test",
+            "task_id": "del-test",
+            "agent_id": "",
+            "name": "to_delete.bin",
+            "type": "binary",
+            "file_path": str(test_file),
+            "size": 9,
+            "created_at": "2026-04-13T00:00:00",
+        })
+
+        resp = await client.delete("/api/v1/artifacts/art-del-test")
+        assert resp.status_code == 204
+        assert not test_file.exists()
+        assert await db.get_artifact("art-del-test") is None
+
+        # Cleanup dir
+        if task_dir.exists():
+            task_dir.rmdir()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  M9: register_build_artifact DB verification
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestRegisterArtifactDBPersistence:
+
+    @pytest.mark.asyncio
+    async def test_registered_artifact_persists_in_db(self, workspace, client):
+        """After register_build_artifact, artifact must exist in DB."""
+        from backend.agents.tools import register_build_artifact
+        from backend import db
+
+        # Create file
+        test_file = workspace / "build" / "driver.elf"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_bytes(b"ELF binary content " * 20)
+
+        result = await register_build_artifact.ainvoke({
+            "file_path": "build/driver.elf",
+            "task_id": "persist-test",
+            "version": "2.0.0",
+        })
+        assert "[OK]" in result
+
+        # Extract artifact ID from result
+        import re
+        match = re.search(r"ID: (art-[a-f0-9]+)", result)
+        assert match, f"Could not find artifact ID in: {result}"
+        art_id = match.group(1)
+
+        # Verify DB persistence
+        art = await db.get_artifact(art_id)
+        assert art is not None
+        assert art["name"] == "driver.elf"
+        assert art["type"] == "binary"
+        assert art["version"] == "2.0.0"
+        assert len(art["checksum"]) == 64  # SHA-256
+        assert art["size"] > 0
