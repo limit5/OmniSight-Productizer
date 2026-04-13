@@ -134,7 +134,7 @@ async def attempt_auto_fix(category: str, error_output: str, workspace_path: str
 
     if category == PermissionErrorCategory.SSH_KEY_PERMISSION:
         # Extract key path
-        m = re.search(r"for '([^']+)'|for \"([^\"]+)\"|permissions.*?(/\S+)", error_output, re.I)
+        m = re.search(r"for '([^']+)'|for \"([^\"]+)\"|permissions.*?(/[^\s'\"]+)", error_output, re.I)
         if m:
             key_path = Path(m.group(1) or m.group(2) or m.group(3)).expanduser()
             if key_path.exists():

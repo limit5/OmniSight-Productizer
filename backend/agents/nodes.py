@@ -711,13 +711,9 @@ async def error_check_node(state: GraphState) -> dict:
                     f"{perm_err['category']}: {perm_err['matched_text'][:60]}",
                 )
                 if perm_err["auto_fixable"]:
-                    import asyncio
-                    fix_result = asyncio.get_event_loop().run_until_complete(
-                        attempt_auto_fix(perm_err["category"], r.output, state.workspace_path or "")
-                    ) if asyncio.get_event_loop().is_running() else {"fixed": False}
-                    # Sync-safe fallback
-                    if not isinstance(fix_result, dict):
-                        fix_result = {"fixed": False}
+                    fix_result = await attempt_auto_fix(
+                        perm_err["category"], r.output, state.workspace_path or ""
+                    )
                     if fix_result.get("fixed"):
                         emit_pipeline_phase(
                             "env_fix",
