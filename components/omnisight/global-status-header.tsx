@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import { EmergencyStop } from "./emergency-stop"
 import { LanguageToggle } from "./language-toggle"
+import { ModeSelector } from "./mode-selector"
 
 interface StatusHeaderProps {
   finished: number
@@ -74,8 +75,9 @@ export function GlobalStatusHeader({
           </div>
         </div>
         
-        {/* Mobile Right: Language + Time + Emergency */}
+        {/* Mobile Right: Mode + Language + Time + Emergency */}
         <div className="flex items-center gap-2 shrink-0">
+          <ModeSelector compact />
           <LanguageToggle compact />
           <div className="font-mono text-xs text-[var(--neural-blue)] tabular-nums">
             {time}
@@ -161,9 +163,12 @@ export function GlobalStatusHeader({
             </div>
           </div>
           
+          {/* Operation Mode */}
+          <ModeSelector />
+
           {/* Language Toggle */}
           <LanguageToggle />
-          
+
           {/* Time */}
           <div className="font-mono text-sm text-[var(--neural-blue)] tabular-nums">
             {time}
