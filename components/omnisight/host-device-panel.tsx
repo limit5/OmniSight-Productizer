@@ -23,13 +23,17 @@ export type DeviceStatus = "connected" | "disconnected" | "detecting" | "error"
 export interface Device {
   id: string
   name: string
-  type: "usb" | "camera" | "storage" | "network" | "display"
+  type: "usb" | "camera" | "storage" | "network" | "display" | "evk"
   status: DeviceStatus
   vendorId?: string
   productId?: string
   serial?: string
   speed?: string
   mountPoint?: string
+  v4l2_device?: string      // /dev/video0
+  deploy_target_ip?: string // EVK board IP
+  deploy_method?: string    // ssh | adb | fastboot
+  reachable?: boolean       // EVK reachability
 }
 
 interface HostInfo {
@@ -156,6 +160,18 @@ function DeviceCard({
         {device.mountPoint && (
           <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate">
             {device.mountPoint}
+          </span>
+        )}
+        {/* UVC V4L2 device path */}
+        {device.v4l2_device && (
+          <span className="font-mono text-[10px] text-[var(--neural-blue)]">
+            {device.v4l2_device}
+          </span>
+        )}
+        {/* EVK board info */}
+        {device.deploy_target_ip && (
+          <span className={`font-mono text-[10px] ${device.reachable ? "text-[var(--validation-emerald)]" : "text-[var(--critical-red)]"}`}>
+            {device.deploy_method?.toUpperCase()} {device.deploy_target_ip} {device.reachable ? "●" : "○"}
           </span>
         )}
       </div>

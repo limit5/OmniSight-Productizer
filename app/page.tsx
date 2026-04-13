@@ -272,6 +272,10 @@ export default function Home() {
             productId: d.productId,
             speed: d.speed ?? undefined,
             mountPoint: d.mountPoint,
+            v4l2_device: (d as Record<string, unknown>).v4l2_device as string | undefined,
+            deploy_target_ip: (d as Record<string, unknown>).deploy_target_ip as string | undefined,
+            deploy_method: (d as Record<string, unknown>).deploy_method as string | undefined,
+            reachable: (d as Record<string, unknown>).reachable as boolean | undefined,
           })) : undefined}
         />
       case "spec":
