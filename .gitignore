@@ -35,6 +35,9 @@ __pycache__/
 backend/data/
 backend/artifacts/
 
+# Claude Code harness scratch
+.claude/
+
 # agent isolated workspaces
 .agent_workspaces/
 
