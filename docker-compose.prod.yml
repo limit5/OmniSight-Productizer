@@ -1,0 +1,55 @@
+version: "3.9"
+
+# Production compose — optimized images, named volumes, restart policy
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - omnisight-data:/app/data
+      - omnisight-artifacts:/app/.artifacts
+      - omnisight-sdks:/app/.sdks
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OMNISIGHT_DEBUG=false
+      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+    env_file:
+      - .env
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - NODE_ENV=production
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  omnisight-data:
+    driver: local
+  omnisight-artifacts:
+    driver: local
+  omnisight-sdks:
+    driver: local

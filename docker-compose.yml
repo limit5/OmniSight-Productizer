@@ -1,0 +1,38 @@
+version: "3.9"
+
+# Development compose — hot reload, debug mode
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./configs:/app/configs
+      - ./scripts:/app/scripts
+      - ./data:/app/data
+      - ./.artifacts:/app/.artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OMNISIGHT_DEBUG=true
+      - OMNISIGHT_FRONTEND_ORIGIN=http://localhost:3000
+      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
