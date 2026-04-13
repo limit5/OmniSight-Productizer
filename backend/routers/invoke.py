@@ -878,10 +878,18 @@ async def invoke_halt():
 
 @router.post("/resume")
 async def invoke_resume():
-    """Resume INVOKE after emergency stop."""
+    """Resume INVOKE after emergency stop — restores halted agents to idle."""
     _running.set()
-    emit_invoke("resume", "INVOKE resumed")
-    return {"status": "resumed"}
+    # Restore agents that were set to warning during halt
+    restored = 0
+    for agent in _agents.values():
+        if agent.status == AgentStatus.warning:
+            agent.status = AgentStatus.idle
+            agent.thought_chain = "Resumed from emergency halt."
+            emit_agent_update(agent.id, agent.status, agent.thought_chain)
+            restored += 1
+    emit_invoke("resume", f"INVOKE resumed, {restored} agent(s) restored to idle")
+    return {"status": "resumed", "agents_restored": restored}
 
 
 @router.post("")

@@ -391,12 +391,16 @@ export interface SystemInfo {
 export interface SystemDevice {
   id: string
   name: string
-  type: "usb" | "camera" | "storage" | "network" | "display"
+  type: "usb" | "camera" | "storage" | "network" | "display" | "evk"
   status: "connected" | "disconnected" | "detecting" | "error"
   vendorId?: string
   productId?: string
   speed?: string | null
   mountPoint?: string
+  v4l2_device?: string
+  deploy_target_ip?: string
+  deploy_method?: string
+  reachable?: boolean
 }
 
 export interface SystemStatus {

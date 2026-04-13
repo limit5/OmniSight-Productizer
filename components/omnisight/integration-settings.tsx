@@ -318,7 +318,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
           </SettingsSection>
 
           <SettingsSection title="GITHUB WEBHOOK" integration="github">
-            <SettingField label="Secret" value={getVal("webhooks", "github_secret")} type="password" onChange={v => setVal("github_webhook_secret", v)} />
+            <SettingField label="Secret" value={getVal("webhooks", "github_secret", "github_webhook_secret")} type="password" onChange={v => setVal("github_webhook_secret", v)} />
           </SettingsSection>
 
         </div>

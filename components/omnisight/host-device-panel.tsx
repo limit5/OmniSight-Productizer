@@ -191,7 +191,7 @@ function DeviceCard({
 }
 
 function HostInfoSection({ info }: { info: HostInfo }) {
-  const memoryPercent = Math.round((info.memoryUsed / info.memoryTotal) * 100)
+  const memoryPercent = info.memoryTotal > 0 ? Math.round((info.memoryUsed / info.memoryTotal) * 100) : 0
   
   return (
     <div className="space-y-2">
@@ -293,10 +293,13 @@ export function HostDevicePanel({
       d.id === id ? { ...d, status: "disconnected" as DeviceStatus } : d
     ))
     setTimeout(() => {
-      setDevices(prev => prev.filter(d => d.id !== id))
-      onDeviceChange?.(devices.filter(d => d.id !== id))
+      setDevices(prev => {
+        const updated = prev.filter(d => d.id !== id)
+        onDeviceChange?.(updated)
+        return updated
+      })
     }, 500)
-  }, [devices, onDeviceChange])
+  }, [onDeviceChange])
   
   const connectedCount = devices.filter(d => d.status === "connected").length
   const detectingCount = devices.filter(d => d.status === "detecting").length
