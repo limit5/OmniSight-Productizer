@@ -72,13 +72,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow Next.js frontend (dev: multiple origins)
-_cors_origins = [
-    settings.frontend_origin,
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-]
+# CORS — configurable origins (hardcoded localhost only in debug mode)
+_cors_origins = [settings.frontend_origin]
+if settings.extra_cors_origins:
+    _cors_origins.extend(o.strip() for o in settings.extra_cors_origins.split(",") if o.strip())
+if settings.debug:
+    # Dev convenience: add localhost variants
+    for dev_origin in ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001"]:
+        if dev_origin not in _cors_origins:
+            _cors_origins.append(dev_origin)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

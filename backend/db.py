@@ -17,7 +17,13 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "omnisight.db"
+def _resolve_db_path() -> Path:
+    from backend.config import settings
+    if settings.database_path:
+        return Path(settings.database_path).expanduser()
+    return Path(__file__).resolve().parents[1] / "data" / "omnisight.db"
+
+_DB_PATH = _resolve_db_path()
 _db: aiosqlite.Connection | None = None
 
 

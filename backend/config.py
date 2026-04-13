@@ -4,11 +4,15 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     app_name: str = "OmniSight Engine"
-    debug: bool = True
+    debug: bool = False  # Set OMNISIGHT_DEBUG=true for development
     api_prefix: str = "/api/v1"
 
-    # Frontend origin for CORS
+    # Frontend origin for CORS (comma-separated for multiple origins)
     frontend_origin: str = "http://localhost:3000"
+    extra_cors_origins: str = ""  # Additional CORS origins, comma-separated
+
+    # Database
+    database_path: str = ""  # SQLite path (empty = default data/omnisight.db)
 
     # ── LLM Provider Configuration ──
     # Which provider to use: anthropic | google | openai | xai | groq | deepseek | together | ollama
