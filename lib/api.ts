@@ -511,7 +511,7 @@ export interface SimulationItem {
   id: string
   task_id: string | null
   agent_id: string | null
-  track: "algo" | "hw"
+  track: "algo" | "hw" | "npu"
   module: string
   status: "running" | "pass" | "fail" | "error"
   tests_total: number
@@ -522,6 +522,12 @@ export interface SimulationItem {
   duration_ms: number
   report_json?: Record<string, unknown>
   created_at: string
+  // NPU-specific fields (only present for npu track)
+  npu_latency_ms?: number
+  npu_throughput_fps?: number
+  accuracy_delta?: number
+  model_size_kb?: number
+  npu_framework?: string
 }
 
 export async function listSimulations(params?: { task_id?: string; status?: string }): Promise<SimulationItem[]> {

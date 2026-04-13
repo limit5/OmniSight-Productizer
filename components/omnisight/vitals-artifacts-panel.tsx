@@ -364,9 +364,11 @@ function SimulationResults({
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const [showForm, setShowForm] = useState(false)
-  const [formTrack, setFormTrack] = useState<"algo" | "hw">("algo")
+  const [formTrack, setFormTrack] = useState<"algo" | "hw" | "npu">("algo")
   const [formModule, setFormModule] = useState("")
   const [formMock, setFormMock] = useState(true)
+  const [formModelPath, setFormModelPath] = useState("")
+  const [formFramework, setFormFramework] = useState("rknn")
 
   return (
     <div className="border-b border-[var(--border)]">
@@ -402,7 +404,7 @@ function SimulationResults({
             return (
               <div key={sim.id} className="flex items-center gap-1.5 p-1.5 rounded bg-[var(--secondary)] hover:bg-[var(--secondary-foreground)]/10 transition-colors">
                 {/* Track icon */}
-                <Cpu size={10} className={sim.track === "algo" ? "text-[var(--neural-blue)]" : "text-[var(--hardware-orange)]"} />
+                <Cpu size={10} className={sim.track === "algo" ? "text-[var(--neural-blue)]" : sim.track === "npu" ? "text-[var(--artifact-purple)]" : "text-[var(--hardware-orange)]"} />
                 {/* Module */}
                 <span className="font-mono text-[9px] text-[var(--foreground)] flex-1 truncate">{sim.module}</span>
                 {/* Status badge */}
@@ -421,6 +423,12 @@ function SimulationResults({
                 {sim.valgrind_errors > 0 && (
                   <span className="font-mono text-[8px] text-[var(--critical-red)] font-semibold">
                     V:{sim.valgrind_errors}
+                  </span>
+                )}
+                {/* NPU metrics */}
+                {sim.track === "npu" && (sim as Record<string, unknown>).npu_latency_ms != null && (
+                  <span className="font-mono text-[8px] text-[var(--artifact-purple)]" title={`${((sim as Record<string, unknown>).npu_throughput_fps as number || 0).toFixed(1)}fps`}>
+                    {((sim as Record<string, unknown>).npu_latency_ms as number || 0).toFixed(1)}ms
                   </span>
                 )}
               </div>
@@ -469,6 +477,16 @@ function SimulationResults({
                   >
                     HW
                   </button>
+                  <button
+                    onClick={() => setFormTrack("npu")}
+                    className={`flex-1 font-mono text-[9px] py-1 rounded transition-colors ${
+                      formTrack === "npu"
+                        ? "bg-[var(--artifact-purple)]/20 text-[var(--artifact-purple)] border border-[var(--artifact-purple)]"
+                        : "bg-[var(--secondary)] text-[var(--muted-foreground)] border border-[var(--border)]"
+                    }`}
+                  >
+                    NPU
+                  </button>
                 </div>
               </div>
               {/* Module input */}
@@ -482,7 +500,41 @@ function SimulationResults({
                   className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
                 />
               </div>
-              {/* Mock toggle */}
+              {/* NPU-specific fields */}
+              {formTrack === "npu" && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-10">MODEL</span>
+                    <input
+                      type="text"
+                      value={formModelPath}
+                      onChange={(e) => setFormModelPath(e.target.value)}
+                      placeholder="model.rknn"
+                      className="flex-1 font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:border-[var(--artifact-purple)]"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-10">FW</span>
+                    <div className="flex gap-1 flex-1">
+                      {["rknn", "tflite", "tensorrt"].map(fw => (
+                        <button
+                          key={fw}
+                          onClick={() => setFormFramework(fw)}
+                          className={`flex-1 font-mono text-[8px] py-0.5 rounded transition-colors ${
+                            formFramework === fw
+                              ? "bg-[var(--artifact-purple)]/20 text-[var(--artifact-purple)] border border-[var(--artifact-purple)]"
+                              : "bg-[var(--secondary)] text-[var(--muted-foreground)] border border-[var(--border)]"
+                          }`}
+                        >
+                          {fw.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+              {/* Mock toggle (algo/hw only) */}
+              {formTrack !== "npu" && (
               <div className="flex items-center gap-2">
                 <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-10">MOCK</span>
                 <button
@@ -499,6 +551,7 @@ function SimulationResults({
                   </span>
                 </button>
               </div>
+              )}
               {/* Submit / Cancel */}
               <div className="flex gap-1.5 pt-1">
                 <button
