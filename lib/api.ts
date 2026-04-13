@@ -73,9 +73,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       clearTimeout(timer)
       if (!res.ok) {
         const body = await res.text().catch(() => "")
-        // Only retry idempotent methods (GET/HEAD/OPTIONS) on 5xx
         const method = (init?.method || "GET").toUpperCase()
         const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(method)
+
+        // Retry on 429 (rate limited) and 503 (overloaded) — all methods, with backoff
+        if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
+          const retryAfter = parseInt(res.headers.get("Retry-After") || "0", 10)
+          const delay = retryAfter > 0 ? retryAfter * 1000 : 1000 * Math.pow(2, attempt)
+          lastError = new Error(`API ${res.status}: ${body}`)
+          console.warn(`[API] ${res.status} on ${path}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`)
+          await new Promise(r => setTimeout(r, delay))
+          continue
+        }
+        // Retry idempotent methods on 5xx
         if (res.status >= 500 && isIdempotent && attempt < MAX_RETRIES) {
           lastError = new Error(`API ${res.status}: ${body}`)
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
