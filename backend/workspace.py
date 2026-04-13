@@ -98,7 +98,26 @@ async def provision(
 
     from backend.config import settings as _settings
 
-    # Disk space check
+    # Preventive environment checks (non-blocking warnings + hard disk check)
+    try:
+        from backend.permission_errors import check_environment
+        env_issues = await check_environment(str(_WORKSPACES_ROOT))
+        for issue in env_issues:
+            level = "warn" if issue["status"] == "warning" else "error"
+            emit_pipeline_phase(
+                "env_check",
+                f"[{issue['status'].upper()}] {issue['check']}: {issue['detail']}",
+            )
+            if issue["status"] in ("error", "critical"):
+                try:
+                    from backend.events import emit_token_warning
+                    emit_token_warning(level, f"Environment: {issue['detail']}. {issue.get('suggestion', '')}")
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("Preventive env check failed (non-critical): %s", exc)
+
+    # Hard disk space check (blocks provision)
     free_bytes = shutil.disk_usage(str(_WORKSPACES_ROOT)).free
     if free_bytes < 100 * 1024 * 1024:  # 100MB minimum
         raise RuntimeError(f"Insufficient disk space: {free_bytes // 1024 // 1024}MB free")
