@@ -38,6 +38,10 @@ backend/artifacts/
 # Claude Code harness scratch
 .claude/
 
+# Vitest
+/coverage/
+/.vitest-cache/
+
 # agent isolated workspaces
 .agent_workspaces/
 
