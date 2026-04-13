@@ -310,10 +310,11 @@ async def git_diff(path: str = "") -> str:
     Args:
         path: Optional relative file path to diff.
     """
+    import shlex
     safe = ""
     if path:
         _safe_path(path)
-        safe = f" -- {path}"
+        safe = f" -- {shlex.quote(path)}"
     result = await _git(f"diff{safe}")
     if len(result) > 20_000:
         return result[:20_000] + "\n... [diff truncated at 20 KB]"
@@ -327,10 +328,11 @@ async def git_diff_staged(path: str = "") -> str:
     Args:
         path: Optional relative file path to diff.
     """
+    import shlex
     safe = ""
     if path:
         _safe_path(path)
-        safe = f" -- {path}"
+        safe = f" -- {shlex.quote(path)}"
     result = await _git(f"diff --cached{safe}")
     if len(result) > 20_000:
         return result[:20_000] + "\n... [diff truncated at 20 KB]"
@@ -350,8 +352,9 @@ async def git_add(path: str) -> str:
     Args:
         path: Relative file path to stage.
     """
+    import shlex
     _safe_path(path)
-    return await _git(f"add {path}")
+    return await _git(f"add {shlex.quote(path)}")
 
 
 @tool
@@ -361,8 +364,8 @@ async def git_commit(message: str) -> str:
     Args:
         message: Commit message.
     """
-    safe_msg = message.replace('"', '\\"')
-    return await _git(f'commit -m "{safe_msg}"')
+    import shlex
+    return await _git(f"commit -m {shlex.quote(message)}")
 
 
 @tool
@@ -993,9 +996,15 @@ async def deploy_to_evk(
     if method != "ssh":
         return f"[ERROR] Only SSH deploy is currently supported (got: {method})"
 
+    import shlex
+
     workspace = get_active_workspace()
     if binary_path:
-        src = workspace / binary_path
+        # Validate path stays inside workspace (prevent traversal)
+        try:
+            src = _safe_path(binary_path)
+        except PermissionError:
+            return f"[BLOCKED] Path escapes workspace: {binary_path}"
     else:
         # Auto-detect: look for common build outputs
         for candidate in ["build/output", "build/bin", "out"]:
@@ -1008,12 +1017,16 @@ async def deploy_to_evk(
     if not src.exists():
         return f"[ERROR] Binary not found: {src}. Build first with run_simulation --type=hw --mock=false"
 
+    # Sanitize all values used in remote SSH commands
+    safe_remote_path = shlex.quote(remote_path)
+    safe_binary_name = shlex.quote(src.name)
+
     # SCP to EVK
     ssh_opts = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no"]
     try:
         # Ensure remote directory exists
         proc = await asyncio.create_subprocess_exec(
-            "ssh", *ssh_opts, f"{user}@{ip}", f"mkdir -p {remote_path}",
+            "ssh", *ssh_opts, f"{user}@{ip}", f"mkdir -p {safe_remote_path}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
@@ -1032,10 +1045,9 @@ async def deploy_to_evk(
 
         # Run after deploy
         if run_after_deploy:
-            binary_name = src.name
             proc = await asyncio.create_subprocess_exec(
                 "ssh", *ssh_opts, f"{user}@{ip}",
-                f"cd {remote_path} && chmod +x {binary_name} && ./{binary_name} 2>&1 | head -50",
+                f"cd {safe_remote_path} && chmod +x {safe_binary_name} && ./{safe_binary_name} 2>&1 | head -50",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
