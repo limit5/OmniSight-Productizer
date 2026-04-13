@@ -38,14 +38,22 @@ async def gerrit_webhook(request: Request):
     if not settings.gerrit_enabled:
         return JSONResponse(status_code=503, content={"detail": "Gerrit integration disabled"})
 
-    # Authenticate if secret is configured
+    # Authenticate — per-instance secret from credential registry with scalar fallback
     raw_body = await request.body()
-    if settings.gerrit_webhook_secret:
+    try:
+        from backend.git_credentials import get_webhook_secret_for_host
+        # Try to identify Gerrit host from event payload or headers
+        _preview = json.loads(raw_body) if raw_body else {}
+        _gerrit_host = (_preview.get("change", {}).get("url", "") or "").split("/")[2] if "change" in _preview else ""
+        secret = get_webhook_secret_for_host(_gerrit_host, "gerrit") if _gerrit_host else settings.gerrit_webhook_secret
+    except Exception:
+        secret = settings.gerrit_webhook_secret
+    if secret:
         import hashlib
         import hmac as _hmac
         signature = request.headers.get("X-Gerrit-Signature", "")
         expected = _hmac.new(
-            settings.gerrit_webhook_secret.encode(), raw_body, hashlib.sha256
+            secret.encode(), raw_body, hashlib.sha256
         ).hexdigest()
         if not _hmac.compare_digest(signature, expected):
             return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
@@ -494,12 +502,18 @@ async def _sync_external_to_task(task, new_status: str, platform: str) -> dict:
 async def github_webhook(request: Request):
     """Receive GitHub issue/PR webhooks — sync status to internal tasks."""
     import hashlib, hmac as _hmac
-    if not settings.github_webhook_secret:
+    # Per-instance secret from credential registry with scalar fallback
+    try:
+        from backend.git_credentials import get_webhook_secret_for_host
+        secret = get_webhook_secret_for_host("github.com", "github") or settings.github_webhook_secret
+    except Exception:
+        secret = settings.github_webhook_secret
+    if not secret:
         return JSONResponse(status_code=503, content={"detail": "GitHub webhooks not configured"})
 
     body = await request.body()
     sig = request.headers.get("X-Hub-Signature-256", "")
-    expected = "sha256=" + _hmac.new(settings.github_webhook_secret.encode(), body, hashlib.sha256).hexdigest()
+    expected = "sha256=" + _hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     if not _hmac.compare_digest(expected, sig):
         return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
 
@@ -524,11 +538,21 @@ async def github_webhook(request: Request):
 async def gitlab_webhook(request: Request):
     """Receive GitLab issue webhooks — sync status to internal tasks."""
     import hmac as _hmac
-    if not settings.gitlab_webhook_secret:
+    # Per-instance secret from credential registry with scalar fallback
+    try:
+        from backend.git_credentials import get_webhook_secret_for_host
+        # Try to identify GitLab instance from header (GitLab 15.x+) or fallback
+        gl_instance = request.headers.get("X-Gitlab-Instance", "gitlab.com")
+        from urllib.parse import urlparse
+        gl_host = urlparse(gl_instance).hostname or gl_instance
+        secret = get_webhook_secret_for_host(gl_host, "gitlab") or settings.gitlab_webhook_secret
+    except Exception:
+        secret = settings.gitlab_webhook_secret
+    if not secret:
         return JSONResponse(status_code=503, content={"detail": "GitLab webhooks not configured"})
 
     token = request.headers.get("X-Gitlab-Token", "")
-    if not _hmac.compare_digest(token, settings.gitlab_webhook_secret):
+    if not _hmac.compare_digest(token, secret):
         return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
     event = await request.json()
