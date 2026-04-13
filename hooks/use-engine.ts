@@ -106,15 +106,15 @@ export function useEngine() {
   const [simulations, setSimulations] = useState<api.SimulationItem[]>([])
   const [npiData, setNpiData] = useState<api.NPIData | null>(null)
   const providerSwitchCallbackRef = useRef<(() => void) | null>(null)
-  const initRef = useRef(false)
+  // Track resources for cleanup (supports StrictMode double-mount)
+  const eventSourceRef = useRef<EventSource | null>(null)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Fetch initial data and subscribe to SSE event stream
   useEffect(() => {
-    if (initRef.current) return
-    initRef.current = true
-
     let eventSource: EventSource | null = null
     let lastEventTimestamp: string = ""
+    let cancelled = false  // cleanup flag to prevent setState after unmount
 
     let sysInterval: ReturnType<typeof setInterval> | null = null
 
@@ -356,16 +356,20 @@ export function useEngine() {
               timestamp: d.timestamp,
             }])
           }
-          }, (err) => {
+          }, () => {
             // On SSE error — reconnect with backoff + replay missed events
-            if (eventSource?.readyState === EventSource.CLOSED && reconnectAttempts < 5) {
+            if (cancelled) return
+            if (reconnectAttempts < 5) {
               reconnectAttempts++
               const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
               console.warn(`[Engine] SSE closed, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
-              setTimeout(async () => {
-                // Close leaked old EventSource before creating new one
-                eventSource?.close()
+              // Close old EventSource before scheduling reconnect
+              eventSource?.close()
+              const timerId = setTimeout(async () => {
+                if (cancelled) return
                 connectSSE()
+                // Store new ref for cleanup
+                eventSourceRef.current = eventSource
                 // Replay missed events from gap period
                 if (lastEventTimestamp) {
                   try {
@@ -378,20 +382,26 @@ export function useEngine() {
                   }
                 }
               }, delay)
+              reconnectTimerRef.current = timerId
             }
           })
+          // Store ref for cleanup
+          eventSourceRef.current = eventSource
         }
         connectSSE()
       } catch {
         console.warn("[Engine] Backend unavailable, using offline mode")
-        setConnected(false)
+        if (!cancelled) setConnected(false)
       }
     }
     init()
     fetchNPI()
 
     return () => {
+      cancelled = true
       eventSource?.close()
+      eventSourceRef.current?.close()
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
       if (sysInterval) clearInterval(sysInterval)
     }
   }, [])
