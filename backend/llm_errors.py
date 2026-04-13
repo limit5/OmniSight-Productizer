@@ -119,6 +119,13 @@ def _extract_status_code(exc: Exception) -> int | None:
         if 100 <= code <= 599:
             return code
 
+    # Check for bare status code at start of message (e.g. "502 Bad Gateway")
+    bare_match = re.match(r"^(\d{3})\b", msg.strip())
+    if bare_match:
+        code = int(bare_match.group(1))
+        if 100 <= code <= 599:
+            return code
+
     # Common patterns without explicit "status_code"
     if "429" in msg:
         return 429
