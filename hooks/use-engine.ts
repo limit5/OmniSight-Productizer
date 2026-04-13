@@ -263,7 +263,7 @@ export function useEngine() {
                   id: simId,
                   task_id: null,
                   agent_id: null,
-                  track: (d.track as "algo" | "hw") || "algo",
+                  track: (d.track as "algo" | "hw" | "npu") || "algo",
                   module: (d.module as string) || "",
                   status: "running",
                   tests_total: (d.tests_total as number) || 0,
@@ -294,7 +294,7 @@ export function useEngine() {
                   return [{
                     id: simId,
                     task_id: null, agent_id: null,
-                    track: (d.track as "algo" | "hw") || "algo",
+                    track: (d.track as "algo" | "hw" | "npu") || "algo",
                     module: (d.module as string) || "",
                     status: (d.status as "pass" | "fail" | "error") || "error",
                     tests_total: (d.tests_total as number) || 0,

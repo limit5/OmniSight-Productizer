@@ -127,6 +127,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
   useEffect(() => {
     if (open) {
+      setDirty({})  // Clear unsaved changes on fresh open
       api.getSettings().then(setSettingsData).catch(() => {})
       api.getProviders().then(r => setProviders(r.providers)).catch(() => {})
     }
