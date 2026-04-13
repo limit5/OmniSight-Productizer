@@ -49,6 +49,9 @@ async def switch_provider(body: SwitchProviderRequest):
         settings.llm_model = ""
 
     llm_ready = llm is not None
+    # Emit SSE event so other UI panels (Orchestrator, Settings) can sync
+    from backend.events import emit_invoke
+    emit_invoke("provider_switch", f"{settings.llm_provider}/{settings.get_model_name()}")
     return {
         "status": "switched",
         "provider": settings.llm_provider,

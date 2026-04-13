@@ -37,14 +37,22 @@ export default function Home() {
   const [showNotifications, setShowNotifications] = useState(false)
 
   // Fetch provider list + health on mount and periodically
-  useEffect(() => {
+  const refetchProviders = useCallback(() => {
     api.getProviders().then(setProviderData).catch(() => {})
     api.getProviderHealth().then(setProviderHealth).catch(() => {})
+  }, [])
+  useEffect(() => {
+    refetchProviders()
     const healthInterval = setInterval(() => {
       api.getProviderHealth().then(setProviderHealth).catch(() => {})
     }, 10000)
     return () => clearInterval(healthInterval)
-  }, [])
+  }, [refetchProviders])
+  // Sync provider data when switched from any source (Settings or Orchestrator)
+  useEffect(() => {
+    engine.setProviderSwitchCallback(refetchProviders)
+    return () => engine.setProviderSwitchCallback(null)
+  }, [engine, refetchProviders])
 
   // Use engine state (backed by API when connected)
   const {

@@ -105,6 +105,7 @@ export function useEngine() {
   const [artifacts, setArtifacts] = useState<api.ArtifactItem[]>([])
   const [simulations, setSimulations] = useState<api.SimulationItem[]>([])
   const [npiData, setNpiData] = useState<api.NPIData | null>(null)
+  const providerSwitchCallbackRef = useRef<(() => void) | null>(null)
   const initRef = useRef(false)
 
   // Fetch initial data and subscribe to SSE event stream
@@ -213,6 +214,10 @@ export function useEngine() {
               logMsg = `[DOCKER] ${d.agent_id} ${d.action}: ${d.detail}`
             } else if (event.event === "invoke") {
               logMsg = `[INVOKE] ${d.action_type}: ${d.detail}`
+              // Trigger provider data refetch when provider is switched from any source
+              if (d.action_type === "provider_switch" && providerSwitchCallbackRef.current) {
+                providerSwitchCallbackRef.current()
+              }
             } else if (event.event === "artifact_created") {
               logMsg = `[ARTIFACT] ${d.name} (${d.type}, ${d.size} bytes)`
               setArtifacts(prev => [{
@@ -685,5 +690,7 @@ export function useEngine() {
     invoke,
     // Utils
     refresh,
+    // Provider sync callback — set by page.tsx to refetch provider data on SSE event
+    setProviderSwitchCallback: (cb: (() => void) | null) => { providerSwitchCallbackRef.current = cb },
   }
 }

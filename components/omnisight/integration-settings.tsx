@@ -123,10 +123,12 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
   const [saving, setSaving] = useState(false)
+  const [providers, setProviders] = useState<api.ProviderConfig[]>([])
 
   useEffect(() => {
     if (open) {
       api.getSettings().then(setSettingsData).catch(() => {})
+      api.getProviders().then(r => setProviders(r.providers)).catch(() => {})
     }
   }, [open])
 
@@ -180,20 +182,98 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2">
 
           <SettingsSection title="LLM PROVIDERS">
-            <SettingField label="Provider" value={getVal("llm", "provider")} onChange={v => setVal("llm_provider", v)} />
-            <SettingField label="Model" value={getVal("llm", "model")} onChange={v => setVal("llm_model", v)} />
-            <div className="pt-1 pb-0.5">
-              <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">API Keys (leave empty to disable)</span>
+            {/* Active Provider — dropdown */}
+            {(() => {
+              const currentProvider = (dirty["llm_provider"] as string) ?? String(settingsData["llm"]?.["provider"] ?? "")
+              const selectedProvider = providers.find(p => p.id === currentProvider)
+              const modelList = selectedProvider?.models ?? []
+              const currentModel = (dirty["llm_model"] as string) ?? String(settingsData["llm"]?.["model"] ?? "")
+              return (
+                <>
+                  <div className="flex items-center gap-2">
+                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Provider</label>
+                    <select
+                      value={currentProvider}
+                      onChange={e => {
+                        setVal("llm_provider", e.target.value)
+                        // Auto-select default model for new provider
+                        const p = providers.find(pr => pr.id === e.target.value)
+                        if (p) setVal("llm_model", p.default_model)
+                      }}
+                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                    >
+                      {providers.map(p => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} {p.configured ? "✅" : "⚫"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {/* Active Model — dropdown linked to provider */}
+                  <div className="flex items-center gap-2">
+                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Model</label>
+                    <select
+                      value={currentModel}
+                      onChange={e => setVal("llm_model", e.target.value)}
+                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                    >
+                      {modelList.map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                      {/* Allow current model even if not in list */}
+                      {currentModel && !modelList.includes(currentModel) && (
+                        <option value={currentModel}>{currentModel} (custom)</option>
+                      )}
+                    </select>
+                  </div>
+                </>
+              )
+            })()}
+            {/* API Keys with status indicators */}
+            <div className="pt-1.5 pb-0.5">
+              <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">API Keys</span>
             </div>
-            <SettingField label="Anthropic" value={getVal("llm", "anthropic_api_key")} type="password" onChange={v => setVal("anthropic_api_key", v)} />
-            <SettingField label="OpenAI" value={getVal("llm", "openai_api_key")} type="password" onChange={v => setVal("openai_api_key", v)} />
-            <SettingField label="Google" value={getVal("llm", "google_api_key")} type="password" onChange={v => setVal("google_api_key", v)} />
-            <SettingField label="OpenRouter" value={getVal("llm", "openrouter_api_key")} type="password" onChange={v => setVal("openrouter_api_key", v)} />
-            <SettingField label="xAI (Grok)" value={getVal("llm", "xai_api_key")} type="password" onChange={v => setVal("xai_api_key", v)} />
-            <SettingField label="Groq" value={getVal("llm", "groq_api_key")} type="password" onChange={v => setVal("groq_api_key", v)} />
-            <SettingField label="DeepSeek" value={getVal("llm", "deepseek_api_key")} type="password" onChange={v => setVal("deepseek_api_key", v)} />
-            <SettingField label="Together" value={getVal("llm", "together_api_key")} type="password" onChange={v => setVal("together_api_key", v)} />
-            <SettingField label="Ollama URL" value={getVal("llm", "ollama_base_url")} onChange={v => setVal("ollama_base_url", v)} />
+            {[
+              { id: "anthropic", label: "Anthropic", key: "anthropic_api_key" },
+              { id: "openai", label: "OpenAI", key: "openai_api_key" },
+              { id: "google", label: "Google", key: "google_api_key" },
+              { id: "openrouter", label: "OpenRouter", key: "openrouter_api_key" },
+              { id: "xai", label: "xAI (Grok)", key: "xai_api_key" },
+              { id: "groq", label: "Groq", key: "groq_api_key" },
+              { id: "deepseek", label: "DeepSeek", key: "deepseek_api_key" },
+              { id: "together", label: "Together", key: "together_api_key" },
+            ].map(({ id, label, key }) => {
+              const configured = providers.find(p => p.id === id)?.configured ?? false
+              const hasLocalEdit = key in dirty && String(dirty[key]).length > 0
+              const showConfigured = configured || hasLocalEdit
+              return (
+                <div key={id} className="flex items-center gap-2">
+                  <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${showConfigured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`} />
+                    {label}
+                  </label>
+                  <input
+                    type="password"
+                    value={key in dirty ? String(dirty[key]) : String(settingsData["llm"]?.[key] ?? "")}
+                    onChange={e => setVal(key, e.target.value)}
+                    placeholder={configured ? "••• configured •••" : "paste key here"}
+                    className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:border-[var(--neural-blue)]"
+                  />
+                </div>
+              )
+            })}
+            <div className="flex items-center gap-2">
+              <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--validation-emerald)]" />
+                Ollama
+              </label>
+              <input
+                type="text"
+                value={"ollama_base_url" in dirty ? String(dirty["ollama_base_url"]) : String(settingsData["llm"]?.["ollama_base_url"] ?? "http://localhost:11434")}
+                onChange={e => setVal("ollama_base_url", e.target.value)}
+                className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+              />
+            </div>
             <div className="pt-1">
               <SettingField label="Fallback" value={getVal("llm", "fallback_chain")} onChange={v => setVal("llm_fallback_chain", v)} />
             </div>

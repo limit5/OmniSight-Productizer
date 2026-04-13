@@ -136,6 +136,12 @@ async def update_settings(body: SettingsUpdate):
             _cache.clear()
         except Exception:
             pass
+        # Emit SSE event so Orchestrator panel can sync
+        try:
+            from backend.events import emit_invoke
+            emit_invoke("provider_switch", f"{settings.llm_provider}/{settings.get_model_name()}")
+        except Exception:
+            pass
 
     logger.info("Settings updated: %s", list(applied.keys()))
     return {
