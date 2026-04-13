@@ -287,6 +287,13 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
             task.status = TaskStatus.blocked
         await _persist_task(task)
         await _check_parent_completion(task.id)
+        # Pipeline auto-advance: notify pipeline when task completes
+        if agent.status == AgentStatus.success:
+            try:
+                from backend.pipeline import on_task_completed
+                await on_task_completed(task.id, getattr(task, "npi_phase_id", None))
+            except Exception:
+                pass
         emit_invoke("task_complete", f"Agent {agent.id} finished task {task.id}")
     finally:
         _running_tasks.pop(agent.id, None)
