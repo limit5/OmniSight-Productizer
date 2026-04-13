@@ -73,6 +73,7 @@ function getDeviceIcon(type: Device["type"]) {
     case "storage": return HardDrive
     case "network": return Wifi
     case "display": return Monitor
+    case "evk": return Cpu
     default: return Usb
   }
 }

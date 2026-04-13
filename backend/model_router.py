@@ -14,6 +14,7 @@ import logging
 import re
 
 from backend.config import settings
+from backend.events import emit_pipeline_phase
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,6 @@ def select_model_for_task(
     # Emit SSE when budget forces a downgrade
     if budget_constrained:
         try:
-            from backend.events import emit_pipeline_phase
             emit_pipeline_phase(
                 "smart_route",
                 f"Budget {budget_ratio:.0%} — limiting {agent_type} to ≤${max_cost:.1f}/1M models",
@@ -232,7 +232,6 @@ def select_model_for_task(
                 top_short = top_pref.split(":")[-1] if ":" in top_pref else top_pref
                 downgrade_note = f" (downgraded from {top_short})"
             try:
-                from backend.events import emit_pipeline_phase
                 emit_pipeline_phase(
                     "smart_route",
                     f"{agent_type} [{complexity}] → {short_model}{downgrade_note} | \"{short_task}\"",

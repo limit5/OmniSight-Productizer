@@ -324,7 +324,8 @@ async def _help(args: str) -> str:
     return "\n".join(lines)
 
 
-_HANDLERS: dict[str, object] = {
+from typing import Callable, Awaitable
+_HANDLERS: dict[str, Callable[[str], Awaitable[str]]] = {
     # System
     "status": _status, "info": _info, "debug": _debug, "logs": _logs, "devices": _devices,
     # Development

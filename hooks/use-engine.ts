@@ -134,6 +134,7 @@ export function useEngine() {
           api.listSimulations(),
         ])
         // Only update state for successful fetches — stale data is better than no data
+        if (cancelled) return
         if (rStatus.status === "fulfilled") setSystemStatus(rStatus.value)
         if (rInfo.status === "fulfilled") setSystemInfo(rInfo.value)
         if (rDevices.status === "fulfilled") setDevices(rDevices.value)

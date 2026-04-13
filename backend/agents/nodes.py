@@ -807,11 +807,12 @@ def _estimate_context_tokens(state: GraphState) -> int:
     return total_chars // _CHARS_PER_TOKEN
 
 
-def _get_context_window() -> int:
-    """Get the context window size for the active model."""
+def _get_context_window(model_name: str = "") -> int:
+    """Get the context window size for the given model (or global default)."""
     try:
         from backend.config import settings
-        model = (settings.llm_model or "").lower()
+        # Prefer per-agent model_name over global setting
+        model = (model_name or settings.llm_model or "").lower()
         for prefix, window in _DEFAULT_CONTEXT_WINDOWS.items():
             if prefix in model:
                 return window
@@ -827,7 +828,7 @@ def context_compression_gate(state: GraphState) -> dict:
     compresses older messages (keeping the most recent 4) into a digest.
     """
     est_tokens = _estimate_context_tokens(state)
-    ctx_window = _get_context_window()
+    ctx_window = _get_context_window(state.model_name)
     usage_ratio = est_tokens / ctx_window if ctx_window > 0 else 0
 
     if usage_ratio >= _L2_WARN_THRESHOLD:

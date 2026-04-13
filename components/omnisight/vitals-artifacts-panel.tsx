@@ -360,7 +360,7 @@ function SimulationResults({
   onTriggerSimulation,
 }: {
   simulations: SimulationItem[]
-  onTriggerSimulation?: (track: string, module: string, mock: boolean) => void
+  onTriggerSimulation?: (track: string, module: string, mock: boolean, npuModel?: string, npuFramework?: string) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
   const [showForm, setShowForm] = useState(false)
@@ -426,9 +426,9 @@ function SimulationResults({
                   </span>
                 )}
                 {/* NPU metrics */}
-                {sim.track === "npu" && (sim as Record<string, unknown>).npu_latency_ms != null && (
-                  <span className="font-mono text-[8px] text-[var(--artifact-purple)]" title={`${((sim as Record<string, unknown>).npu_throughput_fps as number || 0).toFixed(1)}fps`}>
-                    {((sim as Record<string, unknown>).npu_latency_ms as number || 0).toFixed(1)}ms
+                {sim.track === "npu" && sim.npu_latency_ms != null && (
+                  <span className="font-mono text-[8px] text-[var(--artifact-purple)]" title={`${(sim.npu_throughput_fps || 0).toFixed(1)}fps`}>
+                    {(sim.npu_latency_ms || 0).toFixed(1)}ms
                   </span>
                 )}
               </div>
@@ -557,7 +557,7 @@ function SimulationResults({
                 <button
                   onClick={() => {
                     if (formModule.trim() && onTriggerSimulation) {
-                      onTriggerSimulation(formTrack, formModule.trim(), formMock)
+                      onTriggerSimulation(formTrack, formModule.trim(), formMock, formTrack === "npu" ? formModelPath : undefined, formTrack === "npu" ? formFramework : undefined)
                       setFormModule("")
                       setShowForm(false)
                     }

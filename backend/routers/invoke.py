@@ -296,7 +296,6 @@ _SPLIT_PATTERNS = re.compile(
 )
 
 # Conjunctions that should NOT trigger a split (too ambiguous)
-_FALSE_SPLIT = re.compile(r"^(and|or)$", re.IGNORECASE)
 
 
 async def _maybe_decompose_task(task) -> list:
@@ -527,8 +526,9 @@ def _plan_actions(state: dict, command: str | None) -> list[dict]:
     return actions
 
 
-def _priority_rank(priority: str) -> int:
-    return {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(priority, 4)
+def _priority_rank(priority) -> int:
+    p = priority.value if hasattr(priority, "value") else str(priority)
+    return {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(p, 4)
 
 
 def _score_agent_for_task(agent, task) -> int:
@@ -799,6 +799,8 @@ async def invoke_stream(command: str | None = None):
     Query param `command` is optional; if provided, it takes priority
     and is routed through the LangGraph pipeline.
     """
+    # Non-blocking lock check — the actual lock is acquired in the generator/body
+    # via `async with _invoke_lock`, which guarantees mutual exclusion
     if _invoke_lock.locked():
         return JSONResponse(
             status_code=409,
@@ -895,6 +897,8 @@ async def invoke_resume():
 @router.post("")
 async def invoke_sync(command: str | None = None):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
+    # Non-blocking lock check — the actual lock is acquired in the generator/body
+    # via `async with _invoke_lock`, which guarantees mutual exclusion
     if _invoke_lock.locked():
         return JSONResponse(
             status_code=409,
