@@ -107,12 +107,14 @@ export function useEngine() {
   const [npiData, setNpiData] = useState<api.NPIData | null>(null)
   const providerSwitchCallbackRef = useRef<(() => void) | null>(null)
   // Track resources for cleanup (supports StrictMode double-mount)
-  const eventSourceRef = useRef<EventSource | null>(null)
+  const eventSourceRef = useRef<{ close: () => void; readyState: number } | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Fetch initial data and subscribe to SSE event stream
   useEffect(() => {
-    let eventSource: EventSource | null = null
+    // Phase 48-Fix P0: subscribeEvents now returns a handle (close + readyState)
+    // instead of a raw EventSource so all callers share one underlying stream.
+    let eventSource: { close: () => void; readyState: number } | null = null
     let lastEventTimestamp: string = ""
     let cancelled = false  // cleanup flag to prevent setState after unmount
 

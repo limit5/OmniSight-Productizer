@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { AlertOctagon, AlertTriangle, Check, History, Info, RotateCcw, X, Zap } from "lucide-react"
 import {
   type DecisionPayload,
@@ -15,12 +15,15 @@ import {
 } from "@/lib/api"
 
 /**
- * Phase 48C — Decision Dashboard.
+ * Phase 48C (post-audit) — Decision Dashboard.
  *
- * Two tabs: Pending (actionable) + History (recent resolved). Decisions
- * arrive via SSE (decision_pending / auto_executed / resolved / undone);
- * user can approve/reject pending or undo resolved. A countdown bar
- * shows time remaining before timeout_default kicks in.
+ * Changes from the original implementation:
+ *   - Uses shared SSE manager (via subscribeEvents); no dedicated connection.
+ *   - Local merge on SSE events instead of a 150-item refetch every tick.
+ *   - AbortController cancels in-flight refetches on unmount.
+ *   - Inline seconds-left computation — no useMemo with unstable deps.
+ *   - Countdown tick owns its own useEffect; unrelated to refresh deps.
+ *   - Sweep button tracks its own loading state.
  */
 
 const SEVERITY_META: Record<DecisionSeverity, { label: string; color: string; Icon: typeof Info }> = {
@@ -30,9 +33,10 @@ const SEVERITY_META: Record<DecisionSeverity, { label: string; color: string; Ic
   destructive: { label: "DESTRUCTIVE", color: "var(--critical-red, #ef4444)", Icon: AlertOctagon },
 }
 
-function secondsLeft(deadline_at: number | null): number | null {
-  if (!deadline_at) return null
-  return Math.max(0, Math.floor(deadline_at - Date.now() / 1000))
+const HISTORY_CAP = 50
+
+function sortNewestFirst(items: DecisionPayload[]): DecisionPayload[] {
+  return [...items].sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
 }
 
 export function DecisionDashboard() {
@@ -40,79 +44,103 @@ export function DecisionDashboard() {
   const [pending, setPending] = useState<DecisionPayload[]>([])
   const [history, setHistory] = useState<DecisionPayload[]>([])
   const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const [sweeping, setSweeping] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [initialLoaded, setInitialLoaded] = useState(false)
   const [now, setNow] = useState(Date.now())
 
-  const refresh = useCallback(async () => {
+  const mountedRef = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const initialLoad = useCallback(async () => {
+    // Cancel any prior in-flight before starting a new pass.
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
     try {
       const [p, h] = await Promise.all([
         listDecisions("pending", 100),
-        listDecisions("history", 50),
+        listDecisions("history", HISTORY_CAP),
       ])
-      setPending(p.items)
-      setHistory(h.items.slice().reverse())
+      if (!mountedRef.current || ac.signal.aborted) return
+      setPending(sortNewestFirst(p.items))
+      setHistory(sortNewestFirst(h.items))
       setError(null)
+      setInitialLoaded(true)
     } catch (exc) {
+      if (!mountedRef.current || ac.signal.aborted) return
       setError(exc instanceof Error ? exc.message : String(exc))
     }
   }, [])
 
+  // SSE local-merge handlers — never refetch for single-item updates.
+  const mergePending = useCallback((d: DecisionPayload) => {
+    setPending((prev) => {
+      const without = prev.filter((x) => x.id !== d.id)
+      return sortNewestFirst([d, ...without])
+    })
+  }, [])
+  const markResolved = useCallback((d: DecisionPayload) => {
+    setPending((prev) => prev.filter((x) => x.id !== d.id))
+    setHistory((prev) => {
+      const without = prev.filter((x) => x.id !== d.id)
+      return sortNewestFirst([d, ...without]).slice(0, HISTORY_CAP)
+    })
+  }, [])
+
   useEffect(() => {
-    void refresh()
-    const es = subscribeEvents((ev: SSEEvent) => {
-      if (
-        ev.event === "decision_pending" ||
+    mountedRef.current = true
+    void initialLoad()
+    const sub = subscribeEvents((ev: SSEEvent) => {
+      if (ev.event === "decision_pending") {
+        mergePending(ev.data)
+      } else if (
         ev.event === "decision_auto_executed" ||
         ev.event === "decision_resolved" ||
         ev.event === "decision_undone"
       ) {
-        void refresh()
+        markResolved(ev.data)
       }
     })
-    return () => es.close()
-  }, [refresh])
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort()
+      sub.close()
+    }
+  }, [initialLoad, mergePending, markResolved])
 
-  // Countdown tick
+  // Countdown tick — own effect, 1 Hz, independent of refresh or SSE.
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(t)
   }, [])
 
-  const doApprove = async (d: DecisionPayload, option_id: string) => {
-    setBusy((b) => ({ ...b, [d.id]: true }))
+  const withRowBusy = async (id: string, fn: () => Promise<unknown>) => {
+    setBusy((b) => ({ ...b, [id]: true }))
     try {
-      await approveDecision(d.id, option_id)
+      await fn()
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc))
+      if (mountedRef.current) setError(exc instanceof Error ? exc.message : String(exc))
     } finally {
-      setBusy((b) => ({ ...b, [d.id]: false }))
+      if (mountedRef.current) setBusy((b) => ({ ...b, [id]: false }))
     }
   }
-  const doReject = async (d: DecisionPayload) => {
-    setBusy((b) => ({ ...b, [d.id]: true }))
-    try {
-      await rejectDecision(d.id)
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc))
-    } finally {
-      setBusy((b) => ({ ...b, [d.id]: false }))
-    }
-  }
-  const doUndo = async (d: DecisionPayload) => {
-    setBusy((b) => ({ ...b, [d.id]: true }))
-    try {
-      await undoDecision(d.id)
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc))
-    } finally {
-      setBusy((b) => ({ ...b, [d.id]: false }))
-    }
-  }
+
+  const doApprove = (d: DecisionPayload, option_id: string) =>
+    withRowBusy(d.id, () => approveDecision(d.id, option_id))
+  const doReject = (d: DecisionPayload) => withRowBusy(d.id, () => rejectDecision(d.id))
+  const doUndo = (d: DecisionPayload) => withRowBusy(d.id, () => undoDecision(d.id))
+
   const doSweep = async () => {
+    if (sweeping) return
+    setSweeping(true)
+    setError(null)
     try {
       await triggerSweep()
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc))
+      if (mountedRef.current) setError(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      if (mountedRef.current) setSweeping(false)
     }
   }
 
@@ -162,22 +190,37 @@ export function DecisionDashboard() {
           </button>
           <button
             onClick={() => void doSweep()}
-            className="ml-1 px-2 py-0.5 font-mono text-[10px] tracking-wider rounded-sm text-[var(--muted-foreground,#94a3b8)] hover:text-white hover:bg-white/5"
+            disabled={sweeping}
+            className={`ml-1 px-2 py-0.5 font-mono text-[10px] tracking-wider rounded-sm ${
+              sweeping
+                ? "text-[var(--muted-foreground,#64748b)] cursor-wait"
+                : "text-[var(--muted-foreground,#94a3b8)] hover:text-white hover:bg-white/5"
+            }`}
             title="Trigger timeout sweep (resolves expired pending decisions)"
           >
-            SWEEP
+            {sweeping ? "SWEEP…" : "SWEEP"}
           </button>
         </div>
       </header>
 
       {error && (
-        <div className="px-3 py-1.5 font-mono text-[10px] text-[var(--critical-red,#ef4444)] border-b border-[var(--neural-border,rgba(148,163,184,0.2))]">
-          {error}
+        <div className="px-3 py-1.5 flex items-center justify-between gap-2 font-mono text-[10px] text-[var(--critical-red,#ef4444)] border-b border-[var(--neural-border,rgba(148,163,184,0.2))]">
+          <span className="truncate">{error}</span>
+          <button
+            onClick={() => void initialLoad()}
+            className="px-1.5 py-0.5 rounded-sm border border-current hover:bg-current/10"
+          >
+            RETRY
+          </button>
         </div>
       )}
 
       <ul className="flex-1 min-h-[120px] max-h-[360px] overflow-y-auto divide-y divide-[var(--neural-border,rgba(148,163,184,0.15))]">
-        {items.length === 0 ? (
+        {!initialLoaded ? (
+          <li className="px-3 py-6 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]">
+            Loading…
+          </li>
+        ) : items.length === 0 ? (
           <li className="px-3 py-6 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]">
             {tab === "pending" ? "No pending decisions." : "No history yet."}
           </li>
@@ -207,12 +250,15 @@ function DecisionRow(props: {
   onReject: (d: DecisionPayload) => void | Promise<void>
   onUndo: (d: DecisionPayload) => void | Promise<void>
 }) {
-  const { d, busy, onApprove, onReject, onUndo } = props
+  const { d, now, busy, onApprove, onReject, onUndo } = props
   const meta = SEVERITY_META[d.severity] || SEVERITY_META.routine
   const { Icon } = meta
-  const remaining = useMemo(() => secondsLeft(d.deadline_at), [d.deadline_at, props.now])
+  // Inline — cheap pure function, no memo needed.
+  const remaining =
+    d.deadline_at == null ? null : Math.max(0, Math.floor(d.deadline_at - now / 1000))
   const isPending = d.status === "pending"
-  const canUndo = d.status === "approved" || d.status === "auto_executed" || d.status === "timeout_default"
+  const canUndo =
+    d.status === "approved" || d.status === "auto_executed" || d.status === "timeout_default"
 
   return (
     <li className="px-3 py-2">

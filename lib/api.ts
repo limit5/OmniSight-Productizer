@@ -27,38 +27,115 @@ export type SSEEvent =
   | { event: "heartbeat"; data: { subscribers: number } }
   // ─── Phase 47: Autonomous Decision Engine ───
   | { event: "mode_changed"; data: { mode: OperationMode; previous: OperationMode; parallel_cap: number; in_flight: number; over_cap: number; timestamp: string } }
-  | { event: "decision_pending"; data: DecisionPayload }
-  | { event: "decision_auto_executed"; data: DecisionPayload }
-  | { event: "decision_resolved"; data: DecisionPayload }
-  | { event: "decision_undone"; data: DecisionPayload }
+  // Phase 47 decisions always carry timestamp (publisher sets it in bus.publish);
+  // intersect with DecisionPayload so consumers don't branch on optional.
+  | { event: "decision_pending"; data: DecisionPayload & { timestamp: string } }
+  | { event: "decision_auto_executed"; data: DecisionPayload & { timestamp: string } }
+  | { event: "decision_resolved"; data: DecisionPayload & { timestamp: string } }
+  | { event: "decision_undone"; data: DecisionPayload & { timestamp: string } }
   | { event: "budget_strategy_changed"; data: { strategy: BudgetStrategyId; previous: BudgetStrategyId; tuning: BudgetTuning; timestamp: string } }
 
-/**
- * Subscribe to the persistent SSE event stream from the backend.
- * Returns an EventSource that auto-reconnects.
- */
-export function subscribeEvents(
-  onEvent: (event: SSEEvent) => void,
-  onError?: (err: Event) => void,
-): EventSource {
-  // EventSource needs absolute URL in some environments
-  const eventsUrl = API_V1.startsWith("http") ? `${API_V1}/events` : `${window.location.origin}${API_V1}/events`
-  const es = new EventSource(eventsUrl)
+// ─── Global SSE manager ───
+// 48A-Fix P0: a single EventSource per origin, shared across every caller.
+// Each `subscribeEvents()` now registers a listener on the shared stream
+// instead of opening its own connection. Closing the returned handle only
+// removes the listener; the underlying EventSource is torn down when the
+// last subscriber leaves. This fixes both the 3×-connection waste and the
+// browser's 6-connection-per-origin hard cap.
 
-  for (const eventType of ["agent_update", "task_update", "tool_progress", "pipeline", "workspace", "container", "invoke", "token_warning", "notification", "artifact_created", "simulation", "debug_finding", "heartbeat"]) {
+// Event type names the backend actually emits — keep in sync with
+// sse_schemas.SSE_EVENT_SCHEMAS.
+const SSE_EVENT_TYPES = [
+  "agent_update",
+  "task_update",
+  "tool_progress",
+  "pipeline",
+  "workspace",
+  "container",
+  "invoke",
+  "token_warning",
+  "notification",
+  "artifact_created",
+  "simulation",
+  "debug_finding",
+  "heartbeat",
+  // Phase 47 decision engine
+  "mode_changed",
+  "decision_pending",
+  "decision_auto_executed",
+  "decision_resolved",
+  "decision_undone",
+  "budget_strategy_changed",
+] as const
+
+type SSEListener = (ev: SSEEvent) => void
+type ErrorListener = (err: Event) => void
+
+let _sharedES: EventSource | null = null
+const _sseListeners = new Set<SSEListener>()
+const _sseErrorListeners = new Set<ErrorListener>()
+
+function _ensureSharedEventSource(): EventSource {
+  if (_sharedES && _sharedES.readyState !== EventSource.CLOSED) {
+    return _sharedES
+  }
+  const eventsUrl = API_V1.startsWith("http")
+    ? `${API_V1}/events`
+    : `${window.location.origin}${API_V1}/events`
+  const es = new EventSource(eventsUrl)
+  for (const eventType of SSE_EVENT_TYPES) {
     es.addEventListener(eventType, (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data)
-        onEvent({ event: eventType, data } as SSEEvent)
-      } catch { /* skip malformed */ }
+      let data: unknown
+      try { data = JSON.parse(e.data) } catch { return }
+      const payload = { event: eventType, data } as SSEEvent
+      // Copy the set so a listener removing itself mid-dispatch is safe.
+      for (const l of Array.from(_sseListeners)) {
+        try { l(payload) } catch (err) { console.warn("[SSE listener error]", err) }
+      }
     })
   }
-
   es.onerror = (e) => {
-    onError?.(e)
+    for (const l of Array.from(_sseErrorListeners)) {
+      try { l(e) } catch { /* swallow */ }
+    }
   }
-
+  _sharedES = es
   return es
+}
+
+/**
+ * Subscribe to the persistent SSE event stream. All callers share a single
+ * underlying EventSource. Returns a handle whose `.close()` removes only
+ * this subscriber; when the last one leaves, the connection is torn down.
+ *
+ * The returned object keeps `readyState` / `close()` members so existing
+ * call sites that treat the return value as an EventSource continue to
+ * work. New code should just call `.close()`.
+ */
+export function subscribeEvents(
+  onEvent: SSEListener,
+  onError?: ErrorListener,
+): { close: () => void; readyState: number } {
+  const es = _ensureSharedEventSource()
+  _sseListeners.add(onEvent)
+  if (onError) _sseErrorListeners.add(onError)
+
+  let closed = false
+  return {
+    get readyState() {
+      return _sharedES ? _sharedES.readyState : EventSource.CLOSED
+    },
+    close() {
+      if (closed) return
+      closed = true
+      _sseListeners.delete(onEvent)
+      if (onError) _sseErrorListeners.delete(onError)
+      if (_sseListeners.size === 0 && _sseErrorListeners.size === 0 && _sharedES) {
+        _sharedES.close()
+        _sharedES = null
+      }
+    },
+  }
 }
 
 // ─── Helpers ───

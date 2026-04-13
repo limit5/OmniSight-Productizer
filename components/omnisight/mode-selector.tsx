@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   type OperationMode,
   type SSEEvent,
@@ -35,36 +35,55 @@ export function ModeSelector({ compact = false }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const mountedRef = useRef(true)
+  const abortRef = useRef<AbortController | null>(null)
+
   const refresh = useCallback(async () => {
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
     try {
       const info = await getOperationMode()
+      if (!mountedRef.current || ac.signal.aborted) return
       setMode(info.mode)
       setCap(info.parallel_cap)
       setInFlight(info.in_flight)
       setError(null)
     } catch (exc) {
+      if (!mountedRef.current || ac.signal.aborted) return
       setError(exc instanceof Error ? exc.message : String(exc))
     }
   }, [])
 
+  // Keep a ref to the latest refresh so the 5 s interval (which only
+  // mounts once) can always call the current closure without restarting.
+  const refreshRef = useRef(refresh)
+  useEffect(() => { refreshRef.current = refresh }, [refresh])
+
+  // SSE + initial load. Fires once on mount.
   useEffect(() => {
-    void refresh()
-    // SSE: live-update when another client changes mode
-    const es = subscribeEvents((ev: SSEEvent) => {
+    mountedRef.current = true
+    void refreshRef.current()
+    const sub = subscribeEvents((ev: SSEEvent) => {
       if (ev.event === "mode_changed") {
+        if (!mountedRef.current) return
         setMode(ev.data.mode)
         setCap(ev.data.parallel_cap)
         setInFlight(ev.data.in_flight)
       }
     })
-    return () => es.close()
-  }, [refresh])
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort()
+      sub.close()
+    }
+  }, [])
 
-  // Poll in_flight every 5s since there's no dedicated SSE for it
+  // Poll in_flight every 5 s — single interval for component lifetime.
   useEffect(() => {
-    const t = setInterval(() => void refresh(), 5000)
+    const t = setInterval(() => { void refreshRef.current() }, 5000)
     return () => clearInterval(t)
-  }, [refresh])
+  }, [])
 
   const handlePick = async (next: OperationMode) => {
     if (next === mode || busy) return

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Gauge, Gem, Rabbit, Settings2 } from "lucide-react"
 import {
   type BudgetStrategyId,
@@ -38,26 +38,35 @@ export function BudgetStrategyPanel() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const mountedRef = useRef(true)
+
   const refresh = useCallback(async () => {
     try {
       const info = await getBudgetStrategy()
+      if (!mountedRef.current) return
       setCurrent(info.strategy)
       setTuning(info.tuning)
       setError(null)
     } catch (exc) {
+      if (!mountedRef.current) return
       setError(exc instanceof Error ? exc.message : String(exc))
     }
   }, [])
 
   useEffect(() => {
+    mountedRef.current = true
     void refresh()
-    const es = subscribeEvents((ev: SSEEvent) => {
+    const sub = subscribeEvents((ev: SSEEvent) => {
       if (ev.event === "budget_strategy_changed") {
+        if (!mountedRef.current) return
         setCurrent(ev.data.strategy)
         setTuning(ev.data.tuning)
       }
     })
-    return () => es.close()
+    return () => {
+      mountedRef.current = false
+      sub.close()
+    }
   }, [refresh])
 
   const pick = async (s: BudgetStrategyId) => {
