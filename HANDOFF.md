@@ -73,6 +73,13 @@
 - **Batch C**（`de2c365`）：N7 pending cap（env `OMNISIGHT_DECISION_PENDING_MAX`，default 256）／N8 reject 用 `__rejected__` sentinel／N10 `OMNISIGHT_DECISION_BEARER` 選配 bearer token／N11 structured-only log／N12 SSEDecision 加 `source`／N13 sweep interval env（default 10s）／N14 GET mode 回傳 `in_flight`
 - **Batch D**（本 commit）：8 個 SSE round-trip 測試覆蓋 approve/reject/undo/mode/budget/sweep + schema 契約驗證
 
+## Phase 48 進度（Autonomous Decision 前端）
+- **48A**（`7ba21e3`）：lib/api.ts 新增 Phase 47 types + CRUD + SSEEvent 擴展（mode_changed/decision_*/budget_strategy_changed）
+- **48B**（`3ddf608`）：`mode-selector.tsx` — 4-pill segmented control，global header 內掛載（mobile + desktop 兩版），SSE 同步 + 5s 輪詢 in_flight
+- **48C**（`598127f`）：`decision-dashboard.tsx` — pending/history 雙分頁、approve/reject/undo 按鈕、倒數計時（<10s 變紅）、SSE 自動 refetch、手動 SWEEP
+- **48D**（本 commit）：`budget-strategy-panel.tsx` — 4 策略卡片 + 5 knob 讀數（tier/retries/downgrade/freeze/parallel）；全部三個元件已掛在 app/page.tsx 右側 aside 頂端
+- **E2E 驗證**：`curl PUT /operation-mode` 與 `PUT /budget-strategy` 成功 round-trip，回傳 payload 與前端 type 完全匹配
+
 ---
 
 ## 0. 專案理解與未來開發藍圖
