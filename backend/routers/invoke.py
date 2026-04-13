@@ -916,9 +916,15 @@ async def invoke_sync(command: str | None = None):
                             _task_skill = _lts(_m)
                     except Exception:
                         pass
+                    # Smart model routing for sync commands
+                    _sync_model = ""
+                    if _agent_ctx:
+                        from backend.model_router import select_model_for_task as _sel_sync
+                        _at_sync = _agent_ctx.type.value if hasattr(_agent_ctx.type, "value") else str(_agent_ctx.type)
+                        _sync_model = _sel_sync(_at_sync, action["command"], _agent_ctx.ai_model or "")
                     result = await run_graph(
                         action["command"],
-                        model_name=(_agent_ctx.ai_model or "") if _agent_ctx else "",
+                        model_name=_sync_model,
                         agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
                         handoff_context=_handoff,
                         task_skill_context=_task_skill,
