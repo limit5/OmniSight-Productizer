@@ -142,9 +142,15 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
                 sysroot = pdata.get("sysroot_path", "")
                 if sysroot and Path(sysroot).is_dir():
                     mounts += f'-v "{Path(sysroot).resolve()}":/opt/vendor_sysroot:ro '
+                elif sysroot:
+                    logger.warning("Sysroot not found: %s — container will use host compiler. Run: /sdks install %s", sysroot, platform_name)
+                    from backend.events import emit_pipeline_phase
+                    emit_pipeline_phase("env_check", f"[WARNING] Sysroot missing: {sysroot} — cross-compile may fail")
                 cmake_tc = pdata.get("cmake_toolchain_file", "")
                 if cmake_tc and Path(cmake_tc).is_file():
                     mounts += f'-v "{Path(cmake_tc).resolve()}":/opt/toolchain.cmake:ro '
+                elif cmake_tc:
+                    logger.warning("CMake toolchain not found: %s", cmake_tc)
         except Exception as exc:
             logger.warning("Vendor SDK mount (best-effort) failed: %s", exc)
 

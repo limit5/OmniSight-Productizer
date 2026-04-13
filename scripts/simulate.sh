@@ -114,11 +114,17 @@ GCC_VENDOR_FLAGS=""
 if [ -n "$CMAKE_TOOLCHAIN_FILE" ] && [ -f "$CMAKE_TOOLCHAIN_FILE" ]; then
   CMAKE_FLAGS="-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
   log "  Vendor CMake toolchain: ${CMAKE_TOOLCHAIN_FILE}"
+elif [ -n "$CMAKE_TOOLCHAIN_FILE" ]; then
+  log "  [WARNING] CMake toolchain file not found: ${CMAKE_TOOLCHAIN_FILE}"
+  log "  Build will proceed without vendor toolchain — cross-compile may fail"
 fi
 if [ -n "$VENDOR_SYSROOT" ] && [ -d "$VENDOR_SYSROOT" ]; then
   CMAKE_FLAGS="${CMAKE_FLAGS} -DCMAKE_SYSROOT=${VENDOR_SYSROOT}"
   GCC_VENDOR_FLAGS="--sysroot=${VENDOR_SYSROOT}"
   log "  Vendor sysroot: ${VENDOR_SYSROOT}"
+elif [ -n "$VENDOR_SYSROOT" ]; then
+  log "  [WARNING] Sysroot directory not found: ${VENDOR_SYSROOT}"
+  log "  Build will use host compiler — run '/sdks install <platform>' first"
 fi
 
 # ── Working directories ──

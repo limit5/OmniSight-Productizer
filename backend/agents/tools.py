@@ -994,9 +994,16 @@ async def get_platform_config(platform: str = "") -> str:
     sysroot = data.get("sysroot_path", "")
     if sysroot:
         lines.append(f"SYSROOT={sysroot}")
+        if not Path(sysroot).is_dir():
+            lines.append("SYSROOT_MISSING=true")
+            sdk_url = data.get("sdk_git_url", "")
+            hint = f" (run: /sdks install {platform})" if sdk_url else " (set sdk_git_url or install manually)"
+            lines.append(f"# WARNING: sysroot not found at {sysroot}{hint}")
     cmake_tc = data.get("cmake_toolchain_file", "")
     if cmake_tc:
         lines.append(f"CMAKE_TOOLCHAIN_FILE={cmake_tc}")
+        if not Path(cmake_tc).is_file():
+            lines.append("CMAKE_TOOLCHAIN_MISSING=true")
     # NPU acceleration fields
     if data.get("npu_enabled"):
         lines.append("NPU_ENABLED=true")
