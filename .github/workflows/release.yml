@@ -36,22 +36,26 @@ jobs:
       - name: Create release bundle
         run: |
           python -c "
-          import asyncio
+          import asyncio, os
           from backend.release import create_release_bundle
-          result = asyncio.run(create_release_bundle(version='${GITHUB_REF_NAME#v}'))
+          version = os.environ.get('RELEASE_VERSION', '0.0.0')
+          result = asyncio.run(create_release_bundle(version=version))
           print(f'Bundle: {result[\"name\"]} ({result[\"size\"]} bytes)')
-          with open('BUNDLE_PATH', 'w') as f:
-              f.write(result['file_path'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'bundle_path={result[\"file_path\"]}\n')
           "
+        id: bundle
         env:
           OMNISIGHT_WORKSPACE: ${{ github.workspace }}
+          RELEASE_VERSION: ${{ github.ref_name }}
 
       - name: Upload to GitHub Release
         run: |
-          BUNDLE=$(cat BUNDLE_PATH)
-          gh release create ${{ github.ref_name }} \
-            --title "OmniSight ${GITHUB_REF_NAME}" \
+          gh release create "$TAG" \
+            --title "OmniSight $TAG" \
             --generate-notes \
             "$BUNDLE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          BUNDLE: ${{ steps.bundle.outputs.bundle_path }}

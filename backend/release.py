@@ -138,13 +138,22 @@ async def create_release_bundle(
         # Add manifest
         tar.add(manifest_path, arcname="manifest.json")
 
-        # Add artifact files
+        # Add artifact files (sanitized: basename only, path validated)
+        import os
         for art_meta in manifest["artifacts"]:
             art = await db.get_artifact(art_meta["id"])
             if art and art.get("file_path"):
-                fpath = Path(art["file_path"])
+                fpath = Path(art["file_path"]).resolve()
+                # Validate file is within artifacts root
+                try:
+                    fpath.relative_to(artifacts_root.resolve())
+                except ValueError:
+                    logger.warning("Skipping artifact outside artifacts root: %s", fpath)
+                    continue
                 if fpath.exists():
-                    tar.add(fpath, arcname=art["name"])
+                    # Use basename only to prevent tar path traversal
+                    safe_name = os.path.basename(art["name"])
+                    tar.add(fpath, arcname=safe_name)
 
     # Compute checksum
     sha = hashlib.sha256()
