@@ -81,11 +81,17 @@ async def run_watchdog():
     """Periodic scan for stuck background tasks and stale assignments."""
     import time as _time
     from backend import stuck_detector as _stuck
+    from backend import decision_engine as _de
     # De-dupe: don't propose the same (agent_id, reason) again while an
     # earlier proposal is still pending.
     _open_proposals: dict[tuple[str, str], str] = {}
+    _executed_proposals: set[str] = set()  # N9/②: avoid double-executing
     while True:
         await asyncio.sleep(60)
+        # N9: when the system is halted, skip the stuck pass entirely —
+        # proposals pile up with no executor able to act on them.
+        if not _running.is_set():
+            continue
         now = _time.time()
         async with _state_lock:
             # Phase 47B: stuck-agent detection BEFORE hard cancellation, so
@@ -127,8 +133,46 @@ async def run_watchdog():
                         signal.suggested_strategy.value,
                         dec.id, dec.status.value,
                     )
+                    # Fix ②: if DecisionEngine auto-executed in full_auto /
+                    # turbo, actually apply the remediation. Otherwise the
+                    # decision sits logged but inert.
+                    if dec.status == _de.DecisionStatus.auto_executed and dec.id not in _executed_proposals:
+                        _executed_proposals.add(dec.id)
+                        try:
+                            await _apply_stuck_remediation(agent_id, signal, dec.chosen_option_id or "")
+                        except Exception as exc_e:
+                            logger.warning("[STUCK] apply remediation failed: %s", exc_e)
                 except Exception as exc:
                     logger.warning("[STUCK] proposal failed: %s", exc)
+
+            # Catch up on decisions the user approved manually since last tick
+            # and apply their remediation (fix ② for manual-mode path).
+            try:
+                from backend import decision_engine as _de_mod
+                for d in _de_mod.list_history(limit=50):
+                    if (d.kind.startswith("stuck/")
+                        and d.id not in _executed_proposals
+                        and d.status in (_de_mod.DecisionStatus.approved, _de_mod.DecisionStatus.auto_executed)):
+                        _executed_proposals.add(d.id)
+                        src_agent = d.source.get("agent_id") or ""
+                        src_reason = d.source.get("reason") or ""
+                        if not src_agent:
+                            continue
+                        # Reconstruct a minimal signal for the executor
+                        fake_sig = _stuck.StuckSignal(
+                            agent_id=src_agent, task_id=d.source.get("task_id"),
+                            reason=_stuck.StuckReason(src_reason) if src_reason else _stuck.StuckReason.repeat_error,
+                            suggested_strategy=_stuck.Strategy(d.chosen_option_id)
+                                if d.chosen_option_id in {s.value for s in _stuck.Strategy}
+                                else _stuck.Strategy.retry_same,
+                            detail="", source=d.source,
+                        )
+                        try:
+                            await _apply_stuck_remediation(src_agent, fake_sig, d.chosen_option_id or "")
+                        except Exception as exc_e:
+                            logger.warning("[STUCK] apply remediation (approved) failed: %s", exc_e)
+            except Exception as exc:
+                logger.debug("[STUCK] history scan failed: %s", exc)
 
             # Check background tasks
             for agent_id, (task_handle, started) in list(_running_tasks.items()):
@@ -179,6 +223,76 @@ async def run_watchdog():
                         await _persist_task(t)
                         idle_agents.remove(best_agent)
                         logger.info("[WATCHDOG] Reallocated blocked task %s to backlog for reassignment", t.id)
+
+
+async def _apply_stuck_remediation(agent_id: str, signal, chosen: str) -> None:
+    """Execute the strategy chosen by DecisionEngine for a stuck agent.
+
+    - switch_model: bump the provider failure mark for the agent's current
+      model so the fallback chain picks a different one, then clear the
+      agent's error ring buffer so the new attempt is judged on its own.
+    - spawn_alternate: create a new backlog task duplicating the stuck
+      agent's current task, targeted at a different agent_type so
+      `select_model_for_task` picks a different route.
+    - escalate: mark the agent's status=warning + emit a notification so
+      a human can pick it up. No code action beyond that.
+    - retry_same: clear the ring buffer so the next retry isn't flagged
+      as "still stuck".
+    """
+    from backend.stuck_detector import Strategy
+    agent = _agents.get(agent_id)
+    if chosen == Strategy.switch_model.value:
+        try:
+            from backend.agents.llm import _record_provider_failure
+            if agent and agent.ai_model and ":" in agent.ai_model:
+                provider = agent.ai_model.split(":")[0]
+                _record_provider_failure(provider)
+        except Exception as exc:
+            logger.debug("[STUCK-exec] switch_model record failure: %s", exc)
+        clear_agent_error_history(agent_id)
+        emit_invoke("stuck_switch_model", f"[{agent_id}] model downgraded; retry with fallback chain")
+        return
+    if chosen == Strategy.spawn_alternate.value:
+        task_id = signal.task_id or (agent.current_task_id if agent and hasattr(agent, "current_task_id") else None)
+        src = _tasks.get(task_id) if task_id else None
+        if src is None:
+            emit_invoke("stuck_spawn_alt", f"[{agent_id}] spawn_alternate: no source task to duplicate")
+            return
+        alt_id = f"alt-{_uid()}"
+        try:
+            from backend.models import Task, TaskStatus, TaskPriority
+            alt = Task(
+                id=alt_id, title=f"[ALT] {src.title}",
+                description=(src.description or "") + "\n\n[spawned by stuck-detector]",
+                priority=TaskPriority.high, status=TaskStatus.backlog,
+                suggested_agent_type=getattr(src, "suggested_agent_type", None),
+                npi_phase_id=getattr(src, "npi_phase_id", None),
+                parent_task_id=src.id,
+            )
+            _tasks[alt_id] = alt
+            await _persist_task(alt)
+            emit_invoke("stuck_spawn_alt", f"[{agent_id}] spawned alt task {alt_id}")
+        except Exception as exc:
+            logger.warning("[STUCK-exec] spawn_alternate failed: %s", exc)
+        return
+    if chosen == Strategy.escalate.value:
+        if agent:
+            agent.status = AgentStatus.warning
+            agent.thought_chain = "[STUCK] escalated to human — awaiting intervention"
+            try:
+                await _persist_agent(agent)
+            except Exception:
+                pass
+            emit_agent_update(agent_id, "warning", agent.thought_chain)
+        try:
+            from backend.notifications import notify
+            await notify("action", f"Agent {agent_id} stuck — manual intervention needed",
+                         source="stuck-detector")
+        except Exception:
+            pass
+        return
+    # retry_same (or unknown): clear buffer so the retry is judged fresh
+    clear_agent_error_history(agent_id)
 
 
 def _now() -> str:

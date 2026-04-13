@@ -330,14 +330,24 @@ async def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) ->
         }
 
     # Retryable with backoff — attempt retry with exponential delay
-    if err["retryable"] and err["max_retries"] > 0:
+    # Phase 47C fix ①: BudgetStrategy tuning overrides classifier default
+    # when the strategy caps retries lower (cost_saver) or higher (quality).
+    _classifier_max = err["max_retries"]
+    try:
+        from backend.budget_strategy import get_tuning as _get_budget_tuning
+        strat_cap = _get_budget_tuning().max_retries
+        effective_max_retries = min(_classifier_max, strat_cap) if _classifier_max > 0 else 0
+    except Exception:
+        effective_max_retries = _classifier_max
+
+    if err["retryable"] and effective_max_retries > 0:
         base_delay = err["retry_after"] or err["base_delay"]
-        for attempt in range(1, err["max_retries"] + 1):
+        for attempt in range(1, effective_max_retries + 1):
             delay = base_delay * (2 ** (attempt - 1))
             delay = min(delay, 30)  # Cap at 30 seconds
-            logger.info("LLM retry %d/%d for %s (waiting %.1fs)", attempt, err["max_retries"], category, delay)
+            logger.info("LLM retry %d/%d for %s (waiting %.1fs)", attempt, effective_max_retries, category, delay)
             try:
-                emit_pipeline_phase("llm_retry", f"{agent_type} retry {attempt}/{err['max_retries']} in {delay:.0f}s ({category})")
+                emit_pipeline_phase("llm_retry", f"{agent_type} retry {attempt}/{effective_max_retries} in {delay:.0f}s ({category})")
             except Exception:
                 pass
             # Async sleep so the LangGraph node yields to the event loop
@@ -358,7 +368,7 @@ async def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) ->
                     return None  # LLM recovered — caller will re-invoke on next graph cycle
             except Exception:
                 continue
-        logger.warning("LLM retries exhausted for %s after %d attempts", category, err["max_retries"])
+        logger.warning("LLM retries exhausted for %s after %d attempts", category, effective_max_retries)
 
     # Cooldown the provider for failover
     if err["provider_action"] == "cooldown":

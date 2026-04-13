@@ -189,23 +189,34 @@ def select_model_for_task(
     # 3. Complexity-based filtering
     complexity = estimate_complexity(task_text)
 
-    # 4. Budget awareness
+    # 4. Budget awareness — Phase 47C fix ①: honour BudgetStrategy.
     budget_ratio = _get_budget_ratio()
+    try:
+        from backend.budget_strategy import get_tuning as _get_tuning
+        tuning = _get_tuning()
+        tier = tuning.model_tier          # "premium" | "default" | "budget"
+        downgrade_pct = tuning.downgrade_at_usage_pct / 100.0
+    except Exception:
+        tier, downgrade_pct = "default", 0.9
 
     budget_constrained = False
-    if budget_ratio >= 0.9:
-        max_cost = 0.5
-        budget_constrained = True
-    elif budget_ratio >= 0.7:
-        max_cost = 5.0
+    if budget_ratio >= downgrade_pct:
+        # Stratgy-aware cap when the token budget crosses the threshold.
+        if tier == "budget":
+            max_cost = 0.5
+        elif tier == "premium":
+            max_cost = 20.0
+        else:
+            max_cost = 5.0
         budget_constrained = True
     else:
-        if complexity == "simple":
-            max_cost = 2.0
-        elif complexity == "complex":
-            max_cost = 50.0
+        if tier == "budget":
+            base = {"simple": 0.5, "complex": 5.0}.get(complexity, 2.0)
+        elif tier == "premium":
+            base = {"simple": 10.0, "complex": 100.0}.get(complexity, 30.0)
         else:
-            max_cost = 10.0
+            base = {"simple": 2.0, "complex": 50.0}.get(complexity, 10.0)
+        max_cost = base
 
     # Emit SSE when budget forces a downgrade
     if budget_constrained:
