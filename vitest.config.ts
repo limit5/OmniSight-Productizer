@@ -13,7 +13,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./test/setup.ts"],
-    include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
+    include: [
+      "test/**/*.test.ts",
+      "test/**/*.test.tsx",
+      "test/integration/**/*.test.ts",
+    ],
     // Exclude the Python suite — vitest picks up backend/ otherwise because
     // we don't scope `include` above until rootDir matches.
     exclude: ["backend/**", "node_modules/**", ".next/**"],

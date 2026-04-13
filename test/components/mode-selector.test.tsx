@@ -114,14 +114,17 @@ describe("ModeSelector", () => {
     primeSSE()
     render(<ModeSelector compact />)
     await screen.findByRole("radio", { checked: true })
-    for (const stem of ["MAN", "SUP", "AUT", "TRB"]) {
-      expect(screen.getByText(stem)).toBeInTheDocument()
+    // N6 (audit fix): check EACH radio's text content strictly rather
+    // than relying on queryByText (which only matches complete text
+    // nodes). This catches regressions where a radio slips back to
+    // single-letter content or to a different stem length.
+    const radios = screen.getAllByRole("radio")
+    expect(radios).toHaveLength(4)
+    const stems = radios.map(r => r.textContent?.trim())
+    expect(stems).toEqual(["MAN", "SUP", "AUT", "TRB"])
+    for (const s of stems) {
+      expect(s && s.length).toBe(3)
     }
-    // M/S/F/T single letters must NOT be used
-    expect(screen.queryByText("M")).toBeNull()
-    expect(screen.queryByText("S")).toBeNull()
-    expect(screen.queryByText("F")).toBeNull()
-    expect(screen.queryByText("T")).toBeNull()
   })
 
   it("unsubscribes from SSE on unmount (shared-stream ref count)", async () => {

@@ -177,23 +177,61 @@ describe("DecisionDashboard", () => {
   })
 
   it("countdown ticks and turns red under 10 s", async () => {
-    vi.useFakeTimers()
-    const nearDeadline = mkDecision({
-      id: "dec-c", title: "Expiring fast",
-      deadline_at: Math.floor(Date.now() / 1000) + 12,
+    // N3/N4: pin Date.now() via fake timers BEFORE computing deadline_at
+    // so the test runs under a consistent clock. try/finally guarantees
+    // real timers are restored even on assertion failure, so a throw
+    // can't leak fake timers into subsequent tests.
+    vi.useFakeTimers({ now: new Date("2026-04-14T12:00:00Z") })
+    try {
+      const fakeNowSec = Math.floor(Date.now() / 1000)
+      const nearDeadline = mkDecision({
+        id: "dec-c", title: "Expiring fast",
+        deadline_at: fakeNowSec + 12,
+      })
+      primeList([nearDeadline], [])
+      primeSSE()
+      render(<DecisionDashboard />)
+      await vi.waitFor(() => screen.getByText("Expiring fast"))
+      // Advance 3 s → remaining 9 s → red
+      act(() => { vi.advanceTimersByTime(3000) })
+      await vi.waitFor(() => {
+        const span = screen.getByText(/^\d+s$/)
+        const color = span.getAttribute("style") || ""
+        expect(color).toMatch(/critical-red|#ef4444/)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("history renders newest-first by created_at (N10 / P1-4 guard)", async () => {
+    const user = userEvent.setup()
+    // Arrange: intentionally return items in an unsorted order.
+    const older = mkDecision({
+      id: "dec-old", title: "OLD",
+      status: "approved", resolver: "user",
+      created_at: 1000, deadline_at: null,
+      resolved_at: 1100,
     })
-    primeList([nearDeadline], [])
+    const middle = mkDecision({
+      id: "dec-mid", title: "MID",
+      status: "approved", resolver: "user",
+      created_at: 2000, deadline_at: null,
+      resolved_at: 2100,
+    })
+    const newest = mkDecision({
+      id: "dec-new", title: "NEW",
+      status: "approved", resolver: "user",
+      created_at: 3000, deadline_at: null,
+      resolved_at: 3100,
+    })
+    primeList([], [older, newest, middle])  // out-of-order from backend
     primeSSE()
     render(<DecisionDashboard />)
-    await vi.waitFor(() => screen.getByText("Expiring fast"))
-    // Advance 3 s → remaining 9 s → red
-    act(() => { vi.advanceTimersByTime(3000) })
-    await vi.waitFor(() => {
-      const span = screen.getByText(/^\d+s$/)
-      const color = span.getAttribute("style") || ""
-      expect(color).toMatch(/critical-red|#ef4444/)
-    })
-    vi.useRealTimers()
+    await user.click(screen.getByRole("button", { name: /HISTORY/ }))
+    // Find titles in DOM order and assert newest→oldest.
+    const rows = await screen.findAllByText(/^(OLD|MID|NEW)$/)
+    expect(rows.map(r => r.textContent)).toEqual(["NEW", "MID", "OLD"])
   })
 
   it("RETRY after an initial-load failure re-runs listDecisions", async () => {

@@ -42,11 +42,31 @@ class MockEventSource {
   }
   /** Dispatch a fake SSE event to registered listeners. */
   emit(type: string, data: unknown) {
+    if (this.readyState === 2) return  // closed — drop like the real API
     const payload = new MessageEvent(type, { data: JSON.stringify(data) })
     for (const l of this.listeners[type] || []) l(payload)
   }
+  /**
+   * N5: simulate a connection-level error. Real EventSource fires
+   * `onerror` AND any `addEventListener("error", …)` listeners; we honour
+   * both so tests can exercise both attach styles.
+   */
+  emitError() {
+    const err = new Event("error")
+    for (const l of this.listeners["error"] || []) l(err as MessageEvent)
+    this.onerror?.(err)
+  }
+  /**
+   * N1: close() now clears listeners so stale handlers from a prior
+   * test can't fire across boundaries. Mirrors what a torn-down real
+   * EventSource effectively does (the GC collects it shortly after).
+   */
   close() {
     this.readyState = 2
+    this.listeners = {}
+    this.onerror = null
+    this.onmessage = null
+    this.onopen = null
   }
 
   /** Instances created during the current test — cleared in afterEach. */
