@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 import yaml
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse,
@@ -248,6 +249,75 @@ async def trigger_deploy(body: DeployRequest):
         "run_after_deploy": body.run_after_deploy,
     })
     return {"result": result, "platform": body.platform, "module": body.module}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Release Packaging (Phase 40)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class ReleaseRequest(BaseModel):
+    version: str = ""           # Override version (empty = auto-resolve from git)
+    artifact_ids: list[str] = Field(default_factory=list)  # Empty = include all
+    upload_github: bool = False
+    upload_gitlab: bool = False
+
+
+@router.get("/release/version")
+async def get_release_version():
+    """Get the current resolved version."""
+    from backend.release import resolve_version
+    version = await resolve_version()
+    return {"version": version}
+
+
+@router.get("/release/manifest")
+async def get_release_manifest(version: str = ""):
+    """Generate a release manifest (JSON) listing all artifacts."""
+    from backend.release import generate_release_manifest
+    manifest = await generate_release_manifest(version)
+    return manifest
+
+
+@router.post("/release")
+async def create_release(body: ReleaseRequest):
+    """Create a release bundle and optionally upload to GitHub/GitLab.
+
+    Returns bundle metadata, manifest, and upload results.
+    """
+    from backend.release import create_release_bundle, upload_to_github, upload_to_gitlab
+
+    bundle = await create_release_bundle(
+        version=body.version,
+        artifact_ids=body.artifact_ids or None,
+    )
+
+    result = {
+        "bundle": {
+            "id": bundle["id"],
+            "name": bundle["name"],
+            "version": bundle["version"],
+            "size": bundle["size"],
+            "checksum": bundle["checksum"],
+            "download_url": bundle["download_url"],
+            "artifact_count": bundle["manifest"]["artifact_count"],
+        },
+        "uploads": {},
+    }
+
+    if body.upload_github:
+        gh_result = await upload_to_github(
+            bundle["file_path"], bundle["version"], bundle["manifest"],
+        )
+        result["uploads"]["github"] = gh_result
+
+    if body.upload_gitlab:
+        gl_result = await upload_to_gitlab(
+            bundle["file_path"], bundle["version"], bundle["manifest"],
+        )
+        result["uploads"]["gitlab"] = gl_result
+
+    return result
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
