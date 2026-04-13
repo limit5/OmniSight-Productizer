@@ -65,6 +65,55 @@ async def get_decision(decision_id: str) -> dict[str, Any]:
     return d.to_dict()
 
 
+class ResolveRequest(BaseModel):
+    option_id: str = Field(..., description="Which option the user picked")
+
+
+@router.post("/decisions/{decision_id}/approve")
+async def approve_decision(decision_id: str, req: ResolveRequest) -> dict[str, Any]:
+    # Validate option_id belongs to the decision
+    existing = de.get(decision_id)
+    if existing is None:
+        return JSONResponse(status_code=404, content={"detail": "decision not found"})
+    if existing.status != de.DecisionStatus.pending:
+        return JSONResponse(status_code=409, content={"detail": f"not pending (status={existing.status.value})"})
+    valid_ids = {o["id"] for o in existing.options}
+    if req.option_id not in valid_ids:
+        return JSONResponse(status_code=400, content={"detail": "unknown option_id"})
+    out = de.resolve(decision_id, req.option_id, resolver="user",
+                     status=de.DecisionStatus.approved)
+    assert out is not None  # we checked pending above
+    return out.to_dict()
+
+
+@router.post("/decisions/{decision_id}/reject")
+async def reject_decision(decision_id: str) -> dict[str, Any]:
+    existing = de.get(decision_id)
+    if existing is None:
+        return JSONResponse(status_code=404, content={"detail": "decision not found"})
+    if existing.status != de.DecisionStatus.pending:
+        return JSONResponse(status_code=409, content={"detail": f"not pending (status={existing.status.value})"})
+    # Rejection: resolve with an empty chosen id + status=rejected
+    out = de.resolve(decision_id, "", resolver="user",
+                     status=de.DecisionStatus.rejected)
+    return out.to_dict() if out else {}
+
+
+@router.post("/decisions/{decision_id}/undo")
+async def undo_decision(decision_id: str) -> dict[str, Any]:
+    out = de.undo(decision_id)
+    if out is None:
+        return JSONResponse(status_code=404, content={"detail": "no resolved decision with that id"})
+    return out.to_dict()
+
+
+@router.post("/decisions/sweep")
+async def trigger_sweep() -> dict[str, Any]:
+    """Manually trigger the timeout sweep (testing + manual nudge)."""
+    resolved = de.sweep_timeouts()
+    return {"resolved": len(resolved), "ids": [d.id for d in resolved]}
+
+
 # ─── Phase 47C: Budget Strategy ───
 
 from backend import budget_strategy as _bs

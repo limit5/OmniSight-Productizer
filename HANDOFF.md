@@ -64,7 +64,8 @@
 - **47A（完成）**：OperationMode (manual/supervised/full_auto/turbo) + DecisionEngine (`backend/decision_engine.py`) + GET/PUT `/operation-mode` + GET `/decisions` + 5 個 SSE events (mode_changed, decision_pending/auto_executed/resolved/undone) + invoke.py 由 `_invoke_lock` 改為 mode-aware semaphore (parallel cap 1/2/4/8)
 - **47B（完成）**：Stuck detection + strategy switch — `backend/stuck_detector.py`（StuckReason × Strategy 策略矩陣）+ `analyze_agent / analyze_blocked_task / propose_remediation` 橋接 DecisionEngine（severity 映射：switch_model→risky、escalate→destructive）+ watchdog 整合（60s 掃描、de-dupe by (agent_id,reason)）
 - **47C（完成）**：Ambiguity handling + Budget strategy — `backend/ambiguity.propose_options()`（safe_default_id + id 去重驗證 + severity 化 DecisionEngine 提案）+ `backend/budget_strategy.py`（quality/balanced/cost_saver/sprint 4 策略 × model_tier/max_retries/downgrade_at/freeze_at/prefer_parallel 5 knob）+ GET/PUT `/budget-strategy` + `budget_strategy_changed` SSE
-- 47D：pending
+- **47D（完成）**：Decision API + 30s sweep loop — `POST /decisions/{id}/approve|reject|undo` + `POST /decisions/sweep` 手動觸發 + `de.sweep_timeouts()` + `run_sweep_loop()` 於 lifespan 啟動（30s cadence, 過期 pending → timeout_default + resolver=timeout + chosen=default_option_id）
+- **Phase 47 總計**：8 API 端點、6 SSE events、4 新模組（decision_engine/stuck_detector/ambiguity/budget_strategy）、~100 新測試全綠、2 background tasks（watchdog+sweep）
 
 ---
 

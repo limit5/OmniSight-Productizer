@@ -56,12 +56,16 @@ async def lifespan(app: FastAPI):
     # Start watchdog for stuck agent detection
     import asyncio
     watchdog_task = asyncio.create_task(invoke.run_watchdog())
+    # Phase 47D: DecisionEngine timeout sweep (30 s cadence)
+    from backend import decision_engine as _de
+    sweep_task = asyncio.create_task(_de.run_sweep_loop())
     yield
-    watchdog_task.cancel()
-    try:
-        await watchdog_task
-    except asyncio.CancelledError:
-        pass
+    for t in (watchdog_task, sweep_task):
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     await db.close()
 
 

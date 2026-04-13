@@ -351,3 +351,55 @@ def _reset_for_tests() -> None:
         _current_mode = OperationMode.supervised
     _parallel_sema = None
     _parallel_cap_for_sema = 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  47D: periodic timeout sweep
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+SWEEP_INTERVAL_S = 30
+
+
+def sweep_timeouts(now: float | None = None) -> list[Decision]:
+    """Resolve any pending decision whose deadline has passed.
+
+    Called by the 30-second background loop. Exposed so tests can drive
+    it deterministically without waiting real time. Resolved entries
+    move to history with status=timeout_default and resolver=timeout.
+    """
+    now = now if now is not None else time.time()
+    resolved: list[Decision] = []
+    with _state_lock:
+        expired_ids = [
+            d.id for d in _pending.values()
+            if d.deadline_at is not None and d.deadline_at <= now
+        ]
+    for did in expired_ids:
+        dec = resolve(
+            did,
+            option_id="",  # overwritten below
+            resolver="timeout",
+            status=DecisionStatus.timeout_default,
+        )
+        if dec is None:
+            continue
+        # resolve() set chosen_option_id to "" because we passed "" —
+        # patch to the decision's own default so callers can act on it.
+        dec.chosen_option_id = dec.default_option_id
+        resolved.append(dec)
+    return resolved
+
+
+async def run_sweep_loop(interval_s: float = SWEEP_INTERVAL_S) -> None:
+    """Background task: periodically call sweep_timeouts."""
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+            count = len(sweep_timeouts())
+            if count:
+                logger.info("DecisionEngine sweep: resolved %d timed-out decision(s)", count)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("DecisionEngine sweep error: %s", exc)
