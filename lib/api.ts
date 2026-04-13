@@ -25,6 +25,13 @@ export type SSEEvent =
   | { event: "simulation"; data: { sim_id: string; action: "start" | "progress" | "result"; detail: string; status?: string; track?: string; module?: string; tests_total?: number; tests_passed?: number; tests_failed?: number; timestamp: string } }
   | { event: "debug_finding"; data: { id: string; task_id: string; agent_id: string; finding_type: string; severity: string; message: string; timestamp: string } }
   | { event: "heartbeat"; data: { subscribers: number } }
+  // ─── Phase 47: Autonomous Decision Engine ───
+  | { event: "mode_changed"; data: { mode: OperationMode; previous: OperationMode; parallel_cap: number; in_flight: number; over_cap: number; timestamp: string } }
+  | { event: "decision_pending"; data: DecisionPayload }
+  | { event: "decision_auto_executed"; data: DecisionPayload }
+  | { event: "decision_resolved"; data: DecisionPayload }
+  | { event: "decision_undone"; data: DecisionPayload }
+  | { event: "budget_strategy_changed"; data: { strategy: BudgetStrategyId; previous: BudgetStrategyId; tuning: BudgetTuning; timestamp: string } }
 
 /**
  * Subscribe to the persistent SSE event stream from the backend.
@@ -838,4 +845,119 @@ export async function* streamInvoke(
       }
     }
   }
+}
+
+
+// ─── Phase 47: Autonomous Decision Engine ────────────────────────────────────
+
+export type OperationMode = "manual" | "supervised" | "full_auto" | "turbo"
+export type DecisionSeverity = "info" | "routine" | "risky" | "destructive"
+export type DecisionStatus =
+  | "pending"
+  | "auto_executed"
+  | "approved"
+  | "rejected"
+  | "undone"
+  | "timeout_default"
+
+export interface DecisionOption {
+  id: string
+  label: string
+  description?: string
+  is_safe_default?: boolean
+}
+
+export interface DecisionPayload {
+  id: string
+  kind: string
+  severity: DecisionSeverity
+  title: string
+  detail: string
+  status: DecisionStatus
+  options: DecisionOption[]
+  default_option_id: string | null
+  chosen_option_id: string | null
+  resolver: "user" | "auto" | "timeout" | null
+  created_at: number
+  deadline_at: number | null
+  resolved_at: number | null
+  source: Record<string, unknown>
+  timestamp?: string
+}
+
+export interface OperationModeInfo {
+  mode: OperationMode
+  parallel_cap: number
+  in_flight: number
+  modes: OperationMode[]
+}
+
+export async function getOperationMode() {
+  return request<OperationModeInfo>("/operation-mode")
+}
+
+export async function setOperationMode(mode: OperationMode) {
+  return request<{ mode: OperationMode; parallel_cap: number }>(
+    "/operation-mode",
+    { method: "PUT", body: JSON.stringify({ mode }) },
+  )
+}
+
+export async function listDecisions(status: "pending" | "history" = "pending", limit = 100) {
+  const params = new URLSearchParams({ status, limit: String(limit) })
+  return request<{ items: DecisionPayload[]; count: number }>(
+    `/decisions?${params.toString()}`,
+  )
+}
+
+export async function approveDecision(id: string, option_id: string) {
+  return request<DecisionPayload>(
+    `/decisions/${id}/approve`,
+    { method: "POST", body: JSON.stringify({ option_id }) },
+  )
+}
+
+export async function rejectDecision(id: string) {
+  return request<DecisionPayload>(`/decisions/${id}/reject`, { method: "POST" })
+}
+
+export async function undoDecision(id: string) {
+  return request<DecisionPayload>(`/decisions/${id}/undo`, { method: "POST" })
+}
+
+export async function triggerSweep() {
+  return request<{ resolved: number; ids: string[] }>(
+    "/decisions/sweep",
+    { method: "POST" },
+  )
+}
+
+// Budget strategy
+
+export type BudgetStrategyId = "quality" | "balanced" | "cost_saver" | "sprint"
+
+export interface BudgetTuning {
+  strategy: BudgetStrategyId
+  model_tier: "premium" | "default" | "budget"
+  max_retries: number
+  downgrade_at_usage_pct: number
+  freeze_at_usage_pct: number
+  prefer_parallel: boolean
+}
+
+export interface BudgetStrategyInfo {
+  strategy: BudgetStrategyId
+  tuning: BudgetTuning
+  available: BudgetTuning[]
+}
+
+export async function getBudgetStrategy() {
+  return request<BudgetStrategyInfo>("/budget-strategy")
+}
+
+export async function setBudgetStrategy(strategy: BudgetStrategyId) {
+  return request<{ strategy: BudgetStrategyId; tuning: BudgetTuning }>(
+    "/budget-strategy",
+    { method: "PUT", body: JSON.stringify({ strategy }) },
+  )
 }
