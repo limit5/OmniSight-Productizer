@@ -700,6 +700,48 @@ async def error_check_node(state: GraphState) -> dict:
         f"{r.tool_name}: {r.output[:200]}" for r in failed
     )
 
+    # Permission/environment auto-fix — attempt before counting as retry
+    try:
+        from backend.permission_errors import classify_permission_error, attempt_auto_fix
+        for r in failed:
+            perm_err = classify_permission_error(r.output)
+            if perm_err:
+                emit_pipeline_phase(
+                    "env_error",
+                    f"{perm_err['category']}: {perm_err['matched_text'][:60]}",
+                )
+                if perm_err["auto_fixable"]:
+                    import asyncio
+                    fix_result = asyncio.get_event_loop().run_until_complete(
+                        attempt_auto_fix(perm_err["category"], r.output, state.workspace_path or "")
+                    ) if asyncio.get_event_loop().is_running() else {"fixed": False}
+                    # Sync-safe fallback
+                    if not isinstance(fix_result, dict):
+                        fix_result = {"fixed": False}
+                    if fix_result.get("fixed"):
+                        emit_pipeline_phase(
+                            "env_fix",
+                            f"Auto-fixed {perm_err['category']}: {fix_result.get('action', '')}",
+                        )
+                        logger.info("Permission auto-fix: %s → %s", perm_err["category"], fix_result)
+                        # Don't count this as a retry — return to specialist to try again
+                        return {
+                            "last_error": f"[AUTO-FIXED] {perm_err['category']}: {fix_result.get('action', '')}. Retrying...",
+                            "tool_calls": [], "tool_results": [],
+                        }
+                else:
+                    # Non-fixable — emit specific user guidance
+                    try:
+                        from backend.events import emit_token_warning
+                        emit_token_warning(
+                            "warn",
+                            f"Environment issue: {perm_err['fix_description']}",
+                        )
+                    except Exception:
+                        pass
+    except Exception as exc:
+        logger.debug("Permission check failed (non-critical): %s", exc)
+
     # Loop detection: compare error key with previous errors
     error_key = _extract_error_key(error_summary)
     updated_history = list(state.error_history) + [error_key]
