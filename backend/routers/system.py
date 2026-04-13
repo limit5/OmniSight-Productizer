@@ -164,7 +164,96 @@ async def get_devices():
                 "speed": f"{speed} Mbps" if speed and speed != "-1" else None,
             })
 
+    # V4L2 UVC camera enumeration (enhanced camera detection)
+    import glob
+    for dev in sorted(glob.glob("/dev/video*"))[:8]:
+        dev_name = os.path.basename(dev)
+        # Check if already found via lsusb
+        if any(d["type"] == "camera" for d in devices):
+            # Enhance existing camera entry with V4L2 path
+            for d in devices:
+                if d["type"] == "camera" and "v4l2_device" not in d:
+                    d["v4l2_device"] = dev
+                    break
+        else:
+            card = await _sh(f"v4l2-ctl -d {dev} --info 2>/dev/null | grep 'Card type' | cut -d: -f2")
+            devices.append({
+                "id": f"v4l2-{dev_name}", "name": card.strip() or f"Camera {dev_name}",
+                "type": "camera", "status": "connected",
+                "v4l2_device": dev,
+            })
+
     return devices
+
+
+@router.get("/evk")
+async def get_evk_status():
+    """Check EVK board reachability for all platforms with deploy config."""
+    results = []
+    platforms_dir = _PROJECT_ROOT / "configs" / "platforms"
+    if not platforms_dir.is_dir():
+        return results
+
+    for yf in sorted(platforms_dir.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(yf.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        method = data.get("deploy_method", "")
+        ip = data.get("deploy_target_ip", "")
+        if not method:
+            continue
+
+        entry = {
+            "platform": yf.stem,
+            "board_name": data.get("soc_model", data.get("label", yf.stem)),
+            "deploy_method": method,
+            "deploy_target_ip": ip,
+            "deploy_user": data.get("deploy_user", "root"),
+            "deploy_path": data.get("deploy_path", "/opt/app"),
+            "reachable": False,
+            "last_check": "",
+        }
+
+        if ip and method == "ssh":
+            user = data.get("deploy_user", "root")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes", f"{user}@{ip}", "echo", "OK",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                entry["reachable"] = "OK" in stdout.decode()
+            except Exception:
+                entry["reachable"] = False
+            from datetime import datetime
+            entry["last_check"] = datetime.now().isoformat()
+        elif not ip:
+            entry["reachable"] = False
+
+        results.append(entry)
+    return results
+
+
+@router.post("/deploy")
+async def trigger_deploy(body: dict):
+    """Trigger deployment to an EVK board.
+
+    Body: {"platform": "vendor-example", "module": "sensor", "binary_path": "build/output"}
+    """
+    platform = body.get("platform", "")
+    module = body.get("module", "")
+    if not platform or not module:
+        raise HTTPException(400, "platform and module are required")
+
+    from backend.agents.tools import deploy_to_evk
+    result = await deploy_to_evk.ainvoke({
+        "platform": platform,
+        "binary_path": body.get("binary_path", ""),
+        "run_after_deploy": body.get("run_after_deploy", True),
+    })
+    return {"result": result}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
