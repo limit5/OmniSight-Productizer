@@ -75,6 +75,8 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("tasks", "depends_on", "TEXT NOT NULL DEFAULT '[]'"),
         ("tasks", "external_issue_platform", "TEXT"),
         ("tasks", "last_external_sync_at", "TEXT"),
+        # Pipeline linkage (Phase 46)
+        ("tasks", "npi_phase_id", "TEXT"),
         ("notifications", "dispatch_status", "TEXT NOT NULL DEFAULT 'pending'"),
         ("notifications", "send_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("notifications", "last_error", "TEXT"),
@@ -371,11 +373,11 @@ async def upsert_task(data: dict) -> None:
         """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id,
              created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type,
              parent_task_id, child_task_ids, external_issue_id, issue_url, acceptance_criteria,
-             labels, depends_on, external_issue_platform, last_external_sync_at)
+             labels, depends_on, external_issue_platform, last_external_sync_at, npi_phase_id)
            VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id,
                    :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type,
                    :parent_task_id, :child_task_ids, :external_issue_id, :issue_url, :acceptance_criteria,
-                   :labels, :depends_on, :external_issue_platform, :last_external_sync_at)
+                   :labels, :depends_on, :external_issue_platform, :last_external_sync_at, :npi_phase_id)
            ON CONFLICT(id) DO UPDATE SET
              title=excluded.title, description=excluded.description, priority=excluded.priority,
              status=excluded.status, assigned_agent_id=excluded.assigned_agent_id,
@@ -385,7 +387,7 @@ async def upsert_task(data: dict) -> None:
              external_issue_id=excluded.external_issue_id, issue_url=excluded.issue_url,
              acceptance_criteria=excluded.acceptance_criteria, labels=excluded.labels,
              depends_on=excluded.depends_on, external_issue_platform=excluded.external_issue_platform,
-             last_external_sync_at=excluded.last_external_sync_at
+             last_external_sync_at=excluded.last_external_sync_at, npi_phase_id=excluded.npi_phase_id
         """,
         {
             "id": data["id"],
@@ -408,6 +410,7 @@ async def upsert_task(data: dict) -> None:
             "depends_on": json.dumps(data.get("depends_on", [])),
             "external_issue_platform": data.get("external_issue_platform"),
             "last_external_sync_at": data.get("last_external_sync_at"),
+            "npi_phase_id": data.get("npi_phase_id"),
         },
     )
     await _conn().commit()

@@ -137,6 +137,8 @@ class Task(BaseModel):
     last_external_sync_at: Optional[str] = None  # ISO timestamp — debounce sync loops
     acceptance_criteria: Optional[str] = None
     labels: list[str] = Field(default_factory=list)
+    # Pipeline linkage (Phase 46)
+    npi_phase_id: Optional[str] = None  # Links task to an NPI phase for pipeline tracking
 
 
 class TaskCreate(BaseModel):
