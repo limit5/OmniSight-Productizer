@@ -132,9 +132,17 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
     }
   }, [open])
 
-  const getVal = (category: string, field: string): string => {
-    const configKey = `${category === "llm" ? "llm" : category === "git" ? "" : category === "gerrit" ? "gerrit" : category === "jira" ? "notification_jira" : category === "slack" ? "notification_slack" : ""}_${field}`
-    if (configKey in dirty) return String(dirty[configKey])
+  const getVal = (category: string, field: string, dirtyKey?: string): string => {
+    // dirtyKey: the exact key used in setVal() — allows override for fields
+    // where the config key doesn't follow category_field pattern
+    const key = dirtyKey || `${
+      category === "llm" ? "llm" :
+      category === "git" ? "git" :
+      category === "gerrit" ? "gerrit" :
+      category === "jira" ? "notification_jira" :
+      category === "slack" ? "notification_slack" : ""
+    }_${field}`
+    if (key in dirty) return String(dirty[key])
     return String(settingsData[category]?.[field] ?? "")
   }
 
@@ -281,9 +289,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
           <SettingsSection title="GIT & SSH" integration="ssh">
             <SettingField label="SSH Key" value={getVal("git", "ssh_key_path")} onChange={v => setVal("git_ssh_key_path", v)} />
-            <SettingField label="GitHub Token" value={getVal("git", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
-            <SettingField label="GitLab Token" value={getVal("git", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
-            <SettingField label="GitLab URL" value={getVal("git", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
+            <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
+            <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
+            <SettingField label="GitLab URL" value={getVal("git", "gitlab_url", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
           </SettingsSection>
 
           <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">
