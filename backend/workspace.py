@@ -426,28 +426,33 @@ async def _collect_build_artifacts(
         for fpath in build_dir.rglob("*"):
             if not fpath.is_file():
                 continue
-            # Skip tiny files (< 10 bytes — likely empty placeholders)
-            if fpath.stat().st_size < 10:
-                continue
             # Skip common non-artifact files
             if fpath.name in (".gitkeep", ".gitignore", "CMakeCache.txt", "Makefile"):
                 continue
 
-            # Compute checksum
-            sha = hashlib.sha256()
-            with open(fpath, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    sha.update(chunk)
-            checksum = sha.hexdigest()
+            try:
+                # Skip tiny files (< 10 bytes — likely empty placeholders)
+                if fpath.stat().st_size < 10:
+                    continue
 
-            # Copy to .artifacts/
-            dest = task_dir / fpath.name
-            # Avoid collision
-            if dest.exists():
-                stem = dest.stem
-                suffix = dest.suffix
-                dest = task_dir / f"{stem}_{uuid.uuid4().hex[:4]}{suffix}"
-            shutil.copy2(fpath, dest)
+                # Compute checksum
+                sha = hashlib.sha256()
+                with open(fpath, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        sha.update(chunk)
+                checksum = sha.hexdigest()
+
+                # Copy to .artifacts/
+                dest = task_dir / fpath.name
+                # Avoid collision
+                if dest.exists():
+                    stem = dest.stem
+                    suffix = dest.suffix
+                    dest = task_dir / f"{stem}_{uuid.uuid4().hex[:4]}{suffix}"
+                shutil.copy2(fpath, dest)
+            except (FileNotFoundError, OSError) as exc:
+                logger.debug("Artifact collection skipped %s: %s", fpath.name, exc)
+                continue
 
             artifact_id = f"art-{uuid.uuid4().hex[:8]}"
             artifact_data = {

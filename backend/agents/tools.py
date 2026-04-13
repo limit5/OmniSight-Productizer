@@ -917,7 +917,15 @@ async def register_build_artifact(
         "checksum": checksum,
     }
 
-    await db.insert_artifact(artifact_data)
+    try:
+        await db.insert_artifact(artifact_data)
+    except Exception as exc:
+        # File already copied — clean up orphan on DB failure
+        try:
+            dest.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return f"[ERROR] Failed to register artifact in DB: {exc}"
 
     # Emit SSE event
     try:

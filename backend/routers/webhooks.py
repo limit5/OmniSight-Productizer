@@ -318,7 +318,8 @@ async def _package_merged_artifacts(change_id: str, subject: str) -> None:
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
         safe_subject = "".join(c if c.isalnum() or c in "-_" else "_" for c in subject[:40])
-        bundle_name = f"release_{safe_subject}_{change_id[:8]}.tar.gz"
+        safe_change_id = "".join(c if c.isalnum() or c in "-_" else "" for c in change_id[:12])
+        bundle_name = f"release_{safe_subject}_{safe_change_id}.tar.gz"
         bundle_path = bundle_dir / bundle_name
 
         with tarfile.open(bundle_path, "w:gz") as tar:

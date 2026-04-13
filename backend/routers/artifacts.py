@@ -1,8 +1,11 @@
 """Artifact management endpoints — list, download, delete generated reports."""
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
 
 from backend import db
@@ -42,7 +45,9 @@ async def download_artifact(artifact_id: str):
 
     file_path = Path(artifact["file_path"]).resolve()
     artifacts_root = get_artifacts_root().resolve()
-    if not str(file_path).startswith(str(artifacts_root)):
+    try:
+        file_path.relative_to(artifacts_root)
+    except ValueError:
         raise HTTPException(status_code=403, detail="Access denied: file outside artifact storage")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Artifact file missing from disk")
@@ -71,9 +76,14 @@ async def delete_artifact(artifact_id: str):
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    # Remove file if it exists
-    file_path = Path(artifact["file_path"])
-    if file_path.exists():
-        file_path.unlink(missing_ok=True)
+    # Remove file if it exists and is within artifacts root
+    file_path = Path(artifact["file_path"]).resolve()
+    artifacts_root = get_artifacts_root().resolve()
+    try:
+        file_path.relative_to(artifacts_root)
+        if file_path.exists():
+            file_path.unlink(missing_ok=True)
+    except ValueError:
+        logger.warning("Artifact %s file_path outside artifacts root — skipping file deletion", artifact_id)
 
     await db.delete_artifact(artifact_id)
