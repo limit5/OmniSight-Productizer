@@ -909,6 +909,241 @@ PLATFORM_TOOLS = [get_platform_config]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  9.5. Hardware deploy tools
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEPLOY_TIMEOUT = 60  # seconds
+
+
+@tool
+async def check_evk_connection(platform: str = "") -> str:
+    """Check if an EVK (evaluation kit) board is reachable via SSH.
+
+    Args:
+        platform: Platform profile name (e.g. 'vendor-example'). If empty, auto-detect.
+    """
+    deploy_info = await _get_deploy_info(platform)
+    if not deploy_info:
+        return "[ERROR] No deploy configuration found. Set deploy_method and deploy_target_ip in platform YAML."
+    ip = deploy_info.get("ip", "")
+    if not ip:
+        return "[NOT_CONFIGURED] deploy_target_ip is empty. Set it in configs/platforms/{platform}.yaml"
+
+    method = deploy_info.get("method", "ssh")
+    user = deploy_info.get("user", "root")
+
+    if method == "ssh":
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes", f"{user}@{ip}", "echo", "OMNISIGHT_OK",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            output = stdout.decode().strip()
+            if "OMNISIGHT_OK" in output:
+                return f"[OK] EVK reachable: {user}@{ip} (SSH)"
+            return f"[ERROR] EVK SSH connected but unexpected response: {output[:100]}"
+        except asyncio.TimeoutError:
+            return f"[ERROR] EVK SSH timeout: {user}@{ip}"
+        except Exception as exc:
+            return f"[ERROR] EVK SSH failed: {exc}"
+    elif method in ("adb", "fastboot"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "adb", "devices",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            output = stdout.decode()
+            if "device" in output and "List" not in output.split("\n")[-2]:
+                return f"[OK] ADB device detected:\n{output.strip()}"
+            return "[NOT_CONNECTED] No ADB device found"
+        except Exception as exc:
+            return f"[ERROR] ADB check failed: {exc}"
+    return f"[ERROR] Unsupported deploy method: {method}"
+
+
+@tool
+async def deploy_to_evk(
+    platform: str = "",
+    binary_path: str = "",
+    run_after_deploy: bool = True,
+) -> str:
+    """Deploy compiled binary to an EVK board via SSH/SCP.
+
+    Args:
+        platform: Platform profile name.
+        binary_path: Path to compiled binary (relative to workspace).
+        run_after_deploy: If True, execute the binary on the EVK after copying.
+    """
+    import time as _time
+    start = _time.time()
+
+    deploy_info = await _get_deploy_info(platform)
+    if not deploy_info:
+        return "[ERROR] No deploy configuration found."
+    ip = deploy_info.get("ip", "")
+    user = deploy_info.get("user", "root")
+    remote_path = deploy_info.get("path", "/opt/app")
+    method = deploy_info.get("method", "ssh")
+
+    if not ip:
+        return "[NOT_CONFIGURED] deploy_target_ip is empty."
+    if method != "ssh":
+        return f"[ERROR] Only SSH deploy is currently supported (got: {method})"
+
+    workspace = get_active_workspace()
+    if binary_path:
+        src = workspace / binary_path
+    else:
+        # Auto-detect: look for common build outputs
+        for candidate in ["build/output", "build/bin", "out"]:
+            src = workspace / candidate
+            if src.exists():
+                break
+        else:
+            src = workspace / "build"
+
+    if not src.exists():
+        return f"[ERROR] Binary not found: {src}. Build first with run_simulation --type=hw --mock=false"
+
+    # SCP to EVK
+    ssh_opts = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no"]
+    try:
+        # Ensure remote directory exists
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", *ssh_opts, f"{user}@{ip}", f"mkdir -p {remote_path}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
+
+        # Copy files
+        proc = await asyncio.create_subprocess_exec(
+            "scp", "-r", *ssh_opts, str(src), f"{user}@{ip}:{remote_path}/",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
+        if proc.returncode != 0:
+            return f"[ERROR] SCP failed: {stderr.decode()[:200]}"
+
+        artifacts = [str(src.name)]
+        remote_output = ""
+
+        # Run after deploy
+        if run_after_deploy:
+            binary_name = src.name
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", *ssh_opts, f"{user}@{ip}",
+                f"cd {remote_path} && chmod +x {binary_name} && ./{binary_name} 2>&1 | head -50",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
+            remote_output = stdout.decode()[:500]
+
+        duration = int((_time.time() - start) * 1000)
+        return (
+            f"[OK] Deployed to {user}@{ip}:{remote_path}\n"
+            f"Artifacts: {', '.join(artifacts)}\n"
+            f"Duration: {duration}ms\n"
+            + (f"Output:\n{remote_output}" if remote_output else "")
+        )
+    except asyncio.TimeoutError:
+        return f"[TIMEOUT] Deploy timed out after {DEPLOY_TIMEOUT}s"
+    except Exception as exc:
+        return f"[ERROR] Deploy failed: {exc}"
+
+
+@tool
+async def list_uvc_devices() -> str:
+    """List connected UVC (USB Video Class) camera devices with their capabilities.
+
+    Detects /dev/video* devices and queries V4L2 capabilities.
+    """
+    results = []
+
+    # Try v4l2-ctl first
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "v4l2-ctl", "--list-devices",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        devices_text = stdout.decode().strip()
+        if devices_text:
+            results.append(f"V4L2 Devices:\n{devices_text}")
+    except Exception:
+        pass
+
+    # Enumerate /dev/video* directly
+    import glob
+    video_devices = sorted(glob.glob("/dev/video*"))
+    if not video_devices:
+        if not results:
+            return "[NOT_FOUND] No UVC camera devices detected (/dev/video* empty, v4l2-ctl unavailable)"
+        return "[OK] " + "\n".join(results)
+
+    for dev in video_devices[:8]:  # Limit to 8 devices
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "v4l2-ctl", "-d", dev, "--all",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            info = stdout.decode()
+            # Extract key info
+            name = ""
+            for line in info.split("\n"):
+                if "Card type" in line:
+                    name = line.split(":", 1)[-1].strip()
+                    break
+            formats = []
+            for line in info.split("\n"):
+                if "Pixel Format" in line and "'" in line:
+                    fmt = line.split("'")[1] if "'" in line else ""
+                    if fmt and fmt not in formats:
+                        formats.append(fmt)
+            results.append(f"  {dev}: {name or 'Unknown'} (formats: {', '.join(formats[:5]) or 'N/A'})")
+        except Exception:
+            results.append(f"  {dev}: detected (v4l2-ctl unavailable)")
+
+    return "[OK] UVC Cameras:\n" + "\n".join(results)
+
+
+async def _get_deploy_info(platform: str = "") -> dict | None:
+    """Read deploy configuration from platform YAML."""
+    if not platform:
+        # Auto-detect from workspace hint
+        workspace = get_active_workspace()
+        hint_file = workspace / ".omnisight" / "platform"
+        if hint_file.exists():
+            platform = hint_file.read_text().strip()
+    if not platform:
+        return None
+
+    platform_dir = WORKSPACE_ROOT / "configs" / "platforms"
+    profile = platform_dir / f"{platform}.yaml"
+    if not profile.exists():
+        return None
+
+    data = yaml.safe_load(profile.read_text(encoding="utf-8")) or {}
+    method = data.get("deploy_method", "")
+    if not method:
+        return None
+
+    return {
+        "method": method,
+        "ip": data.get("deploy_target_ip", ""),
+        "user": data.get("deploy_user", "root"),
+        "path": data.get("deploy_path", "/opt/app"),
+        "platform": platform,
+    }
+
+
+DEPLOY_TOOLS = [check_evk_connection, deploy_to_evk, list_uvc_devices]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  9. L2 Memory tools — context summarization
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1348,17 +1583,17 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
-    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
     "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
-    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
-    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
-    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
+    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
+    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
+    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
     "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
     "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
 }
