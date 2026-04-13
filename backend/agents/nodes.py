@@ -777,6 +777,16 @@ async def error_check_node(state: GraphState) -> dict:
     _ERROR_HISTORY_MAX = 50
     _new_history = list(state.error_history) + [error_key]
     updated_history = _new_history[-_ERROR_HISTORY_MAX:]
+
+    # Phase 47B fix ③: publish to the invoke-side ring buffer so the
+    # watchdog's stuck-detector can see real error keys. Safe best-effort.
+    try:
+        agent_id_for_hist = getattr(state, "agent_id", "") or ""
+        if agent_id_for_hist:
+            from backend.routers.invoke import record_agent_error
+            record_agent_error(agent_id_for_hist, error_key)
+    except Exception:
+        pass
     same_count = state.same_error_count
     loop_triggered = state.loop_breaker_triggered
 

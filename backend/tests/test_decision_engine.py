@@ -149,30 +149,50 @@ class TestParallelSlot:
     @pytest.mark.asyncio
     async def test_slot_respects_mode(self):
         de.set_mode("manual")
-        s1 = de.parallel_slot()
-        async with s1:
-            # second acquire would block — use a short wait_for
+        async with de.parallel_slot():
+            # second acquire would block under cap=1 — use short timeout
             with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(s1.acquire(), timeout=0.05)
+                await asyncio.wait_for(de.parallel_slot().acquire(), timeout=0.05)
 
     @pytest.mark.asyncio
-    async def test_slot_resizes_after_mode_change(self):
+    async def test_slot_cap_is_read_at_acquire_time(self):
+        """Mode change between acquires must take immediate effect for
+        new acquirers (N4). We hold one slot under manual (cap=1), then
+        switch to full_auto (cap=4) — three more slots must be grabbable
+        without waiting."""
+        de.set_mode("manual")
+        async with de.parallel_slot():
+            de.set_mode("full_auto")
+            # Three more slots should be available immediately now.
+            slots = [de.parallel_slot() for _ in range(3)]
+            for s in slots:
+                await asyncio.wait_for(s.acquire(), timeout=0.1)
+            for s in slots:
+                s.release()
+
+    @pytest.mark.asyncio
+    async def test_full_auto_allows_multiple_concurrent(self):
+        de.set_mode("full_auto")  # cap=4
+        held = []
+        for _ in range(3):
+            s = de.parallel_slot()
+            await s.acquire()
+            held.append(s)
+        # 4th slot still free
+        extra = de.parallel_slot()
+        await asyncio.wait_for(extra.acquire(), timeout=0.1)
+        extra.release()
+        for s in held:
+            s.release()
+
+    def test_singleton_slot_is_stable_across_mode(self):
+        """Phase 47A originally returned a new Semaphore on mode change;
+        now the slot is a single object that reads cap on each acquire."""
         de.set_mode("manual")
         s1 = de.parallel_slot()
         de.set_mode("full_auto")
         s2 = de.parallel_slot()
-        # A fresh semaphore object appears after mode switch
-        assert s1 is not s2
-
-    @pytest.mark.asyncio
-    async def test_full_auto_allows_two_concurrent(self):
-        de.set_mode("full_auto")  # cap=4
-        sema = de.parallel_slot()
-        await sema.acquire()
-        await sema.acquire()
-        # still 2 slots free
-        await asyncio.wait_for(sema.acquire(), timeout=0.05)
-        sema.release(); sema.release(); sema.release()
+        assert s1 is s2
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

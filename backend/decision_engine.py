@@ -117,35 +117,83 @@ _HISTORY_MAX = 500
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-_parallel_sema: asyncio.Semaphore | None = None
-_parallel_cap_for_sema: int = 0
+# N4: replaced bare Semaphore with an explicit counter + condvar so we can
+# atomically enforce the *current* cap on every acquire, regardless of how
+# many acquires are already in flight. Rebuilding the Semaphore on mode
+# change let existing holders keep the old cap.
+_parallel_lock = threading.Lock()
+_parallel_in_flight: int = 0
+_parallel_async_cond: asyncio.Condition | None = None
 
 
-def _ensure_parallel_sema() -> asyncio.Semaphore:
-    """Lazily build the semaphore inside a running loop, resizing on mode change.
+class _ModeSlot:
+    """Async context manager that acquires a slot under the *current* cap.
 
-    Returns a semaphore whose slot count matches the current mode's budget.
-    We can't mutate `asyncio.Semaphore._value` safely, so we rebuild when the
-    cap changes. Existing holders keep their reference; new callers see the
-    new cap.
+    Unlike a fixed-cap Semaphore, this reads `_PARALLEL_BUDGET[get_mode()]`
+    at `__aenter__` time, so a mode switch immediately tightens or loosens
+    the limit for new acquirers. Existing holders retain their slot until
+    they release (preserves in-flight safety without killing them).
     """
-    global _parallel_sema, _parallel_cap_for_sema
-    cap = _PARALLEL_BUDGET[get_mode()]
-    if _parallel_sema is None or _parallel_cap_for_sema != cap:
-        _parallel_sema = asyncio.Semaphore(cap)
-        _parallel_cap_for_sema = cap
-    return _parallel_sema
+
+    async def __aenter__(self) -> "_ModeSlot":
+        global _parallel_in_flight, _parallel_async_cond
+        if _parallel_async_cond is None:
+            _parallel_async_cond = asyncio.Condition()
+        while True:
+            async with _parallel_async_cond:
+                cap = _PARALLEL_BUDGET[get_mode()]
+                with _parallel_lock:
+                    if _parallel_in_flight < cap:
+                        _parallel_in_flight += 1
+                        return self
+                await _parallel_async_cond.wait()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        global _parallel_in_flight, _parallel_async_cond
+        with _parallel_lock:
+            _parallel_in_flight = max(0, _parallel_in_flight - 1)
+        if _parallel_async_cond is not None:
+            async with _parallel_async_cond:
+                _parallel_async_cond.notify_all()
+
+    # Back-compat methods so callers that did `.locked()` / `.acquire()` on
+    # the previous Semaphore interface keep working. `locked()` means
+    # "saturated", matching Semaphore semantics.
+    def locked(self) -> bool:
+        with _parallel_lock:
+            return _parallel_in_flight >= _PARALLEL_BUDGET[get_mode()]
+
+    async def acquire(self) -> bool:
+        await self.__aenter__()
+        return True
+
+    def release(self) -> None:
+        global _parallel_in_flight
+        with _parallel_lock:
+            _parallel_in_flight = max(0, _parallel_in_flight - 1)
 
 
-def parallel_slot() -> asyncio.Semaphore:
+_mode_slot_singleton = _ModeSlot()
+
+
+def parallel_slot() -> _ModeSlot:
     """Acquire this in invoke/pipeline runs to respect mode parallelism.
 
     Use as::
 
         async with decision_engine.parallel_slot():
             ...real work...
+
+    The cap is re-read on every acquire; switching mode mid-flight takes
+    effect immediately for *new* acquirers without revoking existing ones.
     """
-    return _ensure_parallel_sema()
+    return _mode_slot_singleton
+
+
+def parallel_in_flight() -> int:
+    """Current number of held slots (observational / SSE telemetry)."""
+    with _parallel_lock:
+        return _parallel_in_flight
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -169,17 +217,22 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
     with _state_lock:
         prev = _current_mode
         _current_mode = mode
-    # Rebuild semaphore on next acquire (lazy).
-    global _parallel_sema, _parallel_cap_for_sema
-    _parallel_cap_for_sema = -1
-    _parallel_sema = None
+    # N4: we no longer rebuild a Semaphore on mode change — _ModeSlot reads
+    # the cap at acquire time. But if the new cap is *lower* than the
+    # in-flight count, surface a warning via SSE so operators know some
+    # requests are still running above the nominal cap until they drain.
+    cur_inflight = parallel_in_flight()
+    new_cap = _PARALLEL_BUDGET[mode]
     try:
         from backend.events import bus as _bus
-        _bus.publish("mode_changed", {
+        payload = {
             "mode": mode.value,
             "previous": prev.value,
-            "parallel_cap": _PARALLEL_BUDGET[mode],
-        })
+            "parallel_cap": new_cap,
+            "in_flight": cur_inflight,
+            "over_cap": max(0, cur_inflight - new_cap),
+        }
+        _bus.publish("mode_changed", payload)
     except Exception:
         pass
     logger.info("OperationMode: %s → %s", prev.value, mode.value)
@@ -292,16 +345,21 @@ def resolve(
     resolver: str = "user",
     status: DecisionStatus = DecisionStatus.approved,
 ) -> Decision | None:
-    """Resolve a pending decision and emit `decision_resolved`."""
+    """Resolve a pending decision and emit `decision_resolved`.
+
+    Pop + mutate + archive happen inside a single lock acquisition so
+    concurrent sweep / user-approval cannot double-resolve (N5/N6 fix).
+    The SSE emit runs outside the lock to avoid holding it across I/O.
+    """
     with _state_lock:
         dec = _pending.pop(decision_id, None)
-    if dec is None:
-        return None
-    dec.status = status
-    dec.chosen_option_id = option_id
-    dec.resolved_at = time.time()
-    dec.resolver = resolver
-    _archive(dec)
+        if dec is None:
+            return None
+        dec.status = status
+        dec.chosen_option_id = option_id
+        dec.resolved_at = time.time()
+        dec.resolver = resolver
+        _archive_locked(dec)
     _emit("decision_resolved", dec)
     return dec
 
@@ -323,10 +381,16 @@ def undo(decision_id: str) -> Decision | None:
 
 
 def _archive(dec: Decision) -> None:
+    """Public archive — takes the lock itself (for standalone callers)."""
     with _state_lock:
-        _history.append(dec)
-        if len(_history) > _HISTORY_MAX:
-            del _history[: len(_history) - _HISTORY_MAX]
+        _archive_locked(dec)
+
+
+def _archive_locked(dec: Decision) -> None:
+    """Archive while the caller already holds _state_lock."""
+    _history.append(dec)
+    if len(_history) > _HISTORY_MAX:
+        del _history[: len(_history) - _HISTORY_MAX]
 
 
 def _emit(event: str, dec: Decision) -> None:
@@ -364,31 +428,32 @@ SWEEP_INTERVAL_S = 30
 def sweep_timeouts(now: float | None = None) -> list[Decision]:
     """Resolve any pending decision whose deadline has passed.
 
-    Called by the 30-second background loop. Exposed so tests can drive
-    it deterministically without waiting real time. Resolved entries
-    move to history with status=timeout_default and resolver=timeout.
+    N5 fix: snapshot + pop + mutate + archive are all done inside a single
+    lock acquisition. A concurrent user-approve can either win the pop
+    (and we skip it) or lose (and we archive). No more "resolve called
+    with ID that just vanished" window. SSE emission runs outside the
+    lock since it is I/O-ish.
     """
     now = now if now is not None else time.time()
-    resolved: list[Decision] = []
+    to_emit: list[Decision] = []
     with _state_lock:
         expired_ids = [
             d.id for d in _pending.values()
             if d.deadline_at is not None and d.deadline_at <= now
         ]
-    for did in expired_ids:
-        dec = resolve(
-            did,
-            option_id="",  # overwritten below
-            resolver="timeout",
-            status=DecisionStatus.timeout_default,
-        )
-        if dec is None:
-            continue
-        # resolve() set chosen_option_id to "" because we passed "" —
-        # patch to the decision's own default so callers can act on it.
-        dec.chosen_option_id = dec.default_option_id
-        resolved.append(dec)
-    return resolved
+        for did in expired_ids:
+            dec = _pending.pop(did, None)
+            if dec is None:
+                continue  # user raced us — their resolve() already handled it
+            dec.status = DecisionStatus.timeout_default
+            dec.chosen_option_id = dec.default_option_id  # safe default
+            dec.resolved_at = now
+            dec.resolver = "timeout"
+            _archive_locked(dec)
+            to_emit.append(dec)
+    for dec in to_emit:
+        _emit("decision_resolved", dec)
+    return to_emit
 
 
 async def run_sweep_loop(interval_s: float = SWEEP_INTERVAL_S) -> None:

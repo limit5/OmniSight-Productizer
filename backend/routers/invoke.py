@@ -53,6 +53,26 @@ logger = logging.getLogger(__name__)
 _running_tasks: dict[str, tuple[asyncio.Task, float]] = {}  # agent_id → (task_handle, start_time)
 TASK_TIMEOUT = 1800  # 30 minutes
 
+# Phase 47B fix ③: per-agent ring buffer of recent error keys the watchdog
+# can inspect. LangGraph GraphState isn't reachable from outside the node,
+# so error_check_node publishes here. Capped at 10 entries per agent.
+_agent_error_history: dict[str, list[str]] = {}
+_AGENT_ERR_HIST_MAX = 10
+
+
+def record_agent_error(agent_id: str, error_key: str) -> None:
+    """Called by graph/nodes when an agent hits an error. Trim to window."""
+    if not agent_id or not error_key:
+        return
+    buf = _agent_error_history.setdefault(agent_id, [])
+    buf.append(error_key)
+    if len(buf) > _AGENT_ERR_HIST_MAX:
+        del buf[: len(buf) - _AGENT_ERR_HIST_MAX]
+
+
+def clear_agent_error_history(agent_id: str) -> None:
+    _agent_error_history.pop(agent_id, None)
+
 # Lock to prevent watchdog and request handlers from modifying _agents/_tasks concurrently
 _state_lock = asyncio.Lock()
 
@@ -75,9 +95,11 @@ async def run_watchdog():
                 if now - started <= 120:
                     continue  # too young to be stuck
                 agent = _agents.get(agent_id)
+                # Fix ③: read the ring buffer published by error_check_node
+                err_hist = list(_agent_error_history.get(agent_id, []))
                 signal = _stuck.analyze_agent(
                     agent_id,
-                    error_history=None,  # GraphState is in-memory only
+                    error_history=err_hist,
                     retry_count=0,
                     started_at=started,
                     task_id=getattr(agent, "current_task_id", None) if agent else None,
