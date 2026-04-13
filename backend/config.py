@@ -36,10 +36,15 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.3
 
     # ── Git Authentication ──
-    git_ssh_key_path: str = "~/.ssh/id_ed25519"  # SSH key for private repos
-    github_token: str = ""  # GitHub Personal Access Token
-    gitlab_token: str = ""  # GitLab Personal Access Token
-    gitlab_url: str = ""  # Self-hosted GitLab URL (empty = gitlab.com)
+    git_ssh_key_path: str = "~/.ssh/id_ed25519"  # Default SSH key (fallback)
+    github_token: str = ""  # Default GitHub PAT (fallback)
+    gitlab_token: str = ""  # Default GitLab PAT (fallback)
+    gitlab_url: str = ""  # Default self-hosted GitLab URL (fallback)
+    # Multi-repo credential maps (JSON: {"host": "token/path"})
+    git_credentials_file: str = ""  # Path to git_credentials.yaml (optional)
+    git_ssh_key_map: str = ""       # JSON: {"github.com": "~/.ssh/id_github", ...}
+    github_token_map: str = ""      # JSON: {"github.com": "ghp_...", "github.enterprise.com": "ghp_..."}
+    gitlab_token_map: str = ""      # JSON: {"gitlab.com": "glpat-...", "gitlab.internal.com": "glpat-..."}
 
     # ── Token Budget & Resilience ──
     token_budget_daily: float = 0.0  # USD per day (0 = unlimited)
@@ -75,9 +80,11 @@ class Settings(BaseSettings):
     gerrit_ssh_port: int = 29418  # Gerrit SSH port (default 29418)
     gerrit_project: str = ""  # Project path, e.g. "project/omnisight-core"
     gerrit_replication_targets: str = ""  # Comma-separated remote names for post-merge push
+    # Multi-instance Gerrit (JSON list of {url, ssh_host, ssh_port, project, webhook_secret})
+    gerrit_instances: str = ""
 
     # ── Webhook Secrets (External → Internal) ──
-    gerrit_webhook_secret: str = ""     # Shared secret for Gerrit webhook auth
+    gerrit_webhook_secret: str = ""     # Default Gerrit webhook secret (fallback)
     github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
     gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
     jira_webhook_secret: str = ""       # Bearer token verification
