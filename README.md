@@ -14,7 +14,7 @@
 ![Google](https://img.shields.io/badge/Google-Gemini-4285F4?logo=google&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-Local-ffffff?logo=ollama&logoColor=black)
 
-![Tests](https://img.shields.io/badge/Tests-466-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-483-brightgreen)
 ![Tools](https://img.shields.io/badge/Tools-29_Sandboxed-green)
 ![Agents](https://img.shields.io/badge/Roles-19_Skills-blueviolet)
 ![API](https://img.shields.io/badge/API-~80_Endpoints-blue)
