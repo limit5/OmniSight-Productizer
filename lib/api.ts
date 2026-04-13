@@ -120,6 +120,8 @@ export interface ApiAgent {
   thought_chain: string
   ai_model: string | null
   sub_tasks: { id: string; label: string; status: string }[]
+  workspace?: { branch: string; path: string; status: string; commit_count: number; task_id: string | null; remote_name: string; repo_url: string }
+  file_scope?: string[]
 }
 
 export async function listAgents() {
@@ -161,8 +163,11 @@ export interface ApiTask {
   suggested_sub_type: string | null
   parent_task_id: string | null
   child_task_ids: string[]
+  depends_on?: string[]
   external_issue_id: string | null
   issue_url: string | null
+  external_issue_platform?: string | null
+  last_external_sync_at?: string | null
   acceptance_criteria: string | null
   labels: string[]
 }
@@ -613,6 +618,8 @@ export interface NPIMilestone {
   track: "engineering" | "design" | "market"
   status: "pending" | "in_progress" | "completed" | "blocked"
   due_date?: string
+  completed_date?: string | null
+  assigned_agent_type?: string | null
   jira_tag?: string
 }
 
@@ -622,6 +629,9 @@ export interface NPIPhase {
   short_name: string
   order: number
   status: "pending" | "active" | "completed" | "blocked"
+  start_date?: string | null
+  target_date?: string | null
+  completed_date?: string | null
   milestones: NPIMilestone[]
 }
 
