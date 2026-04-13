@@ -295,8 +295,9 @@ def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict 
     if err["provider_action"] == "permanent_disable":
         provider = model_name.split(":")[0] if ":" in model_name else ""
         if provider:
-            from backend.agents.llm import _provider_failures
-            _provider_failures[provider] = time.time() + 86400  # 24h cooldown for auth/billing
+            from backend.agents.llm import _record_provider_failure
+            # 24h cooldown for auth/billing — pass an explicit future timestamp.
+            _record_provider_failure(provider, ts=time.time() + 86400)
         try:
             from backend.events import emit_token_warning
             if category == LLMErrorCategory.AUTH_FAILED:
@@ -346,8 +347,8 @@ def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) -> dict 
     if err["provider_action"] == "cooldown":
         provider = model_name.split(":")[0] if ":" in model_name else ""
         if provider:
-            from backend.agents.llm import _provider_failures
-            _provider_failures[provider] = time.time()
+            from backend.agents.llm import _record_provider_failure
+            _record_provider_failure(provider)
 
     return None  # Fall through to rule-based fallback
 

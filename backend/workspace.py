@@ -124,12 +124,25 @@ async def provision(
 
     source = repo_source or str(_MAIN_REPO)
 
-    # Clean stale git lock before worktree operations
-    # Note: could remove a lock held by concurrent git — acceptable for recovery
+    # Clean stale git lock before worktree operations.
+    # Stale-lock guard: only remove if the lock is older than 60s — otherwise
+    # another git process likely holds it. Yanking a fresh lock corrupts the
+    # peer git's transaction.
     source_lock = Path(source) / ".git" / "index.lock"
     if source_lock.exists():
-        source_lock.unlink()
-        logger.warning("Removed stale git lock before provision: %s", source_lock)
+        try:
+            import time as _t
+            age = _t.time() - source_lock.stat().st_mtime
+        except OSError:
+            age = 0
+        if age >= 60:
+            try:
+                source_lock.unlink()
+                logger.warning("Removed stale git lock (%.0fs old): %s", age, source_lock)
+            except OSError as exc:
+                logger.warning("Failed to remove git lock %s: %s", source_lock, exc)
+        else:
+            logger.info("Skipping fresh git lock (%.0fs old, likely held): %s", age, source_lock)
     is_local = not source.startswith("http") and not source.startswith("ssh://") and not source.startswith("git@")
 
     # Gerrit mode: use fresh clone even for local repos (full isolation)
@@ -336,21 +349,35 @@ async def finalize(agent_id: str) -> dict:
 
 
 async def cleanup_stale_locks():
-    """Remove .git/index.lock files left from interrupted operations."""
-    # Main repo
-    main_lock = _MAIN_REPO / ".git" / "index.lock"
-    if main_lock.exists():
-        main_lock.unlink()
-        logger.warning("Removed stale git lock: %s", main_lock)
-    # Agent workspaces
+    """Remove .git/index.lock files left from interrupted operations.
+
+    Only locks older than 60 seconds are considered stale. Fresh locks are
+    likely held by an active git process and yanking them causes corruption.
+    """
+    import time as _t
+
+    def _maybe_unlink(p: Path) -> None:
+        if not p.exists():
+            return
+        try:
+            age = _t.time() - p.stat().st_mtime
+        except OSError:
+            return
+        if age < 60:
+            logger.debug("Skipping fresh lock (%.0fs): %s", age, p)
+            return
+        try:
+            p.unlink()
+            logger.warning("Removed stale lock (%.0fs old): %s", age, p)
+        except OSError as exc:
+            logger.warning("Failed to remove lock %s: %s", p, exc)
+
+    _maybe_unlink(_MAIN_REPO / ".git" / "index.lock")
     if _WORKSPACES_ROOT.exists():
         for ws_dir in _WORKSPACES_ROOT.iterdir():
             if ws_dir.is_dir():
                 for lock_name in ("index.lock", "HEAD.lock"):
-                    lock = ws_dir / ".git" / lock_name
-                    if lock.exists():
-                        lock.unlink()
-                        logger.warning("Removed stale lock: %s", lock)
+                    _maybe_unlink(ws_dir / ".git" / lock_name)
 
 
 async def cleanup(agent_id: str) -> bool:

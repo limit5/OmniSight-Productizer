@@ -24,6 +24,24 @@ _SDK_ROOT = _PROJECT_ROOT / ".sdks"  # Local SDK cache directory
 
 _PLATFORM_NAME_RE = __import__("re").compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
+# Per-platform async lock so two concurrent provision_sdk(p) calls don't
+# clone into the same dir, race on YAML write, or trip over each other.
+_PROVISION_LOCKS: dict[str, asyncio.Lock] = {}
+_PROVISION_LOCKS_GUARD: "asyncio.Lock | None" = None
+
+
+def _get_provision_lock(platform: str) -> asyncio.Lock:
+    global _PROVISION_LOCKS_GUARD
+    if _PROVISION_LOCKS_GUARD is None:
+        _PROVISION_LOCKS_GUARD = asyncio.Lock()
+    # Double-check creation under the guard. The guard itself is created
+    # lazily because asyncio.Lock() must be made inside a running loop.
+    lock = _PROVISION_LOCKS.get(platform)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PROVISION_LOCKS[platform] = lock
+    return lock
+
 
 def _validate_platform_name(name: str) -> bool:
     """Allow only safe platform identifiers (no path separators, no '..')."""
@@ -55,6 +73,12 @@ async def provision_sdk(platform: str) -> dict:
         return {"status": "error", "details": f"Invalid platform name: {platform!r}"}
     if not profile.exists():
         return {"status": "error", "details": f"Platform profile not found: {platform}"}
+
+    async with _get_provision_lock(platform):
+        return await _provision_sdk_locked(platform, profile)
+
+
+async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
 
     data = yaml.safe_load(profile.read_text(encoding="utf-8")) or {}
     sdk_url = data.get("sdk_git_url", "")

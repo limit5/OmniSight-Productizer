@@ -24,7 +24,14 @@
   - `permission_errors.check_environment` docker/git subprocess `try/finally proc.kill()`
   - `_provider_failures` dict 上限 256，>24h 條目自動修剪（防 OOM）
   - `error_history` cap=50（防 LangGraph state 膨脹）
-- Batches 3-6：pending
+- **Batch 3（完成）**：Concurrency & locking — C1/C13/H4/H11/H14/L15
+  - `pipeline._pipeline_lock`：run/advance/force_advance 三入口共用 asyncio.Lock，杜絕 task 重複建立
+  - `git_credentials._CACHE_LOCK`：double-check pattern，避免 first-call race
+  - `sdk_provisioner._get_provision_lock(platform)`：per-platform lock，避免同 platform 並發 clone/YAML write 撞車
+  - `agents/llm._provider_failures_lock` + `_record_provider_failure()` 統一接口（節點回呼也走它）
+  - `events._log_fn_lock`：lazy import 競爭防護
+  - `workspace.cleanup_stale_locks` + 預清理：>=60s 才視為 stale，杜絕誤刪 active git 鎖
+- Batches 4-6：pending
 
 ---
 

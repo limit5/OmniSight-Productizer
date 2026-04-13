@@ -15,17 +15,25 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Late import to avoid circular — resolved at first use
+# Late import to avoid circular — resolved at first use.
+# Lock prevents two early concurrent emits from each importing the system
+# module and racing on the assignment.
 _log_fn = None
+import threading as _threading_log
+_log_fn_lock = _threading_log.Lock()
 
 
 def _log(message: str, level: str = "info") -> None:
     """Write to the system log buffer (REPORTER VORTEX)."""
     global _log_fn
-    if _log_fn is None:
-        from backend.routers.system import add_system_log
-        _log_fn = add_system_log
-    _log_fn(message, level)
+    fn = _log_fn
+    if fn is None:
+        with _log_fn_lock:
+            if _log_fn is None:
+                from backend.routers.system import add_system_log
+                _log_fn = add_system_log
+            fn = _log_fn
+    fn(message, level)
 
 
 # Event types worth persisting to DB (skip high-frequency transient events)

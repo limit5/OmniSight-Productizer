@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CREDENTIALS_CACHE: list[dict] | None = None
+import threading as _threading
+_CACHE_LOCK = _threading.Lock()
 
 
 def _allowed_credential_roots() -> list[Path]:
@@ -116,11 +118,27 @@ def get_credential_registry() -> list[dict]:
     """Get the full credential registry (cached after first call).
 
     Each entry has: {id, url, platform, token, ssh_key, ssh_host, ssh_port, project, webhook_secret}
+    Lock prevents two concurrent first-callers from each parsing config and
+    racing on _CREDENTIALS_CACHE assignment (one half-built dict could win).
     """
     global _CREDENTIALS_CACHE
-    if _CREDENTIALS_CACHE is not None:
-        return list(_CREDENTIALS_CACHE)
+    # Fast-path read without lock — dict-pointer assignment is atomic in CPython.
+    cached = _CREDENTIALS_CACHE
+    if cached is not None:
+        return list(cached)
 
+    with _CACHE_LOCK:
+        # Double-check inside lock
+        if _CREDENTIALS_CACHE is not None:
+            return list(_CREDENTIALS_CACHE)
+        registry = _build_registry()
+        _CREDENTIALS_CACHE = registry
+        logger.info("Credential registry: %d entries", len(registry))
+        return list(registry)
+
+
+def _build_registry() -> list[dict]:
+    """Build the full credential registry from all configured sources."""
     registry: list[dict] = []
 
     # 1. Load from YAML file
@@ -211,15 +229,14 @@ def get_credential_registry() -> list[dict]:
             "ssh_key": settings.git_ssh_key_path,
         })
 
-    _CREDENTIALS_CACHE = registry
-    logger.info("Credential registry: %d entries", len(registry))
-    return list(registry)
+    return registry
 
 
 def clear_credential_cache() -> None:
     """Clear the cached registry (call after settings change)."""
     global _CREDENTIALS_CACHE
-    _CREDENTIALS_CACHE = None
+    with _CACHE_LOCK:
+        _CREDENTIALS_CACHE = None
 
 
 def find_credential_for_url(url: str) -> dict | None:

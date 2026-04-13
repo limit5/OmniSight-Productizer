@@ -105,6 +105,22 @@ PIPELINE_STEPS = [
 
 _active_pipeline: dict | None = None  # {id, current_step, status, started_at, tasks_created}
 
+# Async lock for all mutations of _active_pipeline. FastAPI request handlers
+# can be reentrant under concurrent requests; on_task_completed() runs from
+# arbitrary background tasks, and force_advance() is user-triggered. Without
+# a lock, advance_pipeline()+force_advance() can interleave and double-create
+# tasks for the same step.
+import asyncio as _asyncio
+_pipeline_lock: _asyncio.Lock | None = None
+
+
+def _get_pipeline_lock() -> _asyncio.Lock:
+    """Lazy-init the lock — Lock() must be created inside a running loop."""
+    global _pipeline_lock
+    if _pipeline_lock is None:
+        _pipeline_lock = _asyncio.Lock()
+    return _pipeline_lock
+
 
 def get_pipeline_status() -> dict:
     """Get the current pipeline run status."""
@@ -121,25 +137,25 @@ async def run_pipeline(spec_context: str = "") -> dict:
     """
     global _active_pipeline
 
-    if _active_pipeline and _active_pipeline.get("status") == "running":
-        return {"status": "error", "detail": "Pipeline already running"}
+    async with _get_pipeline_lock():
+        if _active_pipeline and _active_pipeline.get("status") == "running":
+            return {"status": "error", "detail": "Pipeline already running"}
 
-    pipeline_id = f"pipeline-{uuid.uuid4().hex[:8]}"
-    _active_pipeline = {
-        "id": pipeline_id,
-        "current_step": PIPELINE_STEPS[0]["id"],
-        "current_step_index": 0,
-        "status": "running",
-        "started_at": datetime.now().isoformat(),
-        "tasks_created": 0,
-        "spec_context": spec_context[:500],
-    }
+        pipeline_id = f"pipeline-{uuid.uuid4().hex[:8]}"
+        _active_pipeline = {
+            "id": pipeline_id,
+            "current_step": PIPELINE_STEPS[0]["id"],
+            "current_step_index": 0,
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+            "tasks_created": 0,
+            "spec_context": spec_context[:500],
+        }
 
-    emit_pipeline_phase("pipeline_start", f"Pipeline {pipeline_id} started: {len(PIPELINE_STEPS)} steps")
-    emit_invoke("pipeline", f"E2E pipeline started: SPEC → Release ({len(PIPELINE_STEPS)} phases)")
+        emit_pipeline_phase("pipeline_start", f"Pipeline {pipeline_id} started: {len(PIPELINE_STEPS)} steps")
+        emit_invoke("pipeline", f"E2E pipeline started: SPEC → Release ({len(PIPELINE_STEPS)} phases)")
 
-    # Create tasks for the first step
-    await _create_tasks_for_step(0, spec_context)
+        await _create_tasks_for_step(0, spec_context)
 
     return get_pipeline_status()
 
@@ -147,10 +163,18 @@ async def run_pipeline(spec_context: str = "") -> dict:
 async def advance_pipeline() -> dict:
     """Check if the current step is complete and advance to the next.
 
-    Called after task completions or manual checkpoints.
+    Called after task completions or manual checkpoints. Holds the
+    pipeline lock for the entire mutation so concurrent advance / force
+    paths do not race.
     """
     global _active_pipeline
 
+    async with _get_pipeline_lock():
+        return await _advance_pipeline_locked()
+
+
+async def _advance_pipeline_locked() -> dict:
+    global _active_pipeline
     if not _active_pipeline or _active_pipeline["status"] != "running":
         return {"status": "idle", "detail": "No active pipeline"}
 
@@ -201,26 +225,27 @@ async def force_advance() -> dict:
     """Force-advance past a human checkpoint (user approved)."""
     global _active_pipeline
 
-    if not _active_pipeline or _active_pipeline["status"] != "running":
-        return {"status": "error", "detail": "No active pipeline"}
+    async with _get_pipeline_lock():
+        if not _active_pipeline or _active_pipeline["status"] != "running":
+            return {"status": "error", "detail": "No active pipeline"}
 
-    step_idx = _active_pipeline["current_step_index"]
-    next_idx = step_idx + 1
+        step_idx = _active_pipeline["current_step_index"]
+        next_idx = step_idx + 1
 
-    if next_idx >= len(PIPELINE_STEPS):
-        _active_pipeline["status"] = "completed"
-        _active_pipeline["completed_at"] = datetime.now().isoformat()
-        emit_pipeline_phase("pipeline_complete", "Pipeline completed (force-advanced)")
-        return {"status": "completed"}
+        if next_idx >= len(PIPELINE_STEPS):
+            _active_pipeline["status"] = "completed"
+            _active_pipeline["completed_at"] = datetime.now().isoformat()
+            emit_pipeline_phase("pipeline_complete", "Pipeline completed (force-advanced)")
+            return {"status": "completed"}
 
-    next_step = PIPELINE_STEPS[next_idx]
-    _active_pipeline["current_step"] = next_step["id"]
-    _active_pipeline["current_step_index"] = next_idx
+        next_step = PIPELINE_STEPS[next_idx]
+        _active_pipeline["current_step"] = next_step["id"]
+        _active_pipeline["current_step_index"] = next_idx
 
-    emit_pipeline_phase("pipeline_advance", f"Force-advanced to: {next_step['name']}")
-    await _create_tasks_for_step(next_idx, _active_pipeline.get("spec_context", ""))
+        emit_pipeline_phase("pipeline_advance", f"Force-advanced to: {next_step['name']}")
+        await _create_tasks_for_step(next_idx, _active_pipeline.get("spec_context", ""))
 
-    return {"status": "advanced", "step": next_step["id"]}
+        return {"status": "advanced", "step": next_step["id"]}
 
 
 async def on_task_completed(task_id: str, npi_phase_id: str | None = None) -> None:

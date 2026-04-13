@@ -62,6 +62,12 @@ _provider_failures: dict[str, float] = {}  # provider → last_failure_timestamp
 PROVIDER_COOLDOWN = 300  # 5 minutes — don't retry a failed provider within this window
 _PROVIDER_FAILURES_MAX = 256  # cap to bound memory
 
+# Lock guards composite read-modify-write on _provider_failures (record +
+# prune). CPython single dict ops are atomic, but iteration during prune
+# from another thread/coroutine would raise RuntimeError.
+import threading as _threading
+_provider_failures_lock = _threading.Lock()
+
 
 def _record_provider_failure(provider: str, ts: float | None = None) -> None:
     """Record a provider failure timestamp; prune stale entries to bound size.
@@ -71,15 +77,15 @@ def _record_provider_failure(provider: str, ts: float | None = None) -> None:
     """
     import time as _t
     now = _t.time()
-    _provider_failures[provider] = ts if ts is not None else now
-    if len(_provider_failures) > _PROVIDER_FAILURES_MAX:
-        # Drop entries older than 24h, then if still oversized drop oldest
-        cutoff = now - 86400
-        for k in [k for k, v in _provider_failures.items() if v < cutoff]:
-            _provider_failures.pop(k, None)
-        while len(_provider_failures) > _PROVIDER_FAILURES_MAX:
-            oldest = min(_provider_failures, key=_provider_failures.get)
-            _provider_failures.pop(oldest, None)
+    with _provider_failures_lock:
+        _provider_failures[provider] = ts if ts is not None else now
+        if len(_provider_failures) > _PROVIDER_FAILURES_MAX:
+            cutoff = now - 86400
+            for k in [k for k, v in _provider_failures.items() if v < cutoff]:
+                _provider_failures.pop(k, None)
+            while len(_provider_failures) > _PROVIDER_FAILURES_MAX:
+                oldest = min(_provider_failures, key=_provider_failures.get)
+                _provider_failures.pop(oldest, None)
 
 
 def get_llm(
