@@ -28,9 +28,11 @@ interface VitalsData {
 interface Artifact {
   id: string
   name: string
-  type: "pdf" | "markdown" | "json" | "log" | "html"
+  type: "pdf" | "markdown" | "json" | "log" | "html" | "binary" | "firmware" | "kernel_module" | "sdk" | "model" | "archive"
   timestamp: string
-  size: string
+  size: number | string
+  checksum?: string
+  version?: string
 }
 
 interface LogEntry {
@@ -656,15 +658,29 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
               <FileText size={14} className="text-[var(--artifact-purple)]" />
               <div className="flex-1 min-w-0">
                 <div className="font-mono text-xs text-[var(--foreground)] truncate">{artifact.name}</div>
-                <div className="font-mono text-xs text-[var(--muted-foreground)]">{artifact.timestamp} - {artifact.size}</div>
+                <div className="font-mono text-xs text-[var(--muted-foreground)]">
+                  {artifact.timestamp} - {typeof artifact.size === "number" ? `${(artifact.size / 1024).toFixed(1)} KB` : artifact.size}
+                  {artifact.version && <span className="ml-1 text-[var(--artifact-purple)]">v{artifact.version}</span>}
+                </div>
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button className="p-1 hover:bg-[var(--artifact-purple-dim)] rounded">
+                <a
+                  href={`/api/v1/artifacts/${artifact.id}/download`}
+                  download={artifact.name}
+                  className="p-1 hover:bg-[var(--artifact-purple-dim)] rounded"
+                  title="Download"
+                >
                   <Download size={12} className="text-[var(--artifact-purple)]" />
-                </button>
-                <button className="p-1 hover:bg-[var(--artifact-purple-dim)] rounded">
+                </a>
+                <a
+                  href={`/api/v1/artifacts/${artifact.id}/download`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-1 hover:bg-[var(--artifact-purple-dim)] rounded"
+                  title="Open in new tab"
+                >
                   <ExternalLink size={12} className="text-[var(--artifact-purple)]" />
-                </button>
+                </a>
               </div>
             </div>
           ))}
