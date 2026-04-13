@@ -82,8 +82,12 @@ async def provision(
     Uses git worktree for instant provisioning from the main repo,
     or git clone for external repos.
     """
-    branch = f"agent/{agent_id}/{task_id}"
-    ws_path = _WORKSPACES_ROOT / agent_id
+    # Sanitize IDs for safe use in branch names and shell commands
+    import re as _re
+    safe_agent = _re.sub(r'[^a-zA-Z0-9_-]', '_', agent_id)
+    safe_task = _re.sub(r'[^a-zA-Z0-9_-]', '_', task_id)
+    branch = f"agent/{safe_agent}/{safe_task}"
+    ws_path = _WORKSPACES_ROOT / safe_agent
 
     # Clean up existing workspace if any
     if agent_id in _workspaces:

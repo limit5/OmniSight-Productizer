@@ -144,7 +144,8 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
       category === "git" ? "git" :
       category === "gerrit" ? "gerrit" :
       category === "jira" ? "notification_jira" :
-      category === "slack" ? "notification_slack" : ""
+      category === "slack" ? "notification_slack" :
+      category === "webhooks" ? "github_webhook" : ""
     }_${field}`
     if (key in dirty) return String(dirty[key])
     return String(settingsData[category]?.[field] ?? "")

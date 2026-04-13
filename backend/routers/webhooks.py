@@ -182,7 +182,7 @@ async def _on_comment_added(event: dict) -> None:
     subject = change.get("subject", change_id)
 
     for approval in approvals:
-        if approval.get("type") == "Code-Review" and approval.get("value") == "-1":
+        if approval.get("type") == "Code-Review" and str(approval.get("value")) == "-1":
             logger.info("Code-Review -1 on change %s — creating fix task", change_id)
 
             # Extract reviewer feedback
