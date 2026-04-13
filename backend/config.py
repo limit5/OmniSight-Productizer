@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     ci_jenkins_api_token: str = ""
     ci_gitlab_enabled: bool = False
 
+    # ── Release Packaging ──
+    github_repo: str = ""              # owner/repo slug for GitHub Releases API
+    gitlab_project_id: str = ""        # GitLab project ID or URL-encoded path
+    release_enabled: bool = False      # Enable release upload on merge
+    release_draft: bool = True         # Create as draft (requires manual publish)
+
     # Docker isolation
     docker_enabled: bool = True  # enable container execution for agents
     docker_image: str = "omnisight-agent:latest"
