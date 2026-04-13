@@ -269,11 +269,93 @@ async def _on_change_merged(event: dict) -> None:
         except Exception as exc:
             logger.error("Replication to %s error: %s", target, exc)
 
+    # Package build artifacts from merged change
+    asyncio.create_task(_package_merged_artifacts(change_id, subject))
+
     # L3 Episodic Memory: auto-save solution from merged change
     asyncio.create_task(_save_merged_solution_to_l3(change_id, subject))
 
     # Trigger CI/CD pipelines after merge
     asyncio.create_task(_trigger_ci_pipelines())
+
+
+async def _package_merged_artifacts(change_id: str, subject: str) -> None:
+    """Create a release artifact bundle from a merged change.
+
+    Scans the main repo for recent build outputs and packages them
+    as a tar.gz archive registered in the artifact system.
+    """
+    import hashlib
+    import tarfile
+    import uuid as _uuid
+    from datetime import datetime
+    from pathlib import Path
+
+    try:
+        from backend.routers.artifacts import get_artifacts_root
+        from backend.workspace import _MAIN_REPO, _BUILD_OUTPUT_DIRS
+        from backend import db
+
+        # Scan main repo for build outputs
+        build_files: list[Path] = []
+        for build_dir_name in _BUILD_OUTPUT_DIRS:
+            build_dir = _MAIN_REPO / build_dir_name
+            if not build_dir.is_dir():
+                continue
+            for fpath in build_dir.rglob("*"):
+                if fpath.is_file() and fpath.stat().st_size >= 10:
+                    build_files.append(fpath)
+            if build_files:
+                break
+
+        if not build_files:
+            logger.debug("No build outputs found for merged change %s", change_id)
+            return
+
+        # Create tar.gz bundle
+        artifacts_root = get_artifacts_root()
+        bundle_dir = artifacts_root / "releases"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_subject = "".join(c if c.isalnum() or c in "-_" else "_" for c in subject[:40])
+        bundle_name = f"release_{safe_subject}_{change_id[:8]}.tar.gz"
+        bundle_path = bundle_dir / bundle_name
+
+        with tarfile.open(bundle_path, "w:gz") as tar:
+            for fpath in build_files:
+                tar.add(fpath, arcname=fpath.name)
+
+        # Compute checksum
+        sha = hashlib.sha256()
+        with open(bundle_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha.update(chunk)
+
+        artifact_id = f"art-{_uuid.uuid4().hex[:8]}"
+        await db.insert_artifact({
+            "id": artifact_id,
+            "task_id": "",
+            "agent_id": "gerrit-merge",
+            "name": bundle_name,
+            "type": "archive",
+            "file_path": str(bundle_path),
+            "size": bundle_path.stat().st_size,
+            "created_at": datetime.now().isoformat(),
+            "version": change_id[:12],
+            "checksum": sha.hexdigest(),
+        })
+
+        from backend.events import bus
+        bus.publish("artifact_created", {
+            "id": artifact_id, "name": bundle_name, "type": "archive",
+            "task_id": "", "agent_id": "gerrit-merge",
+            "size": bundle_path.stat().st_size,
+        })
+
+        logger.info("Merge artifact: %s (%d files, %d bytes)", bundle_name, len(build_files), bundle_path.stat().st_size)
+
+    except Exception as exc:
+        logger.warning("Merge artifact packaging failed (non-critical): %s", exc)
 
 
 async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
