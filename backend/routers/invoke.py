@@ -283,41 +283,109 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
 # ─── Task decomposition ───
 
 _SPLIT_PATTERNS = re.compile(
-    r"\b(?:and then|then|and|之後|然後|並且|以及|接著)\b", re.IGNORECASE,
+    r"(?:\band then\b|\bthen\b|之後|然後|並且|以及|接著|，然後|，接著)", re.IGNORECASE,
 )
+
+# Conjunctions that should NOT trigger a split (too ambiguous)
+_FALSE_SPLIT = re.compile(r"^(and|or)$", re.IGNORECASE)
 
 
 async def _maybe_decompose_task(task) -> list:
-    """Split a compound task into sub-tasks if it contains conjunctions.
+    """Split a compound task into sub-tasks.
+
+    Strategy:
+      1. Try LLM-based decomposition (semantic understanding)
+      2. Fall back to regex splitting if LLM unavailable
 
     Returns a list of new child Task objects (empty if no decomposition needed).
     """
-    from backend.agents.nodes import _rule_based_route
-
     text = f"{task.title}. {task.description or ''}"
-    parts = _SPLIT_PATTERNS.split(text)
-    parts = [p.strip().rstrip(".").strip() for p in parts if p.strip()]
+
+    # Try LLM decomposition first
+    parts = await _llm_decompose(text)
+
+    # Fallback: regex splitting
+    if parts is None:
+        parts = _regex_decompose(text)
 
     if len(parts) <= 1:
-        return []  # Single task, no decomposition
+        return []
 
-    # Create child tasks
+    from backend.agents.nodes import _rule_based_route
+
     children = []
+    prev_id = None
     for i, part in enumerate(parts):
         route, _ = _rule_based_route(part)
         child_id = f"{task.id}-sub{i + 1}"
+        # Auto-dependency: each sub-task depends on the previous one (sequential chain)
+        depends = [prev_id] if prev_id else []
         child = Task(
             id=child_id,
             title=part,
-            description=f"Sub-task of: {task.title}",
+            description=f"Sub-task {i + 1}/{len(parts)} of: {task.title}",
             priority=task.priority,
             status=TaskStatus.backlog,
             suggested_agent_type=route if route != "general" else task.suggested_agent_type,
             parent_task_id=task.id,
+            depends_on=depends,
         )
         children.append(child)
+        prev_id = child_id
 
     return children
+
+
+async def _llm_decompose(text: str) -> list[str] | None:
+    """Use LLM to decompose a compound task into atomic sub-tasks.
+
+    Returns list of sub-task titles, or None if LLM unavailable.
+    """
+    try:
+        from backend.agents.llm import get_llm
+        llm = get_llm()
+        if not llm:
+            return None
+
+        from langchain_core.messages import SystemMessage, HumanMessage
+        resp = llm.invoke([
+            SystemMessage(content=(
+                "You are a task decomposition assistant. Given a compound task, "
+                "split it into 2-5 atomic sub-tasks that can each be assigned to "
+                "one specialist agent. Rules:\n"
+                "- Each sub-task must be a complete, self-contained instruction\n"
+                "- Preserve the original intent — do NOT add extra steps\n"
+                "- If the task is already atomic (single action), return ONLY: ATOMIC\n"
+                "- Output each sub-task on a separate line, numbered: 1. ... 2. ...\n"
+                "- Do NOT output anything else (no explanation, no prefix)"
+            )),
+            HumanMessage(content=text),
+        ])
+        content = resp.content.strip()  # type: ignore[union-attr]
+
+        if "ATOMIC" in content:
+            return None  # LLM says no split needed
+
+        # Parse numbered lines
+        lines = []
+        for line in content.split("\n"):
+            line = line.strip()
+            # Match "1. ...", "2. ..." etc
+            m = re.match(r"^\d+[\.\)]\s*(.+)", line)
+            if m:
+                lines.append(m.group(1).strip())
+        return lines if len(lines) >= 2 else None
+
+    except Exception as exc:
+        logger.debug("LLM decomposition failed (falling back to regex): %s", exc)
+        return None
+
+
+def _regex_decompose(text: str) -> list[str]:
+    """Regex-based fallback decomposition. Splits on sequential conjunctions."""
+    parts = _SPLIT_PATTERNS.split(text)
+    parts = [p.strip().rstrip(".").strip() for p in parts if p.strip() and len(p.strip()) > 1]
+    return parts
 
 
 async def _check_parent_completion(task_id: str) -> None:
