@@ -80,6 +80,16 @@
 - **48D**（本 commit）：`budget-strategy-panel.tsx` — 4 策略卡片 + 5 knob 讀數（tier/retries/downgrade/freeze/parallel）；全部三個元件已掛在 app/page.tsx 右側 aside 頂端
 - **E2E 驗證**：`curl PUT /operation-mode` 與 `PUT /budget-strategy` 成功 round-trip，回傳 payload 與前端 type 完全匹配
 
+## Phase 48-Fix（前端深度審計後補修）
+- **Batch A**（`244095d`）：P0 — 共享 SSE manager（lib/api.ts 單 EventSource 跨 caller）、Dashboard local-merge（SSE → upsert/remove 而非 150 項全拉）、AbortController + mountedRef、DecisionRow 去 useMemo、ModeSelector interval 分離（refreshRef 模式）、decision events timestamp 必填、SWEEP loading + RETRY 按鈕
+- **Batch B**（`6cbd9b4`）：P1/P2 — Mobile nav 加 decisions/budget、DecisionSource 型別細化、compact 3-字母標籤 MAN/SUP/AUT/TRB、radiogroup aria-labelledby、BudgetPanel RETRY
+
+## Phase 49（前端測試框架）
+- **49A**（`2666c34`）：Vitest + jsdom + @testing-library/react + jest-dom + happy-dom 安裝，`vitest.config.ts` / `test/setup.ts` / `package.json` scripts（test / test:watch / test:ui），MockEventSource 伺服器端渲染 polyfill，4 個 smoke tests 綠
+- **49B**（`0cc95c1`）：ModeSelector 6 + BudgetStrategyPanel 4 = 10 個 component tests — 覆蓋初始載入 / PUT / peer SSE / 錯誤路徑 / compact 3-letter guard / unmount cleanup
+- **49C**（本 commit）：DecisionDashboard 9 tests — list merge（_pending → 加入、_resolved → 移到 history）、approve/reject/undo、SWEEP loading、countdown（fake timers 驗證 < 10s 變紅）、RETRY 路徑
+- **總計**：23 個前端 tests 全綠，執行 ~1s，與後端 200+ 個 pytest 合組首次 frontend+backend 雙軌驗證
+
 ---
 
 ## 0. 專案理解與未來開發藍圖
