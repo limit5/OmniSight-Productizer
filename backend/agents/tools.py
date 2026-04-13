@@ -838,6 +838,112 @@ async def generate_artifact_report(template: str, title: str = "", context_json:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  8. Platform / Vendor SDK tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  7.5. Build artifact registration tool
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@tool
+async def register_build_artifact(
+    file_path: str,
+    name: str = "",
+    artifact_type: str = "",
+    task_id: str = "",
+    version: str = "",
+) -> str:
+    """Register a compiled binary or build output as a downloadable artifact.
+
+    Call this after a successful build to make the output available for download.
+    The file is copied from the workspace to the persistent .artifacts/ directory.
+
+    Args:
+        file_path: Path to the file (relative to workspace root).
+        name: Display name for the artifact. Defaults to filename.
+        artifact_type: Type override (binary, firmware, kernel_module, sdk, model, archive).
+                      Auto-detected from extension if empty.
+        task_id: Associated task ID for tracking.
+        version: Semantic version string (e.g. "1.0.0-rc1").
+    """
+    import hashlib
+    import shutil
+    import uuid
+    from datetime import datetime
+
+    from backend import db
+    from backend.routers.artifacts import get_artifacts_root
+    from backend.workspace import _guess_artifact_type
+
+    # Validate path
+    try:
+        src = _safe_path(file_path)
+    except PermissionError:
+        return f"[BLOCKED] Path escapes workspace: {file_path}"
+
+    if not src.exists():
+        return f"[ERROR] File not found: {file_path}"
+    if not src.is_file():
+        return f"[ERROR] Not a file: {file_path}"
+
+    # Compute checksum
+    sha = hashlib.sha256()
+    with open(src, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha.update(chunk)
+    checksum = sha.hexdigest()
+
+    # Copy to .artifacts/
+    artifacts_root = get_artifacts_root()
+    task_dir = artifacts_root / (task_id or "general")
+    task_dir.mkdir(parents=True, exist_ok=True)
+    dest = task_dir / src.name
+    if dest.exists():
+        dest = task_dir / f"{dest.stem}_{uuid.uuid4().hex[:4]}{dest.suffix}"
+    shutil.copy2(src, dest)
+
+    # Determine type
+    atype = artifact_type or _guess_artifact_type(src.name)
+    display_name = name or src.name
+    artifact_id = f"art-{uuid.uuid4().hex[:8]}"
+
+    artifact_data = {
+        "id": artifact_id,
+        "task_id": task_id,
+        "agent_id": get_active_agent_id() or "",
+        "name": display_name,
+        "type": atype,
+        "file_path": str(dest),
+        "size": dest.stat().st_size,
+        "created_at": datetime.now().isoformat(),
+        "version": version,
+        "checksum": checksum,
+    }
+
+    await db.insert_artifact(artifact_data)
+
+    # Emit SSE event
+    try:
+        from backend.events import bus
+        bus.publish("artifact_created", {
+            "id": artifact_id, "name": display_name, "type": atype,
+            "task_id": task_id, "agent_id": artifact_data["agent_id"],
+            "size": artifact_data["size"],
+        })
+    except Exception:
+        pass
+
+    return (
+        f"[OK] Artifact registered: {display_name}\n"
+        f"  ID: {artifact_id}\n"
+        f"  Type: {atype}\n"
+        f"  Size: {artifact_data['size']} bytes\n"
+        f"  SHA-256: {checksum[:16]}...\n"
+        f"  Download: GET /artifacts/{artifact_id}/download"
+    )
+
+
+ARTIFACT_TOOLS = [register_build_artifact]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 @tool
@@ -1595,17 +1701,17 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
-    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
-    "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS,
+    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS,
+    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
-    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
-    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
-    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS,
-    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
-    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS,
+    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
+    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
 }
