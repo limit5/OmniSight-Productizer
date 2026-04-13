@@ -41,6 +41,9 @@ def _log(message: str, level: str = "info") -> None:
 # notification excluded: already persisted by notify() → db.insert_notification()
 _PERSIST_EVENT_TYPES = frozenset({
     "agent_update", "task_update", "simulation", "invoke",
+    # Phase 47: persist audit-relevant decision events
+    "decision_pending", "decision_resolved", "decision_auto_executed",
+    "decision_undone", "mode_changed",
 })
 
 

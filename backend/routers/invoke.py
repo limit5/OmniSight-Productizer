@@ -28,8 +28,19 @@ from backend.events import emit_agent_update, emit_invoke
 
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
-# Concurrency guard — only one INVOKE at a time (asyncio.Lock is safe against disconnect)
-_invoke_lock = asyncio.Lock()
+# Concurrency guard — Phase 47A replaces the single-slot lock with a
+# mode-aware semaphore owned by decision_engine. In Manual/Supervised mode
+# the cap is still 1-2 (legacy behavior); FullAuto=4 / Turbo=8 unlock real
+# parallelism. The module-level `_invoke_lock` remains for backward compat
+# (tests and `.locked()` polling) but is now a degenerate semaphore-backed
+# facade that checks the real budget lazily.
+_invoke_lock = asyncio.Lock()  # kept for legacy `.locked()` callers
+
+
+def _invoke_slot():
+    """Acquire an INVOKE concurrency slot scaled by OperationMode."""
+    from backend import decision_engine as _de
+    return _de.parallel_slot()
 
 # Halt flag — checked between actions to support emergency stop
 # _running: set() = system running (not halted), clear() = halted
@@ -838,12 +849,16 @@ async def invoke_stream(command: str | None = None):
     Query param `command` is optional; if provided, it takes priority
     and is routed through the LangGraph pipeline.
     """
-    # Non-blocking lock check — the actual lock is acquired in the generator/body
-    # via `async with _invoke_lock`, which guarantees mutual exclusion
-    if _invoke_lock.locked():
+    # Phase 47A: parallelism is capped by OperationMode via a Semaphore.
+    # Reject at the door only when every slot is taken AND we're in Manual
+    # (preserve the old "one-at-a-time" UX for Manual). Other modes block
+    # inside the generator until a slot frees up.
+    from backend import decision_engine as _de
+    sema = _de.parallel_slot()
+    if _de.get_mode() == _de.OperationMode.manual and sema.locked():
         return JSONResponse(
             status_code=409,
-            content={"detail": "Invoke already in progress"},
+            content={"detail": "Invoke already in progress (Manual mode)"},
         )
 
     # Pre-step: decompose compound tasks before planning
@@ -863,7 +878,7 @@ async def invoke_stream(command: str | None = None):
     actions = _plan_actions(state, command)
 
     async def event_generator():
-        async with _invoke_lock:
+        async with sema:
             # Opening event with analysis
             yield {
                 "event": "analysis",
@@ -948,15 +963,15 @@ async def invoke_resume():
 @router.post("")
 async def invoke_sync(command: str | None = None):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
-    # Non-blocking lock check — the actual lock is acquired in the generator/body
-    # via `async with _invoke_lock`, which guarantees mutual exclusion
-    if _invoke_lock.locked():
+    from backend import decision_engine as _de
+    sema = _de.parallel_slot()
+    if _de.get_mode() == _de.OperationMode.manual and sema.locked():
         return JSONResponse(
             status_code=409,
-            content={"detail": "Invoke already in progress"},
+            content={"detail": "Invoke already in progress (Manual mode)"},
         )
 
-    async with _invoke_lock:
+    async with sema:
         state = _analyze_state()
         actions = _plan_actions(state, command)
         results: list[dict] = []

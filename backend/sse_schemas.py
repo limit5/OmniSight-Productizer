@@ -132,6 +132,34 @@ class SSEHeartbeat(BaseModel):
     subscribers: int = 0
 
 
+# ─── Phase 47: Decision Engine events ───
+
+class SSEModeChanged(BaseModel):
+    """mode_changed — OperationMode switched."""
+    mode: str
+    previous: str
+    parallel_cap: int
+    timestamp: str = ""
+
+
+class SSEDecision(BaseModel):
+    """decision_pending / decision_auto_executed / decision_resolved / decision_undone."""
+    id: str
+    kind: str
+    severity: str
+    title: str
+    detail: str = ""
+    status: str
+    options: list[dict] = Field(default_factory=list)
+    default_option_id: Optional[str] = None
+    chosen_option_id: Optional[str] = None
+    resolver: Optional[str] = None
+    created_at: float = 0.0
+    deadline_at: Optional[float] = None
+    resolved_at: Optional[float] = None
+    timestamp: str = ""
+
+
 # Registry for schema export
 SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "agent_update": SSEAgentUpdate,
@@ -147,6 +175,12 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "notification": SSENotification,
     "artifact_created": SSEArtifactCreated,
     "heartbeat": SSEHeartbeat,
+    # Phase 47
+    "mode_changed": SSEModeChanged,
+    "decision_pending": SSEDecision,
+    "decision_auto_executed": SSEDecision,
+    "decision_resolved": SSEDecision,
+    "decision_undone": SSEDecision,
 }
 
 

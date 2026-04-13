@@ -57,9 +57,12 @@
   - 修復 3 個 pre-existing test_release UNIQUE failures：artifact id 改為 per-test uuid 後綴
 
 ## Audit-Fix 總結
-- 6 個 batch、~50+ 個問題修復，commit 範圍 `67506d2..HEAD`
+- 6 個 batch、~50+ 個問題修復，commit 範圍 `67506d2..756ac93`
 - 對應的安全 / 並發 / 資源 / pipeline / SDK / schema 領域全數獲得加固
-- 後續 Phase 47 可在乾淨基礎上開展
+
+## Phase 47 進度（Autonomous Decision Engine）
+- **47A（完成）**：OperationMode (manual/supervised/full_auto/turbo) + DecisionEngine (`backend/decision_engine.py`) + GET/PUT `/operation-mode` + GET `/decisions` + 5 個 SSE events (mode_changed, decision_pending/auto_executed/resolved/undone) + invoke.py 由 `_invoke_lock` 改為 mode-aware semaphore (parallel cap 1/2/4/8)
+- 47B-D：pending
 
 ---
 

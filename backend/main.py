@@ -104,6 +104,8 @@ app.include_router(webhooks.router, prefix=settings.api_prefix)
 app.include_router(simulations.router, prefix=settings.api_prefix)
 app.include_router(integration.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
+from backend.routers import decisions as _decisions_router  # Phase 47A
+app.include_router(_decisions_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")
