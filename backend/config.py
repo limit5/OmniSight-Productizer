@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     together_api_key: str = ""
 
+    # OpenRouter (aggregator — single key accesses 200+ models)
+    openrouter_api_key: str = ""
+
     # Ollama (local, no key needed)
     ollama_base_url: str = "http://localhost:11434"
 
@@ -45,7 +48,7 @@ class Settings(BaseSettings):
     token_freeze_threshold: float = 1.0  # 100% → stop all LLM calls
     token_fallback_provider: str = "ollama"  # Provider to downgrade to at 90%
     token_fallback_model: str = "llama3.1"  # Model to downgrade to at 90%
-    llm_fallback_chain: str = "anthropic,openai,google,groq,ollama"  # Failover priority
+    llm_fallback_chain: str = "anthropic,openai,google,groq,deepseek,openrouter,ollama"  # Failover priority
 
     # ── RTK Output Compression ──
     rtk_enabled: bool = True  # Enable output compression for token savings

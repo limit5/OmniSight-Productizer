@@ -229,6 +229,23 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
             temperature=temp,
         )
 
+    if provider == "openrouter":
+        key = settings.openrouter_api_key
+        if not key:
+            logger.info("No OMNISIGHT_OPENROUTER_API_KEY set")
+            return None
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model or "anthropic/claude-sonnet-4",
+            api_key=key,
+            base_url="https://openrouter.ai/api/v1",
+            temperature=temp,
+            default_headers={
+                "HTTP-Referer": "https://omnisight.local",
+                "X-Title": "OmniSight Productizer",
+            },
+        )
+
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(
@@ -336,6 +353,36 @@ def list_providers() -> list[dict]:
             "requires_key": True,
             "env_var": "OMNISIGHT_TOGETHER_API_KEY",
             "configured": bool(settings.together_api_key),
+        },
+        {
+            "id": "openrouter",
+            "name": "OpenRouter",
+            "default_model": "anthropic/claude-sonnet-4",
+            "models": [
+                # Anthropic (via OpenRouter)
+                "anthropic/claude-sonnet-4",
+                "anthropic/claude-haiku-4",
+                # OpenAI (via OpenRouter)
+                "openai/gpt-4o",
+                "openai/gpt-4o-mini",
+                # Google (via OpenRouter)
+                "google/gemini-2.5-flash-preview",
+                "google/gemini-2.5-pro-preview",
+                # OpenRouter exclusive — not available via direct providers
+                "qwen/qwen3-235b-a22b",
+                "qwen/qwen3-32b",
+                "cohere/command-r-plus",
+                "cohere/command-a",
+                "mistralai/mistral-large",
+                "mistralai/codestral",
+                "meta-llama/llama-4-maverick",
+                "meta-llama/llama-4-scout",
+                "nvidia/llama-3.1-nemotron-ultra-253b",
+                "perplexity/sonar-pro",
+            ],
+            "requires_key": True,
+            "env_var": "OMNISIGHT_OPENROUTER_API_KEY",
+            "configured": bool(settings.openrouter_api_key),
         },
         {
             "id": "ollama",
