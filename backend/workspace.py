@@ -277,6 +277,15 @@ async def finalize(agent_id: str) -> dict:
     except Exception as exc:
         logger.warning("Handoff generation failed: %s", exc)
 
+    # Collect build artifacts before cleanup destroys the workspace
+    try:
+        collected = await _collect_build_artifacts(ws, agent_id, info.task_id)
+        if collected:
+            result["artifacts"] = collected
+            logger.info("Collected %d build artifact(s) from %s", len(collected), ws)
+    except Exception as exc:
+        logger.warning("Artifact collection failed: %s", exc)
+
     return result
 
 
@@ -361,3 +370,124 @@ async def _detect_base_branch(repo_path: Path) -> str:
 def list_workspaces() -> list[WorkspaceInfo]:
     """List all active workspaces."""
     return list(_workspaces.values())
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Build artifact collection (Phase 39)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Directories to scan for build outputs (relative to workspace root)
+_BUILD_OUTPUT_DIRS = ["build/output", "build/bin", "build", "out", "dist"]
+
+# File extensions → ArtifactType mapping
+_ARTIFACT_TYPE_MAP = {
+    ".ko": "kernel_module", ".bin": "firmware", ".hex": "firmware",
+    ".elf": "binary", ".so": "binary", ".a": "binary", ".o": "binary",
+    ".rknn": "model", ".tflite": "model", ".engine": "model", ".onnx": "model",
+    ".tar.gz": "archive", ".tgz": "archive", ".zip": "archive",
+    ".deb": "sdk", ".rpm": "sdk",
+    ".pdf": "pdf", ".html": "html", ".md": "markdown", ".log": "log",
+}
+
+
+def _guess_artifact_type(filename: str) -> str:
+    """Guess artifact type from file extension."""
+    name_lower = filename.lower()
+    for ext, atype in _ARTIFACT_TYPE_MAP.items():
+        if name_lower.endswith(ext):
+            return atype
+    return "binary"
+
+
+async def _collect_build_artifacts(
+    workspace: Path, agent_id: str, task_id: str | None,
+) -> list[dict]:
+    """Scan workspace for build outputs and copy them to .artifacts/.
+
+    Returns list of artifact metadata dicts that were registered.
+    """
+    import hashlib
+    import uuid
+    from datetime import datetime
+
+    from backend.routers.artifacts import get_artifacts_root
+
+    artifacts_root = get_artifacts_root()
+    task_dir = artifacts_root / (task_id or "general")
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    collected = []
+
+    for build_dir_name in _BUILD_OUTPUT_DIRS:
+        build_dir = workspace / build_dir_name
+        if not build_dir.is_dir():
+            continue
+
+        for fpath in build_dir.rglob("*"):
+            if not fpath.is_file():
+                continue
+            # Skip tiny files (< 10 bytes — likely empty placeholders)
+            if fpath.stat().st_size < 10:
+                continue
+            # Skip common non-artifact files
+            if fpath.name in (".gitkeep", ".gitignore", "CMakeCache.txt", "Makefile"):
+                continue
+
+            # Compute checksum
+            sha = hashlib.sha256()
+            with open(fpath, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    sha.update(chunk)
+            checksum = sha.hexdigest()
+
+            # Copy to .artifacts/
+            dest = task_dir / fpath.name
+            # Avoid collision
+            if dest.exists():
+                stem = dest.stem
+                suffix = dest.suffix
+                dest = task_dir / f"{stem}_{uuid.uuid4().hex[:4]}{suffix}"
+            shutil.copy2(fpath, dest)
+
+            artifact_id = f"art-{uuid.uuid4().hex[:8]}"
+            artifact_data = {
+                "id": artifact_id,
+                "task_id": task_id or "",
+                "agent_id": agent_id,
+                "name": fpath.name,
+                "type": _guess_artifact_type(fpath.name),
+                "file_path": str(dest),
+                "size": dest.stat().st_size,
+                "created_at": datetime.now().isoformat(),
+                "version": "",
+                "checksum": checksum,
+            }
+
+            try:
+                from backend import db
+                await db.insert_artifact(artifact_data)
+            except Exception as exc:
+                logger.warning("Failed to register artifact %s: %s", fpath.name, exc)
+                continue
+
+            # Emit SSE event
+            try:
+                from backend.events import bus
+                bus.publish("artifact_created", {
+                    "id": artifact_id,
+                    "name": fpath.name,
+                    "type": artifact_data["type"],
+                    "task_id": task_id or "",
+                    "agent_id": agent_id,
+                    "size": artifact_data["size"],
+                })
+            except Exception:
+                pass
+
+            collected.append(artifact_data)
+            logger.info("Artifact collected: %s (%d bytes, %s)", fpath.name, artifact_data["size"], artifact_data["type"])
+
+        # Only scan the first existing build dir
+        break
+
+    return collected
