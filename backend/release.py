@@ -259,14 +259,15 @@ async def upload_to_gitlab(bundle_path: str, version: str, manifest: dict) -> di
         import urllib.parse
         encoded_project = urllib.parse.quote(project, safe="")
 
-        # Create tag (may already exist)
-        await asyncio.create_subprocess_exec(
-            "curl", "-s", "-X", "POST",
+        # Create tag (may already exist) — with timeout
+        tag_proc = await asyncio.create_subprocess_exec(
+            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST",
             f"{base_url}/api/v4/projects/{encoded_project}/repository/tags",
             "-H", f"PRIVATE-TOKEN: {token}",
             "-d", f"tag_name={tag}&ref=main",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
+        await asyncio.wait_for(tag_proc.communicate(), timeout=15)
 
         # Create release
         proc = await asyncio.create_subprocess_exec(
@@ -283,9 +284,38 @@ async def upload_to_gitlab(bundle_path: str, version: str, manifest: dict) -> di
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         result = json.loads(stdout.decode())
-        if "tag_name" in result:
-            logger.info("GitLab release created: %s", result.get("_links", {}).get("self", ""))
-            return {"status": "uploaded", "tag": tag, "url": result.get("_links", {}).get("self", "")}
-        return {"status": "error", "error": result.get("message", str(result))[:200]}
+        if "tag_name" not in result:
+            return {"status": "error", "error": result.get("message", str(result))[:200]}
+
+        release_url = result.get("_links", {}).get("self", "")
+
+        # Upload bundle as release asset (Generic Package)
+        bundle_filename = Path(bundle_path).name
+        upload_proc = await asyncio.create_subprocess_exec(
+            "curl", "-s", "-X", "POST",
+            f"{base_url}/api/v4/projects/{encoded_project}/uploads",
+            "-H", f"PRIVATE-TOKEN: {token}",
+            "-F", f"file=@{bundle_path}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        upload_stdout, _ = await asyncio.wait_for(upload_proc.communicate(), timeout=120)
+        try:
+            upload_result = json.loads(upload_stdout.decode())
+            asset_url = upload_result.get("full_path", "")
+            if asset_url:
+                # Link asset to release
+                await asyncio.create_subprocess_exec(
+                    "curl", "-s", "-X", "POST",
+                    f"{base_url}/api/v4/projects/{encoded_project}/releases/{tag}/assets/links",
+                    "-H", f"PRIVATE-TOKEN: {token}",
+                    "-H", "Content-Type: application/json",
+                    "-d", json.dumps({"name": bundle_filename, "url": f"{base_url}{asset_url}"}),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+        except Exception:
+            logger.warning("GitLab asset link failed (release still created)")
+
+        logger.info("GitLab release created: %s", release_url)
+        return {"status": "uploaded", "tag": tag, "url": release_url}
     except Exception as exc:
         return {"status": "error", "error": str(exc)[:200]}

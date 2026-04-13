@@ -139,6 +139,10 @@ async def provision(
         logger.info("Workspace provisioned (worktree): %s → %s", agent_id, ws_path)
     else:
         # Clone external repo (with authentication)
+        # Validate source URL to prevent shell injection
+        import shlex
+        if any(c in source for c in ('`', '$', ';', '|', '&', '\n')):
+            raise ValueError(f"Invalid characters in repo source URL: {source}")
         from backend.git_auth import get_auth_env
         auth_env = get_auth_env(source)
 
