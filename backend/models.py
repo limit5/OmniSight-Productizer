@@ -388,7 +388,7 @@ class SystemInfoResponse(BaseModel):
     memory_used: int = 0
     disk_total_mb: int = 0
     disk_used_mb: int = 0
-    disk_use_pct: float = 0.0
+    disk_use_pct: str | float = 0.0
     uptime: str = ""
     wsl: bool = False
     docker: bool = False
@@ -427,7 +427,7 @@ class ProviderInfo(BaseModel):
     default_model: str = ""
     models: list[str] = Field(default_factory=list)
     requires_key: bool = True
-    env_var: str = ""
+    env_var: Optional[str] = ""
     configured: bool = False
     base_url: Optional[str] = None
 
