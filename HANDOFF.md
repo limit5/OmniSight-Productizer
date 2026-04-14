@@ -192,6 +192,79 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 51 / 56 / 53 / 60 — 一次性實作（2026-04-14）
+
+四個 phase 依 SOP 子任務制連續實作，每 phase 完成後 targeted test +
+uvicorn health + commit。共 4 個 commit、~1700 LoC、18 個新後端 test，
+93 個受測項全綠。
+
+### Phase 51 — Backend coverage + CI + Alembic（commit `4e23303`）
+- `pytest-cov` + `pytest.ini [coverage:run/report]`
+- `.github/workflows/ci.yml` — 5 job pipeline（lint / backend-tests
+  sharded by domain / backend-migrate / frontend-unit / frontend-e2e）；
+  shard 矩陣分 decision (85% min) / pipeline / schema / rest (60% min)
+- Alembic：`alembic.ini` + `env.py`（env-aware、`render_as_batch=False`）
+  + baseline migration `0001_baseline.py` 反向 dump 13 表（用
+  `bind.exec_driver_sql()` 避開 `:` JSON DEFAULT 被當 bind param）；
+  downgrade 拒絕；既有 `db._migrate()` 保留為 defence-in-depth
+- v0：lint 與 tsc 暫設 warn-only；待 v1 收斂
+
+### Phase 56 — Durable Workflow Checkpointing（commit `4bb4b21`）
+- Migration `0002_workflow_runs.py` + db._SCHEMA mirror：
+  `workflow_runs`（id/kind/status/last_step_id/metadata）+
+  `workflow_steps`（UNIQUE(run_id, idempotency_key)）+ 索引
+- `backend/workflow.py`：
+  - `start()` / `get_run()` / `list_runs()` / `list_steps()`
+  - `step(run, key)` decorator — cache-hit 返回快取、cache-miss 執行並寫入、
+    UNIQUE collision 回讀
+  - `finish()` / `replay()` / `list_in_flight_on_startup()`
+- `backend/routers/workflow.py` — 4 端點（list / in-flight / replay / finish）
+- `main.py` lifespan：startup 掃描 status='running' 的 workflow，logger.warning
+  列出（前端可後續加 banner）
+- 7 個 test 含 headline use case「resume after simulated crash」
+
+### Phase 53 — Audit & Compliance（commit `9df9b73`）
+- Migration `0003_audit_log.py` + db._SCHEMA mirror：`audit_log`
+  with `prev_hash` / `curr_hash` + 索引（ts / actor / entity）
+- `backend/audit.py`：
+  - `log()`：sha256(prev_hash || canonical(payload) || ts) → curr_hash，
+    asyncio.Lock 序列化避免 race
+  - `log_sync()`：sync 呼叫端 fire-and-forget
+  - `query()` 三維篩選；`verify_chain()` 走訪 + 報告第一個 broken row id
+- DecisionEngine 三點掛載 audit：`set_mode` / `resolve` / `undo`，
+  全部 try/except 包裝確保 audit 失敗不影響主流程
+- `backend/routers/audit.py` — `GET /audit?...` + `GET /audit/verify`，
+  受 `OMNISIGHT_DECISION_BEARER` 保護
+- CLI：`python -m backend.audit verify | tail [N]`
+- 5 個 test 含 chain_detects_tampering（forge row 3 → bad=3）
+
+### Phase 60 v1 — History-Calibrated Forecast（commit pending）
+- `backend/forecast.py · _load_history_sync()`：從 `token_usage`
+  （avg tokens/request）+ `simulations`（avg duration_ms / count）萃取
+- 信賴度 ladder：
+  - `sample < 5` → `method=template`，confidence 0.50（v0 行為）
+  - `sample 5..19` → `method=template+history`，50/50 blend，confidence 0.70
+  - `sample ≥ 20` → `method=history`，全 history-driven，confidence 0.80
+- `ProjectForecast.method` Literal 擴充
+- 6 個 test：v0 baseline、track 輕重對比、5/20 sample blend、profile
+  順序、provider 路由
+
+### 累計
+
+| Phase | commit | LoC 增 | 新後端 test |
+|---|---|---|---|
+| 51    | `4e23303` | +474 | (CI yml + shard config) |
+| 56    | `4bb4b21` | +654 | 7 |
+| 53    | `9df9b73` | +477 | 5 |
+| 60 v1 | (本次)    | ~120 | 6 |
+| **合計** | | **~1700** | **18** |
+
+健康端點 200、forecast/audit/workflow API 全 200、alembic migrations 全
+idempotent、93 個 backend test 綠（forecast + audit + workflow +
+decision_engine + decision_rules + stuck_detector + schema）。
+
+---
+
 ## Phase 50-Layout — Header / Panel 寬度穩定性掃修（2026-04-14）
 
 操作員回報「某個元件狀態變動造成版面跑掉」是在多輪 commit 中陸續發現

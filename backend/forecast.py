@@ -139,7 +139,7 @@ class ProjectForecast:
     tokens: TokenBreakdown
     cost: CostBreakdown
     confidence: float                # 0..1
-    method: Literal["fresh", "template", "template+regression"]
+    method: Literal["fresh", "template", "template+history", "history", "template+regression"]
     profile_sensitivity: list[ProfileSensitivity]
     generated_at: float
 
@@ -177,12 +177,65 @@ def _load_pricing() -> dict[str, dict[str, float]]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _load_history_sync() -> tuple[float | None, float | None, int]:
+    """Phase 60 v1: pull historical means out of token_usage +
+    simulations to overlay on the template.
+
+    Returns (avg_tokens_per_request, avg_duration_minutes, sample_size).
+
+    Synchronous on purpose — `from_manifest` runs in a sync context.
+    Uses a brief sqlite3 connection rather than the aiosqlite singleton
+    to avoid loop coupling. Returns (None, None, 0) if both tables
+    are empty / unreadable.
+    """
+    import sqlite3
+    db_path = (
+        os.environ.get("OMNISIGHT_DATABASE_PATH", "").strip()
+        or str(_PROJECT_ROOT / "data" / "omnisight.db")
+    )
+    if not Path(db_path).exists():
+        return (None, None, 0)
+    try:
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        tok_row = con.execute(
+            "SELECT SUM(total_tokens) AS tt, SUM(request_count) AS rc "
+            "FROM token_usage WHERE request_count > 0"
+        ).fetchone()
+        sim_row = con.execute(
+            "SELECT AVG(duration_ms) AS d, COUNT(*) AS n "
+            "FROM simulations WHERE duration_ms > 0"
+        ).fetchone()
+        con.close()
+    except Exception as exc:
+        logger.debug("forecast history load failed (non-fatal): %s", exc)
+        return (None, None, 0)
+
+    avg_tokens = None
+    if tok_row and tok_row["rc"] and tok_row["rc"] > 0:
+        avg_tokens = float(tok_row["tt"]) / float(tok_row["rc"])
+    avg_min = None
+    sample = 0
+    if sim_row and sim_row["n"] and sim_row["n"] > 0 and sim_row["d"]:
+        avg_min = float(sim_row["d"]) / 60_000.0
+        sample = int(sim_row["n"])
+    if avg_tokens is not None:
+        sample = max(sample, 1)
+    return (avg_tokens, avg_min, sample)
+
+
 def from_manifest(manifest_path: Path | str | None = None,
                   provider: str | None = None) -> ProjectForecast:
     """Compute a fresh forecast from the active hardware_manifest.yaml.
 
     `provider` overrides the default pricing source (e.g. "openai");
     if not given, uses OMNISIGHT_LLM_PROVIDER env or anthropic.
+
+    v1: overlays history (token_usage + simulations means) on the
+    template baseline. Confidence ladder:
+        sample < 5    → template only,           confidence 0.50
+        sample 5..19  → 50/50 blend,             confidence 0.70
+        sample ≥ 20   → fully history-driven,    confidence 0.80
     """
     mp = Path(manifest_path) if manifest_path else _PROJECT_ROOT / "configs" / "hardware_manifest.yaml"
     data: dict = {}
@@ -209,9 +262,27 @@ def from_manifest(manifest_path: Path | str | None = None,
     role_list = list(_ROLES_BY_TRACK.get(project_track, _ROLES_BY_TRACK["full_stack"]))
     agents = AgentBreakdown(total=len(role_list), by_type=role_list)
 
+    # ---- v1 history overlay
+    hist_tokens, hist_min, sample = _load_history_sync()
+    if sample >= 20:
+        eff_min_per_task = (hist_min or _AVG_MIN_PER_TASK)
+        eff_tokens_per_task = (hist_tokens or _AVG_TOKENS_PER_TASK)
+        confidence = 0.80
+        method: Literal["fresh", "template", "template+history", "history", "template+regression"] = "history"
+    elif sample >= 5:
+        eff_min_per_task = ((hist_min or _AVG_MIN_PER_TASK) + _AVG_MIN_PER_TASK) / 2
+        eff_tokens_per_task = ((hist_tokens or _AVG_TOKENS_PER_TASK) + _AVG_TOKENS_PER_TASK) / 2
+        confidence = 0.70
+        method = "template+history"
+    else:
+        eff_min_per_task = _AVG_MIN_PER_TASK
+        eff_tokens_per_task = _AVG_TOKENS_PER_TASK
+        confidence = 0.50
+        method = "template"
+
     # ---- Duration (BALANCED baseline)
     cross_mult = _CROSS_COMPILE_PENALTY.get(target_platform, _CROSS_COMPILE_PENALTY[""])
-    base_minutes = total_tasks * _AVG_MIN_PER_TASK * cross_mult
+    base_minutes = total_tasks * eff_min_per_task * cross_mult
     base_hours = round(base_minutes / 60.0, 1)
 
     duration = DurationBreakdown(
@@ -220,8 +291,8 @@ def from_manifest(manifest_path: Path | str | None = None,
         pessimistic_hours=round(base_hours * _PROFILE_MULT["STRICT"] * 1.05, 1),
     )
 
-    # ---- Tokens
-    total_tokens = total_tasks * _AVG_TOKENS_PER_TASK
+    # ---- Tokens (uses effective per-task value from history blend)
+    total_tokens = int(total_tasks * eff_tokens_per_task)
     by_tier_tokens = {tier: int(total_tokens * pct) for tier, pct in _DEFAULT_TIER_MIX.items()}
     tokens = TokenBreakdown(total=total_tokens, by_tier=by_tier_tokens)
 
@@ -244,9 +315,7 @@ def from_manifest(manifest_path: Path | str | None = None,
         for p, m in _PROFILE_MULT.items()
     ]
 
-    # ---- Confidence (v0 always 0.5 because purely template; v1 will
-    # raise for projects whose track + arch combo has historical samples)
-    confidence = 0.5
+    # confidence + method already set in v1 history block above
 
     return ProjectForecast(
         project_name=project_name,
@@ -258,7 +327,7 @@ def from_manifest(manifest_path: Path | str | None = None,
         tokens=tokens,
         cost=cost,
         confidence=confidence,
-        method="template",
+        method=method,
         profile_sensitivity=sensitivity,
         generated_at=time.time(),
     )
