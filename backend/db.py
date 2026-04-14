@@ -111,6 +111,15 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             else:
                 logger.warning("Migration %s.%s failed: %s", table, column, exc)
 
+    # Phase 63-E fix: index for decay worker's last_used_at filter.
+    try:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_episodic_last_used "
+            "ON episodic_memory(last_used_at)"
+        )
+    except Exception as exc:
+        logger.warning("idx_episodic_last_used create failed: %s", exc)
+
     # Verify every REQUIRED column ended up present (defends against a YAML
     # typo or partial schema rebuild).
     for table, column in REQUIRED:

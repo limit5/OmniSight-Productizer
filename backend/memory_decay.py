@@ -121,18 +121,28 @@ async def decay_unused(
     cutoff_iso = _ts_iso((now if now is not None else time.time()) - ttl)
     from backend import db
 
+    # Count fresh rows separately so `scanned` still reflects total table
+    # size (tests assert on it). The WHERE filters the decay loop to
+    # just stale / never-touched rows — index on last_used_at keeps this
+    # O(log n) instead of O(n) as the table grows.
+    async with db._conn().execute(
+        "SELECT COUNT(*) AS n FROM episodic_memory "
+        "WHERE last_used_at IS NOT NULL AND last_used_at >= ?",
+        (cutoff_iso,),
+    ) as cur:
+        fresh_row = await cur.fetchone()
+    fresh_n = int(fresh_row["n"] or 0) if fresh_row else 0
+
     async with db._conn().execute(
         "SELECT id, last_used_at, decayed_score, quality_score "
-        "FROM episodic_memory"
+        "FROM episodic_memory "
+        "WHERE last_used_at IS NULL OR last_used_at < ?",
+        (cutoff_iso,),
     ) as cur:
         rows = await cur.fetchall()
 
-    res = DecayResult(scanned=len(rows))
+    res = DecayResult(scanned=len(rows) + fresh_n, skipped_recent=fresh_n)
     for r in rows:
-        last = r["last_used_at"]
-        if last and last >= cutoff_iso:
-            res.skipped_recent += 1
-            continue
         # First-ever pass for a row migrated in: decayed_score may be
         # 0 if the column was added before quality_score was copied.
         # Initialise it from quality_score in that case.
