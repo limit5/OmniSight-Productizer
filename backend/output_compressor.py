@@ -11,7 +11,6 @@ Applied at the tool executor level to cover ALL tools (shell and Python alike).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import threading

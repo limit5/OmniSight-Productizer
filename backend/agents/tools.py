@@ -1082,7 +1082,6 @@ async def get_platform_config(platform: str = "") -> str:
         platform: Platform profile name (e.g. 'aarch64', 'vendor-example').
                  If empty, reads from workspace .omnisight/platform hint.
     """
-    from pathlib import Path as _Path
 
     if not platform:
         ws = get_active_workspace()

@@ -32,7 +32,6 @@ from backend.models import (
     Task,
     TaskCreate,
     TaskPriority,
-    TaskStatus,
 )
 
 

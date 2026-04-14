@@ -1,6 +1,5 @@
 """Tests for artifact generation pipeline."""
 
-import asyncio
 
 import pytest
 

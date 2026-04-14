@@ -1,7 +1,6 @@
 """Tests for error handling and recovery mechanisms (Phase 16)."""
 
 import asyncio
-import time
 
 import pytest
 

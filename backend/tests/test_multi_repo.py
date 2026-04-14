@@ -85,7 +85,7 @@ class TestCredentialRegistry:
         assert len(r1) == len(r2)
 
     def test_clear_cache(self):
-        from backend.git_credentials import get_credential_registry, clear_credential_cache, _CREDENTIALS_CACHE
+        from backend.git_credentials import get_credential_registry, clear_credential_cache
         get_credential_registry()
         clear_credential_cache()
         from backend import git_credentials

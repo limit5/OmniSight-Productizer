@@ -160,7 +160,6 @@ class TestBundleContents:
     @pytest.mark.asyncio
     async def test_bundle_contains_artifact_files(self, client):
         import tarfile
-        from pathlib import Path
         from backend import db
         from backend.routers.artifacts import get_artifacts_root
         from backend.release import create_release_bundle

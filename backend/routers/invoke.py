@@ -20,7 +20,7 @@ from backend.agents.graph import run_graph
 from backend.routers.agents import _agents, _persist as _persist_agent
 from backend.routers.tasks import _tasks, _persist as _persist_task
 from backend.models import AgentStatus, AgentWorkspace, Task, TaskStatus
-from backend.workspace import provision as ws_provision, get_workspace
+from backend.workspace import provision as ws_provision
 from backend.handoff import load_handoff_for_task
 from fastapi.responses import JSONResponse
 

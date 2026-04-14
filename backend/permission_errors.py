@@ -107,7 +107,6 @@ async def attempt_auto_fix(category: str, error_output: str, workspace_path: str
 
     Returns: {"fixed": bool, "action": str, "detail": str}
     """
-    import asyncio
     from pathlib import Path
 
     if category == PermissionErrorCategory.FILE_READONLY:

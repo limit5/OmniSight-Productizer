@@ -171,7 +171,8 @@ def test_github_app_jwt_signs_with_test_key(monkeypatch):
     parts = jwt.split(".")
     assert len(parts) == 3
     # header decodes to {"alg":"RS256","typ":"JWT"}
-    import base64, json as _json
+    import base64
+    import json as _json
     pad = "=" * (-len(parts[0]) % 4)
     header = _json.loads(base64.urlsafe_b64decode(parts[0] + pad))
     assert header == {"alg": "RS256", "typ": "JWT"}

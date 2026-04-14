@@ -1,6 +1,5 @@
 """Tests for debug blackboard and loop detection (Phase 20)."""
 
-import json
 import uuid
 
 import pytest

@@ -1,6 +1,5 @@
 """Tests for issue tracking: state machine, fact gate, tools, URL parsing."""
 
-import asyncio
 
 import pytest
 

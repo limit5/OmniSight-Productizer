@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from backend.agents.graph import build_graph, run_graph, agent_graph
-from backend.agents.state import GraphState
 
 
 class TestGraphStructure:

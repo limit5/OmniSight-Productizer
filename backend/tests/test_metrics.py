@@ -128,7 +128,6 @@ def test_noop_stub_exposes_required_methods():
     """Every call site assumes `.labels(...).inc()` / `.observe(...)` /
     `.set(...)` all work. Build a fresh _NoOp here and verify."""
     import importlib
-    import sys
 
     # We can't easily toggle `_AVAILABLE` at runtime (module already
     # imported), so sniff the stub via a fresh import of the symbol.

@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError as PydanticError
 
 from backend import dag_validator as dv
-from backend.dag_schema import DAG, SCHEMA_VERSION, Task
+from backend.dag_schema import DAG, Task
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

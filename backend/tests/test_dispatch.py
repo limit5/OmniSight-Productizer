@@ -1,6 +1,5 @@
 """Tests for task dispatch scoring, decomposition, and multi-routing."""
 
-import asyncio
 
 import pytest
 

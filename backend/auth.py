@@ -34,7 +34,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
 

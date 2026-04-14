@@ -18,7 +18,6 @@ from backend.agents.tools import (
     git_remote_list,
     git_add_remote,
     create_pr,
-    set_active_workspace,
 )
 
 

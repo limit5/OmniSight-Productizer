@@ -17,7 +17,6 @@ import logging
 from urllib.parse import quote_plus, urlparse
 
 from backend.config import settings
-from backend.git_auth import detect_platform, parse_repo_path
 
 logger = logging.getLogger(__name__)
 

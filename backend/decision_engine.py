@@ -416,7 +416,6 @@ def propose(
             dec.source["chooser_rationale"] = profile_rationale
             dec.source["profile_id"] = profile_id_used
             try:
-                from backend import db
                 loop = asyncio.get_event_loop()
                 loop.create_task(_log_auto_decision(
                     decision_id=dec.id, kind=kind, severity=severity.value,

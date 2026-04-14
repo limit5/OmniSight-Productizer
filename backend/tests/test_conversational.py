@@ -1,6 +1,5 @@
 """Tests for conversational AI system (Phase 19)."""
 
-import pytest
 
 
 class TestQuestionDetection:

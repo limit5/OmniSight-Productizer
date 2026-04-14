@@ -58,7 +58,7 @@ def generate_handoff(
         lines.append(f"role: {sub_type}")
     if model_name:
         lines.append(f"model: {model_name}")
-    lines.append(f"status: finalized")
+    lines.append("status: finalized")
     lines.append(f"timestamp: {now}")
     lines.append("---")
     lines.append("")

@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from backend.config import settings
 from backend.events import emit_invoke, emit_agent_update, emit_task_update
 from backend.models import (
-    Agent, AgentCreate, AgentProgress, AgentStatus,
+    Agent, AgentProgress, AgentStatus,
     Task, TaskStatus, TaskPriority,
 )
 
@@ -580,7 +580,8 @@ async def _sync_external_to_task(task, new_status: str, platform: str) -> dict:
 @router.post("/github")
 async def github_webhook(request: Request):
     """Receive GitHub issue/PR webhooks — sync status to internal tasks."""
-    import hashlib, hmac as _hmac
+    import hashlib
+    import hmac as _hmac
     # Per-instance secret from credential registry with scalar fallback
     try:
         from backend.git_credentials import get_webhook_secret_for_host

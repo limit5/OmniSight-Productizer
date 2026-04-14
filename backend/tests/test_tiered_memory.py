@@ -37,7 +37,7 @@ class TestL1CoreRules:
             assert prompt.index("Core Rules") < prompt.index("Firmware Agent")
 
     def test_core_rules_cached(self):
-        from backend.prompt_loader import load_core_rules, _core_rules_cache
+        from backend.prompt_loader import load_core_rules
         first = load_core_rules()
         second = load_core_rules()
         assert first == second  # Should return cached result

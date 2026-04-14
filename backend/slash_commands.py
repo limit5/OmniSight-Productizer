@@ -6,9 +6,7 @@ response string or None if the command should fall through to LLM.
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +305,6 @@ async def _stream(args: str) -> str:
 
 async def _release(args: str) -> str:
     """Create a release bundle or show current version."""
-    from backend.config import settings
     from backend.release import resolve_version
     version = await resolve_version()
 

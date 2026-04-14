@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from backend.config import settings
-from backend.git_auth import detect_platform, parse_repo_path, get_gitlab_api_url, get_auth_env
+from backend.git_auth import detect_platform, parse_repo_path, get_gitlab_api_url
 
 logger = logging.getLogger(__name__)
 

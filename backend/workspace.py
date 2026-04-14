@@ -173,7 +173,6 @@ async def provision(
     else:
         # Clone external repo (with authentication)
         # Validate source URL to prevent shell injection
-        import shlex
         if any(c in source for c in ('`', '$', ';', '|', '&', '\n')):
             raise ValueError(f"Invalid characters in repo source URL: {source}")
         from backend.git_auth import get_auth_env

@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, Too
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
-from backend.events import emit_tool_progress, emit_pipeline_phase, emit_agent_update
+from backend.events import emit_tool_progress, emit_pipeline_phase
 from backend.prompt_loader import build_system_prompt
 
 logger = logging.getLogger(__name__)

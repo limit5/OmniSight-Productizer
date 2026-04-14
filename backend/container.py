@@ -100,7 +100,7 @@ async def resolve_runtime(force_redetect: bool = False) -> str:
             try:
                 from backend.events import emit_pipeline_phase as _emit
                 _emit("sandbox_runtime_fallback",
-                      f"runsc unavailable; using runc")
+                      "runsc unavailable; using runc")
             except Exception:
                 pass
         _RUNTIME_RESOLVED = "runc"

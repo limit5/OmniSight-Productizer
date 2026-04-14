@@ -234,7 +234,6 @@ async def _send_with_retry(notif: Notification, sender, channel: str) -> bool:
 
 async def _send_slack(notif: Notification) -> None:
     """Send to Slack via Incoming Webhook."""
-    import os
     url = settings.notification_slack_webhook
     emoji = {"warning": ":warning:", "action": ":rotating_light:", "critical": ":fire:"}.get(notif.level, ":information_source:")
     mention = ""

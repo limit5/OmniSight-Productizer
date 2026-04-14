@@ -35,7 +35,6 @@ its step list so a higher level loop can decide how to continue.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time

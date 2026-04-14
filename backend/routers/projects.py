@@ -13,7 +13,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi.responses import FileResponse, HTMLResponse
 
 from backend import project_report as pr

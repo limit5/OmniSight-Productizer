@@ -150,7 +150,8 @@ class TestAutoFix:
         lock = git_dir / "index.lock"
         lock.write_text("locked")
         # Stale-lock guard requires lock to be >60s old.
-        import os, time
+        import os
+        import time
         old = time.time() - 120
         os.utime(lock, (old, old))
 

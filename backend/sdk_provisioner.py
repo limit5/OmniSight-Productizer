@@ -114,7 +114,8 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
         if not sdk_path.exists():
             from backend.git_auth import get_auth_env
             auth_env = get_auth_env(sdk_url)
-            import os, shutil as _shutil
+            import os
+            import shutil as _shutil
             env = {**os.environ, **auth_env}
             # H13: cap clone size to avoid runaway 50 GB SDK repos filling
             # the disk. Bound via partial clone + max-pack-size.
@@ -270,7 +271,8 @@ async def _provision_sdk_locked(platform: str, profile: Path) -> dict:
 
 def _atomic_write_yaml(target: Path, data: dict) -> None:
     """Write *data* as YAML to *target* atomically (temp + rename)."""
-    import tempfile, os as _os
+    import tempfile
+    import os as _os
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
