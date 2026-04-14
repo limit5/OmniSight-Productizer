@@ -219,6 +219,20 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 67-A: prompt cache hit/miss in input tokens ─────────
+    prompt_cache_hit_total = Counter(
+        "omnisight_prompt_cache_hit_total",
+        "Input tokens served from the provider's prompt cache",
+        labelnames=("provider",),
+        registry=REGISTRY,
+    )
+    prompt_cache_miss_total = Counter(
+        "omnisight_prompt_cache_miss_total",
+        "Input tokens that were NOT served from cache (newly billed)",
+        labelnames=("provider",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -256,6 +270,8 @@ else:
     prompt_rolled_back_total = _NoOp()  # type: ignore
     dag_validation_total = _NoOp()  # type: ignore
     dag_validation_error_total = _NoOp()  # type: ignore
+    prompt_cache_hit_total = _NoOp()  # type: ignore
+    prompt_cache_miss_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -281,6 +297,7 @@ def reset_for_tests() -> None:
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
     global dag_validation_total, dag_validation_error_total
+    global prompt_cache_hit_total, prompt_cache_miss_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -385,6 +402,14 @@ def reset_for_tests() -> None:
     dag_validation_error_total = Counter(
         "omnisight_dag_validation_error_total", "DAG validation errors",
         labelnames=("rule",), registry=REGISTRY,
+    )
+    prompt_cache_hit_total = Counter(
+        "omnisight_prompt_cache_hit_total", "Cached input tokens",
+        labelnames=("provider",), registry=REGISTRY,
+    )
+    prompt_cache_miss_total = Counter(
+        "omnisight_prompt_cache_miss_total", "Uncached input tokens",
+        labelnames=("provider",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
