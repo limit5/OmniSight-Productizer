@@ -118,3 +118,33 @@ class TestDecisionEngineBridge:
         de.set_mode("turbo")
         dec2 = sd.propose_remediation(sig)
         assert dec2.status == de.DecisionStatus.auto_executed
+
+
+class TestHibernateStrategy:
+    """Phase 47-Fix Batch E — docker pause hibernate as a 5th strategy."""
+
+    def test_hibernate_listed_as_option(self):
+        de.set_mode("supervised")
+        sig = sd.analyze_agent("a1", error_history=["e", "e", "e"])
+        dec = sd.propose_remediation(sig)
+        option_ids = [o["id"] for o in dec.options]
+        assert "hibernate_and_wait" in option_ids
+        # Default for repeat_error remains switch_model
+        assert dec.default_option_id == "switch_model"
+
+    def test_hibernate_severity_is_routine(self):
+        # Manually craft a hibernate-suggested signal
+        sig = sd.StuckSignal(
+            agent_id="a1",
+            task_id=None,
+            reason=sd.StuckReason.long_running,
+            suggested_strategy=sd.Strategy.hibernate_and_wait,
+            detail="paused for the night",
+            source={"reason": "long_running"},
+        )
+        de.set_mode("supervised")
+        dec = sd.propose_remediation(sig)
+        # routine severity → auto-executed even in supervised mode
+        assert dec.severity == de.DecisionSeverity.routine
+        assert dec.status == de.DecisionStatus.auto_executed
+        assert dec.chosen_option_id == "hibernate_and_wait"

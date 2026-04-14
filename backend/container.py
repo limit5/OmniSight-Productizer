@@ -231,6 +231,38 @@ async def stop_container(agent_id: str) -> bool:
     return True
 
 
+async def pause_container(agent_id: str) -> bool:
+    """Phase 47-Fix Batch E: docker pause the agent container without
+    removing it. Worktree state preserved; CPU/mem reservation released
+    by Docker. Returns True on success."""
+    info = _containers.get(agent_id)
+    if not info:
+        return False
+    rc, out, err = await _run(f"docker pause {info.container_name}", timeout=10)
+    if rc == 0:
+        info.status = "paused"
+        emit_container(agent_id, "paused", info.container_name)
+        logger.info("Container paused: %s", info.container_name)
+        return True
+    logger.warning("docker pause failed for %s: %s", info.container_name, (err or out)[:120])
+    return False
+
+
+async def unpause_container(agent_id: str) -> bool:
+    """Resume a previously paused container. Returns True on success."""
+    info = _containers.get(agent_id)
+    if not info:
+        return False
+    rc, out, err = await _run(f"docker unpause {info.container_name}", timeout=10)
+    if rc == 0:
+        info.status = "running"
+        emit_container(agent_id, "resumed", info.container_name)
+        logger.info("Container resumed: %s", info.container_name)
+        return True
+    logger.warning("docker unpause failed for %s: %s", info.container_name, (err or out)[:120])
+    return False
+
+
 def get_container(agent_id: str) -> ContainerInfo | None:
     """Get container info for an agent."""
     return _containers.get(agent_id)

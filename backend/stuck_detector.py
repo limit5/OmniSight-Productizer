@@ -37,6 +37,12 @@ class Strategy(str, Enum):
     switch_model = "switch_model"
     spawn_alternate = "spawn_alternate"
     escalate = "escalate"
+    # Phase 47-Fix Batch E (Open Agents borrow #4): pause the agent's
+    # docker container instead of cancelling work. Worktree state is
+    # preserved; operator (or auto-resume in higher modes) can
+    # `docker unpause` to resume. Used as a lightweight first-line
+    # response when the agent isn't progressing but isn't broken.
+    hibernate_and_wait = "hibernate_and_wait"
 
 
 # Heuristic thresholds — intentionally conservative. A caller can override
@@ -224,6 +230,10 @@ def propose_remediation(signal: StuckSignal):
         Strategy.switch_model: de.DecisionSeverity.risky,
         Strategy.spawn_alternate: de.DecisionSeverity.risky,
         Strategy.escalate: de.DecisionSeverity.destructive,
+        # Phase 47-Fix Batch E: hibernate is non-destructive (state
+        # preserved, can resume any time) → routine severity, safe to
+        # auto-execute under SUPERVISED+.
+        Strategy.hibernate_and_wait: de.DecisionSeverity.routine,
     }
     severity = strat_to_severity.get(
         signal.suggested_strategy, de.DecisionSeverity.routine
@@ -244,6 +254,13 @@ def propose_remediation(signal: StuckSignal):
             "id": Strategy.escalate.value,
             "label": "Escalate to human",
             "description": "Stop and wait for human input.",
+        })
+    if signal.suggested_strategy != Strategy.hibernate_and_wait:
+        options.append({
+            "id": Strategy.hibernate_and_wait.value,
+            "label": "Hibernate (docker pause)",
+            "description": "Pause the agent's container; preserve state; "
+                           "operator can `docker unpause` to resume.",
         })
 
     title = f"Stuck: {signal.reason.value} ({signal.agent_id or signal.task_id})"

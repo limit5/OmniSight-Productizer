@@ -306,6 +306,30 @@ async def _apply_stuck_remediation(agent_id: str, signal, chosen: str) -> None:
         except Exception:
             pass
         return
+    if chosen == Strategy.hibernate_and_wait.value:
+        # Phase 47-Fix Batch E: docker pause the container; preserve
+        # worktree state. Operator (or auto-resume in higher modes)
+        # can `docker unpause` to continue.
+        try:
+            from backend.container import pause_container
+            paused = await pause_container(agent_id)
+        except Exception as exc:
+            logger.warning("[STUCK-exec] hibernate failed for %s: %s", agent_id, exc)
+            paused = False
+        if agent:
+            agent.status = AgentStatus.idle
+            agent.thought_chain = (
+                "[STUCK] hibernated (container paused) — resume any time"
+                if paused
+                else "[STUCK] hibernate requested but container not paused"
+            )
+            try:
+                await _persist_agent(agent)
+            except Exception:
+                pass
+            emit_agent_update(agent_id, "idle", agent.thought_chain)
+        emit_invoke("stuck_hibernate", f"[{agent_id}] container paused={paused}")
+        return
     # retry_same (or unknown): clear buffer so the retry is judged fresh
     clear_agent_error_history(agent_id)
 
