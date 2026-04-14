@@ -348,6 +348,124 @@ OMNISIGHT_DAG_MUTATION_MAX_ROUNDS=3
 
 ---
 
+## Phase 67 — Lossless Agent Acceleration（重定，未實作；2026-04-14 規劃）
+
+設計源：`docs/design/lossless-agent-acceleration.md`（4 引擎：Prompt
+Cache / Diff Patch / Speculative Pre-warm / RAG Pre-fetch）。目標
+prod 端 token -40~60%、end-to-end 延遲 -30~50%，**不犧牲精度**。
+
+### 已敲定決策
+
+1. **新編號 Phase 67**（不併入既有 Phase）— 4 引擎跨層級（LLM /
+   tool / sandbox / RAG），不適合塞單一既有 Phase。
+2. **E1 Provider 順序**：Anthropic-first → OpenAI auto → Ollama no-op +
+   warning。抽象層在 `agents/llm.py`。
+3. **E2 違規處置**：軟反饋（IIS L1 calibrate）而非硬重啟，避免無限迴圈。
+4. **E2 既有 `write_file`**：標 deprecated 漸進，保留 1 phase fallback。
+5. **E3 Pre-warm 觸發**：DAG validator pass + in-degree=0 + 前 **N=2** 名。
+6. **E4 confidence 門檻**：v1 起 **0.5**，待 Phase 63-E memory decay 完成後可上調 0.7。
+7. **與 56-DAG 順序**：**67-A 立即可平行啟動**（純 LLM 層無 dependency）；
+   67-B/C/D 卡在後續 phase。
+
+### 子任 / 工時
+
+| 子任 | 工時 | 內容 |
+|---|---|---|
+| **67-A** Prompt Cache 標記層 | 3–4h | `agents/llm.py::CachedPromptBuilder` (`add_static` / `add_volatile`)；message 順序契約 `system → tools → static_kb → conversation → volatile_log`；Anthropic `cache_control: ephemeral` 注入；OpenAI auto；Ollama no-op + warning；新 metric `prompt_cache_hit_total{provider}` / `prompt_cache_miss_total` |
+| **67-B** Diff Patch 工具 + 強制契約 | 5–7h | `agents/tools/patch.py::apply_search_replace`（≥3 行 context、唯一性檢查）+ `apply_unified_diff`；`write_file` 對既有檔 raise → 引導 patch；`create_file` 用於新檔不受 cap；攔截器 token>N 且 modify-existing → reject + 觸發 IIS L1；System prompt 規範段透過 prompt_registry (63-C) canary 推上 |
+| **67-C** Speculative Pre-warm | 4–5h | `sandbox_prewarm.py::prewarm_for(dag, depth=2)` 對 in-degree=0 task 預先 pull image + start container（重用 64-A `start_container` 含 image trust）；DAG dispatcher (56-DAG-D) 呼叫；mutation/cancel 立即 stop_container 釋放 lifetime；新 metrics `prewarm_started_total` / `prewarm_consumed_total{result}` |
+| **67-D** RAG Pre-fetch on Error | 3–4h | `rag_prefetch.py::intercept_failed_step(error_log)` rc≠0 即從 `episodic_memory` (Phase 18) FTS5 查 → confidence ≥ 0.5 過濾 → top 3 包成 `<related_past_solutions>` block 標 cacheable；注入點 workflow.py step error path + invoke.py error_check_node；與 Phase 63-E quality_score 共用 |
+
+**累計工時**：15–20h（4 子任分批，可與 56-DAG / 63-D 部分平行）。
+
+### 與既有系統的接點
+
+- **Phase 56-DAG**：E2 patch 是 step-level，與 DAG `expected_output`
+  (task-level artifact) 解耦；E3 pre-warm 直接讀 DAG dependency
+  graph；E4 RAG 注入點在 step error path。
+- **Phase 63 IIS**：E2 違規 → L1 calibrate（教 SEARCH/REPLACE 格式）；
+  連 3 次 → L2 route；token entropy baseline 需加 `mode={normal,patch}`
+  區分（避免 patch 短回覆觸發 entropy 警報）。
+- **Phase 63-C prompt_registry**：E2 規範段 + E1 cache hint marker
+  皆走 canary 推上。
+- **Phase 64-A image trust**：pre-warm 必須通過同樣的 trust check，
+  不可繞 trust list。
+- **Phase 64-D lifetime cap**：pre-warm 啟動的容器同樣受 45min cap；
+  cancel 釋放避免資源浪費。
+- **Phase 65 Data Flywheel**：patch diff 比 full file 更易做 fine-tune
+  料；E1 cache hit log 可作 prompt quality signal；E4 命中歷史解法的
+  成功率作 quality score。
+
+### 新環境變數（規劃）
+
+```
+OMNISIGHT_PROMPT_CACHE_ENABLED=true        # 67-A
+OMNISIGHT_PATCH_ENFORCE_MODE=warn|reject   # 67-B 漸進
+OMNISIGHT_PATCH_MAX_INLINE_LINES=50
+OMNISIGHT_PREWARM_DEPTH=2                  # 67-C
+OMNISIGHT_RAG_MIN_CONFIDENCE=0.5           # 67-D
+OMNISIGHT_RAG_TOP_K=3
+```
+
+### 新 metrics（規劃）
+
+- `omnisight_prompt_cache_hit_total{provider}` / `prompt_cache_miss_total`
+- `omnisight_patch_apply_total{result}` — applied / search_ambiguous / not_found / size_violation
+- `omnisight_patch_violation_total{reason}`
+- `omnisight_prewarm_started_total` / `prewarm_consumed_total{result}` — hit / miss / cancelled
+- `omnisight_rag_prefetch_total{result}` — injected / no_hit / below_confidence
+
+### 風險摘要
+
+| 風險 | 等級 | Mitigation |
+|---|---|---|
+| Diff 唯一性失敗無限重試 | 高 | ≥3 行 context + 連 3 次失敗→IIS L1 calibrate |
+| Generated/template 50-line cap 誤殺 | 中 | modify vs create 區分；create 不受 cap |
+| Pre-warm 浪費 docker / lifetime | 中 | 只對 DAG-validated + in-degree=0 + 前 N=2；mutation 立即釋放 |
+| L3 poisoning → RAG 注入錯解 | 高 | confidence ≥ 0.5 過濾 + 等 63-E decay |
+| RAG 注入導致 input token 反增 | 中 | top 3 cap + cacheable marker |
+| 違規重啟造成模型 stuck | 高 | 軟反饋（IIS）而非硬重啟 |
+| 跨 provider 不對稱 | 中 | ops doc + healthz `prompt_cache_supported{provider}` |
+| 與 IIS token entropy 警報互斥 | 中 | patch response 走獨立 baseline |
+| Anthropic API cost 結構變動 | 低 | 抽象層集中、易調 |
+
+### 預估效益（量化）
+
+| 引擎 | 預估改善 | 條件 |
+|---|---|---|
+| E1 Prompt Cache | TTFT -80% / Input token -50% | Anthropic / OpenAI / 重複任務 |
+| E2 Diff Patching | Output token -70% / 生成時間 -85% | 既有檔修改 |
+| E3 Pre-warm | 任務感知延遲 -2~5s/task | DAG 已驗證 |
+| E4 RAG Pre-fetch | 重複錯誤 MTTR -10~15s | L3 命中 |
+
+合計：prod 端 token **-40~60%**、end-to-end 延遲 **-30~50%**。
+
+### 啟動順序（已調整入主鏈）
+
+```
+[已完成] 64-A ✅ + 64-D ✅ + 64-B ✅ + 62 ✅ + 63-A ✅ + 63-B ✅ + 63-C ✅ + 56-DAG-A ✅
+   ↓
+56-DAG-B (storage + workflow 連動)  ──┐
+   ↓                                  │ 平行
+67-A (Prompt Cache)                   ┘ — 純 LLM 層、無 dependency
+   ↓
+63-D (Daily IQ Benchmark)
+   ↓
+67-D (RAG Pre-fetch)                  — 需 episodic_memory + 強過濾
+   ↓
+56-DAG-C (mutation loop + Orchestrator)
+   ↓
+67-B (Diff Patch + 強制契約)          — 需 prompt_registry canary
+   ↓
+56-DAG-D (雙模執行 + ops)
+   ↓
+67-C (Speculative Pre-warm)           — 需 DAG dispatcher
+   ↓
+65 (Data Flywheel) → 63-E (Memory Decay) → 64-C(平行)
+```
+
+---
+
 ## Phase 63-C — Prompt Registry + Canary 完成（2026-04-14）
 
 吸收原 Phase 63 Meta-Prompting Evaluator 主體並落地。Prompt 從 code 抽
