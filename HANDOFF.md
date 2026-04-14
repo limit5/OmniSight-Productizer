@@ -192,6 +192,107 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 65 — Data Flywheel / Auto-Fine-Tuning 完成（2026-04-15）
+
+L4 自我進化最後一塊：合格 workflow_runs 每晚 export 成 JSONL → 微調
+backend 提交 → poll 完成 → 對 hold-out 評估 → Decision Engine admin
+gate 決定 promote 或 reject。完整的「資料 → 訓練 → 評估 → 部署」閉
+環，全程 audit-logged。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `finetune_export.py`：double-gate（completed × hvt_passed × clean resolver × scrub-safe）+ shortest-path filter（drop failed retries by `_key_root`）+ ChatML JSONL；CLI `python -m backend.finetune_export`；1 metric；17 test | `840a862` |
+| S2 | `configs/iq_benchmark/holdout-finetune.yaml` 10 題手工策展 + `finetune_eval.py::compare_models` baseline vs candidate；regression > 5pp（env clamp [0,50]）→ reject；4 種 decision；1 Gauge；16 test | `987700b` |
+| S3 | `finetune_backend.py` `FinetuneBackend` Protocol + Noop（synthetic 立即 succeeded）/ OpenAI（lazy SDK + key gate）/ Unsloth（subprocess injectable runner，prod 走 T2 sandbox）；`select_backend` factory unknown fallback noop + warn；19 test | `518f42d` |
+| S4 | `finetune_nightly.py` 串接 export → submit → poll bounded → eval → DE proposal；10 status 涵蓋全分支；reject 走 destructive default=reject、promote 走 routine default=accept；min_rows=50 防小樣本；audit 全程；opt-in L4；lifespan wire；20 test | `8be01e1` |
+| S5 | `docs/operations/finetune.md` 操作員 runbook（status 表 / audit / metrics / backend / hold-out 策展守則 / pitfalls）+ HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **雙閘 + shortest-path 防 feedback poisoning**：auto-only resolver
+  + hvt_passed=false + scrub_unsafe 都 reject；retry 失敗的中間步驟
+  剔除，只訓練「真正成功的最短路徑」。
+- **Backend 抽象 Protocol**：3 後端介面一致；prod 用 OpenAI 或 Unsloth，
+  dev/staging 用 noop（synthetic 立即 succeeded 仍跑完整 gate logic）。
+- **Unsloth 必走 T2 sandbox**：injectable runner 是契約，prod caller
+  把 `container.exec_in_container` 包進 runner，本地 subprocess 只
+  是 dev fallback。
+- **Hold-out 手工策展、禁 auto-gen**：避免「model 評自己功課」自評偏誤。
+- **Eval 雙跑同 ask_fn**：baseline 與 candidate 共用同一 ask_fn，任何
+  共用基礎設施問題（rate limit / 暫時錯誤）影響相同，delta 仍有意義。
+- **Reject 走 destructive default=reject**：admin 必須明確 override 才
+  能上一個已知 regress 的模型；DE timeout 24h 後 default 自動 apply
+  → 候選自動丟棄。
+- **Promote 走 routine default=accept**：通過 hold-out 的候選在
+  BALANCED+ profile 自動接受，operator 可手動 reject 退出。
+- **min_rows_to_submit=50**：小訓練集帶來 regression 多於改進，預設
+  即跳過。
+- **每步 audit_log**：10 個 audit action 涵蓋全分支，hash chain 不變。
+- **全部 opt-in L4**：`OMNISIGHT_SELF_IMPROVE_LEVEL` 含 `l4` 才啟動。
+
+### 新環境變數
+
+```
+OMNISIGHT_FINETUNE_BACKEND=noop           # noop|openai|unsloth
+OMNISIGHT_FINETUNE_REGRESSION_PP=5        # [0,50] clamp
+# 既有 OMNISIGHT_SELF_IMPROVE_LEVEL 需含 'l4' 或 'all'
+```
+
+### 新 metrics
+
+- `omnisight_training_set_rows_total{result}` — Counter；`result=
+  written` 或 `skip:<rule>`，funnel 視覺化
+- `omnisight_finetune_eval_score{model}` — Gauge；baseline 與
+  candidate 同時發 sample 便於 Grafana 對照
+
+### 新 Decision Engine kinds
+
+- `finetune/regression` — destructive，default=reject，options
+  {reject, accept_anyway}，24h timeout
+- `finetune/promote` — routine，default=accept，options {accept,
+  reject}，24h timeout
+
+### 新 audit actions（10 個）
+
+`finetune_exported` / `finetune_submit_unavailable` /
+`finetune_submit_error` / `finetune_submitted` /
+`finetune_poll_timeout` / `finetune_failed` / `finetune_eval_skipped` /
+`finetune_evaluated` / `finetune_promoted` / `finetune_rejected`
+
+### 驗收
+
+`pytest test_finetune_export + test_finetune_eval +
+test_finetune_backend + test_finetune_nightly` → **72 passed**
+（17 + 16 + 19 + 20）。
+
+### Phase 65 完成 → 64-B/65 連動全鏈打通
+
+64-B Tier 2 sandbox（egress 控制）就位 → 65 Unsloth backend 可在
+T2 內 run；OpenAI fine-tune API 也可（egress 經 T2 限流 / 監控）。
+完整鏈：
+
+```
+workflow_runs → JSONL → T2 sandbox → fine-tune backend → 候選模型
+                                                         │
+                                                         ▼
+                                              hold-out eval (T0)
+                                                         │
+                                                         ▼
+                                      DE finetune/regression or promote
+                                                         │
+                                                         ▼
+                                         operator approve → live model
+```
+
+### 後續
+
+剩 **Phase 63-E Memory Decay**（2–3h，輕量收尾）+ **Phase 64-C T3
+Hardware Daemon**（10–14h，等實機，獨立 track）。
+
+---
+
 ## Phase 67-C — Speculative Container Pre-warm 完成（2026-04-15）
 
 Engine 3 從 `lossless-agent-acceleration.md` 落地。DAG validate 通過
