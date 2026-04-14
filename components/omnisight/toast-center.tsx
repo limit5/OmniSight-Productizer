@@ -52,11 +52,19 @@ function severityStyle(sev: DecisionSeverity) {
 
 export function ToastCenter() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  // B3: count of high-severity pending decisions that arrived while the
+  // stack was already full at MAX_TOASTS. Surfaced as a "+N more" chip
+  // so operators notice they missed one.
+  const [overflow, setOverflow] = useState(0)
   const [now, setNow] = useState<number>(() => Date.now())
   const focusedRef = useRef<string | null>(null)
 
   const dismiss = useCallback((id: string) => {
-    setToasts((cur) => cur.filter((t) => t.decision.id !== id))
+    setToasts((cur) => {
+      const next = cur.filter((t) => t.decision.id !== id)
+      if (next.length === 0) setOverflow(0)
+      return next
+    })
   }, [])
 
   const handleApprove = useCallback(async (t: ToastItem) => {
@@ -93,7 +101,11 @@ export function ToastCenter() {
             createdAt: now,
             deadlineAt: deadlineMs > now ? deadlineMs : now + DEFAULT_TIMEOUT_MS,
           }
-          // Keep newest-first but cap at MAX_TOASTS.
+          // Keep newest-first but cap at MAX_TOASTS. If capacity was
+          // already full, surface the dropped count as overflow chip.
+          if (cur.length >= MAX_TOASTS) {
+            setOverflow((n) => n + 1)
+          }
           return [item, ...cur].slice(0, MAX_TOASTS)
         })
       } else if (ev.event === "decision_resolved" || ev.event === "decision_auto_executed") {
@@ -157,6 +169,16 @@ export function ToastCenter() {
       aria-label="decision toasts"
       className="fixed bottom-4 right-4 z-[60] flex flex-col-reverse gap-2 w-[min(360px,calc(100vw-2rem))] pointer-events-none"
     >
+      {overflow > 0 && (
+        <div
+          data-testid="toast-overflow-chip"
+          className="pointer-events-auto self-end px-2 py-1 rounded-sm font-mono text-[10px] tracking-wider bg-[var(--critical-red,#ef4444)] text-white shadow-lg"
+          role="status"
+          aria-label={`${overflow} additional decisions awaiting review`}
+        >
+          +{overflow} MORE PENDING
+        </div>
+      )}
       {toasts.map((t) => {
         const total = t.deadlineAt - t.createdAt
         const remaining = Math.max(0, t.deadlineAt - now)

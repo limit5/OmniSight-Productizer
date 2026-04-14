@@ -110,14 +110,19 @@ export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
             <button
               key={panel.id}
               onClick={() => onPanelChange(panel.id)}
-              className={`w-2 h-2 rounded-full transition-all ${
-                activePanel === panel.id 
-                  ? "scale-125" 
-                  : "opacity-50 hover:opacity-100"
-              }`}
-              style={{ backgroundColor: panel.color }}
+              className="relative w-11 h-11 flex items-center justify-center rounded-full transition-all"
               aria-label={panel.label}
-            />
+              aria-current={activePanel === panel.id ? "page" : undefined}
+            >
+              {/* Visual dot stays 8px; hit target is 44×44 for WCAG 2.5.5. */}
+              <span
+                aria-hidden
+                className={`block w-2 h-2 rounded-full transition-all ${
+                  activePanel === panel.id ? "scale-150" : "opacity-50"
+                }`}
+                style={{ backgroundColor: panel.color }}
+              />
+            </button>
           ))}
         </div>
       </nav>

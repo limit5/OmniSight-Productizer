@@ -69,7 +69,20 @@ export function DecisionDashboard() {
       setInitialLoaded(true)
     } catch (exc) {
       if (!mountedRef.current || ac.signal.aborted) return
-      setError(exc instanceof Error ? exc.message : String(exc))
+      // B11: surface HTTP class in the user-visible error so operators can
+      // distinguish "backend down" from "not authorised" without opening
+      // devtools.
+      const msg = exc instanceof Error ? exc.message : String(exc)
+      const m = /API\s+(\d{3})/.exec(msg)
+      const code = m ? parseInt(m[1], 10) : 0
+      const label =
+        code === 401 || code === 403 ? "AUTH"
+        : code === 429 ? "RATE LIMITED"
+        : code === 404 ? "NOT FOUND"
+        : code >= 500 ? "BACKEND DOWN"
+        : code === 0 ? "NETWORK"
+        : "ERROR"
+      setError(`[${label}] ${msg}`)
     }
   }, [])
 
@@ -126,9 +139,26 @@ export function DecisionDashboard() {
     }
   }
 
-  const doApprove = (d: DecisionPayload, option_id: string) =>
-    withRowBusy(d.id, () => approveDecision(d.id, option_id))
-  const doReject = (d: DecisionPayload) => withRowBusy(d.id, () => rejectDecision(d.id))
+  const doApprove = (d: DecisionPayload, option_id: string) => {
+    // B10: destructive-severity approvals require an explicit confirm so
+    // a stray keypress can't greenlight, e.g., a production deploy.
+    if (d.severity === "destructive") {
+      const ok = typeof window !== "undefined"
+        ? window.confirm(`Approve DESTRUCTIVE decision?\n\n${d.title}\nOption: ${option_id}\n\nThis cannot be silently undone.`)
+        : true
+      if (!ok) return Promise.resolve()
+    }
+    return withRowBusy(d.id, () => approveDecision(d.id, option_id))
+  }
+  const doReject = (d: DecisionPayload) => {
+    if (d.severity === "destructive") {
+      const ok = typeof window !== "undefined"
+        ? window.confirm(`Reject DESTRUCTIVE decision?\n\n${d.title}\n\nThe default-safe option will NOT run.`)
+        : true
+      if (!ok) return Promise.resolve()
+    }
+    return withRowBusy(d.id, () => rejectDecision(d.id))
+  }
   const doUndo = (d: DecisionPayload) => withRowBusy(d.id, () => undoDecision(d.id))
 
   const doSweep = async () => {
@@ -217,9 +247,24 @@ export function DecisionDashboard() {
 
       <ul className="flex-1 min-h-[120px] max-h-[360px] overflow-y-auto divide-y divide-[var(--neural-border,rgba(148,163,184,0.15))]">
         {!initialLoaded ? (
-          <li className="px-3 py-6 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]">
-            Loading…
-          </li>
+          // B7: skeleton rows instead of a single "Loading…" line keep the
+          // list height stable and eliminate the content layout shift
+          // previously measured at CLS > 0.1 on first paint.
+          <>
+            {[0, 1, 2].map((i) => (
+              <li
+                key={i}
+                className="px-3 py-3 animate-pulse"
+                aria-hidden
+                data-testid={`decision-skeleton-${i}`}
+              >
+                <div className="h-2 w-1/4 bg-white/10 rounded-sm mb-2" />
+                <div className="h-3 w-3/4 bg-white/5 rounded-sm mb-1.5" />
+                <div className="h-2 w-1/2 bg-white/5 rounded-sm" />
+              </li>
+            ))}
+            <span className="sr-only" aria-live="polite">Loading decisions…</span>
+          </>
         ) : items.length === 0 ? (
           <li
             className="px-3 py-8 flex flex-col items-center gap-2 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]"
