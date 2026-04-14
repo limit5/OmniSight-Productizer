@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { AlertOctagon, AlertTriangle, Check, CheckCircle2, History, Info, Inbox, RotateCcw, X, Zap } from "lucide-react"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   type DecisionPayload,
   type DecisionSeverity,
@@ -188,6 +189,7 @@ export function DecisionDashboard() {
           <h2 className="font-mono text-sm tracking-wider text-[var(--neural-cyan,#67e8f9)]">
             DECISION QUEUE
           </h2>
+          <PanelHelp doc="decision-severity" />
           {pendingCount > 0 && (
             <span
               className="font-mono text-[10px] px-1.5 py-0.5 rounded-sm bg-[var(--critical-red,#ef4444)] text-white"

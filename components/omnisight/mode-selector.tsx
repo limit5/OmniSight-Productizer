@@ -8,6 +8,7 @@ import {
   setOperationMode,
   subscribeEvents,
 } from "@/lib/api"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 
 /**
  * OperationMode selector — 4-pill segmented control.
@@ -110,6 +111,8 @@ export function ModeSelector({ compact = false }: Props) {
       title={error ?? MODE_META[mode].hint}
     >
       <span id="operation-mode-label" className="text-[var(--neural-muted, #64748b)] hidden md:inline">MODE</span>
+      <PanelHelp doc="operation-modes" />
+
       <div className="flex items-center border border-[var(--neural-border, rgba(148,163,184,0.35))] rounded-sm overflow-hidden">
         {MODE_ORDER.map((m) => {
           const active = m === mode

@@ -1249,6 +1249,33 @@ html {
   animation: signal-wave 2s ease-out infinite;
 }
 
+/* D2: operator-doc viewer typography.
+ * Mini prose replacement (we avoid @tailwindcss/typography). */
+.doc-article {
+  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--foreground, #e2e8f0);
+}
+.doc-article h1 { font-family: var(--font-sans); font-size: 28px; margin: 20px 0 12px; color: var(--neural-cyan, #67e8f9); letter-spacing: 0.04em; }
+.doc-article h2 { font-size: 20px; margin: 22px 0 8px; color: var(--neural-blue, #60a5fa); border-bottom: 1px solid rgba(148,163,184,0.15); padding-bottom: 4px; }
+.doc-article h3 { font-size: 16px; margin: 16px 0 6px; color: var(--neural-cyan, #67e8f9); }
+.doc-article h4 { font-size: 14px; margin: 14px 0 4px; color: var(--foreground); opacity: 0.9; }
+.doc-article p  { margin: 6px 0; }
+.doc-article a  { color: var(--neural-cyan, #67e8f9); text-decoration: underline; text-underline-offset: 2px; }
+.doc-article a:hover { color: var(--neural-blue, #60a5fa); }
+.doc-article ul, .doc-article ol { margin: 6px 0 10px 20px; }
+.doc-article li { margin: 3px 0; }
+.doc-article code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; background: rgba(148,163,184,0.12); padding: 1px 5px; border-radius: 3px; }
+.doc-article pre  { background: rgba(15,23,42,0.8); border: 1px solid rgba(148,163,184,0.2); border-radius: 4px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
+.doc-article pre code { background: none; padding: 0; font-size: 12px; }
+.doc-article blockquote { margin: 10px 0; padding: 6px 12px; border-left: 3px solid var(--neural-cyan, #67e8f9); background: rgba(103,232,249,0.05); color: var(--muted-foreground, #94a3b8); font-style: italic; }
+.doc-article table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 12px; }
+.doc-article th, .doc-article td { border: 1px solid rgba(148,163,184,0.2); padding: 5px 8px; text-align: left; vertical-align: top; }
+.doc-article th { background: rgba(56,189,248,0.08); color: var(--neural-cyan, #67e8f9); font-weight: 600; }
+.doc-article tbody tr:nth-child(odd) { background: rgba(148,163,184,0.03); }
+.doc-article strong { color: var(--foreground, #e2e8f0); font-weight: 600; }
+
 /* B21: scroll affordance — adds a subtle fade at the bottom of a
  * scrollable container that shrinks as the user scrolls near the
  * bottom. Applied via `.scroll-fade` utility. Uses a masking image
