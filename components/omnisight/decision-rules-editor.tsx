@@ -105,7 +105,31 @@ export function DecisionRulesEditor() {
     setDirty(true)
   }
 
+  // C17: client-side pre-flight so the operator sees the violation inline
+  // instead of a raw 400 from the server. Mirrors backend _normalise().
+  const clientValidate = (rs: DecisionRule[]): string | null => {
+    const seenIds = new Set<string>()
+    for (const r of rs) {
+      if (!r.kind_pattern || !r.kind_pattern.trim()) {
+        return "kind_pattern is required on every rule"
+      }
+      if (r.severity && !severities.includes(r.severity)) {
+        return `unknown severity: ${r.severity}`
+      }
+      for (const m of r.auto_in_modes || []) {
+        if (!modes.includes(m)) return `unknown mode in auto_in_modes: ${m}`
+      }
+      if (r.id) {
+        if (seenIds.has(r.id)) return `duplicate rule id: ${r.id}`
+        seenIds.add(r.id)
+      }
+    }
+    return null
+  }
+
   const save = async () => {
+    const violation = clientValidate(sorted)
+    if (violation) { setError(violation); return }
     setBusy(true)
     setError(null)
     try {
