@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, MessageSquare, CheckCircle2, XCircle, Clock, FileText, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, Settings, Eye } from "lucide-react"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 
 export type AgentStatus = "idle" | "running" | "success" | "error" | "warning" | "booting" | "awaiting_confirmation" | "materializing"
 
@@ -984,6 +985,7 @@ export function AgentMatrixWall({
             <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">
               AGENT MATRIX
             </h2>
+            <PanelHelp doc="panels-overview" />
           </div>
           <div className="flex items-center gap-2">
             {materializingCount > 0 && (

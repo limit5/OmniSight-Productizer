@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useCallback, useRef, useEffect } from "react"
-import { 
-  GitBranch, 
+import { PanelHelp } from "@/components/omnisight/panel-help"
+import {
+  GitBranch,
   GitCommit, 
   Plus, 
   Link2, 
@@ -230,6 +231,7 @@ export function SourceControlMatrix({
           <h2 className="font-mono text-xs font-semibold tracking-fui text-[var(--artifact-purple)]">
             SOURCE
           </h2>
+          <PanelHelp doc="panels-overview" />
           <div className="flex items-center gap-1 ml-auto">
             <button
               onClick={() => setShowAddRepoModal(true)}

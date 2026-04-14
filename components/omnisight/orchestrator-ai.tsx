@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { 
-  Send, 
+import { PanelHelp } from "@/components/omnisight/panel-help"
+import {
+  Send,
   Bot, 
   User, 
   Sparkles,
@@ -453,6 +454,7 @@ export function OrchestratorAI({
             <h2 className="font-sans text-xs font-semibold tracking-fui text-[var(--artifact-purple)] truncate">
               ORCHESTRATOR
             </h2>
+            <PanelHelp doc="panels-overview" />
           </div>
           <button
             onClick={(e) => { e.stopPropagation(); setIsAnalyzing(true); generateSuggestions(); onRefresh?.(); setTimeout(() => setIsAnalyzing(false), 1000); }}

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, Signal, Wifi, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2, Cpu, Play, ToggleLeft, ToggleRight } from "lucide-react"
 import type { SimulationItem } from "@/lib/api"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 
 export type StreamType = "uvc" | "rtsp"
 
@@ -940,9 +941,10 @@ export function VitalsArtifactsPanel({
         <div className="flex items-center justify-between relative z-10">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-[var(--validation-emerald)] pulse-emerald signal-wave" />
-            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--validation-emerald)]">
+            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--validation-emerald)] mr-1">
               LIVE FEEDS
             </h2>
+            <PanelHelp doc="panels-overview" />
           </div>
           <div className="flex items-center gap-2">
             <span className="font-mono text-xs text-[var(--muted-foreground)]">

@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import { ChevronDown, ChevronUp, Target, Zap, Shield, Package, Rocket, CheckCircle2, Clock, AlertTriangle, BarChart3, List } from "lucide-react"
 import { NPIGantt } from "./npi-gantt"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 
 // Types matching backend
 interface NPIMilestone {
@@ -75,6 +76,7 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
           <div className="flex items-center gap-2 relative z-10">
             <div className="w-2 h-2 rounded-full bg-[var(--neural-blue)] pulse-blue pulse-ring" />
             <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">NPI LIFECYCLE</h2>
+            <PanelHelp doc="panels-overview" />
           </div>
         </div>
         <div className="flex-1 flex items-center justify-center">
@@ -100,6 +102,7 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
           <div className="flex items-center gap-1.5 min-w-0">
             <div className="w-2 h-2 rounded-full bg-[var(--neural-blue)] pulse-blue pulse-ring shrink-0" />
             <h2 className="font-sans text-xs font-semibold tracking-fui text-[var(--neural-blue)] truncate">NPI LIFECYCLE</h2>
+            <PanelHelp doc="panels-overview" />
           </div>
           <span className="font-mono text-[10px] text-[var(--validation-emerald)] tabular-nums shrink-0">{progressPercent}%</span>
         </div>

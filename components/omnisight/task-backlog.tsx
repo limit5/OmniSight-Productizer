@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 import { 
   Plus, 
   Send, 
@@ -478,6 +479,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
           <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--hardware-orange)]">
             TASK BACKLOG
           </h2>
+          <PanelHelp doc="panels-overview" />
         </div>
         {/* Row 2: Stats + ADD button */}
         <div className="flex items-center justify-between mt-2 relative z-10">

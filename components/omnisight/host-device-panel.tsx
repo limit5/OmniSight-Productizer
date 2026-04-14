@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { 
-  Cpu, 
+import { PanelHelp } from "@/components/omnisight/panel-help"
+import {
+  Cpu,
   HardDrive, 
   MemoryStick, 
   Wifi, 
@@ -315,6 +316,7 @@ export function HostDevicePanel({
             <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--hardware-orange)]">
               HOST & DEVICES
             </h2>
+            <PanelHelp doc="panels-overview" />
           </div>
           <button
             onClick={handleScan}
