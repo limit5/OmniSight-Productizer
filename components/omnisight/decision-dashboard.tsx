@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { AlertOctagon, AlertTriangle, Check, History, Info, RotateCcw, X, Zap } from "lucide-react"
+import { AlertOctagon, AlertTriangle, Check, CheckCircle2, History, Info, Inbox, RotateCcw, X, Zap } from "lucide-react"
 import {
   type DecisionPayload,
   type DecisionSeverity,
@@ -221,8 +221,36 @@ export function DecisionDashboard() {
             Loading…
           </li>
         ) : items.length === 0 ? (
-          <li className="px-3 py-6 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]">
-            {tab === "pending" ? "No pending decisions." : "No history yet."}
+          <li
+            className="px-3 py-8 flex flex-col items-center gap-2 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]"
+            data-testid={`decision-empty-${tab}`}
+          >
+            {tab === "pending" ? (
+              <>
+                <CheckCircle2
+                  className="w-8 h-8 text-[var(--validation-emerald,#10b981)]"
+                  aria-hidden
+                />
+                <span className="font-semibold tracking-wider text-[var(--foreground,#e2e8f0)]">
+                  ALL CLEAR
+                </span>
+                <span className="max-w-[22ch] leading-snug">
+                  No pending decisions. The engine will post one here when an
+                  agent needs approval.
+                </span>
+              </>
+            ) : (
+              <>
+                <Inbox className="w-8 h-8 opacity-60" aria-hidden />
+                <span className="font-semibold tracking-wider text-[var(--foreground,#e2e8f0)]">
+                  NO HISTORY YET
+                </span>
+                <span className="max-w-[22ch] leading-snug">
+                  Approved, rejected and auto-executed decisions will appear
+                  here.
+                </span>
+              </>
+            )}
           </li>
         ) : (
           items.map((d) => (
@@ -301,8 +329,12 @@ function DecisionRow(props: {
             </span>
             {remaining !== null && isPending && (
               <span
-                className="font-mono text-[9px] tabular-nums"
-                style={{ color: remaining < 10 ? "var(--critical-red,#ef4444)" : "var(--muted-foreground,#94a3b8)" }}
+                className="font-mono text-[12px] tabular-nums font-semibold"
+                style={{
+                  color: remaining < 10 ? "var(--critical-red,#ef4444)" : "var(--muted-foreground,#94a3b8)",
+                  animation: remaining < 10 ? "toast-urgent-pulse 1s ease-in-out infinite" : undefined,
+                }}
+                aria-label={`${remaining} seconds remaining`}
               >
                 {remaining}s
               </span>

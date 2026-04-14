@@ -80,12 +80,18 @@ export function ToastCenter() {
         if (!TRIGGER_SEVERITIES.has(d.severity)) return
         setToasts((cur) => {
           if (cur.some((t) => t.decision.id === d.id)) return cur  // dedupe
+          // deadline_at is unix seconds. Defend against NaN / negative /
+          // ms-by-mistake payloads that would otherwise NaN the countdown.
+          const now = Date.now()
+          const raw = typeof d.deadline_at === "number" && Number.isFinite(d.deadline_at)
+            ? d.deadline_at
+            : 0
+          // Heuristic: if value looks like milliseconds (>1e12), treat as ms.
+          const deadlineMs = raw > 1e12 ? raw : raw * 1000
           const item: ToastItem = {
             decision: d,
-            createdAt: Date.now(),
-            deadlineAt: d.deadline_at
-              ? d.deadline_at * 1000
-              : Date.now() + DEFAULT_TIMEOUT_MS,
+            createdAt: now,
+            deadlineAt: deadlineMs > now ? deadlineMs : now + DEFAULT_TIMEOUT_MS,
           }
           // Keep newest-first but cap at MAX_TOASTS.
           return [item, ...cur].slice(0, MAX_TOASTS)
@@ -99,14 +105,24 @@ export function ToastCenter() {
   }, [])
 
   // Tick for countdown + auto-dismiss on deadline passage.
+  // Suspend while the tab is hidden — no point burning CPU/battery on a
+  // timer the user cannot see, and the countdown catches up on resume.
   useEffect(() => {
     if (toasts.length === 0) return
-    const t = setInterval(() => {
-      const n = Date.now()
-      setNow(n)
-      setToasts((cur) => cur.filter((x) => x.deadlineAt > n))
-    }, TICK_MS)
-    return () => clearInterval(t)
+    let timer: ReturnType<typeof setInterval> | null = null
+    const start = () => {
+      if (timer) return
+      timer = setInterval(() => {
+        const n = Date.now()
+        setNow(n)
+        setToasts((cur) => cur.filter((x) => x.deadlineAt > n))
+      }, TICK_MS)
+    }
+    const stop = () => { if (timer) { clearInterval(timer); timer = null } }
+    const onVis = () => (document.hidden ? stop() : start())
+    if (!document.hidden) start()
+    document.addEventListener("visibilitychange", onVis)
+    return () => { stop(); document.removeEventListener("visibilitychange", onVis) }
   }, [toasts.length])
 
   // Keyboard: A / R / Esc. Only the focused (newest) toast receives them,
@@ -136,7 +152,8 @@ export function ToastCenter() {
 
   return (
     <div
-      aria-live="polite"
+      aria-live="assertive"
+      aria-atomic="true"
       aria-label="decision toasts"
       className="fixed bottom-4 right-4 z-[60] flex flex-col-reverse gap-2 w-[min(360px,calc(100vw-2rem))] pointer-events-none"
     >
@@ -208,20 +225,33 @@ export function ToastCenter() {
               >
                 <X className="w-3 h-3" aria-hidden /> REJECT
               </button>
-              <span className="ml-auto font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)] tabular-nums">
-                A · R · Esc
+              <span
+                className="ml-auto font-mono text-[11px] tabular-nums font-semibold"
+                style={{
+                  color: remaining < 10000 ? "var(--critical-red,#ef4444)" : "var(--muted-foreground,#94a3b8)",
+                  animation: remaining < 10000 ? "toast-urgent-pulse 1s ease-in-out infinite" : undefined,
+                }}
+                aria-label={`${Math.ceil(remaining / 1000)} seconds remaining`}
+              >
+                {Math.ceil(remaining / 1000)}s
+              </span>
+              <span className="font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)] tabular-nums">
+                A·R·Esc
               </span>
             </div>
 
             {/* Countdown bar */}
             <div
               aria-hidden
-              className="h-[2px] w-full bg-white/5"
+              className="h-[3px] w-full bg-white/5"
               data-testid={`toast-bar-${t.decision.id}`}
             >
               <div
                 className="h-full transition-[width]"
-                style={{ width: `${pct}%`, background: s.color }}
+                style={{
+                  width: `${pct}%`,
+                  background: remaining < 10000 ? "var(--critical-red,#ef4444)" : s.color,
+                }}
               />
             </div>
           </div>

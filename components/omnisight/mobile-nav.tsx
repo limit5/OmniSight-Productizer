@@ -50,7 +50,10 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   
-  const currentIndex = panels.findIndex(p => p.id === activePanel)
+  const rawIndex = panels.findIndex(p => p.id === activePanel)
+  // Invalid activePanel (e.g., stale URL deep-link) would otherwise crash
+  // at `currentPanel.icon` below — fall back to the first panel.
+  const currentIndex = rawIndex >= 0 ? rawIndex : 0
   const currentPanel = panels[currentIndex]
   
   const goToPrev = () => {
