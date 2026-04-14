@@ -160,15 +160,38 @@ export function subscribeEvents(
 const FETCH_TIMEOUT = 15_000 // 15 seconds
 const MAX_RETRIES = 2
 
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null
+  for (const part of document.cookie.split(";")) {
+    const [k, ...v] = part.trim().split("=")
+    if (k === name) return decodeURIComponent(v.join("="))
+  }
+  return null
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let lastError: Error | null = null
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
     try {
+      // Phase 54 / Internet-auth: send the session cookie with every
+      // call so the backend's auth_mode=session/strict can recognise
+      // the operator. CSRF token is read from the non-HttpOnly cookie
+      // and echoed via X-CSRF-Token for state-changing methods.
+      const method = (init?.method || "GET").toUpperCase()
+      const baseHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+      }
+      if (typeof document !== "undefined"
+          && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+        const csrf = readCookie("omnisight_csrf")
+        if (csrf) baseHeaders["X-CSRF-Token"] = csrf
+      }
       const res = await fetch(`${API_V1}${path}`, {
         signal: controller.signal,
-        headers: { "Content-Type": "application/json", ...init?.headers },
+        credentials: "include",
+        headers: { ...baseHeaders, ...init?.headers },
         ...init,
       })
       clearTimeout(timer)
@@ -742,6 +765,36 @@ export async function listArtifacts(taskId?: string, agentId?: string) {
 
 export function getArtifactDownloadUrl(id: string): string {
   return `${API_V1}/artifacts/${id}/download`
+}
+
+// ─── Auth (Phase 54 + Internet-exposure hardening) ──────────
+
+export interface AuthUser {
+  id: string
+  email: string
+  name: string
+  role: "viewer" | "operator" | "admin"
+  enabled: boolean
+}
+
+export interface WhoamiResponse {
+  user: AuthUser
+  auth_mode: "open" | "session" | "strict"
+}
+
+export async function whoami(): Promise<WhoamiResponse> {
+  return request<WhoamiResponse>("/auth/whoami")
+}
+
+export async function login(email: string, password: string): Promise<{ user: AuthUser; csrf_token: string }> {
+  return request<{ user: AuthUser; csrf_token: string }>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  })
+}
+
+export async function logout(): Promise<void> {
+  await request<{ status: string }>("/auth/logout", { method: "POST" })
 }
 
 // ─── Ops Summary (L1-04) ─────────────────────────────────────

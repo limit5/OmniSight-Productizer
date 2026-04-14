@@ -14,6 +14,9 @@ import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { DagEditor } from "@/components/omnisight/dag-editor"
 import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
+import { UserMenu } from "@/components/omnisight/user-menu"
+import { useAuth } from "@/lib/auth-context"
+import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
 import { CommandPalette } from "@/components/omnisight/command-palette"
@@ -53,6 +56,21 @@ function readPanelFromUrl(): PanelId | null {
 }
 
 export default function Home() {
+  // Internet-exposure gate: redirect to /login if the cookie isn't
+  // good. In auth_mode=open the backend whoami returns a synthetic
+  // admin user, so this check is a no-op for dev — exactly what we
+  // want for backwards compatibility with the single-user flow.
+  const auth = useAuth()
+  const router = useRouter()
+  useEffect(() => {
+    if (!auth.loading && !auth.user && auth.authMode !== "open") {
+      const next = typeof window !== "undefined"
+        ? window.location.pathname + window.location.search
+        : "/"
+      router.replace(`/login?next=${encodeURIComponent(next)}`)
+    }
+  }, [auth.loading, auth.user, auth.authMode, router])
+
   const engine = useEngine()
   const [syncCount, setSyncCount] = useState(0)
   // R2-#21: always hydrate with the same value as the server
@@ -516,7 +534,12 @@ export default function Home() {
           hasRunningAgents={hasRunningAgents || isHalted}
           unreadNotifications={engine.unreadCount}
           onToggleNotifications={() => setShowNotifications(prev => !prev)}
-          settingsButton={<SettingsButton onClick={() => setShowSettings(true)} />}
+          settingsButton={
+            <span className="inline-flex items-center gap-0.5">
+              <UserMenu />
+              <SettingsButton onClick={() => setShowSettings(true)} />
+            </span>
+          }
         />
         <IntegrationSettings open={showSettings} onClose={() => setShowSettings(false)} />
 
