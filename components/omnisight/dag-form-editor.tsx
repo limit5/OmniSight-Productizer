@@ -17,8 +17,8 @@
  *     the JSON tab shares the same panel.
  */
 
-import { useCallback, useMemo } from "react"
-import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react"
+import { useCallback, useMemo, useState } from "react"
+import { ArrowDown, ArrowUp, Plus, Trash2, X } from "lucide-react"
 
 // Mirrors `backend/dag_schema.py`. Kept local rather than hoisting into
 // lib/api.ts because only the form editor needs this shape concrete
@@ -66,6 +66,11 @@ function blankTask(index: number, allIds: string[]): FormTask {
 }
 
 export function DagFormEditor({ value, onChange }: Props) {
+  // Per-row draft for the "add input" text field. Stored outside the
+  // DAG itself so an empty draft doesn't serialise back into the JSON
+  // text tab. Keyed by task index — cleared on commit or row delete.
+  const [inputDraft, setInputDraft] = useState<Record<number, string>>({})
+
   // ─── mutation helpers ──────────────────────────────────────────
 
   const patchDag = useCallback(
@@ -94,6 +99,13 @@ export function DagFormEditor({ value, onChange }: Props) {
       // it becomes an `unknown_dep`. Scrub to keep form validity high.
       .map((t) => ({ ...t, depends_on: t.depends_on.filter((d) => d !== removed) }))
     onChange({ ...value, tasks })
+    // Clear any draft typeahead tied to the removed row index so it
+    // doesn't get misapplied to whatever shifts into that slot.
+    setInputDraft((d) => {
+      const next = { ...d }
+      delete next[idx]
+      return next
+    })
   }
 
   const moveTask = (idx: number, delta: -1 | 1) => {
@@ -111,6 +123,30 @@ export function DagFormEditor({ value, onChange }: Props) {
       ? t.depends_on.filter((d) => d !== depId)
       : [...t.depends_on, depId]
     patchTask(idx, { depends_on })
+  }
+
+  // ─── inputs[] helpers ──────────────────────────────────────────
+  // Chip-with-typeahead: the draft text commits on Enter / blur, dups
+  // are dropped silently so the operator can't trip unknown_input in
+  // the validator. Empty string is a no-op.
+
+  const addInput = (idx: number) => {
+    const draft = (inputDraft[idx] || "").trim()
+    if (!draft) return
+    const t = value.tasks[idx]
+    const inputs = t.inputs ?? []
+    if (inputs.includes(draft)) {
+      setInputDraft((d) => ({ ...d, [idx]: "" }))
+      return
+    }
+    patchTask(idx, { inputs: [...inputs, draft] })
+    setInputDraft((d) => ({ ...d, [idx]: "" }))
+  }
+
+  const removeInput = (idx: number, val: string) => {
+    const t = value.tasks[idx]
+    const inputs = (t.inputs ?? []).filter((x) => x !== val)
+    patchTask(idx, { inputs })
   }
 
   // ─── derived ───────────────────────────────────────────────────
@@ -225,7 +261,65 @@ export function DagFormEditor({ value, onChange }: Props) {
               className="text-xs font-mono px-2 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
             />
 
-            {/* Row 4: depends_on chips */}
+            {/* Row 4: inputs chips + typeahead */}
+            <div className="flex flex-wrap gap-1 items-center">
+              <span className="text-[10px] font-mono text-[var(--muted-foreground)] mr-1">
+                inputs:
+              </span>
+              {(t.inputs ?? []).map((inp) => (
+                <span
+                  key={inp}
+                  className="inline-flex items-center gap-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--muted)]/30 text-[var(--foreground)]"
+                >
+                  {inp}
+                  <button
+                    type="button"
+                    onClick={() => removeInput(idx, inp)}
+                    aria-label={`remove input ${inp} from task ${idx + 1}`}
+                    className="ml-0.5 opacity-60 hover:opacity-100"
+                  >
+                    <X size={9} />
+                  </button>
+                </span>
+              ))}
+              <input
+                type="text"
+                value={inputDraft[idx] || ""}
+                onChange={(e) =>
+                  setInputDraft((d) => ({ ...d, [idx]: e.target.value }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    addInput(idx)
+                  }
+                }}
+                onBlur={() => addInput(idx)}
+                placeholder="add input path (press Enter)"
+                aria-label={`task ${idx + 1} new input`}
+                className="flex-1 min-w-[120px] text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+              />
+            </div>
+
+            {/* Row 5: output_overlap_ack — MECE escape hatch.
+                Rarely used, so visually small and titled with the why. */}
+            <label
+              className="flex items-center gap-1 text-[10px] font-mono text-[var(--muted-foreground)] select-none"
+              title="Allow this task's expected_output path to overlap with another task's. The DAG validator's MECE rule will refuse overlapping outputs unless BOTH sides set this flag (e.g. parallel benchmarks writing the same merged report)."
+            >
+              <input
+                type="checkbox"
+                checked={!!t.output_overlap_ack}
+                onChange={(e) =>
+                  patchTask(idx, { output_overlap_ack: e.target.checked })
+                }
+                aria-label={`task ${idx + 1} output overlap ack`}
+                className="accent-[var(--artifact-purple)]"
+              />
+              <span>allow output overlap (MECE escape)</span>
+            </label>
+
+            {/* Row 6: depends_on chips */}
             {allIds.length > 1 && (
               <div className="flex flex-wrap gap-1 items-center">
                 <span className="text-[10px] font-mono text-[var(--muted-foreground)] mr-1">depends_on:</span>

@@ -84,6 +84,63 @@ describe("DagFormEditor", () => {
     expect(next.tasks[0].depends_on).toEqual([])
   })
 
+  it("adds an input on Enter and removes via the chip's × button", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<DagFormEditor value={sample} onChange={onChange} />)
+
+    const draftField = screen.getByLabelText("task 1 new input")
+    await user.type(draftField, "build/extra.bin{Enter}")
+    let next = onChange.mock.calls[0][0] as FormDAG
+    expect(next.tasks[0].inputs).toEqual(["build/extra.bin"])
+
+    // Re-render with the updated DAG so the chip now appears.
+    onChange.mockClear()
+    const updated: FormDAG = {
+      ...sample,
+      tasks: sample.tasks.map((t, i) =>
+        i === 0 ? { ...t, inputs: ["build/extra.bin"] } : t,
+      ),
+    }
+    const { unmount } = render(<DagFormEditor value={updated} onChange={onChange} />)
+    // Using the aria-label to target exactly this chip's × button.
+    const removeBtn = screen.getByLabelText("remove input build/extra.bin from task 1")
+    await user.click(removeBtn)
+    next = onChange.mock.calls[0][0] as FormDAG
+    expect(next.tasks[0].inputs).toEqual([])
+    unmount()
+  })
+
+  it("drops a duplicate input silently", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    const withInput: FormDAG = {
+      ...sample,
+      tasks: sample.tasks.map((t, i) =>
+        i === 0 ? { ...t, inputs: ["build/a.bin"] } : t,
+      ),
+    }
+    render(<DagFormEditor value={withInput} onChange={onChange} />)
+    const draftField = screen.getByLabelText("task 1 new input")
+    await user.type(draftField, "build/a.bin{Enter}")
+    // Duplicate rejected — no onChange fires with a changed inputs array.
+    for (const call of onChange.mock.calls) {
+      const next = call[0] as FormDAG
+      expect(next.tasks[0].inputs).toEqual(["build/a.bin"])
+    }
+  })
+
+  it("output_overlap_ack checkbox toggles the task flag", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<DagFormEditor value={sample} onChange={onChange} />)
+    const cbx = screen.getByLabelText("task 1 output overlap ack") as HTMLInputElement
+    expect(cbx.checked).toBe(false)
+    await user.click(cbx)
+    const next = onChange.mock.calls[0][0] as FormDAG
+    expect(next.tasks[0].output_overlap_ack).toBe(true)
+  })
+
   it("depends_on chip toggles membership", async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
