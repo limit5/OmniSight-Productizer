@@ -57,6 +57,43 @@ def _top_k() -> int:
         return 3
 
 
+# Phase 67-E (docs/design/dag-pre-fetching.md) — stricter Tier-1 sandbox
+# gate. The generic `_min_confidence` above stays (0.5 default, suits
+# the agent-side L3 hint path). The *sandbox* injection path routes
+# through `prefetch_for_sandbox_error` and wants a higher bar so a
+# borderline match can't "poison" the compile-fix loop.
+def _min_cosine() -> float:
+    """Sandbox-path similarity floor. Design doc spec: cosine > 0.85.
+    Caveat: the DB layer today uses FTS5 rank + a curated quality_score
+    rather than a real dense-embedding cosine. We use quality_score
+    as a proxy for this gate — when a true embedding column lands
+    (Phase 67-F), this function's call site is the one place to swap."""
+    raw = (os.environ.get("OMNISIGHT_RAG_MIN_COSINE") or "0.85").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.85
+
+
+def _max_block_tokens() -> int:
+    """Total token budget for the injected `<system_auto_prefetch>`
+    block. Spec: 1000 max. Approximated as chars/4 for v1 — every
+    production tokenizer (tiktoken, claude's) agrees within ±20% on
+    English prose, which is within the safety margin."""
+    raw = (os.environ.get("OMNISIGHT_RAG_MAX_BLOCK_TOKENS") or "1000").strip()
+    try:
+        return max(100, min(8000, int(raw)))
+    except ValueError:
+        return 1000
+
+
+def _approx_tokens(text: str) -> int:
+    """Char/4 approximation. Good enough for a budget gate — the cost
+    of an over-budget block is a wasted prompt-cache slot, not
+    correctness."""
+    return (len(text) + 3) // 4
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Error signature extraction
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -206,6 +243,169 @@ def format_block(hits: list[PrefetchHit], *, max_solution_chars: int = 800) -> s
         lines.append("  </solution>")
     lines.append("</related_past_solutions>")
     return "\n".join(lines)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 67-E — Tier-1 sandbox-error prefetch (strict guards)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Same underlying L3 search as `prefetch_for_error`, but applies the
+# three guardrails the design doc calls out explicitly:
+#
+#   1. **Cosine (proxy) > 0.85**. Borderline quality_score matches
+#      are rejected outright; they're exactly the "agent degradation"
+#      poison the doc warns about.
+#   2. **SDK version hard-lock**. When `sdk_version` is supplied and
+#      the hit's sdk_version is non-empty and differs, the hit is
+#      DROPPED even at confidence 0.99. Older APIs are a top cause of
+#      agent confusion — we'd rather the agent reason from scratch
+#      than parrot a deprecated fix.
+#   3. **1000-token block budget**. Hits are emitted in quality order
+#      and we stop as soon as adding the next one would blow the
+#      budget. The block gets a `truncated="true"` attribute so the
+#      agent knows there might be more.
+
+def _version_hard_lock_rejects(hit_sdk: str, env_sdk: str) -> bool:
+    """Return True iff the hit must be dropped on version mismatch.
+
+    Rules:
+      * env_sdk unknown ('') → accept anything (nothing to compare).
+      * hit_sdk unknown ('') → accept (legacy rows have no tag).
+      * both set and unequal → reject.
+    """
+    if not env_sdk or not hit_sdk:
+        return False
+    return hit_sdk.strip() != env_sdk.strip()
+
+
+async def prefetch_for_sandbox_error(
+    error_log: str, *,
+    rc: int = 1,
+    soc_vendor: str = "",
+    sdk_version: str = "",
+) -> Optional[str]:
+    """Tier-1 sandbox-specific pre-fetch with the strict guardrails
+    from docs/design/dag-pre-fetching.md. Returns a `<system_auto_prefetch>`
+    XML block ready for injection, or None if no hit clears the bars.
+
+    Never raises; DB / metric failures degrade to None."""
+    if rc == 0:
+        return None
+    sig = extract_signature(error_log)
+    if not sig:
+        return None
+
+    try:
+        from backend import db
+        hits_raw = await db.search_episodic_memory(
+            sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
+            limit=_top_k() * 2,
+        )
+    except Exception as exc:
+        logger.warning("rag_prefetch(sandbox): episodic search failed: %s", exc)
+        _bump("search_error")
+        return None
+
+    min_cos = _min_cosine()
+    hits: list[PrefetchHit] = []
+    rejected_version = 0
+    for r in hits_raw:
+        try:
+            q = float(r.get("quality_score") or 0.0)
+        except (TypeError, ValueError):
+            q = 0.0
+        if q < min_cos:
+            continue
+        hit_sdk = (r.get("sdk_version") or "").strip()
+        if _version_hard_lock_rejects(hit_sdk, sdk_version):
+            rejected_version += 1
+            continue
+        hits.append(PrefetchHit(
+            memory_id=r.get("id") or "",
+            error_signature=r.get("error_signature") or "",
+            solution=r.get("solution") or "",
+            quality_score=q,
+            soc_vendor=r.get("soc_vendor") or "",
+            sdk_version=hit_sdk,
+        ))
+        if len(hits) >= _top_k():
+            break
+
+    if rejected_version:
+        _bump("version_mismatch")
+
+    if not hits:
+        _bump("below_cosine" if hits_raw else "no_hit")
+        return None
+
+    _bump("injected")
+    return format_sandbox_block(hits, max_tokens=_max_block_tokens())
+
+
+def format_sandbox_block(
+    hits: list[PrefetchHit], *,
+    max_tokens: int = 1000,
+    max_solution_chars: int = 800,
+) -> str:
+    """Render hits per docs/design/dag-pre-fetching.md §三 template:
+
+        <system_auto_prefetch>
+        💡 ...
+          <past_solution>
+            <bug_context>...</bug_context>
+            <working_fix>...</working_fix>
+          </past_solution>
+        </system_auto_prefetch>
+
+    Budget logic: greedy, quality-first. Stop adding solutions once
+    the accumulated char count would exceed `max_tokens * 4` (the
+    inverse of `_approx_tokens`). The block header + `💡` intro are
+    always emitted even if only one solution fits."""
+    HEADER = (
+        "<system_auto_prefetch>\n"
+        "💡 系統在 L3 經驗記憶庫中發現了與此錯誤高度相似的歷史解法，"
+        "請優先參考以下經驗進行除錯：\n"
+    )
+    FOOTER = "</system_auto_prefetch>"
+    char_budget = max_tokens * 4
+    used = len(HEADER) + len(FOOTER)
+    truncated = False
+
+    sorted_hits = sorted(hits, key=lambda h: (-h.quality_score, h.memory_id))
+    body_parts: list[str] = []
+    for h in sorted_hits:
+        bug_ctx = (h.error_signature or "(no signature)").strip()
+        fix = (h.solution or "").strip()
+        if len(fix) > max_solution_chars:
+            fix = fix[:max_solution_chars] + "…[truncated]"
+        # Attrs only if informative; stable order so the prompt cache
+        # prefix is byte-identical across retries.
+        attrs = f' id="{h.memory_id}" quality="{h.quality_score:.2f}"'
+        if h.soc_vendor:
+            attrs += f' soc="{h.soc_vendor}"'
+        if h.sdk_version:
+            attrs += f' sdk="{h.sdk_version}"'
+        part = (
+            f"  <past_solution{attrs}>\n"
+            f"    <bug_context>{bug_ctx}</bug_context>\n"
+            f"    <working_fix>{fix}</working_fix>\n"
+            f"  </past_solution>\n"
+        )
+        # Over-budget check — but always include the first hit so the
+        # caller never gets an empty block from a too-tight budget.
+        if body_parts and used + len(part) > char_budget:
+            truncated = True
+            break
+        body_parts.append(part)
+        used += len(part)
+
+    if truncated:
+        opening = HEADER.replace(
+            "<system_auto_prefetch>",
+            '<system_auto_prefetch truncated="true">',
+        )
+        return opening + "".join(body_parts) + FOOTER
+    return HEADER + "".join(body_parts) + FOOTER
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
