@@ -1,14 +1,15 @@
 /**
- * N11 — tsconfig/vitest alias sync check.
+ * N11 — tsconfig ↔ vitest `@/` alias sync check.
  *
- * Both tsconfig.json (paths) and vitest.config.ts (resolve.alias) declare
- * an `@/` alias pointing to the repo root. They're maintained by hand
- * today; this test fails loudly if someone edits one without the other.
+ * Scope: exactly the two configs that declare the alias by hand —
+ * tsconfig.json `compilerOptions.paths` (which Next.js and Playwright's
+ * TS loader both pick up automatically) and vitest.config.ts
+ * `resolve.alias`. Keeping those two in agreement is enough to cover
+ * every runtime we actually use; other tools inherit from them.
  *
- * We parse each config structurally — strip JSONC comments/trailing
- * commas from tsconfig, and dynamically import vitest.config.ts — so
- * that harmless formatting changes (whitespace, quote style, key order)
- * do not trigger false positives.
+ * Parsing is structural: JSONC-aware stripper for tsconfig, dynamic
+ * import for vitest.config. Harmless formatting changes (whitespace,
+ * quote style, key order) do not trigger false positives.
  */
 
 import { describe, expect, it } from "vitest"
