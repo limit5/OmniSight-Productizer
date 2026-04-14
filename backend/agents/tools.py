@@ -259,17 +259,16 @@ async def _git(cmd: str, cwd: Path | None = None, auth_for_url: str | None = Non
         extra = get_auth_env(auth_for_url)
         if extra:
             env = {**os.environ, **extra}
-    proc = await asyncio.create_subprocess_shell(
-        f"git {cmd}",
-        cwd=work,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
+    # Fix-A S3': exec with argv to avoid shell interpolation on `cmd`.
+    import shlex
+    from backend.agents._shell_safe import run_exec
+    rc, out_raw, err_raw = await run_exec(
+        ["git", *shlex.split(cmd)],
+        cwd=work, env=env, timeout=BASH_TIMEOUT,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BASH_TIMEOUT)
-    out = stdout.decode(errors="replace").strip()
-    err = stderr.decode(errors="replace").strip()
-    if proc.returncode != 0:
+    out = out_raw.strip()
+    err = err_raw.strip()
+    if rc != 0:
         return f"[GIT ERROR] {err or out}"
     return out or err or "[OK]"
 
@@ -277,14 +276,12 @@ async def _git(cmd: str, cwd: Path | None = None, auth_for_url: str | None = Non
 async def _get_remote_url(remote: str = "origin", cwd: Path | None = None) -> str:
     """Get the URL of a git remote."""
     work = cwd or get_active_workspace()
-    proc = await asyncio.create_subprocess_shell(
-        f'git remote get-url "{remote}"',
-        cwd=work,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    # Fix-A S3': exec with argv.
+    from backend.agents._shell_safe import run_exec
+    rc, out, _ = await run_exec(
+        ["git", "remote", "get-url", remote], cwd=work, timeout=5,
     )
-    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-    return stdout.decode(errors="replace").strip() if proc.returncode == 0 else ""
+    return out.strip() if rc == 0 else ""
 
 
 @tool
@@ -590,17 +587,22 @@ async def gerrit_get_diff(commit: str = "") -> str:
         return "[ERROR] Gerrit integration not enabled"
     workspace = get_active_workspace()
     target = commit or "HEAD"
-    # Try parent diff first; fall back to --root for initial commits
-    proc = await asyncio.create_subprocess_shell(
-        f"git diff {target}~1..{target} 2>/dev/null || git diff --root {target}",
-        cwd=workspace,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    # Fix-A S3': exec with argv. The old shell fallback (|| git diff --root)
+    # is now an explicit Python try/except so `target` cannot break out of
+    # the shell context.
+    from backend.agents._shell_safe import run_exec
+    rc, out_raw, err_raw = await run_exec(
+        ["git", "diff", f"{target}~1..{target}"],
+        cwd=workspace, timeout=BASH_TIMEOUT,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BASH_TIMEOUT)
-    out = stdout.decode(errors="replace").strip()
-    if proc.returncode != 0:
-        return f"[ERROR] {stderr.decode(errors='replace').strip()}"
+    if rc != 0:
+        rc, out_raw, err_raw = await run_exec(
+            ["git", "diff", "--root", target],
+            cwd=workspace, timeout=BASH_TIMEOUT,
+        )
+    out = out_raw.strip()
+    if rc != 0:
+        return f"[ERROR] {err_raw.strip()}"
     if len(out) > 20_000:
         return out[:20_000] + "\n... [diff truncated at 20 KB]"
     return out or "[EMPTY DIFF]"
@@ -1592,6 +1594,9 @@ async def run_simulation(
             cmd_parts.append(f"--framework={framework}")
         if test_images:
             cmd_parts.append(f"--test-images={test_images}")
+    # Fix-A S3': keep argv list for exec-based path; `cmd` kept for the
+    # in-container legacy exec_in_container() signature which expects str.
+    cmd_argv = cmd_parts
     cmd = " ".join(cmd_parts)
 
     # Execute in container or host
@@ -1609,30 +1614,20 @@ async def run_simulation(
                 else:
                     raise RuntimeError("No container")
             except Exception:
-                # Fallback to host
+                # Fix-A S3': fallback to host via exec + argv (no shell).
+                from backend.agents._shell_safe import run_exec
                 workspace = get_active_workspace()
-                proc = await asyncio.create_subprocess_shell(
-                    cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    cwd=workspace,
+                rc, stdout_s, stderr_s = await run_exec(
+                    cmd_argv, cwd=workspace, timeout=SIMULATION_TIMEOUT,
                 )
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=SIMULATION_TIMEOUT
-                )
-                raw_output = (stdout or b"").decode(errors="replace")
-                if not raw_output.strip() and stderr:
-                    raw_output = (stderr or b"").decode(errors="replace")
+                raw_output = stdout_s if stdout_s.strip() else stderr_s
         else:
+            from backend.agents._shell_safe import run_exec
             workspace = get_active_workspace()
-            proc = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                cwd=workspace,
+            rc, stdout_s, stderr_s = await run_exec(
+                cmd_argv, cwd=workspace, timeout=SIMULATION_TIMEOUT,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=SIMULATION_TIMEOUT
-            )
-            raw_output = (stdout or b"").decode(errors="replace")
-            if not raw_output.strip() and stderr:
-                raw_output = (stderr or b"").decode(errors="replace")
+            raw_output = stdout_s if stdout_s.strip() else stderr_s
     except asyncio.TimeoutError:
         await db.update_simulation(sim_id, {"status": "error", "report_json": '{"errors":["Timeout"]}'})
         emit_simulation(sim_id, "result", "Timeout", status="error")
