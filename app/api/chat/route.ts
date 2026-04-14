@@ -12,7 +12,7 @@
  *   const { messages, input, handleSubmit } = useChat({ api: "/api/chat" })
  */
 
-import { streamText } from "ai"
+import { streamText, type ModelMessage } from "ai"
 import { getModel, type ProviderId } from "@/lib/providers"
 
 export async function POST(req: Request) {
@@ -22,7 +22,12 @@ export async function POST(req: Request) {
     provider = "anthropic",
     model,
   } = body as {
-    messages: { role: string; content: string }[]
+    // ai SDK v3 renamed the chat message type to ModelMessage; the
+    // union of role strings (system / user / assistant / tool) is
+    // enforced by the type, so accepting `ModelMessage[]` directly
+    // keeps the route honest instead of leaning on a narrower
+    // structural type.
+    messages: ModelMessage[]
     provider?: ProviderId
     model?: string
   }
@@ -36,5 +41,8 @@ export async function POST(req: Request) {
     messages,
   })
 
-  return result.toDataStreamResponse()
+  // ai SDK v3 dropped `toDataStreamResponse`; the replacement is
+  // `toTextStreamResponse` (plain SSE) or the UI-message variant.
+  // Text stream is sufficient for useChat's default wire format.
+  return result.toTextStreamResponse()
 }

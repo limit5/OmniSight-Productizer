@@ -26,7 +26,10 @@ export function DocsSearchClient({
   locale: string
   entries: DocEntry[]
 }) {
-  const L = (COPY as Record<string, typeof COPY.en>)[locale] ?? COPY.en
+  // TS narrows COPY's literal shape too tightly to be compatible with
+  // a generic string index. Go through `unknown` per the compiler
+  // hint — we fall back to `COPY.en` anyway when the locale misses.
+  const L = (COPY as unknown as Record<string, typeof COPY.en>)[locale] ?? COPY.en
   const [q, setQ] = useState("")
   const needle = q.trim().toLowerCase()
 

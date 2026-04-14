@@ -29,7 +29,10 @@ export interface Repository {
   name: string
   url: string
   branch: string
-  status: "synced" | "syncing" | "error" | "detached"
+  // `unconfigured` covers a workspace with no remote yet (pre-tether);
+  // widening here matches the engine/useEngine shape so app/page.tsx
+  // doesn't need a coercion layer. UI paths already handle it.
+  status: "synced" | "syncing" | "error" | "detached" | "unconfigured"
   lastCommit?: string
   lastCommitTime?: string
   tetheredAgentId?: string
