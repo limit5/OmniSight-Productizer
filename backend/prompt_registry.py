@@ -377,6 +377,49 @@ async def evaluate_canary(path: str, *,
     )
 
 
+async def bootstrap_from_disk(*, paths: list[Path] | None = None) -> list[tuple[str, str]]:
+    """Phase 56-DAG-C S3: sync on-disk prompt markdown files into
+    ``prompt_versions`` as the active row.
+
+    Idempotent — `register_active` is a no-op when the body hash
+    already matches. Called from the app lifespan so a fresh DB
+    always has an active version for every shipped prompt file,
+    even if no operator has registered anything yet.
+
+    Returns a list of ``(path, action)`` where action is
+    ``"registered"`` or ``"unchanged"``. Failures per-file are
+    caught + logged so one malformed prompt can't block startup.
+
+    `paths` override is for tests; default scans PROMPTS_ROOT.
+    """
+    targets = paths if paths is not None else sorted(PROMPTS_ROOT.glob("*.md"))
+    outcomes: list[tuple[str, str]] = []
+    for p in targets:
+        try:
+            rel = _normalise_path(str(p))
+        except PathRejected as exc:
+            logger.warning("bootstrap: skip %s (%s)", p, exc)
+            continue
+        try:
+            body = p.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.warning("bootstrap: read %s failed: %s", p, exc)
+            continue
+        try:
+            prior = await get_active(rel)
+            new = await register_active(rel, body)
+            if prior and prior.id == new.id:
+                outcomes.append((rel, "unchanged"))
+            else:
+                outcomes.append((rel, "registered"))
+                logger.info(
+                    "prompt_registry: bootstrapped %s (v%d)", rel, new.version,
+                )
+        except Exception as exc:
+            logger.warning("bootstrap: register %s failed: %s", rel, exc)
+    return outcomes
+
+
 async def promote_canary(path: str) -> Optional[PromptVersion]:
     """Operator action: replace the active prompt with the open canary.
     Old active goes to archive; canary becomes active."""

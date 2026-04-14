@@ -192,6 +192,52 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 56-DAG-C — DAG Mutation Loop + Orchestrator 完成（2026-04-14）
+
+把 Phase 56-DAG-A（validator）+ Phase 56-DAG-B（persistence）串成真正
+的自癒閉環：validate 失敗 → Orchestrator LLM 重新規劃 → 再 validate
+→ 至多 3 round；超過即升級 Decision Engine admin gate。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `backend/agents/prompts/orchestrator.md`（Lead Orchestrator prompt、4 slicing laws、JSON-only contract）+ `dag_planner.py::propose_mutation`（inject ask_fn、JSON 容錯提取含 fence / prose prefix / brace balance、parse 失敗 loud raise、dag_id drift 強制還原）；20 test | `48a9bc0` |
+| S2 | `run_mutation_loop(initial, ask_fn, max_rounds=3)` + `MutationAttempt`/`MutationResult` 三狀態（validated / exhausted / orchestrator_error）；exhausted → Decision Engine `kind=dag/exhausted severity=destructive default=abort` + timeout 1h；parse 失敗也消耗 round 防 orchestrator 壞掉無限迴圈；DE 失敗不影響 caller；新 metric `dag_mutation_total{result}`；11 test | `d6e19b7` |
+| S3 | `prompt_registry.bootstrap_from_disk()` idempotent 把 `backend/agents/prompts/*.md` 注入 `prompt_versions` 當 active；wire 進 lifespan；拒絕 CLAUDE.md、拒絕 PROMPTS_ROOT 外、read 失敗跳過；7 test；HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **Bounded retry = 3**：locked decision，防 orchestrator 壞了無限燒 token。
+- **Status 三分**：validated / exhausted / orchestrator_error — operator 能立即區分「任務本身 intractable」vs「planner 本身壞了」。
+- **Parse fail 消耗 round**：若純 parse 失敗不計 round，壞掉 orch 可永回 "not json" → 系統永不升級 admin。
+- **DE default = abort**：destructive proposal 的安全默認是放棄而非 accept_failed。
+- **DE failure swallowed**：mutation loop caller 不應因 DE 單點故障而死。
+- **Orchestrator prompt 走 registry canary**：operator 改 `.md` 重啟 → registry 產生 v2 → 由 Phase 63-C canary 漸進部署。
+- **Bootstrap idempotent**：body hash 相同即 no-op；重啟不堆積 version。
+- **Path 白名單嚴格**：CLAUDE.md 永禁、PROMPTS_ROOT 外一律拒，即使絕對路徑也一樣。
+
+### 新 Decision Engine kind
+
+- `dag/exhausted` — severity=destructive, options={abort, accept_failed}, default=abort, 1h timeout
+
+### 新 metric
+
+- `omnisight_dag_mutation_total{result}` — recovered / exhausted
+
+### 驗收
+
+`pytest test_dag_planner_propose + test_dag_mutation_loop + test_prompt_registry_bootstrap`
+→ **38 passed**（20 + 11 + 7）。
+
+### 後續
+
+**Phase 67-B Diff Patch**（5–7h）或 **Phase 56-DAG-D 雙模執行**
+（2–3h）可動工。56-DAG-D 會把 mutation loop 接進 chat router
+（Mode B auto-plan）與新 POST /api/v1/dag endpoint（Mode A manual）。
+
+---
+
 ## Phase 63-D — Daily IQ Benchmark 完成（2026-04-14）
 
 每晚跑固定題庫、量化 model 能力退化，連續 2 天低於 baseline 10pp 即

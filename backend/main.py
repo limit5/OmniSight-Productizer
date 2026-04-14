@@ -93,6 +93,17 @@ async def lifespan(app: FastAPI):
                 )
         except Exception as exc:
             _log.debug("workflow in-flight scan failed (non-fatal): %s", exc)
+        # Phase 56-DAG-C S3: sync shipped prompt markdown files into
+        # prompt_versions so the canary layer has a baseline to compare
+        # against on day 1. Best-effort — don't fail startup.
+        try:
+            from backend import prompt_registry as _pr
+            outcomes = await _pr.bootstrap_from_disk()
+            reg = [p for p, a in outcomes if a == "registered"]
+            if reg:
+                _log.info("prompt_registry bootstrap: registered %d", len(reg))
+        except Exception as exc:
+            _log.debug("prompt_registry bootstrap failed (non-fatal): %s", exc)
     except Exception as exc:
         _log.error("Startup failed: %s", exc, exc_info=True)
         raise
