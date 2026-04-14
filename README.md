@@ -164,6 +164,21 @@ OmniSight-Productizer/
 
 See [HANDOFF.md](HANDOFF.md) for detailed phase history and future roadmap.
 
+## Theme
+
+The UI is deliberately **dark-only** — the "FUI" (fictional user interface)
+language (neural-grid, holo-glass, deep-space gradients, scan-lines) is
+designed around a dark canvas. There is no light-mode toggle. A
+`color-scheme: dark` declaration is set at the root so browsers render
+native controls, scrollbars and autofill in the dark palette even when
+the host OS is configured for light mode. Users who prefer a light UI
+should use a different tool — this is a mission-control dashboard, not a
+documentation site.
+
+Motion preferences are honoured: `prefers-reduced-motion: reduce`
+disables the neural-flow animation, toast urgency pulses, and all
+tween transitions.
+
 ## License
 
 Proprietary. All rights reserved.

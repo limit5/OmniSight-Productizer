@@ -3,7 +3,19 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* OmniSight Productizer - FUI Sci-Fi Theme */
+/* OmniSight Productizer — dark-only FUI Sci-Fi theme.
+ * Light mode is intentionally not supported: the design language
+ * (neural grid, holo glass, deep-space gradient) relies on a dark
+ * canvas. Declaring `color-scheme: dark` tells the browser to render
+ * native form controls, scrollbars and autofill backgrounds with the
+ * dark-mode palette so they do not punch a white hole through the UI
+ * when the OS is set to light mode. See README → "Theme" for the
+ * rationale (B5 audit resolution). */
+html {
+  color-scheme: dark;
+  background: #010409;
+}
+
 :root {
   /* Deep Space Background */
   --deep-space-start: #010409;
