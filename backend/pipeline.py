@@ -149,15 +149,24 @@ async def run_pipeline(spec_context: str = "") -> dict:
             return {"status": "error", "detail": "Pipeline already running"}
 
         pipeline_id = f"pipeline-{uuid.uuid4().hex[:8]}"
+        now = datetime.now().isoformat()
         _active_pipeline = {
             "id": pipeline_id,
             "current_step": PIPELINE_STEPS[0]["id"],
             "current_step_index": 0,
             "status": "running",
-            "started_at": datetime.now().isoformat(),
+            "started_at": now,
             "tasks_created": 0,
             "spec_context": spec_context[:500],
+            # Phase 50A: per-step timing so the timeline can show real
+            # elapsed + compute velocity. Shape: list aligned to
+            # PIPELINE_STEPS order; first step opens at run_pipeline().
+            "step_history": [
+                {"id": s["id"], "started_at": None, "completed_at": None}
+                for s in PIPELINE_STEPS
+            ],
         }
+        _active_pipeline["step_history"][0]["started_at"] = now
 
         emit_pipeline_phase("pipeline_start", f"Pipeline {pipeline_id} started: {len(PIPELINE_STEPS)} steps")
         emit_invoke("pipeline", f"E2E pipeline started: SPEC → Release ({len(PIPELINE_STEPS)} phases)")
@@ -205,6 +214,12 @@ async def _advance_pipeline_locked() -> dict:
             pass
         return {"status": "checkpoint", "step": step["id"], "detail": checkpoint}
 
+    # Stamp the completing step (Phase 50A).
+    now_iso = datetime.now().isoformat()
+    hist = _active_pipeline.get("step_history")
+    if hist and step_idx < len(hist):
+        hist[step_idx]["completed_at"] = now_iso
+
     # Auto-advance to next step
     next_idx = step_idx + 1
     if next_idx >= len(PIPELINE_STEPS):
@@ -212,7 +227,7 @@ async def _advance_pipeline_locked() -> dict:
         # accumulate across many runs (M17).
         global _last_completed_pipeline
         _active_pipeline["status"] = "completed"
-        _active_pipeline["completed_at"] = datetime.now().isoformat()
+        _active_pipeline["completed_at"] = now_iso
         emit_pipeline_phase("pipeline_complete", f"Pipeline {_active_pipeline['id']} completed!")
         emit_invoke("pipeline", "E2E pipeline completed: all phases done")
         _last_completed_pipeline = _active_pipeline
@@ -223,6 +238,8 @@ async def _advance_pipeline_locked() -> dict:
     next_step = PIPELINE_STEPS[next_idx]
     _active_pipeline["current_step"] = next_step["id"]
     _active_pipeline["current_step_index"] = next_idx
+    if hist and next_idx < len(hist):
+        hist[next_idx]["started_at"] = now_iso
 
     emit_pipeline_phase("pipeline_advance", f"Advancing to step: {next_step['name']}")
 
@@ -266,12 +283,17 @@ async def force_advance() -> dict:
         except Exception as exc:
             logger.debug("force_advance audit failed: %s", exc)
 
+        now_iso = datetime.now().isoformat()
+        hist = _active_pipeline.get("step_history")
+        if hist and step_idx < len(hist):
+            hist[step_idx]["completed_at"] = now_iso
+
         next_idx = step_idx + 1
 
         if next_idx >= len(PIPELINE_STEPS):
             global _last_completed_pipeline
             _active_pipeline["status"] = "completed"
-            _active_pipeline["completed_at"] = datetime.now().isoformat()
+            _active_pipeline["completed_at"] = now_iso
             emit_pipeline_phase("pipeline_complete", "Pipeline completed (force-advanced)")
             _last_completed_pipeline = _active_pipeline
             _active_pipeline = None
@@ -280,6 +302,8 @@ async def force_advance() -> dict:
         next_step = PIPELINE_STEPS[next_idx]
         _active_pipeline["current_step"] = next_step["id"]
         _active_pipeline["current_step_index"] = next_idx
+        if hist and next_idx < len(hist):
+            hist[next_idx]["started_at"] = now_iso
 
         emit_pipeline_phase("pipeline_advance", f"Force-advanced to: {next_step['name']}")
         await _create_tasks_for_step(next_idx, _active_pipeline.get("spec_context", ""))

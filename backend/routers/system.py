@@ -283,6 +283,108 @@ async def advance_pipeline_endpoint():
     return await force_advance()
 
 
+@router.get("/pipeline/timeline")
+async def get_pipeline_timeline():
+    """Phase 50A — timeline with per-step timing + velocity rollup.
+
+    Returns:
+      steps: [{ id, name, npi_phase, auto_advance, human_checkpoint,
+               planned_at, started_at, completed_at, deadline_at,
+               status: idle|active|done|overdue }]
+      velocity:
+        avg_step_seconds:  mean observed duration across completed steps
+        eta_completion:    ISO timestamp estimate for pipeline finish, or null
+        tasks_completed_7d: tasks the invoke-layer marked done in the last 7 d
+    """
+    from backend.pipeline import PIPELINE_STEPS, _active_pipeline, _last_completed_pipeline
+    from backend.routers.invoke import _tasks
+    from backend.models import TaskStatus
+    from datetime import datetime, timedelta
+
+    run = _active_pipeline or _last_completed_pipeline
+    history = run.get("step_history") if run else None
+    current_idx = (_active_pipeline or {}).get("current_step_index", -1)
+
+    # Rough deadline heuristic: each step gets a default 1-hour budget
+    # unless it's already observed a longer run. Real SLAs will come
+    # with the Decision Rules phase (50B).
+    DEFAULT_STEP_SECONDS = 3600
+    now = datetime.now()
+
+    def parse(ts: str | None) -> datetime | None:
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+
+    # Average duration of every step that has both start + end stamps.
+    durations: list[float] = []
+    if history:
+        for h in history:
+            s, c = parse(h.get("started_at")), parse(h.get("completed_at"))
+            if s and c:
+                durations.append((c - s).total_seconds())
+    avg_step_sec = sum(durations) / len(durations) if durations else float(DEFAULT_STEP_SECONDS)
+
+    steps_out: list[dict] = []
+    for idx, s in enumerate(PIPELINE_STEPS):
+        rec = history[idx] if history and idx < len(history) else {}
+        started = parse(rec.get("started_at"))
+        completed = parse(rec.get("completed_at"))
+        deadline = (started + timedelta(seconds=avg_step_sec * 1.5)) if started else None
+
+        if completed:
+            status = "done"
+        elif idx == current_idx and _active_pipeline:
+            status = "overdue" if (deadline and now > deadline) else "active"
+        else:
+            status = "idle"
+
+        steps_out.append({
+            "id": s["id"],
+            "name": s["name"],
+            "npi_phase": s["npi_phase"],
+            "auto_advance": s.get("auto_advance", True),
+            "human_checkpoint": s.get("human_checkpoint"),
+            "planned_at": None,  # reserved for future SLA-driven planning
+            "started_at": started.isoformat() if started else None,
+            "completed_at": completed.isoformat() if completed else None,
+            "deadline_at": deadline.isoformat() if deadline else None,
+            "status": status,
+        })
+
+    # ETA: remaining steps × avg_step_sec from now if a run is active.
+    eta: str | None = None
+    if _active_pipeline and current_idx >= 0:
+        remaining = len(PIPELINE_STEPS) - current_idx
+        eta = (now + timedelta(seconds=avg_step_sec * remaining)).isoformat()
+
+    # 7-day completion count from the task store. TaskStatus.completed is
+    # the shipping terminal state; other terminals (failed/cancelled) are
+    # ignored so velocity tracks genuine throughput.
+    week_ago = now - timedelta(days=7)
+    completed_7d = 0
+    for t in _tasks.values():
+        if t.status != getattr(TaskStatus, "completed", None):
+            continue
+        ts = parse(getattr(t, "updated_at", None)) or parse(getattr(t, "created_at", None))
+        if ts and ts >= week_ago:
+            completed_7d += 1
+
+    return {
+        "steps": steps_out,
+        "velocity": {
+            "avg_step_seconds": avg_step_sec,
+            "eta_completion": eta,
+            "tasks_completed_7d": completed_7d,
+            "pipeline_id": run.get("id") if run else None,
+            "pipeline_status": run.get("status") if run else "idle",
+        },
+    }
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Release Packaging (Phase 40)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
