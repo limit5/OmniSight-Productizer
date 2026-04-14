@@ -1,0 +1,34 @@
+# Phase 59 — Host-Native target profile.
+#
+# Use this when the target arch == the dev host arch
+# (e.g. x86_64 host running x86_64 Industrial PC SoC, Hailo-8/15 dev
+# kits, NUC-class edge AI devices). Skips cross-compile entirely:
+#   * uses system gcc / clang
+#   * no QEMU emulation
+#   * docker container builds AND runs the binary in-place
+#   * sysroot = host root
+#
+# `toolchain: gcc` deliberately points at the system default; runtime
+# can override per-distro via OMNISIGHT_HOST_NATIVE_CC.
+#
+# Combined with `project_track: app_only` in hardware_manifest.yaml,
+# this profile reduces typical iteration cycle from ~15 min to ~2-3 min
+# (no QEMU boot, no cross-compile dance).
+
+platform: host_native
+label: "Host Native (no cross-compile)"
+
+vendor_id: ""
+sdk_version: ""
+sysroot_path: ""
+cmake_toolchain_file: ""
+
+toolchain: gcc
+cross_prefix: ""
+qemu: ""
+arch_flags: ""
+kernel_arch: ""
+
+# Optional accelerator passthrough — set OMNISIGHT_HOST_DEVICE_PASSTHROUGH
+# in .env to enable PCIe / USB device forwarding into the sandbox.
+docker_packages: []

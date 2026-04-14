@@ -370,11 +370,13 @@ def propose(
         try:
             from backend import decision_defaults as _dd
             from backend import decision_profiles as _dp
+            from backend import host_native as _hn
+            hn_ctx = _hn.context_dict()
             ctx = _dd.Context(
                 kind=kind, severity=severity.value,
                 options=opts, default_option_id=default_option_id,
-                is_host_native=(source or {}).get("is_host_native", False),
-                project_track=(source or {}).get("project_track", ""),
+                is_host_native=(source or {}).get("is_host_native", hn_ctx["is_host_native"]),
+                project_track=(source or {}).get("project_track", hn_ctx["project_track"]),
             )
             chosen = _dd.consult(ctx)
             prof = _dp.get_profile()

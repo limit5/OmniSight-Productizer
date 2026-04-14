@@ -180,6 +180,26 @@ def _choose_ambiguity(ctx: Context) -> Optional[ChosenOption]:
     return _safe_default(ctx, confidence=0.85, why="propose() supplied safe_default")
 
 
+# Phase 59 — host-native fast path. Kinds that are normally `risky`
+# (deploy/dev_board, binary/execute) become safer when
+# host_arch == target_arch + container isolation.
+@register("deploy/dev_board")
+@register("deploy/host")
+def _choose_deploy_host_native(ctx: Context) -> Optional[ChosenOption]:
+    if ctx.is_host_native:
+        return _safe_default(ctx, confidence=0.92,
+                             why="host-native deploy = container exec; routine")
+    return _safe_default(ctx, confidence=0.65, why="cross-arch deploy; tread carefully")
+
+
+@register("binary/execute")
+def _choose_binary_execute(ctx: Context) -> Optional[ChosenOption]:
+    if ctx.is_host_native:
+        return _safe_default(ctx, confidence=0.95,
+                             why="same-arch binary; container-isolated execution")
+    return _safe_default(ctx, confidence=0.7, why="cross-arch via QEMU")
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Test hook
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
