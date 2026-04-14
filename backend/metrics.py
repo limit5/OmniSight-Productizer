@@ -114,6 +114,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Fix-A S6: orphaned CI subprocess tracker ─────────────────
+    subprocess_orphan_total = Counter(
+        "omnisight_subprocess_orphan_total",
+        "CI subprocess kill() failed after timeout — likely zombie",
+        labelnames=("target",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -137,6 +145,7 @@ else:
     sse_subscribers = sse_dropped_total = _NoOp()  # type: ignore
     workflow_step_total = _NoOp()  # type: ignore
     auth_login_total = _NoOp()  # type: ignore
+    subprocess_orphan_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -155,7 +164,7 @@ def reset_for_tests() -> None:
     global REGISTRY, decision_total, decision_resolve_seconds
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
     global sse_subscribers, sse_dropped_total, workflow_step_total
-    global auth_login_total, process_start_time
+    global auth_login_total, subprocess_orphan_total, process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
         "omnisight_decision_total", "Decisions registered",
@@ -196,6 +205,10 @@ def reset_for_tests() -> None:
     auth_login_total = Counter(
         "omnisight_auth_login_total", "Login attempts",
         labelnames=("outcome",), registry=REGISTRY,
+    )
+    subprocess_orphan_total = Counter(
+        "omnisight_subprocess_orphan_total", "CI subprocess kill failed",
+        labelnames=("target",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

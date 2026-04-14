@@ -489,8 +489,16 @@ async def _trigger_ci_pipelines() -> None:
         except Exception as exc:
             logger.warning("Jenkins trigger error: %s", exc)
             if proc and proc.returncode is None:
-                try: proc.kill()
-                except Exception: pass
+                try:
+                    proc.kill()
+                except Exception as kill_exc:
+                    # Fix-A S6: visibility on orphaned CI subprocesses.
+                    logger.warning(
+                        "orphaned CI subprocess pid=%s kill failed: %s",
+                        proc.pid, kill_exc,
+                    )
+                    from backend import metrics as _m
+                    _m.subprocess_orphan_total.labels(target="jenkins").inc()
 
     if settings.ci_gitlab_enabled and settings.gitlab_token:
         proc = None
@@ -518,8 +526,15 @@ async def _trigger_ci_pipelines() -> None:
         except Exception as exc:
             logger.warning("GitLab CI trigger error: %s", exc)
             if proc and proc.returncode is None:
-                try: proc.kill()
-                except Exception: pass
+                try:
+                    proc.kill()
+                except Exception as kill_exc:
+                    logger.warning(
+                        "orphaned CI subprocess pid=%s kill failed: %s",
+                        proc.pid, kill_exc,
+                    )
+                    from backend import metrics as _m
+                    _m.subprocess_orphan_total.labels(target="gitlab").inc()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
