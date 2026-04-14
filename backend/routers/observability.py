@@ -56,7 +56,9 @@ def _watchdog_age_s() -> float | None:
         if not last:
             return None
         return time.time() - float(last)
-    except Exception:
+    except Exception as exc:
+        # Fix-B B5: not fatal, but shouldn't be completely silent.
+        logger.debug("_watchdog_age_s lookup failed: %s", exc)
         return None
 
 

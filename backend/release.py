@@ -40,8 +40,11 @@ async def resolve_version() -> str:
         tag = stdout.decode().strip()
         if tag:
             return tag
-    except Exception:
-        pass
+    except Exception as exc:
+        # Fix-B B2: falling back to VERSION file / constant is expected;
+        # log at debug level for diagnostics.
+        import logging as _l
+        _l.getLogger(__name__).debug("release.get_version: git describe failed: %s", exc)
 
     # 2. VERSION file
     version_file = _PROJECT_ROOT / "VERSION"

@@ -119,8 +119,10 @@ def set_strategy(strategy: BudgetStrategy | str) -> Tuning:
             "previous": prev.value,
             "tuning": _TUNINGS[strategy].to_dict(),
         })
-    except Exception:
-        pass
+    except Exception as exc:
+        # Fix-B B2: SSE publish failure is non-critical; surface at debug level.
+        import logging as _l
+        _l.getLogger(__name__).debug("budget_strategy SSE publish failed: %s", exc)
     return _TUNINGS[strategy]
 
 

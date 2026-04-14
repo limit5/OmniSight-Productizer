@@ -244,8 +244,11 @@ async def build_report(project_id: str = "current") -> FinalReport:
     if mp.exists():
         try:
             manifest = yaml.safe_load(mp.read_text(encoding="utf-8")) or {}
-        except Exception:
-            pass
+        except Exception as exc:
+            # Fix-B B2: manifest is optional; log at debug so a malformed
+            # YAML isn't completely invisible to anyone debugging report output.
+            import logging as _l
+            _l.getLogger(__name__).debug("hardware_manifest parse failed: %s", exc)
     proj = manifest.get("project") or {}
     project_name = proj.get("name") or project_id
     target_platform = proj.get("target_platform") or ""

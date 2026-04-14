@@ -35,13 +35,23 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 async def _sh(cmd: str) -> str:
+    # Fix-B B4: retain empty-string fallback for callers, but surface the
+    # failure so diagnostics aren't completely silent. `cmd` is always a
+    # compile-time string here (os facts: uptime, df, etc.), not user input.
     try:
         proc = await asyncio.create_subprocess_shell(
             cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=_BASH_TIMEOUT)
         return out.decode(errors="replace").strip()
-    except Exception:
+    except FileNotFoundError as exc:
+        logger.debug("_sh(%s): command not found: %s", cmd.split()[:1], exc)
+        return ""
+    except asyncio.TimeoutError:
+        logger.warning("_sh(%s): timed out after %ds", cmd.split()[:1], _BASH_TIMEOUT)
+        return ""
+    except Exception as exc:
+        logger.warning("_sh(%s): unexpected error: %s", cmd.split()[:1], exc)
         return ""
 
 

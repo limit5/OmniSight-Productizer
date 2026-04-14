@@ -113,8 +113,11 @@ async def _dispatch_external(notif: Notification) -> None:
         # No external channels configured for this level
         try:
             await db.update_notification_dispatch(notif.id, "skipped")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Fix-B B2/B6: persistence failure is non-fatal but observable.
+            logger.warning("notifications: persist skipped status for %s failed: %s", notif.id, exc)
+            from backend import metrics as _m
+            _m.persist_failure_total.labels(module="notifications").inc()
         return
 
     # Update dispatch status in DB
@@ -156,8 +159,10 @@ async def retry_failed_notifications(limit: int = 50) -> dict[str, int]:
                     row["id"], "dead", attempts=attempts,
                     error=(row.get("last_error") or "exhausted"),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("DLQ: mark dead failed for %s: %s", row.get("id"), exc)
+                from backend import metrics as _m
+                _m.persist_failure_total.labels(module="notifications").inc()
             dead += 1
             continue
         retried += 1
@@ -175,8 +180,8 @@ async def retry_failed_notifications(limit: int = 50) -> dict[str, int]:
             fresh = await db.get_notification(notif.id) if hasattr(db, "get_notification") else None
             if fresh and fresh.get("dispatch_status") == "sent":
                 recovered += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("DLQ: post-dispatch status check failed for %s: %s", notif.id, exc)
     return {"retried": retried, "recovered": recovered, "dead": dead}
 
 

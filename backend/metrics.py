@@ -114,6 +114,16 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Fix-B B6: non-fatal persistence / dispatch failures that used to
+    # be `except Exception: pass`. Now logged + incremented so Grafana
+    # can alert when a normally-silent write starts failing repeatedly.
+    persist_failure_total = Counter(
+        "omnisight_persist_failure_total",
+        "Non-fatal persistence/dispatch failures that were swallowed",
+        labelnames=("module",),
+        registry=REGISTRY,
+    )
+
     # Fix-A S6: orphaned CI subprocess tracker ─────────────────
     subprocess_orphan_total = Counter(
         "omnisight_subprocess_orphan_total",
@@ -145,6 +155,7 @@ else:
     sse_subscribers = sse_dropped_total = _NoOp()  # type: ignore
     workflow_step_total = _NoOp()  # type: ignore
     auth_login_total = _NoOp()  # type: ignore
+    persist_failure_total = _NoOp()  # type: ignore
     subprocess_orphan_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
@@ -164,7 +175,7 @@ def reset_for_tests() -> None:
     global REGISTRY, decision_total, decision_resolve_seconds
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
     global sse_subscribers, sse_dropped_total, workflow_step_total
-    global auth_login_total, subprocess_orphan_total, process_start_time
+    global auth_login_total, subprocess_orphan_total, persist_failure_total, process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
         "omnisight_decision_total", "Decisions registered",
@@ -209,6 +220,10 @@ def reset_for_tests() -> None:
     subprocess_orphan_total = Counter(
         "omnisight_subprocess_orphan_total", "CI subprocess kill failed",
         labelnames=("target",), registry=REGISTRY,
+    )
+    persist_failure_total = Counter(
+        "omnisight_persist_failure_total", "Swallowed persistence failures",
+        labelnames=("module",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
