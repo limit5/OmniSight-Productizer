@@ -1182,10 +1182,16 @@ async def rebuild_episodic_fts() -> int:
 
 async def search_episodic_memory(
     query: str, soc_vendor: str = "", sdk_version: str = "", limit: int = 5,
+    min_quality: float | None = None,
 ) -> list[dict]:
     """Search L3 episodic memory using FTS5 (with LIKE fallback).
 
     Returns matching memories sorted by relevance, filtered by vendor/SDK if provided.
+
+    Phase 67-E: `min_quality` pushes the similarity-proxy floor into
+    SQL so callers that want cosine-style gating (the Tier-1 sandbox
+    path wants > 0.85) don't have to over-fetch then Python-filter.
+    None = no floor (matches pre-67-E behaviour).
     """
     results: list[dict] = []
 
@@ -1205,6 +1211,9 @@ async def search_episodic_memory(
         if sdk_version:
             sql += " AND em.sdk_version = ?"
             params.append(sdk_version)
+        if min_quality is not None:
+            sql += " AND em.quality_score >= ?"
+            params.append(min_quality)
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
         async with _conn().execute(sql, params) as cur:
@@ -1224,6 +1233,9 @@ async def search_episodic_memory(
         if sdk_version:
             sql += " AND sdk_version = ?"
             params.append(sdk_version)
+        if min_quality is not None:
+            sql += " AND quality_score >= ?"
+            params.append(min_quality)
         sql += " ORDER BY quality_score DESC, created_at DESC LIMIT ?"
         params.append(limit)
         async with _conn().execute(sql, params) as cur:

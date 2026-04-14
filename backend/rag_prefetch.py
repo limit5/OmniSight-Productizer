@@ -295,18 +295,18 @@ async def prefetch_for_sandbox_error(
     if not sig:
         return None
 
+    min_cos = _min_cosine()
     try:
         from backend import db
         hits_raw = await db.search_episodic_memory(
             sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
-            limit=_top_k() * 2,
+            limit=_top_k() * 2, min_quality=min_cos,
         )
     except Exception as exc:
         logger.warning("rag_prefetch(sandbox): episodic search failed: %s", exc)
         _bump("search_error")
         return None
 
-    min_cos = _min_cosine()
     hits: list[PrefetchHit] = []
     rejected_version = 0
     for r in hits_raw:
@@ -314,6 +314,7 @@ async def prefetch_for_sandbox_error(
             q = float(r.get("quality_score") or 0.0)
         except (TypeError, ValueError):
             q = 0.0
+        # SQL already filtered but the param is optional; belt-and-braces.
         if q < min_cos:
             continue
         hit_sdk = (r.get("sdk_version") or "").strip()
