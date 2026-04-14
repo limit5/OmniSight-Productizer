@@ -177,6 +177,20 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 63-A: Intelligence Immune System signal layer ───────
+    intelligence_score = Gauge(
+        "omnisight_intelligence_score",
+        "Current per-agent score in {code_pass, compliance, consistency, entropy}",
+        labelnames=("agent_id", "dim"),
+        registry=REGISTRY,
+    )
+    intelligence_alert_total = Counter(
+        "omnisight_intelligence_alert_total",
+        "Alerts emitted by IIS signal layer (no mitigation triggered here)",
+        labelnames=("agent_id", "dim", "level"),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -208,6 +222,8 @@ else:
     sandbox_output_truncated_total = _NoOp()  # type: ignore
     skill_extracted_total = _NoOp()  # type: ignore
     skill_promoted_total = _NoOp()  # type: ignore
+    intelligence_score = _NoOp()  # type: ignore
+    intelligence_alert_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -230,6 +246,7 @@ def reset_for_tests() -> None:
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
     global sandbox_launch_total, sandbox_output_truncated_total
     global skill_extracted_total, skill_promoted_total
+    global intelligence_score, intelligence_alert_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -308,6 +325,16 @@ def reset_for_tests() -> None:
         "omnisight_skill_promoted_total",
         "Skill candidates promoted into live skills/",
         registry=REGISTRY,
+    )
+    intelligence_score = Gauge(
+        "omnisight_intelligence_score",
+        "Per-agent IIS score across 4 dims",
+        labelnames=("agent_id", "dim"), registry=REGISTRY,
+    )
+    intelligence_alert_total = Counter(
+        "omnisight_intelligence_alert_total",
+        "IIS alerts emitted (signal-only)",
+        labelnames=("agent_id", "dim", "level"), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
