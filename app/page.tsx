@@ -10,6 +10,7 @@ import { AgentMatrixWall, defaultAgents, type Agent, type AgentStatus } from "@/
 import { VitalsArtifactsPanel } from "@/components/omnisight/vitals-artifacts-panel"
 import { DecisionDashboard } from "@/components/omnisight/decision-dashboard"
 import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-panel"
+import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
@@ -396,6 +397,8 @@ export default function Home() {
         return <DecisionDashboard />
       case "budget":
         return <BudgetStrategyPanel />
+      case "timeline":
+        return <PipelineTimeline />
       default:
         return null
     }
@@ -575,6 +578,7 @@ export default function Home() {
 
           {/* Far Right: Decision Engine + Vitals & Artifacts */}
           <aside className="min-h-0 overflow-y-auto overflow-x-hidden space-y-3">
+            <PipelineTimeline />
             <DecisionDashboard />
             <BudgetStrategyPanel />
             <VitalsArtifactsPanel

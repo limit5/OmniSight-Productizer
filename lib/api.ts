@@ -1048,3 +1048,37 @@ export async function setBudgetStrategy(strategy: BudgetStrategyId) {
     { method: "PUT", body: JSON.stringify({ strategy }) },
   )
 }
+
+// ─── Phase 50A: Pipeline Timeline ───
+
+export type PipelineStepStatus = "idle" | "active" | "done" | "overdue"
+
+export interface PipelineTimelineStep {
+  id: string
+  name: string
+  npi_phase: string
+  auto_advance: boolean
+  human_checkpoint: string | null
+  planned_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  deadline_at: string | null
+  status: PipelineStepStatus
+}
+
+export interface PipelineVelocity {
+  avg_step_seconds: number
+  eta_completion: string | null
+  tasks_completed_7d: number
+  pipeline_id: string | null
+  pipeline_status: string
+}
+
+export interface PipelineTimeline {
+  steps: PipelineTimelineStep[]
+  velocity: PipelineVelocity
+}
+
+export async function getPipelineTimeline() {
+  return request<PipelineTimeline>("/system/pipeline/timeline")
+}

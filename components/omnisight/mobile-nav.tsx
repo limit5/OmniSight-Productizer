@@ -12,6 +12,7 @@ import {
   Rocket,
   Zap,
   Gauge,
+  Clock3,
   Menu,
   X,
   ChevronLeft,
@@ -20,9 +21,10 @@ import {
 
 // 48-Fix B: added decisions + budget so mobile users can reach the
 // Autonomous Decision panels (previously desktop-only in the right aside).
+// 50A: + timeline.
 export type PanelId =
   | "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
-  | "decisions" | "budget"
+  | "decisions" | "budget" | "timeline"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -40,6 +42,7 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "vitals", label: "Vitals & Artifacts", shortLabel: "Vitals", icon: Activity, color: "var(--hardware-orange)" },
   { id: "decisions", label: "Decision Queue", shortLabel: "Decide", icon: Zap, color: "var(--neural-cyan, #67e8f9)" },
   { id: "budget", label: "Budget Strategy", shortLabel: "Budget", icon: Gauge, color: "var(--neural-blue)" },
+  { id: "timeline", label: "Pipeline Timeline", shortLabel: "Timeline", icon: Clock3, color: "var(--neural-cyan, #67e8f9)" },
 ]
 
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
