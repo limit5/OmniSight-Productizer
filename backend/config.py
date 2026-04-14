@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     t1_allow_egress: bool = False
     t1_egress_allow_hosts: str = ""  # CSV: "github.com,gerrit.internal:29418"
 
+    # Phase 64-A S3: image immutability check. CSV of acceptable
+    # `sha256:...` digests for the agent docker image. Empty (default)
+    # = no check, preserving today's behaviour. Set this in prod to
+    # refuse a tampered/swapped image at launch time.
+    docker_image_allowed_digests: str = ""
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:

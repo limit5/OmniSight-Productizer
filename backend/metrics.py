@@ -132,6 +132,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 64-A S3: image digest allow-list rejections ─────────
+    sandbox_image_rejected_total = Counter(
+        "omnisight_sandbox_image_rejected_total",
+        "Container launches refused because image digest not in trust list",
+        labelnames=("image",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -157,6 +165,7 @@ else:
     auth_login_total = _NoOp()  # type: ignore
     persist_failure_total = _NoOp()  # type: ignore
     subprocess_orphan_total = _NoOp()  # type: ignore
+    sandbox_image_rejected_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -175,7 +184,8 @@ def reset_for_tests() -> None:
     global REGISTRY, decision_total, decision_resolve_seconds
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
     global sse_subscribers, sse_dropped_total, workflow_step_total
-    global auth_login_total, subprocess_orphan_total, persist_failure_total, process_start_time
+    global auth_login_total, subprocess_orphan_total, persist_failure_total
+    global sandbox_image_rejected_total, process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
         "omnisight_decision_total", "Decisions registered",
@@ -224,6 +234,11 @@ def reset_for_tests() -> None:
     persist_failure_total = Counter(
         "omnisight_persist_failure_total", "Swallowed persistence failures",
         labelnames=("module",), registry=REGISTRY,
+    )
+    sandbox_image_rejected_total = Counter(
+        "omnisight_sandbox_image_rejected_total",
+        "Sandbox launches refused due to untrusted image digest",
+        labelnames=("image",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

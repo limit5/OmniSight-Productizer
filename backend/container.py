@@ -113,6 +113,88 @@ def _reset_runtime_cache_for_tests() -> None:
     _RUNTIME_RESOLVED = None
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 64-A S3: Image digest allow-list
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class ImageNotTrusted(RuntimeError):
+    """Raised when the agent image's sha256 digest is not in the
+    configured allow-list."""
+
+
+def _parse_allowed_digests(raw: str) -> set[str]:
+    """CSV of `sha256:...` digests → normalised set. Strips whitespace,
+    rejects entries that don't look like sha256."""
+    out: set[str] = set()
+    for item in (raw or "").split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        if not item.startswith("sha256:") or len(item) != 7 + 64:
+            logger.warning(
+                "ignoring malformed digest in allow-list: %r "
+                "(expected 'sha256:' + 64 hex chars)", item,
+            )
+            continue
+        out.add(item)
+    return out
+
+
+async def _inspect_image_digest(image: str) -> str | None:
+    """Return the local image's `sha256:...` digest, or None if the image
+    is missing / inspect fails. We use `.Id` (the local content digest),
+    not `.RepoDigests` (which is registry-specific) — this catches a
+    mutated layer even if someone keeps the same tag.
+    """
+    rc, out, err = await _run(
+        f"docker image inspect --format '{{{{.Id}}}}' {image}", timeout=10,
+    )
+    if rc != 0:
+        logger.debug("image inspect failed for %s: %s", image, err or out)
+        return None
+    digest = out.strip().lower()
+    return digest or None
+
+
+async def assert_image_trusted(image: str = DOCKER_IMAGE) -> None:
+    """Reject launch if the configured allow-list is non-empty and the
+    image's digest isn't in it. Empty allow-list = open mode (today's
+    behaviour, doesn't break dev)."""
+    from backend.config import settings as _settings
+    allowed = _parse_allowed_digests(_settings.docker_image_allowed_digests or "")
+    if not allowed:
+        return  # open mode — explicit decision by operator
+    digest = await _inspect_image_digest(image)
+    if digest is None:
+        logger.warning(
+            "cannot resolve digest for %s — refusing launch under "
+            "strict allow-list mode", image,
+        )
+        try:
+            from backend import metrics as _m
+            _m.sandbox_image_rejected_total.labels(image=image).inc()
+        except Exception:
+            pass
+        raise ImageNotTrusted(
+            f"image {image!r}: digest unresolvable, cannot verify trust"
+        )
+    if digest not in allowed:
+        logger.error(
+            "image %s digest %s NOT in OMNISIGHT_DOCKER_IMAGE_ALLOWED_DIGESTS — "
+            "refusing launch (possible tampering or stale image)",
+            image, digest,
+        )
+        try:
+            from backend import metrics as _m
+            _m.sandbox_image_rejected_total.labels(image=image).inc()
+        except Exception:
+            pass
+        raise ImageNotTrusted(
+            f"image {image!r} digest {digest} not in trust list"
+        )
+    logger.debug("image %s trusted (digest %s)", image, digest)
+
+
 @dataclass
 class ContainerInfo:
     """Tracks a running agent container."""
@@ -187,6 +269,10 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     # Ensure image exists
     if not await ensure_image():
         raise RuntimeError(f"Docker image {DOCKER_IMAGE} not available")
+
+    # Phase 64-A S3: refuse launch if a digest allow-list is configured
+    # and this image isn't on it. No-op when the allow-list is empty.
+    await assert_image_trusted(DOCKER_IMAGE)
 
     # Build mount list — workspace always, test_assets/simulate.sh conditionally (:ro)
     ws_abs = str(workspace_path.resolve())
