@@ -221,11 +221,25 @@ mutation：
 `pytest backend/tests/test_db.py` → **13 passed in 1.34s**。  
 與 observability / decision_api / audit / dispatch 合併 → **49 passed**。
 
-### D2–D8 未執行
+### D2 — `backend/models.py` Pydantic validation（commit `71693c5`）
 
-仍排程於 Fix-D 計畫中（models / events / metrics / notifications DLQ
-edge / budget_strategy・config・structlog smoke / hooks）。Phase 62
-Knowledge Generation 仍待全 Fix-D 完成。
+`backend/tests/test_models.py` 20 case，0.06s：
+
+- Required-field enforcement（Agent / Task / Notification / Simulation）
+- Enum coercion + rejection（AgentType / TaskPriority / TaskStatus /
+  NotificationLevel / MessageRole / SimulationTrack / SimulationStatus）
+- `default_factory` 產生獨立 instance（sub_tasks / progress / workspace）
+- ISO-8601 timestamp default
+- Nested model round-trip（Agent w/ sub_tasks + workspace、Task w/ list
+  fields、OrchestratorMessage w/ suggestion）
+- Subset model default（AgentCreate / TaskCreate）
+- ChatRequest("") 接受 — 明列為當前 contract，後續若要加 min_length 會
+  自動在此失敗
+
+### D3–D7 未執行
+
+仍排程於 Fix-D 計畫中（events / DLQ edge / metrics / core smoke /
+hooks）。Phase 62 仍待全 Fix-D 完成。
 
 ---
 
