@@ -96,44 +96,70 @@ export function ArchIndicator({ compact = false }: { compact?: boolean }) {
     }
   }, [open])
 
+  // ── Layout safety ──────────────────────────────────────────────
+  // Cap each arch label to 8 chars + ellipsis so a malformed backend
+  // payload (e.g. `riscv64-unknown-linux-gnu`) cannot blow up the
+  // header. Full string is still shown in the popover and as the
+  // button's title attribute.
+  const truncateArch = (s: string): string =>
+    s.length > 8 ? s.slice(0, 7) + "…" : s
+
+  // Fixed dimensions so the chip never expands or contracts
+  // regardless of payload, and the loading placeholder occupies the
+  // same box (no layout shift on mount). On compact (mobile) headers
+  // the chip is a hair narrower.
+  const dims = compact
+    ? { width: 124, height: 18, fontSize: 10 }
+    : { width: 142, height: 20, fontSize: 11 }
+  const containerStyle: React.CSSProperties = {
+    width: dims.width,
+    height: dims.height,
+    fontSize: dims.fontSize,
+    flexShrink: 0,            // header flex never squashes the chip
+  }
+
   if (!status) {
     return (
-      <span
-        className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] opacity-60"
+      <div
+        className="inline-flex items-center justify-center font-mono text-[var(--muted-foreground,#94a3b8)] opacity-50 rounded-sm border border-dashed border-[var(--muted-foreground,#94a3b8)]/40"
+        style={containerStyle}
         title="Loading platform status…"
+        aria-label="loading platform status"
       >
-        --/--
-      </span>
+        — / —
+      </div>
     )
   }
 
   const meta = STATUS_META[status.status]
   const { Icon } = meta
-  const hostArch = status.host?.arch ?? "?"
-  const targetArch = status.target?.arch ?? "—"
+  const hostArchFull = status.host?.arch ?? "?"
+  const targetArchFull = status.target?.arch ?? "—"
+  const hostArch = truncateArch(hostArchFull)
+  const targetArch = truncateArch(targetArchFull)
 
   return (
-    <div className="relative inline-flex">
+    <div className="relative inline-flex" style={{ flexShrink: 0 }}>
       <button
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Host ${hostArch} → Target ${targetArch}: ${meta.short}`}
-        title={status.advice}
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded-sm font-mono tabular-nums tracking-wider transition-colors hover:brightness-125"
+        aria-label={`Host ${hostArchFull} → Target ${targetArchFull}: ${meta.short}`}
+        title={`${hostArchFull} → ${targetArchFull}\n${status.advice}`}
+        className="flex items-center justify-center gap-1 px-1.5 rounded-sm font-mono tabular-nums tracking-wider transition-colors hover:brightness-125 whitespace-nowrap overflow-hidden"
         style={{
+          ...containerStyle,
           color: meta.color,
           background: meta.bg,
           border: `1px solid ${meta.color}`,
-          fontSize: compact ? "10px" : "11px",
         }}
       >
         <Icon className="w-3 h-3 shrink-0" aria-hidden />
-        <span>{hostArch}</span>
-        <span aria-hidden className="opacity-60">→</span>
-        <span>{targetArch}</span>
+        <span className="truncate">{hostArch}</span>
+        <span aria-hidden className="opacity-60 shrink-0">→</span>
+        <span className="truncate">{targetArch}</span>
       </button>
       {open && (
         <div

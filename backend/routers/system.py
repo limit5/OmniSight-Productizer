@@ -592,9 +592,13 @@ _ARCH_ALIASES: dict[str, str] = {
 
 
 def _canon_arch(raw: str | None) -> str:
+    """Canonicalise an arch string. Caps length at 16 chars so a
+    malformed source can't push hundreds of characters into the UI
+    chip — frontend also truncates to 8 for display."""
     if not raw:
         return "unknown"
-    return _ARCH_ALIASES.get(raw.lower().strip(), raw.lower().strip())
+    cleaned = raw.lower().strip()[:16]
+    return _ARCH_ALIASES.get(cleaned, cleaned)
 
 
 # Mapping from platform-profile id (configs/platforms/*.yaml) to the
