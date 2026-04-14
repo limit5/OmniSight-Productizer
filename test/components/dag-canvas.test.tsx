@@ -98,6 +98,22 @@ describe("DagCanvas", () => {
     expect(compileRect?.getAttribute("stroke")).not.toContain("destructive")
   })
 
+  it("clicking a node dispatches omnisight:dag-focus-task with its id", async () => {
+    const user = (await import("@testing-library/user-event")).default.setup()
+    const listener = vi.fn()
+    window.addEventListener("omnisight:dag-focus-task", listener as EventListener)
+    try {
+      const { container } = render(<DagCanvas dag={twoTask} />)
+      const flashNode = container.querySelector('g[data-task-id="flash"]') as SVGGElement
+      await user.click(flashNode)
+      expect(listener).toHaveBeenCalledTimes(1)
+      const ev = listener.mock.calls[0][0] as CustomEvent<{ taskId: string }>
+      expect(ev.detail.taskId).toBe("flash")
+    } finally {
+      window.removeEventListener("omnisight:dag-focus-task", listener as EventListener)
+    }
+  })
+
   it("a graph-level cycle error tints every node red", () => {
     const { container } = render(
       <DagCanvas

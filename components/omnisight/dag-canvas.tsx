@@ -220,8 +220,33 @@ export function DagCanvas({ dag, errors = [] }: Props) {
         {nodes.map((n) => {
           const red = redIds.has(n.id)
           const stroke = red ? "var(--destructive)" : TIER_COLOR[n.tier] ?? "var(--border)"
+          const handleFocus = () => {
+            if (typeof window === "undefined") return
+            // Bubble a focus request up — DagEditor listens, flips to
+            // the Form tab, DagFormEditor scrolls/highlights the row.
+            window.dispatchEvent(
+              new CustomEvent("omnisight:dag-focus-task", {
+                detail: { taskId: n.id },
+              }),
+            )
+          }
           return (
-            <g key={n.id} data-task-id={n.id} data-layer={n.layer}>
+            <g
+              key={n.id}
+              data-task-id={n.id}
+              data-layer={n.layer}
+              onClick={handleFocus}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault()
+                  handleFocus()
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              aria-label={`Focus task ${n.id} in the Form editor`}
+              className="cursor-pointer focus:outline-none focus-visible:[&>rect]:stroke-[var(--artifact-purple)]"
+            >
               <rect
                 x={n.x}
                 y={n.y}

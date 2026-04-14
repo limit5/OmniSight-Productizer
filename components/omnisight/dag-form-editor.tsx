@@ -17,7 +17,7 @@
  *     the JSON tab shares the same panel.
  */
 
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ArrowDown, ArrowUp, Plus, Trash2, X } from "lucide-react"
 
 // Mirrors `backend/dag_schema.py`. Kept local rather than hoisting into
@@ -44,6 +44,12 @@ export interface FormDAG {
 interface Props {
   value: FormDAG
   onChange: (next: FormDAG) => void
+  /** Phase 56-DAG-G follow-up: when bumped (new `n`), scroll the row
+   * for `taskId` into view and flash a highlight ring. DagEditor sets
+   * this in response to the `omnisight:dag-focus-task` event emitted
+   * by DagCanvas clicks. A counter rather than a plain string so the
+   * same id twice in a row still re-fires. */
+  focusRequest?: { taskId: string; n: number } | null
 }
 
 const TIERS: FormTask["required_tier"][] = ["t1", "networked", "t3"]
@@ -65,11 +71,26 @@ function blankTask(index: number, allIds: string[]): FormTask {
   }
 }
 
-export function DagFormEditor({ value, onChange }: Props) {
+export function DagFormEditor({ value, onChange, focusRequest }: Props) {
   // Per-row draft for the "add input" text field. Stored outside the
   // DAG itself so an empty draft doesn't serialise back into the JSON
   // text tab. Keyed by task index — cleared on commit or row delete.
   const [inputDraft, setInputDraft] = useState<Record<number, string>>({})
+
+  // Refs to every task row DOM node, for scroll-to-row on focus request.
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // Task id currently flashing the highlight ring (null otherwise).
+  const [flashed, setFlashed] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!focusRequest) return
+    const node = rowRefs.current[focusRequest.taskId]
+    if (!node) return
+    node.scrollIntoView({ behavior: "smooth", block: "center" })
+    setFlashed(focusRequest.taskId)
+    const t = setTimeout(() => setFlashed(null), 1500)
+    return () => clearTimeout(t)
+  }, [focusRequest])
 
   // ─── mutation helpers ──────────────────────────────────────────
 
@@ -179,7 +200,16 @@ export function DagFormEditor({ value, onChange }: Props) {
         {value.tasks.map((t, idx) => (
           <div
             key={idx}
-            className="rounded border border-[var(--border)] bg-[var(--background)] p-2 flex flex-col gap-1"
+            ref={(el) => {
+              rowRefs.current[t.task_id] = el
+            }}
+            data-task-row-id={t.task_id}
+            className={
+              "rounded border p-2 flex flex-col gap-1 transition-shadow " +
+              (flashed === t.task_id
+                ? "border-[var(--artifact-purple)] bg-[var(--artifact-purple)]/10 shadow-[0_0_0_2px_var(--artifact-purple)]"
+                : "border-[var(--border)] bg-[var(--background)]")
+            }
           >
             {/* Row 1: id + tier + reorder + delete */}
             <div className="flex items-center gap-1">

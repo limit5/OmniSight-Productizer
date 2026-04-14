@@ -301,6 +301,28 @@ export function DagEditor() {
   // derives FormDAG from it and serializes back on every mutation, so
   // switching tabs never loses work (as long as JSON is parseable).
   const [tab, setTab] = useState<"json" | "form" | "canvas">("json")
+  // Phase 56-DAG-G follow-up: Canvas clicks dispatch a
+  // `omnisight:dag-focus-task` custom event. We catch it here, flip
+  // to Form, and pass the task id down so the form can scroll /
+  // highlight the matching row. The counter is bumped on every
+  // request so the same id in a row (click → edit → click again)
+  // still re-triggers the scroll.
+  const [focusRequest, setFocusRequest] = useState<{ taskId: string; n: number } | null>(null)
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onFocus = (e: Event) => {
+      const detail = (e as CustomEvent<{ taskId?: string }>).detail
+      if (!detail?.taskId) return
+      setTab("form")
+      setFocusRequest((prev) => ({
+        taskId: detail.taskId!,
+        n: (prev?.n ?? 0) + 1,
+      }))
+    }
+    window.addEventListener("omnisight:dag-focus-task", onFocus as EventListener)
+    return () =>
+      window.removeEventListener("omnisight:dag-focus-task", onFocus as EventListener)
+  }, [])
 
   // Cancel-previous pattern: keep latest request's signal so a stale
   // response can't clobber a fresher one.
@@ -545,7 +567,11 @@ export function DagEditor() {
         />
       ) : tab === "form" ? (
         formDag ? (
-          <DagFormEditor value={formDag} onChange={handleFormChange} />
+          <DagFormEditor
+            value={formDag}
+            onChange={handleFormChange}
+            focusRequest={focusRequest}
+          />
         ) : (
           <div className="text-xs font-mono p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)]">
             Form view disabled — JSON is not parseable. Fix in the JSON tab first.

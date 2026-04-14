@@ -114,6 +114,29 @@ describe("DagEditor", () => {
     }
   })
 
+  it("dag-focus-task event flips to Form tab and scrolls/highlights the row", async () => {
+    const scrollSpy = vi.fn()
+    // jsdom doesn't implement scrollIntoView; stub before render so
+    // the effect doesn't throw.
+    Element.prototype.scrollIntoView = scrollSpy as unknown as Element["scrollIntoView"]
+
+    const user = userEvent.setup()
+    render(<DagEditor />)
+    // Wait for the default template to parse / validate.
+    await waitFor(() => expect(screen.getByText(/valid/i)).toBeInTheDocument())
+
+    // Fire the focus event the Canvas would emit on click.
+    window.dispatchEvent(
+      new CustomEvent("omnisight:dag-focus-task", { detail: { taskId: "compile" } }),
+    )
+
+    // Tab should flip to Form and the row should be in the document.
+    await waitFor(() => {
+      expect(screen.getByLabelText("task 1 id")).toBeInTheDocument()
+    })
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalled())
+  })
+
   it("loads a template when the chip is clicked", async () => {
     const user = userEvent.setup()
     render(<DagEditor />)
