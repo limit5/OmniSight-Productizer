@@ -452,6 +452,36 @@ read-only 視覺化 canvas — 作為 DAG Editor 的第三 tab（JSON / Form
 
 ---
 
+## DAG UX 軌小產品收益收尾（2026-04-15）
+
+DAG 主線 backend + editor/form/canvas 三 tab 落地後，本輪四小項把
+剩餘 UX 邊角補齊。整軌（E/F/G + Products #1–4）operator 鏈路完整。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| #1 Template gallery 擴充 | 3 → 7 範本：加 `tier-mix`（T1+NET+T3 交接）/ `cross-compile`（sysroot + checkpatch）/ `fine-tune`（Phase 65 pipeline）/ `diff-patch`（Phase 67-B workflow），每個 toolchain 都對應系統已有名稱、不杜撰 | `e5c6433` |
+| #2 `inputs[]` + `output_overlap_ack` 進 Form | DagFormEditor 新增 inputs chip-with-typeahead（Enter/blur commit、dup silent drop）+ output_overlap_ack checkbox；Form 覆蓋率 95% → 100%；row delete 連帶清 input draft | `806435a` |
+| #3 Canvas click → Form jump | Canvas `<g>` 加 onClick + keyboard role=button；派 `omnisight:dag-focus-task` CustomEvent；DagEditor 監聽切 tab；DagFormEditor 收 focusRequest 做 scrollIntoView + 1.5s 紫框 flash | `8dbd75a` |
+| #4 Operator 文件（en + zh-TW） | `docs/operator/{en,zh-TW}/reference/dag-authoring.md`（~180 行 × 2），含 schema / 7 rules / 三 tab 哲學 / 7 範本 / submit / mutate=true / 常見錯誤；PanelHelp 加 `dag-authoring` DocId + 4 語系 TL;DR；DagEditor header 掛 `?` 圖示 | _本 commit_ |
+
+### Operator 體驗交付
+
+從「curl 手寫 JSON」→ **三種視角互通 + 7 範本 + 100% Form 覆蓋 + Canvas 點擊跳 Form + 即時 7-rule 驗證 + Submit 成功跳 Timeline + 4 語系完整參考文件**。
+
+### 測試累計
+
+dag-* 前端套件 **24/24**，backend `test_dag_router.py` 16/16，全套綠燈。
+
+### 後續解鎖
+
+- **react-flow 升級**（pan/zoom/minimap，需要 50+ task DAG 時再上）
+- **Canvas 互動式編輯**（drag to connect depends_on；需要先證明 chip toggle 不夠用）
+- **UI 端 `/dag` route 的 SEO 深連結**（目前 `/?panel=dag` 走 query param）
+
+---
+
 ## Phase 67-C — Speculative Container Pre-warm 完成（2026-04-15）
 
 Engine 3 從 `lossless-agent-acceleration.md` 落地。DAG validate 通過

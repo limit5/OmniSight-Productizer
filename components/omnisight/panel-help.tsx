@@ -35,6 +35,7 @@ export type DocId =
   | "panels-overview"
   | "budget-strategies"
   | "glossary"
+  | "dag-authoring"
 
 // Inline TL;DR — kept in sync with the first TL;DR paragraph of each
 // matching .md file. If you change wording there, mirror it here.
@@ -147,6 +148,28 @@ const TL_DR: Record<DocId, Record<Locale, { title: string; summary: string }>> =
       title: "Glossary 用語集",
       summary:
         "UI と log で使われる専門用語(agent、task、pipeline、NPI、sweep、workspace、SSE…)の正本定義。",
+    },
+  },
+  "dag-authoring": {
+    en: {
+      title: "DAG Authoring",
+      summary:
+        "Three tabs (JSON / Form / Canvas) that edit the same DAG plan. 7 rules validate live on every keystroke. Templates in the header; click a Canvas node to jump to its Form row.",
+    },
+    "zh-TW": {
+      title: "DAG Authoring DAG 編寫",
+      summary:
+        "三 tab（JSON / Form / Canvas）編輯同一份 DAG。7 條規則每次鍵入即時驗證。header 有範本；Canvas 節點可點擊跳 Form 對應 row。",
+    },
+    "zh-CN": {
+      title: "DAG Authoring DAG 编写",
+      summary:
+        "三 tab（JSON / Form / Canvas）编辑同一份 DAG。7 条规则每次键入即时验证。header 有模板；Canvas 节点可点击跳 Form 对应 row。",
+    },
+    ja: {
+      title: "DAG Authoring DAG 編集",
+      summary:
+        "3 タブ(JSON / Form / Canvas)で同じ DAG を編集。7 ルールがキー入力ごとに即時検証。ヘッダにテンプレ、Canvas ノードクリックで Form 行にジャンプ。",
     },
   },
 }

@@ -22,6 +22,7 @@ import {
 } from "@/lib/api"
 import { DagFormEditor, type FormDAG } from "@/components/omnisight/dag-form-editor"
 import { DagCanvas } from "@/components/omnisight/dag-canvas"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 
 // ─── Templates ──────────────────────────────────────────────────────
 
@@ -475,6 +476,7 @@ export function DagEditor() {
         <h3 className="font-mono text-sm font-semibold text-[var(--foreground)] flex items-center gap-2">
           <FileText size={14} className="text-[var(--artifact-purple)]" />
           DAG Editor
+          <PanelHelp doc="dag-authoring" />
         </h3>
         <div className="flex items-center gap-2">
           <div role="tablist" aria-label="Editor mode" className="flex rounded border border-[var(--border)] overflow-hidden">
