@@ -51,12 +51,23 @@ def sample_files(workspace: Path) -> Path:
 
 
 @pytest.fixture()
-async def client():
+async def client(tmp_path, monkeypatch):
     """Provide an async HTTP test client against the FastAPI app.
 
-    Initializes the database so lifespan dependencies are met.
+    Each test gets a fresh per-test sqlite file so state never leaks
+    across tests. Previously every test hit the real `data/omnisight.db`
+    and rows accumulated forever — the audit flagged this as the root
+    cause of `test_list_plan_chain` seeing 8+ plans when it expected 2.
     """
+    db_path = tmp_path / "test.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
+    # Re-resolve path on the module (loaded at import time from the real
+    # data/ dir) so `init()` opens the fresh tmp file.
+    from backend import config as _cfg
+    _cfg.settings.database_path = str(db_path)
     from backend import db
+    db._DB_PATH = db._resolve_db_path()
+
     from backend.main import app
     from httpx import ASGITransport, AsyncClient
 
