@@ -131,7 +131,6 @@ async def update_task(task_id: str, body: TaskUpdate, force: bool = False):
         if s_str == "completed":
             update_data["completed_at"] = datetime.now().isoformat()
 
-    old_status = task.status
     for field, value in update_data.items():
         setattr(task, field, value)
     await _persist(task)

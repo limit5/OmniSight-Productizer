@@ -31,7 +31,12 @@ jobs:
       - name: install ruff
         run: pip install "ruff==0.7.4"
       - name: ruff check
-        run: ruff check backend || true     # Phase 51 v0: warn-only; tighten in v1
+        # Tech debt #3.b graduated ruff to a hard gate. Pre-existing
+        # violations cleared by `ruff --fix` + a project-level
+        # `ruff.toml` that ignores three intentional patterns
+        # (E402 lazy imports, E741 ambiguous binders, E702 one-line
+        # tuple swaps). New real-bug violations (F-series) fail CI.
+        run: ruff check backend
       - uses: actions/setup-node@v4
         with: { node-version: "20", cache: npm }
       - run: npm ci --no-audit --prefer-offline

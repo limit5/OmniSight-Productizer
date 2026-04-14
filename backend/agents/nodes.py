@@ -1040,7 +1040,6 @@ def context_compression_gate(state: GraphState) -> dict:
 
     keep_recent = 4
     old_messages = messages[:-keep_recent]
-    recent_messages = messages[-keep_recent:]
 
     # Build text from old messages for summarization
     old_text_parts = []

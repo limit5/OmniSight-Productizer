@@ -76,7 +76,6 @@ def _build_markdown(run: Any, steps: list[Any]) -> str:
     error_steps = [s for s in steps if getattr(s, "error", None)]
     success_steps = [s for s in steps if not getattr(s, "error", None)]
     retry_count = len(error_steps)
-    final_step = success_steps[-1] if success_steps else (steps[-1] if steps else None)
 
     duration_s = 0.0
     if steps and getattr(steps[-1], "completed_at", None) and getattr(steps[0], "started_at", None):

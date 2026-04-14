@@ -224,7 +224,7 @@ async def test_mutate_workflow_chains_runs_and_plans(fresh_db):
 async def test_list_plans_traces_full_mutation_chain(fresh_db):
     from backend import workflow as wf, dag_storage as ds
     run1 = await wf.start("invoke", dag=_bad_dag(dag_id="REQ-chain"))
-    run2 = await wf.mutate_workflow(run1.id, _good_dag(dag_id="REQ-chain"),
+    _run2 = await wf.mutate_workflow(run1.id, _good_dag(dag_id="REQ-chain"),
                                     mutation_round=1)
     chain = await ds.list_plans("REQ-chain")
     assert len(chain) == 2

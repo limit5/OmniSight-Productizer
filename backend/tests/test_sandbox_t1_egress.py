@@ -141,7 +141,7 @@ async def test_ensure_egress_network_skips_when_present():
 @pytest.mark.asyncio
 async def test_resolve_allow_ips_caches_within_ttl(monkeypatch):
     calls = {"n": 0}
-    real_resolver = None
+    _real_resolver = None
 
     async def fake_getaddrinfo(host, port, type=None):
         calls["n"] += 1

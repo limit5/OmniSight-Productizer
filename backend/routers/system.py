@@ -1209,18 +1209,6 @@ async def mark_read(notification_id: str):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  SSE Event Schema Export
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-@router.get("/sse-schema")
-async def get_sse_schema():
-    """Export JSON Schema definitions for all SSE event types."""
-    from backend.sse_schemas import get_sse_schema_export
-    return get_sse_schema_export()
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Roles & Model Rules registry
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

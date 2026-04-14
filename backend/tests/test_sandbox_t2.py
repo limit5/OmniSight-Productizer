@@ -159,7 +159,7 @@ async def test_t1_default_still_uses_none(monkeypatch):
     monkeypatch.setattr(
         "backend.config.settings.t1_egress_allow_hosts", "", raising=False,
     )
-    info = await ct.start_container("a-default", Path("/tmp"))
+    _info = await ct.start_container("a-default", Path("/tmp"))
     try:
         assert "--network none" in seen["docker_run_cmd"]
         assert "omnisight-egress-t2" not in seen["docker_run_cmd"]

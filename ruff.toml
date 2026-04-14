@@ -1,0 +1,30 @@
+# OmniSight ruff config.
+#
+# Goal: ruff is a hard CI gate (Tech debt #3.b graduated it, same as
+# tsc). To get there without churning intentional style choices, the
+# rule set is the ruff defaults minus three categories that the
+# codebase deliberately uses:
+#
+#   E402 — module-level import not at top of file. We do many lazy
+#          imports inside functions to break circular deps and gate
+#          heavy imports (LangChain, prometheus_client, yaml, …)
+#          off the cold-start path.
+#   E741 — ambiguous variable name (l / I / O). Mostly comes from
+#          short list-comprehension binders; renaming them all is
+#          churn for zero correctness gain.
+#   E702 — multiple statements on one line. Used sparingly in
+#          one-line tuple swaps and similar terse code.
+#
+# Real-bug rules (F-series) stay on. Add specific files to the
+# `per-file-ignores` map below if a localised exception is needed.
+
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+    "backend/.venv",
+    "backend/__pycache__",
+    "backend/docker",
+]
+
+[lint]
+ignore = ["E402", "E741", "E702"]

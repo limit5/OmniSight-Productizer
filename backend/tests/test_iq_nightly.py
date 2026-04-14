@@ -43,7 +43,7 @@ def _bench(name: str) -> ib.IQBenchmark:
 def _report(model: str, bench: str, score: float,
             tokens: int = 100, truncated: str | None = None) -> ir.RunReport:
     # Synthesise a RunReport with a score matching `score` value.
-    qs = [ib.IQQuestion(id="q1", prompt="?", expected_keywords=["x"])]
+    _qs = [ib.IQQuestion(id="q1", prompt="?", expected_keywords=["x"])]
     passed = score > 0
     bscore = ib.BenchmarkScore(
         benchmark=bench, model=model,
