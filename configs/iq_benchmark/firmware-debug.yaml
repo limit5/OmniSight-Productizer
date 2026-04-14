@@ -1,0 +1,103 @@
+# Phase 63-D — Daily IQ Benchmark, curated set #1.
+#
+# 10 questions covering the corners of the embedded-firmware /
+# kernel-driver / NPU-quantization domain we actually ship into. Each
+# question's matcher is conservative: at least one specific concept the
+# answer MUST mention. The intent is to catch a model that has FORGOTTEN
+# the domain (regression), not to score nuance.
+#
+# Hand-curated. DO NOT auto-generate from episodic_memory — the design
+# explicitly rejects that to avoid self-reference bias.
+
+schema_version: 1
+name: "firmware-debug-set-1"
+description: >
+  Embedded-firmware regression benchmark. Targets memory safety,
+  driver authoring, NPU quantization, and toolchain hygiene. Pass
+  rate < 70% sustained across 2 nights triggers Phase 63-D
+  Notification level=action.
+
+questions:
+
+  - id: q01-memcpy-bounds
+    weight: 1.0
+    tags: [memory-safety, c]
+    prompt: >
+      A 100-byte buffer is being filled by memcpy from a network packet
+      of unknown length. What's the safe pattern?
+    expected_keywords: ["bounds", "length"]
+    forbidden_keywords: ["i don't know", "[uncertain]"]
+
+  - id: q02-dma-cache-coherency
+    weight: 1.0
+    tags: [dma, cache]
+    prompt: >
+      A DMA-mapped buffer reads stale data on the CPU side after the
+      device finishes writing. What's the missing step?
+    expected_keywords: ["invalidate"]
+
+  - id: q03-int8-quantization
+    weight: 1.0
+    tags: [npu, quantization]
+    prompt: >
+      Convert an FP32 NPU model to INT8. Which two parameters does the
+      per-tensor symmetric quantizer compute?
+    expected_keywords: ["scale", "zero"]
+
+  - id: q04-race-condition
+    weight: 1.0
+    tags: [concurrency]
+    prompt: >
+      Two ISR handlers and a kthread all increment the same `unsigned
+      int errors` counter. Why is `errors++` unsafe and what's the fix?
+    expected_keywords: ["atomic"]
+
+  - id: q05-valgrind-uninit
+    weight: 1.0
+    tags: [valgrind, c]
+    prompt: >
+      Valgrind reports "Conditional jump or move depends on
+      uninitialised value(s)" inside foo(). What changed in your code?
+    expected_keywords: ["initialize"]
+
+  - id: q06-spinlock-vs-mutex
+    weight: 1.0
+    tags: [kernel]
+    prompt: >
+      In a Linux kernel driver, when must you use a spinlock instead of
+      a mutex?
+    expected_keywords: ["interrupt", "sleep"]
+
+  - id: q07-volatile-memory-barrier
+    weight: 1.0
+    tags: [c, optimization]
+    prompt: >
+      A volatile pointer to an MMIO register reads stale values after
+      `-O2`. `volatile` alone isn't enough — what else is needed for
+      ordering across the access?
+    expected_keywords: ["barrier"]
+
+  - id: q08-use-after-free
+    weight: 1.0
+    tags: [memory-safety]
+    prompt: >
+      `p = malloc(N); free(p); *p = 0;` is what class of bug, and what's
+      the cheapest defensive coding habit?
+    expected_keywords: ["use", "after", "free"]
+
+  - id: q09-i2c-ack-poll
+    weight: 1.0
+    tags: [i2c, hal]
+    prompt: >
+      An I2C ACK polling loop sometimes hangs when a slave is removed.
+      What two things must the loop bound itself with?
+    expected_keywords: ["timeout"]
+
+  - id: q10-sysroot-cross
+    weight: 1.0
+    tags: [toolchain]
+    prompt: >
+      Cross-compiling with arm-linux-gnueabihf-gcc but headers from
+      /usr/include get pulled in. Which compiler flag pins it to the
+      vendor sysroot?
+    expected_keywords: ["sysroot"]
