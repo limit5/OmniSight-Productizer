@@ -163,8 +163,8 @@ async def decay_unused(
         _m.memory_decay_total.labels(action="skipped_recent").inc(
             res.skipped_recent,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("memory_decay metric failed: %s", exc)
 
     logger.info(
         "memory_decay: scanned=%d decayed=%d skipped_recent=%d "
@@ -199,8 +199,8 @@ async def restore(memory_id: str) -> Optional[float]:
     try:
         from backend import metrics as _m
         _m.memory_decay_total.labels(action="restored").inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("memory_decay metric failed: %s", exc)
     logger.info("memory_decay: restored %s → %.3f", memory_id, q)
     return q
 

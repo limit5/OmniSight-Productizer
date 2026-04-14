@@ -259,8 +259,8 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
             action="mode_change", entity_kind="operation_mode", entity_id="global",
             before={"mode": prev.value}, after={"mode": mode.value, "parallel_cap": new_cap},
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("mode_change audit failed (non-fatal): %s", exc)
     return mode
 
 
@@ -424,8 +424,8 @@ def propose(
                     rationale=profile_rationale, profile_id=profile_id_used,
                     auto_executed_at=now,
                 ))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("auto_decision log schedule failed: %s", exc)
         _archive(dec)
         _emit("decision_auto_executed", dec)
         # Phase 52 metric: count + record resolve duration
@@ -437,8 +437,8 @@ def propose(
             _m.decision_resolve_seconds.labels(
                 kind=kind, severity=severity.value, resolver="auto"
             ).observe(0.0)  # auto resolved instantly
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("decision metrics failed: %s", exc)
         return dec
 
     with _state_lock:
@@ -460,8 +460,8 @@ def propose(
         _m.decision_total.labels(
             kind=kind, severity=severity.value, status="pending"
         ).inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("decision pending metric failed: %s", exc)
     return dec
 
 
@@ -517,8 +517,8 @@ def resolve(
                    "resolver": dec.resolver},
             actor=resolver,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("decision resolve audit failed: %s", exc)
     return dec
 
 
@@ -542,8 +542,8 @@ def undo(decision_id: str) -> Decision | None:
                         before={"status": prev_status},
                         after={"status": "undone"},
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("decision undo audit failed: %s", exc)
                 return d
     return None
 
