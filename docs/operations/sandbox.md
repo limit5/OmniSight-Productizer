@@ -185,6 +185,53 @@ action=sandbox_image_rejected  actor=agent:<id>
 
 ---
 
+## 7. Tier 2 — Networked Sandbox (Phase 64-B)
+
+Tier 2 inverts T1's policy: **public internet is reachable, private
+RFC1918 / link-local / ULA addresses are DROPped** at iptables. Use
+this for MLOps data pulls, third-party API tests, and Phase 65
+training-data exfil.
+
+There is **no env double-gate** for T2 — the Python entry point is
+the gate:
+
+```python
+from backend.container import start_networked_container
+info = await start_networked_container(agent_id, workspace_path)
+```
+
+The caller is responsible for any Decision Engine approval (planned
+`kind=sandbox/networked`, severity=`risky`) before touching this API.
+
+### Install (once per host)
+
+```bash
+sudo scripts/setup_t2_network.sh
+```
+
+This requires the `omnisight-egress-t2` bridge to exist; the backend
+creates it the first time `start_networked_container` runs, so you
+can either (a) launch one T2 container then run the script, or (b)
+pre-create with `docker network create --driver bridge omnisight-egress-t2`.
+
+### Defended against
+
+- Prompt-injected agent → curl `http://10.0.0.1/admin` → DROP
+- Same agent → `nslookup metadata.google.internal` → DROP (link-local)
+- Same agent → `pip install pkg` from public PyPI → ACCEPT
+
+### Observability
+
+Same metrics as T1, just `tier="networked"`:
+
+- `omnisight_sandbox_launch_total{tier="networked",result="success"}`
+- `omnisight_sandbox_lifetime_killed_total{tier="networked"}`
+- `omnisight_sandbox_output_truncated_total{tier="networked"}`
+
+Audit row carries `after.tier="networked"`, `after.network=omnisight-egress-t2`.
+
+---
+
 ## Related
 
 - `docs/design/tiered-sandbox-architecture.md` — design rationale

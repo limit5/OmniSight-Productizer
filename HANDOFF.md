@@ -192,6 +192,49 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 64-B — Tier 2 Networked Sandbox 完成（2026-04-14）
+
+承 Phase 64-A + 64-D 之後。**T2 與 T1 完全相反**：公網 ACCEPT、
+RFC1918 / link-local / ULA DROP。用於 MLOps 資料下載、第三方 API
+測試，及 Phase 65 訓練資料外送。
+
+### 設計分工
+
+- **Python 側 (backend)**：擁有 docker bridge `omnisight-egress-t2`、
+  決定 `--network` 旗標、重用 64-A 的 runtime / image trust /
+  lifetime。**無 env 雙 gate** — 進入點 `start_networked_container()`
+  即是 gate（呼叫端負責 Decision Engine 審核）。
+- **Host 側 (operator)**：跑一次 `scripts/setup_t2_network.sh` 安裝
+  iptables IPv4/IPv6 規則。
+
+### 子任 / commit
+
+| 子任 | 內容 |
+|---|---|
+| S1 | `sandbox_net.ensure_t2_network` / `resolve_t2_network_arg`；`start_container(tier=...)` 加 `tier` 參數；`start_networked_container()` 公開別名；metric / audit / lifetime tier 全程貫穿 |
+| S2 | `scripts/setup_t2_network.sh` — IPv4 + IPv6 雙 chain，DROP RFC1918 / 100.64/10 / link-local / 多播 / ULA / fe80::/10，預設 ACCEPT 公網 |
+| S3 | ops doc 增 §7 Tier 2 + 本 HANDOFF 條目 |
+
+### 驗收
+
+`pytest backend/tests/test_sandbox_t2.py 加 既有 sandbox bundle`
+→ **77 pass + 2 skip / 1.66s**。
+
+T2 9 test 覆蓋：
+- bridge name 與 T1 區隔
+- bridge create 冪等 / 重複跳過
+- `resolve_t2_network_arg` happy path / fail-fast raise
+- `start_networked_container` 傳遞 `--network omnisight-egress-t2`
+- T1 預設仍走 `--network none`
+- launch metric `tier="networked"` / audit `after.tier="networked"`
+
+### 後續解鎖
+
+**Phase 65 Data Flywheel** 解除阻擋（外送訓練資料現可走 T2 egress
+而不違反「T0 不執行外送」原則）。
+
+---
+
 ## Phase 64-D — Killswitch 統一 完成（2026-04-14）
 
 承 Phase 64-A 完成後立即實作。原計畫 4 小項，**D2 重審後刪除**，

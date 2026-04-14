@@ -310,10 +310,19 @@ async def ensure_image() -> bool:
     return True
 
 
-async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
+async def start_container(agent_id: str, workspace_path: Path,
+                          *, tier: str = "t1") -> ContainerInfo:
     """Start a Docker container for an agent with its workspace mounted.
 
-    The workspace directory is bind-mounted to /workspace inside the container.
+    The workspace directory is bind-mounted to /workspace inside the
+    container. `tier` selects the network policy:
+
+      * ``"t1"`` (default): air-gap by default, optional T1 egress
+        whitelist via OMNISIGHT_T1_ALLOW_EGRESS double-gate.
+      * ``"networked"``: place container on the omnisight-egress-t2
+        bridge with public-internet egress (RFC1918 still DROPped by
+        the host iptables script). Caller is responsible for any
+        Decision-Engine gate (sandbox/networked, severity=risky).
     """
     container_name = f"omnisight-agent-{agent_id}"
 
@@ -337,7 +346,7 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
         try:
             from backend import metrics as _m
             _m.sandbox_launch_total.labels(
-                tier="t1", runtime="?", result="image_rejected",
+                tier=tier, runtime="?", result="image_rejected",
             ).inc()
         except Exception:
             pass
@@ -399,10 +408,12 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     cpus = _settings.docker_cpu_limit or "2"
     # Phase 64-A S1: gVisor (runsc) when available; runc fallback otherwise.
     runtime = await resolve_runtime()
-    # Phase 64-A S2: --network defaults to `none`, opens to the
-    # omnisight-egress-t1 bridge only when the double-gate is satisfied.
+    # Phase 64-A S2 / 64-B: pick the network arg per tier.
     from backend import sandbox_net as _sn
-    network_arg = await _sn.resolve_network_arg()
+    if tier == "networked":
+        network_arg = await _sn.resolve_t2_network_arg()
+    else:
+        network_arg = await _sn.resolve_network_arg()
     rc, out, err = await _run(
         f"docker run -d "
         f"--runtime={runtime} "
@@ -418,7 +429,7 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
         try:
             from backend import metrics as _m
             _m.sandbox_launch_total.labels(
-                tier="t1", runtime=runtime, result="error",
+                tier=tier, runtime=runtime, result="error",
             ).inc()
         except Exception:
             pass
@@ -446,7 +457,7 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     try:
         from backend import metrics as _m
         _m.sandbox_launch_total.labels(
-            tier="t1", runtime=runtime, result="success",
+            tier=tier, runtime=runtime, result="success",
         ).inc()
     except Exception:
         pass
@@ -460,7 +471,7 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
                 "agent_id": agent_id,
                 "container_id": container_id,
                 "image": DOCKER_IMAGE,
-                "tier": "t1",
+                "tier": tier,
                 "runtime": runtime,
                 "network": network_arg.split()[-1],  # "none" or bridge name
             },
@@ -473,7 +484,7 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     lifetime = int(_settings.sandbox_lifetime_s or 0)
     if lifetime > 0:
         info.lifetime_task = asyncio.create_task(
-            _lifetime_killswitch(agent_id, container_name, float(lifetime)),
+            _lifetime_killswitch(agent_id, container_name, float(lifetime), tier=tier),
             name=f"sandbox-lifetime-{container_name}",
         )
 
@@ -481,6 +492,14 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     emit_agent_update(agent_id, "running", f"Container {container_id} running")
     logger.info("Container started: %s (%s)", container_name, container_id)
     return info
+
+
+async def start_networked_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
+    """Phase 64-B convenience wrapper. Equivalent to
+    ``start_container(..., tier="networked")``. Use this from MLOps /
+    third-party-API agent paths *after* the caller has cleared the
+    Decision Engine ``sandbox/networked`` gate (severity=risky)."""
+    return await start_container(agent_id, workspace_path, tier="networked")
 
 
 async def exec_in_container(

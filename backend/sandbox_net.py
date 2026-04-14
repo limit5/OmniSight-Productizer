@@ -34,6 +34,7 @@ from typing import Iterable
 logger = logging.getLogger(__name__)
 
 T1_NETWORK_NAME = "omnisight-egress-t1"
+T2_NETWORK_NAME = "omnisight-egress-t2"  # Phase 64-B
 _DNS_CACHE_TTL_S = 300.0  # 5 min — long enough to amortise lookups, short
                           # enough that DNS rotation eventually catches up.
 
@@ -135,6 +136,52 @@ async def ensure_egress_network(*, runner=None) -> str:
         raise RuntimeError(f"docker network create failed: {err}")
     logger.info("created docker network %s for Tier-1 egress", T1_NETWORK_NAME)
     return T1_NETWORK_NAME
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 64-B — Tier 2 Networked Sandbox
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# T2 inverts T1's policy: egress to the public internet is allowed
+# (ACCEPT-by-default), but all RFC1918 + link-local + ULA destinations
+# are DROPped at iptables. The Python side just owns the docker bridge
+# `omnisight-egress-t2`; the iptables hardening lives in
+# `scripts/setup_t2_network.sh` and must be run once per host with
+# CAP_NET_ADMIN.
+
+async def ensure_t2_network(*, runner=None) -> str:
+    """Idempotent `docker network create omnisight-egress-t2` (bridge)."""
+    if runner is None:
+        from backend.container import _run as runner
+    if await _docker_network_exists(T2_NETWORK_NAME, runner=runner):
+        return T2_NETWORK_NAME
+    rc, _, err = await runner(
+        f"docker network create --driver bridge "
+        f"--label omnisight.tier=2 {T2_NETWORK_NAME}",
+        timeout=15,
+    )
+    if rc != 0:
+        logger.error(
+            "ensure_t2_network: failed to create %s: %s",
+            T2_NETWORK_NAME, err,
+        )
+        raise RuntimeError(f"docker network create failed: {err}")
+    logger.info("created docker network %s for Tier-2 egress", T2_NETWORK_NAME)
+    return T2_NETWORK_NAME
+
+
+async def resolve_t2_network_arg(*, runner=None) -> str:
+    """Always returns ``--network omnisight-egress-t2`` once the bridge
+    is up. T2 is opt-in at the *call site* (via start_networked_container);
+    there is no env double-gate here — the caller is the gate."""
+    try:
+        await ensure_t2_network(runner=runner)
+    except Exception as exc:
+        logger.error(
+            "T2 bridge unavailable (%s) — refusing to launch", exc,
+        )
+        raise
+    return f"--network {T2_NETWORK_NAME}"
 
 
 async def resolve_network_arg(*, runner=None) -> str:
