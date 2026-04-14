@@ -286,6 +286,58 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             "whitelist?"
         )
 
+    # ── Internet-exposure auth (Phase 54 + L1) ──
+    # The single most common foot-gun on first deploy: auth_mode=open
+    # (the default) is fine for a dev box, fatal for an exposed URL.
+    auth_mode = (os.environ.get("OMNISIGHT_AUTH_MODE") or "open").strip().lower()
+    if auth_mode not in {"open", "session", "strict"}:
+        hard_errors.append(
+            f"OMNISIGHT_AUTH_MODE={auth_mode!r} unknown. "
+            "Valid: open / session / strict."
+        )
+    elif auth_mode == "open":
+        msg = (
+            "OMNISIGHT_AUTH_MODE=open — the dashboard treats every "
+            "request as admin. Acceptable on a dev box; never on an "
+            "exposed URL. Set OMNISIGHT_AUTH_MODE=strict in prod."
+        )
+        (hard_errors if strict else warnings).append(msg)
+
+    # The bootstrap admin password ships as `omnisight-admin`. Hard-
+    # fail if that's still in use under prod, so an internet-exposed
+    # instance can't have its default admin trivially logged into.
+    admin_pw = (os.environ.get("OMNISIGHT_ADMIN_PASSWORD") or "").strip()
+    if not admin_pw:
+        warnings.append(
+            "OMNISIGHT_ADMIN_PASSWORD unset — bootstrap admin will use "
+            "the dev default 'omnisight-admin'. SET THIS before exposing "
+            "the URL or change the admin's password via /users/{id}."
+        )
+    elif admin_pw == "omnisight-admin":
+        msg = (
+            "OMNISIGHT_ADMIN_PASSWORD is the literal default "
+            "'omnisight-admin'. Refuse to start in prod — this is a "
+            "well-known credential."
+        )
+        (hard_errors if strict else warnings).append(msg)
+    elif len(admin_pw) < 12:
+        warnings.append(
+            f"OMNISIGHT_ADMIN_PASSWORD is only {len(admin_pw)} chars; "
+            "use at least 12. Better: a passphrase."
+        )
+
+    # When cookies cross a TLS boundary they MUST be `Secure` —
+    # cloudflared terminates HTTPS, but the Secure flag must still be
+    # set so a session cookie can't accidentally leak over a future
+    # plain-HTTP path (custom browser, dev proxy, etc.).
+    if auth_mode != "open" and (os.environ.get("OMNISIGHT_COOKIE_SECURE") or "").strip().lower() != "true":
+        warnings.append(
+            "OMNISIGHT_COOKIE_SECURE not set — session cookies are "
+            "shipped without the Secure flag. Set to 'true' once you "
+            "have HTTPS (Cloudflare Tunnel terminates TLS, so this is "
+            "the right value behind it)."
+        )
+
     # ── Masked summary at startup ──
     _startup_logger.info(
         "config loaded: provider=%s model=%s debug=%s "

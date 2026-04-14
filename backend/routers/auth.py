@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from collections import defaultdict, deque
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -32,6 +34,88 @@ def _cookie_secure() -> bool:
     return (os.environ.get("OMNISIGHT_COOKIE_SECURE") or "").strip().lower() == "true"
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Login brute-force defence
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Rolling per-IP attempt window. Five failed logins in 15 min → 401
+# with `Retry-After` until the oldest attempt ages out. Holds in
+# memory only — restart resets the counter, which is fine because a
+# restart already clears sessions.
+#
+# Tunables via env so security ops can tighten under attack:
+#   OMNISIGHT_LOGIN_MAX_ATTEMPTS=5
+#   OMNISIGHT_LOGIN_WINDOW_S=900       # 15 min
+#
+# IPv4/IPv6 client.host is the key. Behind Cloudflare Tunnel, the
+# real IP arrives as `cf-connecting-ip` header — honour it when present
+# so the limit is per-real-client, not per-tunnel-egress.
+
+_LOGIN_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
+# Cap dict size so a parade of unique source IPs can't OOM the box.
+_LOGIN_ATTEMPTS_MAX_KEYS = 4096
+
+
+def _login_max_attempts() -> int:
+    raw = (os.environ.get("OMNISIGHT_LOGIN_MAX_ATTEMPTS") or "5").strip()
+    try:
+        return max(1, min(100, int(raw)))
+    except ValueError:
+        return 5
+
+
+def _login_window_s() -> float:
+    raw = (os.environ.get("OMNISIGHT_LOGIN_WINDOW_S") or "900").strip()
+    try:
+        return max(60.0, min(86400.0, float(raw)))
+    except ValueError:
+        return 900.0
+
+
+def _client_key(request: Request) -> str:
+    """Real-client IP, preferring CF's `cf-connecting-ip` because behind
+    a Cloudflare Tunnel the immediate peer is always the tunnel."""
+    cf = (request.headers.get("cf-connecting-ip") or "").strip()
+    if cf:
+        return cf
+    return (request.client.host if request.client else "") or "unknown"
+
+
+def _check_login_rate_limit(request: Request) -> None:
+    """Raise 429 if the caller already burned their attempts."""
+    key = _client_key(request)
+    now = time.time()
+    window = _login_window_s()
+    cap = _login_max_attempts()
+
+    # Bound dictionary growth — drop the longest-untouched key when full.
+    if key not in _LOGIN_ATTEMPTS and len(_LOGIN_ATTEMPTS) >= _LOGIN_ATTEMPTS_MAX_KEYS:
+        oldest_key = min(
+            _LOGIN_ATTEMPTS,
+            key=lambda k: _LOGIN_ATTEMPTS[k][-1] if _LOGIN_ATTEMPTS[k] else 0,
+        )
+        _LOGIN_ATTEMPTS.pop(oldest_key, None)
+
+    bucket = _LOGIN_ATTEMPTS[key]
+    cutoff = now - window
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= cap:
+        retry_after = int(bucket[0] + window - now) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many login attempts; retry in {retry_after}s",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _record_failed_login(request: Request) -> None:
+    """Append a failure to the per-IP window. Successful logins
+    intentionally do NOT add to the window — a long-lived legitimate
+    session shouldn't lock out the IP if a roommate later mistypes."""
+    _LOGIN_ATTEMPTS[_client_key(request)].append(time.time())
+
+
 # ── Login / logout / whoami ─────────────────────────────────────
 
 
@@ -42,14 +126,44 @@ class LoginRequest(BaseModel):
 
 @router.post("/auth/login")
 async def login(req: LoginRequest, request: Request, response: Response) -> dict:
+    # Brute-force defence FIRST — never authenticate a request that
+    # already exceeded its window, otherwise password-hash CPU is the
+    # attack vector even when every password is wrong.
+    _check_login_rate_limit(request)
+
     user = await auth.authenticate_password(req.email, req.password)
     if not user:
+        _record_failed_login(request)
+        # Audit the failure with the masked email so log search can
+        # find brute-force fingerprints by IP without leaking which
+        # accounts were probed in cleartext.
+        try:
+            from backend import audit as _audit
+            masked = (req.email[:2] + "***@" + req.email.split("@")[-1]
+                      if "@" in req.email else req.email[:2] + "***")
+            await _audit.log(
+                action="login_failed", entity_kind="auth", entity_id=masked,
+                before={"ip": _client_key(request)},
+                after={"reason": "bad_credentials"},
+            )
+        except Exception as exc:
+            logger.debug("login_failed audit emit failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid email or password")
     sess = await auth.create_session(
         user.id,
-        ip=(request.client.host if request.client else "") or "",
+        ip=_client_key(request),
         user_agent=request.headers.get("user-agent", ""),
     )
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="login_ok", entity_kind="auth", entity_id=user.id,
+            before={"ip": _client_key(request)},
+            after={"role": user.role, "email": user.email},
+            actor=user.email,
+        )
+    except Exception as exc:
+        logger.debug("login_ok audit emit failed: %s", exc)
     secure = _cookie_secure()
     response.set_cookie(
         key=auth.SESSION_COOKIE, value=sess.token,
