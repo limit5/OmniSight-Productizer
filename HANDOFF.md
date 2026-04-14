@@ -192,6 +192,38 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 52-Fix-B — 穩定性修補（2026-04-14）
+
+Fix-A 之後的第二批。重審時將 4 項原審計列項降為誤判（`list_pending`
+copy、`get()` 已在鎖內、`_RULES_LOCK` await-outside、`asyncio.wait_for`
+實際會 cancel），剩下的 6 項合併成 3 個 commit。
+
+| Commit | 項 | 內容 |
+|---|---|---|
+| `9a61ec0` | B7 | 4 個 `threading.Lock` 宣告加 intent docstring；新增 `scripts/check_lock_await.py` 偵測 `with _lock:` 中的 `await`，含 self-test，base clean |
+| `1d84502` | B1+B3 | 新增 `backend/routers/_pagination.py::Limit()`；9 個 list endpoint（decisions / logs / notifications / auto-decisions / audit / simulations / workflow / artifacts / task comments+handoffs）套用 `ge=1, le≤500`；13 bound test |
+| `80435f9` | B2+B4+B5+B6 | 新增 `omnisight_persist_failure_total{module}` counter；notifications skipped/dead persist fail 補 log+metric；budget_strategy SSE、project_report manifest、release git describe、routers/system._sh、observability._watchdog_age_s 補 log.debug/warning |
+
+### 驗收
+
+```
+pytest backend/tests/test_pagination_bounds.py test_silent_catch_logged.py \
+       test_observability.py test_shell_safe.py test_decision_engine.py \
+       test_decision_rules.py test_decision_api.py test_dispatch.py \
+       test_external_webhooks.py test_audit.py test_tools.py
+```
+→ **144 passed, 1 skipped**（skip 為 prometheus_client 不在時的 env-gated
+  case）。
+
+`python3 scripts/check_lock_await.py` → clean ✓。
+
+### 後續
+
+Fix-C (UI/UX) + Fix-D (測試補強) 可並行啟動。Phase 62 Knowledge Generation
+仍等待 Fix-D 完成以確保 workflow_runs 有足夠 coverage 再開。
+
+---
+
 ## Phase 52-Fix-A — 緊急安全修補（2026-04-14）
 
 源自 Fix-A 五項深度審計發現（S1/S2 auth bypass、S3' shell injection、
