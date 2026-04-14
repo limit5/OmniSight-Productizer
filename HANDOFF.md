@@ -105,6 +105,36 @@
 - 前端 Playwright：5 個 E2E，涵蓋 3 panel 呈現 + 2 個 round-trip + SWEEP + SSE 基線
 - 合計 ~267 個自動化 test 全綠
 
+## Phase 50（排程中，尚未開工）— Timeline / Velocity / Decision Rules / Toast
+
+延續 Phase 47 原 plan 中 Autonomous Decision Engine 仍未落地的 UI 能力。拆 4 個 sub-phase，每個自成 commit：
+
+### 50A — Timeline View with deadline awareness + velocity tracking
+- 後端：`GET /pipeline/timeline` 回傳每個 phase 的 `planned_at / started_at / completed_at / deadline_at`；若缺 schedule 資料先從 NPI state 推算
+- 前端：`components/omnisight/pipeline-timeline.tsx`，水平 timeline + 當前進度標記 + 逾期 phase 高亮
+- Velocity：近 7 天已完成 task 數 / 每 phase 平均完成時長，推算 ETA
+- 測試：3 component test + 1 Playwright happy-path
+
+### 50B — Decision Rules Editor
+- 後端：`GET /decision-rules` / `PUT /decision-rules` — 規則 shape `{kind_pattern, severity, auto_in_modes[], default_option_id}`
+- `decision_engine.propose()` 接 rule engine：優先命中 rule 決定 severity/default，否則落回目前 hardcoded policy
+- 前端：`components/omnisight/decision-rules-editor.tsx`（Settings panel 內新 tab），CRUD + 拖拉排序 + "Test against last 20 decisions" 預覽
+- 測試：5 backend unit（rule match precedence）+ 4 component test
+
+### 50C — Notification Toast（approve / reject / undo 路徑）
+- 前端：`components/omnisight/toast-center.tsx` — SSE `decision_pending` 高 severity 時跳 toast；toast 內含 approve/reject 按鈕 + 倒數 bar
+- 與既有 NotificationCenter 不衝突（toast 是即時 overlay，notification 是持久中心）
+- 可鍵盤操作（`A` approve default / `R` reject / `Esc` dismiss）
+- 測試：3 component test（SSE→toast 出現 / approve / auto-dismiss on timeout）
+
+### 50D — Mobile bridge + deep-link
+- Mobile nav 目前有 decisions/budget（48-Fix B 加入）但缺 timeline
+- Timeline view 加 mobile 佈局（垂直）
+- URL deep-link：`/?decision=<id>` 打開指定 decision、`/?panel=timeline` 直達
+- 測試：1 Playwright 路由 test
+
+**預估**：每 sub-phase 1-2 h。整體 ~5-8 h。依照慣例，每 sub-phase 後做深度審計 → 補修 batch。
+
 ---
 
 ## 0. 專案理解與未來開發藍圖
