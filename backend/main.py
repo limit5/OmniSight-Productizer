@@ -170,6 +170,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Internet-exposure auth S4 — security response headers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Defense-in-depth for the exposed URL. Cloudflare's edge will add
+# some of these too; we set them at the origin so a future non-CF
+# path (custom domain, on-prem) still gets them.
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    # Tell browsers "only come back over HTTPS for the next 6 months".
+    # Safe behind Cloudflare Tunnel (TLS is already terminated at CF's
+    # edge). Setting `includeSubDomains` protects api.* and staging.*
+    # on the same zone.
+    response.headers.setdefault(
+        "Strict-Transport-Security",
+        "max-age=15552000; includeSubDomains",
+    )
+    # Refuse to be framed — neutralises most clickjacking vectors.
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    # Disable MIME sniffing — stops browsers from reinterpreting a
+    # JSON response as HTML.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # Strip the Referer on cross-origin so our routes don't leak in
+    # other sites' analytics.
+    response.headers.setdefault(
+        "Referrer-Policy", "strict-origin-when-cross-origin",
+    )
+    # Minimal Permissions-Policy — we don't use these APIs, deny them.
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
+    # CSP. The dashboard is a single Next.js app talking to our own
+    # API + optional Cloudflare tunnel subdomains. Kept strict but
+    # allow inline styles (Tailwind generates some) and blob: for
+    # SVG/image previews. 'unsafe-eval' is intentionally omitted;
+    # Next 16 client bundles don't need it for prod builds.
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self' https:; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'",
+    )
+    return response
+
+
 # Mount routers
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(agents.router, prefix=settings.api_prefix)
