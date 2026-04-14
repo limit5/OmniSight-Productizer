@@ -124,6 +124,163 @@ const TEMPLATES: Template[] = [
       ],
     },
   },
+  // ─── Real-world templates ─────────────────────────────────────
+  // These exist because operators kept asking "how do I write a
+  // DAG that…" and the three above didn't cover it. Each matches
+  // a pattern already present elsewhere in the system — don't
+  // invent new toolchains here, wire to the ones the agents know.
+  {
+    id: "tier-mix",
+    label: "Tier Mix (T1+NET+T3)",
+    description: "Build on T1, download deps over the network, flash on T3. Exercises tier handoffs.",
+    body: {
+      schema_version: 1,
+      dag_id: "SAMPLE-tier-mix",
+      tasks: [
+        {
+          task_id: "build",
+          description: "Compile firmware in the airgapped T1 sandbox",
+          required_tier: "t1",
+          toolchain: "cmake",
+          inputs: [],
+          expected_output: "build/firmware.bin",
+          depends_on: [],
+        },
+        {
+          task_id: "fetch_vendor_blob",
+          description: "Download the proprietary vendor partition from the CDN",
+          required_tier: "networked",
+          toolchain: "http_download",
+          inputs: [],
+          expected_output: "artifacts/vendor.img",
+          depends_on: [],
+        },
+        {
+          task_id: "flash",
+          description: "Write firmware + vendor partition to the target board",
+          required_tier: "t3",
+          toolchain: "flash_board",
+          inputs: ["build/firmware.bin", "artifacts/vendor.img"],
+          expected_output: "logs/flash.log",
+          depends_on: ["build", "fetch_vendor_blob"],
+        },
+      ],
+    },
+  },
+  {
+    id: "cross-compile",
+    label: "Cross-compile (sysroot)",
+    description: "T1 cross-compile for an embedded SoC with explicit sysroot + toolchain file.",
+    body: {
+      schema_version: 1,
+      dag_id: "SAMPLE-cross-compile",
+      tasks: [
+        {
+          task_id: "configure",
+          description: "Run cmake with CMAKE_TOOLCHAIN_FILE + --sysroot for the target platform",
+          required_tier: "t1",
+          toolchain: "cmake",
+          inputs: [],
+          expected_output: "build/CMakeCache.txt",
+          depends_on: [],
+        },
+        {
+          task_id: "compile",
+          description: "Build the cross-compiled firmware image",
+          required_tier: "t1",
+          toolchain: "cmake",
+          inputs: ["build/CMakeCache.txt"],
+          expected_output: "build/app.elf",
+          depends_on: ["configure"],
+        },
+        {
+          task_id: "checkpatch",
+          description: "Run checkpatch.pl --strict before the artifact is considered good",
+          required_tier: "t1",
+          toolchain: "checkpatch",
+          inputs: ["build/app.elf"],
+          expected_output: "reports/checkpatch.log",
+          depends_on: ["compile"],
+        },
+      ],
+    },
+  },
+  {
+    id: "fine-tune",
+    label: "Fine-tune (Phase 65)",
+    description: "Export JSONL → submit backend → poll → eval. Feeds the nightly self-improvement loop.",
+    body: {
+      schema_version: 1,
+      dag_id: "SAMPLE-finetune",
+      tasks: [
+        {
+          task_id: "export_jsonl",
+          description: "Build the training-set JSONL from completed workflow runs (Phase 65 S1)",
+          required_tier: "t1",
+          toolchain: "finetune_export",
+          inputs: [],
+          expected_output: "artifacts/train.jsonl",
+          depends_on: [],
+        },
+        {
+          task_id: "submit_job",
+          description: "Hand the JSONL to the configured backend (noop | openai | unsloth)",
+          required_tier: "networked",
+          toolchain: "finetune_submit",
+          inputs: ["artifacts/train.jsonl"],
+          expected_output: "git:finetune-job-id",
+          depends_on: ["export_jsonl"],
+        },
+        {
+          task_id: "eval_holdout",
+          description: "Compare candidate vs baseline against configs/iq_benchmark/holdout-finetune.yaml",
+          required_tier: "networked",
+          toolchain: "finetune_eval",
+          inputs: ["git:finetune-job-id"],
+          expected_output: "reports/finetune-eval.json",
+          depends_on: ["submit_job"],
+        },
+      ],
+    },
+  },
+  {
+    id: "diff-patch",
+    label: "Diff-Patch (Phase 67-B)",
+    description: "Generate a unified diff, review via DE, apply under the workspace lock.",
+    body: {
+      schema_version: 1,
+      dag_id: "SAMPLE-diff-patch",
+      tasks: [
+        {
+          task_id: "propose_patch",
+          description: "Ask the specialist for a focused diff against the failing module",
+          required_tier: "t1",
+          toolchain: "patch_propose",
+          inputs: [],
+          expected_output: "artifacts/proposal.diff",
+          depends_on: [],
+        },
+        {
+          task_id: "dry_run",
+          description: "git apply --check so we know the patch is clean before the DE sees it",
+          required_tier: "t1",
+          toolchain: "git",
+          inputs: ["artifacts/proposal.diff"],
+          expected_output: "logs/dry-run.log",
+          depends_on: ["propose_patch"],
+        },
+        {
+          task_id: "apply",
+          description: "Apply the approved patch (DE proposal `patch/apply` must be accepted first)",
+          required_tier: "t1",
+          toolchain: "git",
+          inputs: ["artifacts/proposal.diff"],
+          expected_output: "git:HEAD",
+          depends_on: ["dry_run"],
+        },
+      ],
+    },
+  },
 ]
 
 // ─── Component ──────────────────────────────────────────────────────
