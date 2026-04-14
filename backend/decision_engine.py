@@ -241,8 +241,10 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
             "over_cap": max(0, cur_inflight - new_cap),
         }
         _bus.publish("mode_changed", payload)
-    except Exception:
-        pass
+    except Exception as _exc:
+        # L#44: log at warning — mode changes are audit-relevant; silent
+        # swallow hid broken event bus wiring in the past.
+        logger.warning("mode_changed publish failed: %s", _exc)
     logger.info("OperationMode: %s → %s", prev.value, mode.value)
     return mode
 

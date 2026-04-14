@@ -29,12 +29,10 @@ from backend.events import emit_agent_update, emit_invoke
 router = APIRouter(prefix="/invoke", tags=["invoke"])
 
 # Concurrency guard — Phase 47A replaces the single-slot lock with a
-# mode-aware semaphore owned by decision_engine. In Manual/Supervised mode
-# the cap is still 1-2 (legacy behavior); FullAuto=4 / Turbo=8 unlock real
-# parallelism. The module-level `_invoke_lock` remains for backward compat
-# (tests and `.locked()` polling) but is now a degenerate semaphore-backed
-# facade that checks the real budget lazily.
-_invoke_lock = asyncio.Lock()  # kept for legacy `.locked()` callers
+# mode-aware semaphore owned by decision_engine (full_auto=4, turbo=8).
+# Removed in M-Cluster 5 audit fix (R2 #29): `_invoke_lock` had no
+# remaining callers — grep confirmed only the declaration referenced
+# it. Real concurrency is owned by `_invoke_slot()` below.
 
 
 def _invoke_slot():

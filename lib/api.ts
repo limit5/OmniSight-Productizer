@@ -5,9 +5,26 @@
 
 // Use relative path — Next.js rewrites proxy /api/v1/* to the Python backend.
 // This avoids CORS and WSL2↔Windows networking issues.
-const API_V1 = process.env.NEXT_PUBLIC_API_URL
-  ? `${process.env.NEXT_PUBLIC_API_URL}/api/v1`
-  : "/api/v1"
+// R2 #37: if NEXT_PUBLIC_API_URL is set, validate it looks like a URL
+// before handing it to EventSource / fetch. A malformed value fails
+// loud here instead of throwing deep inside the streaming code.
+function _resolveApiBase(): string {
+  const env = process.env.NEXT_PUBLIC_API_URL
+  if (!env) return "/api/v1"
+  try {
+    new URL(env)  // throws on invalid
+  } catch {
+    // Dev-time signal; still fall back to relative so the app works.
+    if (typeof console !== "undefined") {
+      console.error(
+        `[api] NEXT_PUBLIC_API_URL=${env} is not a valid URL; falling back to /api/v1`,
+      )
+    }
+    return "/api/v1"
+  }
+  return `${env.replace(/\/+$/, "")}/api/v1`
+}
+const API_V1 = _resolveApiBase()
 
 // ─── Persistent SSE Events ───
 
