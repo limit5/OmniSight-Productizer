@@ -276,17 +276,30 @@ c1037fc D3: budget-strategies + troubleshooting × 4 langs
 ```
 （F1 tutorials + HANDOFF 本段為本次 commit）
 
-## Phase 51-55（未來排程）
+## Phase 51-57（未來排程）
 
 為 Phase 50 完成後的下一批工作。每個 phase 維持既有節奏：實作 → 深度審計 → 補修 batch → commit。
 
-### Phase 51 — Backend coverage + CI pipeline
-讓 Python 測試與前端同級可觀測。
+> **2026-04-14 更新**：吸收 [vercel-labs/open-agents](https://github.com/vercel-labs/open-agents)
+> 深度比較分析的結論。已將 6 項可借鑑模式對齊到既有 phase，新增
+> **Phase 56**（durable workflow checkpointing）與 **Phase 57**（AI SDK
+> wire-protocol + 語音輸入），並於 Phase 47-Fix 加入 **Batch E**
+> （docker pause/resume hibernate）作為 stuck-remediation 第 5 個 strategy。
+> 詳見本段末「Open Agents 借鑑分析」。
+
+### Phase 51 — Backend coverage + CI pipeline + schema migrations
+讓 Python 測試與前端同級可觀測，同時把手刻 ALTER TABLE 升級成正式 migration 工具。
 - `pytest-cov` 安裝 + `pyproject.toml` 設定（或 pytest.ini），coverage source 限制 `backend/`
 - `.github/workflows/ci.yml`：跑 ruff / pytest（batched by folder）/ vitest / playwright（install deps: chromium-deps）
 - Coverage threshold：`backend/decision_engine`, `stuck_detector`, `ambiguity`, `budget_strategy`, `pipeline` ≥ 85%；其餘 ≥ 60%
 - 補齊 Phase 47 尚未被測的分支（`_handle_llm_error` 的 budget-strategy 接入路徑、`_apply_stuck_remediation` 每個 strategy 分支）
-- 產出：`coverage.xml` + HTML report，CI artifact
+- **新增（Open Agents 借鑑）**：引入 **Alembic** migration tool（Open Agents 用
+  `drizzle-kit`，Python 對應品為 Alembic）。
+  - `backend/db.py` 的 `_migrate()` 手刻 ALTER TABLE 區塊改寫為 Alembic env，每個 migration 一個版本檔
+  - 既有 12 表的 schema 反向產出第一個 baseline migration
+  - Phase 50-Fix M1 的 PRAGMA-fail-fast 邏輯保留，作為 Alembic 之外的 invariant 防線
+  - CI 加 `alembic upgrade head` 步驟確保新 schema 都過 dry-run
+- 產出：`coverage.xml` + HTML report、CI artifact、`backend/alembic/versions/*.py`
 
 ### Phase 52 — Production observability
 把系統從「能跑」升級到「能線上」。
@@ -306,15 +319,29 @@ Decision 有記錄但目前無保留策略、無 actor 追蹤、無 tamper-evide
 - 保留策略 config：`OMNISIGHT_AUDIT_RETENTION_DAYS`（默認 365），超出由 nightly task 歸檔至 `audit_archive/{year-month}.jsonl.gz`
 - GDPR 友善：`actor` 可為 hash（隱匿實姓）；`redact_fields` config
 - 產出：audit chain 完整性驗證 CLI `python -m backend.audit verify`
+- **設計沿用**：Phase 50-Fix Cluster 5（A1）建立的 `replace_decision_rules
+  + load_from_db` 樣式可直接套用到 audit_log 的歸檔 CLI
 
-### Phase 54 — RBAC + authenticated sessions
-取代目前「optional bearer token」這個過渡方案。
+### Phase 54 — RBAC + authenticated sessions + GitHub App
+取代目前「optional bearer token」這個過渡方案，順帶把 GitHub PAT 升級為 App。
 - Session-based auth（cookie + CSRF token），支援 OIDC（Google/GitHub/自建）
 - User model：`id, email, role ∈ {viewer, operator, admin}`
 - Per-endpoint role gate：mode=turbo 只 admin；approve destructive decision 只 operator+；/audit 全 role 可讀但 actor filter 強制自己
 - Settings UI 加 User Management（admin only）
 - Migration：若未啟用 OIDC，維持單用戶本地模式（default admin）以免破壞既有 dev 流程
-- 產出：驗證矩陣（role × action → allow/deny）tests + 前端 role-aware UI（disabled vs hidden）
+- **新增（Open Agents 借鑑）**：**GitHub App 取代 PAT**
+  - Open Agents 用 installation-based GitHub App（org 級授權 +
+    per-installation token + 細權限：`Contents: write` /
+    `Pull requests: write`）
+  - 新增 `backend/github_app.py`：`PyGithub` + `pyjwt` 實作
+    App JWT → installation token cache（5 min TTL）
+  - DB 新表 `github_installations` (id, account_login,
+    installation_id, repos[], created_at)
+  - Settings UI 加「Install GitHub App」按鈕；callback 寫入 installation
+  - `OMNISIGHT_GITHUB_TOKEN` PAT 路徑保留為 fallback（向後相容）
+  - 補強 Phase 18 既有 GitHub 整合
+- 產出：驗證矩陣（role × action → allow/deny）tests + 前端 role-aware UI
+  （disabled vs hidden）+ GitHub App webhook handler
 
 ### Phase 55 — Agent plugin system
 新增 agent type 目前要改 Python 核心；目標是配置化。
@@ -325,9 +352,127 @@ Decision 有記錄但目前無保留策略、無 actor 追蹤、無 tamper-evide
 - 範例：加 `ai_safety_reviewer` plugin、`security_audit` plugin，不碰 core
 - 產出：2 個示範 plugin YAML + loader tests + 前端 plugin picker UI
 
+### Phase 56 — Durable Workflow Checkpointing（**新增 / Open Agents 借鑑 #1**）
+
+當前 `pipeline.py` / `invoke.py` 是手刻 watchdog（30 min timeout）+
+asyncio.Lock；後端 crash → in-flight invoke 全部丟。Open Agents 用 Vercel
+Workflows SDK 提供 **durable multi-step execution**：每 step idempotent
+checkpoint、stream reconnect 可從上一個 step 接續。我們用同模式但不綁
+Vercel 平台。
+
+- 新增 `backend/workflow.py` + DB 表：
+  ```sql
+  CREATE TABLE workflow_runs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,            -- "invoke" | "pipeline_phase" | "decision_chain"
+    started_at REAL NOT NULL,
+    completed_at REAL,
+    status TEXT NOT NULL,          -- "running" | "completed" | "failed" | "halted"
+    last_step_id TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
+  );
+  CREATE TABLE workflow_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES workflow_runs(id),
+    idempotency_key TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    completed_at REAL,
+    output_json TEXT,
+    error TEXT,
+    UNIQUE(run_id, idempotency_key)
+  );
+  ```
+- LangGraph node 入口 / 出口透過 `@workflow_step` decorator 自動 checkpoint
+- 新端點 `POST /invoke/resume?run_id=…` 從最後成功 step 之後續跑
+- 配合 Phase 50-Fix #18 EventBus dead queue 的記憶體無界成長修復，把
+  in-flight decision 也納入 workflow_runs 追蹤
+- 前端 `app/page.tsx` 加「Resume in-flight runs」notification banner
+- 估時：8-10 h；產出：跨重啟可續執行的 invoke、watchdog timeout race
+  根本解、decision queue 隨 run 自動清理
+
+### Phase 57 — AI SDK wire-protocol + 語音輸入（**新增 / Open Agents 借鑑 #2 + #5**）
+
+Open Agents `apps/web` 用 Vercel AI SDK (`ai`, `@ai-sdk/react`) 統一 chat
+streaming UX。我們前端 `package.json` 已裝了 8 個 `@ai-sdk/*` provider
+client，但 backend FastAPI 是直接呼 SDK，wire 格式不符 SDK 的 UI message
+stream protocol。
+
+- **AI SDK wire protocol**
+  - `backend/routers/chat.py` 的 `streamChat` 改為輸出 SDK v5 streaming
+    format（`0:"text"` / `2:[{toolCallId,...}]` / `9:{...}` /
+    `d:{finishReason,usage}`）
+  - 前端 `lib/api.ts` 的 `streamChat()` / `streamInvoke()` 改用
+    `useChat()` hook
+  - 把 Phase 50-Fix Cluster 3 修的 `stream_truncated` 邏輯收斂成 SDK
+    內建的 `onError` callback
+  - `Orchestrator AI` panel 改為 `<Conversation>` 元件（@ai-sdk/react），
+    streaming UX 與 Vercel AI Playground 一致
+- **語音輸入（Open Agents #5 借鑑）**
+  - 加 `lib/voice.ts` wrapper：`@ai-sdk/elevenlabs` Speech-to-Text
+  - ⌘K palette 加「🎤 Voice command」入口（按住空白鍵 push-to-talk）
+  - Mic 錄音 → 文字 → dispatch 為 slash command（與既有 Orchestrator 命令系統共軌）
+  - `OMNISIGHT_ELEVENLABS_API_KEY` env 可選；未設則 mic 按鈕 disabled + tooltip
+- 估時：8-10 h（AI SDK 整合）+ 4 h（語音）= 12-14 h；產出：與業界
+  AI dashboard 一致的 chat UX、無痛切到任何 AI SDK 相容前端
+
+### 既有 Phase 47-Fix 補充：Batch E（**Open Agents 借鑑 #4**）
+
+stuck_detector 目前提案 4 種補救：`switch_model` / `spawn_alternate` /
+`escalate` / `retry_same`。Open Agents 的 sandbox **snapshot-based hibernate**
+很適合作為第 5 種 lightweight 策略：
+
+- 新 strategy `hibernate_and_wait`：
+  - `docker pause <container>` 凍結 agent 但保留 worktree state
+  - DB 加 `agents.hibernated_at` 欄位
+  - 操作員回來時 `docker unpause` resume；超過 24 h 自動 `docker rm`
+- MODE = MANUAL 時預設 idle 即 hibernate（省 LLM token + container CPU）
+- 估時 3 h；併入 47-Fix 既有 batch 序列
+
 ---
 
-**總體估時**：51 大約 4-6 h（多是 config 調整 + CI 配線），52 大約 6-8 h（metrics 要 instrument 很多點），53 大約 5-7 h，54 大約 8-12 h（auth 本來就耗），55 大約 6-10 h。合計 ~29-43 h，橫跨多個工作單元。
+### 總體估時
+
+| Phase | 主題 | 估時 |
+|---|---|---|
+| 51 | Backend coverage + CI + **Alembic** | 5-7 h（+1 h Alembic）|
+| 52 | Production observability | 6-8 h |
+| 53 | Audit & compliance | 5-7 h |
+| 54 | RBAC + sessions + **GitHub App** | 14-18 h（+6 h GitHub App）|
+| 55 | Agent plugin system | 6-10 h |
+| **56** | **Durable workflow checkpointing** | **8-10 h** |
+| **57** | **AI SDK wire-protocol + voice** | **12-14 h** |
+| 47-Fix Batch E | docker pause hibernate | 3 h |
+| **合計** | | **~59-77 h** |
+
+橫跨多個工作單元；建議順序為 **51 → 56 → 53 → 54 → 52 → 57 → 55**：
+先把 CI/coverage 立起來才能放心改 architecture（51）；workflow
+checkpointing 是 audit 與 RBAC 的前置（每 step 寫 audit、role 化 step
+retry 權限），先做 56；最後 57 屬於使用者體驗 polish，可獨立執行。
+
+---
+
+## Open Agents 借鑑分析（2026-04-14）
+
+完整深度比較見對話歷史；以下為 **wontfix 決策**（不採用的部分）與
+**rationale**，避免未來重複評估：
+
+| 拒絕項 | Rationale |
+|---|---|
+| **Vercel Workflows SDK 直接套用** | 平台綁死 Vercel；OmniSight 是 self-host / WSL2 / 邊緣部署友善。借鑑「step checkpointing」模式但自實作為 Phase 56 |
+| **Vercel Sandbox 取代 Docker** | 我們 sandbox 要做 aarch64 cross-compile + QEMU + Valgrind + RTK 壓縮，Vercel Sandbox 為一般 Linux VM 不支援 |
+| **PostgreSQL 取代 SQLite** | 單機 dashboard 為主、12 表規模合理；Postgres 引入部署複雜度而無對應收益。Phase 53 audit chain 需要再評估 |
+| **Drizzle ORM** | JS 生態，不適 Python 後端；對應品 Alembic 已於 Phase 51 排入 |
+| **Open Agents 的 Skills / Subagents 模型** | 我們 8 agent type × 19 role skill + 4 個 Anthropic Skills（webapp-testing/pdf/xlsx/mcp-builder）已更成熟，反向借鑑無收益 |
+| **Session 唯讀分享連結** | 我們的 `?panel=…&decision=…` 深鏈 + Phase 50-Docs 已涵蓋 80% 共享需求；做 read-only token 屬 Phase 54 RBAC 範疇 |
+
+**已採納項**（如上 Phase 51 / 54 / 56 / 57 / 47-Fix Batch E 所列）：
+
+1. Step-checkpointed durable workflow → **Phase 56**
+2. GitHub App installation-based auth → **Phase 54** 擴充
+3. docker pause hibernate as stuck strategy → **47-Fix Batch E**
+4. Alembic migration tool（drizzle-kit 對應品）→ **Phase 51** 擴充
+5. AI SDK v5 wire protocol + `useChat()` hook → **Phase 57**
+6. ElevenLabs 語音輸入 → **Phase 57**
 
 ---
 
