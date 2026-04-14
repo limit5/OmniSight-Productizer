@@ -247,6 +247,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 67-D: RAG pre-fetch outcomes on step error ──────────
+    rag_prefetch_total = Counter(
+        "omnisight_rag_prefetch_total",
+        "RAG pre-fetch outcomes: injected / no_hit / below_confidence / search_error",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -288,6 +296,7 @@ else:
     prompt_cache_miss_total = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
     intelligence_iq_regression_total = _NoOp()  # type: ignore
+    rag_prefetch_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -315,6 +324,7 @@ def reset_for_tests() -> None:
     global dag_validation_total, dag_validation_error_total
     global prompt_cache_hit_total, prompt_cache_miss_total
     global intelligence_iq_score, intelligence_iq_regression_total
+    global rag_prefetch_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -436,6 +446,11 @@ def reset_for_tests() -> None:
         "omnisight_intelligence_iq_regression_total",
         "IQ regression events",
         labelnames=("model",), registry=REGISTRY,
+    )
+    rag_prefetch_total = Counter(
+        "omnisight_rag_prefetch_total",
+        "RAG pre-fetch outcomes",
+        labelnames=("result",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

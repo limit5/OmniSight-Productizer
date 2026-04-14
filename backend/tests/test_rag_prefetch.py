@@ -1,0 +1,266 @@
+"""Phase 67-D — RAG pre-fetch on step error."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+
+import pytest
+
+from backend import rag_prefetch as rp
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Tunables from env
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_min_confidence_default(monkeypatch):
+    monkeypatch.delenv("OMNISIGHT_RAG_MIN_CONFIDENCE", raising=False)
+    assert rp._min_confidence() == 0.5
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("0.7", 0.7),
+    ("0.0", 0.0),
+    ("1.0", 1.0),
+    ("2.5", 1.0),   # clamped
+    ("-1", 0.0),    # clamped
+    ("nope", 0.5),  # invalid → default
+])
+def test_min_confidence_env_override(monkeypatch, raw, expected):
+    monkeypatch.setenv("OMNISIGHT_RAG_MIN_CONFIDENCE", raw)
+    assert rp._min_confidence() == expected
+
+
+def test_top_k_default(monkeypatch):
+    monkeypatch.delenv("OMNISIGHT_RAG_TOP_K", raising=False)
+    assert rp._top_k() == 3
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("5", 5), ("1", 1), ("0", 1), ("15", 10), ("abc", 3),
+])
+def test_top_k_env_override(monkeypatch, raw, expected):
+    monkeypatch.setenv("OMNISIGHT_RAG_TOP_K", raw)
+    assert rp._top_k() == expected
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  extract_signature
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_extract_signature_empty_returns_empty():
+    assert rp.extract_signature("") == ""
+
+
+def test_extract_signature_segfault():
+    log = "some noise\nSegmentation fault (core dumped)\nmore noise"
+    sig = rp.extract_signature(log)
+    assert "Segmentation fault" in sig
+
+
+def test_extract_signature_gcc_error():
+    log = "src/foo.c:42:7: error: 'bar' undeclared (first use in this function)"
+    sig = rp.extract_signature(log)
+    assert "undeclared" in sig
+
+
+def test_extract_signature_python_traceback():
+    log = "Traceback (most recent call last):\n  File ...\nValueError: invalid literal for int()"
+    sig = rp.extract_signature(log)
+    assert "ValueError" in sig
+
+
+def test_extract_signature_undefined_reference():
+    log = "ld: undefined reference to `pthread_create'\ncollect2: error: ld returned 1"
+    sig = rp.extract_signature(log)
+    assert "undefined reference to" in sig
+
+
+def test_extract_signature_valgrind():
+    log = ("==12345== Invalid read of size 4\n"
+           "==12345==    at 0x...: foo (bar.c:42)")
+    sig = rp.extract_signature(log)
+    assert "Invalid read of size 4" in sig
+
+
+def test_extract_signature_respects_max_len():
+    long_msg = "error: " + ("X" * 5000)
+    sig = rp.extract_signature(long_msg, max_len=80)
+    assert len(sig) <= 80
+
+
+def test_extract_signature_uses_log_tail_not_head():
+    """A 5MB gcc output with the actual error in the last KB must still
+    match — we only scan the tail."""
+    head = "note: stuff\n" * 10000  # lots of benign noise
+    tail = "error: the actual problem here"
+    sig = rp.extract_signature(head + tail)
+    assert "actual problem" in sig
+
+
+def test_extract_signature_no_match_returns_empty():
+    log = "Build succeeded in 2.3s\nWarning: nothing fatal"
+    # "warning" isn't in the pattern list; this should NOT yield a sig.
+    sig = rp.extract_signature(log)
+    assert sig == ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  format_block — determinism + truncation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _hit(memory_id, q, err="oops", sol="fix it", vendor="", sdk=""):
+    return rp.PrefetchHit(
+        memory_id=memory_id, error_signature=err, solution=sol,
+        quality_score=q, soc_vendor=vendor, sdk_version=sdk,
+    )
+
+
+def test_format_block_is_deterministic():
+    """Same hits → byte-identical output (required for cache prefix stability)."""
+    hits = [_hit("m1", 0.9), _hit("m2", 0.7), _hit("m3", 0.9)]
+    a = rp.format_block(hits)
+    b = rp.format_block(list(reversed(hits)))  # input order must not matter
+    assert a == b
+
+
+def test_format_block_sorts_by_quality_desc_then_id_asc():
+    hits = [_hit("b", 0.7), _hit("c", 0.9), _hit("a", 0.9)]
+    out = rp.format_block(hits)
+    # first solution shown should be the 0.9-score "a" (id tie-break).
+    idx_a = out.find("id='a'")
+    idx_c = out.find("id='c'")
+    idx_b = out.find("id='b'")
+    assert idx_a < idx_c < idx_b
+
+
+def test_format_block_wraps_with_expected_tags():
+    out = rp.format_block([_hit("m1", 0.9)])
+    assert out.startswith("<related_past_solutions>")
+    assert out.endswith("</related_past_solutions>")
+    assert "<solution" in out
+
+
+def test_format_block_truncates_long_solutions():
+    sol = "X" * 5000
+    out = rp.format_block([_hit("m1", 0.9, sol=sol)], max_solution_chars=100)
+    assert "[truncated]" in out
+    # Body should be capped; no 5000-char run of X's.
+    assert "X" * 1000 not in out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  prefetch_for_error — end to end
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@pytest.fixture()
+async def fresh_db(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "t.db")
+        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
+        from backend import config as cfg
+        cfg.settings.database_path = path
+        from backend import db
+        db._DB_PATH = db._resolve_db_path()
+        await db.init()
+        try:
+            yield db
+        finally:
+            await db.close()
+
+
+async def _seed(db, *, mid: str, err: str, sol: str, q: float,
+                vendor: str = "", sdk: str = ""):
+    await db.insert_episodic_memory({
+        "id": mid, "error_signature": err, "solution": sol,
+        "soc_vendor": vendor, "sdk_version": sdk, "hardware_rev": "",
+        "source_task_id": "", "source_agent_id": "",
+        "gerrit_change_id": "", "tags": "", "quality_score": q,
+    })
+
+
+@pytest.mark.asyncio
+async def test_rc_zero_never_prefetches(fresh_db):
+    """rc=0 means no error; the pre-fetch must be a no-op even if L3
+    happens to contain a match for something in the log."""
+    await _seed(fresh_db, mid="m1", err="Segmentation fault",
+                sol="init the pointer", q=0.9)
+    out = await rp.prefetch_for_error("Segmentation fault somewhere", rc=0)
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_no_signature_match_returns_none(fresh_db):
+    out = await rp.prefetch_for_error("build succeeded in 2.3s", rc=1)
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_below_confidence_returns_none(fresh_db, monkeypatch):
+    await _seed(fresh_db, mid="low", err="Segmentation fault",
+                sol="try A", q=0.3)
+    monkeypatch.setenv("OMNISIGHT_RAG_MIN_CONFIDENCE", "0.5")
+    out = await rp.prefetch_for_error(
+        "Segmentation fault (core dumped)", rc=139,
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_high_confidence_injects_block(fresh_db):
+    await _seed(fresh_db, mid="good", err="Segmentation fault",
+                sol="initialise the pointer before deref", q=0.9)
+    out = await rp.prefetch_for_error(
+        "something something Segmentation fault here", rc=139,
+    )
+    assert out is not None
+    assert "<related_past_solutions>" in out
+    assert "initialise the pointer" in out
+
+
+@pytest.mark.asyncio
+async def test_top_k_caps_results(fresh_db, monkeypatch):
+    for i in range(5):
+        await _seed(fresh_db, mid=f"m{i}", err="Segmentation fault",
+                    sol=f"sol {i}", q=0.8)
+    monkeypatch.setenv("OMNISIGHT_RAG_TOP_K", "2")
+    out = await rp.prefetch_for_error(
+        "Segmentation fault boom", rc=139,
+    )
+    assert out is not None
+    assert out.count("<solution") == 2
+
+
+@pytest.mark.asyncio
+async def test_search_error_returns_none_not_raise(fresh_db, monkeypatch):
+    """DB failure on the error path must never bubble up — the caller's
+    retry loop shouldn't die because of a pre-fetch hiccup."""
+    from backend import db
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("fts5 melted")
+    monkeypatch.setattr(db, "search_episodic_memory", boom)
+
+    out = await rp.prefetch_for_error("Segmentation fault here", rc=1)
+    assert out is None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  inject_into_builder — prompt_cache integration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_inject_into_builder_adds_static_kb():
+    from backend.prompt_cache import CachedPromptBuilder
+    b = CachedPromptBuilder()
+    rp.inject_into_builder(b, "<related_past_solutions>…</related_past_solutions>")
+    kinds = [s.kind for s in b.segments]
+    assert "static_kb" in kinds
+
+
+def test_inject_into_builder_noop_on_empty():
+    from backend.prompt_cache import CachedPromptBuilder
+    b = CachedPromptBuilder()
+    rp.inject_into_builder(b, "")
+    rp.inject_into_builder(b, None)  # type: ignore[arg-type]
+    assert b.segments == []
