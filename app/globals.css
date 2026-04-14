@@ -1258,8 +1258,9 @@ html {
   color: var(--foreground, #e2e8f0);
 }
 .doc-article h1 { font-family: var(--font-sans); font-size: 28px; margin: 20px 0 12px; color: var(--neural-cyan, #67e8f9); letter-spacing: 0.04em; }
-.doc-article h2 { font-size: 20px; margin: 22px 0 8px; color: var(--neural-blue, #60a5fa); border-bottom: 1px solid rgba(148,163,184,0.15); padding-bottom: 4px; }
-.doc-article h3 { font-size: 16px; margin: 16px 0 6px; color: var(--neural-cyan, #67e8f9); }
+.doc-article h2 { font-size: 20px; margin: 22px 0 8px; color: var(--neural-blue, #60a5fa); border-bottom: 1px solid rgba(148,163,184,0.15); padding-bottom: 4px; scroll-margin-top: 24px; }
+.doc-article h3 { font-size: 16px; margin: 16px 0 6px; color: var(--neural-cyan, #67e8f9); scroll-margin-top: 24px; }
+.doc-article h2[id], .doc-article h3[id] { scroll-margin-top: 24px; }
 .doc-article h4 { font-size: 14px; margin: 14px 0 4px; color: var(--foreground); opacity: 0.9; }
 .doc-article p  { margin: 6px 0; }
 .doc-article a  { color: var(--neural-cyan, #67e8f9); text-decoration: underline; text-underline-offset: 2px; }

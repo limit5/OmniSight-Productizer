@@ -22,7 +22,46 @@
  *   [text](url)               <a> — .md suffix stripped for Next.js routes
  */
 
-export function mdToHtml(src: string): string {
+export interface TocEntry {
+  level: 2 | 3
+  text: string
+  id: string
+}
+
+/** Parse markdown headings (## / ###) into a flat TOC list with URL
+ * slugs matching the ids injected by `mdToHtml` when `opts.withIds`
+ * is set. Unicode-safe slug (strips punctuation, collapses whitespace).
+ */
+export function extractToc(src: string): TocEntry[] {
+  const out: TocEntry[] = []
+  const seen = new Map<string, number>()
+  for (const line of src.split(/\r?\n/)) {
+    const m = /^(##|###)\s+(.*)$/.exec(line)
+    if (!m) continue
+    const level = m[1].length as 2 | 3
+    const text = m[2].trim()
+    const baseId = slugify(text)
+    const n = (seen.get(baseId) ?? 0) + 1
+    seen.set(baseId, n)
+    const id = n === 1 ? baseId : `${baseId}-${n}`
+    out.push({ level, text, id })
+  }
+  return out
+}
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[`*_~]/g, "")
+    .replace(/[^\p{L}\p{N}\s-]+/gu, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    || "section"
+}
+
+export function mdToHtml(src: string, opts?: { withIds?: boolean }): string {
   const esc = (s: string) =>
     s
       .replaceAll("&", "&amp;")
@@ -35,6 +74,7 @@ export function mdToHtml(src: string): string {
   let inCode = false
   let inTable = false
   let inList: "ul" | "ol" | null = null
+  const headingCounts = new Map<string, number>()
 
   const closeList = () => {
     if (inList) {
@@ -86,13 +126,24 @@ export function mdToHtml(src: string): string {
       continue
     }
 
-    // Headings
+    // Headings — optionally embed an id so the TOC can anchor-link.
     const h = /^(#{1,4})\s+(.*)$/.exec(line)
     if (h) {
       closeList()
       closeTable()
       const n = h[1].length
-      out.push(`<h${n}>${inline(h[2])}</h${n}>`)
+      if (opts?.withIds && (n === 2 || n === 3)) {
+        const baseId = slugify(h[2])
+        const key = `${n}:${baseId}`
+        const prev = headingCounts.get(baseId) ?? 0
+        const nth = prev + 1
+        headingCounts.set(baseId, nth)
+        const id = nth === 1 ? baseId : `${baseId}-${nth}`
+        out.push(`<h${n} id="${id}">${inline(h[2])}</h${n}>`)
+        void key
+      } else {
+        out.push(`<h${n}>${inline(h[2])}</h${n}>`)
+      }
       continue
     }
 
