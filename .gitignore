@@ -42,6 +42,11 @@ backend/artifacts/
 /coverage/
 /.vitest-cache/
 
+# Playwright
+/test-results/
+/playwright-report/
+/playwright/.cache/
+
 # agent isolated workspaces
 .agent_workspaces/
 

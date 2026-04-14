@@ -87,8 +87,23 @@
 ## Phase 49（前端測試框架）
 - **49A**（`2666c34`）：Vitest + jsdom + @testing-library/react + jest-dom + happy-dom 安裝，`vitest.config.ts` / `test/setup.ts` / `package.json` scripts（test / test:watch / test:ui），MockEventSource 伺服器端渲染 polyfill，4 個 smoke tests 綠
 - **49B**（`0cc95c1`）：ModeSelector 6 + BudgetStrategyPanel 4 = 10 個 component tests — 覆蓋初始載入 / PUT / peer SSE / 錯誤路徑 / compact 3-letter guard / unmount cleanup
-- **49C**（本 commit）：DecisionDashboard 9 tests — list merge（_pending → 加入、_resolved → 移到 history）、approve/reject/undo、SWEEP loading、countdown（fake timers 驗證 < 10s 變紅）、RETRY 路徑
-- **總計**：23 個前端 tests 全綠，執行 ~1s，與後端 200+ 個 pytest 合組首次 frontend+backend 雙軌驗證
+- **49C**（`639d113`）：DecisionDashboard 9 tests — list merge（_pending → 加入、_resolved → 移到 history）、approve/reject/undo、SWEEP loading、countdown（fake timers 驗證 < 10s 變紅）、RETRY 路徑
+
+## Phase 49-Fix（測試框架深度審計補修）
+- **Batch A**（`f0194d3`）：**N2** shared-SSE 整合測試（7 real-api cases）、**N1** MockEventSource close 清 listeners、**N5** emitError、**N3+N4** fake-timer isolation（try/finally + pin date）、**N6** compact label 斷言強化（radio.textContent 精確比對）、**N10** history 排序測試
+- **Batch B**（`80335b2`）：**N7** `@vitest/coverage-v8` + thresholds（scoped to 3 Phase 48 components）、**N9** 拔 happy-dom、**N11** alias sync 檢查、**N8** 文件化非契約
+
+## Phase 49E（Playwright E2E browser-level）
+- 安裝 `@playwright/test` + Chromium（系統缺 `libnspr4`/`libnss3`/`libasound2`，用 `apt download` 抓 deb 解到 `~/.local/lib/playwright-deps`，透過 `OMNISIGHT_PW_LIB_DIR` 注入 LD_LIBRARY_PATH）
+- `playwright.config.ts`：自動啟動 backend（uvicorn :18830）+ Next.js dev（:3100）兩個 webServer
+- `e2e/decision-happy-path.spec.ts` — 5 tests 全綠：頁面掛載 3 個 panel、mode 切換 round-trip、budget 切換 round-trip、SWEEP button、SSE 決策表面穩定
+- 實務心得：Turbopack 開發模式 React hydration 後 re-render 不穩，E2E 斷言在「browser fetch 透過 Next rewrite → backend」這層最可靠；UI aria-checked sync 後斷言會間歇性 flake，改為驗證 round-trip + 重新載入後再 fetch 確認
+
+## 全家桶總計（commit 範圍 `67506d2..HEAD`）
+- 後端 pytests：230+ 個，coverage 未量（Python 側不在本 phase 範圍）
+- 前端 vitest：32 個（smoke 4 + components 19 + integration 7 + alias 1 + smoke 1），Phase 48 component coverage: lines 97.4% / statements 90.5% / functions 93.3% / branches 75%
+- 前端 Playwright：5 個 E2E，涵蓋 3 panel 呈現 + 2 個 round-trip + SWEEP + SSE 基線
+- 合計 ~267 個自動化 test 全綠
 
 ---
 
