@@ -192,6 +192,65 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 64-A — Tier-1 Sandbox Hardening 完成（2026-04-14）
+
+設計源：`docs/design/tiered-sandbox-architecture.md`。整個 Phase 64
+拆為 A/B/C/D，本次完成 A 全部六子任務。
+
+### 子任務與 commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | gVisor (`runsc`) opt-in + runc fallback + cached probe | `a192ba4` |
+| S2 | T1 egress 雙 gate + `omnisight-egress-t1` bridge + iptables operator script | `9ae5134` |
+| S3 | image digest allow-list（拒絕 fail-open；`.Id` 非 `RepoDigest`） | `4a993b8` |
+| S4 | 45 min wall-clock killswitch + audit `sandbox_killed reason=lifetime` | `987b695` |
+| S5 | `sandbox_launch_total{tier,runtime,result}` + audit `sandbox_launched` / `sandbox_image_rejected`；附帶修一個 prod-blocker UnboundLocalError | `4ebe7a6` |
+| S6 | `docs/operations/sandbox.md` 操作員指南 + 本 HANDOFF 條目 | _本 commit_ |
+
+### 新環境變數
+
+```
+OMNISIGHT_DOCKER_RUNTIME=runsc            # gVisor，缺則 fallback runc
+OMNISIGHT_T1_ALLOW_EGRESS=false           # 雙 gate 之一
+OMNISIGHT_T1_EGRESS_ALLOW_HOSTS=          # 雙 gate 之二（CSV）
+OMNISIGHT_DOCKER_IMAGE_ALLOWED_DIGESTS=   # CSV sha256:..；空 = 開放
+OMNISIGHT_SANDBOX_LIFETIME_S=2700         # 45 min；0 = 停用
+```
+
+### 新 metrics
+
+- `omnisight_sandbox_launch_total{tier,runtime,result}` — success / error / image_rejected
+- `omnisight_sandbox_image_rejected_total{image}`
+- `omnisight_sandbox_lifetime_killed_total{tier}`
+
+### 新 audit actions
+
+- `sandbox_launched`（actor `agent:<id>`）
+- `sandbox_killed`（actor `system:lifetime-watchdog`）
+- `sandbox_image_rejected`（actor `agent:<id>`）
+
+### 驗收
+
+`pytest backend/tests/test_sandbox_t1_*.py test_metrics.py
+test_observability.py test_audit.py` → **66 passed + 2 skip / 1.87s**。
+
+### 副產
+
+S5 testing 揭露並修復 `start_container` 中 `from backend.events
+import emit_pipeline_phase` 局部 import 因 Python scope 規則整個函式
+遮蔽 module-level 名稱 → 大多數啟動路徑都會 `UnboundLocalError`。
+真實 prod-blocker，已修。
+
+### 後續解鎖
+
+Tier-1 沙盒就位 → **Phase 62 Knowledge Generation** 與 **Phase 64-D
+Killswitch 統一**可立即啟動。**Phase 64-B** (T2 networked) 是
+**Phase 65** Data Flywheel 的硬性前提。**Phase 64-C** (T3 hardware
+daemon) 為獨立 track，需實機環境。
+
+---
+
 ## Phase 52-Fix-D 進行中 — 測試覆蓋補強（2026-04-14）
 
 ### D1 — `backend/db.py` CRUD smoke（commit `a859329`）
