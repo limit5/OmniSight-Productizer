@@ -744,6 +744,47 @@ export function getArtifactDownloadUrl(id: string): string {
   return `${API_V1}/artifacts/${id}/download`
 }
 
+// ─── DAG Authoring (Phase 56-DAG-E) ───
+
+export interface DAGValidationError {
+  rule: string          // schema | cycle | unknown_dep | duplicate_id | tier_violation | io_entity | dep_closure | mece
+  task_id: string | null
+  message: string
+}
+
+export interface DAGValidateResponse {
+  ok: boolean
+  stage: "schema" | "semantic"
+  errors: DAGValidationError[]
+  task_count?: number
+}
+
+export interface DAGSubmitResponse {
+  run_id: string
+  plan_id: number | null
+  status: string
+  validation_errors: DAGValidationError[]
+  mutation_rounds?: number
+  supersedes_run_id?: string
+}
+
+export async function validateDag(dag: unknown): Promise<DAGValidateResponse> {
+  return request<DAGValidateResponse>("/dag/validate", {
+    method: "POST",
+    body: JSON.stringify({ dag }),
+  })
+}
+
+export async function submitDag(
+  dag: unknown,
+  opts: { mutate?: boolean; metadata?: Record<string, unknown> } = {},
+): Promise<DAGSubmitResponse> {
+  return request<DAGSubmitResponse>("/dag", {
+    method: "POST",
+    body: JSON.stringify({ dag, mutate: !!opts.mutate, metadata: opts.metadata }),
+  })
+}
+
 // ─── NPI Lifecycle ───
 
 export interface NPIMilestone {
