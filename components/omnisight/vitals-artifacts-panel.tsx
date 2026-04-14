@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, Signal, Wifi, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2, Cpu, Play, ToggleLeft, ToggleRight } from "lucide-react"
 import type { SimulationItem } from "@/lib/api"
+import { getArtifactDownloadUrl } from "@/lib/api"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 
 export type StreamType = "uvc" | "rtsp"
@@ -665,9 +666,8 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
                 </div>
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                {/* TODO: use api.getArtifactDownloadUrl() if API prefix changes */}
                 <a
-                  href={`/api/v1/artifacts/${artifact.id}/download`}
+                  href={getArtifactDownloadUrl(artifact.id)}
                   download={artifact.name}
                   className="p-1 hover:bg-[var(--artifact-purple-dim)] rounded"
                   title="Download"
@@ -675,7 +675,7 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
                   <Download size={12} className="text-[var(--artifact-purple)]" />
                 </a>
                 <a
-                  href={`/api/v1/artifacts/${artifact.id}/download`}
+                  href={getArtifactDownloadUrl(artifact.id)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="p-1 hover:bg-[var(--artifact-purple-dim)] rounded"
