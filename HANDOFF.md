@@ -376,8 +376,35 @@ Pain point：DAG-E 解決「不用 curl」，但 operator 仍要手寫 JSON sche
 
 ### 後續解鎖
 
-- **DAG-G**：視覺化 DAG canvas（react-flow / dagre）— 給 5+ task 的 DAG 一個拓撲鳥瞰圖，拖拉連線即時看 cycle。
 - **可順手**：inputs[] / output_overlap_ack 也進 Form（目前得切 JSON）；DAG template gallery 擴充（e.g. 含 tier mix 範本）。
+
+---
+
+## Phase 56-DAG-G — DAG Canvas Visualization 完成（2026-04-15）
+
+DAG-F 解決「不用記 schema」，但扁平列表看不出拓撲。本 phase 加
+read-only 視覺化 canvas — 作為 DAG Editor 的第三 tab（JSON / Form
+/ Canvas），讓 operator 一眼看見任務層級與依賴流向。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `components/omnisight/dag-canvas.tsx`（249 行）— 純 SVG，depth-based layout（`layer = 1 + max(layer[deps])`）、Bezier 邊 + 箭頭 marker、tier 著色（t1 purple / networked blue / t3 orange）、error 紅框（individual task_id 標個別；cycle graph-level 標全部）、空狀態 placeholder；拉進 DagEditor 為第三 tab | `23f7a51` |
+| S2 | 6 個 vitest：空狀態、零 task 空狀態、node/edge DOM 正確（`data-task-id` / `data-from` / `data-to`）、longest-path layer 正確、個別 task 錯誤紅框、graph-level cycle 全部紅框；HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **零新 dep**：純 React + SVG。1–20 task DAG（operator 實際會寫的規模）depth-layout 夠看。延後 react-flow 到真有 pan/zoom/minimap 需求時再上（避免 ~100KB gzip 的 bundle 成本）。
+- **Read-only 為 v1**：drag-to-connect 需要完整互動模型；Form tab 的 chip toggle 已能編 deps。證明 operator 要拖線再做。
+- **Layer 演算法防 cycle**：iterative relaxation + `pass < tasks.length + 1` cap；cycle 不會讓 UI 無限迴圈（validator 已另外標示錯誤）。
+- **Accessibility**：`role="img"` + aria-label "DAG {id} — N tasks" + 節點 `<title>` tooltip。
+
+### 後續解鎖
+
+- **react-flow 升級**：若 operator 開始寫 50+ task 的 DAG、需要 pan/zoom/minimap，可替換 layout 引擎（edge coordinate 計算已解耦）。
+- **互動式編輯**：drag node to reorder layer、drag handle to create edge — 要慎重，目前 chip toggle 已能覆蓋，等需求。
+- **DAG-E/F/G 完結 DAG 主線**：backend planner（A–D）+ MVP editor（E）+ 表單（F）+ 視覺化（G）— operator UX 鏈路完整。
 
 ---
 
