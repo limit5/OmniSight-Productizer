@@ -175,6 +175,8 @@ from backend.routers import observability as _obs_router  # Phase 52
 app.include_router(_obs_router.router, prefix=settings.api_prefix)
 from backend.routers import skills as _skills_router  # Phase 62
 app.include_router(_skills_router.router, prefix=settings.api_prefix)
+from backend.routers import dag as _dag_router  # Phase 56-DAG-D
+app.include_router(_dag_router.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)

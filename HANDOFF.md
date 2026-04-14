@@ -192,6 +192,58 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 56-DAG-D — Mode A 端點 完成（2026-04-14）
+
+DAG suite (A/B/C) 由 Python 層推上 HTTP layer。Mode A = operator 手寫
+DAG JSON，驗證 + 選擇性 mutation + workflow_run 連結。
+
+### 交付
+
+`backend/routers/dag.py`：
+- `POST /api/v1/dag`（operator）：body `{dag, mutate, metadata}`；
+  Pydantic schema fail → 422 stage=schema；semantic fail →
+  422 + `validation_errors`；`mutate=true` + fail → 走
+  `dag_planner.run_mutation_loop`：recovered → 200 + successor run_id
+  + supersedes_run_id；exhausted → 422 stage=mutation_exhausted
+  （DE `dag/exhausted` 已於 loop 內 file）。
+- `GET /api/v1/dag/plans/{plan_id}`
+- `GET /api/v1/dag/runs/{run_id}/plan`
+- `GET /api/v1/dag/plans/by-dag/{dag_id}` — 完整 mutation chain
+
+`_default_ask_fn` lazy-import `iq_runner.live_ask_fn`，避免 LangChain
+拖累 router import 時間。`main.py` 已 wire。
+
+`docs/operations/dag-mode-a.md`：7 rule 速查 / mutate 行為 / response
+shape / 常見 pitfall。
+
+### 設計姿態
+
+- **Mode B 延後**：chat router 整合 AI auto-plan 另行規劃，避免動到 hot chat 路徑。
+- **Schema error 早 fail**：Pydantic 在語意驗證前即擋下，省 DB round-trip。
+- **Mutation opt-in**：預設 `mutate=false`；operator 須明確要求。
+- **Recovered = 新 run**：保留舊 run audit trail（successor_run_id 雙向連）。
+- **Exhausted = 422 + DE already filed**：endpoint 不重複 file。
+- **operator role 即可**：與 chat 一致；admin 只用於破壞性 skill 操作。
+
+### 驗收
+
+`pytest test_dag_router` → **12 passed / 12.78s**。
+
+### Phase 56-DAG 全套就位
+
+```
+[A] validator ✅ → [B] persistence ✅ → [C] mutation loop ✅ → [D] Mode A endpoint ✅
+```
+
+Mode B（chat-integrated auto-plan）留作未來 Phase。
+
+### 後續
+
+**Phase 67-B Diff Patch**（5–7h）或 **Phase 67-C Speculative Pre-warm**
+（4–5h）可動工。67-C 已有 DAG dispatcher 可讀（56-DAG-D 就位）。
+
+---
+
 ## Phase 56-DAG-C — DAG Mutation Loop + Orchestrator 完成（2026-04-14）
 
 把 Phase 56-DAG-A（validator）+ Phase 56-DAG-B（persistence）串成真正
