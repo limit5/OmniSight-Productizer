@@ -192,6 +192,76 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 67-B — Diff Patch + 強制契約 完成（2026-04-15）
+
+把「agent 不可覆寫整檔」從宣告改成 enforced。五條路徑（patch/create/
+write-new/write-small/write-big）全用 @tool 控管；規範透過 prompt
+registry canary 推送，違規觸發 IIS 軟反饋。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `agents/tools_patch.py`：`parse_search_replace` + `apply_search_replace` (≥3 行 context、唯一匹配強制) + `apply_unified_diff` (多 hunk、CRLF 保留、last→first apply) + `apply_to_file` 原子寫入；4 種 exception 分類；22 test | `dacba89` |
+| S2 | `@tool` 三劍客：`patch_file(path, kind, payload)` / `create_file(path, content)` / `write_file` 攔截器；既有檔超 cap overwrite → `[REJECTED]` + 餵 IIS `code_pass=False`；`patch_file` 失敗同樣餵 IIS；env `OMNISIGHT_PATCH_MAX_INLINE_LINES=50`；12 test | `c5c4a66` |
+| S3 | `backend/agents/prompts/patch_protocol.md`（由 Phase 56-DAG-C S3 bootstrap 自動入 prompt_versions）+ `docs/operations/patching.md`（操作員 runbook / 失敗 mode 表 / IIS 連動）+ HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **`write_file` 不強制刪除**：first-time writes 仍可用（scratch / fresh
+  path 常見），只對既有檔超 cap overwrite 擋；漸進 deprecation，不破
+  壞 agent 現有 workflow。
+- **違規軟反饋而非硬阻擋**：`write_file` 超 cap + `patch_file` 失敗
+  皆餵 IIS `code_pass=False`；3 次以上觸發 Phase 63-B L1 calibrate
+  （prompt_registry 重 inject `patch_protocol.md`）；連續失敗再升 L2
+  route。不做硬重啟避免無限迴圈（與 IIS 已鎖決策一致）。
+- **SEARCH ≥3 行 context**：設計鎖死；1 行 SEARCH 在真實代碼幾乎必
+  定 ambiguous。
+- **唯一匹配強制**：zero match / multi match 都 raise；silent apply on
+  wrong occurrence 是最糟失敗模式。
+- **Atomic write**：temp file + rename；崩潰不留半檔。
+- **CRLF 保留**：Windows-origin 檔不被悄悄轉 LF。
+- **`create_file` 不 cap**：generated boilerplate（`__init__.py` /
+  fixtures / templates）本就合理長檔。
+
+### 新環境變數
+
+```
+OMNISIGHT_PATCH_MAX_INLINE_LINES=50    # write_file 既有檔 overwrite cap
+```
+
+### 新 agent tools
+
+- `patch_file(path, patch_kind, payload)` — 既有檔編輯
+- `create_file(path, content)` — 新檔
+- `write_file` — deprecated for existing-file overwrites（保留 first-time writes）
+
+### 新 prompt fragment
+
+- `backend/agents/prompts/patch_protocol.md` — bootstrapped 進
+  prompt_versions，可走 Phase 63-C canary。
+
+### 驗收
+
+`pytest test_tools_patch + test_tools_patch_wrappers + test_prompt_registry_bootstrap`
+→ **41 passed**（22 + 12 + 7）。
+
+### Phase 67 進度
+
+```
+67-A Prompt Cache       ✅
+67-B Diff Patch         ✅（本 commit）
+67-D RAG Pre-fetch      ✅
+67-C Speculative Pre-warm  ← 下一個（需 DAG dispatcher，已就位）
+```
+
+### 後續
+
+**Phase 67-C Speculative Pre-warm**（4–5h）可直接動工 — 需要 DAG
+dispatcher（Phase 56-DAG-D 已就位）+ 64-A image trust（已就位）。
+
+---
+
 ## Phase 56-DAG-D — Mode A 端點 完成（2026-04-14）
 
 DAG suite (A/B/C) 由 Python 層推上 HTTP layer。Mode A = operator 手寫
