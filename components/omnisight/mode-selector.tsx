@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { AlertOctagon, RotateCcw, X } from "lucide-react"
 import {
   type OperationMode,
   type SSEEvent,
@@ -41,6 +42,29 @@ export function ModeSelector({ compact = false }: Props) {
   // the active mode flips, then cleared so CSS can replay next time.
   const [engaging, setEngaging] = useState(false)
   const prevModeRef = useRef<OperationMode>(mode)
+
+  // Error popover open state — separate from `error` value so closing
+  // doesn't clear the underlying state.
+  const [errorOpen, setErrorOpen] = useState(false)
+  const errorPopRef = useRef<HTMLDivElement | null>(null)
+  const errorBadgeRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!errorOpen) return
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (errorPopRef.current?.contains(t) || errorBadgeRef.current?.contains(t)) return
+      setErrorOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setErrorOpen(false) }
+    document.addEventListener("mousedown", onDoc)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDoc)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [errorOpen])
+  // Auto-clear error display when refresh succeeds (error becomes null).
+  useEffect(() => { if (!error) setErrorOpen(false) }, [error])
   useEffect(() => {
     if (prevModeRef.current === mode) return
     prevModeRef.current = mode
@@ -130,7 +154,7 @@ export function ModeSelector({ compact = false }: Props) {
       </span>
       <PanelHelp doc="operation-modes" tourAnchor />
 
-      <div className="mode-frame flex items-stretch">
+      <div className="mode-frame flex items-stretch relative">
         {MODE_ORDER.map((m, idx) => {
           const active = m === mode
           const meta = MODE_META[m]
@@ -161,6 +185,64 @@ export function ModeSelector({ compact = false }: Props) {
             </div>
           )
         })}
+        {/* Error badge — absolutely positioned on the mode-frame so it
+         * never affects the surrounding flex layout. Click opens a
+         * popover with the full message + RETRY. */}
+        {error && (
+          <button
+            ref={errorBadgeRef}
+            type="button"
+            onClick={() => setErrorOpen((v) => !v)}
+            aria-label={`Mode error — click for details`}
+            aria-expanded={errorOpen}
+            aria-haspopup="dialog"
+            title={error}
+            className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center z-20 shadow-md"
+            style={{
+              background: "var(--critical-red,#ef4444)",
+              color: "white",
+              animation: "toast-urgent-pulse 1.4s ease-in-out infinite",
+              boxShadow: "0 0 0 2px var(--background,#010409), 0 0 8px rgba(239,68,68,0.6)",
+            }}
+          >
+            <AlertOctagon className="w-2.5 h-2.5" aria-hidden />
+          </button>
+        )}
+        {error && errorOpen && (
+          <div
+            ref={errorPopRef}
+            role="dialog"
+            aria-label="Mode error details"
+            className="absolute right-0 top-full mt-2 z-50 w-[min(320px,calc(100vw-2rem))] holo-glass-simple rounded-sm border border-[var(--critical-red,#ef4444)]/60 shadow-lg p-3 font-mono text-[11px]"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="tracking-wider font-semibold text-[var(--critical-red,#ef4444)]">
+                MODE API ERROR
+              </span>
+              <button
+                type="button"
+                onClick={() => setErrorOpen(false)}
+                aria-label="close"
+                className="text-[var(--muted-foreground,#94a3b8)] hover:text-white"
+              >
+                <X className="w-3 h-3" aria-hidden />
+              </button>
+            </div>
+            <div className="text-[var(--foreground,#e2e8f0)] mb-2 break-words leading-snug max-h-40 overflow-y-auto">
+              {error}
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => { setErrorOpen(false); void refresh() }}
+                className="flex items-center gap-1 px-2 py-1 rounded-sm border border-[var(--neural-cyan,#67e8f9)] text-[var(--neural-cyan,#67e8f9)] hover:bg-[var(--neural-cyan,#67e8f9)]/10"
+              >
+                <RotateCcw className="w-3 h-3" aria-hidden />
+                RETRY
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       <span
         className="mode-lcd font-mono text-[10px] ml-1"
@@ -170,15 +252,6 @@ export function ModeSelector({ compact = false }: Props) {
       >
         {inFlight}/{cap}
       </span>
-      {error && (
-        <span
-          role="alert"
-          className="font-mono text-[10px] text-[var(--critical-red,#ef4444)] animate-pulse"
-          title={error}
-        >
-          ⚠ {error.length > 40 ? error.slice(0, 40) + "…" : error}
-        </span>
-      )}
     </div>
   )
 }
