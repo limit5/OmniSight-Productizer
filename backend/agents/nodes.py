@@ -825,27 +825,34 @@ async def error_check_node(state: GraphState) -> dict:
         f"Tool error (attempt {new_retry}/{state.max_retries}): {error_summary[:120]}",
     )
 
-    # L3 episodic memory query: on first retry, search for past solutions
+    # Phase 67-E: RAG pre-fetch on first retry. Replaces the previous
+    # inline `[L3 HINT]` query. The new path routes through
+    # `prefetch_for_sandbox_error` which enforces cosine > 0.85,
+    # SDK-version hard-lock, and 1000-token block budget per
+    # docs/design/dag-pre-fetching.md, and emits a structured
+    # <system_auto_prefetch> block the agent's retry prompt can
+    # consume. Same surface — an AIMessage appended on hit; None
+    # on miss keeps the retry prompt clean.
     l3_hint_messages = []
     if new_retry == 1:
         try:
-            from backend import db
-            search_query = failed[0].output[:100] if failed else error_summary[:100]
-            l3_results = await db.search_episodic_memory(query=search_query, limit=2)
-
-            if l3_results:
-                hint_parts = ["[L3 HINT] Past solutions for similar errors:"]
-                for r in l3_results[:2]:
-                    hint_parts.append(
-                        f"  - Error: {r['error_signature'][:80]}\n"
-                        f"    Fix: {r['solution'][:200]}"
-                        f" (vendor={r.get('soc_vendor', '?')}, sdk={r.get('sdk_version', '?')})"
-                    )
-                hint_text = "\n".join(hint_parts)
-                l3_hint_messages = [AIMessage(content=hint_text)]
-                emit_pipeline_phase("l3_query", f"Found {len(l3_results)} past solution(s) for retry hint")
+            from backend import rag_prefetch as _rp
+            error_log = failed[0].output if failed else error_summary
+            block = await _rp.prefetch_for_sandbox_error(
+                error_log, rc=1,
+                # SoC / SDK context isn't carried on GraphState today —
+                # empty strings make the version hard-lock permissive
+                # (see `_version_hard_lock_rejects`). A future platform-
+                # aware enhancement can fill these.
+                soc_vendor="", sdk_version="",
+            )
+            if block:
+                l3_hint_messages = [AIMessage(content=block)]
+                emit_pipeline_phase(
+                    "l3_query", "Pre-fetched past solution(s) for retry hint",
+                )
         except Exception as exc:
-            logger.debug("L3 query in error_check failed (non-critical): %s", exc)
+            logger.debug("rag_prefetch in error_check failed (non-critical): %s", exc)
 
     return {
         "retry_count": new_retry,
