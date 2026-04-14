@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     # still work; CI/prod should ensure runsc is present.
     docker_runtime: str = "runsc"  # runsc | runc
 
+    # Phase 64-A S2: Tier 1 egress whitelist. DOUBLE-GATED on purpose —
+    # opening any egress weakens the air-gap, so it requires both an
+    # explicit hostname list AND the boolean `allow_egress` flag. Either
+    # one missing → falls back to `--network none`.
+    t1_allow_egress: bool = False
+    t1_egress_allow_hosts: str = ""  # CSV: "github.com,gerrit.internal:29418"
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:

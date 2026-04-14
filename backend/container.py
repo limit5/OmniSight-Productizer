@@ -229,13 +229,17 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     cpus = _settings.docker_cpu_limit or "2"
     # Phase 64-A S1: gVisor (runsc) when available; runc fallback otherwise.
     runtime = await resolve_runtime()
+    # Phase 64-A S2: --network defaults to `none`, opens to the
+    # omnisight-egress-t1 bridge only when the double-gate is satisfied.
+    from backend import sandbox_net as _sn
+    network_arg = await _sn.resolve_network_arg()
     rc, out, err = await _run(
         f"docker run -d "
         f"--runtime={runtime} "
         f"--name {container_name} "
         f"{mounts}"
         f"-w /workspace "
-        f"--network none "
+        f"{network_arg} "
         f"--memory={mem} --cpus={cpus} --pids-limit=256 "
         f"{DOCKER_IMAGE}"
     )
