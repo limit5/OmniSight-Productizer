@@ -296,6 +296,18 @@ def propose(
     if default_option_id is None:
         default_option_id = opts[0]["id"]
 
+    # Phase 50B: a matching rule can force severity / default / auto-exec
+    # ahead of the normal mode × severity policy. Imported lazily to avoid
+    # an import cycle.
+    try:
+        from backend import decision_rules as _rules
+        severity, default_option_id, matched_rule, rule_forces_auto = _rules.apply(
+            kind, severity, default_option_id, get_mode(),
+        )
+    except Exception as _exc:
+        logger.debug("decision_rules.apply failed (non-fatal): %s", _exc)
+        matched_rule, rule_forces_auto = None, False
+
     now = time.time()
     deadline = (now + timeout_s) if (timeout_s and timeout_s > 0) else None
     dec = Decision(
@@ -309,10 +321,10 @@ def propose(
         status=DecisionStatus.pending,
         created_at=now,
         deadline_at=deadline,
-        source=dict(source or {}),
+        source=dict({"rule_id": matched_rule["id"]} if matched_rule else {}, **(source or {})),
     )
 
-    if should_auto_execute(severity):
+    if rule_forces_auto or should_auto_execute(severity):
         dec.status = DecisionStatus.auto_executed
         dec.resolved_at = now
         dec.chosen_option_id = default_option_id

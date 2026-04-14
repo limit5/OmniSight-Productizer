@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend import decision_engine as de
+from backend import decision_rules as _dr
 
 router = APIRouter(tags=["decisions"])
 
@@ -162,3 +163,42 @@ async def put_budget_strategy(req: StrategyRequest,
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
     return {"strategy": tuning.strategy.value, "tuning": tuning.to_dict()}
+
+
+# ─── Phase 50B: Decision Rules Editor ───────────────────────────────
+
+class RulesPayload(BaseModel):
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RulesTestPayload(BaseModel):
+    kinds: list[str] = Field(default_factory=list)
+    mode: str | None = None
+
+
+@router.get("/decision-rules")
+async def get_decision_rules() -> dict[str, Any]:
+    """Return the ordered rule list + available severity/mode vocab."""
+    return {
+        "rules": _dr.list_rules(),
+        "severities": [s.value for s in de.DecisionSeverity],
+        "modes": [m.value for m in de.OperationMode],
+    }
+
+
+@router.put("/decision-rules")
+async def put_decision_rules(payload: RulesPayload,
+                             _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+    try:
+        rules = _dr.replace_rules(payload.rules)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+    return {"rules": rules}
+
+
+@router.post("/decision-rules/test")
+async def test_decision_rules(payload: RulesTestPayload) -> dict[str, Any]:
+    """Dry-run: for each sample kind, which rule (if any) fires under
+    the current (or requested) mode."""
+    mode = payload.mode or de.get_mode().value
+    return {"mode": mode, "hits": _dr.test_against(payload.kinds, mode)}
