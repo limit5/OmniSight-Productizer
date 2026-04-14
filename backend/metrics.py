@@ -248,6 +248,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 65 S2: hold-out evaluation gauge ────────────────────
+    finetune_eval_score = Gauge(
+        "omnisight_finetune_eval_score",
+        "Latest hold-out weighted score (0..1) per model evaluated",
+        labelnames=("model",),
+        registry=REGISTRY,
+    )
+
     # Phase 67-A: prompt cache hit/miss in input tokens ─────────
     prompt_cache_hit_total = Counter(
         "omnisight_prompt_cache_hit_total",
@@ -325,6 +333,7 @@ else:
     prewarm_started_total = _NoOp()  # type: ignore
     prewarm_consumed_total = _NoOp()  # type: ignore
     training_set_rows = _NoOp()  # type: ignore
+    finetune_eval_score = _NoOp()  # type: ignore
     prompt_cache_hit_total = _NoOp()  # type: ignore
     prompt_cache_miss_total = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
@@ -356,6 +365,7 @@ def reset_for_tests() -> None:
     global prompt_outcome_total, prompt_rolled_back_total
     global dag_validation_total, dag_validation_error_total, dag_mutation_total
     global prewarm_started_total, prewarm_consumed_total, training_set_rows
+    global finetune_eval_score
     global prompt_cache_hit_total, prompt_cache_miss_total
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
@@ -479,6 +489,10 @@ def reset_for_tests() -> None:
     training_set_rows = Counter(
         "omnisight_training_set_rows_total", "Training set rows",
         labelnames=("result",), registry=REGISTRY,
+    )
+    finetune_eval_score = Gauge(
+        "omnisight_finetune_eval_score", "Hold-out weighted score per model",
+        labelnames=("model",), registry=REGISTRY,
     )
     prompt_cache_hit_total = Counter(
         "omnisight_prompt_cache_hit_total", "Cached input tokens",

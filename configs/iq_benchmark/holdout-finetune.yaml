@@ -1,0 +1,115 @@
+# Phase 65 S2 — Fine-tune hold-out evaluation set.
+#
+# Distinct from `firmware-debug.yaml` (Phase 63-D nightly) by design:
+# the nightly set probes general regression; this set probes whether
+# a freshly fine-tuned model still understands the OmniSight-specific
+# domain it was trained on.
+#
+# Curator policy (locked):
+#   * Hand-curated, never auto-generated from training data
+#     (avoids the "model graded on its own homework" failure mode).
+#   * Questions answer-able from PUBLIC knowledge — we do NOT include
+#     OmniSight-internal trade secrets in the hold-out.
+#   * v1 ships 10 questions; the design target is 100. New questions
+#     append here without renumbering.
+#
+# Scoring contract: same `iq_benchmark.IQQuestion.matches` as the
+# nightly set — keyword AND + optional regex + forbidden blacklist.
+# Promotion threshold lives in `backend/finetune_eval.py`.
+
+schema_version: 1
+name: "holdout-finetune-v1"
+description: >
+  Hold-out evaluation for fine-tuned models. Newly trained candidate
+  must score within OMNISIGHT_FINETUNE_REGRESSION_PP (default 5
+  percentage points) of the baseline weighted score on this set OR
+  the candidate is REJECTED, the canary roll-back fires, and a
+  Decision Engine kind=finetune/regression proposal opens.
+
+questions:
+
+  - id: q01-bsp-bringup
+    weight: 1.0
+    tags: [bsp, bringup]
+    prompt: >
+      A new SoC variant boots U-Boot but hangs before kernel hand-off.
+      Which two artefacts must you compare against a known-good board?
+    expected_keywords: ["device tree", "config"]
+
+  - id: q02-isp-tuning
+    weight: 1.0
+    tags: [isp, image]
+    prompt: >
+      The ISP delivers correct exposure but skin tones look magenta
+      under tungsten light. Which calibration step is missing?
+    expected_keywords: ["white balance"]
+
+  - id: q03-rk3588-npu-mem
+    weight: 1.0
+    tags: [npu, rockchip]
+    prompt: >
+      RKNN inference on RK3588 OOMs at runtime even though the model
+      fits in RAM at load. What's the typical cause?
+    expected_keywords: ["fragmentation"]
+
+  - id: q04-uvc-isochronous
+    weight: 1.0
+    tags: [usb, uvc]
+    prompt: >
+      A UVC camera drops frames over USB 2.0 at 30 fps 1080p but works
+      at 720p. Which transfer-mode parameter has hit its wall?
+    expected_keywords: ["bandwidth"]
+
+  - id: q05-i2c-clock-stretch
+    weight: 1.0
+    tags: [i2c]
+    prompt: >
+      An I2C slave intermittently NACKs reads. Logic analyser shows
+      SCL held low between bytes. Which slave behaviour is the master
+      not handling?
+    expected_keywords: ["clock stretch"]
+
+  - id: q06-cross-compile-link
+    weight: 1.0
+    tags: [toolchain]
+    prompt: >
+      arm-linux-gnueabihf-gcc compiles fine but link fails: undefined
+      reference to symbols from libpthread. Beside -lpthread, what
+      flag is missing?
+    expected_keywords: ["pthread"]
+
+  - id: q07-spi-mode
+    weight: 1.0
+    tags: [spi]
+    prompt: >
+      SPI flash chip reads back 0xFF on every byte. Voltage and CS
+      are correct on the scope. What two host-side parameters do you
+      try first?
+    expected_keywords: ["mode"]
+
+  - id: q08-rtos-priority-inversion
+    weight: 1.0
+    tags: [rtos, scheduling]
+    prompt: >
+      A high-priority sensor task starves while a low-priority logger
+      holds a mutex it shares. What's the technique name and the
+      mutex feature you need?
+    expected_keywords: ["priority", "inheritance"]
+
+  - id: q09-mipi-csi-lane
+    weight: 1.0
+    tags: [mipi, csi]
+    prompt: >
+      A 4-lane MIPI-CSI sensor enumerates but produces a torn frame
+      every 30 fps. Two-lane mode works fine. Which signal integrity
+      check do you run?
+    expected_keywords: ["skew"]
+
+  - id: q10-dts-overlay
+    weight: 1.0
+    tags: [dts, kernel]
+    prompt: >
+      You added a new I2C peripheral via a device-tree overlay but
+      probe never fires. Which kernel knob enables overlay loading
+      from the bootloader's chosen node?
+    expected_keywords: ["overlays"]
