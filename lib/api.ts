@@ -900,27 +900,36 @@ export async function* streamInvoke(
   const decoder = new TextDecoder()
   let buffer = ""
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
 
-    const lines = buffer.split("\n")
-    buffer = lines.pop() || ""
+      const lines = buffer.split("\n")
+      buffer = lines.pop() || ""
 
-    let currentEvent = "message"
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        currentEvent = line.slice(6).trim()
-      } else if (line.startsWith("data:")) {
-        try {
-          const data = JSON.parse(line.slice(5).trim())
-          yield { event: currentEvent, data } as InvokeEvent
-        } catch {
-          // skip malformed
+      let currentEvent = "message"
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          currentEvent = line.slice(6).trim()
+        } else if (line.startsWith("data:")) {
+          try {
+            const data = JSON.parse(line.slice(5).trim())
+            yield { event: currentEvent, data } as InvokeEvent
+          } catch {
+            // skip malformed
+          }
         }
       }
     }
+    // Surface partial trailing chunk as an explicit truncation signal so
+    // the consumer doesn't mistake a dropped connection for a clean end.
+    if (buffer.trim().length > 0) {
+      yield { event: "error", data: { reason: "stream_truncated", partial: buffer } } as unknown as InvokeEvent
+    }
+  } finally {
+    try { reader.releaseLock() } catch { /* already released */ }
   }
 }
 
