@@ -120,6 +120,26 @@ daily cron for peace of mind:
 
 Keep the last 7 days; older can be deleted by a `find -mtime +7`.
 
+### Audit log retention (L1-07)
+
+Phase 53's audit_log is hash-chained and grows unbounded. Rotate
+nightly alongside the DB backup:
+
+```cron
+# Archive audit rows >90 days old into cold JSONL + prune from DB.
+0 3 * * * cd /home/$USER/work/sora/OmniSight-Productizer && \
+  python3 scripts/audit_archive.py --days 90
+
+# Verify the archive boundary still matches the live DB's chain.
+15 3 * * * cd /home/$USER/work/sora/OmniSight-Productizer && \
+  python3 scripts/audit_archive.py --verify
+```
+
+Archive files land in `data/audit-archive/audit-YYYYMMDD-HHMMSS.jsonl`.
+They are immutable — the `--verify` subcommand proves the live DB's
+first post-boundary row still points at the last archived row's hash,
+so evidence of tampering surfaces as a chain break.
+
 ## Common issues
 
 - **`cloudflared` exits immediately** — usually the credentials-file
