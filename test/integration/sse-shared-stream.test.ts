@@ -20,14 +20,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest"
 // Track every EventSource constructed during a test so we can assert
 // counts. Each test resets the counter in beforeEach.
 let ctorCount = 0
-type Instance = {
-  url: string
-  readyState: number
-  close: () => void
-  fire: (type: string, data: unknown) => void
-  fireError: () => void
-}
-let latestInstance: Instance | null = null
+// Expose the most recently constructed instance directly — no proxy
+// object needed; a TrackedEventSource already has readyState, close,
+// fire, and fireError as real members.
+let latestInstance: TrackedEventSource | null = null
 
 class TrackedEventSource {
   static readonly CONNECTING = 0
@@ -41,27 +37,17 @@ class TrackedEventSource {
   onerror: ((e: Event) => void) | null = null
   onmessage: ((e: MessageEvent) => void) | null = null
   onopen: ((e: Event) => void) | null = null
-  private listeners: Record<string, Array<(e: MessageEvent) => void>> = {}
+  private listeners: Record<string, Array<(e: Event) => void>> = {}
 
   constructor(url: string) {
     this.url = url
     ctorCount++
-    latestInstance = {
-      url,
-      get readyState() { return (this as unknown as TrackedEventSource).readyState },
-      close: () => this.close(),
-      fire: (type, data) => this.fire(type, data),
-      fireError: () => this.fireError(),
-    } as unknown as Instance
-    // Rebind getters so they see *this* instance state
-    Object.defineProperty(latestInstance, "readyState", {
-      get: () => this.readyState,
-    })
+    latestInstance = this
   }
-  addEventListener(type: string, listener: (e: MessageEvent) => void) {
+  addEventListener(type: string, listener: (e: Event) => void) {
     ;(this.listeners[type] ||= []).push(listener)
   }
-  removeEventListener(type: string, listener: (e: MessageEvent) => void) {
+  removeEventListener(type: string, listener: (e: Event) => void) {
     this.listeners[type] = (this.listeners[type] || []).filter(l => l !== listener)
   }
   close() {
