@@ -192,6 +192,38 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 52-Fix-C — 前端穩定性 + A11y（2026-04-14）
+
+Fix-B 之後的第三批（前端）。原前端審計 14 項中 8 項重審後為誤判
+（`tabIndex` 已存在、`mountedRef` 已存在、grid `overflow-x-auto` 已吸
+收、WSL2 header 已有 `minWidth: 56`、`testResult` 已 render、i18n 等
+大範圍工作排往未來 Phase），剩下 4 項合併成 4 個 commit。
+
+| Commit | 項 | 內容 |
+|---|---|---|
+| `4357bad` | C1 | `hooks/use-toast.ts` effect deps 從 `[state]` 改 `[]`；修 listener array unbounded growth；3 新測試（20-dispatch burst / 單次 unmount / 5 mount-unmount cycle） |
+| `b234edb` | C3 | `forecast-panel` 截斷 span 加 `aria-label`；`agent-matrix-wall` sub-task 色點加 `role="img"` + `aria-label="Status: ..."`（色盲 / SR parity）|
+| `a0fa35c` | C2 | `app/page.tsx` provider fetch 失敗從 `.catch(() => {})` 改 `console.debug(...)`；其他兩處已自備 error UI / mount guard |
+| `27bfb1c` | C5 | `invoke-core.tsx` energy-beam glow `width: 40%` → `min(40%, 120px)` 防寬螢幕視覺溢出 |
+
+### 驗收
+
+`npx vitest run` → **55 passed / 11 files**（含新增 `test/hooks/use-toast.test.tsx`）。
+
+### 重審降級項（未實作，已記錄）
+
+- Layout shift：`global-status-header.tsx:161–172` 已用 `width: 110` + `minWidth: 56` + `tabular-nums` 固定。
+- `integration-settings.tsx:62`：`tabIndex={0}` + `onKeyDown(Enter/Space)` 已存在。
+- `decision-dashboard.tsx`：`mountedRef.current` + `AbortController` 已在 init-load 與 handler 兩側都做 guard。
+- `page.tsx:513` desktop grid：`grid-cols-[...minmax()...1fr...]` + `overflow-x-auto` 已自動吸收。
+- i18n 缺席、Final Report panel UI、三模式 Auth UI：scope 大，排往未來 Phase 67+。
+
+### 後續
+
+Fix-D（測試覆蓋補強）可立即啟動。Phase 62 Knowledge Generation 仍等 Fix-D。
+
+---
+
 ## Phase 52-Fix-B — 穩定性修補（2026-04-14）
 
 Fix-A 之後的第二批。重審時將 4 項原審計列項降為誤判（`list_pending`
