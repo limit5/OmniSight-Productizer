@@ -37,6 +37,8 @@ from backend.decision_engine import DecisionSeverity, OperationMode
 
 logger = logging.getLogger(__name__)
 
+# Fix-B B7: threading.Lock guarding sync `_RULES[:] = ...` mutations only.
+# `_persist()` and `load_from_db()` do their `await db.*` OUTSIDE the lock.
 _RULES_LOCK = threading.Lock()
 _RULES: list[dict[str, Any]] = []
 

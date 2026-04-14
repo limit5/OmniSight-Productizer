@@ -84,6 +84,7 @@ _TUNINGS: dict[BudgetStrategy, Tuning] = {
 }
 
 
+# Fix-B B7: sync-only lock; awaits happen outside. See decision_engine.py.
 _state_lock = threading.Lock()
 _current: BudgetStrategy = BudgetStrategy.balanced
 

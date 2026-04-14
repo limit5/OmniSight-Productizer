@@ -97,6 +97,7 @@ CRITICAL_KINDS = {
 }
 
 
+# Fix-B B7: sync-only lock; awaits happen outside. See decision_engine.py.
 _state_lock = threading.Lock()
 _current: ProfileId = os.environ.get("OMNISIGHT_DEFAULT_PROFILE", "STRICT").strip().upper() or "STRICT"
 if _current not in _BUILTIN:

@@ -78,6 +78,11 @@ class DecisionStatus(str, Enum):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+# Fix-B B7: threading.Lock is intentional — the holders (propose/resolve/
+# list_pending/get/sweep_timeouts) are all synchronous, DB/SSE `await`s
+# happen in wrappers *outside* the lock. Any async helper entering this
+# module MUST do its awaits before/after the lock. Verified by
+# `scripts/check_lock_await.py`.
 _state_lock = threading.Lock()
 _current_mode: OperationMode = OperationMode.supervised
 
