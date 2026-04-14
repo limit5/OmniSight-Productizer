@@ -70,14 +70,22 @@ export default function Home() {
   const [showNotifications, setShowNotifications] = useState(false)
 
   // Fetch provider list + health on mount and periodically
+  // Fix-C C2: surface fetch failures at debug level so a dead backend
+  // isn't 100% invisible (was: silent `catch(() => {})`).
   const refetchProviders = useCallback(() => {
-    api.getProviders().then(setProviderData).catch(() => {})
-    api.getProviderHealth().then(setProviderHealth).catch(() => {})
+    api.getProviders().then(setProviderData).catch((e) => {
+      console.debug("[providers] list fetch failed:", e)
+    })
+    api.getProviderHealth().then(setProviderHealth).catch((e) => {
+      console.debug("[providers] health fetch failed:", e)
+    })
   }, [])
   useEffect(() => {
     refetchProviders()
     const healthInterval = setInterval(() => {
-      api.getProviderHealth().then(setProviderHealth).catch(() => {})
+      api.getProviderHealth().then(setProviderHealth).catch((e) => {
+        console.debug("[providers] health poll failed:", e)
+      })
     }, 10000)
     return () => clearInterval(healthInterval)
   }, [refetchProviders])
