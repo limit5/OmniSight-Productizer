@@ -9,7 +9,10 @@ from __future__ import annotations
 from typing import Any
 
 import os
-from fastapi import APIRouter, Depends, Header, HTTPException
+import time
+import threading
+from collections import deque
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -19,11 +22,43 @@ from backend import decision_rules as _dr
 router = APIRouter(tags=["decisions"])
 
 
+# R2-#13: sliding-window rate limit on decision mutators. Defends against
+# brute-forcing a short OMNISIGHT_DECISION_BEARER and against an over-eager
+# operator script flooding approve/reject. Window is per-client-ip;
+# intentionally not keyed on the token itself so a credential-stuffer
+# cannot use a cheap probe to learn rate limit window size.
+_RL_WINDOW_S = float(os.environ.get("OMNISIGHT_DECISION_RL_WINDOW_S", "10"))
+_RL_MAX = int(os.environ.get("OMNISIGHT_DECISION_RL_MAX", "30"))
+_rl_hits: dict[str, deque[float]] = {}
+_rl_lock = threading.Lock()
+
+
+def _rate_limit(client_ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - _RL_WINDOW_S
+    with _rl_lock:
+        dq = _rl_hits.setdefault(client_ip, deque())
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= _RL_MAX:
+            raise HTTPException(
+                status_code=429,
+                detail=f"rate limit: {_RL_MAX}/{int(_RL_WINDOW_S)}s on decision mutators",
+                headers={"Retry-After": str(int(_RL_WINDOW_S))},
+            )
+        dq.append(now)
+
+
 # N10: decision-action endpoints can destructively change agent state
 # (e.g. approving a destructive-severity decision). Gate them behind an
 # optional bearer token — if OMNISIGHT_DECISION_BEARER is unset we keep
 # the current open-posture of the codebase; if set, mutators require it.
-def _require_decision_token(authorization: str | None = Header(default=None)) -> None:
+def _require_decision_token(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> None:
+    client_ip = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(client_ip)
     expected = os.environ.get("OMNISIGHT_DECISION_BEARER", "").strip()
     if not expected:
         return  # feature off — preserves pre-fix behavior
@@ -32,6 +67,11 @@ def _require_decision_token(authorization: str | None = Header(default=None)) ->
         presented = presented[len("Bearer "):]
     if not presented or presented != expected:
         raise HTTPException(status_code=401, detail="Invalid or missing decision bearer token")
+
+
+def _reset_rate_limit_for_tests() -> None:  # test hook
+    with _rl_lock:
+        _rl_hits.clear()
 
 
 class ModeRequest(BaseModel):

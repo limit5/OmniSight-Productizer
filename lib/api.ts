@@ -360,27 +360,34 @@ export async function* streamChat(
   const decoder = new TextDecoder()
   let buffer = ""
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
 
-    const lines = buffer.split("\n")
-    buffer = lines.pop() || ""
+      const lines = buffer.split("\n")
+      buffer = lines.pop() || ""
 
-    let currentEvent = "message"
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        currentEvent = line.slice(6).trim()
-      } else if (line.startsWith("data:")) {
-        try {
-          const data = JSON.parse(line.slice(5).trim())
-          yield { event: currentEvent, data }
-        } catch {
-          // skip malformed data lines
+      let currentEvent = "message"
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          currentEvent = line.slice(6).trim()
+        } else if (line.startsWith("data:")) {
+          try {
+            const data = JSON.parse(line.slice(5).trim())
+            yield { event: currentEvent, data }
+          } catch {
+            // skip malformed data lines
+          }
         }
       }
     }
+    if (buffer.trim().length > 0) {
+      yield { event: "error", data: { reason: "stream_truncated", partial: buffer } }
+    }
+  } finally {
+    try { reader.releaseLock() } catch { /* already released */ }
   }
 }
 

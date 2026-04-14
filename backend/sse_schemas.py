@@ -142,12 +142,31 @@ class SSEModeChanged(BaseModel):
     timestamp: str = ""
 
 
+class SSEBudgetTuning(BaseModel):
+    """Knobs surfaced by budget_strategy.get_tuning(). Strongly typed so
+    the TS side can rely on the shape (R2-#17)."""
+    strategy: str = ""
+    model_tier: str = ""
+    max_retries: int = 0
+    downgrade_at: float = 0.0
+    freeze_at: float = 0.0
+    prefer_parallel: bool = False
+
+
 class SSEBudgetStrategyChanged(BaseModel):
     """budget_strategy_changed — Budget strategy switched (Phase 47C)."""
     strategy: str
     previous: str
-    tuning: dict
+    tuning: SSEBudgetTuning = Field(default_factory=SSEBudgetTuning)
     timestamp: str = ""
+
+
+class SSEDecisionOption(BaseModel):
+    """One decision option. Strongly typed to catch drift (R2-#17)."""
+    id: str
+    label: str = ""
+    description: str = ""
+    is_safe_default: bool = False
 
 
 class SSEDecision(BaseModel):
@@ -158,7 +177,7 @@ class SSEDecision(BaseModel):
     title: str
     detail: str = ""
     status: str
-    options: list[dict] = Field(default_factory=list)
+    options: list[SSEDecisionOption] = Field(default_factory=list)
     default_option_id: Optional[str] = None
     chosen_option_id: Optional[str] = None
     resolver: Optional[str] = None
