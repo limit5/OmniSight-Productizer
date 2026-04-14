@@ -295,10 +295,42 @@ mutation：
   `configure` idempotent 雙模式、`bind_logger` 兩後端（structlog /
   LoggerAdapter）、empty context、`get_logger(None)` 回 root。
 
-### D7 未執行
+### D7 — frontend hooks coverage（commit `90eb637`）
 
-仍排程於 Fix-D 計畫中（frontend hooks `use-engine` + `use-mobile`）。
-Phase 62 仍待全 Fix-D 完成。
+`test/hooks/use-mobile.test.tsx`（6）：desktop/mobile 返回值、767/768 邊界、
+matchMedia change 回應、add/remove listener 生命週期。
+
+`test/hooks/use-engine.test.tsx`（5）：初始 state + 完整 callable 表面、
+`patchAgentLocal` 僅更目標 agent、missing id no-op、`setAgents` functional
+updater、offline addAgent fallback（`connected=false` 時本地合成 agent）。
+
+Vitest 全套 13 files / 66 pass / 1.8s。
+
+### Fix-D 整體完成
+
+Fix-D 七個子批全數交付：
+
+| 子項 | 檔案 | 測試數 | commit |
+|---|---|---|---|
+| D1 | `test_db.py` | 13 | `a859329` |
+| D2 | `test_models.py` | 20 | `71693c5` |
+| D3 | `test_events_bus.py` | 10 | `de36358` |
+| D4 | `test_notifications_dlq.py` | 4+1skip | `66b8a77` |
+| D5 | `test_metrics.py` | 16（雙模式） | `76d2e91` |
+| D6 | `test_budget_strategy.py` / `test_config.py` / `test_structlog_setup.py` | 30+1skip | `7c77f75` |
+| D7 | `test/hooks/use-mobile.test.tsx` / `use-engine.test.tsx` | 11 | `90eb637` |
+
+**總計新增**：~104 backend test + 11 frontend test。
+
+**Tier-3 延期**：`github_app`、`issue_tracker`、`sdk_provisioner`、
+`model_router`、`container`、`workspace`、`ambiguity`、`decision_defaults`、
+`main`、`sse_schemas`、`report_generator`、`git_credentials` 共 12 模組
+仍無直接 test，已排入未來 Phase 66。
+
+### Phase 62 解鎖
+
+Fix-D 完成 → **Phase 62 Knowledge Generation 可啟動**。workflow_runs /
+audit_log / notifications 皆有 test 保護，skills_extractor 可安心讀取。
 
 ---
 
