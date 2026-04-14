@@ -192,6 +192,41 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 52-Fix-A — 緊急安全修補（2026-04-14）
+
+源自 Fix-A 五項深度審計發現（S1/S2 auth bypass、S3' shell injection、
+S6 orphan subprocess、S7 watchdog false positive）。各點獨立 commit
+以便單獨 revert。
+
+| Commit | 項 | 內容 |
+|---|---|---|
+| `9f18e2c` | S7 | `routers/invoke.py` watchdog tick 移至 stuck-detection 掃描完成後更新；hang 時 `/healthz` 可見 watchdog-age 增長 |
+| `e51bbda` | S6 | `routers/webhooks.py` Jenkins/GitLab `proc.kill()` 失敗從 silent pass 改為 log + `omnisight_subprocess_orphan_total{target}` counter |
+| `e0939cd` | S1+S2 | `/chat`/`/chat/stream`/`/chat/history` + `/system/settings` / `/system/vendor/sdks` mutators 加上 RBAC dependency；open 模式維持向後相容 |
+| `c85c544` | S3' | `agents/tools.py` 5 處 `create_subprocess_shell` + f-string → `_shell_safe.run_exec` argv exec；新增 `backend/agents/_shell_safe.py` + 16 測試 |
+
+### 驗收
+
+`pytest backend/tests/test_observability.py test_shell_safe.py test_tools.py
+test_git_platform.py test_external_webhooks.py test_integration_settings.py
+test_decision_engine.py test_stuck_detector.py` → **139 passed**。
+
+### 假陽性回補
+
+審計報告原列 S4「Gerrit webhook 缺簽章」為誤判：`routers/webhooks.py:41–95`
+已有 HMAC-SHA256 驗證（含 host-scoped secret fallback）。本次不動。
+
+CLAUDE.md `checkpatch.pl --strict` / Valgrind CI gate 列入未來 Fix-E（文件合規），不屬 Fix-A 安全批。
+
+### 後續
+
+Fix-B / Fix-C / Fix-D / Fix-E 仍待排程。**Phase 62–65（Agentic
+Self-Improvement）必須在 Fix-B + Fix-D 完成後才能啟動**，因為 Phase 64
+toolmaking 會放大 shell-exec 攻擊面 — Fix-A 僅將 host 路徑補上，真正
+sandbox 待 Phase 64 本身交付。
+
+---
+
 ## Phase 52 — Production Observability（2026-04-14）
 
 **Scope**：Prometheus `/metrics`、Deep `/healthz`、結構化 JSON log、Webhook DLQ
