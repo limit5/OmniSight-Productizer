@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight, Code, List } from "lucide-react"
+import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight, Code, List, Workflow } from "lucide-react"
 import {
   validateDag,
   submitDag,
@@ -21,6 +21,7 @@ import {
   type DAGValidationError,
 } from "@/lib/api"
 import { DagFormEditor, type FormDAG } from "@/components/omnisight/dag-form-editor"
+import { DagCanvas } from "@/components/omnisight/dag-canvas"
 
 // ─── Templates ──────────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ export function DagEditor() {
   // Phase 56-DAG-F: tab state. `text` stays canonical — the form view
   // derives FormDAG from it and serializes back on every mutation, so
   // switching tabs never loses work (as long as JSON is parseable).
-  const [tab, setTab] = useState<"json" | "form">("json")
+  const [tab, setTab] = useState<"json" | "form" | "canvas">("json")
 
   // Cancel-previous pattern: keep latest request's signal so a stale
   // response can't clobber a fresher one.
@@ -326,6 +327,20 @@ export function DagEditor() {
             >
               <List size={10} /> Form
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "canvas"}
+              onClick={() => setTab("canvas")}
+              className={
+                "text-xs font-mono px-2 py-0.5 flex items-center gap-1 " +
+                (tab === "canvas"
+                  ? "bg-[var(--artifact-purple)] text-white"
+                  : "text-[var(--muted-foreground)] hover:bg-[var(--muted)]")
+              }
+            >
+              <Workflow size={10} /> Canvas
+            </button>
           </div>
           <StatusBadge status={status} validating={validating} />
         </div>
@@ -371,12 +386,18 @@ export function DagEditor() {
           aria-label="DAG JSON editor"
           className="w-full min-h-[240px] max-h-[480px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
         />
-      ) : formDag ? (
-        <DagFormEditor value={formDag} onChange={handleFormChange} />
+      ) : tab === "form" ? (
+        formDag ? (
+          <DagFormEditor value={formDag} onChange={handleFormChange} />
+        ) : (
+          <div className="text-xs font-mono p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)]">
+            Form view disabled — JSON is not parseable. Fix in the JSON tab first.
+          </div>
+        )
       ) : (
-        <div className="text-xs font-mono p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)]">
-          Form view disabled — JSON is not parseable. Fix in the JSON tab first.
-        </div>
+        // Canvas tab — pass any task-id-bearing validation errors so
+        // the canvas can tint offenders red in place.
+        <DagCanvas dag={formDag} errors={errors} />
       )}
 
       {/* Error panel */}
