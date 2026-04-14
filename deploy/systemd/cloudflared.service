@@ -1,0 +1,29 @@
+; systemd unit for cloudflared (Cloudflare Tunnel daemon).
+;
+; Preconditions:
+;   1. `cloudflared tunnel login` done (browser auth).
+;   2. `cloudflared tunnel create omnisight` done — creates the UUID.
+;   3. `cloudflared tunnel route dns omnisight omnisight.yourdomain.com`
+;      plus any extra subdomains (api, staging).
+;   4. config.yml lives at ~/.cloudflared/config.yml — see
+;      deploy/cloudflared/config.yml.example.
+
+[Unit]
+Description=Cloudflare Tunnel for OmniSight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=USERNAME
+ExecStart=/usr/bin/cloudflared --config /home/USER_HOME/.cloudflared/config.yml tunnel run
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/USER_HOME/.cloudflared
+
+[Install]
+WantedBy=multi-user.target

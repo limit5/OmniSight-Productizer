@@ -1,0 +1,45 @@
+; systemd unit for the OmniSight FastAPI backend.
+;
+; Install:
+;   sudo cp deploy/systemd/omnisight-backend.service /etc/systemd/system/
+;   # Edit the USER_HOME / USERNAME placeholders below to match your WSL user.
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-backend
+;
+; Graceful shutdown: the FastAPI lifespan cancels six background loops
+; (watchdog / decision sweep / DLQ retry / IQ nightly / finetune nightly /
+; memory decay). uvicorn's default SIGTERM is honoured — no extra
+; KillMode needed.
+
+[Unit]
+Description=OmniSight backend (FastAPI / uvicorn)
+Documentation=https://github.com/your-org/OmniSight-Productizer
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=exec
+User=USERNAME
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+EnvironmentFile=/home/USER_HOME/work/sora/OmniSight-Productizer/.env
+ExecStart=/usr/bin/python3 -m uvicorn backend.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+; Sandboxing. OmniSight itself needs docker + /home access; keep the
+; rest locked down so a compromise doesn't walk out.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/data
+ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/workspaces
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+# Cloudflare Tunnel ingress for OmniSight.
+#
+# Copy to ~/.cloudflared/config.yml and fill in:
+#   - tunnel: the UUID printed by `cloudflared tunnel create omnisight`
+#   - credentials-file: the auto-created json under ~/.cloudflared/
+#   - hostnames: your own subdomain on the Cloudflare-delegated zone
+#
+# DNS records for the hostnames must already exist, created via:
+#   cloudflared tunnel route dns omnisight omnisight.yourdomain.com
+#   cloudflared tunnel route dns omnisight api.omnisight.yourdomain.com
+
+tunnel: REPLACE-WITH-TUNNEL-UUID
+credentials-file: /home/USER_HOME/.cloudflared/REPLACE-WITH-TUNNEL-UUID.json
+
+ingress:
+  # Frontend — Next.js on :3000
+  - hostname: omnisight.yourdomain.com
+    service: http://localhost:3000
+
+  # API — FastAPI on :8000. Pinned to a subdomain so the browser's
+  # NEXT_PUBLIC_API_URL can target it cleanly without CORS gymnastics.
+  - hostname: api.omnisight.yourdomain.com
+    service: http://localhost:8000
+
+  # Optional staging slot on the same WSL host, different ports.
+  # Uncomment once deploy.sh manages an omnisight-backend-staging unit.
+  # - hostname: staging.omnisight.yourdomain.com
+  #   service: http://localhost:3001
+  # - hostname: api-staging.omnisight.yourdomain.com
+  #   service: http://localhost:8001
+
+  # Catch-all.
+  - service: http_status:404

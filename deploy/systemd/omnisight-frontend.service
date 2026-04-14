@@ -1,0 +1,29 @@
+; systemd unit for the OmniSight Next.js frontend.
+;
+; Assumes `npm run build` has produced .next/ and node_modules is
+; populated. The deploy.sh script takes care of both before restart.
+
+[Unit]
+Description=OmniSight frontend (Next.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=USERNAME
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+Environment=NODE_ENV=production
+; NEXT_PUBLIC_API_URL must match what cloudflared routes to :8000.
+Environment=NEXT_PUBLIC_API_URL=https://api.omnisight.yourdomain.com/api/v1
+ExecStart=/usr/bin/npx next start -p 3000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/.next
+
+[Install]
+WantedBy=multi-user.target
