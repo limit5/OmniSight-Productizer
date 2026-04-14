@@ -78,8 +78,11 @@ function SettingsSection({ title, integration, children }: {
               : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
             }`}>
               {testResult.status === "ok" ? "Connected" : testResult.message || testResult.status}
-              {testResult.user && ` (${testResult.user})`}
-              {testResult.version && ` — ${testResult.version}`}
+              {/* user / version are open-ended metadata on the integration
+                  probe response (unknown-typed); coerce to string before
+                  rendering so React's ReactNode contract stays satisfied. */}
+              {testResult.user ? ` (${String(testResult.user)})` : null}
+              {testResult.version ? ` — ${String(testResult.version)}` : null}
             </div>
           )}
         </div>

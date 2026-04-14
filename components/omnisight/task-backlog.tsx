@@ -96,6 +96,9 @@ function getStatusColor(status: TaskStatus): string {
 
 // AI Analysis simulation
 function analyzeTask(task: Task, agents: Agent[]): { analysis: string; suggestedType: Agent["type"] | null; existingAgent: Agent | null } {
+  // `Array.find` returns T | undefined; the function signature
+  // contracts `Agent | null` so call sites can `?? null` once instead
+  // of paying the union tax everywhere. Convert at the boundary.
   const title = task.title.toLowerCase()
   const desc = (task.description || "").toLowerCase()
   const combined = `${title} ${desc}`
@@ -113,10 +116,10 @@ function analyzeTask(task: Task, agents: Agent[]): { analysis: string; suggested
   }
   
   // Check if any existing agent could handle this
-  const existingAgent = agents.find(a => 
-    a.type === suggestedType && 
+  const existingAgent: Agent | null = agents.find(a =>
+    a.type === suggestedType &&
     (a.status === "idle" || a.status === "success")
-  )
+  ) ?? null
   
   // Check if task might already be done
   const completedAgent = agents.find(a => 
@@ -824,8 +827,11 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
                       style={{
                         backgroundColor: newTaskPriority === p ? `color-mix(in srgb, ${getPriorityColor(p)} 20%, transparent)` : undefined,
                         color: getPriorityColor(p),
-                        ringColor: getPriorityColor(p)
-                      }}
+                        // See npi-timeline note: Tailwind's ring colour
+                        // is driven by --tw-ring-color, not a real CSS
+                        // property.
+                        "--tw-ring-color": getPriorityColor(p),
+                      } as React.CSSProperties}
                     >
                       {p.toUpperCase()}
                     </button>

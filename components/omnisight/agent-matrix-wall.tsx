@@ -569,7 +569,10 @@ function ShadowNode({ onSpawn, disabled = false }: ShadowNodeProps) {
 
   const handleSpawn = () => {
     if (!selectedType) return
-    onSpawn(selectedType, AGENT_TYPES[selectedType].tools, selectedRole || undefined, selectedModel || undefined)
+    // Each AGENT_TYPES entry ships a readonly tuple literal for
+    // `tools`; onSpawn accepts the mutable string[] contract so a
+    // shallow copy widens the type without changing the value.
+    onSpawn(selectedType, [...AGENT_TYPES[selectedType].tools], selectedRole || undefined, selectedModel || undefined)
     setShowMenu(false)
     setSelectedType(null)
     setSelectedRole("")

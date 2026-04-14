@@ -154,12 +154,16 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
                   ? "ring-1"
                   : "text-[var(--muted-foreground)] hover:text-[var(--foreground)] bg-[var(--secondary)]"
               }`}
-              style={data.business_model === bm.id ? {
+              style={data.business_model === bm.id ? ({
                 backgroundColor: `color-mix(in srgb, ${bm.color} 20%, transparent)`,
                 color: bm.color,
-                ringColor: bm.color,
+                // Tailwind's `ring-1` reads --tw-ring-color; React's
+                // CSSProperties type doesn't know about that custom
+                // property, so cast the literal through the standard
+                // CSS-vars escape hatch.
+                "--tw-ring-color": bm.color,
                 boxShadow: `0 0 6px color-mix(in srgb, ${bm.color} 30%, transparent)`,
-              } : undefined}
+              } as React.CSSProperties) : undefined}
               title={bm.desc}
             >
               {bm.label}

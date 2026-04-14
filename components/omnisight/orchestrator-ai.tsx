@@ -398,11 +398,14 @@ export function OrchestratorAI({
         timestamp: formatTime()
       }])
     } else if (suggestion.type === "spawn" && suggestion.agentType) {
-      onSpawnAgent(suggestion.agentType)
+      // Pin the agentType into a local so TS can see the
+      // narrowed-non-undefined type inside the closure below.
+      const agentType = suggestion.agentType
+      onSpawnAgent(agentType)
       setMessages(prev => [...prev, {
         id: `sys-${Date.now()}`,
         role: "system",
-        content: `Spawning ${AGENT_TYPES[suggestion.agentType].label} agent...`,
+        content: `Spawning ${AGENT_TYPES[agentType].label} agent...`,
         timestamp: formatTime()
       }])
     }
