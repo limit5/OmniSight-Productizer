@@ -35,6 +35,42 @@ router = APIRouter(prefix="/invoke", tags=["invoke"])
 # it. Real concurrency is owned by `_invoke_slot()` below.
 
 
+# Phase 67-E follow-up: platform-aware RAG gate.
+def _resolve_platform_tags(workspace_path: str | None) -> tuple[str, str]:
+    """Return (soc_vendor, sdk_version) for the task's workspace.
+
+    Reads `.omnisight/platform` (the hint file agents already honour
+    via get_platform_config), then pulls `vendor_id` / `sdk_version`
+    from the matching platform profile YAML. Any failure path returns
+    ("", "") so the downstream SDK hard-lock stays permissive — the
+    gate is strictly opt-in per workspace.
+    """
+    if not workspace_path:
+        return "", ""
+    try:
+        from pathlib import Path
+        import yaml
+        hint = Path(workspace_path) / ".omnisight" / "platform"
+        if not hint.exists():
+            return "", ""
+        platform = hint.read_text().strip()
+        if not platform:
+            return "", ""
+        from backend.sdk_provisioner import _validate_platform_name, _platform_profile
+        if not _validate_platform_name(platform):
+            return "", ""
+        profile = _platform_profile(platform)
+        if profile is None or not profile.exists():
+            return "", ""
+        data = yaml.safe_load(profile.read_text()) or {}
+        return (
+            str(data.get("vendor_id") or ""),
+            str(data.get("sdk_version") or ""),
+        )
+    except Exception:
+        return "", ""
+
+
 def _invoke_slot():
     """Acquire an INVOKE concurrency slot scaled by OperationMode."""
     from backend import decision_engine as _de
@@ -471,6 +507,12 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 )
                 logger.warning("INVOKE: %s model '%s' not available: %s", agent.id, selected_model, _v["warning"])
                 selected_model = ""  # Fall back to global
+        # Phase 67-E follow-up: resolve platform tags for the sandbox
+        # RAG pre-fetch SDK hard-lock. Reads the workspace's
+        # `.omnisight/platform` hint and pulls vendor/sdk from the
+        # profile YAML. Empty strings when the workspace is not
+        # platform-tagged — downstream gate stays permissive.
+        soc_vendor, sdk_version = _resolve_platform_tags(workspace_path)
         try:
             graph_result = await run_graph(
                 task_command,
@@ -480,6 +522,8 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 handoff_context=handoff_ctx,
                 task_skill_context=task_skill,
                 task_id=task.id,
+                soc_vendor=soc_vendor,
+                sdk_version=sdk_version,
             )
             agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
             agent.status = AgentStatus.success

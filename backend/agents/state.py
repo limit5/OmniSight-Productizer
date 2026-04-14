@@ -92,3 +92,12 @@ class GraphState(BaseModel):
 
     # Final answer text to return to the frontend
     answer: str = ""
+
+    # Phase 67-E follow-up — platform tags used by the sandbox RAG
+    # pre-fetch to enforce the SDK-version hard-lock. Empty strings
+    # map to "unknown, be permissive" in prefetch_for_sandbox_error.
+    # Populated by the workflow layer from the active platform config
+    # (get_platform_config) when a task is routed to a platform-aware
+    # specialist.
+    soc_vendor: str = ""
+    sdk_version: str = ""

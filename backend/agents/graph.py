@@ -175,6 +175,8 @@ async def run_graph(
     handoff_context: str = "",
     task_skill_context: str = "",
     task_id: str | None = None,
+    soc_vendor: str = "",
+    sdk_version: str = "",
 ) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
@@ -186,6 +188,10 @@ async def run_graph(
         handoff_context: Previous task handoff content (injected into prompt).
         task_skill_context: Anthropic SKILL.md content for task-specific guidance.
         task_id: Associated task ID for debug finding tracking.
+        soc_vendor / sdk_version: Phase 67-E follow-up — pass through
+            so prefetch_for_sandbox_error can enforce the SDK
+            hard-lock. Empty strings keep the gate permissive (the
+            non-platform-aware default).
     """
     import asyncio
 
@@ -198,6 +204,8 @@ async def run_graph(
         agent_sub_type=agent_sub_type,
         handoff_context=handoff_context,
         task_skill_context=task_skill_context,
+        soc_vendor=soc_vendor,
+        sdk_version=sdk_version,
     )
     try:
         result = await asyncio.wait_for(
@@ -214,6 +222,8 @@ async def run_graph(
             agent_sub_type=agent_sub_type,
             handoff_context=handoff_context,
             task_skill_context=task_skill_context,
+            soc_vendor=soc_vendor,
+            sdk_version=sdk_version,
             answer=f"[TIMEOUT] Graph execution exceeded {GRAPH_TIMEOUT}s",
             last_error="Graph execution timeout",
         )

@@ -840,11 +840,12 @@ async def error_check_node(state: GraphState) -> dict:
             error_log = failed[0].output if failed else error_summary
             block = await _rp.prefetch_for_sandbox_error(
                 error_log, rc=1,
-                # SoC / SDK context isn't carried on GraphState today —
-                # empty strings make the version hard-lock permissive
-                # (see `_version_hard_lock_rejects`). A future platform-
-                # aware enhancement can fill these.
-                soc_vendor="", sdk_version="",
+                # Phase 67-E follow-up: state now carries platform tags.
+                # Empty strings still map to "unknown, permissive" in
+                # `_version_hard_lock_rejects`, so non-platform-aware
+                # callers degrade gracefully.
+                soc_vendor=state.soc_vendor,
+                sdk_version=state.sdk_version,
             )
             if block:
                 l3_hint_messages = [AIMessage(content=block)]
