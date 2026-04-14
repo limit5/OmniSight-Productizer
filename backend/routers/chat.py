@@ -6,9 +6,10 @@ import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sse_starlette.sse import EventSourceResponse
 
+from backend import auth as _au
 from backend.agents.graph import run_graph
 from backend.events import emit_pipeline_phase
 from backend.routers.system import add_system_log
@@ -96,7 +97,7 @@ async def _try_slash_command(message: str) -> OrchestratorMessage | None:
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(body: ChatRequest):
+async def chat(body: ChatRequest, _user=Depends(_au.require_operator)):
     user_message = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
         role=MessageRole.user,
@@ -115,7 +116,7 @@ async def chat(body: ChatRequest):
 
 
 @router.post("/stream")
-async def chat_stream(body: ChatRequest):
+async def chat_stream(body: ChatRequest, _user=Depends(_au.require_operator)):
     """SSE streaming — pipeline runs with real-time events pushed via event bus,
     then the final answer is streamed token-by-token here."""
     # Slash command interception
@@ -141,10 +142,10 @@ async def chat_stream(body: ChatRequest):
 
 
 @router.get("/history", response_model=list[OrchestratorMessage])
-async def get_history():
+async def get_history(_user=Depends(_au.require_operator)):
     return _history
 
 
 @router.delete("/history", status_code=204)
-async def clear_history():
+async def clear_history(_user=Depends(_au.require_admin)):
     _history.clear()

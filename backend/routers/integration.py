@@ -8,9 +8,10 @@ import os
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from backend import auth as _au
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def _get_masked_credentials() -> list[dict]:
 
 
 @router.get("/settings")
-async def get_settings():
+async def get_settings(_user=Depends(_au.require_operator)):
     """Return all integration settings grouped by category. Tokens are masked."""
     return {
         "llm": {
@@ -138,7 +139,7 @@ _UPDATABLE_FIELDS = frozenset({
 
 
 @router.put("/settings")
-async def update_settings(body: SettingsUpdate):
+async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)):
     """Update integration settings at runtime (not persisted to .env)."""
     applied = {}
     rejected = {}
@@ -177,7 +178,7 @@ async def update_settings(body: SettingsUpdate):
 
 
 @router.post("/test/{integration}")
-async def test_integration(integration: str):
+async def test_integration(integration: str, _user=Depends(_au.require_admin)):
     """Test connectivity for an external integration."""
     tester = _TESTERS.get(integration)
     if not tester:
@@ -335,7 +336,7 @@ class VendorSDKCreate(BaseModel):
 
 
 @router.post("/vendor/sdks")
-async def create_vendor_sdk(body: VendorSDKCreate):
+async def create_vendor_sdk(body: VendorSDKCreate, _user=Depends(_au.require_admin)):
     """Create a new vendor SDK platform profile."""
     import re
     if not re.match(r'^[a-zA-Z0-9_-]+$', body.platform):
@@ -376,7 +377,7 @@ async def create_vendor_sdk(body: VendorSDKCreate):
 
 
 @router.delete("/vendor/sdks/{platform}")
-async def delete_vendor_sdk(platform: str):
+async def delete_vendor_sdk(platform: str, _user=Depends(_au.require_admin)):
     """Delete a vendor SDK platform profile."""
     if not re.match(r'^[a-zA-Z0-9_-]+$', platform):
         raise HTTPException(400, "Invalid platform name (alphanumeric, hyphens, underscores only)")
@@ -393,7 +394,7 @@ async def delete_vendor_sdk(platform: str):
 
 
 @router.post("/vendor/sdks/{platform}/install")
-async def install_vendor_sdk(platform: str):
+async def install_vendor_sdk(platform: str, _user=Depends(_au.require_admin)):
     """Clone and provision the vendor SDK for a platform.
 
     Reads sdk_git_url from the platform YAML, clones the repo,
