@@ -192,6 +192,59 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 63-C — Prompt Registry + Canary 完成（2026-04-14）
+
+吸收原 Phase 63 Meta-Prompting Evaluator 主體並落地。Prompt 從 code 抽
+為 DB 行；5% deterministic canary、7 天窗口、自動 rollback。
+
+### 交付（commit `65a98ea`）
+
+**新表 `prompt_versions`**：(path, version, role, body, body_sha256,
+success/failure_count, created/promoted/rolled_back_at, rollback_reason)；
+UNIQUE(path, version)，索引 (path, role)。
+
+**`backend/prompt_registry.py`**：
+
+| 函式 | 行為 |
+|---|---|
+| `_normalise_path` | 白名單：僅 `backend/agents/prompts/**.md`；明確拒 `CLAUDE.md`（L1-immutable） |
+| `register_active(path, body)` | 同 body idempotent；否則舊 active → archive、version+1 |
+| `register_canary(path, body)` | 取代既有 canary（rollback_reason=superseded） |
+| `pick_for_request(path, agent_id) → (version, role)` | blake2b(agent_id) % 100 < 5 走 canary；deterministic 可重播 |
+| `record_outcome(version_id, success)` | 累加 per-version counter（Phase 63-A IIS 餵 source） |
+| `evaluate_canary(path, min_samples=20, regression_pp=5, window_s=7d)` | 回 `{no_canary, insufficient_samples, rollback, keep_running, promote_canary}`；regression > 5pp 即 auto-archive canary |
+| `promote_canary(path)` | operator action：canary → active、舊 active → archive |
+
+### 設計姿態
+
+- **deterministic canary**：incident replay 不會「碰運氣」走到不同 lane。
+- **path 白名單嚴格**：CLAUDE.md / L1 規則文件永禁；`.md` 副檔強制；
+  路徑 escape 一律 PathRejected。
+- **auto-rollback 但非 auto-promote**：跌過 5pp 自動回滾；通過則回
+  `promote_canary` 等 operator 拍板。
+- **idempotent register_active**：同 body 不會無謂炸版本號。
+- **outcome 累計而非個別行**：節省寫入；版本級 pass rate 即為信號。
+
+### 新 metrics
+
+- `omnisight_prompt_outcome_total{role,outcome}` — Counter
+- `omnisight_prompt_rolled_back_total{path}` — Counter
+
+### 驗收
+
+`pytest test_prompt_registry + test_intelligence + test_intelligence_mitigation + test_db + test_metrics`
+→ **93 pass + 2 skip / 5.02s**。19 test 覆蓋路徑白名單 4 邊界、
+register_active 三路徑、canary supersession、pick 5% 偏差容忍 (1000
+draws / 期待 20–90)、deterministic per agent_id、evaluate 五決策、
+promote 兩路徑。
+
+### 後續
+
+**Phase 63-D Daily IQ Benchmark** — 手動策展 10 題、nightly 跑 active
++ chain 中其他 model、低於 baseline 連 2 天 → Notification。
+
+---
+
 ## Phase 63-B — IIS Mitigation Layer 完成（2026-04-14）
 
 承 Phase 63-A 之後立即實作。把 signal-only 的 alerts 對應到 Decision
