@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
 
 from backend import db
+from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
@@ -22,7 +23,7 @@ def get_artifacts_root() -> Path:
 
 
 @router.get("")
-async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = 50):
+async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = _pg.Limit(default=50, max_cap=200)):
     """List artifacts, optionally filtered by task or agent."""
     return await db.list_artifacts(task_id=task_id, agent_id=agent_id, limit=limit)
 

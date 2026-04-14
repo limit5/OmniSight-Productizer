@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from backend import audit
 from backend import auth as _au
+from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
@@ -37,7 +38,7 @@ async def list_audit(
     since: float | None = None,
     actor: str | None = None,
     entity_kind: str | None = None,
-    limit: int = 200,
+    limit: int = _pg.Limit(default=200, max_cap=500),
     _auth: None = Depends(_require_audit_token),
     user: _au.User = Depends(_au.current_user),
 ) -> dict:

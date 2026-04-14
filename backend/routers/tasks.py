@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from backend.models import Task, TaskCreate, TaskStatus, TaskUpdate
 from backend.events import emit_task_update
 from backend import db
+from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -163,7 +164,7 @@ async def _sync_external_issue(issue_url: str, status: str, task_id: str) -> Non
 # ── Task Comments ──
 
 @router.get("/{task_id}/comments")
-async def get_task_comments(task_id: str, limit: int = 20):
+async def get_task_comments(task_id: str, limit: int = _pg.Limit(default=20, max_cap=200)):
     """Get comment thread for a task."""
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -198,7 +199,7 @@ async def get_task_handoffs(task_id: str):
 
 
 @router.get("/handoffs/recent")
-async def get_recent_handoffs(limit: int = 20):
+async def get_recent_handoffs(limit: int = _pg.Limit(default=20, max_cap=200)):
     """Get recent handoffs across all tasks."""
     handoffs = await db.list_handoffs()
     return handoffs[:limit]

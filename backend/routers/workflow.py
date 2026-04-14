@@ -19,12 +19,13 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from backend import workflow as wf
+from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
 
 @router.get("/runs")
-async def list_runs(status: str | None = None, limit: int = 50) -> dict:
+async def list_runs(status: str | None = None, limit: int = _pg.Limit(default=50, max_cap=200)) -> dict:
     runs = await wf.list_runs(status=status, limit=limit)
     return {
         "runs": [

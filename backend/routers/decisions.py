@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from backend import auth as _au
 from backend import decision_engine as de
 from backend import decision_rules as _dr
+from backend.routers import _pagination as _pg
 
 router = APIRouter(tags=["decisions"])
 
@@ -114,7 +115,7 @@ async def put_mode(
 
 
 @router.get("/decisions")
-async def list_decisions(status: str = "pending", limit: int = 100) -> dict[str, Any]:
+async def list_decisions(status: str = "pending", limit: int = _pg.Limit(default=100)) -> dict[str, Any]:
     if status == "pending":
         items = [d.to_dict() for d in de.list_pending()]
     elif status == "history":

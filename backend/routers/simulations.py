@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend import db
 from backend.models import SimulationRequest
+from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/system/simulations", tags=["simulations"])
 
@@ -13,7 +14,7 @@ async def list_simulations(
     task_id: str = "",
     agent_id: str = "",
     status: str = "",
-    limit: int = 50,
+    limit: int = _pg.Limit(default=50, max_cap=200),
 ):
     """List recent simulation runs with optional filters."""
     return await db.list_simulations(

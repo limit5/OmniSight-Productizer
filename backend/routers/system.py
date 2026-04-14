@@ -21,6 +21,8 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.routers import _pagination as _pg
+
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse,
     Notification, Simulation, Artifact, DebugFinding, DeployRequest,
@@ -930,7 +932,7 @@ add_system_log(f"Python {platform.python_version()} on {platform.system()}", "in
 
 
 @router.get("/logs")
-async def get_logs(limit: int = 50):
+async def get_logs(limit: int = _pg.Limit(default=50, max_cap=500)):
     """Return recent system logs."""
     return list(_log_buffer)[-limit:]
 
@@ -1182,7 +1184,7 @@ async def unread_count():
 
 
 @router.get("/notifications")
-async def get_notifications(limit: int = 50, level: str = ""):
+async def get_notifications(limit: int = _pg.Limit(default=50, max_cap=200), level: str = ""):
     """List notifications, optionally filtered by level."""
     from backend import db
     return await db.list_notifications(limit=limit, level=level)

@@ -14,6 +14,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from backend.routers import _pagination as _pg
+
 from backend import auth as _au
 from backend import decision_profiles as dp
 
@@ -69,7 +71,7 @@ async def put_profile(req: ProfileRequest, _auth: None = Depends(_require_token)
 async def list_auto_decisions(
     since: float | None = None,
     undone: bool | None = None,
-    limit: int = 200,
+    limit: int = _pg.Limit(default=200, max_cap=500),
 ) -> dict:
     """Postmortem feed."""
     from backend import db
