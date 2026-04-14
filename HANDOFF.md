@@ -276,16 +276,20 @@ c1037fc D3: budget-strategies + troubleshooting × 4 langs
 ```
 （F1 tutorials + HANDOFF 本段為本次 commit）
 
-## Phase 51-57（未來排程）
+## Phase 51-59（未來排程）
 
 為 Phase 50 完成後的下一批工作。每個 phase 維持既有節奏：實作 → 深度審計 → 補修 batch → commit。
 
-> **2026-04-14 更新**：吸收 [vercel-labs/open-agents](https://github.com/vercel-labs/open-agents)
-> 深度比較分析的結論。已將 6 項可借鑑模式對齊到既有 phase，新增
-> **Phase 56**（durable workflow checkpointing）與 **Phase 57**（AI SDK
-> wire-protocol + 語音輸入），並於 Phase 47-Fix 加入 **Batch E**
-> （docker pause/resume hibernate）作為 stuck-remediation 第 5 個 strategy。
-> 詳見本段末「Open Agents 借鑑分析」。
+> **2026-04-14 更新**：
+> - 吸收 [vercel-labs/open-agents](https://github.com/vercel-labs/open-agents)
+>   分析 → 新增 **Phase 56**（durable workflow）+ **Phase 57**（AI SDK +
+>   voice），於 47-Fix 加 **Batch E**（docker pause hibernate）。
+> - 全自動化目標的介入最小化驗證 → 新增 **Phase 58**（Smart Defaults +
+>   Decision Profiles，含完整 UX 補強）。
+> - x86_64 host-native 嵌入式場景（Hailo / Movidius / Industrial PC）
+>   → 新增 **Phase 59**（Host-Native Target Support）。
+>
+> 詳見本段末三個分析小節。
 
 ### Phase 51 — Backend coverage + CI pipeline + schema migrations
 讓 Python 測試與前端同級可觀測，同時把手刻 ALTER TABLE 升級成正式 migration 工具。
@@ -430,24 +434,7 @@ stuck_detector 目前提案 4 種補救：`switch_model` / `spawn_alternate` /
 
 ---
 
-### 總體估時
-
-| Phase | 主題 | 估時 |
-|---|---|---|
-| 51 | Backend coverage + CI + **Alembic** | 5-7 h（+1 h Alembic）|
-| 52 | Production observability | 6-8 h |
-| 53 | Audit & compliance | 5-7 h |
-| 54 | RBAC + sessions + **GitHub App** | 14-18 h（+6 h GitHub App）|
-| 55 | Agent plugin system | 6-10 h |
-| **56** | **Durable workflow checkpointing** | **8-10 h** |
-| **57** | **AI SDK wire-protocol + voice** | **12-14 h** |
-| 47-Fix Batch E | docker pause hibernate | 3 h |
-| **合計** | | **~59-77 h** |
-
-橫跨多個工作單元；建議順序為 **51 → 56 → 53 → 54 → 52 → 57 → 55**：
-先把 CI/coverage 立起來才能放心改 architecture（51）；workflow
-checkpointing 是 audit 與 RBAC 的前置（每 step 寫 audit、role 化 step
-retry 權限），先做 56；最後 57 屬於使用者體驗 polish，可獨立執行。
+> **總體估時與順序見本段末「更新後總體估時」表**（含 Phase 58 / 59）
 
 ---
 
@@ -473,6 +460,365 @@ retry 權限），先做 56；最後 57 屬於使用者體驗 polish，可獨立
 4. Alembic migration tool（drizzle-kit 對應品）→ **Phase 51** 擴充
 5. AI SDK v5 wire protocol + `useChat()` hook → **Phase 57**
 6. ElevenLabs 語音輸入 → **Phase 57**
+
+---
+
+## 介入最小化驗證（2026-04-14）
+
+針對「全自動化系統應讓操作員介入最小化」目標，以 9 個既有中斷場景對照
+**今天 / +Phase 56（durable workflow）/ +Phase 58（smart defaults）** 三階段：
+
+| # | 中斷場景 | 今天 | +Phase 56 | +Phase 58 | 殘留介入 |
+|---|---|---|---|---|---|
+| 1 | 後端 crash | 檢查 `[RECOVERY]` agents、pending decisions 全失 | resume from last step、idempotency 防重複 | smart defaults 在 resume 後仍套用 | **無** ✅ |
+| 2 | 單 agent LLM error | 已自動（retry / failover / circuit breaker）| step idempotency 防重複 spend | confidence-gated provider switch | **無** ✅ |
+| 3 | 卡住 agent | supervised 下要批 `switch_model`/`spawn_alternate` | （無變化）| BALANCED 自動解 risky-stuck，僅 escalate 找人 | **僅 escalate 情境** ⚠️ |
+| 4 | Pipeline blocked | `force_advance` 手動推進 | （無變化）| 非關鍵 phase 加 `auto_force_advance_after`；關鍵 phase 保 HITL | **僅關鍵 phase** ⚠️ |
+| 5 | Decision queue 中斷 | 重啟全失 | 持久化至 workflow_runs | smart defaults 自動消化 ~80% | **僅 critical kinds** ⚠️ |
+| 6 | Container / workspace 故障 | 已自動清理 | （無變化）| （無變化）| **無** ✅ |
+| 7 | LLM provider quota / webhook 失敗 | failover + 冷卻；無 DLQ | webhook idempotency 可重投 | profile 自動切 fallback | **全 provider 都掛**（外部依賴）❌ |
+| 8 | Halt / Emergency Stop | 操作員觸發 | resume 智慧復原 idle agent | （無變化）| **觸發瞬間需人意志**（語意上必要）❌ |
+| 9 | 前端斷線 | SSE replay 已自動 | （無變化）| （無變化）| **無** ✅ |
+
+### 結論
+
+**4 / 9 場景**（#1 / #2 / #6 / #9）介入完全消除  
+**3 / 9 場景**（#3 / #4 / #5）縮減為僅 critical kinds  
+**2 / 9 場景**（#7 / #8）結構性不可消除（外部依賴 / 操作員意志）
+
+### 殘留 critical kinds 量化
+
+依目前 17 種 decision kind 觀察：
+
+- **必 HITL**：5 種（push/main、deploy/prod、release/ship、workspace/delete、grant_admin）≈ **30%**
+- **BALANCED profile 自動化**：12 種 ≈ **70%**
+- **AUTONOMOUS profile**：剩 3 種（push/main、deploy/prod、grant_admin）≈ **18%** 需介入
+
+換算到日常使用：每日提案數從 **30+** 降到 **5 個內**（BALANCED）或 **2-3 個**（AUTONOMOUS）。
+
+### 設計上保留的人類介面
+
+「介入最小化」≠「介入歸零」。5 個 critical kinds + Emergency Stop 是**設計上**保留的人類意志介面，非技術 gap。把它們也自動化會讓系統具備「不請示就 ship 給客戶」的能力——通常被視為 bug 而非 feature。
+
+### 達成介入最小化所需 phase 組合
+
+**Phase 56 + Phase 58 + Phase 52 webhook DLQ 補強**（額外 3h）三件套即可達成。
+
+---
+
+## Phase 58 — Smart Defaults / Decision Profiles（**新增**）
+
+讓系統真正全自動：把現有的 Decision Engine（severity × MODE × Rules）擴充
+為**四層**：severity → **smart default chooser** → **profile 嚴格度** → 規則覆寫。
+將「事前 approve」轉為「事後 review + bulk undo 安全網」。
+
+### 4 個元件
+
+#### 1. 智慧預設註冊表 `backend/decision_defaults.py`
+
+```python
+@dataclass
+class SmartDefault:
+    kind_pattern: str                              # fnmatch
+    chooser: Callable[[Context], ChosenOption]     # 回傳 (option_id, confidence, rationale)
+    confidence_min: float = 0.7                    # 低於此 → queue
+    fallback_chain: list[str] = field(default_factory=list)
+    auto_in_profiles: list[ProfileId] = field(default_factory=list)
+```
+
+每個 `kind` 對應一個 SmartDefault；首批種子 ~20 個常見 kind（branch
+naming、commit style、model 選擇、test framework、retry strategy、provider
+fallback order…）。
+
+#### 2. Decision Profiles（4 預設，與 Budget Strategy 對稱）
+
+| Profile | HITL 嚴格度 | 適用 | 預設？ |
+|---|---|---|---|
+| **STRICT**（≈ 現在 SUPERVISED 行為）| 所有 `risky+` 都問 | 上線前一週、新團隊接手 | |
+| **BALANCED** | `risky` 若 confidence ≥ 0.7 自動；`destructive` 仍問 | 日常開發 | ✅ **新預設** |
+| **AUTONOMOUS** | 連 `destructive` 都自動，僅 critical_kinds 白名單問；24 h 內可 bulk undo | 週末批次、demo 衝刺 | |
+| **GHOST** | 連 critical 也只 5 s 倒數通知（強制 audit_log 完整 + staging-only 環境檢查）| dry-run / staging | **disabled by default** |
+
+GHOST 啟用條件：`OMNISIGHT_ALLOW_GHOST_PROFILE=true` + 環境變數
+`OMNISIGHT_ENV=staging` 雙重確認，否則 PUT `/profile` 拒絕切換。
+
+#### 3. Confidence-gated auto-resolve
+
+chooser 回傳 confidence score（來源 3 種）：
+- LLM 自評（`temperature=0` + structured output 要求 `confidence: 0.0-1.0`）
+- 歷史成功率（過去 N 筆同 kind 採 default option 的成功比）
+- Episodic L3 memory（FTS5 找類似 decision 結果）
+
+`confidence ≥ profile.threshold` → 自動 + 標 `source.auto_chosen=true`；
+否則進佇列。
+
+#### 4. Postmortem & Bulk Undo（**Q1 對應 UX 補強**）
+
+BALANCED 為新預設代表使用者**少看到 30 個提案** → 為避免「失控感」加 6 項 UX 補強：
+
+##### a. **Activity Digest Card**（dashboard 載入即顯示）
+> 「過去 24 小時自動處理 47 件，44 件成功、3 件已撤銷。最近一筆：5 分鐘前
+> auto-approved `branch/create` (confidence 0.92)」  
+> 點開展開詳細 timeline。
+
+##### b. **HISTORY tab 加 `auto-only` filter + bulk undo**
+- 多選 checkbox + 「Undo selected」按鈕
+- 每筆顯示 `confidence` bar + chooser rationale 縮圖
+
+##### c. **Real-time Auto Activity 浮窗**（左下角，可關）
+SSE `decision_auto_executed` 事件來時冒一個 1.5 s 半透明 chip：
+> ✓ branch/create → agent/foo/refactor-x  (BALANCED · 0.92)
+
+讓使用者**感受到系統正在工作**而非靜默吞動作。
+
+##### d. **「Would have asked you under STRICT」標記**
+HISTORY row hover 顯示：「此筆在 STRICT profile 下會進佇列」。讓使用者
+知道 BALANCED 為他省了多少 click。
+
+##### e. **Negative Rule 自動學習**
+若操作員對同一 kind undo ≥ 2 次 → 自動建議：
+> 「您撤銷了 `model_switch/refactor` 兩次。要為此 kind 加一條
+> STRICT rule 嗎？」
+
+接受 → 寫入 `decision_rules` 表 `negative=true` 欄位，往後此 kind 一律 queue。
+
+##### f. **End-of-day Summary**（可選 opt-in）
+每日 18:00 推一次（Slack / email / 站內通知）：
+> 「今日 OmniSight 自動處理 152 件決策，含 0 件破壞性。最有信心的：
+> branch naming（avg 0.94）。最低信心：provider fallback（0.71，3 件
+> queue 等您）」
+
+設定在 Settings → Notifications。
+
+### DB schema
+
+```sql
+CREATE TABLE decision_profiles (
+    id TEXT PRIMARY KEY,           -- "strict" | "balanced" | "autonomous" | "ghost"
+    threshold_risky REAL NOT NULL,
+    threshold_destructive REAL NOT NULL,
+    auto_critical BOOLEAN NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT 1
+);
+
+CREATE TABLE auto_decision_log (
+    id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    chosen_option TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    rationale TEXT,
+    profile_id TEXT NOT NULL,
+    auto_executed_at REAL NOT NULL,
+    undone_at REAL,                -- NULL = still standing
+    undone_by TEXT
+);
+
+ALTER TABLE decision_rules ADD COLUMN negative BOOLEAN NOT NULL DEFAULT 0;
+ALTER TABLE decision_rules ADD COLUMN undo_count INTEGER NOT NULL DEFAULT 0;
+```
+
+### 與既有元件整合
+
+| 既有 | 改動 |
+|---|---|
+| `decision_engine.propose()` | `decision_rules.apply()` 之後加 `decision_defaults.consult()`；rule 沒命中再走 default |
+| `OperationMode` | **語意僅保留「平行度預算」**（manual=1 / supervised=2 / full_auto=4 / turbo=8）；舊的 severity 自動執行矩陣**整體移到 Profile** |
+| `BudgetStrategy` | 不變 |
+| 新增 `DecisionProfile` | 與 BudgetStrategy 對稱：`/profile` GET/PUT、SSE `profile_changed` |
+
+### 端點 + SSE
+
+- `GET /profile` / `PUT /profile`（rate-limited、bearer-token 同 mode）
+- `GET /auto-decisions?since=&undone=&limit=`（postmortem digest）
+- `POST /decisions/bulk-undo` body `{ids: []}`
+- SSE: `profile_changed`、`decision_auto_executed`（已存在，補 confidence 欄）
+
+### 估時 & 順序
+
+| 工項 | 估時 |
+|---|---|
+| `decision_defaults.py` 註冊表 + `consult()` 接入 propose | 4 h |
+| 4 個 Profile + `/profile` API + SSE event + GHOST 雙重 gate | 4 h |
+| Confidence chooser（LLM structured output + 歷史成功率）| 4 h |
+| Postmortem card + bulk undo + auto-only filter | 4 h |
+| Activity chip + Would-have-asked tooltip + Negative rule 學習 | 4 h |
+| End-of-day summary（與 notifications.py 整合）| 2 h |
+| Decision Defaults seed（前 20 個常見 kind）| 3 h |
+| Tests + docs（operator/<lang>/reference/profiles.md ×4）| 5 h |
+| **合計** | **~30 h** |
+
+---
+
+## Phase 59 — Host-Native Target Support（**新增**）
+
+### 動機
+
+OmniSight 目前主力 platform profile：`aarch64 / armv7 / riscv64`（embedded
+SoC）。但實務上越來越多 AI camera 開發場景是**在 x86_64 host 上跑 x86_64
+SoC / 評估板**：
+
+- **Hailo-8 / Hailo-15** 評估板：x86_64 host + PCIe/USB 加速器
+- **Intel Movidius / Myriad** dev kit：x86 NUC 為 host
+- **AMD Versal / Xilinx Kria** 部分配置：x86 控制器
+- **Industrial PC SoC**（COM Express、Mini-ITX）：x86 SoC 直接運行 AI workload
+- **NVIDIA Jetson Orin x86 AGX 開發機**：交叉開發但部分階段 native 跑
+
+當 `target_arch == host_arch` 時，**整個 cross-compile / QEMU 流程都是浪費**：
+
+- ❌ 不需要 cross-compiler → 用 system gcc / clang
+- ❌ 不需要 QEMU 模擬 → 直接執行 binary
+- ❌ 不需要 sysroot → 用 host filesystem
+- ❌ Docker container 可同時 build + run + test
+
+### 影響的決策嚴重度
+
+許多今天標 `risky` 的決策在 host-native 模式下實際是 `routine`：
+
+| Kind | 今天 severity | host-native | 理由 |
+|---|---|---|---|
+| `deploy/dev_board` | risky | routine | container 隔離下「部署到 host」=「跑進 docker」 |
+| `simulation/qemu_run` | risky | **N/A** | 完全不需要 |
+| `cross_compile/toolchain_switch` | risky | **N/A** | 用 system toolchain |
+| `binary/execute` | risky | routine | 同架構直接跑 |
+| `firmware/flash` | destructive | risky | host-native 通常無 flash 步驟（軟體部署） |
+
+### 新增 platform profile
+
+`configs/platforms/host_native.yaml`（自動偵測 host arch 產生）：
+
+```yaml
+id: host_native
+target_arch: x86_64                # auto-detect
+host_arch: x86_64
+cross_compile: false
+toolchain:
+  cc: gcc
+  cxx: g++
+  cmake_toolchain: null            # use system default
+sysroot: null
+qemu: false
+docker_isolation: required         # 仍需 container 防誤刪 host
+build_then_run_same_container: true
+```
+
+### 新增 `app_only` 模式
+
+對於「**只開發應用層、不碰韌體 / driver**」的專案（多數 x86 邊緣 AI 應用都
+是這類），加 project-level flag：
+
+```yaml
+# hardware_manifest.yaml
+project_track: app_only            # firmware | driver | algo | app_only
+target_platform: host_native
+```
+
+`app_only` 自動關閉的功能：
+- 不啟動 firmware agent
+- 不要求 BSP / HAL skill 載入
+- 略過雙軌模擬中的 hw track（algo 直接跑）
+- Pipeline 階段精簡：`Concept → Build → Test → Deploy`（從 8 階段縮為 4）
+
+### Skill loader 偵測
+
+`backend/prompt_loader.py` 載入 role 時若偵測 `host_native + app_only`：
+- 載入 `roles/app-developer.yaml` 取代 `roles/bsp.yaml`、`roles/isp.yaml`
+- 把 system prompt 中 cross-compile / QEMU 段落抑制
+- 工具預設 set 縮減（不需要 `qemu_emulate`、`flash_firmware` 等）
+
+### Pipeline / 雙軌模擬簡化
+
+`backend/pipeline.py` 對 host_native + app_only：
+- 只跑 `algo_track`（資料驅動回放）
+- `hw_track` 改為直接 `pytest -m hardware`（host native 即 target）
+- 無需 `simulate.sh` 切 platform profile
+- Build & test 同一 container → 時間從 ~5 min 縮至 ~1 min
+
+### Decision Engine 整合
+
+新增 `Context.is_host_native: bool`，傳入 `decision_engine.propose()`：
+- chooser 可基於此 flag 調整 severity（用 `decision_defaults.py` 內的 modifier）
+- `decision_rules.yaml` 可宣告 `host_native_only_routine: true` 表示 host-native 下降級
+
+範例 rule：
+```yaml
+- kind_pattern: "deploy/*"
+  severity: routine            # host-native 下
+  conditions:
+    is_host_native: true
+    project_track: app_only
+  auto_in_modes: [supervised, full_auto, turbo]
+```
+
+### 對 BALANCED profile 的相乘效應
+
+host_native + app_only + BALANCED profile 組合：
+
+- 介入頻率從 **每日 5 個** 降到 **每日 1-2 個**
+- 完整 build-test-deploy cycle 從 **15 min** 縮到 **2-3 min**
+- LLM token 消耗減少 **~40%**（少了 cross-compile 錯誤分析）
+
+### Sandbox 安全考量
+
+雖然 arch 一致，**仍需 docker 容器隔離**（防呆）：
+
+- container 內仍受 `--memory` / `--cpus` / `--pids-limit` 限制（既有 Phase 16 機制）
+- workspace mount 仍 `:ro` 防主機檔案污染
+- 但允許 USB / PCIe device passthrough（Hailo 等加速卡需要）：新 env
+  `OMNISIGHT_HOST_DEVICE_PASSTHROUGH=hailo|movidius|none`
+
+### 估時 & 工項
+
+| 工項 | 估時 |
+|---|---|
+| `host_native.yaml` profile + 自動偵測 host arch | 2 h |
+| `project_track: app_only` schema + manifest 解析 | 2 h |
+| `prompt_loader` 偵測 + skill 抑制邏輯 | 3 h |
+| `pipeline.py` 簡化（4 階段精簡 + 單 container build-run）| 4 h |
+| 雙軌模擬：跳過 hw_track 改 pytest 直跑 | 3 h |
+| Decision Engine `Context.is_host_native` + severity modifier | 2 h |
+| Sandbox device passthrough（PCIe/USB）| 4 h |
+| 範例 manifest（Hailo-8 + x86 host）+ tests | 3 h |
+| Operator docs：新增 host-native getting-started × 4 langs | 5 h |
+| **合計** | **~28 h** |
+
+### 排序建議
+
+放在 Phase 58 之後、Phase 55 之前：
+
+1. **Phase 58**（Smart Defaults）已建立 confidence-based auto-resolution
+2. **Phase 59** 給 host-native 場景注入 `is_host_native` context flag
+3. 兩者相乘 → 介入頻率最低化的最大化收益
+
+---
+
+### 更新後總體估時
+
+| Phase | 主題 | 估時 |
+|---|---|---|
+| 51 | Backend coverage + CI + Alembic | 5-7 h |
+| 52 | Production observability（含 webhook DLQ）| 9-11 h |
+| 53 | Audit & compliance | 5-7 h |
+| 54 | RBAC + sessions + GitHub App | 14-18 h |
+| 55 | Agent plugin system | 6-10 h |
+| 56 | Durable workflow checkpointing | 8-10 h |
+| 57 | AI SDK wire-protocol + voice | 12-14 h |
+| **58** | **Smart Defaults / Decision Profiles** | **30 h** |
+| **59** | **Host-Native Target Support** | **28 h** |
+| 47-Fix Batch E | docker pause hibernate | 3 h |
+| **合計** | | **~120-138 h** |
+
+### 更新後執行順序建議
+
+**51 → 56 → 53 → 58 → 59 → 54 → 52 → 57 → 55**
+
+關鍵理由：
+1. CI/coverage 先（51）
+2. workflow checkpoint 是後續所有 phase 的可靠性前置（56）
+3. audit chain 在加 auto decision 之前（53），確保自動化決策皆有跡可循
+4. **Smart Defaults（58）+ Host-Native（59）相鄰執行**——兩者相乘效益最大
+5. RBAC（54）建立在已有完整審計與 profile 之上
+6. observability（52）→ UX polish（57）→ plugin system（55）收尾
 
 ---
 
