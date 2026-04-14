@@ -223,3 +223,54 @@ async def test_list_plan_chain(client, monkeypatch):
     assert body["plans"][0]["mutation_round"] == 0
     assert body["plans"][1]["mutation_round"] == 1
     assert body["plans"][1]["parent_plan_id"] == body["plans"][0]["id"]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /dag/validate — Phase 56-DAG-E (dry-run for UI)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@pytest.mark.asyncio
+async def test_validate_valid_dag_returns_ok(client):
+    r = await client.post("/api/v1/dag/validate",
+                          json={"dag": _valid_dag("REQ-v-ok")})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["stage"] == "semantic"
+    assert body["errors"] == []
+    assert body["task_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_validate_malformed_schema_stage(client):
+    r = await client.post("/api/v1/dag/validate",
+                          json={"dag": _malformed_dag()})
+    assert r.status_code == 200  # dry-run always 200; payload carries ok=false
+    body = r.json()
+    assert body["ok"] is False
+    assert body["stage"] == "schema"
+    assert body["errors"][0]["rule"] == "schema"
+
+
+@pytest.mark.asyncio
+async def test_validate_semantic_failure_surfaces_all_rules(client):
+    r = await client.post("/api/v1/dag/validate",
+                          json={"dag": _bad_dag("REQ-v-bad")})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert body["stage"] == "semantic"
+    rules = {e["rule"] for e in body["errors"]}
+    assert "tier_violation" in rules
+
+
+@pytest.mark.asyncio
+async def test_validate_does_not_persist(client):
+    """Dry-run must not create a workflow_run or plan row."""
+    from backend import dag_storage as _ds
+    before = await _ds.list_plans("REQ-v-nostore")
+    r = await client.post("/api/v1/dag/validate",
+                          json={"dag": _valid_dag("REQ-v-nostore")})
+    assert r.status_code == 200
+    after = await _ds.list_plans("REQ-v-nostore")
+    assert len(after) == len(before)  # no new plan

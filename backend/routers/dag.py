@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from backend import auth as _au
 from backend import dag_storage as _ds
+from backend import dag_validator as _dv
 from backend.dag_schema import DAG
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,50 @@ async def _cancel_prewarm(reason: str) -> None:
             logger.info("prewarm: cancelled %d container(s) on %s", n, reason)
     except Exception as exc:
         logger.debug("prewarm cancel swallowed error: %s", exc)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /api/v1/dag/validate — Phase 56-DAG-E
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Dry-run validation for the authoring UI. Pure function: parses the
+# payload against the Pydantic schema, then runs the 7-rule validator.
+# Nothing is persisted and no workflow_run is created — the editor's
+# live-validate loop can hit this on every keystroke without polluting
+# storage or burning a plan id. Mutation loop is NOT invoked here; the
+# operator fixes the DAG themselves via the UI.
+
+class DAGValidateRequest(BaseModel):
+    dag: dict = Field(..., description="DAG JSON to validate")
+
+
+@router.post("/validate")
+async def validate_dag(req: DAGValidateRequest,
+                       _user=Depends(_au.require_operator)) -> dict:
+    """Run validator without storing. Returns either
+    `{ok: true}` or `{ok: false, stage: schema|semantic, errors: [...]}`.
+    Each semantic error carries `rule`, `task_id` (or null), `message`."""
+    # Stage 1: Pydantic schema (shape).
+    try:
+        dag = DAG.model_validate(req.dag)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "stage": "schema",
+            "errors": [{"rule": "schema", "task_id": None, "message": str(exc)}],
+        }
+
+    # Stage 2: semantic rules.
+    result = _dv.validate(dag)
+    return {
+        "ok": result.ok,
+        "stage": "semantic",
+        "errors": [
+            {"rule": e.rule, "task_id": e.task_id, "message": e.message}
+            for e in result.errors
+        ],
+        "task_count": len(dag.tasks),
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
