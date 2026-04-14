@@ -334,6 +334,24 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(run_id);
+
+-- Phase 53: audit & compliance hash chain
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL NOT NULL,
+    actor           TEXT NOT NULL DEFAULT 'system',
+    action          TEXT NOT NULL,
+    entity_kind     TEXT NOT NULL,
+    entity_id       TEXT,
+    before_json     TEXT NOT NULL DEFAULT '{}',
+    after_json      TEXT NOT NULL DEFAULT '{}',
+    prev_hash       TEXT NOT NULL DEFAULT '',
+    curr_hash       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_kind, entity_id);
 """
 
 

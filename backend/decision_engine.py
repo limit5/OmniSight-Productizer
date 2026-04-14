@@ -246,6 +246,16 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
         # swallow hid broken event bus wiring in the past.
         logger.warning("mode_changed publish failed: %s", _exc)
     logger.info("OperationMode: %s → %s", prev.value, mode.value)
+    # Phase 53: tamper-evident audit. Fire-and-forget; failures
+    # logged but do not block the mode change.
+    try:
+        from backend import audit as _audit
+        _audit.log_sync(
+            action="mode_change", entity_kind="operation_mode", entity_id="global",
+            before={"mode": prev.value}, after={"mode": mode.value, "parallel_cap": new_cap},
+        )
+    except Exception:
+        pass
     return mode
 
 
@@ -417,6 +427,18 @@ def resolve(
         dec.resolver = resolver
         _archive_locked(dec)
     _emit("decision_resolved", dec)
+    # Phase 53 audit
+    try:
+        from backend import audit as _audit
+        _audit.log_sync(
+            action="decision_resolve", entity_kind="decision", entity_id=dec.id,
+            before={"status": "pending", "kind": dec.kind, "severity": dec.severity.value},
+            after={"status": dec.status.value, "chosen_option_id": dec.chosen_option_id,
+                   "resolver": dec.resolver},
+            actor=resolver,
+        )
+    except Exception:
+        pass
     return dec
 
 
@@ -429,9 +451,19 @@ def undo(decision_id: str) -> Decision | None:
                 DecisionStatus.auto_executed,
                 DecisionStatus.timeout_default,
             ):
+                prev_status = d.status.value
                 d.status = DecisionStatus.undone
                 d.resolved_at = time.time()
                 _emit("decision_undone", d)
+                try:
+                    from backend import audit as _audit
+                    _audit.log_sync(
+                        action="decision_undo", entity_kind="decision", entity_id=d.id,
+                        before={"status": prev_status},
+                        after={"status": "undone"},
+                    )
+                except Exception:
+                    pass
                 return d
     return None
 

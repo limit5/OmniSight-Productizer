@@ -122,6 +122,8 @@ app.include_router(providers.router, prefix=settings.api_prefix)
 app.include_router(invoke.router, prefix=settings.api_prefix)
 app.include_router(events.router, prefix=settings.api_prefix)
 app.include_router(wf_router.router, prefix=settings.api_prefix)
+from backend.routers import audit as _audit_router  # Phase 53
+app.include_router(_audit_router.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)
