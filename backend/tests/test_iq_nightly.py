@@ -269,6 +269,47 @@ async def test_nightly_notify_on_regression(fresh_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_nightly_loop_cancel_cleans_flag(fresh_db, monkeypatch):
+    """Loop cancel must clear _LOOP_RUNNING so a restart isn't no-op."""
+    import asyncio
+    monkeypatch.setenv("OMNISIGHT_SELF_IMPROVE_LEVEL", "l3")
+    iqn._LOOP_RUNNING = False
+
+    task = asyncio.create_task(
+        iqn.run_nightly_loop(interval_s=0.05, models=["m1"])
+    )
+    await asyncio.sleep(0.01)
+    assert iqn._LOOP_RUNNING is True
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert iqn._LOOP_RUNNING is False
+
+
+@pytest.mark.asyncio
+async def test_run_nightly_loop_second_start_is_noop(fresh_db, monkeypatch):
+    import asyncio
+    monkeypatch.setenv("OMNISIGHT_SELF_IMPROVE_LEVEL", "l3")
+    iqn._LOOP_RUNNING = False
+
+    t1 = asyncio.create_task(
+        iqn.run_nightly_loop(interval_s=10, models=["m1"])
+    )
+    await asyncio.sleep(0.01)
+    result = await asyncio.wait_for(
+        iqn.run_nightly_loop(interval_s=10, models=["m1"]), timeout=0.5,
+    )
+    assert result is None
+    t1.cancel()
+    try:
+        await t1
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
 async def test_nightly_silent_when_no_regression(fresh_db, monkeypatch):
     monkeypatch.setenv("OMNISIGHT_SELF_IMPROVE_LEVEL", "l3")
     bench = _bench("tiny")

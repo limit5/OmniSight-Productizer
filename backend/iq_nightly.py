@@ -219,6 +219,61 @@ async def _publish_gauge(reports: Sequence[ir.RunReport]) -> None:
         pass
 
 
+_LOOP_RUNNING = False
+
+
+async def run_nightly_loop(*, interval_s: float = 86400.0,
+                           models: Sequence[str] | None = None,
+                           ask_fn: ir.AskFn | None = None,
+                           token_budget_per_model: int = 50_000) -> None:
+    """Background coroutine: sleeps `interval_s` (24h default), then
+    runs one nightly pass. Gated by `is_enabled()` so setting the
+    env off silently parks the loop. Exits cleanly on CancelledError
+    (Phase 52 convention). Singleton — a second concurrent start is
+    a no-op."""
+    import asyncio
+    global _LOOP_RUNNING
+    if _LOOP_RUNNING:
+        return
+    _LOOP_RUNNING = True
+
+    def _resolve_models() -> list[str]:
+        if models:
+            return list(models)
+        # Fallback: primary provider/model + fallback chain head.
+        try:
+            from backend.config import settings as _s
+            primary = f"{_s.llm_provider}/{_s.get_model_name()}"
+            chain = [c.strip() for c in (_s.llm_fallback_chain or "").split(",")
+                     if c.strip() and c.strip() != _s.llm_provider]
+            return [primary] + [f"{c}/" for c in chain[:3]]
+        except Exception:
+            return []
+
+    try:
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+            except asyncio.CancelledError:
+                break
+            if not is_enabled():
+                logger.info("iq nightly loop: opt-in off, skipping tick")
+                continue
+            try:
+                m = _resolve_models()
+                if not m:
+                    logger.warning("iq nightly: no models resolved, skipping")
+                    continue
+                await nightly(m, ask_fn=ask_fn,
+                              token_budget_per_model=token_budget_per_model)
+            except Exception as exc:
+                logger.warning("iq nightly tick failed: %s", exc)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _LOOP_RUNNING = False
+
+
 async def _check_and_notify(models: Sequence[str]) -> None:
     """Detect regression per model; send Notification level=action once."""
     from backend import notifications as _n

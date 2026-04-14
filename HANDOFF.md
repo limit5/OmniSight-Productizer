@@ -192,6 +192,43 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 63-D — Daily IQ Benchmark 完成（2026-04-14）
+
+每晚跑固定題庫、量化 model 能力退化，連續 2 天低於 baseline 10pp 即
+`action` level Notification。吸收原 Phase 65 hold-out eval 的題庫前身。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| D1 | `iq_benchmark.py` schema + loader + scorer + `configs/iq_benchmark/firmware-debug.yaml` 手工 10 題；deterministic match（keyword AND + optional regex + forbidden blacklist）；20 test | `a4be773` |
+| D2 | `iq_runner.py` `run_benchmark` + `run_all` + injectable `ask_fn`；token budget cap 中途 truncate；per-Q timeout；失敗其他題仍跑；跨 model budget 隔離；`live_ask_fn` lazy-import LangChain；9 test | `ac8c8d5` |
+| D3 | `iq_runs` 表 + `iq_nightly.py`：per-day 聚合 + median baseline + 10pp 門檻 regression；opt-in `OMNISIGHT_SELF_IMPROVE_LEVEL` 含 l3；notify level=action；Gauge `intelligence_iq_score{model}` + Counter `intelligence_iq_regression_total{model}`；18 test | `62824b4` |
+| D4 | `run_nightly_loop` 背景循環 + singleton guard + cancel 清 flag；wire 進 `main.py` lifespan；2 loop test；HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **題庫手工策展**：避免從 episodic_memory 自動生成造成的自我參照偏誤。
+- **Deterministic scorer**：keyword + regex，無 LLM judge（judge 本身也會漂）。
+- **Per-day 聚合**：多次同日 run → 取平均，避免單日雜訊誤觸發。
+- **Baseline = 滾動中位數**：對極端值 robust。
+- **連 2 天 + 10pp 雙 gate**：單日跌 15pp 不觸發（可能是 noise）；連續跌才算真 regression。
+- **Notification level=action** 非 critical：operator 可處理但不該 3am 打 pager。
+- **Opt-in L3**：與 Phase 63-B mitigation 同域 gate（都屬 intelligence track）。
+- **Loop 單例 + 乾淨 cancel**：與 Phase 52 dlq_loop、47 sweep_loop 相同模式。
+
+### 驗收
+
+`pytest test_iq_benchmark + test_iq_runner + test_iq_nightly` →
+**49 passed**（20 + 9 + 20；含 2 loop singleton/cancel test）。
+
+### 後續
+
+**Phase 67-D RAG Pre-fetch**（3–4h）可立即啟動。56-DAG-C mutation loop
+是主鏈下個節點。
+
+---
+
 ## Phase 67-A — Prompt Cache 標記層 完成（2026-04-14）
 
 第一個 Phase 67 子任，純 LLM 層、無 dependency、與 56-DAG track 平行

@@ -105,8 +105,11 @@ async def lifespan(app: FastAPI):
     # Phase 52: Webhook DLQ retry worker
     from backend import notifications as _notif
     dlq_task = asyncio.create_task(_notif.run_dlq_loop())
+    # Phase 63-D: Daily IQ benchmark loop (opt-in, gated by env).
+    from backend import iq_nightly as _iq
+    iq_task = asyncio.create_task(_iq.run_nightly_loop())
     yield
-    for t in (watchdog_task, sweep_task, dlq_task):
+    for t in (watchdog_task, sweep_task, dlq_task, iq_task):
         t.cancel()
         try:
             await t
