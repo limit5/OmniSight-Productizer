@@ -13,6 +13,7 @@ import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-pane
 import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { ToastCenter } from "@/components/omnisight/toast-center"
+import { FirstRunTour } from "@/components/omnisight/first-run-tour"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
@@ -463,6 +464,7 @@ export default function Home() {
 
       {/* Phase 50C: overlay toasts for risky/destructive decisions. */}
       <ToastCenter />
+      <FirstRunTour />
 
       {/* Main Content */}
       <div className="relative z-10 flex flex-col h-screen">

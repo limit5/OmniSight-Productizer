@@ -442,7 +442,10 @@ export function OrchestratorAI({
   const pendingSuggestions = suggestions.filter(s => s.status === "pending")
   
   return (
-    <div className="holo-glass h-full flex flex-col min-h-0 overflow-hidden corner-brackets-full holo-flicker">
+    <div
+      className="holo-glass h-full flex flex-col min-h-0 overflow-hidden corner-brackets-full holo-flicker"
+      data-tour="orchestrator"
+    >
       {/* Header */}
       <div className="px-3 py-2 border-b border-[var(--border)] relative">
         {/* Subtle holographic shimmer */}

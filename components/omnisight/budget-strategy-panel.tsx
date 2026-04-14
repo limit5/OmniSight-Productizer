@@ -98,6 +98,7 @@ export function BudgetStrategyPanel() {
     <section
       className="holo-glass-simple corner-brackets-full rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))]"
       aria-label="Budget Strategy"
+      data-tour="budget"
     >
       <header className="flex items-center justify-between px-3 py-2 border-b border-[var(--neural-border,rgba(148,163,184,0.35))]">
         <div className="flex items-center gap-2">

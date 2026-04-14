@@ -120,6 +120,7 @@ export function ModeSelector({ compact = false }: Props) {
       role="radiogroup"
       aria-labelledby="operation-mode-label"
       title={error ?? MODE_META[mode].hint}
+      data-tour="mode"
     >
       <span
         id="operation-mode-label"
@@ -127,7 +128,7 @@ export function ModeSelector({ compact = false }: Props) {
       >
         MODE
       </span>
-      <PanelHelp doc="operation-modes" />
+      <PanelHelp doc="operation-modes" tourAnchor />
 
       <div className="mode-frame flex items-stretch">
         {MODE_ORDER.map((m, idx) => {

@@ -161,9 +161,12 @@ interface PanelHelpProps {
   doc: DocId
   /** Optional extra className on the trigger button (e.g. size override). */
   className?: string
+  /** Set on the first instance rendered in the header so the first-run
+   * tour can anchor its final step to a visible `?` icon. */
+  tourAnchor?: boolean
 }
 
-export function PanelHelp({ doc, className }: PanelHelpProps) {
+export function PanelHelp({ doc, className, tourAnchor }: PanelHelpProps) {
   const locale = useLocale()
   const [open, setOpen] = useState(false)
   const popRef = useRef<HTMLDivElement | null>(null)
@@ -193,7 +196,10 @@ export function PanelHelp({ doc, className }: PanelHelpProps) {
   const docUrl = `/docs/operator/${locale}/reference/${doc}`
 
   return (
-    <div className="relative inline-flex">
+    <div
+      className="relative inline-flex"
+      data-tour={tourAnchor ? "panel-help" : undefined}
+    >
       <button
         ref={triggerRef}
         type="button"

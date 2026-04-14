@@ -182,6 +182,7 @@ export function DecisionDashboard() {
     <section
       className="holo-glass-simple corner-brackets-full flex flex-col rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))]"
       aria-label="Decision Dashboard"
+      data-tour="decision-queue"
     >
       <header className="flex items-center justify-between px-3 py-2 border-b border-[var(--neural-border,rgba(148,163,184,0.35))]">
         <div className="flex items-center gap-2">
