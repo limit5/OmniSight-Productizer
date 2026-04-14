@@ -192,6 +192,59 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 56-DAG-A — DAG Schema + Validator 完成（2026-04-14）
+
+第一個 DAG 子任，純 deterministic、無 LLM、無 DB。Validator 一次回所有
+錯誤而非 first-fail，配合 Phase 56-DAG-C 的 mutation prompt 一輪可看
+全貌。
+
+### 交付（commit `bb42e0f`）
+
+- `backend/dag_schema.py` — Pydantic `Task` + `DAG` 模型，schema_version=1，
+  含 alnum task_id / 自依賴禁止 / depends_on 去重 / schema_version
+  接受清單 / required_tier ∈ {t1, networked, t3}。
+- `configs/tier_capabilities.yaml` — 三 tier × allow/deny toolchain
+  外移；YAML 單一真實來源，Phase 65 訓練料可引用。
+- `backend/dag_validator.py` — 7 條規則：
+  - `duplicate_id` 同 task_id 重複
+  - `unknown_dep` depends_on 指向不存在
+  - `cycle` Kahn 拓撲排序；報未解 task 數
+  - `tier_violation` toolchain 不在 allow 或在 deny
+  - `io_entity` expected_output 必為 file path / `git:<sha>` / `issue:<id>`
+  - `dep_closure` input 必來自 upstream `expected_output` 或 `external:` / `user:` 標記
+  - `mece` 兩 task 同 output 必須 BOTH `output_overlap_ack=true`
+  - 一次回所有錯，非 first-fail
+- 新 metrics（with no-op fallback）：
+  - `omnisight_dag_validation_total{result}` — passed / failed
+  - `omnisight_dag_validation_error_total{rule}` — 7 rule label
+
+### 驗收
+
+`pytest test_dag_validator + intelligence + intelligence_mitigation +
+prompt_registry + metrics` → **119 pass + 2 skip / 180s**（39 新 test
++ 80 既有，含 Pydantic schema 6 / happy path 2 / 結構違反 3 / tier
+capability 4 / I/O entity 13 參數化 / dep closure 4 / MECE 3 / 全錯
+彙整 / summary 格式 / metric pass + per-rule fail）。
+
+### 設計姿態
+
+- **Validator 不呼 LLM**：所有規則 deterministic，可 unit test 到鎖死；
+  LLM Reviewer 留 v2。
+- **All-errors-collected**：mutation prompt 一輪即可看到全部問題，避
+  免「修一個 cycle、再被 tier 退一次」造成 mutation 振盪。
+- **Tier 規則 YAML 外移**：新 toolchain 只改 yaml，不動 code。
+- **MECE 留逃生口**：`output_overlap_ack=true` 雙方同意可允許，覆蓋
+  並行 benchmark 等真實場景。
+- **I/O 三類入口**：file path / `git:<sha>` / `issue:<id>` 對應檔案 /
+  commit / 工單三類產物，已可涵蓋 95% 任務形態。
+
+### 後續
+
+**Phase 56-DAG-B Storage + workflow 連動** — 新表 `dag_plans` + workflow_runs
+連動 + idempotency_key 加 `dag_task_id` 欄。
+
+---
+
 ## Phase 56-DAG — Self-Healing Scheduling（重定，未實作；2026-04-14 規劃）
 
 設計源：`docs/design/self-healing-scheduling-mechanism.md`（規劃 → 乾跑
