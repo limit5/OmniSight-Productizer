@@ -135,6 +135,59 @@
 
 **預估**：每 sub-phase 1-2 h。整體 ~5-8 h。依照慣例，每 sub-phase 後做深度審計 → 補修 batch。
 
+## Phase 51-55（未來排程）
+
+為 Phase 50 完成後的下一批工作。每個 phase 維持既有節奏：實作 → 深度審計 → 補修 batch → commit。
+
+### Phase 51 — Backend coverage + CI pipeline
+讓 Python 測試與前端同級可觀測。
+- `pytest-cov` 安裝 + `pyproject.toml` 設定（或 pytest.ini），coverage source 限制 `backend/`
+- `.github/workflows/ci.yml`：跑 ruff / pytest（batched by folder）/ vitest / playwright（install deps: chromium-deps）
+- Coverage threshold：`backend/decision_engine`, `stuck_detector`, `ambiguity`, `budget_strategy`, `pipeline` ≥ 85%；其餘 ≥ 60%
+- 補齊 Phase 47 尚未被測的分支（`_handle_llm_error` 的 budget-strategy 接入路徑、`_apply_stuck_remediation` 每個 strategy 分支）
+- 產出：`coverage.xml` + HTML report，CI artifact
+
+### Phase 52 — Production observability
+把系統從「能跑」升級到「能線上」。
+- `/metrics` Prometheus endpoint（`prometheus_client`）：`decision_total{kind,severity,status}`、`pipeline_step_seconds`、`sse_subscribers`、`provider_failure_total`
+- 結構化 JSON logging（`structlog`）：取代既有 `logger.info` 散落字串，每條含 `agent_id/task_id/decision_id/trace_id`
+- `/healthz` 深度 health check：DB ping + backend version + watchdog heartbeat age
+- `docker-compose.prod.yml` 掛 Prometheus + Grafana sidecar（可選 profile）
+- OpenTelemetry trace hook 預留（不強制 span export）
+- 產出：metrics 抓 scrape 可驗證、一個 Grafana dashboard 樣板
+
+### Phase 53 — Audit & compliance layer
+Decision 有記錄但目前無保留策略、無 actor 追蹤、無 tamper-evident。
+- `audit_log` DB 表：`id, ts, actor, action, entity_kind, entity_id, before_json, after_json, prev_hash, curr_hash`
+- Hash chain 每筆串接（Merkle-ish），防事後竄改
+- DecisionEngine `resolve()` / `set_mode()` / `set_strategy()` 寫入 audit
+- `GET /audit?since=&actor=&kind=&limit=`（有 `OMNISIGHT_DECISION_BEARER` 驗證）
+- 保留策略 config：`OMNISIGHT_AUDIT_RETENTION_DAYS`（默認 365），超出由 nightly task 歸檔至 `audit_archive/{year-month}.jsonl.gz`
+- GDPR 友善：`actor` 可為 hash（隱匿實姓）；`redact_fields` config
+- 產出：audit chain 完整性驗證 CLI `python -m backend.audit verify`
+
+### Phase 54 — RBAC + authenticated sessions
+取代目前「optional bearer token」這個過渡方案。
+- Session-based auth（cookie + CSRF token），支援 OIDC（Google/GitHub/自建）
+- User model：`id, email, role ∈ {viewer, operator, admin}`
+- Per-endpoint role gate：mode=turbo 只 admin；approve destructive decision 只 operator+；/audit 全 role 可讀但 actor filter 強制自己
+- Settings UI 加 User Management（admin only）
+- Migration：若未啟用 OIDC，維持單用戶本地模式（default admin）以免破壞既有 dev 流程
+- 產出：驗證矩陣（role × action → allow/deny）tests + 前端 role-aware UI（disabled vs hidden）
+
+### Phase 55 — Agent plugin system
+新增 agent type 目前要改 Python 核心；目標是配置化。
+- `configs/agents/*.yaml` schema：`{id, type, sub_types[], tools_allowed[], system_prompt_template, default_model_tier, skill_files[]}`
+- 啟動時掃描載入，暴露 `GET /agents/plugins`
+- 動態 agent spawn（`POST /agents` 帶 plugin id）不再 hardcode `AgentType` enum
+- Skill file 支援 Markdown frontmatter 聲明 `required_tools` / `mode_gate`
+- 範例：加 `ai_safety_reviewer` plugin、`security_audit` plugin，不碰 core
+- 產出：2 個示範 plugin YAML + loader tests + 前端 plugin picker UI
+
+---
+
+**總體估時**：51 大約 4-6 h（多是 config 調整 + CI 配線），52 大約 6-8 h（metrics 要 instrument 很多點），53 大約 5-7 h，54 大約 8-12 h（auth 本來就耗），55 大約 6-10 h。合計 ~29-43 h，橫跨多個工作單元。
+
 ---
 
 ## 0. 專案理解與未來開發藍圖
