@@ -371,7 +371,7 @@ function DecisionRow(props: {
     <li
       ref={rowRef}
       data-testid={`decision-row-${d.id}`}
-      className={`px-3 py-2 transition-shadow ${focusRing ? "ring-2 ring-[var(--neural-cyan,#67e8f9)] rounded-sm" : ""}`}
+      className={`px-3 py-2 transition-shadow ${focusRing ? "ring-2 ring-offset-2 ring-offset-[var(--background,#010409)] ring-white rounded-sm" : ""}`}
     >
       <div className="flex items-start gap-2">
         <Icon className="w-4 h-4 mt-0.5 shrink-0" style={{ color: meta.color }} aria-hidden />

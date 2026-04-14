@@ -222,22 +222,26 @@ export function BudgetStrategyPanel() {
 
       {tuning && (
         <div className="px-3 py-2 grid grid-cols-2 lg:grid-cols-5 gap-2 border-t border-[var(--neural-border,rgba(148,163,184,0.35))] font-mono text-[10px]">
-          <TuningCell label="TIER" value={tuning.model_tier.toUpperCase()} />
-          <TuningCell label="RETRIES" value={String(tuning.max_retries)} />
-          <TuningCell label="DOWNGRADE" value={`${tuning.downgrade_at_usage_pct}%`} />
-          <TuningCell label="FREEZE" value={`${tuning.freeze_at_usage_pct}%`} />
-          <TuningCell label="PARALLEL" value={tuning.prefer_parallel ? "YES" : "NO"} />
+          <TuningCell label="TIER"      value={tuning.model_tier.toUpperCase()} hint="fast | balanced | strong" />
+          <TuningCell label="RETRIES"   value={String(tuning.max_retries)}      hint="0–5" />
+          <TuningCell label="DOWNGRADE" value={`${tuning.downgrade_at_usage_pct}%`} hint="0–100% token usage" />
+          <TuningCell label="FREEZE"    value={`${tuning.freeze_at_usage_pct}%`}   hint="0–100% token usage" />
+          <TuningCell label="PARALLEL"  value={tuning.prefer_parallel ? "YES" : "NO"} hint="YES | NO" />
         </div>
       )}
     </section>
   )
 }
 
-function TuningCell({ label, value }: { label: string; value: string }) {
+// B17: knob cells now surface the valid range / option set via title tooltip
+// and an sr-only span so keyboard/AT users learn the vocabulary without a
+// docs lookup.
+function TuningCell({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col" title={hint ? `${label}: ${hint}` : undefined}>
       <span className="text-[var(--muted-foreground,#94a3b8)]">{label}</span>
       <span className="tabular-nums text-[var(--foreground,#e2e8f0)]">{value}</span>
+      {hint && <span className="sr-only">Valid range: {hint}</span>}
     </div>
   )
 }
