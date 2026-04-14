@@ -140,6 +140,62 @@ They are immutable — the `--verify` subcommand proves the live DB's
 first post-boundary row still points at the last archived row's hash,
 so evidence of tampering surfaces as a chain break.
 
+## Internet-exposure auth (S1–S3, mandatory before going public)
+
+The dashboard ships with `OMNISIGHT_AUTH_MODE=open` for dev — every
+request is treated as admin. **Never expose that to the internet.**
+Before flipping the Cloudflare Tunnel hostname public, set:
+
+```bash
+# .env (production)
+OMNISIGHT_AUTH_MODE=strict
+OMNISIGHT_COOKIE_SECURE=true
+OMNISIGHT_ADMIN_EMAIL=you@example.com
+OMNISIGHT_ADMIN_PASSWORD='at-least-12-chars-prefer-a-passphrase'
+OMNISIGHT_DECISION_BEARER='another-long-random-string'
+```
+
+`validate_startup_config` (L1-03) refuses to boot under
+`debug=False` if you leave any of these dangerous defaults:
+
+- `OMNISIGHT_AUTH_MODE=open`
+- `OMNISIGHT_ADMIN_PASSWORD=omnisight-admin` (the literal default)
+
+So the worst-case is the systemd unit fails to come up, not a
+silently-open URL.
+
+### First login
+
+1. Boot the backend once with the env above set.
+2. The lifespan startup logs `[AUTH] default admin bootstrapped: …`.
+3. Browse to `https://omnisight.yourdomain.com` — you'll be
+   redirected to `/login`.
+4. Sign in with the email + password from `.env`.
+5. Change the admin's password via `PATCH /api/v1/users/{id}` (or
+   create a second admin and disable the bootstrap one).
+
+### Adding more operators
+
+```bash
+# Logged in as admin in the dashboard, or via curl:
+curl -X POST https://api.omnisight.yourdomain.com/api/v1/users \
+  -H "Content-Type: application/json" \
+  --cookie "omnisight_session=…; omnisight_csrf=…" \
+  -H "X-CSRF-Token: …" \
+  -d '{"email":"engineer@example.com","name":"Engineer","role":"operator","password":"…"}'
+```
+
+Roles: `viewer` (read-only), `operator` (approve/reject decisions,
+switch profile up to AUTONOMOUS), `admin` (everything).
+
+### Brute-force defence
+
+`/auth/login` is rate-limited per real-client IP (Cloudflare's
+`cf-connecting-ip` is honoured behind the tunnel). Default: 5 fails
+in 15 min → 429 with `Retry-After`. Failures and successes both
+write to `audit_log` so log-search can fingerprint a brute force
+without leaking which accounts existed.
+
 ## Common issues
 
 - **`cloudflared` exits immediately** — usually the credentials-file
