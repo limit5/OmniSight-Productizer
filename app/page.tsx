@@ -12,6 +12,7 @@ import { DecisionDashboard } from "@/components/omnisight/decision-dashboard"
 import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-panel"
 import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
+import { DagEditor } from "@/components/omnisight/dag-editor"
 import { ToastCenter } from "@/components/omnisight/toast-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
 import { CommandPalette } from "@/components/omnisight/command-palette"
@@ -38,7 +39,7 @@ const agentTemplates: Record<string, Partial<Agent>> = {
 // specific panel, and optionally focus a decision id in the dashboard.
 const VALID_PANELS: ReadonlySet<PanelId> = new Set([
   "host", "spec", "agents", "orchestrator", "tasks", "source", "npi", "vitals",
-  "decisions", "budget", "timeline", "rules", "forecast",
+  "decisions", "budget", "timeline", "rules", "forecast", "dag",
 ])
 
 function readPanelFromUrl(): PanelId | null {
@@ -464,6 +465,8 @@ export default function Home() {
         return <DecisionRulesEditor />
       case "forecast":
         return <ForecastPanel />
+      case "dag":
+        return <DagEditor />
       default:
         return null
     }
