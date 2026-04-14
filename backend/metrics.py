@@ -240,6 +240,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 65: training set export funnel ──────────────────────
+    training_set_rows = Counter(
+        "omnisight_training_set_rows_total",
+        "Training-set rows: result=written or skip:<reason>",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
+
     # Phase 67-A: prompt cache hit/miss in input tokens ─────────
     prompt_cache_hit_total = Counter(
         "omnisight_prompt_cache_hit_total",
@@ -316,6 +324,7 @@ else:
     dag_mutation_total = _NoOp()  # type: ignore
     prewarm_started_total = _NoOp()  # type: ignore
     prewarm_consumed_total = _NoOp()  # type: ignore
+    training_set_rows = _NoOp()  # type: ignore
     prompt_cache_hit_total = _NoOp()  # type: ignore
     prompt_cache_miss_total = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
@@ -346,7 +355,7 @@ def reset_for_tests() -> None:
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
     global dag_validation_total, dag_validation_error_total, dag_mutation_total
-    global prewarm_started_total, prewarm_consumed_total
+    global prewarm_started_total, prewarm_consumed_total, training_set_rows
     global prompt_cache_hit_total, prompt_cache_miss_total
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
@@ -465,6 +474,10 @@ def reset_for_tests() -> None:
     )
     prewarm_consumed_total = Counter(
         "omnisight_prewarm_consumed_total", "Pre-warm outcomes",
+        labelnames=("result",), registry=REGISTRY,
+    )
+    training_set_rows = Counter(
+        "omnisight_training_set_rows_total", "Training set rows",
         labelnames=("result",), registry=REGISTRY,
     )
     prompt_cache_hit_total = Counter(
