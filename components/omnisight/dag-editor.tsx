@@ -13,13 +13,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight } from "lucide-react"
+import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight, Code, List } from "lucide-react"
 import {
   validateDag,
   submitDag,
   type DAGValidateResponse,
   type DAGValidationError,
 } from "@/lib/api"
+import { DagFormEditor, type FormDAG } from "@/components/omnisight/dag-form-editor"
 
 // ─── Templates ──────────────────────────────────────────────────────
 
@@ -138,6 +139,10 @@ export function DagEditor() {
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
   const [mutate, setMutate] = useState(false)
   const [parseError, setParseError] = useState<string | null>(null)
+  // Phase 56-DAG-F: tab state. `text` stays canonical — the form view
+  // derives FormDAG from it and serializes back on every mutation, so
+  // switching tabs never loses work (as long as JSON is parseable).
+  const [tab, setTab] = useState<"json" | "form">("json")
 
   // Cancel-previous pattern: keep latest request's signal so a stale
   // response can't clobber a fresher one.
@@ -252,6 +257,27 @@ export function DagEditor() {
     return validation?.errors ?? []
   }, [parseError, validation])
 
+  // Form tab derives its FormDAG from the canonical text. If JSON is
+  // unparseable we render a nudge instead of the form — editing the
+  // form under a broken JSON would silently discard the user's WIP.
+  const formDag: FormDAG | null = useMemo(() => {
+    try {
+      const obj = JSON.parse(text) as Partial<FormDAG>
+      if (!obj || !Array.isArray(obj.tasks)) return null
+      return {
+        schema_version: obj.schema_version ?? 1,
+        dag_id: obj.dag_id ?? "",
+        tasks: obj.tasks,
+      }
+    } catch {
+      return null
+    }
+  }, [text])
+
+  const handleFormChange = (next: FormDAG) => {
+    setText(JSON.stringify(next, null, 2))
+  }
+
   const status: "ok" | "error" | "unknown" = parseError
     ? "error"
     : validation?.ok
@@ -264,13 +290,45 @@ export function DagEditor() {
 
   return (
     <div className="flex flex-col gap-3 p-3 rounded-lg bg-[var(--card)] border border-[var(--border)]">
-      {/* Header + actions */}
+      {/* Header + tabs + status */}
       <div className="flex items-center justify-between gap-2">
         <h3 className="font-mono text-sm font-semibold text-[var(--foreground)] flex items-center gap-2">
           <FileText size={14} className="text-[var(--artifact-purple)]" />
           DAG Editor
         </h3>
-        <StatusBadge status={status} validating={validating} />
+        <div className="flex items-center gap-2">
+          <div role="tablist" aria-label="Editor mode" className="flex rounded border border-[var(--border)] overflow-hidden">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "json"}
+              onClick={() => setTab("json")}
+              className={
+                "text-xs font-mono px-2 py-0.5 flex items-center gap-1 " +
+                (tab === "json"
+                  ? "bg-[var(--artifact-purple)] text-white"
+                  : "text-[var(--muted-foreground)] hover:bg-[var(--muted)]")
+              }
+            >
+              <Code size={10} /> JSON
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "form"}
+              onClick={() => setTab("form")}
+              className={
+                "text-xs font-mono px-2 py-0.5 flex items-center gap-1 " +
+                (tab === "form"
+                  ? "bg-[var(--artifact-purple)] text-white"
+                  : "text-[var(--muted-foreground)] hover:bg-[var(--muted)]")
+              }
+            >
+              <List size={10} /> Form
+            </button>
+          </div>
+          <StatusBadge status={status} validating={validating} />
+        </div>
       </div>
 
       {/* Templates */}
@@ -304,14 +362,22 @@ export function DagEditor() {
         </div>
       </div>
 
-      {/* Editor */}
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        spellCheck={false}
-        aria-label="DAG JSON editor"
-        className="w-full min-h-[240px] max-h-[480px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
-      />
+      {/* Editor body — JSON textarea or Form view */}
+      {tab === "json" ? (
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          spellCheck={false}
+          aria-label="DAG JSON editor"
+          className="w-full min-h-[240px] max-h-[480px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
+        />
+      ) : formDag ? (
+        <DagFormEditor value={formDag} onChange={handleFormChange} />
+      ) : (
+        <div className="text-xs font-mono p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)]">
+          Form view disabled — JSON is not parseable. Fix in the JSON tab first.
+        </div>
+      )}
 
       {/* Error panel */}
       {errors.length > 0 && (
