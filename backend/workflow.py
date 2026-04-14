@@ -191,6 +191,25 @@ async def finish(run_id: str, status: RunStatus = "completed") -> None:
     )
     await conn.commit()
 
+    # Phase 62 hook: when a long / hard-fought run completes successfully
+    # and OMNISIGHT_SELF_IMPROVE_LEVEL includes L1, distil it into a
+    # skill candidate and file a Decision Engine proposal. Failures here
+    # must NEVER break the workflow.finish contract — wrap everything.
+    if status == "completed":
+        try:
+            from backend import skills_extractor as _ex
+            if _ex.is_enabled():
+                run = await get_run(run_id)
+                steps = await list_steps(run_id)
+                if run is not None:
+                    result = _ex.extract(run, steps)
+                    if result.written:
+                        _ex.propose_promotion(result, run)
+        except Exception as exc:
+            logger.warning(
+                "skills extractor hook failed for run=%s: %s", run_id, exc,
+            )
+
 
 async def _get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
     conn = await _conn()
