@@ -238,8 +238,8 @@ def _publish_alerts(w: IntelligenceWindow,
             _m.intelligence_alert_total.labels(
                 agent_id=w.agent_id, dim=dim, level=level,
             ).inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("intelligence_alert metric bump failed: %s", exc)
 
 
 def record_and_publish(agent_id: str, **kwargs) -> tuple[

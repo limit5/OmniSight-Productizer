@@ -313,8 +313,8 @@ async def export_jsonl(
         _m.training_set_rows.labels(result="written").inc(stats.written)
         for k, v in stats.skip_reasons.items():
             _m.training_set_rows.labels(result=f"skip:{k}").inc(v)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("training_set_rows metric bump failed: %s", exc)
 
     logger.info(
         "training set export: wrote=%d skipped=%d (%s) → %s",

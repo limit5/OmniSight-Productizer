@@ -312,8 +312,8 @@ async def run_mutation_loop(
             try:
                 from backend import metrics as _m
                 _m.dag_mutation_total.labels(result="recovered").inc()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("dag_mutation metric bump failed: %s", exc)
             return MutationResult(
                 status="validated", final_dag=current,
                 attempts=attempts, total_tokens=total_tokens,
@@ -323,8 +323,8 @@ async def run_mutation_loop(
     try:
         from backend import metrics as _m
         _m.dag_mutation_total.labels(result="exhausted").inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("dag_mutation metric bump failed: %s", exc)
 
     if file_exhausted_proposal:
         await _file_exhausted_proposal(

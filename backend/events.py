@@ -60,8 +60,8 @@ class EventBus:
         try:
             from backend import metrics as _m
             _m.sse_subscribers.set(len(self._subscribers))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("sse_subscribers gauge set failed: %s", exc)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
@@ -70,8 +70,8 @@ class EventBus:
         try:
             from backend import metrics as _m
             _m.sse_subscribers.set(len(self._subscribers))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("sse_subscribers gauge set failed: %s", exc)
 
     def publish(self, event: str, data: dict[str, Any]) -> None:
         data.setdefault("timestamp", datetime.now().isoformat())
@@ -94,8 +94,8 @@ class EventBus:
                 try:
                     from backend import metrics as _m
                     _m.sse_dropped_total.inc()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("sse_dropped metric bump failed: %s", exc)
         for q in dead:
             self._subscribers.discard(q)
 

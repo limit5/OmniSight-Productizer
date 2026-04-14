@@ -452,5 +452,5 @@ def _bump(result: str) -> None:
     try:
         from backend import metrics as _m
         _m.rag_prefetch_total.labels(result=result).inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("rag_prefetch metric bump failed: %s", exc)

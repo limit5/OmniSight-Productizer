@@ -142,8 +142,8 @@ async def prewarm_for(
             try:
                 from backend import metrics as _m
                 _m.prewarm_consumed_total.labels(result="start_error").inc()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("prewarm metric bump failed: %s", exc)
             continue
         slot = PrewarmSlot(task_id=t.task_id, agent_id=agent_id, info=info)
         async with _lock:
@@ -152,8 +152,8 @@ async def prewarm_for(
         try:
             from backend import metrics as _m
             _m.prewarm_started_total.inc()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("prewarm metric bump failed: %s", exc)
         logger.info(
             "prewarm: started container for %s (agent_id=%s)",
             t.task_id, agent_id,
@@ -176,8 +176,8 @@ async def consume(task_id: str) -> Optional[PrewarmSlot]:
         _m.prewarm_consumed_total.labels(
             result="hit" if slot else "miss",
         ).inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("prewarm consume metric bump failed: %s", exc)
     if slot:
         logger.info(
             "prewarm: consumed %s (agent_id=%s)", task_id, slot.agent_id,
@@ -217,8 +217,8 @@ async def cancel_all(*, stopper=None, reason: str = "dag_mutated") -> int:
         try:
             from backend import metrics as _m
             _m.prewarm_consumed_total.labels(result="cancelled").inc()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("prewarm metric bump failed: %s", exc)
     if count:
         logger.info("prewarm: cancelled %d container(s) (%s)", count, reason)
     return count

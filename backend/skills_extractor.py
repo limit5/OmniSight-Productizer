@@ -189,8 +189,8 @@ def extract(run: Any, steps: list[Any], *,
     try:
         from backend import metrics as _m
         _m.skill_extracted_total.labels(status="written").inc()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("skill_extracted metric bump failed: %s", exc)
 
     return SkillExtractionResult(written=True, path=path, hits=hits)
 
