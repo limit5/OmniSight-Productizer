@@ -1,0 +1,85 @@
+# Phase 56-DAG-A — tier capability rules.
+#
+# Read by backend/dag_validator.py to enforce the "environment
+# homogeneity" golden law: each task's required_tier must match the
+# toolchain it asks for. Edit this file to add a new toolchain rather
+# than touching code.
+#
+# Format:
+#   tiers.<tier_id>:
+#     description:        operator-facing string
+#     toolchains_allowed: [exact strings the planner may name]
+#     toolchains_denied:  [strings that MUST NOT appear in this tier]
+#                         (deny wins over allow; useful for explicit
+#                          cross-tier violations like flash_board on T1)
+
+schema_version: 1
+
+tiers:
+  t1:
+    description: "Strict Sandbox — cross-compile, unit tests, Valgrind. No hardware."
+    toolchains_allowed:
+      - cmake
+      - make
+      - gcc
+      - g++
+      - clang
+      - clang++
+      - arm-linux-gnueabihf-gcc
+      - aarch64-linux-gnu-gcc
+      - rustc
+      - cargo
+      - go
+      - python3
+      - pytest
+      - valgrind
+      - npu-quantizer
+      - rknn-toolkit2
+    toolchains_denied:
+      - hardware-daemon-rpc
+      - flash_board
+      - uart_read
+      - i2c_read
+      - i2c_write
+      - spi_read
+      - power_cycle
+
+  networked:
+    description: "Networked Sandbox — public egress, RFC1918 denied. MLOps + 3rd-party APIs."
+    toolchains_allowed:
+      - curl
+      - wget
+      - pip
+      - npm
+      - huggingface-cli
+      - aws-cli
+      - openai-fine-tune
+      - unsloth
+      - python3
+    toolchains_denied:
+      - hardware-daemon-rpc
+      - flash_board
+      - uart_read
+      - cmake               # heavy compiles belong in t1
+      - arm-linux-gnueabihf-gcc
+
+  t3:
+    description: "Hardware Bridge — RPC daemon only. No shell, no compile."
+    toolchains_allowed:
+      - hardware-daemon-rpc
+      - flash_board
+      - uart_read
+      - i2c_read
+      - i2c_write
+      - spi_read
+      - power_cycle
+    toolchains_denied:
+      - cmake
+      - make
+      - arm-linux-gnueabihf-gcc
+      - aarch64-linux-gnu-gcc
+      - clang
+      - clang++
+      - rustc
+      - cargo
+      - pip
