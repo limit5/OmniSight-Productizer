@@ -13,6 +13,7 @@ import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-pane
 import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { DagEditor } from "@/components/omnisight/dag-editor"
+import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
 import { ToastCenter } from "@/components/omnisight/toast-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
 import { CommandPalette } from "@/components/omnisight/command-palette"
@@ -667,8 +668,10 @@ export default function Home() {
             />
           </aside>
 
-          {/* Far Right: Decision Engine + Vitals & Artifacts */}
+          {/* Far Right: Ops + Decision Engine + Vitals & Artifacts.
+              OpsSummary leads — it's the "is anything on fire?" glance. */}
           <aside className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden space-y-3">
+            <OpsSummaryPanel />
             <PipelineTimeline />
             <DecisionDashboard />
             <BudgetStrategyPanel />

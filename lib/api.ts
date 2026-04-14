@@ -744,6 +744,24 @@ export function getArtifactDownloadUrl(id: string): string {
   return `${API_V1}/artifacts/${id}/download`
 }
 
+// ─── Ops Summary (L1-04) ─────────────────────────────────────
+
+export interface OpsSummary {
+  checked_at: number
+  uptime_s: number | null
+  daily_cost_usd: number
+  hourly_cost_usd: number
+  token_frozen: boolean
+  budget_level: string
+  decisions_pending: number
+  sse_subscribers: number
+  watchdog_age_s: number | null
+}
+
+export async function getOpsSummary(): Promise<OpsSummary> {
+  return request<OpsSummary>("/ops/summary")
+}
+
 // ─── DAG Authoring (Phase 56-DAG-E) ───
 
 export interface DAGValidationError {

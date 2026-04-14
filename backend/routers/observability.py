@@ -159,3 +159,61 @@ async def healthz() -> JSONResponse:
         "checked_at": time.time(),
     }
     return JSONResponse(content=body, status_code=200 if overall_ok else 503)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L1-04: compact ops summary for the in-app dashboard panel
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# /healthz is great for probes; it's heavy to poll. This endpoint
+# returns the handful of numbers an operator actually glances at
+# (spend, freeze state, pending decisions, watchdog, subscribers)
+# so the frontend's OpsSummary panel can poll every 10 s cheaply.
+
+@router.get("/ops/summary")
+async def ops_summary() -> dict:
+    from backend.routers import system as _sys
+    from backend import decision_engine as _de
+
+    try:
+        pending = len(_de.list_pending())
+    except Exception as exc:
+        logger.debug("ops_summary: decision engine lookup failed: %s", exc)
+        pending = 0
+
+    try:
+        sse_subs = 0
+        from backend.events import bus as _bus
+        sse_subs = len(_bus._subscribers)
+    except Exception as exc:
+        logger.debug("ops_summary: sse bus lookup failed: %s", exc)
+
+    # Uptime derives from the Prometheus process_start_time gauge
+    # that metrics.py sets at import time — avoids needing a second
+    # anchor variable and stays accurate across reloads.
+    uptime = None
+    try:
+        from backend import metrics as _m
+        if hasattr(_m.process_start_time, "_value"):
+            started = float(_m.process_start_time._value.get())
+            if started > 0:
+                uptime = round(time.time() - started, 1)
+    except Exception:
+        pass
+
+    return {
+        "checked_at": time.time(),
+        "uptime_s": uptime,
+        # Spend
+        "daily_cost_usd": _sys.get_daily_cost(),
+        "hourly_cost_usd": _sys.get_hourly_cost()
+            if hasattr(_sys, "get_hourly_cost") else 0.0,
+        "token_frozen": bool(getattr(_sys, "token_frozen", False)),
+        "budget_level": getattr(_sys, "_last_budget_level", "") or "normal",
+        # DE load
+        "decisions_pending": pending,
+        # Event bus pressure
+        "sse_subscribers": sse_subs,
+        # Watchdog liveness
+        "watchdog_age_s": _watchdog_age_s(),
+    }
