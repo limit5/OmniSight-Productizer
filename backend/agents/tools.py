@@ -113,6 +113,13 @@ async def read_file(path: str) -> str:
 async def write_file(path: str, content: str) -> str:
     """Write content to a file in the workspace. Creates parent dirs.
 
+    DEPRECATED for *modifying existing files* (Phase 67-B): overwriting
+    a full file when you only changed a few lines wastes output tokens
+    and invites hallucination. For edits, use `patch_file`. This tool
+    will REFUSE to overwrite an existing file whose new body exceeds
+    OMNISIGHT_PATCH_MAX_INLINE_LINES (default 50 lines). For genuinely
+    new files use `create_file` — that path is uncapped.
+
     Args:
         path: Relative path from workspace root.
         content: Full file content to write.
@@ -134,9 +141,120 @@ async def write_file(path: str, content: str) -> str:
         except Exception:
             pass  # CODEOWNERS check is best-effort
     target = _safe_path(path)
+    # Phase 67-B S2: deprecation interceptor for existing-file overwrites.
+    if target.exists():
+        import os as _os
+        cap_raw = _os.environ.get("OMNISIGHT_PATCH_MAX_INLINE_LINES", "50")
+        try:
+            cap = max(1, int(cap_raw))
+        except ValueError:
+            cap = 50
+        line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+        if line_count > cap:
+            # Trigger IIS L1 calibrate (best-effort) and reject.
+            try:
+                from backend import intelligence as _iis
+                _iis.record_and_publish(
+                    agent_id or "unknown",
+                    code_pass=False,  # treat as a quality incident
+                )
+            except Exception:
+                pass
+            return (
+                f"[REJECTED] write_file on existing file {path!r} with "
+                f"{line_count} lines exceeds cap {cap}. Use `patch_file` "
+                f"with SEARCH/REPLACE or unified diff for edits. See "
+                f"docs/operations/patching.md."
+            )
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"[OK] Written {len(content)} bytes to {path}"
+
+
+@tool
+async def create_file(path: str, content: str) -> str:
+    """Create a NEW file with full content. Refuses if the path
+    already exists (use `patch_file` to edit existing files).
+
+    Uncapped (unlike `write_file`) — generated fixtures, boilerplate
+    __init__.py, README templates, etc. are legitimately full files.
+
+    Args:
+        path: Relative path from workspace root.
+        content: Full file content to write.
+    """
+    agent_id = get_active_agent_id()
+    if agent_id:
+        try:
+            from backend.codeowners import check_file_permission
+            from backend.routers.agents import _agents
+            agent = _agents.get(agent_id)
+            if agent:
+                allowed, reason = check_file_permission(
+                    path, agent.type.value, agent.sub_type,
+                )
+                if not allowed:
+                    return f"[BLOCKED] {reason}"
+        except Exception:
+            pass
+    target = _safe_path(path)
+    if target.exists():
+        return (
+            f"[REJECTED] create_file on existing path {path!r}. "
+            f"Use `patch_file` to edit existing files."
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return f"[OK] Created {len(content)} bytes at {path}"
+
+
+@tool
+async def patch_file(path: str, patch_kind: str, payload: str) -> str:
+    """Apply a patch to an existing file. Preferred over `write_file`
+    for any edit (see docs/operations/patching.md).
+
+    Args:
+        path: Relative path from workspace root.
+        patch_kind: "search_replace" or "unified_diff".
+        payload: For "search_replace" — one or more blocks of the form
+            ``<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE``.
+            SEARCH must carry ≥3 lines of context and match exactly once.
+            For "unified_diff" — standard --- / +++ / @@ hunk format.
+    """
+    agent_id = get_active_agent_id()
+    if agent_id:
+        try:
+            from backend.codeowners import check_file_permission
+            from backend.routers.agents import _agents
+            agent = _agents.get(agent_id)
+            if agent:
+                allowed, reason = check_file_permission(
+                    path, agent.type.value, agent.sub_type,
+                )
+                if not allowed:
+                    return f"[BLOCKED] {reason}"
+        except Exception:
+            pass
+    target = _safe_path(path)
+    if not target.is_file():
+        return (
+            f"[REJECTED] patch_file on missing path {path!r}. "
+            f"Use `create_file` for new files."
+        )
+    try:
+        from backend.agents.tools_patch import apply_to_file, PatchError
+        apply_to_file(target, patch_kind, payload)
+    except PatchError as exc:
+        # Quality signal: patch failure is an agent mistake. Feed IIS.
+        try:
+            from backend import intelligence as _iis
+            _iis.record_and_publish(
+                agent_id or "unknown", code_pass=False,
+            )
+        except Exception:
+            pass
+        return f"[PATCH-FAILED] {type(exc).__name__}: {exc}"
+    return f"[OK] Patched {path} ({patch_kind})"
 
 
 @tool
