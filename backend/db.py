@@ -422,6 +422,28 @@ CREATE TABLE IF NOT EXISTS github_installations (
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     suspended_at        TEXT
 );
+
+-- Phase 63-C: Prompt registry. Each row is a versioned snapshot of an
+-- agent system prompt under backend/agents/prompts/. At most one row per
+-- `path` may have role='active'; canary candidates use role='canary';
+-- retired versions stay as role='archive' for rollback.
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    path            TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'archive',  -- active | canary | archive
+    body            TEXT NOT NULL,
+    body_sha256     TEXT NOT NULL,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL,
+    promoted_at     REAL,
+    rolled_back_at  REAL,
+    rollback_reason TEXT,
+    UNIQUE(path, version)
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_path_role
+    ON prompt_versions(path, role);
 """
 
 

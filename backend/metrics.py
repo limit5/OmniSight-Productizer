@@ -191,6 +191,20 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 63-C: Prompt registry + canary ──────────────────────
+    prompt_outcome_total = Counter(
+        "omnisight_prompt_outcome_total",
+        "Per-prompt-version outcomes recorded by IIS feedback",
+        labelnames=("role", "outcome"),
+        registry=REGISTRY,
+    )
+    prompt_rolled_back_total = Counter(
+        "omnisight_prompt_rolled_back_total",
+        "Canary prompts auto-rolled-back because they regressed vs active",
+        labelnames=("path",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -224,6 +238,8 @@ else:
     skill_promoted_total = _NoOp()  # type: ignore
     intelligence_score = _NoOp()  # type: ignore
     intelligence_alert_total = _NoOp()  # type: ignore
+    prompt_outcome_total = _NoOp()  # type: ignore
+    prompt_rolled_back_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -247,6 +263,7 @@ def reset_for_tests() -> None:
     global sandbox_launch_total, sandbox_output_truncated_total
     global skill_extracted_total, skill_promoted_total
     global intelligence_score, intelligence_alert_total
+    global prompt_outcome_total, prompt_rolled_back_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -335,6 +352,14 @@ def reset_for_tests() -> None:
         "omnisight_intelligence_alert_total",
         "IIS alerts emitted (signal-only)",
         labelnames=("agent_id", "dim", "level"), registry=REGISTRY,
+    )
+    prompt_outcome_total = Counter(
+        "omnisight_prompt_outcome_total", "Prompt-version outcomes",
+        labelnames=("role", "outcome"), registry=REGISTRY,
+    )
+    prompt_rolled_back_total = Counter(
+        "omnisight_prompt_rolled_back_total", "Canary auto-rollbacks",
+        labelnames=("path",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
