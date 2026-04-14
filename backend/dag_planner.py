@@ -203,3 +203,199 @@ async def propose_mutation(
         )
         new_dag = new_dag.model_copy(update={"dag_id": prior.dag_id})
     return new_dag, int(n_tokens or 0)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Mutation loop (S2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+from dataclasses import dataclass, field  # noqa: E402 — keep near the loop
+from typing import Optional  # noqa: E402
+
+MAX_MUTATION_ROUNDS = 3  # locked decision, see HANDOFF
+
+
+@dataclass
+class MutationAttempt:
+    """One propose → validate round inside the loop."""
+    round_index: int
+    dag_before: DAG
+    errors_before: list[ValidationError]
+    dag_after: Optional[DAG]  # None if the propose itself failed
+    errors_after: list[ValidationError] = field(default_factory=list)
+    tokens_used: int = 0
+    orchestrator_error: Optional[str] = None
+
+
+@dataclass
+class MutationResult:
+    """Outcome of run_mutation_loop().
+
+    `status`:
+      * ``validated``          final DAG passed the validator
+      * ``exhausted``          used all rounds without converging
+      * ``orchestrator_error`` every round raised before a DAG
+                               could be re-validated (all dag_after
+                               are None)
+    """
+    status: str
+    final_dag: DAG
+    attempts: list[MutationAttempt]
+    total_tokens: int
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "validated"
+
+
+async def run_mutation_loop(
+    initial: DAG,
+    *,
+    ask_fn: OrchestratorAskFn,
+    max_rounds: int = MAX_MUTATION_ROUNDS,
+    file_exhausted_proposal: bool = True,
+) -> MutationResult:
+    """Validate → mutate → re-validate up to ``max_rounds`` times.
+
+    Returns a ``MutationResult`` carrying the full attempt trace so
+    the caller can audit exactly how the DAG evolved. On
+    ``status=exhausted`` / ``orchestrator_error`` we file a Decision
+    Engine ``kind=dag/exhausted severity=destructive`` proposal (admin)
+    unless ``file_exhausted_proposal=False`` (test hook).
+
+    Does NOT persist intermediate attempts — that's Phase 56-DAG-D's
+    job. This function is a pure transform:
+    (DAG, ask_fn) → MutationResult.
+    """
+    from backend import dag_validator as dv
+
+    attempts: list[MutationAttempt] = []
+    total_tokens = 0
+    current = initial
+
+    v0 = dv.validate(current)
+    if v0.ok:
+        return MutationResult(
+            status="validated", final_dag=current,
+            attempts=[], total_tokens=0,
+        )
+
+    current_errors = v0.errors
+    last_orch_error: str | None = None
+
+    for i in range(1, max_rounds + 1):
+        att = MutationAttempt(
+            round_index=i, dag_before=current,
+            errors_before=current_errors, dag_after=None,
+        )
+        try:
+            new_dag, toks = await propose_mutation(
+                current, current_errors, ask_fn=ask_fn,
+            )
+            att.tokens_used = toks
+            total_tokens += toks
+            att.dag_after = new_dag
+        except OrchestratorResponseError as exc:
+            att.orchestrator_error = str(exc)
+            last_orch_error = str(exc)
+            attempts.append(att)
+            # A parse failure spends a round — otherwise a broken
+            # orchestrator could loop forever against the same prompt.
+            continue
+
+        v = dv.validate(new_dag)
+        att.errors_after = v.errors
+        attempts.append(att)
+        current = new_dag
+        current_errors = v.errors
+        if v.ok:
+            try:
+                from backend import metrics as _m
+                _m.dag_mutation_total.labels(result="recovered").inc()
+            except Exception:
+                pass
+            return MutationResult(
+                status="validated", final_dag=current,
+                attempts=attempts, total_tokens=total_tokens,
+            )
+
+    # Exhausted: budget hit without validation.
+    try:
+        from backend import metrics as _m
+        _m.dag_mutation_total.labels(result="exhausted").inc()
+    except Exception:
+        pass
+
+    if file_exhausted_proposal:
+        await _file_exhausted_proposal(
+            initial, current, attempts, last_orch_error,
+        )
+
+    status = (
+        "orchestrator_error"
+        if last_orch_error and all(a.dag_after is None for a in attempts)
+        else "exhausted"
+    )
+    return MutationResult(
+        status=status, final_dag=current,
+        attempts=attempts, total_tokens=total_tokens,
+    )
+
+
+async def _file_exhausted_proposal(
+    initial: DAG,
+    last_dag: DAG,
+    attempts: list[MutationAttempt],
+    last_orch_error: str | None,
+) -> None:
+    """File a Decision Engine admin-gate proposal so the operator sees
+    the broken DAG plan. Best-effort — DE failures must not raise back
+    into the mutation loop's caller."""
+    try:
+        from backend import decision_engine as de
+    except Exception as exc:
+        logger.warning("dag exhausted: cannot import decision_engine: %s", exc)
+        return
+    try:
+        lines = [
+            f"dag_id={initial.dag_id}",
+            f"rounds={len(attempts)}/{MAX_MUTATION_ROUNDS}",
+        ]
+        for a in attempts:
+            if a.orchestrator_error:
+                lines.append(
+                    f"- r{a.round_index}: orchestrator_error: "
+                    f"{a.orchestrator_error[:200]}"
+                )
+            else:
+                rules = sorted({e.rule for e in a.errors_after})
+                lines.append(
+                    f"- r{a.round_index}: unresolved rules={rules} "
+                    f"(tokens={a.tokens_used})"
+                )
+        if last_orch_error:
+            lines.append(f"last_orchestrator_error: {last_orch_error[:300]}")
+
+        de.propose(
+            kind="dag/exhausted",
+            title=f"DAG mutation exhausted: {initial.dag_id}",
+            detail="\n".join(lines),
+            options=[
+                {"id": "abort", "label": "Abort",
+                 "description": "Discard this DAG plan; operator will re-file."},
+                {"id": "accept_failed",
+                 "label": "Accept final draft despite failures",
+                 "description": "Record the broken plan as-is; not recommended."},
+            ],
+            default_option_id="abort",  # safer default
+            severity=de.DecisionSeverity.destructive,
+            timeout_s=3600.0,
+            source={
+                "subsystem": "dag_planner",
+                "dag_id": initial.dag_id,
+                "rounds_used": len(attempts),
+                "had_orchestrator_error": last_orch_error is not None,
+            },
+        )
+    except Exception as exc:
+        logger.warning("dag exhausted: DE propose failed: %s", exc)
