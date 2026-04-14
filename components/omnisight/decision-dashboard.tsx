@@ -265,7 +265,7 @@ export function DecisionDashboard() {
         </div>
       )}
 
-      <ul className="flex-1 min-h-[120px] max-h-[360px] overflow-y-auto divide-y divide-[var(--neural-border,rgba(148,163,184,0.15))]">
+      <ul className="flex-1 min-h-[120px] max-h-[360px] overflow-y-auto divide-y divide-[var(--neural-border,rgba(148,163,184,0.15))] scroll-fade">
         {!initialLoaded ? (
           // B7: skeleton rows instead of a single "Loading…" line keep the
           // list height stable and eliminate the content layout shift

@@ -224,7 +224,7 @@ class TestRouter:
     @pytest.mark.asyncio
     async def test_put_mode_invalid(self, client):
         r = await client.put("/api/v1/operation-mode", json={"mode": "godmode"})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     @pytest.mark.asyncio
     async def test_list_decisions_empty(self, client):

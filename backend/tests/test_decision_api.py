@@ -39,7 +39,7 @@ class TestApprove:
         d = de.propose("k", "t", severity="routine",
                        options=[{"id": "a", "label": "A"}])
         r = await client.post(f"/api/v1/decisions/{d.id}/approve", json={"option_id": "not_there"})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     @pytest.mark.asyncio
     async def test_approve_already_resolved_409(self, client):

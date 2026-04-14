@@ -149,4 +149,4 @@ class TestBudgetRoutes:
     @pytest.mark.asyncio
     async def test_put_budget_strategy_invalid(self, client):
         r = await client.put("/api/v1/budget-strategy", json={"strategy": "zzz"})
-        assert r.status_code == 400
+        assert r.status_code == 422

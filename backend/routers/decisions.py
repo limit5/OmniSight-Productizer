@@ -94,7 +94,8 @@ async def put_mode(req: ModeRequest, _auth: None = Depends(_require_decision_tok
     try:
         mode = de.set_mode(req.mode)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
+        # L#45: 422 per REST/Pydantic convention (validation), not 400.
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
     return {
         "mode": mode.value,
         "parallel_cap": de._PARALLEL_BUDGET[mode],
@@ -109,7 +110,7 @@ async def list_decisions(status: str = "pending", limit: int = 100) -> dict[str,
         items = [d.to_dict() for d in de.list_history(limit=limit)]
     else:
         return JSONResponse(
-            status_code=400,
+            status_code=422,
             content={"detail": "status must be 'pending' or 'history'"},
         )
     return {"items": items, "count": len(items)}
@@ -138,7 +139,7 @@ async def approve_decision(decision_id: str, req: ResolveRequest,
         return JSONResponse(status_code=409, content={"detail": f"not pending (status={existing.status.value})"})
     valid_ids = {o["id"] for o in existing.options}
     if req.option_id not in valid_ids:
-        return JSONResponse(status_code=400, content={"detail": "unknown option_id"})
+        return JSONResponse(status_code=422, content={"detail": "unknown option_id"})
     out = de.resolve(decision_id, req.option_id, resolver="user",
                      status=de.DecisionStatus.approved)
     assert out is not None  # we checked pending above
@@ -201,7 +202,8 @@ async def put_budget_strategy(req: StrategyRequest,
     try:
         tuning = _bs.set_strategy(req.strategy)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
+        # L#45: 422 per REST/Pydantic convention (validation), not 400.
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
     return {"strategy": tuning.strategy.value, "tuning": tuning.to_dict()}
 
 
@@ -232,7 +234,8 @@ async def put_decision_rules(payload: RulesPayload,
     try:
         rules = _dr.replace_rules(payload.rules)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
+        # L#45: 422 per REST/Pydantic convention (validation), not 400.
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
     return {"rules": rules}
 
 

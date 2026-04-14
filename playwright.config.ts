@@ -7,6 +7,14 @@ import { defineConfig, devices } from "@playwright/test"
  * single `webServer` list so tests run against a live integration.
  * Kept deliberately small: headless Chromium only, one happy-path
  * spec. Expanded browser coverage and shards land as a follow-up.
+ *
+ * Env overrides (C18 audit-fix — previously undocumented):
+ *   OMNISIGHT_E2E_BACKEND_PORT  — default 18830. Override if 18830 is
+ *                                 in use (e.g. another suite running
+ *                                 in parallel on the same host).
+ *   OMNISIGHT_E2E_FRONTEND_PORT — default 3100.
+ *   OMNISIGHT_PW_LIB_DIR        — override for the Playwright shared-
+ *                                 library search path.
  */
 
 const BACKEND_PORT = Number(process.env.OMNISIGHT_E2E_BACKEND_PORT ?? "18830")

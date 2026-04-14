@@ -1249,6 +1249,15 @@ html {
   animation: signal-wave 2s ease-out infinite;
 }
 
+/* B21: scroll affordance — adds a subtle fade at the bottom of a
+ * scrollable container that shrinks as the user scrolls near the
+ * bottom. Applied via `.scroll-fade` utility. Uses a masking image
+ * so the fade is background-agnostic. */
+.scroll-fade {
+  mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent 100%);
+}
+
 /* Toast urgency (<10s remaining) — steady 1s pulse to draw attention. */
 @keyframes toast-urgent-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }

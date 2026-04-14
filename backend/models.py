@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,10 +42,16 @@ class SubTask(BaseModel):
     status: str = "pending"
 
 
+# L#48: pin the valid set so typos (`status="activ"`) fail at validate
+# time instead of leaking to the UI. The four values were previously
+# documented in a trailing comment only.
+AgentWorkspaceStatus = Literal["none", "active", "finalized", "cleaned"]
+
+
 class AgentWorkspace(BaseModel):
     branch: Optional[str] = None
     path: Optional[str] = None
-    status: str = "none"  # none | active | finalized | cleaned
+    status: AgentWorkspaceStatus = "none"
     commit_count: int = 0
     task_id: Optional[str] = None
     remote_name: str = "origin"
