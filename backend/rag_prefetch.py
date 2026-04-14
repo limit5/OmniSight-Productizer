@@ -213,6 +213,7 @@ async def prefetch_for_error(
         return None
 
     _bump("injected")
+    await _touch_hits(hits)
     return format_block(hits)
 
 
@@ -340,6 +341,7 @@ async def prefetch_for_sandbox_error(
         return None
 
     _bump("injected")
+    await _touch_hits(hits)
     return format_sandbox_block(hits, max_tokens=_max_block_tokens())
 
 
@@ -418,6 +420,28 @@ def inject_into_builder(builder, block: str) -> None:
     static_kb segment (cacheable). No-op when `block` is falsy."""
     if block:
         builder.add_static_kb(block)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Memory decay integration (Phase 67-E S4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def _touch_hits(hits: list[PrefetchHit]) -> None:
+    """Reset Phase 63-E decay clock for every solution that's about
+    to be injected. Best-effort — decay is a background process; a
+    failed touch just means the row will decay on its normal schedule
+    instead of getting a fresh 90-day lease."""
+    try:
+        from backend import memory_decay as _md
+    except Exception:
+        return
+    for h in hits:
+        if not h.memory_id:
+            continue
+        try:
+            await _md.touch(h.memory_id)
+        except Exception as exc:
+            logger.debug("memory_decay.touch(%s) failed: %s", h.memory_id, exc)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
