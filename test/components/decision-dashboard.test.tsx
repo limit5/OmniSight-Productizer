@@ -169,11 +169,13 @@ describe("DecisionDashboard", () => {
   })
 
   it("countdown ticks and turns red under 10 s", async () => {
-    // N3/N4: pin Date.now() via fake timers BEFORE computing deadline_at
-    // so the test runs under a consistent clock. try/finally guarantees
-    // real timers are restored even on assertion failure, so a throw
-    // can't leak fake timers into subsequent tests.
-    vi.useFakeTimers({ now: new Date("2026-04-14T12:00:00Z") })
+    // S7: avoid the `vi.waitFor` + fake-timer combination — vitest 4
+    // has a known race where waitFor polls via real timers while the
+    // component's setInterval runs on fake timers, and the two can't
+    // agree on when the re-render settles. Instead: pin the clock,
+    // render, flush initial fetch with a real-timer helper (findByText
+    // inside act), then advance timers synchronously and assert.
+    vi.useFakeTimers({ now: new Date("2026-04-14T12:00:00Z"), shouldAdvanceTime: true })
     try {
       const fakeNowSec = Math.floor(Date.now() / 1000)
       const nearDeadline = mkDecision({
@@ -183,14 +185,14 @@ describe("DecisionDashboard", () => {
       primeList([nearDeadline], [])
       primeSSE()
       render(<DecisionDashboard />)
-      await vi.waitFor(() => screen.getByText("Expiring fast"))
-      // Advance 3 s → remaining 9 s → red
+      // Initial async render — shouldAdvanceTime lets pending microtasks
+      // and the mocked listDecisions promise resolve.
+      await screen.findByText("Expiring fast")
+      // Advance 3 s → remaining 9 s → red. Wrap in act so React flushes
+      // the interval callback synchronously.
       act(() => { vi.advanceTimersByTime(3000) })
-      await vi.waitFor(() => {
-        const span = screen.getByText(/^\d+s$/)
-        const color = span.getAttribute("style") || ""
-        expect(color).toMatch(/critical-red|#ef4444/)
-      })
+      const span = screen.getByText(/^\d+s$/)
+      expect(span.getAttribute("style") || "").toMatch(/critical-red|#ef4444/)
     } finally {
       vi.useRealTimers()
     }
