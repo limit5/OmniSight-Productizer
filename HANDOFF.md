@@ -192,6 +192,43 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 52-Fix-D 進行中 — 測試覆蓋補強（2026-04-14）
+
+### D1 — `backend/db.py` CRUD smoke（commit `a859329`）
+
+1,214 LOC 資料層過去僅靠 router/engine 測試間接觸及；新增
+`backend/tests/test_db.py` 13 case，每區一個 round-trip + 至少一項
+mutation：
+
+| 涵蓋表 | 測試重點 |
+|---|---|
+| agents | upsert 冪等、JSON progress round-trip、delete idempotent |
+| tasks | labels/depends_on JSON 解碼、default child_task_ids |
+| task_comments | ORDER BY timestamp DESC、多筆 |
+| token_usage | ON CONFLICT(model) 更新 |
+| handoffs | upsert 置換、get missing 回空字串 |
+| notifications | level filter、mark_read、count_unread 多 level、failed list |
+| artifacts | task_id/agent_id filter、delete |
+| npi_state | get empty default、save 覆寫 |
+| simulations | whitelist 列更新（bogus column 被過濾）、status filter |
+| debug_findings | INSERT OR IGNORE 冪等、update status |
+| event_log | event_type filter、cleanup days=0 |
+| episodic_memory | 完整 CRUD |
+| decision_rules | replace_rules 原子置換 |
+
+### 驗收
+
+`pytest backend/tests/test_db.py` → **13 passed in 1.34s**。  
+與 observability / decision_api / audit / dispatch 合併 → **49 passed**。
+
+### D2–D8 未執行
+
+仍排程於 Fix-D 計畫中（models / events / metrics / notifications DLQ
+edge / budget_strategy・config・structlog smoke / hooks）。Phase 62
+Knowledge Generation 仍待全 Fix-D 完成。
+
+---
+
 ## Phase 52-Fix-C — 前端穩定性 + A11y（2026-04-14）
 
 Fix-B 之後的第三批（前端）。原前端審計 14 項中 8 項重審後為誤判
