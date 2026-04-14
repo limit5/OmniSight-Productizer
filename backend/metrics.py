@@ -233,6 +233,20 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 63-D D3: daily IQ benchmark score per model ─────────
+    intelligence_iq_score = Gauge(
+        "omnisight_intelligence_iq_score",
+        "Latest nightly IQ benchmark weighted score (0..1) per model",
+        labelnames=("model",),
+        registry=REGISTRY,
+    )
+    intelligence_iq_regression_total = Counter(
+        "omnisight_intelligence_iq_regression_total",
+        "IQ regression events (sustained score < baseline - threshold)",
+        labelnames=("model",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -272,6 +286,8 @@ else:
     dag_validation_error_total = _NoOp()  # type: ignore
     prompt_cache_hit_total = _NoOp()  # type: ignore
     prompt_cache_miss_total = _NoOp()  # type: ignore
+    intelligence_iq_score = _NoOp()  # type: ignore
+    intelligence_iq_regression_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -298,6 +314,7 @@ def reset_for_tests() -> None:
     global prompt_outcome_total, prompt_rolled_back_total
     global dag_validation_total, dag_validation_error_total
     global prompt_cache_hit_total, prompt_cache_miss_total
+    global intelligence_iq_score, intelligence_iq_regression_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -410,6 +427,15 @@ def reset_for_tests() -> None:
     prompt_cache_miss_total = Counter(
         "omnisight_prompt_cache_miss_total", "Uncached input tokens",
         labelnames=("provider",), registry=REGISTRY,
+    )
+    intelligence_iq_score = Gauge(
+        "omnisight_intelligence_iq_score", "Latest IQ weighted score",
+        labelnames=("model",), registry=REGISTRY,
+    )
+    intelligence_iq_regression_total = Counter(
+        "omnisight_intelligence_iq_regression_total",
+        "IQ regression events",
+        labelnames=("model",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

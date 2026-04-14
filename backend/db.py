@@ -471,6 +471,23 @@ CREATE TABLE IF NOT EXISTS dag_plans (
 CREATE INDEX IF NOT EXISTS idx_dag_plans_dag_id ON dag_plans(dag_id);
 CREATE INDEX IF NOT EXISTS idx_dag_plans_run_id ON dag_plans(run_id);
 CREATE INDEX IF NOT EXISTS idx_dag_plans_status ON dag_plans(status);
+
+-- Phase 63-D D3: per-night IQ benchmark results. One row per (run, model,
+-- benchmark). `truncated_at_question` non-null when the token budget cap
+-- aborted the run early — aggregator uses this to downweight the row.
+CREATE TABLE IF NOT EXISTS iq_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL NOT NULL,
+    model           TEXT NOT NULL,
+    benchmark       TEXT NOT NULL,
+    weighted_score  REAL NOT NULL,
+    pass_count      INTEGER NOT NULL,
+    total_count     INTEGER NOT NULL,
+    tokens_used     INTEGER NOT NULL DEFAULT 0,
+    truncated_at_question TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_iq_runs_model_ts ON iq_runs(model, ts);
+CREATE INDEX IF NOT EXISTS idx_iq_runs_ts ON iq_runs(ts);
 """
 
 
