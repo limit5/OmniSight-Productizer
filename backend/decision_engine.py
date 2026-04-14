@@ -304,9 +304,14 @@ def propose(
         severity, default_option_id, matched_rule, rule_forces_auto = _rules.apply(
             kind, severity, default_option_id, get_mode(),
         )
+        rule_engine_error: str | None = None
     except Exception as _exc:
-        logger.debug("decision_rules.apply failed (non-fatal): %s", _exc)
+        logger.warning(
+            "decision_rules.apply failed (%s) — falling back to mode/severity policy",
+            _exc,
+        )
         matched_rule, rule_forces_auto = None, False
+        rule_engine_error = str(_exc)[:200]
 
     now = time.time()
     deadline = (now + timeout_s) if (timeout_s and timeout_s > 0) else None
@@ -321,7 +326,11 @@ def propose(
         status=DecisionStatus.pending,
         created_at=now,
         deadline_at=deadline,
-        source=dict({"rule_id": matched_rule["id"]} if matched_rule else {}, **(source or {})),
+        source=dict(
+            {"rule_id": matched_rule["id"]} if matched_rule else {},
+            **({"rule_engine_error": rule_engine_error} if rule_engine_error else {}),
+            **(source or {}),
+        ),
     )
 
     if rule_forces_auto or should_auto_execute(severity):
@@ -439,13 +448,13 @@ def _emit(event: str, dec: Decision) -> None:
 
 def _reset_for_tests() -> None:
     """Clear global state between tests. Not for production use."""
-    global _current_mode, _parallel_sema, _parallel_cap_for_sema
+    global _current_mode, _parallel_in_flight, _parallel_async_cond
     with _state_lock:
         _pending.clear()
         _history.clear()
         _current_mode = OperationMode.supervised
-    _parallel_sema = None
-    _parallel_cap_for_sema = 0
+    _parallel_in_flight = 0
+    _parallel_async_cond = None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
