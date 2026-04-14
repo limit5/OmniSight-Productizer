@@ -122,8 +122,11 @@ async def lifespan(app: FastAPI):
     # Phase 65 S4: Fine-tune nightly loop (opt-in L4, gated by env).
     from backend import finetune_nightly as _ft
     ft_task = asyncio.create_task(_ft.run_nightly_loop())
+    # Phase 63-E: Memory decay loop (opt-in L3, gated by env).
+    from backend import memory_decay as _md
+    md_task = asyncio.create_task(_md.run_decay_loop())
     yield
-    for t in (watchdog_task, sweep_task, dlq_task, iq_task, ft_task):
+    for t in (watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task):
         t.cancel()
         try:
             await t
@@ -188,6 +191,8 @@ app.include_router(integration.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 from backend.routers import decisions as _decisions_router  # Phase 47A
 app.include_router(_decisions_router.router, prefix=settings.api_prefix)
+from backend.routers import memory as _memory_router  # Phase 63-E
+app.include_router(_memory_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

@@ -292,6 +292,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 63-E: episodic memory quality decay ────────────────
+    memory_decay_total = Counter(
+        "omnisight_memory_decay_total",
+        "Memory decay events by action: decayed / skipped_recent / restored",
+        labelnames=("action",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -339,6 +347,7 @@ else:
     intelligence_iq_score = _NoOp()  # type: ignore
     intelligence_iq_regression_total = _NoOp()  # type: ignore
     rag_prefetch_total = _NoOp()  # type: ignore
+    memory_decay_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -369,6 +378,7 @@ def reset_for_tests() -> None:
     global prompt_cache_hit_total, prompt_cache_miss_total
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
+    global memory_decay_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -515,6 +525,11 @@ def reset_for_tests() -> None:
         "omnisight_rag_prefetch_total",
         "RAG pre-fetch outcomes",
         labelnames=("result",), registry=REGISTRY,
+    )
+    memory_decay_total = Counter(
+        "omnisight_memory_decay_total",
+        "Memory decay events by action",
+        labelnames=("action",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

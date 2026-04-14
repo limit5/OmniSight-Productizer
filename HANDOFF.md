@@ -288,8 +288,40 @@ workflow_runs → JSONL → T2 sandbox → fine-tune backend → 候選模型
 
 ### 後續
 
-剩 **Phase 63-E Memory Decay**（2–3h，輕量收尾）+ **Phase 64-C T3
-Hardware Daemon**（10–14h，等實機，獨立 track）。
+剩 **Phase 64-C T3 Hardware Daemon**（10–14h，等實機，獨立 track）。
+
+---
+
+## Phase 63-E — Episodic Memory Quality Decay 完成（2026-04-14）
+
+Locked design rule：**只降權，不刪除**。過時答案可能仍是罕見邊角
+case 的正解，刪掉不可逆；decay 讓 `decayed_score` 滑向 0、FTS5
+排序往下沉，但 row 留著，admin 可 restore。
+
+### 改動
+
+- `backend/db.py`：`episodic_memory` 加 `decayed_score REAL NOT NULL DEFAULT 0.0`
+  + `last_used_at TEXT`（runtime migration）；`insert_episodic_memory`
+  初始化 `decayed_score=quality_score`（新 row 以自身品質競爭）。
+- `backend/memory_decay.py`（新）：
+  - `touch(memory_id)` — RAG pre-fetch / 手動查詢 hook，重置 decay clock
+  - `decay_unused(ttl_s, factor, now)` — nightly worker；`last_used_at`
+    早於 cutoff（或 NULL）的 row `decayed_score *= factor`；factor clamp [0,1]
+  - `restore(memory_id)` — admin endpoint，複製 `quality_score` 回 `decayed_score`
+  - `run_decay_loop` — 單例背景 coroutine，opt-in `OMNISIGHT_SELF_IMPROVE_LEVEL` 含 `l3`
+- `backend/metrics.py`：`memory_decay_total{action}`（decayed/skipped_recent/restored）
+- `backend/main.py` lifespan：`md_task = asyncio.create_task(md.run_decay_loop())`
+- `backend/routers/memory.py`（新）：`POST /memory/{id}/restore`（require_admin）
+- `.env.example`：`OMNISIGHT_MEMORY_DECAY_TTL_S=7776000`（90d）/
+  `_FACTOR=0.9` / `_INTERVAL_S=86400`
+- `backend/tests/test_memory_decay.py`：16 tests（is_enabled 參數化 /
+  touch / decay skip-vs-apply / factor clamp / restore / loop singleton）
+  全綠。
+
+### 後續
+
+Phase 63-E 完成 → **僅剩 Phase 64-C T3 Hardware Daemon**（10–14h，
+等實機，獨立 track）。主線隊列清空。
 
 ---
 

@@ -93,6 +93,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("workflow_runs", "dag_plan_id", "INTEGER"),
         ("workflow_runs", "successor_run_id", "TEXT"),
         ("workflow_steps", "dag_task_id", "TEXT"),
+        # Phase 63-E — Memory quality decay.
+        ("episodic_memory", "decayed_score", "REAL NOT NULL DEFAULT 0.0"),
+        ("episodic_memory", "last_used_at", "TEXT"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -1104,12 +1107,17 @@ async def cleanup_old_events(days: int = 7) -> int:
 
 async def insert_episodic_memory(data: dict) -> None:
     """Insert a new episodic memory entry (L3)."""
+    # Phase 63-E: decayed_score initialises to quality_score so a
+    # fresh row competes on its own merit; the nightly worker decays
+    # it later when access stops.
     await _conn().execute(
         """INSERT INTO episodic_memory
            (id, error_signature, solution, soc_vendor, sdk_version, hardware_rev,
-            source_task_id, source_agent_id, gerrit_change_id, tags, quality_score, created_at, updated_at)
+            source_task_id, source_agent_id, gerrit_change_id, tags,
+            quality_score, decayed_score, created_at, updated_at)
            VALUES (:id, :error_signature, :solution, :soc_vendor, :sdk_version, :hardware_rev,
-                   :source_task_id, :source_agent_id, :gerrit_change_id, :tags, :quality_score,
+                   :source_task_id, :source_agent_id, :gerrit_change_id, :tags,
+                   :quality_score, :quality_score,
                    datetime('now'), datetime('now'))""",
         {
             "id": data["id"],
