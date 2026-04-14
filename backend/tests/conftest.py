@@ -1,4 +1,14 @@
-"""Shared fixtures for OmniSight backend tests."""
+"""Shared fixtures for OmniSight backend tests.
+
+A8/C9 note: several tests import modules that keep state in
+module-level globals (decision_engine._pending, decision_rules._RULES,
+pipeline._active_pipeline, etc.). The reset hooks (`_reset_for_tests`,
+`clear`) exist so this file can put those singletons back in a known
+state between runs — they are NOT a supported production API. A
+future refactor pass should dependency-inject these stores so
+pytest-xdist can run tests in parallel safely; until then the serial
+runner plus these reset hooks is the contract.
+"""
 
 from __future__ import annotations
 

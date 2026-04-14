@@ -46,18 +46,31 @@ FastAPI (WSL2:8000)               Backend — Multi-agent engine (14 routers, ~8
 ## Quick Start
 
 ```bash
+# 0. Config (one-time)
+cp .env.example .env
+#   then edit .env — at minimum set OMNISIGHT_LLM_PROVIDER + its API key.
+#   Without one, agents run in rule-based fallback mode (see below).
+
 # 1. Backend
 cd OmniSight-Productizer
+python3 -m pip install --upgrade pip   # avoid Python 3.12 resolver bugs
 pip install -r backend/requirements.txt
 python3 -m uvicorn backend.main:app --port 8000
 
-# 2. Frontend
+# 2. Frontend (new terminal)
 npm install
 npm run dev
 
 # 3. Browser
 open http://localhost:3000
+
+# Alternative: one-shot docker compose
+#   docker compose up --build
+#   (reads the same .env; exposes :3000 + :8000)
 ```
+
+Interactive API docs live at `http://localhost:8000/docs` (FastAPI
+auto-generated Swagger) once the backend is up.
 
 ### Environment Variables
 
