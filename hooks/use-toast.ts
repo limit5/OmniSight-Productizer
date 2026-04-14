@@ -171,6 +171,11 @@ function toast({ ...props }: Toast) {
 function useToast() {
   const [state, setState] = React.useState<State>(memoryState)
 
+  // Fix-C C1: deps were `[state]`, which re-ran this effect on every
+  // state change and pushed a fresh `setState` reference into `listeners`
+  // every render. Over time the global `listeners` array grew unbounded
+  // (mount/unmount cycles amplified it). React's `setState` identity is
+  // stable across renders, so `[]` is both correct and sufficient.
   React.useEffect(() => {
     listeners.push(setState)
     return () => {
@@ -179,7 +184,7 @@ function useToast() {
         listeners.splice(index, 1)
       }
     }
-  }, [state])
+  }, [])
 
   return {
     ...state,
