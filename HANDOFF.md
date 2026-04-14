@@ -192,6 +192,109 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 56-DAG — Self-Healing Scheduling（重定，未實作；2026-04-14 規劃）
+
+設計源：`docs/design/self-healing-scheduling-mechanism.md`（規劃 → 乾跑
+→ 突變閉環 + 4 大黃金特徵 + Orchestrator 模板）。原 Phase 56 (Durable
+Workflow Checkpointing) **已交付** (`4bb4b21`)，現擴充為 DAG-first
+規劃層。原線性 step API 不變、向後相容；新增 `dag_plans` 表 + DAG
+schema + validator + mutation loop + 雙模執行入口。
+
+### 已敲定決策
+
+1. 名稱：原 Phase 56 不重命名；新增子任 56-DAG-A/B/C/D。
+2. **執行模式：B (AI auto-plan) 先，A (人手 DAG endpoint) 後** — B 改既有 chat 流即可，A 需新 endpoint+frontend。
+3. **Validator：v1 純 deterministic**（Pydantic schema + 拓撲 + 規則表），不呼叫 LLM；LLM Reviewer 留 v2。
+4. **Mutation bounded retry = 3 round**，超過 → Decision Engine `kind=dag/exhausted` severity=destructive，admin 介入。
+5. **Tier capabilities** 抽到 `configs/tier_capabilities.yaml`，避免硬編碼且便於 Phase 65 訓練料引用。
+6. **與 Phase 63-D / 65 順序**：56-DAG-A/B 先（驗證器越早就位、Phase 63-D IQ 題可加 DAG benchmark）。
+
+### 子任 / 工時
+
+| 子任 | 工時 | 內容 |
+|---|---|---|
+| **56-DAG-A** schema + validator | 4–5h | `backend/dag_schema.py`（Pydantic Task/DAG，schema_version 欄）+ `backend/dag_validator.py`（cycle detection、tier 合法性、tier-capability 規則、依賴閉包、I/O 實體化（accept file path / `git:<sha>` / `issue:<id>` 三類）、MECE on outputs（`output_overlap_ack=true` 例外））；deterministic、無 LLM、無 DB；~30 test |
+| **56-DAG-B** storage + workflow 連動 | 3–4h | 新表 `dag_plans(id, dag_id, run_id, json_body, status, mutation_round, created_at)`；`workflow_steps.idempotency_key` 加 `dag_task_id` 欄；`workflow.start(dag_id=...)` 接 DAG plan；mutation 改 DAG 開新 run，舊 run 標 `mutated` 並記 `successor_run_id` |
+| **56-DAG-C** mutation loop + Orchestrator agent | 4–6h | `backend/dag_planner.py::propose_mutation(dag, errors)` 把錯誤串成 prompt → call orchestrator agent → 新 DAG → re-validate → ≤3 round；超過 file Decision Engine `kind=dag/exhausted` severity=destructive；orchestrator prompt 註冊於 `backend/agents/prompts/orchestrator.md`（走 prompt_registry canary） |
+| **56-DAG-D** 雙模 + ops 文件 | 2–3h | Mode B 改 chat router 內部走 Orchestrator → DAG → validator；Mode A `POST /api/v1/dag` 接 JSON（opt-in 進階模式）；ops doc + HANDOFF |
+
+**累計工時**：13–18h，分 4 commit 批。
+
+### 新環境變數（規劃）
+
+```
+OMNISIGHT_DAG_PLANNING_MODE=auto   # auto | manual | both
+OMNISIGHT_DAG_MUTATION_MAX_ROUNDS=3
+```
+
+### 新 metrics（規劃）
+
+- `omnisight_dag_validation_total{result}` — passed / failed
+- `omnisight_dag_mutation_total{result}` — recovered / exhausted
+- `omnisight_dag_validation_error_total{rule}` — cycle / tier_violation / mece / io_entity / dep_closure
+
+### 新 audit actions（規劃）
+
+- `dag_validated`、`dag_mutated`、`dag_exhausted`、`dag_dispatched`
+
+### 新 Decision Engine kinds（規劃）
+
+- `dag/validation_failed` (severity=routine，每次 mutation round)
+- `dag/exhausted` (severity=destructive，admin 介入)
+
+### 與既有系統的接點
+
+- **Phase 56 Workflow** (`4bb4b21`)：`workflow_runs` 加 `dag_plan_id` FK 欄；既有線性 step API 不變。
+- **Phase 64-A/B** Sandbox：`Task.required_tier` 強制 `container.start_container(tier=)` 一致。
+- **Phase 63-A IIS**：DAG validation failure rate 是新指標餵 IIS window；mutation 振盪 → IIS L2 route。
+- **Phase 63-C** prompt_registry：Orchestrator agent prompt 走 canary。
+- **Phase 62 Knowledge Generation**：成功 DAG plan + workflow_run → skill candidate。
+- **Phase 65** Data Flywheel：題庫第 11–20 題加 DAG planning benchmark；DAG validation 通過率作 quality signal。
+
+### 風險摘要
+
+| 風險 | 等級 | Mitigation |
+|---|---|---|
+| Mutation loop 振盪 | 高 | bounded retry=3 + Decision Engine destructive 升級 |
+| Reviewer LLM 成本爆炸 | 高 | v1 純 deterministic，LLM Reviewer 留 v2 |
+| `<thinking>` self-check 雞生蛋 | 嚴重 | **完全不信** — 全靠 deterministic validator + DE gate |
+| 「人手 vs AI auto」雙模衝突 | 中 | Mode B 預設、Mode A opt-in |
+| MECE output 偵測誤殺 | 中 | `output_overlap_ack=true` 註釋例外 |
+| Tier 規則表硬編碼難維護 | 中 | YAML 外移 + unit test |
+| 與 stuck_detector spawn_alternate 跨 tier | 中 | 重派也走 validator；fail → IIS L2 |
+| DAG schema 變動向後不相容 | 低 | `schema_version` 欄 + validator 接受多版本 |
+
+### 預估效益
+
+- **Token 用量**：-20–40%（爛 DAG 在 dry-run 即被擋下）。
+- **失敗時點**：執行中崩 → 規劃時拒；MTTR 大幅縮短。
+- **Phase 64 沙盒守則自動執行**：`required_tier` 與 `container.start_container(tier=)` 強制一致。
+- **Phase 63-A IIS 訊號乾淨**：規劃錯不再污染 code_pass_rate。
+- **Audit 完整性**：mutation round 可追溯，Phase 65 訓練料品質提升。
+
+### 啟動順序（已調整）
+
+```
+[已完成] 64-A ✅ + 64-D ✅ + 64-B ✅ + 62 ✅ + 63-A ✅ + 63-B ✅ + 63-C ✅
+   ↓
+56-DAG-A (validator)               ← 下一步、最高 ROI、無 LLM 依賴
+   ↓
+56-DAG-B (storage + workflow 連動)
+   ↓
+63-D (Daily IQ Benchmark — 含 DAG 題)
+   ↓
+56-DAG-C (mutation loop + Orchestrator)
+   ↓
+56-DAG-D (雙模執行 + ops)
+   ↓
+65 (Data Flywheel — 64-B 已就位)
+   ↓
+63-E (Memory Decay)
+64-C (T3 Hardware Daemon) — 等實機，獨立 track
+```
+
+---
+
 ## Phase 63-C — Prompt Registry + Canary 完成（2026-04-14）
 
 吸收原 Phase 63 Meta-Prompting Evaluator 主體並落地。Prompt 從 code 抽
