@@ -227,6 +227,19 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 67-C: speculative container pre-warm ────────────────
+    prewarm_started_total = Counter(
+        "omnisight_prewarm_started_total",
+        "Containers launched speculatively for in-degree-0 DAG tasks",
+        registry=REGISTRY,
+    )
+    prewarm_consumed_total = Counter(
+        "omnisight_prewarm_consumed_total",
+        "Pre-warmed container outcomes: hit / miss / cancelled / start_error",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
+
     # Phase 67-A: prompt cache hit/miss in input tokens ─────────
     prompt_cache_hit_total = Counter(
         "omnisight_prompt_cache_hit_total",
@@ -301,6 +314,8 @@ else:
     dag_validation_total = _NoOp()  # type: ignore
     dag_validation_error_total = _NoOp()  # type: ignore
     dag_mutation_total = _NoOp()  # type: ignore
+    prewarm_started_total = _NoOp()  # type: ignore
+    prewarm_consumed_total = _NoOp()  # type: ignore
     prompt_cache_hit_total = _NoOp()  # type: ignore
     prompt_cache_miss_total = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
@@ -331,6 +346,7 @@ def reset_for_tests() -> None:
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
     global dag_validation_total, dag_validation_error_total, dag_mutation_total
+    global prewarm_started_total, prewarm_consumed_total
     global prompt_cache_hit_total, prompt_cache_miss_total
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
@@ -441,6 +457,14 @@ def reset_for_tests() -> None:
     )
     dag_mutation_total = Counter(
         "omnisight_dag_mutation_total", "DAG mutation outcomes",
+        labelnames=("result",), registry=REGISTRY,
+    )
+    prewarm_started_total = Counter(
+        "omnisight_prewarm_started_total", "Pre-warmed containers started",
+        registry=REGISTRY,
+    )
+    prewarm_consumed_total = Counter(
+        "omnisight_prewarm_consumed_total", "Pre-warm outcomes",
         labelnames=("result",), registry=REGISTRY,
     )
     prompt_cache_hit_total = Counter(
