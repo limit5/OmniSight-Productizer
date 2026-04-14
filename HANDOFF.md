@@ -192,6 +192,59 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 56-DAG-B — Storage + workflow 連動 完成（2026-04-14）
+
+承 56-DAG-A validator 之後立即實作。新表 `dag_plans` + workflow_runs
+雙向連結 + mutation chain，保留 Phase 56 append-only invariant
+（舊 run 的 steps 永不改寫）。
+
+### 交付（commit `b9a66d2`）
+
+**DB 變更**：
+- 新表 `dag_plans(id, dag_id, run_id, parent_plan_id, json_body, status, mutation_round, validation_errors, created_at, updated_at)` + 3 indexes。
+- migrate `workflow_runs` 加 `dag_plan_id` + `successor_run_id`，`workflow_steps` 加 `dag_task_id`，全 nullable 向後相容。
+
+**`backend/dag_storage.py`**（新）：
+- `StoredPlan` dataclass + `.dag()` rehydrate + `.errors()`
+- 狀態機（write-time guard）：
+  ```
+  pending → {validated, failed}
+  validated → {executing, mutated, exhausted}
+  failed → {mutated, exhausted}
+  executing → {completed, mutated, exhausted}
+  completed/mutated/exhausted → terminal
+  ```
+- CRUD：`save_plan` / `get_plan` / `get_plan_by_run` / `list_plans` / `set_status` / `attach_to_run` / `link_successor` / `get_dag_plan_id_for_run`
+
+**`backend/workflow.py` 擴充**：
+- `start(kind, *, dag=None, parent_plan_id=None, mutation_round=0)`：
+  - `dag=None` → 既有行為完全不變（向後相容）
+  - `dag=DAG` → 持久化 + dag_validator pass → status `validated→executing`；fail → status `failed`；雙向 link；persist 失敗不破壞 `workflow.start` 合約（全 try/except）
+- `mutate_workflow(old_run_id, new_dag, *, mutation_round)`：
+  - 開新 successor run
+  - 舊 plan 標 `mutated`、舊 run 寫 `successor_run_id`
+  - 新 plan `parent_plan_id` 指向舊 plan，mutation chain 完整可追溯
+
+### 設計姿態
+
+- **Append-only invariant 不破**：mutation 永遠開新 run/plan，舊資料只加 link，不 mutate steps。
+- **狀態機 write-time guard**：illegal transition 在 set_status 即 raise，無法繞過。
+- **Storage 失敗不傳染**：workflow.start 對 plan 持久化錯誤完全 swallow + log.warning，舊功能零中斷。
+- **Validator 失敗不擋啟動**：DAG 失敗 → plan 標 `failed`，但 run 仍 `running`，由上層（56-DAG-C mutation loop）決定下一步。
+
+### 驗收
+
+`pytest test_dag_storage` → **13 pass / 132s**。覆蓋 CRUD round-trip / 狀態機 legal+illegal+terminal / workflow.start 含 dag+不含 dag 雙路徑 / mutation chain 雙端 link / list_plans 排序 / 防禦性測試（storage blowup 不破壞 start 合約）。
+
+### 後續
+
+下一個是 **Phase 67-A Prompt Cache**（純 LLM 層，與 DAG track 平行
+可進）或 **Phase 63-D Daily IQ Benchmark**（依 HANDOFF 主鏈）。
+56-DAG-C mutation loop 需先有 Orchestrator agent prompt（透過
+prompt_registry 推上）→ 與 67-A 有間接依賴關係。
+
+---
+
 ## Phase 56-DAG-A — DAG Schema + Validator 完成（2026-04-14）
 
 第一個 DAG 子任，純 deterministic、無 LLM、無 DB。Validator 一次回所有
