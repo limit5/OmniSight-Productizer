@@ -19,17 +19,9 @@ vi.mock("@/lib/api", () => ({
 
 import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-panel"
 import * as api from "@/lib/api"
+import { primeSSE as _primeSSE } from "../helpers/sse"
 
-type SSEListener = (ev: { event: string; data: unknown }) => void
-
-function primeSSE() {
-  const listeners: SSEListener[] = []
-  ;(api.subscribeEvents as ReturnType<typeof vi.fn>).mockImplementation((fn: SSEListener) => {
-    listeners.push(fn)
-    return { close: vi.fn(), readyState: 1 }
-  })
-  return { emit: (ev: { event: string; data: unknown }) => listeners.forEach(l => l(ev)) }
-}
+const primeSSE = () => _primeSSE(api)
 
 const balancedTuning = {
   strategy: "balanced", model_tier: "default", max_retries: 2,

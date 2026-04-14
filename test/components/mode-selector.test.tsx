@@ -25,23 +25,9 @@ vi.mock("@/lib/api", () => {
 
 import { ModeSelector } from "@/components/omnisight/mode-selector"
 import * as api from "@/lib/api"
+import { primeSSE as _primeSSE } from "../helpers/sse"
 
-type SSEListener = (ev: { event: string; data: unknown }) => void
-
-function primeSSE() {
-  const listeners: SSEListener[] = []
-  let closed = 0
-  const handle = {
-    close: () => { closed++ },
-    readyState: 1,
-  }
-  ;(api.subscribeEvents as ReturnType<typeof vi.fn>).mockImplementation((fn: SSEListener) => {
-    listeners.push(fn)
-    return handle
-  })
-  return { listeners, emit: (ev: { event: string; data: unknown }) => listeners.forEach(l => l(ev)),
-           closeCount: () => closed }
-}
+const primeSSE = () => _primeSSE(api)
 
 describe("ModeSelector", () => {
   beforeEach(() => {
