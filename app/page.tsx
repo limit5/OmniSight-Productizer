@@ -12,6 +12,7 @@ import { DecisionDashboard } from "@/components/omnisight/decision-dashboard"
 import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-panel"
 import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
+import { ToastCenter } from "@/components/omnisight/toast-center"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
@@ -411,6 +412,9 @@ export default function Home() {
     <div className="relative min-h-screen flex flex-col overflow-hidden">
       {/* Neural Grid Background */}
       <NeuralGrid />
+
+      {/* Phase 50C: overlay toasts for risky/destructive decisions. */}
+      <ToastCenter />
 
       {/* Main Content */}
       <div className="relative z-10 flex flex-col h-screen">
