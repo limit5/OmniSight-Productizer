@@ -105,7 +105,7 @@ export function BudgetStrategyPanel() {
           <h2 className="font-mono text-sm tracking-wider text-[var(--neural-cyan,#67e8f9)]">
             BUDGET STRATEGY
           </h2>
-          <PanelHelp doc="panels-overview" />
+          <PanelHelp doc="budget-strategies" />
         </div>
         <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)]">
           {STRATEGY_META[current].hint}

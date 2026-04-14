@@ -32,6 +32,7 @@ export type DocId =
   | "operation-modes"
   | "decision-severity"
   | "panels-overview"
+  | "budget-strategies"
   | "glossary"
 
 // Inline TL;DR — kept in sync with the first TL;DR paragraph of each
@@ -101,6 +102,28 @@ const TL_DR: Record<DocId, Record<Locale, { title: string; summary: string }>> =
       title: "Panels Overview",
       summary:
         "Dashboard は 12 個の panel で構成。各 panel の一言役割、URL ディープリンク、キーボードショートカット、スマホナビ挙動を網羅。",
+    },
+  },
+  "budget-strategies": {
+    en: {
+      title: "Budget Strategies",
+      summary:
+        "Four preset bundles of five tuning knobs (tier, retries, downgrade, freeze, parallel) picking how expensive each agent call is allowed to be. QUALITY / BALANCED / COST_SAVER / SPRINT.",
+    },
+    "zh-TW": {
+      title: "Budget Strategies",
+      summary:
+        "五個 knob（tier/retries/downgrade/freeze/parallel）的四種預設組合，決定每次 agent 呼叫允許多貴。QUALITY / BALANCED / COST_SAVER / SPRINT。",
+    },
+    "zh-CN": {
+      title: "Budget Strategies",
+      summary:
+        "五个 knob（tier/retries/downgrade/freeze/parallel）的四种预设组合，决定每次 agent 调用允许多贵。QUALITY / BALANCED / COST_SAVER / SPRINT。",
+    },
+    ja: {
+      title: "Budget Strategies",
+      summary:
+        "5 knob (tier/retries/downgrade/freeze/parallel) の 4 プリセット組合で agent 呼び出しの許容コストを決定。QUALITY / BALANCED / COST_SAVER / SPRINT。",
     },
   },
   glossary: {

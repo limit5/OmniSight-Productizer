@@ -19,6 +19,7 @@ import {
   ScrollText,
   Trash2,
 } from "lucide-react"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   type DecisionRule,
   type DecisionRulesTestHit,
@@ -174,6 +175,7 @@ export function DecisionRulesEditor() {
           <h2 className="font-mono text-sm tracking-wider text-[var(--neural-cyan,#67e8f9)]">
             DECISION RULES
           </h2>
+          <PanelHelp doc="decision-severity" />
           <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)]">
             {rules.length} {rules.length === 1 ? "rule" : "rules"}
           </span>

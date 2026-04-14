@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Activity, AlertTriangle, CheckCircle2, Circle, Clock3, Zap } from "lucide-react"
+import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   type PipelineTimeline,
   type PipelineTimelineStep,
@@ -98,6 +99,7 @@ export function PipelineTimeline() {
           <h2 className="font-mono text-sm tracking-wider text-[var(--neural-cyan,#67e8f9)]">
             PIPELINE TIMELINE
           </h2>
+          <PanelHelp doc="panels-overview" />
         </div>
         {data && (
           <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex items-center gap-3">
