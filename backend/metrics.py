@@ -164,6 +164,19 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 62: skills extraction (Knowledge Generation L1) ─────
+    skill_extracted_total = Counter(
+        "omnisight_skill_extracted_total",
+        "Skill extraction events from completed workflow_runs",
+        labelnames=("status",),  # written | skipped_threshold | skipped_unsafe
+        registry=REGISTRY,
+    )
+    skill_promoted_total = Counter(
+        "omnisight_skill_promoted_total",
+        "Skill candidates moved from _pending into live skills/",
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -193,6 +206,8 @@ else:
     sandbox_lifetime_killed_total = _NoOp()  # type: ignore
     sandbox_launch_total = _NoOp()  # type: ignore
     sandbox_output_truncated_total = _NoOp()  # type: ignore
+    skill_extracted_total = _NoOp()  # type: ignore
+    skill_promoted_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -214,6 +229,7 @@ def reset_for_tests() -> None:
     global auth_login_total, subprocess_orphan_total, persist_failure_total
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
     global sandbox_launch_total, sandbox_output_truncated_total
+    global skill_extracted_total, skill_promoted_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -283,6 +299,15 @@ def reset_for_tests() -> None:
         "omnisight_sandbox_output_truncated_total",
         "exec_in_container outputs that exceeded sandbox_max_output_bytes",
         labelnames=("tier",), registry=REGISTRY,
+    )
+    skill_extracted_total = Counter(
+        "omnisight_skill_extracted_total", "Skill extraction events",
+        labelnames=("status",), registry=REGISTRY,
+    )
+    skill_promoted_total = Counter(
+        "omnisight_skill_promoted_total",
+        "Skill candidates promoted into live skills/",
+        registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
