@@ -280,10 +280,25 @@ mutation：
 
 雙向驗證：安裝 prom → 14 pass + 2 skip；無 prom → 2 pass + 14 skip。
 
-### D6–D7 未執行
+### D6 — core smoke: budget_strategy / config / structlog（commit `7c77f75`）
 
-仍排程於 Fix-D 計畫中（core smoke / hooks）。Phase 62 仍待全 Fix-D
-完成。
+三個小型基礎模組補 smoke test，總計 30 pass + 1 documented-skip / 0.12s：
+
+- `test_budget_strategy.py`（10）：default=balanced、list_strategies 4 筆
+  鍵齊全、set_strategy 參數化 4 strategy × tier/retries、enum + string
+  接受、unknown raise、`quality` 不 downgrade 不變量、`sprint` 唯一
+  `prefer_parallel=True`。
+- `test_config.py`（13）：預設值、`OMNISIGHT_*` env 覆寫（provider /
+  numeric / bool）、`get_model_name` 對 5 provider 的 fallback、明確
+  override 優先、未知 provider 降回 anthropic 預設。
+- `test_structlog_setup.py`（7 + 1 skip）：`is_json` 大小寫容忍、
+  `configure` idempotent 雙模式、`bind_logger` 兩後端（structlog /
+  LoggerAdapter）、empty context、`get_logger(None)` 回 root。
+
+### D7 未執行
+
+仍排程於 Fix-D 計畫中（frontend hooks `use-engine` + `use-mobile`）。
+Phase 62 仍待全 Fix-D 完成。
 
 ---
 
