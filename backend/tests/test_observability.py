@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 
 import pytest
 
@@ -82,10 +83,11 @@ async def test_dlq_retry_marks_exhausted_as_dead(monkeypatch):
     from backend import db, notifications as n
     from backend.config import settings
 
+    nid = f"notif-dlq1-{uuid.uuid4().hex[:6]}"
     await db.init()
     try:
         await db.insert_notification({
-            "id": "notif-dlq1",
+            "id": nid,
             "level": "warning",
             "title": "t",
             "message": "m",
@@ -96,7 +98,7 @@ async def test_dlq_retry_marks_exhausted_as_dead(monkeypatch):
         })
         # Pre-mark as failed and exhausted
         await db.update_notification_dispatch(
-            "notif-dlq1", "failed",
+            nid, "failed",
             attempts=settings.notification_max_retries,
             error="simulated",
         )
@@ -104,7 +106,7 @@ async def test_dlq_retry_marks_exhausted_as_dead(monkeypatch):
         assert result["dead"] >= 1
 
         rows = await db.list_failed_notifications()
-        assert all(r["id"] != "notif-dlq1" for r in rows)
+        assert all(r["id"] != nid for r in rows)
     finally:
         await db.close()
 
@@ -114,10 +116,11 @@ async def test_dlq_retry_redispatches_when_attempts_remain(monkeypatch):
     from backend import db, notifications as n
     from backend.config import settings
 
+    nid = f"notif-dlq2-{uuid.uuid4().hex[:6]}"
     await db.init()
     try:
         await db.insert_notification({
-            "id": "notif-dlq2",
+            "id": nid,
             "level": "warning",
             "title": "t",
             "message": "m",
@@ -127,7 +130,7 @@ async def test_dlq_retry_redispatches_when_attempts_remain(monkeypatch):
             "action_label": None,
         })
         await db.update_notification_dispatch(
-            "notif-dlq2", "failed", attempts=0, error="first attempt",
+            nid, "failed", attempts=0, error="first attempt",
         )
         # No webhooks configured → dispatch resolves as 'skipped'
         monkeypatch.setattr(settings, "notification_slack_webhook", "", raising=False)

@@ -100,16 +100,17 @@ async def run_watchdog():
     # earlier proposal is still pending.
     _open_proposals: dict[tuple[str, str], str] = {}
     _executed_proposals: set[str] = set()  # N9/②: avoid double-executing
+    global _watchdog_last_tick
     while True:
         await asyncio.sleep(60)
-        # Phase 52: heartbeat for /healthz "watchdog age" probe
-        global _watchdog_last_tick
-        _watchdog_last_tick = _time.time()
-        # N9: when the system is halted, skip the stuck pass entirely —
-        # proposals pile up with no executor able to act on them.
+        # Fix-A S7: only publish the tick AFTER the stuck-detection pass
+        # completes, so a hung detector shows up as watchdog-age growth
+        # in /healthz instead of being masked by a fresh tick at loop top.
+        # Halted state still bumps the tick (idle ≠ stuck).
         if not _running.is_set():
+            _watchdog_last_tick = _time.time()
             continue
-        now = _watchdog_last_tick
+        now = _time.time()
         async with _state_lock:
             # Phase 47B: stuck-agent detection BEFORE hard cancellation, so
             # full_auto/turbo modes can try a switch_model / spawn_alternate
@@ -244,6 +245,10 @@ async def run_watchdog():
                         await _persist_task(t)
                         idle_agents.remove(best_agent)
                         logger.info("[WATCHDOG] Reallocated blocked task %s to backlog for reassignment", t.id)
+
+        # Fix-A S7: publish tick only after a full pass completes so
+        # /healthz watchdog-age reflects real liveness, not loop entry.
+        _watchdog_last_tick = _time.time()
 
 
 async def _apply_stuck_remediation(agent_id: str, signal, chosen: str) -> None:
