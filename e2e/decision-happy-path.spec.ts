@@ -106,6 +106,16 @@ test.describe("Autonomous Decision Engine — happy path", () => {
     await expect(sweep).toBeEnabled()
   })
 
+  test("pipeline timeline renders every phase from the backend", async ({ page }) => {
+    // Phase 50A: the timeline calls GET /pipeline/timeline on mount and
+    // renders a <li data-testid="timeline-step-…"> for every configured
+    // pipeline step. We assert the header + the well-known first step
+    // so UI wiring doesn't regress silently.
+    await expect(page.getByRole("heading", { name: "PIPELINE TIMELINE" })).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByTestId("timeline-step-spec")).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByTestId("timeline-step-docs")).toBeVisible()
+  })
+
   test("SSE stream delivers mode_changed event to the browser", async ({ page, request }) => {
     // Real SSE round-trip: open an EventSource in the browser, trigger a
     // mode change on the backend, and assert the browser receives the
