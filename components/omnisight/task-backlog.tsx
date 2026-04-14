@@ -483,10 +483,16 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
         </div>
         {/* Row 2: Stats + ADD button */}
         <div className="flex items-center justify-between mt-2 relative z-10">
-          <div className="flex items-center gap-2 text-[10px] font-mono">
-            <span className="text-[var(--muted-foreground)]">{tasks.length} TASKS</span>
-            <span className="text-[var(--neural-blue)]">{tasks.filter(t => t.status === "in_progress").length} ACTIVE</span>
-            <span className="text-[var(--validation-emerald)]">{tasks.filter(t => t.status === "completed").length} DONE</span>
+          <div className="flex items-center gap-2 text-[10px] font-mono tabular-nums">
+            <span className="text-[var(--muted-foreground)] inline-block text-right" style={{ minWidth: 64 }}>
+              <span className="inline-block text-right" style={{ minWidth: 24 }}>{tasks.length}</span> TASKS
+            </span>
+            <span className="text-[var(--neural-blue)] inline-block text-right" style={{ minWidth: 70 }}>
+              <span className="inline-block text-right" style={{ minWidth: 24 }}>{tasks.filter(t => t.status === "in_progress").length}</span> ACTIVE
+            </span>
+            <span className="text-[var(--validation-emerald)] inline-block text-right" style={{ minWidth: 60 }}>
+              <span className="inline-block text-right" style={{ minWidth: 24 }}>{tasks.filter(t => t.status === "completed").length}</span> DONE
+            </span>
           </div>
           <button
             onClick={(e) => { e.stopPropagation(); setShowAddTask(true) }}

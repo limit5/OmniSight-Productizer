@@ -333,15 +333,23 @@ export function HostDevicePanel({
             <RefreshCw size={12} className={isScanning ? "animate-spin" : ""} />
           </button>
         </div>
-        <div className="flex items-center gap-4 mt-2">
-          <p className="font-mono text-xs text-[var(--validation-emerald)]">
-            {connectedCount} CONNECTED
+        <div className="flex items-center gap-4 mt-2 tabular-nums">
+          <p
+            className="font-mono text-xs text-[var(--validation-emerald)] inline-block"
+            style={{ minWidth: 100 }}
+          >
+            <span className="inline-block text-right" style={{ minWidth: 22 }}>{connectedCount}</span> CONNECTED
           </p>
-          {detectingCount > 0 && (
-            <p className="font-mono text-xs text-[var(--neural-blue)]">
-              {detectingCount} DETECTING
-            </p>
-          )}
+          {/* Reserve the slot for DETECTING regardless of count, so the
+            * row height + neighbour positions are stable when the value
+            * flips between 0 and >0. */}
+          <p
+            className="font-mono text-xs text-[var(--neural-blue)] inline-block"
+            style={{ minWidth: 96, visibility: detectingCount > 0 ? "visible" : "hidden" }}
+            aria-hidden={detectingCount === 0}
+          >
+            <span className="inline-block text-right" style={{ minWidth: 22 }}>{detectingCount || 0}</span> DETECTING
+          </p>
         </div>
       </div>
       

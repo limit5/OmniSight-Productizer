@@ -193,10 +193,12 @@ export function DecisionDashboard() {
           <PanelHelp doc="decision-severity" />
           {pendingCount > 0 && (
             <span
-              className="font-mono text-[10px] px-1.5 py-0.5 rounded-sm bg-[var(--critical-red,#ef4444)] text-white"
+              className="font-mono text-[10px] px-1.5 py-0.5 rounded-sm bg-[var(--critical-red,#ef4444)] text-white tabular-nums text-center inline-block"
+              style={{ minWidth: 22 }}
               aria-label={`${pendingCount} pending decisions`}
+              title={`${pendingCount} pending decision${pendingCount === 1 ? "" : "s"}`}
             >
-              {pendingCount}
+              {pendingCount > 99 ? "99+" : pendingCount}
             </span>
           )}
         </div>

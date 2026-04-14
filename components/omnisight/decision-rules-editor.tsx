@@ -176,7 +176,11 @@ export function DecisionRulesEditor() {
             DECISION RULES
           </h2>
           <PanelHelp doc="decision-severity" />
-          <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)]">
+          <span
+            className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] tabular-nums inline-block text-right"
+            style={{ minWidth: 56 }}
+            title={`${rules.length} ${rules.length === 1 ? "rule" : "rules"}`}
+          >
             {rules.length} {rules.length === 1 ? "rule" : "rules"}
           </span>
         </div>

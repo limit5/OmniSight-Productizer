@@ -102,17 +102,27 @@ export function PipelineTimeline() {
           <PanelHelp doc="panels-overview" />
         </div>
         {data && (
-          <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex items-center gap-3">
-            <span className="flex items-center gap-1">
-              <Zap className="w-3 h-3" aria-hidden />
-              <span aria-label="tasks completed in the last 7 days">
+          <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex items-center gap-3 tabular-nums shrink-0">
+            <span className="flex items-center gap-1" style={{ minWidth: 56 }}>
+              <Zap className="w-3 h-3 shrink-0" aria-hidden />
+              <span aria-label="tasks completed in the last 7 days" className="text-right inline-block" style={{ minWidth: 36 }}>
                 {data.velocity.tasks_completed_7d}/7d
               </span>
             </span>
-            <span aria-label="average step duration">
+            <span
+              aria-label="average step duration"
+              className="inline-block text-right truncate"
+              style={{ minWidth: 70, maxWidth: 90 }}
+              title={`avg step duration ${formatDuration(data.velocity.avg_step_seconds)}`}
+            >
               AVG {formatDuration(data.velocity.avg_step_seconds)}
             </span>
-            <span aria-label="pipeline completion estimate">
+            <span
+              aria-label="pipeline completion estimate"
+              className="inline-block text-right truncate"
+              style={{ minWidth: 70, maxWidth: 110 }}
+              title={`ETA ${formatEta(data.velocity.eta_completion)}`}
+            >
               ETA {formatEta(data.velocity.eta_completion)}
             </span>
           </span>

@@ -108,7 +108,11 @@ export function BudgetStrategyPanel() {
           </h2>
           <PanelHelp doc="budget-strategies" />
         </div>
-        <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)]">
+        <span
+          className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] truncate text-right"
+          style={{ maxWidth: 240 }}
+          title={STRATEGY_META[current].hint}
+        >
           {STRATEGY_META[current].hint}
         </span>
       </header>
