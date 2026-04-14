@@ -380,6 +380,50 @@ Pain point：DAG-E 解決「不用 curl」，但 operator 仍要手寫 JSON sche
 
 ---
 
+## Phase 67-E — Tier-1 Sandbox RAG Pre-fetch Hardening 完成（2026-04-15）
+
+`docs/design/dag-pre-fetching.md` 規定 Tier-1 沙盒專用的 pre-fetch
+要比 Phase 67-D 通用模組更嚴：cosine > 0.85 / SDK 版本硬鎖 / 1000
+token budget / `<system_auto_prefetch>` XML 格式。**關鍵價值**：Phase
+67-D 從 commit 到今天，`rag_prefetch` 模組一直存在但沒被任何
+production 路徑呼叫；本 phase 真正把它接進 agent 錯誤處理迴圈。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `rag_prefetch.py` 加 `_min_cosine()` / `_max_block_tokens()` / `_version_hard_lock_rejects()` / `_approx_tokens()`；新 `prefetch_for_sandbox_error()` + `format_sandbox_block()`（`<system_auto_prefetch>` / `<past_solution>` / `<bug_context>` / `<working_fix>`）；新 metric label `below_cosine` / `version_mismatch`；`.env.example` 加 `OMNISIGHT_RAG_MIN_COSINE=0.85` / `OMNISIGHT_RAG_MAX_BLOCK_TOKENS=1000` | `dc0ad31` |
+| S2 | `search_episodic_memory` 加 `min_quality` 參數（FTS5 + LIKE fallback 都加），SQL 層排掉低分，prefetch 省 over-fetch；None 預設向後相容 | `0d51dff` |
+| S3 | **Wire！** — `nodes.py:828-846` 的 inline `[L3 HINT]` 查詢替換為 `prefetch_for_sandbox_error()`。`rag_prefetch_total` 開始有真實量 | `d4bf944` |
+| S4 | `_touch_hits()` — 每個被注入的 solution 呼叫 `memory_decay.touch()`，重置 Phase 63-E decay clock；兩條 prefetch 路徑都套 | `c4e9ece` |
+| S5 | 12 新測試（version lock 三情境 / format 格式 / 排序 / budget 截斷 / no-truncation / sandbox rc=0 / below-cosine / SDK mismatch 0.99 拒絕 / 匹配通過 / memory_decay touch integration）；HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **Cosine proxy 承認**：DB 還沒真 embedding，目前用 `quality_score` 做 proxy。文件註明 Phase 67-F 若要 ada-002 / nomic-embed，只要換 `_min_cosine` 的查詢資料源。
+- **第一 hit 永遠納入**：budget 再緊 format_sandbox_block 也會吐第一個（避免空 block 干擾 agent）。第二+ 才進 budget gate，超過標 `truncated="true"`。
+- **排序穩定**（quality desc / id asc tiebreak）：prompt cache prefix byte-identical，跨 retry 可命中 Anthropic / OpenAI cache。
+- **platform 欄位尚未接**：`soc_vendor` / `sdk_version` 目前 GraphState 沒帶，version hard-lock 落在 permissive 模式；後續 platform-aware enhancement 把這兩欄位丟進 state 就啟動。
+- **正向飛輪**：hit → touch → decay 重置 → FTS5 排名穩定 → 更易再被命中。
+
+### 後續解鎖
+
+- **真 embedding（Phase 67-F）**：DB 加 `embedding_vec BLOB`、ingest 時算、查詢用 cosine similarity；`_min_cosine` 換資料源。對齊設計文件原意。
+- **Platform-aware state**：`soc_vendor` / `sdk_version` 進 GraphState；version hard-lock 真正啟動，避免跨版本毒藥。
+- **Canary 5%**：套 Phase 63-C prompt_registry canary，觀察新 XML 格式對 agent 行為的影響。
+
+### 量化指標（部署後追蹤）
+
+| Metric | 期望 |
+|---|---|
+| `rag_prefetch_total{result="injected"}` | 從 0 開始有量（此前模組死碼） |
+| `rag_prefetch_total{result="below_cosine"}` / `{version_mismatch}` | 守門在工作的證據 |
+| `omnisight_memory_decay_total{action}` | `skipped_recent` 隨熱門解法上升 |
+| 沙盒首次 retry 延遲（需自訂 histogram） | 理論 ↓ 10–15s（取消 agent tool round-trip） |
+| Prompt cache hit rate | `<system_auto_prefetch>` prefix 穩定 → 命中率 ↑ |
+
+---
+
 ## Phase 56-DAG-G — DAG Canvas Visualization 完成（2026-04-15）
 
 DAG-F 解決「不用記 schema」，但扁平列表看不出拓撲。本 phase 加

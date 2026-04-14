@@ -264,3 +264,159 @@ def test_inject_into_builder_noop_on_empty():
     rp.inject_into_builder(b, "")
     rp.inject_into_builder(b, None)  # type: ignore[arg-type]
     assert b.segments == []
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 67-E — sandbox prefetch, strict guards
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_version_hard_lock_empty_sides_are_permissive():
+    """Both empty, hit empty, env empty — each case accepts so legacy
+    rows without tags and ad-hoc runs without platform info don't
+    silently block every hit."""
+    assert rp._version_hard_lock_rejects("", "") is False
+    assert rp._version_hard_lock_rejects("SDK-v1", "") is False
+    assert rp._version_hard_lock_rejects("", "SDK-v2") is False
+
+
+def test_version_hard_lock_rejects_mismatched_tags():
+    assert rp._version_hard_lock_rejects("SDK-v1", "SDK-v2") is True
+
+
+def test_version_hard_lock_accepts_matching_tags():
+    assert rp._version_hard_lock_rejects("SDK-v2", "SDK-v2") is False
+    # Whitespace-only difference is not a mismatch.
+    assert rp._version_hard_lock_rejects(" SDK-v2 ", "SDK-v2") is False
+
+
+def test_format_sandbox_block_wraps_with_doc_spec_tags():
+    hits = [rp.PrefetchHit(
+        memory_id="m1", error_signature="undefined reference to v4l2_open",
+        solution="add -lv4l2 to target_link_libraries",
+        quality_score=0.92, soc_vendor="Fullhan", sdk_version="v1.2",
+    )]
+    out = rp.format_sandbox_block(hits)
+    assert out.startswith("<system_auto_prefetch>")
+    assert out.endswith("</system_auto_prefetch>")
+    assert "<past_solution" in out
+    assert "<bug_context>" in out
+    assert "<working_fix>" in out
+    assert 'soc="Fullhan"' in out
+    assert 'sdk="v1.2"' in out
+
+
+def test_format_sandbox_block_sorts_by_quality_desc_then_id_asc():
+    hits = [
+        rp.PrefetchHit("aaa", "e", "low", 0.85, "", ""),
+        rp.PrefetchHit("zzz", "e", "hi",  0.95, "", ""),
+        rp.PrefetchHit("bbb", "e", "mid", 0.95, "", ""),
+    ]
+    out = rp.format_sandbox_block(hits)
+    # Expect bbb before zzz (id asc as tiebreak), both before aaa.
+    pos_aaa = out.index('id="aaa"')
+    pos_bbb = out.index('id="bbb"')
+    pos_zzz = out.index('id="zzz"')
+    assert pos_bbb < pos_zzz < pos_aaa
+
+
+def test_format_sandbox_block_token_budget_truncates_and_flags():
+    big_fix = "X" * 400  # ~100 tokens each by char/4 heuristic
+    hits = [rp.PrefetchHit(f"m{i}", f"sig{i}", big_fix, 0.9 - i * 0.01, "", "")
+            for i in range(5)]
+    # Tight budget forces truncation after the first (or few) hits.
+    out = rp.format_sandbox_block(hits, max_tokens=120)
+    assert 'truncated="true"' in out
+    # First hit is always included even when the budget is tight.
+    assert 'id="m0"' in out
+    # A far-down hit must have been dropped.
+    assert 'id="m4"' not in out
+
+
+def test_format_sandbox_block_no_truncation_when_budget_fits():
+    hits = [rp.PrefetchHit("m1", "sig", "small", 0.9, "", "")]
+    out = rp.format_sandbox_block(hits, max_tokens=1000)
+    assert 'truncated="true"' not in out
+
+
+# ─── prefetch_for_sandbox_error — end to end ────────────────────
+
+@pytest.mark.asyncio
+async def test_sandbox_rc_zero_returns_none(fresh_db):
+    await _seed(fresh_db, mid="m", err="Segmentation fault",
+                sol="fix it", q=0.9)
+    out = await rp.prefetch_for_sandbox_error("Segmentation fault", rc=0)
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_sandbox_below_cosine_returns_none(fresh_db, monkeypatch):
+    """Borderline hit (q=0.7) must be rejected when floor is the
+    design-doc default 0.85."""
+    await _seed(fresh_db, mid="weak", err="Segmentation fault",
+                sol="try A", q=0.7)
+    monkeypatch.delenv("OMNISIGHT_RAG_MIN_COSINE", raising=False)
+    out = await rp.prefetch_for_sandbox_error(
+        "Segmentation fault here", rc=139,
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_sandbox_rejects_sdk_mismatch_even_at_high_quality(
+    fresh_db, monkeypatch,
+):
+    """The whole point of the hard lock: even a 0.99 match gets
+    dropped when the SDK tag doesn't line up."""
+    await _seed(fresh_db, mid="old", err="Segmentation fault",
+                sol="the deprecated fix", q=0.99,
+                vendor="Rockchip", sdk="SDK-v1")
+    monkeypatch.delenv("OMNISIGHT_RAG_MIN_COSINE", raising=False)
+    out = await rp.prefetch_for_sandbox_error(
+        "Segmentation fault", rc=139,
+        soc_vendor="Rockchip", sdk_version="SDK-v2",
+    )
+    # DB's sdk_version filter also drops the row, so we reach the
+    # "no_hit" branch. Either way the block must not be emitted.
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_sandbox_high_quality_matching_sdk_injects_doc_format(fresh_db):
+    await _seed(fresh_db, mid="good", err="undefined reference to v4l2_open",
+                sol="add -lv4l2", q=0.92,
+                vendor="Fullhan", sdk="SDK-v1")
+    out = await rp.prefetch_for_sandbox_error(
+        "libmedia.so: undefined reference to `v4l2_open'", rc=1,
+        soc_vendor="Fullhan", sdk_version="SDK-v1",
+    )
+    assert out is not None
+    assert "<system_auto_prefetch>" in out
+    assert "<past_solution" in out
+    assert "<working_fix>add -lv4l2</working_fix>" in out
+
+
+@pytest.mark.asyncio
+async def test_sandbox_hit_touches_memory_decay(fresh_db):
+    """Integration: a successful injection must reset last_used_at on
+    every memory that made it into the output."""
+    await _seed(fresh_db, mid="touched", err="Segmentation fault",
+                sol="the fix", q=0.9)
+    # Precondition: last_used_at starts null.
+    async with fresh_db._conn().execute(
+        "SELECT last_used_at FROM episodic_memory WHERE id = ?",
+        ("touched",),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["last_used_at"] is None
+
+    out = await rp.prefetch_for_sandbox_error(
+        "Segmentation fault (core dumped)", rc=139,
+    )
+    assert out is not None
+
+    async with fresh_db._conn().execute(
+        "SELECT last_used_at FROM episodic_memory WHERE id = ?",
+        ("touched",),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["last_used_at"] is not None
