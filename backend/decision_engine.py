@@ -293,8 +293,22 @@ def propose(
     opts = list(options or [])
     if not opts:
         opts = [{"id": "ok", "label": "OK", "description": ""}]
+    # R2-#27: validate options — each must have a non-empty string id;
+    # ids must be unique. Garbage-in → garbage-out otherwise (the SSE
+    # subscriber picks an option by id later and has no way to recover
+    # from duplicates).
+    seen: set[str] = set()
+    for o in opts:
+        oid = o.get("id")
+        if not isinstance(oid, str) or not oid:
+            raise ValueError(f"option.id must be a non-empty string, got {oid!r}")
+        if oid in seen:
+            raise ValueError(f"duplicate option id: {oid!r}")
+        seen.add(oid)
     if default_option_id is None:
         default_option_id = opts[0]["id"]
+    elif default_option_id not in seen:
+        raise ValueError(f"default_option_id {default_option_id!r} not in options")
 
     # Phase 50B: a matching rule can force severity / default / auto-exec
     # ahead of the normal mode × severity policy. Imported lazily to avoid

@@ -110,14 +110,18 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         try:
             cur = await conn.execute(f"PRAGMA table_info({table})")
             cols = {row[1] for row in await cur.fetchall()}
-            if column not in cols:
-                raise RuntimeError(
-                    f"Required column {table}.{column} missing after migration"
-                )
-        except RuntimeError:
-            raise
         except Exception as exc:
-            logger.error("Schema verify failed for %s.%s: %s", table, column, exc)
+            # R2-#34: if PRAGMA itself fails we cannot verify invariants,
+            # so we must fail loudly instead of logging and proceeding —
+            # the app would otherwise start with an invisibly broken
+            # schema and every insert would IntegrityError at runtime.
+            raise RuntimeError(
+                f"Schema verify failed for {table}.{column}: {exc}"
+            ) from exc
+        if column not in cols:
+            raise RuntimeError(
+                f"Required column {table}.{column} missing after migration"
+            )
 
 
 async def close() -> None:
