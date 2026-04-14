@@ -1363,9 +1363,8 @@ html {
 .mode-pill {
   position: relative;
   overflow: hidden;
-  isolation: isolate;
 }
-.mode-pill[data-active="false"] span {
+.mode-pill[data-active="false"] > .mode-pill-label {
   animation: mode-idle-flicker 7s ease-in-out infinite;
 }
 .mode-pill[data-active="true"] {
@@ -1380,10 +1379,18 @@ html {
 .mode-pill[data-engaging="true"] {
   animation: mode-engage 420ms cubic-bezier(0.2, 0.9, 0.2, 1.05);
 }
-.mode-pill[data-active="true"]::before {
-  content: '';
+/* Decorative overlays use real <span aria-hidden> with explicit
+ * pointer-events: none — safer than pseudo-elements which some
+ * browser/blend-mode combinations mishandle for hit-testing. */
+.mode-pill-scan,
+.mode-pill-edge {
   position: absolute;
   inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.mode-pill-scan {
+  width: 30%;
   background: linear-gradient(
     90deg,
     transparent 0%,
@@ -1392,20 +1399,16 @@ html {
     rgba(255, 255, 255, 0.55) 55%,
     transparent 100%
   );
-  width: 30%;
   transform: translateX(-120%);
   animation: mode-scan 2.4s ease-in-out infinite;
-  mix-blend-mode: overlay;
-  pointer-events: none;
 }
-.mode-pill[data-active="true"]::after {
-  /* Inner hairline on top and bottom — the "engaged" segmented look. */
-  content: '';
-  position: absolute;
-  inset: 0;
+.mode-pill-edge {
   border-top: 1px solid rgba(255, 255, 255, 0.55);
   border-bottom: 1px solid rgba(0, 0, 0, 0.35);
-  pointer-events: none;
+}
+.mode-pill-label {
+  position: relative;
+  z-index: 2;
 }
 .mode-pill:not([data-active="true"]):hover {
   background: rgba(103, 232, 249, 0.06);

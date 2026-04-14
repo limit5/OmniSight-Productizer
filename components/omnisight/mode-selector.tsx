@@ -151,7 +151,11 @@ export function ModeSelector({ compact = false }: Props) {
                   : undefined}
                 title={meta.hint}
               >
-                <span aria-label={meta.label}>{compact ? meta.compact : meta.label}</span>
+                {active && <span className="mode-pill-scan" aria-hidden />}
+                {active && <span className="mode-pill-edge" aria-hidden />}
+                <span className="mode-pill-label" aria-label={meta.label}>
+                  {compact ? meta.compact : meta.label}
+                </span>
               </button>
             </div>
           )
@@ -165,6 +169,15 @@ export function ModeSelector({ compact = false }: Props) {
       >
         {inFlight}/{cap}
       </span>
+      {error && (
+        <span
+          role="alert"
+          className="font-mono text-[10px] text-[var(--critical-red,#ef4444)] animate-pulse"
+          title={error}
+        >
+          ⚠ {error.length > 40 ? error.slice(0, 40) + "…" : error}
+        </span>
+      )}
     </div>
   )
 }
