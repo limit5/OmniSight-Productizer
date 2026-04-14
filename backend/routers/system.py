@@ -571,6 +571,149 @@ async def get_sse_schema():
     return get_sse_schema_export()
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Platform / arch awareness  (H1 — host vs target indicator)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Normalise the many synonyms `uname -m` / cmake / kernel use into the
+# canonical short id we display in the UI chip.
+_ARCH_ALIASES: dict[str, str] = {
+    "x86_64": "x86_64", "amd64": "x86_64", "x64": "x86_64",
+    "aarch64": "arm64", "arm64": "arm64",
+    "armv7l": "arm32", "armv7": "arm32", "armhf": "arm32", "arm": "arm32",
+    "armv6l": "arm32",
+    "riscv64": "riscv64", "rv64": "riscv64",
+    "riscv32": "riscv32",
+    "mipsel": "mips", "mips": "mips", "mips64": "mips64",
+    "i686": "x86", "i386": "x86",
+    "ppc64le": "ppc64le", "s390x": "s390x",
+    "loongarch64": "loong64",
+}
+
+
+def _canon_arch(raw: str | None) -> str:
+    if not raw:
+        return "unknown"
+    return _ARCH_ALIASES.get(raw.lower().strip(), raw.lower().strip())
+
+
+# Mapping from platform-profile id (configs/platforms/*.yaml) to the
+# canonical target arch the toolchain produces.
+_PROFILE_ARCH: dict[str, str] = {
+    "aarch64": "arm64",
+    "armv7":   "arm32",
+    "riscv64": "riscv64",
+    "host_native": "",        # filled at runtime to match host
+    "vendor-example": "arm64",
+}
+
+
+@router.get("/platform-status")
+async def get_platform_status() -> dict:
+    """H1: surface host arch + active target arch + toolchain readiness so
+    the operator chip in the dashboard header can warn about
+    cross-compile mismatch *before* a build starts.
+
+    Status values:
+      * `no_target`         — hardware_manifest.target_platform is empty
+      * `native`            — host arch == target arch (Phase 59 fast-path)
+      * `cross_ready`       — different arch + cross-compiler installed
+      * `toolchain_missing` — different arch + cross-compiler NOT on PATH
+      * `unknown_target`    — target_platform set but no matching profile yaml
+    """
+    import shutil
+    import yaml as _yaml
+
+    host_raw = platform.machine()
+    host_canon = _canon_arch(host_raw)
+
+    manifest_path = _PROJECT_ROOT / "configs" / "hardware_manifest.yaml"
+    target_profile_id = ""
+    if manifest_path.exists():
+        try:
+            data = _yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+            target_profile_id = (data.get("project") or {}).get("target_platform", "") or ""
+        except Exception:
+            target_profile_id = ""
+
+    if not target_profile_id:
+        return {
+            "host":   {"arch": host_canon, "raw": host_raw, "os": platform.system()},
+            "target": None,
+            "match":  None,
+            "status": "no_target",
+            "advice": "Set project.target_platform in configs/hardware_manifest.yaml",
+        }
+
+    profile_path = _PROJECT_ROOT / "configs" / "platforms" / f"{target_profile_id}.yaml"
+    if not profile_path.exists():
+        return {
+            "host":   {"arch": host_canon, "raw": host_raw, "os": platform.system()},
+            "target": {"profile_id": target_profile_id},
+            "match":  False,
+            "status": "unknown_target",
+            "advice": f"No configs/platforms/{target_profile_id}.yaml — create or pick a known profile",
+        }
+
+    try:
+        prof = _yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return {
+            "host":   {"arch": host_canon, "raw": host_raw, "os": platform.system()},
+            "target": {"profile_id": target_profile_id},
+            "match":  False,
+            "status": "unknown_target",
+            "advice": f"Cannot parse profile yaml: {exc}",
+        }
+
+    target_canon = _PROFILE_ARCH.get(target_profile_id) or _canon_arch(prof.get("platform"))
+    if target_profile_id == "host_native":
+        target_canon = host_canon
+
+    toolchain = prof.get("toolchain", "")
+    qemu = prof.get("qemu", "")
+    cross_compile = host_canon != target_canon
+    toolchain_present = bool(toolchain) and shutil.which(toolchain) is not None
+    qemu_present = bool(qemu) and shutil.which(qemu) is not None
+
+    if not cross_compile:
+        status = "native"
+        advice = "Same arch — no cross-compile needed (host-native fast path)"
+    elif toolchain_present:
+        status = "cross_ready"
+        advice = f"Cross-compile toolchain `{toolchain}` ready on PATH"
+    else:
+        status = "toolchain_missing"
+        advice = (
+            f"Toolchain `{toolchain}` not on PATH. Install it (e.g. "
+            f"`apt install gcc-{target_profile_id}-linux-gnu`) before building."
+        )
+
+    return {
+        "host": {
+            "arch": host_canon,
+            "raw":  host_raw,
+            "os":   platform.system(),
+        },
+        "target": {
+            "profile_id": target_profile_id,
+            "arch":       target_canon,
+            "label":      prof.get("label") or target_profile_id,
+            "toolchain":  toolchain,
+            "toolchain_present": toolchain_present,
+            "qemu":       qemu,
+            "qemu_present": qemu_present,
+            "sysroot":    prof.get("sysroot_path") or None,
+            "cmake_toolchain_file": prof.get("cmake_toolchain_file") or None,
+            "vendor_id":  prof.get("vendor_id") or "",
+            "sdk_version": prof.get("sdk_version") or "",
+        },
+        "match":  not cross_compile,
+        "status": status,
+        "advice": advice,
+    }
+
+
 @router.get("/spec")
 async def get_spec():
     """Load spec from hardware_manifest.yaml (or return empty if not found)."""

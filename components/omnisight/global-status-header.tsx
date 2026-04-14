@@ -5,6 +5,7 @@ import { EmergencyStop } from "./emergency-stop"
 import { LanguageToggle } from "./language-toggle"
 import { ModeSelector } from "./mode-selector"
 import { HelpMenu } from "./help-menu"
+import { ArchIndicator } from "./arch-indicator"
 
 interface StatusHeaderProps {
   finished: number
@@ -79,6 +80,7 @@ export function GlobalStatusHeader({
         {/* Mobile Right: Mode + Language + Time + Emergency */}
         <div className="flex items-center gap-2 shrink-0">
           <ModeSelector compact />
+          <ArchIndicator compact />
           <HelpMenu />
           <LanguageToggle compact />
           <div className="font-mono text-xs text-[var(--neural-blue)] tabular-nums">
@@ -167,6 +169,9 @@ export function GlobalStatusHeader({
           
           {/* Operation Mode */}
           <ModeSelector />
+
+          {/* Host vs Target arch indicator */}
+          <ArchIndicator />
 
           {/* Help dropdown (desktop) */}
           <HelpMenu />
