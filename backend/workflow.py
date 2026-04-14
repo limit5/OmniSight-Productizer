@@ -99,9 +99,22 @@ async def _conn():
 
 
 async def start(kind: str, *, metadata: dict[str, Any] | None = None,
-                run_id: str | None = None) -> WorkflowRun:
+                run_id: str | None = None,
+                dag: Any | None = None,
+                parent_plan_id: int | None = None,
+                mutation_round: int = 0) -> WorkflowRun:
     """Open a new workflow run, or attach to an existing one if
-    `run_id` is supplied (used by resume paths)."""
+    `run_id` is supplied (used by resume paths).
+
+    Phase 56-DAG-B: when `dag` is supplied (a `dag_schema.DAG`), the
+    plan is persisted to `dag_plans`, validated by `dag_validator`,
+    and bidirectionally linked to the new workflow_run. The run is
+    only set to status='executing' if validation passes; failed
+    validation leaves the plan at status='failed' and the run still
+    starts (caller decides whether to mutate via Phase 56-DAG-C).
+
+    `parent_plan_id` + `mutation_round` chain mutation history.
+    """
     conn = await _conn()
     if run_id:
         existing = await get_run(run_id)
@@ -119,8 +132,61 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
         (run.id, run.kind, run.started_at, json.dumps(run.metadata)),
     )
     await conn.commit()
-    logger.info("workflow.start kind=%s id=%s", kind, run.id)
+
+    # Phase 56-DAG-B: persist + validate + link the plan.
+    if dag is not None:
+        try:
+            from backend import dag_storage as _ds
+            from backend import dag_validator as _dv
+            result = _dv.validate(dag)
+            plan = await _ds.save_plan(
+                dag, run_id=run.id,
+                parent_plan_id=parent_plan_id,
+                status="failed" if not result.ok else "validated",
+                mutation_round=mutation_round,
+                validation_errors=result.errors if not result.ok else None,
+            )
+            await _ds.attach_to_run(plan.id, run.id)
+            if result.ok:
+                await _ds.set_status(plan.id, "executing")
+        except Exception as exc:
+            # Plan attach failure must not break workflow.start.
+            logger.warning("dag plan attach failed for run=%s: %s", run.id, exc)
+
+    logger.info("workflow.start kind=%s id=%s%s",
+                kind, run.id,
+                f" dag={dag.dag_id}" if dag is not None else "")
     return run
+
+
+async def mutate_workflow(old_run_id: str, new_dag: Any, *,
+                          mutation_round: int) -> WorkflowRun:
+    """Phase 56-DAG-B: open a successor workflow_run for a mutated DAG.
+
+    The old run is preserved (Phase 56's append-only invariant) and
+    marked with `successor_run_id` pointing at the new run. The new
+    plan inherits the old plan's id as `parent_plan_id` so the
+    mutation chain is replayable.
+    """
+    from backend import dag_storage as _ds
+    old_plan = await _ds.get_plan_by_run(old_run_id)
+    parent_plan_id = old_plan.id if old_plan else None
+
+    new_run = await start(
+        kind="invoke",  # mutated runs reuse the invoke kind by default
+        dag=new_dag,
+        parent_plan_id=parent_plan_id,
+        mutation_round=mutation_round,
+        metadata={"mutated_from": old_run_id, "mutation_round": mutation_round},
+    )
+    await _ds.link_successor(old_run_id, new_run.id)
+    if old_plan and old_plan.status in {"validated", "executing", "failed"}:
+        try:
+            await _ds.set_status(old_plan.id, "mutated")
+        except Exception as exc:
+            logger.warning("mark mutated failed for plan=%s: %s",
+                           old_plan.id, exc)
+    return new_run
 
 
 async def get_run(run_id: str) -> Optional[WorkflowRun]:

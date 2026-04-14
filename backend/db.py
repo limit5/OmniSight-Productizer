@@ -89,6 +89,10 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("simulations", "accuracy_delta", "REAL NOT NULL DEFAULT 0.0"),
         ("simulations", "model_size_kb", "INTEGER NOT NULL DEFAULT 0"),
         ("simulations", "npu_framework", "TEXT NOT NULL DEFAULT ''"),
+        # Phase 56-DAG-B — DAG planner ↔ workflow linkage.
+        ("workflow_runs", "dag_plan_id", "INTEGER"),
+        ("workflow_runs", "successor_run_id", "TEXT"),
+        ("workflow_steps", "dag_task_id", "TEXT"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -444,6 +448,29 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_prompt_versions_path_role
     ON prompt_versions(path, role);
+
+-- Phase 56-DAG-B: DAG plan storage. One row per submitted DAG; the
+-- mutation chain (planner → validator fail → orchestrator regenerate
+-- → planner again) creates additional rows linked via mutation_round
+-- and parent_plan_id. Status transitions:
+--   pending → validated → executing → completed
+--                                  → mutated  (parent of next plan)
+--                                  → exhausted (mutation budget hit)
+CREATE TABLE IF NOT EXISTS dag_plans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    dag_id          TEXT NOT NULL,
+    run_id          TEXT,
+    parent_plan_id  INTEGER,
+    json_body       TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    mutation_round  INTEGER NOT NULL DEFAULT 0,
+    validation_errors TEXT,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dag_plans_dag_id ON dag_plans(dag_id);
+CREATE INDEX IF NOT EXISTS idx_dag_plans_run_id ON dag_plans(run_id);
+CREATE INDEX IF NOT EXISTS idx_dag_plans_status ON dag_plans(status);
 """
 
 
