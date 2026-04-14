@@ -37,6 +37,17 @@ export function ModeSelector({ compact = false }: Props) {
   const [inFlight, setInFlight] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // "Engaging" burst animation — toggled true for ~420ms whenever
+  // the active mode flips, then cleared so CSS can replay next time.
+  const [engaging, setEngaging] = useState(false)
+  const prevModeRef = useRef<OperationMode>(mode)
+  useEffect(() => {
+    if (prevModeRef.current === mode) return
+    prevModeRef.current = mode
+    setEngaging(true)
+    const t = setTimeout(() => setEngaging(false), 430)
+    return () => clearTimeout(t)
+  }, [mode])
 
   const mountedRef = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
@@ -105,40 +116,50 @@ export function ModeSelector({ compact = false }: Props) {
 
   return (
     <div
-      className={`flex items-center gap-1 ${compact ? "text-[10px]" : "text-xs"}`}
+      className={`flex items-center gap-1.5 ${compact ? "text-[10px]" : "text-xs"}`}
       role="radiogroup"
       aria-labelledby="operation-mode-label"
       title={error ?? MODE_META[mode].hint}
     >
-      <span id="operation-mode-label" className="text-[var(--neural-muted, #64748b)] hidden md:inline">MODE</span>
+      <span
+        id="operation-mode-label"
+        className="mode-label font-mono hidden md:inline"
+      >
+        MODE
+      </span>
       <PanelHelp doc="operation-modes" />
 
-      <div className="flex items-center border border-[var(--neural-border, rgba(148,163,184,0.35))] rounded-sm overflow-hidden">
-        {MODE_ORDER.map((m) => {
+      <div className="mode-frame flex items-stretch">
+        {MODE_ORDER.map((m, idx) => {
           const active = m === mode
           const meta = MODE_META[m]
           return (
-            <button
-              key={m}
-              role="radio"
-              aria-checked={active}
-              disabled={busy}
-              onClick={() => void handlePick(m)}
-              className={`px-2 py-0.5 font-mono tracking-wider transition-colors ${
-                active
-                  ? "text-black font-bold"
-                  : "text-[var(--neural-muted, #94a3b8)] hover:text-white hover:bg-white/5"
-              } ${busy ? "cursor-wait opacity-70" : "cursor-pointer"}`}
-              style={active ? { backgroundColor: meta.color } : undefined}
-              title={meta.hint}
-            >
-              <span aria-label={meta.label}>{compact ? meta.compact : meta.label}</span>
-            </button>
+            <div key={m} className="flex items-stretch">
+              {idx > 0 && <span className="mode-divider" aria-hidden />}
+              <button
+                role="radio"
+                aria-checked={active}
+                disabled={busy}
+                onClick={() => void handlePick(m)}
+                data-active={active}
+                data-engaging={active && engaging ? "true" : "false"}
+                className={`mode-pill px-2.5 py-0.5 font-mono tracking-[0.18em] transition-[background,color,box-shadow] ${
+                  busy ? "cursor-wait opacity-70" : "cursor-pointer"
+                }`}
+                style={active
+                  ? ({ backgroundColor: meta.color, ["--mode-color" as string]: meta.color } as React.CSSProperties)
+                  : undefined}
+                title={meta.hint}
+              >
+                <span aria-label={meta.label}>{compact ? meta.compact : meta.label}</span>
+              </button>
+            </div>
           )
         })}
       </div>
       <span
-        className="font-mono text-[var(--neural-muted, #94a3b8)] ml-1"
+        className="mode-lcd font-mono text-[10px] ml-1"
+        data-load={inFlight > 0 ? "true" : "false"}
         aria-label="parallel slots"
         title={`in-flight / cap; over-cap agents drain on next mode-tightening`}
       >
