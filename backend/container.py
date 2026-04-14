@@ -329,7 +329,30 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
 
     # Phase 64-A S3: refuse launch if a digest allow-list is configured
     # and this image isn't on it. No-op when the allow-list is empty.
-    await assert_image_trusted(DOCKER_IMAGE)
+    try:
+        await assert_image_trusted(DOCKER_IMAGE)
+    except ImageNotTrusted as exc:
+        # S5: count + audit the rejection so an attacker swapping the
+        # image is visible in both metrics and the hash-chained log.
+        try:
+            from backend import metrics as _m
+            _m.sandbox_launch_total.labels(
+                tier="t1", runtime="?", result="image_rejected",
+            ).inc()
+        except Exception:
+            pass
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="sandbox_image_rejected",
+                entity_kind="container",
+                entity_id=container_name,
+                after={"image": DOCKER_IMAGE, "reason": str(exc)},
+                actor=f"agent:{agent_id}",
+            )
+        except Exception:
+            pass
+        raise
 
     # Build mount list — workspace always, test_assets/simulate.sh conditionally (:ro)
     ws_abs = str(workspace_path.resolve())
@@ -356,7 +379,11 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
                     mounts += f'-v "{Path(sysroot).resolve()}":/opt/vendor_sysroot:ro '
                 elif sysroot:
                     logger.warning("Sysroot not found: %s — container will use host compiler. Run: /sdks install %s", sysroot, platform_name)
-                    from backend.events import emit_pipeline_phase
+                    # S5 fix: local re-import here used to shadow the
+                    # module-level `emit_pipeline_phase` for the WHOLE
+                    # function (Python scope rules), making line 324
+                    # raise UnboundLocalError when this branch wasn't
+                    # taken. Use the already-imported name.
                     emit_pipeline_phase("env_check", f"[WARNING] Sysroot missing: {sysroot} — cross-compile may fail")
                 cmake_tc = pdata.get("cmake_toolchain_file", "")
                 if cmake_tc and Path(cmake_tc).is_file():
@@ -387,6 +414,14 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
         f"{DOCKER_IMAGE}"
     )
     if rc != 0:
+        # Phase 64-A S5: count the failed launch.
+        try:
+            from backend import metrics as _m
+            _m.sandbox_launch_total.labels(
+                tier="t1", runtime=runtime, result="error",
+            ).inc()
+        except Exception:
+            pass
         raise RuntimeError(f"Failed to start container: {err or out}")
 
     container_id = out.strip()[:12]
@@ -406,6 +441,33 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
         image=DOCKER_IMAGE,
     )
     _containers[agent_id] = info
+
+    # Phase 64-A S5: count the successful launch + write an audit row.
+    try:
+        from backend import metrics as _m
+        _m.sandbox_launch_total.labels(
+            tier="t1", runtime=runtime, result="success",
+        ).inc()
+    except Exception:
+        pass
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="sandbox_launched",
+            entity_kind="container",
+            entity_id=container_name,
+            after={
+                "agent_id": agent_id,
+                "container_id": container_id,
+                "image": DOCKER_IMAGE,
+                "tier": "t1",
+                "runtime": runtime,
+                "network": network_arg.split()[-1],  # "none" or bridge name
+            },
+            actor=f"agent:{agent_id}",
+        )
+    except Exception as exc:
+        logger.debug("audit log for sandbox_launched failed: %s", exc)
 
     # Phase 64-A S4: start the lifetime killswitch (0 = disabled).
     lifetime = int(_settings.sandbox_lifetime_s or 0)
