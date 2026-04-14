@@ -308,6 +308,32 @@ CREATE TABLE IF NOT EXISTS decision_rules (
     note                TEXT NOT NULL DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Phase 56: durable workflow checkpointing
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    started_at      REAL NOT NULL,
+    completed_at    REAL,
+    status          TEXT NOT NULL DEFAULT 'running',
+    last_step_id    TEXT,
+    metadata        TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    id              TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    started_at      REAL NOT NULL,
+    completed_at    REAL,
+    output_json     TEXT,
+    error           TEXT,
+    UNIQUE (run_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(run_id);
 """
 
 

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.routers import agents, artifacts, chat, events, health, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workspaces
+from backend.routers import agents, artifacts, chat, events, health, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
 from backend import db
 
 async def _startup_cleanup(log):
@@ -54,6 +54,21 @@ async def lifespan(app: FastAPI):
         from backend import decision_rules as _dr
         loaded = await _dr.load_from_db()
         _log.info("Decision rules loaded from DB: %d", loaded)
+        # Phase 56: surface workflow runs that were still 'running' when
+        # the previous process died — operators can /workflow/in-flight
+        # to review and decide whether to resume.
+        try:
+            from backend import workflow as _wf
+            in_flight = await _wf.list_in_flight_on_startup()
+            if in_flight:
+                _log.warning(
+                    "[STARTUP] %d workflow run(s) left in-flight by previous "
+                    "process: %s",
+                    len(in_flight),
+                    ", ".join(f"{r.id}({r.kind})" for r in in_flight[:5]),
+                )
+        except Exception as exc:
+            _log.debug("workflow in-flight scan failed (non-fatal): %s", exc)
     except Exception as exc:
         _log.error("Startup failed: %s", exc, exc_info=True)
         raise
@@ -106,6 +121,7 @@ app.include_router(tools.router, prefix=settings.api_prefix)
 app.include_router(providers.router, prefix=settings.api_prefix)
 app.include_router(invoke.router, prefix=settings.api_prefix)
 app.include_router(events.router, prefix=settings.api_prefix)
+app.include_router(wf_router.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)
