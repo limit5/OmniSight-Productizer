@@ -59,6 +59,22 @@ async def lifespan(app: FastAPI):
         prof_id = await _dp.load_from_db()
         if prof_id:
             _log.info("Decision profile restored: %s", prof_id)
+        # Phase 54: bootstrap a default admin if users table is empty
+        # (preserves the single-user dev flow when no SSO configured).
+        from backend import auth as _auth
+        bootstrapped = await _auth.ensure_default_admin()
+        if bootstrapped:
+            _log.warning(
+                "[AUTH] default admin bootstrapped: %s — change password before sharing!",
+                bootstrapped.email,
+            )
+        # Trim expired sessions on every cold start.
+        try:
+            removed = await _auth.cleanup_expired_sessions()
+            if removed:
+                _log.info("[AUTH] purged %d expired sessions", removed)
+        except Exception as exc:
+            _log.debug("session cleanup failed (non-fatal): %s", exc)
         # Phase 56: surface workflow runs that were still 'running' when
         # the previous process died — operators can /workflow/in-flight
         # to review and decide whether to resume.
@@ -133,6 +149,8 @@ from backend.routers import profile as _profile_router  # Phase 58
 app.include_router(_profile_router.router, prefix=settings.api_prefix)
 from backend.routers import projects as _projects_router  # Phase 61
 app.include_router(_projects_router.router, prefix=settings.api_prefix)
+from backend.routers import auth as _auth_router  # Phase 54
+app.include_router(_auth_router.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)

@@ -13,6 +13,7 @@ import os
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from backend import audit
+from backend import auth as _au
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
@@ -38,12 +39,19 @@ async def list_audit(
     entity_kind: str | None = None,
     limit: int = 200,
     _auth: None = Depends(_require_audit_token),
+    user: _au.User = Depends(_au.current_user),
 ) -> dict:
+    # Phase 54 RBAC: non-admin callers can only read entries they
+    # themselves authored. Admins see everything; the optional
+    # `actor` query param narrows further.
+    if not _au.role_at_least(user.role, "admin"):
+        actor = user.email  # force-narrow to self
     rows = await audit.query(since=since, actor=actor, entity_kind=entity_kind, limit=limit)
-    return {"items": rows, "count": len(rows)}
+    return {"items": rows, "count": len(rows), "filtered_to_self": user.role != "admin"}
 
 
 @router.get("/verify")
-async def verify_chain(_auth: None = Depends(_require_audit_token)) -> dict:
+async def verify_chain(_auth: None = Depends(_require_audit_token),
+                       _user: _au.User = Depends(_au.require_admin)) -> dict:
     ok, bad = await audit.verify_chain()
     return {"ok": ok, "first_bad_id": bad}

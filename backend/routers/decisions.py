@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from backend import auth as _au
 from backend import decision_engine as de
 from backend import decision_rules as _dr
 
@@ -90,7 +91,17 @@ async def get_mode() -> dict[str, Any]:
 
 
 @router.put("/operation-mode")
-async def put_mode(req: ModeRequest, _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+async def put_mode(
+    req: ModeRequest,
+    _auth: None = Depends(_require_decision_token),
+    _user=Depends(_au.require_operator),
+) -> dict[str, Any]:
+    # Phase 54: turbo doubles the parallel cap → admin only. Other
+    # modes remain operator+. In `open` auth mode `_user` is the
+    # synthetic anonymous-admin so this is a no-op for legacy dev.
+    if req.mode == "turbo" and not _au.role_at_least(_user.role, "admin"):
+        return JSONResponse(status_code=403,
+                            content={"detail": "turbo mode requires admin role"})
     try:
         mode = de.set_mode(req.mode)
     except ValueError as exc:
@@ -130,13 +141,21 @@ class ResolveRequest(BaseModel):
 
 @router.post("/decisions/{decision_id}/approve")
 async def approve_decision(decision_id: str, req: ResolveRequest,
-                           _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+                           _auth: None = Depends(_require_decision_token),
+                           _user=Depends(_au.require_operator)) -> dict[str, Any]:
     # Validate option_id belongs to the decision
     existing = de.get(decision_id)
     if existing is None:
         return JSONResponse(status_code=404, content={"detail": "decision not found"})
     if existing.status != de.DecisionStatus.pending:
         return JSONResponse(status_code=409, content={"detail": f"not pending (status={existing.status.value})"})
+    # Phase 54: destructive approvals require admin role.
+    if (existing.severity == de.DecisionSeverity.destructive
+            and not _au.role_at_least(_user.role, "admin")):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "destructive decisions require admin role to approve"},
+        )
     valid_ids = {o["id"] for o in existing.options}
     if req.option_id not in valid_ids:
         return JSONResponse(status_code=422, content={"detail": "unknown option_id"})
@@ -148,7 +167,8 @@ async def approve_decision(decision_id: str, req: ResolveRequest,
 
 @router.post("/decisions/{decision_id}/reject")
 async def reject_decision(decision_id: str,
-                          _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+                          _auth: None = Depends(_require_decision_token),
+                          _user=Depends(_au.require_operator)) -> dict[str, Any]:
     existing = de.get(decision_id)
     if existing is None:
         return JSONResponse(status_code=404, content={"detail": "decision not found"})
@@ -164,7 +184,8 @@ async def reject_decision(decision_id: str,
 
 @router.post("/decisions/{decision_id}/undo")
 async def undo_decision(decision_id: str,
-                        _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+                        _auth: None = Depends(_require_decision_token),
+                        _user=Depends(_au.require_operator)) -> dict[str, Any]:
     out = de.undo(decision_id)
     if out is None:
         return JSONResponse(status_code=404, content={"detail": "no resolved decision with that id"})
@@ -172,7 +193,8 @@ async def undo_decision(decision_id: str,
 
 
 @router.post("/decisions/sweep")
-async def trigger_sweep(_auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+async def trigger_sweep(_auth: None = Depends(_require_decision_token),
+                        _user=Depends(_au.require_operator)) -> dict[str, Any]:
     """Manually trigger the timeout sweep (testing + manual nudge)."""
     resolved = de.sweep_timeouts()
     return {"resolved": len(resolved), "ids": [d.id for d in resolved]}
@@ -198,7 +220,8 @@ async def get_budget_strategy() -> dict[str, Any]:
 
 @router.put("/budget-strategy")
 async def put_budget_strategy(req: StrategyRequest,
-                              _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+                              _auth: None = Depends(_require_decision_token),
+                              _user=Depends(_au.require_operator)) -> dict[str, Any]:
     try:
         tuning = _bs.set_strategy(req.strategy)
     except ValueError as exc:
@@ -230,7 +253,8 @@ async def get_decision_rules() -> dict[str, Any]:
 
 @router.put("/decision-rules")
 async def put_decision_rules(payload: RulesPayload,
-                             _auth: None = Depends(_require_decision_token)) -> dict[str, Any]:
+                             _auth: None = Depends(_require_decision_token),
+                             _user=Depends(_au.require_operator)) -> dict[str, Any]:
     try:
         rules = _dr.replace_rules(payload.rules)
     except ValueError as exc:

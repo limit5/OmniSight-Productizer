@@ -192,6 +192,92 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 54 — RBAC + Sessions + GitHub App scaffold（2026-04-14）
+
+第三波單一 phase。取代「optional bearer token」過渡方案，建立完整
+session + role 授權層；同時導入 GitHub App scaffold（Open Agents 借鑑 #3）。
+
+### 三模式設計
+
+`OMNISIGHT_AUTH_MODE` env 控制：
+
+| 模式 | 行為 | 適用 |
+|---|---|---|
+| **open**（預設）| 任何呼叫視為 anonymous-admin，bearer token 仍可用 | 單機 dev、向後相容 |
+| **session** | mutator 需 session cookie；GET 仍開放 | 多人共用 dev / staging |
+| **strict** | 所有請求需 cookie + CSRF | 上線環境 |
+
+### 角色階層
+
+`viewer < operator < admin`：
+
+| 端點 | 最低角色 | 額外條件 |
+|---|---|---|
+| `GET *` | viewer | audit list 非 admin 自動 force `actor=user.email` |
+| `POST /decisions/*/approve` | operator | destructive severity 額外要 admin |
+| `POST /decisions/*/reject` `/undo` `/sweep` | operator | — |
+| `PUT /budget-strategy` `/decision-rules` | operator | — |
+| `PUT /operation-mode` | operator | `mode=turbo` 要 admin |
+| `PUT /profile` | operator | `GHOST` / `AUTONOMOUS` 要 admin（GHOST 仍需雙 env gate）|
+| `POST /decisions/bulk-undo` | operator | — |
+| `GET /audit/verify` | admin | — |
+| `GET/POST/PATCH /users` | admin | — |
+
+### 元件
+
+- Migration `0005_users_sessions_github_app.py`：3 表
+  - `users`(id, email, name, role, password_hash, oidc_*, enabled, ...)
+  - `sessions`(token, user_id, csrf_token, created/expires/last_seen,
+    ip, ua) + 索引
+  - `github_installations`(installation_id, account_login, repos_json,
+    permissions_json, ...)
+- `backend/auth.py`：
+  - `User`/`Session` dataclass、`ROLES = (viewer, operator, admin)`
+  - PBKDF2-SHA256（320k iters）密碼 hash（純 stdlib）
+  - `create_user / authenticate_password / create_session / cleanup_expired_sessions`
+  - `current_user(request)` FastAPI dependency 三模式分流；
+    `require_role('operator')` / `require_admin` factory
+  - `csrf_check` 雙提交 token 驗證
+  - `ensure_default_admin()` 啟動時若 `users` 空則建一個（env
+    `OMNISIGHT_ADMIN_EMAIL/PASSWORD`）
+- `backend/routers/auth.py`：6 端點（login/logout/whoami + oidc stub
+  + users CRUD）
+- `backend/github_app.py`（Open Agents 借鑑 #3）：
+  - 純 stdlib + cryptography 的 RS256 JWT 簽署
+  - `app_jwt()` 6 min TTL；`get_installation_token()` 50 min cache
+  - `upsert_installation` / `list_installations`
+  - webhook handler 留待 v1
+- 5 個既有 router 加 role gate：decisions × 5、profile × 2、audit × 2
+
+### Tests（14 個新 test，全部一次過）
+
+主檔 `test_auth.py`：role ladder、密碼 hash 防篡改、user CRUD、session
+expire 清理、auth_mode 三模式、GitHub App JWT 環境檢查 + 用 ad-hoc
+RSA-2048 簽出標準 RS256 JWT、installation upsert idempotent。
+
+回歸：132 個 backend test 全綠（含 9 個 phase 加總）。
+
+### 端到端驗證
+
+- 啟動 log 出現 `[AUTH] default admin bootstrapped: admin@omnisight.local`
+- `POST /auth/login` 成功設 `omnisight_session` (HttpOnly) + `omnisight_csrf`
+- `POST /auth/logout` 清 session
+- `GET /auth/whoami` 在 open mode 回 `role=admin email=anonymous@local`
+- `PUT /operation-mode {mode:turbo}` 在 open mode 200；session/strict
+  下 non-admin 會 403
+- GitHub App `app_jwt()` 環境缺時 raise `GhostNotAllowed`-style；
+  ad-hoc RSA 簽出的 JWT 通過 header / payload base64url 驗證
+
+### v1 待補（不影響 MVP）
+
+- OIDC（Google / GitHub）真實 redirect + callback
+- Frontend User Management UI（admin only）
+- session/strict 模式下 frontend 自動帶 cookie + CSRF header
+- GitHub App webhook handler（installation_repositories / push）
+- 記住「上次 mode 切換是 turbo」並提示 admin role 才能維持
+
+---
+
 ## Phase 58 / 59 / 61 — 一次性實作（2026-04-14）
 
 第二批一次性實作三個 phase，共 4 個 commit、~1900 LoC、22 個新後端 test。

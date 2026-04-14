@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from backend import auth as _au
 from backend import decision_profiles as dp
 
 router = APIRouter(tags=["profile"])
@@ -45,7 +46,16 @@ class ProfileRequest(BaseModel):
 
 
 @router.put("/profile")
-async def put_profile(req: ProfileRequest, _auth: None = Depends(_require_token)) -> dict:
+async def put_profile(req: ProfileRequest, _auth: None = Depends(_require_token),
+                      user: _au.User = Depends(_au.require_operator)) -> dict:
+    # Phase 54: GHOST profile requires admin role *and* the existing
+    # double env gate. AUTONOMOUS likewise requires admin to enable
+    # destructive auto-resolution. STRICT/BALANCED stay operator+.
+    if req.id.upper() in {"GHOST", "AUTONOMOUS"} and not _au.role_at_least(user.role, "admin"):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"{req.id.upper()} profile requires admin role"},
+        )
     try:
         prof = dp.set_profile(req.id)
     except dp.GhostNotAllowed as exc:
@@ -99,7 +109,8 @@ class BulkUndoRequest(BaseModel):
 
 
 @router.post("/decisions/bulk-undo")
-async def bulk_undo(req: BulkUndoRequest, _auth: None = Depends(_require_token)) -> dict:
+async def bulk_undo(req: BulkUndoRequest, _auth: None = Depends(_require_token),
+                    _user: _au.User = Depends(_au.require_operator)) -> dict:
     """Mark a batch of auto_decision_log rows as undone. The matching
     Decision in DecisionEngine._history is also flipped to undone via
     decision_engine.undo() (best-effort — we don't fail if the in-memory
