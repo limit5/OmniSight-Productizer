@@ -56,6 +56,9 @@ TASK_TIMEOUT = 1800  # 30 minutes
 # so error_check_node publishes here. Capped at 10 entries per agent.
 _agent_error_history: dict[str, list[str]] = {}
 _AGENT_ERR_HIST_MAX = 10
+# Phase 52: last successful watchdog pass (epoch seconds). The
+# /healthz endpoint reads this to surface "is the watchdog stuck?".
+_watchdog_last_tick: float = 0.0
 # R2-#20: ring buffer is mutated by sync error-publisher callbacks and
 # iterated by the async watchdog; guard with a threading.Lock so we don't
 # race on list length during trim-and-append.
@@ -99,11 +102,14 @@ async def run_watchdog():
     _executed_proposals: set[str] = set()  # N9/②: avoid double-executing
     while True:
         await asyncio.sleep(60)
+        # Phase 52: heartbeat for /healthz "watchdog age" probe
+        global _watchdog_last_tick
+        _watchdog_last_tick = _time.time()
         # N9: when the system is halted, skip the stuck pass entirely —
         # proposals pile up with no executor able to act on them.
         if not _running.is_set():
             continue
-        now = _time.time()
+        now = _watchdog_last_tick
         async with _state_lock:
             # Phase 47B: stuck-agent detection BEFORE hard cancellation, so
             # full_auto/turbo modes can try a switch_model / spawn_alternate

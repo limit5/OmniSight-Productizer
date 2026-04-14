@@ -42,6 +42,9 @@ async def _startup_cleanup(log):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Phase 52: configure structlog JSON output if requested
+    from backend import structlog_setup as _sl
+    _sl.configure()
     import logging
     _log = logging.getLogger(__name__)
     try:
@@ -99,8 +102,11 @@ async def lifespan(app: FastAPI):
     # Phase 47D: DecisionEngine timeout sweep (30 s cadence)
     from backend import decision_engine as _de
     sweep_task = asyncio.create_task(_de.run_sweep_loop())
+    # Phase 52: Webhook DLQ retry worker
+    from backend import notifications as _notif
+    dlq_task = asyncio.create_task(_notif.run_dlq_loop())
     yield
-    for t in (watchdog_task, sweep_task):
+    for t in (watchdog_task, sweep_task, dlq_task):
         t.cancel()
         try:
             await t
@@ -151,6 +157,8 @@ from backend.routers import projects as _projects_router  # Phase 61
 app.include_router(_projects_router.router, prefix=settings.api_prefix)
 from backend.routers import auth as _auth_router  # Phase 54
 app.include_router(_auth_router.router, prefix=settings.api_prefix)
+from backend.routers import observability as _obs_router  # Phase 52
+app.include_router(_obs_router.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)

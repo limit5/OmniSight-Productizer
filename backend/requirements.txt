@@ -28,3 +28,6 @@ httpx==0.28.1
 alembic==1.14.0
 # Phase 61 — Final Report Generator (PDF rendering for text reports)
 weasyprint>=63.0; sys_platform != 'win32'
+# Phase 52 — Production observability
+prometheus-client==0.21.1
+structlog==24.4.0

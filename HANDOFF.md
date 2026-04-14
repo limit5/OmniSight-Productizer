@@ -192,6 +192,41 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 52 — Production Observability（2026-04-14）
+
+**Scope**：Prometheus `/metrics`、Deep `/healthz`、結構化 JSON log、Webhook DLQ
+retry worker、Prom+Grafana sidecar 可選 profile。
+
+### 交付
+
+- `backend/metrics.py` — `CollectorRegistry` 與 10 組核心 metric（decision /
+  pipeline / provider / sse / workflow / auth / uptime）。缺 prom 套件時自動
+  退化為 no-op stub，呼叫端不需 guard。
+- `backend/routers/observability.py` — `/metrics`（exposition）與 `/healthz`
+  （db probe + watchdog age + sse + profile + auth_mode，1s timeout，503 on fail）。
+- `backend/structlog_setup.py` — `configure()` / `bind_logger(**ctx)` /
+  `get_logger(name)`；僅於 `OMNISIGHT_LOG_FORMAT=json` 時啟用 stdlib bridge。
+- `backend/notifications.py::run_dlq_loop()` — 背景 worker 掃描
+  `dispatch_status='failed'`，用盡 retry 後標記 `'dead'`；已併入 lifespan。
+- `backend/routers/invoke.py` — watchdog 迴圈每次 tick 更新
+  `_watchdog_last_tick`，供 `/healthz` 計算 watchdog age。
+- `docker-compose.prod.yml` — 新增 `prometheus` + `grafana` service，置於
+  `observability` compose profile（`docker compose --profile observability up`）。
+- `configs/prometheus.yml` — backend scrape @15s，targets `backend:8000`。
+- `backend/tests/test_observability.py` — 8 項測試涵蓋 `/metrics` 輸出、counter
+  反映 decision propose、`/healthz` 200/503、structlog idempotent、DLQ
+  exhausted→dead、DLQ re-dispatch。
+
+### 依賴
+
+`backend/requirements.txt` += `prometheus-client==0.21.1`、`structlog==24.4.0`。
+
+### Commit
+
+Phase 52 完成於 commit `TBD`（下一個 commit）。
+
+---
+
 ## Phase 54 — RBAC + Sessions + GitHub App scaffold（2026-04-14）
 
 第三波單一 phase。取代「optional bearer token」過渡方案，建立完整

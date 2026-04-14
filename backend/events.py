@@ -57,11 +57,21 @@ class EventBus:
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._subscribers.add(q)
+        try:
+            from backend import metrics as _m
+            _m.sse_subscribers.set(len(self._subscribers))
+        except Exception:
+            pass
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         # set.discard is O(1) and safe for missing elements
         self._subscribers.discard(q)
+        try:
+            from backend import metrics as _m
+            _m.sse_subscribers.set(len(self._subscribers))
+        except Exception:
+            pass
 
     def publish(self, event: str, data: dict[str, Any]) -> None:
         data.setdefault("timestamp", datetime.now().isoformat())
@@ -81,6 +91,11 @@ class EventBus:
                     "EventBus: dropping subscriber (queue full, event=%s, total_dropped=%d)",
                     event, self._dropped_events,
                 )
+                try:
+                    from backend import metrics as _m
+                    _m.sse_dropped_total.inc()
+                except Exception:
+                    pass
         for q in dead:
             self._subscribers.discard(q)
 

@@ -423,6 +423,17 @@ def propose(
                 pass
         _archive(dec)
         _emit("decision_auto_executed", dec)
+        # Phase 52 metric: count + record resolve duration
+        try:
+            from backend import metrics as _m
+            _m.decision_total.labels(
+                kind=kind, severity=severity.value, status=dec.status.value
+            ).inc()
+            _m.decision_resolve_seconds.labels(
+                kind=kind, severity=severity.value, resolver="auto"
+            ).observe(0.0)  # auto resolved instantly
+        except Exception:
+            pass
         return dec
 
     with _state_lock:
@@ -439,6 +450,13 @@ def propose(
             )
         _pending[dec.id] = dec
     _emit("decision_pending", dec)
+    try:
+        from backend import metrics as _m
+        _m.decision_total.labels(
+            kind=kind, severity=severity.value, status="pending"
+        ).inc()
+    except Exception:
+        pass
     return dec
 
 

@@ -46,10 +46,46 @@ services:
       timeout: 5s
       retries: 3
 
+  # Phase 52 — Observability sidecars. Enable with `--profile observability`.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - omnisight-prom:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    depends_on:
+      - backend
+    restart: always
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: ["observability"]
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - omnisight-grafana:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: always
+
 volumes:
   omnisight-data:
     driver: local
   omnisight-artifacts:
     driver: local
   omnisight-sdks:
+    driver: local
+  omnisight-prom:
+    driver: local
+  omnisight-grafana:
     driver: local

@@ -131,6 +131,79 @@ async def _dispatch_external(notif: Notification) -> None:
         logger.warning("Failed to update dispatch status for %s: %s", notif.id, exc)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 52: Webhook DLQ retry worker
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_DLQ_RUNNING = False
+
+
+async def retry_failed_notifications(limit: int = 50) -> dict[str, int]:
+    """Scan `dispatch_status='failed'` notifications and re-attempt dispatch.
+
+    Exhausted rows (send_attempts >= max_retries) are marked `'dead'` so the
+    next sweep skips them. Returns {retried, recovered, dead}.
+    """
+    from backend import db
+    rows = await db.list_failed_notifications(limit=limit)
+    retried = recovered = dead = 0
+    max_retries = settings.notification_max_retries
+    for row in rows:
+        attempts = int(row.get("send_attempts") or 0)
+        if attempts >= max_retries:
+            try:
+                await db.update_notification_dispatch(
+                    row["id"], "dead", attempts=attempts,
+                    error=(row.get("last_error") or "exhausted"),
+                )
+            except Exception:
+                pass
+            dead += 1
+            continue
+        retried += 1
+        try:
+            notif = Notification(**{k: row.get(k) for k in (
+                "id", "level", "title", "message", "source", "timestamp",
+                "action_url", "action_label",
+            ) if row.get(k) is not None})
+        except Exception as exc:
+            logger.warning("DLQ: cannot rehydrate %s: %s", row.get("id"), exc)
+            continue
+        await _dispatch_external(notif)
+        # Re-check status; dispatched() may have set 'sent'
+        try:
+            fresh = await db.get_notification(notif.id) if hasattr(db, "get_notification") else None
+            if fresh and fresh.get("dispatch_status") == "sent":
+                recovered += 1
+        except Exception:
+            pass
+    return {"retried": retried, "recovered": recovered, "dead": dead}
+
+
+async def run_dlq_loop() -> None:
+    """Background coroutine: periodically retries failed webhook dispatches.
+
+    Interval = notification_retry_backoff (default 30s), capped at 5min.
+    Exits cleanly on CancelledError.
+    """
+    global _DLQ_RUNNING
+    if _DLQ_RUNNING:
+        return
+    _DLQ_RUNNING = True
+    interval = max(5, min(300, int(settings.notification_retry_backoff)))
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await retry_failed_notifications()
+            except Exception as exc:
+                logger.warning("DLQ sweep failed: %s", exc)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _DLQ_RUNNING = False
+
+
 async def _send_with_retry(notif: Notification, sender, channel: str) -> bool:
     """Retry a sender function with exponential backoff. Returns True on success."""
     max_retries = settings.notification_max_retries
