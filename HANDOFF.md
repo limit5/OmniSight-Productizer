@@ -135,6 +135,63 @@
 
 **預估**：每 sub-phase 1-2 h。整體 ~5-8 h。依照慣例，每 sub-phase 後做深度審計 → 補修 batch。
 
+## Phase 50-Fix — 三輪深度審計後補修（2026-04-14，110 項 → 18 cluster）
+
+三輪審計接連產出：第一輪 15 個 Critical / 第二輪 ~54 個 bug+設計 / 第三輪 56 個設計副作用+UX+測試文件落差。合計 **~110 項**，以 cluster 批次制收斂——每 cluster 修復 → targeted 測試 → uvicorn 啟動檢查 → 清理 → commit。
+
+### 🔴 Critical 波（commit `7d0cf31` .. `e6995b7`，5 cluster）
+
+- **Cluster 1**：SSE 穩定性三項（`connectSSE` stale closure / `_log_fn` race / `_sharedES.onerror` sync）經 Read 驗證**全為審計代理幻覺**——code 已使用正確雙重檢查鎖、EventSource 內建重連、listener iteration 已快照。Wontfix with rationale（無 commit）。
+- **Cluster 2** `7d0cf31`：backend safety — `_reset_for_tests()` 參考已刪除全域 `_parallel_sema` 修為實際的 `_parallel_in_flight/_parallel_async_cond`；`decision_rules.apply` 例外改 warning + `source.rule_engine_error` 外露。#5/#8 誤報。
+- **Cluster 3** `20a4ac8`：`streamInvoke()` 加 try/finally + `stream_truncated` error frame + reader lock 釋放。#4/#9 誤報。
+- **Cluster 4** `9cdad18`：UX Critical — mobile-nav undefined 崩潰保護、toast `deadline_at` 單位驗證（支援秒/毫秒自動偵測）、倒數字體 12px + 紅脈動 + `prefers-reduced-motion`、決策儀表板 empty state with icon/CTA、全站 `aria-live="assertive"` + `aria-atomic`、Page-Visibility tick 暫停。
+- **Cluster 5** `e6995b7`：A1 決策規則 SQLite 持久化 — 新增 `decision_rules` 表 + `load_from_db()` lifespan 載入 + `replace_rules()` 寫透；新增 3 個持久化測試全綠。
+
+### 🟠 High 波（commit `e2c11cb` .. `31e81a1`，7 cluster）
+
+- **H1** `e2c11cb`：`_agent_error_history` 加 `threading.Lock` + `_snapshot_agent_errors()` 供 watchdog。#11/#12/#15/#22 誤報。
+- **H2** `7177ef0`：API 安全三項 — decision mutator sliding-window rate limit（30 req/10s per IP，`OMNISIGHT_DECISION_RL_{WINDOW_S,MAX}` 可調）、`streamChat` 加 stream_truncated 守護、SSE schema 內聯型別強化（`SSEBudgetTuning`/`SSEDecisionOption`）。#14/#25 誤報。
+- **H3** `211486f`：SSR/CSR hydration mismatch 修復 — `activePanel` 統一初始為 `orchestrator`，URL 深鏈在 mount effect 套用。#16/#24 誤報。
+- **H4** `832d6f4`：UX accessibility 五項 — toast overflow chip（"+N MORE PENDING"）、mobile dots 44×44 觸控目標、skeleton loading、destructive confirm dialog、HTTP 錯誤分類（AUTH / RATE LIMITED / BACKEND DOWN / NETWORK）。
+- **H5** `1bbac3b`：明示 dark-only 設計決定 — `color-scheme: dark` + README Theme 章節解釋。
+- **H6** `2f5c327`：新增 `/api/v1/system/sse-schema` 端點、補 `.env.example` 七個遺漏項。同步修復 Phase 47 新增事件後未更新的 `test_schema.py`。A2/A3/A6/A8 標記為設計決定。
+- **H7** `31e81a1`：測試/文件 scaffold — 3 個元件 smoke test（EmergencyStop/NeuralGrid/LanguageToggle）、3 個 E2E deep-link spec、README Quick Start `.env` 前置步驟 + `/docs` Swagger 指引、conftest globals-reset pattern 文件化。
+
+### 🟡 Medium 波（commit `f196085` .. `bba663c`，5 cluster）
+
+- **M1** `f196085`：`propose()` options 驗證（非空 id / 不重複 / default 存在）、db `_migrate` PRAGMA 失敗改 raise RuntimeError。#32/#36/#38/#40/#42 誤報。
+- **M2** `fd969ec`：budget-panel error 10s 自動清除、decision-dashboard tablist + 方向鍵切換。既有測試 query 由 `role="button"` 改 `role="tab"`。
+- **M3** `222ba33`：focus ring 改白色 + offset（WCAG AA 通過）、budget knob cells 加 title + sr-only valid-range。B15/B16 誤報。
+- **M4** `8e8265e`：新增 `CHANGELOG.md`（Unreleased 段匯整本次所有修復）、`.github/CONTRIBUTING.md`、`.github/PULL_REQUEST_TEMPLATE.md`、decision-rules-editor 加 `clientValidate()` 行內預檢。
+- **M5** `bba663c`：移除 dead `_invoke_lock`、`lib/api.ts` 加 `_resolveApiBase()` URL 驗證、`mode_changed` publish 例外改 warning。#28/#39/#46/#47 wontfix。
+
+### 🟢 Low 波（commit `52a89ab`，1 cluster）
+
+- **L** `52a89ab`：validation 錯誤改 HTTP 422（REST/Pydantic 慣例）、`AgentWorkspace.status` 改 `Literal["none","active","finalized","cleaned"]`、`.scroll-fade` mask 提示可捲動、`playwright.config.ts` env 覆寫文件化。#46/#49/#51/#53 誤報。
+
+### 統計
+
+| 類別 | 總項 | 實修 | 誤報 / 刻意設計 |
+|---|---|---|---|
+| 🔴 Critical | 15 | 8 + 3 順手 | 7 |
+| 🟠 High | 44 | 17 + 5 文件 | 12 |
+| 🟡 Medium | 32 | 12 + 3 新檔 | 14 |
+| 🟢 Low | 19 | 5 | 10+ |
+| **合計** | **~110** | **~48 實修 + 11 新檔/文件** | **~43 wontfix with rationale** |
+
+### 產出
+- **新增 SQLite 表**：`decision_rules`（operator 規則持久化）
+- **新增 API 端點**：`GET /api/v1/system/sse-schema`
+- **新增 env 變數**：`OMNISIGHT_DECISION_RL_WINDOW_S / DECISION_RL_MAX`（速率限制調整）
+- **新增檔案**：`CHANGELOG.md`、`.github/CONTRIBUTING.md`、`.github/PULL_REQUEST_TEMPLATE.md`、`backend/tests/test_decision_rules_persistence.py`、`test/components/smoke-untested.test.tsx`、`e2e/deep-link.spec.ts`
+- **每 cluster 啟動驗證**：uvicorn `/api/v1/health` → 200
+- **測試**：backend 95+ 決策/schema/ambiguity tests 綠；frontend 52/52 綠（46 原 + 6 新 smoke）
+
+### 關鍵工程經驗
+- **審計代理幻覺**：三輪審計合計 ~43 項誤報（39%），多為行號幻覺、已有防護視而不見、或 LangGraph/Pydantic 慣例誤判。**修復前務必 Read 驗證**；每項 commit 訊息都標註 wontfix 的具體 rationale。
+- **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
+- **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
+
 ## Phase 51-55（未來排程）
 
 為 Phase 50 完成後的下一批工作。每個 phase 維持既有節奏：實作 → 深度審計 → 補修 batch → commit。
