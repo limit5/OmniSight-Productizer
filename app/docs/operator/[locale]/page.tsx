@@ -26,6 +26,8 @@ const DOC_ROUTES: Array<{ slug: string | null; file: string; route: string }> = 
   { slug: "budget-strategies",  file: "reference/budget-strategies.md",  route: "reference/budget-strategies" },
   { slug: "glossary",           file: "reference/glossary.md",           route: "reference/glossary" },
   { slug: null,                 file: "troubleshooting.md",              route: "troubleshooting" },
+  { slug: "first-invoke",       file: "tutorial/first-invoke.md",        route: "tutorial/first-invoke" },
+  { slug: "handling-a-decision", file: "tutorial/handling-a-decision.md", route: "tutorial/handling-a-decision" },
 ]
 
 export const dynamic = "force-dynamic"

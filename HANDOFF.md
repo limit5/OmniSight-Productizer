@@ -192,6 +192,90 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 50-Docs — 操作員文件 / 內建導覽（2026-04-14）
+
+Phase 50-Fix 審計後補完的另一個大缺口：系統有 ~80 個 API 端點、12 個
+panel、4 種 MODE × 4 種 Budget 策略，但使用者拿到介面後除了 tooltip
+以外完全沒文件入口。以下全部原生內建、無外部依賴：
+
+### D1/D2/D3 — 文件內容 × 4 語言
+
+- **`docs/operator/{en,zh-TW,zh-CN,ja}/`** 6 份核心 reference：
+  `operation-modes` / `decision-severity` / `panels-overview` /
+  `budget-strategies` / `glossary` / `troubleshooting` — 每份分
+  *TL;DR for PMs* + *matrix/table* + *under the hood* + *related
+  reading* 三段，同檔頂部標 `source_en:` 以便翻譯漂移追蹤。
+- **`app/docs/operator/[locale]/reference/[slug]/page.tsx`** +
+  **`.../troubleshooting/page.tsx`** — Next.js App Router 頁面，讀取
+  `.md` 並以 `lib/md-to-html.ts` 渲染（~170 行輕量 md 解析，支援
+  headings / tables / lists / code / blockquote / inline links；link
+  `.md` 後綴自動剝除轉 Next.js route）。
+
+### E1 — `<PanelHelp>` `?` 圖示全面掛載
+
+12 個 panel header 皆掛 `<PanelHelp doc="…">` 小元件：hover + 點擊
+顯示 locale-aware TL;DR popover + 「完整文件 →」連結。 tolerant-locale
+fallback（無 I18nProvider 時用 `en`），個別元件測試不受影響。
+
+### E2 — 首次導覽（`?tour=1`）
+
+**`components/omnisight/first-run-tour.tsx`** ~400 行，無 react-joyride
+依賴：
+- 新瀏覽器 localStorage 無 `omnisight-tour-seen` 時自動啟動，或任何 URL
+  帶 `?tour=1` 手動觸發
+- 5 步錨定到 `data-tour="mode|decision-queue|budget|orchestrator|panel-help"`
+- SVG `evenodd` 路徑挖洞背景 + cyan pulse 框線 + 自動 viewport clamp
+- 鍵盤 ← / → / Esc、4 語言 copy、`prefers-reduced-motion` 自動關動畫
+
+### E3 — Help dropdown + docs 索引/搜尋
+
+- **`HelpMenu`** 在 `GlobalStatusHeader` 桌機與手機版皆掛載：Reference /
+  Tutorials / Troubleshooting / Run tour / Search / Swagger，每項 4 語
+  標籤與 icon。
+- **`/docs/operator/<locale>`** docs landing 頁：伺服器端讀取所有 .md
+  抽 `{ title, headings, paragraphs }` → client 加權搜尋（title×5 /
+  heading×3 / paragraph×1），顯示 100 字上下文 snippet。
+
+### F1 — Tutorials × 4 語言
+
+- **`docs/operator/<locale>/tutorial/first-invoke.md`**（10 分鐘 handon）
+- **`docs/operator/<locale>/tutorial/handling-a-decision.md`**（8 分鐘
+  含 undo / rule 設定）
+- `/docs/operator/[locale]/tutorial/[slug]/page.tsx` 新 viewer route。
+- HelpMenu 新分類「Tutorials」含兩筆。
+
+### 產出一覽
+
+| 類別 | 數量 |
+|---|---|
+| `.md` 文件（6 reference + troubleshooting + 2 tutorial × 4 langs） | 36 |
+| Next.js routes 新增 | 4（reference viewer / troubleshooting viewer / tutorial viewer / docs landing）|
+| 新元件 | 4（`PanelHelp` / `FirstRunTour` / `HelpMenu` / `DocsSearchClient`）|
+| 共用 helper | 1（`lib/md-to-html.ts`）|
+
+### 關鍵設計決策
+
+- **英文為權威源**：每個譯文檔頭標 `source_en: <date>`，未來 CI 可比對。
+- **無外部搜尋引擎**：六個 < 200 行的 .md，記憶體掃描 + 加權足夠。
+- **無 markdown 函式庫**：避免 react-markdown / remark 的依賴重量；
+  ~170 行自刻 renderer 涵蓋 90% 需求，其餘留給 D4+。
+- **tolerant i18n hook**：`useLocale()` 在無 `I18nProvider` 時回傳 `en`，
+  讓 PanelHelp / HelpMenu / FirstRunTour 可於單元測試獨立渲染。
+
+### commits（時序）
+
+```
+09b6671 E3: Help dropdown + docs landing/search + md extract
+6a7b934 E2: first-run 5-step walkthrough (?tour=1)
+6b77088 E1: panel ? icons on every remaining panel
+deebae8 fix: restore clickability on sci-fi MODE pills
+864a941 feat: cockpit-grade MODE styling
+c1037fc D3: budget-strategies + troubleshooting × 4 langs
+897377a D2: in-app ? help popover + markdown viewer
+2a40ff5 D1: 4 reference docs × 4 languages (20 files)
+```
+（F1 tutorials + HANDOFF 本段為本次 commit）
+
 ## Phase 51-55（未來排程）
 
 為 Phase 50 完成後的下一批工作。每個 phase 維持既有節奏：實作 → 深度審計 → 補修 batch → commit。

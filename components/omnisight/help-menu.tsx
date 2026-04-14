@@ -79,6 +79,24 @@ const SECTIONS: Section[] = [
     ],
   },
   {
+    key: "tutorials",
+    title: { en: "Tutorials", "zh-TW": "教學", "zh-CN": "教程", ja: "チュートリアル" },
+    items: [
+      {
+        key: "first-invoke",
+        label: { en: "First Invoke (10 min)", "zh-TW": "第一次 Invoke（10 分鐘）", "zh-CN": "第一次 Invoke（10 分钟）", ja: "はじめての Invoke (10 分)" },
+        href: (l) => `/docs/operator/${l}/tutorial/first-invoke`,
+        icon: PlayCircle,
+      },
+      {
+        key: "handling-decision",
+        label: { en: "Handling a decision (8 min)", "zh-TW": "處理一個決策（8 分鐘）", "zh-CN": "处理一个决策（8 分钟）", ja: "決定の扱い方 (8 分)" },
+        href: (l) => `/docs/operator/${l}/tutorial/handling-a-decision`,
+        icon: PlayCircle,
+      },
+    ],
+  },
+  {
     key: "problems",
     title: { en: "Something broken?", "zh-TW": "遇到問題？", "zh-CN": "遇到问题？", ja: "問題発生時" },
     items: [
