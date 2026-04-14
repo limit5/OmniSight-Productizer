@@ -40,11 +40,23 @@ class MockEventSource {
   removeEventListener(type: string, listener: (e: MessageEvent) => void) {
     this.listeners[type] = (this.listeners[type] || []).filter(l => l !== listener)
   }
-  /** Dispatch a fake SSE event to registered listeners. */
+  /**
+   * Dispatch a fake SSE event. Real EventSource calls both the matching
+   * `addEventListener` listeners AND the property handler (`onmessage`
+   * for default-typed "message" events), so mirror that — otherwise
+   * components that use only `onmessage =` slip through our tests.
+   */
   emit(type: string, data: unknown) {
     if (this.readyState === 2) return  // closed — drop like the real API
     const payload = new MessageEvent(type, { data: JSON.stringify(data) })
     for (const l of this.listeners[type] || []) l(payload)
+    if (type === "message") this.onmessage?.(payload)
+  }
+  /** Fake the `open` handshake — property and addEventListener paths. */
+  emitOpen() {
+    const ev = new Event("open")
+    for (const l of this.listeners["open"] || []) l(ev as MessageEvent)
+    this.onopen?.(ev)
   }
   /**
    * N5: simulate a connection-level error. Real EventSource fires
