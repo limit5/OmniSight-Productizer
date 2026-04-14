@@ -34,7 +34,9 @@ jobs:
         with: { node-version: "20", cache: npm }
       - run: npm ci --no-audit --prefer-offline
       - name: tsc --noEmit
-        run: npx tsc --noEmit || true       # Phase 51 v0: 10 pre-existing errors; fix incrementally
+        # Tech debt TS B1-B3 cleared all 15 pre-existing errors;
+        # tsc is now a real gate. New type errors fail CI.
+        run: npx tsc --noEmit
       - name: eslint
         run: npm run lint || true
 
