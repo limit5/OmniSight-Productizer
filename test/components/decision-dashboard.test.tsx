@@ -103,7 +103,7 @@ describe("DecisionDashboard", () => {
       expect(screen.queryByText("Moving item")).toBeNull()
     })
     // Switch to history tab → appears
-    await user.click(screen.getByRole("button", { name: /HISTORY/ }))
+    await user.click(screen.getByRole("tab", { name: /HISTORY/ }))
     expect(await screen.findByText("Moving item")).toBeInTheDocument()
   })
 
@@ -141,7 +141,7 @@ describe("DecisionDashboard", () => {
     ;(api.undoDecision as ReturnType<typeof vi.fn>).mockResolvedValue({})
     primeSSE()
     render(<DecisionDashboard />)
-    await user.click(screen.getByRole("button", { name: /HISTORY/ }))
+    await user.click(screen.getByRole("tab", { name: /HISTORY/ }))
     await screen.findByText("Retry strategy?")
     await user.click(screen.getByRole("button", { name: /UNDO/ }))
     expect(api.undoDecision).toHaveBeenCalledWith("dec-u")
@@ -222,7 +222,7 @@ describe("DecisionDashboard", () => {
     primeList([], [older, newest, middle])  // out-of-order from backend
     primeSSE()
     render(<DecisionDashboard />)
-    await user.click(screen.getByRole("button", { name: /HISTORY/ }))
+    await user.click(screen.getByRole("tab", { name: /HISTORY/ }))
     // Find titles in DOM order and assert newest→oldest.
     const rows = await screen.findAllByText(/^(OLD|MID|NEW)$/)
     expect(rows.map(r => r.textContent)).toEqual(["NEW", "MID", "OLD"])

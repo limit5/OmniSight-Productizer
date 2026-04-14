@@ -84,6 +84,15 @@ export function BudgetStrategyPanel() {
     }
   }
 
+  // R3-B-#35: auto-clear stale error after 10 s. Without this the red
+  // error bar stays forever even after the user successfully switched
+  // strategies via a different path, making the UI feel stuck.
+  useEffect(() => {
+    if (!error) return
+    const t = setTimeout(() => setError(null), 10_000)
+    return () => clearTimeout(t)
+  }, [error])
+
   return (
     <section
       className="holo-glass-simple corner-brackets-full rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))]"

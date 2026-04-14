@@ -197,8 +197,25 @@ export function DecisionDashboard() {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div
+          className="flex items-center gap-1"
+          role="tablist"
+          aria-label="Decision view"
+          onKeyDown={(e) => {
+            // B13: left/right arrows toggle tabs; Home/End jump endpoints.
+            // Lets keyboard-only users swap views without tabbing past
+            // every row in the list.
+            if (e.key === "ArrowLeft" || e.key === "Home") {
+              e.preventDefault(); setTab("pending")
+            } else if (e.key === "ArrowRight" || e.key === "End") {
+              e.preventDefault(); setTab("history")
+            }
+          }}
+        >
           <button
+            role="tab"
+            aria-selected={tab === "pending"}
+            tabIndex={tab === "pending" ? 0 : -1}
             onClick={() => setTab("pending")}
             className={`px-2 py-0.5 font-mono text-[10px] tracking-wider rounded-sm transition-colors ${
               tab === "pending"
@@ -209,6 +226,9 @@ export function DecisionDashboard() {
             PENDING
           </button>
           <button
+            role="tab"
+            aria-selected={tab === "history"}
+            tabIndex={tab === "history" ? 0 : -1}
             onClick={() => setTab("history")}
             className={`px-2 py-0.5 font-mono text-[10px] tracking-wider rounded-sm transition-colors ${
               tab === "history"
