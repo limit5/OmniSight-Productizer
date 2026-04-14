@@ -114,15 +114,16 @@ export function BudgetStrategyPanel() {
       )}
 
       <div
-        className="grid grid-cols-2 lg:grid-cols-4 gap-2 p-2"
+        className="grid grid-cols-2 gap-2 p-2"
         role="radiogroup"
         aria-labelledby="budget-strategy-label"
       >
         <span id="budget-strategy-label" className="sr-only">Budget Strategy</span>
-        {ORDER.map((s) => {
+        {ORDER.map((s, idx) => {
           const meta = STRATEGY_META[s]
           const active = s === current
           const { Icon } = meta
+          const slotId = String(idx + 1).padStart(2, "0")
           return (
             <button
               key={s}
@@ -130,19 +131,79 @@ export function BudgetStrategyPanel() {
               aria-checked={active}
               disabled={busy}
               onClick={() => void pick(s)}
-              className={`flex flex-col items-start gap-1 p-2 rounded-sm border transition-colors text-left ${
+              className={`group relative flex flex-col gap-1.5 p-2.5 pt-3 rounded-sm border text-left min-w-0 overflow-hidden transition-all duration-200 ${
                 active
-                  ? "border-transparent text-black"
-                  : "border-[var(--neural-border,rgba(148,163,184,0.35))] text-[var(--foreground,#e2e8f0)] hover:bg-white/5"
+                  ? "border-transparent"
+                  : "border-[var(--neural-border,rgba(148,163,184,0.35))] hover:border-[color:var(--card-accent)] hover:bg-white/5"
               } ${busy ? "cursor-wait opacity-70" : "cursor-pointer"}`}
-              style={active ? { backgroundColor: meta.color } : undefined}
+              style={{
+                // `--card-accent` is consumed by the border/hover rules and the
+                // inner glyphs so each card gets its own accent without a
+                // style explosion.
+                ["--card-accent" as string]: meta.color,
+                backgroundColor: active ? meta.color : undefined,
+                boxShadow: active
+                  ? `0 0 0 1px ${meta.color}, 0 0 18px -4px ${meta.color}, inset 0 0 24px -12px rgba(0,0,0,0.6)`
+                  : undefined,
+                color: active ? "#020617" : undefined,
+              }}
               title={meta.hint}
             >
-              <div className="flex items-center gap-1">
-                <Icon className="w-3.5 h-3.5" style={{ color: active ? "#000" : meta.color }} aria-hidden />
-                <span className="font-mono text-[11px] tracking-wider font-bold">{meta.label}</span>
+              {/* Corner brackets — tiny sci-fi targeting reticle */}
+              <span aria-hidden className="pointer-events-none absolute inset-1 flex justify-between">
+                <span className={`w-1.5 h-1.5 border-l border-t ${active ? "border-black/50" : "border-[color:var(--card-accent)] opacity-60 group-hover:opacity-100"}`} />
+                <span className={`w-1.5 h-1.5 border-r border-t ${active ? "border-black/50" : "border-[color:var(--card-accent)] opacity-60 group-hover:opacity-100"}`} />
+              </span>
+              <span aria-hidden className="pointer-events-none absolute inset-1 top-auto h-1.5 flex justify-between">
+                <span className={`w-1.5 h-1.5 border-l border-b ${active ? "border-black/50" : "border-[color:var(--card-accent)] opacity-60 group-hover:opacity-100"}`} />
+                <span className={`w-1.5 h-1.5 border-r border-b ${active ? "border-black/50" : "border-[color:var(--card-accent)] opacity-60 group-hover:opacity-100"}`} />
+              </span>
+
+              {/* Slot id + active pulse dot */}
+              <div className="flex items-center justify-between font-mono text-[8px] tracking-[0.25em] opacity-70">
+                <span>SLOT_{slotId}</span>
+                <span className="flex items-center gap-1">
+                  {active && (
+                    <span
+                      aria-hidden
+                      className="inline-block w-1.5 h-1.5 rounded-full animate-pulse"
+                      style={{ backgroundColor: "#020617" }}
+                    />
+                  )}
+                  <span>{active ? "ACTIVE" : "STANDBY"}</span>
+                </span>
               </div>
-              <span className={`font-mono text-[9px] leading-tight ${active ? "text-black/80" : "text-[var(--muted-foreground,#94a3b8)]"}`}>
+
+              {/* Icon + full title — single line, fluid-sized so it never
+                  has to wrap per-character at any column width. */}
+              <div className="flex items-center gap-1.5 w-full min-w-0">
+                <Icon
+                  className="w-4 h-4 shrink-0"
+                  style={{ color: active ? "#020617" : meta.color }}
+                  aria-hidden
+                />
+                <span className="font-mono font-bold leading-tight tracking-[0.08em] text-[11px] xl:text-[12px] min-w-0 flex-1 whitespace-normal [overflow-wrap:normal] [word-break:keep-all]">
+                  {meta.label}
+                </span>
+              </div>
+
+              {/* Divider scanline — colored on active, accent-muted otherwise */}
+              <span
+                aria-hidden
+                className="block h-px w-full"
+                style={{
+                  background: active
+                    ? "linear-gradient(90deg, rgba(0,0,0,0.45), rgba(0,0,0,0) 80%)"
+                    : `linear-gradient(90deg, var(--card-accent), transparent 70%)`,
+                  opacity: active ? 0.5 : 0.35,
+                }}
+              />
+
+              <span
+                className={`font-mono text-[9.5px] leading-tight whitespace-normal break-words w-full ${
+                  active ? "text-black/75" : "text-[var(--muted-foreground,#94a3b8)]"
+                }`}
+              >
                 {meta.hint}
               </span>
             </button>
