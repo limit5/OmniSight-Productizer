@@ -979,6 +979,7 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
             "last_used": "",
         }
     u = _token_usage[model]
+    prev_cost = u["cost"]
     u["input_tokens"] += input_tokens
     u["output_tokens"] += output_tokens
     u["total_tokens"] = u["input_tokens"] + u["output_tokens"]
@@ -987,6 +988,10 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
     u["last_used"] = datetime.now().strftime("%H:%M:%S")
     inp_rate, out_rate = _PRICING.get(model, (1.0, 3.0))
     u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
+    # L1-06: feed the rolling hourly burn-rate ledger with this call's
+    # spend delta (not cumulative) so the 60-min window can accumulate
+    # correctly and age entries out.
+    _record_hourly(u["cost"] - prev_cost)
 
     # Persist asynchronously (fire-and-forget) + check budget
     import asyncio
@@ -1012,6 +1017,14 @@ token_frozen: bool = False
 _last_budget_level: str = ""  # Track to avoid repeat events
 _token_daily_reset_date: str = ""
 
+# L1-06: rolling hourly spend ledger. Each entry is (timestamp_s, cost_usd).
+# The ledger is prunsed on every append so memory stays bounded by the
+# 60-min window. Breaching `token_budget_hourly` flips `token_frozen`
+# exactly like the daily cap; the unfreeze happens naturally once
+# enough old rows age out of the window.
+_hourly_ledger: list[tuple[float, float]] = []
+_HOURLY_WINDOW_S = 3600
+
 
 def _maybe_reset_daily_budget() -> None:
     """Auto-reset token freeze at midnight (new day)."""
@@ -1033,6 +1046,31 @@ def get_daily_cost() -> float:
     return round(sum(u.get("cost", 0) for u in _token_usage.values()), 4)
 
 
+def _record_hourly(cost_delta: float) -> None:
+    """Append a cost sample and prune anything older than the window.
+    Called from track_tokens when a call actually incremented spend."""
+    import time as _time
+    if cost_delta <= 0:
+        return
+    now = _time.time()
+    _hourly_ledger.append((now, cost_delta))
+    cutoff = now - _HOURLY_WINDOW_S
+    # Prune in-place from the front. Usually just a handful of entries
+    # age out per call so this stays O(k) amortised.
+    while _hourly_ledger and _hourly_ledger[0][0] < cutoff:
+        _hourly_ledger.pop(0)
+
+
+def get_hourly_cost() -> float:
+    """Sum cost deltas recorded in the last 60 minutes."""
+    import time as _time
+    cutoff = _time.time() - _HOURLY_WINDOW_S
+    return round(
+        sum(c for (t, c) in _hourly_ledger if t >= cutoff),
+        4,
+    )
+
+
 async def _safe_check_budget() -> None:
     try:
         await asyncio.wait_for(_check_token_budget(), timeout=2.0)
@@ -1041,10 +1079,34 @@ async def _safe_check_budget() -> None:
 
 
 async def _check_token_budget() -> None:
-    """Check if daily cost exceeds budget thresholds. Called after each track_tokens."""
+    """Check daily + hourly cost thresholds. Called after each
+    track_tokens. The hourly guard fires independent of the daily
+    one — a burst that won't hit the daily cap today can still blow
+    a month's budget in a few hours."""
     global token_frozen, _last_budget_level
     from backend.config import settings
     from backend.events import emit_token_warning
+    from backend.notifications import notify
+
+    # ── Hourly burn-rate guard (L1-06) ──
+    hourly_cap = settings.token_budget_hourly
+    if hourly_cap > 0:
+        hourly = get_hourly_cost()
+        if hourly >= hourly_cap and _last_budget_level != "frozen":
+            token_frozen = True
+            _last_budget_level = "hourly_frozen"
+            msg = (
+                f"Hourly burn-rate cap exceeded "
+                f"(${hourly:.4f} in last 60 min / ${hourly_cap:.2f}). "
+                "All LLM calls frozen. Will auto-reset at top of next "
+                "hour as old spend ages out of the window."
+            )
+            emit_token_warning("frozen", msg, hourly, hourly_cap)
+            await notify(
+                "critical", "LLM hourly burn-rate cap — frozen",
+                message=msg, source="token_budget",
+            )
+            return  # Don't also trip daily warnings this call.
 
     budget = settings.token_budget_daily
     if budget <= 0:
@@ -1052,8 +1114,6 @@ async def _check_token_budget() -> None:
 
     cost = get_daily_cost()
     ratio = cost / budget
-
-    from backend.notifications import notify
 
     if ratio >= settings.token_freeze_threshold and _last_budget_level != "frozen":
         token_frozen = True

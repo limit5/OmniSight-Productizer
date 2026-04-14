@@ -56,6 +56,12 @@ class Settings(BaseSettings):
 
     # ── Token Budget & Resilience ──
     token_budget_daily: float = 0.0  # USD per day (0 = unlimited)
+    # L1-06: hourly burn-rate kill-switch. A daily budget catches slow
+    # drift; an hourly cap catches the spike that blows a whole
+    # month's budget in one runaway retry loop. Recommended: set to
+    # token_budget_daily / 12 or so — calibrate once, adjust after
+    # the first week of observed traffic. 0 = disabled.
+    token_budget_hourly: float = 0.0
     token_warn_threshold: float = 0.8  # 80% → emit warning
     token_downgrade_threshold: float = 0.9  # 90% → auto switch to cheaper model
     token_freeze_threshold: float = 1.0  # 100% → stop all LLM calls
