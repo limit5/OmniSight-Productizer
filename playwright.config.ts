@@ -40,12 +40,19 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
   },
 
-  projects: [
-    {
-      name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
-    },
-  ],
+  // Browsers: chromium is the default. Firefox + WebKit ship as extra
+  // projects gated behind OMNISIGHT_PW_BROWSERS=all so CI can opt in
+  // without slowing down local runs. Tracking expanded coverage as
+  // follow-up work once chromium + backend integration is fully stable.
+  // TODO(phase-51): wire firefox / webkit into the CI matrix.
+  projects: (() => {
+    const all = [
+      { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+      { name: "firefox", use: { ...devices["Desktop Firefox"] } },
+      { name: "webkit", use: { ...devices["Desktop Safari"] } },
+    ]
+    return process.env.OMNISIGHT_PW_BROWSERS === "all" ? all : [all[0]]
+  })(),
 
   webServer: [
     {
