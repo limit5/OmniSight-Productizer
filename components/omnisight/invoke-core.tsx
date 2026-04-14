@@ -107,11 +107,11 @@ export function InvokeCore({ onInvoke, onCommand, onCommandChange }: InvokeCoreP
         <>
           <div
             className="absolute left-0 top-1/2 -translate-y-1/2 h-0.5 energy-beam"
-            style={{ width: '40%', transform: 'translateY(-50%) translateX(-100%)', background: 'linear-gradient(270deg, var(--neural-blue), transparent)' }}
+            style={{ width: 'min(40%, 120px)', transform: 'translateY(-50%) translateX(-100%)', background: 'linear-gradient(270deg, var(--neural-blue), transparent)' }}
           />
           <div
             className="absolute right-0 top-1/2 -translate-y-1/2 h-0.5 energy-beam"
-            style={{ width: '40%', transform: 'translateY(-50%) translateX(100%)', background: 'linear-gradient(90deg, var(--neural-blue), transparent)' }}
+            style={{ width: 'min(40%, 120px)', transform: 'translateY(-50%) translateX(100%)', background: 'linear-gradient(90deg, var(--neural-blue), transparent)' }}
           />
           <div
             className="absolute left-1/2 top-0 w-0.5 energy-beam"
