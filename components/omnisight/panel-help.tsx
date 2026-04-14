@@ -12,7 +12,8 @@
  * viewer lands in D4.
  */
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { HelpCircle, ExternalLink } from "lucide-react"
 import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
 
@@ -166,11 +167,20 @@ interface PanelHelpProps {
   tourAnchor?: boolean
 }
 
+const POPOVER_W = 320
+const POPOVER_GAP = 4
+const VIEWPORT_PAD = 8
+
 export function PanelHelp({ doc, className, tourAnchor }: PanelHelpProps) {
   const locale = useLocale()
   const [open, setOpen] = useState(false)
   const popRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  // Pixel coords for the portaled popover. Null until we've measured
+  // the trigger — avoids a one-frame flash at (0,0) on open.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => { setMounted(true) }, [])
 
   // Close on outside click or Escape.
   useEffect(() => {
@@ -188,6 +198,36 @@ export function PanelHelp({ doc, className, tourAnchor }: PanelHelpProps) {
     return () => {
       document.removeEventListener("mousedown", onDocClick)
       document.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  // Position the portaled popover relative to the trigger button.
+  // Right-align to the trigger (matches the old `right-0` anchor) but
+  // clamp to the viewport so the left edge never clips — this is the
+  // whole reason we portal: escape the clipping `overflow-x-hidden`
+  // on the far-right aside that used to cut popovers off at the
+  // column's left edge.
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return
+    const recompute = () => {
+      const rect = triggerRef.current!.getBoundingClientRect()
+      const vw = window.innerWidth
+      const top = rect.bottom + POPOVER_GAP
+      // Prefer right-aligned to the trigger. Clamp left so popover
+      // stays entirely on screen with an 8 px margin.
+      let left = rect.right - POPOVER_W
+      if (left < VIEWPORT_PAD) left = VIEWPORT_PAD
+      if (left + POPOVER_W > vw - VIEWPORT_PAD) {
+        left = vw - POPOVER_W - VIEWPORT_PAD
+      }
+      setPos({ top, left })
+    }
+    recompute()
+    window.addEventListener("resize", recompute)
+    window.addEventListener("scroll", recompute, true)
+    return () => {
+      window.removeEventListener("resize", recompute)
+      window.removeEventListener("scroll", recompute, true)
     }
   }, [open])
 
@@ -211,12 +251,18 @@ export function PanelHelp({ doc, className, tourAnchor }: PanelHelpProps) {
       >
         <HelpCircle className="w-3.5 h-3.5" aria-hidden />
       </button>
-      {open && (
+      {open && mounted && pos && createPortal(
         <div
           ref={popRef}
           role="dialog"
           aria-label={tldr.title}
-          className="absolute right-0 top-full mt-1 z-50 w-[min(320px,calc(100vw-2rem))] holo-glass-simple rounded-sm border border-[var(--neural-cyan,#67e8f9)]/40 shadow-lg p-3 font-mono text-[11px] leading-snug text-[var(--foreground,#e2e8f0)]"
+          style={{
+            position: "fixed",
+            top: pos.top,
+            left: pos.left,
+            width: POPOVER_W,
+          }}
+          className="z-[100] holo-glass-simple rounded-sm border border-[var(--neural-cyan,#67e8f9)]/40 shadow-lg p-3 font-mono text-[11px] leading-snug text-[var(--foreground,#e2e8f0)]"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between mb-1.5">
@@ -241,7 +287,8 @@ export function PanelHelp({ doc, className, tourAnchor }: PanelHelpProps) {
           >
             {label.fullDoc} <ExternalLink className="w-3 h-3" aria-hidden />
           </a>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )
