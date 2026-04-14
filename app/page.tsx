@@ -38,19 +38,28 @@ const VALID_PANELS: ReadonlySet<PanelId> = new Set([
   "decisions", "budget", "timeline", "rules",
 ])
 
-function readInitialPanel(): PanelId {
-  if (typeof window === "undefined") return "orchestrator"
-  const panel = new URLSearchParams(window.location.search).get("panel")
+function readPanelFromUrl(): PanelId | null {
+  if (typeof window === "undefined") return null
+  const qs = new URLSearchParams(window.location.search)
+  const panel = qs.get("panel")
   if (panel && (VALID_PANELS as Set<string>).has(panel)) return panel as PanelId
-  // A `?decision=…` link without `panel=` implies the decision queue.
-  if (new URLSearchParams(window.location.search).get("decision")) return "decisions"
-  return "orchestrator"
+  if (qs.get("decision")) return "decisions"
+  return null
 }
 
 export default function Home() {
   const engine = useEngine()
   const [syncCount, setSyncCount] = useState(0)
-  const [activePanel, setActivePanel] = useState<PanelId>(readInitialPanel)
+  // R2-#21: always hydrate with the same value as the server
+  // (`orchestrator`). Apply the URL-derived panel in a mount effect so
+  // SSR markup and the first client render never disagree — previously
+  // a deep link rendered "orchestrator" on the server but "decisions"
+  // on the client, triggering React hydration warnings.
+  const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
+  useEffect(() => {
+    const p = readPanelFromUrl()
+    if (p && p !== "orchestrator") setActivePanel(p)
+  }, [])
   const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
   const [providerHealth, setProviderHealth] = useState<api.ProviderHealthResponse | null>(null)
   const [handoffs, setHandoffs] = useState<api.HandoffItem[]>([])
