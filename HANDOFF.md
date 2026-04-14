@@ -325,6 +325,36 @@ Phase 63-E 完成 → **僅剩 Phase 64-C T3 Hardware Daemon**（10–14h，
 
 ---
 
+## Phase 56-DAG-E — DAG Authoring UI 完成（2026-04-14）
+
+Pain point：backend 的 DAG planner 功能齊備（7 rules / mutation loop /
+storage），但 operator 只能手寫 JSON 走 curl、錯了盲改再丟，沒有任何前端。
+本 phase 補上 MVP 編輯器 + dry-run 驗證端點。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `POST /api/v1/dag/validate` dry-run — 不入庫、不建 run、不跑 mutation loop；過 Pydantic schema + 7-rule validator 後回 `{ok, stage, errors[]}`，固定 200（payload 帶 ok flag，前端少寫 HTTP 分支）；4 tests | `7485c45` |
+| S2 | `components/omnisight/dag-editor.tsx`（316 行）— JSON textarea + 500ms debounce live-validate + 3 範本（minimal / compile→flash / fan-out 1→3）+ Format/Copy/Submit + `mutate=true` toggle + cancel-previous AbortController + valid-only-enables-Submit；`lib/api.ts` 加 `validateDag`/`submitDag` + types | `d6e5292` |
+| S3 | Mount — `PanelId` 加 `"dag"`、MobileNav/TabletNav chips 加 DAG Editor（Workflow icon）、`VALID_PANELS` 加入、`renderPanel` switch 加 case；deep link `/?panel=dag` 可用 | `a6e12b7` |
+| S4 | 5 frontend tests（default template / JSON parse error / rule errors disable Submit / valid enables + POST / template load）；HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **Dry-run 與 submit 分離**：validate 不污染儲存，editor 可以每個 keystroke 打一次。submit 仍走 `workflow.start` 完整路徑。
+- **422 vs 200**：validate 固定 200，payload 帶 `ok`；submit 保留 backend 原本語意（422 = validation fail）。
+- **mutate 預設 off**：UI 明示這會呼叫 LLM 自動修，不當黑盒。
+- **不依賴 Monaco / react-flow**：純 textarea + lucide icons 無新 dep。升級到 Monaco（DAG-F）或視覺化 canvas（DAG-G）延後。
+
+### 後續解鎖
+
+- **DAG-F**：表單式 authoring（行式 CRUD + 下拉 + depends_on multi-select），複用 DecisionRulesEditor pattern。
+- **DAG-G**：react-flow 視覺化（節點/邊、拖拉依賴、即時 cycle 偵測）。
+- **可順手**：live-validate 結果面板加 **jump to line**（需切到 Monaco）；submit 成功後跳轉到 pipeline timeline 看 run 執行。
+
+---
+
 ## Phase 67-C — Speculative Container Pre-warm 完成（2026-04-15）
 
 Engine 3 從 `lossless-agent-acceleration.md` 落地。DAG validate 通過
