@@ -45,6 +45,74 @@ DOCKER_TIMEOUT = 60  # seconds for commands
 BUILD_TIMEOUT = 300  # seconds for image build
 
 
+# Phase 64-A S1: cache for runtime probe. None = not probed yet.
+_RUNTIME_RESOLVED: str | None = None
+
+
+async def _detect_available_runtimes() -> set[str]:
+    """Return the set of OCI runtimes registered with the local docker.
+
+    Parses `docker info --format '{{json .Runtimes}}'`. On any failure we
+    return {"runc"} since that's the daemon default.
+    """
+    rc, out, _ = await _run(
+        "docker info --format '{{json .Runtimes}}'", timeout=10,
+    )
+    if rc != 0 or not out:
+        return {"runc"}
+    try:
+        import json
+        data = json.loads(out)
+        if isinstance(data, dict):
+            return set(data.keys())
+    except Exception as exc:
+        logger.debug("runtime probe parse failed: %s", exc)
+    return {"runc"}
+
+
+async def resolve_runtime(force_redetect: bool = False) -> str:
+    """Resolve the docker runtime to use, honouring the configured
+    preference but falling back to runc when the preferred runtime
+    isn't installed. Cached after first call (idempotent for callers)."""
+    global _RUNTIME_RESOLVED
+    if _RUNTIME_RESOLVED is not None and not force_redetect:
+        return _RUNTIME_RESOLVED
+    from backend.config import settings as _settings
+    preferred = (_settings.docker_runtime or "runc").strip().lower()
+    if preferred not in {"runsc", "runc"}:
+        logger.warning(
+            "OMNISIGHT_DOCKER_RUNTIME=%r not in {runsc,runc}; using runc",
+            preferred,
+        )
+        _RUNTIME_RESOLVED = "runc"
+        return _RUNTIME_RESOLVED
+    available = await _detect_available_runtimes()
+    if preferred in available:
+        _RUNTIME_RESOLVED = preferred
+    else:
+        if preferred != "runc":
+            logger.warning(
+                "Tier-1 sandbox runtime %r not registered with docker "
+                "(available=%s); falling back to runc — escape-resistance "
+                "DOWNGRADED. Install gVisor for production.",
+                preferred, sorted(available),
+            )
+            try:
+                from backend.events import emit_pipeline_phase as _emit
+                _emit("sandbox_runtime_fallback",
+                      f"runsc unavailable; using runc")
+            except Exception:
+                pass
+        _RUNTIME_RESOLVED = "runc"
+    return _RUNTIME_RESOLVED
+
+
+def _reset_runtime_cache_for_tests() -> None:
+    """Test hook — clear the cached runtime so monkeypatched envs apply."""
+    global _RUNTIME_RESOLVED
+    _RUNTIME_RESOLVED = None
+
+
 @dataclass
 class ContainerInfo:
     """Tracks a running agent container."""
@@ -159,8 +227,11 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     from backend.config import settings as _settings
     mem = _settings.docker_memory_limit or "1g"
     cpus = _settings.docker_cpu_limit or "2"
+    # Phase 64-A S1: gVisor (runsc) when available; runc fallback otherwise.
+    runtime = await resolve_runtime()
     rc, out, err = await _run(
         f"docker run -d "
+        f"--runtime={runtime} "
         f"--name {container_name} "
         f"{mounts}"
         f"-w /workspace "

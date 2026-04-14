@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     docker_memory_limit: str = "1g"    # container memory cap
     docker_cpu_limit: str = "2"        # container CPU cap
 
+    # Phase 64-A S1: Tier 1 sandbox runtime. "runsc" (gVisor) gives a
+    # user-space kernel — blocks most container-escape CVEs. We auto-fall
+    # back to "runc" if runsc isn't installed, so dev boxes (mac/WSL2)
+    # still work; CI/prod should ensure runsc is present.
+    docker_runtime: str = "runsc"  # runsc | runc
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:
