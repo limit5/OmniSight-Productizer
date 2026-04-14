@@ -14,7 +14,9 @@ permissions:
 #   backend-tests     pytest sharded by folder + coverage thresholds
 #   backend-migrate   alembic upgrade head from a clean DB
 #   frontend-unit     vitest + coverage
-#   frontend-e2e      playwright chromium with --with-deps
+#   frontend-e2e      playwright chromium (hard gate) + firefox / webkit
+#                     (advisory until Chromium-only assumptions are
+#                     confirmed clean across all three)
 # Each job has its own timeout so a hung step doesn't block the matrix.
 
 jobs:
@@ -115,6 +117,17 @@ jobs:
   frontend-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      # Matrix: chromium runs as a hard gate (required to pass).
+      # firefox + webkit run as advisory until their first green
+      # pass confirms no Chromium-only assumptions remain. Once clean,
+      # drop `continue-on-error` below and the matrix becomes a hard
+      # gate for all three — the same "warn first, harden later"
+      # pattern tsc just graduated from.
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    continue-on-error: ${{ matrix.browser != 'chromium' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -124,13 +137,18 @@ jobs:
         with: { node-version: "20", cache: npm }
       - run: npm ci --no-audit --prefer-offline
       - name: install playwright + system libs
-        run: npx playwright install --with-deps chromium
-      - name: run playwright
-        run: npx playwright test --reporter=line
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: run playwright (${{ matrix.browser }})
+        env:
+          # playwright.config.ts gates the extra projects behind this
+          # env var — set it so the matrix browser is actually picked
+          # up (`--project` needs the project to exist).
+          OMNISIGHT_PW_BROWSERS: all
+        run: npx playwright test --project=${{ matrix.browser }} --reporter=line
       - name: upload report
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}
           path: playwright-report/
           retention-days: 7

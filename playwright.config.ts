@@ -48,11 +48,10 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
   },
 
-  // Browsers: chromium is the default. Firefox + WebKit ship as extra
-  // projects gated behind OMNISIGHT_PW_BROWSERS=all so CI can opt in
-  // without slowing down local runs. Tracking expanded coverage as
-  // follow-up work once chromium + backend integration is fully stable.
-  // TODO(phase-51): wire firefox / webkit into the CI matrix.
+  // Browsers: chromium is the default for local runs. Firefox + WebKit
+  // ship as extra projects gated behind OMNISIGHT_PW_BROWSERS=all.
+  // CI's `frontend-e2e` job uses a strategy.matrix on browser and sets
+  // this env var per-axis so each matrix shard runs only its browser.
   projects: (() => {
     const all = [
       { name: "chromium", use: { ...devices["Desktop Chrome"] } },
