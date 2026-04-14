@@ -1082,3 +1082,47 @@ export interface PipelineTimeline {
 export async function getPipelineTimeline() {
   return request<PipelineTimeline>("/system/pipeline/timeline")
 }
+
+// ─── Phase 50B: Decision Rules Editor ───
+
+export interface DecisionRule {
+  id: string
+  kind_pattern: string
+  severity: DecisionSeverity | null
+  auto_in_modes: OperationMode[]
+  default_option_id: string | null
+  priority: number
+  enabled: boolean
+  note: string
+}
+
+export interface DecisionRulesInfo {
+  rules: DecisionRule[]
+  severities: DecisionSeverity[]
+  modes: OperationMode[]
+}
+
+export interface DecisionRulesTestHit {
+  kind: string
+  rule_id: string | null
+  severity: DecisionSeverity | null
+  auto: boolean
+}
+
+export async function getDecisionRules() {
+  return request<DecisionRulesInfo>("/decision-rules")
+}
+
+export async function putDecisionRules(rules: Partial<DecisionRule>[]) {
+  return request<{ rules: DecisionRule[] }>("/decision-rules", {
+    method: "PUT",
+    body: JSON.stringify({ rules }),
+  })
+}
+
+export async function testDecisionRules(kinds: string[], mode?: OperationMode) {
+  return request<{ mode: string; hits: DecisionRulesTestHit[] }>(
+    "/decision-rules/test",
+    { method: "POST", body: JSON.stringify({ kinds, mode }) },
+  )
+}

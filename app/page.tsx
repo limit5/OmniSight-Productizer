@@ -11,6 +11,7 @@ import { VitalsArtifactsPanel } from "@/components/omnisight/vitals-artifacts-pa
 import { DecisionDashboard } from "@/components/omnisight/decision-dashboard"
 import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-panel"
 import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
+import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
@@ -399,6 +400,8 @@ export default function Home() {
         return <BudgetStrategyPanel />
       case "timeline":
         return <PipelineTimeline />
+      case "rules":
+        return <DecisionRulesEditor />
       default:
         return null
     }
@@ -581,6 +584,7 @@ export default function Home() {
             <PipelineTimeline />
             <DecisionDashboard />
             <BudgetStrategyPanel />
+            <DecisionRulesEditor />
             <VitalsArtifactsPanel
               logs={logs.length > 0 ? logs : undefined}
               artifacts={mappedArtifacts}
