@@ -22,8 +22,14 @@ async def _profile_db(monkeypatch):
         from backend import decision_profiles as dp, decision_engine as de
         dp._reset_for_tests()
         de._reset_for_tests()
-        yield (db, dp, de)
-        await db.close()
+        try:
+            yield (db, dp, de)
+        finally:
+            # Reset module-level singletons so subsequent test files
+            # don't see leaked profile / mode state.
+            dp._reset_for_tests()
+            de._reset_for_tests()
+            await db.close()
 
 
 @pytest.mark.asyncio

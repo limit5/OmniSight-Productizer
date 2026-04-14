@@ -26,3 +26,5 @@ pytest-cov==6.0.0
 httpx==0.28.1
 # Schema migrations (Phase 51)
 alembic==1.14.0
+# Phase 61 — Final Report Generator (PDF rendering for text reports)
+weasyprint>=63.0; sys_platform != 'win32'

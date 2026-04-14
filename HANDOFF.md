@@ -192,6 +192,79 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 58 / 59 / 61 — 一次性實作（2026-04-14）
+
+第二批一次性實作三個 phase，共 4 個 commit、~1900 LoC、22 個新後端 test。
+
+### Phase 58 — Smart Defaults + Decision Profiles（commit `5c127fd`）
+- Migration `0004_profiles_and_auto_log.py`：`decision_profiles` +
+  `auto_decision_log` + `decision_rules.{negative, undo_count}`
+- `backend/decision_profiles.py`：4 builtins（STRICT / BALANCED /
+  AUTONOMOUS / GHOST），`CRITICAL_KINDS` 包含 git_push/main、deploy/prod、
+  release/ship、workspace/delete、user/grant_admin
+- GHOST 雙重 gate：`OMNISIGHT_ALLOW_GHOST_PROFILE=true` +
+  `OMNISIGHT_ENV=staging`，否則 `set_profile()` 拋 `GhostNotAllowed`
+- `backend/decision_defaults.py`：14 個 v0 chooser seed
+- `decision_engine.propose()` 整合：rule 沒命中 → consult chooser →
+  profile gate → 自動執行寫 `auto_decision_log` 並把 confidence /
+  rationale / profile_id 放進 `dec.source`
+- API：`GET/PUT /profile`、`GET /auto-decisions`、`POST /decisions/bulk-undo`
+- 9 個 test 含 GHOST 雙 gate / 各 profile threshold / critical kind queue
+
+### Phase 59 — Host-Native Target Support（commit `f656b40`）
+- `configs/platforms/host_native.yaml`：toolchain=gcc，cross_prefix /
+  qemu / sysroot 全空
+- `backend/host_native.py`：`is_host_native()` /
+  `should_use_app_only_pipeline()` / `app_only_phases()`（[concept,
+  build, test, deploy] 4 階段）/ `host_device_passthrough()` /
+  `context_dict()` 統一查詢點，60s 快取
+- `decision_engine.propose()` 注入 `is_host_native` + `project_track`
+  到 chooser Context
+- 兩個 host-native chooser：
+  - `deploy/dev_board` / `deploy/host`：host-native 0.92，cross-arch 0.65
+  - `binary/execute`：host-native 0.95，cross-arch 0.70
+- 8 個 test 含 chooser confidence ladder 對比 / yaml exists 健全性
+
+### Phase 61 — Project Final Report Generator（commit pending）
+- `backend/project_report.py`：6 段聚合 builder
+  - Executive Summary（v0 templated；v1 交給 Reporter agent）
+  - Compliance Matrix（manifest spec lines × tasks × tests）
+  - Metrics Forecast vs Actual（從 token_usage 拉 actuals）
+  - Decision Audit Timeline（最近 50 筆 audit_log）
+  - Lessons Learned（episodic_memory top 20）
+  - Artifact Catalog（最近 200 筆 artifacts）
+- `render_html()` self-contained CSS（無外部依賴 → WeasyPrint 可直接消費）
+- `render_pdf()` WeasyPrint；缺 system libs 時 fallback 為 .html 並設
+  `X-Render-Fallback: html` header
+- `requirements.txt` 加 `weasyprint>=63.0; sys_platform != 'win32'`
+- API（`backend/routers/projects.py`）：
+  - `POST /projects/{id}/report` 觸發生成
+  - `GET /projects/{id}/report` JSON
+  - `GET /projects/{id}/report.html` HTML
+  - `GET /projects/{id}/report.pdf` PDF（fallback HTML）
+  - 內存最後一次 build 結果於 `_LAST` dict
+- 5 個 test 含 6 sections 完整性 / metrics 對應 / HTML self-contained /
+  PDF fallback 不崩潰 / etag 16 hex chars
+
+### 累計
+
+| Phase | commit | LoC 增 | 新後端 test |
+|---|---|---|---|
+| 58 | `5c127fd` | +891 | 9 |
+| 59 | `f656b40` | +294 | 8 |
+| 61 | （本次）| ~640 | 5 |
+| **合計** | | **~1825** | **22** |
+
+實測：health 200、profile API 200（PUT BALANCED OK / PUT GHOST 403）、
+host_native context 正確、`POST /projects/demo/report` 200、
+`GET .html` + `.pdf` 皆 200（PDF 在缺 cairo/pango 環境會 fallback 為
+HTML 並標 `X-Render-Fallback` header）。
+
+跨檔測試確認：`test_decision_profiles` 加 finally 重置 module-level
+singletons，避免 `_current` profile / `_current_mode` 洩漏到後續測試檔。
+
+---
+
 ## Phase 51 / 56 / 53 / 60 — 一次性實作（2026-04-14）
 
 四個 phase 依 SOP 子任務制連續實作，每 phase 完成後 targeted test +
