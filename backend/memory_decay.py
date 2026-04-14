@@ -85,10 +85,14 @@ async def touch(memory_id: str, *, now: float | None = None) -> bool:
 
 def _ts_iso(now: float | None = None) -> str:
     """ISO-8601 in UTC for SQL TEXT comparisons (matches the
-    `datetime('now')` defaults already in the table)."""
+    `datetime('now')` defaults already in the table).
+
+    `utcfromtimestamp` was deprecated in 3.12 and is removed in 3.13;
+    use the tz-aware form then drop the tz suffix so sqlite's naïve
+    `datetime('now')` strings still lexically compare."""
     import datetime as _dt
     t = now if now is not None else time.time()
-    return _dt.datetime.utcfromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    return _dt.datetime.fromtimestamp(t, _dt.UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
