@@ -333,7 +333,7 @@ c1037fc D3: budget-strategies + troubleshooting × 4 langs
 ```
 （F1 tutorials + HANDOFF 本段為本次 commit）
 
-## Phase 51-59（未來排程）
+## Phase 51-61（未來排程）
 
 為 Phase 50 完成後的下一批工作。每個 phase 維持既有節奏：實作 → 深度審計 → 補修 batch → commit。
 
@@ -849,6 +849,136 @@ host_native + app_only + BALANCED profile 組合：
 
 ---
 
+## Phase 60 — Project Forecast Panel（**新增**）
+
+當 `hardware_manifest.yaml` 設定完成時，使用者應該能立即看到本專案的
+預期：任務數 / agent 數 / cycle time / token 消耗 / 預計費用 / 信賴度。
+用以建立心理預期、與管理層對齊預算、選擇合適的 MODE × Profile 組合。
+
+### 資料來源（皆已存在）
+
+| 來源 | 提供 |
+|---|---|
+| `hardware_manifest.yaml` | 專案範圍：sensor、target_platform、project_track、商業模式 |
+| `configs/platforms/*.yaml` | toolchain、cross-compile 與否（影響工時） |
+| `configs/roles/*.yaml` | 19 role × 各自典型工序 |
+| `pipeline.py · PIPELINE_STEPS` | NPI 8 phase × 已知步驟序列 |
+| `token_usage` 表 | 歷史每 task token 消耗（per agent / model） |
+| `simulations` 表 | 歷史 task duration |
+| `episodic_memory` (FTS5) | 過往類似專案的可搜事件 |
+| 新增 `configs/provider_pricing.yaml` | provider × tier 單價（USD per 1M tokens） |
+
+### 後端 API
+
+新增 `backend/forecast.py`：
+
+```python
+@dataclass(frozen=True)
+class ProjectForecast:
+    tasks:    TaskBreakdown        # total + by_phase + by_track
+    agents:   AgentBreakdown       # total + by_type
+    duration: DurationBreakdown    # optimistic / typical / pessimistic
+    tokens:   TokenBreakdown       # total + by_model_tier
+    cost_usd: CostBreakdown        # total + by_provider
+    confidence: float              # 0.0..1.0 based on history sample size
+    method: Literal["fresh","template","template+regression"]
+    profile_sensitivity: dict      # STRICT/BALANCED/AUTONOMOUS 對照
+```
+
+端點：
+- `GET /api/v1/forecast` — 即時計算 + 5min cache
+- `POST /api/v1/forecast/snapshot` — 凍結當前預估存入 `forecast_snapshots` 表
+- SSE event `forecast_recomputed`（manifest 變更時）
+
+### Forecasting model 演進
+
+| 階段 | 模型 | 信賴度 |
+|---|---|---|
+| **v0**（本 phase 內首版）| 純 template — `track × phase × role` 查表得任務數，`avg_minutes_per_task` 預設值乘上 | ~0.5 |
+| **v1** | template + 歷史校準（同 sensor / 同 track 過去 N 筆 token_usage 中位數） | ~0.7 |
+| **v2** | 簡單線性回歸（features: project_track, target_arch, sensor_resolution, role_count）→ tokens / hours | ~0.8 |
+
+### 前端
+
+新增 `components/omnisight/forecast-panel.tsx`：
+- 6 KPI 卡：TASKS / AGENTS / HOURS / TOKENS / USD / CONFIDENCE
+- 折疊區：Phase breakdown + Profile sensitivity 對照表
+- Recompute 按鈕（手動觸發）
+- 位置：Spec panel 旁，或 Project tab 第一頁
+
+### 估時
+
+| 工項 | 時 |
+|---|---|
+| `forecast.py` template + 6 種 breakdown dataclass | 4 |
+| `provider_pricing.yaml` + 載入器 | 1 |
+| 端點 + cache + SSE | 2 |
+| forecast_snapshots 表 + history（為 Phase 61 鋪路）| 2 |
+| `<ForecastPanel>` 6 KPI + breakdown chart | 3 |
+| Tests + docs（operator/<lang>/reference/forecast.md ×4）| 2 |
+| **合計** | **~14 h** |
+
+---
+
+## Phase 61 — Project Final Report Generator（**新增**）
+
+當專案完成（NPI 進入 Mass Production）時，自動產出一份**完整報告**。
+給 PM / 客戶 / 稽核三類受眾。沿用 Phase 50-Docs 的 markdown → HTML
+渲染管線，加上 PDF 輸出。
+
+### 報告內容
+
+1. **Executive Summary**（Reporter agent 用 templated prompt 生成，PM 視角）
+2. **Compliance Matrix** — `hardware_manifest.yaml` 每行 spec → 哪些 task 實作 / 哪些 test 通過
+3. **Metrics: forecast vs actual**（依賴 Phase 60 開頭 snapshot + 結尾實測）
+4. **Decision Audit Timeline**（依賴 Phase 53 audit_log）
+5. **Lessons Learned** — 從 `episodic_memory` FTS5 萃取「踩過哪些坑、解法為何」
+6. **Artifact Catalog** — 自動 BOM + checksum + 下載清單
+
+### PDF 渲染策略（依您的指示）
+
+| 報告類型 | 渲染器 | 理由 |
+|---|---|---|
+| **純文字 / 表格報告**（compliance matrix、artifact catalog、lessons）| **WeasyPrint** | 純 Python，CSS print 支援好，無 chromium 依賴；中日文字型靠 fontconfig + Noto |
+| **含圖表報告**（forecast vs actual chart、decision timeline graph）| **Playwright** + Next.js print page | 可重用 dashboard FUI 圖表元件（recharts），輸出風格一致 |
+
+實作：
+- `backend/project_report.py · render_pdf(report, kind="text"|"chart")` 路由到對應 renderer
+- 文字版用 WeasyPrint 直接渲染 `.html`（已用 `lib/md-to-html.ts` 同邏輯的 Python 版）
+- 圖表版用 Playwright 開 `http://localhost:3000/projects/<id>/report/print` print-only Next.js page
+
+### 端點
+
+```
+POST /api/v1/projects/{id}/report      # 觸發生成（async workflow，依賴 Phase 56）
+GET  /api/v1/projects/{id}/report      # 取得最近一次 report JSON
+GET  /api/v1/projects/{id}/report.pdf  # 下載 PDF
+GET  /api/v1/projects/{id}/report.html # 下載 HTML
+```
+
+### 估時
+
+| 工項 | 時 |
+|---|---|
+| `project_report.py` 6 段聚合邏輯 | 5 |
+| Compliance matrix 萃取（spec line × task × test）| 3 |
+| WeasyPrint 文字版 + Noto 中日文字型 | 2 |
+| Playwright print page（Next.js route + chart 版面）| 4 |
+| Forecast vs actual diff 計算（依 Phase 60 snapshot）| 1 |
+| Lessons learned FTS5 萃取（依 Phase 53 audit_log + episodic）| 2 |
+| 新前端 panel：Final Report tab 於 Vitals & Artifacts panel 內 | 1 |
+| **合計** | **~18 h** |
+
+### 依賴關係
+
+- **Phase 53** audit chain：`Decision Audit Timeline` 段需要 audit_log
+- **Phase 60** forecast snapshot：`Forecast vs Actual` 段需要開頭快照
+- **Phase 56** durable workflow：報告生成本身是長 task，需 step checkpoint
+
+故 61 必須排在 53 + 60 + 56 之後。
+
+---
+
 ### 更新後總體估時
 
 | Phase | 主題 | 估時 |
@@ -863,19 +993,24 @@ host_native + app_only + BALANCED profile 組合：
 | **58** | **Smart Defaults / Decision Profiles** | **30 h** |
 | **59** | **Host-Native Target Support** | **28 h** |
 | 47-Fix Batch E | docker pause hibernate | 3 h |
-| **合計** | | **~120-138 h** |
+| **60** | **Project Forecast Panel** | **14 h** |
+| **61** | **Project Final Report Generator** | **18 h** |
+| **合計** | | **~152-170 h** |
 
 ### 更新後執行順序建議
 
-**51 → 56 → 53 → 58 → 59 → 54 → 52 → 57 → 55**
+**51 → 56 → 53 → 60 → 58 → 59 → 61 → 54 → 52 → 57 → 55**
 
 關鍵理由：
 1. CI/coverage 先（51）
 2. workflow checkpoint 是後續所有 phase 的可靠性前置（56）
 3. audit chain 在加 auto decision 之前（53），確保自動化決策皆有跡可循
-4. **Smart Defaults（58）+ Host-Native（59）相鄰執行**——兩者相乘效益最大
-5. RBAC（54）建立在已有完整審計與 profile 之上
-6. observability（52）→ UX polish（57）→ plugin system（55）收尾
+4. **Forecast（60）排在 audit 之後 + Smart Defaults 之前**——audit log 是
+   actual 資料權威來源，且 Profile 切換時可即時看到 forecast 對照
+5. **Smart Defaults（58）+ Host-Native（59）相鄰執行**——兩者相乘效益最大
+6. **Final Report（61）依賴 53 + 60 + 56 全部完成**才能聚合
+7. RBAC（54）建立在已有完整審計與 profile 之上
+8. observability（52）→ UX polish（57）→ plugin system（55）收尾
 
 ---
 

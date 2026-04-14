@@ -15,7 +15,7 @@
 project:
   name: ""
   version: ""
-  target_platform: ""
+  target_platform: "host_native"
 
 sensor:
   model: ""

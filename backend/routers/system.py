@@ -718,6 +718,40 @@ async def get_platform_status() -> dict:
     }
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Project forecast (Phase 60 v0 prototype)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_FORECAST_CACHE: tuple[float, dict] | None = None
+_FORECAST_TTL_S = 300  # 5 min
+
+
+@router.get("/forecast")
+async def get_project_forecast(provider: str | None = None) -> dict:
+    """Phase 60: project-level estimates (tasks / agents / hours /
+    tokens / USD / confidence) computed from the active
+    hardware_manifest.yaml. Template-based v0 — see backend/forecast.py
+    for the model evolution roadmap."""
+    global _FORECAST_CACHE
+    import time as _time
+    from backend import forecast as _fc
+    now = _time.time()
+    if _FORECAST_CACHE and (now - _FORECAST_CACHE[0]) < _FORECAST_TTL_S and provider is None:
+        return _FORECAST_CACHE[1]
+    f = _fc.from_manifest(provider=provider).to_dict()
+    if provider is None:
+        _FORECAST_CACHE = (now, f)
+    return f
+
+
+@router.post("/forecast/recompute")
+async def recompute_project_forecast() -> dict:
+    """Bust the 5-min cache and re-read the manifest."""
+    global _FORECAST_CACHE
+    _FORECAST_CACHE = None
+    return await get_project_forecast()
+
+
 @router.get("/spec")
 async def get_spec():
     """Load spec from hardware_manifest.yaml (or return empty if not found)."""

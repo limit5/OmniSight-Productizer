@@ -14,6 +14,7 @@ import {
   Gauge,
   Clock3,
   ScrollText,
+  BarChart3,
   Menu,
   X,
   ChevronLeft,
@@ -25,7 +26,7 @@ import {
 // 50A: + timeline. 50B: + rules.
 export type PanelId =
   | "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
-  | "decisions" | "budget" | "timeline" | "rules"
+  | "decisions" | "budget" | "timeline" | "rules" | "forecast"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -45,6 +46,7 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "budget", label: "Budget Strategy", shortLabel: "Budget", icon: Gauge, color: "var(--neural-blue)" },
   { id: "timeline", label: "Pipeline Timeline", shortLabel: "Timeline", icon: Clock3, color: "var(--neural-cyan, #67e8f9)" },
   { id: "rules", label: "Decision Rules", shortLabel: "Rules", icon: ScrollText, color: "var(--neural-cyan, #67e8f9)" },
+  { id: "forecast", label: "Project Forecast", shortLabel: "Forecast", icon: BarChart3, color: "var(--neural-cyan, #67e8f9)" },
 ]
 
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {

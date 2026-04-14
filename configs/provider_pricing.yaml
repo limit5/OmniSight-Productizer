@@ -1,0 +1,46 @@
+# Provider pricing (USD per 1M tokens, blended input+output rough average).
+# Used by backend/forecast.py to convert token estimates into dollar
+# estimates. Update when a provider changes pricing — values as of
+# 2026-04 according to public price pages.
+#
+# Tier mapping:
+#   premium  — strongest model the provider sells (Claude Opus, GPT-5, ...)
+#   default  — balanced (Claude Sonnet, GPT-5-mini, Gemini Pro)
+#   budget   — cheap (Claude Haiku, GPT-4o-mini, Gemini Flash)
+
+anthropic:
+  premium: 22.50          # Opus 4 / 4.5
+  default: 4.50           # Sonnet 4 / 4.5
+  budget:  1.20           # Haiku 4.5
+openai:
+  premium: 18.00          # GPT-5
+  default: 3.50           # GPT-5-mini
+  budget:  0.50           # GPT-4o-mini
+google:
+  premium: 12.00          # Gemini 2.5 Pro
+  default: 1.50           # Gemini 2.5 Flash
+  budget:  0.30           # Gemini Flash-Lite
+xai:
+  premium: 15.00          # Grok 4
+  default: 3.00
+  budget:  0.80
+groq:
+  premium: 0.80
+  default: 0.50
+  budget:  0.20
+deepseek:
+  premium: 1.10
+  default: 0.50
+  budget:  0.20
+together:
+  premium: 5.00
+  default: 1.00
+  budget:  0.30
+ollama:
+  premium: 0.0            # local
+  default: 0.0
+  budget:  0.0
+openrouter:
+  premium: 16.00          # routing premium
+  default: 4.00
+  budget:  0.80
