@@ -192,6 +192,54 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 63-A — IIS Signal Layer 完成（2026-04-14）
+
+設計源：`docs/design/intelligence-immune-system.md` §一. 第一個 IIS
+子任：訊號收集 + Prometheus 公開，**完全不觸發應變**（mitigation 是
+63-B 的職責）。
+
+### 交付（commit `cd34dae`）
+
+`backend/intelligence.py` 提供四指標滑動窗口：
+
+| 指標 | 計算 | 警報門檻 |
+|---|---|---|
+| `code_pass` | 通過 / 總數 | warn < 60%、critical < 30%（升級式，互斥） |
+| `compliance` | HANDOFF.md 觸碰率 | warn < 70%（**git diff 餵入，禁 LLM 自查**） |
+| `consistency` | Jaccard(proposed, L3 historical) 平均 | warn < 0.3 |
+| `entropy` | 最新 response_tokens vs window z-score | warn |z| > 2 |
+
+公開 API：
+- `IntelligenceWindow(agent_id, size=10).record(...)` / `.score()` / `.alerts()`
+- `get_window(agent_id)` — 進程內 singleton
+- `record_and_publish(agent_id, **kw) → (score, alerts)` — 同步回傳並 push 到 Prometheus
+
+### 新 metrics
+
+- `omnisight_intelligence_score{agent_id,dim}` — Gauge
+- `omnisight_intelligence_alert_total{agent_id,dim,level}` — Counter
+
+### 設計姿態
+
+- **signal-only**：本層完全不觸發任何 mitigation；只負責計算 + 公開。Phase 63-B 才把 alerts 餵給 Decision Engine。
+- **Jaccard v1 而非 embedding**：deterministic、可測；真實 embedding 留到後期。
+- **escalation 互斥**：critical 觸發時不再 warn 同一 dim，避免 pager double-fire。
+- **HANDOFF compliance 由 caller 餵 bool**：本模組不自己 check，徹底排除 LLM 自查的雞生蛋。
+- **空窗口 / 不足樣本回 None**：alert 也 None-safe，不會在 cold start 噴假警。
+
+### 驗收
+
+`pytest backend/tests/test_intelligence.py + metrics + skills_extractor + observability`
+→ **66 pass + 2 skip / 0.81s**。27 test 覆蓋 Jaccard 邊界 / window 基礎 / 4 指標數學 / 閾值觸發 / critical-supersedes-warning / singleton / Prometheus publish。
+
+### 後續解鎖
+
+**Phase 63-B Mitigation Layer** — 把本層的 `(level, dim, reason)` 對應到
+Decision Engine 三 kind（intelligence/calibrate, route, contain），重
+用 Stuck Detector 的 `_open_proposals` 去重。
+
+---
+
 ## Phase 62 — Knowledge Generation 完成（2026-04-14）
 
 設計源：`docs/design/agentic-self-improvement.md` L1。沙盒前置已完成
