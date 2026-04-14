@@ -262,10 +262,28 @@ mutation：
 - `persist_failure_total` label cardinality 允許集合白名單測試
   （env-skip 若 prometheus_client 缺席）。
 
-### D5–D7 未執行
+### D5 — `backend/metrics.py` registry integrity（commit `76d2e91`）
 
-仍排程於 Fix-D 計畫中（metrics / core smoke / hooks）。Phase 62 仍待
-全 Fix-D 完成。
+`backend/tests/test_metrics.py` 16 case（14 prom + 2 no-op）：
+
+**真實 registry 支線**（prom 安裝時）：
+- `reset_for_tests` 後 11 個模組級 metric attr 全部 rebind
+- 9 個 labelled metric 參數化測試，各自接受聲明 label
+- 未知 label raise（prom 不變量）
+- 無 label Gauge `set/collect` round-trip
+- `render_exposition` 回 text/plain + `omnisight_decision_total`
+- `REGISTRY.collect()` 包含全部 11 族
+
+**No-op fallback 支線**（prom 缺席時）：
+- `_NoOp` chaining `labels().inc()` / `.observe()` / `.set()` 全不 raise
+- `render_exposition` 回 placeholder body
+
+雙向驗證：安裝 prom → 14 pass + 2 skip；無 prom → 2 pass + 14 skip。
+
+### D6–D7 未執行
+
+仍排程於 Fix-D 計畫中（core smoke / hooks）。Phase 62 仍待全 Fix-D
+完成。
 
 ---
 
