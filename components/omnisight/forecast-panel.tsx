@@ -80,6 +80,7 @@ export function ForecastPanel() {
               className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] truncate"
               style={{ maxWidth: 200 }}
               title={`${data.project_name} · track=${data.project_track} · target=${data.target_platform}`}
+              aria-label={`Project ${data.project_name}, track ${data.project_track}, target ${data.target_platform}`}
             >
               {data.project_name}
             </span>

@@ -394,12 +394,19 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
                 <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase">Tasks</span>
                 {agent.subTasks.map(task => (
                   <div key={task.id} className="flex items-center gap-2">
-                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                      task.status === "done" ? "bg-[var(--validation-emerald)]" :
-                      task.status === "running" ? "bg-[var(--neural-blue)] animate-pulse" :
-                      task.status === "error" ? "bg-[var(--critical-red)]" :
-                      "bg-[var(--muted-foreground)] opacity-30"
-                    }`} />
+                    {/* Fix-C C3: status conveyed by colour alone is inaccessible
+                        to colour-blind / screen-reader users. sr-only label
+                        mirrors the semantic meaning. */}
+                    <div
+                      role="img"
+                      aria-label={`Status: ${task.status}`}
+                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                        task.status === "done" ? "bg-[var(--validation-emerald)]" :
+                        task.status === "running" ? "bg-[var(--neural-blue)] animate-pulse" :
+                        task.status === "error" ? "bg-[var(--critical-red)]" :
+                        "bg-[var(--muted-foreground)] opacity-30"
+                      }`}
+                    />
                     <span className="font-mono text-xs text-[var(--foreground)] flex-1">{task.name}</span>
                     {task.duration && (
                       <span className="font-mono text-[10px] text-[var(--validation-emerald)]">{task.duration}</span>
