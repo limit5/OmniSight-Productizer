@@ -560,6 +560,17 @@ def _yaml_to_spec(data: dict, parent_type: str = "hardware") -> list[dict]:
     return result
 
 
+@router.get("/sse-schema")
+async def get_sse_schema():
+    """A4/C7: return JSON-Schema for every SSE event type keyed by event
+    name, so the frontend can detect drift between the hand-maintained
+    TS union in lib/api.ts and the backend Pydantic models. Shape matches
+    the `get_sse_schema_export()` helper — i.e. flat `{ event_name:
+    { description, schema } }` map."""
+    from backend.sse_schemas import get_sse_schema_export
+    return get_sse_schema_export()
+
+
 @router.get("/spec")
 async def get_spec():
     """Load spec from hardware_manifest.yaml (or return empty if not found)."""

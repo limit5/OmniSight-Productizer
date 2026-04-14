@@ -152,17 +152,23 @@ class TestSSESchemaExport:
     def test_all_events_have_schemas(self):
         from backend.sse_schemas import SSE_EVENT_SCHEMAS
         expected_events = {
+            # Core runtime
             "agent_update", "task_update", "tool_progress", "pipeline",
             "workspace", "container", "invoke", "token_warning",
             "simulation", "debug_finding", "notification",
             "artifact_created", "heartbeat",
+            # Phase 47 Autonomous Decision Engine
+            "mode_changed", "decision_pending", "decision_auto_executed",
+            "decision_resolved", "decision_undone", "budget_strategy_changed",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 
     def test_schema_export_is_valid_json_schema(self):
-        from backend.sse_schemas import get_sse_schema_export
+        from backend.sse_schemas import get_sse_schema_export, SSE_EVENT_SCHEMAS
         export = get_sse_schema_export()
-        assert len(export) == 13
+        # Size equals the (dynamic) event map — don't hard-code a magic
+        # number that drifts every time a new SSE event type is added.
+        assert len(export) == len(SSE_EVENT_SCHEMAS)
         for event_type, info in export.items():
             assert "schema" in info
             schema = info["schema"]
