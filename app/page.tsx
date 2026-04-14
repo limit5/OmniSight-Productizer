@@ -535,7 +535,7 @@ export default function Home() {
         </main>
 
         {/* ===== DESKTOP LAYOUT (>= 1024px) ===== */}
-        <main className="hidden lg:grid flex-1 grid-cols-[minmax(140px,180px)_minmax(140px,180px)_1fr_minmax(200px,240px)_minmax(140px,180px)_minmax(140px,180px)_minmax(160px,200px)_minmax(200px,240px)] gap-2 p-3 min-h-0 overflow-x-auto">
+        <main className="hidden lg:grid flex-1 grid-cols-[minmax(140px,180px)_minmax(140px,180px)_1fr_minmax(200px,240px)_minmax(140px,180px)_minmax(140px,180px)_minmax(160px,200px)_minmax(300px,360px)] gap-2 p-3 min-h-0 overflow-x-auto">
           {/* Far Left: Host & Devices */}
           <aside className="min-h-0 overflow-hidden">
             <HostDevicePanel
@@ -668,7 +668,7 @@ export default function Home() {
           </aside>
 
           {/* Far Right: Decision Engine + Vitals & Artifacts */}
-          <aside className="min-h-0 overflow-y-auto overflow-x-hidden space-y-3">
+          <aside className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden space-y-3">
             <PipelineTimeline />
             <DecisionDashboard />
             <BudgetStrategyPanel />

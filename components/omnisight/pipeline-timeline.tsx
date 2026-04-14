@@ -102,17 +102,21 @@ export function PipelineTimeline() {
           <PanelHelp doc="panels-overview" />
         </div>
         {data && (
-          <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex items-center gap-3 tabular-nums shrink-0">
-            <span className="flex items-center gap-1" style={{ minWidth: 56 }}>
+          // Allow the stat row to wrap instead of pushing width out of
+          // the parent column. `shrink` (not `shrink-0`) + flex-wrap
+          // keeps it on one line when there's room and stacks it when
+          // the column is narrow (e.g. the dashboard's far-right aside).
+          <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums justify-end">
+            <span className="flex items-center gap-1">
               <Zap className="w-3 h-3 shrink-0" aria-hidden />
-              <span aria-label="tasks completed in the last 7 days" className="text-right inline-block" style={{ minWidth: 36 }}>
+              <span aria-label="tasks completed in the last 7 days" className="text-right inline-block tabular-nums">
                 {data.velocity.tasks_completed_7d}/7d
               </span>
             </span>
             <span
               aria-label="average step duration"
               className="inline-block text-right truncate"
-              style={{ minWidth: 70, maxWidth: 90 }}
+              style={{ maxWidth: 90 }}
               title={`avg step duration ${formatDuration(data.velocity.avg_step_seconds)}`}
             >
               AVG {formatDuration(data.velocity.avg_step_seconds)}
@@ -120,7 +124,7 @@ export function PipelineTimeline() {
             <span
               aria-label="pipeline completion estimate"
               className="inline-block text-right truncate"
-              style={{ minWidth: 70, maxWidth: 110 }}
+              style={{ maxWidth: 110 }}
               title={`ETA ${formatEta(data.velocity.eta_completion)}`}
             >
               ETA {formatEta(data.velocity.eta_completion)}
@@ -146,7 +150,11 @@ export function PipelineTimeline() {
 
       {data && (
         <ol
-          className="relative flex flex-col md:flex-row md:items-stretch gap-2 p-3 overflow-x-auto"
+          // Stack vertically by default (narrow right-aside layout);
+          // only switch to horizontal flow when there's real room
+          // (xl+ ~ full-width panel). md was too aggressive — it fired
+          // inside the 240 px dashboard column and cards clipped.
+          className="relative flex flex-col xl:flex-row xl:items-stretch gap-2 p-3 overflow-x-auto"
           aria-label="pipeline phases"
         >
           {data.steps.map((step, idx) => {
@@ -165,7 +173,7 @@ export function PipelineTimeline() {
                 key={step.id}
                 data-testid={`timeline-step-${step.id}`}
                 data-status={step.status}
-                className="relative flex-1 min-w-[140px] rounded-sm border p-2 flex flex-col gap-1.5 overflow-hidden"
+                className="relative flex-1 min-w-0 xl:min-w-[140px] rounded-sm border p-2 flex flex-col gap-1.5 overflow-hidden"
                 style={{
                   borderColor: style.color,
                   boxShadow:
