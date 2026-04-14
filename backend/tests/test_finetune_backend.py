@@ -24,7 +24,7 @@ def test_default_is_noop(monkeypatch):
 @pytest.mark.parametrize("env,cls", [
     ("noop", fb.NoopBackend),
     ("openai", fb.OpenAIBackend),
-    ("unsloth", fb.UnsloththBackend),
+    ("unsloth", fb.UnslothBackend),
     ("NoOp", fb.NoopBackend),       # case-insensitive
     ("OPENAI", fb.OpenAIBackend),
 ])
@@ -122,7 +122,7 @@ async def test_openai_raises_unavailable_when_sdk_missing(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  UnsloththBackend with injected runner
+#  UnslothBackend with injected runner
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _scripted_runner(replies: list[tuple[int, str, str]]):
@@ -143,7 +143,7 @@ def _scripted_runner(replies: list[tuple[int, str, str]]):
 @pytest.mark.asyncio
 async def test_unsloth_submit_happy(tmp_path):
     runner, calls = _scripted_runner([(0, "OK\n", "")])
-    backend = fb.UnsloththBackend(runner=runner)
+    backend = fb.UnslothBackend(runner=runner)
     h = await backend.submit(tmp_path / "data.jsonl",
                               base_model="meta/llama-3", suffix="omn")
     assert h.backend == "unsloth"
@@ -161,7 +161,7 @@ async def test_unsloth_submit_happy(tmp_path):
 async def test_unsloth_submit_failure_raises(tmp_path):
     runner, _ = _scripted_runner([(2, "", "GPU OOM")])
     with pytest.raises(fb.BackendUnavailable, match="rc=2"):
-        await fb.UnsloththBackend(runner=runner).submit(
+        await fb.UnslothBackend(runner=runner).submit(
             tmp_path / "x.jsonl", base_model="b",
         )
 
@@ -172,7 +172,7 @@ async def test_unsloth_poll_parses_status_and_model():
         (0, "OK\n", ""),  # submit
         (0, "STATUS: succeeded\nMODEL: meta/llama3-omn-abc123\n", ""),
     ])
-    backend = fb.UnsloththBackend(runner=runner)
+    backend = fb.UnslothBackend(runner=runner)
     h = await backend.submit(Path("/tmp/x"), base_model="b")
     s = await backend.poll(h)
     assert s.state == "succeeded"
@@ -185,7 +185,7 @@ async def test_unsloth_poll_running_no_model_yet():
         (0, "OK\n", ""),
         (0, "STATUS: running\n", ""),
     ])
-    backend = fb.UnsloththBackend(runner=runner)
+    backend = fb.UnslothBackend(runner=runner)
     h = await backend.submit(Path("/tmp/x"), base_model="b")
     s = await backend.poll(h)
     assert s.state == "running"
@@ -198,7 +198,7 @@ async def test_unsloth_poll_failure_returns_failed_state():
         (0, "OK\n", ""),
         (3, "", "process died"),
     ])
-    backend = fb.UnsloththBackend(runner=runner)
+    backend = fb.UnslothBackend(runner=runner)
     h = await backend.submit(Path("/tmp/x"), base_model="b")
     s = await backend.poll(h)
     assert s.state == "failed"
@@ -210,5 +210,5 @@ async def test_unsloth_poll_failure_returns_failed_state():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def test_all_backends_implement_protocol():
-    for cls in (fb.NoopBackend, fb.OpenAIBackend, fb.UnsloththBackend):
+    for cls in (fb.NoopBackend, fb.OpenAIBackend, fb.UnslothBackend):
         assert isinstance(cls(), fb.FinetuneBackend)

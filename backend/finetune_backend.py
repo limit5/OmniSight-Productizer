@@ -201,7 +201,7 @@ class OpenAIBackend:
 #  Unsloth — local subprocess via injected shell runner
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-class UnsloththBackend:
+class UnslothBackend:  # noqa: D401 — audit-fix H1: was UnsloththBackend (typo)
     """Submits a fine-tune job via a local Unsloth CLI subprocess.
 
     The `runner` argument is the injection point — production callers
@@ -293,8 +293,13 @@ def select_backend(name: Optional[str] = None) -> FinetuneBackend:
     if raw == "openai":
         return OpenAIBackend()
     if raw == "unsloth":
-        return UnsloththBackend()
+        return UnslothBackend()
     logger.warning(
         "unknown OMNISIGHT_FINETUNE_BACKEND=%r; falling back to noop", raw,
     )
     return NoopBackend()
+
+
+# Back-compat alias for the typo the class shipped with. Remove in the
+# next phase after downstream imports catch up.
+UnsloththBackend = UnslothBackend
