@@ -249,10 +249,23 @@ mutation：
 - `emit_tool_progress` output 硬上限 1000 char
 - singleton `bus` 為 EventBus 實例
 
-### D4–D7 未執行
+### D4 — DLQ edge cases（commit `66b8a77`）
 
-仍排程於 Fix-D 計畫中（DLQ edge / metrics / core smoke / hooks）。
-Phase 62 仍待全 Fix-D 完成。
+`backend/tests/test_notifications_dlq.py` 4 pass + 1 env-skip，0.56s：
+
+- 兩個並發 sweep 在同一 failed row 上 → 合計 dead/retried 有界；掃完不再
+  現身於 `list_failed_notifications`。
+- 可重試 row 並發 → retried 合計 ≤ 2（每 sweep 至多一次）。
+- `run_dlq_loop` cancel → task 乾淨結束、`_DLQ_RUNNING` 於 `finally`
+  歸 False。
+- 已在跑時第二次呼叫 `run_dlq_loop()` → 立即返回，不起第二組迴圈。
+- `persist_failure_total` label cardinality 允許集合白名單測試
+  （env-skip 若 prometheus_client 缺席）。
+
+### D5–D7 未執行
+
+仍排程於 Fix-D 計畫中（metrics / core smoke / hooks）。Phase 62 仍待
+全 Fix-D 完成。
 
 ---
 
