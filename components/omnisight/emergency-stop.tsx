@@ -48,18 +48,34 @@ export function EmergencyStop({ onStop, onResume, isHalted = false, disabled = f
     onResume()
   }
 
+  // Layout-safety constants — every visual state of this button is
+  // boxed into the same dimensions so siblings (clock, language
+  // toggle, etc.) never move when state changes.
+  //
+  // Width budget for the longest variant: " CONFIRM " (7 chars at
+  // text-xs mono ≈ 7px each = 49px) + 14px icon + gap-2 (8px) +
+  // px-3 (24px) = ~95px. Cap at 100px.
+  // Border swap (1px → 2px on CONFIRM) replaced with `outline` so
+  // it never affects the box dimensions.
+  const dims: React.CSSProperties = {
+    width: 100,
+    height: 32,
+    flexShrink: 0,
+  }
+
   // Show resume button when halted
   if (isHalted) {
     return (
       <button
         onClick={handleResumeClick}
         disabled={disabled || !onResume}
+        style={dims}
         className={`
-          relative group flex items-center gap-2 px-3 py-2 rounded-lg
+          relative group flex items-center justify-center gap-2 rounded-lg
           font-mono text-xs font-semibold tracking-wider
-          transition-all duration-300 
+          transition-[colors,box-shadow] duration-300
           ${disabled || !onResume
-            ? "opacity-40 cursor-not-allowed bg-[var(--secondary)]" 
+            ? "opacity-40 cursor-not-allowed bg-[var(--secondary)]"
             : "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)] border border-[var(--validation-emerald)]/50 hover:bg-[var(--validation-emerald)]/30 hover:border-[var(--validation-emerald)]"
           }
         `}
@@ -67,13 +83,13 @@ export function EmergencyStop({ onStop, onResume, isHalted = false, disabled = f
       >
         {/* Pulsing indicator */}
         <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-[var(--validation-emerald)] animate-pulse" />
-        
+
         {/* Icon */}
-        <Play size={14} className="relative z-10 fill-current" />
-        
+        <Play size={14} className="relative z-10 fill-current shrink-0" />
+
         {/* Text */}
         <span className="relative z-10">RESUME</span>
-        
+
         {/* Glow effect on hover */}
         <span className="absolute inset-0 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-300 shadow-[0_0_15px_var(--validation-emerald)] pointer-events-none" />
       </button>
@@ -84,17 +100,19 @@ export function EmergencyStop({ onStop, onResume, isHalted = false, disabled = f
     <button
       onClick={handleStopClick}
       disabled={disabled}
+      style={dims}
       className={`
-        relative group flex items-center gap-2 px-3 py-2 rounded-lg
+        relative group flex items-center justify-center gap-2 rounded-lg
         font-mono text-xs font-semibold tracking-wider
-        transition-all duration-300 
-        ${disabled 
-          ? "opacity-40 cursor-not-allowed bg-[var(--secondary)]" 
+        transition-[colors,box-shadow] duration-300
+        border border-[var(--critical-red)]/50
+        ${disabled
+          ? "opacity-40 cursor-not-allowed bg-[var(--secondary)]"
           : isActivating
-            ? "bg-[var(--critical-red)] text-white animate-pulse scale-105"
+            ? "bg-[var(--critical-red)] text-white animate-pulse outline outline-2 outline-[var(--critical-red)]"
             : showConfirm
-              ? "bg-[var(--critical-red)]/30 text-[var(--critical-red)] border-2 border-[var(--critical-red)] scale-105"
-              : "bg-[var(--critical-red)]/10 text-[var(--critical-red)] border border-[var(--critical-red)]/50 hover:bg-[var(--critical-red)]/20 hover:border-[var(--critical-red)]"
+              ? "bg-[var(--critical-red)]/30 text-[var(--critical-red)] outline outline-2 outline-[var(--critical-red)] outline-offset-[-1px]"
+              : "bg-[var(--critical-red)]/10 text-[var(--critical-red)] hover:bg-[var(--critical-red)]/20 hover:border-[var(--critical-red)]"
         }
       `}
       title="Emergency stop - halt all running operations"
@@ -106,23 +124,28 @@ export function EmergencyStop({ onStop, onResume, isHalted = false, disabled = f
           <span className="absolute inset-0 rounded-lg bg-[var(--critical-red)] animate-ping opacity-30 animation-delay-150" />
         </>
       )}
-      
+
       {/* Icon */}
-      <OctagonX 
-        size={14} 
-        className={`relative z-10 ${isActivating ? "animate-spin" : showConfirm ? "animate-pulse" : ""}`}
+      <OctagonX
+        size={14}
+        className={`relative z-10 shrink-0 ${isActivating ? "animate-spin" : showConfirm ? "animate-pulse" : ""}`}
       />
-      
-      {/* Text */}
-      <span className="relative z-10">
-        {isActivating 
-          ? "HALT" 
-          : showConfirm 
-            ? "CONFIRM" 
+
+      {/* Text — fixed-width slot so E-STOP / CONFIRM / HALT do not
+       * change the button width; left-padded with NBSP for HALT (4
+       * chars) so the icon + text always render centred. */}
+      <span
+        className="relative z-10 inline-block text-center tabular-nums"
+        style={{ width: 50 }}
+      >
+        {isActivating
+          ? "HALT"
+          : showConfirm
+            ? "CONFIRM"
             : "E-STOP"
         }
       </span>
-      
+
       {/* Glow effect on hover */}
       {!disabled && !isActivating && (
         <span className="absolute inset-0 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-300 shadow-[0_0_15px_var(--critical-red)] pointer-events-none" />
