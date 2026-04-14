@@ -192,6 +192,62 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 62 — Knowledge Generation 完成（2026-04-14）
+
+設計源：`docs/design/agentic-self-improvement.md` L1。沙盒前置已完成
+（64-A/D/B），技能檔可安全產生 + 審核 + 執行。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `backend/skills_scrubber.py` — 12 類 deny-list（AWS / GitHub PAT / GitLab PAT / OpenAI / Anthropic / Slack / JWT / SSH 私鑰 / env 賦值 / email / /home /Users /root paths / IPv4 非 loopback / 高 entropy 通用），`SAFETY_THRESHOLD=25` 拒絕過敏感來源；20 test | `1ab7cb3` |
+| S2 | `backend/skills_extractor.py` — `should_extract`（≥5 step OR ≥3 retry）+ template 渲染 + 自動 scrub + Decision Engine `kind=skill/promote` severity=routine 24h timeout default-safe=`discard`；`is_enabled` 讀 `OMNISIGHT_SELF_IMPROVE_LEVEL`；新 metrics `skill_extracted_total{status}` + `skill_promoted_total`；17 test | `9dcbe8d` |
+| S3 | `workflow.finish()` hook（completed run + L1 enabled → extract + propose，全 `try/except` 包覆不破壞 finish 合約）；`backend/routers/skills.py` 提供 `/skills/pending`（list/read operator+）+ `/skills/pending/{name}/promote`（admin，移入 `configs/skills/<slug>/SKILL.md`）+ `DELETE`（admin）；audit log `skill_promoted` / `skill_discarded`；path traversal 防護；10 test | `5b25e77` |
+| S4 | `docs/operations/skills-promotion.md` 操作員指南 + 本 HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **v1 模板而非 LLM**：deterministic、可測試、可審；LLM 重寫留作 Phase 62.5。
+- **opt-in 預設 off**：`OMNISIGHT_SELF_IMPROVE_LEVEL` 不設則整個 hook 不跑。
+- **default-safe = `discard`**：Decision Engine 24h timeout 後自動丟棄而非自動上架。
+- **失敗 run 不入庫**：避免「記住失敗解法」造成負面 feedback。
+- **scrubber 過敏感即拒寫**：超過 25 個 redaction 直接不產出檔案，連標記都不留。
+
+### 新環境變數
+
+```
+OMNISIGHT_SELF_IMPROVE_LEVEL=l1  # off | l1 | l1+l3 | all
+```
+
+### 新 metrics
+
+- `omnisight_skill_extracted_total{status}` — written / skipped_threshold / skipped_unsafe
+- `omnisight_skill_promoted_total` — operator-approved 移入 live tree
+
+### 新 audit actions
+
+- `skill_promoted`（actor admin email）
+- `skill_discarded`（actor admin email）
+
+### 新 endpoints
+
+- `GET    /api/v1/skills/pending`
+- `GET    /api/v1/skills/pending/{name}`
+- `POST   /api/v1/skills/pending/{name}/promote`（admin）
+- `DELETE /api/v1/skills/pending/{name}`（admin）
+
+### 驗收
+
+`pytest backend/tests/test_skills_*.py + decision_engine + observability + metrics + audit` → **100 pass + 2 skip / 2.11s**。47 新 test 覆蓋 scrubber 12 redaction 類別、extractor trigger gate / 模板輸出 / scrub 整合 / opt-in 7 級別 / Decision Engine wiring、workflow.finish hook 4 路徑、4 個 endpoint。
+
+### 後續解鎖
+
+**Phase 63-A IIS Metrics Collector** 可立即啟動（Phase 62 產出的技能檔
+即將成為 Phase 63-B mitigation L1 的 few-shot 注入來源）。
+
+---
+
 ## Phase 64-B — Tier 2 Networked Sandbox 完成（2026-04-14）
 
 承 Phase 64-A + 64-D 之後。**T2 與 T1 完全相反**：公網 ACCEPT、
