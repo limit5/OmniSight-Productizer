@@ -292,7 +292,80 @@ CREATE TABLE IF NOT EXISTS debug_findings (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS decision_rules (
+    id                  TEXT PRIMARY KEY,
+    kind_pattern        TEXT NOT NULL,
+    severity            TEXT,
+    auto_in_modes       TEXT NOT NULL DEFAULT '[]',
+    default_option_id   TEXT,
+    priority            INTEGER NOT NULL DEFAULT 100,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    note                TEXT NOT NULL DEFAULT '',
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Decision Rules persistence (Phase 50B-Fix / A1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def load_decision_rules() -> list[dict]:
+    """Load all persisted decision rules. Returns list of dicts matching
+    the in-memory shape used by backend.decision_rules."""
+    async with _conn().execute(
+        "SELECT id, kind_pattern, severity, auto_in_modes, default_option_id, "
+        "priority, enabled, note FROM decision_rules"
+    ) as cur:
+        rows = await cur.fetchall()
+    out: list[dict] = []
+    for r in rows:
+        try:
+            modes = json.loads(r["auto_in_modes"])
+        except Exception:
+            modes = []
+        out.append({
+            "id": r["id"],
+            "kind_pattern": r["kind_pattern"],
+            "severity": r["severity"],
+            "auto_in_modes": modes if isinstance(modes, list) else [],
+            "default_option_id": r["default_option_id"],
+            "priority": r["priority"],
+            "enabled": bool(r["enabled"]),
+            "note": r["note"] or "",
+        })
+    return out
+
+
+async def replace_decision_rules(rules: list[dict]) -> None:
+    """Atomically swap the decision_rules table. Used when the editor PUTs
+    the whole list."""
+    db = _conn()
+    async with db.execute("BEGIN IMMEDIATE"):
+        pass
+    try:
+        await db.execute("DELETE FROM decision_rules")
+        for r in rules:
+            await db.execute(
+                "INSERT INTO decision_rules (id, kind_pattern, severity, "
+                "auto_in_modes, default_option_id, priority, enabled, note) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    r["id"],
+                    r["kind_pattern"],
+                    r.get("severity"),
+                    json.dumps(r.get("auto_in_modes") or []),
+                    r.get("default_option_id"),
+                    int(r.get("priority", 100)),
+                    1 if r.get("enabled", True) else 0,
+                    (r.get("note") or "")[:240],
+                ),
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

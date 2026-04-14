@@ -50,6 +50,10 @@ async def lifespan(app: FastAPI):
         await agents.seed_defaults_if_empty()
         await tasks.seed_defaults_if_empty()
         await system.load_token_usage_from_db()
+        # A1: restore operator-defined decision rules (Phase 50B) from DB
+        from backend import decision_rules as _dr
+        loaded = await _dr.load_from_db()
+        _log.info("Decision rules loaded from DB: %d", loaded)
     except Exception as exc:
         _log.error("Startup failed: %s", exc, exc_info=True)
         raise

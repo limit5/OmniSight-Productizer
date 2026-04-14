@@ -18,18 +18,24 @@ Rule shape:
         "note":              str        # operator-facing comment
     }
 
-Rules are in-memory for now (same lifetime as _active_pipeline). Phase 53
-audit layer will persist + hash-chain them.
+Rules persist to SQLite (table `decision_rules`) — the in-memory list is
+a cache loaded at startup via `load_from_db()`. `replace_rules()` writes
+through to the DB so operator edits survive restart. Phase 53 audit
+layer will add hash-chaining on top of this.
 """
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
+import logging
 import threading
 import uuid
 from typing import Any
 
 from backend.decision_engine import DecisionSeverity, OperationMode
+
+logger = logging.getLogger(__name__)
 
 _RULES_LOCK = threading.Lock()
 _RULES: list[dict[str, Any]] = []
@@ -70,7 +76,13 @@ def list_rules() -> list[dict[str, Any]]:
 
 
 def replace_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Replace the rule set wholesale. The editor PUTs the whole list."""
+    """Replace the rule set wholesale. The editor PUTs the whole list.
+
+    Persists the new list to SQLite so operator edits survive restart.
+    DB failure is logged but does not abort the in-memory update —
+    operators should not lose their current session because of a
+    transient DB hiccup.
+    """
     normalised = [_normalise(r) for r in rules]
     # Reject duplicate ids.
     ids = [r["id"] for r in normalised]
@@ -78,7 +90,44 @@ def replace_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raise ValueError("duplicate rule id")
     with _RULES_LOCK:
         _RULES[:] = normalised
+    # Schedule DB write on the running loop if available; best-effort.
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist(normalised))
+    except RuntimeError:
+        # No running loop (sync test path) — skip persistence.
+        pass
     return list_rules()
+
+
+async def _persist(rules: list[dict[str, Any]]) -> None:
+    try:
+        from backend import db
+        await db.replace_decision_rules(rules)
+    except Exception as exc:
+        logger.warning("decision_rules persist failed: %s", exc)
+
+
+async def load_from_db() -> int:
+    """Populate the in-memory rule list from SQLite. Called once at
+    backend startup. Returns the number of rules loaded."""
+    try:
+        from backend import db
+        rows = await db.load_decision_rules()
+    except Exception as exc:
+        logger.warning("decision_rules load failed: %s", exc)
+        return 0
+    # Normalise each row so legacy/partial DB rows cannot poison the
+    # engine with malformed data.
+    normalised: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            normalised.append(_normalise(r))
+        except ValueError as exc:
+            logger.warning("skipping invalid persisted rule %r: %s", r.get("id"), exc)
+    with _RULES_LOCK:
+        _RULES[:] = normalised
+    return len(normalised)
 
 
 def clear() -> None:
