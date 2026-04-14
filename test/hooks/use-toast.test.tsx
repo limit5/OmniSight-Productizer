@@ -1,6 +1,6 @@
 /** Fix-C C1: regression test for the listener-accumulation bug. */
 import { renderHook, act } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { useToast, toast } from "@/hooks/use-toast"
 
 describe("useToast listener registration", () => {
@@ -39,9 +39,10 @@ describe("useToast listener registration", () => {
       unmount()
     }
     // Any React "update on unmounted" warnings would have been emitted here.
-    const bad = warn.mock.calls.filter(([msg]) =>
-      typeof msg === "string" && /unmounted/i.test(msg)
-    )
+    const bad = warn.mock.calls.filter((args: unknown[]) => {
+      const msg = args[0]
+      return typeof msg === "string" && /unmounted/i.test(msg)
+    })
     expect(bad).toHaveLength(0)
     warn.mockRestore()
   })

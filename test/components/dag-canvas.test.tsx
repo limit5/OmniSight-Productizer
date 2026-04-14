@@ -9,7 +9,7 @@
  *   5. A graph-level cycle error tints every node red.
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { render } from "@testing-library/react"
 
 import { DagCanvas } from "@/components/omnisight/dag-canvas"

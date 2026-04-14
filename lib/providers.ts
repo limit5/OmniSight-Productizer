@@ -13,7 +13,7 @@ import { createGroq } from "@ai-sdk/groq"
 import { deepseek } from "@ai-sdk/deepseek"
 import { togetherai } from "@ai-sdk/togetherai"
 import { ollama } from "ollama-ai-provider"
-import type { LanguageModelV1 } from "ai"
+import type { LanguageModel } from "ai"
 
 export type ProviderId =
   | "anthropic"
@@ -108,7 +108,7 @@ const groq = createGroq()
 export function getModel(
   providerId: ProviderId,
   modelName?: string
-): LanguageModelV1 {
+): LanguageModel {
   const info = PROVIDERS.find((p) => p.id === providerId)
   const model = modelName || info?.defaultModel || ""
 
@@ -128,7 +128,11 @@ export function getModel(
     case "together":
       return togetherai(model)
     case "ollama":
-      return ollama(model)
+      // ollama-ai-provider still emits the legacy `LanguageModelV1`
+      // shape — structurally compatible with `LanguageModel` for
+      // streamText's purposes. Cast through unknown until the
+      // upstream package is updated.
+      return ollama(model) as unknown as LanguageModel
     default:
       return anthropic(model)
   }
