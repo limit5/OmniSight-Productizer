@@ -192,6 +192,70 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 67-A — Prompt Cache 標記層 完成（2026-04-14）
+
+第一個 Phase 67 子任，純 LLM 層、無 dependency、與 56-DAG track 平行
+完成。`CachedPromptBuilder` 統一封裝 5 段 message order contract +
+provider-specific cache hint 注入。
+
+### 交付（commit `e3c976d`）
+
+`backend/prompt_cache.py`：
+- `CachedPromptBuilder.add_*()` 5 個 typed adder（system / tools /
+  static_kb / conversation / volatile_log）
+- `.build_for(provider)` 回 provider-native message list
+- 順序在 build 時排序強制（`_ORDER` 寫死），caller 加入順序不影響輸出
+- Provider matrix：
+
+| Provider | 處理 |
+|---|---|
+| Anthropic | system+tools 走 `_anthropic_system_blocks` wrapper、每 block 加 `cache_control: ephemeral`；static_kb user block 也標 cacheable；conversation/volatile_log **不**標 |
+| OpenAI | 不加 markers（auto-cache prefix ≥1024 tokens）；只保持順序穩定 |
+| Ollama | one-shot process-level warning + plain messages |
+| 未知 | 同 Ollama，warning 帶 provider name |
+
+- 空 / whitespace 段在 build 時 drop（避免污染 cache prefix）
+- Master switch `OMNISIGHT_PROMPT_CACHE_ENABLED`（預設 true）
+- `record_cache_outcome(provider, hit_tokens=, miss_tokens=)` 餵 SDK 回傳的 cache token 計數
+
+### 新環境變數
+
+```
+OMNISIGHT_PROMPT_CACHE_ENABLED=true   # 預設 ON，prod 不應關
+```
+
+### 新 metrics
+
+- `omnisight_prompt_cache_hit_total{provider}` — Counter（tokens）
+- `omnisight_prompt_cache_miss_total{provider}` — Counter（tokens）
+
+### 設計姿態
+
+- **Builder 不呼 LLM**：純 message list 產生器；既有 `agents/llm.py` adapter 不變，整合留給後續 hot callsite 漸進。
+- **Order at build time**：caller 自由 `.add_*()`，build 時統一排序；避免「呼叫順序錯就 silent miss」陷阱。
+- **Cacheable vs volatile 二分**：3 段（system/tools/static_kb）標 cacheable、2 段（conversation/volatile_log）不標；conversation 雖然某輪內容固定，但下一輪即變，標反而會炸 cache invalidation。
+- **未知 provider 不 raise**：graceful fallback + 一次性 warning，避免 prod 引入新 provider 時 404 callsite。
+- **Empty drop**：空段不入 message list；保持 prefix 緊湊。
+
+### 驗收
+
+`pytest test_prompt_cache.py` → **23 pass / 0.06s**。覆蓋 order
+enforcement / blank drop / Anthropic markers 三層 / OpenAI 無 marker /
+Ollama warns-once / unknown fallback / empty provider / master switch
+default + 10 個 truthy/falsy / metric round-trip / silent without prom。
+
+### 後續
+
+下一步可選：
+1. **Phase 63-D Daily IQ Benchmark**（按主鏈順序，3–4h）
+2. **Phase 67-D RAG Pre-fetch**（67-A 已就位、前置 episodic_memory 已有，3–4h）
+3. **Phase 56-DAG-C mutation loop**（需 prompt_registry canary 推 Orchestrator prompt，4–6h）
+
+Phase 67-A 不阻擋任何後續 phase；hot callsite 整合可在後續 phase 漸進
+（如 56-DAG-C 的 Orchestrator agent 直接用 `CachedPromptBuilder`）。
+
+---
+
 ## Phase 56-DAG-B — Storage + workflow 連動 完成（2026-04-14）
 
 承 56-DAG-A validator 之後立即實作。新表 `dag_plans` + workflow_runs
