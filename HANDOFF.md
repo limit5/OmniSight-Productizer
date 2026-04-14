@@ -192,6 +192,58 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 63-B — IIS Mitigation Layer 完成（2026-04-14）
+
+承 Phase 63-A 之後立即實作。把 signal-only 的 alerts 對應到 Decision
+Engine 三級 kind，**只負責提案，不執行 strategy**（與 stuck/* 同模式，
+應用層在 consumer 側）。
+
+### 交付（commit `860be3a`）
+
+`backend/intelligence_mitigation.py`：
+
+| 級 | kind | severity | default | 內容 |
+|---|---|---|---|---|
+| L1 | `intelligence/calibrate` | routine | calibrate | options {calibrate, skip}；calibrate 描述帶 profile-aware COT char budget |
+| L2 | `intelligence/route` | risky | calibrate（safer than switch_model） | options {switch_model, calibrate, abort} + warning Notification |
+| L3 | `intelligence/contain` | destructive | halt | options {halt, switch_model} + critical Notification + 可選 Jira |
+
+### 對應規則
+
+```
+empty alerts            → no proposal
+any warning             → L1 calibrate
+any critical            → L2 route
+critical + L2 already open → escalate to L3 contain
+```
+
+`map_alerts_to_level` 永不從單次 snapshot 直接產出 contain — escalation 是唯一路徑。
+
+### 鎖定決策實裝
+
+- **Profile-aware COT**：cost_saver=0 / sprint=100 / BALANCED=200 / QUALITY=500（讀 `budget_strategy.get_strategy()`，profile 切換立即生效）。
+- **Jira containment 預設 off**：`OMNISIGHT_IIS_JIRA_CONTAINMENT=true` 才走 [IIS-CONTAIN] tagged Jira。
+- **Dedup 同 stuck/***：`_open_proposals[(agent_id, level)] = dec.id`，consumer 側 `on_decision_resolved(agent_id, level)` 釋放。
+
+### 新環境變數
+
+```
+OMNISIGHT_IIS_JIRA_CONTAINMENT=false   # 預設 off
+```
+
+### 驗收
+
+`pytest test_intelligence_mitigation + intelligence + decision_engine + decision_api + dispatch + observability`
+→ **105 pass / 2.61s**。20 test 覆蓋 4 profile COT 長度 + fallback / 4 map 規則 / 3 tier 提案 kind+severity+default / dedup 同 agent + 跨 agent / route→contain 升級 / resolved callback 釋放 / L3 critical Notification / Jira default off / Jira env-on / snapshot 暴露狀態。
+
+### 後續
+
+**Phase 63-C Prompt Registry + Canary** — 把 prompt 從 code 抽到
+`backend/agents/prompts/*.md` + DB 版本表 + 5% canary + 7 天監控 +
+auto-rollback。
+
+---
+
 ## Phase 63-A — IIS Signal Layer 完成（2026-04-14）
 
 設計源：`docs/design/intelligence-immune-system.md` §一. 第一個 IIS
