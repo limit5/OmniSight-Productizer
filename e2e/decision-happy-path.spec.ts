@@ -45,40 +45,28 @@ test.describe("Autonomous Decision Engine — happy path", () => {
     await expect(page.getByRole("radio", { name: "SUPERVISED" }))
       .toHaveAttribute("aria-checked", "true", { timeout: 10_000 })
 
-    // Fall back to a direct backend round-trip through the browser's
-    // fetch. The UI click is flaky in Next.js dev mode (turbopack
-    // HMR + stale handler warnings during first render), but every
-    // other behaviour is genuine browser traffic through the Next.js
-    // rewrite proxy, which is what we really want to cover here.
-    const putResult = await page.evaluate(async () => {
-      const res = await fetch("/api/v1/operation-mode", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "full_auto" }),
-      })
-      return { ok: res.ok, status: res.status, body: await res.json() }
-    })
-    expect(putResult.ok).toBe(true)
-    expect(putResult.body.mode).toBe("full_auto")
+    // Header renders two ModeSelectors (mobile `md:hidden` + desktop
+    // `hidden md:flex`), both with the same accessible-name radios. At
+    // 1440×900 only the desktop one is visible; filter accordingly so
+    // the click lands on the painted element.
+    const fullAuto = page
+      .getByRole("radio", { name: "FULL AUTO", exact: true })
+      .filter({ visible: true })
+    await fullAuto.click()
 
-    // Backend-side check via the request fixture (independent of browser)
+    // Assert backend state first — this is the durable contract and is
+    // immune to turbopack React re-render jitter.
+    await expect.poll(
+      async () => (await (await request.get(
+        `http://127.0.0.1:${BACKEND_PORT}/api/v1/operation-mode`)).json()).mode,
+      { timeout: 10_000 },
+    ).toBe("full_auto")
+
+    // And the UI does eventually reflect it.
+    await expect(fullAuto).toHaveAttribute("aria-checked", "true", { timeout: 10_000 })
+
     const res = await request.get(`http://127.0.0.1:${BACKEND_PORT}/api/v1/operation-mode`)
-    const body = await res.json()
-    expect(body.mode).toBe("full_auto")
-    expect(body.parallel_cap).toBe(4)
-
-    // Confirm that a fresh fetch from the browser (routed through the
-    // Next.js dev-server rewrite) sees the updated backend state. We
-    // deliberately *don't* assert the React-rendered aria-checked here
-    // because Turbopack dev-mode hydration after reload races the fetch
-    // result unreliably — the contract we care about (HTTP round-trip
-    // via the proxy rewrite) is covered by this evaluate() + the
-    // independent backend GET above.
-    const seenFromBrowser = await page.evaluate(async () => {
-      const r = await fetch("/api/v1/operation-mode")
-      return await r.json()
-    })
-    expect(seenFromBrowser.mode).toBe("full_auto")
+    expect((await res.json()).parallel_cap).toBe(4)
   })
 
   test("switching budget strategy round-trips to the backend", async ({ page, request }) => {
@@ -87,32 +75,26 @@ test.describe("Autonomous Decision Engine — happy path", () => {
     await expect(page.getByRole("radio", { name: /BALANCED/ }))
       .toHaveAttribute("aria-checked", "true", { timeout: 10_000 })
 
-    // Same fetch-in-browser approach as the operation-mode test
-    // (see that comment for rationale).
-    const putResult = await page.evaluate(async () => {
-      const res = await fetch("/api/v1/budget-strategy", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy: "cost_saver" }),
-      })
-      return { ok: res.ok, body: await res.json() }
-    })
-    expect(putResult.ok).toBe(true)
-    expect(putResult.body.tuning.max_retries).toBe(1)
-    expect(putResult.body.tuning.model_tier).toBe("budget")
+    // BudgetStrategyPanel renders once (outside the dual-mobile header),
+    // but keep the visible filter defensive in case future layouts add
+    // a compact twin.
+    const costSaver = page
+      .getByRole("radio", { name: /COST SAVER/ })
+      .filter({ visible: true })
+    await costSaver.click()
 
-    // Backend state independent confirmation
+    await expect.poll(
+      async () => (await (await request.get(
+        `http://127.0.0.1:${BACKEND_PORT}/api/v1/budget-strategy`)).json()).strategy,
+      { timeout: 10_000 },
+    ).toBe("cost_saver")
+
+    await expect(costSaver).toHaveAttribute("aria-checked", "true", { timeout: 10_000 })
+
     const res = await request.get(`http://127.0.0.1:${BACKEND_PORT}/api/v1/budget-strategy`)
-    expect((await res.json()).strategy).toBe("cost_saver")
-
-    // Browser fetch through the Next.js rewrite confirms the proxy
-    // layer. (Same rationale as the operation-mode test: UI-render
-    // sync after a forced reload is too dev-mode-flaky to assert.)
-    const seenFromBrowser = await page.evaluate(async () => {
-      const r = await fetch("/api/v1/budget-strategy")
-      return await r.json()
-    })
-    expect(seenFromBrowser.strategy).toBe("cost_saver")
+    const body = await res.json()
+    expect(body.tuning.max_retries).toBe(1)
+    expect(body.tuning.model_tier).toBe("budget")
   })
 
   test("sweep button completes even when the queue is empty", async ({ page }) => {

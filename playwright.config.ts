@@ -65,13 +65,16 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
-      // Frontend — Next.js dev server proxies /api/v1/* → BACKEND_PORT
-      // via the rewrite in next.config.mjs.
-      command: `next dev --port ${FRONTEND_PORT}`,
+      // Frontend — production build via `next start`. Using dev mode
+      // (Turbopack or webpack) under Next 16 + React 19 leaves onClick
+      // handlers unhydrated intermittently in the E2E browser, swallowing
+      // UI clicks. Building once and serving with `next start` gives
+      // deterministic hydration, which is what E2E actually needs.
+      command: `sh -c 'next build >/dev/null && next start --port ${FRONTEND_PORT}'`,
       env: { BACKEND_URL: `http://127.0.0.1:${BACKEND_PORT}` },
       port: FRONTEND_PORT,
       reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
+      timeout: 300_000,
       stdout: "pipe",
       stderr: "pipe",
     },
