@@ -58,20 +58,33 @@ TASK_TIMEOUT = 1800  # 30 minutes
 # so error_check_node publishes here. Capped at 10 entries per agent.
 _agent_error_history: dict[str, list[str]] = {}
 _AGENT_ERR_HIST_MAX = 10
+# R2-#20: ring buffer is mutated by sync error-publisher callbacks and
+# iterated by the async watchdog; guard with a threading.Lock so we don't
+# race on list length during trim-and-append.
+import threading as _threading
+_agent_error_history_lock = _threading.Lock()
 
 
 def record_agent_error(agent_id: str, error_key: str) -> None:
     """Called by graph/nodes when an agent hits an error. Trim to window."""
     if not agent_id or not error_key:
         return
-    buf = _agent_error_history.setdefault(agent_id, [])
-    buf.append(error_key)
-    if len(buf) > _AGENT_ERR_HIST_MAX:
-        del buf[: len(buf) - _AGENT_ERR_HIST_MAX]
+    with _agent_error_history_lock:
+        buf = _agent_error_history.setdefault(agent_id, [])
+        buf.append(error_key)
+        if len(buf) > _AGENT_ERR_HIST_MAX:
+            del buf[: len(buf) - _AGENT_ERR_HIST_MAX]
 
 
 def clear_agent_error_history(agent_id: str) -> None:
-    _agent_error_history.pop(agent_id, None)
+    with _agent_error_history_lock:
+        _agent_error_history.pop(agent_id, None)
+
+
+def _snapshot_agent_errors(agent_id: str) -> list[str]:
+    """Thread-safe snapshot for watchdog iteration."""
+    with _agent_error_history_lock:
+        return list(_agent_error_history.get(agent_id, []))
 
 # Lock to prevent watchdog and request handlers from modifying _agents/_tasks concurrently
 _state_lock = asyncio.Lock()
@@ -102,7 +115,7 @@ async def run_watchdog():
                     continue  # too young to be stuck
                 agent = _agents.get(agent_id)
                 # Fix ③: read the ring buffer published by error_check_node
-                err_hist = list(_agent_error_history.get(agent_id, []))
+                err_hist = _snapshot_agent_errors(agent_id)
                 signal = _stuck.analyze_agent(
                     agent_id,
                     error_history=err_hist,
