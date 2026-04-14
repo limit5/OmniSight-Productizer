@@ -153,17 +153,37 @@ export function GlobalStatusHeader({
 
         {/* Environment Probes & Emergency Stop */}
         <div className="flex items-center gap-4">
-          {/* Status Indicators - hidden on tablet */}
-          <div className="hidden lg:flex items-center gap-4">
-            <div className="flex items-center gap-2">
+          {/* Status Indicators - hidden on tablet.
+            * Each pill has a fixed-width inner span (right-padded to the
+            * widest possible label, e.g. WSL2 reserves room for OFFLINE
+            * not OK) so changing state doesn't push the rest of the
+            * header sideways. USB string is truncated at 14 chars + ….  */}
+          <div className="hidden lg:flex items-center gap-4 shrink-0">
+            <div className="flex items-center gap-2 shrink-0" style={{ width: 110 }}>
               <div className={`status-dot ${wslStatus === "OK" ? "status-dot-active" : "status-dot-error"}`} />
-              <span className="font-mono text-xs text-[var(--foreground)]">
-                WSL2: <span className={wslStatus === "OK" ? "text-[var(--validation-emerald)]" : "text-[var(--critical-red)]"}>{wslStatus}</span>
+              <span className="font-mono text-xs text-[var(--foreground)] whitespace-nowrap">
+                WSL2:{" "}
+                <span
+                  className={`inline-block tabular-nums text-right ${wslStatus === "OK" ? "text-[var(--validation-emerald)]" : "text-[var(--critical-red)]"}`}
+                  style={{ minWidth: 56 }}
+                  title={`WSL2 ${wslStatus}`}
+                >
+                  {wslStatus}
+                </span>
               </span>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="status-dot status-dot-active" />
-              <span className="font-mono text-xs text-[var(--foreground)]">{usbStatus}</span>
+            <div
+              className="flex items-center gap-2 shrink-0 overflow-hidden"
+              style={{ width: 140 }}
+              title={usbStatus}
+            >
+              <div className="status-dot status-dot-active shrink-0" />
+              <span
+                className="font-mono text-xs text-[var(--foreground)] truncate whitespace-nowrap"
+                aria-label={`USB ${usbStatus}`}
+              >
+                {usbStatus.length > 14 ? usbStatus.slice(0, 13) + "…" : usbStatus}
+              </span>
             </div>
           </div>
           
