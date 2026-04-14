@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy } from "lucide-react"
+import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight } from "lucide-react"
 import {
   validateDag,
   submitDag,
@@ -135,6 +135,7 @@ export function DagEditor() {
   const [submitting, setSubmitting] = useState(false)
   const [submitMessage, setSubmitMessage] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
   const [mutate, setMutate] = useState(false)
   const [parseError, setParseError] = useState<string | null>(null)
 
@@ -219,17 +220,29 @@ export function DagEditor() {
     setSubmitting(true)
     setSubmitError(null)
     setSubmitMessage(null)
+    setSubmittedRunId(null)
     try {
       const res = await submitDag(parsed, { mutate })
       setSubmitMessage(
         `✓ Submitted — run ${res.run_id}, plan ${res.plan_id ?? "?"} (${res.status}).` +
           (res.mutation_rounds ? ` mutation rounds: ${res.mutation_rounds}` : ""),
       )
+      setSubmittedRunId(res.run_id)
     } catch (exc) {
       setSubmitError(exc instanceof Error ? exc.message : String(exc))
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // Hand off to the Pipeline Timeline panel so the operator can watch
+  // execution progress on the run they just submitted. Top-level
+  // page.tsx listens for this custom event and switches activePanel.
+  const jumpToTimeline = () => {
+    if (typeof window === "undefined") return
+    window.dispatchEvent(
+      new CustomEvent("omnisight:navigate", { detail: { panel: "timeline" } }),
+    )
   }
 
   // ─── error index (used to decorate error rows) ──────────────────
@@ -343,7 +356,19 @@ export function DagEditor() {
 
       {/* Submit result */}
       {submitMessage && (
-        <div className="text-xs font-mono text-[var(--artifact-purple)]">{submitMessage}</div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-mono text-[var(--artifact-purple)]">{submitMessage}</div>
+          {submittedRunId && (
+            <button
+              type="button"
+              onClick={jumpToTimeline}
+              className="text-xs font-mono px-2 py-0.5 rounded border border-[var(--artifact-purple)] text-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)] hover:text-white transition-colors flex items-center gap-1 shrink-0"
+              title={`View run ${submittedRunId} in Pipeline Timeline`}
+            >
+              View in Timeline <ArrowRight size={10} />
+            </button>
+          )}
+        </div>
       )}
       {submitError && (
         <div className="text-xs font-mono text-[var(--destructive)]">{submitError}</div>

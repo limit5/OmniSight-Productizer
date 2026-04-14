@@ -119,6 +119,20 @@ export default function Home() {
     return () => window.removeEventListener("popstate", onPop)
   }, [])
 
+  // Programmatic panel navigation from nested components (e.g. DagEditor
+  // jumping to the timeline after a successful submit). Using a custom
+  // event keeps the child decoupled from the top-level state setter.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onNav = (e: Event) => {
+      const detail = (e as CustomEvent<{ panel?: string }>).detail
+      const p = detail?.panel
+      if (p && (VALID_PANELS as Set<string>).has(p)) setActivePanel(p as PanelId)
+    }
+    window.addEventListener("omnisight:navigate", onNav as EventListener)
+    return () => window.removeEventListener("omnisight:navigate", onNav as EventListener)
+  }, [])
+
   // Use engine state (backed by API when connected)
   const {
     agents, tasks, messages: orchestratorMessages,

@@ -93,6 +93,27 @@ describe("DagEditor", () => {
     await waitFor(() => expect(screen.getByText(/wf-xyz/)).toBeInTheDocument())
   })
 
+  it("after successful submit, View in Timeline dispatches navigate event", async () => {
+    const user = userEvent.setup()
+    render(<DagEditor />)
+    await waitFor(() => expect(screen.getByText(/valid/i)).toBeInTheDocument())
+    const submit = screen.getByRole("button", { name: /submit/i })
+    await waitFor(() => expect(submit).not.toBeDisabled())
+
+    const navListener = vi.fn()
+    window.addEventListener("omnisight:navigate", navListener as EventListener)
+    try {
+      await user.click(submit)
+      await waitFor(() => expect(screen.getByRole("button", { name: /view in timeline/i })).toBeInTheDocument())
+      await user.click(screen.getByRole("button", { name: /view in timeline/i }))
+      expect(navListener).toHaveBeenCalledTimes(1)
+      const ev = navListener.mock.calls[0][0] as CustomEvent<{ panel: string }>
+      expect(ev.detail.panel).toBe("timeline")
+    } finally {
+      window.removeEventListener("omnisight:navigate", navListener as EventListener)
+    }
+  })
+
   it("loads a template when the chip is clicked", async () => {
     const user = userEvent.setup()
     render(<DagEditor />)
