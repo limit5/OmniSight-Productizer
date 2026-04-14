@@ -12,6 +12,7 @@ shell command. It enforces:
 | Egress whitelist | `OMNISIGHT_T1_ALLOW_EGRESS` + `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` | air-gap |
 | Image trust | `OMNISIGHT_DOCKER_IMAGE_ALLOWED_DIGESTS` | open mode |
 | Wall-clock kill | `OMNISIGHT_SANDBOX_LIFETIME_S` | 2700 (45 min) |
+| Per-exec output cap | `OMNISIGHT_SANDBOX_MAX_OUTPUT_BYTES` | 10000 (10 KB) |
 
 Everything below is opt-in for dev (sane fallbacks) and required for
 prod.

@@ -487,10 +487,16 @@ async def exec_in_container(
     container_id_or_name: str,
     command: str,
     timeout: int = DOCKER_TIMEOUT,
+    *,
+    tier: str = "t1",
 ) -> tuple[int, str]:
     """Execute a command inside a running container.
 
-    Returns (exit_code, combined output).
+    Returns (exit_code, combined output). Output is hard-capped at
+    `OMNISIGHT_SANDBOX_MAX_OUTPUT_BYTES` (default 10 KB) to keep a
+    runaway command from blowing up the Tier-0 LLM context. Truncation
+    appends a one-line marker and bumps
+    `omnisight_sandbox_output_truncated_total{tier}`.
     """
     rc, out, err = await _run(
         f'docker exec {container_id_or_name} bash -c "{command}"',
@@ -499,6 +505,22 @@ async def exec_in_container(
     combined = out
     if err:
         combined += f"\n[STDERR] {err}" if out else err
+    # Phase 64-D D3: enforce per-exec output cap.
+    from backend.config import settings as _settings
+    cap = int(_settings.sandbox_max_output_bytes or 0)
+    if cap > 0:
+        b = combined.encode("utf-8", errors="replace")
+        if len(b) > cap:
+            head = b[:cap].decode("utf-8", errors="replace")
+            combined = (
+                f"{head}\n[TRUNCATED — {len(b)} bytes total, "
+                f"cap={cap} via OMNISIGHT_SANDBOX_MAX_OUTPUT_BYTES]"
+            )
+            try:
+                from backend import metrics as _m
+                _m.sandbox_output_truncated_total.labels(tier=tier).inc()
+            except Exception:
+                pass
     return rc, combined
 
 

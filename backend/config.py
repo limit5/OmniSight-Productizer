@@ -141,6 +141,13 @@ class Settings(BaseSettings):
     # Set to 0 to disable (NOT recommended in prod). Default 45 min.
     sandbox_lifetime_s: int = 2700
 
+    # Phase 64-D D3: per-exec output size cap. If exec_in_container's
+    # stdout+stderr exceeds this many bytes, we truncate and append a
+    # one-line marker. Defends Tier-0 LLM context from being blown up
+    # by a runaway command (gcc dumping 5 MB of warnings, for example).
+    # 0 = disabled. Default 10 KB matches the design spec.
+    sandbox_max_output_bytes: int = 10_000
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:

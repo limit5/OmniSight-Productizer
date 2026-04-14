@@ -156,6 +156,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 64-D D3: per-exec output truncation events ──────────
+    sandbox_output_truncated_total = Counter(
+        "omnisight_sandbox_output_truncated_total",
+        "exec_in_container outputs that exceeded sandbox_max_output_bytes",
+        labelnames=("tier",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -184,6 +192,7 @@ else:
     sandbox_image_rejected_total = _NoOp()  # type: ignore
     sandbox_lifetime_killed_total = _NoOp()  # type: ignore
     sandbox_launch_total = _NoOp()  # type: ignore
+    sandbox_output_truncated_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -204,7 +213,8 @@ def reset_for_tests() -> None:
     global sse_subscribers, sse_dropped_total, workflow_step_total
     global auth_login_total, subprocess_orphan_total, persist_failure_total
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
-    global sandbox_launch_total, process_start_time
+    global sandbox_launch_total, sandbox_output_truncated_total
+    global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
         "omnisight_decision_total", "Decisions registered",
@@ -268,6 +278,11 @@ def reset_for_tests() -> None:
         "omnisight_sandbox_launch_total",
         "Sandbox launch attempts by tier/runtime/result",
         labelnames=("tier", "runtime", "result"), registry=REGISTRY,
+    )
+    sandbox_output_truncated_total = Counter(
+        "omnisight_sandbox_output_truncated_total",
+        "exec_in_container outputs that exceeded sandbox_max_output_bytes",
+        labelnames=("tier",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

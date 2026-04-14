@@ -192,6 +192,44 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 64-D — Killswitch 統一 完成（2026-04-14）
+
+承 Phase 64-A 完成後立即實作。原計畫 4 小項，**D2 重審後刪除**，
+理由：`subprocess_orphan_total{target}` 既有 label 描述 CI 整合
+（Jenkins / GitLab）的子程序，與沙盒 tier 不同領域，硬塞 `tier`
+label 會稀釋語義；保留現狀。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| D1 | 驗證 `_lifetime_killswitch(tier=...)` 對 T2 已可重用（S4 已預留） | （無新 code） |
+| D2 | **不做** — 見上述理由 | — |
+| D3 | `exec_in_container` 輸出超 `OMNISIGHT_SANDBOX_MAX_OUTPUT_BYTES`（預設 10 KB）即截斷 + marker；新 metric `omnisight_sandbox_output_truncated_total{tier}` | _本 commit_ |
+| D4 | `/healthz` 增 `sandbox: {launched, errors, lifetime_killed, image_rejected, output_truncated}` 區塊（從 Counter 即時計算） | _本 commit_ |
+
+### 新環境變數
+
+```
+OMNISIGHT_SANDBOX_MAX_OUTPUT_BYTES=10000   # 0 = 停用
+```
+
+### 新 metric
+
+- `omnisight_sandbox_output_truncated_total{tier}` — Counter
+
+### 驗收
+
+`pytest backend/tests/test_sandbox_killswitch.py 加 既有 sandbox bundle`
+→ **68 pass + 2 skip / 1.36s**。
+
+### 後續解鎖
+
+Phase 64-A + 64-D 全套就位 → 沙盒可觀測 + 可控制 + 可破壞性 cap。
+**Phase 62 / 64-B 正式可啟動**。
+
+---
+
 ## Phase 64-A — Tier-1 Sandbox Hardening 完成（2026-04-14）
 
 設計源：`docs/design/tiered-sandbox-architecture.md`。整個 Phase 64

@@ -119,6 +119,33 @@ async def healthz() -> JSONResponse:
         except Exception:
             pass
 
+    # Phase 64-D D4: surface sandbox counters so /healthz alone tells
+    # the operator whether containers are launching, getting killed by
+    # the lifetime cap, or having their output truncated.
+    sandbox_info: dict[str, Any] = {
+        "launched": 0, "errors": 0,
+        "lifetime_killed": 0, "image_rejected": 0,
+        "output_truncated": 0,
+    }
+    if _metrics.is_available():
+        try:
+            from backend import metrics as _m
+            def _sum(metric, **filt):
+                total = 0.0
+                for s in metric.collect()[0].samples:
+                    if not s.name.endswith("_total"):
+                        continue
+                    if all(s.labels.get(k) == v for k, v in filt.items()):
+                        total += s.value
+                return int(total)
+            sandbox_info["launched"] = _sum(_m.sandbox_launch_total, result="success")
+            sandbox_info["errors"] = _sum(_m.sandbox_launch_total, result="error")
+            sandbox_info["image_rejected"] = _sum(_m.sandbox_launch_total, result="image_rejected")
+            sandbox_info["lifetime_killed"] = _sum(_m.sandbox_lifetime_killed_total)
+            sandbox_info["output_truncated"] = _sum(_m.sandbox_output_truncated_total)
+        except Exception as exc:
+            logger.debug("sandbox counters lookup failed: %s", exc)
+
     overall_ok = bool(db_probe.get("ok"))
     body = {
         "ok": overall_ok,
@@ -129,6 +156,7 @@ async def healthz() -> JSONResponse:
         "db": db_probe,
         "watchdog": {"age_s": _watchdog_age_s()},
         "sse": sse_info,
+        "sandbox": sandbox_info,
         "checked_at": time.time(),
     }
     return JSONResponse(content=body, status_code=200 if overall_ok else 503)
