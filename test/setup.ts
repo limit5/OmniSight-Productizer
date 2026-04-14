@@ -28,16 +28,19 @@ class MockEventSource {
   onerror: ((e: Event) => void) | null = null
   onmessage: ((e: MessageEvent) => void) | null = null
   onopen: ((e: Event) => void) | null = null
-  private listeners: Record<string, Array<(e: MessageEvent) => void>> = {}
+  // Listeners can be attached for data events (MessageEvent) or
+  // connection-level events (plain Event — e.g. "error", "open"),
+  // so the store is widened to accept both.
+  private listeners: Record<string, Array<(e: Event) => void>> = {}
 
   constructor(url: string) {
     this.url = url
     MockEventSource._instances.push(this)
   }
-  addEventListener(type: string, listener: (e: MessageEvent) => void) {
+  addEventListener(type: string, listener: (e: Event) => void) {
     ;(this.listeners[type] ||= []).push(listener)
   }
-  removeEventListener(type: string, listener: (e: MessageEvent) => void) {
+  removeEventListener(type: string, listener: (e: Event) => void) {
     this.listeners[type] = (this.listeners[type] || []).filter(l => l !== listener)
   }
   /**
@@ -55,7 +58,7 @@ class MockEventSource {
   /** Fake the `open` handshake — property and addEventListener paths. */
   emitOpen() {
     const ev = new Event("open")
-    for (const l of this.listeners["open"] || []) l(ev as MessageEvent)
+    for (const l of this.listeners["open"] || []) l(ev)
     this.onopen?.(ev)
   }
   /**
@@ -65,7 +68,7 @@ class MockEventSource {
    */
   emitError() {
     const err = new Event("error")
-    for (const l of this.listeners["error"] || []) l(err as MessageEvent)
+    for (const l of this.listeners["error"] || []) l(err)
     this.onerror?.(err)
   }
   /**
