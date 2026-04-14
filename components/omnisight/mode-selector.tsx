@@ -76,20 +76,28 @@ export function ModeSelector({ compact = false }: Props) {
   const mountedRef = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
 
-  const refresh = useCallback(async () => {
+  // Audit-fix L2: exponential backoff on failure so a 5 xx backend
+  // doesn't eat 12 req/min from every connected operator. Reset to 5 s
+  // on the first success.
+  const failCountRef = useRef(0)
+  const refresh = useCallback(async (): Promise<boolean> => {
     abortRef.current?.abort()
     const ac = new AbortController()
     abortRef.current = ac
     try {
       const info = await getOperationMode()
-      if (!mountedRef.current || ac.signal.aborted) return
+      if (!mountedRef.current || ac.signal.aborted) return true
       setMode(info.mode)
       setCap(info.parallel_cap)
       setInFlight(info.in_flight)
       setError(null)
+      failCountRef.current = 0
+      return true
     } catch (exc) {
-      if (!mountedRef.current || ac.signal.aborted) return
+      if (!mountedRef.current || ac.signal.aborted) return false
       setError(exc instanceof Error ? exc.message : String(exc))
+      failCountRef.current += 1
+      return false
     }
   }, [])
 
@@ -117,10 +125,26 @@ export function ModeSelector({ compact = false }: Props) {
     }
   }, [])
 
-  // Poll in_flight every 5 s — single interval for component lifetime.
+  // Poll in_flight with exponential backoff (5 s → 60 s cap on sustained
+  // failure, resets to 5 s on success). Self-scheduling setTimeout chain
+  // so the delay is recomputed each tick.
   useEffect(() => {
-    const t = setInterval(() => { void refreshRef.current() }, 5000)
-    return () => clearInterval(t)
+    let cancelled = false
+    let handle: ReturnType<typeof setTimeout> | null = null
+    const tick = async () => {
+      if (cancelled) return
+      await refreshRef.current()
+      if (cancelled) return
+      const fails = failCountRef.current
+      // 5s, 10s, 20s, 40s, 60s (cap).
+      const delay = Math.min(60_000, 5_000 * Math.pow(2, fails))
+      handle = setTimeout(tick, delay)
+    }
+    handle = setTimeout(tick, 5_000)
+    return () => {
+      cancelled = true
+      if (handle) clearTimeout(handle)
+    }
   }, [])
 
   const handlePick = async (next: OperationMode) => {
