@@ -306,7 +306,9 @@ CREATE TABLE IF NOT EXISTS decision_rules (
     priority            INTEGER NOT NULL DEFAULT 100,
     enabled             INTEGER NOT NULL DEFAULT 1,
     note                TEXT NOT NULL DEFAULT '',
-    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    negative            INTEGER NOT NULL DEFAULT 0,
+    undo_count          INTEGER NOT NULL DEFAULT 0
 );
 
 -- Phase 56: durable workflow checkpointing
@@ -352,6 +354,33 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor);
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_kind, entity_id);
+
+-- Phase 58: decision profiles + auto-decision postmortem log
+CREATE TABLE IF NOT EXISTS decision_profiles (
+    id                      TEXT PRIMARY KEY,
+    threshold_risky         REAL NOT NULL,
+    threshold_destructive   REAL NOT NULL,
+    auto_critical           INTEGER NOT NULL DEFAULT 0,
+    enabled                 INTEGER NOT NULL DEFAULT 0,
+    description             TEXT NOT NULL DEFAULT '',
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS auto_decision_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id         TEXT NOT NULL,
+    kind                TEXT NOT NULL,
+    severity            TEXT NOT NULL,
+    chosen_option       TEXT NOT NULL,
+    confidence          REAL NOT NULL DEFAULT 0.0,
+    rationale           TEXT NOT NULL DEFAULT '',
+    profile_id          TEXT NOT NULL DEFAULT '',
+    auto_executed_at    REAL NOT NULL,
+    undone_at           REAL,
+    undone_by           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auto_decision_log_kind ON auto_decision_log(kind);
+CREATE INDEX IF NOT EXISTS idx_auto_decision_log_undone ON auto_decision_log(undone_at);
 """
 
 

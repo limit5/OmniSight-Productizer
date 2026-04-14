@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI):
         from backend import decision_rules as _dr
         loaded = await _dr.load_from_db()
         _log.info("Decision rules loaded from DB: %d", loaded)
+        # Phase 58: restore active decision profile
+        from backend import decision_profiles as _dp
+        prof_id = await _dp.load_from_db()
+        if prof_id:
+            _log.info("Decision profile restored: %s", prof_id)
         # Phase 56: surface workflow runs that were still 'running' when
         # the previous process died — operators can /workflow/in-flight
         # to review and decide whether to resume.
@@ -124,6 +129,8 @@ app.include_router(events.router, prefix=settings.api_prefix)
 app.include_router(wf_router.router, prefix=settings.api_prefix)
 from backend.routers import audit as _audit_router  # Phase 53
 app.include_router(_audit_router.router, prefix=settings.api_prefix)
+from backend.routers import profile as _profile_router  # Phase 58
+app.include_router(_profile_router.router, prefix=settings.api_prefix)
 app.include_router(workspaces.router, prefix=settings.api_prefix)
 app.include_router(artifacts.router, prefix=settings.api_prefix)
 app.include_router(webhooks.router, prefix=settings.api_prefix)

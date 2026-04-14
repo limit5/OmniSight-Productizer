@@ -359,11 +359,66 @@ def propose(
         ),
     )
 
-    if rule_forces_auto or should_auto_execute(severity):
+    # Phase 58: smart defaults + profile gate. Rule already had its
+    # chance above; if no rule fired AND we're in a profile that
+    # accepts auto-resolution by confidence, ask the chooser.
+    profile_chosen_id: str | None = None
+    profile_confidence: float = 0.0
+    profile_rationale: str = ""
+    profile_id_used: str = ""
+    if not rule_forces_auto:
+        try:
+            from backend import decision_defaults as _dd
+            from backend import decision_profiles as _dp
+            ctx = _dd.Context(
+                kind=kind, severity=severity.value,
+                options=opts, default_option_id=default_option_id,
+                is_host_native=(source or {}).get("is_host_native", False),
+                project_track=(source or {}).get("project_track", ""),
+            )
+            chosen = _dd.consult(ctx)
+            prof = _dp.get_profile()
+            profile_id_used = prof.id
+            if chosen is not None:
+                # Critical-kind allow-list always queues unless profile
+                # explicitly opted in (only GHOST does).
+                is_critical = kind in _dp.CRITICAL_KINDS
+                threshold = (
+                    prof.threshold_destructive
+                    if severity == DecisionSeverity.destructive
+                    else prof.threshold_risky
+                )
+                allow_auto = (
+                    chosen.confidence >= threshold
+                    and (not is_critical or prof.auto_critical)
+                )
+                if allow_auto:
+                    profile_chosen_id = chosen.option_id
+                    profile_confidence = chosen.confidence
+                    profile_rationale = chosen.rationale
+        except Exception as exc:
+            logger.warning("decision_defaults/profile gate failed: %s", exc)
+
+    if rule_forces_auto or should_auto_execute(severity) or profile_chosen_id is not None:
         dec.status = DecisionStatus.auto_executed
         dec.resolved_at = now
-        dec.chosen_option_id = default_option_id
+        dec.chosen_option_id = profile_chosen_id or default_option_id
         dec.resolver = "auto"
+        if profile_chosen_id:
+            dec.source["chooser_confidence"] = profile_confidence
+            dec.source["chooser_rationale"] = profile_rationale
+            dec.source["profile_id"] = profile_id_used
+            try:
+                from backend import db
+                loop = asyncio.get_event_loop()
+                loop.create_task(_log_auto_decision(
+                    decision_id=dec.id, kind=kind, severity=severity.value,
+                    chosen_option=dec.chosen_option_id, confidence=profile_confidence,
+                    rationale=profile_rationale, profile_id=profile_id_used,
+                    auto_executed_at=now,
+                ))
+            except Exception:
+                pass
         _archive(dec)
         _emit("decision_auto_executed", dec)
         return dec
@@ -472,6 +527,26 @@ def _archive(dec: Decision) -> None:
     """Public archive — takes the lock itself (for standalone callers)."""
     with _state_lock:
         _archive_locked(dec)
+
+
+async def _log_auto_decision(*, decision_id: str, kind: str, severity: str,
+                             chosen_option: str, confidence: float, rationale: str,
+                             profile_id: str, auto_executed_at: float) -> None:
+    """Phase 58: write to auto_decision_log so the postmortem UI can
+    list / bulk-undo. Best-effort; failures logged at warning."""
+    try:
+        from backend import db
+        await db._conn().execute(
+            "INSERT INTO auto_decision_log "
+            "(decision_id, kind, severity, chosen_option, confidence, rationale, "
+            " profile_id, auto_executed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (decision_id, kind, severity, chosen_option, confidence,
+             rationale[:240], profile_id, auto_executed_at),
+        )
+        await db._conn().commit()
+    except Exception as exc:
+        logger.warning("auto_decision_log insert failed for %s: %s", decision_id, exc)
 
 
 def _archive_locked(dec: Decision) -> None:
