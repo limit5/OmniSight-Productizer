@@ -160,12 +160,34 @@ export function FirstRunTour() {
   const cardRef = useRef<HTMLDivElement | null>(null)
 
   // Decide whether to start. Runs once on mount.
+  // `?tour=1` starts at step 0; `?tour=2` starts at step 1; or
+  // `?tour=decision-queue` jumps to the matching anchor so teammates
+  // can share a link that opens the tour on a specific step.
   useEffect(() => {
     if (typeof window === "undefined") return
     const params = new URLSearchParams(window.location.search)
-    const forced = params.get("tour") === "1"
+    const tourParam = params.get("tour")
     const seen = window.localStorage.getItem(STORAGE_KEY) === "1"
-    if (forced || !seen) setActive(true)
+    if (tourParam) {
+      // Numeric 1..5 → zero-indexed step.
+      const asNum = parseInt(tourParam, 10)
+      if (Number.isFinite(asNum) && asNum >= 1 && asNum <= STEPS.length) {
+        setIdx(asNum - 1)
+        setActive(true)
+        return
+      }
+      // Anchor name → find the step with that anchor.
+      const anchorIdx = STEPS.findIndex((s) => s.anchor === tourParam)
+      if (anchorIdx >= 0) {
+        setIdx(anchorIdx)
+        setActive(true)
+        return
+      }
+      // Unknown value — fall back to full tour from step 0.
+      setActive(true)
+      return
+    }
+    if (!seen) setActive(true)
   }, [])
 
   const closeTour = useCallback((remember = true) => {

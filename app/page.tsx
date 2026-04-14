@@ -14,6 +14,7 @@ import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { ToastCenter } from "@/components/omnisight/toast-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
+import { CommandPalette } from "@/components/omnisight/command-palette"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
@@ -465,6 +466,11 @@ export default function Home() {
       {/* Phase 50C: overlay toasts for risky/destructive decisions. */}
       <ToastCenter />
       <FirstRunTour />
+      <CommandPalette
+        onNavigatePanel={(id) => {
+          if ((VALID_PANELS as Set<string>).has(id)) setActivePanel(id as PanelId)
+        }}
+      />
 
       {/* Main Content */}
       <div className="relative z-10 flex flex-col h-screen">

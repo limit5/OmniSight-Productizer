@@ -120,7 +120,7 @@ const SECTIONS: Section[] = [
       },
       {
         key: "search",
-        label: { en: "Search docs", "zh-TW": "搜尋文件", "zh-CN": "搜索文档", ja: "ドキュメント検索" },
+        label: { en: "Search docs   (⌘K)", "zh-TW": "搜尋文件   (⌘K)", "zh-CN": "搜索文档   (⌘K)", ja: "ドキュメント検索   (⌘K)" },
         href: (l) => `/docs/operator/${l}`,
         icon: Compass,
       },
