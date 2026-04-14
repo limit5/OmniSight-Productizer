@@ -16,7 +16,6 @@ export default defineConfig({
     include: [
       "test/**/*.test.ts",
       "test/**/*.test.tsx",
-      "test/integration/**/*.test.ts",
     ],
     // Exclude the Python suite — vitest picks up backend/ otherwise because
     // we don't scope `include` above until rootDir matches.
