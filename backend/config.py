@@ -1,4 +1,9 @@
+import logging
+import os
+
 from pydantic_settings import BaseSettings
+
+_startup_logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -167,3 +172,133 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L1-03: startup-time config validation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Called from backend.main lifespan. Catches common deploy-day
+# mistakes that would otherwise manifest as confusing 401s or
+# silent "provider unreachable" logs hours later.
+
+def _mask(v: str, show: int = 4) -> str:
+    """Redact secrets for logging: keep first + last `show` chars."""
+    if not v:
+        return "(empty)"
+    if len(v) <= show * 2 + 3:
+        return "***"
+    return f"{v[:show]}…{v[-show:]}"
+
+
+# Provider key prefixes we recognise. Wrong prefix = almost certainly
+# a copy-paste error; we warn but don't block so private deployments
+# (proxies, Bedrock-style wrappers) still work.
+_PROVIDER_PREFIXES: dict[str, tuple[str, ...]] = {
+    "anthropic_api_key":  ("sk-ant-",),
+    "openai_api_key":     ("sk-", "sk-proj-"),
+    "google_api_key":     (),            # Google keys are varied
+    "xai_api_key":        ("xai-",),
+    "groq_api_key":       ("gsk_",),
+    "deepseek_api_key":   ("sk-",),
+    "together_api_key":   (),            # Together keys are varied
+    "openrouter_api_key": ("sk-or-",),
+}
+
+_MIN_BEARER_LEN = 16  # 128-bit entropy, roughly
+
+
+class ConfigValidationError(RuntimeError):
+    """Startup-time settings rejected — refuse to boot."""
+
+
+def validate_startup_config(strict: bool | None = None) -> list[str]:
+    """Sanity-check the loaded settings + critical env vars. Returns a
+    list of warnings (empty = clean). Raises `ConfigValidationError`
+    on a *hard* problem if strict mode is on.
+
+    `strict` defaults to True when `settings.debug == False`, False
+    when debug is on — dev workflow stays lenient, prod boots refuse
+    to start with a known-dangerous config.
+    """
+    if strict is None:
+        strict = not settings.debug
+
+    warnings: list[str] = []
+    hard_errors: list[str] = []
+
+    # ── Bearer token ──
+    bearer = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
+    if bearer:
+        if len(bearer) < _MIN_BEARER_LEN:
+            msg = (
+                f"OMNISIGHT_DECISION_BEARER is only {len(bearer)} chars "
+                f"(min {_MIN_BEARER_LEN}). Brute-forcing is cheap at "
+                "that size — use at least 16."
+            )
+            (hard_errors if strict else warnings).append(msg)
+    else:
+        # Empty bearer leaves DE mutator endpoints open. Fine in dev,
+        # foot-gun in prod.
+        warnings.append(
+            "OMNISIGHT_DECISION_BEARER is empty — Decision Engine "
+            "mutator endpoints (approve/reject/undo/mode) are OPEN."
+        )
+
+    # ── Provider key shape ──
+    for field, prefixes in _PROVIDER_PREFIXES.items():
+        value = getattr(settings, field, "") or ""
+        value = value.strip()
+        if not value or not prefixes:
+            continue
+        if not any(value.startswith(p) for p in prefixes):
+            warnings.append(
+                f"{field} doesn't start with any known prefix "
+                f"({'/'.join(prefixes)}); may be a paste error. "
+                f"Loaded as: {_mask(value)}"
+            )
+
+    # ── LLM provider sanity: the *selected* provider must have a
+    #    matching key (unless it's ollama which is local/no-auth, or
+    #    the debug dev profile). ──
+    provider = (settings.llm_provider or "").strip().lower()
+    if provider and provider != "ollama":
+        key_field = f"{provider}_api_key"
+        if not getattr(settings, key_field, ""):
+            msg = (
+                f"llm_provider={provider!r} but {key_field.upper()} "
+                "is empty — every LLM call will fail. Either set the "
+                "key or switch llm_provider to 'ollama'."
+            )
+            (hard_errors if strict else warnings).append(msg)
+
+    # ── T1 sandbox egress consistency ──
+    if settings.t1_allow_egress and not settings.t1_egress_allow_hosts:
+        warnings.append(
+            "t1_allow_egress=true but t1_egress_allow_hosts is empty — "
+            "no hosts will actually be reachable. Did you forget the "
+            "whitelist?"
+        )
+
+    # ── Masked summary at startup ──
+    _startup_logger.info(
+        "config loaded: provider=%s model=%s debug=%s "
+        "bearer=%s db=%s docker_runtime=%s t1_egress=%s",
+        settings.llm_provider, settings.get_model_name(), settings.debug,
+        "set" if bearer else "UNSET",
+        settings.database_path or "data/omnisight.db",
+        settings.docker_runtime,
+        "ON" if settings.t1_allow_egress else "off",
+    )
+
+    for w in warnings:
+        _startup_logger.warning("config: %s", w)
+    if hard_errors:
+        for e in hard_errors:
+            _startup_logger.error("config: %s", e)
+        if strict:
+            raise ConfigValidationError(
+                "Refusing to start — " + "; ".join(hard_errors),
+            )
+
+    return warnings

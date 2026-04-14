@@ -47,6 +47,17 @@ async def lifespan(app: FastAPI):
     _sl.configure()
     import logging
     _log = logging.getLogger(__name__)
+    # L1-03: sanity-check critical env/config BEFORE opening the DB.
+    # Catches deploy-day typos (wrong bearer, missing provider key)
+    # at boot instead of the first 401 / first silent provider fail.
+    # Strict mode (refuse to boot on hard errors) auto-enables when
+    # debug=False; dev stays lenient.
+    from backend.config import validate_startup_config, ConfigValidationError
+    try:
+        validate_startup_config()
+    except ConfigValidationError as exc:
+        _log.error("config validation failed: %s", exc)
+        raise
     try:
         await db.init()
         await _startup_cleanup(_log)
