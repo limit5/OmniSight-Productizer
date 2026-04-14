@@ -31,10 +31,26 @@ const agentTemplates: Record<string, Partial<Agent>> = {
   custom: { type: "custom", thoughtChain: "Custom agent initialized...", status: "idle" },
 }
 
+// Phase 50D: parse ?panel=…&decision=… so a URL can deep-link into a
+// specific panel, and optionally focus a decision id in the dashboard.
+const VALID_PANELS: ReadonlySet<PanelId> = new Set([
+  "host", "spec", "agents", "orchestrator", "tasks", "source", "npi", "vitals",
+  "decisions", "budget", "timeline", "rules",
+])
+
+function readInitialPanel(): PanelId {
+  if (typeof window === "undefined") return "orchestrator"
+  const panel = new URLSearchParams(window.location.search).get("panel")
+  if (panel && (VALID_PANELS as Set<string>).has(panel)) return panel as PanelId
+  // A `?decision=…` link without `panel=` implies the decision queue.
+  if (new URLSearchParams(window.location.search).get("decision")) return "decisions"
+  return "orchestrator"
+}
+
 export default function Home() {
   const engine = useEngine()
   const [syncCount, setSyncCount] = useState(0)
-  const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
+  const [activePanel, setActivePanel] = useState<PanelId>(readInitialPanel)
   const [providerData, setProviderData] = useState<api.ProvidersResponse | null>(null)
   const [providerHealth, setProviderHealth] = useState<api.ProviderHealthResponse | null>(null)
   const [handoffs, setHandoffs] = useState<api.HandoffItem[]>([])
@@ -58,6 +74,29 @@ export default function Home() {
     engine.setProviderSwitchCallback(refetchProviders)
     return () => engine.setProviderSwitchCallback(null)
   }, [refetchProviders])  // engine.setProviderSwitchCallback is a stable ref assignment
+
+  // Phase 50D: keep ?panel=… in sync with activePanel and honour the
+  // browser back/forward button. Preserves any ?decision=… query so a
+  // deep link like `/?decision=dec-x&panel=timeline` survives navigation.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const params = new URLSearchParams(window.location.search)
+    const currentParam = params.get("panel")
+    if (currentParam === activePanel) return
+    params.set("panel", activePanel)
+    const next = `${window.location.pathname}?${params.toString()}`
+    window.history.replaceState(null, "", next)
+  }, [activePanel])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onPop = () => {
+      const p = new URLSearchParams(window.location.search).get("panel")
+      if (p && (VALID_PANELS as Set<string>).has(p)) setActivePanel(p as PanelId)
+    }
+    window.addEventListener("popstate", onPop)
+    return () => window.removeEventListener("popstate", onPop)
+  }, [])
 
   // Use engine state (backed by API when connected)
   const {

@@ -260,8 +260,26 @@ function DecisionRow(props: {
   const canUndo =
     d.status === "approved" || d.status === "auto_executed" || d.status === "timeout_default"
 
+  // Phase 50D: deep-link highlight. `/?decision=<id>` scrolls the matching
+  // row into view and ring-pulses it briefly.
+  const rowRef = useRef<HTMLLIElement | null>(null)
+  const [focusRing, setFocusRing] = useState(false)
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const target = new URLSearchParams(window.location.search).get("decision")
+    if (target !== d.id) return
+    rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+    setFocusRing(true)
+    const t = setTimeout(() => setFocusRing(false), 3500)
+    return () => clearTimeout(t)
+  }, [d.id])
+
   return (
-    <li className="px-3 py-2">
+    <li
+      ref={rowRef}
+      data-testid={`decision-row-${d.id}`}
+      className={`px-3 py-2 transition-shadow ${focusRing ? "ring-2 ring-[var(--neural-cyan,#67e8f9)] rounded-sm" : ""}`}
+    >
       <div className="flex items-start gap-2">
         <Icon className="w-4 h-4 mt-0.5 shrink-0" style={{ color: meta.color }} aria-hidden />
         <div className="flex-1 min-w-0">

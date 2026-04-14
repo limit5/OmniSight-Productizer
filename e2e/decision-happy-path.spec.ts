@@ -106,6 +106,18 @@ test.describe("Autonomous Decision Engine — happy path", () => {
     await expect(sweep).toBeEnabled()
   })
 
+  test("?panel=timeline deep-link opens the timeline panel", async ({ page }) => {
+    // Phase 50D: the URL-driven panel selector runs on mount — the
+    // first render should already be on the timeline panel, not the
+    // default orchestrator. We probe for the timeline heading which
+    // is unique to that panel at desktop widths + the mobile tab.
+    await page.goto("/?panel=timeline")
+    await expect(page.getByRole("heading", { name: "PIPELINE TIMELINE" }))
+      .toBeVisible({ timeout: 10_000 })
+    // URL should survive the initial replaceState round-trip.
+    await expect.poll(() => page.url()).toContain("panel=timeline")
+  })
+
   test("pipeline timeline renders every phase from the backend", async ({ page }) => {
     // Phase 50A: the timeline calls GET /pipeline/timeline on mount and
     // renders a <li data-testid="timeline-step-…"> for every configured
