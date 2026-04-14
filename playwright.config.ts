@@ -52,6 +52,12 @@ export default defineConfig({
       // Backend — FastAPI. `reuseExistingServer` makes local iteration
       // painless when the dev already has it up.
       command: `python3 -m uvicorn backend.main:app --host 127.0.0.1 --port ${BACKEND_PORT}`,
+      env: {
+        // E2E browser origin differs from dev default; whitelist it so
+        // cross-origin EventSource (used by the SSE round-trip test)
+        // isn't blocked by CORS.
+        OMNISIGHT_EXTRA_CORS_ORIGINS: `http://127.0.0.1:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT}`,
+      },
       port: BACKEND_PORT,
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,

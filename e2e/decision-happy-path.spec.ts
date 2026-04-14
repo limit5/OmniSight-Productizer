@@ -124,41 +124,45 @@ test.describe("Autonomous Decision Engine — happy path", () => {
     await expect(sweep).toBeEnabled()
   })
 
-  test("proposed decision surfaces in the dashboard via SSE", async ({ page, request }) => {
-    // Use manual mode so the proposal stays in pending instead of
-    // auto-executing out of sight.
+  test("SSE stream delivers mode_changed event to the browser", async ({ page, request }) => {
+    // Real SSE round-trip: open an EventSource in the browser, trigger a
+    // mode change on the backend, and assert the browser receives the
+    // corresponding mode_changed event through the Next.js rewrite proxy.
+    // This is the genuine SSE contract Phase 47-48 added; the earlier
+    // version of this test asserted nothing SSE-specific.
+    // Connect EventSource directly to the backend rather than through
+    // the Next.js dev-server rewrite: turbopack buffers SSE responses
+    // and eats events in dev. CORS for :FRONTEND_PORT is whitelisted in
+    // playwright.config.ts via OMNISIGHT_EXTRA_CORS_ORIGINS.
+    const received = await page.evaluate(async (backendPort) => {
+      return await new Promise<{ event: string; data: unknown } | null>((resolve) => {
+        const es = new EventSource(`http://127.0.0.1:${backendPort}/api/v1/events`)
+        const timer = setTimeout(() => { es.close(); resolve(null) }, 8000)
+        es.addEventListener("mode_changed", (ev: MessageEvent) => {
+          clearTimeout(timer)
+          const data = JSON.parse(ev.data)
+          es.close()
+          resolve({ event: "mode_changed", data })
+        })
+        // Only fire the PUT once the EventSource is OPEN — otherwise a
+        // fast local backend can publish before the subscriber attaches.
+        es.onopen = () => {
+          fetch(`http://127.0.0.1:${backendPort}/api/v1/operation-mode`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: "turbo" }),
+          })
+        }
+      })
+    }, BACKEND_PORT)
+    expect(received).not.toBeNull()
+    expect(received!.event).toBe("mode_changed")
+    const payload = received!.data as { mode: string }
+    expect(payload.mode).toBe("turbo")
+
+    // Reset so next test's beforeEach isn't the only thing restoring state.
     await request.put(`http://127.0.0.1:${BACKEND_PORT}/api/v1/operation-mode`, {
-      data: { mode: "manual" },
+      data: { mode: "supervised" },
     })
-    // Reload to pick up mode via SSE (dev race-safety).
-    await page.reload()
-
-    // Poke a proposal into the queue via Python one-liner through the
-    // backend's public API: there is no public "propose" endpoint, so
-    // we call the internal decision_engine via a Python eval route that
-    // ships with the backend smoke-test fixtures. Fall back to a skip
-    // if the route isn't there — this keeps the test resilient to
-    // internal-API churn without sacrificing the basic SSE assertion.
-    const urlProbe = `http://127.0.0.1:${BACKEND_PORT}/api/v1/decisions`
-    const pre = await request.get(urlProbe)
-    expect(pre.ok()).toBe(true)
-    const preBody = await pre.json()
-    // Baseline — some other test may have left pending items.
-    const baselinePending = preBody.count
-
-    // Use the sweep endpoint with a freshly proposed decision by going
-    // through an internal helper: directly POST an artificial approve on
-    // a non-existent id should 404 — that's enough to prove API is up.
-    const missing = await request.post(
-      `http://127.0.0.1:${BACKEND_PORT}/api/v1/decisions/dec-nope/approve`,
-      { data: { option_id: "x" } },
-    )
-    expect(missing.status()).toBe(404)
-
-    // The dashboard "DECISION QUEUE" title must still render even with
-    // an empty list — proves the happy-path surface stays up.
-    await expect(page.getByRole("heading", { name: "DECISION QUEUE" })).toBeVisible()
-    // Leave the baseline where it is.
-    void baselinePending
   })
 })
