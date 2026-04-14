@@ -192,6 +192,75 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 67-C — Speculative Container Pre-warm 完成（2026-04-15）
+
+Engine 3 從 `lossless-agent-acceleration.md` 落地。DAG validate 通過
+後，in-degree=0 的 Tier-1 任務容器在背景啟動；dispatch 時 consume
+省掉 1–3s 冷啟動。
+
+### 子任 / commit
+
+| 子任 | 內容 | commit |
+|---|---|---|
+| S1 | `backend/sandbox_prewarm.py`：`pick_prewarm_candidates`（in-degree=0 + Tier-1、depth 2 env clamp [0,8]）+ `prewarm_for`（走既有 `start_container` → 自動套 64-A image trust + 64-D lifetime cap、dedup）+ `consume` 原子 pop + `cancel_all`（mutation/abort 釋放、per-slot stopper 失敗不影響其他）；2 metrics；22 test | `ee64837` |
+| S2 | DAG router 整合：submit validated → `asyncio.create_task(prewarm_in_background)` 不阻 response；mutate 前 `cancel_all` 防過時速推浪費 lifetime；opt-in env + 失敗 swallow；6 test；HANDOFF | _本 commit_ |
+
+### 設計姿態
+
+- **預設 off（opt-in）**：`OMNISIGHT_PREWARM_ENABLED=true` 才啟動。
+  Fire-and-forget + 失敗 swallow 不影響 submit。
+- **絕不繞過沙盒守門**：pre-warm 走既有 `start_container` → image trust + lifetime cap 自動套用。
+- **Mutation 前必 cancel**：replanned DAG 的 in-degree=0 任務會不同。
+- **In-degree ≠ 0 絕不 pre-warm**：上游未完成無從 useful。
+- **只 Tier-1**：networked / t3 start-up 特性不同，v1 不 model。
+- **Depth clamp [0, 8]**：operator 設 99 也只會跑 8。
+- **Consumed slot 由 caller 擁有**：cancel_all 不 stop 已交付 container。
+
+### 新環境變數
+
+```
+OMNISIGHT_PREWARM_DEPTH=2       # [0, 8] clamp
+OMNISIGHT_PREWARM_ENABLED=false # 整合 opt-in gate
+```
+
+### 新 metrics
+
+- `omnisight_prewarm_started_total` — Counter
+- `omnisight_prewarm_consumed_total{result}` — Counter；
+  `result ∈ {hit, miss, cancelled, start_error}`
+
+### 驗收
+
+`pytest test_sandbox_prewarm + test_dag_prewarm_wire` →
+**28 passed**（22 + 6）。
+
+### Phase 67 完成進度
+
+```
+67-A Prompt Cache         ✅
+67-B Diff Patch           ✅
+67-C Speculative Pre-warm ✅（本 commit）
+67-D RAG Pre-fetch        ✅
+```
+
+Engine 1–4 全部 ship；`lossless-agent-acceleration.md` 落地完成。
+
+### 已知限制（Phase 68+ 待續）
+
+- **Workspace binding**：v1 pre-warm 使用 `_prewarm/` shared 空間。
+  真正 dispatch 時 consume() 回傳 container，但 per-agent workspace
+  尚未 mount。完整收益需「pre-warm → consume → mount workspace via
+  docker cp / bind remount」流程。
+- **Consume 未 wire 到執行器**：DAG dispatcher 尚未整合 `consume()`；
+  現階段 pre-warm 帶來 image-pull cache 但尚未省 start。
+
+### 後續
+
+**Phase 65 Data Flywheel**（10–14h，64-B T2 已就位）或 **Phase 63-E
+Memory Decay**（2–3h）可動工。64-C T3 硬體 track 獨立。
+
+---
+
 ## Phase 67-B — Diff Patch + 強制契約 完成（2026-04-15）
 
 把「agent 不可覆寫整檔」從宣告改成 enforced。五條路徑（patch/create/

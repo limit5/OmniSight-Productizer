@@ -77,6 +77,46 @@ async def _default_ask_fn(system: str, user: str) -> tuple[str, int]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 67-C hooks — speculative pre-warm
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _prewarm_enabled() -> bool:
+    """Pre-warm is opt-in. Default OFF because v1 cannot yet mount the
+    per-agent workspace into the pre-warmed container (that requires
+    agent→task assignment which happens LATER). Operators that run a
+    shared workspace layout can turn this on experimentally."""
+    import os as _os
+    raw = (_os.environ.get("OMNISIGHT_PREWARM_ENABLED") or "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+async def _prewarm_in_background(dag: DAG) -> None:
+    """Fire-and-forget hook. Always swallows exceptions — pre-warm
+    failure must not surface to the DAG submit caller."""
+    try:
+        from pathlib import Path
+        from backend.workspace import _WORKSPACES_ROOT  # type: ignore[attr-defined]
+        from backend import sandbox_prewarm as _pw
+        shared = Path(_WORKSPACES_ROOT) / "_prewarm"
+        shared.mkdir(parents=True, exist_ok=True)
+        await _pw.prewarm_for(dag, shared)
+    except Exception as exc:
+        logger.debug("prewarm hook swallowed error: %s", exc)
+
+
+async def _cancel_prewarm(reason: str) -> None:
+    """Mutation / abort path — drop stale pre-warms so their lifetime
+    budget isn't burned waiting for a task that'll never consume."""
+    try:
+        from backend import sandbox_prewarm as _pw
+        n = await _pw.cancel_all(reason=reason)
+        if n:
+            logger.info("prewarm: cancelled %d container(s) on %s", n, reason)
+    except Exception as exc:
+        logger.debug("prewarm cancel swallowed error: %s", exc)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  POST /api/v1/dag
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -119,6 +159,10 @@ async def submit_dag(req: DAGSubmitRequest,
     #    kick the Orchestrator loop.
     if plan.status == "failed" and req.mutate:
         from backend import dag_planner as dp
+        # Before we attempt to mutate, drop any pre-warms that were
+        # speculatively launched against the prior draft — the
+        # replanned DAG will have different in-degree-0 tasks.
+        await _cancel_prewarm(reason="dag_mutated")
         loop = await dp.run_mutation_loop(dag, ask_fn=_default_ask_fn)
         if loop.ok:
             # Open a successor run with the recovered DAG.
@@ -152,6 +196,14 @@ async def submit_dag(req: DAGSubmitRequest,
     # 4. Normal path — plain submit, no mutation. Return whatever
     #    status we landed at (validated / executing / failed).
     status_code = 200 if plan.status != "failed" else 422
+
+    # Phase 67-C hook: only fire pre-warm on validated plans AND when
+    # opt-in. We fire-and-forget with asyncio.create_task so the
+    # response returns immediately; pre-warm continues in background.
+    if plan.status == "executing" and _prewarm_enabled():
+        import asyncio as _asyncio
+        _asyncio.create_task(_prewarm_in_background(dag))
+
     return JSONResponse(
         status_code=status_code,
         content={
