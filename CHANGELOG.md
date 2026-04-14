@@ -47,6 +47,13 @@ history).
 - Destructive-severity approve/reject now require `window.confirm()`.
 - Toast `aria-live` upgraded from `polite` to `assertive` +
   `aria-atomic`.
+- Header / panel layout stability sweep — every dynamic-width
+  element in the dashboard header (WSL2 / USB / MODE error / ARCH
+  chip / EmergencyStop) and 5 panel headers (task-backlog,
+  decision-dashboard, budget-strategy, pipeline-timeline,
+  decision-rules-editor, host-device-panel) now occupies a fixed
+  box. Status changes never reflow neighbouring elements. See
+  HANDOFF "Phase 50-Layout" for the design rules.
 
 ### Fixed
 - `decision_engine._reset_for_tests()` referenced deleted globals

@@ -192,6 +192,63 @@
 - **Cluster 批次制**：per-item full test 不可行（備忘錄已記 60–180min + 超時）；改為 cluster 內修多項、cluster 末跑 targeted + 啟動檢查。18 個 cluster、每個 5–15 min，整體 ~4h 完成 110 項。
 - **persist → load from DB 模式**：A1 確立的寫透 + lifespan 載入樣式，後續 Phase 53 audit_log 可沿用。
 
+## Phase 50-Layout — Header / Panel 寬度穩定性掃修（2026-04-14）
+
+操作員回報「某個元件狀態變動造成版面跑掉」是在多輪 commit 中陸續發現
+的同類 bug。集中於 9 個 commit，徹底解決所有 dashboard 元件的寬度抖動。
+
+### 根本原因
+
+flex 列裡的可變寬度文字 / badge / 邊框 → 鄰居被推；無 `tabular-nums`
+的數字會微抖；`border-2` 替換 `border` 會撐 box；loading placeholder 與
+實際元件寬度不一致造成 mount 時跳動。
+
+### 修法總綱
+
+| 模式 | 套用對象 |
+|---|---|
+| 容器 `width: Npx` + `flexShrink: 0` | EmergencyStop / ArchIndicator / WSL2 / USB |
+| 內 span `min-width` 預留最寬狀態空間 | EmergencyStop 文字槽、所有計數 |
+| `tabular-nums` 確保數字等寬 | task counts / decision pending / progress |
+| `truncate + maxWidth + title` 保完整字串 | hint text / advice 串 |
+| `visibility: hidden` 預留隱藏槽位 | DETECTING 計數 (0 / N 切換) |
+| `border-2` → `outline outline-2 outline-offset` | EmergencyStop CONFIRM 狀態 |
+| `absolute` 定位脫離 flex flow | MODE error badge / popover / tour outline |
+
+### 修復清單（commit 順序）
+
+```
+024804a fix(layout): 5 panel header sweep — task-backlog 計數、decision pending、
+                                            budget hint、pipeline 3 metrics、
+                                            decision-rules 計數、host CONNECTED/DETECTING
+c0b254f fix(emergency-stop): 100×32 鎖 box + outline 取代 border-2 + 50px 文字槽
+a3ef235 fix(header): WSL2 (110px) + USB (140px) 固定容器
+628c655 fix(arch-indicator): 142/124 px 鎖 chip + truncate 7 字 + 後端 cap 16 字
+2db910b fix(mode-selector): error chip absolute -top-1.5 -right-1.5 圓 badge + popover
+```
+
+### 影響面
+
+- header 任何狀態組合（WSL OFFLINE / USB Detecting / MODE 500 / target
+  toolchain missing / EmergencyStop 4 種狀態 / 100+ tasks）都不再造成
+  鄰居元素位移。
+- panel header 任何 counter / hint 變動也不再推 PanelHelp / tab / button。
+- mount 時 placeholder 與實際元件同尺寸，無 layout shift。
+
+### 設計沿用
+
+未來新增 header / panel 元件須遵守 5 條規則：
+
+1. 任何 flex row 的可變內容必有 `min-width` 或 `width` + `flex-shrink: 0`
+2. 數字一律 `tabular-nums`
+3. 任意字串 (provider / arch / hint / status) 須 `truncate` + `maxWidth` +
+   完整內容於 `title` / `aria-label`
+4. loading placeholder 須與真實元件同尺寸
+5. 強調狀態變化用 `outline` / `box-shadow` / `transform`，**避免 `border-N`
+   或 `padding` 改變 box 維度**
+
+---
+
 ## Phase 50-Docs — 操作員文件 / 內建導覽（2026-04-14）
 
 Phase 50-Fix 審計後補完的另一個大缺口：系統有 ~80 個 API 端點、12 個
