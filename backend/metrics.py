@@ -140,6 +140,14 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 64-A S4: lifetime-cap killswitch fires ──────────────
+    sandbox_lifetime_killed_total = Counter(
+        "omnisight_sandbox_lifetime_killed_total",
+        "Containers SIGKILLed for exceeding the wall-clock lifetime cap",
+        labelnames=("tier",),
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -166,6 +174,7 @@ else:
     persist_failure_total = _NoOp()  # type: ignore
     subprocess_orphan_total = _NoOp()  # type: ignore
     sandbox_image_rejected_total = _NoOp()  # type: ignore
+    sandbox_lifetime_killed_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -185,7 +194,8 @@ def reset_for_tests() -> None:
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
     global sse_subscribers, sse_dropped_total, workflow_step_total
     global auth_login_total, subprocess_orphan_total, persist_failure_total
-    global sandbox_image_rejected_total, process_start_time
+    global sandbox_image_rejected_total, sandbox_lifetime_killed_total
+    global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
         "omnisight_decision_total", "Decisions registered",
@@ -239,6 +249,11 @@ def reset_for_tests() -> None:
         "omnisight_sandbox_image_rejected_total",
         "Sandbox launches refused due to untrusted image digest",
         labelnames=("image",), registry=REGISTRY,
+    )
+    sandbox_lifetime_killed_total = Counter(
+        "omnisight_sandbox_lifetime_killed_total",
+        "Containers SIGKILLed by the lifetime-cap watchdog",
+        labelnames=("tier",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

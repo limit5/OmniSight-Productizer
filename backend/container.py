@@ -156,6 +156,60 @@ async def _inspect_image_digest(image: str) -> str | None:
     return digest or None
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 64-A S4: Sandbox lifetime cap
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def _lifetime_killswitch(agent_id: str, container_name: str,
+                               lifetime_s: float, *, tier: str = "t1") -> None:
+    """Wait `lifetime_s`, then force-kill the container if it's still
+    in our registry. Cancelled cleanly when the agent finishes via the
+    normal stop_container path."""
+    try:
+        await asyncio.sleep(lifetime_s)
+    except asyncio.CancelledError:
+        return  # agent finished normally — nothing to do
+    info = _containers.get(agent_id)
+    if not info or info.container_name != container_name:
+        return  # already removed / replaced
+    logger.warning(
+        "[SANDBOX KILL] %s exceeded lifetime cap %.0fs — SIGKILL",
+        container_name, lifetime_s,
+    )
+    info.status = "killed_lifetime"
+    # Best-effort force-remove. We don't await stop_container here
+    # because it would re-trigger this same task's cancellation logic;
+    # do the docker call directly and pop the registry.
+    await _run(f"docker rm -f {container_name} 2>/dev/null", timeout=15)
+    _containers.pop(agent_id, None)
+    # Audit + metric (best-effort).
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="sandbox_killed",
+            entity_kind="container",
+            entity_id=container_name,
+            after={"reason": "lifetime", "tier": tier,
+                   "lifetime_s": int(lifetime_s)},
+            actor="system:lifetime-watchdog",
+        )
+    except Exception as exc:
+        logger.debug("audit log for sandbox_killed failed: %s", exc)
+    try:
+        from backend import metrics as _m
+        _m.sandbox_lifetime_killed_total.labels(tier=tier).inc()
+    except Exception:
+        pass
+    try:
+        emit_container(agent_id, "killed", f"{container_name} (lifetime cap)")
+        emit_agent_update(
+            agent_id, "error",
+            f"Container killed after {int(lifetime_s)}s lifetime cap",
+        )
+    except Exception:
+        pass
+
+
 async def assert_image_trusted(image: str = DOCKER_IMAGE) -> None:
     """Reject launch if the configured allow-list is non-empty and the
     image's digest isn't in it. Empty allow-list = open mode (today's
@@ -204,7 +258,10 @@ class ContainerInfo:
     workspace_path: Path
     image: str
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    status: str = "running"  # running | stopped | removed
+    status: str = "running"  # running | stopped | removed | killed_lifetime
+    # Phase 64-A S4: handle to the lifetime-cap watchdog so stop_container
+    # can cancel it cleanly when the agent finishes naturally.
+    lifetime_task: object | None = None  # asyncio.Task
 
 
 # Registry of active containers
@@ -350,6 +407,14 @@ async def start_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
     )
     _containers[agent_id] = info
 
+    # Phase 64-A S4: start the lifetime killswitch (0 = disabled).
+    lifetime = int(_settings.sandbox_lifetime_s or 0)
+    if lifetime > 0:
+        info.lifetime_task = asyncio.create_task(
+            _lifetime_killswitch(agent_id, container_name, float(lifetime)),
+            name=f"sandbox-lifetime-{container_name}",
+        )
+
     emit_container(agent_id, "started", f"{container_name} ({container_id})")
     emit_agent_update(agent_id, "running", f"Container {container_id} running")
     logger.info("Container started: %s (%s)", container_name, container_id)
@@ -380,6 +445,15 @@ async def stop_container(agent_id: str) -> bool:
     info = _containers.pop(agent_id, None)
     if not info:
         return False
+
+    # Phase 64-A S4: cancel the lifetime watchdog so it doesn't fire
+    # against an already-removed name.
+    task = getattr(info, "lifetime_task", None)
+    if task is not None:
+        try:
+            task.cancel()
+        except Exception:
+            pass
 
     emit_pipeline_phase("container_stop", f"Stopping container for {agent_id}")
 

@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     # refuse a tampered/swapped image at launch time.
     docker_image_allowed_digests: str = ""
 
+    # Phase 64-A S4: hard upper bound on a sandbox's wall-clock lifetime.
+    # The watchdog SIGKILLs the container after this many seconds even
+    # if its commands look "in progress" — this is the killswitch that
+    # protects against infinite loops the per-command BASH_TIMEOUT
+    # cannot catch (e.g. a build that legitimately sleeps for hours).
+    # Set to 0 to disable (NOT recommended in prod). Default 45 min.
+    sandbox_lifetime_s: int = 2700
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:
