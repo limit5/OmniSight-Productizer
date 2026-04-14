@@ -236,10 +236,23 @@ mutation：
 - ChatRequest("") 接受 — 明列為當前 contract，後續若要加 min_length 會
   自動在此失敗
 
-### D3–D7 未執行
+### D3 — `backend/events.py` EventBus（commit `de36358`）
 
-仍排程於 Fix-D 計畫中（events / DLQ edge / metrics / core smoke /
-hooks）。Phase 62 仍待全 Fix-D 完成。
+`backend/tests/test_events_bus.py` 10 case，0.19s：
+
+- subscribe/unsubscribe 計數正確、`discard` 冪等
+- publish 單點 / 多點 fan-out、自動 timestamp、尊重 caller timestamp
+- 無訂閱者時 publish no-op（不 raise，不計 drop）
+- **Backpressure**：用 monkeypatch 縮 Queue maxsize=2 驗 slow subscriber
+  被移出 `_subscribers`、`subscriber_dropped` 遞增
+- `emit_agent_update` 走 singleton bus
+- `emit_tool_progress` output 硬上限 1000 char
+- singleton `bus` 為 EventBus 實例
+
+### D4–D7 未執行
+
+仍排程於 Fix-D 計畫中（DLQ edge / metrics / core smoke / hooks）。
+Phase 62 仍待全 Fix-D 完成。
 
 ---
 
