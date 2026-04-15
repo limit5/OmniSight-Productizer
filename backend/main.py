@@ -258,6 +258,8 @@ from backend.routers import decisions as _decisions_router  # Phase 47A
 app.include_router(_decisions_router.router, prefix=settings.api_prefix)
 from backend.routers import memory as _memory_router  # Phase 63-E
 app.include_router(_memory_router.router, prefix=settings.api_prefix)
+from backend.routers import intent as _intent_router  # Phase 68-C
+app.include_router(_intent_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

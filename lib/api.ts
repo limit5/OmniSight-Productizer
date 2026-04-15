@@ -818,6 +818,58 @@ export async function getOpsSummary(): Promise<OpsSummary> {
   return request<OpsSummary>("/ops/summary")
 }
 
+// ─── Intent Parser (Phase 68-A/B/C) ───
+
+export interface IntentField {
+  value: string
+  confidence: number
+}
+
+export interface IntentConflictOption {
+  id: string
+  label: string
+  desc?: string
+}
+
+export interface IntentConflict {
+  id: string
+  message: string
+  fields: string[]
+  options: IntentConflictOption[]
+  severity: "info" | "routine" | "risky" | "destructive"
+}
+
+export interface ParsedSpec {
+  project_type:       IntentField
+  runtime_model:      IntentField
+  target_arch:        IntentField
+  target_os:          IntentField
+  framework:          IntentField
+  persistence:        IntentField
+  deploy_target:      IntentField
+  hardware_required:  IntentField
+  raw_text:           string
+  conflicts:          IntentConflict[]
+}
+
+export async function parseIntent(text: string, useLlm = true): Promise<ParsedSpec> {
+  return request<ParsedSpec>("/intent/parse", {
+    method: "POST",
+    body: JSON.stringify({ text, use_llm: useLlm }),
+  })
+}
+
+export async function clarifyIntent(
+  parsed: ParsedSpec,
+  conflictId: string,
+  optionId: string,
+): Promise<ParsedSpec> {
+  return request<ParsedSpec>("/intent/clarify", {
+    method: "POST",
+    body: JSON.stringify({ parsed, conflict_id: conflictId, option_id: optionId }),
+  })
+}
+
 // ─── DAG Authoring (Phase 56-DAG-E) ───
 
 export interface DAGValidationError {
