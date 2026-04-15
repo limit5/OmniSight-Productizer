@@ -245,12 +245,12 @@ Legend:
 - [x] Integration test: flash → reboot → rollback path
 
 ### C17. L4-CORE-17 Telemetry backend (#231)
-- [ ] Client SDK: crash dump + usage event + perf metric
-- [ ] Ingestion endpoint (batched POST + retry queue)
-- [ ] Storage: partitioned table with retention policy
-- [ ] Privacy: PII redaction + opt-in flag
-- [ ] Dashboard: fleet health + crash rate + adoption
-- [ ] Unit test: SDK offline queue flushes on reconnect
+- [x] Client SDK: crash dump + usage event + perf metric
+- [x] Ingestion endpoint (batched POST + retry queue)
+- [x] Storage: partitioned table with retention policy
+- [x] Privacy: PII redaction + opt-in flag
+- [x] Dashboard: fleet health + crash rate + adoption
+- [x] Unit test: SDK offline queue flushes on reconnect
 
 ### C18. L4-CORE-18 Payment / PCI compliance framework (#239)
 - [ ] PCI-DSS control mapping (req 1-12 → product artifacts)

@@ -7,6 +7,50 @@
 
 ---
 
+## C17 L4-CORE-17 Telemetry backend 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。94 項測試全部通過。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Client SDK: crash dump + usage event + perf metric | ✅ | 3 SDK profiles (default/low_bandwidth/high_fidelity), 3 event types with schema validation, sampling rates, batch/compression config, C + Python scaffold implementations |
+| Ingestion endpoint (batched POST + retry queue) | ✅ | Batched POST with max 500 events/batch, per-device rate limiting (60/min), retry queue with configurable max size/retries/dead-letter, gzip/lz4/identity encoding support |
+| Storage: partitioned table with retention policy | ✅ | Month-based partitioning, per-event-type retention (crash_dump=365d, usage_event=90d, perf_metric=30d), archive-after thresholds, vacuum scheduling, purge API |
+| Privacy: PII redaction + opt-in flag | ✅ | 11 PII fields with per-field anonymization rules (hash/truncate_last_octet/round_2_decimals), SHA-256 salted hashing, opt-in consent enforcement with record retention, data deletion SLA |
+| Dashboard: fleet health + crash rate + adoption | ✅ | 3 dashboards with 12 panels total — fleet_health (active devices, heartbeat rate, error ratio, firmware distribution), crash_rate (timeline, top signals, affected devices, by firmware), adoption (DAU, feature usage, avg session, new devices). count/count_distinct/avg/ratio/group_by query types |
+| Unit test: SDK offline queue flushes on reconnect | ✅ | Dedicated TestOfflineQueueFlush test class — flush 10 events on reconnect, flush 100 events (large queue), consent enforcement on flush, SDK profile offline_queue config verification. 94 total tests covering all domains |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/telemetry_backend.yaml` | 新建——3 SDK profiles + 3 event type schemas + ingestion config + storage/retention policies + privacy/PII rules + 3 dashboards (12 panels) + 10 test recipes + 11 SoC compatibility entries + 6 artifact definitions |
+| `backend/telemetry_backend.py` | 新建——Telemetry backend library：11 enums + 18 data models + config loader + SDK profile queries + event type queries + ingestion (batched + rate limiting + consent) + PII redaction + consent management + storage retention purge + dashboard panel queries (count/count_distinct/avg/ratio/group_by) + offline queue flush + retry queue + test runner + SoC compatibility + cert registry |
+| `backend/routers/telemetry_backend.py` | 新建——REST endpoints: GET /telemetry/sdk-profiles, /event-types, /ingestion/config, /dashboards, /test-recipes, /socs, /artifacts, /certs, /privacy/config, /privacy/consent/{device_id}, /storage/config, /retry-queue/status. POST /telemetry/ingest, /ingest/flush, /retry-queue/add, /retry-queue/drain, /storage/purge, /privacy/redact, /privacy/consent, /dashboards/query, /test-recipes/{id}/run, /certs/generate/{soc_id} |
+| `backend/main.py` | 擴充——註冊 telemetry_backend router |
+| `configs/skills/telemetry/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-15 + CORE-16 dependencies) |
+| `configs/skills/telemetry/tasks.yaml` | 新建——10 DAG tasks (SDK init, crash handler, usage tracker, perf collector, offline queue, ingestion deploy, privacy setup, storage setup, dashboard setup, integration test) |
+| `configs/skills/telemetry/scaffolds/` | 新建——3 scaffold files (telemetry_sdk.h, telemetry_sdk.c, telemetry_sdk.py) |
+| `configs/skills/telemetry/tests/test_definitions.yaml` | 新建——5 test suites, 21 test definitions |
+| `configs/skills/telemetry/hil/telemetry_hil_recipes.yaml` | 新建——3 HIL recipes (crash capture, offline reconnect, perf overhead) |
+| `configs/skills/telemetry/docs/telemetry_integration_guide.md.j2` | 新建——Jinja2 doc template for telemetry integration guide |
+| `backend/tests/test_telemetry_backend.py` | 新建，94 項測試全部通過 |
+| `TODO.md` | 更新——C17 全部標記完成 |
+
+### 架構說明
+
+- **TelemetryDomain enum** — client_sdk / ingestion / storage / privacy / dashboard
+- **EventType enum** — crash_dump / usage_event / perf_metric
+- **IngestStatus enum** — accepted / rejected / rate_limited / queued_for_retry / consent_required
+- **ConsentStatus enum** — opted_in / opted_out / not_recorded
+- **RedactionStrategy enum** — hash_sha256 / truncate_last_octet / round_2_decimals / hash / remove
+- **RetentionAction enum** — keep / archive / purge
+- **TestStatus enum** — passed / failed / pending / skipped / error
+- In-memory stores for consent, events, retry queue, rate limit counters (production would use persistent DB)
+- PII salt sourced from `OMNISIGHT_PII_SALT` env var with fallback
+
+---
+
 ## C16 L4-CORE-16 OTA framework 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。**
