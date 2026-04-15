@@ -291,6 +291,18 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # Phase 64-C-LOCAL: T3 runner dispatch split (local / bundle /
+    # ssh / qemu) — how many t3 tasks are going through which runner
+    # class. Surfaces in Ops Summary so the operator can tell at a
+    # glance whether the host==target happy path is actually being
+    # hit.
+    t3_runner_dispatch_total = Counter(
+        "omnisight_t3_runner_dispatch_total",
+        "T3 task dispatches by runner class",
+        labelnames=("runner",),  # local | ssh | qemu | bundle
+        registry=REGISTRY,
+    )
+
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
         "omnisight_memory_decay_total",
@@ -347,6 +359,7 @@ else:
     intelligence_iq_regression_total = _NoOp()  # type: ignore
     rag_prefetch_total = _NoOp()  # type: ignore
     memory_decay_total = _NoOp()  # type: ignore
+    t3_runner_dispatch_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -378,6 +391,7 @@ def reset_for_tests() -> None:
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
     global memory_decay_total
+    global t3_runner_dispatch_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -529,6 +543,11 @@ def reset_for_tests() -> None:
         "omnisight_memory_decay_total",
         "Memory decay events by action",
         labelnames=("action",), registry=REGISTRY,
+    )
+    t3_runner_dispatch_total = Counter(
+        "omnisight_t3_runner_dispatch_total",
+        "T3 task dispatches by runner class",
+        labelnames=("runner",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
