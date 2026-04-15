@@ -78,6 +78,12 @@ def host_os() -> str:
 #  Resolution
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _ssh_enabled() -> bool:
+    """Kill-switch for SSH runner. Default on."""
+    raw = (os.environ.get("OMNISIGHT_SSH_RUNNER_ENABLED") or "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _local_enabled() -> bool:
     """Kill-switch env. Default on; set `false` to force BUNDLE even
     when LOCAL would match."""
@@ -126,9 +132,21 @@ def resolve_t3_runner(
             host_arch=h_arch, host_os=h_os,
         )
 
-    # 2. SSH — deferred (Phase 64-C-SSH). Resolver already returns the
-    #    BUNDLE fallback for now; when the remote-runner registry
-    #    lands it slots in here.
+    # 2. SSH — Phase 64-C-SSH. Check if a registered remote runner
+    #    matches the target arch.
+    if _ssh_enabled() and t_arch:
+        from backend.ssh_runner import find_target_for_arch
+        ssh_target = find_target_for_arch(t_arch, t_os)
+        if ssh_target is not None:
+            return T3Resolution(
+                kind=T3RunnerKind.SSH,
+                reason=(
+                    f"host ({h_arch}/{h_os}) ≠ target ({t_arch}/{t_os}); "
+                    f"SSH runner registered at {ssh_target.host}"
+                ),
+                target_arch=t_arch, target_os=t_os,
+                host_arch=h_arch, host_os=h_os,
+            )
 
     # 3. QEMU — deferred (Phase 64-C-QEMU).
 
@@ -141,7 +159,7 @@ def resolve_t3_runner(
     else:
         reason = (
             f"host ({h_arch}/{h_os}) does not match target ({t_arch}/{t_os}); "
-            "producing bundle (no SSH/QEMU runner available yet)"
+            "producing bundle (no SSH/QEMU runner matched)"
         )
     return T3Resolution(
         kind=T3RunnerKind.BUNDLE,

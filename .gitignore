@@ -56,6 +56,10 @@ backend/artifacts/
 # Vendor SDK cache
 .sdks/
 
+# Credential files (keep .example tracked)
+configs/ssh_credentials.yaml
+configs/git_credentials.yaml
+
 # SQLite database
 data/
 

@@ -151,6 +151,13 @@ class Settings(BaseSettings):
     # Set to 0 to disable (NOT recommended in prod). Default 45 min.
     sandbox_lifetime_s: int = 2700
 
+    # Phase 64-C-SSH: SSH runner for cross-arch target boards.
+    ssh_runner_enabled: bool = True
+    ssh_runner_timeout: int = 300
+    ssh_runner_heartbeat_interval: int = 30
+    ssh_runner_max_output_bytes: int = 10_000
+    ssh_credentials_file: str = ""
+
     # Phase 64-D D3: per-exec output size cap. If exec_in_container's
     # stdout+stderr exceeds this many bytes, we truncate and append a
     # one-line marker. Defends Tier-0 LLM context from being blown up

@@ -563,9 +563,23 @@ async def dispatch_t3(
     if res.kind == T3RunnerKind.LOCAL:
         info = await start_t3_local_container(agent_id, workspace_path)
         return info, res.kind
-    # BUNDLE / SSH (64-C-SSH) / QEMU (64-C-QEMU): no live runner yet;
-    # caller handles the bundling / remote dispatch at the orchestrator
-    # layer.
+    if res.kind == T3RunnerKind.SSH:
+        from backend.ssh_runner import find_target_for_arch, SSHRunnerInfo
+        ssh_target = find_target_for_arch(res.target_arch, res.target_os)
+        if ssh_target is not None:
+            ssh_info = SSHRunnerInfo(
+                agent_id=agent_id,
+                target=ssh_target,
+                status="ready",
+            )
+            return ssh_info, res.kind
+        logger.warning(
+            "dispatch_t3: resolver said SSH but no target found for %s/%s",
+            res.target_arch, res.target_os,
+        )
+        return None, T3RunnerKind.BUNDLE
+    # BUNDLE / QEMU (64-C-QEMU): no live runner yet; caller handles
+    # the bundling / remote dispatch at the orchestrator layer.
     return None, res.kind
 
 
