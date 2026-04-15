@@ -22,7 +22,7 @@ Legend:
 - [ ] Confirm Cloudflare Tunnel active + cert issued *(🅐 operator: needs CF dashboard)*
 - [ ] Smoke GET `/api/health` from public domain *(🅐 operator: after deploy)*
 - [x] Tag `v0.1.0` on master *(done: local tag created 2026-04-15)*
-- [ ] Push `v0.1.0` tag to origin *(🅐 operator: `git push origin v0.1.0`)*
+- [x] Push `v0.1.0` tag to origin *(done: pushed to origin 2026-04-15)*
 - [x] Update HANDOFF with deploy URL + v0.1.0 release notes *(done: runbook + release notes added)*
 
 ### A2. L1-05 Prod smoke test — 2 real DAGs end-to-end (#176)

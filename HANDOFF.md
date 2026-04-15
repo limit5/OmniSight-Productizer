@@ -66,9 +66,12 @@ curl -sf https://yourdomain.com/api/v1/health | python3 -m json.tool
 # Expected: {"status": "OK", ...}
 ```
 
-#### Step 5: Push tag
+#### Step 5: Push tag ✅ DONE (2026-04-15)
+
+Tag `v0.1.0` has been pushed to origin.
 
 ```bash
+# Already executed:
 git push origin v0.1.0
 ```
 
@@ -115,6 +118,7 @@ After deploy, fill in:
 | `f36472f` | L1-07: `audit_archive.py` — 90d retention + manifest + `--verify` 抓篡改 |
 | `9d0b3be` | L1-08: ESLint v10 flat config（之前 silent no-op，113 真實 finding 浮現） |
 
+**A1 進度**：`v0.1.0` tag 已推送至 origin（2026-04-15）。剩餘 4 項（實跑 deploy.sh、GoDaddy NS 遷移、CF Tunnel 確認、smoke test）皆需 operator 手動執行，見上方 runbook。
 **剩**：L1-01（實跑 `deploy.sh prod`）+ L1-05（兩個真 DAG smoke），需 operator 動手。
 
 ### 軌道 3 — 對外身份驗證（5 commits → 10 層縱深防禦）
