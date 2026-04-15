@@ -166,6 +166,15 @@ def _try_security_stack_certs() -> list[ComplianceCert]:
         return []
 
 
+def _try_ota_framework_certs() -> list[ComplianceCert]:
+    """Merge from L4-CORE-16 OTA framework (when available)."""
+    try:
+        from backend.ota_framework import get_ota_framework_certs  # type: ignore[import-not-found]
+        return [ComplianceCert(**c) for c in get_ota_framework_certs()]
+    except (ImportError, Exception):
+        return []
+
+
 def collect_compliance_certs(
     extra: list[dict[str, Any]] | None = None,
 ) -> list[ComplianceCert]:
@@ -177,6 +186,7 @@ def collect_compliance_certs(
     certs.extend(_try_connectivity_certs())
     certs.extend(_try_sensor_fusion_certs())
     certs.extend(_try_security_stack_certs())
+    certs.extend(_try_ota_framework_certs())
     if extra:
         for c in extra:
             certs.append(ComplianceCert(

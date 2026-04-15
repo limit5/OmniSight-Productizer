@@ -1,0 +1,650 @@
+# C16 — L4-CORE-16 OTA Framework (#230)
+# A/B slot partition scheme, delta update, rollback, signature verification,
+# server-side manifest + phased rollout, and integration test recipes.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  A/B Slot Partition Schemes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ab_slot_schemes:
+  linux_ab:
+    name: "Linux A/B Partition"
+    description: "Classic dual-rootfs A/B scheme for Linux-based SoCs (RAUC / swupdate style)"
+    slot_count: 2
+    partitions:
+      - partition_id: boot_a
+        label: "Boot A"
+        type: boot
+        slot: A
+        filesystem: vfat
+        typical_size_mb: 64
+      - partition_id: boot_b
+        label: "Boot B"
+        type: boot
+        slot: B
+        filesystem: vfat
+        typical_size_mb: 64
+      - partition_id: rootfs_a
+        label: "Root Filesystem A"
+        type: rootfs
+        slot: A
+        filesystem: ext4
+        typical_size_mb: 512
+      - partition_id: rootfs_b
+        label: "Root Filesystem B"
+        type: rootfs
+        slot: B
+        filesystem: ext4
+        typical_size_mb: 512
+      - partition_id: data
+        label: "Persistent Data"
+        type: data
+        slot: shared
+        filesystem: ext4
+        typical_size_mb: 256
+    bootloader_integration: "u-boot env (bootcount / upgrade_available)"
+    compatible_socs:
+      - hi3516
+      - rk3566
+      - rk3568
+      - imx8m
+      - stm32mp1
+    required_tools:
+      - fdisk
+      - mkfs.ext4
+      - mkfs.vfat
+      - rauc
+
+  mcuboot_ab:
+    name: "MCUboot A/B Slot"
+    description: "MCUboot-managed dual image slots for MCU targets (Zephyr / FreeRTOS)"
+    slot_count: 2
+    partitions:
+      - partition_id: primary
+        label: "Primary Slot"
+        type: firmware
+        slot: A
+        filesystem: raw
+        typical_size_mb: 1
+      - partition_id: secondary
+        label: "Secondary Slot"
+        type: firmware
+        slot: B
+        filesystem: raw
+        typical_size_mb: 1
+      - partition_id: scratch
+        label: "Scratch Area"
+        type: scratch
+        slot: shared
+        filesystem: raw
+        typical_size_mb: 0.25
+    bootloader_integration: "mcuboot swap/move algorithm"
+    compatible_socs:
+      - stm32h7
+      - stm32f4
+      - nrf52840
+      - nrf5340
+      - esp32s3
+    required_tools:
+      - mcuboot
+      - imgtool
+
+  android_ab:
+    name: "Android A/B (Seamless)"
+    description: "Android Seamless Update with boot control HAL"
+    slot_count: 2
+    partitions:
+      - partition_id: boot_a
+        label: "Boot A"
+        type: boot
+        slot: A
+        filesystem: raw
+        typical_size_mb: 64
+      - partition_id: boot_b
+        label: "Boot B"
+        type: boot
+        slot: B
+        filesystem: raw
+        typical_size_mb: 64
+      - partition_id: system_a
+        label: "System A"
+        type: rootfs
+        slot: A
+        filesystem: ext4
+        typical_size_mb: 2048
+      - partition_id: system_b
+        label: "System B"
+        type: rootfs
+        slot: B
+        filesystem: ext4
+        typical_size_mb: 2048
+      - partition_id: vendor_a
+        label: "Vendor A"
+        type: vendor
+        slot: A
+        filesystem: ext4
+        typical_size_mb: 512
+      - partition_id: vendor_b
+        label: "Vendor B"
+        type: vendor
+        slot: B
+        filesystem: ext4
+        typical_size_mb: 512
+      - partition_id: userdata
+        label: "User Data"
+        type: data
+        slot: shared
+        filesystem: f2fs
+        typical_size_mb: 4096
+    bootloader_integration: "bootctl HAL (markBootSuccessful / setActiveBootSlot)"
+    compatible_socs:
+      - rk3566
+      - rk3568
+      - imx8m
+      - x86_64
+    required_tools:
+      - fastboot
+      - update_engine
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Delta Update Engines
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+delta_engines:
+  bsdiff:
+    name: "bsdiff/bspatch"
+    description: "Binary diff/patch for firmware images — small deltas, high CPU on generation"
+    version: "4.3"
+    max_image_size_mb: 512
+    compression: bzip2
+    features:
+      - binary_diff
+      - deterministic_output
+      - single_file_patch
+    commands:
+      generate: "bsdiff {old_image} {new_image} {patch_file}"
+      apply: "bspatch {old_image} {new_image} {patch_file}"
+    compatible_schemes:
+      - linux_ab
+      - mcuboot_ab
+    required_tools:
+      - bsdiff
+      - bspatch
+
+  zchunk:
+    name: "zchunk"
+    description: "Chunk-based delta compression — efficient for large rootfs, resume-capable"
+    version: "1.3"
+    max_image_size_mb: 4096
+    compression: zstd
+    features:
+      - chunk_based_delta
+      - resume_capable
+      - range_download
+      - parallel_decompress
+    commands:
+      generate: "zck {input_file} -o {output_file}"
+      delta: "zck_delta_create {old_zck} {new_zck} -o {delta_file}"
+      apply: "zck_delta_apply {old_zck} {delta_file} -o {new_zck}"
+    compatible_schemes:
+      - linux_ab
+      - android_ab
+    required_tools:
+      - zck
+      - zck_delta_create
+      - zck_delta_apply
+
+  rauc:
+    name: "RAUC"
+    description: "Robust Auto-Update Controller — full A/B update framework for Linux"
+    version: "1.10"
+    max_image_size_mb: 4096
+    compression: adaptive
+    features:
+      - full_image_update
+      - delta_update
+      - bundle_verification
+      - slot_management
+      - d_bus_api
+      - streaming_install
+    commands:
+      bundle: "rauc bundle --cert={cert} --key={key} {input_dir} {bundle_file}"
+      install: "rauc install {bundle_file}"
+      status: "rauc status --detailed"
+      info: "rauc info {bundle_file}"
+    compatible_schemes:
+      - linux_ab
+    required_tools:
+      - rauc
+      - openssl
+      - squashfs-tools
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Rollback Configuration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+rollback_policies:
+  watchdog_bootcount:
+    name: "Watchdog + Boot Count"
+    description: "Hardware watchdog resets device on hang; bootloader tracks consecutive failures"
+    max_boot_attempts: 3
+    watchdog_timeout_s: 120
+    triggers:
+      - trigger_id: watchdog_timeout
+        name: "Watchdog Timeout"
+        description: "Hardware watchdog fires — application did not pet watchdog within timeout"
+        action: reboot
+      - trigger_id: boot_count_exceeded
+        name: "Boot Count Exceeded"
+        description: "Consecutive failed boots exceed max_boot_attempts — rollback to previous slot"
+        action: rollback
+      - trigger_id: health_check_fail
+        name: "Health Check Failure"
+        description: "Application-level health check fails after boot — mark slot bad"
+        action: mark_bad_and_rollback
+      - trigger_id: user_initiated
+        name: "User Initiated Rollback"
+        description: "Operator explicitly triggers rollback via API or button"
+        action: rollback
+    bootloader_vars:
+      - name: bootcount
+        description: "Incremented by bootloader each boot; reset to 0 by application on success"
+        type: int
+      - name: upgrade_available
+        description: "Set to 1 after OTA write; cleared after successful boot confirmation"
+        type: int
+      - name: active_slot
+        description: "Current active slot (0=A, 1=B)"
+        type: int
+    health_check:
+      endpoint: "/api/health"
+      timeout_s: 30
+      retries: 3
+      required_services:
+        - systemd_target_reached
+        - network_up
+        - application_responding
+
+  mcuboot_confirm:
+    name: "MCUboot Image Confirmation"
+    description: "MCUboot requires explicit image confirmation; reverts on next reboot if unconfirmed"
+    max_boot_attempts: 1
+    watchdog_timeout_s: 60
+    triggers:
+      - trigger_id: unconfirmed_reboot
+        name: "Unconfirmed Reboot"
+        description: "Image not confirmed via boot_set_confirmed() — MCUboot reverts"
+        action: revert
+      - trigger_id: watchdog_timeout
+        name: "MCU Watchdog Timeout"
+        description: "Watchdog fires before confirmation — triggers reboot → revert"
+        action: reboot_and_revert
+    bootloader_vars:
+      - name: image_ok
+        description: "Set to 1 by application via boot_set_confirmed()"
+        type: int
+      - name: swap_type
+        description: "MCUboot swap type (test/permanent/revert)"
+        type: string
+    health_check:
+      endpoint: null
+      timeout_s: 15
+      retries: 1
+      required_services:
+        - main_task_running
+        - peripherals_initialized
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Signature Verification
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+signature_schemes:
+  ed25519_direct:
+    name: "Ed25519 Direct Signing"
+    description: "Ed25519 signature over firmware image hash — fast, small keys, no CA overhead"
+    algorithm: ed25519
+    hash: sha256
+    key_size_bits: 256
+    signature_size_bytes: 64
+    features:
+      - fast_verify
+      - small_signature
+      - deterministic
+      - no_ca_required
+    key_management:
+      generation: "openssl genpkey -algorithm ed25519 -out ota_signing.key"
+      public_extract: "openssl pkey -in ota_signing.key -pubout -out ota_signing.pub"
+      storage: "HSM or secure key vault; public key embedded in bootloader/firmware"
+    verification_flow:
+      - step: compute_hash
+        description: "SHA-256 hash of firmware image"
+      - step: verify_signature
+        description: "Ed25519 verify(signature, hash, public_key)"
+      - step: check_version
+        description: "Ensure firmware version >= current (anti-rollback)"
+    compatible_engines:
+      - bsdiff
+      - rauc
+      - mcuboot_ab
+
+  x509_chain:
+    name: "X.509 Certificate Chain"
+    description: "Full PKI with root CA → intermediate → signing cert; for enterprise/regulated deployments"
+    algorithm: ecdsa-p256
+    hash: sha256
+    key_size_bits: 256
+    signature_size_bytes: 72
+    features:
+      - certificate_chain
+      - revocation_support
+      - expiry_enforcement
+      - ca_hierarchy
+    key_management:
+      root_ca: "Offline root CA, air-gapped HSM"
+      intermediate_ca: "Online intermediate, HSM-backed"
+      signing_cert: "Short-lived (90 days), CI/CD issued"
+      revocation: "CRL or OCSP stapling"
+    verification_flow:
+      - step: verify_cert_chain
+        description: "Validate signing cert → intermediate → root CA trust anchor"
+      - step: check_revocation
+        description: "Check CRL/OCSP for revoked certificates"
+      - step: check_expiry
+        description: "Ensure signing cert is within validity period"
+      - step: compute_hash
+        description: "SHA-256 hash of firmware image"
+      - step: verify_signature
+        description: "ECDSA verify(signature, hash, signing_cert.public_key)"
+      - step: check_version
+        description: "Anti-rollback version check"
+    compatible_engines:
+      - rauc
+      - zchunk
+
+  mcuboot_ecdsa:
+    name: "MCUboot ECDSA-P256"
+    description: "MCUboot native ECDSA-P256 image signing with TLV metadata"
+    algorithm: ecdsa-p256
+    hash: sha256
+    key_size_bits: 256
+    signature_size_bytes: 72
+    features:
+      - tlv_metadata
+      - hardware_key_support
+      - anti_rollback_counter
+    key_management:
+      generation: "imgtool keygen -k signing_key.pem -t ecdsa-p256"
+      public_extract: "imgtool getpub -k signing_key.pem"
+      storage: "Public key hash burned into MCU OTP fuses"
+    verification_flow:
+      - step: parse_tlv
+        description: "Parse image TLV area for signature + hash + version"
+      - step: verify_hash
+        description: "SHA-256 of image content matches TLV hash"
+      - step: verify_signature
+        description: "ECDSA verify against OTP-burned public key hash"
+      - step: check_security_counter
+        description: "Image security counter >= device counter (anti-rollback)"
+    compatible_engines:
+      - bsdiff
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Server-Side Update Manifest & Phased Rollout
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+server_config:
+  manifest_schema:
+    version: "1.0"
+    fields:
+      - name: manifest_id
+        type: string
+        description: "Unique manifest identifier (UUID)"
+      - name: firmware_version
+        type: string
+        description: "Target firmware semantic version"
+      - name: min_firmware_version
+        type: string
+        description: "Minimum firmware version eligible for this update"
+      - name: release_notes
+        type: string
+        description: "Human-readable release notes (markdown)"
+      - name: images
+        type: array
+        description: "List of image descriptors"
+        items:
+          - name: image_id
+            type: string
+          - name: target_partition
+            type: string
+          - name: url
+            type: string
+          - name: sha256
+            type: string
+          - name: size_bytes
+            type: integer
+          - name: delta_from_version
+            type: string
+            optional: true
+      - name: signature
+        type: string
+        description: "Manifest signature (covers all fields above)"
+      - name: signature_scheme
+        type: string
+        description: "Signature scheme ID (ed25519_direct / x509_chain / mcuboot_ecdsa)"
+      - name: rollout
+        type: object
+        description: "Phased rollout configuration"
+      - name: created_at
+        type: string
+        description: "ISO 8601 timestamp"
+      - name: expires_at
+        type: string
+        description: "Manifest expiry (ISO 8601)"
+
+  rollout_strategies:
+    immediate:
+      name: "Immediate"
+      description: "All devices eligible immediately"
+      phases: []
+
+    canary:
+      name: "Canary Rollout"
+      description: "Progressive percentage-based rollout with health gates"
+      phases:
+        - phase_id: canary
+          name: "Canary"
+          percentage: 1
+          duration_hours: 24
+          health_gate:
+            max_crash_rate_pct: 0.5
+            max_rollback_rate_pct: 1.0
+            min_success_rate_pct: 99.0
+        - phase_id: early_adopter
+          name: "Early Adopter"
+          percentage: 10
+          duration_hours: 48
+          health_gate:
+            max_crash_rate_pct: 1.0
+            max_rollback_rate_pct: 2.0
+            min_success_rate_pct: 98.0
+        - phase_id: general
+          name: "General Availability"
+          percentage: 100
+          duration_hours: 0
+          health_gate: null
+
+    staged:
+      name: "Staged Rollout"
+      description: "Region/group-based staged deployment"
+      phases:
+        - phase_id: internal
+          name: "Internal Devices"
+          selector: "group=internal"
+          percentage: 100
+          duration_hours: 24
+          health_gate:
+            max_crash_rate_pct: 0.1
+            max_rollback_rate_pct: 0.5
+            min_success_rate_pct: 99.5
+        - phase_id: beta
+          name: "Beta Group"
+          selector: "group=beta"
+          percentage: 100
+          duration_hours: 48
+          health_gate:
+            max_crash_rate_pct: 0.5
+            max_rollback_rate_pct: 1.0
+            min_success_rate_pct: 99.0
+        - phase_id: production
+          name: "Production Fleet"
+          selector: "group=production"
+          percentage: 100
+          duration_hours: 0
+          health_gate: null
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Test Recipes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+test_recipes:
+  - id: ota-ab-slot-switch
+    name: "A/B Slot Switch"
+    category: partition
+    description: "Write image to inactive slot, switch active slot, verify boot from new slot"
+    ota_domain: ab_slot
+    tools: [rauc, fw_setenv, mount]
+    timeout_s: 300
+
+  - id: ota-delta-generate-apply
+    name: "Delta Generate + Apply"
+    category: delta
+    description: "Generate delta between two firmware versions, apply patch, verify hash match"
+    ota_domain: delta_update
+    tools: [bsdiff, bspatch, sha256sum]
+    timeout_s: 120
+
+  - id: ota-rollback-watchdog
+    name: "Rollback on Watchdog Timeout"
+    category: rollback
+    description: "Flash bad image, let watchdog fire, verify automatic rollback to previous slot"
+    ota_domain: rollback
+    tools: [rauc, systemctl, journalctl]
+    timeout_s: 600
+
+  - id: ota-rollback-bootcount
+    name: "Rollback on Boot Count Exceeded"
+    category: rollback
+    description: "Simulate repeated boot failures, verify bootloader rolls back after max_boot_attempts"
+    ota_domain: rollback
+    tools: [fw_setenv, fw_printenv, reboot]
+    timeout_s: 600
+
+  - id: ota-signature-ed25519
+    name: "Ed25519 Signature Verify"
+    category: signature
+    description: "Sign firmware image with ed25519, verify signature on device, reject tampered image"
+    ota_domain: signature
+    tools: [openssl, sha256sum]
+    timeout_s: 60
+
+  - id: ota-signature-x509
+    name: "X.509 Chain Verify"
+    category: signature
+    description: "Full cert chain verification: root → intermediate → signing cert → image signature"
+    ota_domain: signature
+    tools: [openssl, rauc]
+    timeout_s: 120
+
+  - id: ota-signature-reject-tampered
+    name: "Reject Tampered Image"
+    category: signature
+    description: "Modify one byte of signed image, verify signature check fails and update is rejected"
+    ota_domain: signature
+    tools: [openssl, dd]
+    timeout_s: 60
+
+  - id: ota-manifest-parse
+    name: "Manifest Parse + Validate"
+    category: server
+    description: "Parse update manifest, verify schema, check signature, validate version constraints"
+    ota_domain: server
+    tools: [python3, openssl]
+    timeout_s: 30
+
+  - id: ota-phased-rollout
+    name: "Phased Rollout Simulation"
+    category: server
+    description: "Simulate canary rollout — verify percentage gates and health checks at each phase"
+    ota_domain: server
+    tools: [python3]
+    timeout_s: 60
+
+  - id: ota-full-cycle
+    name: "Full OTA Cycle (flash → reboot → verify)"
+    category: integration
+    description: "End-to-end: generate manifest → download → flash → reboot → health check → confirm"
+    ota_domain: integration
+    tools: [rauc, curl, systemctl, sha256sum]
+    timeout_s: 900
+
+  - id: ota-rollback-full-path
+    name: "Full Rollback Path"
+    category: integration
+    description: "Flash → reboot → health check fail → watchdog → rollback → verify previous version"
+    ota_domain: integration
+    tools: [rauc, systemctl, journalctl, fw_printenv]
+    timeout_s: 900
+
+  - id: ota-mcuboot-swap
+    name: "MCUboot Swap + Confirm"
+    category: integration
+    description: "Write to secondary slot → reboot → MCUboot swaps → app confirms → permanent"
+    ota_domain: integration
+    tools: [mcuboot, imgtool, mcumgr]
+    timeout_s: 300
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Artifact Definitions
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifact_definitions:
+  ota_partition_layout:
+    name: "OTA Partition Layout"
+    description: "A/B slot partition table definition for the target platform"
+    file_pattern: "partition_layout_{soc}.json"
+  ota_signing_keypair:
+    name: "OTA Signing Keypair"
+    description: "Ed25519 or ECDSA keypair for firmware image signing"
+    file_pattern: "ota_signing.{key,pub}"
+  ota_cert_chain:
+    name: "OTA Certificate Chain"
+    description: "Root CA + intermediate + signing cert chain for X.509 verification"
+    file_pattern: "ota_cert_chain.pem"
+  ota_rauc_system_conf:
+    name: "RAUC System Configuration"
+    description: "RAUC system.conf defining slot classes and boot selection"
+    file_pattern: "system.conf"
+  ota_update_manifest:
+    name: "Update Manifest"
+    description: "JSON manifest describing firmware version, images, signature, and rollout"
+    file_pattern: "update_manifest_{version}.json"
+  ota_delta_patch:
+    name: "Delta Patch File"
+    description: "Binary delta patch generated by bsdiff or zchunk"
+    file_pattern: "delta_{from}_{to}.patch"
+  ota_rollback_policy:
+    name: "Rollback Policy Document"
+    description: "Configured rollback triggers, thresholds, and health check criteria"
+    file_pattern: "rollback_policy.yaml"
+  ota_health_check_script:
+    name: "Health Check Script"
+    description: "Post-update health check script run by init system"
+    file_pattern: "ota_health_check.sh"
+  ota_integration_test_report:
+    name: "OTA Integration Test Report"
+    description: "Full cycle test results: flash → reboot → verify → rollback"
+    file_pattern: "ota_integration_report_{timestamp}.json"
+  ota_server_deployment:
+    name: "OTA Server Deployment Config"
+    description: "Server-side configuration for manifest hosting and rollout management"
+    file_pattern: "ota_server_config.yaml"

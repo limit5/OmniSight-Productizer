@@ -7,6 +7,69 @@
 
 ---
 
+## C16 L4-CORE-16 OTA framework 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| A/B slot partition scheme | ✅ | `configs/ota_framework.yaml` — 3 schemes (Linux A/B dual-rootfs with u-boot env, MCUboot A/B slot with swap/move, Android Seamless with bootctl HAL). Full partition definitions with filesystem types, sizes, bootloader integration. Compatible SoCs mapped per scheme |
+| Delta update (bsdiff / zchunk / RAUC) | ✅ | 3 delta engines (bsdiff/bspatch binary diff, zchunk chunk-based with resume/range-download, RAUC full A/B controller with bundle verification + D-Bus API). Generate/apply simulation with hash tracking |
+| Rollback trigger on boot-fail (watchdog + count) | ✅ | 2 rollback policies (watchdog_bootcount with 4 triggers: watchdog timeout → reboot, boot count exceeded → rollback, health check fail → mark bad + rollback, user initiated; mcuboot_confirm with unconfirmed revert). Bootloader variable tracking (bootcount, upgrade_available, active_slot). Health check with service requirements |
+| Signature verification (ed25519 + cert chain) | ✅ | 3 signature schemes (ed25519 direct — fast/small/deterministic, X.509 cert chain — root CA → intermediate → signing with revocation/expiry, MCUboot ECDSA-P256 — TLV metadata + OTP fuse key). Full verification flow simulation with tampered image rejection. Anti-rollback version check in all schemes |
+| Server side: update manifest + phased rollout | ✅ | Manifest schema (v1.0) with 10 fields + signed manifest creation. 3 rollout strategies (immediate, canary with 3 phases 1%→10%→100% + health gates, staged with group selectors internal→beta→production). Health gate evaluation: crash rate, rollback rate, success rate thresholds |
+| Integration test: flash → reboot → rollback path | ✅ | 12 test recipes across 5 categories (partition/delta/rollback/signature/server/integration). Full cycle test (manifest → download → flash → reboot → health → confirm). Full rollback path test (flash → fail → watchdog → rollback → verify). MCUboot swap + confirm test. 148 tests all passing |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/ota_framework.yaml` | 新建——3 A/B slot schemes + 3 delta engines + 2 rollback policies + 3 signature schemes + server manifest schema + 3 rollout strategies + 12 test recipes + 10 artifact definitions |
+| `backend/ota_framework.py` | 新建——OTA framework library：8 enums + 20 data models + config loader + A/B slot queries/switching + delta engine queries/generation/application + rollback policy queries/evaluation + signature scheme queries/signing/verification + rollout strategy queries/phase evaluation + manifest creation/validation + OTA test runner + SoC compatibility + cert registry |
+| `backend/routers/ota_framework.py` | 新建——REST endpoints: GET /ota/ab-schemes, /delta-engines, /rollback-policies, /signature-schemes, /rollout-strategies, /test/recipes, /artifacts, /certs. POST /ota/ab-schemes/switch, /delta/generate, /delta/apply, /rollback/evaluate, /firmware/sign, /firmware/verify, /manifest/create, /manifest/validate, /rollout/evaluate, /test/run, /artifacts/generate, /soc-compat |
+| `backend/main.py` | 擴充——註冊 ota_framework router |
+| `backend/doc_suite_generator.py` | 擴充——新增 `_try_ota_framework_certs()` + 整合至 `collect_compliance_certs()` |
+| `configs/skills/ota/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-15 dependencies) |
+| `configs/skills/ota/tasks.yaml` | 新建——18 DAG tasks covering partition layout/bootloader/delta/signing/cert chain/rollback/health check/manifest/rollout/client agent/MCUboot/integration tests/documentation |
+| `configs/skills/ota/scaffolds/` | 新建——4 scaffold files (ota_client.c, ota_rollback.c, ota_server.py, ota_verify.c) |
+| `configs/skills/ota/tests/test_definitions.yaml` | 新建——5 test suites, 28 test definitions |
+| `configs/skills/ota/hil/ota_hil_recipes.yaml` | 新建——5 HIL recipes (slot switch, rollback on boot failure, delta update, signature verify, full OTA cycle) |
+| `configs/skills/ota/docs/ota_integration_guide.md.j2` | 新建——Jinja2 doc template for OTA integration guide |
+| `backend/tests/test_ota_framework.py` | 新建，148 項測試 |
+| `TODO.md` | 更新——C16 全部標記完成 |
+
+### 架構說明
+
+- **OTADomain enum** — ab_slot / delta_update / rollback / signature / server / integration
+- **SlotLabel enum** — A / B / shared
+- **SlotSwitchStatus enum** — success / failed / pending
+- **DeltaOperationStatus enum** — success / failed / pending
+- **SignatureVerifyStatus enum** — valid / invalid / error
+- **RollbackAction enum** — none / reboot / rollback / mark_bad_and_rollback / revert / reboot_and_revert
+- **RolloutPhaseStatus enum** — pending / active / passed / failed / skipped
+- **OTATestStatus enum** — passed / failed / pending / skipped / error
+- **ManifestValidationStatus enum** — valid / invalid / expired / signature_mismatch
+- **ABSlotSchemeDef** — scheme_id / name / partitions[] / bootloader_integration / compatible_socs
+- **DeltaEngineDef** — engine_id / name / compression / features / commands / compatible_schemes
+- **RollbackPolicyDef** — policy_id / triggers[] / bootloader_vars[] / health_check / max_boot_attempts / watchdog_timeout_s
+- **SignatureSchemeDef** — scheme_id / algorithm / hash / key_size_bits / verification_flow[] / key_management
+- **RolloutStrategyDef** — strategy_id / phases[] (phase_id / percentage / duration_hours / health_gate)
+- `switch_ab_slot()` — switch active boot slot (A↔B)
+- `generate_delta()` / `apply_delta()` — delta patch generation and application
+- `sign_firmware()` / `verify_firmware_signature()` — firmware signing and verification with tamper detection
+- `evaluate_rollback()` — evaluate rollback decision based on boot count, watchdog, health check
+- `create_update_manifest()` / `validate_manifest()` — manifest lifecycle
+- `evaluate_rollout_phase()` — health gate evaluation for phased rollout
+
+### 下一步
+
+- C17 (Telemetry backend): client SDK + ingestion + privacy + dashboard
+- D-level skill packs can now use OTA framework via `depends_on_core: ["CORE-16"]`
+- SKILL-DISPLAY references CORE-16 for OTA integration
+- SKILL-IPCAM / SKILL-DOORBELL / SKILL-DASHCAM can use A/B slot + delta updates
+
+---
+
 ## C15 L4-CORE-15 Security stack 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。**

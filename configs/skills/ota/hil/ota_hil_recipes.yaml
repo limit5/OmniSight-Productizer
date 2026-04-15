@@ -1,0 +1,95 @@
+hil_recipes:
+  - recipe_id: hil-ota-slot-switch
+    name: "A/B Slot Switch HIL"
+    description: "Write test image to inactive slot via RAUC, reboot, verify device boots from new slot"
+    equipment:
+      - target_board
+      - serial_console
+      - power_relay
+    steps:
+      - Flash test image to slot B via RAUC
+      - Set bootloader to boot from slot B
+      - Power cycle device via relay
+      - Monitor serial console for boot log
+      - Verify kernel reports correct root partition
+    pass_criteria:
+      - Device boots from slot B within 30s
+      - Root filesystem mounted from correct partition
+      - Application health check passes
+
+  - recipe_id: hil-ota-rollback
+    name: "Rollback on Boot Failure HIL"
+    description: "Flash intentionally bad image, let watchdog/bootcount trigger rollback, verify recovery"
+    equipment:
+      - target_board
+      - serial_console
+      - power_relay
+      - watchdog_monitor
+    steps:
+      - Record current firmware version (slot A)
+      - Flash bad image to slot B (truncated / corrupted)
+      - Set bootloader to boot from slot B
+      - Power cycle and monitor boot attempts
+      - Wait for watchdog timeout or max boot count
+      - Verify bootloader reverts to slot A
+      - Verify device boots successfully on slot A
+    pass_criteria:
+      - Device fails to boot slot B
+      - Rollback triggered within max_boot_attempts * watchdog_timeout_s
+      - Device recovers to slot A and passes health check
+
+  - recipe_id: hil-ota-delta-update
+    name: "Delta Update HIL"
+    description: "Apply delta patch on device, verify resulting image hash matches expected"
+    equipment:
+      - target_board
+      - serial_console
+      - tftp_server
+    steps:
+      - Transfer delta patch to device via TFTP
+      - Apply patch with bspatch against current rootfs
+      - Compute SHA-256 of patched image
+      - Compare against expected hash from manifest
+    pass_criteria:
+      - Patch applies without error
+      - Resulting image hash matches expected SHA-256
+      - Apply time within acceptable threshold
+
+  - recipe_id: hil-ota-signature-verify
+    name: "Signature Verification HIL"
+    description: "Verify device rejects unsigned/tampered firmware and accepts properly signed firmware"
+    equipment:
+      - target_board
+      - serial_console
+    steps:
+      - Attempt OTA with unsigned image — verify rejection
+      - Attempt OTA with tampered image — verify rejection
+      - Attempt OTA with correctly signed image — verify acceptance
+    pass_criteria:
+      - Unsigned image rejected with clear error
+      - Tampered image rejected with signature mismatch error
+      - Valid signed image accepted and installed
+
+  - recipe_id: hil-ota-full-cycle
+    name: "Full OTA Cycle HIL"
+    description: "End-to-end: server publishes manifest → device downloads → flashes → reboots → confirms"
+    equipment:
+      - target_board
+      - serial_console
+      - power_relay
+      - ota_server
+    steps:
+      - Publish update manifest to OTA server
+      - Device polls and discovers new version
+      - Device downloads firmware (full or delta)
+      - Device verifies signature
+      - Device writes to inactive slot
+      - Device reboots
+      - Device runs health check
+      - Device confirms update (clears bootcount)
+      - Verify new firmware version reported
+    pass_criteria:
+      - Full cycle completes within 5 minutes
+      - No rollback triggered
+      - Device reports new firmware version
+      - Health check passes on first attempt

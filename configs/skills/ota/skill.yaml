@@ -1,0 +1,53 @@
+schema_version: 1
+name: ota
+description: "OTA framework — A/B slot partitioning, delta updates (bsdiff/zchunk/RAUC), rollback triggers (watchdog+bootcount), signature verification (ed25519/X.509/MCUboot), server-side manifest with phased rollout"
+version: "1.0.0"
+author: "OmniSight"
+license: "Proprietary"
+compatible_socs:
+  - hi3516
+  - rk3566
+  - rk3568
+  - imx8m
+  - stm32mp1
+  - stm32h7
+  - stm32f4
+  - nrf52840
+  - nrf5340
+  - esp32s3
+  - x86_64
+depends_on_skills: []
+depends_on_core:
+  - CORE-05
+  - CORE-15
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/test_definitions.yaml
+  - kind: hil
+    path: hil/ota_hil_recipes.yaml
+  - kind: docs
+    path: docs/ota_integration_guide.md.j2
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+keywords:
+  - ota
+  - firmware-update
+  - a-b-slot
+  - delta-update
+  - bsdiff
+  - zchunk
+  - rauc
+  - rollback
+  - watchdog
+  - bootcount
+  - ed25519
+  - x509
+  - mcuboot
+  - phased-rollout
+  - manifest

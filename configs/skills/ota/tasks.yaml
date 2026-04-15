@@ -1,0 +1,126 @@
+tasks:
+  - id: ota-partition-layout
+    name: "Define A/B partition layout"
+    description: "Create partition table with dual boot + rootfs slots + shared data"
+    depends_on: []
+    artifacts: [partition_layout.json]
+    test_recipe: ota-ab-slot-switch
+
+  - id: ota-bootloader-integration
+    name: "Integrate bootloader A/B slot switching"
+    description: "Configure u-boot env vars (bootcount, upgrade_available, active_slot) or MCUboot swap"
+    depends_on: [ota-partition-layout]
+    artifacts: [boot_env.cfg]
+    test_recipe: ota-ab-slot-switch
+
+  - id: ota-delta-engine-setup
+    name: "Set up delta update engine"
+    description: "Install and configure bsdiff/bspatch or zchunk or RAUC for delta updates"
+    depends_on: [ota-partition-layout]
+    artifacts: [delta_config.yaml]
+    test_recipe: ota-delta-generate-apply
+
+  - id: ota-rauc-system-conf
+    name: "Create RAUC system.conf"
+    description: "Define RAUC slot classes, boot selection, and bundle verification settings"
+    depends_on: [ota-bootloader-integration]
+    artifacts: [system.conf]
+    test_recipe: ota-ab-slot-switch
+
+  - id: ota-signing-keypair
+    name: "Generate OTA signing keypair"
+    description: "Generate ed25519 or ECDSA-P256 keypair for firmware signing"
+    depends_on: []
+    artifacts: [ota_signing.key, ota_signing.pub]
+    test_recipe: ota-signature-ed25519
+
+  - id: ota-cert-chain
+    name: "Set up X.509 certificate chain"
+    description: "Create root CA, intermediate CA, and signing certificate for enterprise deployments"
+    depends_on: [ota-signing-keypair]
+    artifacts: [ota_cert_chain.pem]
+    test_recipe: ota-signature-x509
+
+  - id: ota-image-signing
+    name: "Implement firmware image signing"
+    description: "Sign firmware images during build with ed25519/ECDSA and embed signature"
+    depends_on: [ota-signing-keypair]
+    artifacts: [signed_firmware.bin, firmware.sig]
+    test_recipe: ota-signature-ed25519
+
+  - id: ota-signature-verify
+    name: "Implement on-device signature verification"
+    description: "Verify firmware signature before applying update — reject tampered images"
+    depends_on: [ota-image-signing]
+    artifacts: [verify_firmware.c]
+    test_recipe: ota-signature-reject-tampered
+
+  - id: ota-watchdog-setup
+    name: "Configure hardware watchdog"
+    description: "Set watchdog timeout, ensure application pets watchdog after successful boot"
+    depends_on: [ota-bootloader-integration]
+    artifacts: [watchdog_config.yaml]
+    test_recipe: ota-rollback-watchdog
+
+  - id: ota-rollback-policy
+    name: "Implement rollback policy"
+    description: "Boot count tracking + watchdog trigger + health check → automatic rollback"
+    depends_on: [ota-watchdog-setup]
+    artifacts: [rollback_policy.yaml]
+    test_recipe: ota-rollback-bootcount
+
+  - id: ota-health-check
+    name: "Implement post-update health check"
+    description: "Application-level health check that confirms update success and clears bootcount"
+    depends_on: [ota-rollback-policy]
+    artifacts: [ota_health_check.sh]
+    test_recipe: ota-rollback-full-path
+
+  - id: ota-server-manifest
+    name: "Implement server-side update manifest"
+    description: "Create and serve signed update manifests with version constraints"
+    depends_on: [ota-image-signing]
+    artifacts: [update_manifest.json]
+    test_recipe: ota-manifest-parse
+
+  - id: ota-phased-rollout
+    name: "Implement phased rollout"
+    description: "Canary → early adopter → GA rollout with health gates at each phase"
+    depends_on: [ota-server-manifest]
+    artifacts: [rollout_config.yaml]
+    test_recipe: ota-phased-rollout
+
+  - id: ota-client-agent
+    name: "Implement OTA client agent"
+    description: "Device-side agent: poll manifest → download → verify → flash → reboot → confirm"
+    depends_on: [ota-signature-verify, ota-delta-engine-setup, ota-rollback-policy]
+    artifacts: [ota_agent.c, ota_agent.py]
+    test_recipe: ota-full-cycle
+
+  - id: ota-mcuboot-integration
+    name: "MCUboot OTA integration"
+    description: "MCUboot-specific: imgtool signing, slot swap, image confirmation"
+    depends_on: [ota-signing-keypair]
+    artifacts: [mcuboot_ota.c]
+    test_recipe: ota-mcuboot-swap
+
+  - id: ota-integration-test-full
+    name: "Full OTA integration test"
+    description: "End-to-end: manifest → download → flash → reboot → health → confirm/rollback"
+    depends_on: [ota-client-agent, ota-server-manifest, ota-health-check]
+    artifacts: [ota_integration_report.json]
+    test_recipe: ota-full-cycle
+
+  - id: ota-rollback-integration-test
+    name: "Rollback path integration test"
+    description: "Flash bad image → reboot → watchdog/bootcount → rollback → verify old version"
+    depends_on: [ota-rollback-policy, ota-client-agent]
+    artifacts: [rollback_test_report.json]
+    test_recipe: ota-rollback-full-path
+
+  - id: ota-documentation
+    name: "Generate OTA documentation"
+    description: "Integration guide, partition layout docs, key management cross-reference"
+    depends_on: [ota-integration-test-full]
+    artifacts: [ota_integration_guide.md]
+    test_recipe: null

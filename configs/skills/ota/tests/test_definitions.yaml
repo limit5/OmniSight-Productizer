@@ -1,0 +1,109 @@
+test_suites:
+  - suite_id: ota_ab_slot
+    name: "A/B Slot Partition Tests"
+    domain: ab_slot
+    tests:
+      - id: test_linux_ab_scheme_loaded
+        name: "Linux A/B scheme loaded from config"
+        type: unit
+      - id: test_mcuboot_ab_scheme_loaded
+        name: "MCUboot A/B scheme loaded from config"
+        type: unit
+      - id: test_android_ab_scheme_loaded
+        name: "Android A/B scheme loaded from config"
+        type: unit
+      - id: test_slot_switch_a_to_b
+        name: "Switch from slot A to B"
+        type: unit
+      - id: test_slot_switch_b_to_a
+        name: "Switch from slot B to A"
+        type: unit
+      - id: test_invalid_slot_rejected
+        name: "Invalid slot target rejected"
+        type: unit
+
+  - suite_id: ota_delta_update
+    name: "Delta Update Tests"
+    domain: delta_update
+    tests:
+      - id: test_bsdiff_generate_delta
+        name: "Generate delta with bsdiff"
+        type: unit
+      - id: test_bsdiff_apply_delta
+        name: "Apply delta with bspatch"
+        type: unit
+      - id: test_zchunk_generate_delta
+        name: "Generate delta with zchunk"
+        type: unit
+      - id: test_rauc_bundle
+        name: "Generate RAUC bundle"
+        type: unit
+      - id: test_unknown_engine_rejected
+        name: "Unknown delta engine rejected"
+        type: unit
+
+  - suite_id: ota_rollback
+    name: "Rollback Tests"
+    domain: rollback
+    tests:
+      - id: test_watchdog_triggers_reboot
+        name: "Watchdog timeout triggers reboot"
+        type: unit
+      - id: test_bootcount_triggers_rollback
+        name: "Boot count exceeded triggers rollback"
+        type: unit
+      - id: test_health_fail_triggers_rollback
+        name: "Health check failure triggers rollback"
+        type: unit
+      - id: test_healthy_boot_no_rollback
+        name: "Healthy boot — no rollback action"
+        type: unit
+      - id: test_mcuboot_unconfirmed_reverts
+        name: "MCUboot unconfirmed reboot reverts"
+        type: unit
+
+  - suite_id: ota_signature
+    name: "Signature Verification Tests"
+    domain: signature
+    tests:
+      - id: test_ed25519_sign
+        name: "Sign firmware with ed25519"
+        type: unit
+      - id: test_ed25519_verify_valid
+        name: "Verify valid ed25519 signature"
+        type: unit
+      - id: test_ed25519_verify_tampered
+        name: "Reject tampered ed25519 signature"
+        type: unit
+      - id: test_x509_verify_valid
+        name: "Verify valid X.509 chain signature"
+        type: unit
+      - id: test_x509_verify_tampered
+        name: "Reject tampered X.509 signature"
+        type: unit
+      - id: test_mcuboot_ecdsa_verify
+        name: "MCUboot ECDSA-P256 signature verify"
+        type: unit
+
+  - suite_id: ota_server
+    name: "Server & Manifest Tests"
+    domain: server
+    tests:
+      - id: test_create_manifest
+        name: "Create update manifest"
+        type: unit
+      - id: test_validate_manifest_valid
+        name: "Validate correct manifest"
+        type: unit
+      - id: test_validate_manifest_missing_fields
+        name: "Reject manifest with missing required fields"
+        type: unit
+      - id: test_rollout_canary_pass
+        name: "Canary rollout phase passes with good metrics"
+        type: unit
+      - id: test_rollout_canary_fail
+        name: "Canary rollout phase fails with bad metrics"
+        type: unit
+      - id: test_rollout_no_gate_auto_pass
+        name: "Phase with no health gate auto-passes"
+        type: unit

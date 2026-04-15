@@ -1,0 +1,122 @@
+# OTA Framework Integration Guide
+
+## Overview
+
+This guide covers integrating the OTA (Over-The-Air) update framework into
+your embedded product. The framework provides A/B slot partitioning, delta
+updates, automatic rollback on boot failure, cryptographic signature
+verification, and server-side phased rollout.
+
+## Prerequisites
+
+- CORE-05 (Skill Pack Framework) installed and validated
+- CORE-15 (Security Stack) for key management and secure boot chain
+
+## A/B Slot Partition Scheme
+
+{% if ab_schemes %}
+### Available Schemes
+
+{% for scheme in ab_schemes %}
+#### {{ scheme.name }}
+
+- **Scheme ID**: `{{ scheme.scheme_id }}`
+- **Slot Count**: {{ scheme.slot_count }}
+- **Bootloader**: {{ scheme.bootloader_integration }}
+- **Compatible SoCs**: {{ scheme.compatible_socs | join(', ') }}
+
+**Partitions:**
+
+| Partition | Type | Slot | Filesystem | Size (MB) |
+|-----------|------|------|------------|-----------|
+{% for p in scheme.partitions %}
+| {{ p.label }} | {{ p.type }} | {{ p.slot }} | {{ p.filesystem }} | {{ p.typical_size_mb }} |
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+
+## Delta Update Engines
+
+{% if delta_engines %}
+{% for engine in delta_engines %}
+### {{ engine.name }} (v{{ engine.version }})
+
+{{ engine.description }}
+
+- **Compression**: {{ engine.compression }}
+- **Max Image Size**: {{ engine.max_image_size_mb }} MB
+- **Features**: {{ engine.features | join(', ') }}
+{% endfor %}
+{% endif %}
+
+## Rollback Configuration
+
+The rollback system uses hardware watchdog + boot count tracking to
+automatically revert to the previous firmware slot on boot failure.
+
+### Triggers
+
+1. **Watchdog Timeout** — Hardware watchdog fires if application fails to
+   initialize within timeout period
+2. **Boot Count Exceeded** — Bootloader increments counter each boot;
+   if counter exceeds threshold, rollback is triggered
+3. **Health Check Failure** — Application-level health check fails after
+   boot completes
+
+### Health Check Integration
+
+```c
+// After successful application initialization:
+// 1. Pet the watchdog
+// 2. Clear the boot counter
+// 3. Mark the slot as good
+ota_confirm_update();
+```
+
+## Signature Verification
+
+{% if signature_schemes %}
+{% for sig in signature_schemes %}
+### {{ sig.name }}
+
+- **Algorithm**: {{ sig.algorithm }}
+- **Hash**: {{ sig.hash }}
+- **Key Size**: {{ sig.key_size_bits }} bits
+
+**Verification Flow:**
+{% for step in sig.verification_flow %}
+{{ loop.index }}. `{{ step.step }}` — {{ step.description }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+
+## Server-Side Manifest
+
+Update manifests are JSON documents signed by the OTA signing key. Each
+manifest specifies the target firmware version, image descriptors (URLs,
+hashes, sizes), and rollout configuration.
+
+### Phased Rollout
+
+{% if rollout_strategies %}
+{% for strategy in rollout_strategies %}
+#### {{ strategy.name }}
+
+{{ strategy.description }}
+
+{% for phase in strategy.phases %}
+- **{{ phase.name }}**: {{ phase.percentage }}% of fleet, {{ phase.duration_hours }}h soak
+{% endfor %}
+{% endfor %}
+{% endif %}
+
+## Quick Start
+
+1. Choose your A/B slot scheme based on target SoC
+2. Generate signing keypair: `openssl genpkey -algorithm ed25519 -out ota.key`
+3. Configure RAUC `system.conf` (Linux) or MCUboot keys (MCU)
+4. Implement health check in your application
+5. Set up OTA server with manifest endpoint
+6. Test full cycle: flash -> reboot -> verify -> rollback path

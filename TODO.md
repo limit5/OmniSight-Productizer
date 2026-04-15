@@ -237,12 +237,12 @@ Legend:
 - [x] Threat model per product class
 
 ### C16. L4-CORE-16 OTA framework (#230)
-- [ ] A/B slot partition scheme
-- [ ] Delta update (bsdiff / zchunk / RAUC)
-- [ ] Rollback trigger on boot-fail (watchdog + count)
-- [ ] Signature verification (ed25519 + cert chain)
-- [ ] Server side: update manifest + phased rollout
-- [ ] Integration test: flash → reboot → rollback path
+- [x] A/B slot partition scheme
+- [x] Delta update (bsdiff / zchunk / RAUC)
+- [x] Rollback trigger on boot-fail (watchdog + count)
+- [x] Signature verification (ed25519 + cert chain)
+- [x] Server side: update manifest + phased rollout
+- [x] Integration test: flash → reboot → rollback path
 
 ### C17. L4-CORE-17 Telemetry backend (#231)
 - [ ] Client SDK: crash dump + usage event + perf metric
