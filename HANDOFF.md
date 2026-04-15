@@ -7,6 +7,57 @@
 
 ---
 
+## C6 L4-CORE-06 Document suite generator 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Extend REPORT-01 with per-product-class templates | ✅ | `backend/doc_suite_generator.py` — `PRODUCT_CLASS_TEMPLATES` mapping 7 ProjectClass → tailored template subsets |
+| Templates (7) | ✅ | `configs/templates/` — datasheet.md.j2, user_manual.md.j2, compliance_report.md.j2, api_doc.md.j2, sbom.json.j2, eula.md.j2, security.md.j2 |
+| Merge compliance-cert fields from CORE-09/10/18 | ✅ | `collect_compliance_certs()` — tries importing safety/radio/payment modules, graceful fallback when unavailable |
+| PDF export via weasyprint | ✅ | `render_doc_pdf()` + `export_suite_to_dir()` — reuses `report_generator.render_pdf()`, JSON docs wrapped in `<pre>` |
+| Unit test per product class | ✅ | 58 項測試全數通過：template selection (8) + render single (11) + compliance merging (8) + suite generation (10) + PDF export (4) + from_parsed_spec (5) + context (6) + edge cases (6) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/doc_suite_generator.py` | 新建——per-product-class document suite generator |
+| `backend/routers/report.py` | 擴充——新增 C6 doc-suite endpoints (GET templates, POST generate) |
+| `backend/tests/test_doc_suite_generator.py` | 新建，58 項測試 |
+| `configs/templates/datasheet.md.j2` | 新建——技術規格書模板 |
+| `configs/templates/user_manual.md.j2` | 新建——使用者手冊模板 |
+| `configs/templates/api_doc.md.j2` | 新建——API 文件模板 |
+| `configs/templates/sbom.json.j2` | 新建——CycloneDX 1.5 SBOM 模板 |
+| `configs/templates/eula.md.j2` | 新建——EULA 授權條款模板 |
+| `configs/templates/security.md.j2` | 新建——資安評估報告模板 |
+
+### 架構說明
+
+- `PRODUCT_CLASS_TEMPLATES` — 每個 ProjectClass 對應的文件模板子集：
+  - `embedded_product` / `factory_tool`：全部 7 種
+  - `enterprise_web`：api_doc + user_manual + sbom + eula + security
+  - `algo_sim` / `optical_sim` / `test_tool`：api_doc + user_manual + sbom + eula
+  - `iso_standard`：compliance + api_doc + user_manual + sbom + eula + security
+- `DocSuiteContext` — 文件套件生成上下文，包含 product_name/version/hw_profile/parsed_spec/compliance_certs
+- `ComplianceCert` — 合規認證欄位，從 CORE-09 (safety) / CORE-10 (radio) / CORE-18 (payment) 動態合併
+- `generate_suite()` → `list[GeneratedDoc]` — 批次生成全套文件
+- `export_suite_to_dir()` — 輸出 Markdown + PDF 至指定目錄
+- API endpoints：`GET /report/doc-suite/templates` + `POST /report/doc-suite/generate`
+
+### 驗證
+
+- 58 項新增 doc suite 測試全數通過
+- 101 項既有測試全數通過（report_generator 39 + skill_framework 62，無迴歸）
+
+### 下一步
+
+- C7 (#216)：HIL plugin API
+- D1 (#218)：SKILL-UVC pilot — doc templates 可由 skill pack 的 docs/ artifacts 擴充
+
+---
+
 ## C5 L4-CORE-05 Skill pack framework 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

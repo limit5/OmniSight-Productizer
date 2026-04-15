@@ -161,11 +161,11 @@ Legend:
 - [x] Contract test: every skill must provide 5 artifacts (tasks/scaffolds/tests/hil/docs)
 
 ### C6. L4-CORE-06 Document suite generator (#215)
-- [ ] Extend REPORT-01 with per-product-class templates
-- [ ] Templates: datasheet.md.j2 / user_manual.md.j2 / compliance.md.j2 / api_doc.md.j2 / sbom.json.j2 / eula.md.j2 / security.md.j2
-- [ ] Merge compliance-cert fields from relevant L4-CORE-09/10/18
-- [ ] PDF export via weasyprint
-- [ ] Unit test per product class
+- [x] Extend REPORT-01 with per-product-class templates
+- [x] Templates: datasheet.md.j2 / user_manual.md.j2 / compliance.md.j2 / api_doc.md.j2 / sbom.json.j2 / eula.md.j2 / security.md.j2
+- [x] Merge compliance-cert fields from relevant L4-CORE-09/10/18
+- [x] PDF export via weasyprint
+- [x] Unit test per product class
 
 ### C7. L4-CORE-07 HIL plugin API (#216)
 - [ ] Define plugin protocol: `measure()` / `verify()` / `teardown()`
