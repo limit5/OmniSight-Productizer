@@ -4405,3 +4405,57 @@ curl -X POST http://localhost:8000/api/v1/invoke
 | 改 workspace 隔離邏輯 | `backend/workspace.py` |
 | 改 Gerrit 整合 | `backend/gerrit.py` + `backend/routers/webhooks.py` |
 | 改 Token Budget 閾值 | `backend/config.py` + `backend/routers/system.py` |
+| 改 repo ingestion 邏輯 | `backend/repo_ingest.py` |
+
+---
+
+## B2/INGEST-01 — Repository Ingestion (2026-04-15)
+
+### What was done
+
+Implemented `backend/repo_ingest.py` (#202) — full repository ingestion pipeline:
+
+1. **`clone_repo(url, shallow=True)`** — async git clone with:
+   - URL validation (shell injection prevention)
+   - Credential resolution via `git_credentials.yaml` registry (HTTPS token embedding + SSH key passthrough)
+   - Shallow clone by default for speed
+   - Timeout (60s) with cleanup on failure
+   - Clear error differentiation: `PermissionError` for auth failures, `RuntimeError` for git errors
+
+2. **`introspect(repo_path)`** — reads manifest files:
+   - `package.json` (parsed as JSON)
+   - `README.md` (truncated to 8KB)
+   - `next.config.mjs` / `next.config.js` / `next.config.ts`
+   - `requirements.txt` (comments stripped)
+   - `Cargo.toml`
+   - Also scans for `pyproject.toml`, `setup.py`, `setup.cfg`
+
+3. **`map_to_parsed_spec(result)`** — maps introspection to `ParsedSpec`:
+   - Framework detection from package.json deps (next/react/vue/svelte/angular/etc.)
+   - Framework detection from requirements.txt (fastapi/django/flask/etc.)
+   - Framework detection from Cargo.toml (actix-web/axum/rocket/clap/embedded-hal)
+   - Runtime model inference (SSG/SSR/SPA/CLI) from next.config + scripts
+   - Persistence detection from deps (prisma→postgres, psycopg2→postgres, etc.)
+   - Project type inference (web_app/cli_tool/embedded_firmware)
+
+4. **Private repo token storage** — reuses `git_credentials.yaml` pattern via `find_credential_for_url()` / `get_token_for_url()` / `get_ssh_key_for_url()`.
+
+5. **`ingest_repo(url)`** — convenience pipeline: clone → introspect → map → cleanup.
+
+### Tests
+
+37 tests in `backend/tests/test_repo_ingest.py`, all passing:
+- **v0.app Next.js**: framework=nextjs, runtime=ssr, persistence=postgres (prisma), project_type=web_app
+- **FastAPI backend**: framework=fastapi, runtime=ssr, persistence=postgres (psycopg2), project_type=web_app
+- **Rust CLI**: framework=rust, runtime=cli, project_type=cli_tool
+- URL validation (empty, injection, bad scheme)
+- Auth URL building (token embed, SSH passthrough)
+- Edge cases (empty dir, malformed JSON, README truncation, SSG detection)
+
+### Files changed
+
+| File | Action |
+|------|--------|
+| `backend/repo_ingest.py` | **Created** — 280 lines |
+| `backend/tests/test_repo_ingest.py` | **Created** — 360 lines |
+| `TODO.md` | Updated B2 items → `[x]` |

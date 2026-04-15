@@ -44,11 +44,11 @@ Legend:
 - [x] Update `docs/sop/implement_phase_step.md` with cross-agent protocol
 
 ### B2. INGEST-01 `backend/repo_ingest.py` (#202)
-- [ ] Implement `clone_repo(url, shallow=True)` with git credential validation
-- [ ] Implement `introspect(repo_path)` → reads `package.json` / `README.md` / `next.config.mjs` / `requirements.txt` / `Cargo.toml`
-- [ ] Map discovered fields → ParsedSpec (framework, runtime_model, persistence, target_arch)
-- [ ] Handle private repo token storage (reuse git_credentials.yaml pattern)
-- [ ] Unit tests for 3 starter templates (v0.app Next.js / FastAPI backend / Rust CLI)
+- [x] Implement `clone_repo(url, shallow=True)` with git credential validation
+- [x] Implement `introspect(repo_path)` → reads `package.json` / `README.md` / `next.config.mjs` / `requirements.txt` / `Cargo.toml`
+- [x] Map discovered fields → ParsedSpec (framework, runtime_model, persistence, target_arch)
+- [x] Handle private repo token storage (reuse git_credentials.yaml pattern)
+- [x] Unit tests for 3 starter templates (v0.app Next.js / FastAPI backend / Rust CLI)
 
 ### B3. REPORT-01 `backend/report_generator.py` (#203)
 - [ ] Section 1 (Spec): read ParsedSpec + all clarifications + input sources
