@@ -1,0 +1,82 @@
+schema_version: 1
+skill: telemetry
+test_suites:
+  - suite_id: sdk_unit_tests
+    name: "SDK Unit Tests"
+    tests:
+      - test_id: sdk_init
+        name: "SDK initializes with profile config"
+        type: unit
+      - test_id: sdk_batch_flush
+        name: "SDK batches events and flushes at interval"
+        type: unit
+      - test_id: sdk_offline_queue
+        name: "SDK queues events when offline and flushes on reconnect"
+        type: unit
+      - test_id: sdk_sampling
+        name: "SDK respects sampling rates per event type"
+        type: unit
+      - test_id: sdk_compression
+        name: "SDK compresses batched payload"
+        type: unit
+      - test_id: sdk_retry_backoff
+        name: "SDK retries with exponential backoff"
+        type: unit
+
+  - suite_id: ingestion_tests
+    name: "Ingestion Endpoint Tests"
+    tests:
+      - test_id: ingest_batch
+        name: "Accept batched POST with mixed event types"
+        type: integration
+      - test_id: ingest_rate_limit
+        name: "Rate limit per-device requests"
+        type: integration
+      - test_id: ingest_retry_queue
+        name: "Failed events enter retry queue"
+        type: integration
+      - test_id: ingest_validation
+        name: "Reject events missing required fields"
+        type: integration
+
+  - suite_id: privacy_tests
+    name: "Privacy & PII Tests"
+    tests:
+      - test_id: pii_hash_redaction
+        name: "PII fields hashed with SHA-256"
+        type: unit
+      - test_id: pii_ip_truncation
+        name: "IP addresses truncated to /24"
+        type: unit
+      - test_id: pii_gps_rounding
+        name: "GPS coordinates rounded to 2 decimals"
+        type: unit
+      - test_id: consent_enforcement
+        name: "Events rejected without opt-in consent"
+        type: integration
+      - test_id: consent_revocation
+        name: "Events rejected after consent revocation"
+        type: integration
+
+  - suite_id: storage_tests
+    name: "Storage & Retention Tests"
+    tests:
+      - test_id: retention_purge
+        name: "Expired events purged per retention policy"
+        type: integration
+      - test_id: partition_by_month
+        name: "Events partitioned by month"
+        type: integration
+
+  - suite_id: dashboard_tests
+    name: "Dashboard Query Tests"
+    tests:
+      - test_id: fleet_health_panels
+        name: "Fleet health dashboard returns correct metrics"
+        type: integration
+      - test_id: crash_rate_panels
+        name: "Crash rate dashboard shows top signals"
+        type: integration
+      - test_id: adoption_panels
+        name: "Adoption dashboard tracks feature usage"
+        type: integration

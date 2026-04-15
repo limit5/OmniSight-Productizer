@@ -1,0 +1,626 @@
+# C17 — L4-CORE-17 Telemetry Backend (#231)
+# Client SDK configuration, ingestion endpoints, storage retention policies,
+# privacy/PII redaction, fleet health dashboards.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Client SDK Profiles
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+sdk_profiles:
+  default:
+    name: "Default Telemetry SDK"
+    description: "General-purpose telemetry SDK for embedded devices"
+    event_types:
+      - crash_dump
+      - usage_event
+      - perf_metric
+    batch_size: 50
+    flush_interval_seconds: 60
+    max_queue_size: 1000
+    retry_max_attempts: 5
+    retry_backoff_base_seconds: 2
+    retry_backoff_max_seconds: 300
+    offline_queue_enabled: true
+    offline_queue_max_size: 5000
+    offline_queue_flush_on_reconnect: true
+    compression: gzip
+    transport: https
+    min_log_level: warn
+    sampling_rates:
+      crash_dump: 1.0
+      usage_event: 0.5
+      perf_metric: 0.1
+
+  low_bandwidth:
+    name: "Low-Bandwidth Telemetry SDK"
+    description: "Optimized for constrained network environments (LoRa, NB-IoT)"
+    event_types:
+      - crash_dump
+      - perf_metric
+    batch_size: 10
+    flush_interval_seconds: 300
+    max_queue_size: 200
+    retry_max_attempts: 3
+    retry_backoff_base_seconds: 5
+    retry_backoff_max_seconds: 600
+    offline_queue_enabled: true
+    offline_queue_max_size: 1000
+    offline_queue_flush_on_reconnect: true
+    compression: lz4
+    transport: https
+    min_log_level: error
+    sampling_rates:
+      crash_dump: 1.0
+      perf_metric: 0.05
+
+  high_fidelity:
+    name: "High-Fidelity Telemetry SDK"
+    description: "Full telemetry capture for dev/staging environments"
+    event_types:
+      - crash_dump
+      - usage_event
+      - perf_metric
+    batch_size: 100
+    flush_interval_seconds: 10
+    max_queue_size: 10000
+    retry_max_attempts: 10
+    retry_backoff_base_seconds: 1
+    retry_backoff_max_seconds: 120
+    offline_queue_enabled: true
+    offline_queue_max_size: 50000
+    offline_queue_flush_on_reconnect: true
+    compression: gzip
+    transport: https
+    min_log_level: debug
+    sampling_rates:
+      crash_dump: 1.0
+      usage_event: 1.0
+      perf_metric: 1.0
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Event Type Schemas
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+event_types:
+  crash_dump:
+    name: "Crash Dump"
+    description: "Device crash reports with stack trace, register dump, and coredump metadata"
+    required_fields:
+      - device_id
+      - timestamp
+      - crash_signal
+      - stack_trace
+    optional_fields:
+      - firmware_version
+      - uptime_seconds
+      - free_memory_bytes
+      - register_dump
+      - coredump_path
+      - watchdog_triggered
+      - last_known_state
+    severity: critical
+    max_payload_bytes: 65536
+    retention_days: 365
+
+  usage_event:
+    name: "Usage Event"
+    description: "User/device interaction events for adoption and feature tracking"
+    required_fields:
+      - device_id
+      - timestamp
+      - event_name
+    optional_fields:
+      - firmware_version
+      - session_id
+      - feature_id
+      - duration_ms
+      - metadata
+    severity: info
+    max_payload_bytes: 4096
+    retention_days: 90
+
+  perf_metric:
+    name: "Performance Metric"
+    description: "System and application performance metrics (CPU, memory, latency, FPS)"
+    required_fields:
+      - device_id
+      - timestamp
+      - metric_name
+      - metric_value
+    optional_fields:
+      - firmware_version
+      - metric_unit
+      - metric_tags
+      - cpu_percent
+      - memory_percent
+      - disk_percent
+      - temperature_celsius
+      - network_latency_ms
+      - fps
+    severity: info
+    max_payload_bytes: 2048
+    retention_days: 30
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Ingestion Endpoint Configuration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ingestion:
+  max_batch_size: 500
+  max_payload_bytes: 1048576
+  rate_limit_per_device_per_minute: 60
+  rate_limit_global_per_second: 1000
+  accepted_content_types:
+    - application/json
+    - application/x-ndjson
+  accepted_encodings:
+    - gzip
+    - lz4
+    - identity
+  retry_queue:
+    enabled: true
+    max_size: 10000
+    max_age_seconds: 86400
+    retry_interval_seconds: 30
+    max_retries: 10
+    dead_letter_after_retries: 10
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Storage & Retention Policies
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+storage:
+  engine: sqlite
+  partition_by: month
+  partitions:
+    crash_dump:
+      retention_days: 365
+      archive_after_days: 90
+      archive_format: parquet
+      index_columns:
+        - device_id
+        - crash_signal
+        - firmware_version
+    usage_event:
+      retention_days: 90
+      archive_after_days: 30
+      archive_format: parquet
+      index_columns:
+        - device_id
+        - event_name
+        - feature_id
+    perf_metric:
+      retention_days: 30
+      archive_after_days: 7
+      archive_format: parquet
+      index_columns:
+        - device_id
+        - metric_name
+  vacuum_schedule: weekly
+  max_db_size_mb: 2048
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Privacy / PII Redaction
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+privacy:
+  opt_in_required: true
+  opt_in_default: false
+  pii_fields:
+    - ip_address
+    - mac_address
+    - serial_number
+    - gps_latitude
+    - gps_longitude
+    - user_name
+    - email
+    - phone_number
+    - ssid
+    - imei
+    - imsi
+  redaction_strategy: hash_sha256
+  redaction_salt_env: OMNISIGHT_PII_SALT
+  redaction_fallback_salt: "omnisight-default-pii-salt-change-me"
+  anonymization_rules:
+    ip_address: truncate_last_octet
+    mac_address: hash
+    serial_number: hash
+    gps_latitude: round_2_decimals
+    gps_longitude: round_2_decimals
+    user_name: hash
+    email: hash
+    phone_number: hash
+    ssid: hash
+    imei: hash
+    imsi: hash
+  consent_record_retention_days: 730
+  data_deletion_sla_hours: 72
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Dashboard Definitions
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+dashboards:
+  fleet_health:
+    name: "Fleet Health"
+    description: "Overall fleet health: online devices, heartbeat rate, error rate"
+    panels:
+      - panel_id: active_devices
+        name: "Active Devices"
+        query_type: count_distinct
+        field: device_id
+        event_type: perf_metric
+        time_range: 24h
+        display: stat_card
+
+      - panel_id: heartbeat_rate
+        name: "Heartbeat Rate"
+        query_type: count
+        event_type: perf_metric
+        filter:
+          metric_name: heartbeat
+        time_range: 1h
+        display: timeseries
+
+      - panel_id: error_rate
+        name: "Error Rate"
+        query_type: ratio
+        numerator:
+          event_type: crash_dump
+        denominator:
+          event_type: perf_metric
+          filter:
+            metric_name: heartbeat
+        time_range: 24h
+        display: stat_card
+
+      - panel_id: firmware_distribution
+        name: "Firmware Version Distribution"
+        query_type: count
+        field: firmware_version
+        event_type: usage_event
+        group_by: firmware_version
+        time_range: 24h
+        display: pie_chart
+
+  crash_rate:
+    name: "Crash Rate"
+    description: "Crash analysis: rate over time, top crash signals, affected devices"
+    panels:
+      - panel_id: crash_timeline
+        name: "Crashes Over Time"
+        query_type: count
+        event_type: crash_dump
+        time_range: 7d
+        bucket: 1h
+        display: timeseries
+
+      - panel_id: top_crash_signals
+        name: "Top Crash Signals"
+        query_type: count
+        event_type: crash_dump
+        group_by: crash_signal
+        time_range: 7d
+        limit: 10
+        display: bar_chart
+
+      - panel_id: affected_devices
+        name: "Affected Devices"
+        query_type: count_distinct
+        field: device_id
+        event_type: crash_dump
+        time_range: 7d
+        display: stat_card
+
+      - panel_id: crash_by_firmware
+        name: "Crashes by Firmware"
+        query_type: count
+        event_type: crash_dump
+        group_by: firmware_version
+        time_range: 7d
+        display: bar_chart
+
+  adoption:
+    name: "Feature Adoption"
+    description: "Feature usage tracking: active users, feature adoption, session duration"
+    panels:
+      - panel_id: daily_active_devices
+        name: "Daily Active Devices"
+        query_type: count_distinct
+        field: device_id
+        event_type: usage_event
+        time_range: 30d
+        bucket: 1d
+        display: timeseries
+
+      - panel_id: feature_usage
+        name: "Feature Usage"
+        query_type: count
+        event_type: usage_event
+        group_by: feature_id
+        time_range: 7d
+        limit: 20
+        display: bar_chart
+
+      - panel_id: avg_session_duration
+        name: "Avg Session Duration"
+        query_type: avg
+        field: duration_ms
+        event_type: usage_event
+        time_range: 7d
+        display: stat_card
+
+      - panel_id: new_devices
+        name: "New Devices"
+        query_type: count_distinct
+        field: device_id
+        event_type: usage_event
+        filter:
+          event_name: first_boot
+        time_range: 30d
+        bucket: 1d
+        display: timeseries
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Test Recipes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+test_recipes:
+  - recipe_id: sdk_offline_queue
+    name: "SDK Offline Queue Flush on Reconnect"
+    description: "Verify that queued events flush when connectivity is restored"
+    domain: client_sdk
+    steps:
+      - step_id: enqueue_offline
+        action: "Enqueue 100 events while offline"
+      - step_id: simulate_reconnect
+        action: "Simulate network reconnect"
+      - step_id: verify_flush
+        action: "Verify all 100 events delivered within flush_interval"
+    expected_outcome: all_events_delivered
+    timeout_seconds: 120
+
+  - recipe_id: sdk_batch_compression
+    name: "SDK Batch Compression"
+    description: "Verify batching and gzip compression of telemetry events"
+    domain: client_sdk
+    steps:
+      - step_id: generate_events
+        action: "Generate 50 mixed events"
+      - step_id: verify_batch
+        action: "Verify events batched into single POST"
+      - step_id: verify_compression
+        action: "Verify Content-Encoding: gzip"
+    expected_outcome: single_compressed_batch
+    timeout_seconds: 60
+
+  - recipe_id: ingestion_rate_limit
+    name: "Ingestion Rate Limit"
+    description: "Verify per-device rate limiting on ingestion endpoint"
+    domain: ingestion
+    steps:
+      - step_id: send_burst
+        action: "Send 100 events in 1 second from same device"
+      - step_id: verify_throttle
+        action: "Verify 429 returned after rate limit exceeded"
+    expected_outcome: rate_limited
+    timeout_seconds: 30
+
+  - recipe_id: ingestion_retry_queue
+    name: "Ingestion Retry Queue"
+    description: "Verify failed ingestion events are queued for retry"
+    domain: ingestion
+    steps:
+      - step_id: simulate_storage_failure
+        action: "Simulate storage write failure"
+      - step_id: send_events
+        action: "Send 10 events"
+      - step_id: verify_queued
+        action: "Verify events placed in retry queue"
+      - step_id: restore_storage
+        action: "Restore storage"
+      - step_id: verify_retried
+        action: "Verify events retried and stored"
+    expected_outcome: all_events_stored_after_retry
+    timeout_seconds: 120
+
+  - recipe_id: pii_redaction
+    name: "PII Redaction"
+    description: "Verify PII fields are redacted before storage"
+    domain: privacy
+    steps:
+      - step_id: send_with_pii
+        action: "Send event with IP, MAC, email fields"
+      - step_id: verify_redacted
+        action: "Verify stored event has hashed/truncated PII"
+    expected_outcome: pii_redacted
+    timeout_seconds: 30
+
+  - recipe_id: opt_in_enforcement
+    name: "Opt-In Enforcement"
+    description: "Verify events rejected when device has not opted in"
+    domain: privacy
+    steps:
+      - step_id: send_without_consent
+        action: "Send event without opt-in flag"
+      - step_id: verify_rejected
+        action: "Verify 403 returned"
+      - step_id: grant_consent
+        action: "Record device consent"
+      - step_id: send_with_consent
+        action: "Send event with opt-in flag"
+      - step_id: verify_accepted
+        action: "Verify event stored"
+    expected_outcome: consent_enforced
+    timeout_seconds: 60
+
+  - recipe_id: retention_purge
+    name: "Retention Purge"
+    description: "Verify expired events are purged per retention policy"
+    domain: storage
+    steps:
+      - step_id: insert_old_events
+        action: "Insert events with timestamps beyond retention"
+      - step_id: run_purge
+        action: "Trigger retention purge"
+      - step_id: verify_purged
+        action: "Verify old events removed, recent events preserved"
+    expected_outcome: expired_purged
+    timeout_seconds: 60
+
+  - recipe_id: dashboard_fleet_health
+    name: "Dashboard Fleet Health Query"
+    description: "Verify fleet health dashboard returns correct metrics"
+    domain: dashboard
+    steps:
+      - step_id: seed_events
+        action: "Seed perf_metric and crash_dump events"
+      - step_id: query_dashboard
+        action: "Query fleet_health dashboard"
+      - step_id: verify_panels
+        action: "Verify active_devices, heartbeat_rate, error_rate panels"
+    expected_outcome: panels_populated
+    timeout_seconds: 60
+
+  - recipe_id: sdk_crash_dump_capture
+    name: "SDK Crash Dump Capture"
+    description: "Verify crash dump with stack trace is captured and sent"
+    domain: client_sdk
+    steps:
+      - step_id: trigger_crash
+        action: "Simulate SIGSEGV with stack trace"
+      - step_id: verify_capture
+        action: "Verify crash_dump event created with signal + trace"
+      - step_id: verify_sent
+        action: "Verify event sent to ingestion endpoint"
+    expected_outcome: crash_captured_and_sent
+    timeout_seconds: 60
+
+  - recipe_id: sdk_perf_metric_sampling
+    name: "SDK Performance Metric Sampling"
+    description: "Verify sampling rate is respected for perf metrics"
+    domain: client_sdk
+    steps:
+      - step_id: set_sampling
+        action: "Set perf_metric sampling to 0.1"
+      - step_id: generate_1000
+        action: "Generate 1000 perf_metric events"
+      - step_id: verify_sampled
+        action: "Verify ~100 events sent (±20% tolerance)"
+    expected_outcome: sampling_respected
+    timeout_seconds: 60
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SoC Compatibility
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+compatible_socs:
+  hi3516:
+    sdk_profile: default
+    transport: https
+    notes: "Full telemetry support via Linux userspace"
+  rk3566:
+    sdk_profile: default
+    transport: https
+    notes: "Full telemetry support via Linux userspace"
+  rk3568:
+    sdk_profile: default
+    transport: https
+    notes: "Full telemetry support via Linux userspace"
+  imx8m:
+    sdk_profile: default
+    transport: https
+    notes: "Full telemetry support via Linux userspace"
+  stm32mp1:
+    sdk_profile: default
+    transport: https
+    notes: "Full telemetry support via Linux userspace"
+  stm32h7:
+    sdk_profile: low_bandwidth
+    transport: https
+    notes: "RTOS-based — use low_bandwidth profile, limited queue"
+  stm32f4:
+    sdk_profile: low_bandwidth
+    transport: https
+    notes: "RTOS-based — use low_bandwidth profile, minimal queue"
+  nrf52840:
+    sdk_profile: low_bandwidth
+    transport: https
+    notes: "BLE relay preferred; HTTPS via WiFi coprocessor"
+  nrf5340:
+    sdk_profile: low_bandwidth
+    transport: https
+    notes: "BLE relay preferred; HTTPS via WiFi coprocessor"
+  esp32s3:
+    sdk_profile: default
+    transport: https
+    notes: "WiFi-native — default profile suitable"
+  x86_64:
+    sdk_profile: high_fidelity
+    transport: https
+    notes: "Dev/test host — high fidelity recommended"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Artifact Definitions
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifact_definitions:
+  telemetry_sdk_c:
+    name: "Telemetry SDK (C Library)"
+    description: "Embedded C library for crash dump, usage, and perf telemetry"
+    artifact_type: source
+    language: c
+    files:
+      - telemetry_sdk.h
+      - telemetry_sdk.c
+      - telemetry_queue.h
+      - telemetry_queue.c
+      - telemetry_transport.h
+      - telemetry_transport.c
+
+  telemetry_sdk_python:
+    name: "Telemetry SDK (Python)"
+    description: "Python SDK for Linux-based devices"
+    artifact_type: source
+    language: python
+    files:
+      - telemetry_sdk.py
+      - telemetry_queue.py
+      - telemetry_transport.py
+
+  ingestion_server:
+    name: "Ingestion Server"
+    description: "FastAPI-based telemetry ingestion endpoint"
+    artifact_type: service
+    language: python
+    files:
+      - ingestion_endpoint.py
+      - retry_queue.py
+      - rate_limiter.py
+
+  privacy_module:
+    name: "Privacy Module"
+    description: "PII redaction and consent management"
+    artifact_type: library
+    language: python
+    files:
+      - pii_redactor.py
+      - consent_manager.py
+
+  dashboard_module:
+    name: "Dashboard Module"
+    description: "Fleet health, crash rate, and adoption dashboards"
+    artifact_type: service
+    language: python
+    files:
+      - dashboard_queries.py
+      - dashboard_api.py
+
+  retention_manager:
+    name: "Retention Manager"
+    description: "Partitioned storage with retention policy enforcement"
+    artifact_type: service
+    language: python
+    files:
+      - retention_manager.py
+      - partition_manager.py

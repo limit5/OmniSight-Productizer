@@ -1,0 +1,59 @@
+schema_version: 1
+skill: telemetry
+hil_recipes:
+  - recipe_id: hil_crash_capture
+    name: "HIL Crash Capture"
+    description: "Trigger a real crash on target device and verify crash dump telemetry event received"
+    equipment:
+      - target_device
+      - serial_console
+      - network_tap
+    steps:
+      - step_id: flash_test_firmware
+        action: "Flash firmware with intentional NULL dereference trigger"
+      - step_id: trigger_crash
+        action: "Send trigger command via serial console"
+      - step_id: verify_crash_dump
+        action: "Verify crash_dump event received at ingestion endpoint within 60s"
+    pass_criteria:
+      - "crash_dump event contains signal=SIGSEGV"
+      - "stack_trace includes test_trigger function"
+      - "event arrives within 60 seconds of crash"
+
+  - recipe_id: hil_offline_reconnect
+    name: "HIL Offline Queue Reconnect"
+    description: "Disconnect network, generate events, reconnect, verify flush"
+    equipment:
+      - target_device
+      - network_switch
+    steps:
+      - step_id: disconnect_network
+        action: "Disable network port on switch"
+      - step_id: generate_events
+        action: "Trigger 50 telemetry events on device"
+      - step_id: reconnect_network
+        action: "Re-enable network port"
+      - step_id: verify_flush
+        action: "Verify all 50 events received at ingestion endpoint"
+    pass_criteria:
+      - "All 50 events received"
+      - "Events arrive within 2x flush_interval_seconds"
+      - "Event timestamps reflect original generation time"
+
+  - recipe_id: hil_perf_overhead
+    name: "HIL Telemetry Performance Overhead"
+    description: "Measure CPU and memory overhead of telemetry SDK"
+    equipment:
+      - target_device
+      - performance_monitor
+    steps:
+      - step_id: baseline_measurement
+        action: "Measure CPU/memory without telemetry enabled"
+      - step_id: enable_telemetry
+        action: "Enable telemetry with default profile"
+      - step_id: load_measurement
+        action: "Measure CPU/memory with telemetry under load"
+    pass_criteria:
+      - "CPU overhead < 2%"
+      - "Memory overhead < 512KB"
+      - "No event loss under sustained load"

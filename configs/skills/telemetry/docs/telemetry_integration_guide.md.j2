@@ -1,0 +1,100 @@
+# Telemetry Integration Guide
+
+## Overview
+
+This guide covers integrating the OmniSight telemetry SDK into your
+{{ product_name | default("embedded device") }} firmware. The SDK captures
+three event types — crash dumps, usage events, and performance metrics —
+and delivers them to the ingestion backend with offline queuing, PII
+redaction, and consent enforcement.
+
+## SDK Profile: {{ sdk_profile | default("default") }}
+
+| Parameter | Value |
+|---|---|
+| Batch size | {{ batch_size | default(50) }} |
+| Flush interval | {{ flush_interval_seconds | default(60) }}s |
+| Compression | {{ compression | default("gzip") }} |
+| Offline queue | {{ "enabled" if offline_queue_enabled else "disabled" }} |
+| Max queue size | {{ offline_queue_max_size | default(5000) }} |
+
+## Quick Start (C)
+
+```c
+#include "telemetry_sdk.h"
+
+telemetry_config_t cfg = {
+    .endpoint_url = "{{ endpoint_url | default('https://telemetry.omnisight.local/api/v1/telemetry/ingest') }}",
+    .device_id    = "{{ device_id | default('DEVICE_ID') }}",
+    .profile      = "{{ sdk_profile | default('default') }}",
+    .opt_in       = true,
+};
+
+telemetry_init(&cfg);
+
+// Crash handler installed automatically after init
+// Usage event:
+telemetry_send_usage("feature_activated", "{ \"feature\": \"night_mode\" }");
+
+// Performance metric:
+telemetry_send_metric("cpu_percent", 42.5, "percent");
+```
+
+## Quick Start (Python)
+
+```python
+from telemetry_sdk import TelemetryClient
+
+client = TelemetryClient(
+    endpoint_url="{{ endpoint_url | default('https://telemetry.omnisight.local/api/v1/telemetry/ingest') }}",
+    device_id="{{ device_id | default('DEVICE_ID') }}",
+    profile="{{ sdk_profile | default('default') }}",
+    opt_in=True,
+)
+
+# Crash handler installed automatically
+# Usage event:
+client.send_usage("feature_activated", metadata={"feature": "night_mode"})
+
+# Performance metric:
+client.send_metric("cpu_percent", 42.5, unit="percent")
+```
+
+## Privacy & Consent
+
+Telemetry collection requires explicit opt-in from the device. The SDK
+will queue events locally but will not transmit them until consent is
+recorded.
+
+### PII Fields Redacted
+
+The following fields are automatically redacted before storage:
+
+{% for field in pii_fields | default(["ip_address", "mac_address", "email"]) %}
+- `{{ field }}`
+{% endfor %}
+
+## Dashboards
+
+Three dashboards are available:
+
+1. **Fleet Health** — active device count, heartbeat rate, error rate
+2. **Crash Rate** — crash timeline, top signals, affected devices
+3. **Feature Adoption** — daily active devices, feature usage, session duration
+
+## Offline Queue Behavior
+
+When network connectivity is lost:
+
+1. Events are queued in persistent local storage (max {{ offline_queue_max_size | default(5000) }} events)
+2. On reconnect, queued events are flushed in FIFO order
+3. Flush respects batch size and rate limits
+4. Events older than 24 hours are dropped from the queue
+
+## Retention Policy
+
+| Event Type | Retention | Archive After |
+|---|---|---|
+| crash_dump | 365 days | 90 days |
+| usage_event | 90 days | 30 days |
+| perf_metric | 30 days | 7 days |

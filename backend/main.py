@@ -282,6 +282,8 @@ from backend.routers import security_stack as _security_stack_router  # C15/SECU
 app.include_router(_security_stack_router.router, prefix=settings.api_prefix)
 from backend.routers import ota_framework as _ota_framework_router  # C16/OTA-FRAMEWORK
 app.include_router(_ota_framework_router.router, prefix=settings.api_prefix)
+from backend.routers import telemetry_backend as _telemetry_backend_router  # C17/TELEMETRY-BACKEND
+app.include_router(_telemetry_backend_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

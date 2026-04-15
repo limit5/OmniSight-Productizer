@@ -1,0 +1,127 @@
+schema_version: 1
+skill: telemetry
+tasks:
+  - task_id: telemetry-sdk-init
+    name: "Initialize Telemetry SDK"
+    description: "Scaffold and configure the telemetry client SDK for the target platform"
+    phase: integration
+    depends_on: []
+    inputs:
+      - sdk_profile
+      - hardware_profile
+    outputs:
+      - telemetry_sdk_source
+    estimated_minutes: 30
+
+  - task_id: telemetry-crash-handler
+    name: "Implement Crash Handler"
+    description: "Install signal handlers for SIGSEGV/SIGABRT, capture stack trace and register dump"
+    phase: integration
+    depends_on:
+      - telemetry-sdk-init
+    inputs:
+      - telemetry_sdk_source
+    outputs:
+      - crash_handler_source
+    estimated_minutes: 45
+
+  - task_id: telemetry-usage-tracker
+    name: "Implement Usage Event Tracker"
+    description: "Add usage event instrumentation points for feature adoption tracking"
+    phase: integration
+    depends_on:
+      - telemetry-sdk-init
+    inputs:
+      - telemetry_sdk_source
+    outputs:
+      - usage_tracker_source
+    estimated_minutes: 30
+
+  - task_id: telemetry-perf-collector
+    name: "Implement Performance Metric Collector"
+    description: "Periodic sampling of CPU, memory, disk, temperature, and custom metrics"
+    phase: integration
+    depends_on:
+      - telemetry-sdk-init
+    inputs:
+      - telemetry_sdk_source
+    outputs:
+      - perf_collector_source
+    estimated_minutes: 30
+
+  - task_id: telemetry-offline-queue
+    name: "Implement Offline Queue"
+    description: "Persistent event queue that flushes on network reconnect"
+    phase: integration
+    depends_on:
+      - telemetry-sdk-init
+    inputs:
+      - telemetry_sdk_source
+    outputs:
+      - offline_queue_source
+    estimated_minutes: 45
+
+  - task_id: telemetry-ingestion-deploy
+    name: "Deploy Ingestion Endpoint"
+    description: "Deploy the batched POST ingestion endpoint with rate limiting"
+    phase: deployment
+    depends_on:
+      - telemetry-sdk-init
+    inputs:
+      - ingestion_config
+    outputs:
+      - ingestion_endpoint_url
+    estimated_minutes: 30
+
+  - task_id: telemetry-privacy-setup
+    name: "Configure Privacy & Consent"
+    description: "Configure PII redaction rules and device consent flow"
+    phase: integration
+    depends_on:
+      - telemetry-ingestion-deploy
+    inputs:
+      - privacy_config
+    outputs:
+      - privacy_module_config
+    estimated_minutes: 20
+
+  - task_id: telemetry-storage-setup
+    name: "Setup Partitioned Storage"
+    description: "Create partitioned tables with retention policies"
+    phase: deployment
+    depends_on:
+      - telemetry-ingestion-deploy
+    inputs:
+      - storage_config
+    outputs:
+      - storage_schema
+    estimated_minutes: 30
+
+  - task_id: telemetry-dashboard-setup
+    name: "Deploy Dashboards"
+    description: "Deploy fleet health, crash rate, and adoption dashboards"
+    phase: deployment
+    depends_on:
+      - telemetry-storage-setup
+    inputs:
+      - dashboard_config
+    outputs:
+      - dashboard_urls
+    estimated_minutes: 30
+
+  - task_id: telemetry-integration-test
+    name: "Run Integration Tests"
+    description: "Execute all telemetry test recipes end-to-end"
+    phase: verification
+    depends_on:
+      - telemetry-crash-handler
+      - telemetry-usage-tracker
+      - telemetry-perf-collector
+      - telemetry-offline-queue
+      - telemetry-privacy-setup
+      - telemetry-dashboard-setup
+    inputs:
+      - test_recipes
+    outputs:
+      - test_report
+    estimated_minutes: 60
