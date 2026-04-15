@@ -118,6 +118,12 @@ class Session:
     csrf_token: str
     created_at: float
     expires_at: float
+    ip: str = ""
+    user_agent: str = ""
+    last_seen_at: float = 0.0
+    metadata: str = "{}"
+    mfa_verified: bool = False
+    rotated_from: str | None = None
 
 
 SESSION_TTL_S = 8 * 60 * 60          # 8 hours
@@ -220,7 +226,8 @@ async def create_session(user_id: str, ip: str = "", user_agent: str = "") -> Se
     )
     await conn.commit()
     return Session(token=token, user_id=user_id, csrf_token=csrf,
-                   created_at=now, expires_at=expires)
+                   created_at=now, expires_at=expires, ip=ip,
+                   user_agent=(user_agent or "")[:240], last_seen_at=now)
 
 
 async def get_session(token: str) -> Optional[Session]:
@@ -228,7 +235,8 @@ async def get_session(token: str) -> Optional[Session]:
         return None
     conn = await _conn()
     async with conn.execute(
-        "SELECT token, user_id, csrf_token, created_at, expires_at "
+        "SELECT token, user_id, csrf_token, created_at, expires_at, "
+        "ip, user_agent, last_seen_at, metadata, mfa_verified, rotated_from "
         "FROM sessions WHERE token=?", (token,),
     ) as cur:
         r = await cur.fetchone()
@@ -237,15 +245,19 @@ async def get_session(token: str) -> Optional[Session]:
     if r["expires_at"] < time.time():
         await delete_session(token)
         return None
-    # Touch last_seen
+    now = time.time()
     await conn.execute(
         "UPDATE sessions SET last_seen_at=? WHERE token=?",
-        (time.time(), token),
+        (now, token),
     )
     await conn.commit()
     return Session(
         token=r["token"], user_id=r["user_id"], csrf_token=r["csrf_token"],
         created_at=r["created_at"], expires_at=r["expires_at"],
+        ip=r["ip"] or "", user_agent=r["user_agent"] or "",
+        last_seen_at=now, metadata=r["metadata"] or "{}",
+        mfa_verified=bool(r["mfa_verified"]),
+        rotated_from=r["rotated_from"],
     )
 
 
@@ -322,12 +334,16 @@ async def current_user(request: Request) -> User:
     """
     mode = auth_mode()
     if mode == "open":
+        request.state.session = None
         return _ANON_ADMIN
 
-    # Bearer token still works as a service-to-service shortcut in
-    # session/strict modes — useful for CLI / CI clients that don't
-    # want to maintain cookie jars.
     if _bearer_matches(request):
+        bearer_raw = (request.headers.get("authorization") or "")[len("Bearer "):]
+        fp = hashlib.sha256(bearer_raw.encode()).hexdigest()[:12]
+        request.state.session = Session(
+            token=f"bearer:{fp}", user_id="anonymous",
+            csrf_token="", created_at=0, expires_at=0,
+        )
         return _ANON_ADMIN
 
     cookie = request.cookies.get(SESSION_COOKIE) or ""
@@ -335,10 +351,12 @@ async def current_user(request: Request) -> User:
     if sess:
         u = await get_user(sess.user_id)
         if u and u.enabled:
+            request.state.session = sess
             return u
 
     if mode == "session" and request.method in {"GET", "HEAD", "OPTIONS"}:
-        return _ANON_ADMIN  # graceful read
+        request.state.session = None
+        return _ANON_ADMIN
 
     raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -391,3 +409,58 @@ async def require_viewer(user: User = Depends(current_user)) -> User:
 
 require_operator = require_role("operator")
 require_admin = require_role("admin")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Session listing / revocation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _mask_token(token: str) -> str:
+    if len(token) <= 8:
+        return "***"
+    return token[:4] + "***" + token[-4:]
+
+
+async def list_sessions(user_id: str) -> list[dict]:
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT token, user_id, created_at, expires_at, last_seen_at, "
+        "ip, user_agent, metadata, mfa_verified "
+        "FROM sessions WHERE user_id=? AND expires_at > ? "
+        "ORDER BY last_seen_at DESC",
+        (user_id, time.time()),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [
+        {
+            "token_hint": _mask_token(r["token"]),
+            "token": r["token"],
+            "user_id": r["user_id"],
+            "created_at": r["created_at"],
+            "expires_at": r["expires_at"],
+            "last_seen_at": r["last_seen_at"],
+            "ip": r["ip"],
+            "user_agent": r["user_agent"],
+            "metadata": r["metadata"],
+            "mfa_verified": bool(r["mfa_verified"]),
+        }
+        for r in rows
+    ]
+
+
+async def revoke_session(token: str) -> bool:
+    conn = await _conn()
+    cur = await conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+    await conn.commit()
+    return (cur.rowcount or 0) > 0
+
+
+async def revoke_other_sessions(user_id: str, keep_token: str) -> int:
+    conn = await _conn()
+    cur = await conn.execute(
+        "DELETE FROM sessions WHERE user_id=? AND token!=?",
+        (user_id, keep_token),
+    )
+    await conn.commit()
+    return cur.rowcount or 0

@@ -160,7 +160,7 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
             action="login_ok", entity_kind="auth", entity_id=user.id,
             before={"ip": _client_key(request)},
             after={"role": user.role, "email": user.email},
-            actor=user.email,
+            actor=user.email, session_id=sess.token,
         )
     except Exception as exc:
         logger.debug("login_ok audit emit failed: %s", exc)
@@ -284,3 +284,80 @@ async def patch_user(user_id: str, req: PatchUserRequest,
     await db._conn().commit()
     updated = await auth.get_user(user_id)
     return updated.to_dict() if updated else {"detail": "vanished"}
+
+
+# ── Session management ─────────────────────────────────────────
+
+
+@router.get("/auth/sessions")
+async def list_sessions(request: Request,
+                        user: auth.User = Depends(auth.current_user)) -> dict:
+    sessions = await auth.list_sessions(user.id)
+    current_token = request.cookies.get(auth.SESSION_COOKIE) or ""
+    items = []
+    for s in sessions:
+        items.append({
+            "token_hint": s["token_hint"],
+            "created_at": s["created_at"],
+            "expires_at": s["expires_at"],
+            "last_seen_at": s["last_seen_at"],
+            "ip": s["ip"],
+            "user_agent": s["user_agent"],
+            "is_current": s["token"] == current_token,
+        })
+    return {"items": items, "count": len(items)}
+
+
+@router.delete("/auth/sessions/{token_hint}")
+async def revoke_session(token_hint: str, request: Request,
+                         user: auth.User = Depends(auth.current_user)) -> dict:
+    target_user_id = user.id
+    is_admin = auth.role_at_least(user.role, "admin")
+    sessions = await auth.list_sessions(user.id)
+    target_token = None
+    for s in sessions:
+        if s["token_hint"] == token_hint:
+            target_token = s["token"]
+            target_user_id = s["user_id"]
+            break
+    if not target_token and is_admin:
+        from backend import db
+        async with db._conn().execute(
+            "SELECT token, user_id FROM sessions"
+        ) as cur:
+            async for row in cur:
+                if auth._mask_token(row["token"]) == token_hint:
+                    target_token = row["token"]
+                    target_user_id = row["user_id"]
+                    break
+    if not target_token:
+        raise HTTPException(status_code=404, detail="session not found")
+    if target_user_id != user.id and not is_admin:
+        raise HTTPException(status_code=403, detail="cannot revoke another user's session")
+    await auth.revoke_session(target_token)
+    try:
+        from backend import audit as _audit
+        await _audit.write_audit(
+            request, action="session_revoke", entity_kind="session",
+            entity_id=token_hint, actor=user.email,
+        )
+    except Exception:
+        pass
+    return {"status": "revoked", "token_hint": token_hint}
+
+
+@router.delete("/auth/sessions")
+async def revoke_all_other_sessions(request: Request,
+                                    user: auth.User = Depends(auth.current_user)) -> dict:
+    current_token = request.cookies.get(auth.SESSION_COOKIE) or ""
+    count = await auth.revoke_other_sessions(user.id, current_token)
+    try:
+        from backend import audit as _audit
+        await _audit.write_audit(
+            request, action="sessions_revoke_all_others", entity_kind="session",
+            entity_id=user.id, after={"revoked_count": count},
+            actor=user.email,
+        )
+    except Exception:
+        pass
+    return {"status": "revoked", "revoked_count": count}

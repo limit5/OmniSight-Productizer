@@ -68,7 +68,8 @@ async def _last_hash() -> str:
 async def log(action: str, entity_kind: str, entity_id: str | None,
               before: dict[str, Any] | None = None,
               after: dict[str, Any] | None = None,
-              actor: str = "system") -> Optional[int]:
+              actor: str = "system",
+              session_id: str | None = None) -> Optional[int]:
     """Append a single row. Returns the new row id, or None on failure
     (logged at warning, never raises). Chains the new row to the prior
     one's curr_hash so any post-write tampering breaks `verify_chain`."""
@@ -92,12 +93,13 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
             curr = _hash(prev, payload_canon + str(round(ts, 6)))
             cur = await conn.execute(
                 "INSERT INTO audit_log "
-                "(ts, actor, action, entity_kind, entity_id, before_json, after_json, prev_hash, curr_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(ts, actor, action, entity_kind, entity_id, before_json, after_json, "
+                "prev_hash, curr_hash, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts, actor, action, entity_kind, entity_id or "",
                  json.dumps(before_d, ensure_ascii=False),
                  json.dumps(after_d, ensure_ascii=False),
-                 prev, curr),
+                 prev, curr, session_id),
             )
             await conn.commit()
             new_id = cur.lastrowid
@@ -110,7 +112,8 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
 def log_sync(action: str, entity_kind: str, entity_id: str | None,
              before: dict[str, Any] | None = None,
              after: dict[str, Any] | None = None,
-             actor: str = "system") -> None:
+             actor: str = "system",
+             session_id: str | None = None) -> None:
     """Fire-and-forget wrapper for callers that aren't on an async stack
     (e.g. decision_engine.set_mode is sync). Schedules log() on the
     running loop; if there's no loop, drops with a debug message
@@ -120,7 +123,7 @@ def log_sync(action: str, entity_kind: str, entity_id: str | None,
     except RuntimeError:
         logger.debug("audit.log_sync skipped (no running loop): %s/%s", action, entity_kind)
         return
-    loop.create_task(log(action, entity_kind, entity_id, before, after, actor))
+    loop.create_task(log(action, entity_kind, entity_id, before, after, actor, session_id))
 
 
 async def query(*, since: float | None = None, actor: str | None = None,
@@ -135,7 +138,7 @@ async def query(*, since: float | None = None, actor: str | None = None,
     if entity_kind:
         where.append("entity_kind = ?"); params.append(entity_kind)
     sql = ("SELECT id, ts, actor, action, entity_kind, entity_id, "
-           "before_json, after_json, prev_hash, curr_hash FROM audit_log")
+           "before_json, after_json, prev_hash, curr_hash, session_id FROM audit_log")
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC LIMIT ?"
@@ -151,9 +154,28 @@ async def query(*, since: float | None = None, actor: str | None = None,
             "after": json.loads(r["after_json"] or "{}"),
             "prev_hash": r["prev_hash"],
             "curr_hash": r["curr_hash"],
+            "session_id": r["session_id"],
         }
         for r in rows
     ]
+
+
+async def write_audit(request, action: str, entity_kind: str,
+                      entity_id: str | None = None,
+                      before: dict[str, Any] | None = None,
+                      after: dict[str, Any] | None = None,
+                      actor: str | None = None) -> Optional[int]:
+    """Convenience wrapper that auto-extracts session_id and actor from
+    the current request context (set by ``auth.current_user``)."""
+    sess = getattr(getattr(request, "state", None), "session", None)
+    sid = sess.token if sess else None
+    if actor is None:
+        user = getattr(getattr(request, "state", None), "user", None)
+        if user:
+            actor = getattr(user, "email", "system")
+        else:
+            actor = "system"
+    return await log(action, entity_kind, entity_id, before, after, actor, session_id=sid)
 
 
 async def verify_chain() -> tuple[bool, Optional[int]]:

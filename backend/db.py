@@ -96,6 +96,11 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # Phase 63-E — Memory quality decay.
         ("episodic_memory", "decayed_score", "REAL NOT NULL DEFAULT 0.0"),
         ("episodic_memory", "last_used_at", "TEXT"),
+        # S0 — session/audit enhancements.
+        ("audit_log", "session_id", "TEXT"),
+        ("sessions", "metadata", "TEXT NOT NULL DEFAULT '{}'"),
+        ("sessions", "mfa_verified", "INTEGER NOT NULL DEFAULT 0"),
+        ("sessions", "rotated_from", "TEXT"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -119,6 +124,15 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         )
     except Exception as exc:
         logger.warning("idx_episodic_last_used create failed: %s", exc)
+
+    # S0: audit_log.session_id index (safe to run after column migration).
+    try:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_session "
+            "ON audit_log(session_id)"
+        )
+    except Exception as exc:
+        logger.warning("idx_audit_log_session create failed: %s", exc)
 
     # Verify every REQUIRED column ended up present (defends against a YAML
     # typo or partial schema rebuild).
@@ -364,7 +378,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     before_json     TEXT NOT NULL DEFAULT '{}',
     after_json      TEXT NOT NULL DEFAULT '{}',
     prev_hash       TEXT NOT NULL DEFAULT '',
-    curr_hash       TEXT NOT NULL
+    curr_hash       TEXT NOT NULL,
+    session_id      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
@@ -422,7 +437,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at      REAL NOT NULL,
     last_seen_at    REAL NOT NULL,
     ip              TEXT NOT NULL DEFAULT '',
-    user_agent      TEXT NOT NULL DEFAULT ''
+    user_agent      TEXT NOT NULL DEFAULT '',
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    mfa_verified    INTEGER NOT NULL DEFAULT 0,
+    rotated_from    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
