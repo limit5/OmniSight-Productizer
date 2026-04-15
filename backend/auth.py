@@ -202,17 +202,77 @@ async def change_password(user_id: str, new_password: str) -> None:
     await conn.commit()
 
 
+LOCKOUT_BASE_S = 15 * 60
+LOCKOUT_MAX_S = 24 * 60 * 60
+LOCKOUT_THRESHOLD = 10
+
+
+def _lockout_duration(failed_count: int) -> float:
+    """Exponential backoff: 15 min × 2^(n - threshold), capped at 24 h."""
+    exponent = max(0, failed_count - LOCKOUT_THRESHOLD)
+    return min(LOCKOUT_BASE_S * (2 ** exponent), LOCKOUT_MAX_S)
+
+
+async def _record_login_failure(conn, user_id: str, current_count: int) -> int:
+    new_count = current_count + 1
+    locked_until = None
+    if new_count >= LOCKOUT_THRESHOLD:
+        locked_until = time.time() + _lockout_duration(new_count)
+    await conn.execute(
+        "UPDATE users SET failed_login_count=?, locked_until=? WHERE id=?",
+        (new_count, locked_until, user_id),
+    )
+    await conn.commit()
+    return new_count
+
+
+async def _reset_login_failures(conn, user_id: str) -> None:
+    await conn.execute(
+        "UPDATE users SET failed_login_count=0, locked_until=NULL WHERE id=?",
+        (user_id,),
+    )
+    await conn.commit()
+
+
+async def is_account_locked(email: str) -> tuple[bool, float]:
+    """Check if account is locked. Returns (locked, retry_after_s)."""
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT locked_until FROM users WHERE email=?",
+        (email.lower().strip(),),
+    ) as cur:
+        r = await cur.fetchone()
+    if not r or r["locked_until"] is None:
+        return False, 0.0
+    remaining = r["locked_until"] - time.time()
+    if remaining <= 0:
+        return False, 0.0
+    return True, remaining
+
+
 async def authenticate_password(email: str, password: str) -> Optional[User]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, email, name, role, enabled, password_hash, must_change_password "
+        "SELECT id, email, name, role, enabled, password_hash, "
+        "must_change_password, failed_login_count, locked_until "
         "FROM users WHERE email=?", (email.lower().strip(),),
     ) as cur:
         r = await cur.fetchone()
     if not r or not r["enabled"]:
         return None
-    if not verify_password(password, r["password_hash"]):
+
+    locked_until = r["locked_until"]
+    if locked_until is not None and locked_until > time.time():
         return None
+
+    if locked_until is not None and locked_until <= time.time():
+        await _reset_login_failures(conn, r["id"])
+
+    if not verify_password(password, r["password_hash"]):
+        await _record_login_failure(conn, r["id"], r["failed_login_count"])
+        return None
+
+    await _reset_login_failures(conn, r["id"])
     await conn.execute(
         "UPDATE users SET last_login_at=datetime('now') WHERE id=?",
         (r["id"],),

@@ -103,6 +103,9 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("sessions", "rotated_from", "TEXT"),
         # K1 — force password change for default-credential admins.
         ("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+        # K2 — account lockout after consecutive login failures.
+        ("users", "failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("users", "locked_until", "REAL"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -427,7 +430,9 @@ CREATE TABLE IF NOT EXISTS users (
     enabled         INTEGER NOT NULL DEFAULT 1,
     must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    last_login_at   TEXT
+    last_login_at   TEXT,
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_provider, oidc_subject);

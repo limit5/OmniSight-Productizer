@@ -12,6 +12,7 @@ import time
 import pytest
 from starlette.requests import Request
 
+from backend.rate_limit import reset_limiters
 from backend.routers import auth as auth_router
 
 
@@ -32,8 +33,10 @@ def _fake_request(ip: str = "1.2.3.4", cf_ip: str | None = None) -> Request:
 @pytest.fixture(autouse=True)
 def _reset_window():
     auth_router._LOGIN_ATTEMPTS.clear()
+    reset_limiters()
     yield
     auth_router._LOGIN_ATTEMPTS.clear()
+    reset_limiters()
 
 
 def test_client_key_prefers_cf_connecting_ip():
@@ -145,7 +148,7 @@ async def test_login_failure_writes_audit_row(client):
 
     async with db._conn().execute(
         "SELECT action, entity_id FROM audit_log "
-        "WHERE action = 'login_failed' ORDER BY id DESC LIMIT 1"
+        "WHERE action = 'auth.login.fail' ORDER BY id DESC LIMIT 1"
     ) as cur:
         row = await cur.fetchone()
     assert row is not None

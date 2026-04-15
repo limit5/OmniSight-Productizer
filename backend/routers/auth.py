@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from backend import auth
+from backend.rate_limit import ip_limiter, email_limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["auth"])
@@ -124,41 +125,92 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+def _mask_email(email: str) -> str:
+    if "@" in email:
+        return email[:2] + "***@" + email.split("@")[-1]
+    return email[:2] + "***"
+
+
 @router.post("/auth/login")
 async def login(req: LoginRequest, request: Request, response: Response) -> dict:
-    # Brute-force defence FIRST — never authenticate a request that
-    # already exceeded its window, otherwise password-hash CPU is the
-    # attack vector even when every password is wrong.
     _check_login_rate_limit(request)
+
+    client_ip = _client_key(request)
+    email_key = req.email.lower().strip()
+
+    ip_ok, ip_wait = ip_limiter().allow(client_ip)
+    if not ip_ok:
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many login attempts from this IP; retry in {int(ip_wait) + 1}s",
+            headers={"Retry-After": str(int(ip_wait) + 1)},
+        )
+
+    email_ok, email_wait = email_limiter().allow(email_key)
+    if not email_ok:
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many login attempts for this account; retry in {int(email_wait) + 1}s",
+            headers={"Retry-After": str(int(email_wait) + 1)},
+        )
+
+    locked, lock_remaining = await auth.is_account_locked(email_key)
+    if locked:
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="auth.lockout", entity_kind="auth",
+                entity_id=_mask_email(req.email),
+                before={"ip": client_ip},
+                after={"reason": "account_locked", "retry_after_s": int(lock_remaining)},
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=423,
+            detail=f"account locked; retry in {int(lock_remaining) + 1}s",
+            headers={"Retry-After": str(int(lock_remaining) + 1)},
+        )
 
     user = await auth.authenticate_password(req.email, req.password)
     if not user:
         _record_failed_login(request)
-        # Audit the failure with the masked email so log search can
-        # find brute-force fingerprints by IP without leaking which
-        # accounts were probed in cleartext.
+        masked = _mask_email(req.email)
         try:
             from backend import audit as _audit
-            masked = (req.email[:2] + "***@" + req.email.split("@")[-1]
-                      if "@" in req.email else req.email[:2] + "***")
             await _audit.log(
-                action="login_failed", entity_kind="auth", entity_id=masked,
-                before={"ip": _client_key(request)},
+                action="auth.login.fail", entity_kind="auth", entity_id=masked,
+                before={"ip": client_ip},
                 after={"reason": "bad_credentials"},
             )
         except Exception as exc:
-            logger.debug("login_failed audit emit failed: %s", exc)
+            logger.debug("auth.login.fail audit emit failed: %s", exc)
+
+        new_locked, _ = await auth.is_account_locked(email_key)
+        if new_locked:
+            try:
+                from backend import audit as _audit
+                await _audit.log(
+                    action="auth.lockout", entity_kind="auth",
+                    entity_id=masked,
+                    before={"ip": client_ip},
+                    after={"reason": "threshold_reached"},
+                )
+            except Exception:
+                pass
+
         raise HTTPException(status_code=401, detail="invalid email or password")
+
     sess = await auth.create_session(
         user.id,
-        ip=_client_key(request),
+        ip=client_ip,
         user_agent=request.headers.get("user-agent", ""),
     )
     try:
         from backend import audit as _audit
         await _audit.log(
             action="login_ok", entity_kind="auth", entity_id=user.id,
-            before={"ip": _client_key(request)},
+            before={"ip": client_ip},
             after={"role": user.role, "email": user.email},
             actor=user.email, session_id=sess.token,
         )
