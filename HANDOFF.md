@@ -1,9 +1,48 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：J3 Session management UI (master)
+> 最後 commit：J4 localStorage multi-tab sync (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## J4 (complete) localStorage 多 tab 同步（2026-04-16 完成）
+
+**背景**：多 tab / 共用電腦場景下，localStorage 狀態（locale、wizard seen、tour seen、spec 快取）需要按使用者隔離，且跨 tab 即時同步。此外首次載入 wizard 判斷不能僅靠 localStorage（共用電腦第二使用者會被跳過），需查詢 server-side `user_preferences` 表。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `lib/storage.ts` | 集中式 localStorage wrapper：`getUserStorage(userId)` 自動加 `omnisight:{userId}:` 前綴，`migrateAllLegacyKeys()` 遷移舊 key，`onStorageChange()` 監聽 cross-tab storage event | ✅ 完成 |
+| `StorageBridge` 元件 | 位於 AuthProvider 內，auth 載入後遷移舊 key、從 user-scoped key 讀取 locale 並同步、監聽 cross-tab locale 變更 | ✅ 完成 |
+| DB migration 0010 | `user_preferences` 表 (user_id, pref_key, value, updated_at)，複合 PK + user_id 索引 | ✅ 完成 |
+| Backend API | `GET /user-preferences`、`GET /user-preferences/{key}`、`PUT /user-preferences/{key}` | ✅ 完成 |
+| Frontend API | `getUserPreferences()`、`getUserPreference(key)`、`setUserPreference(key, value)` 於 lib/api.ts | ✅ 完成 |
+| new-project-wizard | 改用 user-scoped storage + server-side `wizard_seen` check；共用電腦第二使用者不被跳過 | ✅ 完成 |
+| first-run-tour | 改用 user-scoped storage + server-side `tour_seen` check | ✅ 完成 |
+| spec-template-editor | 改用 user-scoped storage + cross-tab spec sync via storage event | ✅ 完成 |
+| Unit tests | 13 項 storage utility 測試 + 更新 wizard/spec-editor 測試加 AuthProvider wrapper | ✅ 36/36 pass |
+| E2E test | Playwright 雙 tab locale sync + user_preferences API 驗證 + key isolation 驗證 | ✅ 完成 |
+
+**新增/修改檔案**：
+- `lib/storage.ts` — 集中式 user-scoped localStorage wrapper（新增）
+- `components/storage-bridge.tsx` — 跨 provider 同步橋接元件（新增）
+- `components/providers.tsx` — 加入 StorageBridge
+- `backend/alembic/versions/0010_user_preferences.py` — DB migration（新增）
+- `backend/routers/preferences.py` — user-preferences REST API（新增）
+- `backend/main.py` — 註冊 preferences router
+- `lib/api.ts` — 新增 getUserPreferences / getUserPreference / setUserPreference
+- `components/omnisight/new-project-wizard.tsx` — user-scoped + server-side check
+- `components/omnisight/first-run-tour.tsx` — user-scoped + server-side check
+- `components/omnisight/spec-template-editor.tsx` — user-scoped + cross-tab sync
+- `test/lib/storage.test.ts` — 13 項 storage 單元測試（新增）
+- `test/components/new-project-wizard.test.tsx` — 更新：AuthProvider wrapper + user-scoped key
+- `test/components/spec-template-editor.test.tsx` — 更新：AuthProvider wrapper + user-scoped key
+- `e2e/j4-storage-sync.spec.ts` — Playwright 雙 tab E2E 測試（新增）
+- `e2e/docs-palette.spec.ts` — 更新：清除 user-scoped tour key
+- `backend/tests/test_user_preferences.py` — backend 單元測試（新增）
+
+**全部測試**：173/173 pass（25 files）
 
 ---
 
@@ -348,6 +387,42 @@ H1→H4a         ─┼──► S0 ──► K-early ──► J ──► K-re
 4. K6 廢除 legacy bearer 會破壞 CI / scripts — 需提前 2 週通知
 
 **詳細 sub-tasks** 見 `TODO.md` Priority S / K-early / J / K-rest / I 各區段。
+
+---
+
+## M (pending) Resource Hard Isolation — SaaS 級硬邊界（2026-04-16 登錄）
+
+**背景**：I 做完資料層硬隔離（RLS / SSE filter / secrets / audit chain / 路徑 namespace），但資源層仍是「公平排隊」而非「硬邊界」。多租戶並發時仍會互相拖累：I6 DRF token bucket 只排隊不 cgroup，一個 tenant compile 吃滿 CPU 會觸發 AIMD derate 讓無辜 tenant 也降速；I5 路徑隔離不含 quota，磁碟可互吃；dockerd 單點啟動仍序列化；prewarm pool 共用有狀態污染風險；provider circuit breaker 全域一跳全跳；egress allowlist 仍共用。
+
+**為何需要**：三件事 I 做不到 — (1) **SaaS 計費**（算不出 per-tenant cpu_seconds / mem_gb_seconds）；(2) **嘈雜鄰居防護**（一個濫用 tenant 拖慢全體）；(3) **合規證明**（A 無法存取 B 的執行環境需 cgroup 層級證據）。
+
+**相依**：**I6（DRF token bucket）+ I4（secrets per-tenant）+ I5（filesystem namespace）+ H1（host metrics）** 必須先完成。
+
+| Phase | 主題 | 狀態 | 預估 |
+|---|---|---|---|
+| M1 | Cgroup CPU/Memory 硬隔離：`docker run --cpus/--memory` 對映 DRF token（1 token ≈ 1 core × 512MB）+ OOM 偵測不影響鄰居 | ⏳ 待辦 | 1 day |
+| M2 | Per-tenant Disk Quota + LRU cleanup（soft 5GB / hard 10GB，超 hard 回 507；keep 標記保護） | ⏳ 待辦 | 0.5 day |
+| M3 | Per-tenant-per-provider Circuit Breaker：`(tenant_id, provider, key_fp)` 獨立 circuit state，A key 壞不影響 B | ⏳ 待辦 | 0.5 day |
+| M4 | Cgroup per-tenant Metrics + UI 拆分：`/sys/fs/cgroup/<c>/cpu.stat` 採集 → per-tenant Prometheus + UI 柱狀圖；AIMD 升級只降禍首 tenant；計費 `cpu_seconds_total` 累積 | ⏳ 待辦 | 1 day |
+| M5 | Prewarm Pool 多租戶安全：`shared/per_tenant/disabled` policy，預設 per_tenant；launch 前強制清 `/tmp` | ⏳ 待辦 | 0.25 day |
+| M6 | Per-tenant Egress Allowlist：`tenant_egress_policies` 表 + 動態 iptables/nftables rule + 申請審批流程；default DROP | ⏳ 待辦 | 1.5 day |
+
+**總預估**：**~4.75 day**
+
+**驗收標準**：
+- 10 tenant × 3 並發 job 混合負載：per-tenant 實測 CPU/mem 用量對映 DRF 權重 ±15% 以內
+- Tenant A 寫滿自己 10GB quota 後 B 寫入不受影響
+- A 的 LLM key 故障觸發 circuit open 不影響 B
+- UI host-device-panel admin 可看 per-tenant 資源使用率
+- 可產出 per-tenant monthly usage report（cpu_seconds / mem_gb_seconds / disk_gb_days / tokens_used）作為計費基礎
+- 合規審計可證明 sandbox A 無法存取 sandbox B 的資源 / 網路
+
+**風險**：
+1. M1 cgroup v2 在 WSL2 支援度需驗證（若未啟用 unified hierarchy 需切換 kernel cmdline）
+2. M6 iptables 動態規則需 root；需搭配 K1 sudoers scoped rule 或 capability CAP_NET_ADMIN
+3. M4 AIMD 升級「只降禍首」演算法要小心：可能識別錯誤導致誤殺；先保留 fallback 至 global derate 的 kill switch
+
+**不做的後果**：無法開 SaaS、嘈雜鄰居拖慢全體、合規過不了審計。
 
 ---
 

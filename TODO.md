@@ -433,11 +433,11 @@ Legend:
 - [x] 預估：**1 day**
 
 ### J4. localStorage 多 tab 同步
-- [ ] 所有 `omnisight:*` keys 加 `user_id` 前綴（從登入 context 取）
-- [ ] `window.addEventListener('storage', ...)` 跨 tab 同步 spec / locale / wizard 狀態
-- [ ] 首次載入 wizard 判斷改查 server-side `user_preferences` 表（共用電腦第二使用者不被跳過）
-- [ ] 測試：Playwright 雙 tab scenario
-- [ ] 預估：**0.5 day**
+- [x] 所有 `omnisight:*` keys 加 `user_id` 前綴（從登入 context 取）
+- [x] `window.addEventListener('storage', ...)` 跨 tab 同步 spec / locale / wizard 狀態
+- [x] 首次載入 wizard 判斷改查 server-side `user_preferences` 表（共用電腦第二使用者不被跳過）
+- [x] 測試：Playwright 雙 tab scenario
+- [x] 預估：**0.5 day**
 
 ### J5. Per-session Operation Mode
 - [ ] Operation Mode 從全域 config 搬到 `sessions.metadata.operation_mode`
@@ -572,6 +572,81 @@ Legend:
 **I 總預估**：**16.5 day**
 
 **相依**：I 必須在 **G4 + H4a + S0 + K-early** 完成後才開工；I 進行中 B12（CF Tunnel wizard）設計需配合 I4 改 tenant-scoped。
+
+---
+
+## 🅜 Priority M — Resource Hard Isolation（SaaS 級硬邊界）
+
+> 背景：I 做完資料 plane 是硬隔離（RLS / SSE filter / secrets / audit / 路徑），但資源層仍是「公平排隊」不是「硬邊界」。多租戶並發時仍會互相拖：一個 tenant 的 compile 吃滿 CPU 會觸發 AIMD derate 讓無辜 tenant 也降速；磁碟無 quota 會互吃；dockerd 單點啟動序列化；prewarm pool 共用有狀態污染風險；LLM provider circuit breaker 全域；egress allowlist 共用。此 Phase 補齊達 SaaS 級硬隔離 + per-tenant 計費可能。
+>
+> 相依：**I6（DRF token bucket）** 是 M1 權重映射基礎；**I4（secrets per-tenant）** 是 M3 circuit breaker per-key 基礎；**I5（filesystem namespace）** 是 M2 quota 基礎；**H1（host metrics）** 是 M4 cgroup metrics 擴展基礎。
+
+### M1. Cgroup CPU/Memory 硬隔離（對映 DRF token）
+- [ ] Sandbox launch 時 `docker run --cpus=<weight> --memory=<limit>`；權重由 I6 DRF token 折算（1 token ≈ 1 core × 512MB）
+- [ ] `backend/container.py` `start_container()` 接 `tenant_budget` 參數，自動算 `--cpus` / `--memory`
+- [ ] Cgroup v2 `cpu.weight` 驗證：A tenant 4-token job + B tenant 1-token job 同核並跑 → CPU 時間 4:1
+- [ ] OOM 偵測：container hit memory limit → audit_log 記錄 `sandbox.oom` + 回 sandbox_result with error，不影響其他 tenant
+- [ ] 測試：並發 CPU 打滿實測、memory limit 精確性、權重公平性
+- [ ] 預估：**1 day**
+
+### M2. Per-tenant Disk Quota + LRU Cleanup
+- [ ] `data/tenants/<tid>/` 加 `quota.yaml`：`soft=5GB / hard=10GB`（plan 驅動）
+- [ ] Background sweep（每 5 min）：`du -sh` per-tenant → 超 soft 發 warning SSE；超 hard 拒新寫入（sandbox create 回 507 Insufficient Storage）
+- [ ] LRU cleanup：超 soft 時自動刪 `artifacts/` 下最舊的完成 workflow_run（保留最近 N 筆 + 所有 `keep=true` 標記）
+- [ ] `/tmp` 也按 tenant namespace + 每 sandbox 結束強制清理
+- [ ] UI：Settings → Storage 頁顯示用量 + 手動清理按鈕
+- [ ] 測試：quota 強制生效、LRU 不誤刪 keep 標記
+- [ ] 預估：**0.5 day**
+
+### M3. Per-tenant-per-provider Circuit Breaker
+- [ ] 現行 `provider_chain` 5min cooldown 改 key：`(tenant_id, provider, api_key_fingerprint)` → 獨立 circuit state
+- [ ] Tenant A 的 OpenAI key 壞掉不會影響 Tenant B 的同 provider
+- [ ] Audit：circuit open/close 事件帶 tenant_id
+- [ ] UI：Settings → LLM Providers 顯示各 key 當前 circuit 狀態
+- [ ] 測試：A key 故障 → A fallback、B 不受影響
+- [ ] 預估：**0.5 day**
+
+### M4. Cgroup-based Per-tenant Metrics + UI 拆分
+- [ ] `backend/host_metrics.py` 擴展：從 `/sys/fs/cgroup/<container>/cpu.stat` + `memory.current` 採集 per-container 用量
+- [ ] 依 container label `tenant_id` 聚合 → `tenant_cpu_percent` / `tenant_mem_used_gb` / `tenant_disk_used_gb` / `tenant_sandbox_count` Prometheus metrics
+- [ ] `/api/v1/host/metrics?tenant_id=...` 回該租戶的資源用量（admin 可查任意、user 只能查自己）
+- [ ] UI `host-device-panel` 新增 per-tenant 柱狀圖（admin 視角）+ 當前 tenant bar（user 視角）
+- [ ] AIMD 決策升級：不再只看整機 CPU，同時看「哪個 tenant 是禍首」，derate 只降該 tenant 的 budget（非全體）
+- [ ] 計費基礎：per-tenant `cpu_seconds_total` / `mem_gb_seconds` 累積，輸出 `scripts/usage_report.py`
+- [ ] 預估：**1 day**
+
+### M5. Prewarm Pool 多租戶安全
+- [ ] Config `prewarm_policy`：`shared` / `per_tenant` / `disabled`；多租戶模式預設 `per_tenant`
+- [ ] `per_tenant` 模式：prewarm pool 按 tenant 分桶（每桶深度 1-2），空間換隔離
+- [ ] `disabled` 模式：徹底關 prewarm，犧牲 300ms 啟動延遲換乾淨（高安全需求客戶）
+- [ ] Launch 前強制 `/tmp` 清空（即使 shared 模式亦然）
+- [ ] 測試：A prewarm container 無法被 B 拿去用（per_tenant 模式）
+- [ ] 預估：**0.25 day**
+
+### M6. Per-tenant Egress Allowlist
+- [ ] `tenant_egress_policies` 表：`tenant_id, allowed_hosts[], allowed_cidrs[], default_action`
+- [ ] Sandbox launch 時動態寫 iptables/nftables rule：`-A OUTPUT -m owner --uid-owner <sandbox_uid> -d <allowed> -j ACCEPT`
+- [ ] 預設拒絕（`default DROP`），只白名單可達
+- [ ] UI：Settings → Network Egress 頁面 + 申請審批流程（viewer/operator 申請、admin 核准）
+- [ ] 相容舊 `configs/t1_egress_allow_hosts.yaml`（自動 migrate 到 `t-default`）
+- [ ] 測試：A 允許 `api.openai.com`、B 僅允許內網 → A/B sandbox 實際出向測試
+- [ ] 預估：**1.5 day**
+
+**相依**：I6 + I4 + I5 + H1。I 全做完後可順接。
+
+**總預估**：M1 (1) + M2 (0.5) + M3 (0.5) + M4 (1) + M5 (0.25) + M6 (1.5) = **~4.75 day**
+
+**驗收**：
+- 10 tenant × 3 並發 job 混合負載 — 每 tenant 實測 CPU / mem 用量對映 DRF 權重 ±15% 以內
+- Tenant A 寫滿自己 10GB quota 後 B 寫入不受影響
+- A 的 LLM key 故障觸發 circuit open 不影響 B
+- UI host-device-panel admin 可看 per-tenant 資源使用率
+- 可產出 per-tenant monthly usage report（cpu_seconds / mem_gb_seconds / disk_gb_days / tokens_used）作為計費基礎
+
+**不做的後果**：
+- 無法開 SaaS（計費算不出來）
+- 嘈雜鄰居問題：一個濫用 tenant 拖慢全體
+- 合規：無法證明「tenant A 無法存取 tenant B 的執行環境」
 
 ---
 
@@ -1135,7 +1210,11 @@ I1 (schema + tenant_id) → I2 (RLS) → I3 (SSE filter) → I4 (secrets per-ten
 → I5 (filesystem namespace) → I6 (sandbox fair-share DRF) → I7 (frontend tenant-aware)
 → I8 (audit per-tenant chain) → I9 (rate limit) → I10 (multi-worker + Redis shared state)
 
-### Phase 11 — Bootstrap Wizard 一鍵安裝（~1 week，需 B12 + G1 + K1 基礎）
+### Phase 11 — Resource Hard Isolation（~1 week，緊接 Phase 10 之後）
+M1 (cgroup CPU/mem) → M2 (disk quota + LRU) → M3 (per-tenant circuit breaker)
+→ M4 (cgroup per-tenant metrics + AIMD 升級 + 計費) → M5 (prewarm 多租戶安全) → M6 (per-tenant egress)
+
+### Phase 12 — Bootstrap Wizard 一鍵安裝（~1 week，需 B12 + G1 + K1 基礎）
 L1 (status 偵測 + /bootstrap 路由) → L2 (admin 密碼) → L3 (LLM provider) → L4 (CF Tunnel embed)
 → L5 (服務啟動 + SSE log) → L6 (smoke test + finalize) → L7 (部署模式偵測) → L8 (reset + E2E)
 
