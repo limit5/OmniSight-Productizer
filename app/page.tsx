@@ -22,6 +22,7 @@ import { useAuth } from "@/lib/auth-context"
 import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
+import { NewProjectWizard } from "@/components/omnisight/new-project-wizard"
 import { CommandPalette } from "@/components/omnisight/command-palette"
 import { ForecastPanel } from "@/components/omnisight/forecast-panel"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
@@ -540,6 +541,7 @@ export default function Home() {
       {/* Phase 50C: overlay toasts for risky/destructive decisions. */}
       <ToastCenter />
       <FirstRunTour />
+      <NewProjectWizard />
       <CommandPalette
         onNavigatePanel={(id) => {
           if ((VALID_PANELS as Set<string>).has(id)) setActivePanel(id as PanelId)
