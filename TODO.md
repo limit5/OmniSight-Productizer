@@ -464,14 +464,14 @@ Legend:
 - [x] 預估：**1 day**
 
 ### K5. MFA (TOTP) + Passkey (WebAuthn) 骨架
-- [ ] `user_mfa` 表：method (totp/webauthn)、secret/credential、created_at、last_used
-- [ ] TOTP：enrollment QR + verify flow；backup codes（10 組，單次）
-- [ ] WebAuthn：`py_webauthn` 套件、register + authenticate endpoints
-- [ ] 登入流程：密碼 OK → 若有 MFA → `mfa_required=true` response → 驗通過才 `create_session(mfa_verified=True)`
-- [ ] Strict mode 可設 `require_mfa=True` 強制 admin / operator 啟用
-- [ ] UI：Settings → MFA 管理頁
-- [ ] 測試：TOTP drift 容忍、backup code 單次性
-- [ ] 預估：**2.5 day**
+- [x] `user_mfa` 表：method (totp/webauthn)、secret/credential、created_at、last_used
+- [x] TOTP：enrollment QR + verify flow；backup codes（10 組，單次）
+- [x] WebAuthn：`py_webauthn` 套件、register + authenticate endpoints
+- [x] 登入流程：密碼 OK → 若有 MFA → `mfa_required=true` response → 驗通過才 `create_session(mfa_verified=True)`
+- [x] Strict mode 可設 `require_mfa=True` 強制 admin / operator 啟用
+- [x] UI：Settings → MFA 管理頁
+- [x] 測試：TOTP drift 容忍、backup code 單次性
+- [x] 預估：**2.5 day**
 
 ### K6. Bearer token per-key + 稽核
 - [ ] 廢除單一 `OMNISIGHT_DECISION_BEARER` env；改 `api_keys` 表（id、name、hashed_key、scopes、created_by、last_used_ip、enabled）

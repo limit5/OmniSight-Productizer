@@ -6627,3 +6627,38 @@ Full suite regression: 91/91 tests passing across 13 component test files.
 - `Dockerfile.backend` — 預設 `OMNISIGHT_AUTH_MODE=strict`
 - `docker-compose.prod.yml` — 預設 `OMNISIGHT_AUTH_MODE=strict` + `OMNISIGHT_ENV=production`
 - `TODO.md` — K1 全部 6 項標記為 `[x]`
+
+---
+
+## K5: MFA (TOTP) + Passkey (WebAuthn) 骨架 — 完成
+
+**日期**：2026-04-16
+**狀態**：✅ 完成
+**Commit**：K5: MFA (TOTP) + Passkey (WebAuthn) skeleton — full implementation
+
+### 實作內容
+
+1. **Database**: `user_mfa` 表 (method, secret/credential, verified, FK cascade) + `mfa_backup_codes` 表 (SHA-256 hash, single-use tracking)
+2. **TOTP**: pyotp 2.9.0 產生 secret → QR code (qrcode 8.0) → verify with drift tolerance ±1 time step (30s)
+3. **WebAuthn**: webauthn 2.7.1 — register/authenticate endpoints with RP ID/origin 可透過 env 設定 (`OMNISIGHT_WEBAUTHN_RP_ID`, `OMNISIGHT_WEBAUTHN_ORIGIN`)
+4. **Backup codes**: 10 組 xxxx-xxxx 格式，SHA-256 雜湊存入 DB，每組只能用一次
+5. **Login flow**: 密碼 OK → check has_verified_mfa → 若有 → 回傳 `mfa_required=true` + `mfa_token` → 前端用 mfa_token + code 呼叫 `/auth/mfa/challenge` → 驗通過才建 session (mfa_verified=1)
+6. **Strict mode**: `OMNISIGHT_REQUIRE_MFA=true` 環境變數，強制 admin/operator 必須啟用 MFA
+7. **Frontend**: Login page 支援 MFA 二階段驗證流程，User menu 新增 "MFA settings" modal (TOTP enrollment/QR/disable, WebAuthn register/remove, backup codes management)
+8. **12 個 API endpoints**: `/auth/mfa/status`, `/auth/mfa/totp/enroll|confirm|disable`, `/auth/mfa/backup-codes/status|regenerate`, `/auth/mfa/webauthn/register/begin|complete`, `/auth/mfa/webauthn/{id}` DELETE, `/auth/mfa/challenge`, `/auth/mfa/webauthn/challenge/begin|complete`
+9. **11 unit tests**: TOTP enrollment, wrong code rejection, drift tolerance, disable, backup code single-use, status tracking, challenge create/consume/expire, MFA status
+
+### 修改檔案
+- `backend/db.py` — 新增 `user_mfa` + `mfa_backup_codes` tables
+- `backend/mfa.py` — 新增 MFA 核心邏輯 (TOTP, backup codes, WebAuthn, challenge tokens)
+- `backend/routers/mfa.py` — 新增 12 個 MFA API endpoints
+- `backend/routers/auth.py` — Login flow 修改：密碼 OK 後檢查 MFA
+- `backend/main.py` — 註冊 MFA router
+- `backend/requirements.txt` — 新增 pyotp, qrcode[pil], webauthn
+- `lib/api.ts` — 新增 MFA API client functions + LoginResponse type
+- `lib/auth-context.tsx` — 新增 mfaPending state, submitMfa(), cancelMfa()
+- `app/login/page.tsx` — MFA challenge UI (二階段驗證)
+- `components/omnisight/mfa-management-panel.tsx` — MFA 管理面板
+- `components/omnisight/user-menu.tsx` — 新增 "MFA settings" 選項
+- `tests/test_mfa.py` — 11 個單元測試
+- `TODO.md` — K5 全部 7 項標記為 `[x]`
