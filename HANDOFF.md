@@ -268,6 +268,50 @@ META — 組織/矩陣（便宜但容易漏，合計 3-5 day）
 Layer C 37-55 day + META 3-5 day ≈ 200-285 day。三人團隊併行可壓到
 ~3-4 個月 wall-clock。
 
+── 擴充：Imaging/Printing/Scanning/Payment/Enterprise web 家族 ──
+新增 5 嵌入產品（文件掃描器 / 打印機 / MFP / 掃碼槍 / 刷卡付款機）+ 9 軟體
+系統（ERP / WMS / HRM / 物料 / 進銷存 / 個人網頁 / e-commerce / POS /
+KIOSK，後二者為嵌入+web 混合）。
+
+Layer A 擴充（29-41 day）
+- L4-CORE-18 Payment/PCI 合規 framework（PCI-DSS + PCI-PTS + EMV L1/L2/L3 +
+  P2PE + HSM 整合，7-10 day，payment/POS gate）
+- L4-CORE-19 Imaging/文件處理 pipeline（scanner ISP + OCR + TWAIN/SANE +
+  ICC profile，5-7 day）
+- L4-CORE-20 Print pipeline（IPP/CUPS + PCL/PS/PDF interpreter + 色彩管理，
+  6-8 day）
+- L4-CORE-21 Enterprise web stack pattern（auth + RBAC + audit + reports +
+  i18n + 多租戶 + import/export + workflow engine，8-12 day，所有 ERP
+  家族 + e-commerce + KIOSK 後台共用）
+- L4-CORE-22 Barcode/scanning SDK abstraction（Zebra/Honeywell/Datalogic/
+  Newland 統一介面 + 1D/2D 符號集，3-4 day）
+
+Layer B 擴充 skill pack（41-59 day）
+- SKILL-SCANNER（文件掃描 + OCR + TWAIN/SANE，5-7 day）
+- SKILL-PRINTER（IPP + PDL，5-7 day）
+- SKILL-MFP（複用 SCANNER+PRINTER ~70%，3-4 day）
+- SKILL-BARCODE-GUN（HID wedge / SPP，3-5 day）
+- SKILL-PAYMENT-TERMINAL（含 CORE-18 + 15，10-14 day）
+- SKILL-POS（payment + barcode + receipt printer + HMI + 後台，8-12 day）
+- SKILL-KIOSK（display + touch + payment 選配 + network + 後台，7-10 day）
+
+Layer C 擴充軟體軌道（60-88 day，多數可複用 CORE-21 縮 30-50%）
+- SW-WEB-ERP（財務+會計+採購+訂單，14-20 day）
+- SW-WEB-WMS（倉儲 + barcode，8-12 day）
+- SW-WEB-HRM（打卡/請假/薪資/績效，10-14 day）
+- SW-WEB-MATERIAL（BOM + 採購 + 庫存，7-10 day）
+- SW-WEB-SALES-INV（進銷存，通常 ERP 輕量版，8-12 day）
+- SW-WEB-PORTFOLIO（個人形象網頁，用現有 UX-05 + INGEST-01 即可，只需
+  內容模板，1-2 day）
+- SW-WEB-ECOMMERCE（catalog + cart + payment + CMS + 後台，12-18 day）
+
+META 補充（1-2 day）
+- Payment 合規矩陣（PCI L1-L4 × EMV 地區認證 × HSM 廠商）
+- Enterprise 部署拓撲（on-prem / SaaS / 混合雲）
+- 硬體↔後台配對標準化（POS/KIOSK/payment 終端 embedded 端 ↔ 雲端管理後台）
+
+更新後 L4 總估：~331-475 day，3 人併行 wall-clock ~6-8 個月。
+
 - 真 embedding（Phase 67-F）替換 quality_score 做 cosine
 - SSO / OAuth（內部多 operator）
 - Postgres 遷移（>2 concurrent operator）
