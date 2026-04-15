@@ -7,6 +7,49 @@
 
 ---
 
+## C3 L4-CORE-02 Datasheet PDF → HardwareProfile parser 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| PDF text extraction | ✅ | pdfplumber-based extraction with table-aware parsing, 120K char limit |
+| Structured extraction prompt | ✅ | LLM prompt per HardwareProfile field, JSON schema output, markdown fence tolerance |
+| Confidence per field | ✅ | ≥0.7 auto-accept, <0.7 flagged in `low_confidence_fields`; `needs_operator_review` property |
+| Fallback: operator form-fill | ✅ | `apply_operator_overrides()` merges operator values at confidence 1.0; heuristic regex fallback when LLM unavailable |
+| Unit test | ✅ | 43 項測試全數通過：Hi3516DV300 / RK3566 / ESP32-S3 heuristic + LLM mock + confidence + override + edge cases |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/datasheet_parser.py` | 新建——PDF extraction, LLM extraction prompt, heuristic regex fallback, confidence scoring, operator override |
+| `backend/tests/test_datasheet_parser.py` | 新建，43 項測試 |
+| `backend/tests/fixtures/datasheet_hi3516.txt` | 新建——Hi3516DV300 sample datasheet text |
+| `backend/tests/fixtures/datasheet_rk3566.txt` | 新建——RK3566 sample datasheet text |
+| `backend/tests/fixtures/datasheet_esp32s3.txt` | 新建——ESP32-S3 sample datasheet text |
+
+### 架構說明
+
+- `parse_datasheet(source, ask_fn, model, raw_text)` — 主入口，接受 PDF 路徑或預提取文字
+- `DatasheetResult` — 包含 HardwareProfile + per-field confidences + low_confidence_fields
+- Heuristic fallback：12+ regex pattern families 覆蓋 SoC/MCU/DSP/NPU/sensor/codec/USB/peripheral/memory/display
+- LLM path：結構化 JSON prompt，與 intent_parser.py 相同的 ask_fn 介面
+- `apply_operator_overrides()` — 合併 operator 表單填寫值，信心度設為 1.0
+
+### 驗證
+
+- 43 項新增 datasheet parser 測試全數通過
+- 41 項既有 HardwareProfile + intent_parser 測試全數通過（無迴歸）
+
+### 下一步
+
+- C4 (#213)：Embedded product planner agent（讀取 HardwareProfile 生成 DAG）
+- C5 (#214)：Skill pack framework（技能包框架）
+- 整合 API endpoint：POST `/datasheet/parse` 接受 PDF 上傳 → 回傳 DatasheetResult
+
+---
+
 ## C2 L4-CORE-01 HardwareProfile schema 狀態更新（2026-04-15）
 
 **全部 4/4 項目已完成。**

@@ -140,11 +140,11 @@ Legend:
 - [x] Unit test: round-trip serialize/deserialize
 
 ### C3. L4-CORE-02 Datasheet PDF → HardwareProfile parser (#212)
-- [ ] PDF text extraction (reuse Phase 67-E RAG)
-- [ ] Structured extraction prompt per HardwareProfile field
-- [ ] Confidence per field (≥0.7 auto-accept, else clarify)
-- [ ] Fallback: operator form-fills missing fields
-- [ ] Unit test: sample datasheets (Hi3516 / RK3566 / ESP32-S3)
+- [x] PDF text extraction (reuse Phase 67-E RAG)
+- [x] Structured extraction prompt per HardwareProfile field
+- [x] Confidence per field (≥0.7 auto-accept, else clarify)
+- [x] Fallback: operator form-fills missing fields
+- [x] Unit test: sample datasheets (Hi3516 / RK3566 / ESP32-S3)
 
 ### C4. L4-CORE-03 Embedded product planner agent (#213)
 - [ ] Input: HardwareProfile + ProductSpec + selected skill_pack
