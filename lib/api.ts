@@ -830,6 +830,26 @@ export interface WorkflowRunSummary {
   metadata: Record<string, unknown>
 }
 
+export interface WorkflowStepDetail {
+  id: string
+  key: string
+  started_at: number | null
+  completed_at: number | null
+  is_done: boolean
+  error: string | null
+  output: string | null
+}
+
+export interface WorkflowRunDetail {
+  run: WorkflowRunSummary
+  steps: WorkflowStepDetail[]
+  in_flight: boolean
+}
+
+export async function getWorkflowRun(runId: string): Promise<WorkflowRunDetail> {
+  return request<WorkflowRunDetail>(`/workflow/runs/${encodeURIComponent(runId)}`)
+}
+
 export async function listWorkflowRuns(opts: { status?: string; limit?: number } = {}): Promise<WorkflowRunSummary[]> {
   const params = new URLSearchParams()
   if (opts.status) params.set("status", opts.status)

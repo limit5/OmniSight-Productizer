@@ -16,6 +16,7 @@ import userEvent from "@testing-library/user-event"
 
 vi.mock("@/lib/api", () => ({
   listWorkflowRuns: vi.fn(),
+  getWorkflowRun: vi.fn(),
 }))
 
 import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"
@@ -23,6 +24,7 @@ import * as api from "@/lib/api"
 import type { WorkflowRunSummary } from "@/lib/api"
 
 const mockList = api.listWorkflowRuns as ReturnType<typeof vi.fn>
+const mockGet = api.getWorkflowRun as ReturnType<typeof vi.fn>
 
 const runs: WorkflowRunSummary[] = [
   {
@@ -75,26 +77,50 @@ describe("RunHistoryPanel", () => {
     })
   })
 
-  it("row click dispatches navigate + timeline-focus-run events", async () => {
+  it("row click expands inline + fetches steps via getWorkflowRun", async () => {
     const user = userEvent.setup()
-    const navListener = vi.fn()
-    const focusListener = vi.fn()
-    window.addEventListener("omnisight:navigate", navListener as EventListener)
-    window.addEventListener("omnisight:timeline-focus-run", focusListener as EventListener)
-    try {
-      render(<RunHistoryPanel />)
-      const row = await screen.findByRole("button", { name: /run wf-2/i })
-      await user.click(row)
-      expect(navListener).toHaveBeenCalledTimes(1)
-      const navEv = navListener.mock.calls[0][0] as CustomEvent<{ panel: string }>
-      expect(navEv.detail.panel).toBe("timeline")
-      expect(focusListener).toHaveBeenCalledTimes(1)
-      const focusEv = focusListener.mock.calls[0][0] as CustomEvent<{ runId: string }>
-      expect(focusEv.detail.runId).toBe("wf-2")
-    } finally {
-      window.removeEventListener("omnisight:navigate", navListener as EventListener)
-      window.removeEventListener("omnisight:timeline-focus-run", focusListener as EventListener)
-    }
+    mockGet.mockResolvedValue({
+      run: runs[1],
+      in_flight: false,
+      steps: [
+        {
+          id: "s1", key: "compile", started_at: 1, completed_at: 2,
+          is_done: true, error: null, output: "ok",
+        },
+        {
+          id: "s2", key: "flash", started_at: 2, completed_at: 3,
+          is_done: false, error: "boom: serial closed", output: null,
+        },
+      ],
+    })
+    render(<RunHistoryPanel />)
+    const row = await screen.findByRole("button", { name: /run wf-2/i })
+    await user.click(row)
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("wf-2"))
+    // Step list shows up with both step keys + the failure detail.
+    expect(await screen.findByText("compile")).toBeInTheDocument()
+    expect(screen.getByText("flash")).toBeInTheDocument()
+    expect(screen.getByText(/boom: serial closed/)).toBeInTheDocument()
+    // aria-expanded flips on the row.
+    expect(row).toHaveAttribute("aria-expanded", "true")
+  })
+
+  it("row click again collapses without re-fetching", async () => {
+    const user = userEvent.setup()
+    mockGet.mockResolvedValue({
+      run: runs[1], in_flight: false,
+      steps: [{ id: "s1", key: "x", started_at: 0, completed_at: 1, is_done: true, error: null, output: null }],
+    })
+    render(<RunHistoryPanel />)
+    const row = await screen.findByRole("button", { name: /run wf-2/i })
+    await user.click(row)
+    await waitFor(() => expect(mockGet).toHaveBeenCalled())
+    mockGet.mockClear()
+    await user.click(row)
+    expect(row).toHaveAttribute("aria-expanded", "false")
+    // Re-expand uses the cache, so no second fetch.
+    await user.click(row)
+    expect(mockGet).not.toHaveBeenCalled()
   })
 
   it("surfaces fetch errors inline without crashing", async () => {
