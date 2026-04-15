@@ -294,6 +294,8 @@ from backend.routers import enterprise_web_stack as _ews_router  # C21/ENTERPRIS
 app.include_router(_ews_router.router, prefix=settings.api_prefix)
 from backend.routers import barcode_scanner as _barcode_router  # C22/BARCODE-SCANNER-SDK
 app.include_router(_barcode_router.router, prefix=settings.api_prefix)
+from backend.routers import machine_vision as _machine_vision_router  # C24/MACHINE-VISION
+app.include_router(_machine_vision_router.router, prefix=settings.api_prefix)
 from backend.routers import cloudflare_tunnel as _cf_tunnel_router  # B12/CF-TUNNEL-WIZARD
 app.include_router(_cf_tunnel_router.router, prefix=settings.api_prefix)
 

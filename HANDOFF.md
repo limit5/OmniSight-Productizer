@@ -46,6 +46,38 @@
 
 ---
 
+## H (pending) Host-aware Coordinator — 主機負載感知 + 自適應調度（2026-04-16 登錄）
+
+**背景**：現行 `_ModeSlot`（`backend/decision_engine.py` L52-189）只以 Operation Mode 給靜態 concurrency budget（manual=1 / supervised=2 / full_auto=4 / turbo=8），coordinator 完全不讀 CPU / mem / disk，`sandbox_prewarm.py` 純猜測。UI `components/omnisight/host-device-panel.tsx` L40-51 `HostInfo` 介面是 placeholder 從未實作。風險：turbo 在高壓時仍硬塞 → OOM / watchdog 誤判 stuck → 重試放大壓力。
+
+**基準硬體（hardcode baseline，不做 auto-detect）**：AMD Ryzen 9 9950X、WSL2 分配 **16 cores + 64 GB RAM + 512 GB disk**。
+
+| Phase | 主題 | 狀態 | 預估 |
+|---|---|---|---|
+| H1 | 主機 metrics 採集（psutil + Docker SDK + WSL2 loadavg 輔助訊號，ring buffer 60pt，SSE `host.metrics.tick`） | ⏳ 待辦 | 0.5 day |
+| H2 | Coordinator 負載感知調度：`_ModeSlot.acquire` 加 CPU/mem/container precondition，turbo 自動降級到 supervised，prewarm 高壓暫停 | ⏳ 待辦 | 2 day |
+| H3 | UI Host Load Panel（真 SSE 驅動）+ `ops-summary-panel` 加 queue depth / deferred / effective budget + derate badge + Force turbo override | ⏳ 待辦 | 1.5 day |
+| H4a | Weighted Token Bucket + AIMD 自適應 concurrency（CAPACITY_MAX=12 tokens；AI +1/30s、MD halve、floor=2、cap=12；last-known-good 持久化） | ⏳ 待辦 | 1.5 day |
+| H4b | Sandbox cost calibration 腳本（H1 上線 1 週後，讀 ring + 執行紀錄產新權重表；--apply 寫回 `configs/sandbox_cost_weights.yaml`） | ⏳ 待辦（deferred 1 週） | 1 day |
+
+**設計決策**：
+- Baseline **hardcode** 不做 auto-detect（使用者已確認環境固定）
+- **Weighted Token Bucket** 而非實例數計數 — gVisor(=1) / T2 docker(=2) / Phase 64-C-LOCAL(=4) / QEMU(=3) / SSH(=0.5)
+- AIMD 類 TCP congestion control：`budget=6` 啟動、`+1/30s` 爬升、`halve` 當 CPU/mem>85% 持續 10s
+- Mode 變 multiplier：`turbo=1.0 / full_auto=0.7 / supervised=0.4 / manual=0.15` × CAPACITY_MAX，取 `min(mode_cap, aimd_budget)`
+- WSL2 特殊處理：`loadavg_1m / 16 > 0.9` 視為 high pressure（捕捉 Windows host 其他進程壓力，psutil 看不到）
+
+**相依性**：H1 → H2 → H3；H4a 可與 H3 並行；H4b 需 H1 資料累積 1 週。
+**總預估**：**6.5 day**（5.5 day 核心 + 1 day calibration deferred）。
+**驗收標準**：
+- turbo 在 CPU>85% 持續 30s 內自動降級，UI Badge 顯示原因
+- 同時跑 8 個 Phase 64-C-LOCAL compile 不會 OOM（AIMD 先擋）
+- host-device-panel 顯示 16c/64GB baseline + 即時壓力 + queue depth
+
+**與 G 系列關係**：獨立可並行。H 解決「單機內部排程」、G 解決「多副本 HA」；多副本上線後 H 的 metrics 要分 per-instance（H 先做好單機基礎）。
+
+---
+
 ## G (pending) Ops / HA 補強待辦（2026-04-15 登錄）
 
 **背景**：現況為單機 systemd 原型，`scripts/deploy.sh` 原地 `systemctl restart` 有短暫中斷；SQLite 無複製；無 LB / 多副本 / blue-green / rolling。Canary（5% deterministic）、DB online backup、DLQ 重試、watchdog、provider failover 已具備，但欠缺真正 HA 與零停機。詳細拆解見 `TODO.md` Priority G。
@@ -5990,3 +6022,35 @@ Full suite regression: 91/91 tests passing across 13 component test files.
 | `test/components/new-project-wizard.test.tsx` | **Created** — 7 component tests |
 | `app/page.tsx` | Updated — import + render `NewProjectWizard` |
 | `TODO.md` | Updated B4 items → `[x]` |
+
+---
+
+## C24 (complete) L4-CORE-24 — Machine Vision & Industrial Imaging Framework（2026-04-16 完成）
+
+**背景**：OmniSight 需要統一的工業機器視覺框架，涵蓋 GenICam 驅動抽象、多種傳輸層（GigE Vision / USB3 Vision / Camera Link / CoaXPress）、硬體觸發與編碼器同步、多相機校正（棋盤格 + 束調整）、線掃描相機支援，以及透過 CORE-13 的 PLC 整合（Modbus/OPC-UA）。
+
+**目標**：建立完整的 GenICam 相容機器視覺管線，從相機發現、連接、配置、擷取到校正、線掃描、PLC 整合，全部統一在一個模組中。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| GenICam 驅動抽象 | `GenICamCamera` ABC + transport adapter 模式（GigE/USB3/CameraLink/CoaXPress） | ✅ 完成 |
+| GigE Vision 傳輸 | `GigEVisionAdapter` — aravis 後端，GVSP/GVCP/Action Commands | ✅ 完成 |
+| USB3 Vision 傳輸 | `USB3VisionAdapter` — libusb 後端，Bulk streaming/hot-plug | ✅ 完成 |
+| Camera Link / CoaXPress | `CameraLinkAdapter` / `CoaXPressAdapter` — frame grabber 後端 | ✅ 完成 |
+| GenICam Feature 存取 | 14 標準 feature（ExposureTime/Gain/PixelFormat/TriggerMode/LineRate 等）+ 範圍/列舉驗證 | ✅ 完成 |
+| 硬體觸發 + 編碼器同步 | 7 觸發模式（Free/SW/HW Rising/Falling/AnyEdge/Encoder/Action）+ RotaryEncoder 類別 | ✅ 完成 |
+| 多相機校正 | 棋盤格/ChArUco/Circle Grid + Stereo pair + Multi-camera bundle adjustment + Hand-eye | ✅ 完成 |
+| 線掃描支援 | Forward/Reverse/Bidirectional 合成 + 編碼器同步 + 多種行速率 | ✅ 完成 |
+| PLC 整合 | Modbus registers (40001-40004, 10001-10002) + OPC-UA nodes + trigger mapping | ✅ 完成 |
+| REST API | `/vision/*` 28 endpoints — transports/cameras/features/trigger/encoder/calibration/line-scan/plc | ✅ 完成 |
+| 測試 | 110 項全部通過：config/transport/feature/lifecycle/trigger/encoder/calibration/line-scan/PLC/recipes/gate | ✅ 完成 |
+
+**新增檔案**：
+- `backend/machine_vision.py` — 核心模組（GenICam ABC + 4 transport adapters + encoder + calibration + line-scan + PLC）
+- `backend/routers/machine_vision.py` — REST API router（28 endpoints）
+- `backend/tests/test_machine_vision.py` — 110 項測試
+- `configs/machine_vision.yaml` — 傳輸/Feature/相機/觸發/編碼器/校正/PLC 配置
+
+**修改檔案**：
+- `backend/main.py` — 註冊 machine_vision router
+- `TODO.md` — 標記 C24 全部 7 項為 `[x]`

@@ -1,0 +1,475 @@
+schema_version: 1
+
+machine_vision:
+  name: "Machine Vision & Industrial Imaging Framework"
+  description: >
+    GenICam-based machine vision framework with GigE Vision and USB3 Vision
+    transport layers, hardware trigger and encoder synchronization,
+    multi-camera calibration (checkerboard + bundle adjustment),
+    line-scan camera support, and PLC integration via Modbus/OPC-UA (CORE-13).
+
+  transports:
+    - id: "gige_vision"
+      name: "GigE Vision"
+      description: "Gigabit Ethernet Vision standard (IEEE 802.3) — aravis / mvIMPACT backend"
+      standard: "GigE Vision 2.2"
+      backend: "aravis"
+      max_bandwidth_mbps: 1000
+      max_packet_size: 9000
+      features:
+        - "gvsp_streaming"
+        - "gvcp_control"
+        - "action_commands"
+        - "scheduled_action"
+        - "packet_resend"
+        - "multi_zone"
+        - "extended_id"
+      discovery: "gvcp_broadcast"
+      link_speed_negotiation: true
+      jumbo_frames: true
+
+    - id: "usb3_vision"
+      name: "USB3 Vision"
+      description: "USB3 Vision standard — libusb / vendor SDK backend"
+      standard: "USB3 Vision 1.1"
+      backend: "libusb"
+      max_bandwidth_mbps: 5000
+      features:
+        - "bulk_streaming"
+        - "control_endpoint"
+        - "event_endpoint"
+        - "usb3_superspeed"
+        - "link_power_management"
+      discovery: "usb_enumeration"
+      hot_plug: true
+
+    - id: "camera_link"
+      name: "Camera Link"
+      description: "Camera Link interface for high-bandwidth frame grabber setups"
+      standard: "Camera Link 2.0"
+      backend: "frame_grabber"
+      max_bandwidth_mbps: 6800
+      features:
+        - "base_config"
+        - "medium_config"
+        - "full_config"
+        - "deca_config"
+        - "power_over_camera_link"
+      discovery: "manual"
+      requires_frame_grabber: true
+
+    - id: "coaxpress"
+      name: "CoaXPress"
+      description: "CoaXPress high-speed coaxial interface"
+      standard: "CoaXPress 2.0"
+      backend: "frame_grabber"
+      max_bandwidth_mbps: 12500
+      features:
+        - "single_link"
+        - "multi_link"
+        - "power_over_coax"
+        - "uplink_control"
+      discovery: "auto_negotiation"
+      requires_frame_grabber: true
+
+  genicam_features:
+    - id: "acquisition_mode"
+      name: "AcquisitionMode"
+      category: "AcquisitionControl"
+      type: "enumeration"
+      values: ["Continuous", "SingleFrame", "MultiFrame"]
+      description: "Sets the acquisition mode of the device"
+
+    - id: "exposure_time"
+      name: "ExposureTime"
+      category: "AcquisitionControl"
+      type: "float"
+      unit: "us"
+      min: 10
+      max: 10000000
+      description: "Sets the exposure time in microseconds"
+
+    - id: "gain"
+      name: "Gain"
+      category: "AnalogControl"
+      type: "float"
+      unit: "dB"
+      min: 0.0
+      max: 48.0
+      description: "Controls the analog or digital gain"
+
+    - id: "pixel_format"
+      name: "PixelFormat"
+      category: "ImageFormatControl"
+      type: "enumeration"
+      values: ["Mono8", "Mono10", "Mono12", "Mono16", "BayerRG8", "BayerRG12", "RGB8", "BGR8", "YUV422_8"]
+      description: "Format of the pixels provided by the device"
+
+    - id: "width"
+      name: "Width"
+      category: "ImageFormatControl"
+      type: "integer"
+      min: 1
+      max: 16384
+      description: "Width of the image provided by the device in pixels"
+
+    - id: "height"
+      name: "Height"
+      category: "ImageFormatControl"
+      type: "integer"
+      min: 1
+      max: 16384
+      description: "Height of the image provided by the device in pixels"
+
+    - id: "offset_x"
+      name: "OffsetX"
+      category: "ImageFormatControl"
+      type: "integer"
+      min: 0
+      max: 16383
+      description: "Horizontal offset from the origin to the ROI"
+
+    - id: "offset_y"
+      name: "OffsetY"
+      category: "ImageFormatControl"
+      type: "integer"
+      min: 0
+      max: 16383
+      description: "Vertical offset from the origin to the ROI"
+
+    - id: "trigger_mode"
+      name: "TriggerMode"
+      category: "AcquisitionControl"
+      type: "enumeration"
+      values: ["Off", "On"]
+      description: "Controls if the selected trigger is active"
+
+    - id: "trigger_source"
+      name: "TriggerSource"
+      category: "AcquisitionControl"
+      type: "enumeration"
+      values: ["Software", "Line0", "Line1", "Line2", "Encoder0", "Action1"]
+      description: "Specifies the internal signal or physical input line to use as the trigger source"
+
+    - id: "trigger_activation"
+      name: "TriggerActivation"
+      category: "AcquisitionControl"
+      type: "enumeration"
+      values: ["RisingEdge", "FallingEdge", "AnyEdge", "LevelHigh", "LevelLow"]
+      description: "Specifies the activation mode of the trigger"
+
+    - id: "line_rate"
+      name: "AcquisitionLineRate"
+      category: "AcquisitionControl"
+      type: "float"
+      unit: "Hz"
+      min: 1.0
+      max: 200000.0
+      description: "Controls the rate at which lines are acquired in line-scan mode"
+
+    - id: "frame_rate"
+      name: "AcquisitionFrameRate"
+      category: "AcquisitionControl"
+      type: "float"
+      unit: "Hz"
+      min: 0.1
+      max: 10000.0
+      description: "Controls the acquisition rate at which frames are captured"
+
+  camera_models:
+    - id: "basler_ace2"
+      name: "Basler ace 2"
+      vendor: "Basler"
+      transport: "gige_vision"
+      sensor: "Sony IMX547"
+      resolution: [5328, 3040]
+      max_fps: 23
+      pixel_formats: ["Mono8", "Mono12", "BayerRG8", "BayerRG12"]
+      scan_type: "area"
+
+    - id: "basler_racer2"
+      name: "Basler racer 2"
+      vendor: "Basler"
+      transport: "gige_vision"
+      sensor: "custom CMOS"
+      resolution: [8192, 1]
+      max_line_rate: 70000
+      pixel_formats: ["Mono8", "Mono10", "Mono12"]
+      scan_type: "line"
+
+    - id: "ids_u3"
+      name: "IDS U3"
+      vendor: "IDS"
+      transport: "usb3_vision"
+      sensor: "Sony IMX264"
+      resolution: [2448, 2048]
+      max_fps: 35
+      pixel_formats: ["Mono8", "Mono12", "BayerRG8", "RGB8"]
+      scan_type: "area"
+
+    - id: "flir_bfs"
+      name: "FLIR Blackfly S"
+      vendor: "FLIR/Teledyne"
+      transport: "gige_vision"
+      sensor: "Sony IMX250"
+      resolution: [2448, 2048]
+      max_fps: 75
+      pixel_formats: ["Mono8", "Mono10", "BayerRG8", "BGR8"]
+      scan_type: "area"
+
+    - id: "dalsa_linea"
+      name: "Teledyne DALSA Linea"
+      vendor: "Teledyne DALSA"
+      transport: "gige_vision"
+      sensor: "custom CMOS"
+      resolution: [4096, 1]
+      max_line_rate: 80000
+      pixel_formats: ["Mono8", "Mono10", "Mono12"]
+      scan_type: "line"
+
+    - id: "jai_go"
+      name: "JAI GO Series"
+      vendor: "JAI"
+      transport: "gige_vision"
+      sensor: "Sony IMX174"
+      resolution: [1936, 1216]
+      max_fps: 164
+      pixel_formats: ["Mono8", "Mono12", "BayerRG8"]
+      scan_type: "area"
+
+  trigger_modes:
+    - id: "free_running"
+      name: "Free Running"
+      description: "Camera acquires images at its maximum frame rate continuously"
+      source: "internal"
+      requires_hardware: false
+
+    - id: "software"
+      name: "Software Trigger"
+      description: "Acquisition triggered by a software command"
+      source: "software"
+      requires_hardware: false
+
+    - id: "hardware_rising"
+      name: "Hardware Trigger — Rising Edge"
+      description: "Trigger on rising edge of an external signal (e.g., sensor, PLC output)"
+      source: "line_input"
+      activation: "rising_edge"
+      requires_hardware: true
+
+    - id: "hardware_falling"
+      name: "Hardware Trigger — Falling Edge"
+      description: "Trigger on falling edge of an external signal"
+      source: "line_input"
+      activation: "falling_edge"
+      requires_hardware: true
+
+    - id: "hardware_any_edge"
+      name: "Hardware Trigger — Any Edge"
+      description: "Trigger on any edge transition of an external signal"
+      source: "line_input"
+      activation: "any_edge"
+      requires_hardware: true
+
+    - id: "encoder_position"
+      name: "Encoder Position Trigger"
+      description: "Trigger based on rotary/linear encoder position — ideal for line scan"
+      source: "encoder"
+      activation: "position_step"
+      requires_hardware: true
+      encoder_resolution_min: 1
+      encoder_resolution_max: 65535
+
+    - id: "action_command"
+      name: "GigE Action Command"
+      description: "IEEE 1588 PTP-synchronised trigger across multiple GigE cameras"
+      source: "action"
+      requires_hardware: false
+      requires_ptp: true
+
+  encoder_config:
+    interface_types: ["quadrature_ab", "quadrature_abz", "step_direction", "pulse_counter"]
+    resolutions: [256, 512, 1024, 2048, 4096, 8192, 16384]
+    divider_range: [1, 65535]
+    direction_modes: ["forward", "reverse", "auto"]
+    index_reset: true
+    debounce_us_range: [0, 1000]
+
+  calibration_methods:
+    - id: "checkerboard"
+      name: "Checkerboard Calibration"
+      description: "Zhang's method using a planar checkerboard pattern"
+      pattern_type: "checkerboard"
+      min_images: 10
+      recommended_images: 25
+      outputs: ["camera_matrix", "distortion_coeffs", "reprojection_error"]
+
+    - id: "charuco"
+      name: "ChArUco Board Calibration"
+      description: "Combined ChArUco board for robust partial occlusion handling"
+      pattern_type: "charuco"
+      min_images: 8
+      recommended_images: 20
+      outputs: ["camera_matrix", "distortion_coeffs", "reprojection_error"]
+
+    - id: "circle_grid"
+      name: "Circle Grid Calibration"
+      description: "Symmetric or asymmetric circle grid pattern"
+      pattern_type: "circle_grid"
+      min_images: 10
+      recommended_images: 20
+      outputs: ["camera_matrix", "distortion_coeffs", "reprojection_error"]
+
+    - id: "stereo_pair"
+      name: "Stereo Pair Calibration"
+      description: "Stereo camera extrinsic calibration using checkerboard pairs"
+      pattern_type: "checkerboard"
+      min_images: 15
+      recommended_images: 30
+      outputs: ["camera_matrix_left", "camera_matrix_right", "R", "T", "E", "F", "reprojection_error"]
+
+    - id: "multi_camera_bundle"
+      name: "Multi-Camera Bundle Adjustment"
+      description: "Global bundle adjustment across N cameras with shared calibration targets"
+      pattern_type: "any"
+      min_images: 20
+      recommended_images: 50
+      outputs: ["camera_matrices", "distortion_coeffs", "extrinsics", "reprojection_errors"]
+
+    - id: "hand_eye"
+      name: "Hand-Eye Calibration"
+      description: "Robot hand-eye calibration (eye-in-hand or eye-to-hand)"
+      pattern_type: "checkerboard"
+      min_images: 10
+      recommended_images: 20
+      outputs: ["hand_eye_transform", "reprojection_error"]
+
+  line_scan_config:
+    scan_directions: ["forward", "reverse", "bidirectional"]
+    transport_mechanisms: ["conveyor_belt", "rotary_drum", "web_roller", "xy_stage", "gantry"]
+    typical_line_rates_hz: [1000, 5000, 10000, 20000, 50000, 80000, 100000, 200000]
+    image_composition:
+      height_source: ["fixed_lines", "encoder_distance", "external_trigger"]
+      max_lines_per_frame: 65536
+      overlap_lines: [0, 1, 2, 4, 8]
+    lighting_types: ["line_light", "dome_light", "bar_light", "backlight", "coaxial"]
+
+  plc_integration:
+    protocol_ref: "connectivity.modbus"
+    opcua_ref: "connectivity.opcua"
+    trigger_mapping:
+      - plc_signal: "camera_trigger_out"
+        camera_input: "Line0"
+        description: "PLC digital output → camera hardware trigger input"
+      - plc_signal: "encoder_a"
+        camera_input: "Encoder0"
+        description: "PLC encoder output → camera encoder input"
+      - plc_signal: "inspection_result"
+        camera_output: "Line1"
+        description: "Camera GPIO output → PLC digital input for pass/fail"
+    modbus_registers:
+      - address: 40001
+        name: "trigger_count"
+        type: "holding"
+        access: "read"
+        description: "Total trigger count from PLC"
+      - address: 40002
+        name: "encoder_position"
+        type: "holding"
+        access: "read"
+        description: "Current encoder position from PLC"
+      - address: 40003
+        name: "inspection_result"
+        type: "holding"
+        access: "write"
+        description: "Write inspection result back to PLC (0=fail, 1=pass)"
+      - address: 40004
+        name: "line_speed_mpm"
+        type: "holding"
+        access: "read"
+        description: "Line speed in metres per minute"
+      - address: 10001
+        name: "part_present"
+        type: "discrete_input"
+        access: "read"
+        description: "Part presence sensor"
+      - address: 10002
+        name: "conveyor_running"
+        type: "discrete_input"
+        access: "read"
+        description: "Conveyor running status"
+    opcua_nodes:
+      - node_id: "ns=2;s=Camera.TriggerCount"
+        name: "trigger_count"
+        access: "read"
+      - node_id: "ns=2;s=Camera.EncoderPosition"
+        name: "encoder_position"
+        access: "read"
+      - node_id: "ns=2;s=Camera.InspectionResult"
+        name: "inspection_result"
+        access: "write"
+      - node_id: "ns=2;s=Camera.LineSpeed"
+        name: "line_speed_mpm"
+        access: "read"
+
+  test_recipes:
+    - id: "transport_discovery"
+      name: "Transport Discovery"
+      description: "Verify GenICam transport enumeration and camera discovery"
+      domains: ["transports", "genicam"]
+
+    - id: "camera_lifecycle"
+      name: "Camera Lifecycle"
+      description: "Connect → configure → acquire → disconnect for all transports"
+      domains: ["transports", "camera_models"]
+
+    - id: "trigger_modes"
+      name: "Trigger Mode Validation"
+      description: "Validate all trigger modes including hardware, software, and encoder"
+      domains: ["trigger_modes", "encoder"]
+
+    - id: "multi_camera_calibration"
+      name: "Multi-Camera Calibration"
+      description: "Run checkerboard detection, intrinsic, and bundle adjustment"
+      domains: ["calibration"]
+
+    - id: "line_scan_acquisition"
+      name: "Line-Scan Acquisition"
+      description: "Validate line-scan image composition with encoder sync"
+      domains: ["line_scan", "encoder"]
+
+    - id: "plc_roundtrip"
+      name: "PLC Integration Round-Trip"
+      description: "Verify Modbus/OPC-UA register read/write for trigger and result feedback"
+      domains: ["plc_integration"]
+
+    - id: "genicam_feature_access"
+      name: "GenICam Feature Access"
+      description: "Read/write standard GenICam features across all transports"
+      domains: ["genicam_features"]
+
+    - id: "error_handling"
+      name: "Error Handling"
+      description: "Validate error paths: unknown transport, disconnected camera, invalid features"
+      domains: ["error_handling"]
+
+  artifacts:
+    - id: "genicam_feature_report"
+      kind: "json"
+      description: "GenICam feature enumeration and validation report"
+
+    - id: "calibration_result"
+      kind: "json"
+      description: "Camera calibration matrices, distortion coefficients, and reprojection errors"
+
+    - id: "trigger_timing_report"
+      kind: "json"
+      description: "Hardware trigger latency and jitter measurements"
+
+    - id: "line_scan_composition"
+      kind: "image"
+      description: "Composed line-scan image from acquired lines"
+
+    - id: "plc_register_map"
+      kind: "yaml"
+      description: "PLC Modbus/OPC-UA register mapping for vision integration"

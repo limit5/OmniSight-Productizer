@@ -340,13 +340,13 @@ Legend:
 - [x] Unit test: known scene → expected point count + bounds
 
 ### C24. L4-CORE-24 Machine vision & industrial imaging framework (#254)
-- [ ] GenICam driver abstraction
-- [ ] GigE Vision transport (aravis or mvIMPACT)
-- [ ] USB3 Vision transport
-- [ ] Hardware trigger + encoder sync
-- [ ] Multi-camera calibration (checkerboard + bundle adjustment)
-- [ ] Line-scan support
-- [ ] PLC integration (Modbus/OPC-UA via CORE-13)
+- [x] GenICam driver abstraction
+- [x] GigE Vision transport (aravis or mvIMPACT)
+- [x] USB3 Vision transport
+- [x] Hardware trigger + encoder sync
+- [x] Multi-camera calibration (checkerboard + bundle adjustment)
+- [x] Line-scan support
+- [x] PLC integration (Modbus/OPC-UA via CORE-13)
 
 ### C25. L4-CORE-25 Motion control / G-code / CNC abstraction (#255)
 - [ ] G-code interpreter (subset: G0/G1/G28/M104/M109/M140)
@@ -701,6 +701,85 @@ tests / HIL recipes / doc templates) per framework contract.
 
 ---
 
+## 🅗 Priority H — Host-aware Coordinator（主機負載感知 + 自適應調度）
+
+> 背景：現行 `_ModeSlot`（`backend/decision_engine.py` L52-189）只以 Operation Mode 給靜態 budget（manual=1/supervised=2/full_auto=4/turbo=8），coordinator 不讀 CPU/mem/disk，prewarm 純猜測。風險：turbo 在高壓時仍硬塞 → OOM / watchdog 誤判 stuck → 重試放大壓力。UI `host-device-panel.tsx` L40-51 `HostInfo` 是 placeholder 未實作。
+>
+> 基準硬體（hardcode baseline）：AMD Ryzen 9 9950X、WSL2 分配 **16 cores + 64 GB RAM + 512 GB disk**。
+
+### H1. 主機 metrics 採集（baseline hardcode 版）
+- [ ] `backend/host_metrics.py`：定義 `HOST_BASELINE = HostBaseline(cpu_cores=16, mem_total_gb=64, disk_total_gb=512, cpu_model="AMD Ryzen 9 9950X")`
+- [ ] `psutil` 採樣：`cpu_percent(interval=1)` / `virtual_memory()` (用 `available` 反推) / `disk_usage('/')` / `os.getloadavg()`
+- [ ] Docker SDK 抓 running container 數 + 總 mem reservation；Docker Desktop 情境 fallback `docker stats --no-stream`
+- [ ] 採樣 5s 週期、ring buffer 60 點（5 分鐘歷史）
+- [ ] WSL2 輔助訊號：`loadavg_1m / 16 > 0.9` 也標記為 high pressure（host 其他進程）
+- [ ] Prometheus gauges：`host_cpu_percent` / `host_mem_percent` / `host_disk_percent` / `host_loadavg_1m` / `host_container_count`
+- [ ] Endpoint：`GET /api/v1/host/metrics`（current + history）
+- [ ] SSE event：`host.metrics.tick`（5s 推送）
+- [ ] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
+- [ ] 預估：**0.5 day**
+
+### H2. Coordinator 負載感知調度（precondition + backoff）
+- [ ] `_ModeSlot.acquire()` 新增 precondition：`cpu_pct < 85 AND mem_pct < 85 AND container_count < K`
+- [ ] 超標時指數 backoff（cap 30s），不佔槽位；emit `sandbox.deferred` audit 事件（reason: `host_cpu_high` / `host_mem_high` / `container_cap`）
+- [ ] Turbo 自動降級：`cpu_pct > 80` 持續 30s → 降到 supervised budget；恢復後可自動回升（需冷卻 2 min）
+- [ ] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
+- [ ] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
+- [ ] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
+- [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
+- [ ] 預估：**2 day**
+
+### H3. UI Host Load Panel + Coordinator 決策透明化
+- [ ] 把 `components/omnisight/host-device-panel.tsx` placeholder 換成真 SSE 驅動（listen `host.metrics.tick`）
+- [ ] 顯示：CPU% / mem%（含 available）/ disk% / loadavg 1m / running container 數 + 各項 60-pt sparkline
+- [ ] Baseline 顯示「16c / 64GB / 512GB」於 header（hardcode）
+- [ ] `ops-summary-panel.tsx` 加欄位：**queue depth**（等槽位任務數）/ **deferred count**（近 5min）/ **effective concurrency budget**（因 derate 可能 < 設定）
+- [ ] 過載 Badge：`Coordinator auto-derated to supervised`，hover tooltip 顯示原因（"CPU 87% > threshold"）
+- [ ] 手動 override 按鈕：`Force turbo`（confirm dialog 警告可能 OOM，audit 記錄）
+- [ ] 高壓閾值視覺標記（CPU >85% 變紅、70-85% 變黃）
+- [ ] Component + Playwright E2E 測試
+- [ ] 預估：**1.5 day**
+
+### H4a. Weighted Token Bucket + AIMD 自適應 concurrency
+- [ ] 定義 `SandboxCostWeight` 表（初期估值）：
+  - `gvisor_lightweight = 1` (unit test / lint, ~512MB / 1 core burst)
+  - `docker_t2_networked = 2` (integration, ~1.5GB / 2 core)
+  - `phase64c_local_compile = 4` (`make -j4`, ~2GB / 4 core sustained)
+  - `phase64c_qemu_aarch64 = 3` (cross-compile, ~2GB / 2 core)
+  - `phase64c_ssh_remote = 0.5` (成本在對端)
+- [ ] `CAPACITY_MAX = min(cpu_cores * 0.8, mem_gb / 2) = 12 tokens`（16c/64GB → 12）
+- [ ] AIMD 控制器（`backend/adaptive_budget.py`）：
+  - Init `budget = 6`（≈ CAPACITY_MAX / 2 安全啟動）
+  - Additive: 每 30s 若 `cpu<70` & `mem<70` & `deferred=0` → `budget += 1`
+  - Multiplicative: `cpu>85` 或 `mem>85` 持續 10s → `budget = max(floor=2, budget//2)`
+  - Hard cap：`budget ≤ CAPACITY_MAX`
+- [ ] Mode 變 multiplier：`turbo=1.0 / full_auto=0.7 / supervised=0.4 / manual=0.15`；effective = `min(mode_cap × CAPACITY_MAX, aimd_budget)`
+- [ ] `_ModeSlot.acquire(cost: int)` 改為 token-based，排隊時 emit `sandbox.deferred`
+- [ ] Last-known-good budget 持久化（DB），冷啟動時載入替代 `init=6`
+- [ ] UI 顯示當前 AIMD budget + 最近 5min trace（上升/下降歷史）
+- [ ] 測試：模擬 CPU spike → 驗證 MD halve、冷卻後 AI 回升、floor/cap 邊界
+- [ ] 預估：**1.5 day**
+
+### H4b. Sandbox cost calibration（H1 上線 1 週後）
+- [ ] `scripts/calibrate_sandbox_cost.py`：讀取過去 N 天 sandbox 執行紀錄（start/end timestamp + 同期 host_metrics ring）
+- [ ] 計算每類 sandbox 的平均 CPU×time / Δmem_peak → 產新權重表
+- [ ] 輸出 diff report（舊權重 vs 新權重）供人工審核
+- [ ] 支援 `--apply` 旗標寫回 `configs/sandbox_cost_weights.yaml`（改 H4a hardcode 為 config 驅動）
+- [ ] Audit：權重變更寫入 hash-chain
+- [ ] 預估：**1 day**
+
+**相依性**：H1 → H2 → H3（metrics → 調度 → UI）；H4a 可與 H3 並行；H4b 需 H1 資料累積 1 週。
+
+**總預估**：H1 (0.5d) + H2 (2d) + H3 (1.5d) + H4a (1.5d) + H4b (1d) = **6.5 day**
+
+**驗收**：
+- turbo mode 在 CPU>85% 時 30s 內自動降級，UI Badge 顯示原因
+- 同時跑 8 個 Phase 64-C-LOCAL compile 不會 OOM（AIMD 會先擋）
+- 新使用者看 host-device-panel 可一眼知道系統壓力與 queue 狀況
+- WSL2 host-load 輔助訊號（loadavg_1m/16）能反映 Windows host 其他進程壓力
+
+---
+
 ## 🅕 Priority F — META (matrices / SOPs)
 
 ### F1. META bundle #1 — embedded portfolio (#238)
@@ -752,6 +831,10 @@ F1 + F2 + F3 + cost burndown review
 ### Phase 7 — Ops / HA 補強（3-4 weeks，可與 Phase 3-5 並行）
 G1 (graceful shutdown + readyz) → G2 (reverse proxy + dual instance) → G3 (blue-green)
 → G4 (Postgres + replica, 獨立並行) → G5 (K8s/Nomad manifests) → G6 (DR drill) + G7 (HA observability)
+
+### Phase 8 — Host-aware Coordinator（~1.5 week，可與 Phase 7 並行）
+H1 (host metrics, baseline hardcode) → H2 (load-aware scheduling) → H3 (UI panel)
+→ H4a (AIMD + weighted token bucket) → H4b (cost calibration, H1 上線 1 週後執行)
 
 ---
 
