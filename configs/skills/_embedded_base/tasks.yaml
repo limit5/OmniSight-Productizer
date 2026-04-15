@@ -1,0 +1,295 @@
+# Embedded product base task template
+# Used by the embedded_planner to generate DAGs for embedded_product class.
+# Each task has optional `when:` conditions evaluated against
+# HardwareProfile + ParsedSpec to decide inclusion.
+
+schema_version: 1
+
+tasks:
+  # ── Phase 1: BSP Bring-up ──
+  - task_id: bsp-toolchain-setup
+    description: "Set up cross-compilation toolchain for target SoC"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - "external:hardware_profile"
+    expected_output: build/toolchain/toolchain.cmake
+    depends_on: []
+
+  - task_id: bsp-bootloader
+    description: "Configure and build bootloader (U-Boot / vendor SPL)"
+    required_tier: t1
+    toolchain: make
+    inputs:
+      - build/toolchain/toolchain.cmake
+    expected_output: build/bsp/u-boot.bin
+    depends_on:
+      - bsp-toolchain-setup
+
+  # ── Phase 2: Kernel ──
+  - task_id: kernel-config
+    description: "Generate kernel defconfig for target SoC and peripherals"
+    required_tier: t1
+    toolchain: make
+    inputs:
+      - build/toolchain/toolchain.cmake
+      - "external:hardware_profile"
+    expected_output: build/kernel/defconfig.cfg
+    depends_on:
+      - bsp-toolchain-setup
+
+  - task_id: kernel-build
+    description: "Cross-compile Linux kernel image + device tree blob"
+    required_tier: t1
+    toolchain: make
+    inputs:
+      - build/kernel/defconfig.cfg
+      - build/toolchain/toolchain.cmake
+    expected_output: build/kernel/zImage.bin
+    depends_on:
+      - kernel-config
+
+  - task_id: kernel-modules
+    description: "Build out-of-tree kernel modules for peripherals"
+    required_tier: t1
+    toolchain: make
+    inputs:
+      - build/kernel/zImage.bin
+    expected_output: build/kernel/modules.tar.gz
+    depends_on:
+      - kernel-build
+
+  # ── Phase 3: Drivers ──
+  - task_id: driver-sensor
+    description: "Build sensor driver (ISP pipeline integration)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+      - "external:hardware_profile"
+    expected_output: build/drivers/sensor_driver.ko
+    depends_on:
+      - kernel-modules
+    when:
+      has_sensor: true
+
+  - task_id: driver-npu
+    description: "Build NPU runtime driver and inference SDK binding"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/drivers/npu_runtime.so
+    depends_on:
+      - kernel-modules
+    when:
+      has_npu: true
+
+  - task_id: driver-codec
+    description: "Build hardware video/audio codec driver"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/drivers/codec_driver.ko
+    depends_on:
+      - kernel-modules
+    when:
+      has_codec: true
+
+  - task_id: driver-display
+    description: "Build display driver (framebuffer / DRM)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/drivers/display_driver.ko
+    depends_on:
+      - kernel-modules
+    when:
+      has_display: true
+
+  - task_id: driver-usb
+    description: "Build USB gadget/host driver"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/drivers/usb_gadget.ko
+    depends_on:
+      - kernel-modules
+    when:
+      has_usb: true
+
+  - task_id: driver-peripheral
+    description: "Build peripheral drivers (GPIO / I2C / SPI / UART)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/drivers/peripheral_drivers.tar.gz
+    depends_on:
+      - kernel-modules
+    when:
+      has_peripherals: true
+
+  # ── Phase 4: Protocol Layer ──
+  - task_id: protocol-network
+    description: "Configure network stack (WiFi / Ethernet / BLE)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/protocol/network_stack.tar.gz
+    depends_on:
+      - kernel-modules
+
+  - task_id: protocol-streaming
+    description: "Build streaming protocol layer (RTSP / RTMP / WebRTC)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/protocol/network_stack.tar.gz
+    expected_output: build/protocol/streaming_server.bin
+    depends_on:
+      - protocol-network
+    when:
+      has_sensor: true
+
+  # ── Phase 5: Application Logic ──
+  - task_id: app-main
+    description: "Build main application logic and service daemon"
+    required_tier: t1
+    toolchain: cmake
+    inputs: []
+    expected_output: build/app/main_service.bin
+    depends_on:
+      - protocol-network
+
+  # ── Phase 6: UI ──
+  - task_id: ui-panel
+    description: "Build on-device UI (LVGL / Qt / web-based)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/app/main_service.bin
+    expected_output: build/ui/ui_bundle.tar.gz
+    depends_on:
+      - app-main
+    when:
+      has_display: true
+
+  - task_id: ui-web-admin
+    description: "Build web-based admin/configuration interface"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/app/main_service.bin
+    expected_output: build/ui/web_admin.tar.gz
+    depends_on:
+      - app-main
+
+  # ── Phase 7: OTA ──
+  - task_id: ota-package
+    description: "Build OTA update package with A/B partition support"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/zImage.bin
+      - build/app/main_service.bin
+    expected_output: build/ota/update_package.swu
+    depends_on:
+      - kernel-build
+      - app-main
+
+  - task_id: ota-signature
+    description: "Sign OTA package with release key"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/ota/update_package.swu
+    expected_output: build/ota/update_package.swu.sig
+    depends_on:
+      - ota-package
+
+  # ── Phase 8: Integration & Flash ──
+  - task_id: rootfs-assemble
+    description: "Assemble root filesystem image with all components"
+    required_tier: t1
+    toolchain: make
+    inputs:
+      - build/kernel/zImage.bin
+      - build/kernel/modules.tar.gz
+      - build/app/main_service.bin
+    expected_output: build/image/rootfs.img
+    depends_on:
+      - kernel-build
+      - kernel-modules
+      - app-main
+
+  - task_id: flash-image
+    description: "Flash firmware image to target board via hardware bridge"
+    required_tier: t3
+    toolchain: flash_board
+    inputs:
+      - build/bsp/u-boot.bin
+      - build/image/rootfs.img
+    expected_output: build/image/firmware.img
+    depends_on:
+      - bsp-bootloader
+      - rootfs-assemble
+
+  # ── Phase 9: Tests ──
+  - task_id: test-unit
+    description: "Run unit tests for all modules"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/app/main_service.bin
+    expected_output: build/test/unit_results.xml
+    depends_on:
+      - app-main
+
+  - task_id: test-integration
+    description: "Run integration tests (simulated hardware)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/image/rootfs.img
+    expected_output: build/test/integration_results.xml
+    depends_on:
+      - rootfs-assemble
+
+  - task_id: test-hil
+    description: "Run hardware-in-the-loop tests on target board"
+    required_tier: t3
+    toolchain: hardware-daemon-rpc
+    inputs:
+      - build/image/firmware.img
+    expected_output: build/test/hil_results.xml
+    depends_on:
+      - flash-image
+
+  # ── Phase 10: Documentation ──
+  - task_id: docs-datasheet
+    description: "Generate product datasheet from spec + hardware profile"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - "external:hardware_profile"
+      - "external:product_spec"
+    expected_output: build/docs/datasheet.pdf
+    depends_on:
+      - test-unit
+
+  - task_id: docs-compliance
+    description: "Generate compliance report and certification artifacts"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/test/unit_results.xml
+      - build/test/integration_results.xml
+    expected_output: build/docs/compliance_report.pdf
+    depends_on:
+      - test-unit
+      - test-integration
