@@ -154,11 +154,11 @@ Legend:
 - [x] Unit test: fixture spec → expected DAG task count / topology
 
 ### C5. L4-CORE-05 Skill pack framework (#214)
-- [ ] Define skill manifest schema (`skill.yaml`)
-- [ ] Registry: `configs/skills/<name>/` convention
-- [ ] Lifecycle hooks: install / validate / enumerate
-- [ ] CLI: `omnisight skill list / install / validate`
-- [ ] Contract test: every skill must provide 5 artifacts (tasks/scaffolds/tests/hil/docs)
+- [x] Define skill manifest schema (`skill.yaml`)
+- [x] Registry: `configs/skills/<name>/` convention
+- [x] Lifecycle hooks: install / validate / enumerate
+- [x] CLI: `omnisight skill list / install / validate`
+- [x] Contract test: every skill must provide 5 artifacts (tasks/scaffolds/tests/hil/docs)
 
 ### C6. L4-CORE-06 Document suite generator (#215)
 - [ ] Extend REPORT-01 with per-product-class templates

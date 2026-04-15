@@ -7,6 +7,59 @@
 
 ---
 
+## C5 L4-CORE-05 Skill pack framework 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Define skill manifest schema | ✅ | `backend/skill_manifest.py` — Pydantic model: SkillManifest, ArtifactRef, LifecycleHooks；schema_version=1, name pattern validation, 5 required artifact kinds |
+| Registry convention | ✅ | `backend/skill_registry.py` — `configs/skills/<name>/` convention, `_` prefix = internal, auto-detect artifacts when no manifest |
+| Lifecycle hooks | ✅ | install / validate_cmd / enumerate_cmd hooks with subprocess execution, timeout, error capture |
+| CLI endpoints | ✅ | `GET /skills/list`, `GET /skills/registry/{name}`, `POST /skills/registry/{name}/validate`, `POST /skills/install` — all on existing skills router |
+| Contract test | ✅ | 62 項測試全數通過：manifest schema (9) + artifact ref (3) + hooks (2) + load_manifest (3) + detect artifacts (3) + list_skills (6) + get_skill (3) + validate_skill (10) + install_skill (6) + enumerate_skill (3) + contract 5-artifacts (4) + validation result (2) + inspect (3) + edge cases (5) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/skill_manifest.py` | 新建——SkillManifest Pydantic schema (skill.yaml format) |
+| `backend/skill_registry.py` | 新建——skill pack registry: list/get/validate/install/enumerate |
+| `backend/routers/skills.py` | 擴充——新增 C5 registry endpoints (list/detail/validate/install) |
+| `backend/tests/test_skill_framework.py` | 新建，62 項測試 |
+| `configs/skills/_embedded_base/skill.yaml` | 新建——embedded base 參考 manifest |
+| `configs/skills/_embedded_base/scaffolds/.gitkeep` | 新建 |
+| `configs/skills/_embedded_base/tests/.gitkeep` | 新建 |
+| `configs/skills/_embedded_base/hil/.gitkeep` | 新建 |
+| `configs/skills/_embedded_base/docs/.gitkeep` | 新建 |
+
+### 架構說明
+
+- `SkillManifest` — 每個 skill pack 的 `skill.yaml` schema：
+  - `name`: lowercase-kebab-case (`^[a-z][a-z0-9\-]*$`)
+  - `version`: semver
+  - `artifacts[]`: 每個 artifact 有 `kind` (tasks/scaffolds/tests/hil/docs) 和 `path`
+  - `hooks`: install / validate / enumerate lifecycle commands
+  - `compatible_socs[]`, `depends_on_skills[]`, `depends_on_core[]`
+- `skill_registry.list_skills()` — 掃描 `configs/skills/` 排除 `_` prefix
+- `skill_registry.validate_skill()` — 7-step validation: dir exists, manifest parseable, name match, 5 artifact kinds declared, paths exist, deps found, validate hook passes
+- `skill_registry.install_skill()` — copy source → registry, run install hook
+- `skill_registry.enumerate_skill()` — structured capabilities report, optional enumerate hook
+- Contract: `REQUIRED_ARTIFACT_KINDS = {"tasks", "scaffolds", "tests", "hil", "docs"}`
+
+### 驗證
+
+- 62 項新增 skill framework 測試全數通過
+- 55 項既有測試全數通過（embedded_planner 46 + skills_promotion 9，無迴歸）
+
+### 下一步
+
+- C6 (#215)：Document suite generator
+- D1 (#218)：SKILL-UVC pilot — 首個正式 skill pack，驗證 C5 framework
+- 各 SKILL-* pack 建立各自的 `skill.yaml` manifest
+
+---
+
 ## C4 L4-CORE-03 Embedded product planner agent 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

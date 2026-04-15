@@ -1,0 +1,36 @@
+schema_version: 1
+name: embedded-base
+description: "Base task templates for embedded product DAG generation. Provides the core BSP→kernel→drivers→protocol→app→UI→OTA→tests→docs pipeline."
+version: "1.0.0"
+author: "OmniSight Team"
+license: "proprietary"
+
+compatible_socs: []  # all SoCs
+
+depends_on_skills: []
+depends_on_core: []
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/
+  - kind: hil
+    path: hil/
+  - kind: docs
+    path: docs/
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - embedded
+  - bsp
+  - kernel
+  - drivers
+  - ota
+  - firmware

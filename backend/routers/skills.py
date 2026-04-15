@@ -1,8 +1,10 @@
-"""Phase 62 — Operator-facing endpoints for skill promotion.
+"""Phase 62 + C5 — Operator-facing endpoints for skill management.
 
-Listing pending candidates + promoting/discarding them. Promotion is
-gated by `require_admin` because the resulting file lives inside
-`configs/skills/` and feeds future agent prompts.
+* Phase 62: listing pending candidates + promoting/discarding them.
+* C5 (#214): skill registry list / install / validate / enumerate.
+
+Promotion is gated by `require_admin` because the resulting file lives
+inside `configs/skills/` and feeds future agent prompts.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from backend import auth as _au
 from backend import skills_extractor  # late attr-lookup so fixture monkeypatch wins
+from backend import skill_registry
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -124,3 +127,93 @@ async def discard(name: str, _user=Depends(_au.require_admin)) -> dict:
     except Exception as exc:
         logger.debug("audit log for skill_discarded failed: %s", exc)
     return {"discarded": name}
+
+
+# ── C5: Skill registry endpoints ─────────────────────────────────
+
+
+@router.get("/list")
+async def skill_list(_user=Depends(_au.require_operator)) -> dict:
+    """List all installed skill packs (``omnisight skill list``)."""
+    skills = skill_registry.list_skills()
+    items = []
+    for s in skills:
+        entry: dict = {
+            "name": s.name,
+            "has_manifest": s.has_manifest,
+            "has_tasks_yaml": s.has_tasks_yaml,
+            "artifact_kinds": sorted(s.artifact_kinds),
+        }
+        if s.manifest:
+            entry["version"] = s.manifest.version
+            entry["description"] = s.manifest.description
+        items.append(entry)
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/registry/{name}")
+async def skill_detail(name: str,
+                       _user=Depends(_au.require_operator)) -> dict:
+    """Get detailed info about an installed skill pack."""
+    info = skill_registry.get_skill(name)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    return skill_registry.enumerate_skill(name)
+
+
+@router.post("/registry/{name}/validate")
+async def skill_validate(name: str,
+                         _user=Depends(_au.require_operator)) -> dict:
+    """Validate an installed skill pack (``omnisight skill validate``)."""
+    result = skill_registry.validate_skill(name)
+    return {
+        "skill_name": result.skill_name,
+        "ok": result.ok,
+        "errors": [{"level": i.level, "message": i.message} for i in result.errors],
+        "warnings": [{"level": i.level, "message": i.message} for i in result.warnings],
+    }
+
+
+@router.post("/install")
+async def skill_install(
+    source_path: str,
+    name: str = "",
+    overwrite: bool = False,
+    _user=Depends(_au.require_admin),
+) -> dict:
+    """Install a skill pack from a local directory (``omnisight skill install``).
+
+    Query params:
+      source_path — absolute path to the source skill directory
+      name — override skill name (default: source dir name)
+      overwrite — replace existing skill if True
+    """
+    src = Path(source_path)
+    if not src.is_dir():
+        raise HTTPException(status_code=400, detail=f"source not a directory: {source_path}")
+    try:
+        info = skill_registry.install_skill(src, name=name or None, overwrite=overwrite)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    logger.info("installed skill: %s from %s", info.name, source_path)
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="skill_installed",
+            entity_kind="skill",
+            entity_id=info.name,
+            after={"path": str(info.path), "source": source_path},
+            actor=getattr(_user, "email", "operator"),
+        )
+    except Exception as exc:
+        logger.debug("audit log for skill_installed failed: %s", exc)
+
+    return {
+        "name": info.name,
+        "path": str(info.path),
+        "has_manifest": info.has_manifest,
+        "artifact_kinds": sorted(info.artifact_kinds),
+    }
