@@ -3469,7 +3469,55 @@ T3-LOCAL 解鎖 x86_64 自架 prod / dev box 的**全棧 CI/CD 本機自動化**
 
 ---
 
-## Phase 68 — Intent Parser + 規格澄清迴圈（待實作，5–7 day）
+## Phase 68 — Intent Parser + 規格澄清迴圈 完成（2026-04-15）
+
+動機：Phase 47C 的 ambiguity detector 只處理硬編碼的少數 template；
+自由散文的語意衝突（如「靜態站 + runtime DB」）滑進 DAG planner，
+defaults 被默默填上。此 phase 系統性補上：**散文 → 結構化 ParsedSpec
+→ 衝突偵測 → 迭代澄清 → Decision memory 回流 L3**。
+
+### 子任 / commit
+
+| 子任 | commit | 產出 |
+|---|---|---|
+| **68-A** | `2c0c1fb` | `backend/intent_parser.py`：`ParsedSpec` (value, confidence) 資料類 + LLM schema-constrained 解析（fence 容忍、confidence clamp 防 injection）+ CJK-safe regex heuristic fallback；16 test |
+| **68-B** | `cb5a8c2` | `configs/spec_conflicts.yaml` 3 條規則 + `apply_clarification()` + `MAX_CLARIFY_ROUNDS=3` 迭代 loop；壞 rule swallow、empty `when` 視為 disabled；+10 test |
+| **68-C** | `274203e` | Backend `/intent/{parse,clarify}` endpoints；`SpecTemplateEditor`（~340 行，Prose/Form tab、信心色階、衝突 panel、Continue 守門）；10 test |
+| **68-D** | `0275220` | `backend/intent_memory.py`：record/lookup/annotate 三函數；signature prefix per-conflict 隔離；quality=0.85 對齊 67-E `min_cosine`；router auto-annotate；UI ⭐「Last time you picked」hint；6 memory test |
+
+### 正向飛輪
+
+與 Phase 67-E 串接：
+- 67-E 是「失敗時拉歷史解法」（sandbox error → L3 search）
+- 68-D 是「規格澄清時拉歷史選擇」（conflict → L3 search）
+- 同表、不同 tag、**同 decay clock**
+- 重複相同選擇 = 多 row 同 signature → 信心靠 63-E 自然堆疊
+
+### API 契約
+
+```
+POST /intent/parse       { text, use_llm } → ParsedSpec.to_dict()
+POST /intent/clarify     { parsed, conflict_id, option_id } → ParsedSpec
+```
+
+`/parse` 回應的 `conflicts[].prior_choice` 是 68-D 新欄位。
+前端**不自動套用**，只 ⭐ 視覺提示 + 預 highlight；operator 必須
+明示點擊才生效（避免靜默導向）。
+
+### 測試累計
+
+- `test_intent_parser.py` 26（68-A: 16 + 68-B: 10）
+- `test_intent_router.py` 5
+- `test_intent_memory.py` 6
+- `spec-template-editor.test.tsx` 5
+- **42/42 全綠**
+
+### 後續解鎖
+
+- **ParsedSpec → DAG planner 整合**：自動填 hardware_manifest override、`deploy_target=local` + `target_arch=host` 直接路由到 Phase 64-C-LOCAL
+- **UI 掛載**：`SpecTemplateEditor` 元件已寫好未掛進 panel 主介面；下個 UX sprint 決定 panel id
+- **Spec CLI linter**：把 `/intent/parse` 包裝成 CI step
+- **Spec 範本 gallery**：同 DAG-E 7 範本思路
 
 ### 問題
 
