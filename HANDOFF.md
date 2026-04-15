@@ -6797,3 +6797,31 @@ Full suite regression: 91/91 tests passing across 13 component test files.
 - `components/omnisight/user-menu.tsx` — 新增 "MFA settings" 選項
 - `tests/test_mfa.py` — 11 個單元測試
 - `TODO.md` — K5 全部 7 項標記為 `[x]`
+
+---
+
+## I3. SSE per-tenant + per-user filter（延伸 J1）— 完成 ✅
+
+**日期**：2026-04-16
+
+### 完成項目
+1. **Event envelope 加 `tenant_id`** — `bus.publish()` 注入 `_tenant_id` 到每個 SSE event data
+2. **Subscriber 自動綁當前 tenant** — `bus.subscribe(tenant_id=...)` 記錄 subscriber 的 tenant；`/events` endpoint 自動讀取 request context
+3. **`broadcast_scope` 擴充 `tenant` 選項** — server-side 過濾：tenant-scoped event 只送達匹配的 subscriber；無 tenant 的 subscriber（admin）收到所有事件
+4. **Frontend 支援** — `BroadcastScope` type 新增 `"tenant"`、`_shouldDeliverEvent()` 處理 tenant 比對、新增 `setCurrentTenantId()`/`getCurrentTenantId()` API
+5. **所有 emit_\* 函數** 新增 `tenant_id` 參數，自動從 `db_context` 讀取（未顯式傳入時）
+6. **回歸測試** — 15 backend tests + 6 frontend tests，覆蓋：
+   - A tenant 監聽只收到 A 的事件
+   - Global/session/user scope 跨 tenant 不受影響
+   - 無 tenant 的 subscriber 收到所有 tenant 事件
+   - 向後相容：無 `_tenant_id` 的事件正常傳遞
+   - J1 session filter 全部 7 test pass（無回歸）
+   - Decision SSE 全部 8 test pass（無回歸）
+
+### 修改檔案
+- `backend/events.py` — EventBus 改用 `dict[Queue, tenant_id]`、publish 加 tenant 過濾、所有 emit_* 加 tenant_id + `_auto_tenant()`
+- `backend/routers/events.py` — `/events` endpoint 讀取 tenant context 傳入 subscribe
+- `lib/api.ts` — `BroadcastScope` 加 `"tenant"`、`_shouldDeliverEvent()` 處理 tenant、新增 tenant ID 管理
+- `backend/tests/test_i3_sse_tenant_filter.py` — 15 個新增測試
+- `test/integration/sse-tenant-filter.test.ts` — 6 個前端整合測試
+- `TODO.md` — I3 全部 3 項標記為 `[x]`

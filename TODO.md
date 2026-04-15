@@ -516,10 +516,10 @@ Legend:
 - [x] 預估：**2 day**
 
 ### I3. SSE per-tenant + per-user filter（延伸 J1）
-- [ ] Event envelope 加 `tenant_id`；subscriber 自動綁當前 tenant
-- [ ] `broadcast_scope` 擴充 `tenant` 選項
-- [ ] 回歸測試：A tenant 監聽只收到 A 的事件
-- [ ] 預估：**1.5 day**
+- [x] Event envelope 加 `tenant_id`；subscriber 自動綁當前 tenant
+- [x] `broadcast_scope` ��充 `tenant` 選項
+- [x] 回歸測試：A tenant 監聽只收到 A 的事件
+- [x] 預估：**1.5 day**
 
 ### I4. Secrets per-tenant
 - [ ] `git_credentials` / `provider_keys` / `cloudflare_tokens`（B12 產物）全改 tenant-scoped 表
