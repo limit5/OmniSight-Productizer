@@ -1,9 +1,37 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：J5 Per-session operation mode (master)
+> 最後 commit：J6 Audit UI with session filtering (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## J6 (complete) Audit UI 帶 session 過濾（2026-04-16 完成）
+
+**背景**：Audit log 原無 UI 面板，且查詢 API 不支援按 session 過濾。J6 新增完整 Audit 面板，支援 session 過濾（All Sessions / Current Session / 其他 session 快捷鈕），每筆 audit 顯示來源裝置 (device) 和 IP（透過 LEFT JOIN sessions 表）。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/audit.py` query 增強 | 新增 `session_id` 參數；SQL 改為 LEFT JOIN sessions 取 ip + user_agent | ✅ 完成 |
+| `backend/routers/audit.py` | 新增 `session_id` query param；token_hint 自動解析為完整 token | ✅ 完成 |
+| `lib/api.ts` audit API | 新增 `AuditEntry` / `AuditFilters` 型別 + `listAuditEntries()` 函數 | ✅ 完成 |
+| `audit-panel.tsx` | 新增完整 Audit 面板：session filter bar、entry 列表、可展開 before/after diff | ✅ 完成 |
+| Panel 註冊 | `mobile-nav.tsx` PanelId + panels array、`page.tsx` VALID_PANELS + render case | ✅ 完成 |
+| Backend 測試 | `test_query_session_id_filter` — session_id 過濾 3 筆資料驗證 | ✅ 6/6 pass |
+| Frontend 測試 | 5 項：渲染、filter buttons、current session 過濾、empty state、device info | ✅ 5/5 pass |
+
+**新增/修改檔案**：
+- `backend/audit.py` — query() 增加 session_id 參數 + LEFT JOIN sessions
+- `backend/routers/audit.py` — session_id query param + token_hint 解析
+- `lib/api.ts` — AuditEntry, AuditFilters, listAuditEntries()
+- `components/omnisight/audit-panel.tsx` — 全新 Audit 面板（新增）
+- `components/omnisight/mobile-nav.tsx` — PanelId + "audit" panel entry
+- `app/page.tsx` — import AuditPanel + VALID_PANELS + render case
+- `backend/tests/test_audit.py` — 新增 test_query_session_id_filter
+- `test/components/audit-panel.test.tsx` — 5 項前端測試（新增）
+
+**全部測試**：6 backend audit pass + 5 frontend audit pass
 
 ---
 

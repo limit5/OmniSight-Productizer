@@ -447,9 +447,9 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### J6. Audit UI 帶 session 過濾
-- [ ] Audit 查詢頁加 session filter（列表 + 目前 session 快捷鈕）
-- [ ] 顯示每筆 audit 的 device / IP（從 session 聯結）
-- [ ] 預估：**0.5 day**
+- [x] Audit 查詢頁加 session filter（列表 + 目前 session 快捷鈕）
+- [x] 顯示每筆 audit 的 device / IP（從 session 聯結）
+- [x] 預估：**0.5 day**
 
 **J 總預估**：**3.5 day**
 
