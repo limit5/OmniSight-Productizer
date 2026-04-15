@@ -205,11 +205,11 @@ Legend:
 - [x] Unit test: synthetic current trace → correct lifetime estimate
 
 ### C12. L4-CORE-12 Real-time / determinism track (#226)
-- [ ] RT-linux build profile (`PREEMPT_RT` kernel config)
-- [ ] RTOS build profile (FreeRTOS / Zephyr)
-- [ ] `cyclictest` harness + percentile latency report
-- [ ] Scheduler trace capture (`trace-cmd` / `bpftrace`)
-- [ ] Threshold gate: fails build if P99 > declared budget
+- [x] RT-linux build profile (`PREEMPT_RT` kernel config)
+- [x] RTOS build profile (FreeRTOS / Zephyr)
+- [x] `cyclictest` harness + percentile latency report
+- [x] Scheduler trace capture (`trace-cmd` / `bpftrace`)
+- [x] Threshold gate: fails build if P99 > declared budget
 
 ### C13. L4-CORE-13 Connectivity sub-skill library (#227)
 - [ ] BLE sub-skill (GATT + pairing + OTA profile)

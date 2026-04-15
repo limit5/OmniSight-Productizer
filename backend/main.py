@@ -272,6 +272,8 @@ from backend.routers import radio as _radio_router  # C10/RADIO-COMPLIANCE
 app.include_router(_radio_router.router, prefix=settings.api_prefix)
 from backend.routers import power as _power_router  # C11/POWER-PROFILING
 app.include_router(_power_router.router, prefix=settings.api_prefix)
+from backend.routers import realtime as _realtime_router  # C12/REALTIME-DETERMINISM
+app.include_router(_realtime_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

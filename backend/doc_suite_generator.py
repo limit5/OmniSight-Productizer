@@ -130,6 +130,15 @@ def _try_payment_certs() -> list[ComplianceCert]:
         return []
 
 
+def _try_rt_certs() -> list[ComplianceCert]:
+    """Merge from L4-CORE-12 real-time / determinism track (when available)."""
+    try:
+        from backend.realtime_determinism import get_rt_certs  # type: ignore[import-not-found]
+        return [ComplianceCert(**c) for c in get_rt_certs()]
+    except (ImportError, Exception):
+        return []
+
+
 def collect_compliance_certs(
     extra: list[dict[str, Any]] | None = None,
 ) -> list[ComplianceCert]:
@@ -137,6 +146,7 @@ def collect_compliance_certs(
     certs.extend(_try_safety_certs())
     certs.extend(_try_radio_certs())
     certs.extend(_try_payment_certs())
+    certs.extend(_try_rt_certs())
     if extra:
         for c in extra:
             certs.append(ComplianceCert(

@@ -7,6 +7,64 @@
 
 ---
 
+## C12 L4-CORE-12 Real-time / determinism track 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| RT-linux build profile (`PREEMPT_RT` kernel config) | ✅ | `configs/realtime_profiles.yaml` — 2 Linux RT profiles (preempt_rt / preempt_rt_relaxed) with full kernel configs (CONFIG_PREEMPT_RT, CONFIG_HZ, IRQ threading, ftrace, etc.) + recommended boot params (isolcpus, nohz_full, rcu_nocbs). `generate_kernel_config_fragment()` outputs ready-to-use Kconfig fragment |
+| RTOS build profile (FreeRTOS / Zephyr) | ✅ | 2 RTOS profiles with full config: FreeRTOS (preemption, tick rate, priorities, heap, trace facility) + Zephyr (clock ticks, priorities, deadline scheduler, thread analyzer). `generate_rtos_config_header()` outputs C header with #define directives |
+| `cyclictest` harness + percentile latency report | ✅ | `backend/realtime_determinism.py` — `run_cyclictest()` with 3 configs (default/stress/minimal), `compute_percentiles()` for P50/P90/P95/P99/P99.9/min/max/avg/stddev/jitter, `build_histogram()` for distribution, `generate_latency_report()` for Markdown output |
+| Scheduler trace capture (`trace-cmd` / `bpftrace`) | ✅ | `capture_scheduler_trace()` — supports trace-cmd (ftrace events: sched_switch, sched_wakeup, irq_handler, hrtimer) + bpftrace (tracepoints + kprobes). Auto-summarizes event counts (sched_switch/irq/wakeup) |
+| Threshold gate: fails build if P99 > declared budget | ✅ | `threshold_gate()` — supports 4 latency tiers (ultra_strict/strict/moderate/relaxed) with per-percentile budgets + jitter limits, custom P99 budget, or profile default budget. Returns GateVerdict (passed/failed/error) + per-metric findings |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/realtime_profiles.yaml` | 新建——4 RT profiles (preempt_rt/preempt_rt_relaxed/freertos/zephyr) + 3 cyclictest configs (default/stress/minimal) + 2 trace tools (trace-cmd/bpftrace) + 4 latency tiers (ultra_strict/strict/moderate/relaxed) |
+| `backend/realtime_determinism.py` | 新建——Real-time determinism framework：enums + data models + config loader + cyclictest harness + percentile analysis + histogram + scheduler trace capture + threshold gate + kernel config generator + RTOS config header generator + latency report + doc_suite_generator integration + audit integration |
+| `backend/routers/realtime.py` | 新建——REST endpoints: GET /realtime/profiles, GET /realtime/cyclictest/configs, GET /realtime/trace/tools, GET /realtime/tiers, POST /realtime/cyclictest/run, POST /realtime/trace/capture, POST /realtime/gate/check, POST /realtime/report, GET /realtime/profiles/{id}/kernel-config |
+| `backend/main.py` | 擴充——註冊 realtime router |
+| `backend/doc_suite_generator.py` | 擴充——新增 `_try_rt_certs()` + 整合至 `collect_compliance_certs()` |
+| `backend/tests/test_realtime_determinism.py` | 新建，111 項測試 |
+| `TODO.md` | 更新——C12 全部標記完成 |
+
+### 架構說明
+
+- **BuildType enum** — linux / rtos
+- **RTOSType enum** — freertos / zephyr
+- **RunStatus enum** — passed / failed / pending / error / running / completed
+- **GateVerdict enum** — passed / failed / error
+- **RTProfileDef** — profile_id / name / build_type / rtos_type / kernel_configs / rtos_configs / recommended_boot_params / default_p99_budget_us
+- **CyclictestConfig** — config_id / threads / priority / interval_us / duration_s / histogram_buckets / policy / stress_background
+- **TraceToolDef** — tool_id / name / command / events / probes / output_format
+- **LatencyTierDef** — tier_id / p50/p95/p99/p999 budgets / max_jitter_us
+- **LatencyPercentiles** — p50/p90/p95/p99/p999/min/max/avg/stddev/jitter/sample_count
+- **CyclictestResult** — result_id / config_id / profile_id / status / percentiles / histogram / samples
+- **TraceCapture** — capture_id / tool_id / events_captured / summary (sched_switch/irq/wakeup counts)
+- **ThresholdGateResult** — verdict / tier_id / profile_id / findings / percentiles
+- `run_cyclictest()` — accepts synthetic latency samples or returns pending for real hardware
+- `capture_scheduler_trace()` — accepts synthetic trace events or returns pending
+- `threshold_gate()` — tier-based (multi-metric) or custom P99 budget check
+- `generate_kernel_config_fragment()` — outputs Linux Kconfig fragment for RT profiles
+- `generate_rtos_config_header()` — outputs C header for RTOS profiles
+
+### 驗證
+
+- 111 項新增 realtime determinism 測試全數通過
+- 80 項既有 C11 power profiling 測試全數通過（無迴歸）
+- 92 項既有 C10 radio compliance 測試全數通過（無迴歸）
+- 85/86 項既有 C9 safety compliance 測試通過（1 項 pre-existing audit mock 問題，非迴歸）
+
+### 下一步
+
+- C13 (#227)：Connectivity sub-skill library
+- 各 Skill Pack 可透過 latency tier 定義即時性需求
+
+---
+
 ## C11 L4-CORE-11 Power / battery profiling 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

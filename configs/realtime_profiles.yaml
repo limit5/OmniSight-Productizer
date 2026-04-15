@@ -1,0 +1,183 @@
+schema_version: 1
+
+rt_profiles:
+  preempt_rt:
+    name: "PREEMPT_RT Linux"
+    description: "Fully preemptible RT-linux kernel with PREEMPT_RT patch"
+    build_type: "linux"
+    kernel_configs:
+      CONFIG_PREEMPT_RT: "y"
+      CONFIG_PREEMPT: "y"
+      CONFIG_HZ_1000: "y"
+      CONFIG_HZ: "1000"
+      CONFIG_NO_HZ_FULL: "y"
+      CONFIG_HIGH_RES_TIMERS: "y"
+      CONFIG_CPU_FREQ: "n"
+      CONFIG_CPU_IDLE: "n"
+      CONFIG_MIGRATION_COST: "500000"
+      CONFIG_IRQ_FORCED_THREADING: "y"
+      CONFIG_SCHED_DEBUG: "y"
+      CONFIG_FTRACE: "y"
+      CONFIG_FUNCTION_TRACER: "y"
+      CONFIG_IRQSOFF_TRACER: "y"
+      CONFIG_PREEMPTIRQ_DELAY_TEST: "m"
+    recommended_boot_params:
+      - "isolcpus=1-3"
+      - "nohz_full=1-3"
+      - "rcu_nocbs=1-3"
+      - "nosoftlockup"
+      - "tsc=reliable"
+      - "clocksource=tsc"
+    default_p99_budget_us: 100
+
+  preempt_rt_relaxed:
+    name: "PREEMPT_RT Relaxed"
+    description: "PREEMPT_RT with less aggressive tuning for general-purpose use"
+    build_type: "linux"
+    kernel_configs:
+      CONFIG_PREEMPT_RT: "y"
+      CONFIG_PREEMPT: "y"
+      CONFIG_HZ_250: "y"
+      CONFIG_HZ: "250"
+      CONFIG_HIGH_RES_TIMERS: "y"
+      CONFIG_CPU_FREQ: "y"
+      CONFIG_IRQ_FORCED_THREADING: "y"
+      CONFIG_FTRACE: "y"
+    recommended_boot_params:
+      - "isolcpus=1"
+      - "nohz_full=1"
+    default_p99_budget_us: 500
+
+  freertos:
+    name: "FreeRTOS"
+    description: "FreeRTOS real-time operating system for MCU targets"
+    build_type: "rtos"
+    rtos_type: "freertos"
+    rtos_configs:
+      configUSE_PREEMPTION: 1
+      configTICK_RATE_HZ: 1000
+      configMAX_PRIORITIES: 32
+      configMINIMAL_STACK_SIZE: 128
+      configTOTAL_HEAP_SIZE: 65536
+      configUSE_MUTEXES: 1
+      configUSE_RECURSIVE_MUTEXES: 1
+      configUSE_COUNTING_SEMAPHORES: 1
+      configUSE_TASK_NOTIFICATIONS: 1
+      configUSE_TRACE_FACILITY: 1
+      configGENERATE_RUN_TIME_STATS: 1
+      configRECORD_STACK_HIGH_ADDRESS: 1
+    default_p99_budget_us: 50
+
+  zephyr:
+    name: "Zephyr RTOS"
+    description: "Zephyr RTOS with deterministic scheduling"
+    build_type: "rtos"
+    rtos_type: "zephyr"
+    rtos_configs:
+      CONFIG_SYS_CLOCK_TICKS_PER_SEC: 1000
+      CONFIG_NUM_PREEMPT_PRIORITIES: 32
+      CONFIG_NUM_COOP_PRIORITIES: 16
+      CONFIG_PRIORITY_CEILING: 0
+      CONFIG_TIMESLICING: "y"
+      CONFIG_TIMESLICE_SIZE: 1
+      CONFIG_SCHED_DEADLINE: "y"
+      CONFIG_TRACING: "y"
+      CONFIG_TRACING_SYSCALL: "y"
+      CONFIG_THREAD_ANALYZER: "y"
+      CONFIG_THREAD_RUNTIME_STATS: "y"
+    default_p99_budget_us: 30
+
+cyclictest_configs:
+  default:
+    name: "Default Cyclictest"
+    description: "Standard cyclictest run for general RT latency measurement"
+    threads: 4
+    priority: 99
+    interval_us: 1000
+    duration_s: 60
+    histogram_buckets: 200
+    affinity_cpus: []
+    policy: "fifo"
+  stress:
+    name: "Stress Cyclictest"
+    description: "High-stress cyclictest with background load for worst-case"
+    threads: 8
+    priority: 99
+    interval_us: 500
+    duration_s: 300
+    histogram_buckets: 500
+    affinity_cpus: []
+    policy: "fifo"
+    stress_background: true
+  minimal:
+    name: "Quick Cyclictest"
+    description: "Short-duration cyclictest for quick validation"
+    threads: 1
+    priority: 99
+    interval_us: 1000
+    duration_s: 10
+    histogram_buckets: 100
+    affinity_cpus: []
+    policy: "fifo"
+
+trace_tools:
+  trace_cmd:
+    name: "trace-cmd"
+    description: "Frontend for the Linux kernel ftrace infrastructure"
+    command: "trace-cmd"
+    events:
+      - "sched:sched_switch"
+      - "sched:sched_wakeup"
+      - "sched:sched_migrate_task"
+      - "irq:irq_handler_entry"
+      - "irq:irq_handler_exit"
+      - "irq:softirq_entry"
+      - "irq:softirq_exit"
+      - "timer:hrtimer_expire_entry"
+      - "timer:hrtimer_expire_exit"
+    output_format: "dat"
+  bpftrace:
+    name: "bpftrace"
+    description: "eBPF-based dynamic tracing tool"
+    command: "bpftrace"
+    probes:
+      - "tracepoint:sched:sched_switch"
+      - "tracepoint:sched:sched_wakeup"
+      - "tracepoint:irq:irq_handler_entry"
+      - "kprobe:schedule"
+      - "kprobe:try_to_wake_up"
+    output_format: "json"
+
+latency_tiers:
+  ultra_strict:
+    name: "Ultra-Strict (Hard RT)"
+    description: "For safety-critical and hard-real-time systems (automotive, medical)"
+    p50_budget_us: 10
+    p95_budget_us: 25
+    p99_budget_us: 50
+    p999_budget_us: 100
+    max_jitter_us: 20
+  strict:
+    name: "Strict"
+    description: "Industrial and robotics applications"
+    p50_budget_us: 25
+    p95_budget_us: 75
+    p99_budget_us: 150
+    p999_budget_us: 500
+    max_jitter_us: 50
+  moderate:
+    name: "Moderate"
+    description: "Audio/video processing and general embedded"
+    p50_budget_us: 100
+    p95_budget_us: 250
+    p99_budget_us: 500
+    p999_budget_us: 2000
+    max_jitter_us: 200
+  relaxed:
+    name: "Relaxed"
+    description: "Soft real-time, UI responsiveness"
+    p50_budget_us: 500
+    p95_budget_us: 2000
+    p99_budget_us: 5000
+    p999_budget_us: 20000
+    max_jitter_us: 1000
