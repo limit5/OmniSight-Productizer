@@ -1,0 +1,57 @@
+tasks:
+  - id: tof_sensor_interface
+    name: "ToF Sensor Driver Abstraction"
+    depends_on: []
+    artifacts:
+      - backend/depth_sensing.py
+
+  - id: tof_sensor_adapters
+    name: "ToF Vendor Adapters (Sony IMX556 / Melexis MLX75027)"
+    depends_on:
+      - tof_sensor_interface
+    artifacts:
+      - backend/depth_sensing.py
+
+  - id: structured_light
+    name: "Structured Light Capture + Decoder"
+    depends_on:
+      - tof_sensor_interface
+    artifacts:
+      - backend/depth_sensing.py
+
+  - id: stereo_pipeline
+    name: "Stereo Rectification + Disparity (SGBM)"
+    depends_on:
+      - tof_sensor_interface
+    artifacts:
+      - backend/depth_sensing.py
+
+  - id: point_cloud
+    name: "Point Cloud: PCL + Open3D Wrappers"
+    depends_on:
+      - tof_sensor_adapters
+      - structured_light
+      - stereo_pipeline
+    artifacts:
+      - backend/depth_sensing.py
+
+  - id: registration_slam
+    name: "ICP Registration + SLAM Hooks"
+    depends_on:
+      - point_cloud
+    artifacts:
+      - backend/depth_sensing.py
+
+  - id: rest_endpoints
+    name: "REST API Endpoints"
+    depends_on:
+      - registration_slam
+    artifacts:
+      - backend/routers/depth_sensing.py
+
+  - id: unit_tests
+    name: "Unit Tests"
+    depends_on:
+      - rest_endpoints
+    artifacts:
+      - backend/tests/test_depth_sensing.py

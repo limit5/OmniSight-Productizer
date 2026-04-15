@@ -1,0 +1,400 @@
+schema_version: 1
+
+depth_sensing:
+  name: "Depth/3D Sensing Pipeline"
+  description: >
+    Unified depth and 3D sensing pipeline supporting Time-of-Flight sensors,
+    structured light, stereo matching, point cloud processing, registration,
+    SLAM, and calibration. Covers the full chain from raw depth capture
+    through 3D reconstruction and spatial alignment.
+
+  sensors:
+    - id: "sony_imx556"
+      name: "Sony IMX556 ToF"
+      description: "Sony IMX556 back-illuminated ToF image sensor — indirect ToF with CW modulation"
+      technology: "indirect_tof"
+      resolution: [640, 480]
+      max_range_m: 5.0
+      depth_accuracy_m: 0.01
+      frame_rate_fps: 30
+      modulation_frequencies_mhz: [20, 50, 100]
+      pixel_pitch_um: 10.0
+      interface: "mipi_csi2"
+      features:
+        - "ambient_light_suppression"
+        - "multi_frequency_unwrap"
+        - "confidence_map"
+        - "ir_amplitude_image"
+
+    - id: "melexis_mlx75027"
+      name: "Melexis MLX75027"
+      description: "Melexis MLX75027 QVGA ToF sensor — high-speed indoor depth sensing"
+      technology: "indirect_tof"
+      resolution: [320, 240]
+      max_range_m: 2.0
+      depth_accuracy_m: 0.005
+      frame_rate_fps: 60
+      modulation_frequencies_mhz: [80, 100]
+      pixel_pitch_um: 15.0
+      interface: "mipi_csi2"
+      features:
+        - "ambient_light_suppression"
+        - "multi_frequency_unwrap"
+        - "confidence_map"
+        - "high_dynamic_range"
+
+  structured_light:
+    - id: "gray_code"
+      name: "Gray Code Pattern"
+      description: "Binary Gray code structured light — robust to surface discontinuities"
+      pattern_type: "binary"
+      num_patterns: 16
+      projector_resolution: [1280, 720]
+      encoding: "gray"
+      phase_unwrapping: false
+      features:
+        - "robust_decoding"
+        - "sharp_edges"
+        - "ambient_rejection"
+
+    - id: "phase_shift"
+      name: "Phase-Shift Sinusoidal"
+      description: "Multi-step sinusoidal phase-shift — sub-pixel depth precision"
+      pattern_type: "sinusoidal"
+      num_patterns: 4
+      projector_resolution: [1920, 1080]
+      encoding: "phase"
+      phase_unwrapping: true
+      features:
+        - "sub_pixel_precision"
+        - "temporal_unwrapping"
+        - "multi_frequency"
+
+    - id: "speckle"
+      name: "IR Speckle Pattern"
+      description: "Pseudo-random IR speckle — single-shot depth from correlation"
+      pattern_type: "speckle"
+      num_patterns: 1
+      projector_resolution: [640, 480]
+      encoding: "correlation"
+      phase_unwrapping: false
+      features:
+        - "single_shot"
+        - "real_time"
+        - "ir_projection"
+
+  stereo:
+    - id: "sgbm"
+      name: "OpenCV SGBM"
+      description: "Semi-Global Block Matching — dense disparity with consistency check"
+      algorithm: "StereoSGBM"
+      num_disparities: 128
+      block_size: 5
+      P1: 600         # 8 * 3 * 5 * 5
+      P2: 2400        # 32 * 3 * 5 * 5
+      disp12MaxDiff: 1
+      uniquenessRatio: 10
+      speckleWindowSize: 100
+      speckleRange: 32
+      mode: "SGBM_3WAY"
+      features:
+        - "left_right_check"
+        - "subpixel_interpolation"
+        - "wls_filter"
+
+    - id: "bm"
+      name: "OpenCV StereoBM"
+      description: "Block Matching — fast sparse disparity for real-time applications"
+      algorithm: "StereoBM"
+      num_disparities: 64
+      block_size: 15
+      texture_threshold: 10
+      uniquenessRatio: 15
+      features:
+        - "prefilter_normalized"
+        - "speckle_filter"
+
+  point_cloud:
+    - id: "pcl"
+      name: "PCL (Point Cloud Library)"
+      description: "Point Cloud Library — C++ library for 3D point cloud processing"
+      formats: ["pcd", "ply", "xyz"]
+      features:
+        - "voxel_grid"
+        - "statistical_outlier"
+        - "passthrough"
+        - "normal_estimation"
+      default_leaf_size: 0.01
+      coordinate_system: "right_hand"
+      max_points: 10000000
+
+    - id: "open3d"
+      name: "Open3D"
+      description: "Open3D — modern library for 3D data processing with Python/C++ API"
+      formats: ["pcd", "ply", "xyz", "las"]
+      features:
+        - "voxel_downsampling"
+        - "radius_outlier"
+        - "crop"
+        - "compute_normals"
+        - "poisson_reconstruction"
+      default_voxel_size: 0.01
+      coordinate_system: "right_hand"
+      max_points: 50000000
+
+  registration:
+    - id: "icp_point_to_point"
+      name: "ICP Point-to-Point"
+      description: "Iterative Closest Point — minimizes point-to-point distances"
+      algorithm: "icp"
+      variant: "point_to_point"
+      max_iterations: 50
+      tolerance: 1.0e-6
+      max_correspondence_distance: 0.05
+      features:
+        - "initial_alignment"
+        - "correspondence_rejection"
+
+    - id: "icp_point_to_plane"
+      name: "ICP Point-to-Plane"
+      description: "Iterative Closest Point — minimizes point-to-plane distances for faster convergence"
+      algorithm: "icp"
+      variant: "point_to_plane"
+      max_iterations: 30
+      tolerance: 1.0e-8
+      max_correspondence_distance: 0.05
+      requires_normals: true
+      features:
+        - "initial_alignment"
+        - "correspondence_rejection"
+        - "normal_weighting"
+
+    - id: "colored_icp"
+      name: "Colored ICP"
+      description: "Color-aware ICP — jointly optimizes geometry and photometric consistency"
+      algorithm: "colored_icp"
+      variant: "point_to_plane"
+      max_iterations: 50
+      tolerance: 1.0e-6
+      lambda_geometric: 0.968
+      max_correspondence_distance: 0.05
+      requires_normals: true
+      requires_color: true
+      features:
+        - "photometric_alignment"
+        - "geometric_alignment"
+        - "joint_optimization"
+
+    - id: "ndt"
+      name: "Normal Distributions Transform"
+      description: "NDT — represents point cloud as normal distribution cells for robust registration"
+      algorithm: "ndt"
+      variant: "d2d"
+      resolution: 1.0
+      step_size: 0.1
+      max_iterations: 35
+      transformation_epsilon: 0.01
+      features:
+        - "grid_based"
+        - "outlier_robust"
+        - "multi_resolution"
+
+  slam:
+    - id: "visual_slam"
+      name: "ORB-SLAM3 Hook"
+      description: "Visual SLAM via ORB-SLAM3 — monocular, stereo, and RGB-D modes"
+      backend: "orb_slam3"
+      features_type: "orb"
+      max_features: 1000
+      modes: ["monocular", "stereo", "rgbd"]
+      loop_closure: true
+      relocalization: true
+      features:
+        - "keyframe_tracking"
+        - "local_mapping"
+        - "loop_closing"
+        - "map_merging"
+
+    - id: "lidar_slam"
+      name: "LiDAR SLAM Hook"
+      description: "LiDAR-based SLAM — 3D point cloud odometry and mapping"
+      backend: "lidar_odometry"
+      voxel_size: 0.1
+      max_range: 100.0
+      min_range: 0.5
+      scan_matching: "ndt"
+      loop_closure: true
+      features:
+        - "scan_to_map"
+        - "pose_graph_optimization"
+        - "ground_segmentation"
+        - "dynamic_object_removal"
+
+  calibration:
+    - id: "intrinsic"
+      name: "Camera Intrinsic Calibration"
+      description: "Estimate camera intrinsic parameters using checkerboard pattern"
+      method: "checkerboard"
+      pattern_size: [9, 6]
+      square_size_m: 0.025
+      min_captures: 20
+      flags:
+        - "fix_principal_point"
+        - "rational_model"
+      outputs:
+        - "camera_matrix"
+        - "distortion_coefficients"
+        - "reprojection_error"
+
+    - id: "stereo_extrinsic"
+      name: "Stereo Pair Extrinsic Calibration"
+      description: "Estimate relative pose between stereo camera pair"
+      method: "checkerboard"
+      pattern_size: [9, 6]
+      square_size_m: 0.025
+      min_captures: 30
+      outputs:
+        - "rotation_matrix"
+        - "translation_vector"
+        - "essential_matrix"
+        - "fundamental_matrix"
+        - "rectification_transforms"
+
+    - id: "tof_phase"
+      name: "ToF Phase Calibration"
+      description: "Calibrate ToF phase-to-depth mapping at known reference distances"
+      method: "phase_reference"
+      reference_distances_m: [0.5, 1.0, 2.0, 3.0, 5.0]
+      num_frames_per_distance: 100
+      outputs:
+        - "phase_offset"
+        - "depth_lut"
+        - "wiggling_correction"
+        - "temperature_compensation"
+
+  test_scenes:
+    - id: "flat_wall"
+      name: "Flat Wall"
+      description: "Planar surface at ~1m — validates depth accuracy and noise floor"
+      expected_point_count: 307200    # 640 * 480
+      bounds:
+        x: [-0.5, 0.5]
+        y: [-0.4, 0.4]
+        z: [0.95, 1.05]
+      expected_properties:
+        planarity_rmse_m: 0.005
+        normal_direction: [0.0, 0.0, -1.0]
+
+    - id: "box_scene"
+      name: "Box Scene"
+      description: "Rectangular box on table — validates edge detection and multi-plane segmentation"
+      expected_point_count: 25000
+      bounds:
+        x: [-0.5, 0.5]
+        y: [-0.5, 0.5]
+        z: [0.3, 1.0]
+      expected_properties:
+        num_planes: 3
+        edge_sharpness: "sub_centimeter"
+
+    - id: "sphere"
+      name: "Sphere"
+      description: "Sphere with known radius — validates curvature estimation"
+      expected_point_count: 15000
+      bounds:
+        center: [0.0, 0.0, 0.5]
+        radius_m: 0.25
+      expected_properties:
+        radius_tolerance_m: 0.01
+        curvature_uniformity: 0.95
+
+    - id: "staircase"
+      name: "Staircase"
+      description: "Five-step staircase — validates depth discontinuity handling"
+      expected_point_count: 30000
+      bounds:
+        x: [-0.3, 0.3]
+        y: [-0.5, 0.5]
+        z: [0.5, 2.0]
+      expected_properties:
+        num_steps: 5
+        step_height_m: 0.18
+        step_depth_m: 0.25
+
+    - id: "corner"
+      name: "Corner"
+      description: "Two perpendicular planes — validates dihedral angle recovery"
+      expected_point_count: 20000
+      bounds:
+        x: [-0.5, 0.5]
+        y: [-0.5, 0.5]
+        z: [0.3, 1.5]
+      expected_properties:
+        num_planes: 2
+        dihedral_angle_deg: 90.0
+        angle_tolerance_deg: 1.0
+
+    - id: "empty_room"
+      name: "Empty Room"
+      description: "Room-scale capture — validates large-scene reconstruction"
+      expected_point_count: 100000
+      bounds:
+        room_dimensions_m: [4.0, 3.0, 2.5]
+        x: [-2.0, 2.0]
+        y: [-1.5, 1.5]
+        z: [0.0, 2.5]
+      expected_properties:
+        num_planes: 6
+        volume_m3: 30.0
+
+  test_recipes:
+    - id: "tof_capture"
+      name: "ToF Sensor Capture"
+      description: "Initialize ToF sensor, capture depth map, validate range and accuracy"
+      domains: ["sensors"]
+
+    - id: "structured_light_decode"
+      name: "Structured Light Decode"
+      description: "Project pattern sequence, capture, decode phase/disparity, reconstruct depth"
+      domains: ["structured_light"]
+
+    - id: "stereo_disparity"
+      name: "Stereo Disparity"
+      description: "Rectify stereo pair, compute SGBM disparity, validate against ground truth"
+      domains: ["stereo"]
+
+    - id: "point_cloud_processing"
+      name: "Point Cloud Processing"
+      description: "Generate point cloud from depth, apply filters, export to PCD/PLY"
+      domains: ["point_cloud"]
+
+    - id: "registration_icp"
+      name: "ICP Registration"
+      description: "Register two overlapping point clouds using ICP variants, measure fitness"
+      domains: ["registration"]
+
+    - id: "slam_odometry"
+      name: "SLAM Odometry"
+      description: "Run visual odometry on synthetic trajectory, evaluate drift and loop closure"
+      domains: ["slam"]
+
+  artifacts:
+    - id: "depth_sensing_tasks"
+      kind: "tasks"
+      description: "Depth/3D sensing pipeline interfaces and implementations"
+
+    - id: "depth_sensing_scaffolds"
+      kind: "scaffolds"
+      description: "Scaffold templates for depth sensor integration and 3D processing"
+
+    - id: "depth_sensing_tests"
+      kind: "tests"
+      description: "Unit and integration test suite for depth pipeline components"
+
+    - id: "depth_sensing_hil"
+      kind: "hil"
+      description: "Hardware-in-the-loop recipes for ToF and stereo sensor testing"
+
+    - id: "depth_sensing_docs"
+      kind: "docs"
+      description: "Integration guide, calibration procedures, and API documentation"

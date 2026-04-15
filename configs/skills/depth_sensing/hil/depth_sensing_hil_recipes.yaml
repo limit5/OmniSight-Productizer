@@ -1,0 +1,93 @@
+# Depth / 3D Sensing Pipeline — HIL (Hardware-in-the-Loop) test recipes
+schema_version: "1"
+skill_id: depth_sensing
+
+hil_recipes:
+  - id: tof_sensor_capture
+    name: "Physical ToF Sensor Capture Test"
+    description: "Connect to a physical ToF sensor, capture depth frames, verify depth accuracy against a known reference target"
+    equipment:
+      - "ToF sensor module (Sony IMX556 or Melexis MLX75027)"
+      - "Flat reference target at known distance (500 mm, 1000 mm, 2000 mm)"
+      - "Optical bench or rigid mount with calibrated rail"
+      - "USB 3.0 host connection"
+    steps:
+      - "Mount ToF sensor on optical bench facing reference target"
+      - "Connect sensor via USB and initialize vendor adapter"
+      - "Run ToF phase calibration using reference distances"
+      - "Capture 100 depth frames at 500 mm distance"
+      - "Capture 100 depth frames at 1000 mm distance"
+      - "Capture 100 depth frames at 2000 mm distance"
+      - "Compute mean and standard deviation of center-ROI depth values"
+      - "Disconnect sensor"
+    pass_criteria:
+      - "Mean depth error < 1% of true distance at each reference point"
+      - "Depth standard deviation < 5 mm at 1000 mm distance"
+      - "Frame capture rate meets configured FPS within 10% tolerance"
+      - "No dropped frames across 100-frame burst"
+
+  - id: stereo_pair_capture
+    name: "Physical Stereo Camera Pair Test"
+    description: "Capture synchronized stereo image pairs, run rectification and disparity, verify depth reconstruction"
+    equipment:
+      - "Calibrated stereo camera pair (global shutter, synchronized triggers)"
+      - "Checkerboard calibration target (9x7, 25 mm squares)"
+      - "Textured scene with objects at known distances (0.5 m to 5 m)"
+      - "Rigid stereo baseline mount (120 mm nominal)"
+    steps:
+      - "Mount stereo pair on rigid baseline bracket"
+      - "Capture 30 checkerboard image pairs for stereo calibration"
+      - "Run stereo calibration and verify reprojection error < 0.5 px"
+      - "Capture stereo pair of textured scene"
+      - "Run rectification and SGBM disparity"
+      - "Project disparity to 3D and measure distances to known objects"
+      - "Compare reconstructed distances to ground truth"
+    pass_criteria:
+      - "Stereo calibration reprojection error < 0.5 px"
+      - "Reconstructed distance error < 2% at 1 m"
+      - "Reconstructed distance error < 5% at 3 m"
+      - "Disparity map coverage > 80% of valid scene area"
+
+  - id: structured_light_projection
+    name: "Structured Light Projector + Camera Test"
+    description: "Project structured light patterns, capture with camera, decode to depth, verify accuracy"
+    equipment:
+      - "DLP projector module (720p minimum resolution)"
+      - "Global shutter camera (synchronized to projector)"
+      - "Flat reference plane at 500 mm"
+      - "3D reference object with known geometry (calibration sphere, 100 mm diameter)"
+      - "Darkened enclosure to control ambient light"
+    steps:
+      - "Mount projector and camera in fixed configuration"
+      - "Run intrinsic calibration for camera"
+      - "Calibrate projector-camera extrinsics using checkerboard"
+      - "Project Gray code pattern sequence (10-bit horizontal + 10-bit vertical)"
+      - "Capture pattern images and decode to per-pixel projector coordinates"
+      - "Triangulate to produce depth map"
+      - "Capture reference sphere and fit sphere to point cloud"
+      - "Compare fitted sphere diameter to ground truth"
+    pass_criteria:
+      - "Flat plane depth RMS error < 0.5 mm at 500 mm distance"
+      - "Sphere diameter error < 1 mm"
+      - "Pattern decode success rate > 95% of illuminated pixels"
+      - "Full capture-to-point-cloud latency < 2 seconds"
+
+  - id: registration_accuracy
+    name: "Point Cloud Registration Accuracy Test"
+    description: "Capture point clouds from multiple viewpoints, register with ICP, verify alignment against ground truth"
+    equipment:
+      - "Depth sensor (ToF or stereo)"
+      - "Motorized rotation stage with encoder (0.01 degree resolution)"
+      - "Reference object with distinctive 3D geometry"
+    steps:
+      - "Place reference object on rotation stage"
+      - "Capture point cloud at 0 degrees"
+      - "Rotate stage 30 degrees, capture second point cloud"
+      - "Run ICP registration between the two clouds"
+      - "Compare estimated rotation to encoder ground truth"
+      - "Repeat for 60, 90, and 180 degree rotations"
+    pass_criteria:
+      - "ICP rotation error < 0.5 degrees for all test angles"
+      - "ICP translation error < 2 mm"
+      - "ICP convergence within 50 iterations"
+      - "Registration fitness score > 0.95"

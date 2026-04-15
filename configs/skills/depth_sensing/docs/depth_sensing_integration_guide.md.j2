@@ -1,0 +1,180 @@
+# Depth / 3D Sensing Pipeline Integration Guide
+
+## Overview
+
+The Depth / 3D Sensing Pipeline provides a unified interface for time-of-flight
+(ToF) sensors, structured-light projectors, and stereo camera pairs. Raw depth
+data flows through calibration, rectification, and disparity stages into dense
+point clouds that can be registered, fused, and fed into SLAM back-ends.
+
+## Supported Sensors
+
+{% for sensor in sensors %}
+- **{{ sensor.name }}** (`{{ sensor.sensor_id }}`) — {{ sensor.description }}
+{% endfor %}
+
+## Quick Start
+
+```python
+from backend.depth_sensing import create_tof_sensor, ToFConfig
+
+config = ToFConfig(
+    sensor_id="{{ sensors[0].sensor_id }}",
+    resolution=({{ sensors[0].width }}, {{ sensors[0].height }}),
+    fps={{ sensors[0].default_fps }},
+    modulation_freq_mhz={{ sensors[0].modulation_freq_mhz }},
+)
+sensor = create_tof_sensor("{{ sensors[0].sensor_id }}", config)
+sensor.connect()
+depth_frame = sensor.capture()
+print(f"Depth frame shape: {depth_frame.shape}, dtype: {depth_frame.dtype}")
+sensor.disconnect()
+```
+
+## Stereo Pipeline
+
+The stereo pipeline accepts a rectified image pair and produces a dense disparity
+map using Semi-Global Block Matching (SGBM) or classical Block Matching (BM).
+
+```python
+from backend.depth_sensing import StereoPipeline, StereoConfig
+
+stereo_cfg = StereoConfig(
+    algorithm="sgbm",
+    num_disparities={{ stereo.num_disparities }},
+    block_size={{ stereo.block_size }},
+    p1={{ stereo.p1 }},
+    p2={{ stereo.p2 }},
+)
+pipeline = StereoPipeline(stereo_cfg)
+rectified_left, rectified_right = pipeline.rectify(left_img, right_img, calib)
+disparity = pipeline.compute_disparity(rectified_left, rectified_right)
+```
+
+## Point Cloud Processing
+
+Depth maps or disparity maps can be projected into 3D point clouds. Both PCL
+(via pclpy) and Open3D back-ends are supported.
+
+```python
+from backend.depth_sensing import PointCloudEngine
+
+engine = PointCloudEngine(backend="{{ point_cloud.default_backend }}")
+cloud = engine.from_depth_map(depth_frame, intrinsics)
+cloud = engine.statistical_outlier_removal(cloud, nb_neighbors=20, std_ratio=2.0)
+engine.save(cloud, "output.ply")
+```
+
+### Supported Back-ends
+
+{% for be in point_cloud.backends %}
+- **{{ be.name }}** (`{{ be.backend_id }}`) — {{ be.description }}
+{% endfor %}
+
+## ICP Registration
+
+Iterative Closest Point (ICP) and Normal Distributions Transform (NDT) are
+available for aligning consecutive point clouds.
+
+```python
+from backend.depth_sensing import register_clouds, RegistrationConfig
+
+reg_cfg = RegistrationConfig(
+    method="icp",
+    max_iterations={{ registration.max_iterations }},
+    tolerance={{ registration.tolerance }},
+)
+transform = register_clouds(source_cloud, target_cloud, reg_cfg)
+aligned = source_cloud.transform(transform)
+```
+
+### Registration Methods
+
+{% for method in registration.methods %}
+- **{{ method.name }}** (`{{ method.method_id }}`) — {{ method.description }}
+{% endfor %}
+
+## SLAM Integration
+
+The pipeline exposes hooks for visual and LiDAR SLAM systems. A SLAM back-end
+receives registered point clouds and odometry and maintains a global map.
+
+```python
+from backend.depth_sensing import SLAMHook
+
+slam = SLAMHook(backend="{{ slam.default_backend }}")
+slam.initialize(intrinsics, initial_pose)
+for cloud, odom in stream:
+    slam.update(cloud, odom)
+global_map = slam.get_map()
+```
+
+### SLAM Back-ends
+
+{% for be in slam.backends %}
+- **{{ be.name }}** (`{{ be.backend_id }}`) — {{ be.description }}
+{% endfor %}
+
+## Calibration Guide
+
+### Intrinsic Calibration
+
+Estimate focal length, principal point, and distortion coefficients from a
+checkerboard pattern.
+
+```python
+from backend.depth_sensing import calibrate_intrinsics
+
+intrinsics = calibrate_intrinsics(
+    images=checkerboard_images,
+    board_size=({{ calibration.board_cols }}, {{ calibration.board_rows }}),
+    square_size_mm={{ calibration.square_size_mm }},
+)
+```
+
+### Stereo Calibration
+
+Compute the extrinsic relationship between a stereo camera pair.
+
+```python
+from backend.depth_sensing import calibrate_stereo
+
+stereo_calib = calibrate_stereo(
+    left_images=left_checkerboard,
+    right_images=right_checkerboard,
+    board_size=({{ calibration.board_cols }}, {{ calibration.board_rows }}),
+    square_size_mm={{ calibration.square_size_mm }},
+)
+```
+
+### ToF Phase Calibration
+
+Correct phase-offset and multi-path errors for ToF sensors.
+
+```python
+from backend.depth_sensing import calibrate_tof_phase
+
+phase_calib = calibrate_tof_phase(
+    sensor=sensor,
+    reference_distances_mm={{ calibration.tof_reference_distances }},
+    num_captures={{ calibration.tof_num_captures }},
+)
+sensor.apply_calibration(phase_calib)
+```
+
+## REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/depth/sensors` | List supported depth sensors |
+| GET | `/api/depth/algorithms` | List disparity / registration algorithms |
+| POST | `/api/depth/capture` | Capture a depth frame |
+| POST | `/api/depth/stereo/rectify` | Rectify a stereo image pair |
+| POST | `/api/depth/stereo/disparity` | Compute disparity map |
+| POST | `/api/depth/point-cloud` | Generate point cloud from depth |
+| POST | `/api/depth/register` | Register two point clouds (ICP/NDT) |
+| POST | `/api/depth/calibrate/intrinsic` | Run intrinsic calibration |
+| POST | `/api/depth/calibrate/stereo` | Run stereo calibration |
+| POST | `/api/depth/calibrate/tof-phase` | Run ToF phase calibration |
+| POST | `/api/depth/slam/update` | Push frame into SLAM pipeline |
+| GET | `/api/depth/slam/map` | Retrieve current SLAM map |

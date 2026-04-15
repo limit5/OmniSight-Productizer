@@ -1,0 +1,49 @@
+schema_version: "1"
+skill_id: depth_sensing
+name: "Depth / 3D Sensing Pipeline"
+version: "1.0.0"
+product_class: embedded_product
+
+dependencies:
+  - CORE-05
+  - CORE-07
+  - CORE-14
+
+artifact_kinds:
+  - tasks
+  - scaffolds
+  - tests
+  - hil
+  - docs
+
+capabilities:
+  - tof_sensor_driver_abstraction
+  - sony_imx556_adapter
+  - melexis_mlx75027_adapter
+  - structured_light_capture
+  - structured_light_decode
+  - stereo_rectification
+  - sgbm_disparity
+  - bm_disparity
+  - pcl_point_cloud
+  - open3d_point_cloud
+  - icp_registration
+  - ndt_registration
+  - visual_slam_hook
+  - lidar_slam_hook
+  - intrinsic_calibration
+  - stereo_calibration
+  - tof_phase_calibration
+
+tags:
+  - depth
+  - 3d
+  - tof
+  - stereo
+  - point-cloud
+  - slam
+  - icp
+  - structured-light
+  - embedded
+  - robotics
+  - mapping

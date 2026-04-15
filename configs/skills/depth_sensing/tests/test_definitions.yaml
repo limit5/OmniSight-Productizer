@@ -1,0 +1,64 @@
+# Depth / 3D Sensing Pipeline — test suite definitions
+schema_version: "1"
+skill_id: depth_sensing
+
+test_suites:
+  - id: tof_sensor_lifecycle
+    name: "ToF Sensor Lifecycle Tests"
+    description: "Verify connect/configure/capture/disconnect for all ToF sensor adapters"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["tof"]
+
+  - id: tof_vendor_adapters
+    name: "ToF Vendor Adapter Tests"
+    description: "Verify Sony IMX556 and Melexis MLX75027 adapter-specific behavior"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["vendor_adapter"]
+
+  - id: structured_light
+    name: "Structured Light Tests"
+    description: "Verify pattern generation, capture, decode, and triangulation"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["structured_light"]
+
+  - id: stereo_pipeline
+    name: "Stereo Pipeline Tests"
+    description: "Verify rectification, SGBM disparity, and BM disparity computation"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["stereo"]
+
+  - id: point_cloud
+    name: "Point Cloud Tests"
+    description: "Verify depth-to-cloud projection, filtering, and I/O for PCL and Open3D backends"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["point_cloud"]
+
+  - id: registration
+    name: "Registration Tests"
+    description: "Verify ICP and NDT alignment accuracy, convergence, and edge cases"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["registration"]
+
+  - id: slam_hooks
+    name: "SLAM Hook Tests"
+    description: "Verify visual and LiDAR SLAM hook initialization, update, and map retrieval"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["slam"]
+
+  - id: calibration
+    name: "Calibration Tests"
+    description: "Verify intrinsic, stereo, and ToF phase calibration routines"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["calibration"]
+
+  - id: rest_api
+    name: "REST API Tests"
+    description: "Verify all depth sensing REST endpoints return correct status and payloads"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["api"]
+
+  - id: error_handling
+    name: "Error Handling Tests"
+    description: "Verify graceful handling of sensor disconnects, corrupt frames, invalid configs"
+    test_file: backend/tests/test_depth_sensing.py
+    markers: ["error_handling"]
