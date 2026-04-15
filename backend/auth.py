@@ -66,22 +66,28 @@ def auth_mode() -> str:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Password hashing — stdlib only so deps stay light. PBKDF2-SHA256
-#  with 320k iterations matches NIST-recommended floor for 2026.
+#  Password hashing — Argon2id (primary) with PBKDF2-SHA256 legacy support.
+#  New hashes always use Argon2id. Old PBKDF2 hashes are auto-rehashed
+#  to Argon2id on successful verification.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+from argon2 import PasswordHasher as _Argon2Hasher
+from argon2.exceptions import VerifyMismatchError as _Argon2Mismatch
+
+_argon2_ph = _Argon2Hasher()
 
 _PBKDF_ITERS = 320_000
 
+PASSWORD_HISTORY_LIMIT = 5
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MIN_ZXCVBN = 3
+
 
 def hash_password(plain: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", plain.encode("utf-8"), salt, _PBKDF_ITERS)
-    return f"pbkdf2_sha256${_PBKDF_ITERS}${salt.hex()}${digest.hex()}"
+    return _argon2_ph.hash(plain)
 
 
-def verify_password(plain: str, stored: str) -> bool:
-    if not stored.startswith("pbkdf2_sha256$"):
-        return False
+def _verify_pbkdf2(plain: str, stored: str) -> bool:
     try:
         _, iters_s, salt_hex, digest_hex = stored.split("$", 3)
         iters = int(iters_s)
@@ -91,6 +97,46 @@ def verify_password(plain: str, stored: str) -> bool:
         return secrets.compare_digest(got, want)
     except Exception:
         return False
+
+
+def verify_password(plain: str, stored: str) -> bool:
+    if stored.startswith("$argon2"):
+        try:
+            return _argon2_ph.verify(stored, plain)
+        except _Argon2Mismatch:
+            return False
+        except Exception:
+            return False
+    if stored.startswith("pbkdf2_sha256$"):
+        return _verify_pbkdf2(plain, stored)
+    return False
+
+
+def needs_rehash(stored: str) -> bool:
+    if stored.startswith("pbkdf2_sha256$"):
+        return True
+    if stored.startswith("$argon2"):
+        return _argon2_ph.check_needs_rehash(stored)
+    return False
+
+
+def validate_password_strength(plain: str) -> str | None:
+    """Return an error message if the password is too weak, else None."""
+    if len(plain) < PASSWORD_MIN_LENGTH:
+        return f"Password must be at least {PASSWORD_MIN_LENGTH} characters"
+    from zxcvbn import zxcvbn
+    result = zxcvbn(plain)
+    if result["score"] < PASSWORD_MIN_ZXCVBN:
+        feedback = result.get("feedback", {})
+        warning = feedback.get("warning", "")
+        suggestions = feedback.get("suggestions", [])
+        msg = "Password is too weak"
+        if warning:
+            msg += f": {warning}"
+        if suggestions:
+            msg += ". " + " ".join(suggestions)
+        return msg
+    return None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -198,9 +244,49 @@ async def create_user(email: str, name: str, role: str = "viewer",
     return User(id=uid, email=email.lower().strip(), name=name, role=role)
 
 
-async def change_password(user_id: str, new_password: str) -> None:
-    """Update a user's password and clear must_change_password flag."""
+async def check_password_history(user_id: str, plain: str) -> bool:
+    """Return True if the password matches any of the last N stored hashes."""
     conn = await _conn()
+    async with conn.execute(
+        "SELECT password_hash FROM password_history "
+        "WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (user_id, PASSWORD_HISTORY_LIMIT),
+    ) as cur:
+        rows = await cur.fetchall()
+    for row in rows:
+        if verify_password(plain, row["password_hash"]):
+            return True
+    async with conn.execute(
+        "SELECT password_hash FROM users WHERE id=?", (user_id,),
+    ) as cur:
+        r = await cur.fetchone()
+    if r and r["password_hash"] and verify_password(plain, r["password_hash"]):
+        return True
+    return False
+
+
+async def _record_password_history(conn, user_id: str, pw_hash: str) -> None:
+    await conn.execute(
+        "INSERT INTO password_history (user_id, password_hash) VALUES (?, ?)",
+        (user_id, pw_hash),
+    )
+    await conn.execute(
+        "DELETE FROM password_history WHERE user_id=? AND id NOT IN "
+        "(SELECT id FROM password_history WHERE user_id=? ORDER BY id DESC LIMIT ?)",
+        (user_id, user_id, PASSWORD_HISTORY_LIMIT),
+    )
+
+
+async def change_password(user_id: str, new_password: str) -> None:
+    """Update a user's password and clear must_change_password flag.
+    Records the old hash in password_history for reuse prevention."""
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT password_hash FROM users WHERE id=?", (user_id,),
+    ) as cur:
+        r = await cur.fetchone()
+    if r and r["password_hash"]:
+        await _record_password_history(conn, user_id, r["password_hash"])
     pw_hash = hash_password(new_password)
     await conn.execute(
         "UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
@@ -278,6 +364,14 @@ async def authenticate_password(email: str, password: str) -> Optional[User]:
     if not verify_password(password, r["password_hash"]):
         await _record_login_failure(conn, r["id"], r["failed_login_count"])
         return None
+
+    if needs_rehash(r["password_hash"]):
+        new_hash = hash_password(password)
+        await conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (new_hash, r["id"]),
+        )
+        logger.info("[AUTH] Auto-rehashed password to argon2id for user %s", r["email"])
 
     await _reset_login_failures(conn, r["id"])
     await conn.execute(

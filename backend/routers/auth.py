@@ -291,6 +291,17 @@ async def change_password(req: ChangePasswordRequest, request: Request,
     verified = await auth.authenticate_password(user.email, req.current_password)
     if not verified:
         raise HTTPException(status_code=401, detail="current password is incorrect")
+
+    strength_err = auth.validate_password_strength(req.new_password)
+    if strength_err:
+        raise HTTPException(status_code=422, detail=strength_err)
+
+    if await auth.check_password_history(user.id, req.new_password):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot reuse any of the last {auth.PASSWORD_HISTORY_LIMIT} passwords",
+        )
+
     await auth.change_password(user.id, req.new_password)
     try:
         from backend import audit as _audit

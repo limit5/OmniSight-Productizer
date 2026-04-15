@@ -482,6 +482,16 @@ CREATE TABLE IF NOT EXISTS mfa_backup_codes (
 );
 CREATE INDEX IF NOT EXISTS idx_mfa_backup_user ON mfa_backup_codes(user_id);
 
+-- K7: password history for reuse prevention
+CREATE TABLE IF NOT EXISTS password_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    password_hash   TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_password_history_user ON password_history(user_id);
+
 CREATE TABLE IF NOT EXISTS github_installations (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     installation_id     INTEGER NOT NULL UNIQUE,

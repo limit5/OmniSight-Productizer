@@ -36,3 +36,6 @@ structlog==24.4.0
 pyotp==2.9.0
 qrcode[pil]==8.0
 webauthn==2.7.1
+# K7 — Password policy + Argon2id
+argon2-cffi>=23.1.0
+zxcvbn-python>=4.4.28

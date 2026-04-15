@@ -40,10 +40,9 @@ def test_role_at_least_ladder():
 def test_password_hash_roundtrip():
     from backend import auth
     h = auth.hash_password("hunter2")
-    assert h.startswith("pbkdf2_sha256$")
+    assert h.startswith("$argon2id$")
     assert auth.verify_password("hunter2", h)
     assert not auth.verify_password("wrong", h)
-    # tampered hash → False, no crash
     assert not auth.verify_password("hunter2", "garbage")
 
 
