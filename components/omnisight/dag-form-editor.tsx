@@ -8,13 +8,18 @@
  * via `value`; every mutation goes through `onChange` so the sibling
  * JSON view (DAG-E) and this form stay in lockstep.
  *
- * Deliberate omissions (keep the first pass small):
- *   - Free-text `toolchain` (no backend enum exposed yet).
- *   - `inputs` and `output_overlap_ack` edited in JSON tab only —
- *     they're rare-path knobs; promoting them to the form would add
- *     noise to the 95% case.
- *   - Validation errors render in the parent (DagAuthoringPanel) so
- *     the JSON tab shares the same panel.
+ * Coverage: 100 % of the schema. `inputs[]` (chip + typeahead) and
+ * `output_overlap_ack` (inline checkbox) were added in Phase 56-DAG-F
+ * Product #2 so the operator never has to flip back to the JSON tab
+ * just to set those fields.
+ *
+ * Validation errors render in the parent (DagAuthoringPanel) so the
+ * JSON / Form / Canvas tabs share one panel.
+ *
+ * Deliberate omission still in force:
+ *   - `toolchain` is free-text; backend doesn't expose an enum, and
+ *     a typo here surfaces as a runtime sandbox error rather than a
+ *     validator one. Worth a follow-up if operators trip on it.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
