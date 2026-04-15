@@ -8,13 +8,20 @@ from backend.dag_schema import DAG, Task
 
 
 def _valid_dag(dag_id: str = "REQ-api") -> dict:
+    """Phase 64-C-LOCAL S4 note: the historic fixture here used
+    `t3 + flash_board`, which validates under the narrow hardware-
+    bridge contract but fails once the repo's hardware_manifest
+    declares `target_platform: host_native` (you can't flash a
+    board via localhost). Generic "DAG submits cleanly" case is
+    now a two-task t1 pipeline; hardware-bridge tests pass
+    `target_platform` explicitly."""
     d = DAG(dag_id=dag_id, tasks=[
         Task(task_id="A", description="compile",
              required_tier="t1", toolchain="cmake",
              expected_output="build/a.bin"),
-        Task(task_id="B", description="flash",
-             required_tier="t3", toolchain="flash_board",
-             expected_output="logs/b.log",
+        Task(task_id="B", description="smoke test",
+             required_tier="t1", toolchain="pytest",
+             expected_output="logs/smoke.log",
              inputs=["build/a.bin"], depends_on=["A"]),
     ])
     return d.model_dump()

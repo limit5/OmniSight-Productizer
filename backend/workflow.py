@@ -101,7 +101,8 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
                 run_id: str | None = None,
                 dag: Any | None = None,
                 parent_plan_id: int | None = None,
-                mutation_round: int = 0) -> WorkflowRun:
+                mutation_round: int = 0,
+                target_profile: dict | None = None) -> WorkflowRun:
     """Open a new workflow run, or attach to an existing one if
     `run_id` is supplied (used by resume paths).
 
@@ -111,6 +112,11 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
     only set to status='executing' if validation passes; failed
     validation leaves the plan at status='failed' and the run still
     starts (caller decides whether to mutate via Phase 56-DAG-C).
+
+    Phase 64-C-LOCAL S4: `target_profile` flows through to the
+    validator so t3 tasks with a host==target profile get the
+    tier-relaxation treatment (pre-64-C callers pass None and keep
+    the narrow hardware-bridge-only behaviour).
 
     `parent_plan_id` + `mutation_round` chain mutation history.
     """
@@ -137,7 +143,7 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
         try:
             from backend import dag_storage as _ds
             from backend import dag_validator as _dv
-            result = _dv.validate(dag)
+            result = _dv.validate(dag, target_profile=target_profile)
             plan = await _ds.save_plan(
                 dag, run_id=run.id,
                 parent_plan_id=parent_plan_id,

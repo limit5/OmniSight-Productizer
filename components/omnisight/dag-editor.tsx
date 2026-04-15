@@ -582,7 +582,11 @@ export function DagEditor() {
       ) : (
         // Canvas tab — pass any task-id-bearing validation errors so
         // the canvas can tint offenders red in place.
-        <DagCanvas dag={formDag} errors={errors} />
+        <DagCanvas
+          dag={formDag}
+          errors={errors}
+          t3Runner={validation?.t3_runner}
+        />
       )}
 
       {/* Error panel */}

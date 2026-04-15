@@ -238,3 +238,63 @@ Audit row carries `after.tier="networked"`, `after.network=omnisight-egress-t2`.
 - `scripts/setup_t1_egress_iptables.sh` — egress hardening script
 - `backend/sandbox_net.py` — Python-side egress decision
 - `backend/container.py::_lifetime_killswitch` — wall-clock killer
+
+---
+
+## T3-LOCAL — Native-Arch Fast-Path (Phase 64-C-LOCAL)
+
+The historic Tier-3 contract assumed a remote "hardware daemon"
+serving flash/UART/i2c operations against a physically attached
+target. That still applies for **cross-architecture** deployments
+(x86_64 host → arm64 board). But for **same-architecture**
+deployments (AMD x86_64 host → x86_64 industrial PC, or just
+localhost) the daemon is overkill.
+
+T3-LOCAL short-circuits: when `t3_resolver` detects
+`host_arch == target_arch && host_os == target_os`, t3 tasks run in
+a t1-style runsc sandbox on the host, with `--network host` so
+smoke-tests can hit localhost services. Validator `tier_violation`
+relaxes for the matching target — a t3 step with `toolchain: cmake`
+validates fine when the resolver picks LOCAL.
+
+| Control | Env | Default |
+|---|---|---|
+| Runner kill-switch | `OMNISIGHT_T3_LOCAL_ENABLED` | `true` |
+| Target profile override (per submit) | `target_platform` field in `POST /dag` body | (inherits `configs/hardware_manifest.yaml::target_platform`) |
+
+### Resolution pipeline
+
+```
+required_tier=t3 task → resolve_t3_runner(target_arch, target_os)
+  ├─ host_arch == target_arch  AND  host_os == target_os
+  │   AND  OMNISIGHT_T3_LOCAL_ENABLED=true   → LOCAL  ⚡
+  └─ otherwise                                → BUNDLE 🔗
+     (scp artefact + install.sh to the real target)
+```
+
+The Ops Summary panel shows a LOCAL / BUNDLE breakdown; the DAG
+Canvas shows a ⚡ (LOCAL) or 🔗 (bundle) chip on every t3 node so
+the operator can see at a glance whether a plan will run fully on
+the host or needs an artefact handoff.
+
+### Force BUNDLE for paranoid deployments
+
+Set `OMNISIGHT_T3_LOCAL_ENABLED=false`. Every t3 task then routes
+through the BUNDLE path even when host matches target — useful for
+security audits where "the host is also the target" is considered
+too much overlap.
+
+### Still refuses dangerous toolchains under LOCAL
+
+The tier-swap (t3 → check against t1 rules when LOCAL) is a full
+substitution, not an allow-list merge. A `flash_board` toolchain is
+not in t1's allowed list, so it's rejected even on the LOCAL path.
+You can't pretend to flash a board over localhost.
+
+### Related files
+
+- `backend/t3_resolver.py` — resolver + `T3RunnerKind` + metric
+- `backend/container.py::start_t3_local_container` — T3-LOCAL runner
+- `backend/container.py::dispatch_t3` — resolver entry point
+- `backend/dag_validator.py::_check_tier_capability` — tier swap
+- `configs/platforms/host_native.yaml` — "use the host" profile

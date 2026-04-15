@@ -201,9 +201,26 @@ async def ops_summary() -> dict:
     except Exception:
         pass
 
+    # Phase 64-C-LOCAL UX-6: break down t3 dispatch counts per runner
+    # so the Ops Summary panel can show the operator at a glance
+    # whether the host==target happy path is firing (LOCAL >> BUNDLE)
+    # or the plan is producing bundles nobody's installing.
+    t3_runners = {"local": 0, "ssh": 0, "qemu": 0, "bundle": 0}
+    try:
+        from backend import metrics as _m
+        if _m.is_available() and hasattr(_m, "t3_runner_dispatch_total"):
+            for sample in _m.t3_runner_dispatch_total.collect()[0].samples:
+                if sample.name.endswith("_total"):
+                    runner = sample.labels.get("runner", "")
+                    if runner in t3_runners:
+                        t3_runners[runner] = int(sample.value)
+    except Exception as exc:
+        logger.debug("ops_summary: t3 runner lookup failed: %s", exc)
+
     return {
         "checked_at": time.time(),
         "uptime_s": uptime,
+        "t3_runners": t3_runners,
         # Spend
         "daily_cost_usd": _sys.get_daily_cost(),
         "hourly_cost_usd": _sys.get_hourly_cost()

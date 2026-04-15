@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Activity, DollarSign, Flame, Radio, Shield, Clock3 } from "lucide-react"
+import { Activity, DollarSign, Flame, Radio, Shield, Clock3, Cpu } from "lucide-react"
 import { getOpsSummary, type OpsSummary } from "@/lib/api"
 
 const POLL_MS = 10_000
@@ -94,6 +94,44 @@ export function OpsSummaryPanel() {
                tone={data.watchdog_age_s === null || data.watchdog_age_s > 120 ? "warn" : "ok"} />
         </div>
       )}
+
+      {/* Phase 64-C-LOCAL UX-6: T3 runner dispatch breakdown.
+          Hidden entirely until there's at least one dispatch — no
+          noise on fresh deployments that haven't submitted any t3
+          task yet. */}
+      {data && data.t3_runners && (
+        data.t3_runners.local + data.t3_runners.ssh +
+        data.t3_runners.qemu + data.t3_runners.bundle > 0 ? (
+          <div className="px-3 pb-3 -mt-1">
+            <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1">
+              <Cpu size={10} aria-hidden />
+              T3 RUNNERS
+            </div>
+            <div className="flex items-center gap-3 font-mono text-[10px] tabular-nums">
+              <RunnerPill
+                label="LOCAL" value={data.t3_runners.local}
+                accent="var(--validation-emerald,#10b981)"
+              />
+              <RunnerPill
+                label="BUNDLE" value={data.t3_runners.bundle}
+                accent="var(--muted-foreground,#94a3b8)"
+              />
+              {data.t3_runners.ssh > 0 && (
+                <RunnerPill
+                  label="SSH" value={data.t3_runners.ssh}
+                  accent="var(--neural-cyan,#67e8f9)"
+                />
+              )}
+              {data.t3_runners.qemu > 0 && (
+                <RunnerPill
+                  label="QEMU" value={data.t3_runners.qemu}
+                  accent="var(--fui-orange,#f59e0b)"
+                />
+              )}
+            </div>
+          </div>
+        ) : null
+      )}
     </section>
   )
 }
@@ -122,6 +160,16 @@ function Kpi({
     </div>
   )
 }
+
+function RunnerPill({ label, value, accent }: { label: string; value: number; accent: string }) {
+  return (
+    <span className="inline-flex items-center gap-1" style={{ color: accent }}>
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: accent }} />
+      {label}: <span className="text-[var(--foreground,#e2e8f0)]">{value}</span>
+    </span>
+  )
+}
+
 
 function StatusDot({ data, error }: { data: OpsSummary | null; error: string | null }) {
   let color = "var(--muted-foreground,#94a3b8)"

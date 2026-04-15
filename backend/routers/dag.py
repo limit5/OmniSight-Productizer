@@ -54,6 +54,71 @@ class DAGSubmitRequest(BaseModel):
         default=None,
         description="Optional metadata stored on the workflow_run",
     )
+    target_platform: Optional[str] = Field(
+        default=None,
+        description=(
+            "Phase 64-C-LOCAL S4 — platform profile name (e.g. 'host_native', "
+            "'aarch64'). When supplied, the validator asks the T3 resolver "
+            "whether this target can run on the host and relaxes tier_violation "
+            "for t3 tasks accordingly. None = fall back to the global default "
+            "(hardware_manifest.yaml → host_native)."
+        ),
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Target-platform resolver (Phase 64-C-LOCAL S4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Pipeline of sources, first non-empty wins:
+#   1. The request's explicit `target_platform` field.
+#   2. `configs/hardware_manifest.yaml`'s `target_platform` key.
+#   3. Default — `host_native` profile (T1-A default).
+#
+# Returns the parsed profile dict or None if none can be loaded; the
+# validator's `target_profile=None` path preserves pre-64-C behaviour.
+
+def _resolve_target_profile(explicit: str | None) -> dict | None:
+    from pathlib import Path
+    import yaml as _yaml
+    from backend.sdk_provisioner import _validate_platform_name, _platform_profile
+
+    # 1. Explicit request field.
+    if explicit:
+        name = explicit.strip()
+    else:
+        name = ""
+
+    # 2. Fall back to hardware_manifest.
+    if not name:
+        manifest = Path("configs") / "hardware_manifest.yaml"
+        if manifest.is_file():
+            try:
+                m = _yaml.safe_load(manifest.read_text()) or {}
+                name = (
+                    (m.get("project") or {}).get("target_platform")
+                    or m.get("target_platform")
+                    or ""
+                ).strip()
+            except Exception as exc:
+                logger.debug("hardware_manifest parse failed: %s", exc)
+
+    # 3. Final default matches T1-A.
+    if not name:
+        name = "host_native"
+
+    if not _validate_platform_name(name):
+        logger.debug("target_platform %r rejected by validator", name)
+        return None
+    profile_path = _platform_profile(name)
+    if profile_path is None or not profile_path.exists():
+        logger.debug("target_platform %r: no profile YAML", name)
+        return None
+    try:
+        return _yaml.safe_load(profile_path.read_text()) or {}
+    except Exception as exc:
+        logger.debug("profile %s parse failed: %s", name, exc)
+        return None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -130,6 +195,16 @@ async def _cancel_prewarm(reason: str) -> None:
 
 class DAGValidateRequest(BaseModel):
     dag: dict = Field(..., description="DAG JSON to validate")
+    target_platform: Optional[str] = Field(
+        default=None,
+        description=(
+            "Phase 64-C-LOCAL S4 — platform profile name (e.g. 'host_native', "
+            "'aarch64'). Drives the T3 resolver's LOCAL/BUNDLE decision, "
+            "which in turn relaxes tier_violation for t3 tasks when the "
+            "host can natively run the target. None = hardware_manifest → "
+            "host_native fallback."
+        ),
+    )
 
 
 @router.post("/validate")
@@ -137,7 +212,14 @@ async def validate_dag(req: DAGValidateRequest,
                        _user=Depends(_au.require_operator)) -> dict:
     """Run validator without storing. Returns either
     `{ok: true}` or `{ok: false, stage: schema|semantic, errors: [...]}`.
-    Each semantic error carries `rule`, `task_id` (or null), `message`."""
+    Each semantic error carries `rule`, `task_id` (or null), `message`.
+
+    Phase 64-C-LOCAL S4 additions in the response:
+      * `t3_runner` — "local" / "bundle" / ... — what the resolver
+        would pick for every t3 task in this DAG. Lets the editor UI
+        render per-node ⚡ (LOCAL) vs 🔗 (remote bundle) chips.
+      * `target_platform` — the profile name the resolver used, so the
+        UI can display it alongside the chip."""
     # Stage 1: Pydantic schema (shape).
     try:
         dag = DAG.model_validate(req.dag)
@@ -148,8 +230,13 @@ async def validate_dag(req: DAGValidateRequest,
             "errors": [{"rule": "schema", "task_id": None, "message": str(exc)}],
         }
 
-    # Stage 2: semantic rules.
-    result = _dv.validate(dag)
+    # Resolve once — validator + UI-hint both want the same answer.
+    profile = _resolve_target_profile(req.target_platform)
+    from backend.t3_resolver import resolve_from_profile
+    resolution = resolve_from_profile(profile)
+
+    # Stage 2: semantic rules with tier-relaxation awareness.
+    result = _dv.validate(dag, target_profile=profile)
     return {
         "ok": result.ok,
         "stage": "semantic",
@@ -158,6 +245,8 @@ async def validate_dag(req: DAGValidateRequest,
             for e in result.errors
         ],
         "task_count": len(dag.tasks),
+        "t3_runner": resolution.kind.value,
+        "target_platform": (profile or {}).get("platform") or req.target_platform or "host_native",
     }
 
 
@@ -188,8 +277,18 @@ async def submit_dag(req: DAGSubmitRequest,
     metadata.setdefault("source", "api:dag-submit")
     metadata.setdefault("user", getattr(_user, "email", "operator"))
 
+    # Phase 64-C-LOCAL S4: resolve target_platform once and thread it
+    # through so wf.start's internal validator + downstream dispatcher
+    # get the same answer. Stash the profile name in metadata for
+    # post-hoc debugging of "why did this plan validate / not validate".
+    target_profile = _resolve_target_profile(req.target_platform)
+    if target_profile is not None:
+        metadata.setdefault(
+            "target_platform", target_profile.get("platform") or req.target_platform or "host_native",
+        )
+
     # First attempt — workflow.start itself runs the validator.
-    run = await wf.start("invoke", dag=dag, metadata=metadata)
+    run = await wf.start("invoke", dag=dag, metadata=metadata, target_profile=target_profile)
     plan = await _ds.get_plan_by_run(run.id)
     if plan is None:
         # Plan persistence failed inside workflow.start — return best-

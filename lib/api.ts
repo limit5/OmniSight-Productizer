@@ -809,6 +809,9 @@ export interface OpsSummary {
   decisions_pending: number
   sse_subscribers: number
   watchdog_age_s: number | null
+  /** Phase 64-C-LOCAL UX-6: T3 runner dispatch breakdown. local + bundle
+   * always present; ssh / qemu populated once those runners land. */
+  t3_runners?: { local: number; ssh: number; qemu: number; bundle: number }
 }
 
 export async function getOpsSummary(): Promise<OpsSummary> {
@@ -828,6 +831,13 @@ export interface DAGValidateResponse {
   stage: "schema" | "semantic"
   errors: DAGValidationError[]
   task_count?: number
+  /** Phase 64-C-LOCAL S4: runner the plan's t3 tasks would dispatch
+   * to — "local" (host==target), "bundle" (artefact handoff),
+   * "ssh"/"qemu" (future runners). */
+  t3_runner?: "local" | "bundle" | "ssh" | "qemu"
+  /** The platform profile the resolver used. Useful for diagnosing
+   * why a t3 task isn't picking up LOCAL when the operator expects it. */
+  target_platform?: string
 }
 
 export interface DAGSubmitResponse {

@@ -125,9 +125,14 @@ function layout(dag: FormDAG): { nodes: Positioned[]; width: number; height: num
 interface Props {
   dag: FormDAG | null
   errors?: DAGValidationError[]
+  /** Phase 64-C-LOCAL UX-5: T3 runner resolution returned by
+   * `/dag/validate`. Drives the ⚡ (LOCAL) / 🔗 (remote bundle)
+   * indicator on t3 nodes. Undefined = no hint; node renders without
+   * the runner chip. */
+  t3Runner?: "local" | "bundle" | "ssh" | "qemu"
 }
 
-export function DagCanvas({ dag, errors = [] }: Props) {
+export function DagCanvas({ dag, errors = [], t3Runner }: Props) {
   const { nodes, edges, width, height, redIds } = useMemo(() => {
     if (!dag || dag.tasks.length === 0) {
       return { nodes: [], edges: [], width: 320, height: 120, redIds: new Set<string>() }
@@ -267,6 +272,26 @@ export function DagCanvas({ dag, errors = [] }: Props) {
               >
                 {n.id.length > 18 ? n.id.slice(0, 16) + "…" : n.id}
               </text>
+              {/* UX-5: t3 runner chip.
+                  ⚡ = LOCAL (runs natively on host, no hardware daemon)
+                  🔗 = bundle / remote (needs a hardware handoff) */}
+              {n.tier === "t3" && t3Runner && (
+                <text
+                  x={n.x + NODE_W - 14}
+                  y={n.y + 14}
+                  fontSize="11"
+                  fontFamily="ui-monospace, monospace"
+                  fill={t3Runner === "local" ? "var(--validation-emerald,#10b981)" : "var(--muted-foreground,#94a3b8)"}
+                  className="select-none"
+                >
+                  <title>
+                    {t3Runner === "local"
+                      ? "Runs natively on host — no hardware daemon required"
+                      : `Needs ${t3Runner.toUpperCase()} runner for this target`}
+                  </title>
+                  {t3Runner === "local" ? "⚡" : "🔗"}
+                </text>
+              )}
               <text
                 x={n.x + 8}
                 y={n.y + 32}
