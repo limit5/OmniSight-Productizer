@@ -186,32 +186,31 @@ class TestTidValidation:
 class TestGetArtifactsRootTenantAware:
     def test_returns_tenant_scoped_path(self, tmp_path):
         from backend.db_context import set_tenant_id
+        from backend.tenant_fs import tenant_artifacts_root
         set_tenant_id("t-test")
-        from backend.routers.artifacts import get_artifacts_root
-        root = get_artifacts_root()
+        root = tenant_artifacts_root()
         assert "t-test" in str(root)
         assert root.name == "artifacts"
 
     def test_explicit_tenant_overrides_context(self, tmp_path):
         from backend.db_context import set_tenant_id
+        from backend.tenant_fs import tenant_artifacts_root
         set_tenant_id("t-context")
-        from backend.routers.artifacts import get_artifacts_root
-        root = get_artifacts_root("t-explicit")
+        root = tenant_artifacts_root("t-explicit")
         assert "t-explicit" in str(root)
 
 
-class TestIsValidArtifactPath:
+class TestPathValidation:
     def test_tenant_path_valid(self, tmp_path):
-        from backend.tenant_fs import tenant_artifacts_root
-        from backend.routers.artifacts import _is_valid_artifact_path
+        from backend.tenant_fs import tenant_artifacts_root, path_belongs_to_tenant
         art = tenant_artifacts_root("t-alpha")
         f = art / "report.md"
         f.write_text("hello")
-        assert _is_valid_artifact_path(f)
+        assert path_belongs_to_tenant(f, "t-alpha")
 
     def test_outside_path_invalid(self, tmp_path):
-        from backend.routers.artifacts import _is_valid_artifact_path
-        assert not _is_valid_artifact_path(Path("/tmp/random/file.txt"))
+        from backend.tenant_fs import path_belongs_to_tenant
+        assert not path_belongs_to_tenant(Path("/tmp/random/file.txt"), "t-alpha")
 
 
 class TestCloneRepoTenantAware:
