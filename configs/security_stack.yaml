@@ -1,0 +1,771 @@
+# C15 — L4-CORE-15 Security stack (#229)
+# Secure boot chain, TEE binding, remote attestation, SBOM signing,
+# key management, and threat model per product class.
+
+# ── Secure boot chain definitions ──
+secure_boot_chains:
+  arm_trustzone:
+    chain_id: arm_trustzone
+    name: "ARM TrustZone Secure Boot"
+    description: "BL1 → BL2 → BL31 (EL3) → BL32 (OP-TEE) → BL33 (U-Boot) → kernel → rootfs"
+    stages:
+      - stage_id: bl1_rom
+        name: "BL1 — ROM bootloader"
+        description: "First-stage immutable bootloader in SoC ROM"
+        verification: "Hardware root of trust — OTP fuses"
+        signing_algo: "RSA-2048 / ECDSA-P256"
+        rollback_protection: true
+        immutable: true
+      - stage_id: bl2_loader
+        name: "BL2 — Trusted bootloader"
+        description: "Second-stage loader, loads BL31/BL32/BL33"
+        verification: "BL1 verifies BL2 signature against OTP public key hash"
+        signing_algo: "RSA-2048 / ECDSA-P256"
+        rollback_protection: true
+        immutable: false
+      - stage_id: bl31_runtime
+        name: "BL31 — EL3 runtime firmware"
+        description: "ARM Trusted Firmware (ATF) EL3 runtime services"
+        verification: "BL2 verifies BL31 signature"
+        signing_algo: "RSA-2048 / ECDSA-P256"
+        rollback_protection: true
+        immutable: false
+      - stage_id: bl32_tee
+        name: "BL32 — OP-TEE OS"
+        description: "Trusted Execution Environment operating system"
+        verification: "BL2 verifies BL32 signature"
+        signing_algo: "RSA-2048 / ECDSA-P256"
+        rollback_protection: true
+        immutable: false
+      - stage_id: bl33_uboot
+        name: "BL33 — U-Boot"
+        description: "Normal world bootloader"
+        verification: "BL2 verifies BL33 signature; U-Boot verified boot (FIT image)"
+        signing_algo: "RSA-2048 / ECDSA-P256"
+        rollback_protection: true
+        immutable: false
+      - stage_id: kernel
+        name: "Linux Kernel"
+        description: "Signed kernel image (FIT or dm-verity)"
+        verification: "U-Boot verifies kernel FIT signature"
+        signing_algo: "RSA-2048 / ECDSA-P256"
+        rollback_protection: true
+        immutable: false
+      - stage_id: rootfs
+        name: "Root filesystem"
+        description: "Read-only rootfs with dm-verity hash tree"
+        verification: "dm-verity hash tree signed by build key; kernel verifies at mount"
+        signing_algo: "SHA-256 + RSA-2048"
+        rollback_protection: false
+        immutable: false
+    compatible_socs:
+      - hi3516
+      - rk3566
+      - rk3568
+      - imx8m
+      - stm32mp1
+    required_tools:
+      - arm-trusted-firmware
+      - optee_os
+      - u-boot
+      - mkimage
+      - veritysetup
+
+  mcu_secure_boot:
+    chain_id: mcu_secure_boot
+    name: "MCU Secure Boot (STM32/nRF)"
+    description: "ROM → NSPE bootloader → application image (MCUboot)"
+    stages:
+      - stage_id: rom_boot
+        name: "ROM bootloader"
+        description: "Vendor ROM with ECDSA verification"
+        verification: "OTP public key hash"
+        signing_algo: "ECDSA-P256"
+        rollback_protection: true
+        immutable: true
+      - stage_id: mcuboot
+        name: "MCUboot"
+        description: "Open-source secure bootloader for MCUs"
+        verification: "ROM verifies MCUboot signature"
+        signing_algo: "ECDSA-P256 / Ed25519"
+        rollback_protection: true
+        immutable: false
+      - stage_id: app_image
+        name: "Application firmware"
+        description: "Signed application image with version counter"
+        verification: "MCUboot verifies application signature + version"
+        signing_algo: "ECDSA-P256 / Ed25519"
+        rollback_protection: true
+        immutable: false
+    compatible_socs:
+      - stm32h7
+      - stm32f4
+      - nrf52840
+      - nrf5340
+      - esp32s3
+    required_tools:
+      - mcuboot
+      - imgtool
+      - west
+
+  uefi_secure_boot:
+    chain_id: uefi_secure_boot
+    name: "UEFI Secure Boot"
+    description: "UEFI firmware → shim → GRUB → kernel → rootfs (dm-verity)"
+    stages:
+      - stage_id: uefi_firmware
+        name: "UEFI firmware"
+        description: "Platform firmware with Secure Boot enabled"
+        verification: "Platform Key (PK) → KEK → db"
+        signing_algo: "RSA-2048 / RSA-4096"
+        rollback_protection: true
+        immutable: true
+      - stage_id: shim
+        name: "Shim bootloader"
+        description: "Microsoft-signed first-stage loader"
+        verification: "UEFI db signature verification"
+        signing_algo: "RSA-2048"
+        rollback_protection: false
+        immutable: false
+      - stage_id: grub
+        name: "GRUB bootloader"
+        description: "Second-stage bootloader"
+        verification: "Shim verifies GRUB signature with MOK or db"
+        signing_algo: "RSA-2048"
+        rollback_protection: false
+        immutable: false
+      - stage_id: kernel
+        name: "Linux Kernel"
+        description: "Signed kernel image"
+        verification: "GRUB verifies kernel signature"
+        signing_algo: "RSA-2048"
+        rollback_protection: false
+        immutable: false
+      - stage_id: rootfs
+        name: "Root filesystem"
+        description: "dm-verity protected rootfs"
+        verification: "Kernel dm-verity hash tree"
+        signing_algo: "SHA-256"
+        rollback_protection: false
+        immutable: false
+    compatible_socs:
+      - x86_64
+      - rk3588
+    required_tools:
+      - sbsign
+      - mokutil
+      - pesign
+      - veritysetup
+
+# ── TEE definitions ──
+tee_bindings:
+  optee:
+    tee_id: optee
+    name: "OP-TEE (Open Portable TEE)"
+    description: "GlobalPlatform TEE on ARM TrustZone"
+    spec: "GlobalPlatform TEE Internal Core API v1.3"
+    features:
+      - secure_storage
+      - cryptographic_operations
+      - secure_time
+      - ta_management
+      - shared_memory
+      - cancellation
+    api_functions:
+      - name: "TEEC_InitializeContext"
+        description: "Initialize TEE context for CA↔TA communication"
+      - name: "TEEC_OpenSession"
+        description: "Open session with a Trusted Application by UUID"
+      - name: "TEEC_InvokeCommand"
+        description: "Invoke TA command with parameter marshalling"
+      - name: "TEEC_CloseSession"
+        description: "Close TA session"
+      - name: "TEEC_FinalizeContext"
+        description: "Release TEE context resources"
+      - name: "TEEC_RegisterSharedMemory"
+        description: "Register shared memory for zero-copy transfer"
+    compatible_socs:
+      - hi3516
+      - rk3566
+      - rk3568
+      - imx8m
+      - stm32mp1
+    build_system: "cmake"
+    ta_signing: "RSA-2048 or ECDSA-P256 (TA signing key)"
+
+  trustzone_m:
+    tee_id: trustzone_m
+    name: "ARM TrustZone-M"
+    description: "Hardware isolation for Cortex-M MCUs (ARMv8-M)"
+    spec: "ARM TrustZone for ARMv8-M"
+    features:
+      - secure_partition
+      - sau_configuration
+      - nsc_veneer
+      - secure_fault_handler
+      - mpc_ppc_protection
+    api_functions:
+      - name: "TZ_InitContextSystem_S"
+        description: "Initialize secure context management"
+      - name: "TZ_AllocModuleContext_S"
+        description: "Allocate secure context for a module"
+      - name: "cmse_check_address_range"
+        description: "Validate non-secure caller address range"
+      - name: "cmse_nonsecure_call"
+        description: "Mark function as callable from non-secure world"
+    compatible_socs:
+      - stm32h7
+      - stm32l5
+      - nrf5340
+      - nrf9160
+      - lpc55s69
+    build_system: "cmake"
+    ta_signing: "ECDSA-P256"
+
+  sgx:
+    tee_id: sgx
+    name: "Intel SGX"
+    description: "Intel Software Guard Extensions for x86 enclaves"
+    spec: "Intel SGX SDK v2.x"
+    features:
+      - enclave_isolation
+      - sealed_storage
+      - remote_attestation
+      - memory_encryption
+      - enclave_signing
+    api_functions:
+      - name: "sgx_create_enclave"
+        description: "Load and initialize an SGX enclave"
+      - name: "sgx_ecall"
+        description: "Enter enclave (call trusted function)"
+      - name: "sgx_ocall"
+        description: "Exit enclave (call untrusted function)"
+      - name: "sgx_seal_data"
+        description: "Encrypt data bound to enclave identity"
+      - name: "sgx_ra_init"
+        description: "Initialize remote attestation"
+    compatible_socs:
+      - x86_64
+    build_system: "cmake"
+    ta_signing: "RSA-3072 (enclave signing key)"
+
+# ── Remote attestation definitions ──
+attestation_providers:
+  tpm2:
+    provider_id: tpm2
+    name: "TPM 2.0 (Trusted Platform Module)"
+    description: "Hardware TPM for measured boot, sealed storage, remote attestation"
+    spec: "TCG TPM 2.0 Library Specification"
+    features:
+      - pcr_measurement
+      - quote_generation
+      - sealed_storage
+      - key_hierarchy
+      - ek_certificate
+      - platform_hierarchy
+    operations:
+      - name: "tpm2_pcrextend"
+        description: "Extend PCR with measurement hash"
+      - name: "tpm2_quote"
+        description: "Generate signed PCR quote for remote verifier"
+      - name: "tpm2_createprimary"
+        description: "Create primary key under hierarchy"
+      - name: "tpm2_create"
+        description: "Create child key"
+      - name: "tpm2_seal"
+        description: "Seal data to PCR policy"
+      - name: "tpm2_unseal"
+        description: "Unseal data if PCR values match policy"
+      - name: "tpm2_certify"
+        description: "Certify a key with attestation key"
+    pcr_banks:
+      - sha1
+      - sha256
+      - sha384
+    pcr_assignments:
+      - pcr_index: 0
+        description: "BIOS/firmware code"
+      - pcr_index: 1
+        description: "BIOS/firmware configuration"
+      - pcr_index: 2
+        description: "Option ROM code"
+      - pcr_index: 4
+        description: "MBR/bootloader code"
+      - pcr_index: 7
+        description: "Secure Boot state"
+      - pcr_index: 8
+        description: "Kernel command line"
+      - pcr_index: 9
+        description: "Kernel image + initrd"
+      - pcr_index: 14
+        description: "Application-specific (shim MOK)"
+    compatible_platforms:
+      - x86_64
+      - rk3588
+      - imx8m
+    required_tools:
+      - tpm2-tools
+      - tpm2-tss
+      - tpm2-abrmd
+
+  ftpm:
+    provider_id: ftpm
+    name: "Firmware TPM (fTPM)"
+    description: "TPM 2.0 implemented in OP-TEE TA"
+    spec: "TCG TPM 2.0 via OP-TEE TA"
+    features:
+      - pcr_measurement
+      - quote_generation
+      - sealed_storage
+      - key_hierarchy
+    operations:
+      - name: "ftpm_init"
+        description: "Initialize fTPM TA in OP-TEE"
+      - name: "ftpm_pcr_extend"
+        description: "Extend PCR via TEE interface"
+      - name: "ftpm_quote"
+        description: "Generate attestation quote"
+    compatible_platforms:
+      - hi3516
+      - rk3566
+      - rk3568
+      - stm32mp1
+    required_tools:
+      - optee_os
+      - ms-ftpm-ta
+      - tpm2-tools
+
+  secure_element:
+    provider_id: secure_element
+    name: "Secure Element (SE050 / ATECC608)"
+    description: "Dedicated secure IC for key storage and attestation"
+    spec: "GlobalPlatform SE / ATECC608 CryptoAuth"
+    features:
+      - key_generation
+      - ecdsa_sign
+      - certificate_storage
+      - monotonic_counter
+      - secure_boot_assist
+    operations:
+      - name: "se_generate_key"
+        description: "Generate ECDSA key pair in SE"
+      - name: "se_sign"
+        description: "Sign data with private key in SE"
+      - name: "se_verify"
+        description: "Verify signature with public key"
+      - name: "se_read_certificate"
+        description: "Read device certificate from SE"
+      - name: "se_get_random"
+        description: "Get hardware random bytes"
+    compatible_platforms:
+      - any
+    required_tools:
+      - se05x_middleware
+      - cryptoauthlib
+
+# ── SBOM signing definitions ──
+sbom_signing:
+  cosign:
+    tool_id: cosign
+    name: "sigstore/cosign"
+    description: "Keyless or key-based container and artifact signing via Sigstore"
+    version: "2.x"
+    signing_modes:
+      - mode_id: keyless
+        name: "Keyless signing (Fulcio + Rekor)"
+        description: "OIDC identity → Fulcio short-lived cert → Rekor transparency log"
+        requires_key: false
+        requires_oidc: true
+      - mode_id: key_pair
+        name: "Local key pair"
+        description: "Sign with local ed25519/ecdsa key pair"
+        requires_key: true
+        requires_oidc: false
+      - mode_id: kms
+        name: "KMS-backed key"
+        description: "Sign with key stored in HSM/KMS (AWS KMS, GCP KMS, Azure Key Vault)"
+        requires_key: false
+        requires_oidc: false
+    sbom_formats:
+      - spdx
+      - cyclonedx
+    commands:
+      - name: "cosign sign-blob"
+        description: "Sign an arbitrary file (SBOM, firmware image)"
+      - name: "cosign verify-blob"
+        description: "Verify blob signature against certificate/key"
+      - name: "cosign attest"
+        description: "Create in-toto attestation for container image"
+      - name: "cosign attach sbom"
+        description: "Attach SBOM to OCI image"
+    required_tools:
+      - cosign
+      - rekor-cli
+
+  in_toto:
+    tool_id: in_toto
+    name: "in-toto"
+    description: "Supply chain layout verification framework"
+    version: "2.x"
+    features:
+      - layout_definition
+      - step_recording
+      - link_metadata
+      - threshold_signing
+    commands:
+      - name: "in-toto-run"
+        description: "Record a supply chain step (materials → products)"
+      - name: "in-toto-verify"
+        description: "Verify entire supply chain against layout"
+    required_tools:
+      - in-toto-run
+      - in-toto-verify
+
+# ── Threat model templates per product class ──
+threat_models:
+  embedded_product:
+    class_id: embedded_product
+    name: "Embedded Product Threat Model"
+    stride_categories:
+      - category: spoofing
+        threats:
+          - "Firmware image replaced with unsigned payload"
+          - "Device identity cloned via extracted keys"
+          - "Boot chain bypassed via JTAG/SWD debug port"
+        mitigations:
+          - "Secure boot with OTP-fused root of trust"
+          - "Keys stored in TEE/SE, never exported"
+          - "Debug port disabled in production fuses"
+      - category: tampering
+        threats:
+          - "Rootfs modified via physical flash access"
+          - "Configuration tampered via unprotected partition"
+          - "Firmware downgrade to vulnerable version"
+        mitigations:
+          - "dm-verity read-only rootfs"
+          - "Encrypted + signed configuration partition"
+          - "Anti-rollback counter in OTP/TPM"
+      - category: repudiation
+        threats:
+          - "Device actions not logged"
+          - "Audit log tampered on-device"
+        mitigations:
+          - "Monotonic audit log with hash chain"
+          - "Log forwarding to remote syslog (signed)"
+      - category: information_disclosure
+        threats:
+          - "Secrets extracted from flash dump"
+          - "Side-channel attack on crypto operations"
+          - "Debug UART leaks sensitive data"
+        mitigations:
+          - "Secrets in TEE/SE secure storage"
+          - "Constant-time crypto implementations"
+          - "UART disabled or authenticated in production"
+      - category: denial_of_service
+        threats:
+          - "OTA endpoint flooded"
+          - "Watchdog not configured — hang causes brick"
+          - "Flash wear-out via excessive writes"
+        mitigations:
+          - "Rate limiting on all endpoints"
+          - "Hardware watchdog with fallback boot"
+          - "Wear-leveling + write budgets"
+      - category: elevation_of_privilege
+        threats:
+          - "Normal world code calls secure world without auth"
+          - "Buffer overflow in bootloader"
+          - "Unsigned kernel module loaded"
+        mitigations:
+          - "TEE session authentication"
+          - "Stack canaries + ASLR + W^X"
+          - "Module signature verification (CONFIG_MODULE_SIG)"
+    required_artifacts:
+      - threat_model_document
+      - security_architecture_diagram
+      - penetration_test_report
+      - vulnerability_scan_report
+
+  algo_sim:
+    class_id: algo_sim
+    name: "Algorithm Simulation Threat Model"
+    stride_categories:
+      - category: spoofing
+        threats:
+          - "Unauthorized access to simulation environment"
+        mitigations:
+          - "RBAC + session authentication"
+      - category: tampering
+        threats:
+          - "Training data poisoned"
+          - "Model weights replaced"
+        mitigations:
+          - "Dataset integrity hashes"
+          - "Model signing with cosign"
+      - category: information_disclosure
+        threats:
+          - "Proprietary algorithms leaked"
+          - "Training data contains PII"
+        mitigations:
+          - "Access control + encryption at rest"
+          - "PII scanning + anonymization"
+    required_artifacts:
+      - threat_model_document
+      - data_classification_matrix
+
+  enterprise_web:
+    class_id: enterprise_web
+    name: "Enterprise Web Application Threat Model"
+    stride_categories:
+      - category: spoofing
+        threats:
+          - "Credential stuffing / brute force"
+          - "Session hijacking"
+          - "CSRF attacks"
+        mitigations:
+          - "MFA + account lockout + rate limiting"
+          - "Secure cookie flags (HttpOnly, Secure, SameSite)"
+          - "CSRF tokens on state-changing requests"
+      - category: tampering
+        threats:
+          - "SQL injection"
+          - "XSS (stored/reflected)"
+          - "API parameter manipulation"
+        mitigations:
+          - "Parameterized queries / ORM"
+          - "Content Security Policy + output encoding"
+          - "Input validation + schema enforcement"
+      - category: information_disclosure
+        threats:
+          - "Sensitive data in error messages"
+          - "Unencrypted data in transit"
+          - "Excessive API response data"
+        mitigations:
+          - "Generic error pages in production"
+          - "TLS 1.3 everywhere"
+          - "Field-level API response filtering"
+      - category: denial_of_service
+        threats:
+          - "API rate limit bypass"
+          - "Large payload attacks"
+          - "ReDoS in input validation"
+        mitigations:
+          - "WAF + rate limiting per IP/user"
+          - "Request size limits"
+          - "Safe regex patterns"
+      - category: elevation_of_privilege
+        threats:
+          - "IDOR (Insecure Direct Object Reference)"
+          - "JWT manipulation"
+          - "Role escalation via API"
+        mitigations:
+          - "Tenant-scoped queries + ownership checks"
+          - "JWT signature verification + short expiry"
+          - "Server-side role enforcement"
+    required_artifacts:
+      - threat_model_document
+      - owasp_top10_checklist
+      - penetration_test_report
+      - dependency_audit_report
+
+  factory_tool:
+    class_id: factory_tool
+    name: "Factory Tool Threat Model"
+    stride_categories:
+      - category: spoofing
+        threats:
+          - "Rogue device on factory network"
+          - "Unauthorized jig access"
+        mitigations:
+          - "Network segmentation + 802.1X"
+          - "Operator badge authentication"
+      - category: tampering
+        threats:
+          - "Test sequence modified"
+          - "Calibration data falsified"
+        mitigations:
+          - "Signed test sequences"
+          - "Tamper-evident calibration records"
+      - category: information_disclosure
+        threats:
+          - "Production keys exposed on jig"
+          - "Yield data leaked"
+        mitigations:
+          - "HSM-based key injection"
+          - "Encrypted MES channel"
+    required_artifacts:
+      - threat_model_document
+      - factory_security_audit
+
+# ── Security test recipes ──
+test_recipes:
+  - id: sec-boot-chain-verify
+    name: "Secure boot chain verification"
+    category: security
+    description: "Verify each boot stage signature is checked by predecessor"
+    security_domain: secure_boot
+    tools:
+      - arm-trusted-firmware
+      - u-boot
+      - veritysetup
+    timeout_s: 300
+
+  - id: sec-tee-session-lifecycle
+    name: "TEE session lifecycle test"
+    category: security
+    description: "Open/invoke/close TEE session, verify isolation"
+    security_domain: tee
+    tools:
+      - xtest
+      - optee_test
+    timeout_s: 120
+
+  - id: sec-tee-secure-storage
+    name: "TEE secure storage test"
+    category: security
+    description: "Store/retrieve/delete objects in TEE persistent storage"
+    security_domain: tee
+    tools:
+      - xtest
+    timeout_s: 60
+
+  - id: sec-attestation-quote
+    name: "Remote attestation quote generation"
+    category: security
+    description: "Generate TPM/fTPM quote and verify against known-good PCR values"
+    security_domain: attestation
+    tools:
+      - tpm2-tools
+    timeout_s: 60
+
+  - id: sec-attestation-seal-unseal
+    name: "TPM seal/unseal test"
+    category: security
+    description: "Seal data to PCR policy, verify unseal succeeds with correct state"
+    security_domain: attestation
+    tools:
+      - tpm2-tools
+    timeout_s: 60
+
+  - id: sec-sbom-sign-verify
+    name: "SBOM sign and verify"
+    category: security
+    description: "Generate SBOM, sign with cosign, verify signature"
+    security_domain: sbom
+    tools:
+      - cosign
+      - syft
+      - cyclonedx-cli
+    timeout_s: 120
+
+  - id: sec-key-rotation
+    name: "Key rotation test"
+    category: security
+    description: "Rotate signing key, verify old artifacts still verifiable, new artifacts use new key"
+    security_domain: key_management
+    tools:
+      - cosign
+      - openssl
+    timeout_s: 120
+
+  - id: sec-threat-model-coverage
+    name: "Threat model coverage check"
+    category: security
+    description: "Verify all STRIDE threats have corresponding mitigations and test coverage"
+    security_domain: threat_model
+    tools:
+      - custom
+    timeout_s: 60
+
+  - id: sec-rollback-protection
+    name: "Anti-rollback verification"
+    category: security
+    description: "Attempt to flash older firmware version, verify rejection"
+    security_domain: secure_boot
+    tools:
+      - imgtool
+      - u-boot
+    timeout_s: 180
+
+  - id: sec-debug-port-lockdown
+    name: "Debug port lockdown verification"
+    category: security
+    description: "Verify JTAG/SWD debug ports are disabled in production fuse config"
+    security_domain: secure_boot
+    tools:
+      - openocd
+      - jlink
+    timeout_s: 60
+
+  - id: sec-dm-verity-integrity
+    name: "dm-verity rootfs integrity"
+    category: security
+    description: "Modify rootfs block, verify dm-verity detects corruption"
+    security_domain: secure_boot
+    tools:
+      - veritysetup
+      - dd
+    timeout_s: 120
+
+  - id: sec-tee-crypto-ops
+    name: "TEE cryptographic operations"
+    category: security
+    description: "AES/RSA/ECDSA/SHA operations via TEE, verify correctness against known vectors"
+    security_domain: tee
+    tools:
+      - xtest
+    timeout_s: 120
+
+# ── Security artifact definitions ──
+artifact_definitions:
+  threat_model_document:
+    name: "Threat Model Document"
+    description: "STRIDE-based threat analysis per product class"
+    file_pattern: "docs/security/threat-model-*.md"
+  security_architecture_diagram:
+    name: "Security Architecture Diagram"
+    description: "Boot chain + TEE + attestation flow diagram"
+    file_pattern: "docs/security/architecture-*.svg"
+  penetration_test_report:
+    name: "Penetration Test Report"
+    description: "Third-party or internal pentest results"
+    file_pattern: "docs/security/pentest-report-*.pdf"
+  vulnerability_scan_report:
+    name: "Vulnerability Scan Report"
+    description: "Automated SAST/DAST/SCA scan results"
+    file_pattern: "reports/security/vuln-scan-*.json"
+  sbom_signed:
+    name: "Signed SBOM"
+    description: "Software Bill of Materials signed with cosign"
+    file_pattern: "release/sbom-*.spdx.json.sig"
+  key_inventory:
+    name: "Key Inventory"
+    description: "Registry of all cryptographic keys, their purpose, rotation schedule"
+    file_pattern: "docs/security/key-inventory.yaml"
+  boot_chain_verification_log:
+    name: "Boot Chain Verification Log"
+    description: "Log of boot stage signature verification results"
+    file_pattern: "reports/security/boot-verify-*.log"
+  tee_test_report:
+    name: "TEE Test Report"
+    description: "OP-TEE xtest / TrustZone-M test results"
+    file_pattern: "reports/security/tee-test-*.json"
+  attestation_evidence:
+    name: "Attestation Evidence"
+    description: "TPM quote + event log for remote verification"
+    file_pattern: "reports/security/attestation-*.json"
+  owasp_top10_checklist:
+    name: "OWASP Top 10 Checklist"
+    description: "OWASP Top 10 compliance checklist for web applications"
+    file_pattern: "docs/security/owasp-checklist-*.md"
+  data_classification_matrix:
+    name: "Data Classification Matrix"
+    description: "Sensitivity classification for all data types"
+    file_pattern: "docs/security/data-classification-*.md"
+  factory_security_audit:
+    name: "Factory Security Audit"
+    description: "Physical and network security audit of production facility"
+    file_pattern: "docs/security/factory-audit-*.pdf"
+  dependency_audit_report:
+    name: "Dependency Audit Report"
+    description: "Third-party dependency vulnerability and license audit"
+    file_pattern: "reports/security/dep-audit-*.json"

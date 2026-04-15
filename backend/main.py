@@ -278,6 +278,8 @@ from backend.routers import connectivity as _connectivity_router  # C13/CONNECTI
 app.include_router(_connectivity_router.router, prefix=settings.api_prefix)
 from backend.routers import sensor_fusion as _sensor_fusion_router  # C14/SENSOR-FUSION
 app.include_router(_sensor_fusion_router.router, prefix=settings.api_prefix)
+from backend.routers import security_stack as _security_stack_router  # C15/SECURITY-STACK
+app.include_router(_security_stack_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

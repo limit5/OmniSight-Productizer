@@ -1,0 +1,133 @@
+test_suites:
+  - suite_id: sec-boot-chain-tests
+    name: "Secure boot chain test suite"
+    security_domain: secure_boot
+    tests:
+      - test_id: sec-test-boot-chain-arm
+        name: "ARM TrustZone boot chain config loaded"
+        type: unit
+        description: "Verify ARM TrustZone secure boot chain definition loads with all 7 stages"
+      - test_id: sec-test-boot-chain-mcu
+        name: "MCU secure boot chain config loaded"
+        type: unit
+        description: "Verify MCU secure boot chain loads with 3 stages"
+      - test_id: sec-test-boot-chain-uefi
+        name: "UEFI secure boot chain config loaded"
+        type: unit
+        description: "Verify UEFI secure boot chain loads with 5 stages"
+      - test_id: sec-test-boot-verify-all-pass
+        name: "Boot chain verification — all stages verified"
+        type: unit
+        description: "All stages marked verified → overall status verified"
+      - test_id: sec-test-boot-verify-partial
+        name: "Boot chain verification — partial"
+        type: unit
+        description: "Some stages pending → overall status pending"
+      - test_id: sec-test-boot-verify-failure
+        name: "Boot chain verification — stage failure"
+        type: unit
+        description: "One stage failed → overall status failed"
+      - test_id: sec-test-rollback-protection
+        name: "Rollback protection flag check"
+        type: unit
+        description: "Verify rollback_protection=true on all non-rootfs stages"
+
+  - suite_id: sec-tee-tests
+    name: "TEE binding test suite"
+    security_domain: tee
+    tests:
+      - test_id: sec-test-tee-optee-loaded
+        name: "OP-TEE binding config loaded"
+        type: unit
+        description: "Verify OP-TEE binding has all expected API functions"
+      - test_id: sec-test-tee-tzm-loaded
+        name: "TrustZone-M binding config loaded"
+        type: unit
+        description: "Verify TrustZone-M binding loads correctly"
+      - test_id: sec-test-tee-sgx-loaded
+        name: "SGX binding config loaded"
+        type: unit
+        description: "Verify SGX binding loads correctly"
+      - test_id: sec-test-tee-session-lifecycle
+        name: "TEE session lifecycle simulation"
+        type: unit
+        description: "Init → Open → Invoke → Close → Finalize"
+      - test_id: sec-test-tee-session-invalid
+        name: "TEE session with invalid TEE ID"
+        type: unit
+        description: "Unknown TEE ID returns error state"
+
+  - suite_id: sec-attestation-tests
+    name: "Remote attestation test suite"
+    security_domain: attestation
+    tests:
+      - test_id: sec-test-attest-tpm2-loaded
+        name: "TPM 2.0 provider config loaded"
+        type: unit
+        description: "Verify TPM2 provider has PCR banks and operations"
+      - test_id: sec-test-attest-ftpm-loaded
+        name: "fTPM provider config loaded"
+        type: unit
+        description: "Verify fTPM provider loads correctly"
+      - test_id: sec-test-attest-se-loaded
+        name: "Secure Element provider config loaded"
+        type: unit
+        description: "Verify SE provider loads correctly"
+      - test_id: sec-test-attest-quote-gen
+        name: "Attestation quote generation"
+        type: unit
+        description: "Generate quote with nonce, verify PCR values present"
+      - test_id: sec-test-attest-quote-verify
+        name: "Attestation quote self-verify"
+        type: unit
+        description: "Generate and verify quote against own PCR values"
+      - test_id: sec-test-attest-quote-mismatch
+        name: "Attestation quote verification failure"
+        type: unit
+        description: "Verify with wrong expected values → failure"
+
+  - suite_id: sec-sbom-tests
+    name: "SBOM signing test suite"
+    security_domain: sbom
+    tests:
+      - test_id: sec-test-sbom-cosign-loaded
+        name: "cosign signer config loaded"
+        type: unit
+        description: "Verify cosign signer with 3 signing modes"
+      - test_id: sec-test-sbom-intoto-loaded
+        name: "in-toto signer config loaded"
+        type: unit
+        description: "Verify in-toto signer loads correctly"
+      - test_id: sec-test-sbom-sign-stub
+        name: "SBOM sign stub (key_pair mode)"
+        type: unit
+        description: "Sign SBOM in stub mode, verify result structure"
+      - test_id: sec-test-sbom-sign-invalid-mode
+        name: "SBOM sign with invalid mode"
+        type: unit
+        description: "Invalid signing mode returns error"
+      - test_id: sec-test-sbom-sign-missing-key
+        name: "SBOM sign key_pair without key path"
+        type: unit
+        description: "key_pair mode without key_path returns error"
+
+  - suite_id: sec-threat-model-tests
+    name: "Threat model test suite"
+    security_domain: threat_model
+    tests:
+      - test_id: sec-test-threat-embedded
+        name: "Embedded product threat model loaded"
+        type: unit
+        description: "Verify all 6 STRIDE categories present with threats and mitigations"
+      - test_id: sec-test-threat-web
+        name: "Enterprise web threat model loaded"
+        type: unit
+        description: "Verify enterprise web threat model"
+      - test_id: sec-test-threat-coverage-full
+        name: "Threat coverage — full coverage"
+        type: unit
+        description: "All threats have defined mitigations → 100% coverage"
+      - test_id: sec-test-threat-coverage-unknown
+        name: "Threat coverage — unknown class"
+        type: unit
+        description: "Unknown class returns zero coverage"

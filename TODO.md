@@ -229,12 +229,12 @@ Legend:
 - [x] Unit test against known trajectory fixture
 
 ### C15. L4-CORE-15 Security stack (#229)
-- [ ] Secure boot chain: bootloader → kernel → rootfs signature verify
-- [ ] TEE binding (OP-TEE / TrustZone abstraction)
-- [ ] Remote attestation: TPM / SE / fTPM
-- [ ] SBOM signing with sigstore/cosign
-- [ ] Key management SOP (`docs/operations/key-management.md`)
-- [ ] Threat model per product class
+- [x] Secure boot chain: bootloader → kernel → rootfs signature verify
+- [x] TEE binding (OP-TEE / TrustZone abstraction)
+- [x] Remote attestation: TPM / SE / fTPM
+- [x] SBOM signing with sigstore/cosign
+- [x] Key management SOP (`docs/operations/key-management.md`)
+- [x] Threat model per product class
 
 ### C16. L4-CORE-16 OTA framework (#230)
 - [ ] A/B slot partition scheme

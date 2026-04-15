@@ -1,0 +1,136 @@
+# Security Integration Guide
+
+> Auto-generated from OmniSight L4-CORE-15 Security Stack
+> Product: {{ product_name | default("Unnamed Product") }}
+> Date: {{ generation_date | default("N/A") }}
+
+## 1. Secure Boot Chain
+
+{% if boot_chain %}
+### Selected Chain: {{ boot_chain.name }}
+
+{{ boot_chain.description }}
+
+#### Boot Stages
+
+| Stage | Verification | Signing Algorithm | Rollback Protection |
+|-------|-------------|-------------------|---------------------|
+{% for stage in boot_chain.stages %}
+| {{ stage.name }} | {{ stage.verification }} | {{ stage.signing_algo }} | {{ "Yes" if stage.rollback_protection else "No" }} |
+{% endfor %}
+
+#### Required Tools
+{% for tool in boot_chain.required_tools %}
+- `{{ tool }}`
+{% endfor %}
+{% else %}
+No secure boot chain configured.
+{% endif %}
+
+## 2. Trusted Execution Environment
+
+{% if tee_binding %}
+### Selected TEE: {{ tee_binding.name }}
+
+{{ tee_binding.description }}
+
+**Specification**: {{ tee_binding.spec }}
+
+#### API Functions
+{% for func in tee_binding.api_functions %}
+- `{{ func.name }}` — {{ func.description }}
+{% endfor %}
+
+#### Features
+{% for feature in tee_binding.features %}
+- {{ feature }}
+{% endfor %}
+{% else %}
+No TEE binding configured.
+{% endif %}
+
+## 3. Remote Attestation
+
+{% if attestation_provider %}
+### Selected Provider: {{ attestation_provider.name }}
+
+{{ attestation_provider.description }}
+
+#### Operations
+{% for op in attestation_provider.operations %}
+- `{{ op.name }}` — {{ op.description }}
+{% endfor %}
+
+{% if attestation_provider.pcr_assignments %}
+#### PCR Assignments
+| PCR Index | Description |
+|-----------|-------------|
+{% for pcr in attestation_provider.pcr_assignments %}
+| {{ pcr.pcr_index }} | {{ pcr.description }} |
+{% endfor %}
+{% endif %}
+{% else %}
+No attestation provider configured.
+{% endif %}
+
+## 4. SBOM Signing
+
+{% if sbom_signer %}
+### Tool: {{ sbom_signer.name }} (v{{ sbom_signer.version }})
+
+#### Signing Modes
+{% for mode in sbom_signer.signing_modes %}
+- **{{ mode.name }}**: {{ mode.description }}
+{% endfor %}
+
+#### Supported Formats
+{% for fmt in sbom_signer.sbom_formats %}
+- {{ fmt | upper }}
+{% endfor %}
+{% else %}
+No SBOM signer configured.
+{% endif %}
+
+## 5. Threat Model
+
+{% if threat_model %}
+### {{ threat_model.name }}
+
+{% for cat in threat_model.stride_categories %}
+#### {{ cat.category | replace("_", " ") | title }}
+
+**Threats:**
+{% for threat in cat.threats %}
+- {{ threat }}
+{% endfor %}
+
+**Mitigations:**
+{% for mitigation in cat.mitigations %}
+- {{ mitigation }}
+{% endfor %}
+
+{% endfor %}
+
+#### Required Security Artifacts
+{% for artifact in threat_model.required_artifacts %}
+- {{ artifact | replace("_", " ") | title }}
+{% endfor %}
+{% else %}
+No threat model configured.
+{% endif %}
+
+## 6. Key Management
+
+Refer to `docs/operations/key-management.md` for the complete Key Management SOP.
+
+## 7. Security Test Recipes
+
+{% if test_recipes %}
+| Recipe | Domain | Description |
+|--------|--------|-------------|
+{% for recipe in test_recipes %}
+| {{ recipe.name }} | {{ recipe.security_domain }} | {{ recipe.description }} |
+{% endfor %}
+{% else %}
+No security test recipes configured.
+{% endif %}

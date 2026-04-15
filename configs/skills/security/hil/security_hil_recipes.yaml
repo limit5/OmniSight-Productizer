@@ -1,0 +1,114 @@
+hil_recipes:
+  - recipe_id: hil-sec-boot-verify
+    name: "Secure boot chain HIL verification"
+    description: "Flash signed images to target board, verify each boot stage signature via UART log"
+    security_domain: secure_boot
+    equipment:
+      - JTAG/SWD debugger
+      - UART serial adapter
+      - Signed firmware images
+    setup:
+      - "Connect JTAG to target SoC"
+      - "Connect UART for boot log capture"
+      - "Flash signed BL2/BL31/BL32/BL33/kernel/rootfs"
+    steps:
+      - "Power cycle target board"
+      - "Capture boot log via UART"
+      - "Verify each stage reports 'signature verified' in log"
+      - "Verify dm-verity reports clean mount"
+      - "Attempt flash with unsigned image — verify rejection"
+    pass_criteria:
+      - "All boot stages report signature verification success"
+      - "Unsigned image is rejected at each stage"
+      - "Anti-rollback counter prevents downgrade"
+    timeout_s: 300
+
+  - recipe_id: hil-sec-tee-lifecycle
+    name: "TEE session lifecycle HIL test"
+    description: "Open/invoke/close TEE session on target hardware, verify secure world isolation"
+    security_domain: tee
+    equipment:
+      - Target board with OP-TEE
+      - UART serial adapter
+      - xtest binary
+    setup:
+      - "Boot target with signed OP-TEE image"
+      - "Deploy xtest to target filesystem"
+    steps:
+      - "Run xtest regression suite"
+      - "Verify all GP TEE Internal API tests pass"
+      - "Test secure storage create/read/delete"
+      - "Test cryptographic operations (AES/RSA/ECDSA/SHA)"
+      - "Verify normal world cannot access secure world memory"
+    pass_criteria:
+      - "xtest regression pass rate >= 99%"
+      - "Secure storage CRUD operations succeed"
+      - "Crypto known-answer tests match expected vectors"
+    timeout_s: 600
+
+  - recipe_id: hil-sec-attestation-quote
+    name: "Remote attestation quote HIL test"
+    description: "Generate TPM/fTPM quote on target, verify against known-good PCR values"
+    security_domain: attestation
+    equipment:
+      - Target board with TPM/fTPM
+      - tpm2-tools installed
+      - Network connection for remote verifier
+    setup:
+      - "Boot target with measured boot enabled"
+      - "Initialize TPM and create attestation key"
+    steps:
+      - "Send challenge nonce to target"
+      - "Target generates TPM quote over PCRs 0,1,2,4,7"
+      - "Retrieve quote + signature + event log"
+      - "Replay event log against PCR values"
+      - "Verify quote signature with AK public key"
+      - "Compare PCR values against known-good reference"
+    pass_criteria:
+      - "Quote signature valid"
+      - "PCR values match expected for this firmware version"
+      - "Event log replays to same PCR values"
+    timeout_s: 120
+
+  - recipe_id: hil-sec-rollback-reject
+    name: "Anti-rollback rejection HIL test"
+    description: "Attempt to flash older firmware version, verify hardware rejects it"
+    security_domain: secure_boot
+    equipment:
+      - Target board with OTP counter
+      - Old and new firmware images
+      - JTAG/SWD debugger
+    setup:
+      - "Flash current firmware (version N)"
+      - "Increment OTP counter to N"
+    steps:
+      - "Attempt to flash firmware version N-1"
+      - "Verify bootloader rejects old version"
+      - "Flash firmware version N+1"
+      - "Verify bootloader accepts new version"
+      - "Increment OTP counter to N+1"
+    pass_criteria:
+      - "Version N-1 rejected with rollback error"
+      - "Version N+1 accepted and boots successfully"
+    timeout_s: 180
+
+  - recipe_id: hil-sec-debug-lockdown
+    name: "Debug port lockdown HIL verification"
+    description: "Verify JTAG/SWD debug ports are disabled in production configuration"
+    security_domain: secure_boot
+    equipment:
+      - Target board in production fuse config
+      - JTAG debugger (J-Link / ST-Link)
+      - OpenOCD
+    setup:
+      - "Program production OTP fuses (debug disable)"
+      - "Connect JTAG debugger to target"
+    steps:
+      - "Attempt JTAG connection — expect failure"
+      - "Attempt SWD connection — expect failure"
+      - "Verify debug port fuse status via vendor tool"
+    pass_criteria:
+      - "JTAG connection refused"
+      - "SWD connection refused"
+      - "Fuse status shows debug disabled"
+    timeout_s: 60

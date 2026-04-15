@@ -7,6 +7,70 @@
 
 ---
 
+## C15 L4-CORE-15 Security stack 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Secure boot chain: bootloader → kernel → rootfs signature verify | ✅ | `configs/security_stack.yaml` — 3 boot chains (ARM TrustZone 7-stage, MCU/MCUboot 3-stage, UEFI 5-stage). Full stage verification with rollback protection, signing algo tracking, immutability flags. Scaffold: `secure_boot.c` |
+| TEE binding (OP-TEE / TrustZone abstraction) | ✅ | 3 TEE bindings (OP-TEE GlobalPlatform, TrustZone-M ARMv8-M, Intel SGX). API function registry, feature lists, session lifecycle simulation (init→open→invoke→close→finalize). Scaffold: `tee_binding.c` |
+| Remote attestation: TPM / SE / fTPM | ✅ | 3 attestation providers (TPM 2.0 with PCR banks/assignments, fTPM via OP-TEE TA, Secure Element SE050/ATECC608). Quote generation with SHA-256 PCR measurement, nonce challenge, self-verification. Scaffold: `remote_attestation.c` |
+| SBOM signing with sigstore/cosign | ✅ | 2 signing tools (cosign with 3 modes: keyless/key_pair/KMS, in-toto). SPDX + CycloneDX format support. Sign/verify stub with transparency log entry. Scaffold: `sbom_signer.py` |
+| Key management SOP | ✅ | `docs/operations/key-management.md` — comprehensive SOP: key hierarchy, generation procedures, storage requirements (HSM/KMS/TPM), rotation schedule, revocation procedure, destruction protocol, audit/compliance mapping (NIST SP 800-57, FIPS 140-2, PCI-DSS) |
+| Threat model per product class | ✅ | 4 STRIDE threat models (embedded_product 6-category full STRIDE, algo_sim, enterprise_web with OWASP, factory_tool). Coverage evaluation with gap analysis. Required artifact tracking per class |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/security_stack.yaml` | 新建——3 boot chains + 3 TEE bindings + 3 attestation providers + 2 SBOM signers + 4 threat models + 12 test recipes + 13 artifact definitions |
+| `backend/security_stack.py` | 新建——Security stack library：enums + data models + config loader + boot chain queries/verification + TEE binding queries/session simulation + attestation provider queries/quote generation/verification + SBOM signer queries/signing + threat model queries/coverage evaluation + SoC security compatibility + test stub runner + cert registry + audit integration |
+| `backend/routers/security_stack.py` | 新建——REST endpoints: GET /security/boot-chains, /tee/bindings, /attestation/providers, /sbom/signers, /threat-models, /test/recipes, /artifacts. POST /security/boot-chains/verify, /tee/session, /attestation/quote, /attestation/verify, /sbom/sign, /threat-models/coverage, /test/run, /soc-compat, /artifacts/generate |
+| `backend/main.py` | 擴充——註冊 security_stack router |
+| `backend/doc_suite_generator.py` | 擴充——新增 `_try_security_stack_certs()` + 整合至 `collect_compliance_certs()` |
+| `configs/skills/security/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 dependency) |
+| `configs/skills/security/tasks.yaml` | 新建——22 DAG tasks covering boot chain/TEE/attestation/SBOM/threat model/integration |
+| `configs/skills/security/scaffolds/` | 新建——4 scaffold files (secure_boot.c, tee_binding.c, remote_attestation.c, sbom_signer.py) |
+| `configs/skills/security/tests/test_definitions.yaml` | 新建——5 test suites, 30 test definitions |
+| `configs/skills/security/hil/security_hil_recipes.yaml` | 新建——5 HIL recipes (boot chain verify, TEE lifecycle, attestation quote, rollback reject, debug lockdown) |
+| `configs/skills/security/docs/security_integration_guide.md.j2` | 新建——Jinja2 doc template for security integration guide |
+| `docs/operations/key-management.md` | 新建——Key Management SOP (13 sections: inventory, hierarchy, generation, storage, rotation, revocation, destruction, audit, dev vs prod, incident response, tooling, references) |
+| `backend/tests/test_security_stack.py` | 新建，130 項測試 |
+| `TODO.md` | 更新——C15 全部標記完成 |
+
+### 架構說明
+
+- **SecurityDomain enum** — secure_boot / tee / attestation / sbom / key_management / threat_model
+- **BootStageStatus enum** — verified / failed / skipped / pending
+- **TEESessionState enum** — initialized / opened / active / closed / error
+- **AttestationStatus enum** — trusted / untrusted / pending / error
+- **SBOMFormat enum** — spdx / cyclonedx
+- **SigningMode enum** — keyless / key_pair / kms
+- **ThreatCategory enum** — spoofing / tampering / repudiation / information_disclosure / denial_of_service / elevation_of_privilege
+- **SecurityTestStatus enum** — passed / failed / pending / skipped / error
+- **SecureBootChainDef** — chain_id / name / stages[] / compatible_socs / required_tools
+- **TEEBindingDef** — tee_id / name / spec / features / api_functions / compatible_socs / ta_signing
+- **AttestationProviderDef** — provider_id / name / spec / features / operations / pcr_banks / pcr_assignments / compatible_platforms
+- **SBOMSignerDef** — tool_id / name / signing_modes / sbom_formats / commands
+- **ThreatModelDef** — class_id / name / stride_categories[] / required_artifacts
+- `verify_boot_chain()` — verify all stages in boot chain against provided results
+- `simulate_tee_session()` — simulate TEE session lifecycle (init/open/invoke/close/finalize)
+- `generate_attestation_quote()` — generate SHA-256 PCR quote with nonce
+- `verify_attestation_quote()` — verify quote against expected PCR values
+- `sign_sbom()` — sign SBOM with cosign (keyless/key_pair/KMS mode)
+- `evaluate_threat_coverage()` — evaluate STRIDE threat coverage with gap analysis
+- `check_soc_security_support()` — check SoC compatibility with boot chains, TEE, attestation
+
+### 下一步
+
+- C16 (OTA framework): A/B slot + delta update + rollback + signature verify
+- D-level skill packs can now use security stack via `depends_on_core: ["CORE-15"]`
+- SKILL-PAYMENT-TERMINAL references CORE-15 for PCI-PTS tamper handling
+- SKILL-MEDICAL references CORE-15 for IEC 81001-5-1 cybersecurity
+
+---
+
 ## C14 L4-CORE-14 Sensor fusion library 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。**

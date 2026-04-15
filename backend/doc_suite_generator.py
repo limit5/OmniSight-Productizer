@@ -157,6 +157,15 @@ def _try_sensor_fusion_certs() -> list[ComplianceCert]:
         return []
 
 
+def _try_security_stack_certs() -> list[ComplianceCert]:
+    """Merge from L4-CORE-15 security stack (when available)."""
+    try:
+        from backend.security_stack import get_security_stack_certs  # type: ignore[import-not-found]
+        return [ComplianceCert(**c) for c in get_security_stack_certs()]
+    except (ImportError, Exception):
+        return []
+
+
 def collect_compliance_certs(
     extra: list[dict[str, Any]] | None = None,
 ) -> list[ComplianceCert]:
@@ -167,6 +176,7 @@ def collect_compliance_certs(
     certs.extend(_try_rt_certs())
     certs.extend(_try_connectivity_certs())
     certs.extend(_try_sensor_fusion_certs())
+    certs.extend(_try_security_stack_certs())
     if extra:
         for c in extra:
             certs.append(ComplianceCert(

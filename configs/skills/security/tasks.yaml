@@ -1,0 +1,207 @@
+tasks:
+  # -- Secure boot chain tasks --
+  - id: sec-boot-chain-setup
+    name: "Secure boot chain configuration"
+    description: "Configure secure boot chain for target SoC — key fusing, bootloader signing, dm-verity setup"
+    tier: t3
+    toolchain: platform-specific
+    when: "security_secure_boot: true"
+    depends_on: []
+    artifacts:
+      - secure_boot.c
+      - secure_boot.h
+
+  - id: sec-boot-bl2-sign
+    name: "BL2 bootloader signing"
+    description: "Sign BL2 trusted bootloader with root key or sub-key"
+    tier: t1
+    toolchain: cmake
+    when: "security_secure_boot: true"
+    depends_on:
+      - sec-boot-chain-setup
+    artifacts:
+      - bl2_signed.bin
+
+  - id: sec-boot-kernel-sign
+    name: "Kernel image signing"
+    description: "Sign kernel FIT image for U-Boot verified boot"
+    tier: t1
+    toolchain: cmake
+    when: "security_secure_boot: true"
+    depends_on:
+      - sec-boot-chain-setup
+    artifacts:
+      - kernel_signed.itb
+
+  - id: sec-boot-rootfs-verity
+    name: "dm-verity rootfs setup"
+    description: "Generate dm-verity hash tree for read-only rootfs"
+    tier: t1
+    toolchain: cmake
+    when: "security_secure_boot: true"
+    depends_on:
+      - sec-boot-kernel-sign
+    artifacts:
+      - rootfs.img
+      - rootfs.verity
+
+  - id: sec-boot-rollback-counter
+    name: "Anti-rollback counter setup"
+    description: "Configure OTP/TPM monotonic counter for rollback protection"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "security_secure_boot: true"
+    depends_on:
+      - sec-boot-chain-setup
+
+  # -- TEE binding tasks --
+  - id: sec-tee-optee-build
+    name: "OP-TEE OS build"
+    description: "Build OP-TEE OS for target platform with secure boot integration"
+    tier: t1
+    toolchain: cmake
+    when: "security_tee: true"
+    depends_on:
+      - sec-boot-chain-setup
+    artifacts:
+      - tee_binding.c
+      - tee_binding.h
+
+  - id: sec-tee-ta-scaffold
+    name: "Trusted Application scaffold"
+    description: "Generate TA skeleton with session management, secure storage, crypto"
+    tier: t1
+    toolchain: cmake
+    when: "security_tee: true"
+    depends_on:
+      - sec-tee-optee-build
+    artifacts:
+      - ta_template.c
+
+  - id: sec-tee-ca-client
+    name: "Client Application TEE interface"
+    description: "Normal world CA library for invoking TA commands"
+    tier: t1
+    toolchain: cmake
+    when: "security_tee: true"
+    depends_on:
+      - sec-tee-ta-scaffold
+
+  - id: sec-tee-secure-storage
+    name: "TEE secure storage integration"
+    description: "Persistent object storage via TEE trusted storage API"
+    tier: t1
+    toolchain: cmake
+    when: "security_tee: true"
+    depends_on:
+      - sec-tee-ta-scaffold
+
+  # -- Remote attestation tasks --
+  - id: sec-attest-tpm-init
+    name: "TPM initialization"
+    description: "Initialize TPM hierarchy, create attestation key (AK)"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "security_attestation: true"
+    depends_on: []
+    artifacts:
+      - remote_attestation.c
+      - remote_attestation.h
+
+  - id: sec-attest-pcr-extend
+    name: "PCR measurement chain"
+    description: "Extend PCRs at each boot stage for measured boot"
+    tier: t1
+    toolchain: cmake
+    when: "security_attestation: true"
+    depends_on:
+      - sec-attest-tpm-init
+      - sec-boot-chain-setup
+
+  - id: sec-attest-quote-gen
+    name: "Attestation quote generation"
+    description: "Generate signed TPM quote with nonce for remote verifier"
+    tier: t1
+    toolchain: cmake
+    when: "security_attestation: true"
+    depends_on:
+      - sec-attest-pcr-extend
+
+  - id: sec-attest-verify-service
+    name: "Remote attestation verification service"
+    description: "Server-side verifier for TPM quotes against known-good values"
+    tier: t1
+    toolchain: cmake
+    when: "security_attestation: true"
+    depends_on:
+      - sec-attest-quote-gen
+
+  # -- SBOM signing tasks --
+  - id: sec-sbom-generate
+    name: "SBOM generation"
+    description: "Generate SPDX/CycloneDX SBOM from build artifacts"
+    tier: t1
+    toolchain: cmake
+    when: "security_sbom: true"
+    depends_on: []
+    artifacts:
+      - sbom_signer.py
+
+  - id: sec-sbom-sign
+    name: "SBOM signing with cosign"
+    description: "Sign SBOM with cosign (keyless or key-pair mode)"
+    tier: t1
+    toolchain: cmake
+    when: "security_sbom: true"
+    depends_on:
+      - sec-sbom-generate
+
+  - id: sec-sbom-verify
+    name: "SBOM signature verification"
+    description: "Verify SBOM signature and check transparency log entry"
+    tier: t1
+    toolchain: cmake
+    when: "security_sbom: true"
+    depends_on:
+      - sec-sbom-sign
+
+  # -- Threat model tasks --
+  - id: sec-threat-model-generate
+    name: "Threat model generation"
+    description: "Generate STRIDE threat model for product class"
+    tier: t1
+    toolchain: custom
+    when: "security_threat_model: true"
+    depends_on: []
+
+  - id: sec-threat-coverage-eval
+    name: "Threat coverage evaluation"
+    description: "Evaluate mitigation coverage against threat model"
+    tier: t1
+    toolchain: custom
+    when: "security_threat_model: true"
+    depends_on:
+      - sec-threat-model-generate
+
+  # -- Integration test tasks --
+  - id: sec-integration-boot-verify
+    name: "Boot chain end-to-end verification"
+    description: "Flash signed image, verify each boot stage passes signature check"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "security_secure_boot: true"
+    depends_on:
+      - sec-boot-rootfs-verity
+      - sec-boot-rollback-counter
+
+  - id: sec-integration-full-stack
+    name: "Full security stack test"
+    description: "End-to-end test: secure boot → TEE session → attestation quote → SBOM verify"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "security_secure_boot: true"
+    depends_on:
+      - sec-boot-rootfs-verity
+      - sec-tee-secure-storage
+      - sec-attest-quote-gen
+      - sec-sbom-verify
