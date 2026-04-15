@@ -1,9 +1,40 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：J1 SSE per-session filter (master)
+> 最後 commit：J2 Workflow_run optimistic locking (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## J2 (complete) Workflow_run 樂觀鎖（2026-04-16 完成）
+
+**背景**：多處登入（筆電 / 手機 / 多 tab）時，workflow_run 的 retry / cancel 操作無併發保護，可能導致同一 run 被多處同時修改。J2 在 `workflow_runs` 表加入 `version` 欄位實現樂觀鎖，所有狀態變更操作透過 `If-Match` header 攜帶預期版本號，版本不符回 409 Conflict。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Migration 0009 | `ALTER TABLE workflow_runs ADD COLUMN version INTEGER NOT NULL DEFAULT 0` | ✅ 完成 |
+| WorkflowRun dataclass | 新增 `version: int = 0` 欄位；所有 SELECT 查詢含 version | ✅ 完成 |
+| _bump_version helper | CAS 語意 UPDATE … WHERE id=? AND version=?；rowcount=0 → VersionConflict | ✅ 完成 |
+| POST retry endpoint | `/workflow/runs/{id}/retry` — If-Match 必填，failed/halted → running | ✅ 完成 |
+| POST cancel endpoint | `/workflow/runs/{id}/cancel` — If-Match 必填，running → halted | ✅ 完成 |
+| PATCH update endpoint | `/workflow/runs/{id}` — If-Match 必填，合併 metadata | ✅ 完成 |
+| finish 向下相容 | `finish()` 接受 optional expected_version，內部呼叫不傳版本時跳過檢查 | ✅ 完成 |
+| 前端 API 函式 | retryWorkflowRun / cancelWorkflowRun / updateWorkflowRun — 帶 If-Match header | ✅ 完成 |
+| RunActions 元件 | RETRY（failed/halted）+ CANCEL（running）按鈕，帶 version | ✅ 完成 |
+| 409 conflict banner | 橘色橫幅 + 重新整理按鈕：「另一處已修改，請重新整理」 | ✅ 完成 |
+| 單元測試 | 11 項：version lifecycle、conflict detection、concurrent retry | ✅ 11/11 pass |
+| HTTP 整合測試 | 10 項：If-Match 驗證、428/409/400 回應、concurrent race | ✅ 10/10 pass |
+
+**新增/修改檔案**：
+- `backend/alembic/versions/0009_workflow_run_version.py` — 新增 migration
+- `backend/db.py` — raw schema 加 version 欄位
+- `backend/workflow.py` — VersionConflict、_bump_version、cancel_run、retry_run、update_run_metadata
+- `backend/routers/workflow.py` — retry / cancel / update endpoints + If-Match 解析
+- `lib/api.ts` — WorkflowRunSummary 加 version；新增 retry/cancel/update API 函式
+- `components/omnisight/run-history-panel.tsx` — RunActions 元件、409 conflict banner
+- `backend/tests/test_workflow_optimistic_lock.py` — 11 項單元測試（新增）
+- `backend/tests/test_workflow_optimistic_lock_http.py` — 10 項 HTTP 整合測試（新增）
 
 ---
 

@@ -419,11 +419,11 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### J2. Workflow_run 樂觀鎖
-- [ ] `workflow_runs` 加 `version INTEGER DEFAULT 0` + migration
-- [ ] Retry / cancel / update endpoints：require `If-Match: <version>` header；version 不符回 409
-- [ ] 前端按鈕按下時帶當前 version；409 → 提示「另一處已修改，請重新整理」
-- [ ] 測試：並發 retry 只有一個成功
-- [ ] 預估：**0.5 day**
+- [x] `workflow_runs` 加 `version INTEGER DEFAULT 0` + migration
+- [x] Retry / cancel / update endpoints：require `If-Match: <version>` header；version 不符回 409
+- [x] 前端按鈕按下時帶當前 version；409 → 提示「另一處已修改，請重新整理」
+- [x] 測試：並發 retry 只有一個成功
+- [x] 預估：**0.5 day**
 
 ### J3. Session management UI
 - [ ] `components/omnisight/session-manager-panel.tsx`：列 S0 `/auth/sessions` 結果（device / IP / created / last_seen）
