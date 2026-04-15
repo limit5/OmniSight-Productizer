@@ -412,11 +412,11 @@ Legend:
 > 背景：單人但多處登入（筆電 / 手機 / 多 tab）時目前有 7 類體驗問題：SSE 全域廣播、localStorage 各機器不同步、`_ModeSlot` 全域共用、workflow_run 併發無樂觀鎖、無 session 管理 UI、audit 無 session_id（已由 S0 解掉）、operation mode 全域。此 phase 補齊。
 
 ### J1. SSE per-session filter
-- [ ] Event envelope 加 `session_id` + `broadcast_scope: session|user|global`
-- [ ] 前端 SSE client 比對當前 `session_id` 過濾（預設只看自己 session 觸發的 + user-level 通知）
-- [ ] UI toggle：「顯示所有我的 session 事件」/「僅本 session」
-- [ ] 測試：多 session fixture → 驗證過濾正確
-- [ ] 預估：**0.5 day**
+- [x] Event envelope 加 `session_id` + `broadcast_scope: session|user|global`
+- [x] 前端 SSE client 比對當前 `session_id` 過濾（預設只看自己 session 觸發的 + user-level 通知）
+- [x] UI toggle：「顯示所有我的 session 事件」/「僅本 session」
+- [x] 測試：多 session fixture → 驗證過濾正確
+- [x] 預估：**0.5 day**
 
 ### J2. Workflow_run 樂觀鎖
 - [ ] `workflow_runs` 加 `version INTEGER DEFAULT 0` + migration

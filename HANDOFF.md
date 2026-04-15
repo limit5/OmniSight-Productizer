@@ -1,9 +1,38 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：K3 Cookie flags + CSP hardening (master)
+> 最後 commit：J1 SSE per-session filter (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## J1 (complete) SSE per-session filter（2026-04-16 完成）
+
+**背景**：多 session（多 tab / 多裝置）登入時，SSE 全域廣播導致各分頁看到不屬於自己 session 觸發的事件。J1 在 event envelope 加入 `session_id` + `broadcast_scope`（session/user/global），前端 SSE client 根據當前 session_id 過濾，並提供 UI toggle 切換「僅本 Session」/「所有 Session」。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Event envelope | `_session_id` + `_broadcast_scope` 加入所有 SSE 事件 data | ✅ 完成 |
+| session_id 衍生 | `auth.session_id_from_token()` — SHA256 前 16 字元 | ✅ 完成 |
+| whoami 回傳 session_id | `/auth/whoami` response 新增 `session_id` 欄位 | ✅ 完成 |
+| emit_* 函式擴充 | 所有 emit 函式接受 `session_id` / `broadcast_scope` 參數 | ✅ 完成 |
+| 前端 SSE 過濾 | `_shouldDeliverEvent()` — global 永遠通過、user 永遠通過、session 依模式比對 | ✅ 完成 |
+| UI toggle | `SSESessionFilter` 元件，嵌入 global header（手機 + 桌面） | ✅ 完成 |
+| auth-context 整合 | whoami session_id → `setCurrentSessionId()` 自動設定 | ✅ 完成 |
+| 前端測試 | 9 項 integration test（多 session fixture、向後相容、filter mode 切換） | ✅ 9/9 pass |
+| 後端測試 | 7 項 unit test（envelope 結構、session_id 衍生、emit passthrough） | ✅ 7/7 pass |
+
+**新增/修改檔案**：
+- `backend/events.py` — EventBus.publish 加 session_id/broadcast_scope；所有 emit_* 加參數
+- `backend/auth.py` — `session_id_from_token()` 新增
+- `backend/routers/auth.py` — whoami 回傳 session_id
+- `lib/api.ts` — SSE filter 基礎設施（setCurrentSessionId、setSSEFilterMode、_shouldDeliverEvent）
+- `lib/auth-context.tsx` — 儲存並傳播 session_id
+- `components/omnisight/sse-session-filter.tsx` — UI toggle 元件（新增）
+- `components/omnisight/global-status-header.tsx` — 嵌入 SSESessionFilter
+- `backend/tests/test_j1_sse_session_filter.py` — 後端測試（新增）
+- `test/integration/sse-session-filter.test.ts` — 前端整合測試（新增）
 
 ---
 
