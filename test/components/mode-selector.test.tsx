@@ -113,6 +113,29 @@ describe("ModeSelector", () => {
     }
   })
 
+  it("J5: shows per-session tooltip on mode label", async () => {
+    ;(api.getOperationMode as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mode: "supervised", parallel_cap: 2, in_flight: 0, modes: [],
+    })
+    primeSSE()
+    render(<ModeSelector />)
+    await screen.findByRole("radio", { checked: true })
+    const label = document.getElementById("operation-mode-label")
+    expect(label?.getAttribute("title")).toBe("此設定僅影響本裝置")
+  })
+
+  it("J5: radiogroup title includes per-session hint", async () => {
+    ;(api.getOperationMode as ReturnType<typeof vi.fn>).mockResolvedValue({
+      mode: "supervised", parallel_cap: 2, in_flight: 0, modes: [],
+    })
+    primeSSE()
+    render(<ModeSelector />)
+    const group = await screen.findByRole("radiogroup")
+    await waitFor(() => {
+      expect(group.getAttribute("title")).toContain("此設定僅影響本裝置")
+    })
+  })
+
   it("unsubscribes from SSE on unmount (shared-stream ref count)", async () => {
     ;(api.getOperationMode as ReturnType<typeof vi.fn>).mockResolvedValue({
       mode: "manual", parallel_cap: 1, in_flight: 0, modes: [],

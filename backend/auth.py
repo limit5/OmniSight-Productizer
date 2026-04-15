@@ -337,6 +337,40 @@ async def get_session(token: str) -> Optional[Session]:
     )
 
 
+def get_session_metadata(session: "Session") -> dict:
+    """Parse the session metadata JSON string into a dict."""
+    import json
+    try:
+        return json.loads(session.metadata or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+async def update_session_metadata(token: str, updates: dict) -> dict:
+    """Merge *updates* into the session's metadata JSON and persist."""
+    import json
+    if not token:
+        return {}
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT metadata FROM sessions WHERE token=?", (token,),
+    ) as cur:
+        r = await cur.fetchone()
+    if not r:
+        return {}
+    try:
+        meta = json.loads(r["metadata"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    meta.update(updates)
+    dumped = json.dumps(meta)
+    await conn.execute(
+        "UPDATE sessions SET metadata=? WHERE token=?", (dumped, token),
+    )
+    await conn.commit()
+    return meta
+
+
 async def delete_session(token: str) -> None:
     if not token:
         return

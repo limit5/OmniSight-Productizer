@@ -142,11 +142,29 @@ _parallel_async_cond: asyncio.Condition | None = None
 class _ModeSlot:
     """Async context manager that acquires a slot under the *current* cap.
 
-    Unlike a fixed-cap Semaphore, this reads `_PARALLEL_BUDGET[get_mode()]`
-    at `__aenter__` time, so a mode switch immediately tightens or loosens
-    the limit for new acquirers. Existing holders retain their slot until
-    they release (preserves in-flight safety without killing them).
+    Unlike a fixed-cap Semaphore, this reads the cap at ``__aenter__``
+    time from the per-session mode (J5) or global fallback, so a mode
+    switch immediately tightens or loosens the limit for new acquirers.
+    Existing holders retain their slot until they release.
+
+    The budget pool (in-flight counter) is global — all sessions share
+    the same pool. The *cap* is per-session: a turbo session sees cap 8,
+    a supervised session sees cap 2.
     """
+
+    def __init__(self, session_token: str | None = None) -> None:
+        self._session_token = session_token
+
+    def _get_cap(self) -> int:
+        mode = get_session_mode(self._session_token) if self._session_token else get_mode()
+        return _PARALLEL_BUDGET[mode]
+
+    async def _get_cap_async(self) -> int:
+        if self._session_token:
+            mode = await get_session_mode_async(self._session_token)
+        else:
+            mode = get_mode()
+        return _PARALLEL_BUDGET[mode]
 
     async def __aenter__(self) -> "_ModeSlot":
         global _parallel_in_flight, _parallel_async_cond
@@ -154,7 +172,7 @@ class _ModeSlot:
             _parallel_async_cond = asyncio.Condition()
         while True:
             async with _parallel_async_cond:
-                cap = _PARALLEL_BUDGET[get_mode()]
+                cap = await self._get_cap_async()
                 with _parallel_lock:
                     if _parallel_in_flight < cap:
                         _parallel_in_flight += 1
@@ -169,12 +187,9 @@ class _ModeSlot:
             async with _parallel_async_cond:
                 _parallel_async_cond.notify_all()
 
-    # Back-compat methods so callers that did `.locked()` / `.acquire()` on
-    # the previous Semaphore interface keep working. `locked()` means
-    # "saturated", matching Semaphore semantics.
     def locked(self) -> bool:
         with _parallel_lock:
-            return _parallel_in_flight >= _PARALLEL_BUDGET[get_mode()]
+            return _parallel_in_flight >= self._get_cap()
 
     async def acquire(self) -> bool:
         await self.__aenter__()
@@ -189,7 +204,7 @@ class _ModeSlot:
 _mode_slot_singleton = _ModeSlot()
 
 
-def parallel_slot() -> _ModeSlot:
+def parallel_slot(session_token: str | None = None) -> _ModeSlot:
     """Acquire this in invoke/pipeline runs to respect mode parallelism.
 
     Use as::
@@ -197,9 +212,12 @@ def parallel_slot() -> _ModeSlot:
         async with decision_engine.parallel_slot():
             ...real work...
 
+    Pass *session_token* to use the per-session mode cap (J5).
     The cap is re-read on every acquire; switching mode mid-flight takes
     effect immediately for *new* acquirers without revoking existing ones.
     """
+    if session_token:
+        return _ModeSlot(session_token=session_token)
     return _mode_slot_singleton
 
 
@@ -215,12 +233,103 @@ def parallel_in_flight() -> int:
 
 
 def get_mode() -> OperationMode:
+    """Return the global (fallback) operation mode."""
     with _state_lock:
         return _current_mode
 
 
+def get_session_mode(session_token: str | None) -> OperationMode:
+    """Return the operation mode for a specific session.
+
+    Reads from sessions.metadata.operation_mode; falls back to the
+    global mode if the session has no per-session override.
+    """
+    if not session_token:
+        return get_mode()
+    try:
+        import asyncio
+        from backend import auth as _auth
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                sess = pool.submit(asyncio.run, _auth.get_session(session_token)).result()
+        else:
+            sess = loop.run_until_complete(_auth.get_session(session_token))
+        if sess:
+            meta = _auth.get_session_metadata(sess)
+            sm = meta.get("operation_mode")
+            if sm:
+                try:
+                    return OperationMode(sm)
+                except ValueError:
+                    pass
+    except Exception as exc:
+        logger.debug("get_session_mode failed: %s", exc)
+    return get_mode()
+
+
+async def get_session_mode_async(session_token: str | None) -> OperationMode:
+    """Async variant of get_session_mode."""
+    if not session_token:
+        return get_mode()
+    try:
+        from backend import auth as _auth
+        sess = await _auth.get_session(session_token)
+        if sess:
+            meta = _auth.get_session_metadata(sess)
+            sm = meta.get("operation_mode")
+            if sm:
+                try:
+                    return OperationMode(sm)
+                except ValueError:
+                    pass
+    except Exception as exc:
+        logger.debug("get_session_mode_async failed: %s", exc)
+    return get_mode()
+
+
+async def set_session_mode(session_token: str, mode: OperationMode | str) -> OperationMode:
+    """Set the operation mode for a specific session. Emits SSE `mode_changed`."""
+    if isinstance(mode, str):
+        try:
+            mode = OperationMode(mode)
+        except ValueError as exc:
+            raise ValueError(f"unknown mode: {mode}") from exc
+    from backend import auth as _auth
+    prev_mode = await get_session_mode_async(session_token)
+    await _auth.update_session_metadata(session_token, {"operation_mode": mode.value})
+    new_cap = _PARALLEL_BUDGET[mode]
+    cur_inflight = parallel_in_flight()
+    try:
+        from backend.events import bus as _bus
+        payload = {
+            "mode": mode.value,
+            "previous": prev_mode.value,
+            "parallel_cap": new_cap,
+            "in_flight": cur_inflight,
+            "over_cap": max(0, cur_inflight - new_cap),
+            "session_scoped": True,
+        }
+        _bus.publish("mode_changed", payload)
+    except Exception as _exc:
+        logger.warning("mode_changed publish failed: %s", _exc)
+    logger.info("OperationMode (session): %s → %s", prev_mode.value, mode.value)
+    try:
+        from backend import audit as _audit
+        _audit.log_sync(
+            action="mode_change", entity_kind="operation_mode",
+            entity_id=f"session:{session_token[:8]}",
+            before={"mode": prev_mode.value},
+            after={"mode": mode.value, "parallel_cap": new_cap},
+        )
+    except Exception as exc:
+        logger.debug("mode_change audit failed (non-fatal): %s", exc)
+    return mode
+
+
 def set_mode(mode: OperationMode | str) -> OperationMode:
-    """Switch the operation mode. Emits SSE `mode_changed`."""
+    """Switch the global (fallback) operation mode. Emits SSE `mode_changed`."""
     global _current_mode
     if isinstance(mode, str):
         try:
@@ -230,10 +339,6 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
     with _state_lock:
         prev = _current_mode
         _current_mode = mode
-    # N4: we no longer rebuild a Semaphore on mode change — _ModeSlot reads
-    # the cap at acquire time. But if the new cap is *lower* than the
-    # in-flight count, surface a warning via SSE so operators know some
-    # requests are still running above the nominal cap until they drain.
     cur_inflight = parallel_in_flight()
     new_cap = _PARALLEL_BUDGET[mode]
     try:
@@ -247,12 +352,8 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
         }
         _bus.publish("mode_changed", payload)
     except Exception as _exc:
-        # L#44: log at warning — mode changes are audit-relevant; silent
-        # swallow hid broken event bus wiring in the past.
         logger.warning("mode_changed publish failed: %s", _exc)
     logger.info("OperationMode: %s → %s", prev.value, mode.value)
-    # Phase 53: tamper-evident audit. Fire-and-forget; failures
-    # logged but do not block the mode change.
     try:
         from backend import audit as _audit
         _audit.log_sync(

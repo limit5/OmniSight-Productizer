@@ -81,36 +81,40 @@ class ModeRequest(BaseModel):
 
 
 @router.get("/operation-mode")
-async def get_mode() -> dict[str, Any]:
-    mode = de.get_mode()
+async def get_mode(request: Request) -> dict[str, Any]:
+    session_token = request.cookies.get(_au.SESSION_COOKIE) or None
+    mode = await de.get_session_mode_async(session_token)
     return {
         "mode": mode.value,
         "parallel_cap": de._PARALLEL_BUDGET[mode],
         "in_flight": de.parallel_in_flight(),
         "modes": [m.value for m in de.OperationMode],
+        "session_scoped": True,
     }
 
 
 @router.put("/operation-mode")
 async def put_mode(
     req: ModeRequest,
+    request: Request,
     _auth: None = Depends(_require_decision_token),
     _user=Depends(_au.require_operator),
 ) -> dict[str, Any]:
-    # Phase 54: turbo doubles the parallel cap → admin only. Other
-    # modes remain operator+. In `open` auth mode `_user` is the
-    # synthetic anonymous-admin so this is a no-op for legacy dev.
     if req.mode == "turbo" and not _au.role_at_least(_user.role, "admin"):
         return JSONResponse(status_code=403,
                             content={"detail": "turbo mode requires admin role"})
+    session_token = request.cookies.get(_au.SESSION_COOKIE) or None
     try:
-        mode = de.set_mode(req.mode)
+        if session_token:
+            mode = await de.set_session_mode(session_token, req.mode)
+        else:
+            mode = de.set_mode(req.mode)
     except ValueError as exc:
-        # L#45: 422 per REST/Pydantic convention (validation), not 400.
         return JSONResponse(status_code=422, content={"detail": str(exc)})
     return {
         "mode": mode.value,
         "parallel_cap": de._PARALLEL_BUDGET[mode],
+        "session_scoped": session_token is not None,
     }
 
 

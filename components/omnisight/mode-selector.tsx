@@ -167,12 +167,13 @@ export function ModeSelector({ compact = false }: Props) {
       className={`flex items-center gap-1.5 ${compact ? "text-[10px]" : "text-xs"}`}
       role="radiogroup"
       aria-labelledby="operation-mode-label"
-      title={error ?? MODE_META[mode].hint}
+      title={error ?? `${MODE_META[mode].hint}（此設定僅影響本裝置）`}
       data-tour="mode"
     >
       <span
         id="operation-mode-label"
         className="mode-label font-mono hidden md:inline"
+        title="此設定僅影響本裝置"
       >
         MODE
       </span>
