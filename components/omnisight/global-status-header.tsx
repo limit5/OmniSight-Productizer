@@ -6,6 +6,7 @@ import { LanguageToggle } from "./language-toggle"
 import { ModeSelector } from "./mode-selector"
 import { HelpMenu } from "./help-menu"
 import { ArchIndicator } from "./arch-indicator"
+import { SSESessionFilter } from "./sse-session-filter"
 
 interface StatusHeaderProps {
   finished: number
@@ -80,6 +81,7 @@ export function GlobalStatusHeader({
         {/* Mobile Right: Mode + Language + Time + Emergency */}
         <div className="flex items-center gap-2 shrink-0">
           <ModeSelector compact />
+          <SSESessionFilter compact />
           <ArchIndicator compact />
           <HelpMenu />
           <LanguageToggle compact />
@@ -189,6 +191,9 @@ export function GlobalStatusHeader({
           
           {/* Operation Mode */}
           <ModeSelector />
+
+          {/* SSE Session Filter */}
+          <SSESessionFilter />
 
           {/* Host vs Target arch indicator */}
           <ArchIndicator />

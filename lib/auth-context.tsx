@@ -18,6 +18,7 @@ import {
   whoami as apiWhoami,
   login as apiLogin,
   logout as apiLogout,
+  setCurrentSessionId,
   type AuthUser,
   type WhoamiResponse,
 } from "@/lib/api"
@@ -25,10 +26,9 @@ import {
 interface AuthContextValue {
   user: AuthUser | null
   authMode: WhoamiResponse["auth_mode"] | null
+  sessionId: string | null
   loading: boolean
   error: string | null
-  // Returns true on success, false on bad credentials (caller may show
-  // an inline message). Throws only on network / server errors.
   login: (email: string, password: string) => Promise<boolean>
   logout: () => Promise<void>
   refresh: () => Promise<void>
@@ -39,6 +39,7 @@ const Ctx = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [authMode, setAuthMode] = useState<WhoamiResponse["auth_mode"] | null>(null)
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -48,6 +49,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const info = await apiWhoami()
       setUser(info.user)
       setAuthMode(info.auth_mode)
+      setSessionId(info.session_id ?? null)
+      setCurrentSessionId(info.session_id ?? null)
       setError(null)
     } catch (exc) {
       // 401 in non-open mode is the "not logged in" path — surface
@@ -97,10 +100,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // want the local UI to clear so the user can re-login.
     }
     setUser(null)
+    setSessionId(null)
+    setCurrentSessionId(null)
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, loading, error, login, logout, refresh }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, login, logout, refresh }}>
       {children}
     </Ctx.Provider>
   )

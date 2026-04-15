@@ -85,12 +85,49 @@ const SSE_EVENT_TYPES = [
   "budget_strategy_changed",
 ] as const
 
+export type BroadcastScope = "session" | "user" | "global"
+export type SSEFilterMode = "this_session" | "all_sessions"
+
 type SSEListener = (ev: SSEEvent) => void
 type ErrorListener = (err: Event) => void
 
 let _sharedES: EventSource | null = null
 const _sseListeners = new Set<SSEListener>()
 const _sseErrorListeners = new Set<ErrorListener>()
+
+let _currentSessionId: string | null = null
+let _sseFilterMode: SSEFilterMode = "this_session"
+const _filterModeListeners = new Set<(mode: SSEFilterMode) => void>()
+
+export function setCurrentSessionId(sid: string | null): void {
+  _currentSessionId = sid
+}
+export function getCurrentSessionId(): string | null {
+  return _currentSessionId
+}
+export function setSSEFilterMode(mode: SSEFilterMode): void {
+  _sseFilterMode = mode
+  for (const l of Array.from(_filterModeListeners)) {
+    try { l(mode) } catch { /* swallow */ }
+  }
+}
+export function getSSEFilterMode(): SSEFilterMode {
+  return _sseFilterMode
+}
+export function onFilterModeChange(cb: (mode: SSEFilterMode) => void): () => void {
+  _filterModeListeners.add(cb)
+  return () => { _filterModeListeners.delete(cb) }
+}
+
+function _shouldDeliverEvent(data: Record<string, unknown>): boolean {
+  const scope = (data._broadcast_scope as BroadcastScope) || "global"
+  const eventSessionId = (data._session_id as string) || ""
+  if (scope === "global") return true
+  if (!_currentSessionId || !eventSessionId) return true
+  if (_sseFilterMode === "all_sessions") return true
+  if (scope === "user") return true
+  return eventSessionId === _currentSessionId
+}
 
 function _ensureSharedEventSource(): EventSource {
   if (_sharedES && _sharedES.readyState !== EventSource.CLOSED) {
@@ -104,8 +141,8 @@ function _ensureSharedEventSource(): EventSource {
     es.addEventListener(eventType, (e: MessageEvent) => {
       let data: unknown
       try { data = JSON.parse(e.data) } catch { return }
+      if (!_shouldDeliverEvent(data as Record<string, unknown>)) return
       const payload = { event: eventType, data } as SSEEvent
-      // Copy the set so a listener removing itself mid-dispatch is safe.
       for (const l of Array.from(_sseListeners)) {
         try { l(payload) } catch (err) { console.warn("[SSE listener error]", err) }
       }
@@ -780,6 +817,7 @@ export interface AuthUser {
 export interface WhoamiResponse {
   user: AuthUser
   auth_mode: "open" | "session" | "strict"
+  session_id: string | null
 }
 
 export async function whoami(): Promise<WhoamiResponse> {

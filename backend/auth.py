@@ -513,6 +513,13 @@ def _mask_token(token: str) -> str:
     return token[:4] + "***" + token[-4:]
 
 
+def session_id_from_token(token: str) -> str:
+    """Derive a stable, non-reversible session_id from the session token.
+    Used to tag SSE events so the frontend can filter by originating session."""
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 async def list_sessions(user_id: str) -> list[dict]:
     conn = await _conn()
     async with conn.execute(

@@ -239,10 +239,14 @@ async def logout(request: Request, response: Response) -> dict:
 
 
 @router.get("/auth/whoami")
-async def whoami(user: auth.User = Depends(auth.current_user)) -> dict:
+async def whoami(request: Request,
+                 user: auth.User = Depends(auth.current_user)) -> dict:
+    sess = getattr(getattr(request, "state", None), "session", None)
+    sid = auth.session_id_from_token(sess.token) if sess and sess.token else None
     return {
         "user": user.to_dict(),
         "auth_mode": auth.auth_mode(),
+        "session_id": sid,
     }
 
 
