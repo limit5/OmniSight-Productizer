@@ -1074,19 +1074,55 @@ ARTIFACT_TOOLS = [register_build_artifact]
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _default_platform_for_host() -> str:
+    """Decide the platform profile to use when the workspace has no
+    `.omnisight/platform` hint.
+
+    Pre-T1-A this was a hardcoded `"aarch64"` — meaning an AMD 9950X
+    dev box would cheerfully draft a DAG for arm64 cross-compile by
+    default, then fail at toolchain resolution. That was a leftover
+    from when the project's only supported target was a Rockchip
+    devkit.
+
+    Now: prefer the `host_native` profile (Phase 59) which already
+    ships — it uses the system gcc, no QEMU, no cross-compile dance.
+    Falls back to `aarch64` only if `host_native.yaml` is missing
+    from configs/platforms/ (someone pruned it), so legacy users
+    don't suddenly fail to resolve a platform.
+
+    This helper is the pre-Phase-64-C-LOCAL seam that unblocks the
+    host==target happy path end-to-end.
+    """
+    try:
+        from backend.sdk_provisioner import _platform_profile
+        profile = _platform_profile("host_native")
+        if profile is not None and profile.exists():
+            return "host_native"
+    except Exception:
+        pass
+    return "aarch64"
+
+
 @tool
 async def get_platform_config(platform: str = "") -> str:
     """Get build parameters (ARCH, CROSS_COMPILE, sysroot, cmake) for a platform.
 
     Args:
-        platform: Platform profile name (e.g. 'aarch64', 'vendor-example').
-                 If empty, reads from workspace .omnisight/platform hint.
+        platform: Platform profile name (e.g. 'aarch64', 'host_native',
+                  'vendor-example'). If empty, reads from the workspace's
+                  `.omnisight/platform` hint; if that file is missing, falls
+                  back to `_default_platform_for_host()` (Phase 59's
+                  `host_native` when available) — so software projects on
+                  an x86_64 dev box don't silently plan a cross-compile.
     """
 
     if not platform:
         ws = get_active_workspace()
         hint = ws / ".omnisight" / "platform"
-        platform = hint.read_text().strip() if hint.exists() else "aarch64"
+        platform = (
+            hint.read_text().strip() if hint.exists()
+            else _default_platform_for_host()
+        )
 
     # Validate platform name to prevent path traversal via attacker-controlled hint.
     from backend.sdk_provisioner import _validate_platform_name, _platform_profile
