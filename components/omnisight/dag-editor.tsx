@@ -524,6 +524,24 @@ export function DagEditor() {
   // exactly where they were before Continue.
   const jumpToSpec = () => {
     if (typeof window === "undefined") return
+    // Carry the failure context with the jump so SpecTemplateEditor
+    // can show "you came back because: …" in a banner. Otherwise
+    // the operator lands on the restored spec with no idea what
+    // changed since they last clicked Continue.
+    if (submitError) {
+      window.dispatchEvent(new CustomEvent("omnisight:spec-failure-context", {
+        detail: {
+          reason: submitError.slice(0, 300),
+          // Validator errors live on `validation`; fold them in too
+          // when present so the operator sees the rule names that
+          // tripped (tier_violation, mece, …).
+          rules: (validation?.errors ?? [])
+            .map((e) => e.rule)
+            .filter((v, i, arr) => arr.indexOf(v) === i),
+          target_platform: seedTargetPlatform,
+        },
+      }))
+    }
     window.dispatchEvent(
       new CustomEvent("omnisight:navigate", { detail: { panel: "intent" } }),
     )

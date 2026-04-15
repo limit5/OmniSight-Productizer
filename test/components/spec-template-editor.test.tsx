@@ -170,6 +170,39 @@ describe("SpecTemplateEditor", () => {
     expect(cached.framework.value).toBe("nextjs")
   })
 
+  it("renders a failure banner when DagEditor dispatches spec-failure-context", async () => {
+    render(<SpecTemplateEditor />)
+    window.dispatchEvent(new CustomEvent("omnisight:spec-failure-context", {
+      detail: {
+        reason: "API 422: tier_violation on task `flash`",
+        rules: ["tier_violation"],
+        target_platform: "host_native",
+      },
+    }))
+    const alert = await screen.findByRole("alert", { name: /DAG failure context/i })
+    expect(alert).toBeInTheDocument()
+    // tier_violation appears twice (in reason + in rules); use within().
+    expect(alert.textContent).toContain("tier_violation")
+    // tier_violation hint mentions target_arch as the likely fix.
+    expect(alert.textContent).toContain("target_arch")
+  })
+
+  it("clears the failure banner on the next prose edit", async () => {
+    const user = userEvent.setup()
+    render(<SpecTemplateEditor />)
+    window.dispatchEvent(new CustomEvent("omnisight:spec-failure-context", {
+      detail: { reason: "x", rules: [], target_platform: null },
+    }))
+    expect(await screen.findByRole("alert", { name: /DAG failure context/i }))
+      .toBeInTheDocument()
+    await user.type(
+      screen.getByRole("textbox", { name: /project prose/i }),
+      "any change",
+    )
+    expect(screen.queryByRole("alert", { name: /DAG failure context/i }))
+      .not.toBeInTheDocument()
+  })
+
   it("restores the cached spec on next mount (back-from-DAG path)", async () => {
     window.localStorage.setItem(
       "omnisight:intent:last_spec",

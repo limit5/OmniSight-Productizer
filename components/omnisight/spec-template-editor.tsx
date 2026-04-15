@@ -121,12 +121,22 @@ interface Props {
 // fresh handoff so stale state can't shadow new intent.
 const LS_LAST_SPEC = "omnisight:intent:last_spec"
 
+interface DagFailureContext {
+  reason: string
+  rules: string[]
+  target_platform: string | null
+}
+
 export function SpecTemplateEditor({ onSpecReady }: Props) {
   const [tab, setTab] = useState<"prose" | "form">("prose")
   const [text, setText] = useState("")
   const [spec, setSpec] = useState<ParsedSpec | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Phase 68 → DAG round-trip: failure context captured on a
+  // back-jump from DagEditor. Cleared once the operator types or
+  // picks anything (intent has changed, banner is stale).
+  const [failure, setFailure] = useState<DagFailureContext | null>(null)
   // Hydration flag: localStorage isn't accessible during SSR, so we
   // restore on mount and then never write before the first user-
   // initiated change. Avoids overwriting valid prose with empty
@@ -136,6 +146,23 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   // Cancel-previous AbortController keyed via a ref so a slow
   // parse can't clobber a newer one.
   const inflight = useRef<AbortController | null>(null)
+
+  // ─── DAG → Spec back-jump context ──────────────────────────────
+  // DagEditor dispatches `omnisight:spec-failure-context` right
+  // before navigating us, so we already have the reason in state
+  // when the panel renders. Listening on window means we're
+  // robust to event arrival order (event before mount or after).
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onFailure = (e: Event) => {
+      const detail = (e as CustomEvent<DagFailureContext>).detail
+      if (!detail) return
+      setFailure(detail)
+    }
+    window.addEventListener("omnisight:spec-failure-context", onFailure as EventListener)
+    return () =>
+      window.removeEventListener("omnisight:spec-failure-context", onFailure as EventListener)
+  }, [])
 
   // ─── Persistence: restore prior session on mount ───────────────
   useEffect(() => {
@@ -186,6 +213,8 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   }, [text, tab, runParse])
 
   const patchField = (name: FieldName, value: string) => {
+    // Operator changed something — failure context goes stale.
+    if (failure) setFailure(null)
     if (!spec) {
       // First form edit with no prose parse — synthesize an empty
       // spec so operator doesn't need to type prose first.
@@ -294,7 +323,10 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
           </div>
           <textarea
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value)
+              if (failure) setFailure(null)
+            }}
             placeholder="Describe the project, or click a template chip above to start."
             aria-label="Project prose"
             className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
@@ -339,6 +371,46 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         <div className="flex items-start gap-2 p-2 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)] font-mono text-xs">
           <AlertCircle size={12} className="shrink-0 mt-0.5" />
           <span>{error}</span>
+        </div>
+      )}
+
+      {/* DAG failure context banner — shown when the operator
+          back-jumped from a failed DagEditor submit. Auto-clears on
+          any edit (typing in prose or picking a form field), so an
+          intentional re-clarification doesn't leave stale yellow on
+          screen. Hint suggests which fields likely need attention
+          based on the rule names that fired. */}
+      {failure && (
+        <div
+          role="alert"
+          aria-label="DAG failure context"
+          className="flex items-start gap-2 p-2 rounded border border-[var(--fui-orange,#f59e0b)] bg-[var(--fui-orange,#f59e0b)]/10 text-xs font-mono"
+        >
+          <AlertCircle size={12} className="shrink-0 mt-0.5 text-[var(--fui-orange,#f59e0b)]" />
+          <div className="flex-1 min-w-0">
+            <div className="text-[var(--fui-orange,#f59e0b)] font-semibold mb-0.5">
+              Last DAG submit failed — re-clarify and try again
+            </div>
+            <div className="text-[var(--foreground)] break-words mb-1">
+              {failure.reason}
+            </div>
+            {failure.rules.length > 0 && (
+              <div className="text-[10px] text-[var(--muted-foreground)]">
+                Rules: {failure.rules.join(", ")}
+                {failure.rules.includes("tier_violation") && (
+                  <> · likely fix: check <strong>target_arch</strong> / <strong>hardware_required</strong> below</>
+                )}
+                {failure.rules.includes("io_entity") && (
+                  <> · likely fix: check <strong>persistence</strong> / <strong>deploy_target</strong> path shape</>
+                )}
+              </div>
+            )}
+            {failure.target_platform && (
+              <div className="text-[10px] text-[var(--muted-foreground)]">
+                Submitted with target_platform=<strong>{failure.target_platform}</strong>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
