@@ -375,7 +375,7 @@ class DebugFinding(BaseModel):
     id: str
     task_id: str
     agent_id: str
-    finding_type: str  # error_repeated, stuck_loop, timeout, loop_breaker_trigger
+    finding_type: str  # see backend.finding_types.FindingType enum
     severity: str = "info"  # info, warn, error, critical
     content: str
     context: dict = Field(default_factory=dict)

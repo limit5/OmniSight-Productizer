@@ -37,11 +37,11 @@ Legend:
 ## 🅑 Priority B — Small products
 
 ### B1. Cross-agent observation routing (#209)
-- [ ] Add enum constant `cross_agent/observation` in finding_type module
-- [ ] Add orchestrator routing rule: cross-agent finding → Decision Engine proposal
-- [ ] Add `blocking=true` flag on DE proposals to prioritize reporter-blocked cases
-- [ ] Unit test: agent A emits finding → DE proposal appears → agent B notified
-- [ ] Update `docs/sop/implement_phase_step.md` with cross-agent protocol
+- [x] Add enum constant `cross_agent/observation` in finding_type module
+- [x] Add orchestrator routing rule: cross-agent finding → Decision Engine proposal
+- [x] Add `blocking=true` flag on DE proposals to prioritize reporter-blocked cases
+- [x] Unit test: agent A emits finding → DE proposal appears → agent B notified
+- [x] Update `docs/sop/implement_phase_step.md` with cross-agent protocol
 
 ### B2. INGEST-01 `backend/repo_ingest.py` (#202)
 - [ ] Implement `clone_repo(url, shallow=True)` with git credential validation

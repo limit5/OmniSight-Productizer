@@ -7,6 +7,27 @@
 
 ---
 
+## B1 Cross-agent observation routing (#209) 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| FindingType enum | ✅ done | `backend/finding_types.py` — `cross_agent/observation` + 4 legacy values |
+| Orchestrator routing rule | ✅ done | `backend/cross_agent_router.py` + wired in `events.emit_debug_finding()` |
+| `blocking=true` flag | ✅ done | blocking findings get `risky` severity; non-blocking get `routine` |
+| Unit test (E2E chain) | ✅ done | `backend/tests/test_cross_agent_router.py` — 8 tests, all pass |
+| SOP update | ✅ done | Added Cross-Agent Observation Protocol section to `docs/sop/implement_phase_step.md` |
+
+### Architecture
+
+- `backend/finding_types.py`: `FindingType` enum centralising all finding type constants.
+- `backend/cross_agent_router.py`: `route_cross_agent_finding()` creates a DE proposal; emits `cross_agent_observation` SSE event to notify target agent.
+- `backend/events.py`: `emit_debug_finding()` now auto-routes `cross_agent/observation` findings to the DE.
+- Blocking observations (`context.blocking=True`) escalate to `risky` severity for operator prioritisation.
+
+---
+
 ## A2 L1-05 Prod Smoke Test 狀態更新（2026-04-15）
 
 **AI 可完成項目**：2/5 已完成（DAG 定義）。

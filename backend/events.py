@@ -285,6 +285,19 @@ def emit_debug_finding(
     except RuntimeError:
         pass  # No running loop — skip DB persistence (e.g., in sync tests)
 
+    # B1 #209: cross-agent observations route to the Decision Engine
+    if finding_type == "cross_agent/observation":
+        from backend.cross_agent_router import route_cross_agent_finding
+        route_cross_agent_finding(
+            finding_id=finding_id,
+            task_id=task_id,
+            reporter_agent_id=agent_id,
+            target_agent_id=(context or {}).get("target_agent_id"),
+            message=message,
+            context=context,
+            blocking=bool((context or {}).get("blocking")),
+        )
+
     level_label = "error" if severity in ("error", "critical") else "warn" if severity == "warn" else "info"
     _log(f"[DEBUG] {finding_type.upper()} ({agent_id}): {message}", level=level_label)
 

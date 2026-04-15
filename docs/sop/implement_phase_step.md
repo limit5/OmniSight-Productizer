@@ -56,6 +56,36 @@
 - 執行git commit。
 - 列出該階段的執行總結。
 
+### Cross-Agent Observation Protocol (B1 #209)
+
+When an agent discovers information relevant to another agent:
+
+1. The reporter agent calls `emit_debug_finding()` with `finding_type="cross_agent/observation"`.
+2. The `context` dict must include `target_agent_id` (the intended recipient).
+3. Set `context.blocking = true` if the reporter is blocked until the target acts.
+4. The event bus automatically routes the finding to the Decision Engine as a proposal.
+5. Blocking observations get `risky` severity (operator attention); non-blocking get `routine`.
+6. The DE proposal offers two options: `relay` (forward to target) or `dismiss`.
+7. On relay, an SSE `cross_agent_observation` event notifies the target agent's UI.
+
+Example:
+```python
+from backend.events import emit_debug_finding
+from backend.finding_types import FindingType
+
+emit_debug_finding(
+    task_id="task-42",
+    agent_id="firmware-alpha",
+    finding_type=FindingType.cross_agent_observation.value,
+    severity="warn",
+    message="ISP register map changed — SDK headers need update",
+    context={
+        "target_agent_id": "software-beta",
+        "blocking": True,
+    },
+)
+```
+
 ### Step 7: 實際啟動
 - 啟動程式展示結果。
 - 如果出現錯誤時，進行錯誤評估，然後修正。
