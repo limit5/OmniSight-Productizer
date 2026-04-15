@@ -212,13 +212,13 @@ Legend:
 - [x] Threshold gate: fails build if P99 > declared budget
 
 ### C13. L4-CORE-13 Connectivity sub-skill library (#227)
-- [ ] BLE sub-skill (GATT + pairing + OTA profile)
-- [ ] WiFi sub-skill (STA/AP + provisioning + enterprise auth)
-- [ ] 5G sub-skill (modem AT / QMI + dual-SIM)
-- [ ] Ethernet sub-skill (basic + VLAN + PoE detection)
-- [ ] CAN sub-skill (SocketCAN + diagnostics)
-- [ ] Modbus / OPC-UA sub-skills (industrial)
-- [ ] Registry + composition: skill packs opt-in per sub-skill
+- [x] BLE sub-skill (GATT + pairing + OTA profile)
+- [x] WiFi sub-skill (STA/AP + provisioning + enterprise auth)
+- [x] 5G sub-skill (modem AT / QMI + dual-SIM)
+- [x] Ethernet sub-skill (basic + VLAN + PoE detection)
+- [x] CAN sub-skill (SocketCAN + diagnostics)
+- [x] Modbus / OPC-UA sub-skills (industrial)
+- [x] Registry + composition: skill packs opt-in per sub-skill
 
 ### C14. L4-CORE-14 Sensor fusion library (#228)
 - [ ] IMU drivers (MPU6050 / LSM6DS3 / BMI270)

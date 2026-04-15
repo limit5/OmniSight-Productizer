@@ -1,0 +1,158 @@
+schema_version: 1
+description: "Connectivity sub-skill integration test definitions"
+
+test_suites:
+  - suite_id: conn-ble-integration
+    protocol: ble
+    description: "BLE stack integration tests"
+    tests:
+      - test_id: ble-gatt-service-register
+        description: "Register GATT service table and verify UUID/permission"
+        category: functional
+        timeout_s: 30
+      - test_id: ble-pairing-just-works
+        description: "Pair with Just Works method"
+        category: security
+        timeout_s: 60
+      - test_id: ble-pairing-lesc
+        description: "Pair with LE Secure Connections"
+        category: security
+        timeout_s: 60
+      - test_id: ble-ota-dfu-transfer
+        description: "Transfer firmware image via OTA DFU"
+        category: ota
+        timeout_s: 300
+      - test_id: ble-notification-throughput
+        description: "Measure GATT notification throughput"
+        category: performance
+        timeout_s: 120
+
+  - suite_id: conn-wifi-integration
+    protocol: wifi
+    description: "WiFi stack integration tests"
+    tests:
+      - test_id: wifi-sta-connect-wpa2
+        description: "Connect STA to WPA2 AP"
+        category: functional
+        timeout_s: 30
+      - test_id: wifi-sta-connect-wpa3
+        description: "Connect STA to WPA3-SAE AP"
+        category: security
+        timeout_s: 30
+      - test_id: wifi-ap-start-accept
+        description: "Start AP, accept client connection"
+        category: functional
+        timeout_s: 30
+      - test_id: wifi-provision-flow
+        description: "Complete SoftAP provisioning flow"
+        category: provisioning
+        timeout_s: 120
+      - test_id: wifi-enterprise-eaptls
+        description: "EAP-TLS enterprise authentication"
+        category: security
+        timeout_s: 60
+
+  - suite_id: conn-5g-integration
+    protocol: fiveg
+    description: "5G/LTE modem integration tests"
+    tests:
+      - test_id: 5g-modem-init
+        description: "Initialize modem via AT/QMI"
+        category: functional
+        timeout_s: 60
+      - test_id: 5g-sim-detect
+        description: "Detect SIM card(s)"
+        category: functional
+        timeout_s: 30
+      - test_id: 5g-data-connect
+        description: "Establish data connection"
+        category: functional
+        timeout_s: 120
+      - test_id: 5g-dual-sim-failover
+        description: "Automatic SIM failover"
+        category: resilience
+        timeout_s: 180
+
+  - suite_id: conn-ethernet-integration
+    protocol: ethernet
+    description: "Ethernet integration tests"
+    tests:
+      - test_id: eth-link-up
+        description: "Verify link up and auto-negotiation"
+        category: functional
+        timeout_s: 15
+      - test_id: eth-vlan-create
+        description: "Create VLAN interface"
+        category: functional
+        timeout_s: 15
+      - test_id: eth-vlan-isolation
+        description: "Verify VLAN traffic isolation"
+        category: functional
+        timeout_s: 30
+      - test_id: eth-poe-detect
+        description: "Detect PoE source and power class"
+        category: functional
+        timeout_s: 15
+
+  - suite_id: conn-can-integration
+    protocol: can
+    description: "CAN bus integration tests"
+    tests:
+      - test_id: can-link-up
+        description: "Bring up SocketCAN interface"
+        category: functional
+        timeout_s: 10
+      - test_id: can-send-recv
+        description: "Send/receive standard CAN frames"
+        category: functional
+        timeout_s: 15
+      - test_id: can-fd-frames
+        description: "Send/receive CAN FD frames"
+        category: functional
+        timeout_s: 15
+      - test_id: can-uds-session
+        description: "UDS diagnostic session"
+        category: diagnostics
+        timeout_s: 30
+
+  - suite_id: conn-modbus-integration
+    protocol: modbus
+    description: "Modbus integration tests"
+    tests:
+      - test_id: modbus-rtu-read
+        description: "RTU master read holding registers"
+        category: functional
+        timeout_s: 15
+      - test_id: modbus-rtu-write
+        description: "RTU master write register"
+        category: functional
+        timeout_s: 15
+      - test_id: modbus-tcp-client
+        description: "TCP client read/write"
+        category: functional
+        timeout_s: 15
+      - test_id: modbus-exception
+        description: "Exception code handling"
+        category: resilience
+        timeout_s: 15
+
+  - suite_id: conn-opcua-integration
+    protocol: opcua
+    description: "OPC UA integration tests"
+    tests:
+      - test_id: opcua-server-start
+        description: "Start OPC UA server"
+        category: functional
+        timeout_s: 30
+      - test_id: opcua-client-browse
+        description: "Client browse address space"
+        category: functional
+        timeout_s: 15
+      - test_id: opcua-security-sign-encrypt
+        description: "SignAndEncrypt security policy"
+        category: security
+        timeout_s: 30
+      - test_id: opcua-subscription
+        description: "Data change subscription"
+        category: functional
+        timeout_s: 30

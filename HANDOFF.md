@@ -7,6 +7,65 @@
 
 ---
 
+## C13 L4-CORE-13 Connectivity sub-skill library 狀態更新（2026-04-15）
+
+**全部 7/7 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| BLE sub-skill (GATT + pairing + OTA profile) | ✅ | `configs/connectivity_standards.yaml` — BLE protocol def with 6 test recipes (GATT service, legacy/LESC pairing, OTA DFU, advertising, throughput). Scaffold: `ble_gatt_server.c`. Compatible SoCs: nRF52840, nRF5340, ESP32, ESP32-S3, ESP32-C3, CC2652, STM32WB55 |
+| WiFi sub-skill (STA/AP + provisioning + enterprise auth) | ✅ | 7 test recipes (STA connect, AP start, SoftAP provisioning, WPA3-SAE, 802.1X enterprise, throughput, FT roaming). Scaffold: `wifi_sta_ap.c`. Compatible SoCs: ESP32 family, RK3566, Hi3516, MT7621, QCA9531 |
+| 5G sub-skill (modem AT / QMI + dual-SIM) | ✅ | 6 test recipes (modem init, SIM detect, data connect, signal quality, dual-SIM failover, band select). Scaffold: `modem_at_qmi.c`. Compatible modems: Quectel RM500Q/EG25, SimCom SIM8200, Sierra EM9191, Fibocom FM160 |
+| Ethernet sub-skill (basic + VLAN + PoE detection) | ✅ | 6 test recipes (link up, VLAN tag, VLAN trunk, PoE detect, throughput, jumbo frames). Scaffold: `ethernet_vlan_poe.c`. Universal SoC compatibility |
+| CAN sub-skill (SocketCAN + diagnostics) | ✅ | 6 test recipes (link up, send/recv, CAN FD, ISO-TP, UDS diagnostics, error/bus-off recovery). Scaffold: `can_socketcan.c`. Compatible SoCs: STM32F4/H7, NXP S32K, TI AM62, RK3568 |
+| Modbus / OPC-UA sub-skills (industrial) | ✅ | Modbus: 5 recipes (RTU master/slave, TCP client/server, exception handling). Scaffold: `modbus_rtu_tcp.py`. OPC-UA: 5 recipes (server start, client connect, security policy, subscription, method call). Scaffold: `opcua_server.py`. Universal SoC compatibility |
+| Registry + composition: skill packs opt-in per sub-skill | ✅ | 7 sub-skills registered with typical_products mapping. 4 composition rules (Industrial gateway, Automotive ECU, IoT gateway, Smart camera). `resolve_composition()` matches product type → required/optional sub-skills. SoC compatibility checker with case-insensitive matching |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/connectivity_standards.yaml` | 新建——7 protocol definitions (BLE/WiFi/5G/Ethernet/CAN/Modbus/OPC-UA) + 41 test recipes + 7 sub-skills + 4 composition rules + 20 artifact definitions |
+| `backend/connectivity.py` | 新建——Connectivity sub-skill library：enums + data models + config loader + protocol queries + test stub runners + sub-skill registry + composition resolver + cert artifact generator + checklist validation + SoC compatibility + doc_suite_generator integration + audit integration |
+| `backend/routers/connectivity.py` | 新建——REST endpoints: GET /connectivity/protocols, /protocols/{id}, /protocols/{id}/recipes, /protocols/{id}/features, /artifacts, /sub-skills, /sub-skills/{id}, /composition/rules. POST /connectivity/test, /checklist, /artifacts/generate, /composition/resolve, /soc-compat |
+| `backend/main.py` | 擴充——註冊 connectivity router |
+| `backend/doc_suite_generator.py` | 擴充——新增 `_try_connectivity_certs()` + 整合至 `collect_compliance_certs()` |
+| `configs/skills/connectivity/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 dependency) |
+| `configs/skills/connectivity/tasks.yaml` | 新建——20 DAG tasks covering all 7 sub-skills + integration tests |
+| `configs/skills/connectivity/scaffolds/` | 新建——7 scaffold files (ble_gatt_server.c, wifi_sta_ap.c, modem_at_qmi.c, ethernet_vlan_poe.c, can_socketcan.c, modbus_rtu_tcp.py, opcua_server.py) |
+| `configs/skills/connectivity/tests/test_definitions.yaml` | 新建——7 test suites, 33 integration test definitions |
+| `configs/skills/connectivity/hil/connectivity_hil_recipes.yaml` | 新建——7 HIL recipes (BLE pairing, WiFi STA, 5G data, CAN loopback, Ethernet VLAN, Modbus RTU, OPC-UA server) |
+| `configs/skills/connectivity/docs/connectivity_integration_guide.md.j2` | 新建——Jinja2 doc template for per-product connectivity integration guide |
+| `backend/tests/test_connectivity.py` | 新建，138 項測試 |
+| `TODO.md` | 更新——C13 全部標記完成 |
+
+### 架構說明
+
+- **ConnectivityProtocol enum** — ble / wifi / fiveg / ethernet / can / modbus / opcua
+- **TestCategory enum** — functional / security / performance / provisioning / monitoring / resilience / diagnostics / ota
+- **TestStatus enum** — passed / failed / pending / skipped / error
+- **TransportType enum** — wireless / wired / mixed
+- **ProtocolLayer enum** — link / network / application
+- **ProtocolDef** — protocol_id / name / standard / authority / description / transport / layer / features / test_recipes / required_artifacts / compatible_socs
+- **ConnTestRecipe** — recipe_id / name / category / description / tools / reference
+- **ConnTestResult** — recipe_id / protocol / status / target_device / timestamp / measurements / raw_log_path / message
+- **SubSkillDef** — sub_skill_id / skill_id / protocols / typical_products
+- **CompositionRule** — name / required / optional
+- **CompositionResult** — product_type / matched_rule / required_sub_skills / optional_sub_skills / all_protocols
+- **ConnChecklist** — protocol / protocol_name / items (total / passed / pending / failed / complete)
+- **ConnCertArtifact** — artifact_id / name / protocol / status / file_path / description
+- `run_connectivity_test()` — stub runner returning pending; dispatches to binary when available
+- `resolve_composition()` — product type → required/optional sub-skills via composition rules or typical_products fallback
+- `check_soc_compatibility()` — SoC → protocol support matrix (empty compatible_socs = universal)
+- `validate_connectivity_checklist()` — spec → per-protocol checklists with test + artifact items
+
+### 下一步
+
+- C14 (Sensor fusion library): IMU/GPS/barometer drivers + EKF + calibration
+- D-level skill packs can now opt-in to connectivity sub-skills via `depends_on_core: ["CORE-13"]`
+
+---
+
 ## C12 L4-CORE-12 Real-time / determinism track 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

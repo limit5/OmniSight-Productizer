@@ -1,0 +1,129 @@
+# {{ product_name }} — Connectivity Integration Guide
+
+> Generated: {{ generated_at }}
+> Protocols: {{ protocols | join(', ') }}
+> Firmware Version: {{ firmware_version | default('TBD') }}
+
+---
+
+## 1. Overview
+
+This guide covers the connectivity protocols integrated into **{{ product_name }}**.
+
+| Protocol | Standard | Transport | Status |
+|----------|----------|-----------|--------|
+{% for p in protocol_details %}
+| {{ p.name }} | {{ p.standard }} | {{ p.transport }} | {{ p.status | default('Configured') }} |
+{% endfor %}
+
+---
+
+## 2. BLE Configuration
+{% if 'ble' in protocols %}
+
+### GATT Service Table
+
+| Service UUID | Characteristic UUID | Properties | Description |
+|-------------|-------------------|------------|-------------|
+{% for svc in ble_services | default([]) %}
+| {{ svc.uuid }} | {{ svc.char_uuid }} | {{ svc.properties }} | {{ svc.description }} |
+{% endfor %}
+
+### Pairing Configuration
+
+- **Method**: {{ ble_pairing_method | default('LESC Numeric Comparison') }}
+- **Bonding**: {{ ble_bonding | default('Enabled') }}
+- **MITM protection**: {{ ble_mitm | default('Required') }}
+
+### OTA DFU
+
+- **Profile**: {{ ble_ota_profile | default('MCUboot SMP') }}
+- **Max image size**: {{ ble_ota_max_size | default('512 KB') }}
+{% else %}
+BLE not enabled for this product.
+{% endif %}
+
+---
+
+## 3. WiFi Configuration
+{% if 'wifi' in protocols %}
+
+- **Modes**: {{ wifi_modes | default('STA + SoftAP') }}
+- **Security**: {{ wifi_security | default('WPA2/WPA3-Personal') }}
+- **Provisioning**: {{ wifi_provisioning | default('SoftAP captive portal') }}
+{% if wifi_enterprise %}
+- **Enterprise**: EAP-TLS with {{ wifi_enterprise_ca | default('custom CA') }}
+{% endif %}
+{% else %}
+WiFi not enabled for this product.
+{% endif %}
+
+---
+
+## 4. Cellular (5G/LTE)
+{% if 'fiveg' in protocols %}
+
+- **Modem**: {{ modem_model | default('TBD') }}
+- **Interface**: {{ modem_interface | default('AT + QMI') }}
+- **Dual-SIM**: {{ dual_sim | default('Yes') }}
+- **Supported bands**: {{ supported_bands | default('See modem datasheet') }}
+{% else %}
+Cellular not enabled for this product.
+{% endif %}
+
+---
+
+## 5. Ethernet
+{% if 'ethernet' in protocols %}
+
+- **Speed**: {{ eth_speed | default('10/100/1000 Mbps auto-negotiation') }}
+- **VLAN**: {{ eth_vlan | default('802.1Q supported') }}
+- **PoE**: {{ eth_poe | default('802.3af/at PD') }}
+{% else %}
+Ethernet not enabled for this product.
+{% endif %}
+
+---
+
+## 6. CAN Bus
+{% if 'can' in protocols %}
+
+- **Standard**: {{ can_standard | default('CAN 2.0B + CAN FD') }}
+- **Bitrate**: {{ can_bitrate | default('500 kbps (CAN 2.0B) / 2 Mbps (CAN FD)') }}
+- **Diagnostics**: {{ can_diagnostics | default('UDS (ISO 14229)') }}
+{% else %}
+CAN not enabled for this product.
+{% endif %}
+
+---
+
+## 7. Industrial Protocols
+{% if 'modbus' in protocols or 'opcua' in protocols %}
+
+{% if 'modbus' in protocols %}
+### Modbus
+
+- **Modes**: {{ modbus_modes | default('RTU master/slave + TCP client/server') }}
+- **Register map**: See `modbus_register_map.yaml`
+{% endif %}
+
+{% if 'opcua' in protocols %}
+### OPC UA
+
+- **Endpoint**: {{ opcua_endpoint | default('opc.tcp://0.0.0.0:4840') }}
+- **Security**: {{ opcua_security | default('Basic256Sha256 SignAndEncrypt') }}
+- **Namespace**: {{ opcua_namespace | default('urn:omnisight:opcua') }}
+{% endif %}
+{% else %}
+Industrial protocols not enabled for this product.
+{% endif %}
+
+---
+
+## 8. Certification Status
+
+| Standard | Status | Cert ID |
+|----------|--------|---------|
+{% for cert in certifications | default([]) %}
+| {{ cert.standard }} | {{ cert.status }} | {{ cert.cert_id | default('—') }} |
+{% endfor %}

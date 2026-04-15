@@ -1,0 +1,571 @@
+schema_version: 1
+
+protocols:
+  ble:
+    name: "Bluetooth Low Energy"
+    standard: "Bluetooth 5.3 Core Specification"
+    authority: "Bluetooth SIG"
+    description: "BLE GATT profiles, pairing, bonding, and OTA DFU"
+    transport: "wireless"
+    layer: "link"
+    features:
+      - gatt_server
+      - gatt_client
+      - pairing_legacy
+      - pairing_lesc
+      - bonding
+      - ota_dfu
+      - advertising
+      - scanning
+      - connection
+      - notification
+      - indication
+    test_recipes:
+      - id: "BLE-GATT-SERVICE"
+        name: "GATT service registration"
+        category: "functional"
+        description: "Verify GATT service table, characteristic UUIDs, and permissions"
+        tools: ["btmgmt", "gatttool", "bluetoothctl"]
+        reference: "Bluetooth Core Spec Vol 3 Part G"
+      - id: "BLE-PAIRING-LEGACY"
+        name: "Legacy pairing (Just Works / Passkey)"
+        category: "security"
+        description: "Verify legacy pairing with Just Works and Passkey Entry methods"
+        tools: ["btmgmt", "bluetoothctl"]
+        reference: "Bluetooth Core Spec Vol 3 Part H"
+      - id: "BLE-PAIRING-LESC"
+        name: "LE Secure Connections pairing"
+        category: "security"
+        description: "Verify LESC pairing with Numeric Comparison and Passkey Entry"
+        tools: ["btmgmt", "bluetoothctl"]
+        reference: "Bluetooth Core Spec Vol 3 Part H Section 2.3.5"
+      - id: "BLE-OTA-DFU"
+        name: "OTA Device Firmware Update"
+        category: "ota"
+        description: "Verify OTA DFU profile: image transfer, validation, apply, rollback"
+        tools: ["nrfutil", "mcumgr"]
+        reference: "SIG DFU Profile / MCUboot"
+      - id: "BLE-ADV-SCAN"
+        name: "Advertising and scanning"
+        category: "functional"
+        description: "Verify advertising PDU, scan response, and discovery"
+        tools: ["hcitool", "btmon"]
+        reference: "Bluetooth Core Spec Vol 6 Part B"
+      - id: "BLE-THROUGHPUT"
+        name: "Data throughput"
+        category: "performance"
+        description: "Measure GATT notification throughput with various MTU sizes"
+        tools: ["gatttool", "btmon"]
+        reference: "Bluetooth Core Spec Vol 3 Part F"
+    required_artifacts:
+      - ble_gatt_table
+      - ble_pairing_report
+      - ble_ota_test_report
+    compatible_socs:
+      - nrf52840
+      - nrf5340
+      - esp32
+      - esp32s3
+      - esp32c3
+      - cc2652
+      - stm32wb55
+
+  wifi:
+    name: "WiFi (802.11)"
+    standard: "IEEE 802.11ax (WiFi 6)"
+    authority: "Wi-Fi Alliance"
+    description: "STA/AP modes, provisioning, WPA3, and enterprise authentication"
+    transport: "wireless"
+    layer: "link"
+    features:
+      - sta_mode
+      - ap_mode
+      - softap_provisioning
+      - wpa2_personal
+      - wpa3_personal
+      - wpa2_enterprise
+      - wps
+      - wifi_direct
+      - roaming
+      - power_save
+    test_recipes:
+      - id: "WIFI-STA-CONNECT"
+        name: "Station mode connection"
+        category: "functional"
+        description: "Connect to AP with WPA2/WPA3, verify DHCP, test connectivity"
+        tools: ["wpa_supplicant", "iw", "dhclient"]
+        reference: "IEEE 802.11-2020 Section 4.5"
+      - id: "WIFI-AP-START"
+        name: "AP mode startup"
+        category: "functional"
+        description: "Start SoftAP, verify beacon, accept client connection"
+        tools: ["hostapd", "iw", "dnsmasq"]
+        reference: "IEEE 802.11-2020 Section 4.3"
+      - id: "WIFI-PROVISION"
+        name: "SoftAP provisioning flow"
+        category: "provisioning"
+        description: "Full provisioning: SoftAP → captive portal → credential exchange → STA connect"
+        tools: ["hostapd", "wpa_supplicant", "curl"]
+        reference: "ESP-IDF Provisioning / Custom"
+      - id: "WIFI-WPA3-SAE"
+        name: "WPA3-SAE authentication"
+        category: "security"
+        description: "Verify SAE handshake, PMF, and transition mode"
+        tools: ["wpa_supplicant", "hostapd"]
+        reference: "IEEE 802.11-2020 Section 12.4"
+      - id: "WIFI-ENTERPRISE"
+        name: "802.1X enterprise authentication"
+        category: "security"
+        description: "EAP-TLS / EAP-PEAP / EAP-TTLS against RADIUS server"
+        tools: ["wpa_supplicant", "freeradius"]
+        reference: "IEEE 802.1X-2020"
+      - id: "WIFI-THROUGHPUT"
+        name: "Throughput measurement"
+        category: "performance"
+        description: "iperf3 TCP/UDP throughput at various MCS rates"
+        tools: ["iperf3", "iw"]
+        reference: "Wi-Fi Alliance Test Plan"
+      - id: "WIFI-ROAMING"
+        name: "Fast BSS transition"
+        category: "functional"
+        description: "802.11r FT roaming between APs with minimal packet loss"
+        tools: ["wpa_supplicant", "iw"]
+        reference: "IEEE 802.11r-2008"
+    required_artifacts:
+      - wifi_config_report
+      - wifi_security_report
+      - wifi_throughput_report
+    compatible_socs:
+      - esp32
+      - esp32s3
+      - esp32c3
+      - rk3566
+      - hi3516
+      - mt7621
+      - qca9531
+
+  fiveg:
+    name: "5G / LTE"
+    standard: "3GPP Release 16+"
+    authority: "3GPP"
+    description: "Cellular modem control via AT / QMI, dual-SIM management"
+    transport: "wireless"
+    layer: "network"
+    features:
+      - at_commands
+      - qmi_protocol
+      - dual_sim
+      - sim_hot_swap
+      - apn_config
+      - data_connection
+      - signal_quality
+      - band_selection
+      - carrier_aggregation
+      - volte
+    test_recipes:
+      - id: "5G-MODEM-INIT"
+        name: "Modem initialization"
+        category: "functional"
+        description: "Power-on modem, detect via AT/QMI, verify firmware version"
+        tools: ["mmcli", "qmicli", "socat"]
+        reference: "3GPP TS 27.007"
+      - id: "5G-SIM-DETECT"
+        name: "SIM detection and selection"
+        category: "functional"
+        description: "Detect SIM(s), read IMSI/ICCID, switch active SIM"
+        tools: ["mmcli", "qmicli"]
+        reference: "3GPP TS 27.007 AT+CPIN / AT+CSIM"
+      - id: "5G-DATA-CONNECT"
+        name: "Data connection setup"
+        category: "functional"
+        description: "Configure APN, establish PDP/PDN context, verify IP assignment"
+        tools: ["mmcli", "qmicli", "ip"]
+        reference: "3GPP TS 27.007 AT+CGDCONT"
+      - id: "5G-SIGNAL-QUALITY"
+        name: "Signal quality monitoring"
+        category: "monitoring"
+        description: "Read RSSI/RSRP/RSRQ/SINR, verify thresholds"
+        tools: ["mmcli", "qmicli"]
+        reference: "3GPP TS 27.007 AT+CSQ / AT+CESQ"
+      - id: "5G-DUAL-SIM"
+        name: "Dual-SIM failover"
+        category: "resilience"
+        description: "Primary SIM failure → automatic fallback to secondary SIM"
+        tools: ["mmcli", "qmicli"]
+        reference: "3GPP TS 27.007"
+      - id: "5G-BAND-SELECT"
+        name: "Band lock and selection"
+        category: "functional"
+        description: "Lock to specific bands, verify attachment"
+        tools: ["mmcli", "qmicli"]
+        reference: "3GPP TS 27.007 AT+QCFG"
+    required_artifacts:
+      - modem_init_report
+      - signal_quality_report
+      - data_connection_report
+    compatible_socs:
+      - quectel_rm500q
+      - quectel_eg25
+      - simcom_sim8200
+      - sierra_em9191
+      - fibocom_fm160
+
+  ethernet:
+    name: "Ethernet"
+    standard: "IEEE 802.3"
+    authority: "IEEE"
+    description: "Wired Ethernet with VLAN tagging and PoE detection"
+    transport: "wired"
+    layer: "link"
+    features:
+      - basic_link
+      - auto_negotiation
+      - vlan_tagging
+      - vlan_trunk
+      - poe_detection
+      - poe_classification
+      - jumbo_frames
+      - link_aggregation
+      - wake_on_lan
+    test_recipes:
+      - id: "ETH-LINK-UP"
+        name: "Link establishment"
+        category: "functional"
+        description: "Verify link up, auto-negotiation speed/duplex, DHCP"
+        tools: ["ethtool", "ip", "dhclient"]
+        reference: "IEEE 802.3-2022 Section 28"
+      - id: "ETH-VLAN-TAG"
+        name: "VLAN tagging (802.1Q)"
+        category: "functional"
+        description: "Create VLAN interface, tag/untag frames, verify isolation"
+        tools: ["ip", "bridge", "vconfig"]
+        reference: "IEEE 802.1Q-2022"
+      - id: "ETH-VLAN-TRUNK"
+        name: "VLAN trunk mode"
+        category: "functional"
+        description: "Configure trunk port carrying multiple VLANs"
+        tools: ["ip", "bridge"]
+        reference: "IEEE 802.1Q-2022"
+      - id: "ETH-POE-DETECT"
+        name: "PoE detection and classification"
+        category: "functional"
+        description: "Detect PoE source, read power class, verify power budget"
+        tools: ["ethtool", "sysfs"]
+        reference: "IEEE 802.3af/at/bt"
+      - id: "ETH-THROUGHPUT"
+        name: "Throughput measurement"
+        category: "performance"
+        description: "iperf3 TCP/UDP at line rate (100M/1G/2.5G)"
+        tools: ["iperf3", "ethtool"]
+        reference: "IEEE 802.3-2022"
+      - id: "ETH-JUMBO"
+        name: "Jumbo frame support"
+        category: "functional"
+        description: "Set MTU 9000, verify end-to-end jumbo frame delivery"
+        tools: ["ip", "ping"]
+        reference: "IEEE 802.3-2022"
+    required_artifacts:
+      - ethernet_link_report
+      - vlan_config_report
+      - poe_status_report
+    compatible_socs: []
+
+  can:
+    name: "CAN Bus"
+    standard: "ISO 11898 / CAN 2.0B / CAN FD"
+    authority: "ISO / CiA"
+    description: "SocketCAN interface, diagnostics (UDS/OBD-II)"
+    transport: "wired"
+    layer: "link"
+    features:
+      - can_20b
+      - can_fd
+      - socketcan
+      - raw_frames
+      - isotp
+      - uds_diagnostics
+      - obd2
+      - can_filter
+      - bus_off_recovery
+      - error_handling
+    test_recipes:
+      - id: "CAN-LINK-UP"
+        name: "CAN interface setup"
+        category: "functional"
+        description: "Bring up SocketCAN interface, set bitrate, verify bus state"
+        tools: ["ip", "cansend", "candump"]
+        reference: "ISO 11898-1:2015"
+      - id: "CAN-SEND-RECV"
+        name: "Frame send/receive"
+        category: "functional"
+        description: "Send and receive CAN 2.0B standard/extended frames"
+        tools: ["cansend", "candump", "cangen"]
+        reference: "ISO 11898-1:2015"
+      - id: "CAN-FD"
+        name: "CAN FD frames"
+        category: "functional"
+        description: "Send/receive CAN FD frames with >8 byte payload"
+        tools: ["cansend", "candump"]
+        reference: "ISO 11898-1:2015 (CAN FD)"
+      - id: "CAN-ISOTP"
+        name: "ISO-TP transport"
+        category: "functional"
+        description: "Multi-frame ISO-TP segmented transfer"
+        tools: ["isotpsend", "isotprecv"]
+        reference: "ISO 15765-2"
+      - id: "CAN-UDS"
+        name: "UDS diagnostics"
+        category: "diagnostics"
+        description: "DiagnosticSessionControl, ReadDataByIdentifier, routine control"
+        tools: ["isotpsend", "isotprecv", "caringcaribou"]
+        reference: "ISO 14229-1"
+      - id: "CAN-ERROR"
+        name: "Error handling and bus-off recovery"
+        category: "resilience"
+        description: "Inject errors, verify error counters, bus-off → recovery"
+        tools: ["cansend", "candump", "ip"]
+        reference: "ISO 11898-1:2015 Section 12"
+    required_artifacts:
+      - can_bus_report
+      - can_diagnostics_report
+    compatible_socs:
+      - stm32f4
+      - stm32h7
+      - nxp_s32k
+      - ti_am62
+      - rk3568
+
+  modbus:
+    name: "Modbus"
+    standard: "Modbus RTU / TCP"
+    authority: "Modbus Organization"
+    description: "Industrial Modbus RTU (serial) and Modbus TCP/IP"
+    transport: "mixed"
+    layer: "application"
+    features:
+      - rtu_master
+      - rtu_slave
+      - tcp_client
+      - tcp_server
+      - read_coils
+      - read_holding_registers
+      - write_single_register
+      - write_multiple_registers
+      - exception_handling
+      - function_code_custom
+    test_recipes:
+      - id: "MODBUS-RTU-MASTER"
+        name: "RTU master read/write"
+        category: "functional"
+        description: "Read holding registers, write single/multiple registers via RTU"
+        tools: ["modpoll", "diagslave", "pymodbus"]
+        reference: "Modbus Application Protocol V1.1b3"
+      - id: "MODBUS-RTU-SLAVE"
+        name: "RTU slave response"
+        category: "functional"
+        description: "Respond to master requests with correct data and CRC"
+        tools: ["modpoll", "diagslave"]
+        reference: "Modbus over Serial Line V1.02"
+      - id: "MODBUS-TCP-CLIENT"
+        name: "TCP client connection"
+        category: "functional"
+        description: "Connect to Modbus TCP server, read/write registers"
+        tools: ["modpoll", "pymodbus"]
+        reference: "Modbus Messaging on TCP/IP V1.0b"
+      - id: "MODBUS-TCP-SERVER"
+        name: "TCP server hosting"
+        category: "functional"
+        description: "Host Modbus TCP server, handle concurrent client requests"
+        tools: ["diagslave", "pymodbus"]
+        reference: "Modbus Messaging on TCP/IP V1.0b"
+      - id: "MODBUS-EXCEPTION"
+        name: "Exception handling"
+        category: "resilience"
+        description: "Verify correct exception codes for invalid function/address/value"
+        tools: ["modpoll", "pymodbus"]
+        reference: "Modbus Application Protocol V1.1b3 Section 7"
+    required_artifacts:
+      - modbus_register_map
+      - modbus_test_report
+    compatible_socs: []
+
+  opcua:
+    name: "OPC UA"
+    standard: "IEC 62541 / OPC UA"
+    authority: "OPC Foundation"
+    description: "OPC Unified Architecture server/client for industrial automation"
+    transport: "mixed"
+    layer: "application"
+    features:
+      - server
+      - client
+      - discovery
+      - security_none
+      - security_sign
+      - security_sign_encrypt
+      - user_token_anonymous
+      - user_token_username
+      - user_token_certificate
+      - subscription
+      - historical_access
+      - method_call
+    test_recipes:
+      - id: "OPCUA-SERVER-START"
+        name: "OPC UA server startup"
+        category: "functional"
+        description: "Start server, register namespace, expose nodes"
+        tools: ["open62541", "python-opcua", "UaExpert"]
+        reference: "IEC 62541 Part 4"
+      - id: "OPCUA-CLIENT-CONNECT"
+        name: "Client connection"
+        category: "functional"
+        description: "Connect client to server, browse address space, read nodes"
+        tools: ["python-opcua", "UaExpert"]
+        reference: "IEC 62541 Part 4"
+      - id: "OPCUA-SECURITY"
+        name: "Security policy validation"
+        category: "security"
+        description: "Verify Sign, SignAndEncrypt policies with X.509 certificates"
+        tools: ["python-opcua", "UaExpert"]
+        reference: "IEC 62541 Part 2 Section 4"
+      - id: "OPCUA-SUBSCRIPTION"
+        name: "Data change subscription"
+        category: "functional"
+        description: "Subscribe to node changes, verify notification delivery"
+        tools: ["python-opcua", "UaExpert"]
+        reference: "IEC 62541 Part 4 Section 5.12"
+      - id: "OPCUA-METHOD"
+        name: "Method call"
+        category: "functional"
+        description: "Call server-side methods with input/output arguments"
+        tools: ["python-opcua"]
+        reference: "IEC 62541 Part 4 Section 5.11"
+    required_artifacts:
+      - opcua_address_space
+      - opcua_security_report
+      - opcua_compliance_report
+    compatible_socs: []
+
+sub_skill_registry:
+  description: "Registry of connectivity sub-skills. Skill packs opt-in to sub-skills they need."
+  available_sub_skills:
+    - id: ble
+      skill_id: connectivity-ble
+      protocols: [ble]
+      typical_products: [earbuds, watch, beacon, sensor_tag]
+    - id: wifi
+      skill_id: connectivity-wifi
+      protocols: [wifi]
+      typical_products: [ipcam, router, gateway, smart_home]
+    - id: fiveg
+      skill_id: connectivity-5g
+      protocols: [fiveg]
+      typical_products: [gateway_5g, cpe, industrial_router]
+    - id: ethernet
+      skill_id: connectivity-ethernet
+      protocols: [ethernet]
+      typical_products: [ipcam, industrial_pc, switch, nas]
+    - id: can
+      skill_id: connectivity-can
+      protocols: [can]
+      typical_products: [car_dash, industrial_pc, obd_dongle]
+    - id: modbus
+      skill_id: connectivity-modbus
+      protocols: [modbus]
+      typical_products: [industrial_pc, plc, energy_meter]
+    - id: opcua
+      skill_id: connectivity-opcua
+      protocols: [opcua]
+      typical_products: [industrial_pc, scada, mes_gateway]
+
+  composition_rules:
+    - name: "Industrial gateway"
+      required: [ethernet, modbus, opcua]
+      optional: [wifi, can]
+    - name: "Automotive ECU"
+      required: [can, ethernet]
+      optional: [ble, wifi]
+    - name: "IoT gateway"
+      required: [wifi, ble, ethernet]
+      optional: [fiveg]
+    - name: "Smart camera"
+      required: [wifi, ethernet]
+      optional: [ble]
+
+artifact_definitions:
+  ble_gatt_table:
+    name: "BLE GATT Service Table"
+    description: "Complete GATT service/characteristic/descriptor table with UUIDs and permissions"
+    file_pattern: "**/ble_gatt_table.*"
+  ble_pairing_report:
+    name: "BLE Pairing Test Report"
+    description: "Pairing method test results (Legacy / LESC)"
+    file_pattern: "**/ble_pairing_report.*"
+  ble_ota_test_report:
+    name: "BLE OTA DFU Test Report"
+    description: "OTA firmware update test results"
+    file_pattern: "**/ble_ota_report.*"
+  wifi_config_report:
+    name: "WiFi Configuration Report"
+    description: "WiFi mode, security, and provisioning test results"
+    file_pattern: "**/wifi_config_report.*"
+  wifi_security_report:
+    name: "WiFi Security Report"
+    description: "WPA2/WPA3/Enterprise authentication test results"
+    file_pattern: "**/wifi_security_report.*"
+  wifi_throughput_report:
+    name: "WiFi Throughput Report"
+    description: "WiFi throughput measurement results"
+    file_pattern: "**/wifi_throughput_report.*"
+  modem_init_report:
+    name: "Modem Initialization Report"
+    description: "Cellular modem power-on and firmware version report"
+    file_pattern: "**/modem_init_report.*"
+  signal_quality_report:
+    name: "Signal Quality Report"
+    description: "RSSI/RSRP/RSRQ/SINR measurements"
+    file_pattern: "**/signal_quality_report.*"
+  data_connection_report:
+    name: "Data Connection Report"
+    description: "PDP/PDN context setup and IP connectivity report"
+    file_pattern: "**/data_connection_report.*"
+  ethernet_link_report:
+    name: "Ethernet Link Report"
+    description: "Link establishment and auto-negotiation results"
+    file_pattern: "**/ethernet_link_report.*"
+  vlan_config_report:
+    name: "VLAN Configuration Report"
+    description: "VLAN tagging and trunk configuration results"
+    file_pattern: "**/vlan_config_report.*"
+  poe_status_report:
+    name: "PoE Status Report"
+    description: "Power over Ethernet detection and classification results"
+    file_pattern: "**/poe_status_report.*"
+  can_bus_report:
+    name: "CAN Bus Report"
+    description: "CAN interface setup and frame transfer results"
+    file_pattern: "**/can_bus_report.*"
+  can_diagnostics_report:
+    name: "CAN Diagnostics Report"
+    description: "UDS/OBD-II diagnostics test results"
+    file_pattern: "**/can_diagnostics_report.*"
+  modbus_register_map:
+    name: "Modbus Register Map"
+    description: "Complete Modbus register address map with data types"
+    file_pattern: "**/modbus_register_map.*"
+  modbus_test_report:
+    name: "Modbus Test Report"
+    description: "Modbus RTU/TCP read/write test results"
+    file_pattern: "**/modbus_test_report.*"
+  opcua_address_space:
+    name: "OPC UA Address Space"
+    description: "OPC UA node hierarchy and type definitions"
+    file_pattern: "**/opcua_address_space.*"
+  opcua_security_report:
+    name: "OPC UA Security Report"
+    description: "OPC UA security policy and certificate validation results"
+    file_pattern: "**/opcua_security_report.*"
+  opcua_compliance_report:
+    name: "OPC UA Compliance Report"
+    description: "OPC UA conformance unit test results"
+    file_pattern: "**/opcua_compliance_report.*"

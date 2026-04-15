@@ -1,0 +1,242 @@
+schema_version: 1
+
+tasks:
+  # ── BLE Sub-Skill ──
+  - task_id: conn-ble-stack
+    description: "Build BLE stack with GATT server/client support"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+      - "external:hardware_profile"
+    expected_output: build/connectivity/ble_stack.a
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_ble: true
+
+  - task_id: conn-ble-pairing
+    description: "Configure BLE pairing (Legacy / LESC) and bonding"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/ble_stack.a
+    expected_output: build/connectivity/ble_pairing.cfg
+    depends_on:
+      - conn-ble-stack
+    when:
+      connectivity_ble: true
+
+  - task_id: conn-ble-ota
+    description: "Build BLE OTA DFU profile for firmware updates"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/ble_stack.a
+    expected_output: build/connectivity/ble_ota_dfu.a
+    depends_on:
+      - conn-ble-stack
+    when:
+      connectivity_ble: true
+
+  # ── WiFi Sub-Skill ──
+  - task_id: conn-wifi-stack
+    description: "Build WiFi stack with STA/AP mode support"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+      - "external:hardware_profile"
+    expected_output: build/connectivity/wifi_stack.a
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_wifi: true
+
+  - task_id: conn-wifi-provision
+    description: "Build SoftAP provisioning flow (captive portal + credential exchange)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/wifi_stack.a
+    expected_output: build/connectivity/wifi_provisioning.bin
+    depends_on:
+      - conn-wifi-stack
+    when:
+      connectivity_wifi: true
+
+  - task_id: conn-wifi-enterprise
+    description: "Configure 802.1X enterprise authentication (EAP-TLS/PEAP/TTLS)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/wifi_stack.a
+    expected_output: build/connectivity/wifi_enterprise.cfg
+    depends_on:
+      - conn-wifi-stack
+    when:
+      connectivity_wifi_enterprise: true
+
+  # ── 5G Sub-Skill ──
+  - task_id: conn-5g-modem
+    description: "Build modem control layer (AT / QMI command interface)"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+      - "external:hardware_profile"
+    expected_output: build/connectivity/modem_ctrl.a
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_5g: true
+
+  - task_id: conn-5g-dual-sim
+    description: "Configure dual-SIM management and automatic failover"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/modem_ctrl.a
+    expected_output: build/connectivity/dual_sim.cfg
+    depends_on:
+      - conn-5g-modem
+    when:
+      connectivity_5g_dual_sim: true
+
+  # ── Ethernet Sub-Skill ──
+  - task_id: conn-eth-basic
+    description: "Configure Ethernet interface with auto-negotiation and DHCP"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/connectivity/eth_basic.cfg
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_ethernet: true
+
+  - task_id: conn-eth-vlan
+    description: "Configure VLAN tagging (802.1Q) and trunk mode"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/eth_basic.cfg
+    expected_output: build/connectivity/eth_vlan.cfg
+    depends_on:
+      - conn-eth-basic
+    when:
+      connectivity_ethernet_vlan: true
+
+  - task_id: conn-eth-poe
+    description: "Build PoE detection and classification module"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/eth_basic.cfg
+    expected_output: build/connectivity/eth_poe.a
+    depends_on:
+      - conn-eth-basic
+    when:
+      connectivity_ethernet_poe: true
+
+  # ── CAN Sub-Skill ──
+  - task_id: conn-can-socketcan
+    description: "Configure SocketCAN interface and raw frame send/receive"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/connectivity/can_socketcan.a
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_can: true
+
+  - task_id: conn-can-diagnostics
+    description: "Build UDS/OBD-II diagnostics layer over ISO-TP"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/can_socketcan.a
+    expected_output: build/connectivity/can_diagnostics.a
+    depends_on:
+      - conn-can-socketcan
+    when:
+      connectivity_can: true
+
+  # ── Modbus Sub-Skill ──
+  - task_id: conn-modbus-rtu
+    description: "Build Modbus RTU master/slave over serial"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/connectivity/modbus_rtu.a
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_modbus: true
+
+  - task_id: conn-modbus-tcp
+    description: "Build Modbus TCP client/server over Ethernet"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/modbus_rtu.a
+    expected_output: build/connectivity/modbus_tcp.a
+    depends_on:
+      - conn-modbus-rtu
+    when:
+      connectivity_modbus: true
+
+  # ── OPC-UA Sub-Skill ──
+  - task_id: conn-opcua-server
+    description: "Build OPC UA server with address space and security policies"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/kernel/modules.tar.gz
+    expected_output: build/connectivity/opcua_server.a
+    depends_on:
+      - kernel-modules
+    when:
+      connectivity_opcua: true
+
+  - task_id: conn-opcua-client
+    description: "Build OPC UA client with subscription and method call support"
+    required_tier: t1
+    toolchain: cmake
+    inputs:
+      - build/connectivity/opcua_server.a
+    expected_output: build/connectivity/opcua_client.a
+    depends_on:
+      - conn-opcua-server
+    when:
+      connectivity_opcua: true
+
+  # ── Integration Tests ──
+  - task_id: conn-test-unit
+    description: "Run connectivity sub-skill unit tests"
+    required_tier: t1
+    toolchain: cmake
+    inputs: []
+    expected_output: build/test/connectivity_unit_results.xml
+    depends_on:
+      - conn-ble-stack
+      - conn-wifi-stack
+      - conn-5g-modem
+      - conn-eth-basic
+      - conn-can-socketcan
+      - conn-modbus-rtu
+      - conn-opcua-server
+
+  - task_id: conn-test-hil
+    description: "Run connectivity hardware-in-the-loop tests"
+    required_tier: t3
+    toolchain: hardware-daemon-rpc
+    inputs:
+      - build/test/connectivity_unit_results.xml
+    expected_output: build/test/connectivity_hil_results.xml
+    depends_on:
+      - conn-test-unit

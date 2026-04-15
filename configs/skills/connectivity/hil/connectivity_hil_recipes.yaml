@@ -1,0 +1,130 @@
+schema_version: 1
+description: "Hardware-in-the-loop recipes for connectivity sub-skill testing"
+
+recipes:
+  - recipe_id: hil-ble-pairing
+    protocol: ble
+    description: "BLE pairing test using nRF52 DK as peer device"
+    hardware:
+      - nrf52840dk
+      - usb_dongle_ble
+    setup: |
+      1. Flash peer firmware to nRF52 DK
+      2. Connect DK via USB to test host
+      3. Verify btmgmt shows both HCI adapters
+    steps:
+      - "Reset DUT BLE stack"
+      - "Start advertising on DUT"
+      - "Initiate pairing from peer"
+      - "Verify pairing complete (LESC or Legacy per config)"
+      - "Verify bond stored"
+    teardown: "Power-cycle both DUT and peer"
+    timeout_s: 120
+
+  - recipe_id: hil-wifi-sta-connect
+    protocol: wifi
+    description: "WiFi STA connection test using controlled AP"
+    hardware:
+      - wifi_ap_testbed
+      - ethernet_switch
+    setup: |
+      1. Configure test AP with known SSID/password
+      2. Ensure DUT WiFi radio is powered
+    steps:
+      - "Reset DUT WiFi state"
+      - "Scan for test SSID"
+      - "Connect with WPA2-PSK"
+      - "Verify DHCP lease"
+      - "Ping gateway"
+      - "Measure RSSI"
+    teardown: "Disconnect DUT, reset AP to default"
+    timeout_s: 60
+
+  - recipe_id: hil-5g-data-connect
+    protocol: fiveg
+    description: "5G modem data connection test"
+    hardware:
+      - quectel_rm500q_evb
+      - sim_card_test
+    setup: |
+      1. Insert test SIM card
+      2. Verify modem detected on USB
+      3. Ensure antenna connected
+    steps:
+      - "Initialize modem via AT"
+      - "Verify SIM detected (AT+CPIN?)"
+      - "Set APN (AT+CGDCONT)"
+      - "Connect data (AT+CGACT)"
+      - "Verify IP assignment"
+      - "Ping external host"
+    teardown: "Disconnect data, power-cycle modem"
+    timeout_s: 180
+
+  - recipe_id: hil-can-loopback
+    protocol: can
+    description: "CAN bus loopback test using dual-channel CAN adapter"
+    hardware:
+      - pcan_usb_pro_fd
+    setup: |
+      1. Connect CAN adapter channels in loopback
+      2. Verify can0 and can1 visible via ip link
+    steps:
+      - "Set bitrate 500kbps on both channels"
+      - "Bring up can0 and can1"
+      - "Send frame on can0, receive on can1"
+      - "Send CAN FD frame on can0, receive on can1"
+      - "Verify frame integrity"
+    teardown: "Bring down CAN interfaces"
+    timeout_s: 30
+
+  - recipe_id: hil-ethernet-vlan
+    protocol: ethernet
+    description: "Ethernet VLAN isolation test using managed switch"
+    hardware:
+      - managed_switch
+      - dual_nic_testbed
+    setup: |
+      1. Configure switch with VLAN 10 and VLAN 20
+      2. Assign DUT port to VLAN 10 trunk
+      3. Assign test host port to VLAN 10+20 trunk
+    steps:
+      - "Create VLAN 10 interface on DUT"
+      - "Assign IP to VLAN 10 interface"
+      - "Ping test host VLAN 10 IP — expect success"
+      - "Ping test host VLAN 20 IP — expect failure (isolation)"
+    teardown: "Remove VLAN interfaces, reset switch"
+    timeout_s: 45
+
+  - recipe_id: hil-modbus-rtu
+    protocol: modbus
+    description: "Modbus RTU test using RS-485 adapter"
+    hardware:
+      - rs485_usb_adapter
+    setup: |
+      1. Connect DUT RS-485 to adapter
+      2. Start Modbus slave simulator on test host
+    steps:
+      - "Open RTU master on DUT"
+      - "Read holding register 0 from slave"
+      - "Write register 2 on slave"
+      - "Read back register 2 — verify value"
+      - "Send invalid function code — verify exception"
+    teardown: "Close serial ports"
+    timeout_s: 30
+
+  - recipe_id: hil-opcua-server
+    protocol: opcua
+    description: "OPC UA server test with UaExpert client"
+    hardware: []
+    setup: |
+      1. Start OPC UA server on DUT
+      2. Ensure network connectivity to test host
+    steps:
+      - "Connect UaExpert to DUT server endpoint"
+      - "Browse address space"
+      - "Read Temperature node"
+      - "Write Setpoint node"
+      - "Subscribe to Temperature changes"
+      - "Verify notification received after server update"
+    teardown: "Disconnect client, stop server"
+    timeout_s: 60

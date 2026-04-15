@@ -139,6 +139,15 @@ def _try_rt_certs() -> list[ComplianceCert]:
         return []
 
 
+def _try_connectivity_certs() -> list[ComplianceCert]:
+    """Merge from L4-CORE-13 connectivity sub-skill library (when available)."""
+    try:
+        from backend.connectivity import get_connectivity_certs  # type: ignore[import-not-found]
+        return [ComplianceCert(**c) for c in get_connectivity_certs()]
+    except (ImportError, Exception):
+        return []
+
+
 def collect_compliance_certs(
     extra: list[dict[str, Any]] | None = None,
 ) -> list[ComplianceCert]:
@@ -147,6 +156,7 @@ def collect_compliance_certs(
     certs.extend(_try_radio_certs())
     certs.extend(_try_payment_certs())
     certs.extend(_try_rt_certs())
+    certs.extend(_try_connectivity_certs())
     if extra:
         for c in extra:
             certs.append(ComplianceCert(

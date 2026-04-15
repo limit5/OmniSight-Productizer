@@ -1,0 +1,44 @@
+schema_version: 1
+name: connectivity
+description: "Connectivity sub-skill library: BLE / WiFi / 5G / Ethernet / CAN / Modbus / OPC-UA protocol stacks with test recipes, scaffolds, and composition rules"
+version: "0.1.0"
+author: "OmniSight Team"
+license: "proprietary"
+
+compatible_socs: []
+
+depends_on_skills: []
+depends_on_core: ["CORE-05"]
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/
+  - kind: hil
+    path: hil/
+  - kind: docs
+    path: docs/
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - connectivity
+  - ble
+  - bluetooth
+  - wifi
+  - 5g
+  - lte
+  - ethernet
+  - can
+  - modbus
+  - opc-ua
+  - wireless
+  - protocol
+  - network
+  - industrial
