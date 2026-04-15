@@ -155,7 +155,23 @@
   (1) enum 常數 (2) orchestrator 的 routing rule (3) `blocking=true` flag 讓阻擋型
   通報優先排程。
 
+🅑 **「repo + docs → 自動做完」情境（backend）**
+- INGEST-01 `backend/repo_ingest.py`：clone GitHub URL → 讀 `package.json` /
+  `README.md` / `next.config.mjs` → 自動補 ParsedSpec 欄位（半天）
+- REPORT-01 `backend/report_generator.py`：workflow_runs + steps + decisions +
+  audit_log → Markdown/PDF 三段式報告（Spec/Execution/Outcome，半天）
+
+🅑 **「repo + docs → 自動做完」情境（UI/UX）**
+- UX-05 新專案精靈 modal（首次載入偵測 localStorage，選來源：GitHub repo /
+  上傳文件 / 純文字 / 空白 DAG，純前端，最快先做）
+- UX-01 Spec Editor 加 `Prose | From Repo | From Docs` 三向 tab（綁 INGEST-01）
+- UX-04 `Project Report` panel — 三段式 + Markdown 下載 + share link（綁 REPORT-01）
+- UX-03 RunHistory 引入 `project_run` 父層聚合（12 task 的 mega-run 折疊顯示，
+  後端需加 `project_runs` table）
+
 🅒 **大方向（L2/L3 級別，需設計再開工）**
+- DOC-TASKS Phase：PDF/Markdown → LLM 抽取 task → Decision Engine 批次審核
+  （2-3 day，含 prompt 工程；前端配 UX-02 Extracted Tasks Review panel）
 - Phase 64-C-SSH（要實機異架構需求才做）
 - Phase 64-C-QEMU（跨架構 build/test，等真用例）
 - 真 embedding（Phase 67-F）替換 quality_score 做 cosine
