@@ -290,6 +290,8 @@ from backend.routers import imaging_pipeline as _imaging_pipeline_router  # C19/
 app.include_router(_imaging_pipeline_router.router, prefix=settings.api_prefix)
 from backend.routers import print_pipeline as _print_pipeline_router  # C20/PRINT-PIPELINE
 app.include_router(_print_pipeline_router.router, prefix=settings.api_prefix)
+from backend.routers import enterprise_web_stack as _ews_router  # C21/ENTERPRISE-WEB-STACK
+app.include_router(_ews_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

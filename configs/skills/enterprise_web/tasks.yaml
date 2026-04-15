@@ -1,0 +1,79 @@
+# Enterprise Web Stack DAG tasks
+tasks:
+  - id: ews-auth-setup
+    name: "Auth Module Setup"
+    description: "Configure NextAuth with credentials + optional SSO providers"
+    depends_on: []
+    artifacts: [auth_module]
+    estimated_hours: 4
+
+  - id: ews-rbac-setup
+    name: "RBAC Module Setup"
+    description: "Define role/permission schema and policy middleware"
+    depends_on: [ews-auth-setup]
+    artifacts: [rbac_module]
+    estimated_hours: 3
+
+  - id: ews-audit-setup
+    name: "Audit Module Setup"
+    description: "Implement hash-chained audit log for all write operations"
+    depends_on: [ews-auth-setup]
+    artifacts: [audit_module]
+    estimated_hours: 3
+
+  - id: ews-i18n-setup
+    name: "i18n Scaffold"
+    description: "Configure next-intl with zh/en locale bundles"
+    depends_on: []
+    artifacts: [i18n_scaffold]
+    estimated_hours: 2
+
+  - id: ews-tenant-setup
+    name: "Multi-tenant Module"
+    description: "Add tenant_id column + row-level security middleware"
+    depends_on: [ews-auth-setup, ews-rbac-setup]
+    artifacts: [tenant_module]
+    estimated_hours: 4
+
+  - id: ews-reports-setup
+    name: "Reports Module"
+    description: "Build tabular + chart components with Tremor/shadcn"
+    depends_on: [ews-tenant-setup]
+    artifacts: [report_components]
+    estimated_hours: 4
+
+  - id: ews-import-export
+    name: "Import/Export Module"
+    description: "CSV/XLSX/JSON round-trip with validation pipeline"
+    depends_on: [ews-tenant-setup]
+    artifacts: [import_export_module]
+    estimated_hours: 3
+
+  - id: ews-workflow-engine
+    name: "Workflow Engine"
+    description: "State machine + approval chain for business processes"
+    depends_on: [ews-rbac-setup, ews-audit-setup]
+    artifacts: [workflow_module]
+    estimated_hours: 4
+
+  - id: ews-integration-test
+    name: "Full Integration Test"
+    description: "End-to-end test of all modules working together"
+    depends_on:
+      - ews-auth-setup
+      - ews-rbac-setup
+      - ews-audit-setup
+      - ews-i18n-setup
+      - ews-tenant-setup
+      - ews-reports-setup
+      - ews-import-export
+      - ews-workflow-engine
+    artifacts: []
+    estimated_hours: 2
+
+  - id: ews-template-finalize
+    name: "Reference Template Finalization"
+    description: "Prepare as reusable template for SW-WEB-* tracks"
+    depends_on: [ews-integration-test]
+    artifacts: []
+    estimated_hours: 1

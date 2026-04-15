@@ -7,6 +7,60 @@
 
 ---
 
+## C21 L4-CORE-21 Enterprise web stack pattern 狀態更新（2026-04-15）
+
+**全部 9/9 項目已完成。176 項測試全部通過。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Auth: Next-Auth + optional SSO plug (LDAP/SAML/OIDC) | ✅ | 4 auth provider types (credentials/LDAP/SAML/OIDC), session management (create/validate/refresh/revoke), max 5 sessions per user, configurable TTL (28800s default), refresh window (3600s), LDAP bind + user filter, SAML assertion validation, OIDC authorization code exchange |
+| RBAC: role/permission schema + policy middleware | ✅ | 6 roles (super_admin/tenant_admin/manager/editor/viewer/guest) with hierarchy levels (100→10), 18 permissions across 8 resources (users/roles/audit/reports/workflow/import/export/tenant/settings), wildcard (*) support for super_admin, policy enforcement middleware (allow/deny verdict) |
+| Audit: every write → audit_log (reuse Phase 53 hash chain) | ✅ | SHA-256 hash chain with genesis hash, 18 audit action types with severity levels (info/warn/error), 7-year retention (2555 days), tamper detection via chain verification, query by action/actor/tenant_id/since with pagination |
+| Reports: tabular + chart via Tremor / shadcn | ✅ | 6 report types (tabular/bar_chart/line_chart/pie_chart/kpi_card/pivot_table), 4 export formats (CSV/XLSX/PDF/JSON), chart configuration with features (sort/filter/paginate/group_by/stacked/trend_line/sparkline etc.) |
+| i18n: next-intl scaffold with zh/en bundles | ✅ | 4 locales (en/zh-TW/zh-CN/ja), 7 namespaces (common/auth/dashboard/reports/workflow/settings/errors), 20+ keys per namespace, interpolation support ({appName}), fallback to default locale, coverage reporting per locale |
+| Multi-tenant: tenant_id column + row-level security | ✅ | 3 isolation strategies (RLS/schema-per-tenant/database-per-tenant), tenant CRUD with slug uniqueness, 4 plans (free/starter/professional/enterprise), configurable max_users, feature flags, RLS query injection (WHERE/AND tenant_id filter) |
+| Import/export: CSV/XLSX/JSON round-trip | ✅ | 3 import formats with type detection (CSV delimiter/encoding, XLSX multi-sheet, JSON nested/JSONL), 6-step import pipeline (upload→preview→validate→transform→commit→report), 4-step export pipeline (query→format→compress→deliver), column mapping, round-trip verified |
+| Workflow engine: state machine + approval chain | ✅ | 8 states (draft/submitted/under_review/needs_revision/approved/rejected/completed/cancelled), configuration-driven transition validation, approval chain (1-5 approvers, 48h escalation, auto-approve rules), full history tracking, needs_revision cycle support |
+| Reference implementation (acts as template for SW-WEB-*) | ✅ | 8 artifact modules (auth/rbac/audit/reports/i18n/tenant/import_export/workflow), 10 test recipes (auth_flow/rbac_enforcement/audit_chain/tenant_isolation/import_export_roundtrip/workflow_lifecycle/i18n_coverage/report_generation/full_integration/sso_integration), gate validation per domain, skill pack with 5 artifact kinds |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/enterprise_web_stack.yaml` | 新建——Auth (4 providers + session config) + RBAC (6 roles + 18 permissions + role_permissions mapping) + Audit (18 actions + hash chain config) + Reports (6 types + 4 export formats) + i18n (4 locales + 7 namespaces) + Multi-tenant (3 strategies + 6 tenant fields) + Import/Export (3 formats + 6 import steps + 4 export steps) + Workflow (8 states + approval chain) + 10 test recipes + 8 artifacts |
+| `backend/enterprise_web_stack.py` | 新建——Enterprise web stack library：18 enums + 30 data models + config loader + Auth (4 providers + session CRUD + max sessions) + RBAC (role hierarchy + wildcard permissions + policy enforcement) + Audit (SHA-256 hash chain + query + verify) + Reports (6 types + 4 export formats) + i18n (4 locales + 7 namespaces + interpolation + coverage) + Multi-tenant (CRUD + RLS injection) + Import/Export (preview + execute + roundtrip) + Workflow (state machine + approval chain + cancel + revision cycle) + 10 test recipe runners + artifacts + gate validation |
+| `backend/routers/enterprise_web_stack.py` | 新建——REST endpoints: Auth (GET providers, POST authenticate/session/validate/refresh/revoke), RBAC (GET roles/permissions, POST enforce), Audit (GET actions/config, POST write/query/verify), Reports (GET types/export-formats, POST generate/export), i18n (GET locales/config/namespaces/bundle, POST translate, GET coverage), Multi-tenant (GET/POST/PATCH/DELETE tenants, POST rls), Import/Export (GET formats/steps, POST preview/execute), Workflow (GET states/approval-config, POST instances/transition/approve/reject/complete/cancel), Test recipes (GET/POST run), Artifacts (GET), Gate validation (POST) |
+| `backend/main.py` | 擴充——註冊 enterprise_web_stack router |
+| `configs/skills/enterprise_web/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-07 dependencies, 8 capabilities) |
+| `configs/skills/enterprise_web/tasks.yaml` | 新建——DAG tasks for enterprise web stack setup |
+| `configs/skills/enterprise_web/scaffolds/` | 新建——3 scaffold files (nextauth_config.ts, rbac_middleware.ts, workflow_engine.ts) |
+| `configs/skills/enterprise_web/tests/test_definitions.yaml` | 新建——test suite definitions |
+| `configs/skills/enterprise_web/hil/enterprise_web_hil_recipes.yaml` | 新建——HIL recipes for enterprise web testing |
+| `configs/skills/enterprise_web/docs/enterprise_web_integration_guide.md.j2` | 新建——Jinja2 doc template for integration guide |
+| `backend/tests/test_enterprise_web_stack.py` | 新建，176 項測試全部通過 |
+| `TODO.md` | 更新——C21 全部標記完成 |
+
+### 架構說明
+
+- **WebStackDomain enum** — auth / rbac / audit / reports / i18n / multi_tenant / import_export / workflow / integration
+- **AuthProviderType enum** — credentials / ldap / saml / oidc
+- **AuthResult enum** — success / failed / mfa_required / account_locked / provider_error
+- **SessionStatus enum** — active / expired / revoked
+- **RoleLevel enum** — guest(10) / viewer(20) / editor(40) / manager(60) / tenant_admin(80) / super_admin(100)
+- **WorkflowState enum** — draft / submitted / under_review / needs_revision / approved / rejected / completed / cancelled
+- **TenantPlan enum** — free / starter / professional / enterprise
+- **TenantStrategy enum** — rls / schema / database
+- Auth supports 4 SSO providers with configurable endpoints and session management
+- RBAC uses role hierarchy with wildcard permission support for super_admin
+- Audit uses SHA-256 hash chain (reusing Phase 53 pattern) with genesis hash and tamper detection
+- Reports support tabular + 5 chart types with CSV/XLSX/PDF/JSON export
+- i18n supports 4 locales with 7 namespaces, interpolation, and coverage reporting
+- Multi-tenant uses RLS by default with tenant_id column injection
+- Import/Export supports CSV/XLSX/JSON with preview, validation, and column mapping
+- Workflow engine enforces state transitions via configuration-driven state machine
+
+---
+
 ## C20 L4-CORE-20 Print pipeline 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。175 項測試全部通過。**

@@ -1,0 +1,40 @@
+# Enterprise Web Stack skill manifest
+schema_version: "1"
+skill_id: enterprise_web
+name: "Enterprise Web Stack"
+description: >
+  Reference implementation for enterprise web applications.
+  Provides Auth (NextAuth + SSO), RBAC, Audit (hash-chain),
+  Reports (Tremor/shadcn), i18n (next-intl), Multi-tenant (RLS),
+  Import/Export (CSV/XLSX/JSON), and Workflow engine (state machine
+  + approval chain). Acts as template for all SW-WEB-* tracks.
+
+version: "1.0.0"
+product_class: enterprise_web
+
+dependencies:
+  - CORE-05  # Skill pack framework
+  - CORE-07  # HIL plugin API (optional, for integration tests)
+
+artifact_kinds:
+  - tasks
+  - scaffolds
+  - tests
+  - hil
+  - docs
+
+capabilities:
+  - auth_nextauth_sso
+  - rbac_role_permission
+  - audit_hash_chain
+  - reports_tremor_shadcn
+  - i18n_next_intl
+  - multi_tenant_rls
+  - import_export_roundtrip
+  - workflow_state_machine
+
+tags:
+  - enterprise
+  - web
+  - template
+  - saas

@@ -275,15 +275,15 @@ Legend:
 - [x] Unit test: round-trip PDF → raster → PDL → output
 
 ### C21. L4-CORE-21 Enterprise web stack pattern (#242) — **highest leverage for Layer C**
-- [ ] Auth: Next-Auth + optional SSO plug (LDAP/SAML/OIDC)
-- [ ] RBAC: role/permission schema + policy middleware
-- [ ] Audit: every write → audit_log (reuse Phase 53 hash chain)
-- [ ] Reports: tabular + chart via Tremor / shadcn
-- [ ] i18n: next-intl scaffold with zh/en bundles
-- [ ] Multi-tenant: tenant_id column + row-level security
-- [ ] Import/export: CSV/XLSX/JSON round-trip
-- [ ] Workflow engine: state machine + approval chain
-- [ ] Reference implementation (acts as template for SW-WEB-*)
+- [x] Auth: Next-Auth + optional SSO plug (LDAP/SAML/OIDC)
+- [x] RBAC: role/permission schema + policy middleware
+- [x] Audit: every write → audit_log (reuse Phase 53 hash chain)
+- [x] Reports: tabular + chart via Tremor / shadcn
+- [x] i18n: next-intl scaffold with zh/en bundles
+- [x] Multi-tenant: tenant_id column + row-level security
+- [x] Import/export: CSV/XLSX/JSON round-trip
+- [x] Workflow engine: state machine + approval chain
+- [x] Reference implementation (acts as template for SW-WEB-*)
 
 ### C22. L4-CORE-22 Barcode/scanning SDK abstraction (#243)
 - [ ] Unified `BarcodeScanner` interface

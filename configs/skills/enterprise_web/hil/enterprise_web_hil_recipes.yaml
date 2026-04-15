@@ -1,0 +1,74 @@
+# Enterprise Web Stack HIL recipes
+recipes:
+  - id: hil-sso-integration
+    name: "SSO Integration Test"
+    description: "Test LDAP/SAML/OIDC login flows against real IdP"
+    setup:
+      - "Configure test IdP (Keycloak/Okta sandbox)"
+      - "Set provider config in enterprise_web_stack.yaml"
+    measure:
+      - metric: login_latency_ms
+        threshold: 2000
+      - metric: token_exchange_success
+        threshold: 1.0
+    teardown:
+      - "Revoke test sessions"
+
+  - id: hil-concurrent-users
+    name: "Concurrent User Load Test"
+    description: "Simulate 100+ concurrent users with session management"
+    setup:
+      - "Create test tenant with 100 user slots"
+      - "Pre-create user accounts"
+    measure:
+      - metric: session_create_p99_ms
+        threshold: 500
+      - metric: rbac_check_p99_ms
+        threshold: 50
+      - metric: concurrent_active_sessions
+        threshold: 100
+    teardown:
+      - "Cleanup test tenant and sessions"
+
+  - id: hil-audit-chain-integrity
+    name: "Audit Chain Integrity Under Load"
+    description: "Write 10,000 audit entries and verify chain integrity"
+    setup:
+      - "Clear audit log"
+    measure:
+      - metric: chain_verification_time_ms
+        threshold: 5000
+      - metric: chain_valid
+        threshold: 1.0
+    teardown:
+      - "Archive test audit entries"
+
+  - id: hil-import-large-dataset
+    name: "Large Dataset Import"
+    description: "Import 100K-row CSV/XLSX and verify data integrity"
+    setup:
+      - "Generate 100K-row test dataset"
+      - "Create target tenant"
+    measure:
+      - metric: import_time_seconds
+        threshold: 60
+      - metric: import_error_rate
+        threshold: 0.001
+      - metric: data_integrity_pct
+        threshold: 99.9
+    teardown:
+      - "Cleanup imported records"
+
+  - id: hil-workflow-stress
+    name: "Workflow Engine Stress Test"
+    description: "Run 1000 concurrent workflow instances through full lifecycle"
+    setup:
+      - "Create test tenant with workflow config"
+      - "Pre-create approver accounts"
+    measure:
+      - metric: workflow_transition_p99_ms
+        threshold: 200
+      - metric: workflow_completion_rate
+        threshold: 0.99
+    teardown:
+      - "Archive completed workflows"

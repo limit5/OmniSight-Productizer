@@ -1,0 +1,120 @@
+# Enterprise Web Stack Integration Guide
+
+## Overview
+
+This guide covers integration of the Enterprise Web Stack pattern (CORE-21)
+into a new SW-WEB-* project. The stack provides:
+
+- **Auth**: NextAuth + optional SSO (LDAP/SAML/OIDC)
+- **RBAC**: Role/permission schema + policy middleware
+- **Audit**: Hash-chained audit log for every write operation
+- **Reports**: Tabular + chart components (Tremor / shadcn)
+- **i18n**: next-intl with {{ supported_locales | length }} locale bundles
+- **Multi-tenant**: tenant_id column + row-level security
+- **Import/Export**: CSV/XLSX/JSON round-trip
+- **Workflow**: State machine + approval chain
+
+## Quick Start
+
+### 1. Scaffold from Template
+
+```bash
+omnisight skill scaffold enterprise_web --target ./my-erp-project
+```
+
+### 2. Configure Auth Providers
+
+Edit `configs/enterprise_web_stack.yaml` → `auth.providers` section.
+Enable the providers you need:
+
+{% for provider in auth_providers %}
+- **{{ provider.name }}** (`{{ provider.type }}`): {{ "Enabled" if provider.enabled else "Disabled" }}
+{% endfor %}
+
+### 3. Define Roles
+
+Default roles (customizable):
+
+{% for role in roles %}
+- **{{ role.name }}** (level {{ role.level }}): {{ role.description }}
+{% endfor %}
+
+### 4. Set Up Multi-tenant
+
+Default strategy: **Row-Level Security (RLS)**
+
+Available strategies:
+{% for strategy in tenant_strategies %}
+- **{{ strategy.name }}**: {{ strategy.description }}
+{% endfor %}
+
+### 5. Configure i18n
+
+Default locale: `{{ default_locale }}`
+
+Supported locales:
+{% for locale in locales %}
+- `{{ locale.id }}` — {{ locale.name }}
+{% endfor %}
+
+### 6. Define Workflows
+
+Default workflow states:
+{% for state in workflow_states %}
+- **{{ state.name }}**{% if state.initial %} (initial){% endif %}{% if state.terminal %} (terminal){% endif %}
+{% endfor %}
+
+## API Reference
+
+Base path: `/api/enterprise/`
+
+### Auth
+- `GET /auth/providers` — List configured auth providers
+- `POST /auth/authenticate` — Authenticate with a provider
+- `POST /auth/session` — Create a new session
+- `POST /auth/session/validate` — Validate session token
+
+### RBAC
+- `GET /rbac/roles` — List all roles
+- `GET /rbac/permissions` — List all permissions
+- `POST /rbac/enforce` — Check policy enforcement
+
+### Audit
+- `POST /audit/write` — Write an audit entry
+- `POST /audit/query` — Query audit log
+- `POST /audit/verify` — Verify hash chain integrity
+
+### Reports
+- `GET /reports/types` — List report types
+- `POST /reports/generate` — Generate a report
+- `POST /reports/export` — Export a report
+
+### Tenants
+- `POST /tenants` — Create a tenant
+- `GET /tenants` — List tenants
+- `POST /tenants/rls` — Apply RLS to a query
+
+### Import/Export
+- `POST /import/preview` — Preview import data
+- `POST /import/execute` — Execute import
+- `POST /export/execute` — Execute export
+
+### Workflow
+- `POST /workflow/instances` — Create workflow instance
+- `POST /workflow/instances/{id}/transition` — Transition state
+- `POST /workflow/instances/{id}/approve` — Approve
+- `POST /workflow/instances/{id}/reject` — Reject
+
+## Testing
+
+Run all enterprise web stack tests:
+
+```bash
+python -m pytest backend/tests/test_enterprise_web_stack.py -v
+```
+
+Run specific test recipes:
+
+```bash
+curl -X POST http://localhost:8000/api/enterprise/test-recipes/full_integration/run
+```

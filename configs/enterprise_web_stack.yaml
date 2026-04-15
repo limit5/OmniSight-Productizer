@@ -1,0 +1,586 @@
+# C21 — L4-CORE-21 Enterprise web stack pattern (#242)
+# Reference template for SW-WEB-* tracks (ERP, WMS, HRM, etc.)
+
+schema_version: "1.0"
+
+# ── Auth ──────────────────────────────────────────────────────────────
+auth:
+  providers:
+    - id: credentials
+      name: "Email / Password"
+      type: credentials
+      enabled: true
+    - id: ldap
+      name: "LDAP / Active Directory"
+      type: ldap
+      enabled: false
+      config:
+        url: "ldap://ldap.example.com:389"
+        base_dn: "ou=users,dc=example,dc=com"
+        bind_dn: "cn=admin,dc=example,dc=com"
+        user_filter: "(uid={{username}})"
+        tls: true
+    - id: saml
+      name: "SAML 2.0"
+      type: saml
+      enabled: false
+      config:
+        metadata_url: ""
+        entity_id: "omnisight-enterprise"
+        acs_url: "/api/auth/callback/saml"
+        slo_url: "/api/auth/slo/saml"
+        want_assertions_signed: true
+    - id: oidc
+      name: "OpenID Connect"
+      type: oidc
+      enabled: false
+      config:
+        issuer: ""
+        client_id: ""
+        scopes: ["openid", "profile", "email"]
+        redirect_uri: "/api/auth/callback/oidc"
+
+  session:
+    ttl_seconds: 28800
+    refresh_enabled: true
+    refresh_window_seconds: 3600
+    max_sessions_per_user: 5
+
+# ── RBAC ──────────────────────────────────────────────────────────────
+rbac:
+  roles:
+    - id: super_admin
+      name: "Super Admin"
+      description: "Full system access, tenant management"
+      level: 100
+    - id: tenant_admin
+      name: "Tenant Admin"
+      description: "Full access within own tenant"
+      level: 80
+    - id: manager
+      name: "Manager"
+      description: "Approve workflows, view reports"
+      level: 60
+    - id: editor
+      name: "Editor"
+      description: "Create and edit records"
+      level: 40
+    - id: viewer
+      name: "Viewer"
+      description: "Read-only access"
+      level: 20
+    - id: guest
+      name: "Guest"
+      description: "Minimal public access"
+      level: 10
+
+  permissions:
+    - id: users.create
+      name: "Create Users"
+      resource: users
+      action: create
+    - id: users.read
+      name: "Read Users"
+      resource: users
+      action: read
+    - id: users.update
+      name: "Update Users"
+      resource: users
+      action: update
+    - id: users.delete
+      name: "Delete Users"
+      resource: users
+      action: delete
+    - id: roles.assign
+      name: "Assign Roles"
+      resource: roles
+      action: assign
+    - id: audit.read
+      name: "Read Audit Log"
+      resource: audit
+      action: read
+    - id: audit.export
+      name: "Export Audit Log"
+      resource: audit
+      action: export
+    - id: reports.view
+      name: "View Reports"
+      resource: reports
+      action: read
+    - id: reports.create
+      name: "Create Reports"
+      resource: reports
+      action: create
+    - id: reports.export
+      name: "Export Reports"
+      resource: reports
+      action: export
+    - id: workflow.create
+      name: "Create Workflows"
+      resource: workflow
+      action: create
+    - id: workflow.approve
+      name: "Approve Workflows"
+      resource: workflow
+      action: approve
+    - id: workflow.reject
+      name: "Reject Workflows"
+      resource: workflow
+      action: reject
+    - id: import.execute
+      name: "Execute Import"
+      resource: import
+      action: execute
+    - id: export.execute
+      name: "Execute Export"
+      resource: export
+      action: execute
+    - id: tenant.manage
+      name: "Manage Tenants"
+      resource: tenant
+      action: manage
+    - id: settings.manage
+      name: "Manage Settings"
+      resource: settings
+      action: manage
+
+  role_permissions:
+    super_admin: ["*"]
+    tenant_admin:
+      - users.create
+      - users.read
+      - users.update
+      - users.delete
+      - roles.assign
+      - audit.read
+      - audit.export
+      - reports.view
+      - reports.create
+      - reports.export
+      - workflow.create
+      - workflow.approve
+      - workflow.reject
+      - import.execute
+      - export.execute
+      - settings.manage
+    manager:
+      - users.read
+      - audit.read
+      - reports.view
+      - reports.create
+      - reports.export
+      - workflow.create
+      - workflow.approve
+      - workflow.reject
+      - import.execute
+      - export.execute
+    editor:
+      - users.read
+      - reports.view
+      - reports.create
+      - workflow.create
+      - import.execute
+      - export.execute
+    viewer:
+      - users.read
+      - reports.view
+    guest:
+      - reports.view
+
+# ── Audit ─────────────────────────────────────────────────────────────
+audit:
+  enabled: true
+  hash_chain: true
+  hash_algorithm: sha256
+  retention_days: 2555
+  actions:
+    - id: auth.login
+      severity: info
+    - id: auth.logout
+      severity: info
+    - id: auth.login_failed
+      severity: warn
+    - id: user.create
+      severity: info
+    - id: user.update
+      severity: info
+    - id: user.delete
+      severity: warn
+    - id: role.assign
+      severity: info
+    - id: record.create
+      severity: info
+    - id: record.update
+      severity: info
+    - id: record.delete
+      severity: warn
+    - id: workflow.submit
+      severity: info
+    - id: workflow.approve
+      severity: info
+    - id: workflow.reject
+      severity: info
+    - id: import.execute
+      severity: info
+    - id: export.execute
+      severity: info
+    - id: tenant.create
+      severity: warn
+    - id: tenant.update
+      severity: info
+    - id: settings.update
+      severity: warn
+
+# ── Reports ───────────────────────────────────────────────────────────
+reports:
+  chart_library: tremor
+  ui_framework: shadcn
+  types:
+    - id: tabular
+      name: "Tabular Report"
+      description: "Standard table with sorting, filtering, pagination"
+      features: [sort, filter, paginate, group_by, summary_row]
+    - id: bar_chart
+      name: "Bar Chart"
+      chart_type: bar
+      features: [horizontal, vertical, stacked, grouped]
+    - id: line_chart
+      name: "Line Chart"
+      chart_type: line
+      features: [multi_series, area, trend_line, annotations]
+    - id: pie_chart
+      name: "Pie Chart"
+      chart_type: pie
+      features: [donut, legend, percentage_labels]
+    - id: kpi_card
+      name: "KPI Card"
+      description: "Single metric with delta and sparkline"
+      features: [delta, sparkline, threshold_color]
+    - id: pivot_table
+      name: "Pivot Table"
+      description: "Cross-tab analysis"
+      features: [row_group, col_group, value_aggregation]
+  export_formats:
+    - id: csv
+      mime: text/csv
+    - id: xlsx
+      mime: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    - id: pdf
+      mime: application/pdf
+    - id: json
+      mime: application/json
+
+# ── i18n ──────────────────────────────────────────────────────────────
+i18n:
+  framework: next-intl
+  default_locale: en
+  supported_locales:
+    - id: en
+      name: English
+      direction: ltr
+    - id: zh-TW
+      name: 繁體中文
+      direction: ltr
+    - id: zh-CN
+      name: 简体中文
+      direction: ltr
+    - id: ja
+      name: 日本語
+      direction: ltr
+  namespaces:
+    - common
+    - auth
+    - dashboard
+    - reports
+    - workflow
+    - settings
+    - errors
+
+# ── Multi-tenant ──────────────────────────────────────────────────────
+multi_tenant:
+  enabled: true
+  isolation: row_level_security
+  tenant_id_column: tenant_id
+  strategies:
+    - id: rls
+      name: "Row-Level Security"
+      description: "Shared schema, tenant_id filter on every query"
+    - id: schema
+      name: "Schema-per-Tenant"
+      description: "Separate schema per tenant in shared DB"
+    - id: database
+      name: "Database-per-Tenant"
+      description: "Separate database per tenant"
+  default_strategy: rls
+  tenant_fields:
+    - id: name
+      type: string
+      required: true
+    - id: slug
+      type: string
+      required: true
+      unique: true
+    - id: plan
+      type: enum
+      values: [free, starter, professional, enterprise]
+      default: free
+    - id: max_users
+      type: integer
+      default: 5
+    - id: features
+      type: json
+      default: {}
+    - id: active
+      type: boolean
+      default: true
+
+# ── Import/Export ─────────────────────────────────────────────────────
+import_export:
+  formats:
+    - id: csv
+      name: CSV
+      mime: text/csv
+      max_size_mb: 50
+      features: [header_detection, encoding_detection, delimiter_detection]
+    - id: xlsx
+      name: "Excel (XLSX)"
+      mime: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+      max_size_mb: 100
+      features: [multi_sheet, formula_evaluation, style_preservation]
+    - id: json
+      name: JSON
+      mime: application/json
+      max_size_mb: 50
+      features: [nested_objects, array_records, jsonl]
+  import_pipeline:
+    - step: upload
+      description: "File upload with type detection"
+    - step: preview
+      description: "Show first N rows, column mapping"
+    - step: validate
+      description: "Schema validation, duplicate check"
+    - step: transform
+      description: "Type coercion, default values, computed fields"
+    - step: commit
+      description: "Batch insert with rollback on error"
+    - step: report
+      description: "Import summary: rows inserted/skipped/errored"
+  export_pipeline:
+    - step: query
+      description: "Build query with filters + tenant isolation"
+    - step: format
+      description: "Serialize to target format"
+    - step: compress
+      description: "Optional gzip for large exports"
+    - step: deliver
+      description: "Download link or email attachment"
+
+# ── Workflow engine ───────────────────────────────────────────────────
+workflow_engine:
+  states:
+    - id: draft
+      name: Draft
+      initial: true
+      transitions: [submitted]
+    - id: submitted
+      name: Submitted
+      transitions: [under_review, rejected, cancelled]
+    - id: under_review
+      name: Under Review
+      transitions: [approved, rejected, needs_revision]
+    - id: needs_revision
+      name: Needs Revision
+      transitions: [submitted, cancelled]
+    - id: approved
+      name: Approved
+      transitions: [completed, cancelled]
+    - id: rejected
+      name: Rejected
+      terminal: true
+    - id: completed
+      name: Completed
+      terminal: true
+    - id: cancelled
+      name: Cancelled
+      terminal: true
+
+  approval_chain:
+    min_approvers: 1
+    max_approvers: 5
+    escalation_timeout_hours: 48
+    auto_approve_rules:
+      - condition: "amount < 1000"
+        description: "Auto-approve low-value requests"
+      - condition: "submitter.role.level >= 60"
+        description: "Auto-approve manager-level submissions"
+    notification_events:
+      - on: submitted
+        notify: [approvers]
+      - on: approved
+        notify: [submitter]
+      - on: rejected
+        notify: [submitter]
+      - on: needs_revision
+        notify: [submitter]
+
+# ── Test recipes ──────────────────────────────────────────────────────
+test_recipes:
+  - id: auth_flow
+    name: "Auth Flow Test"
+    domain: auth
+    steps:
+      - action: register
+      - action: login
+      - action: verify_session
+      - action: refresh
+      - action: logout
+
+  - id: rbac_enforcement
+    name: "RBAC Enforcement Test"
+    domain: rbac
+    steps:
+      - action: create_user_per_role
+      - action: verify_permission_grant
+      - action: verify_permission_deny
+      - action: verify_role_hierarchy
+
+  - id: audit_chain
+    name: "Audit Hash Chain Test"
+    domain: audit
+    steps:
+      - action: perform_writes
+      - action: verify_chain_integrity
+      - action: tamper_detection
+
+  - id: tenant_isolation
+    name: "Tenant Isolation Test"
+    domain: multi_tenant
+    steps:
+      - action: create_tenants
+      - action: create_records_per_tenant
+      - action: verify_cross_tenant_isolation
+      - action: verify_admin_cross_tenant_access
+
+  - id: import_export_roundtrip
+    name: "Import/Export Round-trip Test"
+    domain: import_export
+    steps:
+      - action: export_csv
+      - action: import_csv
+      - action: verify_data_match
+      - action: export_xlsx
+      - action: import_xlsx
+      - action: verify_data_match
+
+  - id: workflow_lifecycle
+    name: "Workflow Lifecycle Test"
+    domain: workflow
+    steps:
+      - action: create_workflow
+      - action: submit
+      - action: review
+      - action: approve
+      - action: verify_completion
+
+  - id: i18n_coverage
+    name: "i18n Coverage Test"
+    domain: i18n
+    steps:
+      - action: load_all_locales
+      - action: verify_key_coverage
+      - action: verify_interpolation
+      - action: verify_pluralization
+
+  - id: report_generation
+    name: "Report Generation Test"
+    domain: reports
+    steps:
+      - action: generate_tabular
+      - action: generate_chart
+      - action: export_csv
+      - action: export_pdf
+
+  - id: full_integration
+    name: "Full Integration Test"
+    domain: integration
+    steps:
+      - action: setup_tenant
+      - action: create_users
+      - action: assign_roles
+      - action: create_records
+      - action: run_workflow
+      - action: generate_report
+      - action: verify_audit_trail
+      - action: export_data
+
+  - id: sso_integration
+    name: "SSO Integration Test"
+    domain: auth
+    steps:
+      - action: configure_oidc
+      - action: oidc_login_flow
+      - action: verify_user_provisioned
+      - action: verify_role_mapping
+
+# ── Artifacts ─────────────────────────────────────────────────────────
+artifacts:
+  - id: auth_module
+    name: "Auth Module"
+    description: "NextAuth configuration + SSO providers"
+    files:
+      - "app/api/auth/[...nextauth]/route.ts"
+      - "lib/auth.ts"
+      - "lib/auth-providers.ts"
+
+  - id: rbac_module
+    name: "RBAC Module"
+    description: "Role/permission schema + middleware"
+    files:
+      - "lib/rbac.ts"
+      - "middleware.ts"
+
+  - id: audit_module
+    name: "Audit Module"
+    description: "Write-through audit logging"
+    files:
+      - "lib/audit.ts"
+      - "app/api/audit/route.ts"
+
+  - id: report_components
+    name: "Report Components"
+    description: "Tremor + shadcn chart and table components"
+    files:
+      - "components/reports/data-table.tsx"
+      - "components/reports/bar-chart.tsx"
+      - "components/reports/line-chart.tsx"
+      - "components/reports/kpi-card.tsx"
+
+  - id: i18n_scaffold
+    name: "i18n Scaffold"
+    description: "next-intl configuration + locale bundles"
+    files:
+      - "i18n.ts"
+      - "messages/en.json"
+      - "messages/zh-TW.json"
+
+  - id: tenant_module
+    name: "Multi-tenant Module"
+    description: "tenant_id RLS + tenant middleware"
+    files:
+      - "lib/tenant.ts"
+      - "lib/db-tenant.ts"
+
+  - id: import_export_module
+    name: "Import/Export Module"
+    description: "CSV/XLSX/JSON round-trip"
+    files:
+      - "lib/import-export.ts"
+      - "app/api/import/route.ts"
+      - "app/api/export/route.ts"
+
+  - id: workflow_module
+    name: "Workflow Engine Module"
+    description: "State machine + approval chain"
+    files:
+      - "lib/workflow-engine.ts"
+      - "app/api/workflow/route.ts"

@@ -1,0 +1,97 @@
+# Enterprise Web Stack test definitions
+test_suites:
+  - id: auth-tests
+    name: "Auth Test Suite"
+    tests:
+      - id: auth-credentials-login
+        name: "Credentials login flow"
+        type: unit
+        target: enterprise_web_stack.authenticate
+      - id: auth-ldap-bind
+        name: "LDAP bind + user lookup"
+        type: integration
+        target: enterprise_web_stack._auth_ldap
+      - id: auth-saml-assertion
+        name: "SAML assertion validation"
+        type: integration
+        target: enterprise_web_stack._auth_saml
+      - id: auth-oidc-token-exchange
+        name: "OIDC code → token exchange"
+        type: integration
+        target: enterprise_web_stack._auth_oidc
+      - id: auth-session-lifecycle
+        name: "Session create/validate/refresh/revoke"
+        type: unit
+        target: enterprise_web_stack.create_session
+
+  - id: rbac-tests
+    name: "RBAC Test Suite"
+    tests:
+      - id: rbac-role-hierarchy
+        name: "Role level hierarchy"
+        type: unit
+        target: enterprise_web_stack.list_roles
+      - id: rbac-permission-check
+        name: "Permission grant and deny"
+        type: unit
+        target: enterprise_web_stack.check_permission
+      - id: rbac-policy-enforcement
+        name: "Policy middleware enforcement"
+        type: unit
+        target: enterprise_web_stack.enforce_policy
+      - id: rbac-wildcard
+        name: "Super admin wildcard permission"
+        type: unit
+        target: enterprise_web_stack.check_permission
+
+  - id: audit-tests
+    name: "Audit Test Suite"
+    tests:
+      - id: audit-write-chain
+        name: "Write + hash chain verification"
+        type: unit
+        target: enterprise_web_stack.write_audit
+      - id: audit-query-filter
+        name: "Query with filters"
+        type: unit
+        target: enterprise_web_stack.query_audit
+      - id: audit-tamper-detect
+        name: "Tamper detection via chain break"
+        type: unit
+        target: enterprise_web_stack.verify_audit_chain
+      - id: audit-tenant-isolation
+        name: "Audit entries isolated by tenant"
+        type: unit
+        target: enterprise_web_stack.query_audit
+
+  - id: workflow-tests
+    name: "Workflow Engine Test Suite"
+    tests:
+      - id: wf-lifecycle
+        name: "Full lifecycle: draft → completed"
+        type: unit
+        target: enterprise_web_stack.transition_workflow
+      - id: wf-invalid-transition
+        name: "Reject invalid state transition"
+        type: unit
+        target: enterprise_web_stack.transition_workflow
+      - id: wf-approval-chain
+        name: "Approve / reject flows"
+        type: unit
+        target: enterprise_web_stack.approve_workflow
+      - id: wf-cancel
+        name: "Cancel from non-terminal state"
+        type: unit
+        target: enterprise_web_stack.cancel_workflow
+
+  - id: integration-tests
+    name: "Integration Test Suite"
+    tests:
+      - id: integ-full-flow
+        name: "Auth → RBAC → Tenant → Workflow → Audit → Report → Export"
+        type: integration
+        target: enterprise_web_stack
+      - id: integ-import-export-roundtrip
+        name: "CSV/JSON import → export round-trip"
+        type: integration
+        target: enterprise_web_stack.execute_import
