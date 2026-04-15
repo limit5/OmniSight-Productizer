@@ -1456,3 +1456,43 @@ export async function testDecisionRules(kinds: string[], mode?: OperationMode) {
     { method: "POST", body: JSON.stringify({ kinds, mode }) },
   )
 }
+
+// ─── Project Report (B6/UX-04) ───
+
+export interface ReportResponse {
+  report_id: string
+  title: string
+  generated_at: string
+  markdown: string
+}
+
+export interface ShareReportResponse {
+  url: string
+  expires_in: number
+}
+
+export async function generateReport(runId: string, title?: string): Promise<ReportResponse> {
+  return request<ReportResponse>("/report/generate", {
+    method: "POST",
+    body: JSON.stringify({ run_id: runId, title }),
+  })
+}
+
+export async function getReport(reportId: string): Promise<ReportResponse> {
+  return request<ReportResponse>(`/report/${encodeURIComponent(reportId)}`)
+}
+
+export async function shareReport(
+  reportId: string,
+  baseUrl?: string,
+  expiresIn?: number,
+): Promise<ShareReportResponse> {
+  return request<ShareReportResponse>("/report/share", {
+    method: "POST",
+    body: JSON.stringify({
+      report_id: reportId,
+      base_url: baseUrl ?? "",
+      expires_in: expiresIn ?? 86400,
+    }),
+  })
+}
