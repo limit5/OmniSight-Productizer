@@ -235,7 +235,7 @@ async def _security_headers(request, call_next):
     # Strip the Referer on cross-origin so our routes don't leak in
     # other sites' analytics.
     response.headers.setdefault(
-        "Referrer-Policy", "strict-origin-when-cross-origin",
+        "Referrer-Policy", "strict-origin",
     )
     # Minimal Permissions-Policy — we don't use these APIs, deny them.
     response.headers.setdefault(
@@ -252,7 +252,7 @@ async def _security_headers(request, call_next):
         "default-src 'self'; "
         "img-src 'self' data: blob:; "
         "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; "
         "connect-src 'self' https:; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "

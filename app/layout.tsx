@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import { headers } from 'next/headers'
 import { Orbitron, Fira_Code } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Providers } from '@/components/providers'
@@ -39,18 +40,21 @@ export const metadata: Metadata = {
   },
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  const hdrs = await headers()
+  const nonce = hdrs.get("x-nonce") ?? ""
+
   return (
     <html lang="en" className="dark">
       <body className={`${orbitron.variable} ${firaCode.variable} font-sans antialiased`}>
         <Providers>
           {children}
         </Providers>
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        {process.env.NODE_ENV === 'production' && <Analytics nonce={nonce} />}
       </body>
     </html>
   )
