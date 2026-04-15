@@ -134,10 +134,10 @@ Legend:
 - [x] Docs: `docs/operations/ssh-runner.md` with key-gen + lockdown
 
 ### C2. L4-CORE-01 HardwareProfile schema (#211)
-- [ ] Define dataclass `HardwareProfile` with fields: SoC, MCU, DSP, NPU, sensor, codec, USB, display, memory_map, peripherals
-- [ ] JSON schema + pydantic validation
-- [ ] Migration: extend ParsedSpec optionally embedding HardwareProfile
-- [ ] Unit test: round-trip serialize/deserialize
+- [x] Define dataclass `HardwareProfile` with fields: SoC, MCU, DSP, NPU, sensor, codec, USB, display, memory_map, peripherals
+- [x] JSON schema + pydantic validation
+- [x] Migration: extend ParsedSpec optionally embedding HardwareProfile
+- [x] Unit test: round-trip serialize/deserialize
 
 ### C3. L4-CORE-02 Datasheet PDF → HardwareProfile parser (#212)
 - [ ] PDF text extraction (reuse Phase 67-E RAG)

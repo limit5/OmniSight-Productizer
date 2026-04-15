@@ -7,6 +7,37 @@
 
 ---
 
+## C2 L4-CORE-01 HardwareProfile schema 狀態更新（2026-04-15）
+
+**全部 4/4 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| HardwareProfile dataclass | ✅ | Pydantic BaseModel：SoC, MCU, DSP, NPU, sensor, codec, USB, display, memory_map, peripherals |
+| JSON schema + 驗證 | ✅ | `model_json_schema()` 匯出完整 JSON Schema；嵌套 MemoryMap / MemoryRegion / Peripheral 模型；field_validator 驗證 schema_version |
+| ParsedSpec 整合 | ✅ | 新增 `hardware_profile: Optional[HardwareProfile]` 欄位 + `to_dict()` 序列化支援 |
+| 單元測試 | ✅ | 15 項測試全數通過：round-trip dict/JSON、schema export、validation rejection、ParsedSpec 整合 |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/hardware_profile.py` | 新建——HardwareProfile / MemoryMap / MemoryRegion / Peripheral pydantic models |
+| `backend/intent_parser.py` | 新增 `hardware_profile` 欄位至 ParsedSpec + `to_dict()` 輸出 |
+| `backend/tests/test_hardware_profile.py` | 新建，15 項測試 |
+
+### 驗證
+
+- 15 項新增 HardwareProfile 測試全數通過
+- 26 項既有 intent_parser 測試全數通過（無迴歸）
+
+### 下一步
+
+- C3 (#212)：Datasheet PDF → HardwareProfile parser（使用本 schema 作為輸出目標）
+- C4 (#213)：Embedded product planner agent（讀取 HardwareProfile 生成 DAG）
+
+---
+
 ## C1 Phase 64-C-SSH runner 狀態更新（2026-04-15）
 
 **全部 7/7 項目已完成。**
