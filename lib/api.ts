@@ -905,20 +905,36 @@ export interface DAGSubmitResponse {
   supersedes_run_id?: string
 }
 
-export async function validateDag(dag: unknown): Promise<DAGValidateResponse> {
+export async function validateDag(
+  dag: unknown,
+  targetPlatform?: string,
+): Promise<DAGValidateResponse> {
   return request<DAGValidateResponse>("/dag/validate", {
     method: "POST",
-    body: JSON.stringify({ dag }),
+    body: JSON.stringify({ dag, target_platform: targetPlatform }),
   })
 }
 
 export async function submitDag(
   dag: unknown,
-  opts: { mutate?: boolean; metadata?: Record<string, unknown> } = {},
+  opts: {
+    mutate?: boolean
+    metadata?: Record<string, unknown>
+    /** Phase 68 → 64-C-LOCAL integration: pass the target platform
+     * profile name (e.g. "host_native", "aarch64") so the backend
+     * resolver can decide LOCAL vs BUNDLE. When omitted, backend
+     * falls back to hardware_manifest → host_native. */
+    targetPlatform?: string
+  } = {},
 ): Promise<DAGSubmitResponse> {
   return request<DAGSubmitResponse>("/dag", {
     method: "POST",
-    body: JSON.stringify({ dag, mutate: !!opts.mutate, metadata: opts.metadata }),
+    body: JSON.stringify({
+      dag,
+      mutate: !!opts.mutate,
+      metadata: opts.metadata,
+      target_platform: opts.targetPlatform,
+    }),
   })
 }
 

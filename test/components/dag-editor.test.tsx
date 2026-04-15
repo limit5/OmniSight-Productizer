@@ -114,6 +114,70 @@ describe("DagEditor", () => {
     }
   })
 
+  it("seeded spec carries target_platform through to validateDag and submitDag", async () => {
+    const user = userEvent.setup()
+    render(<DagEditor />)
+    await waitFor(() => expect(mockValidate).toHaveBeenCalled())
+
+    // Fire seed with x86_64 + hardware_required=no — the handoff
+    // must pick "host_native" and pass it to subsequent validate
+    // and submit calls.
+    mockValidate.mockClear()
+    window.dispatchEvent(new CustomEvent("omnisight:dag-seed-from-spec", {
+      detail: {
+        spec: {
+          project_type: { value: "web_app", confidence: 0.9 },
+          runtime_model: { value: "ssg", confidence: 0.9 },
+          framework: { value: "nextjs", confidence: 0.9 },
+          target_arch: { value: "x86_64", confidence: 0.9 },
+          hardware_required: { value: "no", confidence: 0.9 },
+        },
+      },
+    }))
+
+    // Wait for the debounced re-validate to fire post-seed.
+    await waitFor(
+      () => {
+        const lastCall = mockValidate.mock.calls[mockValidate.mock.calls.length - 1]
+        expect(lastCall && lastCall[1]).toBe("host_native")
+      },
+      { timeout: 1500 },
+    )
+
+    // Submit — same target_platform must reach submitDag.
+    await waitFor(() => expect(screen.getByText(/valid/i)).toBeInTheDocument())
+    const submit = screen.getByRole("button", { name: /submit/i })
+    await waitFor(() => expect(submit).not.toBeDisabled())
+    await user.click(submit)
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalled())
+    const submitArgs = mockSubmit.mock.calls[0]
+    expect(submitArgs[1]).toMatchObject({ targetPlatform: "host_native" })
+  })
+
+  it("seeded spec with hardware_required forces aarch64 not host_native", async () => {
+    render(<DagEditor />)
+    await waitFor(() => expect(mockValidate).toHaveBeenCalled())
+    mockValidate.mockClear()
+    window.dispatchEvent(new CustomEvent("omnisight:dag-seed-from-spec", {
+      detail: {
+        spec: {
+          project_type: { value: "embedded_firmware", confidence: 0.9 },
+          target_arch: { value: "x86_64", confidence: 0.9 },
+          hardware_required: { value: "yes", confidence: 0.9 },
+        },
+      },
+    }))
+    await waitFor(
+      () => {
+        const lastCall = mockValidate.mock.calls[mockValidate.mock.calls.length - 1]
+        // host_native fast path is wrong when hw is required; expect
+        // the embedded fallback (aarch64).
+        expect(lastCall && lastCall[1]).toBe("aarch64")
+      },
+      { timeout: 1500 },
+    )
+  })
+
   it("dag-seed-from-spec event seeds JSON tab from SpecTemplateEditor handoff", async () => {
     render(<DagEditor />)
     // Wait for initial template to load.

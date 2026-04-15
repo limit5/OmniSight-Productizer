@@ -309,6 +309,15 @@ export function DagEditor() {
   // request so the same id in a row (click → edit → click again)
   // still re-triggers the scroll.
   const [focusRequest, setFocusRequest] = useState<{ taskId: string; n: number } | null>(null)
+  // Phase 68 → 64-C-LOCAL integration: when DagEditor was seeded
+  // from SpecTemplateEditor, carry the spec's target_arch through
+  // to the DAG submit `target_platform` field. That's what makes
+  // the t3 runner resolver pick LOCAL instead of BUNDLE — seeding a
+  // template isn't enough on its own, the backend also needs to
+  // know which platform the operator intends. Kept in state (not
+  // on every ref-attached template click) because the operator may
+  // flip back and tweak the DAG; the spec context is still theirs.
+  const [seedTargetPlatform, setSeedTargetPlatform] = useState<string | null>(null)
   useEffect(() => {
     if (typeof window === "undefined") return
     const onFocus = (e: Event) => {
@@ -327,10 +336,10 @@ export function DagEditor() {
 
   // Phase 68-D follow-up: SpecTemplateEditor's onSpecReady fires a
   // `omnisight:dag-seed-from-spec` custom event with the ParsedSpec
-  // on its detail. Pick the template whose shape best matches —
-  // embedded_firmware → cross-compile, web_app SSG → compile-flash,
-  // etc. — and seed the JSON text with it. Operator can edit further
-  // before submit; this is a starter, not a commitment.
+  // on its detail. Pick the template whose shape best matches AND
+  // translate the spec's target_arch / hardware_required pair into
+  // a backend platform-profile name — that's what wires Phase 68
+  // and Phase 64-C-LOCAL together.
   useEffect(() => {
     if (typeof window === "undefined") return
     const onSeed = (e: Event) => {
@@ -338,14 +347,18 @@ export function DagEditor() {
         project_type?: { value?: string }
         runtime_model?: { value?: string }
         framework?: { value?: string }
+        target_arch?: { value?: string }
+        hardware_required?: { value?: string }
       } }
       const detail = (e as CustomEvent<Seed>).detail?.spec
       if (!detail) return
       const pt = detail.project_type?.value
       const rm = detail.runtime_model?.value
       const fw = detail.framework?.value
-      // Rule-of-thumb template selection. Simple, additive,
-      // deterministic — no LLM in the loop here.
+      const arch = detail.target_arch?.value
+      const hw = detail.hardware_required?.value
+
+      // Rule-of-thumb template selection.
       let pickId: string = "minimal"
       if (pt === "embedded_firmware") pickId = "cross-compile"
       else if (rm === "ssg" || fw === "nextjs" || fw === "react") pickId = "compile-flash"
@@ -353,10 +366,45 @@ export function DagEditor() {
       else if (fw === "rust" || pt === "cli_tool") pickId = "cross-compile"
       const tpl = TEMPLATES.find((t) => t.id === pickId) || TEMPLATES[0]
       setText(JSON.stringify(tpl.body, null, 2))
-      setSubmitMessage(
-        `Seeded from spec — template "${tpl.label}". Edit freely before Submit.`,
-      )
       setTab("json")
+
+      // Platform profile derivation:
+      //   - target_arch unknown → leave undefined (backend falls
+      //     back to hardware_manifest → host_native)
+      //   - hardware not required, target_arch = host-canonical
+      //     → "host_native" (triggers Phase 64-C-LOCAL's fast path)
+      //   - otherwise use the arch profile name that matches the
+      //     `configs/platforms/*.yaml` ids we ship
+      //
+      // We can't call platform.machine() from the browser, so
+      // "host-canonical" is a best-effort guess: x86_64 on an AMD/
+      // Intel desktop is the overwhelmingly common case. Operator
+      // can still override by typing target_platform into the DAG
+      // JSON directly if they're on a non-x86 dev box.
+      const archMap: Record<string, string> = {
+        x86_64: "host_native",    // assumes dev host is x86_64
+        arm64: "aarch64",
+        arm32: "armv7",
+        riscv64: "riscv64",
+      }
+      let platform: string | null = null
+      if (arch && arch !== "unknown" && archMap[arch]) {
+        platform = archMap[arch]
+        // Force cross-compile profile when the spec explicitly flags
+        // hardware — the host_native fast-path doesn't make sense
+        // for "flash a peripheral via USB" work.
+        if (hw === "yes" && platform === "host_native") {
+          platform = "aarch64"   // most common embedded target
+        }
+      }
+      setSeedTargetPlatform(platform)
+
+      const hint = platform
+        ? `target_platform="${platform}"`
+        : "target_platform will fall back to hardware_manifest default"
+      setSubmitMessage(
+        `Seeded from spec — template "${tpl.label}" · ${hint}. Edit freely before Submit.`,
+      )
     }
     window.addEventListener("omnisight:dag-seed-from-spec", onSeed as EventListener)
     return () =>
@@ -369,7 +417,7 @@ export function DagEditor() {
 
   // ─── live validate ──────────────────────────────────────────────
 
-  const runValidate = useCallback(async (raw: string) => {
+  const runValidate = useCallback(async (raw: string, platform: string | null) => {
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
@@ -385,7 +433,10 @@ export function DagEditor() {
     inflight.current = ac
     setValidating(true)
     try {
-      const res = await validateDag(parsed)
+      // Pass through the seeded target_platform so the live-validate
+      // canvas chip (UX-5 ⚡/🔗) reflects the actual runner the
+      // submit will hit, not the backend's manifest fallback.
+      const res = await validateDag(parsed, platform || undefined)
       if (ac.signal.aborted) return
       setValidation(res)
     } catch (exc) {
@@ -401,9 +452,9 @@ export function DagEditor() {
   }, [])
 
   useEffect(() => {
-    const t = setTimeout(() => void runValidate(text), VALIDATE_DEBOUNCE_MS)
+    const t = setTimeout(() => void runValidate(text, seedTargetPlatform), VALIDATE_DEBOUNCE_MS)
     return () => clearTimeout(t)
-  }, [text, runValidate])
+  }, [text, seedTargetPlatform, runValidate])
 
   // ─── actions ────────────────────────────────────────────────────
 
@@ -446,10 +497,14 @@ export function DagEditor() {
     setSubmitMessage(null)
     setSubmittedRunId(null)
     try {
-      const res = await submitDag(parsed, { mutate })
+      const res = await submitDag(parsed, {
+        mutate,
+        targetPlatform: seedTargetPlatform || undefined,
+      })
       setSubmitMessage(
-        `✓ Submitted — run ${res.run_id}, plan ${res.plan_id ?? "?"} (${res.status}).` +
-          (res.mutation_rounds ? ` mutation rounds: ${res.mutation_rounds}` : ""),
+        `✓ Submitted — run ${res.run_id}, plan ${res.plan_id ?? "?"} (${res.status})` +
+          (seedTargetPlatform ? ` · target=${seedTargetPlatform}` : "") +
+          (res.mutation_rounds ? ` · mutation rounds: ${res.mutation_rounds}` : "") + ".",
       )
       setSubmittedRunId(res.run_id)
     } catch (exc) {
