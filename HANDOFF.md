@@ -172,8 +172,39 @@
 🅒 **大方向（L2/L3 級別，需設計再開工）**
 - DOC-TASKS Phase：PDF/Markdown → LLM 抽取 task → Decision Engine 批次審核
   （2-3 day，含 prompt 工程；前端配 UX-02 Extracted Tasks Review panel）
-- Phase 64-C-SSH（要實機異架構需求才做）
 - Phase 64-C-QEMU（跨架構 build/test，等真用例）
+
+🅒 **L4 嵌入式產品線（IPCam / UVC / mic / smart display）**
+做一次受益所有產品，分兩層：
+
+Layer A — 共用基建（序列，後續全部 blocker）
+- L4-CORE-04 Phase 64-C-SSH runner（3-5 day，最優先，對現有 embedded 也立即
+  有價值）
+- L4-CORE-01 HardwareProfile schema（SoC/MCU/DSP/NPU/sensor/codec/USB/display
+  介面統一欄位，2-3 day）
+- L4-CORE-02 Datasheet PDF → HardwareProfile 解析（複用 Phase 67-E RAG，2-3 day）
+- L4-CORE-03 Embedded product planner agent（HW profile + product spec → DAG，
+  依 product class 挑 skill pack，3-5 day）
+- L4-CORE-05 Skill pack framework（registry + manifest + lifecycle，底層
+  skills-promotion.md 已有雛形，2-3 day）
+- L4-CORE-06 Document suite generator（擴充 REPORT-01，依 product_class 出
+  datasheet / user manual / 合規聲明等對應文件集，5-7 day）
+- L4-CORE-07 HIL plugin API（抽象 camera/audio/display 量測介面，3-4 day）
+- L4-CORE-08 Protocol compliance harness（包裝 ODTT / USBCV / UAC test suite
+  成 CLI-able，3-4 day）
+
+Layer B — 產品 skill pack（併行，彼此獨立）
+每個 skill pack 強制產出 5 件套：DAG task templates / code scaffolds /
+integration test pack / HIL test recipes / doc templates。
+- SKILL-IPCAM（RTSP + ONVIF 2.2 Profile S，5-10 day）
+- SKILL-UVC（USB Video Class 1.5，建議 pilot，5-8 day）
+- SKILL-UAC-MIC（USB Audio + mic array + AEC，5-8 day）
+- SKILL-DISPLAY（smart display UI + touch + OTA，7-12 day）
+
+推薦順序：L4-CORE-04 → 01/02/03/05 → SKILL-UVC pilot 跑通 framework →
+剩餘 skill pack 併行 → CORE-06/07/08 收尾。
+合計 wall-clock ~7-10 週（1 人）或 ~4-5 週（2-3 人併行 skill pack）。
+
 - 真 embedding（Phase 67-F）替換 quality_score 做 cosine
 - SSO / OAuth（內部多 operator）
 - Postgres 遷移（>2 concurrent operator）
