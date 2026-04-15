@@ -7,6 +7,60 @@
 
 ---
 
+## C4 L4-CORE-03 Embedded product planner agent 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Input: HardwareProfile + ProductSpec + skill_pack | ✅ | `plan_embedded_product(spec, hw, skill_pack)` 主入口，接受三者作為參數 |
+| Output: full DAG | ✅ | 生成完整 DAG：BSP → kernel → drivers → protocol → app → UI → OTA → tests → docs |
+| tasks.yaml template source | ✅ | `configs/skills/_embedded_base/tasks.yaml` — 26 task templates，支援 `when:` 條件式（has_sensor/has_npu/has_display 等） |
+| Dependency resolution | ✅ | Kahn's topological sort + dangling dep pruning；cycle detection 拋出 ValueError |
+| Unit test | ✅ | 46 項測試全數通過：condition eval (16) + filtering (3) + dep resolution (4) + full plan (6) + minimal plan (4) + camera-no-display (2) + topology helpers (4) + skill pack loading (3) + edge cases (4) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/embedded_planner.py` | 新建——deterministic DAG generator for embedded_product class |
+| `backend/tests/test_embedded_planner.py` | 新建，46 項測試 |
+| `configs/skills/_embedded_base/tasks.yaml` | 新建——26 task templates covering full embedded product lifecycle |
+
+### 架構說明
+
+- `plan_embedded_product(spec, hw, skill_pack, dag_id)` — 主入口
+- `_load_tasks_yaml(skill_pack)` — 從 `configs/skills/<pack>/tasks.yaml` 載入，fallback 到 `_embedded_base`
+- `_evaluate_conditions(when, hw)` — 根據 HardwareProfile 判斷 task 是否納入
+- `_filter_tasks(templates, hw)` — 過濾條件不符的 tasks
+- `_resolve_dependencies(tasks)` — Kahn's algorithm topological sort + dangling dep prune
+- `get_task_count_by_phase(dag)` / `get_dependency_depth(dag)` — topology inspection helpers
+
+### tasks.yaml 條件系統
+
+| 條件 key | 判斷依據 |
+|----------|---------|
+| `has_sensor` | `hw.sensor` 非空 |
+| `has_npu` | `hw.npu` 非空 |
+| `has_codec` | `hw.codec` 非空 |
+| `has_display` | `hw.display` 非空 |
+| `has_usb` | `hw.usb` 非空 |
+| `has_peripherals` | `hw.peripherals` 非空 |
+| `soc_contains` | `hw.soc` 包含指定子字串（不分大小寫） |
+
+### 驗證
+
+- 46 項新增 embedded planner 測試全數通過
+- 81 項既有測試全數通過（無迴歸；1 項 pre-existing failure: paramiko missing）
+
+### 下一步
+
+- C5 (#214)：Skill pack framework（技能包框架 — skill.yaml manifest schema）
+- 整合：將 `plan_embedded_product()` 接入 `planner_router.py` 的 `embedded` planner 路徑
+- 各 SKILL-* pack 建立各自的 `tasks.yaml`
+
+---
+
 ## C3 L4-CORE-02 Datasheet PDF → HardwareProfile parser 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

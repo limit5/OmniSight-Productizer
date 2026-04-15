@@ -147,11 +147,11 @@ Legend:
 - [x] Unit test: sample datasheets (Hi3516 / RK3566 / ESP32-S3)
 
 ### C4. L4-CORE-03 Embedded product planner agent (#213)
-- [ ] Input: HardwareProfile + ProductSpec + selected skill_pack
-- [ ] Output: full DAG (BSP → kernel → drivers → protocol layer → UI → OTA → tests)
-- [ ] Use skill pack's `tasks.yaml` as template source
-- [ ] Handle dependency resolution between tasks
-- [ ] Unit test: fixture spec → expected DAG task count / topology
+- [x] Input: HardwareProfile + ProductSpec + selected skill_pack
+- [x] Output: full DAG (BSP → kernel → drivers → protocol layer → UI → OTA → tests)
+- [x] Use skill pack's `tasks.yaml` as template source
+- [x] Handle dependency resolution between tasks
+- [x] Unit test: fixture spec → expected DAG task count / topology
 
 ### C5. L4-CORE-05 Skill pack framework (#214)
 - [ ] Define skill manifest schema (`skill.yaml`)
