@@ -108,10 +108,10 @@ Legend:
 - [x] Update HANDOFF based on decision
 
 ### B11. Forecast panel reactive to spec context (HANDOFF B)
-- [ ] Listen to `omnisight:spec-updated` event
-- [ ] Recompute estimates when `target_platform` / `framework` changes
-- [ ] Show delta vs previous estimate (± cycle time / ± token budget)
-- [ ] Component test: fire event → estimate re-renders
+- [x] Listen to `omnisight:spec-updated` event
+- [x] Recompute estimates when `target_platform` / `framework` changes
+- [x] Show delta vs previous estimate (± cycle time / ± token budget)
+- [x] Component test: fire event → estimate re-renders
 
 ---
 

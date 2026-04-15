@@ -7,6 +7,33 @@
 
 ---
 
+## B11 Forecast panel reactive to spec context 狀態更新（2026-04-15）
+
+**全部 4/4 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Listen to `omnisight:spec-updated` event | ✅ | SpecTemplateEditor 在 spec state 變更時 dispatch `omnisight:spec-updated` CustomEvent；ForecastPanel 在 useEffect 中監聽並 debounce (800ms) |
+| Recompute on target_platform/framework change | ✅ | 收到 event 後觸發 POST `/api/v1/system/forecast/recompute`；忽略 arch=unknown 且 framework=unknown 的空 spec |
+| Show delta vs previous estimate | ✅ | Delta banner 顯示 ±hours / ±tokens，紅色=增加、綠色=減少；附帶 reason（platform/track 變更說明）；可手動 dismiss |
+| Component test | ✅ | 5 項測試：initial render、RECOMPUTE button、spec-event triggers recompute + delta、delta dismiss、ignore unknown spec |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `components/omnisight/spec-template-editor.tsx` | 新增 useEffect 在 spec 變更時 dispatch `omnisight:spec-updated` event |
+| `components/omnisight/forecast-panel.tsx` | 新增 spec-updated listener、delta state、delta banner UI（TrendingUp/Down icons）|
+| `test/components/forecast-panel.test.tsx` | 新建，5 項 component test |
+
+### 驗證
+
+- `npx eslint` — 0 findings（3 個 changed files）
+- `npx vitest run test/components/` — 115/115 tests pass（15 test files）
+- 無後端變更，API 合約不變
+
+---
+
 ## B10 Pipeline Timeline `omnisight:timeline-focus-run` wiring 狀態更新（2026-04-15）
 
 **全部 4/4 項目已完成。決議：取消 event wiring。**
@@ -555,7 +582,7 @@ After deploy, fill in:
 - DAG `toolchain` 加 enum / autocomplete（消除 typo 只在 runtime 才抓）
 - ESLint 113 finding 分批清；warn → 升硬 gate
 - ~~Pipeline Timeline 接 `omnisight:timeline-focus-run` event~~ ✅ **已決議取消**：Pipeline Timeline 追蹤的是 NPI 生命週期階段，非個別 run；B7 RunHistory inline-expand 已涵蓋 run-level focus 需求，不需額外 event wiring
-- Forecast panel 受 spec context 影響（spec 改 target_platform 即時更新預估）
+- ~~Forecast panel 受 spec context 影響（spec 改 target_platform 即時更新預估）~~ ✅ **已完成**：ForecastPanel 監聽 `omnisight:spec-updated` event，SpecTemplateEditor 在 spec 變更時 dispatch；debounced recompute (800ms)；delta banner 顯示 ±hours / ±tokens 差異；5 項 component test 通過
 - **跨 agent 觀察 routing**：`finding_type` 加標準 enum `cross_agent/observation`；
   orchestrator 用單一 rule 處理所有跨 agent 通報（A 發現 B 的問題 → 只回報、不動手、
   走 Decision Engine propose）。目前 `emit_debug_finding` 已具備底層機制，缺
