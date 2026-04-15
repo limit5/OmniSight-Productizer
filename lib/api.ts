@@ -835,6 +835,34 @@ export async function logout(): Promise<void> {
   await request<{ status: string }>("/auth/logout", { method: "POST" })
 }
 
+// ─── Session management (J3) ─────────────────────────────────
+
+export interface SessionItem {
+  token_hint: string
+  created_at: number
+  expires_at: number
+  last_seen_at: number
+  ip: string
+  user_agent: string
+  is_current: boolean
+}
+
+export async function listSessions(): Promise<{ items: SessionItem[]; count: number }> {
+  return request<{ items: SessionItem[]; count: number }>("/auth/sessions")
+}
+
+export async function revokeSession(tokenHint: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/auth/sessions/${encodeURIComponent(tokenHint)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function revokeAllOtherSessions(): Promise<{ status: string; revoked_count: number }> {
+  return request<{ status: string; revoked_count: number }>("/auth/sessions", {
+    method: "DELETE",
+  })
+}
+
 // ─── Ops Summary (L1-04) ─────────────────────────────────────
 
 export interface OpsSummary {

@@ -10,14 +10,16 @@
  */
 
 import { useEffect, useRef, useState } from "react"
-import { LogOut, User as UserIcon } from "lucide-react"
+import { LogOut, Monitor, User as UserIcon } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/auth-context"
+import { SessionManagerPanel } from "./session-manager-panel"
 
 export function UserMenu() {
   const auth = useAuth()
   const router = useRouter()
   const [open, setOpen] = useState(false)
+  const [showSessions, setShowSessions] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   // Close on outside click / Escape — same shape as PanelHelp.
@@ -74,12 +76,43 @@ export function UserMenu() {
           <button
             type="button"
             role="menuitem"
+            onClick={() => { setOpen(false); setShowSessions(true) }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--secondary)] text-[var(--foreground)]"
+            data-testid="menu-manage-sessions"
+          >
+            <Monitor size={12} />
+            Manage sessions
+          </button>
+          <button
+            type="button"
+            role="menuitem"
             onClick={handleLogout}
             className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--destructive)]/10 text-[var(--destructive)]"
           >
             <LogOut size={12} />
             Sign out
           </button>
+        </div>
+      )}
+
+      {showSessions && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setShowSessions(false)}>
+          <div className="absolute inset-0 bg-black/40" />
+          <div
+            className="relative w-full max-w-lg max-h-[80vh] overflow-y-auto bg-[var(--background)] border border-[var(--border)] rounded-lg shadow-xl p-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <SessionManagerPanel />
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={() => setShowSessions(false)}
+                className="px-3 py-1.5 rounded font-mono text-xs bg-[var(--secondary)] text-[var(--foreground)] hover:bg-[var(--secondary)]/80 transition-colors"
+                data-testid="sessions-close"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
