@@ -1,0 +1,47 @@
+# Barcode Scanner SDK — HIL (Hardware-in-the-Loop) test recipes
+schema_version: "1"
+skill_id: barcode_scanner
+
+hil_recipes:
+  - id: physical_scanner_scan
+    name: "Physical Scanner Decode Test"
+    description: "Connect to physical scanner, scan printed barcode sheet, verify decode"
+    equipment:
+      - "USB barcode scanner (any supported vendor)"
+      - "Printed barcode test sheet (all symbologies)"
+    steps:
+      - "Connect scanner via USB"
+      - "Initialize vendor adapter"
+      - "Scan each barcode on test sheet"
+      - "Verify decoded data matches expected"
+      - "Disconnect scanner"
+    pass_criteria:
+      - "All symbologies decode correctly"
+      - "Decode time < 500ms per barcode"
+
+  - id: decode_mode_switch
+    name: "Decode Mode Live Switch"
+    description: "Switch between HID/SPP/API modes on physical scanner"
+    equipment:
+      - "USB barcode scanner with mode switching support"
+    steps:
+      - "Start in HID wedge mode, verify keystroke output"
+      - "Switch to SPP mode, verify serial output"
+      - "Switch to API mode, verify SDK callback"
+    pass_criteria:
+      - "Mode switch completes without reconnect"
+      - "Output format matches mode specification"
+
+  - id: multi_vendor_consistency
+    name: "Multi-Vendor Consistency"
+    description: "Same barcode scanned by different vendor scanners produces identical output"
+    equipment:
+      - "Zebra scanner"
+      - "Honeywell scanner"
+      - "Datalogic scanner"
+      - "Printed barcode test sheet"
+    steps:
+      - "Scan same barcode with each vendor scanner"
+      - "Compare decoded output across vendors"
+    pass_criteria:
+      - "All vendors produce identical decoded data"

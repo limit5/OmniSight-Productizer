@@ -1,0 +1,63 @@
+# Barcode Scanner SDK Integration Guide
+
+## Overview
+
+The Barcode Scanner SDK provides a unified `BarcodeScanner` interface that
+abstracts vendor-specific scanner SDKs behind a common API. Supported vendors:
+
+{% for vendor in vendors %}
+- **{{ vendor.name }}** ({{ vendor.sdk_name }}) — {{ vendor.description }}
+{% endfor %}
+
+## Quick Start
+
+```python
+from backend.barcode_scanner import create_scanner, ScannerConfig
+
+config = ScannerConfig(
+    vendor_id="{{ vendors[0].vendor_id }}",
+    decode_mode="api",
+    enabled_symbologies=["qr_code", "code_128", "ean_13"],
+)
+scanner = create_scanner("{{ vendors[0].vendor_id }}", config)
+scanner.connect()
+scanner.configure(config)
+result = scanner.scan(frame_data)
+print(f"Decoded: {result.symbology} -> {result.data}")
+scanner.disconnect()
+```
+
+## Supported Symbologies
+
+### 1D Barcodes
+{% for sym in symbologies_1d %}
+- **{{ sym.name }}** (`{{ sym.symbology_id }}`) — {{ sym.description }}
+{% endfor %}
+
+### 2D Barcodes
+{% for sym in symbologies_2d %}
+- **{{ sym.name }}** (`{{ sym.symbology_id }}`) — {{ sym.description }}
+{% endfor %}
+
+## Decode Modes
+
+{% for mode in decode_modes %}
+### {{ mode.name }} (`{{ mode.mode_id }}`)
+{{ mode.description }}
+
+Features: {{ mode.features | join(", ") }}
+{% endfor %}
+
+## REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/barcode/vendors` | List supported vendors |
+| GET | `/api/barcode/symbologies` | List supported symbologies |
+| GET | `/api/barcode/decode-modes` | List decode modes |
+| POST | `/api/barcode/scan` | Decode a barcode frame |
+| GET | `/api/barcode/frame-samples` | List pre-captured frame samples |
+| POST | `/api/barcode/frame-samples/validate` | Validate a frame sample |
+| GET | `/api/barcode/test-recipes` | List test recipes |
+| POST | `/api/barcode/test-recipes/run` | Run a test recipe |
+| POST | `/api/barcode/gate/validate` | Run full gate validation |

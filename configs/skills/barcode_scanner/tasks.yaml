@@ -1,0 +1,46 @@
+# Barcode Scanner SDK — DAG task definitions
+schema_version: "1"
+skill_id: barcode_scanner
+
+tasks:
+  - id: barcode_scanner_interface
+    name: "Unified BarcodeScanner Interface"
+    description: "Implement abstract BarcodeScanner base class with connect/disconnect/configure/scan lifecycle"
+    depends_on: []
+    artifacts:
+      - backend/barcode_scanner.py
+
+  - id: vendor_adapters
+    name: "Vendor Adapter Implementations"
+    description: "Implement Zebra SNAPI, Honeywell, Datalogic, and Newland adapters"
+    depends_on: [barcode_scanner_interface]
+    artifacts:
+      - backend/barcode_scanner.py
+
+  - id: symbology_support
+    name: "Symbology Support"
+    description: "Implement 1D (UPC/EAN/Code128/Code39/Codabar/I2of5) and 2D (QR/DataMatrix/PDF417/Aztec) decode + validation"
+    depends_on: [barcode_scanner_interface]
+    artifacts:
+      - configs/barcode_scanner.yaml
+
+  - id: decode_modes
+    name: "Decode Mode Support"
+    description: "Implement HID wedge, Bluetooth SPP, and native API decode modes with output formatting"
+    depends_on: [vendor_adapters]
+    artifacts:
+      - backend/barcode_scanner.py
+
+  - id: rest_endpoints
+    name: "REST API Endpoints"
+    description: "FastAPI router for scanner management, decoding, and testing"
+    depends_on: [vendor_adapters, decode_modes]
+    artifacts:
+      - backend/routers/barcode_scanner.py
+
+  - id: unit_tests
+    name: "Unit Test Suite"
+    description: "Comprehensive tests with pre-captured frame samples"
+    depends_on: [rest_endpoints]
+    artifacts:
+      - backend/tests/test_barcode_scanner.py

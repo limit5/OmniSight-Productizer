@@ -1,0 +1,392 @@
+schema_version: 1
+
+barcode_scanner:
+  name: "Barcode/Scanning SDK Abstraction"
+  description: >
+    Unified barcode scanner interface with vendor adapter pattern.
+    Supports multiple vendors (Zebra SNAPI, Honeywell, Datalogic, Newland),
+    symbologies (1D/2D), and decode modes (HID wedge, SPP, API).
+
+  vendors:
+    - id: "zebra_snapi"
+      name: "Zebra SNAPI"
+      description: "Zebra Scanner SDK — SNAPI (Simple Network Application Programming Interface)"
+      sdk_name: "CoreScanner"
+      transport: ["usb_hid", "usb_cdc", "ssi"]
+      supported_symbologies:
+        - "upc_a"
+        - "upc_e"
+        - "ean_8"
+        - "ean_13"
+        - "code_128"
+        - "code_39"
+        - "code_93"
+        - "codabar"
+        - "interleaved_2of5"
+        - "qr_code"
+        - "data_matrix"
+        - "pdf417"
+        - "aztec"
+        - "maxi_code"
+      decode_modes: ["hid_wedge", "spp", "api"]
+      features:
+        - "image_capture"
+        - "firmware_update"
+        - "parameter_programming"
+        - "beeper_control"
+        - "led_control"
+
+    - id: "honeywell"
+      name: "Honeywell SDK"
+      description: "Honeywell EZConfig / FreeScan SDK integration"
+      sdk_name: "FreeScan"
+      transport: ["usb_hid", "rs232", "bluetooth"]
+      supported_symbologies:
+        - "upc_a"
+        - "upc_e"
+        - "ean_8"
+        - "ean_13"
+        - "code_128"
+        - "code_39"
+        - "code_93"
+        - "codabar"
+        - "interleaved_2of5"
+        - "qr_code"
+        - "data_matrix"
+        - "pdf417"
+        - "aztec"
+        - "gs1_databar"
+      decode_modes: ["hid_wedge", "spp", "api"]
+      features:
+        - "image_capture"
+        - "firmware_update"
+        - "parameter_programming"
+        - "aim_control"
+
+    - id: "datalogic"
+      name: "Datalogic SDK"
+      description: "Datalogic Aladdin configuration / SDK integration"
+      sdk_name: "Aladdin"
+      transport: ["usb_hid", "rs232", "usb_cdc"]
+      supported_symbologies:
+        - "upc_a"
+        - "upc_e"
+        - "ean_8"
+        - "ean_13"
+        - "code_128"
+        - "code_39"
+        - "code_93"
+        - "codabar"
+        - "interleaved_2of5"
+        - "qr_code"
+        - "data_matrix"
+        - "pdf417"
+        - "aztec"
+      decode_modes: ["hid_wedge", "api"]
+      features:
+        - "image_capture"
+        - "parameter_programming"
+        - "green_spot_aim"
+
+    - id: "newland"
+      name: "Newland SDK"
+      description: "Newland NLS SDK for barcode scanner modules"
+      sdk_name: "NLS"
+      transport: ["uart", "usb_hid", "usb_cdc"]
+      supported_symbologies:
+        - "upc_a"
+        - "upc_e"
+        - "ean_8"
+        - "ean_13"
+        - "code_128"
+        - "code_39"
+        - "code_93"
+        - "codabar"
+        - "interleaved_2of5"
+        - "qr_code"
+        - "data_matrix"
+        - "pdf417"
+        - "aztec"
+        - "han_xin"
+      decode_modes: ["hid_wedge", "spp", "api"]
+      features:
+        - "image_capture"
+        - "firmware_update"
+        - "illumination_control"
+
+  symbologies:
+    one_d:
+      - id: "upc_a"
+        name: "UPC-A"
+        description: "Universal Product Code — 12 digits"
+        digit_count: 12
+        charset: "numeric"
+        check_digit: true
+        category: "retail"
+
+      - id: "upc_e"
+        name: "UPC-E"
+        description: "Compressed UPC — 8 digits (zero-suppressed)"
+        digit_count: 8
+        charset: "numeric"
+        check_digit: true
+        category: "retail"
+
+      - id: "ean_8"
+        name: "EAN-8"
+        description: "European Article Number — 8 digits"
+        digit_count: 8
+        charset: "numeric"
+        check_digit: true
+        category: "retail"
+
+      - id: "ean_13"
+        name: "EAN-13"
+        description: "European Article Number — 13 digits"
+        digit_count: 13
+        charset: "numeric"
+        check_digit: true
+        category: "retail"
+
+      - id: "code_128"
+        name: "Code 128"
+        description: "High-density linear — full ASCII"
+        digit_count: null
+        charset: "ascii_full"
+        check_digit: true
+        category: "logistics"
+
+      - id: "code_39"
+        name: "Code 39"
+        description: "Alphanumeric — uppercase + digits + special"
+        digit_count: null
+        charset: "alphanumeric_upper"
+        check_digit: false
+        category: "industrial"
+
+      - id: "code_93"
+        name: "Code 93"
+        description: "Compact alphanumeric — full ASCII with shift"
+        digit_count: null
+        charset: "ascii_full"
+        check_digit: true
+        category: "logistics"
+
+      - id: "codabar"
+        name: "Codabar"
+        description: "Numeric with 6 special characters"
+        digit_count: null
+        charset: "numeric_plus"
+        check_digit: false
+        category: "healthcare"
+
+      - id: "interleaved_2of5"
+        name: "Interleaved 2 of 5"
+        description: "Numeric — digits encoded in pairs"
+        digit_count: null
+        charset: "numeric"
+        check_digit: false
+        category: "warehouse"
+
+      - id: "gs1_databar"
+        name: "GS1 DataBar"
+        description: "GS1 DataBar (formerly RSS) — omnidirectional"
+        digit_count: 14
+        charset: "numeric"
+        check_digit: true
+        category: "retail"
+
+    two_d:
+      - id: "qr_code"
+        name: "QR Code"
+        description: "Quick Response — ISO 18004"
+        max_data_chars: 4296
+        error_correction_levels: ["L", "M", "Q", "H"]
+        category: "general"
+
+      - id: "data_matrix"
+        name: "Data Matrix"
+        description: "2D matrix — ISO 16022, common in electronics/pharma"
+        max_data_chars: 2335
+        error_correction_levels: ["ECC_200"]
+        category: "manufacturing"
+
+      - id: "pdf417"
+        name: "PDF417"
+        description: "Stacked linear — ISO 15438, used in transport/ID"
+        max_data_chars: 1850
+        error_correction_levels: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        category: "transport"
+
+      - id: "aztec"
+        name: "Aztec Code"
+        description: "Concentric square rings — ISO 24778, used in ticketing"
+        max_data_chars: 3832
+        error_correction_levels: ["default", "compact"]
+        category: "ticketing"
+
+      - id: "maxi_code"
+        name: "MaxiCode"
+        description: "Hexagonal grid — used by UPS for package sorting"
+        max_data_chars: 138
+        error_correction_levels: ["standard"]
+        category: "logistics"
+
+      - id: "han_xin"
+        name: "Han Xin Code"
+        description: "Chinese national standard GB/T 21049 — supports Chinese characters"
+        max_data_chars: 7827
+        error_correction_levels: ["L1", "L2", "L3", "L4"]
+        category: "regional"
+
+  decode_modes:
+    - id: "hid_wedge"
+      name: "HID Keyboard Wedge"
+      description: >
+        Scanner appears as USB HID keyboard. Decoded data is typed as
+        keystrokes. No driver needed — universal compatibility.
+      transport: "usb_hid"
+      requires_driver: false
+      latency: "medium"
+      features:
+        - "prefix_suffix"
+        - "inter_character_delay"
+        - "caps_lock_override"
+
+    - id: "spp"
+      name: "Serial Port Profile (Bluetooth)"
+      description: >
+        Bluetooth SPP creates virtual serial port. Scanner sends decoded
+        data as serial stream. Common in wireless handheld guns.
+      transport: "bluetooth_spp"
+      requires_driver: true
+      latency: "medium"
+      features:
+        - "pairing_management"
+        - "reconnect_on_drop"
+        - "battery_status"
+
+    - id: "api"
+      name: "Native SDK API"
+      description: >
+        Direct SDK integration via vendor library. Provides richest feature
+        set — image capture, parameter control, firmware update.
+      transport: "vendor_sdk"
+      requires_driver: true
+      latency: "low"
+      features:
+        - "image_capture"
+        - "symbology_config"
+        - "parameter_programming"
+        - "firmware_update"
+        - "beeper_led_control"
+        - "decode_event_callback"
+
+  frame_samples:
+    - id: "upc_a_sample"
+      symbology: "upc_a"
+      description: "UPC-A barcode: 012345678905"
+      expected_data: "012345678905"
+      format: "grayscale_8bit"
+      width: 200
+      height: 100
+
+    - id: "ean_13_sample"
+      symbology: "ean_13"
+      description: "EAN-13 barcode: 4006381333931"
+      expected_data: "4006381333931"
+      format: "grayscale_8bit"
+      width: 200
+      height: 100
+
+    - id: "code_128_sample"
+      symbology: "code_128"
+      description: "Code 128 barcode: Hello World"
+      expected_data: "Hello World"
+      format: "grayscale_8bit"
+      width: 300
+      height: 100
+
+    - id: "qr_code_sample"
+      symbology: "qr_code"
+      description: "QR Code: https://omnisight.dev"
+      expected_data: "https://omnisight.dev"
+      format: "grayscale_8bit"
+      width: 200
+      height: 200
+
+    - id: "data_matrix_sample"
+      symbology: "data_matrix"
+      description: "Data Matrix: SN-2026041500001"
+      expected_data: "SN-2026041500001"
+      format: "grayscale_8bit"
+      width: 150
+      height: 150
+
+    - id: "pdf417_sample"
+      symbology: "pdf417"
+      description: "PDF417: OMNISIGHT-PRODUCTIZER-C22"
+      expected_data: "OMNISIGHT-PRODUCTIZER-C22"
+      format: "grayscale_8bit"
+      width: 300
+      height: 100
+
+    - id: "aztec_sample"
+      symbology: "aztec"
+      description: "Aztec Code: TICKET-20260415-001"
+      expected_data: "TICKET-20260415-001"
+      format: "grayscale_8bit"
+      width: 150
+      height: 150
+
+  test_recipes:
+    - id: "vendor_adapter_lifecycle"
+      name: "Vendor Adapter Lifecycle"
+      description: "Initialize, configure, scan, and shutdown each vendor adapter"
+      domains: ["vendor_adapters"]
+
+    - id: "symbology_decode"
+      name: "Symbology Decode Matrix"
+      description: "Decode all supported symbologies from pre-captured frames"
+      domains: ["symbology"]
+
+    - id: "decode_mode_switch"
+      name: "Decode Mode Switching"
+      description: "Switch between HID/SPP/API modes and verify behavior"
+      domains: ["decode_modes"]
+
+    - id: "frame_sample_validation"
+      name: "Frame Sample Validation"
+      description: "Validate all frame samples decode to expected data"
+      domains: ["frame_samples"]
+
+    - id: "multi_vendor_roundtrip"
+      name: "Multi-Vendor Round Trip"
+      description: "Same barcode decoded by each vendor adapter produces identical output"
+      domains: ["vendor_adapters", "symbology"]
+
+    - id: "error_handling"
+      name: "Error Handling"
+      description: "Corrupt frames, unsupported symbologies, disconnection recovery"
+      domains: ["error_handling"]
+
+  artifacts:
+    - id: "barcode_scanner_interface"
+      kind: "tasks"
+      description: "Unified BarcodeScanner interface and vendor adapters"
+
+    - id: "barcode_scanner_scaffolds"
+      kind: "scaffolds"
+      description: "Scaffold templates for barcode scanner integration"
+
+    - id: "barcode_scanner_tests"
+      kind: "tests"
+      description: "Unit and integration test suite"
+
+    - id: "barcode_scanner_hil"
+      kind: "hil"
+      description: "Hardware-in-the-loop recipes for scanner testing"
+
+    - id: "barcode_scanner_docs"
+      kind: "docs"
+      description: "Integration guide and API documentation"

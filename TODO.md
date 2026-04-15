@@ -286,11 +286,11 @@ Legend:
 - [x] Reference implementation (acts as template for SW-WEB-*)
 
 ### C22. L4-CORE-22 Barcode/scanning SDK abstraction (#243)
-- [ ] Unified `BarcodeScanner` interface
-- [ ] Vendor adapters: Zebra SNAPI / Honeywell SDK / Datalogic SDK / Newland SDK
-- [ ] Symbology support: UPC/EAN/Code128/QR/DataMatrix/PDF417/Aztec
-- [ ] Decode modes: HID wedge / SPP / API
-- [ ] Unit test with pre-captured frame samples
+- [x] Unified `BarcodeScanner` interface
+- [x] Vendor adapters: Zebra SNAPI / Honeywell SDK / Datalogic SDK / Newland SDK
+- [x] Symbology support: UPC/EAN/Code128/QR/DataMatrix/PDF417/Aztec
+- [x] Decode modes: HID wedge / SPP / API
+- [x] Unit test with pre-captured frame samples
 
 ### C23. L4-CORE-23 Depth / 3D sensing pipeline (#253)
 - [ ] ToF sensor driver abstraction (Sony IMX556 / Melexis MLX75027)

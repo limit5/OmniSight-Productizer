@@ -1,0 +1,44 @@
+# Barcode Scanner SDK skill manifest
+schema_version: "1"
+skill_id: barcode_scanner
+name: "Barcode/Scanning SDK Abstraction"
+description: >
+  Unified BarcodeScanner interface with vendor adapter pattern.
+  Supports Zebra SNAPI, Honeywell SDK, Datalogic SDK, Newland SDK.
+  Symbologies: 1D (UPC/EAN/Code128/Code39/Codabar/I2of5) and
+  2D (QR/DataMatrix/PDF417/Aztec/MaxiCode/Han Xin).
+  Decode modes: HID keyboard wedge, Bluetooth SPP, native SDK API.
+
+version: "1.0.0"
+product_class: embedded_product
+
+dependencies:
+  - CORE-05  # Skill pack framework
+  - CORE-07  # HIL plugin API (for physical scanner testing)
+
+artifact_kinds:
+  - tasks
+  - scaffolds
+  - tests
+  - hil
+  - docs
+
+capabilities:
+  - unified_scanner_interface
+  - zebra_snapi_adapter
+  - honeywell_adapter
+  - datalogic_adapter
+  - newland_adapter
+  - symbology_1d_decode
+  - symbology_2d_decode
+  - hid_wedge_mode
+  - spp_bluetooth_mode
+  - api_native_mode
+
+tags:
+  - barcode
+  - scanner
+  - embedded
+  - retail
+  - logistics
+  - warehouse

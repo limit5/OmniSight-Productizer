@@ -1,0 +1,34 @@
+# Barcode Scanner SDK — test suite definitions
+schema_version: "1"
+skill_id: barcode_scanner
+
+test_suites:
+  - id: vendor_adapter_lifecycle
+    name: "Vendor Adapter Lifecycle Tests"
+    description: "Verify connect/configure/scan/disconnect for all vendor adapters"
+    test_file: backend/tests/test_barcode_scanner.py
+    markers: ["vendor"]
+
+  - id: symbology_decode
+    name: "Symbology Decode Tests"
+    description: "Verify all supported symbologies decode correctly"
+    test_file: backend/tests/test_barcode_scanner.py
+    markers: ["symbology"]
+
+  - id: decode_mode
+    name: "Decode Mode Tests"
+    description: "Verify HID wedge, SPP, and API mode output formatting"
+    test_file: backend/tests/test_barcode_scanner.py
+    markers: ["decode_mode"]
+
+  - id: frame_sample
+    name: "Frame Sample Validation Tests"
+    description: "Verify pre-captured frame samples decode to expected data"
+    test_file: backend/tests/test_barcode_scanner.py
+    markers: ["frame_sample"]
+
+  - id: error_handling
+    name: "Error Handling Tests"
+    description: "Verify graceful handling of corrupt data, unknown vendors, etc."
+    test_file: backend/tests/test_barcode_scanner.py
+    markers: ["error_handling"]

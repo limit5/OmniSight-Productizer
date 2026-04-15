@@ -7,6 +7,54 @@
 
 ---
 
+## C22 L4-CORE-22 Barcode/scanning SDK abstraction 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。146 項測試全部通過。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Unified BarcodeScanner interface | ✅ | Abstract base class with connect/disconnect/configure/scan lifecycle, ScannerConfig dataclass, ScanResult with status/symbology/data/confidence/decode_time/frame_hash/metadata, factory `create_scanner()` |
+| Vendor adapters: Zebra SNAPI / Honeywell SDK / Datalogic SDK / Newland SDK | ✅ | 4 vendor adapters (ZebraSNAPIAdapter/HoneywellAdapter/DatalogicAdapter/NewlandAdapter) sharing _BaseAdapter decode logic, per-vendor capabilities (CoreScanner/FreeScan/Aladdin/NLS SDKs), transport support (USB HID/CDC/SSI/RS232/UART/Bluetooth) |
+| Symbology support: UPC/EAN/Code128/QR/DataMatrix/PDF417/Aztec | ✅ | 16 symbologies — 1D: UPC-A/UPC-E/EAN-8/EAN-13/Code128/Code39/Code93/Codabar/I2of5/GS1 DataBar; 2D: QR Code/Data Matrix/PDF417/Aztec/MaxiCode/Han Xin. Validation with EAN check digit verification |
+| Decode modes: HID wedge / SPP / API | ✅ | 3 modes — HID wedge (keystroke output with prefix/suffix/inter-char delay), SPP Bluetooth (serial stream with CRLF), API native (SDK decode event callback with symbology/data/confidence) |
+| Unit test with pre-captured frame samples | ✅ | 146 tests: config loading, vendor CRUD, scanner lifecycle (4 vendors × 7 states), scanning (7 symbologies × 4 vendors), decode modes, symbology validation, frame samples (7 samples × 4 vendors), error handling, 6 test recipes, artifacts, gate validation, multi-vendor consistency, synthetic frames, adapter-specific features, enums |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/barcode_scanner.yaml` | 新建——4 vendors (Zebra/Honeywell/Datalogic/Newland) + 16 symbologies (10 1D + 6 2D) + 3 decode modes + 7 frame samples + 6 test recipes + 5 artifacts |
+| `backend/barcode_scanner.py` | 新建——Barcode scanner SDK library：6 enums + 12 data models + config loader + abstract BarcodeScanner interface + 4 vendor adapters + symbology validation + frame generation + decode pipeline + 6 test recipe runners + gate validation |
+| `backend/routers/barcode_scanner.py` | 新建——REST endpoints: vendors (GET list, GET capabilities), symbologies (GET list, POST validate), decode modes (GET), scan (POST), frame samples (GET list, GET by ID, POST validate), test recipes (GET list, POST run), artifacts (GET), gate validation (POST) |
+| `backend/main.py` | 擴充——註冊 barcode_scanner router |
+| `configs/skills/barcode_scanner/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-07 dependencies, 10 capabilities) |
+| `configs/skills/barcode_scanner/tasks.yaml` | 新建——DAG tasks for barcode scanner SDK setup |
+| `configs/skills/barcode_scanner/scaffolds/scanner_integration.py` | 新建——scaffold template for scanner integration |
+| `configs/skills/barcode_scanner/tests/test_definitions.yaml` | 新建——test suite definitions |
+| `configs/skills/barcode_scanner/hil/barcode_scanner_hil_recipes.yaml` | 新建——HIL recipes for physical scanner testing |
+| `configs/skills/barcode_scanner/docs/barcode_scanner_integration_guide.md.j2` | 新建——Jinja2 doc template for integration guide |
+| `backend/tests/test_barcode_scanner.py` | 新建，146 項測試全部通過 |
+| `TODO.md` | 更新——C22 全部標記完成 |
+
+### 架構說明
+
+- **BarcodeDomain enum** — vendor_adapters / symbology / decode_modes / frame_samples / error_handling / integration
+- **VendorId enum** — zebra_snapi / honeywell / datalogic / newland
+- **SymbologyId enum** — upc_a / upc_e / ean_8 / ean_13 / code_128 / code_39 / code_93 / codabar / interleaved_2of5 / gs1_databar / qr_code / data_matrix / pdf417 / aztec / maxi_code / han_xin
+- **DecodeMode enum** — hid_wedge / spp / api
+- **ScannerState enum** — disconnected / connected / configured / scanning / error
+- **BarcodeScanner (ABC)** — abstract interface with connect/disconnect/configure/scan/get_capabilities/set_decode_mode/enable_symbology/disable_symbology
+- **_BaseAdapter** — shared decode logic: synthetic frame parser + decode mode output formatting
+- **4 vendor adapters** — ZebraSNAPIAdapter / HoneywellAdapter / DatalogicAdapter / NewlandAdapter
+
+### 下一步
+
+- C23 L4-CORE-23 Depth / 3D sensing pipeline
+- D22 SKILL-BARCODE-GUN (depends on CORE-22)
+- E7 SW-WEB-WMS barcode integration (depends on CORE-22)
+
+---
+
 ## C21 L4-CORE-21 Enterprise web stack pattern 狀態更新（2026-04-15）
 
 **全部 9/9 項目已完成。176 項測試全部通過。**
