@@ -1,9 +1,25 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`5b5ff01` (master)
+> 最後 commit：`56aa679` (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean（v0.1.0 tagged）
+
+---
+
+## A1 L1-01 狀態更新（2026-04-15）
+
+**自動化可完成項目**：3/7 已完成（tag + push + runbook）。
+**剩餘 4 項為 🅐 operator-blocked**，需人工操作：
+
+| 項目 | 阻塞原因 | 參考 |
+|---|---|---|
+| `deploy.sh prod v0.1.0` | 需 prod host SSH 存取 | 下方 runbook Step 1 |
+| GoDaddy NS → Cloudflare | 需 GoDaddy + CF 帳號登入 | 下方 runbook Step 2 |
+| Cloudflare Tunnel + cert | 需 CF Zero Trust dashboard | 下方 runbook Step 3 |
+| Smoke `/api/health` | 依賴 Steps 1-3 完成 | 下方 runbook Step 4 |
+
+**下一步**：operator 按照下方 runbook 逐步執行，完成後回填 Deploy URL / Tunnel ID / health check 結果。
 
 ---
 
@@ -118,8 +134,10 @@ After deploy, fill in:
 | `f36472f` | L1-07: `audit_archive.py` — 90d retention + manifest + `--verify` 抓篡改 |
 | `9d0b3be` | L1-08: ESLint v10 flat config（之前 silent no-op，113 真實 finding 浮現） |
 
-**A1 進度**：`v0.1.0` tag 已推送至 origin（2026-04-15）。剩餘 4 項（實跑 deploy.sh、GoDaddy NS 遷移、CF Tunnel 確認、smoke test）皆需 operator 手動執行，見上方 runbook。
-**剩**：L1-01（實跑 `deploy.sh prod`）+ L1-05（兩個真 DAG smoke），需 operator 動手。
+**A1 進度**：`v0.1.0` tag 已推送至 origin（2026-04-15）。AI 可執行項目已全部完成（tag + push + release notes + runbook）。
+**剩餘 4 項皆為 🅐 operator-blocked**（實跑 deploy.sh → 需 prod host SSH、GoDaddy NS 遷移 → 需 GoDaddy 帳號、CF Tunnel 確認 → 需 CF dashboard、smoke test → 需公開域名），見上方 runbook。
+**A1 AI 端狀態：✅ 完成（2026-04-15）。等待 operator 執行基礎設施操作。**
+**TODO.md 狀態標記更新（2026-04-15）**：4 項 operator-blocked 已標記為 `[O]`，表示交由 operator 處理。
 
 ### 軌道 3 — 對外身份驗證（5 commits → 10 層縱深防禦）
 

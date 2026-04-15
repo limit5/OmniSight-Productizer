@@ -17,10 +17,10 @@ Legend:
 ## 🅐 Priority A — Operator blockers
 
 ### A1. L1-01 Real deploy.sh execution + NS migration + v0.1.0 tag (#172)
-- [ ] Run `scripts/deploy.sh prod v0.1.0` against production host *(🅐 operator: needs prod host)*
-- [ ] Migrate GoDaddy NS records to Cloudflare *(🅐 operator: needs GoDaddy + CF accounts)*
-- [ ] Confirm Cloudflare Tunnel active + cert issued *(🅐 operator: needs CF dashboard)*
-- [ ] Smoke GET `/api/health` from public domain *(🅐 operator: after deploy)*
+- [O] Run `scripts/deploy.sh prod v0.1.0` against production host *(🅐 BLOCKED: operator needs prod host — see HANDOFF.md runbook Step 1)*
+- [O] Migrate GoDaddy NS records to Cloudflare *(🅐 BLOCKED: operator needs GoDaddy + CF accounts — see HANDOFF.md runbook Step 2)*
+- [O] Confirm Cloudflare Tunnel active + cert issued *(🅐 BLOCKED: operator needs CF dashboard — see HANDOFF.md runbook Step 3)*
+- [O] Smoke GET `/api/health` from public domain *(🅐 BLOCKED: depends on Steps 1-3 above — see HANDOFF.md runbook Step 4)*
 - [x] Tag `v0.1.0` on master *(done: local tag created 2026-04-15)*
 - [x] Push `v0.1.0` tag to origin *(done: pushed to origin 2026-04-15)*
 - [x] Update HANDOFF with deploy URL + v0.1.0 release notes *(done: runbook + release notes added)*
