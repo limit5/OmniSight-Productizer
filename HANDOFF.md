@@ -1,9 +1,39 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：K7 Password policy + Argon2id upgrade path (master)
+> 最後 commit：I1 Multi-tenancy schema — tenants table + tenant_id on business tables (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I1 (complete) Multi-tenancy Schema — tenants + tenant_id 欄位 + 回填（2026-04-16 完成）
+
+**背景**：為多租戶（multi-tenancy）建立基礎 schema。新增 `tenants` 表，並在所有業務表加入 `tenant_id` 欄位，既有資料自動回填至預設 tenant `t-default`。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `tenants` 表 | id / name / plan / created_at / enabled | ✅ 完成 |
+| `users.tenant_id` | 一人一 tenant，DEFAULT 't-default' | ✅ 完成 |
+| 業務表 `tenant_id` | workflow_runs / debug_findings / decision_rules / event_log / audit_log / artifacts / user_preferences | ✅ 完成 |
+| Alembic migration 0012 | 建表 + 預設 tenant 插入 + 欄位新增 + 回填 + 索引 | ✅ 完成 |
+| `_SCHEMA` 更新 | db.py 內含 tenants 表 + tenant_id + user_preferences 表 + 索引 | ✅ 完成 |
+| `_migrate()` 更新 | 支援既有 DB 平滑升級 + 預設 tenant 播種 | ✅ 完成 |
+| 測試（16 項） | 表存在、預設 tenant、tenant_id 欄位/索引、回填、冪等性、migration chain | ✅ 16/16 pass |
+| 回歸測試 | 既有 31 項測試全數通過，零回歸 | ✅ 31/31 pass |
+
+**新增檔案**：
+- `backend/alembic/versions/0012_tenants_multi_tenancy.py` — Alembic 遷移
+- `tests/test_tenants.py` — 16 項測試
+
+**修改檔案**：
+- `backend/db.py` — tenants 表 + tenant_id 欄位 + user_preferences 表 + 索引 + _migrate() 更新
+
+**注意事項**：
+- `spec_*` 表尚未存在，待未來建立時直接包含 `tenant_id`
+- `decisions` 對應至 `decision_rules` 表（已加 tenant_id）
+- SQLite 不支援 RLS，query-level 隔離由 I2 phase 處理
+- 未來多 tenant per user 可透過 `user_tenant_membership` 中介表擴展
 
 ---
 

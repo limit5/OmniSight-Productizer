@@ -500,12 +500,12 @@ Legend:
 > 背景：完成路線 C 後，auth + session + audit 基礎 hardened，才適合把「單人多 session」擴成「多租戶多 user」。此 phase 是正式多人上線的 gate。相依：**G4（Postgres）** 必須完成（SQLite 無 RLS）、**H1-H4a（host-aware）** 必須完成（I6 才有 token bucket 可拆 per-tenant）、**S0 + K-early** 必須完成（auth baseline）。
 
 ### I1. Schema: tenants + tenant_id 欄位 + 回填
-- [ ] 新增 `tenants` 表（id / name / plan / created_at / enabled）
-- [ ] `users` 加 `tenant_id`（一人一 tenant；未來多 tenant 用 `user_tenant_membership` 中介表）
-- [ ] 所有業務表加 `tenant_id`：`workflow_runs` / `debug_findings` / `decisions` / `event_log` / `audit_log` / `spec_*` / `artifacts` / `user_preferences`
-- [ ] Alembic 遷移 + 回填腳本（既有資料歸預設 tenant `t-default`）
-- [ ] 測試：migration 幂等、回填正確
-- [ ] 預估：**3 day**
+- [x] 新增 `tenants` 表（id / name / plan / created_at / enabled）
+- [x] `users` 加 `tenant_id`（一人一 tenant；未來多 tenant 用 `user_tenant_membership` 中介表）
+- [x] 所有業務表加 `tenant_id`：`workflow_runs` / `debug_findings` / `decisions` / `event_log` / `audit_log` / `spec_*` / `artifacts` / `user_preferences`
+- [x] Alembic 遷移 + 回填腳本（既有資料歸預設 tenant `t-default`）
+- [x] 測試：migration 幂等、回填正確
+- [x] 預估：**3 day**
 
 ### I2. Query layer RLS（SQLAlchemy global filter）
 - [ ] `backend/db_context.py`：`current_tenant_id()` context var
