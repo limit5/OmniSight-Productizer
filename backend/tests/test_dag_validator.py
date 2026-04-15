@@ -331,3 +331,89 @@ def test_validate_increments_per_rule_metric_on_failure():
     rules_seen = {s.labels.get("rule")
                   for s in samples if s.name.endswith("_total") and s.value > 0}
     assert "tier_violation" in rules_seen
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 64-C-LOCAL S3 — t3-local tier relaxation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_t3_with_t1_toolchain_fails_without_profile():
+    """Baseline: pre-64-C behaviour preserved when target_profile is None."""
+    res = dv.validate(_dag([
+        _t(task_id="deploy", required_tier="t3", toolchain="cmake",
+           expected_output="out/app.bin"),
+    ]))
+    assert not res.ok
+    assert any(e.rule == "tier_violation" for e in res.errors)
+
+
+def test_t3_with_t1_toolchain_passes_when_resolver_local(monkeypatch):
+    """host_native profile → T3 resolver picks LOCAL → validator
+    checks t3 task against t1's toolchain rules instead of t3's."""
+    from backend import t3_resolver as _r
+    monkeypatch.setattr(_r, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(_r, "host_os", lambda: "linux")
+
+    res = dv.validate(
+        _dag([
+            _t(task_id="deploy", required_tier="t3", toolchain="cmake",
+               expected_output="out/app.bin"),
+        ]),
+        target_profile={"platform": "host_native"},
+    )
+    assert res.ok, f"expected green, got: {[e.message for e in res.errors]}"
+
+
+def test_t3_local_still_blocks_hardware_rpc(monkeypatch):
+    """Security invariant: LOCAL widening must not silently let a
+    `flash_board` task through — t1's denied list still applies."""
+    from backend import t3_resolver as _r
+    monkeypatch.setattr(_r, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(_r, "host_os", lambda: "linux")
+
+    res = dv.validate(
+        _dag([
+            _t(task_id="deploy", required_tier="t3", toolchain="flash_board",
+               expected_output="logs/flash.log"),
+        ]),
+        target_profile={"platform": "host_native"},
+    )
+    # flash_board isn't in t1's allow-list → fails allow-list check.
+    assert not res.ok
+    assert any(e.rule == "tier_violation" for e in res.errors)
+
+
+def test_t3_with_cross_arch_profile_remains_strict(monkeypatch):
+    """aarch64 target on x86 host → resolver picks BUNDLE → t3 task
+    still validated against the narrow t3 hardware-bridge rules."""
+    from backend import t3_resolver as _r
+    monkeypatch.setattr(_r, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(_r, "host_os", lambda: "linux")
+
+    res = dv.validate(
+        _dag([
+            _t(task_id="deploy", required_tier="t3", toolchain="cmake",
+               expected_output="out/app.bin"),
+        ]),
+        target_profile={"platform": "aarch64", "kernel_arch": "arm64"},
+    )
+    assert not res.ok
+    assert any(e.rule == "tier_violation" for e in res.errors)
+
+
+def test_t3_local_does_not_affect_non_t3_tasks(monkeypatch):
+    """The widening MUST be scoped to t3 tasks only. A t1 task with a
+    hardware toolchain must still fail regardless of profile."""
+    from backend import t3_resolver as _r
+    monkeypatch.setattr(_r, "host_arch", lambda: "x86_64")
+    monkeypatch.setattr(_r, "host_os", lambda: "linux")
+
+    res = dv.validate(
+        _dag([
+            _t(task_id="bad", required_tier="t1", toolchain="flash_board",
+               expected_output="logs/bad.log"),
+        ]),
+        target_profile={"platform": "host_native"},
+    )
+    assert not res.ok
+    assert any(e.rule == "tier_violation" for e in res.errors)

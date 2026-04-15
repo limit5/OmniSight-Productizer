@@ -162,10 +162,44 @@ def _check_cycles(dag: DAG, errors: list[ValidationError]) -> None:
         ))
 
 
-def _check_tier_capability(dag: DAG, errors: list[ValidationError]) -> None:
+def _t3_resolves_local(target_profile: dict | None) -> bool:
+    """Ask the T3 resolver whether this plan's target would land in
+    the LOCAL runner. Import is local so dag_validator doesn't pull
+    the container / metrics module graph on pure-schema tests."""
+    try:
+        from backend.t3_resolver import resolve_from_profile, T3RunnerKind
+    except Exception:
+        return False
+    res = resolve_from_profile(target_profile)
+    return res.kind == T3RunnerKind.LOCAL
+
+
+def _check_tier_capability(
+    dag: DAG,
+    errors: list[ValidationError],
+    target_profile: dict | None = None,
+) -> None:
     rules = _load_tier_rules().get("tiers", {})
+    # Pre-compute once per validate() call — same answer for every task
+    # since the target profile is a plan-wide property, not a per-task
+    # one today. When per-task `target_profile` lands (spec'd in Phase
+    # 68 ParsedSpec), move this into the loop.
+    t3_local = _t3_resolves_local(target_profile)
+
     for t in dag.tasks:
-        tier_rules = rules.get(t.required_tier)
+        # T3-LOCAL semantic swap: when a t3 task resolves to the
+        # LOCAL runner, it *physically* runs in a t1-like container
+        # on the host — so enforce t1's capability rules on it
+        # instead of t3's. Operator's declared intent (`required_tier:
+        # t3` = "this is a deployment step") is preserved; only the
+        # toolchain check flips. The true-t3 hardware-bridge path
+        # (cross-arch target, remote runner) keeps the narrow RPC-
+        # only rules.
+        effective_tier = t.required_tier
+        if t.required_tier == "t3" and t3_local:
+            effective_tier = "t1"
+
+        tier_rules = rules.get(effective_tier)
         if tier_rules is None:
             errors.append(ValidationError(
                 rule="tier_violation", task_id=t.task_id,
@@ -175,6 +209,7 @@ def _check_tier_capability(dag: DAG, errors: list[ValidationError]) -> None:
             continue
         denied = set(tier_rules.get("toolchains_denied") or [])
         allowed = set(tier_rules.get("toolchains_allowed") or [])
+
         if t.toolchain in denied:
             errors.append(ValidationError(
                 rule="tier_violation", task_id=t.task_id,
@@ -283,13 +318,25 @@ def _check_mece(dag: DAG, errors: list[ValidationError]) -> None:
 #  Public entry point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def validate(dag: DAG) -> ValidationResult:
-    """Run all semantic rules; return ALL errors (not first-fail)."""
+def validate(
+    dag: DAG,
+    *,
+    target_profile: dict | None = None,
+) -> ValidationResult:
+    """Run all semantic rules; return ALL errors (not first-fail).
+
+    `target_profile` — optional parsed platform YAML for the plan's
+    deployment target. When supplied AND t3_resolver picks LOCAL for
+    it, the t3 toolchain allow-list is widened to include t1's (see
+    `_t3_local_extends_allowed`). Default `None` keeps the pre-
+    Phase-64-C-LOCAL behaviour exactly — t3 means hardware-bridge
+    RPC only.
+    """
     errors: list[ValidationError] = []
     _check_duplicates(dag, errors)
     _check_unknown_deps(dag, errors)
     _check_cycles(dag, errors)
-    _check_tier_capability(dag, errors)
+    _check_tier_capability(dag, errors, target_profile=target_profile)
     _check_io_entity(dag, errors)
     _check_dep_closure(dag, errors)
     _check_mece(dag, errors)
