@@ -4491,3 +4491,33 @@ Implemented `backend/repo_ingest.py` (#202) — full repository ingestion pipeli
 | `backend/repo_ingest.py` | **Created** — 280 lines |
 | `backend/tests/test_repo_ingest.py` | **Created** — 360 lines |
 | `TODO.md` | Updated B2 items → `[x]` |
+
+---
+
+## B4/#204: UX-05 New-project wizard modal (2026-04-15)
+
+### Summary
+
+Implemented a first-load wizard modal that detects empty `localStorage['omnisight:intent:last_spec']` and presents four project-start choices: GitHub Repo, Upload Docs, Prose, and Blank DAG. Each choice navigates to the appropriate panel (Spec Editor or DAG Editor) via the existing `omnisight:navigate` custom event system. The wizard is skipped when the user has a prior session (existing spec in localStorage) or has already dismissed the wizard (tracked via `omnisight:wizard:seen` localStorage key).
+
+### Test results
+
+7 component tests — all passing:
+- First mount with no spec → modal visible
+- All 4 choices rendered
+- Prior spec in localStorage → modal hidden
+- Second mount (wizard-seen flag) → modal hidden
+- Prose choice → navigates to `spec` panel
+- Blank DAG choice → navigates to `dag` panel
+- Dismiss (close button) → sets wizard-seen flag
+
+Full suite regression: 91/91 tests passing across 13 component test files.
+
+### Files changed
+
+| File | Action |
+|------|--------|
+| `components/omnisight/new-project-wizard.tsx` | **Created** — wizard modal component |
+| `test/components/new-project-wizard.test.tsx` | **Created** — 7 component tests |
+| `app/page.tsx` | Updated — import + render `NewProjectWizard` |
+| `TODO.md` | Updated B4 items → `[x]` |

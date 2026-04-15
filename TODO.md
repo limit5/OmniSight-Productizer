@@ -59,11 +59,11 @@ Legend:
 - [x] Unit test: fixture workflow → report matches golden file
 
 ### B4. UX-05 New-project wizard modal (#204)
-- [ ] Detect empty `localStorage['omnisight:intent:last_spec']` on first load
-- [ ] Modal with 4 choices: GitHub repo / Upload docs / Prose / Blank DAG
-- [ ] Route each choice to the correct panel (Spec Editor / DAG Editor)
-- [ ] Skip if user has prior session
-- [ ] Component test: first-mount shows modal; second-mount does not
+- [x] Detect empty `localStorage['omnisight:intent:last_spec']` on first load
+- [x] Modal with 4 choices: GitHub repo / Upload docs / Prose / Blank DAG
+- [x] Route each choice to the correct panel (Spec Editor / DAG Editor)
+- [x] Skip if user has prior session
+- [x] Component test: first-mount shows modal; second-mount does not
 
 ### B5. UX-01 SpecTemplateEditor source tabs (#205)
 - [ ] Add `Prose | From Repo | From Docs` tab header
