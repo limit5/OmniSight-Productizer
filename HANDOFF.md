@@ -7,6 +7,41 @@
 
 ---
 
+## C0 ProjectClass enum + multi-planner routing 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| ProjectClass enum | ✅ | 7 值 enum 加入 `backend/models.py`：embedded_product / algo_sim / optical_sim / iso_standard / test_tool / factory_tool / enterprise_web |
+| ParsedSpec.project_class | ✅ | 新增 `Field(value, confidence)` 欄位，整合至 `to_dict()` / `low_confidence()` / `apply_clarification()` |
+| Intent Parser 推斷 | ✅ | 啟發式解析器新增 `_PROJECT_CLASS_PATTERNS` 關鍵字匹配 + `_infer_project_class()` fallback 邏輯；LLM prompt 已擴充 project_class 欄位 |
+| YAML 衝突規則 | ✅ | `configs/spec_conflicts.yaml` 新增 3 條規則：`embedded_class_ambiguous` / `webapp_class_ambiguous` / `research_class_ambiguous` |
+| Planner Router | ✅ | 新建 `backend/planner_router.py`，`route_to_planner(spec)` → `PlannerConfig(planner_id, prompt_supplement, skill_pack_hint)` |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/models.py` | 新增 `ProjectClass(str, Enum)` |
+| `backend/intent_parser.py` | 新增 `ProjectClass` Literal、`project_class` 欄位、`_PROJECT_CLASS_PATTERNS`、`_infer_project_class()`、LLM prompt 擴充 |
+| `configs/spec_conflicts.yaml` | 新增 3 條 project_class 歧義衝突規則 |
+| `backend/planner_router.py` | 新建——7 個 class → planner 映射 + default fallback |
+| `backend/tests/test_project_class_router.py` | 新建，23 項測試 |
+| `backend/tests/test_intent_parser.py` | 更新 1 項測試（新增 project_class 欄位以維持相容性）|
+
+### 驗證
+
+- 23 項新增測試全數通過
+- 26 項既有 intent_parser 測試全數通過（49/49 green）
+- 161/161 後端全套測試通過（1 項預存失敗 `test_dag_prewarm_wire` 與本次無關）
+
+### 下一步
+
+- C1 (SSH runner) 或 C2 (HardwareProfile) 可接續，planner_router 的 `prompt_supplement` 可在後續 phase 中接入 `dag_planner.py` 的 system prompt
+
+---
+
 ## B11 Forecast panel reactive to spec context 狀態更新（2026-04-15）
 
 **全部 4/4 項目已完成。**

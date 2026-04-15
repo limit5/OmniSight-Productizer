@@ -118,11 +118,11 @@ Legend:
 ## 🅒 Priority C — L4 Layer A (shared infrastructure)
 
 ### C0. L4-CORE-00 ProjectClass enum + multi-planner routing (#222)
-- [ ] Add `ProjectClass` enum: embedded_product / algo_sim / optical_sim / iso_standard / test_tool / factory_tool / enterprise_web
-- [ ] Extend ParsedSpec with `project_class` field
-- [ ] Intent Parser prompt: infer class from prose (add YAML rules to `configs/spec_conflicts.yaml`)
-- [ ] Router: dispatch to correct planner based on class
-- [ ] Unit test: each class routes to its planner
+- [x] Add `ProjectClass` enum: embedded_product / algo_sim / optical_sim / iso_standard / test_tool / factory_tool / enterprise_web
+- [x] Extend ParsedSpec with `project_class` field
+- [x] Intent Parser prompt: infer class from prose (add YAML rules to `configs/spec_conflicts.yaml`)
+- [x] Router: dispatch to correct planner based on class
+- [x] Unit test: each class routes to its planner
 
 ### C1. L4-CORE-04 Phase 64-C-SSH runner (#210) — **highest priority**
 - [ ] Extend `backend/t3_resolver.py` to select SSH when arch≠host
