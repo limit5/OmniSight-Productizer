@@ -866,6 +866,7 @@ export interface WorkflowRunSummary {
   completed_at: number | null
   last_step_id: string | null
   metadata: Record<string, unknown>
+  version: number
 }
 
 export interface WorkflowStepDetail {
@@ -897,6 +898,28 @@ export async function listWorkflowRuns(opts: { status?: string; limit?: number }
     `/workflow/runs${qs ? `?${qs}` : ""}`,
   )
   return out.runs
+}
+
+export async function retryWorkflowRun(runId: string, version: number): Promise<{ id: string; status: string; version: number }> {
+  return request(`/workflow/runs/${encodeURIComponent(runId)}/retry`, {
+    method: "POST",
+    headers: { "If-Match": String(version) },
+  })
+}
+
+export async function cancelWorkflowRun(runId: string, version: number): Promise<{ id: string; status: string; version: number }> {
+  return request(`/workflow/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+    headers: { "If-Match": String(version) },
+  })
+}
+
+export async function updateWorkflowRun(runId: string, version: number, metadata: Record<string, unknown>): Promise<{ id: string; version: number }> {
+  return request(`/workflow/runs/${encodeURIComponent(runId)}`, {
+    method: "PATCH",
+    headers: { "If-Match": String(version) },
+    body: JSON.stringify({ metadata }),
+  })
 }
 
 // ─── Project Runs — B7 (#207) aggregation ───

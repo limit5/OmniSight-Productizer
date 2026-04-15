@@ -60,6 +60,7 @@ class WorkflowRun:
     completed_at: Optional[float] = None
     last_step_id: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    version: int = 0
 
 
 @dataclass
@@ -197,7 +198,7 @@ async def mutate_workflow(old_run_id: str, new_dag: Any, *,
 async def get_run(run_id: str) -> Optional[WorkflowRun]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, kind, started_at, completed_at, status, last_step_id, metadata "
+        "SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
         "FROM workflow_runs WHERE id = ?", (run_id,),
     ) as cur:
         row = await cur.fetchone()
@@ -208,17 +209,18 @@ async def get_run(run_id: str) -> Optional[WorkflowRun]:
         completed_at=row["completed_at"], status=row["status"],
         last_step_id=row["last_step_id"],
         metadata=json.loads(row["metadata"] or "{}"),
+        version=row["version"],
     )
 
 
 async def list_runs(status: str | None = None, limit: int = 50) -> list[WorkflowRun]:
     conn = await _conn()
     if status:
-        sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata "
+        sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
                "FROM workflow_runs WHERE status=? ORDER BY started_at DESC LIMIT ?")
         params: tuple = (status, limit)
     else:
-        sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata "
+        sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
                "FROM workflow_runs ORDER BY started_at DESC LIMIT ?")
         params = (limit,)
     async with conn.execute(sql, params) as cur:
@@ -229,6 +231,7 @@ async def list_runs(status: str | None = None, limit: int = 50) -> list[Workflow
             completed_at=r["completed_at"], status=r["status"],
             last_step_id=r["last_step_id"],
             metadata=json.loads(r["metadata"] or "{}"),
+            version=r["version"],
         )
         for r in rows
     ]
@@ -254,13 +257,45 @@ async def list_steps(run_id: str) -> list[StepRecord]:
     return out
 
 
-async def finish(run_id: str, status: RunStatus = "completed") -> None:
+class VersionConflict(Exception):
+    """Raised when an optimistic-lock version check fails (HTTP 409)."""
+
+
+async def _bump_version(run_id: str, expected_version: int | None,
+                        updates: dict[str, Any]) -> int:
+    """Apply column updates to a workflow_run with optimistic locking.
+
+    Returns the new version.  Raises VersionConflict when the row's
+    current version doesn't match `expected_version`.  When
+    `expected_version` is None the check is skipped (internal callers).
+    """
     conn = await _conn()
-    await conn.execute(
-        "UPDATE workflow_runs SET status=?, completed_at=? WHERE id=?",
-        (status, time.time(), run_id),
+    set_parts = [f"{col}=?" for col in updates]
+    set_parts.append("version=version+1")
+    params: list[Any] = list(updates.values())
+    if expected_version is not None:
+        where = "id=? AND version=?"
+        params += [run_id, expected_version]
+    else:
+        where = "id=?"
+        params += [run_id]
+    cur = await conn.execute(
+        f"UPDATE workflow_runs SET {', '.join(set_parts)} WHERE {where}",
+        tuple(params),
     )
+    if cur.rowcount == 0:
+        await conn.rollback()
+        raise VersionConflict(run_id)
     await conn.commit()
+    return (expected_version or 0) + 1
+
+
+async def finish(run_id: str, status: RunStatus = "completed",
+                 expected_version: int | None = None) -> None:
+    await _bump_version(run_id, expected_version, {
+        "status": status,
+        "completed_at": time.time(),
+    })
 
     # Phase 62 hook: when a long / hard-fought run completes successfully
     # and OMNISIGHT_SELF_IMPROVE_LEVEL includes L1, distil it into a
@@ -280,6 +315,38 @@ async def finish(run_id: str, status: RunStatus = "completed") -> None:
             logger.warning(
                 "skills extractor hook failed for run=%s: %s", run_id, exc,
             )
+
+
+async def cancel_run(run_id: str, expected_version: int) -> int:
+    """Cancel a running workflow. Returns the new version."""
+    return await _bump_version(run_id, expected_version, {
+        "status": "halted",
+        "completed_at": time.time(),
+    })
+
+
+async def retry_run(run_id: str, expected_version: int) -> WorkflowRun:
+    """Reset a failed/halted run back to 'running' for retry.
+    Returns the updated WorkflowRun."""
+    new_ver = await _bump_version(run_id, expected_version, {
+        "status": "running",
+        "completed_at": None,
+    })
+    run = await get_run(run_id)
+    assert run is not None
+    return run
+
+
+async def update_run_metadata(run_id: str, expected_version: int,
+                              metadata: dict[str, Any]) -> int:
+    """Merge new metadata into the run with version guard."""
+    existing = await get_run(run_id)
+    if not existing:
+        raise ValueError(f"run {run_id} not found")
+    merged = {**existing.metadata, **metadata}
+    return await _bump_version(run_id, expected_version, {
+        "metadata": json.dumps(merged),
+    })
 
 
 async def _get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
@@ -379,6 +446,7 @@ async def replay(run_id: str) -> Optional[dict[str, Any]]:
             "id": run.id, "kind": run.kind, "status": run.status,
             "started_at": run.started_at, "completed_at": run.completed_at,
             "last_step_id": run.last_step_id, "metadata": run.metadata,
+            "version": run.version,
         },
         "steps": [
             {

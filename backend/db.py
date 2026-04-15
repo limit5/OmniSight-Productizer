@@ -354,7 +354,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     completed_at    REAL,
     status          TEXT NOT NULL DEFAULT 'running',
     last_step_id    TEXT,
-    metadata        TEXT NOT NULL DEFAULT '{}'
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    version         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);

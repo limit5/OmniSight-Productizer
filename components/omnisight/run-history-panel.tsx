@@ -14,9 +14,11 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import {
   CheckCircle2, Clock3, History, Loader2, XCircle, AlertCircle,
   Pause, ListTodo, ChevronRight, ChevronDown, FolderOpen,
+  RotateCcw, Ban,
 } from "lucide-react"
 import {
   listWorkflowRuns, getWorkflowRun, listProjectRuns,
+  retryWorkflowRun, cancelWorkflowRun,
   type WorkflowRunSummary, type WorkflowStepDetail,
   type ProjectRun,
 } from "@/lib/api"
@@ -132,6 +134,45 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
     setOpenParentId((prev) => prev === parentId ? null : parentId)
   }, [])
 
+  const [conflictMsg, setConflictMsg] = useState<string | null>(null)
+  const [actionBusy, setActionBusy] = useState<string | null>(null)
+
+  const handleRetry = useCallback(async (run: WorkflowRunSummary) => {
+    setActionBusy(run.id)
+    setConflictMsg(null)
+    try {
+      await retryWorkflowRun(run.id, run.version)
+      void refresh()
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc)
+      if (msg.includes("409")) {
+        setConflictMsg("另一處已修改，請重新整理 (conflict: resource modified elsewhere)")
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setActionBusy(null)
+    }
+  }, [refresh])
+
+  const handleCancel = useCallback(async (run: WorkflowRunSummary) => {
+    setActionBusy(run.id)
+    setConflictMsg(null)
+    try {
+      await cancelWorkflowRun(run.id, run.version)
+      void refresh()
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc)
+      if (msg.includes("409")) {
+        setConflictMsg("另一處已修改，請重新整理 (conflict: resource modified elsewhere)")
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setActionBusy(null)
+    }
+  }, [refresh])
+
   const hasProjectRuns = projectRuns && projectRuns.length > 0
 
   const filteredProjectRuns = hasProjectRuns
@@ -176,6 +217,21 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
       {error && (
         <div className="px-3 py-1.5 font-mono text-[10px] text-[var(--destructive)] truncate" title={error}>
           ⚠ {error}
+        </div>
+      )}
+      {conflictMsg && (
+        <div
+          className="px-3 py-1.5 font-mono text-[10px] text-[var(--fui-orange,#f59e0b)] bg-[var(--fui-orange,#f59e0b)]/10 flex items-center justify-between"
+          role="alert"
+        >
+          <span>⚠ {conflictMsg}</span>
+          <button
+            type="button"
+            className="underline ml-2"
+            onClick={() => { setConflictMsg(null); void refresh() }}
+          >
+            重新整理
+          </button>
         </div>
       )}
 
@@ -290,6 +346,7 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
                                   {durationString(c.started_at, c.completed_at)} · {ageString(c.started_at)}
                                 </span>
                               </div>
+                              <RunActions run={c} busy={actionBusy} onRetry={handleRetry} onCancel={handleCancel} />
                             </div>
                             {childOpen && <RunDetail data={details[c.id]} />}
                           </li>
@@ -354,6 +411,7 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
                       {durationString(r.started_at, r.completed_at)} · {ageString(r.started_at)}
                     </span>
                   </div>
+                  <RunActions run={r} busy={actionBusy} onRetry={handleRetry} onCancel={handleCancel} />
                 </div>
                 {open && (
                   <RunDetail data={details[r.id]} />
@@ -432,4 +490,46 @@ function RunDetail({
       })}
     </ol>
   )
+}
+
+
+function RunActions({
+  run,
+  busy,
+  onRetry,
+  onCancel,
+}: {
+  run: WorkflowRunSummary
+  busy: string | null
+  onRetry: (r: WorkflowRunSummary) => void
+  onCancel: (r: WorkflowRunSummary) => void
+}) {
+  const isBusy = busy === run.id
+  if (run.status === "running") {
+    return (
+      <button
+        type="button"
+        disabled={isBusy}
+        className="shrink-0 ml-1 px-1.5 py-0.5 rounded text-[10px] font-mono border border-[var(--destructive)] text-[var(--destructive)] hover:bg-[var(--destructive)]/10 disabled:opacity-40"
+        onClick={(e) => { e.stopPropagation(); onCancel(run) }}
+        aria-label={`cancel run ${run.id}`}
+      >
+        {isBusy ? <Loader2 size={10} className="animate-spin inline" /> : <Ban size={10} className="inline" />}{" "}CANCEL
+      </button>
+    )
+  }
+  if (run.status === "failed" || run.status === "halted") {
+    return (
+      <button
+        type="button"
+        disabled={isBusy}
+        className="shrink-0 ml-1 px-1.5 py-0.5 rounded text-[10px] font-mono border border-[var(--neural-cyan,#67e8f9)] text-[var(--neural-cyan,#67e8f9)] hover:bg-[var(--neural-cyan,#67e8f9)]/10 disabled:opacity-40"
+        onClick={(e) => { e.stopPropagation(); onRetry(run) }}
+        aria-label={`retry run ${run.id}`}
+      >
+        {isBusy ? <Loader2 size={10} className="animate-spin inline" /> : <RotateCcw size={10} className="inline" />}{" "}RETRY
+      </button>
+    )
+  }
+  return null
 }
