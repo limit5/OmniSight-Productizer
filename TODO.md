@@ -389,12 +389,12 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### K2. 登入速率限制 + 帳號鎖定
-- [ ] `backend/rate_limit.py`：in-process token bucket（未來 I 多 worker 時換 Redis）— 預設 `/auth/login` 每 IP 5/min、每 email 10/hour
-- [ ] `users` 表加 `failed_login_count`、`locked_until`；連續 10 次失敗 → 鎖 15 分鐘（指數 backoff 上限 24h）
-- [ ] 鎖定期間 `authenticate_password` 回 `None` 且不走 PBKDF2（省 CPU）
-- [ ] 成功登入 reset counter；audit_log 記錄 `auth.login.fail` / `auth.lockout`
-- [ ] 測試：rate limit 生效、lockout 釋放、時間衰減
-- [ ] 預估：**1 day**
+- [x] `backend/rate_limit.py`：in-process token bucket（未來 I 多 worker 時換 Redis）— 預設 `/auth/login` 每 IP 5/min、每 email 10/hour
+- [x] `users` 表加 `failed_login_count`、`locked_until`；連續 10 次失敗 → 鎖 15 分鐘（指數 backoff 上限 24h）
+- [x] 鎖定期間 `authenticate_password` 回 `None` 且不走 PBKDF2（省 CPU）
+- [x] 成功登入 reset counter；audit_log 記錄 `auth.login.fail` / `auth.lockout`
+- [x] 測試：rate limit 生效、lockout 釋放、時間衰減
+- [x] 預估：**1 day**
 
 ### K3. Cookie flags + CSP 驗證
 - [ ] 驗所有 `Set-Cookie`：session → `HttpOnly + Secure + SameSite=Lax`；CSRF → `Secure + SameSite=Lax`（不可 HttpOnly，前端要讀）
@@ -572,6 +572,79 @@ Legend:
 **I 總預估**：**16.5 day**
 
 **相依**：I 必須在 **G4 + H4a + S0 + K-early** 完成後才開工；I 進行中 B12（CF Tunnel wizard）設計需配合 I4 改 tenant-scoped。
+
+---
+
+## 🅛 Priority L — Bootstrap Wizard（一鍵從新機器到公網可用）
+
+> 背景：目前**無 UI 觸發的 OmniSight 自佈署功能**。`scripts/deploy.sh` 是 CLI-only（A1 待辦卡在 operator 手動執行）；`POST /api/v1/deploy` 是佈產品 binary 到 EVK 開發板，非佈 OmniSight 自身。`ensure_default_admin` 用 env 設密碼、Cloudflare Tunnel 4 步驟手動、LLM provider key 寫 `.env`、systemd unit 要 `sed` 填 USERNAME。首次安裝摩擦極大。
+>
+> 目標：新機器 clone repo → `docker compose up` → 瀏覽器開 UI → 精靈引導完成所有配置 → 公網 HTTPS 可用，**全程不 SSH 不編輯 yaml**。
+>
+> 相依：**B12 (CF Tunnel wizard)** 是 Step 3 基礎；**G1 (readyz)** 讓 Step 4 能精確判斷「起來了沒」；**K1 (must_change_password)** 讓 Step 1 密碼關卡有後端支援。
+
+### L1. Bootstrap 狀態偵測 + `/bootstrap` 路由
+- [ ] `backend/bootstrap.py`：`get_bootstrap_status()` 回傳 `{admin_password_default: bool, llm_provider_configured: bool, cf_tunnel_configured: bool, smoke_passed: bool}`
+- [ ] 全局 middleware：若 bootstrap 未完成 → 除 `/bootstrap/*`、`/auth/login`、`/healthz`、靜態資源外一律導向 `/bootstrap`
+- [ ] `bootstrap_state` 表：`step`, `completed_at`, `actor_user_id`, `metadata`；完成全部步驟後寫 `bootstrap_finalized=true` 進 app 設定
+- [ ] `POST /api/v1/bootstrap/finalize` — 全 step 綠才讓過（admin 才能呼叫）
+- [ ] 前端 `app/bootstrap/page.tsx` 多步 wizard 殼
+- [ ] 預估：**0.5 day**
+
+### L2. Step 1 — 首次 admin 密碼設定
+- [ ] 整合 K1 的 `must_change_password` 旗標；wizard Step 1 強制改預設 `omnisight-admin`
+- [ ] 密碼強度檢查（最短 12 字 + zxcvbn ≥ 3，與 K7 統一）；若 K7 未做則先用簡版
+- [ ] 寫入 audit_log（`bootstrap.admin_password_set`）；清除 `must_change_password`
+- [ ] 預估：**0.5 day**
+
+### L3. Step 2 — LLM Provider 選擇 + API Key 輸入
+- [ ] UI 選單：Anthropic / OpenAI / Ollama（本機）/ Azure
+- [ ] API Key 輸入 → `POST /api/v1/bootstrap/llm-provision`：驗 key（`provider.ping()`）→ 寫入 `backend/secrets.py`（at-rest 加密）→ 更新 `settings.llm_provider`
+- [ ] Ollama 選項偵測本機 `localhost:11434` 可達性 + 列可用 model
+- [ ] 錯誤處理：key 無效 / quota 用盡 / 網路不通 → 明確訊息
+- [ ] 預估：**0.5 day**
+
+### L4. Step 3 — Cloudflare Tunnel（複用 B12 wizard）
+- [ ] 直接 embed B12 的 `cloudflare-tunnel-setup.tsx` 到 bootstrap step 3
+- [ ] 完成 provision 後寫 `bootstrap_state.cf_tunnel_configured=true`
+- [ ] 提供「跳過（內網部署）」選項，記 audit warning
+- [ ] 預估：**0.25 day**（主要靠 B12，此處只做 embed + state 寫入）
+
+### L5. Step 4 — 服務啟動 / 健康驗證（SSE 即時 log）
+- [ ] `POST /api/v1/bootstrap/start-services`：呼叫 `systemctl start` 或 `docker compose up -d`（依部署模式）
+- [ ] SSE event stream `bootstrap.service.tick`：每行 log 即時推送（tail systemd journal 或 docker logs）
+- [ ] 輪詢 G1 的 `/readyz` 直到通過 or timeout 180s
+- [ ] 並行檢查：backend ready / frontend ready / DB migration up-to-date / CF tunnel connector online（若 step 3 有做）
+- [ ] UI 顯示 4 個勾勾即時變綠
+- [ ] 預估：**1 day**
+
+### L6. Step 5 — Smoke Test + 完成
+- [ ] 跑 `scripts/prod_smoke_test.py` 子集（選 compile-flash host_native DAG，~60s）
+- [ ] 顯示 audit_log hash chain 驗證結果、兩個 DAG 的 run summary
+- [ ] 全綠 → `POST /api/v1/bootstrap/finalize` → 寫 `bootstrap_finalized=true` → 導向 dashboard
+- [ ] 失敗 → 顯示錯誤 + 允許回到前面 step 修正
+- [ ] 預估：**0.5 day**
+
+### L7. 部署模式偵測 + docker-compose 路徑
+- [ ] `detect_deploy_mode()`：偵測是否在 docker 內 / 是否有 systemd / 是否有 docker socket
+- [ ] 依模式提供不同 start-services 指令：
+  - `systemd` 模式：`sudo systemctl start omnisight-*`（需 K1 的 scoped sudoers）
+  - `docker-compose` 模式：`docker compose -f docker-compose.prod.yml up -d`
+  - `dev` 模式：跳過 start-services step（已在 uvicorn + next dev）
+- [ ] 文件 `docs/ops/bootstrap_modes.md`
+- [ ] 預估：**0.5 day**
+
+### L8. 重置 + 測試
+- [ ] `POST /api/v1/bootstrap/reset`（admin 限定、dev 模式限定）— 清 bootstrap_state、重設 must_change_password；用於 QA
+- [ ] E2E Playwright：完整 5-step wizard 走完（mock CF API、mock LLM provider ping）
+- [ ] 錯誤路徑：密碼太弱 / LLM key 無效 / systemctl 失敗各自 UX
+- [ ] 預估：**0.75 day**
+
+**總預估**：L1 (0.5) + L2 (0.5) + L3 (0.5) + L4 (0.25) + L5 (1) + L6 (0.5) + L7 (0.5) + L8 (0.75) = **~4.5 day**
+
+**相依**：B12 (CF Tunnel) + G1 (readyz) + K1 (must_change_password)。若三者都已完成，L 可 4.5 day 內完工。若並行，可在 B12/K1 API 層出來後就開做 L1-L2。
+
+**驗收**：在乾淨 WSL2 上 `git clone && docker compose up && 開瀏覽器` → 10 分鐘內完成所有配置、smoke test 綠、公網 HTTPS 可訪問 `/api/v1/health`，全程**零 SSH 零手動編輯 yaml**。
 
 ---
 
@@ -1061,6 +1134,10 @@ S0 (shared foundation, 0.5d) → K-early K1-K3 (對外部署紅線, 2d)
 I1 (schema + tenant_id) → I2 (RLS) → I3 (SSE filter) → I4 (secrets per-tenant)
 → I5 (filesystem namespace) → I6 (sandbox fair-share DRF) → I7 (frontend tenant-aware)
 → I8 (audit per-tenant chain) → I9 (rate limit) → I10 (multi-worker + Redis shared state)
+
+### Phase 11 — Bootstrap Wizard 一鍵安裝（~1 week，需 B12 + G1 + K1 基礎）
+L1 (status 偵測 + /bootstrap 路由) → L2 (admin 密碼) → L3 (LLM provider) → L4 (CF Tunnel embed)
+→ L5 (服務啟動 + SSE log) → L6 (smoke test + finalize) → L7 (部署模式偵測) → L8 (reset + E2E)
 
 ---
 

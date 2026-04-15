@@ -1,9 +1,44 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：S0 Shared foundation (master)
+> 最後 commit：K2 Login rate limiting + account lockout (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## K2 (complete) 登入速率限制 + 帳號鎖定（2026-04-16 完成）
+
+**背景**：防止暴力破解和 credential stuffing 攻擊。雙維度速率限制（per-IP + per-email）配合帳號層級鎖定，為對外部署提供基本安全防線。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| backend/rate_limit.py | In-process token bucket — per-IP 5/min、per-email 10/hour，env 可調 | ✅ 完成 |
+| DB migration 0008 | users 表加 failed_login_count (INTEGER) + locked_until (REAL epoch) | ✅ 完成 |
+| 帳號鎖定邏輯 | 連續 10 次失敗 → 鎖 15 分鐘，指數 backoff 上限 24h | ✅ 完成 |
+| PBKDF2 省 CPU | 鎖定期間 authenticate_password 直接回 None，不走密碼驗證 | ✅ 完成 |
+| 成功登入 reset | 密碼正確時 failed_login_count=0、locked_until=NULL | ✅ 完成 |
+| Audit 事件 | auth.login.fail（含 masked email）、auth.lockout（含 retry_after） | ✅ 完成 |
+| HTTP 狀態碼 | 429 (rate limit)、423 (account locked)、含 Retry-After header | ✅ 完成 |
+| 測試 | 23 項：token bucket 6 + account lockout 9 + 既有 rate limit 7 + audit 1 | ✅ 23/23 pass |
+
+**新增/修改檔案**：
+- `backend/rate_limit.py` — TokenBucketLimiter class + ip_limiter/email_limiter singletons
+- `backend/alembic/versions/0008_account_lockout.py` — 新 migration
+- `backend/db.py` — schema + _migrate 加 failed_login_count/locked_until 欄位
+- `backend/auth.py` — lockout 常數、_record_login_failure、_reset_login_failures、is_account_locked、authenticate_password 整合鎖定
+- `backend/routers/auth.py` — login endpoint 整合 token bucket + lockout check + audit events
+- `backend/tests/test_rate_limit.py` — 6 項 token bucket 單元測試
+- `backend/tests/test_account_lockout.py` — 9 項 lockout 單元 + 整合測試
+- `backend/tests/test_login_rate_limit.py` — 更新 audit action name + reset token bucket fixtures
+
+**環境變數（可調）**：
+- `OMNISIGHT_LOGIN_IP_RATE` — per-IP token bucket capacity (default 5)
+- `OMNISIGHT_LOGIN_IP_WINDOW_S` — per-IP refill window (default 60s)
+- `OMNISIGHT_LOGIN_EMAIL_RATE` — per-email capacity (default 10)
+- `OMNISIGHT_LOGIN_EMAIL_WINDOW_S` — per-email refill window (default 3600s)
+
+**未來擴展**：I9 phase 計劃將 rate limit 擴充為 per-user + per-tenant 維度，並換用 Redis backend。
 
 ---
 
@@ -200,6 +235,40 @@ H1→H4a         ─┼──► S0 ──► K-early ──► J ──► K-re
 4. K6 廢除 legacy bearer 會破壞 CI / scripts — 需提前 2 週通知
 
 **詳細 sub-tasks** 見 `TODO.md` Priority S / K-early / J / K-rest / I 各區段。
+
+---
+
+## L (pending) Bootstrap Wizard — 一鍵從新機器到公網可用（2026-04-16 登錄）
+
+**背景**：目前系統**無 UI 觸發的 OmniSight 自佈署**。`scripts/deploy.sh` 是 CLI-only（A1 卡在 operator 手動執行）；`POST /api/v1/deploy` 是佈產品 binary 到 EVK 板、非佈 OmniSight 自身；UI `components/omnisight/*` 中 deploy 字樣只出現在產品開發流程面板。`ensure_default_admin` 用 env 設密碼、CF Tunnel 4 步驟手動、LLM key 編 `.env`、systemd unit 要 `sed` 填 USERNAME — 首次安裝摩擦極大。
+
+**目標**：新機器 `git clone && docker compose up` → 瀏覽器開 UI → 5-step wizard → 公網 HTTPS 可用，**全程零 SSH 零手動編輯 yaml**，10 分鐘完成。
+
+| Phase | 主題 | 狀態 | 預估 |
+|---|---|---|---|
+| L1 | Bootstrap 狀態偵測 + `/bootstrap` 路由 + middleware 導流 + `bootstrap_state` 表 | ⏳ 待辦 | 0.5 day |
+| L2 | Step 1 — 首次 admin 密碼設定（整合 K1 `must_change_password` + 強度檢查） | ⏳ 待辦 | 0.5 day |
+| L3 | Step 2 — LLM provider 選擇 + API key 驗證（Anthropic/OpenAI/Ollama/Azure，key ping 測試） | ⏳ 待辦 | 0.5 day |
+| L4 | Step 3 — Cloudflare Tunnel（embed B12 wizard，支援「跳過 / 內網」選項） | ⏳ 待辦 | 0.25 day |
+| L5 | Step 4 — 服務啟動 + SSE 即時 log + 輪詢 `/readyz`（4 個子項即時勾選） | ⏳ 待辦 | 1 day |
+| L6 | Step 5 — Smoke test 子集（compile-flash host_native）+ finalize | ⏳ 待辦 | 0.5 day |
+| L7 | 部署模式偵測（systemd / docker-compose / dev） + 對應 start-services 指令 | ⏳ 待辦 | 0.5 day |
+| L8 | Reset endpoint（QA 用）+ Playwright E2E 完整路徑 | ⏳ 待辦 | 0.75 day |
+
+**相依**：**B12（CF Tunnel wizard）** 是 L4 基礎；**G1（graceful shutdown + readyz）** 是 L5 精確判斷依據；**K1（must_change_password）** 是 L2 後端鉤子。三者任一先完成皆可讓 L 對應 step 開做。
+
+**總預估**：**~4.5 day**（並行機會多：L1-L3 可在 B12 完成前先做）
+
+**驗收標準**：
+- 乾淨 WSL2 上 clone + compose up + 開瀏覽器 → 10 分鐘完成全部配置
+- 全程零 SSH、零手動編輯 yaml / env
+- smoke test 綠、公網 HTTPS 可訪問 `/api/v1/health`
+- 重啟服務後 wizard 不再出現（`bootstrap_finalized=true` 寫入）
+
+**與其他 Phase 的關係**：
+- **補齊 A1 的 UI 版**：A1 目前 blocked on operator 手動跑 deploy.sh，L 做完後一般使用者可自助完成
+- **B12 從獨立功能變成 L 的 Step 3 組件**
+- **I（multi-tenancy）之後**：L 的 wizard 需加「首個 tenant 名稱」步驟；此時不做，留 TODO
 
 ---
 
