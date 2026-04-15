@@ -1,0 +1,100 @@
+# Print Pipeline Integration Guide
+
+> Generated: {{ generated_at }}
+> Skill version: {{ skill_version }}
+
+## Overview
+
+The OmniSight Print Pipeline (CORE-20) provides a complete print subsystem for
+embedded and server platforms. It covers four domains:
+
+1. **IPP/CUPS Backend** — Internet Printing Protocol client and CUPS backend filter
+2. **PDL Interpreters** — PCL, PostScript, and PDF (via Ghostscript) rendering
+3. **Color Management** — ICC profile selection per paper type and ink combination
+4. **Print Queue / Spooler** — Job queue management with configurable policies
+
+## Architecture
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Application │────▶│  Print Queue │────▶│   Spooler    │
+│  (IPP/API)   │     │  (FIFO/Pri)  │     │  (Spool Dir) │
+└──────────────┘     └──────────────┘     └──────┬───────┘
+                                                  │
+                     ┌──────────────┐     ┌──────▼───────┐
+                     │ Color Mgmt   │◀───▶│  GS Renderer │
+                     │ (ICC/CMYK)   │     │  (PDF→Raster)│
+                     └──────────────┘     └──────┬───────┘
+                                                  │
+                     ┌──────────────┐     ┌──────▼───────┐
+                     │   Printer    │◀────│ PDL Encoder  │
+                     │  (USB/Net)   │     │ (PCL/PS/PWG) │
+                     └──────────────┘     └──────────────┘
+```
+
+## Quick Start
+
+### 1. Configure IPP Printer
+
+```python
+from backend.print_pipeline import submit_ipp_job
+
+job = submit_ipp_job(
+    printer_uri="ipp://printer.local/ipp/print",
+    document_format="application/pdf",
+    attributes={"copies": 2, "sides": "two-sided-long-edge"},
+)
+```
+
+### 2. Generate PCL Output
+
+```python
+from backend.print_pipeline import generate_pcl
+
+pcl = generate_pcl(
+    page_size="a4",
+    resolution_dpi=600,
+    duplex="duplex_long",
+    pages=3,
+)
+# pcl.data contains the PCL byte stream
+```
+
+### 3. Select ICC Profile
+
+```python
+from backend.print_pipeline import select_print_profile
+
+profile = select_print_profile(paper_id="paper_glossy", ink_id="cmyk_photo")
+# profile.icc_file = "glossy_cmyk_photo.icc"
+# profile.rendering_intent = "perceptual"
+```
+
+### 4. Enqueue Print Job
+
+```python
+from backend.print_pipeline import enqueue_print_job, advance_queue_job_to_completion
+
+job = enqueue_print_job(
+    document_name="report.pdf",
+    printer_uri="ipp://printer.local/ipp/print",
+    priority=75,
+)
+advance_queue_job_to_completion(job.job_id)
+```
+
+## Compatible SoCs
+
+{% for soc in compatible_socs %}
+- **{{ soc.name }}** — {{ soc.notes }}
+{% endfor %}
+
+## Dependencies
+
+- CORE-05 (Skill Pack Framework)
+- CORE-07 (HIL Plugin API)
+- CORE-19 (Imaging Pipeline — ICC profile sharing)
+
+## API Reference
+
+See REST endpoint documentation at `/docs#/printing`.

@@ -268,11 +268,11 @@ Legend:
 - [x] ICC color profile embedding
 
 ### C20. L4-CORE-20 Print pipeline (#241)
-- [ ] IPP/CUPS backend wrapper
-- [ ] PDL interpreters: PCL / PostScript / PDF (via Ghostscript)
-- [ ] Color management: ICC profile per paper/ink combo
-- [ ] Print queue + spooler integration
-- [ ] Unit test: round-trip PDF → raster → PDL → output
+- [x] IPP/CUPS backend wrapper
+- [x] PDL interpreters: PCL / PostScript / PDF (via Ghostscript)
+- [x] Color management: ICC profile per paper/ink combo
+- [x] Print queue + spooler integration
+- [x] Unit test: round-trip PDF → raster → PDL → output
 
 ### C21. L4-CORE-21 Enterprise web stack pattern (#242) — **highest leverage for Layer C**
 - [ ] Auth: Next-Auth + optional SSO plug (LDAP/SAML/OIDC)

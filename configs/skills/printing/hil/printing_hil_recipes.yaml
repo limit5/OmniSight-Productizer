@@ -1,0 +1,86 @@
+schema_version: 1
+skill: printing
+hil_recipes:
+  - id: hil_print_usb_direct
+    name: "USB Direct Print Test"
+    description: "Send print job via USB to physical printer and verify output"
+    hardware_required:
+      - "USB-connected printer (PCL or PostScript capable)"
+      - "Test target board with USB host port"
+    steps:
+      - "Connect printer via USB"
+      - "Detect printer via CUPS backend (usb://)"
+      - "Submit 1-page A4 color PDF job"
+      - "Verify job completes without error"
+      - "Visual inspection: correct output on paper"
+    pass_criteria:
+      - "Printer detected within 10 seconds"
+      - "Job completed state reached"
+      - "No spooler errors"
+
+  - id: hil_print_ipp_network
+    name: "IPP Network Print Test"
+    description: "Print via IPP to network printer, verify job lifecycle"
+    hardware_required:
+      - "Network printer supporting IPP 2.0"
+      - "Test board on same subnet"
+    steps:
+      - "Discover printer via mDNS/DNS-SD"
+      - "Query Get-Printer-Attributes"
+      - "Submit Print-Job with PDF document"
+      - "Poll Get-Job-Attributes until completed"
+      - "Verify printed output"
+    pass_criteria:
+      - "Printer discovered and attributes retrieved"
+      - "Job state: pending → processing → completed"
+      - "Output matches input within color tolerance ΔE < 5"
+
+  - id: hil_print_duplex
+    name: "Duplex Print Verification"
+    description: "Verify front/back alignment and page ordering in duplex mode"
+    hardware_required:
+      - "Duplex-capable printer"
+      - "Registration alignment target PDF"
+    steps:
+      - "Print alignment target in duplex-long-edge mode"
+      - "Scan output with flatbed scanner"
+      - "Measure front-back registration offset"
+      - "Repeat for duplex-short-edge"
+    pass_criteria:
+      - "Registration offset < 1mm in both modes"
+      - "Page ordering correct (1-front/2-back/3-front/4-back)"
+
+  - id: hil_print_color_accuracy
+    name: "Print Color Accuracy Test"
+    description: "Verify ICC profile produces accurate color output"
+    hardware_required:
+      - "Calibrated printer"
+      - "Spectrophotometer (X-Rite i1 or similar)"
+      - "IT8.7/4 print target"
+    steps:
+      - "Print IT8.7/4 target with selected ICC profile"
+      - "Measure patches with spectrophotometer"
+      - "Calculate ΔE2000 for all patches"
+      - "Compare against profile gamut boundary"
+    pass_criteria:
+      - "Average ΔE2000 < 2.0"
+      - "Maximum ΔE2000 < 5.0"
+      - "95th percentile ΔE2000 < 3.0"
+
+  - id: hil_print_queue_stress
+    name: "Print Queue Stress Test"
+    description: "Stress test spooler with concurrent job submission"
+    hardware_required:
+      - "Printer (any type)"
+      - "Test board"
+    steps:
+      - "Submit 50 jobs in rapid succession"
+      - "Mix priorities (low/normal/high/critical)"
+      - "Cancel 10 jobs mid-queue"
+      - "Hold and release 5 jobs"
+      - "Monitor spooler memory and disk usage"
+    pass_criteria:
+      - "All non-canceled jobs reach completed state"
+      - "Priority ordering respected"
+      - "No spooler crash or memory leak"
+      - "Spool directory cleaned after retention period"

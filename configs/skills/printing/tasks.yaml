@@ -1,0 +1,114 @@
+schema_version: 1
+skill: printing
+tasks:
+  - id: print_ipp_setup
+    name: "Configure IPP/CUPS Backend"
+    description: "Set up IPP printer discovery, capability negotiation, and CUPS backend filter"
+    order: 1
+    estimated_minutes: 30
+    inputs:
+      - printer_uri
+      - document_formats
+    outputs:
+      - ipp_backend_config
+      - cups_backend_module
+
+  - id: print_pcl_interpreter
+    name: "PCL Interpreter Setup"
+    description: "Configure PCL 5e/5c/6-XL interpreter for raster-to-PCL conversion"
+    order: 2
+    estimated_minutes: 45
+    inputs:
+      - target_pcl_version
+      - resolution_dpi
+    outputs:
+      - pcl_output_stream
+
+  - id: print_ps_interpreter
+    name: "PostScript Interpreter Setup"
+    description: "Configure PostScript Level 2/3 generator with DSC compliance"
+    order: 3
+    estimated_minutes: 45
+    inputs:
+      - target_ps_level
+      - color_mode
+    outputs:
+      - postscript_output
+
+  - id: print_ghostscript_config
+    name: "Ghostscript PDF Rendering"
+    description: "Configure Ghostscript devices for PDF → raster/PDL conversion"
+    order: 4
+    estimated_minutes: 30
+    inputs:
+      - gs_device
+      - resolution_dpi
+    outputs:
+      - gs_render_output
+
+  - id: print_color_profiling
+    name: "Color Profile Configuration"
+    description: "Assign ICC profiles per paper type and ink combination"
+    order: 5
+    estimated_minutes: 60
+    inputs:
+      - paper_types
+      - ink_sets
+    outputs:
+      - icc_print_profile
+
+  - id: print_icc_generation
+    name: "ICC Profile Generation"
+    description: "Generate printer-specific ICC v4 output profiles"
+    order: 6
+    estimated_minutes: 30
+    inputs:
+      - paper_id
+      - ink_id
+      - measurement_data
+    outputs:
+      - icc_print_profile
+
+  - id: print_queue_setup
+    name: "Print Queue Configuration"
+    description: "Configure spooler, queue policies, and job lifecycle"
+    order: 7
+    estimated_minutes: 30
+    inputs:
+      - queue_policy
+      - max_concurrent_jobs
+    outputs:
+      - print_test_report
+
+  - id: print_duplex_test
+    name: "Duplex Print Verification"
+    description: "Verify correct page ordering and duplex commands in PCL/PS output"
+    order: 8
+    estimated_minutes: 20
+    inputs:
+      - duplex_mode
+      - test_document
+    outputs:
+      - print_test_report
+
+  - id: print_roundtrip_test
+    name: "PDF → Raster → PDL Round-trip Test"
+    description: "End-to-end verification: PDF rendered to raster, encoded to PCL/PS, checksums compared"
+    order: 9
+    estimated_minutes: 45
+    inputs:
+      - test_pdf
+      - target_pdl
+    outputs:
+      - print_test_report
+
+  - id: print_integration_test
+    name: "Full Pipeline Integration Test"
+    description: "IPP submit → spooler → GS render → PDL encode → color managed output"
+    order: 10
+    estimated_minutes: 90
+    inputs:
+      - printer_uri
+      - test_document
+    outputs:
+      - print_test_report

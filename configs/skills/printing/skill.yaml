@@ -1,0 +1,50 @@
+schema_version: 1
+name: printing
+description: "Print pipeline — IPP/CUPS backend, PDL interpreters (PCL/PostScript/PDF via Ghostscript), color management (ICC per paper/ink), print queue/spooler"
+version: "1.0.0"
+author: "OmniSight"
+license: "Proprietary"
+compatible_socs:
+  - rk3566
+  - rk3568
+  - imx8m
+  - stm32mp1
+  - x86_64
+depends_on_skills: []
+depends_on_core:
+  - CORE-05
+  - CORE-07
+  - CORE-19
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/test_definitions.yaml
+  - kind: hil
+    path: hil/printing_hil_recipes.yaml
+  - kind: docs
+    path: docs/printing_integration_guide.md.j2
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+keywords:
+  - print
+  - printing
+  - ipp
+  - cups
+  - pcl
+  - postscript
+  - pdf
+  - ghostscript
+  - raster
+  - pwg-raster
+  - urf
+  - airprint
+  - color-management
+  - icc
+  - spooler
+  - queue
+  - duplex

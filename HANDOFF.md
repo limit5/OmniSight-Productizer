@@ -7,6 +7,51 @@
 
 ---
 
+## C20 L4-CORE-20 Print pipeline 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。175 項測試全部通過。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| IPP/CUPS backend wrapper | ✅ | IPP 2.0 protocol (11 operations, 8 attributes), CUPS 2.4 API (5 backends: USB/socket/IPP/IPPS/LPD), 7 job states, full job lifecycle (submit/cancel/hold/release), in-memory job simulation |
+| PDL interpreters: PCL / PostScript / PDF (via Ghostscript) | ✅ | 3 PDL languages (PCL 5e/5c/6-XL, PostScript Level 1/2/3, PDF 1.4/1.7/2.0). PCL generator with escape sequences (reset/page-size/resolution/duplex/raster). PostScript generator with DSC compliance. 11 Ghostscript devices (pwgraster/urf/pxlcolor/pxlmono/pclm/tiff/png). 3 raster formats (PWG Raster/URF/CUPS Raster) |
+| Color management: ICC profile per paper/ink combo | ✅ | 5 paper profiles (plain/glossy/matte/label/envelope), 4 ink sets (CMYK standard/photo/6-color/mono), 4 rendering intents, 4 color spaces (sRGB/Adobe RGB/CMYK/Device CMYK). ICC v4 binary generation with proper header (acsp signature, prtr device class, CMYK color space). Profile selection per paper/ink combo |
+| Print queue + spooler integration | ✅ | 3 queue policies (FIFO/priority/shortest-first), 4 priority levels, configurable spooler (max 4 concurrent, 1000 queue depth, 500MB max job, zlib compression). 11-state job lifecycle (submitted → queued → spooling → rendering → sending → printing → completed, with hold/cancel/error/requeue transitions) |
+| Unit test: round-trip PDF → raster → PDL → output | ✅ | Full round-trip verified: PDF → Ghostscript render → raster → PCL/PostScript output. Multi-page round-trip (3-page PDF). Full pipeline integration: IPP submit → raster → PCL → color profile select → spooler → completion. 175 tests total |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/print_pipeline.yaml` | 新建——IPP/CUPS (11 operations + 8 attributes + 5 backends + 7 job states) + PDL (3 languages + PCL commands + PS operators + 11 GS devices + 3 raster formats) + Color management (5 paper profiles + 4 ink sets + 4 rendering intents + 4 color spaces) + Print queue (3 policies + 4 priorities + spooler config + 11-state lifecycle) + 10 test recipes + 5 compatible SoCs + 7 artifact definitions |
+| `backend/print_pipeline.py` | 新建——Print pipeline library：19 enums + 26 data models + config loader + IPP operations/attributes/job management + PCL stream generator + PostScript DSC generator + Ghostscript PDF-to-raster renderer + paper/ink profile selection + ICC v4 binary generation + queue/spooler with 3 ordering policies + job lifecycle (hold/cancel/error/requeue) + test recipes + SoC compatibility + gate validation + cert registry |
+| `backend/routers/print_pipeline.py` | 新建——REST endpoints: GET /printing/ipp/operations, /ipp/attributes, /cups/backends, /ipp/job-states, /ipp/jobs, /pdl/languages, /pdl/pcl/commands, /pdl/ps/operators, /pdl/ghostscript/devices, /pdl/raster-formats, /color/papers, /color/inks, /color/rendering-intents, /color/spaces, /queue/policies, /queue/priorities, /queue/config, /queue/lifecycle, /queue/jobs, /test-recipes, /socs, /artifacts, /certs. POST /printing/ipp/jobs, /ipp/jobs/{id}/cancel, /ipp/jobs/{id}/hold, /ipp/jobs/{id}/release, /pdl/pcl/generate, /pdl/ps/generate, /pdl/render, /color/select, /color/icc/generate, /queue/jobs, /queue/jobs/{id}/hold, /queue/jobs/{id}/release, /queue/jobs/{id}/cancel, /queue/jobs/{id}/complete, /test-recipes/{id}/run, /validate, /certs/generate |
+| `backend/main.py` | 擴充——註冊 print_pipeline router |
+| `configs/skills/printing/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-07 + CORE-19 dependencies) |
+| `configs/skills/printing/tasks.yaml` | 新建——10 DAG tasks (IPP setup, PCL interpreter, PS interpreter, GS config, color profiling, ICC generation, queue setup, duplex test, round-trip test, integration test) |
+| `configs/skills/printing/scaffolds/` | 新建——3 scaffold files (cups_backend.c, pcl_generator.c, print_color_mgmt.py) |
+| `configs/skills/printing/tests/test_definitions.yaml` | 新建——5 test suites, 22 test definitions |
+| `configs/skills/printing/hil/printing_hil_recipes.yaml` | 新建——5 HIL recipes (USB direct print, IPP network print, duplex verification, color accuracy, queue stress test) |
+| `configs/skills/printing/docs/printing_integration_guide.md.j2` | 新建——Jinja2 doc template for print pipeline integration guide |
+| `backend/tests/test_print_pipeline.py` | 新建，175 項測試全部通過 |
+| `TODO.md` | 更新——C20 全部標記完成 |
+
+### 架構說明
+
+- **PrintDomain enum** — ipp_cups / pdl_interpreters / color_management / print_queue / integration
+- **PDLLanguage enum** — pcl / postscript / pdf
+- **IPPJobState enum** — pending / pending_held / processing / processing_stopped / canceled / aborted / completed
+- **SpoolerJobState enum** — submitted / queued / held / spooling / rendering / sending / printing / completed / canceled / rejected / error
+- **QueuePolicy enum** — fifo / priority / shortest_first
+- PCL generator produces valid escape sequences (reset, page size, resolution, copies, duplex, raster start/row/end, form feed)
+- PostScript generator produces DSC-compliant output (%%BoundingBox, %%Pages, %%EOF, setpagedevice, colorimage)
+- Ghostscript renderer supports 11 output devices for PDF → raster/PDL conversion
+- ICC v4 binary with proper acsp signature, prtr device class, CMYK color space
+- Print queue supports 3 ordering policies (FIFO, priority, shortest-job-first)
+- Job lifecycle enforces valid state transitions via configuration-driven state machine
+
+---
+
 ## C19 L4-CORE-19 Imaging / document pipeline 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。166 項測試全部通過。**

@@ -1,0 +1,611 @@
+schema_version: 1
+
+ipp_cups:
+  name: "IPP/CUPS Backend"
+  description: "Internet Printing Protocol (IPP) client and CUPS backend wrapper"
+  ipp_version: "2.0"
+  cups_api_version: "2.4"
+
+  ipp_operations:
+    - id: "print_job"
+      name: "Print-Job"
+      code: 0x0002
+      description: "Submit a print job with document data"
+      required: true
+    - id: "validate_job"
+      name: "Validate-Job"
+      code: 0x0004
+      description: "Validate job attributes without printing"
+      required: true
+    - id: "create_job"
+      name: "Create-Job"
+      code: 0x0005
+      description: "Create a job object without document data"
+      required: true
+    - id: "send_document"
+      name: "Send-Document"
+      code: 0x0006
+      description: "Send document data for a created job"
+      required: true
+    - id: "cancel_job"
+      name: "Cancel-Job"
+      code: 0x0008
+      description: "Cancel a pending or processing job"
+      required: true
+    - id: "get_job_attributes"
+      name: "Get-Job-Attributes"
+      code: 0x0009
+      description: "Query job status and attributes"
+      required: true
+    - id: "get_printer_attributes"
+      name: "Get-Printer-Attributes"
+      code: 0x000B
+      description: "Query printer capabilities and status"
+      required: true
+    - id: "pause_printer"
+      name: "Pause-Printer"
+      code: 0x0010
+      description: "Pause job processing"
+      required: false
+    - id: "resume_printer"
+      name: "Resume-Printer"
+      code: 0x0011
+      description: "Resume paused printer"
+      required: false
+    - id: "hold_job"
+      name: "Hold-Job"
+      code: 0x000C
+      description: "Hold a job in the queue"
+      required: false
+    - id: "release_job"
+      name: "Release-Job"
+      code: 0x000D
+      description: "Release a held job"
+      required: false
+
+  ipp_attributes:
+    - id: "printer_uri"
+      name: "printer-uri"
+      group: "operation"
+      syntax: "uri"
+      required: true
+    - id: "document_format"
+      name: "document-format"
+      group: "operation"
+      syntax: "mimeMediaType"
+      required: true
+      values: ["application/pdf", "application/postscript", "application/vnd.hp-PCL", "image/pwg-raster", "application/octet-stream"]
+    - id: "copies"
+      name: "copies"
+      group: "job"
+      syntax: "integer"
+      required: false
+      default: 1
+    - id: "sides"
+      name: "sides"
+      group: "job"
+      syntax: "keyword"
+      required: false
+      values: ["one-sided", "two-sided-long-edge", "two-sided-short-edge"]
+      default: "one-sided"
+    - id: "media"
+      name: "media"
+      group: "job"
+      syntax: "keyword"
+      required: false
+      values: ["iso_a4_210x297mm", "na_letter_8.5x11in", "iso_a3_297x420mm", "na_legal_8.5x14in", "jis_b5_182x257mm"]
+      default: "iso_a4_210x297mm"
+    - id: "print_quality"
+      name: "print-quality"
+      group: "job"
+      syntax: "enum"
+      required: false
+      values: ["draft", "normal", "high"]
+      default: "normal"
+    - id: "print_color_mode"
+      name: "print-color-mode"
+      group: "job"
+      syntax: "keyword"
+      required: false
+      values: ["auto", "color", "monochrome"]
+      default: "auto"
+    - id: "orientation"
+      name: "orientation-requested"
+      group: "job"
+      syntax: "enum"
+      required: false
+      values: ["portrait", "landscape", "reverse-landscape", "reverse-portrait"]
+      default: "portrait"
+
+  cups_backends:
+    - id: "usb"
+      name: "USB Direct"
+      uri_scheme: "usb://"
+      description: "Direct USB connection via libusb"
+    - id: "socket"
+      name: "AppSocket/JetDirect"
+      uri_scheme: "socket://"
+      description: "Raw TCP/IP socket (port 9100)"
+    - id: "ipp"
+      name: "IPP Network"
+      uri_scheme: "ipp://"
+      description: "Internet Printing Protocol over HTTP"
+    - id: "ipps"
+      name: "IPP Secure"
+      uri_scheme: "ipps://"
+      description: "Internet Printing Protocol over HTTPS"
+    - id: "lpd"
+      name: "LPD/LPR"
+      uri_scheme: "lpd://"
+      description: "Line Printer Daemon protocol"
+
+  job_states:
+    - id: "pending"
+      code: 3
+      description: "Job is waiting to be processed"
+    - id: "pending_held"
+      code: 4
+      description: "Job is held and will not be processed"
+    - id: "processing"
+      code: 5
+      description: "Job is being printed"
+    - id: "processing_stopped"
+      code: 6
+      description: "Job processing has been paused"
+    - id: "canceled"
+      code: 7
+      description: "Job has been canceled"
+    - id: "aborted"
+      code: 8
+      description: "Job aborted due to error"
+    - id: "completed"
+      code: 9
+      description: "Job has been printed successfully"
+
+pdl_interpreters:
+  name: "PDL Interpreters"
+  description: "Page Description Language interpreters for PCL, PostScript, and PDF"
+
+  languages:
+    - id: "pcl"
+      name: "PCL 6 / PCL XL"
+      mime_type: "application/vnd.hp-PCL"
+      description: "HP Printer Command Language — binary page description"
+      versions: ["pcl5e", "pcl5c", "pcl6_xl"]
+      features:
+        - "raster graphics"
+        - "vector graphics"
+        - "TrueType font embedding"
+        - "macro definitions"
+        - "duplex control"
+      commands:
+        - id: "reset"
+          sequence: "\\x1bE"
+          description: "Printer reset"
+        - id: "page_size"
+          sequence: "\\x1b&l{n}A"
+          description: "Set page size (1=exec, 2=letter, 26=A4, 27=A3)"
+        - id: "orientation"
+          sequence: "\\x1b&l{n}O"
+          description: "Set orientation (0=portrait, 1=landscape)"
+        - id: "copies"
+          sequence: "\\x1b&l{n}X"
+          description: "Set number of copies"
+        - id: "simplex_duplex"
+          sequence: "\\x1b&l{n}S"
+          description: "Set simplex(0)/duplex-long(1)/duplex-short(2)"
+        - id: "resolution"
+          sequence: "\\x1b*t{n}R"
+          description: "Set print resolution in DPI"
+        - id: "raster_start"
+          sequence: "\\x1b*r1A"
+          description: "Start raster graphics"
+        - id: "raster_row"
+          sequence: "\\x1b*b{n}W"
+          description: "Transfer raster row (n bytes)"
+        - id: "raster_end"
+          sequence: "\\x1b*rB"
+          description: "End raster graphics"
+        - id: "form_feed"
+          sequence: "\\x0c"
+          description: "Eject page"
+
+    - id: "postscript"
+      name: "PostScript Level 3"
+      mime_type: "application/postscript"
+      description: "Adobe PostScript — stack-based interpreted page description"
+      versions: ["level1", "level2", "level3"]
+      features:
+        - "vector graphics"
+        - "Type 1 / TrueType / CID fonts"
+        - "color management (CIE-based)"
+        - "forms / patterns"
+        - "transparency (level 3)"
+      operators:
+        - id: "showpage"
+          description: "Render and eject current page"
+        - id: "gsave"
+          description: "Push graphics state"
+        - id: "grestore"
+          description: "Pop graphics state"
+        - id: "setpagedevice"
+          description: "Set page device parameters (media, duplex, etc.)"
+        - id: "setcolorspace"
+          description: "Set current color space"
+        - id: "image"
+          description: "Paint sampled image"
+        - id: "show"
+          description: "Render text string at current point"
+        - id: "moveto"
+          description: "Move current point"
+        - id: "lineto"
+          description: "Draw line to point"
+        - id: "stroke"
+          description: "Paint current path outline"
+        - id: "fill"
+          description: "Fill current path interior"
+
+    - id: "pdf"
+      name: "PDF (via Ghostscript)"
+      mime_type: "application/pdf"
+      description: "Portable Document Format rendered via Ghostscript to raster/PDL"
+      versions: ["1.4", "1.7", "2.0"]
+      ghostscript_devices:
+        - id: "pdfwrite"
+          description: "PDF → PDF (re-distill / optimize)"
+        - id: "ps2write"
+          description: "PDF → PostScript Level 2"
+        - id: "pxlcolor"
+          description: "PDF → PCL XL (color)"
+        - id: "pxlmono"
+          description: "PDF → PCL XL (mono)"
+        - id: "pclm"
+          description: "PDF → PCLm (mobile printing)"
+        - id: "pwgraster"
+          description: "PDF → PWG Raster (IPP Everywhere)"
+        - id: "urf"
+          description: "PDF → Apple URF (AirPrint)"
+        - id: "tiff24nc"
+          description: "PDF → 24-bit TIFF (color)"
+        - id: "tiffgray"
+          description: "PDF → 8-bit TIFF (greyscale)"
+        - id: "pngmono"
+          description: "PDF → 1-bit PNG (mono)"
+        - id: "png16m"
+          description: "PDF → 24-bit PNG (color)"
+
+  raster_formats:
+    - id: "pwg_raster"
+      name: "PWG Raster"
+      mime_type: "image/pwg-raster"
+      description: "PWG 5102.4 raster format for driverless printing"
+      header_size: 1796
+      compression: ["uncompressed", "packbits"]
+    - id: "urf"
+      name: "Apple URF"
+      mime_type: "image/urf"
+      description: "Apple Universal Raster Format for AirPrint"
+      header_size: 16
+      compression: ["uncompressed", "packbits"]
+    - id: "cups_raster"
+      name: "CUPS Raster"
+      mime_type: "application/vnd.cups-raster"
+      description: "CUPS native raster format"
+      header_size: 1796
+      compression: ["uncompressed", "lzw"]
+
+color_management:
+  name: "Print Color Management"
+  description: "ICC profile management per paper type and ink combination"
+
+  profile_slots:
+    - id: "paper_plain"
+      paper_type: "Plain Paper"
+      weight_gsm: [60, 90]
+      profiles:
+        - ink: "cmyk_standard"
+          icc_file: "plain_cmyk.icc"
+          rendering_intent: "relative_colorimetric"
+        - ink: "mono_black"
+          icc_file: "plain_mono.icc"
+          rendering_intent: "perceptual"
+    - id: "paper_glossy"
+      paper_type: "Glossy Photo Paper"
+      weight_gsm: [180, 260]
+      profiles:
+        - ink: "cmyk_photo"
+          icc_file: "glossy_cmyk_photo.icc"
+          rendering_intent: "perceptual"
+        - ink: "cmyk_6color"
+          icc_file: "glossy_6color.icc"
+          rendering_intent: "perceptual"
+    - id: "paper_matte"
+      paper_type: "Matte Photo Paper"
+      weight_gsm: [120, 200]
+      profiles:
+        - ink: "cmyk_standard"
+          icc_file: "matte_cmyk.icc"
+          rendering_intent: "relative_colorimetric"
+    - id: "paper_label"
+      paper_type: "Label / Sticker"
+      weight_gsm: [80, 150]
+      profiles:
+        - ink: "cmyk_standard"
+          icc_file: "label_cmyk.icc"
+          rendering_intent: "saturation"
+    - id: "paper_envelope"
+      paper_type: "Envelope"
+      weight_gsm: [80, 120]
+      profiles:
+        - ink: "mono_black"
+          icc_file: "envelope_mono.icc"
+          rendering_intent: "perceptual"
+
+  ink_sets:
+    - id: "cmyk_standard"
+      name: "CMYK Standard"
+      channels: ["cyan", "magenta", "yellow", "black"]
+      channel_count: 4
+    - id: "cmyk_photo"
+      name: "CMYK Photo"
+      channels: ["cyan", "magenta", "yellow", "black"]
+      channel_count: 4
+      notes: "Optimized ink limits for photo media"
+    - id: "cmyk_6color"
+      name: "6-Color Photo"
+      channels: ["cyan", "light_cyan", "magenta", "light_magenta", "yellow", "black"]
+      channel_count: 6
+    - id: "mono_black"
+      name: "Monochrome Black"
+      channels: ["black"]
+      channel_count: 1
+
+  rendering_intents:
+    - id: "perceptual"
+      code: 0
+      description: "Preserve visual relationships — best for photos"
+    - id: "relative_colorimetric"
+      code: 1
+      description: "Map source white to destination white — best for proofing"
+    - id: "saturation"
+      code: 2
+      description: "Maximize saturation — best for business graphics"
+    - id: "absolute_colorimetric"
+      code: 3
+      description: "Exact color match with no white point mapping"
+
+  color_spaces:
+    - id: "srgb"
+      name: "sRGB"
+      description: "Standard RGB input color space"
+      type: "input"
+    - id: "adobe_rgb"
+      name: "Adobe RGB (1998)"
+      description: "Wide-gamut RGB input color space"
+      type: "input"
+    - id: "cmyk"
+      name: "CMYK"
+      description: "Process color output space"
+      type: "output"
+    - id: "device_cmyk"
+      name: "Device CMYK"
+      description: "Uncalibrated device-specific CMYK"
+      type: "output"
+
+print_queue:
+  name: "Print Queue / Spooler"
+  description: "Print job queue management and spooler integration"
+
+  queue_policies:
+    - id: "fifo"
+      name: "First In First Out"
+      description: "Jobs processed in submission order"
+      default: true
+    - id: "priority"
+      name: "Priority-based"
+      description: "Jobs ordered by priority level (1=lowest, 100=highest)"
+    - id: "shortest_first"
+      name: "Shortest Job First"
+      description: "Smallest jobs processed first to reduce average wait time"
+
+  priority_levels:
+    - id: "low"
+      value: 25
+      description: "Background / batch jobs"
+    - id: "normal"
+      value: 50
+      description: "Standard user jobs"
+    - id: "high"
+      value: 75
+      description: "Urgent jobs"
+    - id: "critical"
+      value: 100
+      description: "Critical / system jobs"
+
+  spooler_config:
+    max_concurrent_jobs: 4
+    max_queue_depth: 1000
+    spool_directory: "/var/spool/omnisight/print"
+    temp_directory: "/tmp/omnisight/print"
+    job_retention_hours: 72
+    failed_job_retention_hours: 168
+    max_job_size_mb: 500
+    compression: "zlib"
+
+  job_lifecycle:
+    - state: "submitted"
+      transitions: ["queued", "rejected"]
+    - state: "queued"
+      transitions: ["spooling", "held", "canceled"]
+    - state: "held"
+      transitions: ["queued", "canceled"]
+    - state: "spooling"
+      transitions: ["rendering", "error"]
+    - state: "rendering"
+      transitions: ["sending", "error"]
+    - state: "sending"
+      transitions: ["printing", "error"]
+    - state: "printing"
+      transitions: ["completed", "error"]
+    - state: "completed"
+      transitions: []
+    - state: "canceled"
+      transitions: []
+    - state: "rejected"
+      transitions: []
+    - state: "error"
+      transitions: ["queued", "canceled"]
+
+test_recipes:
+  - id: "print_pdf_raster_roundtrip"
+    name: "PDF → Raster → PDL round-trip"
+    domain: "integration"
+    description: "Verify PDF is rasterized via Ghostscript, then encoded to PCL/PS and decoded back"
+    timeout_seconds: 120
+    steps:
+      - "Generate synthetic PDF (A4, color, 3 pages)"
+      - "Rasterize via Ghostscript (pwgraster device, 300 DPI)"
+      - "Encode raster to PCL stream"
+      - "Verify PCL header and raster data integrity"
+      - "Encode raster to PostScript"
+      - "Verify PostScript structure (DSC comments, showpage count)"
+      - "Compare pixel checksums (input vs output within tolerance)"
+  - id: "print_ipp_job_lifecycle"
+    name: "IPP job lifecycle"
+    domain: "ipp_cups"
+    description: "Submit job via IPP, track state transitions, verify completion"
+    timeout_seconds: 60
+    steps:
+      - "Create printer with IPP backend"
+      - "Submit Print-Job with PDF document"
+      - "Poll Get-Job-Attributes until completed"
+      - "Verify state transitions: pending → processing → completed"
+  - id: "print_color_profile_match"
+    name: "ICC profile selection per paper/ink"
+    domain: "color_management"
+    description: "Verify correct ICC profile is selected for each paper/ink combination"
+    timeout_seconds: 30
+    steps:
+      - "Enumerate all paper/ink slot combinations"
+      - "For each: request profile selection"
+      - "Verify correct ICC file is returned"
+      - "Verify rendering intent matches configuration"
+  - id: "print_queue_ordering"
+    name: "Queue ordering policies"
+    domain: "print_queue"
+    description: "Verify FIFO, priority, and shortest-first queue ordering"
+    timeout_seconds: 60
+    steps:
+      - "Submit 5 jobs with varying priority and size"
+      - "Test FIFO: verify submission-order processing"
+      - "Test priority: verify high-priority jobs first"
+      - "Test shortest-first: verify smallest jobs first"
+  - id: "print_spooler_lifecycle"
+    name: "Spooler job lifecycle"
+    domain: "print_queue"
+    description: "Verify full job lifecycle through spooler"
+    timeout_seconds: 90
+    steps:
+      - "Submit job to spooler"
+      - "Verify state: submitted → queued → spooling → rendering → sending → printing → completed"
+      - "Submit and cancel job midway"
+      - "Submit and hold/release job"
+      - "Submit job exceeding max size → rejected"
+  - id: "print_pcl_generation"
+    name: "PCL stream generation"
+    domain: "pdl_interpreters"
+    description: "Generate PCL output from raster data and verify correctness"
+    timeout_seconds: 45
+    steps:
+      - "Create test raster (A4, 300 DPI, CMYK)"
+      - "Generate PCL5 stream"
+      - "Verify reset + page size + resolution commands"
+      - "Verify raster data transfer commands"
+      - "Generate PCL XL stream and verify structure"
+  - id: "print_postscript_generation"
+    name: "PostScript generation"
+    domain: "pdl_interpreters"
+    description: "Generate PostScript output and verify DSC compliance"
+    timeout_seconds: 45
+    steps:
+      - "Create test raster (A4, 300 DPI, RGB)"
+      - "Generate PostScript Level 2 output"
+      - "Verify DSC comments (%!PS-Adobe, %%Pages, %%EOF)"
+      - "Verify setpagedevice parameters"
+      - "Verify image operator and data encoding"
+  - id: "print_ghostscript_devices"
+    name: "Ghostscript device enumeration"
+    domain: "pdl_interpreters"
+    description: "Verify all configured Ghostscript devices produce valid output specs"
+    timeout_seconds: 60
+    steps:
+      - "Enumerate configured GS devices"
+      - "For each device: validate output format spec"
+      - "For each device: verify render parameters (DPI, color space, compression)"
+  - id: "print_duplex_handling"
+    name: "Duplex print job handling"
+    domain: "integration"
+    description: "Verify correct page ordering and PCL/PS duplex commands"
+    timeout_seconds: 60
+    steps:
+      - "Submit 4-page job with duplex-long-edge"
+      - "Verify PCL simplex/duplex escape sequence"
+      - "Verify page ordering (front/back interleave)"
+      - "Submit with duplex-short-edge and verify"
+  - id: "print_error_recovery"
+    name: "Print error recovery"
+    domain: "integration"
+    description: "Verify error handling and recovery paths"
+    timeout_seconds: 60
+    steps:
+      - "Simulate paper jam during print → job error state"
+      - "Requeue errored job → verify returns to queued"
+      - "Simulate render failure → verify error state + diagnostics"
+      - "Submit invalid PDL → verify rejection with error message"
+
+compatible_socs:
+  - id: "rk3566"
+    name: "Rockchip RK3566"
+    notes: "USB printer host + IPP network"
+  - id: "rk3568"
+    name: "Rockchip RK3568"
+    notes: "USB printer host + IPP network"
+  - id: "imx8m"
+    name: "NXP i.MX8M"
+    notes: "USB + network + CUPS native"
+  - id: "stm32mp1"
+    name: "ST STM32MP1"
+    notes: "USB printer host (limited queue depth)"
+  - id: "x86_64"
+    name: "x86_64 (PC/Server)"
+    notes: "Full CUPS + Ghostscript + all PDLs"
+
+artifact_definitions:
+  - id: "ipp_backend_config"
+    name: "IPP Backend Configuration"
+    pattern: "printing/ipp_config_*.yaml"
+    description: "IPP printer configuration and capability advertisement"
+  - id: "cups_backend_module"
+    name: "CUPS Backend Module"
+    pattern: "printing/cups_backend_*.c"
+    description: "CUPS backend filter source code"
+  - id: "pcl_output_stream"
+    name: "PCL Output Stream"
+    pattern: "printing/pcl_output_*.bin"
+    description: "Generated PCL printer data stream"
+  - id: "postscript_output"
+    name: "PostScript Output"
+    pattern: "printing/ps_output_*.ps"
+    description: "Generated PostScript printer data"
+  - id: "icc_print_profile"
+    name: "ICC Print Profile"
+    pattern: "printing/profiles/*.icc"
+    description: "ICC color profile for paper/ink combination"
+  - id: "gs_render_output"
+    name: "Ghostscript Render Output"
+    pattern: "printing/gs_output_*.*"
+    description: "Ghostscript-rendered raster or PDL output"
+  - id: "print_test_report"
+    name: "Print Test Report"
+    pattern: "printing/test_report_*.md"
+    description: "Print pipeline test execution report"

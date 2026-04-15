@@ -1,0 +1,105 @@
+schema_version: 1
+skill: printing
+test_suites:
+  - id: printing_ipp_suite
+    name: "IPP/CUPS Backend Tests"
+    domain: ipp_cups
+    tests:
+      - id: ipp_operations_list
+        name: "List IPP operations"
+        description: "Verify all required IPP operations are defined"
+      - id: ipp_job_submit
+        name: "Submit IPP print job"
+        description: "Submit job and verify state transitions (pending → processing → completed)"
+      - id: ipp_job_cancel
+        name: "Cancel IPP job"
+        description: "Cancel pending job and verify canceled state"
+      - id: ipp_job_hold_release
+        name: "Hold and release IPP job"
+        description: "Hold pending job, then release and verify completion"
+      - id: cups_backends_list
+        name: "List CUPS backends"
+        description: "Verify USB, socket, IPP, IPPS, LPD backends defined"
+
+  - id: printing_pdl_suite
+    name: "PDL Interpreter Tests"
+    domain: pdl_interpreters
+    tests:
+      - id: pcl_generation
+        name: "PCL stream generation"
+        description: "Generate PCL output and verify escape sequences"
+      - id: pcl_duplex
+        name: "PCL duplex commands"
+        description: "Verify correct duplex escape sequences"
+      - id: ps_generation
+        name: "PostScript generation"
+        description: "Generate PS and verify DSC compliance"
+      - id: ps_duplex
+        name: "PostScript duplex"
+        description: "Verify setpagedevice duplex parameters"
+      - id: gs_device_list
+        name: "Ghostscript devices"
+        description: "Verify all configured GS devices"
+      - id: pdf_to_raster
+        name: "PDF to raster rendering"
+        description: "Render PDF via Ghostscript and verify output"
+
+  - id: printing_color_suite
+    name: "Color Management Tests"
+    domain: color_management
+    tests:
+      - id: paper_profile_list
+        name: "Paper profile enumeration"
+        description: "Verify all paper/ink slot definitions"
+      - id: profile_select_plain
+        name: "Profile selection: plain paper"
+        description: "Select ICC profile for plain paper + CMYK standard"
+      - id: profile_select_glossy
+        name: "Profile selection: glossy photo"
+        description: "Select ICC profile for glossy + photo ink"
+      - id: icc_binary_gen
+        name: "ICC binary generation"
+        description: "Generate printer ICC v4 binary and verify header"
+      - id: invalid_paper_ink
+        name: "Invalid paper/ink combo"
+        description: "Verify error on non-existent paper/ink combination"
+
+  - id: printing_queue_suite
+    name: "Print Queue Tests"
+    domain: print_queue
+    tests:
+      - id: queue_fifo
+        name: "FIFO queue ordering"
+        description: "Submit jobs and verify FIFO order"
+      - id: queue_priority
+        name: "Priority queue ordering"
+        description: "Submit jobs with priority and verify ordering"
+      - id: queue_shortest_first
+        name: "Shortest-first ordering"
+        description: "Submit jobs with sizes and verify SJF order"
+      - id: queue_hold_release
+        name: "Job hold and release"
+        description: "Hold queued job, release, and verify completion"
+      - id: queue_cancel
+        name: "Job cancellation"
+        description: "Cancel queued job and verify state"
+      - id: queue_oversize_reject
+        name: "Oversize job rejection"
+        description: "Submit oversized job and verify rejection"
+
+  - id: printing_integration_suite
+    name: "Integration Tests"
+    domain: integration
+    tests:
+      - id: roundtrip_pdf_pcl
+        name: "PDF → raster → PCL round-trip"
+        description: "Full round-trip: render PDF, encode PCL, verify integrity"
+      - id: roundtrip_pdf_ps
+        name: "PDF → raster → PostScript round-trip"
+        description: "Full round-trip: render PDF, encode PS, verify DSC"
+      - id: ipp_to_spooler
+        name: "IPP job → spooler pipeline"
+        description: "Submit IPP job and verify spooler processing"
+      - id: color_managed_output
+        name: "Color-managed print output"
+        description: "Select profile, render, encode — verify ICC is applied"
