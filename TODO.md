@@ -51,12 +51,12 @@ Legend:
 - [x] Unit tests for 3 starter templates (v0.app Next.js / FastAPI backend / Rust CLI)
 
 ### B3. REPORT-01 `backend/report_generator.py` (#203)
-- [ ] Section 1 (Spec): read ParsedSpec + all clarifications + input sources
-- [ ] Section 2 (Execution): workflow_runs + steps + decisions + retries
-- [ ] Section 3 (Outcome): deploy URL + smoke test results + open debug_findings
-- [ ] Markdown template + optional PDF via `weasyprint`
-- [ ] Signed URL helper for read-only share
-- [ ] Unit test: fixture workflow → report matches golden file
+- [x] Section 1 (Spec): read ParsedSpec + all clarifications + input sources
+- [x] Section 2 (Execution): workflow_runs + steps + decisions + retries
+- [x] Section 3 (Outcome): deploy URL + smoke test results + open debug_findings
+- [x] Markdown template + optional PDF via `weasyprint`
+- [x] Signed URL helper for read-only share
+- [x] Unit test: fixture workflow → report matches golden file
 
 ### B4. UX-05 New-project wizard modal (#204)
 - [ ] Detect empty `localStorage['omnisight:intent:last_spec']` on first load

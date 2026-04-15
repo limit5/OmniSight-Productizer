@@ -1,9 +1,41 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`56aa679` (master)
+> 最後 commit：`14182e4` (master)
 > Tag：`v0.1.0` — 首個正式 release
-> 工作目錄狀態：clean（v0.1.0 tagged）
+> 工作目錄狀態：clean
+
+---
+
+## B3 REPORT-01 Project Report Generator (#203) 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Section 1 (Spec) | ✅ done | `build_spec_section()` — ParsedSpec + clarifications + input sources from workflow metadata + DE history |
+| Section 2 (Execution) | ✅ done | `build_execution_section()` — workflow_runs + steps + decisions + retries |
+| Section 3 (Outcome) | ✅ done | `build_outcome_section()` — deploy URL + smoke test results + open debug_findings |
+| Markdown template + PDF | ✅ done | `render_markdown()` + `render_pdf()` (weasyprint optional) + Jinja2 template `project_report.md.j2` |
+| Signed URL helper | ✅ done | `generate_signed_url()` / `verify_signed_url()` — HMAC-SHA256, time-limited |
+| Unit tests | ✅ done | `test_report_generator.py` — 34 tests (golden file match, section builders, signed URL, PDF error handling) |
+
+### Architecture
+
+- `backend/report_generator.py`: Extended with `ReportData` dataclass (3 sections), async section builders, `render_markdown()`, `render_pdf()`, signed URL helper. Pre-existing Jinja2 template mode preserved.
+- `backend/routers/report.py`: 5 endpoints — `POST /report/generate`, `GET /report/{id}`, `GET /report/{id}/pdf`, `POST /report/share`, `GET /report/share/{id}`.
+- `configs/templates/project_report.md.j2`: Jinja2 template for project reports.
+- `backend/tests/golden/project_report_golden.md`: Golden file for regression testing.
+
+### API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/report/generate` | Build project report from workflow run ID |
+| GET | `/report/{report_id}` | Retrieve cached report (markdown) |
+| GET | `/report/{report_id}/pdf` | Download PDF version (requires weasyprint) |
+| POST | `/report/share` | Create signed read-only URL |
+| GET | `/report/share/{report_id}` | Access shared report via signed URL |
 
 ---
 
