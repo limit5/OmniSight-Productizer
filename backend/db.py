@@ -108,6 +108,15 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("users", "locked_until", "REAL"),
         # K4 — session rotation + UA binding.
         ("sessions", "ua_hash", "TEXT NOT NULL DEFAULT ''"),
+        # I1 — multi-tenancy: tenant_id on all business tables.
+        ("users", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("workflow_runs", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("debug_findings", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("decision_rules", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("event_log", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("audit_log", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("artifacts", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        ("user_preferences", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -140,6 +149,27 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         )
     except Exception as exc:
         logger.warning("idx_audit_log_session create failed: %s", exc)
+
+    # I1: seed default tenant + tenant_id indexes.
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO tenants (id, name, plan) "
+            "VALUES ('t-default', 'Default Tenant', 'free')"
+        )
+    except Exception as exc:
+        logger.warning("Default tenant seed failed: %s", exc)
+
+    _tenant_tables = [
+        "users", "artifacts", "event_log", "debug_findings",
+        "decision_rules", "workflow_runs", "audit_log", "user_preferences",
+    ]
+    for t in _tenant_tables:
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{t}_tenant ON {t}(tenant_id)"
+            )
+        except Exception as exc:
+            logger.warning("idx_%s_tenant create failed: %s", t, exc)
 
     # Verify every REQUIRED column ended up present (defends against a YAML
     # typo or partial schema rebuild).
@@ -186,6 +216,15 @@ def _conn() -> aiosqlite.Connection:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _SCHEMA = """
+-- I1: Multi-tenancy foundation
+CREATE TABLE IF NOT EXISTS tenants (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    plan        TEXT NOT NULL DEFAULT 'free',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    enabled     INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS agents (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -241,7 +280,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     type        TEXT NOT NULL DEFAULT 'markdown',
     file_path   TEXT NOT NULL,
     size        INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    tenant_id   TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -300,7 +340,8 @@ CREATE TABLE IF NOT EXISTS event_log (
     id              INTEGER PRIMARY KEY,
     event_type      TEXT NOT NULL,
     data_json       TEXT NOT NULL,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 
 -- L3 Episodic Memory: long-term knowledge base for cross-project learning
@@ -331,7 +372,8 @@ CREATE TABLE IF NOT EXISTS debug_findings (
     context         TEXT NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'open',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at     TEXT
+    resolved_at     TEXT,
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 
 CREATE TABLE IF NOT EXISTS decision_rules (
@@ -345,7 +387,8 @@ CREATE TABLE IF NOT EXISTS decision_rules (
     note                TEXT NOT NULL DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     negative            INTEGER NOT NULL DEFAULT 0,
-    undo_count          INTEGER NOT NULL DEFAULT 0
+    undo_count          INTEGER NOT NULL DEFAULT 0,
+    tenant_id           TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 
 -- Phase 56: durable workflow checkpointing
@@ -357,7 +400,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     status          TEXT NOT NULL DEFAULT 'running',
     last_step_id    TEXT,
     metadata        TEXT NOT NULL DEFAULT '{}',
-    version         INTEGER NOT NULL DEFAULT 0
+    version         INTEGER NOT NULL DEFAULT 0,
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
@@ -387,7 +431,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     after_json      TEXT NOT NULL DEFAULT '{}',
     prev_hash       TEXT NOT NULL DEFAULT '',
     curr_hash       TEXT NOT NULL,
-    session_id      TEXT
+    session_id      TEXT,
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
@@ -435,7 +480,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     last_login_at   TEXT,
     failed_login_count INTEGER NOT NULL DEFAULT 0,
-    locked_until    REAL
+    locked_until    REAL,
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
 );
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_provider, oidc_subject);
@@ -594,6 +640,27 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
+
+-- J4: user preferences (per-user key/value)
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pref_key    TEXT NOT NULL,
+    value       TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+    tenant_id   TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    PRIMARY KEY (user_id, pref_key)
+);
+CREATE INDEX IF NOT EXISTS idx_user_prefs_user ON user_preferences(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_prefs_tenant ON user_preferences(tenant_id);
+
+-- I1: tenant_id indexes on business tables
+CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_tenant ON artifacts(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_event_log_tenant ON event_log(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_debug_findings_tenant ON debug_findings(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_decision_rules_tenant ON decision_rules(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant ON workflow_runs(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
 """
 
 
