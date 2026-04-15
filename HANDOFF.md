@@ -7,6 +7,47 @@
 
 ---
 
+## C1 Phase 64-C-SSH runner 狀態更新（2026-04-15）
+
+**全部 7/7 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| t3_resolver SSH 分支 | ✅ | `resolve_t3_runner()` 新增 SSH 候選：`_ssh_enabled()` + `find_target_for_arch()` 查詢註冊目標 |
+| ssh_runner.py | ✅ | 完整 paramiko-based runner：connect → sandbox → sftp sync → exec → collect |
+| 憑證管理 | ✅ | `configs/ssh_credentials.yaml` 格式（仿 git_credentials.yaml），支援 per-arch 目標 + platform profile fallback |
+| Sandbox 隔離 | ✅ | per-run scratch dir (`/tmp/omnisight/run-<timestamp>`)，sysroot read-only 檢測 + 警告 |
+| Timeout + heartbeat + kill | ✅ | `exec_on_remote()` 實作：timeout 強制 kill、transport liveness 檢測、disconnect 自動中止 |
+| 測試 | ✅ | 23 項測試全數通過：credential loading、resolver SSH branch、dispatch routing、exec mock、session mgmt |
+| 文件 | ✅ | `docs/operations/ssh-runner.md`：key-gen + known_hosts + lockdown + 環境變數參考 |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/ssh_runner.py` | 新建——SSHTarget / SSHRunnerInfo / connect / sandbox / sftp sync / exec_on_remote / run_on_target |
+| `backend/t3_resolver.py` | 新增 `_ssh_enabled()` + SSH candidate branch between LOCAL and QEMU |
+| `backend/container.py` | `dispatch_t3()` 新增 SSH branch → 回傳 SSHRunnerInfo |
+| `backend/config.py` | 新增 5 個 SSH runner 設定：enabled / timeout / heartbeat / max_output / credentials_file |
+| `configs/ssh_credentials.example.yaml` | 新建——SSH 目標註冊範例 |
+| `backend/tests/test_ssh_runner.py` | 新建，23 項測試 |
+| `docs/operations/ssh-runner.md` | 新建——安裝 / 安全 / 設定 / 疑難排解 |
+| `.gitignore` | 新增 ssh_credentials.yaml / git_credentials.yaml |
+
+### 驗證
+
+- 23 項新增 SSH runner 測試全數通過
+- 18 項既有 T3 resolver + dispatch 測試全數通過（無迴歸）
+- 共 41/41 相關測試 green
+
+### 下一步
+
+- C2 (HardwareProfile schema) 可接續
+- SSH runner 的 loopback integration test 需要本機 SSH server 環境（CI 可用 `ssh localhost`）
+- 生產部署前需 operator 執行 key-gen + known_hosts 設定（見 `docs/operations/ssh-runner.md`）
+
+---
+
 ## C0 ProjectClass enum + multi-planner routing 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

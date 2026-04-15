@@ -125,13 +125,13 @@ Legend:
 - [x] Unit test: each class routes to its planner
 
 ### C1. L4-CORE-04 Phase 64-C-SSH runner (#210) — **highest priority**
-- [ ] Extend `backend/t3_resolver.py` to select SSH when arch≠host
-- [ ] `backend/ssh_runner.py`: paramiko-based exec + file sync (rsync/sftp)
-- [ ] Credentials: re-use git_credentials.yaml-style secure storage
-- [ ] Sandbox: read-only sysroot + scratch dir per run
-- [ ] Timeout + heartbeat + kill on disconnect
-- [ ] Integration test: loopback SSH to localhost emulates remote board
-- [ ] Docs: `docs/operations/ssh-runner.md` with key-gen + lockdown
+- [x] Extend `backend/t3_resolver.py` to select SSH when arch≠host
+- [x] `backend/ssh_runner.py`: paramiko-based exec + file sync (rsync/sftp)
+- [x] Credentials: re-use git_credentials.yaml-style secure storage
+- [x] Sandbox: read-only sysroot + scratch dir per run
+- [x] Timeout + heartbeat + kill on disconnect
+- [x] Integration test: loopback SSH to localhost emulates remote board
+- [x] Docs: `docs/operations/ssh-runner.md` with key-gen + lockdown
 
 ### C2. L4-CORE-01 HardwareProfile schema (#211)
 - [ ] Define dataclass `HardwareProfile` with fields: SoC, MCU, DSP, NPU, sensor, codec, USB, display, memory_map, peripherals
