@@ -19,6 +19,7 @@ import userEvent from "@testing-library/user-event"
 vi.mock("@/lib/api", () => ({
   validateDag: vi.fn(),
   submitDag: vi.fn(),
+  fetchToolchains: vi.fn().mockResolvedValue({ all: [], by_platform: {}, by_tier: {} }),
 }))
 
 import { DagEditor } from "@/components/omnisight/dag-editor"
