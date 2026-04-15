@@ -1,9 +1,44 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`f6623d6` (master)
+> 最後 commit：`92fb722` (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## B7 UX-03 RunHistory project_run aggregation (#207) 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| `project_runs` table | ✅ | SQLite table: id, project_id, label, created_at, workflow_run_ids (JSON array) |
+| Migration + backfill | ✅ | Alembic 0006 + `scripts/backfill_project_runs.py` (groups by 5-min session gap) |
+| API endpoint | ✅ | `GET /projects/{id}/runs` — returns parent + materialised children + summary tallies |
+| Collapsed parent row | ✅ | RunHistoryPanel shows parent with FolderOpen icon + total/completed/failed/running counts |
+| Expand on click | ✅ | Parent click reveals child workflow_runs; child click drills into steps |
+| Component tests | ✅ | 11 tests (6 existing flat-mode + 5 new B7 aggregation); 136/136 full suite passing |
+
+### Implementation summary
+
+Added `project_runs` table that groups `workflow_runs` into logical sessions. The `RunHistoryPanel` component now accepts an optional `projectId` prop; when provided and project_runs exist, it renders a hierarchical view with collapsed parent rows showing summary stats (total, ✓completed, ✗failed, ⟳running). Clicking a parent expands to show child workflow_runs. Clicking a child drills into steps (existing behavior). Falls back to flat list when no project_runs are available.
+
+The backfill script groups existing workflow_runs by temporal proximity (default 5-minute gap between consecutive runs defines a session boundary). It's idempotent — runs already assigned to a project_run are skipped.
+
+### Files changed
+
+| File | Action |
+|------|--------|
+| `backend/db.py` | Updated — added `project_runs` table to schema |
+| `backend/project_runs.py` | **Created** — CRUD + backfill + list_by_project_with_children |
+| `backend/alembic/versions/0006_project_runs.py` | **Created** — migration |
+| `backend/routers/projects.py` | Updated — added `GET /{project_id}/runs` endpoint |
+| `scripts/backfill_project_runs.py` | **Created** — CLI backfill script |
+| `lib/api.ts` | Updated — ProjectRun types + listProjectRuns fetch |
+| `components/omnisight/run-history-panel.tsx` | Updated — parent/child hierarchy + summary stats |
+| `test/components/run-history-panel.test.tsx` | Updated — 5 new B7 aggregation tests |
+| `TODO.md` | Updated B7 items → `[x]` |
 
 ---
 

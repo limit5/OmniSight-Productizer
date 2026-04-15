@@ -80,12 +80,12 @@ Legend:
 - [x] Component tests: renders golden fixture; download triggers correct blob
 
 ### B7. UX-03 RunHistory project_run aggregation (#207)
-- [ ] Add `project_runs` table (id, label, created_at, workflow_run_ids[])
-- [ ] Migration + backfill script for existing runs (best-effort: group by session)
-- [ ] API: `GET /projects/{id}/runs` returns parent + children
-- [ ] Frontend: default collapsed parent row with summary stats
-- [ ] Expand on click to show child workflow_runs
-- [ ] Component test: parent click expands, status tallies correct
+- [x] Add `project_runs` table (id, label, created_at, workflow_run_ids[])
+- [x] Migration + backfill script for existing runs (best-effort: group by session)
+- [x] API: `GET /projects/{id}/runs` returns parent + children
+- [x] Frontend: default collapsed parent row with summary stats
+- [x] Expand on click to show child workflow_runs
+- [x] Component test: parent click expands, status tallies correct
 
 ### B8. DAG toolchain enum / autocomplete (HANDOFF B)
 - [ ] Collect toolchain names from `get_platform_config` outputs
