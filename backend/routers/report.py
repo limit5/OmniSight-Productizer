@@ -1,4 +1,4 @@
-"""B3/REPORT-01 — Project report endpoints.
+"""B3/REPORT-01 — Project report endpoints + C6 document suite.
 
 Endpoints:
   POST /report/generate      — build a project report from a workflow run
@@ -6,6 +6,9 @@ Endpoints:
   GET  /report/{report_id}/pdf — download PDF version
   POST /report/share          — create a signed read-only URL
   GET  /report/share/{report_id} — access a shared report via signed URL
+
+  POST /report/doc-suite/generate — generate per-product-class document suite
+  GET  /report/doc-suite/templates — list templates for a project class
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend import report_generator as _rg
+from backend import doc_suite_generator as _dsg
 
 router = APIRouter(tags=["report"])
 
@@ -118,4 +122,61 @@ async def shared_report(
         "title": report.title,
         "generated_at": report.generated_at,
         "markdown": md,
+    }
+
+
+# ── C6: Document suite endpoints ──
+
+
+class DocSuiteRequest(BaseModel):
+    product_name: str = "OmniSight Product"
+    product_version: str = "1.0.0"
+    product_description: str = ""
+    project_class: str = "embedded_product"
+    hardware_profile: dict[str, Any] | None = None
+    parsed_spec: dict[str, Any] | None = None
+    compliance_certs: list[dict[str, Any]] = []
+    extra: dict[str, Any] = {}
+    templates: list[str] | None = None
+
+
+@router.get("/report/doc-suite/templates")
+async def doc_suite_templates(
+    project_class: str = Query("embedded_product"),
+) -> dict[str, Any]:
+    tpls = _dsg.templates_for_class(project_class)
+    return {
+        "project_class": project_class,
+        "templates": list(tpls),
+        "all_templates": list(_dsg.ALL_TEMPLATE_NAMES),
+    }
+
+
+@router.post("/report/doc-suite/generate")
+async def doc_suite_generate(req: DocSuiteRequest) -> dict[str, Any]:
+    ctx = _dsg.DocSuiteContext(
+        product_name=req.product_name,
+        product_version=req.product_version,
+        product_description=req.product_description,
+        project_class=req.project_class,
+        hardware_profile=req.hardware_profile,
+        parsed_spec=req.parsed_spec,
+        compliance_certs=req.compliance_certs,
+        extra=req.extra,
+    )
+    tpls = tuple(req.templates) if req.templates else None
+    docs = _dsg.generate_suite(ctx, templates=tpls)
+    return {
+        "project_class": req.project_class,
+        "documents": [
+            {
+                "name": d.name,
+                "template": d.template,
+                "format": d.format,
+                "content_length": len(d.content),
+                "content": d.content,
+            }
+            for d in docs
+        ],
+        "count": len(docs),
     }

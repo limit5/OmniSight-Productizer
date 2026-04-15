@@ -1,0 +1,82 @@
+{
+  "$schema": "https://cyclonedx.org/schema/bom-1.5.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:{{ sbom_uuid | default("00000000-0000-0000-0000-000000000000") }}",
+  "version": 1,
+  "metadata": {
+    "timestamp": "{{ timestamp | default(date) }}",
+    "tools": [
+      {
+        "vendor": "OmniSight",
+        "name": "Document Suite Generator",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "{{ component_type | default("firmware") }}",
+      "name": "{{ product_name | default("OmniSight Product") }}",
+      "version": "{{ product_version | default("0.0.0") }}",
+      "description": "{{ product_description | default("") }}",
+      "group": "{{ product_group | default("com.omnisight") }}"{% if supplier %},
+      "supplier": {
+        "name": "{{ supplier.name }}",
+        "url": ["{{ supplier.url | default("") }}"]
+      }{% endif %}
+
+    }
+  },
+  "components": [
+{% if components %}
+{% for comp in components %}
+    {
+      "type": "{{ comp.type | default("library") }}",
+      "name": "{{ comp.name }}",
+      "version": "{{ comp.version | default("0.0.0") }}",
+      "group": "{{ comp.group | default("") }}",
+      "description": "{{ comp.description | default("") }}",
+      "purl": "{{ comp.purl | default("") }}"{% if comp.licenses %},
+      "licenses": [
+{% for lic in comp.licenses %}
+        {
+          "license": {
+            "id": "{{ lic }}"
+          }
+        }{{ "," if not loop.last else "" }}
+{% endfor %}
+      ]{% endif %}{% if comp.hashes %},
+      "hashes": [
+{% for h in comp.hashes %}
+        {
+          "alg": "{{ h.alg | default("SHA-256") }}",
+          "content": "{{ h.content }}"
+        }{{ "," if not loop.last else "" }}
+{% endfor %}
+      ]{% endif %}
+
+    }{{ "," if not loop.last else "" }}
+{% endfor %}
+{% endif %}
+
+  ]{% if vulnerabilities %},
+  "vulnerabilities": [
+{% for v in vulnerabilities %}
+    {
+      "id": "{{ v.cve }}",
+      "source": {
+        "name": "{{ v.source | default("NVD") }}",
+        "url": "https://nvd.nist.gov/vuln/detail/{{ v.cve }}"
+      },
+      "ratings": [
+        {
+          "severity": "{{ v.severity | default("unknown") }}",
+          "score": {{ v.score | default(0) }}
+        }
+      ],
+      "description": "{{ v.description | default("") }}",
+      "recommendation": "{{ v.recommendation | default("Update to latest version") }}"
+    }{{ "," if not loop.last else "" }}
+{% endfor %}
+  ]{% endif %}
+
+}
