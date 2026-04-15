@@ -1,9 +1,43 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`14182e4` (master)
+> 最後 commit：`f6623d6` (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## B5 UX-01 SpecTemplateEditor source tabs (#205) 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Tab header | ✅ done | 4-tab layout: Prose / From Repo / From Docs / Form |
+| Repo tab | ✅ done | URL input + clone progress indicator + detected files display |
+| Docs tab | ✅ done | Drag-drop zone + file list + per-file parse status (parsed/rejected/error) |
+| Merge logic | ✅ done | `mergeIntoSpec()` — ingested fields fill gaps, user overrides (confidence 1.0) preserved |
+| Component tests | ✅ done | 6 new tests (16 total): tab rendering, repo ingest round-trip, docs upload, merge preserves overrides, error states |
+
+### Architecture
+
+- `components/omnisight/spec-template-editor.tsx`: Extended from 2 tabs (Prose/Form) to 4 tabs (Prose/From Repo/From Docs/Form). New `mergeIntoSpec()` helper ensures user-set fields (confidence 1.0) are never overridden by ingested data.
+- `backend/routers/intent.py`: 2 new endpoints — `POST /intent/ingest-repo`, `POST /intent/upload-docs`. File upload uses `python-multipart`.
+- `lib/api.ts`: New `ingestRepo()` + `uploadDocs()` client functions, with `IngestRepoResponse`, `DocFileResult`, `UploadDocsResponse` types.
+- `backend/requirements.txt`: Added `python-multipart>=0.0.26` dependency.
+
+### API Endpoints (new)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/intent/ingest-repo` | Clone repo, introspect manifests, return ParsedSpec + ingest metadata |
+| POST | `/intent/upload-docs` | Upload doc files (.txt/.md/.json/.yaml/.toml), parse combined content into ParsedSpec |
+
+### Test Results
+
+- Frontend: 123/123 tests pass (19 files), including 16 spec-template-editor tests
+- Backend: 5/5 intent router tests pass
+- TypeScript: clean compile (zero errors)
 
 ---
 

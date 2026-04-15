@@ -66,11 +66,11 @@ Legend:
 - [x] Component test: first-mount shows modal; second-mount does not
 
 ### B5. UX-01 SpecTemplateEditor source tabs (#205)
-- [ ] Add `Prose | From Repo | From Docs` tab header
-- [ ] Repo tab: URL input + clone progress indicator (depends on INGEST-01)
-- [ ] Docs tab: drag-drop zone + uploaded file list + per-file parse status
-- [ ] Merge ingested data into ParsedSpec; preserve user prose overrides
-- [ ] Component tests: each tab round-trips to the shared spec state
+- [x] Add `Prose | From Repo | From Docs` tab header
+- [x] Repo tab: URL input + clone progress indicator (depends on INGEST-01)
+- [x] Docs tab: drag-drop zone + uploaded file list + per-file parse status
+- [x] Merge ingested data into ParsedSpec; preserve user prose overrides
+- [x] Component tests: each tab round-trips to the shared spec state
 
 ### B6. UX-04 Project Report panel (#206)
 - [ ] Create `components/omnisight/project-report-panel.tsx`
