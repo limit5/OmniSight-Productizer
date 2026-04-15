@@ -1,27 +1,21 @@
 "use client"
 
-/**
- * Internet-exposure auth: client-side session context.
- *
- * Holds the result of `/auth/whoami` so any component can read the
- * current user without re-fetching. Also exposes the operations the
- * UI layer cares about (login / logout / refresh).
- *
- * The provider auto-fetches whoami once on mount. If the response is
- * 401 in non-`open` auth modes, the consumer (HomePage gate) sees
- * `user === null` and redirects to /login. In `open` mode whoami
- * returns the synthetic admin user, so the gate is a no-op for dev.
- */
-
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 import {
   whoami as apiWhoami,
   login as apiLogin,
   logout as apiLogout,
+  mfaChallenge as apiMfaChallenge,
   setCurrentSessionId,
   type AuthUser,
   type WhoamiResponse,
 } from "@/lib/api"
+
+interface MfaPending {
+  mfa_token: string
+  mfa_methods: string[]
+  email: string
+}
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -29,9 +23,12 @@ interface AuthContextValue {
   sessionId: string | null
   loading: boolean
   error: string | null
+  mfaPending: MfaPending | null
   login: (email: string, password: string) => Promise<boolean>
   logout: () => Promise<void>
   refresh: () => Promise<void>
+  submitMfa: (code: string) => Promise<boolean>
+  cancelMfa: () => void
 }
 
 const Ctx = createContext<AuthContextValue | null>(null)
@@ -42,6 +39,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [mfaPending, setMfaPending] = useState<MfaPending | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -53,8 +51,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setCurrentSessionId(info.session_id ?? null)
       setError(null)
     } catch (exc) {
-      // 401 in non-open mode is the "not logged in" path — surface
-      // user=null, no error banner. Other errors keep the message.
       const msg = exc instanceof Error ? exc.message : String(exc)
       setUser(null)
       if (msg.includes(" 401:") || msg.includes("401")) {
@@ -72,13 +68,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     try {
       const res = await apiLogin(email, password)
-      setUser(res.user)
+      if (res.mfa_required && res.mfa_token) {
+        setMfaPending({
+          mfa_token: res.mfa_token,
+          mfa_methods: res.mfa_methods || [],
+          email,
+        })
+        setError(null)
+        return false
+      }
+      if (res.user) {
+        setUser(res.user as AuthUser)
+      }
       setError(null)
+      setMfaPending(null)
       return true
     } catch (exc) {
       const msg = exc instanceof Error ? exc.message : String(exc)
-      // Bad creds = 401, rate limit = 429. Surface both as a user
-      // message; rethrow only on transport-level failures.
       if (msg.includes("401")) {
         setError("Invalid email or password.")
         return false
@@ -92,20 +98,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  const submitMfa = useCallback(async (code: string) => {
+    if (!mfaPending) return false
+    try {
+      const res = await apiMfaChallenge(mfaPending.mfa_token, code)
+      setUser(res.user)
+      setMfaPending(null)
+      setError(null)
+      return true
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc)
+      if (msg.includes("401")) {
+        setError("Invalid MFA code.")
+      } else {
+        setError(msg)
+      }
+      return false
+    }
+  }, [mfaPending])
+
+  const cancelMfa = useCallback(() => {
+    setMfaPending(null)
+    setError(null)
+  }, [])
+
   const logout = useCallback(async () => {
     try {
       await apiLogout()
     } catch {
-      // logout is best-effort; even if the server 5xx's we still
-      // want the local UI to clear so the user can re-login.
+      // best-effort
     }
     setUser(null)
     setSessionId(null)
     setCurrentSessionId(null)
+    setMfaPending(null)
   }, [])
 
   return (
-    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, login, logout, refresh }}>
+    <Ctx.Provider value={{ user, authMode, sessionId, loading, error, mfaPending, login, logout, refresh, submitMfa, cancelMfa }}>
       {children}
     </Ctx.Provider>
   )

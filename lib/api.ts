@@ -824,8 +824,8 @@ export async function whoami(): Promise<WhoamiResponse> {
   return request<WhoamiResponse>("/auth/whoami")
 }
 
-export async function login(email: string, password: string): Promise<{ user: AuthUser; csrf_token: string }> {
-  return request<{ user: AuthUser; csrf_token: string }>("/auth/login", {
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  return request<LoginResponse>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   })
@@ -860,6 +860,109 @@ export async function revokeSession(tokenHint: string): Promise<{ status: string
 export async function revokeAllOtherSessions(): Promise<{ status: string; revoked_count: number }> {
   return request<{ status: string; revoked_count: number }>("/auth/sessions", {
     method: "DELETE",
+  })
+}
+
+// ─── MFA (K5) ───────────────────────────────────────────────
+
+export interface MfaMethod {
+  id: string
+  method: "totp" | "webauthn"
+  name: string
+  verified: boolean
+  created_at: string
+  last_used: string | null
+}
+
+export interface MfaStatusResponse {
+  methods: MfaMethod[]
+  has_mfa: boolean
+  require_mfa: boolean
+}
+
+export interface LoginResponse {
+  user?: AuthUser
+  csrf_token?: string
+  mfa_required?: boolean
+  mfa_token?: string
+  mfa_methods?: string[]
+}
+
+export async function mfaStatus(): Promise<MfaStatusResponse> {
+  return request<MfaStatusResponse>("/auth/mfa/status")
+}
+
+export async function mfaTotpEnroll(): Promise<{
+  mfa_id: string; secret: string; uri: string; qr_png_b64: string
+}> {
+  return request("/auth/mfa/totp/enroll", { method: "POST" })
+}
+
+export async function mfaTotpConfirm(code: string): Promise<{
+  status: string; backup_codes: string[]
+}> {
+  return request("/auth/mfa/totp/confirm", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  })
+}
+
+export async function mfaTotpDisable(): Promise<{ status: string }> {
+  return request("/auth/mfa/totp/disable", { method: "POST" })
+}
+
+export async function mfaBackupCodesStatus(): Promise<{
+  total: number; remaining: number
+}> {
+  return request("/auth/mfa/backup-codes/status")
+}
+
+export async function mfaBackupCodesRegenerate(): Promise<{
+  codes: string[]; count: number
+}> {
+  return request("/auth/mfa/backup-codes/regenerate", { method: "POST" })
+}
+
+export async function mfaChallenge(mfaToken: string, code: string): Promise<{
+  user: AuthUser; csrf_token: string; mfa_verified: boolean
+}> {
+  return request("/auth/mfa/challenge", {
+    method: "POST",
+    body: JSON.stringify({ mfa_token: mfaToken, code }),
+  })
+}
+
+export async function mfaWebauthnRegisterBegin(name?: string): Promise<Record<string, unknown>> {
+  return request("/auth/mfa/webauthn/register/begin", {
+    method: "POST",
+    body: JSON.stringify({ name: name || "" }),
+  })
+}
+
+export async function mfaWebauthnRegisterComplete(credential: unknown, name?: string): Promise<{ status: string }> {
+  return request("/auth/mfa/webauthn/register/complete", {
+    method: "POST",
+    body: JSON.stringify({ credential, name: name || "" }),
+  })
+}
+
+export async function mfaWebauthnRemove(mfaId: string): Promise<{ status: string }> {
+  return request(`/auth/mfa/webauthn/${encodeURIComponent(mfaId)}`, { method: "DELETE" })
+}
+
+export async function mfaWebauthnChallengeBegin(mfaToken: string): Promise<Record<string, unknown>> {
+  return request("/auth/mfa/webauthn/challenge/begin", {
+    method: "POST",
+    body: JSON.stringify({ mfa_token: mfaToken }),
+  })
+}
+
+export async function mfaWebauthnChallengeComplete(mfaToken: string, credential: unknown): Promise<{
+  user: AuthUser; csrf_token: string; mfa_verified: boolean
+}> {
+  return request("/auth/mfa/webauthn/challenge/complete", {
+    method: "POST",
+    body: JSON.stringify({ mfa_token: mfaToken, credential }),
   })
 }
 

@@ -457,6 +457,31 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
 
+CREATE TABLE IF NOT EXISTS user_mfa (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    method          TEXT NOT NULL,  -- 'totp' or 'webauthn'
+    secret          TEXT NOT NULL DEFAULT '',
+    credential      TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL DEFAULT '',
+    verified        INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used       TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_mfa_user ON user_mfa(user_id);
+
+CREATE TABLE IF NOT EXISTS mfa_backup_codes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         TEXT NOT NULL,
+    code_hash       TEXT NOT NULL,
+    used            INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    used_at         TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_backup_user ON mfa_backup_codes(user_id);
+
 CREATE TABLE IF NOT EXISTS github_installations (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     installation_id     INTEGER NOT NULL UNIQUE,

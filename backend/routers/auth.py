@@ -201,6 +201,34 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
         raise HTTPException(status_code=401, detail="invalid email or password")
 
+    # K5: Check if user has MFA enrolled — if so, defer session creation
+    from backend import mfa as _mfa
+    has_mfa = await _mfa.has_verified_mfa(user.id)
+    if has_mfa:
+        mfa_token = _mfa.create_mfa_challenge(
+            user.id, ip=client_ip,
+            user_agent=request.headers.get("user-agent", ""),
+        )
+        methods = await _mfa.get_user_mfa_methods(user.id)
+        available = [m["method"] for m in methods if m["verified"]]
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="login_mfa_required", entity_kind="auth",
+                entity_id=user.id,
+                before={"ip": client_ip},
+                after={"methods": available},
+                actor=user.email,
+            )
+        except Exception:
+            pass
+        return {
+            "mfa_required": True,
+            "mfa_token": mfa_token,
+            "mfa_methods": list(set(available)),
+            "user": {"email": user.email},
+        }
+
     sess = await auth.create_session(
         user.id,
         ip=client_ip,
