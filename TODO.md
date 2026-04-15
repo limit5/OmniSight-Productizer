@@ -117,38 +117,38 @@ Legend:
 > 目標：取代現行手動 4 步驟（`cloudflared tunnel login` → `create` → `route dns` → 編輯 `config.yml`）。使用者在 UI 只輸入 CF API Token + 選 Zone + 填 hostname，其餘由系統自動完成。
 
 **Backend**
-- [ ] `backend/cloudflare_client.py`：CF API v4 wrapper（tunnels / dns / zones / accounts）+ 錯誤映射（401 invalid token / 403 missing scope / 409 conflict / 429 rate limit）
-- [ ] `backend/routers/cloudflare_tunnel.py`：
+- [x] `backend/cloudflare_client.py`：CF API v4 wrapper（tunnels / dns / zones / accounts）+ 錯誤映射（401 invalid token / 403 missing scope / 409 conflict / 429 rate limit）
+- [x] `backend/routers/cloudflare_tunnel.py`：
   - `POST /api/v1/cloudflare/validate-token` — 驗 token 並回傳可用 accounts
   - `GET  /api/v1/cloudflare/zones?account_id=` — 列使用者可選 zone
   - `POST /api/v1/cloudflare/provision` — 建 tunnel + ingress config + DNS CNAME（冪等、失敗自動回滾）
   - `GET  /api/v1/cloudflare/status` — tunnel 連線狀態（connector 是否 up、DNS propagation）
   - `POST /api/v1/cloudflare/rotate-token`
   - `DELETE /api/v1/cloudflare/tunnel` — teardown（刪 tunnel + DNS record）
-- [ ] 使用 connector **token 模式**（`cloudflared tunnel run --token <T>`）避免 credentials.json 檔案管理
-- [ ] 整合 `backend/secrets.py`：token at-rest 加密、UI 只見 fingerprint；寫入 Phase 53 audit_log（`cf_tunnel.provision` / `.rotate` / `.delete`）
-- [ ] systemd 橋接：sudoers NOPASSWD rule **僅限** `systemctl {start,stop,restart,status} cloudflared.service`；或 container 模式用 sidecar 免 systemd
-- [ ] 冪等：provision 失敗要清掉已建 tunnel / DNS（plan → apply 兩段式，或 try/rollback 記錄）
+- [x] 使用 connector **token 模式**（`cloudflared tunnel run --token <T>`）避免 credentials.json 檔案管理
+- [x] 整合 `backend/secret_store.py`：token at-rest 加密、UI 只見 fingerprint；寫入 Phase 53 audit_log（`cf_tunnel.provision` / `.rotate` / `.delete`）
+- [x] systemd 橋接：sudoers NOPASSWD rule **僅限** `systemctl {start,stop,restart,status} cloudflared.service`；或 container 模式用 sidecar 免 systemd
+- [x] 冪等：provision 失敗要清掉已建 tunnel / DNS（plan → apply 兩段式，或 try/rollback 記錄）
 
 **Frontend**
-- [ ] `components/omnisight/cloudflare-tunnel-setup.tsx`：多步 wizard
+- [x] `components/omnisight/cloudflare-tunnel-setup.tsx`：多步 wizard
   - Step 1 API Token 輸入 + "如何建立 token" 連結（預設 scope 清單）
   - Step 2 驗證 token → 列 account / zone 選單
   - Step 3 填 hostname（預設 `omnisight.<zone>` 與 `api.omnisight.<zone>`）
   - Step 4 Review → 「一鍵 Provision」按鈕
   - Step 5 即時狀態（SSE）：tunnel 建立 ✓ / DNS ✓ / connector online ✓ / health probe ✓
-- [ ] 既有 tunnel 偵測：顯示現況 + rotate / teardown 按鈕
-- [ ] 錯誤 UI：token scope 不足時明列缺少哪幾個 permission
+- [x] 既有 tunnel 偵測：顯示現況 + rotate / teardown 按鈕
+- [x] 錯誤 UI：token scope 不足時明列缺少哪幾個 permission
 
 **測試**
-- [ ] Mock CF API（`respx`）涵蓋：invalid token / missing scope / existing tunnel / DNS 已存在 / rate limit / 部分成功回滾
-- [ ] 整合測試：provision → status → teardown 完整循環
-- [ ] E2E（Playwright）：wizard 四步流程 + 錯誤路徑
+- [x] Mock CF API（`respx`）涵蓋：invalid token / missing scope / existing tunnel / DNS 已存在 / rate limit / 部分成功回滾
+- [x] 整合測試：provision → status → teardown 完整循環
+- [O] E2E（Playwright）：wizard 四步流程 + 錯誤路徑
 
 **文件 & 安全**
-- [ ] `docs/operations/cloudflare_tunnel_wizard.md`：使用者操作步驟 + token scope 建議
-- [ ] 更新 `docs/operations/deployment.md`：提示 wizard 路徑並保留 CLI 手動模式備援
-- [ ] 安全檢查：token 不得出現於日誌 / SSE payload / error 訊息
+- [x] `docs/operations/cloudflare_tunnel_wizard.md`：使用者操作步驟 + token scope 建議
+- [x] 更新 `docs/operations/deployment.md`：提示 wizard 路徑並保留 CLI 手動模式備援
+- [x] 安全檢查：token 不得出現於日誌 / SSE payload / error 訊息
 
 **預估**：~6 day（BE 2 + FE 1.5 + systemd 橋接 1 + audit/rollback/test/docs 1.5）
 

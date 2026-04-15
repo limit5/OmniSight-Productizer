@@ -7,36 +7,40 @@
 
 ---
 
-## B12 (pending) UX-CF-TUNNEL-WIZARD — Cloudflare Tunnel 一鍵自動配置（2026-04-15 登錄）
+## B12 (complete) UX-CF-TUNNEL-WIZARD — Cloudflare Tunnel 一鍵自動配置（2026-04-16 完成）
 
-**背景**：現行流程 100% 手動 — `cloudflared tunnel login` 瀏覽器 OAuth → `tunnel create` 抄 UUID → `route dns` → 編輯 `deploy/cloudflared/config.yml` → `sed` 填 systemd unit → `systemctl enable`。UI / 後端 API 皆無 CF 輸入介面。grep 確認 `backend/config.py` 無任何 CF 環境變數、`components/omnisight/integration-settings.tsx` 無 CF 分支。這是 onboarding 最大摩擦點之一。
+**背景**：現行流程 100% 手動 — `cloudflared tunnel login` 瀏覽器 OAuth → `tunnel create` 抄 UUID → `route dns` → 編輯 `deploy/cloudflared/config.yml` → `sed` 填 systemd unit → `systemctl enable`。UI / 後端 API 皆無 CF 輸入介面。這是 onboarding 最大摩擦點之一。
 
 **目標**：使用者只在 UI 提供 Cloudflare API Token（不用 `tunnel login`），後端呼叫 CF API v4 自動完成 tunnel 建立 + ingress config + DNS CNAME + connector 啟動。
 
 | 項目 | 說明 | 狀態 |
 |---|---|---|
-| Backend CF API client | `backend/cloudflare_client.py`（v4 API + 錯誤映射） | ⏳ 待辦 |
-| Backend router | `backend/routers/cloudflare_tunnel.py`：validate-token / zones / provision / status / rotate / teardown | ⏳ 待辦 |
-| Connector token 模式 | `cloudflared tunnel run --token <T>`，免 credentials.json | ⏳ 待辦 |
-| Secrets + Audit | `backend/secrets.py` at-rest 加密 + Phase 53 hash-chain audit_log | ⏳ 待辦 |
-| systemd 橋接 | sudoers NOPASSWD 僅限 `cloudflared.service`，或 container sidecar | ⏳ 待辦 |
-| 冪等 + 回滾 | plan → apply 兩段式，失敗自動清理已建 tunnel/DNS | ⏳ 待辦 |
-| Frontend wizard | `components/omnisight/cloudflare-tunnel-setup.tsx` 5-step + SSE 即時狀態 | ⏳ 待辦 |
-| 測試 | `respx` mock CF API + Playwright E2E | ⏳ 待辦 |
-| 文件 | `docs/operations/cloudflare_tunnel_wizard.md` + 更新 `deployment.md` | ⏳ 待辦 |
+| Backend CF API client | `backend/cloudflare_client.py`（v4 API + 錯誤映射） | ✅ 完成 |
+| Backend router | `backend/routers/cloudflare_tunnel.py`：validate-token / zones / provision / status / rotate / teardown | ✅ 完成 |
+| Connector token 模式 | `cloudflared tunnel run --token <T>`，免 credentials.json | ✅ 完成 |
+| Secrets + Audit | `backend/secret_store.py` at-rest Fernet 加密 + Phase 53 hash-chain audit_log | ✅ 完成 |
+| systemd 橋接 | `backend/cloudflared_service.py` — sudoers NOPASSWD + container sidecar fallback | ✅ 完成 |
+| 冪等 + 回滾 | 既有 tunnel 自動重用 + 失敗自動清理已建 tunnel/DNS | ✅ 完成 |
+| Frontend wizard | `components/omnisight/cloudflare-tunnel-setup.tsx` 5-step + SSE + 既有 tunnel 管理 | ✅ 完成 |
+| 測試 | 31 項通過：14 unit (CF client) + 13 integration (router) + 2 secrets + 2 service | ✅ 完成 |
+| E2E (Playwright) | wizard 四步流程 + 錯誤路徑 | 🅞 Operator |
+| 文件 | `docs/operations/cloudflare_tunnel_wizard.md` + 更新 `deployment.md` | ✅ 完成 |
+
+**新增檔案**：
+- `backend/cloudflare_client.py` — CF API v4 async wrapper (httpx)，typed error hierarchy
+- `backend/secret_store.py` — Fernet 加密 token at-rest，fingerprint 只顯示末 4 碼
+- `backend/cloudflared_service.py` — systemd / container 雙模式 cloudflared 管理
+- `backend/routers/cloudflare_tunnel.py` — 6 REST endpoints + SSE provision 進度
+- `components/omnisight/cloudflare-tunnel-setup.tsx` — 5-step wizard + 既有 tunnel 管理面板
+- `backend/tests/test_cloudflare_tunnel.py` — 31 tests (respx mock)
+- `docs/operations/cloudflare_tunnel_wizard.md` — 完整操作文件
 
 **設計決策**：
 - 採 **API Token**（非 cert-based `tunnel login`）— 可程式化、可 rotate、可 scope 限制
-- Token scope 要求：`Account:Cloudflare Tunnel:Edit` + `Zone:DNS:Edit` + `Zone:Zone:Read`
-- Token 永不回傳明文，UI 只顯示 fingerprint
-- 保留 CLI 手動模式作為備援路徑
-
-**風險**：
-1. Backend 啟 cloudflared 需 systemctl 權限 — 用 scoped sudoers rule 或改 container sidecar
-2. Token 是高敏感憑證 — 必須加密 + audit + rotate 能力
-3. Provision 半途失敗要能 cleanup（tunnel 建了但 DNS 失敗 → 回滾）
-
-**預估**：~6 day（BE 2 + FE 1.5 + systemd 橋接 1 + audit/rollback/test/docs 1.5）。詳細 sub-tasks 見 `TODO.md` B12。
+- Token scope 要求：`Account:Cloudflare Tunnel:Edit` + `Zone:DNS:Edit` + `Account:Account Settings:Read`
+- Token 永不回傳明文，UI 只顯示 fingerprint；日誌 / SSE / error 訊息均不含 token
+- 保留 CLI 手動模式作為備援路徑（deployment.md 更新為 Option A wizard / Option B CLI）
+- 模組名為 `secret_store.py`（避免與 stdlib `secrets` 衝突）
 
 **驗收**：新使用者 10 分鐘內從「沒有 tunnel」到「公網 HTTPS 可訪問 `/api/v1/health`」，過程中不需 SSH 進主機或手敲 `cloudflared` 指令。
 

@@ -34,6 +34,7 @@ __pycache__/
 # Backend runtime / artifacts
 backend/data/
 backend/artifacts/
+data/.secret_key
 
 # Claude Code harness scratch
 .claude/

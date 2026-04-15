@@ -51,6 +51,14 @@ Why this combo:
 
 ## 2. Create the tunnel
 
+### Option A — UI Wizard (recommended)
+
+Navigate to **Settings → Cloudflare Tunnel** in the OmniSight dashboard.
+The wizard automates all steps below — see
+[cloudflare_tunnel_wizard.md](cloudflare_tunnel_wizard.md) for details.
+
+### Option B — CLI (manual fallback)
+
 ```bash
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
   -o /tmp/cf.deb
