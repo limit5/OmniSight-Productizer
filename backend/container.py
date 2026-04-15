@@ -408,10 +408,19 @@ async def start_container(agent_id: str, workspace_path: Path,
     cpus = _settings.docker_cpu_limit or "2"
     # Phase 64-A S1: gVisor (runsc) when available; runc fallback otherwise.
     runtime = await resolve_runtime()
-    # Phase 64-A S2 / 64-B: pick the network arg per tier.
+    # Phase 64-A S2 / 64-B / 64-C-LOCAL S2: pick the network arg per tier.
     from backend import sandbox_net as _sn
     if tier == "networked":
         network_arg = await _sn.resolve_t2_network_arg()
+    elif tier == "t3-local":
+        # Phase 64-C-LOCAL: the whole point of T3-LOCAL is that the
+        # "target" IS the host. Smoke-tests hitting localhost, app
+        # servers binding 0.0.0.0, systemd reloads — all need the
+        # host network namespace. runsc still contains syscalls; we
+        # don't lose the gVisor sandbox just because networking is
+        # shared. If a deployment needs stricter isolation the
+        # operator falls back to tier="networked" + egress rules.
+        network_arg = "--network host"
     else:
         network_arg = await _sn.resolve_network_arg()
     rc, out, err = await _run(
@@ -500,6 +509,64 @@ async def start_networked_container(agent_id: str, workspace_path: Path) -> Cont
     third-party-API agent paths *after* the caller has cleared the
     Decision Engine ``sandbox/networked`` gate (severity=risky)."""
     return await start_container(agent_id, workspace_path, tier="networked")
+
+
+async def start_t3_local_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
+    """Phase 64-C-LOCAL S2 — T3 executor for the host==target path.
+
+    Used by the T3 runner when `t3_resolver.resolve_t3_runner()` has
+    picked the LOCAL kind: same arch, same OS, so a binary built in
+    this sandbox can run on the host. Concretely, `--network host`
+    so smoke-tests against localhost / systemd-managed services work,
+    plus the same runsc/workspace envelope T1 ships with.
+
+    Callers should go through `t3_resolver.resolve_t3_runner()` rather
+    than invoking this directly — it records the metric and delegates.
+
+    Deploy actions that need to mutate host state (systemctl enable,
+    write to /etc/nginx/, etc.) should still NOT happen inside this
+    container. The pattern is: agent produces artefact + install.sh
+    in /workspace, orchestrator runs install.sh on the host (outside
+    the sandbox) as a separate pipeline step. That keeps the sandbox
+    a containment boundary even on the happy-path.
+    """
+    return await start_container(agent_id, workspace_path, tier="t3-local")
+
+
+async def dispatch_t3(
+    agent_id: str,
+    workspace_path: Path,
+    target_arch: str = "",
+    target_os: str = "linux",
+) -> tuple[Optional["ContainerInfo"], "T3RunnerKind"]:
+    """Phase 64-C-LOCAL S2 — single entry point for the T3 dispatcher.
+
+    Consults the resolver, bumps the prometheus counter so the Ops
+    Summary panel (S4) can show a live runner distribution, and
+    returns (ContainerInfo, RunnerKind). Returns (None, BUNDLE) when
+    no live runner is available yet — caller is expected to fall
+    back to the artefact-bundle path.
+
+    Extending to SSH/QEMU is additive in this function: as each kind
+    gains a backing runner, add a branch here; call sites don't change.
+    """
+    from backend.t3_resolver import (
+        T3RunnerKind, record_dispatch, resolve_t3_runner,
+    )
+    res = resolve_t3_runner(target_arch, target_os)
+    record_dispatch(res.kind)
+    logger.info(
+        "dispatch_t3: agent=%s target=%s/%s → %s (%s)",
+        agent_id, res.target_arch or "?", res.target_os,
+        res.kind.value, res.reason,
+    )
+    if res.kind == T3RunnerKind.LOCAL:
+        info = await start_t3_local_container(agent_id, workspace_path)
+        return info, res.kind
+    # BUNDLE / SSH (64-C-SSH) / QEMU (64-C-QEMU): no live runner yet;
+    # caller handles the bundling / remote dispatch at the orchestrator
+    # layer.
+    return None, res.kind
 
 
 async def exec_in_container(
