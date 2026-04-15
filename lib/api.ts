@@ -818,6 +818,29 @@ export async function getOpsSummary(): Promise<OpsSummary> {
   return request<OpsSummary>("/ops/summary")
 }
 
+// ─── Workflow runs (RunHistory panel) ───
+
+export interface WorkflowRunSummary {
+  id: string
+  kind: string
+  status: string
+  started_at: number | null
+  completed_at: number | null
+  last_step_id: string | null
+  metadata: Record<string, unknown>
+}
+
+export async function listWorkflowRuns(opts: { status?: string; limit?: number } = {}): Promise<WorkflowRunSummary[]> {
+  const params = new URLSearchParams()
+  if (opts.status) params.set("status", opts.status)
+  if (opts.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString()
+  const out = await request<{ runs: WorkflowRunSummary[]; count: number }>(
+    `/workflow/runs${qs ? `?${qs}` : ""}`,
+  )
+  return out.runs
+}
+
 // ─── Intent Parser (Phase 68-A/B/C) ───
 
 export interface IntentField {

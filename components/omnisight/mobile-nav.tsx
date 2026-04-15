@@ -17,6 +17,7 @@ import {
   BarChart3,
   Workflow,
   Sparkles,
+  History,
   Menu,
   X,
   ChevronLeft,
@@ -28,7 +29,7 @@ import {
 // 50A: + timeline. 50B: + rules.
 export type PanelId =
   | "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
-  | "decisions" | "budget" | "timeline" | "rules" | "forecast" | "dag" | "intent"
+  | "decisions" | "budget" | "timeline" | "rules" | "forecast" | "dag" | "intent" | "history"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -51,6 +52,7 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "forecast", label: "Project Forecast", shortLabel: "Forecast", icon: BarChart3, color: "var(--neural-cyan, #67e8f9)" },
   { id: "dag", label: "DAG Editor", shortLabel: "DAG", icon: Workflow, color: "var(--artifact-purple)" },
   { id: "intent", label: "Spec Editor", shortLabel: "Spec", icon: Sparkles, color: "var(--artifact-purple)" },
+  { id: "history", label: "Run History", shortLabel: "History", icon: History, color: "var(--neural-cyan, #67e8f9)" },
 ]
 
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
