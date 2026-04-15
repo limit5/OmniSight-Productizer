@@ -1,0 +1,45 @@
+schema_version: 1
+name: sensor_fusion
+description: "Sensor fusion library — IMU drivers, GPS NMEA/UBX, barometer, EKF orientation, calibration"
+version: "1.0.0"
+author: "OmniSight"
+license: "Proprietary"
+compatible_socs:
+  - esp32*
+  - stm32*
+  - nrf52*
+  - nrf5340
+  - rk3566
+  - hi3516
+depends_on_skills: []
+depends_on_core:
+  - CORE-05
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/test_definitions.yaml
+  - kind: hil
+    path: hil/sensor_fusion_hil_recipes.yaml
+  - kind: docs
+    path: docs/sensor_fusion_integration_guide.md.j2
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+keywords:
+  - imu
+  - gps
+  - nmea
+  - ubx
+  - barometer
+  - ekf
+  - sensor-fusion
+  - calibration
+  - mpu6050
+  - lsm6ds3
+  - bmi270
+  - bmp280
+  - lps22

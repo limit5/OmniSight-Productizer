@@ -221,12 +221,12 @@ Legend:
 - [x] Registry + composition: skill packs opt-in per sub-skill
 
 ### C14. L4-CORE-14 Sensor fusion library (#228)
-- [ ] IMU drivers (MPU6050 / LSM6DS3 / BMI270)
-- [ ] GPS NMEA parser + UBX protocol
-- [ ] Barometer driver (BMP280 / LPS22)
-- [ ] EKF implementation (9-DoF orientation)
-- [ ] Calibration routines (bias/scale/alignment)
-- [ ] Unit test against known trajectory fixture
+- [x] IMU drivers (MPU6050 / LSM6DS3 / BMI270)
+- [x] GPS NMEA parser + UBX protocol
+- [x] Barometer driver (BMP280 / LPS22)
+- [x] EKF implementation (9-DoF orientation)
+- [x] Calibration routines (bias/scale/alignment)
+- [x] Unit test against known trajectory fixture
 
 ### C15. L4-CORE-15 Security stack (#229)
 - [ ] Secure boot chain: bootloader → kernel → rootfs signature verify

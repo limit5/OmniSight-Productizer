@@ -1,0 +1,91 @@
+# Sensor Fusion Integration Guide
+
+**Product:** {{ product_name | default("OmniSight Embedded Product") }}
+**Generated:** {{ generated_date | default("N/A") }}
+**Version:** {{ version | default("1.0.0") }}
+
+---
+
+## 1. Supported Sensors
+
+### IMU
+{% for imu in imu_drivers | default([]) %}
+- **{{ imu.name }}** ({{ imu.vendor }}) — {{ imu.bus | upper }}, {{ imu.axes }}-axis, up to {{ imu.sample_rate_hz }} Hz
+{% endfor %}
+
+### GPS
+{% for gps in gps_protocols | default([]) %}
+- **{{ gps.name }}** — {{ gps.standard }}
+{% endfor %}
+
+### Barometer
+{% for baro in barometer_drivers | default([]) %}
+- **{{ baro.name }}** ({{ baro.vendor }}) — {{ baro.pressure_range_hpa[0] }}–{{ baro.pressure_range_hpa[1] }} hPa
+{% endfor %}
+
+## 2. Wiring
+
+| Signal | IMU Pin | MCU Pin | Notes |
+|--------|---------|---------|-------|
+| SDA    | SDA     | {{ sda_pin | default("GPIO21") }} | 4.7kΩ pull-up |
+| SCL    | SCL     | {{ scl_pin | default("GPIO22") }} | 4.7kΩ pull-up |
+| INT    | INT1    | {{ int_pin | default("GPIO4") }}  | Active high |
+| VCC    | VDD     | 3.3V    | Do not exceed 3.6V |
+| GND    | GND     | GND     | |
+
+## 3. Initialization Sequence
+
+```c
+// 1. Initialize I2C bus
+i2c_config_t conf = {
+    .mode = I2C_MODE_MASTER,
+    .sda_io_num = {{ sda_pin | default("GPIO_NUM_21") }},
+    .scl_io_num = {{ scl_pin | default("GPIO_NUM_22") }},
+    .sda_pullup_en = GPIO_PULLUP_ENABLE,
+    .scl_pullup_en = GPIO_PULLUP_ENABLE,
+    .master.clk_speed = 400000,
+};
+
+// 2. Verify sensor presence
+uint8_t who_am_i = imu_read_register(WHO_AM_I_REG);
+assert(who_am_i == EXPECTED_WHO_AM_I);
+
+// 3. Configure sensor
+imu_init(&config);
+
+// 4. Start EKF
+ekf_init(&ekf_config);
+```
+
+## 4. Calibration
+
+Before first use, execute the 6-position calibration procedure:
+
+1. Place sensor flat (Z-up) — collect 10s of static data
+2. Flip to Z-down — collect 10s
+3. Stand on X-up edge — collect 10s
+4. Stand on X-down edge — collect 10s
+5. Stand on Y-up edge — collect 10s
+6. Stand on Y-down edge — collect 10s
+
+The calibration routine computes:
+- Accelerometer bias (3 values, m/s²)
+- Accelerometer scale (3 values, dimensionless)
+- Gyroscope bias (3 values, rad/s)
+- Misalignment matrix (3×3)
+
+## 5. EKF Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Gyro noise | 0.001 | Process noise for gyroscope |
+| Gyro bias drift | 0.0001 | Bias random walk |
+| Accel noise | 0.5 | Measurement noise for accelerometer |
+| Mag noise | 1.0 | Measurement noise for magnetometer |
+| Initial covariance | 0.1 | Initial state uncertainty |
+
+## 6. Test Recipes
+
+{% for recipe in test_recipes | default([]) %}
+- **{{ recipe.name }}** ({{ recipe.category }}) — {{ recipe.description }}
+{% endfor %}

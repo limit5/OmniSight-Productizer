@@ -1,0 +1,89 @@
+hil_recipes:
+  - recipe_id: hil-imu-data-acquisition
+    name: "IMU live data acquisition"
+    description: "Read real IMU data from connected sensor at configured ODR for 10s"
+    sensor_type: imu
+    hardware_required:
+      - imu_breakout_board
+      - i2c_connection
+    duration_s: 30
+    steps:
+      - "Power on IMU breakout board"
+      - "Initialize IMU driver with default settings"
+      - "Read WHO_AM_I and verify"
+      - "Configure ODR to 100 Hz"
+      - "Collect 1000 samples (10s at 100 Hz)"
+      - "Verify sample count and timing"
+      - "Check accelerometer magnitude ~9.81 m/s² at rest"
+
+  - recipe_id: hil-gps-fix-acquisition
+    name: "GPS fix acquisition"
+    description: "Acquire GPS fix from connected receiver and parse NMEA sentences"
+    sensor_type: gps
+    hardware_required:
+      - gps_module
+      - uart_connection
+      - antenna
+    duration_s: 300
+    steps:
+      - "Power on GPS module"
+      - "Configure UART baud rate"
+      - "Wait for first GGA sentence"
+      - "Verify fix quality > 0"
+      - "Record latitude/longitude/altitude"
+      - "Verify HDOP < 5.0"
+
+  - recipe_id: hil-baro-pressure-verify
+    name: "Barometer pressure verification"
+    description: "Read barometer and compare with known reference pressure"
+    sensor_type: barometer
+    hardware_required:
+      - barometer_breakout_board
+      - i2c_connection
+      - reference_pressure_gauge
+    duration_s: 60
+    steps:
+      - "Power on barometer breakout board"
+      - "Initialize driver"
+      - "Read chip ID and verify"
+      - "Collect 100 pressure readings"
+      - "Compare mean with reference gauge"
+      - "Verify offset < 1 hPa"
+
+  - recipe_id: hil-ekf-live-convergence
+    name: "EKF live convergence test"
+    description: "Run EKF on live IMU data and verify orientation convergence"
+    sensor_type: fusion
+    hardware_required:
+      - imu_breakout_board
+      - i2c_connection
+      - reference_orientation_jig
+    duration_s: 120
+    steps:
+      - "Mount sensor on reference jig at known orientation"
+      - "Initialize IMU and EKF"
+      - "Collect 30s of data"
+      - "Verify EKF converged state"
+      - "Compare estimated vs reference orientation"
+      - "Verify error < 3 degrees per axis"
+
+  - recipe_id: hil-calibration-6pos
+    name: "6-position IMU calibration"
+    description: "Execute full 6-position calibration procedure on calibration jig"
+    sensor_type: imu
+    hardware_required:
+      - imu_breakout_board
+      - calibration_jig
+      - i2c_connection
+    duration_s: 600
+    steps:
+      - "Mount sensor on calibration jig"
+      - "Collect data at Z-up position (10s)"
+      - "Rotate to Z-down, collect (10s)"
+      - "Rotate to X-up, collect (10s)"
+      - "Rotate to X-down, collect (10s)"
+      - "Rotate to Y-up, collect (10s)"
+      - "Rotate to Y-down, collect (10s)"
+      - "Run calibration algorithm"
+      - "Verify residual < 0.1g"
+      - "Save calibration parameters"

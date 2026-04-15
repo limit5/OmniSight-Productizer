@@ -1,0 +1,562 @@
+# C14 — L4-CORE-14 Sensor fusion library (#228)
+#
+# IMU drivers, GPS NMEA/UBX, barometer drivers, EKF (9-DoF orientation),
+# calibration routines, and trajectory test fixtures.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Sensor drivers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+imu_drivers:
+  mpu6050:
+    name: "MPU-6050"
+    vendor: "InvenSense / TDK"
+    bus: "i2c"
+    i2c_addr_default: "0x68"
+    i2c_addr_alt: "0x69"
+    accel_range_g: [2, 4, 8, 16]
+    gyro_range_dps: [250, 500, 1000, 2000]
+    sample_rate_hz: 1000
+    fifo_depth: 1024
+    axes: 6
+    temperature: true
+    interrupt_pin: true
+    wake_on_motion: true
+    compatible_socs:
+      - esp32
+      - esp32-s3
+      - stm32f4
+      - stm32h7
+      - nrf52840
+      - rk3566
+      - hi3516
+    registers:
+      who_am_i: { addr: "0x75", expected: "0x68" }
+      pwr_mgmt_1: { addr: "0x6B" }
+      accel_config: { addr: "0x1C" }
+      gyro_config: { addr: "0x1B" }
+      accel_xout_h: { addr: "0x3B" }
+      gyro_xout_h: { addr: "0x43" }
+      temp_out_h: { addr: "0x41" }
+      fifo_en: { addr: "0x23" }
+      int_enable: { addr: "0x38" }
+      int_status: { addr: "0x3A" }
+    init_sequence:
+      - { reg: "pwr_mgmt_1", value: "0x80", comment: "Reset" }
+      - { delay_ms: 100 }
+      - { reg: "pwr_mgmt_1", value: "0x01", comment: "Clock = PLL with X-axis gyro" }
+      - { reg: "accel_config", value: "0x00", comment: "+/- 2g" }
+      - { reg: "gyro_config", value: "0x00", comment: "+/- 250 dps" }
+
+  lsm6ds3:
+    name: "LSM6DS3"
+    vendor: "STMicroelectronics"
+    bus: "i2c"
+    i2c_addr_default: "0x6A"
+    i2c_addr_alt: "0x6B"
+    accel_range_g: [2, 4, 8, 16]
+    gyro_range_dps: [125, 245, 500, 1000, 2000]
+    sample_rate_hz: 6660
+    fifo_depth: 8192
+    axes: 6
+    temperature: true
+    interrupt_pin: true
+    wake_on_motion: true
+    step_counter: true
+    compatible_socs:
+      - esp32
+      - esp32-s3
+      - stm32f4
+      - stm32h7
+      - nrf52840
+      - nrf5340
+      - rk3566
+    registers:
+      who_am_i: { addr: "0x0F", expected: "0x69" }
+      ctrl1_xl: { addr: "0x10" }
+      ctrl2_g: { addr: "0x11" }
+      ctrl3_c: { addr: "0x12" }
+      outx_l_xl: { addr: "0x28" }
+      outx_l_g: { addr: "0x22" }
+      out_temp_l: { addr: "0x20" }
+      fifo_ctrl5: { addr: "0x0A" }
+      int1_ctrl: { addr: "0x0D" }
+      status_reg: { addr: "0x1E" }
+    init_sequence:
+      - { reg: "ctrl3_c", value: "0x01", comment: "SW reset" }
+      - { delay_ms: 50 }
+      - { reg: "ctrl3_c", value: "0x44", comment: "BDU + auto-inc" }
+      - { reg: "ctrl1_xl", value: "0x60", comment: "416 Hz, +/- 2g" }
+      - { reg: "ctrl2_g", value: "0x60", comment: "416 Hz, +/- 245 dps" }
+
+  bmi270:
+    name: "BMI270"
+    vendor: "Bosch Sensortec"
+    bus: "i2c"
+    i2c_addr_default: "0x68"
+    i2c_addr_alt: "0x69"
+    accel_range_g: [2, 4, 8, 16]
+    gyro_range_dps: [125, 250, 500, 1000, 2000]
+    sample_rate_hz: 6400
+    fifo_depth: 6144
+    axes: 6
+    temperature: true
+    interrupt_pin: true
+    wake_on_motion: true
+    step_counter: true
+    gesture_recognition: true
+    requires_config_upload: true
+    compatible_socs:
+      - esp32
+      - esp32-s3
+      - stm32f4
+      - stm32h7
+      - nrf52840
+      - nrf5340
+      - rk3566
+      - hi3516
+    registers:
+      chip_id: { addr: "0x00", expected: "0x24" }
+      cmd: { addr: "0x7E" }
+      pwr_ctrl: { addr: "0x7D" }
+      acc_conf: { addr: "0x40" }
+      acc_range: { addr: "0x41" }
+      gyr_conf: { addr: "0x42" }
+      gyr_range: { addr: "0x43" }
+      data_8: { addr: "0x0C" }
+      data_14: { addr: "0x12" }
+      temperature_0: { addr: "0x22" }
+      fifo_config_0: { addr: "0x48" }
+      int1_io_ctrl: { addr: "0x53" }
+      int1_map: { addr: "0x56" }
+      status: { addr: "0x03" }
+      init_ctrl: { addr: "0x59" }
+      init_data: { addr: "0x5E" }
+    init_sequence:
+      - { reg: "cmd", value: "0xB6", comment: "Soft-reset" }
+      - { delay_ms: 200 }
+      - { action: "upload_config_file", comment: "BMI270 config blob (8 KB)" }
+      - { reg: "pwr_ctrl", value: "0x0E", comment: "Enable accel + gyro + temp" }
+      - { reg: "acc_conf", value: "0xA8", comment: "100 Hz, normal filter" }
+      - { reg: "acc_range", value: "0x01", comment: "+/- 4g" }
+      - { reg: "gyr_conf", value: "0xA9", comment: "200 Hz, normal filter" }
+      - { reg: "gyr_range", value: "0x04", comment: "+/- 125 dps" }
+
+gps_protocols:
+  nmea:
+    name: "NMEA 0183"
+    standard: "IEC 61162-1"
+    baud_default: 9600
+    supported_sentences:
+      - { id: "GGA", description: "Fix data — lat/lon/alt/fix quality/satellites" }
+      - { id: "RMC", description: "Recommended minimum — lat/lon/speed/course/date" }
+      - { id: "GSA", description: "DOP and active satellites" }
+      - { id: "GSV", description: "Satellites in view" }
+      - { id: "VTG", description: "Track/speed over ground" }
+      - { id: "GLL", description: "Geographic position" }
+    checksum: "XOR of bytes between $ and *"
+    talker_ids:
+      - { id: "GP", constellation: "GPS" }
+      - { id: "GL", constellation: "GLONASS" }
+      - { id: "GA", constellation: "Galileo" }
+      - { id: "GB", constellation: "BeiDou" }
+      - { id: "GN", constellation: "Multi-GNSS" }
+
+  ubx:
+    name: "u-blox UBX Binary Protocol"
+    standard: "u-blox proprietary"
+    sync_chars: [0xB5, 0x62]
+    message_classes:
+      - { class_id: "0x01", name: "NAV", description: "Navigation results" }
+      - { class_id: "0x02", name: "RXM", description: "Receiver manager" }
+      - { class_id: "0x04", name: "INF", description: "Information" }
+      - { class_id: "0x05", name: "ACK", description: "Ack/Nak" }
+      - { class_id: "0x06", name: "CFG", description: "Configuration" }
+      - { class_id: "0x0A", name: "MON", description: "Monitoring" }
+      - { class_id: "0x0D", name: "TIM", description: "Timing" }
+      - { class_id: "0x13", name: "MGA", description: "GNSS assistance" }
+    key_messages:
+      - { class: "0x01", id: "0x07", name: "NAV-PVT", description: "Position/velocity/time" }
+      - { class: "0x01", id: "0x03", name: "NAV-STATUS", description: "Receiver status" }
+      - { class: "0x06", id: "0x00", name: "CFG-PRT", description: "Port configuration" }
+      - { class: "0x06", id: "0x08", name: "CFG-RATE", description: "Measurement rate" }
+      - { class: "0x06", id: "0x24", name: "CFG-NAV5", description: "Navigation engine" }
+      - { class: "0x0A", id: "0x09", name: "MON-HW", description: "Hardware status" }
+    checksum: "Fletcher-8 over class + id + length + payload"
+
+barometer_drivers:
+  bmp280:
+    name: "BMP280"
+    vendor: "Bosch Sensortec"
+    bus: "i2c"
+    i2c_addr_default: "0x76"
+    i2c_addr_alt: "0x77"
+    pressure_range_hpa: [300, 1100]
+    pressure_resolution_pa: 0.16
+    temperature_range_c: [-40, 85]
+    temperature_resolution_c: 0.01
+    sample_rate_hz: 157
+    modes: ["sleep", "forced", "normal"]
+    oversampling_options: [0, 1, 2, 4, 8, 16]
+    compatible_socs:
+      - esp32
+      - esp32-s3
+      - stm32f4
+      - stm32h7
+      - nrf52840
+      - rk3566
+    registers:
+      chip_id: { addr: "0xD0", expected: "0x58" }
+      ctrl_meas: { addr: "0xF4" }
+      config: { addr: "0xF5" }
+      press_msb: { addr: "0xF7" }
+      temp_msb: { addr: "0xFA" }
+      calib00: { addr: "0x88", count: 26 }
+      reset: { addr: "0xE0" }
+      status: { addr: "0xF3" }
+    compensation: "3rd-order polynomial using factory calibration (dig_T1..T3, dig_P1..P9)"
+    init_sequence:
+      - { reg: "reset", value: "0xB6", comment: "Soft-reset" }
+      - { delay_ms: 10 }
+      - { action: "read_calibration", from: "calib00", count: 26, comment: "Read factory cal" }
+      - { reg: "config", value: "0x00", comment: "Standby 0.5 ms, filter off" }
+      - { reg: "ctrl_meas", value: "0x27", comment: "Temp OS x1, Press OS x1, normal mode" }
+
+  lps22:
+    name: "LPS22HB"
+    vendor: "STMicroelectronics"
+    bus: "i2c"
+    i2c_addr_default: "0x5C"
+    i2c_addr_alt: "0x5D"
+    pressure_range_hpa: [260, 1260]
+    pressure_resolution_pa: 0.0024
+    temperature_range_c: [-40, 85]
+    temperature_resolution_c: 0.01
+    sample_rate_hz: 75
+    modes: ["power_down", "one_shot", "continuous"]
+    low_pass_filter: true
+    compatible_socs:
+      - esp32
+      - esp32-s3
+      - stm32f4
+      - stm32h7
+      - nrf52840
+      - nrf5340
+    registers:
+      who_am_i: { addr: "0x0F", expected: "0xB1" }
+      ctrl_reg1: { addr: "0x10" }
+      ctrl_reg2: { addr: "0x11" }
+      ctrl_reg3: { addr: "0x12" }
+      press_out_xl: { addr: "0x28" }
+      press_out_l: { addr: "0x29" }
+      press_out_h: { addr: "0x2A" }
+      temp_out_l: { addr: "0x2B" }
+      temp_out_h: { addr: "0x2C" }
+      status: { addr: "0x27" }
+      rpds_l: { addr: "0x18" }
+      rpds_h: { addr: "0x19" }
+    init_sequence:
+      - { reg: "ctrl_reg2", value: "0x04", comment: "SW reset" }
+      - { delay_ms: 10 }
+      - { reg: "ctrl_reg1", value: "0x40", comment: "25 Hz, BDU" }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  EKF configuration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ekf_profiles:
+  orientation_9dof:
+    name: "9-DoF Orientation EKF"
+    description: "Extended Kalman Filter for 9-DoF orientation estimation using accelerometer, gyroscope, and magnetometer"
+    state_vector:
+      - { name: "q0", description: "Quaternion scalar component" }
+      - { name: "q1", description: "Quaternion x component" }
+      - { name: "q2", description: "Quaternion y component" }
+      - { name: "q3", description: "Quaternion z component" }
+      - { name: "gyro_bias_x", description: "Gyroscope bias X (rad/s)" }
+      - { name: "gyro_bias_y", description: "Gyroscope bias Y (rad/s)" }
+      - { name: "gyro_bias_z", description: "Gyroscope bias Z (rad/s)" }
+    state_dim: 7
+    measurement_dim: 6
+    process_noise:
+      gyro_noise: 0.001
+      gyro_bias_drift: 0.0001
+    measurement_noise:
+      accel_noise: 0.5
+      mag_noise: 1.0
+    initial_covariance: 0.1
+    prediction_model: "quaternion_kinematics"
+    update_model: "gravity_and_mag_reference"
+
+  position_15state:
+    name: "15-State INS/GPS EKF"
+    description: "Extended Kalman Filter for integrated navigation (position/velocity/attitude + biases)"
+    state_vector:
+      - { name: "pos_n", description: "Position North (m)" }
+      - { name: "pos_e", description: "Position East (m)" }
+      - { name: "pos_d", description: "Position Down (m)" }
+      - { name: "vel_n", description: "Velocity North (m/s)" }
+      - { name: "vel_e", description: "Velocity East (m/s)" }
+      - { name: "vel_d", description: "Velocity Down (m/s)" }
+      - { name: "roll", description: "Roll angle (rad)" }
+      - { name: "pitch", description: "Pitch angle (rad)" }
+      - { name: "yaw", description: "Yaw angle (rad)" }
+      - { name: "accel_bias_x", description: "Accelerometer bias X (m/s²)" }
+      - { name: "accel_bias_y", description: "Accelerometer bias Y (m/s²)" }
+      - { name: "accel_bias_z", description: "Accelerometer bias Z (m/s²)" }
+      - { name: "gyro_bias_x", description: "Gyroscope bias X (rad/s)" }
+      - { name: "gyro_bias_y", description: "Gyroscope bias Y (rad/s)" }
+      - { name: "gyro_bias_z", description: "Gyroscope bias Z (rad/s)" }
+    state_dim: 15
+    measurement_dim: 6
+    process_noise:
+      accel_noise: 0.1
+      gyro_noise: 0.01
+      accel_bias_drift: 0.001
+      gyro_bias_drift: 0.0001
+    measurement_noise:
+      gps_pos_noise: 2.5
+      gps_vel_noise: 0.1
+      baro_noise: 1.0
+    initial_covariance: 1.0
+    prediction_model: "ins_mechanization"
+    update_model: "gps_position_velocity"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Calibration profiles
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+calibration_profiles:
+  imu_6axis:
+    name: "6-Axis IMU Calibration"
+    description: "Bias, scale, and cross-axis alignment calibration for 6-axis IMU"
+    parameters:
+      accel_bias: { dim: 3, unit: "m/s²", method: "6-position static" }
+      accel_scale: { dim: 3, unit: "dimensionless", method: "6-position static" }
+      accel_misalignment: { dim: 9, unit: "dimensionless", method: "6-position static" }
+      gyro_bias: { dim: 3, unit: "rad/s", method: "static averaging" }
+      gyro_scale: { dim: 3, unit: "dimensionless", method: "rate table or integration" }
+      gyro_misalignment: { dim: 9, unit: "dimensionless", method: "multi-axis rotation" }
+    procedure:
+      - { step: 1, description: "Place sensor flat (Z-up) and collect 10s static data" }
+      - { step: 2, description: "Rotate to Z-down and collect 10s static data" }
+      - { step: 3, description: "Place X-up, collect 10s" }
+      - { step: 4, description: "Place X-down, collect 10s" }
+      - { step: 5, description: "Place Y-up, collect 10s" }
+      - { step: 6, description: "Place Y-down, collect 10s" }
+      - { step: 7, description: "Compute bias and scale from 6-position data" }
+      - { step: 8, description: "Compute misalignment matrix via least-squares" }
+    min_samples_per_position: 1000
+    static_threshold_g: 0.05
+
+  magnetometer:
+    name: "Magnetometer Calibration"
+    description: "Hard-iron and soft-iron calibration for magnetometer"
+    parameters:
+      hard_iron: { dim: 3, unit: "µT", method: "ellipsoid fitting" }
+      soft_iron: { dim: 9, unit: "dimensionless", method: "ellipsoid fitting" }
+    procedure:
+      - { step: 1, description: "Rotate sensor slowly through all orientations (figure-8 pattern)" }
+      - { step: 2, description: "Collect at least 500 samples covering full sphere" }
+      - { step: 3, description: "Fit ellipsoid to magnetometer data" }
+      - { step: 4, description: "Compute hard-iron offset (ellipsoid center)" }
+      - { step: 5, description: "Compute soft-iron matrix (ellipsoid shape correction)" }
+    min_samples: 500
+
+  barometer:
+    name: "Barometer Calibration"
+    description: "Pressure offset and temperature compensation calibration"
+    parameters:
+      pressure_offset: { dim: 1, unit: "Pa", method: "reference comparison" }
+      temperature_coefficient: { dim: 1, unit: "Pa/°C", method: "thermal sweep" }
+    procedure:
+      - { step: 1, description: "Record reference pressure from calibrated source" }
+      - { step: 2, description: "Collect 60s of barometer readings at known pressure" }
+      - { step: 3, description: "Compute offset = mean(measured) - reference" }
+      - { step: 4, description: "Optionally sweep temperature range for thermal coefficient" }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Test recipes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+test_recipes:
+  - id: imu-read-whoami
+    name: "IMU WHO_AM_I register read"
+    category: functional
+    description: "Verify IMU responds with correct WHO_AM_I value"
+    sensor_type: imu
+    tools: ["i2cget"]
+    timeout_s: 10
+
+  - id: imu-accel-selftest
+    name: "IMU accelerometer self-test"
+    category: functional
+    description: "Run accelerometer self-test and verify output shift within spec"
+    sensor_type: imu
+    tools: ["i2cget", "i2cset"]
+    timeout_s: 30
+
+  - id: imu-gyro-bias
+    name: "IMU gyroscope bias measurement"
+    category: calibration
+    description: "Measure gyroscope bias at rest over 10s window"
+    sensor_type: imu
+    tools: ["i2cget"]
+    timeout_s: 30
+
+  - id: imu-sample-rate
+    name: "IMU sample rate verification"
+    category: performance
+    description: "Verify actual sample rate matches configured ODR"
+    sensor_type: imu
+    tools: ["i2cget", "logic_analyzer"]
+    timeout_s: 30
+
+  - id: gps-nmea-parse
+    name: "GPS NMEA sentence parsing"
+    category: functional
+    description: "Parse GGA/RMC sentences and verify field extraction"
+    sensor_type: gps
+    tools: ["serial_terminal"]
+    timeout_s: 60
+
+  - id: gps-ubx-nav-pvt
+    name: "GPS UBX NAV-PVT message"
+    category: functional
+    description: "Request and parse UBX NAV-PVT for position/velocity/time"
+    sensor_type: gps
+    tools: ["serial_terminal"]
+    timeout_s: 120
+
+  - id: gps-cold-start-ttff
+    name: "GPS cold-start TTFF"
+    category: performance
+    description: "Measure time-to-first-fix from cold start"
+    sensor_type: gps
+    tools: ["serial_terminal", "timer"]
+    timeout_s: 300
+
+  - id: baro-pressure-read
+    name: "Barometer pressure reading"
+    category: functional
+    description: "Read compensated pressure and verify within expected range"
+    sensor_type: barometer
+    tools: ["i2cget"]
+    timeout_s: 10
+
+  - id: baro-altitude-calc
+    name: "Barometric altitude calculation"
+    category: functional
+    description: "Convert pressure to altitude and verify against known reference"
+    sensor_type: barometer
+    tools: ["i2cget"]
+    timeout_s: 30
+
+  - id: ekf-static-convergence
+    name: "EKF static convergence test"
+    category: functional
+    description: "Verify EKF converges to known orientation from static IMU data"
+    sensor_type: fusion
+    tools: ["test_harness"]
+    timeout_s: 60
+
+  - id: ekf-trajectory-accuracy
+    name: "EKF trajectory accuracy test"
+    category: performance
+    description: "Run EKF against known trajectory fixture and measure orientation error"
+    sensor_type: fusion
+    tools: ["test_harness"]
+    timeout_s: 120
+
+  - id: calibration-6pos
+    name: "6-position IMU calibration"
+    category: calibration
+    description: "Execute 6-position static calibration procedure"
+    sensor_type: imu
+    tools: ["i2cget", "calibration_jig"]
+    timeout_s: 300
+
+  - id: calibration-mag-ellipsoid
+    name: "Magnetometer ellipsoid calibration"
+    category: calibration
+    description: "Perform figure-8 motion calibration for hard/soft iron"
+    sensor_type: magnetometer
+    tools: ["i2cget", "calibration_jig"]
+    timeout_s: 300
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Artifact definitions
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifact_definitions:
+  sensor_calibration_report:
+    name: "Sensor Calibration Report"
+    description: "Calibration parameters, residuals, and pass/fail status per sensor"
+    file_pattern: "calibration_report_*.json"
+
+  ekf_tuning_report:
+    name: "EKF Tuning Report"
+    description: "EKF noise parameters, convergence metrics, and orientation accuracy"
+    file_pattern: "ekf_tuning_report_*.json"
+
+  trajectory_test_report:
+    name: "Trajectory Test Report"
+    description: "EKF accuracy against known trajectory reference (RMS error per axis)"
+    file_pattern: "trajectory_test_report_*.json"
+
+  imu_characterization:
+    name: "IMU Characterization Report"
+    description: "Noise density, bias stability, and temperature sensitivity"
+    file_pattern: "imu_characterization_*.json"
+
+  sensor_integration_guide:
+    name: "Sensor Integration Guide"
+    description: "Wiring, initialization, and calibration instructions per sensor"
+    file_pattern: "sensor_integration_guide_*.md"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Known trajectory fixtures
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+trajectory_fixtures:
+  static_level:
+    name: "Static level — sensor at rest on flat surface"
+    duration_s: 10.0
+    sample_rate_hz: 100
+    expected_orientation:
+      roll_deg: 0.0
+      pitch_deg: 0.0
+      yaw_deg: 0.0
+    tolerance_deg: 2.0
+    description: "Baseline test: sensor on flat surface, should read ~0 roll/pitch"
+
+  static_tilted_30:
+    name: "Static tilted 30° pitch"
+    duration_s: 10.0
+    sample_rate_hz: 100
+    expected_orientation:
+      roll_deg: 0.0
+      pitch_deg: 30.0
+      yaw_deg: 0.0
+    tolerance_deg: 3.0
+    description: "Sensor tilted 30° forward, verify pitch estimation"
+
+  slow_rotation_yaw:
+    name: "Slow yaw rotation 360°"
+    duration_s: 36.0
+    sample_rate_hz: 100
+    expected_final_orientation:
+      roll_deg: 0.0
+      pitch_deg: 0.0
+      yaw_deg: 360.0
+    tolerance_deg: 5.0
+    angular_rate_dps: 10.0
+    description: "Slow 360° yaw rotation at 10 deg/s — tests gyro integration + drift"
+
+  figure_eight:
+    name: "Figure-eight motion pattern"
+    duration_s: 20.0
+    sample_rate_hz: 100
+    return_to_origin: true
+    tolerance_deg: 8.0
+    description: "Complex 3D motion pattern — tests all axes under dynamic conditions"

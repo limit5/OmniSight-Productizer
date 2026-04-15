@@ -1,0 +1,191 @@
+tasks:
+  # -- IMU driver tasks --
+  - id: sf-imu-driver-init
+    name: "IMU driver initialization"
+    description: "Initialize IMU driver (MPU6050/LSM6DS3/BMI270) — WHO_AM_I check, register config, FIFO setup"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_imu: true"
+    depends_on: []
+    artifacts:
+      - imu_driver.c
+      - imu_driver.h
+
+  - id: sf-imu-data-read
+    name: "IMU data acquisition"
+    description: "Read accelerometer + gyroscope data via I2C/SPI, handle FIFO burst mode"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_imu: true"
+    depends_on:
+      - sf-imu-driver-init
+    artifacts:
+      - imu_data.c
+
+  - id: sf-imu-interrupt
+    name: "IMU interrupt handling"
+    description: "Configure data-ready interrupt, wake-on-motion, FIFO watermark"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_imu: true"
+    depends_on:
+      - sf-imu-driver-init
+    artifacts:
+      - imu_interrupt.c
+
+  - id: sf-imu-selftest
+    name: "IMU self-test"
+    description: "Execute accelerometer and gyroscope self-test routines"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_imu: true"
+    depends_on:
+      - sf-imu-data-read
+
+  # -- GPS tasks --
+  - id: sf-gps-nmea-parser
+    name: "GPS NMEA parser"
+    description: "Parse NMEA 0183 sentences (GGA/RMC/GSA/GSV/VTG/GLL) with checksum validation"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_gps: true"
+    depends_on: []
+    artifacts:
+      - nmea_parser.c
+      - nmea_parser.h
+
+  - id: sf-gps-ubx-protocol
+    name: "GPS UBX binary protocol"
+    description: "u-blox UBX protocol handler — send/receive/ack with Fletcher-8 checksum"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_gps: true"
+    depends_on: []
+    artifacts:
+      - ubx_protocol.c
+      - ubx_protocol.h
+
+  - id: sf-gps-configuration
+    name: "GPS module configuration"
+    description: "Configure measurement rate, navigation mode, NMEA/UBX output selection"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_gps: true"
+    depends_on:
+      - sf-gps-ubx-protocol
+    artifacts:
+      - gps_config.c
+
+  # -- Barometer tasks --
+  - id: sf-baro-driver-init
+    name: "Barometer driver initialization"
+    description: "Initialize barometer driver (BMP280/LPS22) — ID check, calibration read, mode config"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_baro: true"
+    depends_on: []
+    artifacts:
+      - baro_driver.c
+      - baro_driver.h
+
+  - id: sf-baro-compensation
+    name: "Barometer compensation algorithm"
+    description: "Temperature-compensated pressure reading using factory calibration coefficients"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_baro: true"
+    depends_on:
+      - sf-baro-driver-init
+    artifacts:
+      - baro_compensation.c
+
+  - id: sf-baro-altitude
+    name: "Barometric altitude calculation"
+    description: "Convert compensated pressure to altitude using hypsometric formula"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_baro: true"
+    depends_on:
+      - sf-baro-compensation
+
+  # -- EKF tasks --
+  - id: sf-ekf-orientation
+    name: "EKF 9-DoF orientation"
+    description: "Extended Kalman Filter for 9-DoF orientation estimation (quaternion state)"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_ekf: true"
+    depends_on:
+      - sf-imu-data-read
+    artifacts:
+      - ekf_orientation.c
+      - ekf_orientation.h
+
+  - id: sf-ekf-tuning
+    name: "EKF noise parameter tuning"
+    description: "Tune process and measurement noise covariance for specific IMU hardware"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_ekf: true"
+    depends_on:
+      - sf-ekf-orientation
+
+  # -- Calibration tasks --
+  - id: sf-calibration-6pos
+    name: "6-position IMU calibration"
+    description: "Static 6-position calibration for accelerometer bias, scale, and alignment"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "sensor_fusion_calibration: true"
+    depends_on:
+      - sf-imu-data-read
+    artifacts:
+      - calibration_6pos.c
+
+  - id: sf-calibration-gyro-bias
+    name: "Gyroscope bias calibration"
+    description: "Static averaging for gyroscope bias estimation"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_calibration: true"
+    depends_on:
+      - sf-imu-data-read
+
+  - id: sf-calibration-mag
+    name: "Magnetometer calibration"
+    description: "Hard-iron and soft-iron calibration via ellipsoid fitting"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "sensor_fusion_calibration: true"
+    depends_on: []
+
+  - id: sf-calibration-baro
+    name: "Barometer calibration"
+    description: "Pressure offset calibration against known reference"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "sensor_fusion_calibration: true"
+    depends_on:
+      - sf-baro-driver-init
+
+  # -- Integration test tasks --
+  - id: sf-integration-trajectory-test
+    name: "Trajectory fixture test"
+    description: "Run EKF against known trajectory fixtures and verify orientation accuracy"
+    tier: t1
+    toolchain: cmake
+    when: "sensor_fusion_ekf: true"
+    depends_on:
+      - sf-ekf-orientation
+      - sf-calibration-6pos
+
+  - id: sf-integration-full-stack
+    name: "Full sensor fusion stack test"
+    description: "End-to-end test: IMU + GPS + barometer → EKF → calibrated output"
+    tier: t3
+    toolchain: hardware-daemon-rpc
+    when: "sensor_fusion_imu: true"
+    depends_on:
+      - sf-ekf-orientation
+      - sf-gps-nmea-parser
+      - sf-baro-altitude

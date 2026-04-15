@@ -1,0 +1,133 @@
+test_suites:
+  - suite_id: imu-drivers
+    name: "IMU Driver Tests"
+    sensor_type: imu
+    tests:
+      - test_id: imu-mpu6050-whoami
+        description: "Verify MPU6050 WHO_AM_I register returns 0x68"
+        category: functional
+        timeout_s: 10
+      - test_id: imu-lsm6ds3-whoami
+        description: "Verify LSM6DS3 WHO_AM_I register returns 0x69"
+        category: functional
+        timeout_s: 10
+      - test_id: imu-bmi270-chipid
+        description: "Verify BMI270 CHIP_ID register returns 0x24"
+        category: functional
+        timeout_s: 10
+      - test_id: imu-accel-range-config
+        description: "Configure accelerometer range and verify register"
+        category: functional
+        timeout_s: 15
+      - test_id: imu-gyro-range-config
+        description: "Configure gyroscope range and verify register"
+        category: functional
+        timeout_s: 15
+      - test_id: imu-fifo-burst-read
+        description: "Enable FIFO and burst-read 100 samples"
+        category: performance
+        timeout_s: 30
+      - test_id: imu-sample-rate-verify
+        description: "Measure actual ODR and compare to configured"
+        category: performance
+        timeout_s: 30
+
+  - suite_id: gps-protocols
+    name: "GPS Protocol Tests"
+    sensor_type: gps
+    tests:
+      - test_id: gps-nmea-gga-parse
+        description: "Parse NMEA GGA sentence and extract fix data"
+        category: functional
+        timeout_s: 10
+      - test_id: gps-nmea-rmc-parse
+        description: "Parse NMEA RMC sentence and extract position/velocity"
+        category: functional
+        timeout_s: 10
+      - test_id: gps-nmea-checksum
+        description: "Verify NMEA XOR checksum computation"
+        category: functional
+        timeout_s: 10
+      - test_id: gps-ubx-nav-pvt
+        description: "Parse UBX NAV-PVT binary message"
+        category: functional
+        timeout_s: 15
+      - test_id: gps-ubx-checksum
+        description: "Verify UBX Fletcher-8 checksum computation"
+        category: functional
+        timeout_s: 10
+      - test_id: gps-ubx-build-message
+        description: "Build and verify UBX command message"
+        category: functional
+        timeout_s: 10
+
+  - suite_id: barometer-drivers
+    name: "Barometer Driver Tests"
+    sensor_type: barometer
+    tests:
+      - test_id: baro-bmp280-chipid
+        description: "Verify BMP280 chip ID register returns 0x58"
+        category: functional
+        timeout_s: 10
+      - test_id: baro-lps22-whoami
+        description: "Verify LPS22HB WHO_AM_I returns 0xB1"
+        category: functional
+        timeout_s: 10
+      - test_id: baro-pressure-range
+        description: "Read pressure and verify within sensor range"
+        category: functional
+        timeout_s: 15
+      - test_id: baro-altitude-conversion
+        description: "Convert pressure to altitude and verify accuracy"
+        category: functional
+        timeout_s: 10
+      - test_id: baro-temperature-read
+        description: "Read temperature and verify within sensor range"
+        category: functional
+        timeout_s: 10
+
+  - suite_id: ekf-orientation
+    name: "EKF Orientation Tests"
+    sensor_type: fusion
+    tests:
+      - test_id: ekf-static-level
+        description: "EKF converges to 0/0/0 from static level data"
+        category: functional
+        timeout_s: 30
+      - test_id: ekf-static-tilted
+        description: "EKF converges to known tilt from static tilted data"
+        category: functional
+        timeout_s: 30
+      - test_id: ekf-rotation-tracking
+        description: "EKF tracks known rotation rate accurately"
+        category: performance
+        timeout_s: 60
+      - test_id: ekf-convergence-time
+        description: "EKF converges within acceptable time from bad initial guess"
+        category: performance
+        timeout_s: 60
+      - test_id: ekf-gyro-bias-estimation
+        description: "EKF correctly estimates injected gyro bias"
+        category: functional
+        timeout_s: 60
+
+  - suite_id: calibration-routines
+    name: "Calibration Routine Tests"
+    sensor_type: imu
+    tests:
+      - test_id: cal-accel-bias
+        description: "6-position calibration recovers known accelerometer bias"
+        category: calibration
+        timeout_s: 60
+      - test_id: cal-accel-scale
+        description: "6-position calibration recovers known accelerometer scale"
+        category: calibration
+        timeout_s: 60
+      - test_id: cal-gyro-bias
+        description: "Static calibration recovers known gyroscope bias"
+        category: calibration
+        timeout_s: 30
+      - test_id: cal-residual-check
+        description: "Post-calibration gravity residual below threshold"
+        category: calibration
+        timeout_s: 30

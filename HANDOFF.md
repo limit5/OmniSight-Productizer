@@ -7,6 +7,74 @@
 
 ---
 
+## C14 L4-CORE-14 Sensor fusion library 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| IMU drivers (MPU6050 / LSM6DS3 / BMI270) | ✅ | `configs/sensor_fusion_profiles.yaml` — 3 IMU drivers with register maps, init sequences, compatible SoCs. Scaffold: `imu_driver.c`. Compatible SoCs: esp32, stm32f4/h7, nrf52840, nrf5340, rk3566, hi3516 |
+| GPS NMEA parser + UBX protocol | ✅ | Full NMEA parser (GGA/RMC/GSA/VTG/GLL) with XOR checksum. UBX binary protocol parser with Fletcher-8 checksum, NAV-PVT decoding, message builder. Scaffolds: `nmea_parser.c`, `ubx_protocol.c` |
+| Barometer driver (BMP280 / LPS22) | ✅ | 2 barometer drivers with register maps, modes, compensation. Hypsometric altitude formula (pressure ↔ altitude). Scaffold: `baro_driver.c` |
+| EKF implementation (9-DoF orientation) | ✅ | Quaternion-based EKF with gyro prediction + accel gravity update. 7-state (q0-q3 + gyro bias). Covariance tracking, convergence detection. Also: 15-state INS/GPS profile defined. Scaffold: `ekf_orientation.c` |
+| Calibration routines (bias/scale/alignment) | ✅ | 3 calibration profiles (imu_6axis, magnetometer, barometer). 6-position static calibration algorithm computes accel bias/scale, gyro bias, misalignment matrix, residual check. Scaffold: `calibration_6pos.c` |
+| Unit test against known trajectory fixture | ✅ | 4 trajectory fixtures (static_level, static_tilted_30, slow_rotation_yaw, figure_eight). Synthetic trajectory generators. EKF evaluation against fixtures. 147 tests covering all modules |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/sensor_fusion_profiles.yaml` | 新建——3 IMU drivers + 2 GPS protocols + 2 barometer drivers + 2 EKF profiles + 3 calibration profiles + 13 test recipes + 4 trajectory fixtures + 5 artifact definitions |
+| `backend/sensor_fusion.py` | 新建——Sensor fusion library：enums + data models + config loader + IMU/GPS/barometer driver queries + NMEA parser + UBX parser + barometric altitude + EKF 9-DoF orientation + calibration routines + test stub runner + trajectory generators + SoC compatibility + cert registry + audit integration |
+| `backend/routers/sensor_fusion.py` | 新建——REST endpoints: GET /sensor-fusion/imu/drivers, /gps/protocols, /barometer/drivers, /ekf/profiles, /calibration/profiles, /test/recipes, /trajectory/fixtures, /artifacts. POST /gps/nmea/parse, /gps/ubx/parse, /barometer/altitude, /ekf/run, /calibration/run, /test/run, /trajectory/evaluate, /soc-compat, /artifacts/generate |
+| `backend/main.py` | 擴充——註冊 sensor_fusion router |
+| `backend/doc_suite_generator.py` | 擴充——新增 `_try_sensor_fusion_certs()` + 整合至 `collect_compliance_certs()` |
+| `configs/skills/sensor_fusion/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 dependency) |
+| `configs/skills/sensor_fusion/tasks.yaml` | 新建——20 DAG tasks covering IMU/GPS/barometer/EKF/calibration/integration |
+| `configs/skills/sensor_fusion/scaffolds/` | 新建——5 scaffold files (imu_driver.c, nmea_parser.c, ubx_protocol.c, baro_driver.c, ekf_orientation.c, calibration_6pos.c) |
+| `configs/skills/sensor_fusion/tests/test_definitions.yaml` | 新建——5 test suites, 33 integration test definitions |
+| `configs/skills/sensor_fusion/hil/sensor_fusion_hil_recipes.yaml` | 新建——5 HIL recipes (IMU data acquisition, GPS fix, barometer verify, EKF live convergence, 6-position calibration) |
+| `configs/skills/sensor_fusion/docs/sensor_fusion_integration_guide.md.j2` | 新建——Jinja2 doc template for sensor fusion integration guide |
+| `backend/tests/test_sensor_fusion.py` | 新建，147 項測試 |
+| `TODO.md` | 更新——C14 全部標記完成 |
+
+### 架構說明
+
+- **SensorType enum** — imu / gps / barometer / magnetometer / fusion
+- **SensorBus enum** — i2c / spi / uart
+- **TestCategory enum** — functional / performance / calibration
+- **TestStatus enum** — passed / failed / pending / skipped / error
+- **CalibrationStatus enum** — not_calibrated / in_progress / calibrated / failed
+- **EKFState enum** — uninitialized / converging / converged / diverged
+- **NMEASentenceType enum** — GGA / RMC / GSA / GSV / VTG / GLL
+- **IMUDriverDef** — driver_id / name / vendor / bus / registers / init_sequence / compatible_socs / accel_range_g / gyro_range_dps
+- **GPSProtocolDef** — protocol_id / name / standard / supported_sentences / message_classes / talker_ids
+- **BarometerDriverDef** — driver_id / name / vendor / pressure_range / modes / compensation
+- **EKFProfileDef** — profile_id / state_dim / measurement_dim / process_noise / measurement_noise / prediction_model / update_model
+- **CalibrationProfileDef** — profile_id / parameters / procedure / min_samples
+- **SensorTestRecipe** — recipe_id / sensor_type / category / tools / timeout_s
+- **TrajectoryFixture** — fixture_id / expected_orientation / tolerance_deg / angular_rate_dps
+- **NMEAResult** — sentence_type / talker_id / valid / checksum_ok / fields
+- **UBXMessage** — msg_class / msg_id / valid / class_name / msg_name / parsed_fields
+- **EKFResult** — state / quaternion / euler_deg / gyro_bias / covariance_trace / iterations
+- **CalibrationResult** — status / accel_bias / accel_scale / gyro_bias / misalignment_matrix / residual_g
+- `parse_nmea_sentence()` — full NMEA 0183 parser with GGA/RMC/GSA/VTG/GLL field extraction
+- `parse_ubx_message()` — UBX binary parser with NAV-PVT decoding
+- `build_ubx_message()` — construct UBX binary messages with Fletcher-8 checksum
+- `pressure_to_altitude()` / `altitude_to_pressure()` — hypsometric formula
+- `run_ekf_orientation()` — quaternion EKF with gyro prediction + accel update + bias estimation
+- `evaluate_ekf_against_fixture()` — compare EKF output against trajectory fixtures
+- `run_imu_calibration()` — 6-position static calibration for bias/scale/alignment
+- `generate_static_trajectory()` / `generate_rotation_trajectory()` — synthetic data generators for testing
+
+### 下一步
+
+- C15 (Security stack): Secure boot + TEE + remote attestation + SBOM signing
+- D-level skill packs can now use sensor fusion via `depends_on_core: ["CORE-14"]`
+- SKILL-DRONE and SKILL-GLASSES reference CORE-14 for 6-DoF tracking / GPS+IMU fusion
+
+---
+
 ## C13 L4-CORE-13 Connectivity sub-skill library 狀態更新（2026-04-15）
 
 **全部 7/7 項目已完成。**
