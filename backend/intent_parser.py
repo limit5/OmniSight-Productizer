@@ -52,6 +52,12 @@ ProjectType = Literal[
     "research", "cli_tool", "unknown",
 ]
 
+ProjectClass = Literal[
+    "embedded_product", "algo_sim", "optical_sim",
+    "iso_standard", "test_tool", "factory_tool",
+    "enterprise_web", "unknown",
+]
+
 
 @dataclass(frozen=True)
 class Field:
@@ -92,6 +98,7 @@ class ParsedSpec:
     validate; just that there's nothing obvious to clarify first).
     """
     project_type:  Field = field(default_factory=lambda: Field("unknown", 0.0))
+    project_class: Field = field(default_factory=lambda: Field("unknown", 0.0))
     runtime_model: Field = field(default_factory=lambda: Field("unknown", 0.0))
     target_arch:   Field = field(default_factory=lambda: Field("unknown", 0.0))
     target_os:     Field = field(default_factory=lambda: Field("linux", 0.3))
@@ -110,8 +117,8 @@ class ParsedSpec:
         68-C surfaces these as a clarification form."""
         out: list[str] = []
         for name in (
-            "project_type", "runtime_model", "target_arch", "target_os",
-            "framework", "persistence", "deploy_target",
+            "project_type", "project_class", "runtime_model", "target_arch",
+            "target_os", "framework", "persistence", "deploy_target",
         ):
             v: Field = getattr(self, name)
             if v.confidence < threshold:
@@ -131,6 +138,7 @@ class ParsedSpec:
             return {"value": f.value, "confidence": round(f.confidence, 2)}
         return {
             "project_type":       fv(self.project_type),
+            "project_class":      fv(self.project_class),
             "runtime_model":      fv(self.runtime_model),
             "target_arch":        fv(self.target_arch),
             "target_os":          fv(self.target_os),
@@ -240,6 +248,51 @@ def _regex_first(patterns: dict[str, re.Pattern[str]], text: str) -> tuple[str, 
     return "unknown", 0.0
 
 
+_PROJECT_CLASS_PATTERNS: dict[str, re.Pattern[str]] = {
+    "embedded_product": re.compile(
+        f"{_NW}(?:firmware|driver|bsp|uvc|ipcam|camera|dashcam|doorbell|router|gateway|earbuds|display|kiosk|scanner|printer|barcode|drone|watch|glasses|payment.?terminal|pos){_Nw}",
+        re.IGNORECASE,
+    ),
+    "optical_sim": re.compile(
+        f"{_NW}(?:zemax|code.?v|lighttools|optical|lens|ray.?tracing|mtf|spot.?diagram|wavefront|aberration){_Nw}",
+        re.IGNORECASE,
+    ),
+    "algo_sim": re.compile(
+        f"{_NW}(?:algorithm|simulation|matlab|pytorch|tensorflow|training|inference|model|dataset|neural|deep.?learning|machine.?learning|cv|computer.?vision){_Nw}",
+        re.IGNORECASE,
+    ),
+    "iso_standard": re.compile(
+        f"{_NW}(?:iso\\s*\\d|iec\\s*\\d|compliance|certification|conformance|standard|do-?178|asil|sil\\s*[1-4]){_Nw}",
+        re.IGNORECASE,
+    ),
+    "test_tool": re.compile(
+        f"{_NW}(?:test.?tool|test.?harness|test.?framework|test.?fixture|qa.?tool|regression.?tool|benchmark.?tool|validation.?tool){_Nw}",
+        re.IGNORECASE,
+    ),
+    "factory_tool": re.compile(
+        f"{_NW}(?:factory|production.?line|jig|mes|spc|yield|station|manufacturing|assembly.?line){_Nw}",
+        re.IGNORECASE,
+    ),
+    "enterprise_web": re.compile(
+        f"{_NW}(?:erp|crm|hrm|wms|warehouse|inventory|e-?commerce|portal|dashboard|admin.?panel|saas|multi.?tenant|rbac|sso|ldap){_Nw}",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _infer_project_class(text: str, project_type: str, framework: str) -> tuple[str, float]:
+    pc_v, pc_c = _regex_first(_PROJECT_CLASS_PATTERNS, text)
+    if pc_v != "unknown":
+        return pc_v, pc_c
+    if project_type == "embedded_firmware":
+        return "embedded_product", 0.5
+    if project_type == "web_app" and framework in ("nextjs", "react", "vue", "svelte", "django", "flask", "fastapi"):
+        return "enterprise_web", 0.4
+    if project_type == "research":
+        return "algo_sim", 0.4
+    return "unknown", 0.0
+
+
 def _heuristic_parse(text: str) -> ParsedSpec:
     """Fallback parser when no LLM is available."""
     fw_v, fw_c = _regex_first(_FRAMEWORK_PATTERNS, text)
@@ -265,8 +318,11 @@ def _heuristic_parse(text: str) -> ParsedSpec:
     ) else "no"
     hw_c = 0.7 if project_type == "embedded_firmware" else 0.5
 
+    pc_v, pc_c = _infer_project_class(text, project_type, fw_v)
+
     return ParsedSpec(
         project_type=Field(project_type, pt_conf),
+        project_class=Field(pc_v, pc_c),
         runtime_model=Field(rt_v, rt_c),
         target_arch=Field(arch_v, arch_c),
         target_os=Field("linux", 0.3),
@@ -288,6 +344,7 @@ markdown, no prose) matching this schema exactly:
 
 {
   "project_type":   { "value": "embedded_firmware|web_app|data_pipeline|research|cli_tool|unknown", "confidence": 0.0..1.0 },
+  "project_class":  { "value": "embedded_product|algo_sim|optical_sim|iso_standard|test_tool|factory_tool|enterprise_web|unknown", "confidence": 0.0..1.0 },
   "runtime_model":  { "value": "ssg|ssr|isr|spa|cli|batch|unknown", "confidence": 0.0..1.0 },
   "target_arch":    { "value": "x86_64|arm64|arm32|riscv64|unknown", "confidence": 0.0..1.0 },
   "target_os":      { "value": "linux|darwin|windows|rtos|unknown", "confidence": 0.0..1.0 },
@@ -296,6 +353,16 @@ markdown, no prose) matching this schema exactly:
   "deploy_target":  { "value": "local|ssh|edge_device|cloud|unknown", "confidence": 0.0..1.0 },
   "hardware_required": { "value": "yes|no|unknown", "confidence": 0.0..1.0 }
 }
+
+project_class meanings:
+- embedded_product: firmware/drivers for cameras, IoT, wearables, \
+  POS terminals, scanners, printers, drones, etc.
+- algo_sim: academic algorithm simulation, ML training, data science
+- optical_sim: Zemax/CodeV/LightTools optical design simulation
+- iso_standard: ISO/IEC/DO-178/ASIL compliance implementation
+- test_tool: test harnesses, QA automation, validation tools
+- factory_tool: production line jigs, MES integration, SPC
+- enterprise_web: ERP/CRM/HRM/WMS/e-commerce/SaaS web applications
 
 Rules:
 - Use "unknown" with confidence 0.0 for any field the user didn't \
@@ -344,6 +411,7 @@ async def _llm_parse(
 
     return ParsedSpec(
         project_type=pick("project_type"),
+        project_class=pick("project_class"),
         runtime_model=pick("runtime_model"),
         target_arch=pick("target_arch"),
         target_os=pick("target_os", default="linux", default_conf=0.3),
@@ -534,14 +602,16 @@ def apply_clarification(
 
     updates: dict[str, Field] = {}
     for name in (
-        "project_type", "runtime_model", "target_arch", "target_os",
-        "framework", "persistence", "deploy_target", "hardware_required",
+        "project_type", "project_class", "runtime_model", "target_arch",
+        "target_os", "framework", "persistence", "deploy_target",
+        "hardware_required",
     ):
         if name in applies:
             updates[name] = Field(str(applies[name]), 1.0)
 
     new = ParsedSpec(
         project_type=updates.get("project_type", parsed.project_type),
+        project_class=updates.get("project_class", parsed.project_class),
         runtime_model=updates.get("runtime_model", parsed.runtime_model),
         target_arch=updates.get("target_arch", parsed.target_arch),
         target_os=updates.get("target_os", parsed.target_os),

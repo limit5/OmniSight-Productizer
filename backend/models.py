@@ -11,6 +11,16 @@ from pydantic import BaseModel, Field
 
 # ---------- Agent ----------
 
+class ProjectClass(str, Enum):
+    embedded_product = "embedded_product"
+    algo_sim = "algo_sim"
+    optical_sim = "optical_sim"
+    iso_standard = "iso_standard"
+    test_tool = "test_tool"
+    factory_tool = "factory_tool"
+    enterprise_web = "enterprise_web"
+
+
 class AgentType(str, Enum):
     firmware = "firmware"
     software = "software"

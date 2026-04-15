@@ -37,6 +37,7 @@ def test_low_confidence_lists_fields_below_threshold():
 def test_needs_clarification_when_conflict_present():
     ps = ip.ParsedSpec(
         project_type=ip.Field("web_app", 0.9),
+        project_class=ip.Field("enterprise_web", 0.9),
         runtime_model=ip.Field("ssg", 0.9),
         target_arch=ip.Field("x86_64", 0.9),
         target_os=ip.Field("linux", 0.9),

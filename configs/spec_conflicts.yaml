@@ -79,6 +79,72 @@ rules:
         apply:
           deploy_target: cloud
 
+  # ─── ProjectClass ambiguity: embedded firmware but class unknown ───
+  - id: embedded_class_ambiguous
+    severity: routine
+    message: |
+      Project is embedded firmware but the product class wasn't specified.
+      Knowing the class helps pick the right planner (camera vs drone vs
+      industrial vs wearable etc.).
+    when:
+      project_type: embedded_firmware
+      project_class: unknown
+    fields: [project_class]
+    options:
+      - id: embedded_product
+        label: "Embedded product (camera, IoT, wearable, …)"
+        desc: "Physical device with firmware — uses the embedded product planner."
+        apply: { project_class: embedded_product }
+      - id: test_tool
+        label: "Test tool / validation harness"
+        desc: "A tool for testing or validating hardware — uses the test-tool planner."
+        apply: { project_class: test_tool }
+      - id: factory_tool
+        label: "Factory / production-line tool"
+        desc: "Jig, MES integration, or SPC dashboard for the factory floor."
+        apply: { project_class: factory_tool }
+
+  # ─── ProjectClass ambiguity: web app but class unknown ───
+  - id: webapp_class_ambiguous
+    severity: info
+    message: |
+      Project is a web app but the product class wasn't specified.
+      This determines whether to use the enterprise-web planner
+      (ERP/CRM/SaaS) or a simpler web scaffold.
+    when:
+      project_type: web_app
+      project_class: unknown
+    fields: [project_class]
+    options:
+      - id: enterprise_web
+        label: "Enterprise web (ERP, CRM, SaaS, …)"
+        desc: "Full enterprise stack with auth, RBAC, audit, multi-tenant."
+        apply: { project_class: enterprise_web }
+      - id: test_tool
+        label: "Test tool / dashboard"
+        desc: "Web-based test or QA tool."
+        apply: { project_class: test_tool }
+
+  # ─── ProjectClass ambiguity: research but algo vs optical unknown ───
+  - id: research_class_ambiguous
+    severity: info
+    message: |
+      Project is research-oriented. Is this an algorithm/ML simulation
+      or an optical-design simulation? They use different planners.
+    when:
+      project_type: research
+      project_class: unknown
+    fields: [project_class]
+    options:
+      - id: algo_sim
+        label: "Algorithm / ML simulation"
+        desc: "Python/MATLAB, training, inference, dataset management."
+        apply: { project_class: algo_sim }
+      - id: optical_sim
+        label: "Optical simulation"
+        desc: "Zemax/CodeV/LightTools — lens design, ray tracing, MTF."
+        apply: { project_class: optical_sim }
+
   # ─── Hardware required without arch specified ───
   - id: hardware_without_arch
     severity: info
