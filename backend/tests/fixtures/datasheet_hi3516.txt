@@ -1,0 +1,77 @@
+Hi3516DV300 Datasheet
+=====================
+
+1. Overview
+
+The Hi3516DV300 is a high-performance SoC designed for IP cameras and smart video
+applications. It integrates an ARM Cortex-A7 dual-core processor, a high-performance
+ISP, H.265/H.264 video codec engine, and an intelligent video analysis accelerator (NNIE).
+
+2. Key Features
+
+Processor:
+- Dual-core ARM Cortex-A7 @ 900MHz
+- 32KB I-Cache / 32KB D-Cache per core
+- NEON and FPU
+
+Neural Network Inference Engine (NNIE):
+- Deep learning inference accelerator
+- Supports CNN frameworks: Caffe, TensorFlow
+- Performance: 0.5 TOPS
+
+DSP Core:
+- C66x DSP core for audio/video pre-processing
+
+Video Codec:
+- H.265 Main Profile encode/decode, up to 5MP @ 30fps
+- H.264 Baseline/Main/High Profile encode/decode
+- MJPEG encode/decode
+- Multi-stream encoding support
+
+Image Sensor Interface:
+- Supports IMX307 and OV2718 image sensors
+- MIPI CSI-2 / sub-LVDS / HiSPi / DC
+- Max resolution: 5MP (2592 × 1944)
+
+Memory:
+- DDR3/DDR3L: 512 MB max
+- DDR base address: 0x80000000, size: 536870912 bytes (512MB)
+- On-chip SRAM: 64KB at 0x04010000
+
+Flash Interface:
+- SPI NOR Flash: up to 16 MB
+- SPI NAND Flash: up to 128 MB
+- eMMC 4.51 interface
+
+Peripherals:
+- 3 × I2C bus controllers
+- 2 × SPI master
+- 4 × UART (with flow control)
+- 10 × GPIO groups (up to 80 GPIOs)
+- 2 × 12-bit ADC channels
+- 6 × PWM outputs
+- 1 × SDIO 3.0 interface
+- 1 × Ethernet 10/100M PHY (RMII)
+- USB2.0-OTG × 1
+- USB2.0-Host × 1
+
+Display:
+- 7-inch 1024x600 LVDS LCD support
+- BT.656/BT.1120 output
+
+Audio:
+- Built-in audio codec
+- G.711/G.726 voice codec support
+- I2S interface
+
+Security:
+- AES/DES/3DES hardware encryption
+- SHA-256 hardware hash
+- Secure boot support
+
+Package:
+- BGA 289-pin, 15mm × 15mm
+
+Operating Temperature: -40°C to +85°C
+
+Power Supply: 3.3V / 1.0V core

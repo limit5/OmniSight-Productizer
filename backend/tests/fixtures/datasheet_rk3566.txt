@@ -1,0 +1,81 @@
+Rockchip RK3566 Technical Reference Manual
+============================================
+
+1. Product Overview
+
+The RK3566 is a high-performance, low-power quad-core application processor designed for
+personal mobile internet devices and AIoT products. It features a quad-core ARM Cortex-A55
+processor with a Mali-G52 2EE GPU and a 0.8 TOPS neural processing unit (RKNN NPU).
+
+2. CPU System
+
+- Quad-core ARM Cortex-A55 @ up to 1.8 GHz
+- 32KB L1 I-cache and 32KB L1 D-cache per core
+- 512KB unified L3 cache
+- ARM Neon Advanced SIMD
+
+3. GPU
+
+- ARM Mali-G52 2EE GPU
+- OpenGL ES 1.1, 2.0, 3.2
+- Vulkan 1.1
+- OpenCL 2.0
+
+4. Neural Processing Unit
+
+- RKNN NPU: 0.8 TOPS (INT8)
+- Supports TensorFlow, TFLite, Caffe, ONNX, PyTorch, Darknet
+- Quantization: INT8/INT16/FP16
+
+5. Video Codec
+
+- H.264 encode up to 1080p @ 60fps
+- H.265/HEVC decode up to 4K @ 60fps
+- VP9 decode up to 4K @ 30fps
+- H.264/H.265/VP9 multi-format decode
+
+6. Camera Interface
+
+- MIPI CSI-2: 1× 4-lane or 2× 2-lane
+- Supports up to 8MP camera sensor
+- Compatible with OV5647, IMX219, IMX415 sensors
+
+7. Memory Interface
+
+- LPDDR4/LPDDR4X: up to 4 GB
+- DDR base address: 0x00000000
+- Total RAM: 4096 MB
+- eMMC 5.1: up to 256 GB
+- Total Flash: 256 GB
+
+8. Peripheral Interfaces
+
+- 5 × I2C controllers
+- 4 × SPI (1× SPI slave)
+- 10 × UART
+- 4 × PWM
+- GPIO: up to 128 pins
+- 8-channel 10-bit SAR ADC
+- 2 × USB2.0 Host
+- 1 × USB3.0 OTG (Type-C)
+- 1 × PCIe 2.1 (1-lane)
+- 2 × SDIO 3.0
+- 1 × Gigabit Ethernet (RGMII)
+
+9. Display Interface
+
+- HDMI 2.0a output, up to 4K @ 60Hz
+- eDP 1.3: up to 2560×1600 @ 60Hz
+- MIPI DSI: 2× 4-lane, up to 2560×1600 @ 60Hz
+- RGB/BT.656/BT.1120
+
+10. Audio
+
+- I2S/PCM: 4 groups
+- PDM: 8-channel input
+- Built-in audio codec
+- SPDIF TX/RX
+
+Package: FCBGA 506-ball, 19mm × 19mm
+Operating Temperature: -40°C to +85°C (industrial grade available)
+Power: PMIC RK809-5 recommended

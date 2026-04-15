@@ -1,0 +1,86 @@
+ESP32-S3 Series Datasheet
+=========================
+
+1. Overview
+
+ESP32-S3 is a dual-core XTensa LX7 microcontroller with integrated Wi-Fi (802.11 b/g/n)
+and Bluetooth 5 (LE) connectivity. It is designed for AIoT applications requiring
+on-device neural network acceleration and secure connectivity.
+
+2. CPU and Memory
+
+Processor:
+- Xtensa dual-core 32-bit LX7 microprocessor @ up to 240 MHz
+- Ultra-low-power co-processor (ULP-RISC-V)
+
+On-chip Memory:
+- 512 KB SRAM (internal) at base address 0x3FC88000
+- 16 KB RTC SRAM at base address 0x50000000
+- 384 KB ROM
+
+External Memory:
+- SPI Flash: up to 16 MB (Octal SPI / QPI supported)
+- PSRAM: up to 8 MB (Octal SPI)
+
+3. Neural Network Acceleration
+
+- Xtensa AI extension instructions (vector acceleration)
+- Accelerated operations: convolution, pooling, activation
+- No dedicated NPU — uses CPU vector extensions
+- Target performance: ~50 GOPS (8-bit MAC operations)
+
+4. Wireless
+
+- Wi-Fi 802.11 b/g/n (2.4 GHz)
+- Bluetooth 5 (LE): long range, 2Mbps
+- Bluetooth Mesh support
+
+5. Peripheral Interfaces
+
+- 2 × I2C
+- 4 × SPI (including 1 Octal SPI for Flash/PSRAM)
+- 3 × UART
+- 2 × I2S
+- 1 × LCD interface (Intel 8080 / RGB565 / RGB888)
+- 1 × Camera interface (DVP 8/16-bit)
+- 2 × USB-OTG 1.1 (Full Speed, 12 Mbps)
+- 14 × touch sensor channels
+- 2 × 12-bit SAR ADC (20 channels total)
+- 8 × PWM channels (LEDC)
+- 1 × TWAI (CAN 2.0 compatible)
+- 1 × SDIO host/slave 3.0
+- Up to 45 × GPIO
+
+6. Security
+
+- AES-128/256 hardware acceleration
+- SHA hardware acceleration
+- RSA-3072 hardware acceleration
+- Secure boot V2
+- Flash encryption
+- Digital signature peripheral
+
+7. Camera & Display
+
+- DVP camera interface: supports OV2640, OV7670 sensors
+- SPI/8080 LCD: up to 320×240 typical
+- RGB LCD interface: up to 800×480
+
+8. Audio
+
+- 2 × I2S interfaces for audio codec connection
+- PDM microphone input
+- DAC: 2× 8-bit channels
+
+9. Power Management
+
+- Multiple power modes: active, modem-sleep, light-sleep, deep-sleep
+- Deep sleep current: ~7 µA
+- RTC domain always-on
+
+Package Options:
+- QFN56: 7mm × 7mm
+- Modules: ESP32-S3-WROOM-1/2, ESP32-S3-MINI-1
+
+Operating Temperature: -40°C to +105°C
+Supply Voltage: 3.0V – 3.6V
