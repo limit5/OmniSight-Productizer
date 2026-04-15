@@ -264,6 +264,8 @@ from backend.routers import report as _report_router  # B3/REPORT-01
 app.include_router(_report_router.router, prefix=settings.api_prefix)
 from backend.routers import hil as _hil_router  # C7/HIL-PLUGIN-API
 app.include_router(_hil_router.router, prefix=settings.api_prefix)
+from backend.routers import compliance as _compliance_router  # C8/COMPLIANCE-HARNESS
+app.include_router(_compliance_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")
