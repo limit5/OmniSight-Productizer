@@ -1,0 +1,224 @@
+schema_version: 1
+
+motion_control:
+  name: "Motion Control / G-code / CNC Abstraction"
+  description: >
+    Unified motion control framework with G-code interpreter, stepper driver
+    abstraction (TMC2209 / A4988 / DRV8825), heater PID loops, endstop handling,
+    homing sequences, and thermal runaway safety shutoff.
+
+  gcode_commands:
+    - id: "G0"
+      name: "Rapid Move"
+      description: "Rapid linear move to target position (max feedrate)"
+      axes: ["X", "Y", "Z", "E"]
+      parameters: ["F"]
+
+    - id: "G1"
+      name: "Linear Move"
+      description: "Controlled linear move at specified feedrate"
+      axes: ["X", "Y", "Z", "E"]
+      parameters: ["F"]
+
+    - id: "G28"
+      name: "Home"
+      description: "Home one or more axes using endstop sensors"
+      axes: ["X", "Y", "Z"]
+      parameters: []
+
+    - id: "M104"
+      name: "Set Hotend Temperature"
+      description: "Set hotend target temperature (non-blocking)"
+      parameters: ["S", "T"]
+
+    - id: "M109"
+      name: "Wait Hotend Temperature"
+      description: "Set hotend target temperature and wait until reached"
+      parameters: ["S", "R", "T"]
+
+    - id: "M140"
+      name: "Set Bed Temperature"
+      description: "Set heated bed target temperature (non-blocking)"
+      parameters: ["S"]
+
+  stepper_drivers:
+    - id: "tmc2209"
+      name: "TMC2209"
+      description: "Trinamic TMC2209 — silent StealthChop, UART config, StallGuard sensorless homing"
+      interface: "uart"
+      microstep_options: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+      default_microsteps: 16
+      max_current_ma: 2000
+      features:
+        - "stealthchop"
+        - "spreadcycle"
+        - "stallguard"
+        - "uart_config"
+        - "coolstep"
+      stall_threshold_range: [0, 255]
+      default_stall_threshold: 100
+
+    - id: "a4988"
+      name: "A4988"
+      description: "Allegro A4988 — classic step/dir driver with 5 microstep modes"
+      interface: "step_dir"
+      microstep_options: [1, 2, 4, 8, 16]
+      default_microsteps: 16
+      max_current_ma: 2000
+      features:
+        - "sleep_mode"
+        - "adjustable_current"
+      stall_threshold_range: null
+      default_stall_threshold: null
+
+    - id: "drv8825"
+      name: "DRV8825"
+      description: "TI DRV8825 — 32-microstep driver with fault output"
+      interface: "step_dir"
+      microstep_options: [1, 2, 4, 8, 16, 32]
+      default_microsteps: 16
+      max_current_ma: 2500
+      features:
+        - "fault_output"
+        - "sleep_mode"
+        - "low_current_mode"
+      stall_threshold_range: null
+      default_stall_threshold: null
+
+  axes:
+    - id: "X"
+      name: "X Axis"
+      default_steps_per_mm: 80
+      default_max_feedrate_mm_s: 300
+      default_max_accel_mm_s2: 3000
+      default_homing_feedrate_mm_s: 50
+      default_travel_mm: 220
+
+    - id: "Y"
+      name: "Y Axis"
+      default_steps_per_mm: 80
+      default_max_feedrate_mm_s: 300
+      default_max_accel_mm_s2: 3000
+      default_homing_feedrate_mm_s: 50
+      default_travel_mm: 220
+
+    - id: "Z"
+      name: "Z Axis"
+      default_steps_per_mm: 400
+      default_max_feedrate_mm_s: 5
+      default_max_accel_mm_s2: 100
+      default_homing_feedrate_mm_s: 3
+      default_travel_mm: 250
+
+    - id: "E"
+      name: "Extruder"
+      default_steps_per_mm: 93
+      default_max_feedrate_mm_s: 50
+      default_max_accel_mm_s2: 5000
+      default_homing_feedrate_mm_s: 0
+      default_travel_mm: 0
+
+  heaters:
+    - id: "hotend"
+      name: "Hotend"
+      description: "Primary hotend heater element"
+      max_temp_c: 300
+      min_temp_c: 0
+      default_pid:
+        kp: 22.2
+        ki: 1.08
+        kd: 114.0
+      thermal_runaway:
+        period_s: 40
+        hysteresis_c: 4
+        max_deviation_c: 25
+        grace_period_s: 60
+
+    - id: "bed"
+      name: "Heated Bed"
+      description: "Heated print bed"
+      max_temp_c: 120
+      min_temp_c: 0
+      default_pid:
+        kp: 70.0
+        ki: 1.5
+        kd: 600.0
+      thermal_runaway:
+        period_s: 60
+        hysteresis_c: 4
+        max_deviation_c: 10
+        grace_period_s: 120
+
+  endstop_types:
+    - id: "mechanical"
+      name: "Mechanical Switch"
+      description: "Physical microswitch or limit switch"
+      debounce_ms: 10
+      active_low: true
+
+    - id: "optical"
+      name: "Optical Endstop"
+      description: "Slotted optical sensor"
+      debounce_ms: 2
+      active_low: true
+
+    - id: "stallguard"
+      name: "StallGuard (Sensorless)"
+      description: "TMC2209 StallGuard-based sensorless homing"
+      debounce_ms: 0
+      active_low: false
+
+  homing_modes:
+    - id: "single_probe"
+      name: "Single Probe"
+      description: "Move toward endstop until triggered, then back off"
+      phases: 1
+
+    - id: "double_probe"
+      name: "Double Probe"
+      description: "Fast approach, back off, then slow re-approach for accuracy"
+      phases: 2
+
+  test_recipes:
+    - recipe_id: "basic_gcode"
+      name: "Basic G-code Parsing"
+      description: "Parse G0/G1/G28 and verify motion commands extracted correctly"
+      domains: ["gcode_interpreter"]
+
+    - recipe_id: "stepper_lifecycle"
+      name: "Stepper Driver Lifecycle"
+      description: "Enable, step, configure microsteps, disable — all 3 drivers"
+      domains: ["stepper_drivers"]
+
+    - recipe_id: "pid_convergence"
+      name: "PID Convergence"
+      description: "Simulate PID heating and verify temperature converges within tolerance"
+      domains: ["heater_pid"]
+
+    - recipe_id: "endstop_homing"
+      name: "Endstop Homing Sequence"
+      description: "Simulate homing with endstop trigger and verify position reset"
+      domains: ["endstops"]
+
+    - recipe_id: "thermal_runaway"
+      name: "Thermal Runaway Detection"
+      description: "Inject thermal fault and verify safety shutoff activates"
+      domains: ["thermal_safety"]
+
+    - recipe_id: "gcode_motion_trace"
+      name: "G-code → Motion Trace"
+      description: "Full G-code program → expected axis positions and thermal states"
+      domains: ["gcode_interpreter", "stepper_drivers", "heater_pid", "endstops"]
+
+  artifacts:
+    - artifact_id: "motion_trace"
+      kind: "json"
+      description: "Step-by-step position trace from G-code execution"
+
+    - artifact_id: "pid_response"
+      kind: "json"
+      description: "PID temperature response curve over time"
+
+    - artifact_id: "thermal_fault_log"
+      kind: "json"
+      description: "Thermal runaway detection event log"
