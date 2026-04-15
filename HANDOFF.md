@@ -1,9 +1,37 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：J4 localStorage multi-tab sync (master)
+> 最後 commit：J5 Per-session operation mode (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## J5 (complete) Per-session Operation Mode（2026-04-16 完成）
+
+**背景**：Operation Mode 原為全域單一值，所有 session 共用。J5 將 mode 搬到 `sessions.metadata.operation_mode`，使每個 session（裝置）可獨立設定 mode，而 parallelism budget 仍為全域共享池。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `auth.py` metadata helpers | `get_session_metadata()` 解析 session JSON metadata、`update_session_metadata()` merge 更新 | ✅ 完成 |
+| `decision_engine.py` per-session mode | `get_session_mode_async()` / `set_session_mode()` 從 session metadata 讀寫 operation_mode，fallback 到全域 mode | ✅ 完成 |
+| `_ModeSlot` per-session cap | `_ModeSlot` 接受 `session_token` 參數，cap 從該 session 的 mode 計算；global pool 不變 | ✅ 完成 |
+| `parallel_slot()` | 新增 `session_token` 參數，有 token 時回傳獨立 `_ModeSlot` instance | ✅ 完成 |
+| API GET /operation-mode | 從 cookie 讀取 session token，回傳該 session 的 mode（含 `session_scoped: true`） | ✅ 完成 |
+| API PUT /operation-mode | 有 session 時寫入 session metadata，無 session 時 fallback 到全域 set_mode | ✅ 完成 |
+| UI mode-selector | tooltip 顯示「此設定僅影響本裝置」；MODE label + radiogroup title 均含提示 | ✅ 完成 |
+| Backend 測試 | 13 項：metadata helpers、get/set session mode、ModeSlot per-session、dual session cap 驗證 | ✅ 13/13 pass |
+| Frontend 測試 | 2 項 J5 tooltip 測試 + 6 項既有測試 | ✅ 8/8 pass |
+
+**新增/修改檔案**：
+- `backend/auth.py` — 新增 `get_session_metadata()` + `update_session_metadata()`
+- `backend/decision_engine.py` — 新增 `get_session_mode()` / `get_session_mode_async()` / `set_session_mode()`；`_ModeSlot` 支援 per-session cap；`parallel_slot()` 接受 `session_token`
+- `backend/routers/decisions.py` — GET/PUT `/operation-mode` 改為 per-session
+- `components/omnisight/mode-selector.tsx` — tooltip「此設定僅影響本裝置」
+- `backend/tests/test_j5_per_session_mode.py` — 13 項 J5 單元測試（新增）
+- `test/components/mode-selector.test.tsx` — 新增 2 項 J5 tooltip 測試
+
+**全部測試**：52 backend pass + 8 frontend pass
 
 ---
 
@@ -423,6 +451,53 @@ H1→H4a         ─┼──► S0 ──► K-early ──► J ──► K-re
 3. M4 AIMD 升級「只降禍首」演算法要小心：可能識別錯誤導致誤殺；先保留 fallback 至 global derate 的 kill switch
 
 **不做的後果**：無法開 SaaS、嘈雜鄰居拖慢全體、合規過不了審計。
+
+---
+
+## N (pending) Dependency Governance — 相依套件治理（2026-04-16 登錄）
+
+**背景**：Python `backend/requirements.txt` 大部分 `==` 硬鎖但 transitive 未鎖；Node `package.json` 多為 caret `^`；`package-lock.json` 與 `pnpm-lock.yaml` 並存易分歧；`engines` 未設。高風險子系統：**LangChain/LangGraph**（每週一次 minor、import path 常搬家）、**Next.js 16**（App Router API 三個 major 每次都 breaking）、**Pydantic**（v3 可能重演 v1→v2 痛苦）、**FastAPI+Starlette+anyio** 三角關係。此 Phase 建完整堤壩：鎖定 → 自動 PR → 合約測試 → fallback 分支 → 升級 runbook。
+
+| Phase | 主題 | 狀態 | 預估 |
+|---|---|---|---|
+| N1 | 全量鎖定：engines + `.nvmrc` + 單一 lockfile (pnpm) + pip-tools `requirements.in`/`.txt` + `--require-hashes` + CI drift 檢查 | ⏳ 待辦 | 0.5 day |
+| N2 | Renovate + group rules（radix / ai-sdk / langchain / types 各一組）+ 分層 auto-merge（patch 自動 / minor 1 審 / major 2 審 + blue-green） | ⏳ 待辦 | 0.5 day |
+| N3 | OpenAPI 前後端合約：`openapi-typescript` 自動生前端 type + `openapi.json` 入 git 做 diff + `openapi-msw` fixture | ⏳ 待辦 | 0.5 day |
+| N4 | **LangChain/LangGraph adapter 防火牆**：全部 import 集中 `backend/llm_adapter.py`，CI 擋住其他檔案直接 import，升版只改單檔 | ⏳ 待辦 | 1 day |
+| N5 | Nightly upgrade-preview CI：`pip list --outdated` + `pnpm outdated` + 試算 diff + 跑測試 + 自動開 issue | ⏳ 待辦 | 0.5 day |
+| N6 | Upgrade runbook + rollback + CVE（osv-scanner）+ EOL 月查（endoflife.date） | ⏳ 待辦 | 0.5 day |
+| N7 | Multi-version CI matrix：Python 3.12/3.13、Node 20/22、FastAPI current/latest（PR 只跑 primary，nightly 跑全） | ⏳ 待辦 | 0.5 day |
+| N8 | DB engine compatibility matrix：SQLite 3.40/3.45 + Postgres 15/16，alembic migration 雙軌驗證（**與 G4 綁**，G4 後退役 SQLite） | ⏳ 待辦 | 0.5 day |
+| N9 | Framework fallback 長青分支：`compat/nextjs-15` + `compat/pydantic-v2`，weekly rebase、weekly CI，major 升級前必 green | ⏳ 待辦 | 0.5 day |
+| N10 | 升級流程政策（policy doc）+ major 升級強制走 G3 blue-green（CI label gate），一個 PR 一個套件（便於 revert）（**與 G3 綁**） | ⏳ 待辦 | 0.25 day |
+
+**總預估**：**~5.25 day**
+
+**建議順序**：
+- **立即（A1 上線後）**：N1 + N2 + N5（~1.5 day）— 建最低限度堤壩
+- **短期（一個月內）**：N3 + N4 + N6（~2 day）— 合約測試 + LangChain 防火牆 + runbook
+- **中期（配合 G4）**：N8
+- **長期（配合 G3）**：N7 + N9 + N10
+
+**重點風險子系統**（優先治理）：
+1. **LangChain / LangGraph** — 最不穩定，N4 adapter 層是高 ROI 防線
+2. **Next.js 16** — 已在較新 major，出事時 N9 fallback `compat/nextjs-15` 是保命分支
+3. **Pydantic** — v3 預警期就要準備，N9 `compat/pydantic-v2` 備著
+4. **FastAPI + Starlette + anyio** — 綁定關係緊，升任一都要跑完整 E2E
+
+**驗收標準**：
+- 三個月內無「lockfile drift 導致 build 壞」事件
+- LangChain 任一 major 升級影響僅限 `llm_adapter.py` 單檔（N4 守住）
+- 每次 FastAPI schema change 前端編譯期即發現（N3 守住）
+- Nightly upgrade-preview 平均每週提前捕捉至少 1 個 breaking change
+- Next / Pydantic 出現 breaking 大升級時，fallback 分支已 green 可切（N9 守住）
+- 所有 major 升級走 blue-green 部署，rollback 秒級（N10 + G3）
+
+**與其他 Phase 關係**：
+- **N8 ↔ G4**：DB 遷移完成後 N8 matrix 退掉 SQLite
+- **N10 ↔ G3**：blue-green 通道必須先有，N10 才能強制
+- **N2 的 auto-merge 政策**：依賴 CI 完善（K3 cookie flags / G1 readyz 等測試齊備後才可放寬 patch 自動合）
+- **N4（LangChain 防火牆）**：越早做越便宜；目前 LangChain import 可能已散落多處，晚做遷移成本更高
 
 ---
 

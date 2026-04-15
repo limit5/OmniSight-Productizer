@@ -440,11 +440,11 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### J5. Per-session Operation Mode
-- [ ] Operation Mode 從全域 config 搬到 `sessions.metadata.operation_mode`
-- [ ] `_ModeSlot` 讀取改為 per-session（budget 仍是全域池，但 mode cap 個別計算）
-- [ ] UI mode selector 只影響當前 session，tooltip 顯示「此設定僅影響本裝置」
-- [ ] 測試：A session turbo + B session supervised 各自 mode cap 生效
-- [ ] 預估：**0.5 day**
+- [x] Operation Mode 從全域 config 搬到 `sessions.metadata.operation_mode`
+- [x] `_ModeSlot` 讀取改為 per-session（budget 仍是全域池，但 mode cap 個別計算）
+- [x] UI mode selector 只影響當前 session，tooltip 顯示「此設定僅影響本裝置」
+- [x] 測試：A session turbo + B session supervised 各自 mode cap 生效
+- [x] 預估：**0.5 day**
 
 ### J6. Audit UI 帶 session 過濾
 - [ ] Audit 查詢頁加 session filter（列表 + 目前 session 快捷鈕）
@@ -647,6 +647,118 @@ Legend:
 - 無法開 SaaS（計費算不出來）
 - 嘈雜鄰居問題：一個濫用 tenant 拖慢全體
 - 合規：無法證明「tenant A 無法存取 tenant B 的執行環境」
+
+---
+
+## 🅝 Priority N — Dependency Governance（相依套件治理）
+
+> 背景：Python deps (`backend/requirements.txt`) 大部分 `==` 硬鎖，但 transitive 未鎖；Node deps (`package.json`) 多為 caret `^`，minor/patch 自動漂；`package-lock.json` 與 `pnpm-lock.yaml` 並存易分歧；`engines` 欄位未設 → 不同開發者不同 Node 版本。高風險子系統：**LangChain / LangGraph**（近年每週一次 minor、import path 常搬家）、**Next.js 16**（App Router API 近三個 major 每次都 breaking）、**Pydantic**（v1→v2 已痛過，v3 出現會再痛）、**FastAPI + Starlette + anyio** 三角關係。此 Phase 建立從「鎖定 → 自動 PR → 合約測試 → fallback 分支 → 升級 runbook」的完整堤壩。
+>
+> **現在最該先做**：N1 + N2 + N5（~1.5 day），建最低限度堤壩；其餘隨開發節奏補齊。
+
+### N1. 全量鎖定 + 單一 lockfile + Node/Python 版本固定
+- [ ] `package.json` 加 `"engines": {"node": ">=20.17.0 <21", "pnpm": ">=9"}`；repo root 加 `.nvmrc` / `.node-version` 寫 `20.17.0`
+- [ ] 收斂到單一 lockfile：選 `pnpm-lock.yaml`，刪 `package-lock.json`；`.gitignore` 排除另一個；CI 檢查 `git status --porcelain | grep -E 'lock\.(json|yaml)$'` 必須乾淨
+- [ ] Python 全量鎖：導入 `pip-tools`（或 `uv`），`backend/requirements.in` 寫人讀範圍 → `backend/requirements.txt` 由 `pip-compile --generate-hashes` 生出含 transitive hash 的鎖檔
+- [ ] Docker `Dockerfile.backend` 改為 `pip install --require-hashes -r requirements.txt`
+- [ ] CI 新增 lockfile drift 檢查（若 `requirements.in` 或 `package.json` 變動但 lock 未更新 → fail）
+- [ ] 預估：**0.5 day**
+
+### N2. Renovate 自動 PR + group rules + 分層 auto-merge
+- [ ] `renovate.json` 基本 config；排程 `every weekend` 降低雜訊
+- [ ] Group rules：`@radix-ui/*` 一組（peer 連動）、`@ai-sdk/*` 一組、`langchain*` 一組、`@types/*` 一組
+- [ ] 分層 auto-merge：
+  - patch：CI 綠自動合（含 security）
+  - minor：需 1 人審
+  - major：單獨 PR + 2 人審 + 必走 G3 blue-green（見 N10）
+- [ ] Security PR 優先級最高、立即開
+- [ ] 文件 `docs/ops/renovate_policy.md`
+- [ ] 預估：**0.5 day**
+
+### N3. OpenAPI 前後端合約測試 + 自動生前端 type
+- [ ] CI 新 step：`curl /openapi.json > openapi.json` → `openapi-typescript openapi.json > lib/generated/api-types.ts`
+- [ ] 前端 `lib/api.ts` 改用生成的 type；FastAPI 改 schema 時前端編譯期即炸
+- [ ] `openapi.json` 納入 git + snapshot 比對；PR diff 顯示 API breaking change
+- [ ] 合約測試：前端 mock 用 schema 自動生 fixture（`msw` + `openapi-msw`）
+- [ ] 預估：**0.5 day**
+
+### N4. LangChain / LangGraph Adapter 防火牆層
+- [ ] `backend/llm_adapter.py`：所有 `langchain*` / `langgraph*` import 集中此檔；其他模組一律只 import `llm_adapter` 的符號
+- [ ] Adapter 公開 stable interface：`invoke_chat`、`stream_chat`、`embed`、`tool_call`（與 LangChain 版本解耦）
+- [ ] 掃全專案：若 `backend/**` 除 `llm_adapter.py` 外仍有 `from langchain` → CI fail
+- [ ] 升 LangChain 時只需改 adapter 層 + 跑 adapter 測試
+- [ ] 單元測試覆蓋 adapter 所有公開方法
+- [ ] 預估：**1 day**
+
+### N5. Nightly Upgrade-Preview CI
+- [ ] `.github/workflows/upgrade-preview.yml`：cron nightly
+  - `pip list --outdated --format=json` + `pnpm outdated --json` 產報告
+  - 試算 `pip-compile --upgrade` 與 `pnpm update` 的 diff
+  - 在隔離 container 跑完整測試套件（含 E2E）
+  - 結果 POST 成 issue（標 `dependency-preview`），包含：outdated 清單、試升 diff、測試結果、疑似 breaking 套件
+- [ ] 不自動合，只提前警示「明天合 Renovate PR 會壞什麼」
+- [ ] 預估：**0.5 day**
+
+### N6. 升級 Runbook + Rollback + CVE/EOL 監控
+- [ ] `docs/ops/dependency_upgrade_runbook.md`：
+  - 升級前：image snapshot、DB backup、lockfile clean 確認
+  - 升級中：staging 24h 觀察、smoke test 清單
+  - 升級後：監控指標（error rate / latency p99 / memory）72h
+  - Rollback：`git revert` + `docker compose pull <prev-tag>` 步驟
+- [ ] CVE 掃描：`osv-scanner` 或 Snyk 每日跑、嚴重 CVE 自動開 PR
+- [ ] EOL 監控：`scripts/check_eol.py` 每月查 Python / Node / FastAPI / Next.js 官方 EOL schedule（endoflife.date API），剩 6 個月內發 warning
+- [ ] 預估：**0.5 day**
+
+### N7. Multi-version CI Matrix
+- [ ] Python matrix：3.12 + 3.13
+- [ ] Node matrix：20.x + 22.x
+- [ ] FastAPI：current pinned + latest minor
+- [ ] 分層：PR 上只跑 primary（快）；nightly 跑完整 matrix（廣）
+- [ ] 新 deprecation warning 在 CI log 顯眼顯示
+- [ ] 預估：**0.5 day**
+
+### N8. DB Engine Compatibility Matrix（與 G4 綁）
+- [ ] CI matrix：SQLite 3.40 + 3.45；Postgres 15 + 16
+- [ ] Alembic migration 雙軌驗證：每條 migration 對 SQLite 與 Postgres 各跑一次 upgrade/downgrade
+- [ ] 標記 migration 中的 engine-specific 語法（警示 reviewer）
+- [ ] 與 G4 共用：G4 完成後 N8 退役 SQLite，只留 Postgres matrix（15/16/17）
+- [ ] 預估：**0.5 day**
+
+### N9. Framework Fallback Branches
+- [ ] 長青分支 `compat/nextjs-15`：固定在 Next 15 最後穩定版、weekly rebase master（只取非 Next 相關 commit）
+- [ ] 長青分支 `compat/pydantic-v2`：固定在 Pydantic 2.x 最後版（Pydantic v3 出現時用）
+- [ ] CI 每週對 fallback 分支跑 build + 核心測試，確保隨時可切
+- [ ] 重大 major 升級（Next 17 / Pydantic v3）PR 合入前，fallback 分支必須 green
+- [ ] Rollback 流程：若 production 升級爆炸 → 切 fallback 分支 tag → 重部
+- [ ] 預估：**0.5 day** 建置 + 持續維護
+- [ ] 首兩條目標：`compat/nextjs-15`（現處 Next 16，15 是最近 fallback）、`compat/pydantic-v2`（未雨綢繆）
+
+### N10. 升級流程強制走 G3 Blue-Green + 升級節奏政策
+- [ ] 政策寫入 `docs/ops/dependency_upgrade_policy.md`：
+  - Patch：週批次，CI 綠自動合
+  - Minor：雙週批次，1 人審 + staging 24h 觀察
+  - Major：季度，2 人審 + **必走 G3 blue-green**（standby 先升、smoke 通過才切流、舊版保留 24h rollback）
+  - 一個 PR 一個套件（或一組強相依），不混合；便於 single revert
+- [ ] CI gate：major 版本號升級的 PR 自動加 `requires-blue-green` label，deploy workflow 檢查該 label 存在才允許上 prod
+- [ ] 記錄每次 major 升級的 rollback 次數，季度 review
+- [ ] 預估：**0.25 day**（純文件 + CI label gate）
+
+**相依**：N8 與 G4 綁、N10 與 G3 綁；其餘可獨立推進。
+
+**總預估**：N1 (0.5) + N2 (0.5) + N3 (0.5) + N4 (1) + N5 (0.5) + N6 (0.5) + N7 (0.5) + N8 (0.5) + N9 (0.5) + N10 (0.25) = **~5.25 day**
+
+**建議順序**：
+- **立即（A1 上線後）**：N1 + N2 + N5（~1.5 day）— 鎖定 + 自動 PR + 預警
+- **短期（一個月內）**：N3 + N4 + N6（~2 day）— 合約測試 + LangChain 防火牆 + runbook
+- **中期（配合 G4）**：N8（與 G4 同步做）
+- **長期**：N7 + N9 + N10（配合 G3 上線後做）
+
+**驗收**：
+- 三個月內無「lockfile drift 導致 build 壞」事件
+- LangChain 任一 major 升級影響僅限 `llm_adapter.py` 單檔
+- 每次 FastAPI schema change 前端編譯期即發現
+- Nightly upgrade-preview 平均每週提前捕捉至少 1 個 breaking change
+- Next / Pydantic 出現 breaking 大升級時，fallback 分支已 green 可切
 
 ---
 
@@ -1214,7 +1326,13 @@ I1 (schema + tenant_id) → I2 (RLS) → I3 (SSE filter) → I4 (secrets per-ten
 M1 (cgroup CPU/mem) → M2 (disk quota + LRU) → M3 (per-tenant circuit breaker)
 → M4 (cgroup per-tenant metrics + AIMD 升級 + 計費) → M5 (prewarm 多租戶安全) → M6 (per-tenant egress)
 
-### Phase 12 — Bootstrap Wizard 一鍵安裝（~1 week，需 B12 + G1 + K1 基礎）
+### Phase 12 — Dependency Governance（~5.25 day，分三階段推進）
+立即：N1 (lockfile + engines) → N2 (Renovate) → N5 (nightly preview) [~1.5d]
+短期：N3 (OpenAPI 合約) → N4 (LangChain adapter 防火牆) → N6 (runbook + CVE/EOL) [~2d]
+中期：N8 (DB matrix，與 G4 綁) [0.5d]
+長期：N7 (multi-version CI) → N9 (fallback 分支) → N10 (blue-green 政策，與 G3 綁) [~1.25d]
+
+### Phase 13 — Bootstrap Wizard 一鍵安裝（~1 week，需 B12 + G1 + K1 基礎）
 L1 (status 偵測 + /bootstrap 路由) → L2 (admin 密碼) → L3 (LLM provider) → L4 (CF Tunnel embed)
 → L5 (服務啟動 + SSE log) → L6 (smoke test + finalize) → L7 (部署模式偵測) → L8 (reset + E2E)
 
