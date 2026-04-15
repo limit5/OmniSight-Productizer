@@ -205,6 +205,69 @@ integration test pack / HIL test recipes / doc templates。
 剩餘 skill pack 併行 → CORE-06/07/08 收尾。
 合計 wall-clock ~7-10 週（1 人）或 ~4-5 週（2-3 人併行 skill pack）。
 
+Layer A 擴充（支援完整產品組合：智慧門鈴 / dashcam / 路由器 / 5G-GW / 醫療 /
+車載 / 手機 / 手錶 / 眼鏡 / 直播機 / 工控 / drone / BT 耳機 / 視訊會議）
+- L4-CORE-00 ProjectClass enum + 多 planner 路徑分流（embedded/algo/optical/
+  iso/test-tool/factory，2 day）
+- L4-CORE-09 Safety & compliance framework（ISO 26262 ASIL / IEC 60601 /
+  DO-178 / IEC 61508，5-7 day，醫療/車用/drone/工控 gate）
+- L4-CORE-10 Radio certification harness（FCC/CE/NCC/SRRC pre-compliance，
+  3-5 day，所有無線）
+- L4-CORE-11 Power / battery profile（sleep state + current profiling +
+  lifetime model，3-4 day，穿戴/手機/耳機）
+- L4-CORE-12 Real-time / determinism track（RT-linux/RTOS + jitter 量測，
+  4-5 day，車用/工控/drone）
+- L4-CORE-13 Connectivity sub-skills（BLE/WiFi/5G/Ethernet/CAN/Modbus/OPC-UA，
+  5-8 day，跨所有產品共用）
+- L4-CORE-14 Sensor fusion library（IMU/GPS/baro + EKF，4-5 day，drone/
+  車用/wearable）
+- L4-CORE-15 Security stack（secure boot + TEE + attestation + SBOM 簽章，
+  5-7 day，醫療/車用/payment）
+- L4-CORE-16 OTA framework（A/B slot + delta update + rollback + signature，
+  4-5 day，所有產品適用）
+- L4-CORE-17 Telemetry backend（crash/usage/performance post-deploy，
+  4-5 day，所有聯網產品）
+
+Layer B — 產品 skill pack 擴充（13 new skill，小計 ~100-140 day；多數
+子 skill 可從 Layer A 複用 30-50%）
+- SKILL-DOORBELL（reuse SKILL-IPCAM ~70%，2-3 day）
+- SKILL-DASHCAM（影像 + GPS + G-sensor + 迴圈錄影，4-5 day）
+- SKILL-LIVESTREAM（RTMP/SRT/WebRTC push，5-6 day）
+- SKILL-ROUTER（OpenWrt + mesh + QoS，6-8 day）
+- SKILL-5G-GW（modem AT/QMI + dual-SIM + fallback，7-10 day）
+- SKILL-BT-EARBUDS（A2DP/HFP/LE Audio + ANC，7-10 day）
+- SKILL-VIDEOCONF（SKILL-UVC + SKILL-UAC 組合 + WebRTC，4-5 day）
+- SKILL-CARDASH（Android Auto/QNX + AUTOSAR stub + ISO 26262 gate，10-14 day）
+- SKILL-WATCH（Wear OS/RTOS + BLE peripheral，7-10 day）
+- SKILL-GLASSES（display driver + 6DoF + low power，10-14 day）
+- SKILL-MEDICAL（IEC 60601 + SW-B/C 分類 + risk file，10-14 day）
+- SKILL-DRONE（PX4/ArduPilot + MAVLink + failsafe，8-12 day）
+- SKILL-INDUSTRIAL-PC（Modbus/OPC-UA/EtherCAT + 冗餘電源，6-8 day）
+- SKILL-SMARTPHONE（AOSP + modem + cameras，15-20 day，建議最後做或外包）
+
+Layer C — 軟體專案軌道（非嵌入式產品，走獨立 planner，37-55 day）
+- SW-TRACK-01 學術演算法模擬（MATLAB/Python runner + paper-repro + reference
+  dataset + GPU 排程，7-10 day）
+- SW-TRACK-02 光學模擬（Zemax/Code V/LightTools headless + parameter sweep +
+  tolerance analysis，7-10 day）
+- SW-TRACK-03 ISO 標準實作（spec→code 追溯矩陣 + formal verification
+  Frama-C/TLA+ + cert prep，10-14 day）
+- SW-TRACK-04 協作測試工具（test fixture registry + multi-tenant dashboard +
+  跨團隊 replay，5-7 day）
+- SW-TRACK-05 產線調教測試（jig control GPIO/relay + test sequencer + MES
+  整合 + yield dashboard，8-12 day）
+
+META — 組織/矩陣（便宜但容易漏，合計 3-5 day）
+- 產品合規矩陣 yaml（產品 × FCC/CE/NCC/UL/IEC/ISO/FDA）
+- SoC × skill 相容矩陣
+- Test asset 生命週期 SOP（誰維護 / 版本標籤 / test_assets/ 守則延伸）
+- 跨 skill 整合測試策略（videoconf = UVC+UAC 合體須驗整合）
+- 第三方授權審核 gate（live555 GPL / BSP NDA / AOSP patent）
+
+整體 L4 產品線總估：Layer A 全部 60-85 day + Layer B 全部 100-140 day +
+Layer C 37-55 day + META 3-5 day ≈ 200-285 day。三人團隊併行可壓到
+~3-4 個月 wall-clock。
+
 - 真 embedding（Phase 67-F）替換 quality_score 做 cosine
 - SSO / OAuth（內部多 operator）
 - Postgres 遷移（>2 concurrent operator）
