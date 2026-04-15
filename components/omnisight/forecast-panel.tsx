@@ -1,21 +1,9 @@
 "use client"
 
-/**
- * Phase 60 — Project Forecast Panel (v0 prototype).
- *
- * 6 KPI cards (TASKS / AGENTS / HOURS / TOKENS / USD / CONFIDENCE)
- * plus a foldable breakdown showing per-phase task counts and
- * Profile sensitivity. Reads `/api/v1/system/forecast` (5min cache;
- * POST /forecast/recompute to bust).
- *
- * Like every other dashboard pill, every dynamic-width cell is in a
- * fixed-dimension box (Phase 50-Layout rules).
- */
-
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   ChevronDown, ChevronUp, ListChecks, Users, Clock3, Cpu, DollarSign,
-  Gauge, RefreshCw, BarChart3,
+  Gauge, RefreshCw, BarChart3, TrendingUp, TrendingDown, Minus,
 } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 
@@ -34,17 +22,44 @@ interface Forecast {
   generated_at: number
 }
 
+interface IntentField {
+  value: string
+  confidence: number
+}
+
+interface SpecDetail {
+  spec: {
+    target_arch: IntentField
+    framework: IntentField
+    hardware_required: IntentField
+    target_os: IntentField
+    project_type: IntentField
+    [key: string]: IntentField | string | unknown[]
+  }
+}
+
+interface ForecastDelta {
+  hours: number
+  tokens: number
+  reason: string
+}
+
 const COMPACT = (n: number, suffix = ""): string => {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M${suffix}`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k${suffix}`
   return `${n}${suffix}`
 }
 
+const DEBOUNCE_MS = 800
+
 export function ForecastPanel() {
   const [data, setData] = useState<Forecast | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [delta, setDelta] = useState<ForecastDelta | null>(null)
+  const prevRef = useRef<Forecast | null>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fetchForecast = useCallback(async (recompute = false) => {
     setBusy(true)
@@ -53,7 +68,23 @@ export function ForecastPanel() {
       const path = recompute ? "/api/v1/system/forecast/recompute" : "/api/v1/system/forecast"
       const res = await fetch(path, { method: recompute ? "POST" : "GET", cache: "no-store" })
       if (!res.ok) throw new Error(`API ${res.status}`)
-      setData(await res.json())
+      const next = (await res.json()) as Forecast
+      setData((prev) => {
+        if (prev) {
+          prevRef.current = prev
+          const dHours = +(next.duration.total_hours - prev.duration.total_hours).toFixed(1)
+          const dTokens = next.tokens.total - prev.tokens.total
+          if (dHours !== 0 || dTokens !== 0) {
+            const parts: string[] = []
+            if (next.target_platform !== prev.target_platform) parts.push(`platform: ${prev.target_platform} → ${next.target_platform}`)
+            if (next.project_track !== prev.project_track) parts.push(`track: ${prev.project_track} → ${next.project_track}`)
+            setDelta({ hours: dHours, tokens: dTokens, reason: parts.join("; ") || "spec changed" })
+          } else {
+            setDelta(null)
+          }
+        }
+        return next
+      })
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc))
     } finally {
@@ -62,6 +93,29 @@ export function ForecastPanel() {
   }, [])
 
   useEffect(() => { void fetchForecast(false) }, [fetchForecast])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onSpecUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<SpecDetail>).detail
+      if (!detail?.spec) return
+
+      const arch = detail.spec.target_arch?.value
+      const framework = detail.spec.framework?.value
+
+      if ((!arch || arch === "unknown") && (!framework || framework === "unknown")) return
+
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      debounceRef.current = setTimeout(() => {
+        void fetchForecast(true)
+      }, DEBOUNCE_MS)
+    }
+    window.addEventListener("omnisight:spec-updated", onSpecUpdated as EventListener)
+    return () => {
+      window.removeEventListener("omnisight:spec-updated", onSpecUpdated as EventListener)
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [fetchForecast])
 
   return (
     <section
@@ -100,18 +154,80 @@ export function ForecastPanel() {
 
       {error && (
         <div className="px-3 py-1.5 font-mono text-[10px] text-[var(--critical-red,#ef4444)] truncate" title={error}>
-          ⚠ {error}
+          {error}
         </div>
       )}
 
       {!data && !error && (
         <div className="px-3 py-6 text-center font-mono text-xs text-[var(--muted-foreground,#94a3b8)]">
-          Loading forecast…
+          Loading forecast...
         </div>
       )}
 
       {data && (
         <>
+          {/* Delta banner */}
+          {delta && (
+            <div
+              className="flex items-center gap-2 px-3 py-1.5 font-mono text-[10px] border-b border-[var(--neural-border,rgba(148,163,184,0.35))]"
+              role="status"
+              aria-label="Forecast delta"
+              style={{
+                background: delta.hours > 0
+                  ? "rgba(239,68,68,0.08)"
+                  : delta.hours < 0
+                    ? "rgba(16,185,129,0.08)"
+                    : "rgba(148,163,184,0.08)",
+              }}
+            >
+              {delta.hours > 0 ? (
+                <TrendingUp className="w-3 h-3 text-[var(--critical-red,#ef4444)]" aria-hidden />
+              ) : delta.hours < 0 ? (
+                <TrendingDown className="w-3 h-3 text-[var(--validation-emerald,#10b981)]" aria-hidden />
+              ) : (
+                <Minus className="w-3 h-3 text-[var(--muted-foreground,#94a3b8)]" aria-hidden />
+              )}
+              <span className="tabular-nums">
+                <span
+                  className={
+                    delta.hours > 0
+                      ? "text-[var(--critical-red,#ef4444)]"
+                      : delta.hours < 0
+                        ? "text-[var(--validation-emerald,#10b981)]"
+                        : "text-[var(--muted-foreground,#94a3b8)]"
+                  }
+                >
+                  {delta.hours > 0 ? "+" : ""}{delta.hours}h
+                </span>
+                {" / "}
+                <span
+                  className={
+                    delta.tokens > 0
+                      ? "text-[var(--critical-red,#ef4444)]"
+                      : delta.tokens < 0
+                        ? "text-[var(--validation-emerald,#10b981)]"
+                        : "text-[var(--muted-foreground,#94a3b8)]"
+                  }
+                >
+                  {delta.tokens > 0 ? "+" : ""}{COMPACT(delta.tokens)} tok
+                </span>
+              </span>
+              {delta.reason && (
+                <span className="text-[var(--muted-foreground,#94a3b8)] truncate" title={delta.reason}>
+                  {delta.reason}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setDelta(null)}
+                className="ml-auto text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--foreground,#e2e8f0)]"
+                aria-label="dismiss delta"
+              >
+                x
+              </button>
+            </div>
+          )}
+
           {/* 6 KPI cards row */}
           <div className="grid grid-cols-3 lg:grid-cols-6 gap-2 px-3 py-3">
             <KpiCard icon={ListChecks} label="TASKS"      value={String(data.tasks.total)}                   sub={data.tasks.by_track} />
@@ -172,7 +288,7 @@ export function ForecastPanel() {
               {/* Profile sensitivity */}
               <div>
                 <div className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground,#94a3b8)] mb-1.5">
-                  PROFILE × HOURS
+                  PROFILE x HOURS
                 </div>
                 <ul className="space-y-1 font-mono text-[11px]">
                   {data.profile_sensitivity.map((s) => {

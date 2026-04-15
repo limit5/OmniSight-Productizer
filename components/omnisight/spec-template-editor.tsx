@@ -130,6 +130,13 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   const [failure, setFailure] = useState<DagFailureContext | null>(null)
   const [hydrated, setHydrated] = useState(false)
 
+  useEffect(() => {
+    if (typeof window === "undefined" || !spec) return
+    window.dispatchEvent(
+      new CustomEvent("omnisight:spec-updated", { detail: { spec } }),
+    )
+  }, [spec])
+
   // Repo tab state
   const [repoUrl, setRepoUrl] = useState("")
   const [repoLoading, setRepoLoading] = useState(false)
