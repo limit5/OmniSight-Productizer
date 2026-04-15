@@ -149,6 +149,11 @@
 - ESLint 113 finding 分批清；warn → 升硬 gate
 - Pipeline Timeline 接 `omnisight:timeline-focus-run` event（如果未來真的需要）
 - Forecast panel 受 spec context 影響（spec 改 target_platform 即時更新預估）
+- **跨 agent 觀察 routing**：`finding_type` 加標準 enum `cross_agent/observation`；
+  orchestrator 用單一 rule 處理所有跨 agent 通報（A 發現 B 的問題 → 只回報、不動手、
+  走 Decision Engine propose）。目前 `emit_debug_finding` 已具備底層機制，缺
+  (1) enum 常數 (2) orchestrator 的 routing rule (3) `blocking=true` flag 讓阻擋型
+  通報優先排程。
 
 🅒 **大方向（L2/L3 級別，需設計再開工）**
 - Phase 64-C-SSH（要實機異架構需求才做）
