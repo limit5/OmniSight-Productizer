@@ -482,12 +482,12 @@ Legend:
 - [x] 預估：**1 day**
 
 ### K7. 密碼政策 + Argon2id 升級路徑
-- [ ] 密碼強度：最短 12 字、zxcvbn score ≥ 3
-- [ ] 新密碼比對歷史 5 筆（`password_history` 表）
-- [ ] Hash 格式支援 `argon2id$...`；驗證時雙軌（舊 pbkdf2 驗成功後自動 rehash 成 argon2id）
-- [ ] `argon2-cffi` 依賴加入
-- [ ] 測試：升級路徑、舊 hash 仍可驗、下次登入自動升級
-- [ ] 預估：**0.5 day**
+- [x] 密碼強度：最短 12 字、zxcvbn score ≥ 3
+- [x] 新密碼比對歷史 5 筆（`password_history` 表）
+- [x] Hash 格式支援 `argon2id$...`；驗證時雙軌（舊 pbkdf2 驗成功後自動 rehash 成 argon2id）
+- [x] `argon2-cffi` 依賴加入
+- [x] 測試：升級路徑、舊 hash 仍可驗、下次登入自動升級
+- [x] 預估：**0.5 day**
 
 **K-rest 總預估**：**5 day**
 

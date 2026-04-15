@@ -1,9 +1,38 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：K6 Per-key bearer tokens (master)
+> 最後 commit：K7 Password policy + Argon2id upgrade path (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## K7 (complete) 密碼政策 + Argon2id 升級路徑（2026-04-16 完成）
+
+**背景**：原本密碼以 PBKDF2-SHA256 (320k iterations) 儲存，缺乏密碼強度驗證與歷史重用防護。K7 升級至 Argon2id（memory-hard，抗 GPU/ASIC 攻擊）並加入 zxcvbn 密碼強度評估與密碼歷史。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/auth.py` — Argon2id hashing | `hash_password()` 改用 argon2-cffi；`verify_password()` 雙軌支援 argon2id + legacy pbkdf2 | ✅ 完成 |
+| `backend/auth.py` — auto-rehash | `authenticate_password()` 登入成功時若 hash 為 pbkdf2 自動升級為 argon2id | ✅ 完成 |
+| `backend/auth.py` — password validation | `validate_password_strength()`: min 12 chars + zxcvbn score ≥ 3 | ✅ 完成 |
+| `backend/auth.py` — password history | `check_password_history()` / `_record_password_history()`: 比對最近 5 筆 hash，阻止重用 | ✅ 完成 |
+| `backend/db.py` — password_history 表 | user_id, password_hash, created_at + 索引 | ✅ 完成 |
+| `backend/routers/auth.py` — change-password 強化 | 整合 zxcvbn 驗證 + 歷史重用檢查，422 拒絕弱密碼/重用密碼 | ✅ 完成 |
+| `backend/requirements.txt` | 新增 argon2-cffi>=23.1.0, zxcvbn-python>=4.4.28 | ✅ 完成 |
+| 測試（15 項） | argon2id roundtrip, legacy pbkdf2 verify, auto-rehash, zxcvbn validation, history reuse block, endpoint integration | ✅ 15/15 pass |
+
+**新增檔案**：
+- `backend/tests/test_k7_password_policy.py` — 15 項測試
+
+**修改檔案**：
+- `backend/auth.py` — Argon2id hashing + dual-track verify + password validation + history
+- `backend/db.py` — password_history 表
+- `backend/routers/auth.py` — change-password endpoint 加入強度驗證 + 歷史檢查
+- `backend/requirements.txt` — argon2-cffi + zxcvbn-python
+- `backend/tests/test_auth.py` — 更新 hash roundtrip 測試（pbkdf2 → argon2id）
+
+**全部測試**：48/48 pass（K7 15/15 + auth 24/24 + lockout 9/9）
 
 ---
 
