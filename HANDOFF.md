@@ -1,9 +1,48 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：K4 Session rotation + UA binding (master)
+> 最後 commit：K6 Per-key bearer tokens (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## K6 (complete) Bearer token per-key + 稽核（2026-04-16 完成）
+
+**背景**：原本使用單一 `OMNISIGHT_DECISION_BEARER` 環境變數做 service-to-service 認證，無法區分不同 CLI/CI 呼叫者，也無法細粒度控制 scope 或追蹤 key 使用情況。K6 以 `api_keys` 表取代，每把 key 有 SHA-256 hash、scope 白名單、啟用/停用、last_used_ip 追蹤，audit_log 的 session_id 格式為 `bearer:<key_id>` 可追溯。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/api_keys.py` | 完整 CRUD 模組：create/rotate/revoke/enable/delete/list/validate_bearer/migrate_legacy | ✅ 完成 |
+| `backend/db.py` — api_keys table | id, name, key_hash (SHA-256), key_prefix (前 8 字元), scopes (JSON), created_by, last_used_ip/at, enabled | ✅ 完成 |
+| `backend/auth.py` — per-key bearer auth | `current_user()` 先查 api_keys 表再 fallback legacy env；session_id=`bearer:<key_id>` | ✅ 完成 |
+| `backend/routers/api_keys.py` | Admin-only REST API：GET/POST /api-keys, POST /{id}/rotate, POST /{id}/revoke, PATCH /{id}/scopes, DELETE /{id} | ✅ 完成 |
+| `backend/main.py` — scope middleware | 攔截 API key 請求，檢查 scope 是否允許存取該 endpoint | ✅ 完成 |
+| `backend/main.py` — legacy migration | 啟動時偵測 `OMNISIGHT_DECISION_BEARER` env → 自動建 `legacy-bearer` key + 警告 | ✅ 完成 |
+| `components/omnisight/api-key-management-panel.tsx` | Admin UI：建立/旋轉/撤銷/刪除 key，顯示 prefix、scopes、last used | ✅ 完成 |
+| `components/omnisight/user-menu.tsx` | Admin 角色顯示「API Keys」選單項目，開啟管理面板 | ✅ 完成 |
+| `lib/api.ts` | 前端 API 函數：listApiKeys/createApiKey/rotateApiKey/revokeApiKey/enableApiKey/deleteApiKey/updateApiKeyScopes | ✅ 完成 |
+| Alembic migration 0011 | `api_keys` 表 + 索引 | ✅ 完成 |
+| audit/profile routers | 更新 `_require_audit_token` / `_require_token` 相容新舊模式 | ✅ 完成 |
+| 測試（20 項） | create/validate/revoke/rotate/scope/list/delete/legacy migration/audit session_id | ✅ 20/20 pass |
+
+**新增檔案**：
+- `backend/api_keys.py` — 核心 API key 模組
+- `backend/routers/api_keys.py` — Admin REST API
+- `backend/alembic/versions/0011_api_keys.py` — DB migration
+- `components/omnisight/api-key-management-panel.tsx` — 前端管理面板
+- `tests/test_api_keys.py` — 20 項測試
+
+**修改檔案**：
+- `backend/auth.py` — 取代 `_bearer_matches()` 為 per-key 驗證
+- `backend/db.py` — 新增 api_keys 表 schema
+- `backend/main.py` — 註冊 router + scope middleware + legacy migration startup hook
+- `backend/routers/audit.py` / `profile.py` — 更新 bearer gate 邏輯
+- `components/omnisight/user-menu.tsx` — 新增 API Keys 選單
+- `lib/api.ts` — 新增 API key 相關型別與函數
+- `.env.example` — 標記 `OMNISIGHT_DECISION_BEARER` 為 deprecated
+
+**全部測試**：20/20 pass（MFA 回歸 11/11 pass）
 
 ---
 

@@ -474,12 +474,12 @@ Legend:
 - [x] 預估：**2.5 day**
 
 ### K6. Bearer token per-key + 稽核
-- [ ] 廢除單一 `OMNISIGHT_DECISION_BEARER` env；改 `api_keys` 表（id、name、hashed_key、scopes、created_by、last_used_ip、enabled）
-- [ ] CLI / CI 憑個別 key 呼叫；audit_log 帶 `session_id=bearer:<key_id>` 可追
-- [ ] Admin UI 建 / rotate / revoke key
-- [ ] Migration 舊 env：啟動時偵測 → 自動建一筆 `legacy-bearer` key 並發警告要求盡快換
-- [ ] 測試：scope 限制（只能呼叫白名單 endpoint）、revoke 即時生效
-- [ ] 預估：**1 day**
+- [x] 廢除單一 `OMNISIGHT_DECISION_BEARER` env；改 `api_keys` 表（id、name、hashed_key、scopes、created_by、last_used_ip、enabled）
+- [x] CLI / CI 憑個別 key 呼叫；audit_log 帶 `session_id=bearer:<key_id>` 可追
+- [x] Admin UI 建 / rotate / revoke key
+- [x] Migration 舊 env：啟動時偵測 → 自動建一筆 `legacy-bearer` key 並發警告要求盡快換
+- [x] 測試：scope 限制（只能呼叫白名單 endpoint）、revoke 即時生效
+- [x] 預估：**1 day**
 
 ### K7. 密碼政策 + Argon2id 升級路徑
 - [ ] 密碼強度：最短 12 字、zxcvbn score ≥ 3
