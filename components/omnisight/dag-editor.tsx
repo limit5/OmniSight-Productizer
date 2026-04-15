@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight, Code, List, Workflow } from "lucide-react"
+import { AlertCircle, CheckCircle2, Loader2, Play, FileText, Copy, ArrowRight, ArrowLeft, Code, List, Workflow, Sparkles } from "lucide-react"
 import {
   validateDag,
   submitDag,
@@ -517,6 +517,18 @@ export function DagEditor() {
   // Hand off to the Pipeline Timeline panel so the operator can watch
   // execution progress on the run they just submitted. Top-level
   // page.tsx listens for this custom event and switches activePanel.
+  // Reverse jump: failed submit / mutation-exhausted → back to the
+  // Spec Editor where the operator can re-clarify intent rather
+  // than hand-edit the DAG JSON. SpecTemplateEditor restores the
+  // last spec from localStorage on mount, so the operator lands
+  // exactly where they were before Continue.
+  const jumpToSpec = () => {
+    if (typeof window === "undefined") return
+    window.dispatchEvent(
+      new CustomEvent("omnisight:navigate", { detail: { panel: "intent" } }),
+    )
+  }
+
   const jumpToTimeline = () => {
     if (typeof window === "undefined") return
     window.dispatchEvent(
@@ -740,7 +752,24 @@ export function DagEditor() {
         </div>
       )}
       {submitError && (
-        <div className="text-xs font-mono text-[var(--destructive)]">{submitError}</div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-mono text-[var(--destructive)] flex-1 min-w-0 break-words">
+            {submitError}
+          </div>
+          {/* Reverse jump on failure. Only useful when the operator
+              came from /intent in the first place — the existence of
+              a seedTargetPlatform is a good proxy for "yes, the
+              spec flow drove this". Always show as fallback because
+              the Spec editor restores from localStorage either way. */}
+          <button
+            type="button"
+            onClick={jumpToSpec}
+            className="text-xs font-mono px-2 py-0.5 rounded border border-[var(--artifact-purple)] text-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)] hover:text-white transition-colors flex items-center gap-1 shrink-0"
+            title="Re-clarify intent in the Spec Editor instead of hand-editing the DAG JSON"
+          >
+            <ArrowLeft size={10} /> <Sparkles size={10} /> Back to Spec
+          </button>
+        </div>
       )}
     </div>
   )

@@ -130,4 +130,39 @@ describe("SpecTemplateEditor", () => {
     expect(onReady).toHaveBeenCalledTimes(1)
     expect(onReady.mock.calls[0][0].framework.value).toBe("nextjs")
   })
+
+  it("Continue persists the spec to localStorage for back-jump restore", async () => {
+    const user = userEvent.setup()
+    window.localStorage.removeItem("omnisight:intent:last_spec")
+    const onReady = vi.fn()
+    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    await user.type(
+      screen.getByRole("textbox", { name: /project prose/i }),
+      "anything",
+    )
+    await waitFor(() => expect(mockParse).toHaveBeenCalled(), { timeout: 1200 })
+    const btn = await screen.findByRole("button", { name: /continue/i })
+    await waitFor(() => expect(btn).not.toBeDisabled())
+    await user.click(btn)
+    const stored = window.localStorage.getItem("omnisight:intent:last_spec")
+    expect(stored).not.toBeNull()
+    const cached = JSON.parse(stored!)
+    expect(cached.framework.value).toBe("nextjs")
+  })
+
+  it("restores the cached spec on next mount (back-from-DAG path)", async () => {
+    window.localStorage.setItem(
+      "omnisight:intent:last_spec",
+      JSON.stringify({
+        ...okSpec,
+        raw_text: "previously typed prompt",
+        framework: { value: "django", confidence: 0.9 },
+      }),
+    )
+    render(<SpecTemplateEditor />)
+    const ta = await screen.findByRole(
+      "textbox", { name: /project prose/i },
+    ) as HTMLTextAreaElement
+    await waitFor(() => expect(ta.value).toBe("previously typed prompt"))
+  })
 })

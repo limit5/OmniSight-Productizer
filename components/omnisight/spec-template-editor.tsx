@@ -64,16 +64,45 @@ interface Props {
   onSpecReady?: (spec: ParsedSpec) => void
 }
 
+// localStorage key for the last spec the operator handed off via
+// Continue. Picked back up on mount so a "Back to Spec" jump (from
+// a failed DAG submit) lands the operator exactly where they were,
+// not on a blank prose textarea. Survives reload; cleared after a
+// fresh handoff so stale state can't shadow new intent.
+const LS_LAST_SPEC = "omnisight:intent:last_spec"
+
 export function SpecTemplateEditor({ onSpecReady }: Props) {
   const [tab, setTab] = useState<"prose" | "form">("prose")
   const [text, setText] = useState("")
   const [spec, setSpec] = useState<ParsedSpec | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Hydration flag: localStorage isn't accessible during SSR, so we
+  // restore on mount and then never write before the first user-
+  // initiated change. Avoids overwriting valid prose with empty
+  // string during the first render pass.
+  const [hydrated, setHydrated] = useState(false)
 
   // Cancel-previous AbortController keyed via a ref so a slow
   // parse can't clobber a newer one.
   const inflight = useRef<AbortController | null>(null)
+
+  // ─── Persistence: restore prior session on mount ───────────────
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    try {
+      const raw = window.localStorage.getItem(LS_LAST_SPEC)
+      if (raw) {
+        const cached = JSON.parse(raw) as ParsedSpec
+        setSpec(cached)
+        setText(cached.raw_text || "")
+      }
+    } catch (exc) {
+      // Bad JSON / quota issues — silently start fresh.
+      console.debug("[SpecTemplateEditor] restore failed:", exc)
+    }
+    setHydrated(true)
+  }, [])
 
   const runParse = useCallback(async (raw: string) => {
     if (!raw.trim()) {
@@ -266,7 +295,20 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
           </span>
           <button
             type="button"
-            onClick={() => onSpecReady(spec)}
+            onClick={() => {
+              // Persist BEFORE handoff so a "Back to Spec" jump
+              // from the next panel finds the same state we just
+              // shipped. Best-effort — quota / serialisation
+              // failures don't block the handoff.
+              if (hydrated && typeof window !== "undefined") {
+                try {
+                  window.localStorage.setItem(LS_LAST_SPEC, JSON.stringify(spec))
+                } catch (exc) {
+                  console.debug("[SpecTemplateEditor] persist failed:", exc)
+                }
+              }
+              onSpecReady(spec)
+            }}
             disabled={!canContinue}
             className="text-xs font-mono px-3 py-1 rounded bg-[var(--artifact-purple)] text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >

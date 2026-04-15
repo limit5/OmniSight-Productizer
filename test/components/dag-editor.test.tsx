@@ -233,4 +233,28 @@ describe("DagEditor", () => {
     expect(ta.value).toContain("SAMPLE-fanout")
     expect(ta.value).toContain("sim_npu")
   })
+
+  it("submit failure surfaces a Back-to-Spec button that navigates to /intent", async () => {
+    const user = userEvent.setup()
+    mockSubmit.mockRejectedValueOnce(new Error("API 422: validation_errors=[…]"))
+    render(<DagEditor />)
+    await waitFor(() => expect(screen.getByText(/valid/i)).toBeInTheDocument())
+    const submit = screen.getByRole("button", { name: /submit/i })
+    await waitFor(() => expect(submit).not.toBeDisabled())
+
+    const navListener = vi.fn()
+    window.addEventListener("omnisight:navigate", navListener as EventListener)
+    try {
+      await user.click(submit)
+      // Error banner + Back-to-Spec button render.
+      const back = await screen.findByRole("button", { name: /back to spec/i })
+      expect(back).toBeInTheDocument()
+      await user.click(back)
+      expect(navListener).toHaveBeenCalledTimes(1)
+      const ev = navListener.mock.calls[0][0] as CustomEvent<{ panel: string }>
+      expect(ev.detail.panel).toBe("intent")
+    } finally {
+      window.removeEventListener("omnisight:navigate", navListener as EventListener)
+    }
+  })
 })
