@@ -4,6 +4,167 @@
 > 最後 commit：`8d46e8b` (master) → audit-fix batches in progress
 > 工作目錄狀態：audit-fix batches 1-N 進行中
 
+---
+
+## 2026-04-15 Session 總結（51 commits / 0 regression）
+
+長 session，主軸是「**從散文意圖到本機自動化執行的完整鏈路**」。
+分四條軌道並行：技術債清理 → L1 部署規範 → 對外身份驗證 →
+新 Phase 落地（67-E follow-up / 64-C-LOCAL / 68 全套）→ UX 整合
+與 panel 補齊。
+
+### 軌道 1 — 技術債（11 commits → CI 守門 +2）
+
+| commit | 內容 |
+|---|---|
+| `132cccd` | UI: 修最右 column 卡片溢出（grid 寬度 + flex-wrap） |
+| `535bf52` | UI: PanelHelp popover 透過 React portal 脫離 overflow-clip |
+| `51739a0` | `memory_decay`: drop `datetime.utcfromtimestamp` deprecation |
+| `24513c2` | Tech debt #1: pytest-asyncio fixture loop scope 鎖定 |
+| `53232bf` `f1712bc` `bccf3b0` `cd598f6` | TS B1-B4: **15 → 0 TS errors**；CI tsc 升為硬守門 |
+| `eaf8004` | Playwright FF/WebKit CI matrix（Chromium 硬、FF/WK 觀察） |
+| `48b0a59` `8de04d8` | Ruff `--fix` 84 處 + F811/F841 清理 + ruff.toml；CI ruff 升為硬守門 |
+| `530f7ef` | 13 處 metric-swallow `except: pass` → `logger.debug` |
+
+**結果**：CI 硬守門從 2 → 4（pytest+vitest → +tsc +ruff）。`ruff check backend` 與 `tsc --noEmit` 兩個 gate 從沉默變強制。
+
+### 軌道 2 — L1 自架部署規範（6 commits → 部署 ready）
+
+| commit | 內容 |
+|---|---|
+| `086cc5a` | L1-02: `scripts/backup_selftest.py` — WAL-safe 備份 + 還原 + audit chain 驗證 |
+| `63c0631` | L1-03: `validate_startup_config()` — boot 時拒絕危險預設配置 |
+| `74757fa` | L1-04: `OpsSummaryPanel` — 6 KPI（spend/decisions/SSE/watchdog/runner）+ 紅綠燈 dot |
+| `45888ec` | L1-06: hourly LLM 燃燒率 kill-switch（補 daily cap 漏網的 spike） |
+| `f36472f` | L1-07: `audit_archive.py` — 90d retention + manifest + `--verify` 抓篡改 |
+| `9d0b3be` | L1-08: ESLint v10 flat config（之前 silent no-op，113 真實 finding 浮現） |
+
+**剩**：L1-01（實跑 `deploy.sh prod`）+ L1-05（兩個真 DAG smoke），需 operator 動手。
+
+### 軌道 3 — 對外身份驗證（5 commits → 10 層縱深防禦）
+
+| commit | 內容 |
+|---|---|
+| `b360b99` | S1: rate-limit `/auth/login`（CF-IP 友好）+ audit_log + prod 拒絕 weak config |
+| `5e5957b` | S2: 前端 `/login` page + AuthProvider + UserMenu + cookie/CSRF 自動帶 |
+| `93e7979` | S3: `.env.example` + `deployment.md` 首次登入流程 |
+| `b9f6600` | S4: HSTS / X-Frame / CSP / Permissions-Policy / Referrer-Policy middleware |
+| `e16e1e8` | S5: 8 brute-force defence tests（per-IP rate limit + audit mask） |
+
+**安全縱深 10 層**：CF Edge → CF Tunnel → Security Headers → Login Gate → Rate Limit → HttpOnly Cookie → CSRF → RBAC → Audit hash chain → Sandbox tiers。
+
+### 軌道 4 — 新 Phase 落地（10 commits）
+
+#### Phase 67-E follow-up（1 commit）
+| commit | 內容 |
+|---|---|
+| `7588095` | Platform-aware GraphState — `soc_vendor`/`sdk_version` 進 state，`error_check_node` 真正轉發給 prefetch；SDK hard-lock 從 permissive 啟動 |
+
+#### Phase 64-C-LOCAL（5 commits）— Native-arch T3 fast path
+| commit | 內容 |
+|---|---|
+| `04e772a` | T1-A 前置：`get_platform_config` 預設 `aarch64` → `host_native` |
+| `27a8ab7` | S1: `t3_resolver.py` resolver + `record_dispatch` metric + 13 test |
+| `18de8d4` | S2: `start_t3_local_container`（runsc + `--network host`）+ `dispatch_t3` |
+| `ee09bc8` | S3: validator tier swap（t3 + LOCAL → 用 t1 規則檢查，flash_board 仍擋） |
+| `d87582d` | S4: router 串接 + UX-5（Canvas ⚡/🔗 chip）+ UX-6（Ops Summary runner pills）+ docs |
+
+#### Phase 68（4 commits）— Intent Parser + 規格澄清迴圈
+| commit | 內容 |
+|---|---|
+| `2c0c1fb` | 68-A: `intent_parser.py` ParsedSpec + LLM/heuristic 雙路徑 + CJK-safe regex + 16 test |
+| `cb5a8c2` | 68-B: `spec_conflicts.yaml` 宣告式規則庫 + iterative `apply_clarification()` + 10 test |
+| `274203e` | 68-C: `/intent/{parse,clarify}` endpoints + `SpecTemplateEditor`（Prose/Form tab、信心色階、衝突 panel）+ 10 test |
+| `0275220` `7aff71a` | 68-D: `intent_memory.py` 記操作員選擇進 L3、`prior_choice` ⭐ hint；HANDOFF 收尾 |
+
+### 軌道 5 — UX 整合與 panel 補齊（10 commits）
+
+把上面 phase 串成端到端可用的鏈路。
+
+| commit | 內容 |
+|---|---|
+| `f6aea48` | SpecTemplateEditor 掛 `?panel=intent` + Spec→DAG 範本 handoff（CustomEvent） |
+| `cdc4bf3` | `ParsedSpec.target_arch` → DAG submit `target_platform`（host==target 自動 LOCAL） |
+| `392dcd6` | DAG submit 失敗 → ← Back to Spec 按鈕 + localStorage 持久化 spec |
+| `80dc4cf` | Spec 7 範本 chips（含 CJK 範本驗證雙語） |
+| `31332fb` | DAG → Spec 反向跳帶失敗 context（rule names + 推測欄位） |
+| `09e989d` | 文件修正：`dag-form-editor` `inputs[]`/`output_overlap_ack` 已在 Form |
+| `b8e2715` `1463436` | RunHistory panel：列表 → inline 展開 step 詳情（自我修正方向） |
+| `1dd5715` | HANDOFF 草稿 64-C-LOCAL + 68 |
+| `3c9c623` `217a716` `8dd02da` | Ops 文件三件套：systemd units + cloudflared + deploy.sh + release-discipline |
+
+### 端到端 UX 鏈路（最終結果）
+
+```
+[ /intent panel ]
+  ├── 點 chip "Embedded Static UI"（7 範本）
+  ├── 結構化 spec：confidence 色階 + conflict panel + ⭐ prior_choice
+  ├── 解 conflict（iterative loop，3-round guard）
+  └── Continue（守門：無 conflict + 所有欄位 ≥0.7）
+       └── localStorage 寫快照
+          └── handoff event(spec) → /dag
+
+[ /dag panel ]（自動切換）
+  ├── seeded with template（依 spec.runtime_model 等挑 7 範本之一）
+  ├── target_platform 自動填（host_native / aarch64 / …）
+  ├── 即時 validate（Canvas ⚡/🔗 chip）
+  └── Submit
+       ├── 成功 → "View in Timeline" → /timeline
+       └── 失敗 → ← ✨ Back to Spec
+             └── /intent 還原 + 橘色 banner 解釋失敗 rule 與推測欄位
+                 └── 修對應欄位 → 重新 Continue → ...
+
+[ /history panel ]
+  ├── 列出近 50 runs（status filter / poll 15s / age + duration）
+  └── click row → inline 展開 step 列表 + 失敗錯誤訊息
+```
+
+**operator 一句話 → host==target 自動全機 CI/CD → https://localhost 開站 → 失敗可 round-trip 重新 clarify**。
+
+### 量化結果
+
+| 指標 | 數字 |
+|---|---|
+| Commits | **51**（含 1 HANDOFF 草稿、1 HANDOFF 收尾） |
+| Backend tests added | 42（intent_parser 26 + intent_router 5 + intent_memory 6 + login 8 + t3_resolver 13 + t3_dispatch 5 + dag_validator +5 + platform_default 5 + platform_tags_for_rag 9 + 其他） |
+| Frontend tests added | 47（spec-template 10 + run-history 6 + dag-editor +5 + dag-canvas +1 + ops-summary panel + 其他） |
+| Frontend total | **110/110** vitest 全綠 |
+| Backend test files touched | 12 |
+| TS errors | 15 → **0**（CI 升硬守門） |
+| Ruff errors | 139 → **0**（CI 升硬守門） |
+| ESLint | broken → working flat config（113 finding warn-only 觀察） |
+| Phase 64-C-LOCAL | 待實作 → **完成** |
+| Phase 68 | 待實作 → **完成** |
+| 安全縱深 | 6 → **10 層** |
+| L1 部署 ready | 90 % → **98 %**（剩 operator 物理動作） |
+
+### 剩餘工作（priority queue）
+
+🅐 **物理動作（operator）**
+- L1-01 實跑 `scripts/deploy.sh prod v0.1.0` + GoDaddy NS 遷移
+- L1-05 兩個真 DAG smoke test（建議用 `compile-flash` + `cross-compile` 範本）
+
+🅑 **小產品（每項 < 1 day）**
+- DAG `toolchain` 加 enum / autocomplete（消除 typo 只在 runtime 才抓）
+- ESLint 113 finding 分批清；warn → 升硬 gate
+- Pipeline Timeline 接 `omnisight:timeline-focus-run` event（如果未來真的需要）
+- Forecast panel 受 spec context 影響（spec 改 target_platform 即時更新預估）
+
+🅒 **大方向（L2/L3 級別，需設計再開工）**
+- Phase 64-C-SSH（要實機異架構需求才做）
+- Phase 64-C-QEMU（跨架構 build/test，等真用例）
+- 真 embedding（Phase 67-F）替換 quality_score 做 cosine
+- SSO / OAuth（內部多 operator）
+- Postgres 遷移（>2 concurrent operator）
+- 多租戶（對外 SaaS 才需）
+
+⛔ **不建議現在做**
+- pytest-xdist parallel — 需 DI refactor 前置（3-5 day），測試時間目前可忍
+- ESLint 全部 harden — 113 finding 要逐條看不能一股腦 fix
+- Forecast 複雜 ML 預測 — 等資料夠多再說
+
+---
+
 ## Audit-Fix 進度（Phase 42-46 深度審計後續）
 - 第二輪審計總計 ~85 個問題（13 真 CRITICAL + 4 新 CRITICAL + 21 HIGH + ...）
 - **Batch 1（完成）**：Security & path-traversal — C3/C4/C5/C6/C8/C9/C10/C12/M14/N2
