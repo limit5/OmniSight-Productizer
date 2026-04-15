@@ -1,0 +1,53 @@
+# UVC 1.5 Gadget — DAG task definitions
+schema_version: "1"
+skill_id: uvc
+
+tasks:
+  - id: uvc_descriptor_scaffold
+    name: "UVC 1.5 Descriptor Scaffold"
+    description: "Build USB descriptor tree: Video Control Interface, H.264 + MJPEG + Uncompressed streaming, still-image capture, and extension unit (XU) for vendor controls"
+    depends_on: []
+    artifacts:
+      - backend/uvc_gadget.py
+
+  - id: gadgetfs_binding
+    name: "gadget-fs / functionfs Binding"
+    description: "ConfigFS gadget creation, UVC function binding, UDC attachment, and FunctionFS control/streaming endpoint wiring"
+    depends_on: [uvc_descriptor_scaffold]
+    artifacts:
+      - backend/uvc_gadget.py
+
+  - id: uvch264_payload
+    name: "UVCH264 Payload Generator"
+    description: "H.264 NAL-unit framing into UVC payload headers per UVC 1.5 payload spec, including SCR/PTS timestamping and EOF/FID toggling"
+    depends_on: [uvc_descriptor_scaffold]
+    artifacts:
+      - backend/uvc_gadget.py
+
+  - id: still_image_capture
+    name: "Still Image Capture Method"
+    description: "UVC still-image capture trigger (method 2 — dedicated bulk pipe or method 3 — hardware trigger) with JPEG snapshot delivery"
+    depends_on: [gadgetfs_binding]
+    artifacts:
+      - backend/uvc_gadget.py
+
+  - id: extension_unit
+    name: "Extension Unit (XU) Controls"
+    description: "Vendor-specific extension unit with custom selectors for ISP tuning, firmware version query, and GPIO control"
+    depends_on: [uvc_descriptor_scaffold]
+    artifacts:
+      - backend/uvc_gadget.py
+
+  - id: rest_endpoints
+    name: "REST API Endpoints"
+    description: "FastAPI router for UVC gadget lifecycle management, stream control, and status monitoring"
+    depends_on: [gadgetfs_binding, uvch264_payload, still_image_capture, extension_unit]
+    artifacts:
+      - backend/routers/uvc_gadget.py
+
+  - id: unit_tests
+    name: "Unit Test Suite"
+    description: "Comprehensive tests covering descriptor generation, payload framing, configfs operations, and endpoint behavior"
+    depends_on: [rest_endpoints]
+    artifacts:
+      - backend/tests/test_uvc_gadget.py

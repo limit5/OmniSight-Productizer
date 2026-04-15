@@ -300,6 +300,8 @@ from backend.routers import motion_control as _motion_control_router  # C25/MOTI
 app.include_router(_motion_control_router.router, prefix=settings.api_prefix)
 from backend.routers import cloudflare_tunnel as _cf_tunnel_router  # B12/CF-TUNNEL-WIZARD
 app.include_router(_cf_tunnel_router.router, prefix=settings.api_prefix)
+from backend.routers import uvc_gadget as _uvc_gadget_router  # D1/SKILL-UVC
+app.include_router(_uvc_gadget_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

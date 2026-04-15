@@ -1,0 +1,59 @@
+# UVC 1.5 Gadget configuration
+# SKILL-UVC (#218) — D1
+
+gadget:
+  name: g_uvc
+  vendor_id: 0x1d6b
+  product_id: 0x0104
+  bcd_device: 0x0100
+  bcd_usb: 0x0200
+  device_class: 0xEF
+  device_subclass: 0x02
+  device_protocol: 0x01
+  manufacturer: "OmniSight"
+  product: "UVC Camera"
+  serial: "000000000001"
+  max_power: 500
+
+formats:
+  h264:
+    enabled: true
+    profile: "baseline"
+    level: "4.0"
+    resolutions:
+      - { width: 1920, height: 1080, fps: 30 }
+      - { width: 1280, height: 720, fps: 60 }
+      - { width: 640, height: 480, fps: 120 }
+  mjpeg:
+    enabled: true
+    quality: 85
+    resolutions:
+      - { width: 1920, height: 1080, fps: 30 }
+      - { width: 1280, height: 720, fps: 60 }
+      - { width: 640, height: 480, fps: 120 }
+  yuy2:
+    enabled: true
+    resolutions:
+      - { width: 640, height: 480, fps: 30 }
+      - { width: 320, height: 240, fps: 30 }
+
+still_image:
+  method: 2
+  resolution: { width: 1920, height: 1080 }
+
+extension_unit:
+  guid: "a29e7641f04e36119f2bff6137d0e124"
+  controls:
+    - { selector: 1, name: "Firmware Version", size: 4, read_only: true }
+    - { selector: 2, name: "ISP Brightness", size: 1, min: 0, max: 255, default: 128 }
+    - { selector: 3, name: "ISP Contrast", size: 1, min: 0, max: 255, default: 128 }
+    - { selector: 4, name: "ISP Saturation", size: 1, min: 0, max: 255, default: 128 }
+    - { selector: 5, name: "ISP Sharpness", size: 1, min: 0, max: 255, default: 128 }
+    - { selector: 6, name: "GPIO Output", size: 1, min: 0, max: 255, default: 0 }
+    - { selector: 7, name: "Sensor Register R/W", size: 4, min: 0, max: 4294967295, default: 0 }
+    - { selector: 8, name: "Debug Log Level", size: 1, min: 0, max: 4, default: 0 }
+
+compliance:
+  usb_cv_version: "4.x"
+  chapter9_required: true
+  uvc_class_required: true

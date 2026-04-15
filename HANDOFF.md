@@ -1,9 +1,38 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：C25 motion control (master)
+> 最後 commit：D1 SKILL-UVC (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## D1 (complete) SKILL-UVC — UVC 1.5 USB Video Class gadget skill pack（2026-04-16 完成）
+
+**背景**：D 系列第一個 skill pack（pilot），用以驗證 CORE-05 skill pack framework 的完整性。SKILL-UVC 實作 USB Video Class 1.5 裝置端（gadget）功能，讓嵌入式裝置可作為 USB 攝影機使用。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| UVC 1.5 描述符框架 | Camera Terminal → Processing Unit → Output Terminal + Extension Unit，H.264/MJPEG/YUY2 格式 + 4 種解析度 + still-image 描述符 | ✅ 完成 |
+| gadget-fs/functionfs binding | Linux ConfigFS gadget 建立、UVC function 綁定、UDC attach/detach、streaming descriptor 寫入 | ✅ 完成 |
+| UVCH264 payload generator | H.264 NAL 分片打包為 UVC payload，12-byte header 含 PTS/SCR 時戳、EOF/FID 位元切換、max payload 限制 | ✅ 完成 |
+| USB-CV compliance test recipe | 5 項 HIL recipes（enumeration、H.264 stream、still capture、USB-CV、multi-resolution），含軟體層合規性驗證（10 項 Chapter 9 + UVC 1.5 測試） | ✅ 完成 |
+| Datasheet + user manual templates | Jinja2 模板：datasheet（規格表、XU 控制清單、電氣規格）+ user manual（快速上手、API 參考、故障排除） | ✅ 完成 |
+| CORE-05 framework 驗證 | `validate_skill('uvc')` → ok=True, issues=[]，完整通過 7 點驗證 | ✅ 完成 |
+
+**新增檔案**：
+- `backend/uvc_gadget.py` — 核心模組（descriptor builder + ConfigFS binder + UVCH264 payload gen + gadget manager + compliance checker）
+- `configs/uvc_gadget.yaml` — YAML 配置（gadget 參數 + 3 format + 8 XU controls + compliance settings）
+- `backend/routers/uvc_gadget.py` — FastAPI router，18 REST endpoints（lifecycle/stream/still/XU/compliance/descriptors）
+- `backend/tests/test_uvc_gadget.py` — 115 unit tests，11 test classes
+- `configs/skills/uvc/` — CORE-05 skill pack（skill.yaml + tasks.yaml + scaffolds/ + tests/ + hil/ + docs/）
+
+**設計決策**：
+- 採 **ConfigFS 抽象層** 而非直接 sysfs 操作，方便單元測試中 mock
+- UVCH264 payload generator 嚴格遵循 UVC 1.5 payload header 規格（12 bytes: HLE+BFH+PTS+SCR_STC+SCR_SOF）
+- Extension Unit 支援 8 個 vendor selector（含 read-only firmware version、ISP tuning、GPIO、sensor register R/W）
+- Still image 支援 Method 2（dedicated pipe）和 Method 3（HW trigger）
+- Compliance checker 涵蓋 Chapter 9（device class/USB 2.0/descriptor chain）+ UVC 1.5（formats/still/XU）
 
 ---
 

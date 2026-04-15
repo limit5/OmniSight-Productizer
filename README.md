@@ -126,6 +126,9 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Barcode Scanner** (C22): 4 vendor adapters + 16 symbologies + 3 decode modes
 - **Motion Control** (C25): G-code interpreter + 3 stepper drivers + PID heaters + thermal runaway safety
 
+### Skill Packs (Layer D)
+- **UVC Gadget** (D1): UVC 1.5 descriptor scaffold + gadget-fs binding + UVCH264 payload + USB-CV compliance (pilot skill — validates CORE-05 framework)
+
 ### Slash Commands
 Type `/` in any input field for autocomplete:
 

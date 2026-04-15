@@ -1,0 +1,96 @@
+schema_version: 1
+hil_recipes:
+  - id: hil_uvc_enumeration
+    name: "UVC Device Enumeration"
+    description: "HIL test: verify UVC gadget enumerates on USB host as a compliant video device"
+    equipment:
+      - "Target board with USB OTG/device port"
+      - "USB host PC (Linux or Windows)"
+      - "USB 2.0 HS or USB 3.0 cable"
+    steps:
+      - "Configure gadget via configfs on target"
+      - "Attach UDC to bind gadget"
+      - "On host: verify lsusb shows VID:PID"
+      - "On host: verify /dev/videoN appears"
+      - "On host: v4l2-ctl --list-formats-ext shows H.264 + MJPEG"
+      - "On host: v4l2-ctl --list-ctrls shows extension unit controls"
+    pass_criteria:
+      - "Device enumerates within 2 seconds"
+      - "H.264 and MJPEG formats listed"
+      - "Still image capture supported"
+      - "Extension unit controls accessible"
+
+  - id: hil_uvc_h264_stream
+    name: "H.264 Stream Validation"
+    description: "HIL test: stream H.264 video from gadget and validate on host"
+    equipment:
+      - "Target board running UVC gadget"
+      - "USB host PC with ffmpeg/gstreamer"
+    steps:
+      - "Start UVC gadget with H.264 1080p@30fps"
+      - "On host: open stream with ffplay or gst-launch"
+      - "Stream for 30 seconds"
+      - "Verify frame rate stability"
+      - "Verify no frame drops or corruption"
+      - "Stop stream and verify clean shutdown"
+    pass_criteria:
+      - "Average frame rate within 29-31 fps"
+      - "Frame drop rate < 0.1%"
+      - "No H.264 decode errors"
+      - "Clean start/stop without USB errors"
+
+  - id: hil_uvc_still_capture
+    name: "Still Image Capture"
+    description: "HIL test: trigger still-image capture and verify JPEG snapshot"
+    equipment:
+      - "Target board running UVC gadget"
+      - "USB host PC with v4l2-ctl"
+    steps:
+      - "Start UVC gadget in streaming mode"
+      - "Trigger still-image capture via UVC control"
+      - "Save captured JPEG frame"
+      - "Verify JPEG integrity and resolution"
+      - "Verify capture does not interrupt video stream"
+    pass_criteria:
+      - "JPEG snapshot captured within 500ms"
+      - "Resolution matches configured still-image resolution"
+      - "JPEG file validates (no truncation)"
+      - "Video stream continues uninterrupted"
+
+  - id: hil_usb_cv_compliance
+    name: "USB-CV Compliance Test"
+    description: "HIL test: run USB Command Verifier (USB-CV) against UVC gadget"
+    equipment:
+      - "Target board running UVC gadget"
+      - "Windows PC with USB-CV 4.x installed"
+      - "USB 2.0 HS cable"
+    steps:
+      - "Connect target to USB-CV host"
+      - "Run USB-CV Chapter 9 tests"
+      - "Run USB-CV UVC class-specific tests"
+      - "Run USB-CV descriptor validation"
+      - "Export test report"
+    pass_criteria:
+      - "Chapter 9 tests: 100% pass"
+      - "UVC class tests: 100% pass"
+      - "Descriptor validation: no errors"
+      - "No USB protocol violations"
+
+  - id: hil_uvc_multi_resolution
+    name: "Multi-Resolution Switching"
+    description: "HIL test: switch between resolutions and verify stream adapts"
+    equipment:
+      - "Target board running UVC gadget"
+      - "USB host PC"
+    steps:
+      - "Start stream at 1920x1080"
+      - "Stop stream"
+      - "Start stream at 1280x720"
+      - "Stop stream"
+      - "Start stream at 640x480"
+      - "Verify each resolution streams correctly"
+    pass_criteria:
+      - "Resolution switch completes within 1 second"
+      - "No USB stalls during switch"
+      - "Output resolution matches requested"
+      - "All format/frame combinations functional"

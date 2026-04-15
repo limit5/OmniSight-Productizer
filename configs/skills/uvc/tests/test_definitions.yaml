@@ -1,0 +1,46 @@
+# UVC 1.5 Gadget — test suite definitions
+schema_version: "1"
+skill_id: uvc
+
+test_suites:
+  - id: descriptor_scaffold
+    name: "UVC Descriptor Scaffold Tests"
+    description: "Verify descriptor tree generation: VC interface, VS interfaces, format/frame descriptors, still-image, extension unit"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["descriptor"]
+
+  - id: gadgetfs_binding
+    name: "GadgetFS / ConfigFS Binding Tests"
+    description: "Verify configfs directory creation, symlink wiring, UDC attachment, and cleanup"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["gadgetfs"]
+
+  - id: uvch264_payload
+    name: "UVCH264 Payload Framing Tests"
+    description: "Verify H.264 NAL framing, PTS/SCR timestamps, EOF/FID toggling, max payload size enforcement"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["payload"]
+
+  - id: still_image
+    name: "Still Image Capture Tests"
+    description: "Verify still-image trigger, JPEG snapshot generation, and method 2/3 handling"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["still_image"]
+
+  - id: extension_unit
+    name: "Extension Unit Tests"
+    description: "Verify XU descriptor, custom selector handling, GET_CUR/SET_CUR request flow"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["extension_unit"]
+
+  - id: rest_api
+    name: "REST API Endpoint Tests"
+    description: "Verify FastAPI router for gadget lifecycle, stream start/stop, status query"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["rest_api"]
+
+  - id: error_handling
+    name: "Error Handling Tests"
+    description: "Verify graceful handling of missing configfs, invalid descriptors, UDC not found"
+    test_file: backend/tests/test_uvc_gadget.py
+    markers: ["error_handling"]
