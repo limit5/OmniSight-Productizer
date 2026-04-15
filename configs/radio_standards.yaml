@@ -1,0 +1,275 @@
+schema_version: 1
+
+regions:
+  fcc:
+    name: "FCC Part 15"
+    authority: "Federal Communications Commission"
+    region: "United States"
+    description: "Unlicensed radio frequency device regulations"
+    test_recipes:
+      - id: "FCC-15B-CONDUCTED"
+        name: "Conducted emissions"
+        category: "conducted"
+        description: "Conducted emissions on AC mains (FCC Part 15 Subpart B)"
+        frequency_range_mhz: [0.15, 30]
+        limits_db_uv:
+          quasi_peak: 66
+          average: 56
+        equipment: ["EMI receiver", "LISN"]
+        reference: "47 CFR 15.107"
+      - id: "FCC-15B-RADIATED"
+        name: "Radiated emissions"
+        category: "radiated"
+        description: "Radiated emissions measurement (FCC Part 15 Subpart B)"
+        frequency_range_mhz: [30, 1000]
+        limits_db_uv_m:
+          at_3m: 40
+          at_10m: 29.5
+        equipment: ["EMI receiver", "biconical antenna", "log-periodic antenna", "OATS or semi-anechoic chamber"]
+        reference: "47 CFR 15.109"
+      - id: "FCC-15C-TX-CONDUCTED"
+        name: "Transmitter conducted emissions"
+        category: "conducted"
+        description: "Intentional radiator conducted output power"
+        frequency_range_mhz: [0.15, 30]
+        reference: "47 CFR 15.207"
+      - id: "FCC-15C-TX-RADIATED"
+        name: "Transmitter radiated emissions"
+        category: "radiated"
+        description: "Intentional radiator field strength"
+        frequency_range_mhz: [30, 6000]
+        reference: "47 CFR 15.209 / 15.247 / 15.407"
+      - id: "FCC-15C-SPURIOUS"
+        name: "Spurious emissions"
+        category: "radiated"
+        description: "Out-of-band and spurious emissions from intentional radiators"
+        frequency_range_mhz: [30, 25000]
+        reference: "47 CFR 15.209"
+      - id: "FCC-15E-UNII"
+        name: "U-NII band emissions"
+        category: "radiated"
+        description: "5 GHz U-NII device emissions"
+        frequency_range_mhz: [5150, 5850]
+        reference: "47 CFR 15.407"
+      - id: "FCC-SAR"
+        name: "SAR evaluation"
+        category: "sar"
+        description: "Specific Absorption Rate evaluation for portable devices"
+        limit_w_kg: 1.6
+        averaging_mass_g: 1
+        reference: "47 CFR 2.1093"
+    required_artifacts:
+      - test_report
+      - equipment_authorization
+      - device_photos
+      - label_artwork
+      - user_manual_rf_statement
+      - schematic
+      - block_diagram
+
+  ce_red:
+    name: "CE RED"
+    authority: "European Commission"
+    region: "European Union"
+    description: "Radio Equipment Directive 2014/53/EU"
+    test_recipes:
+      - id: "RED-CONDUCTED"
+        name: "Conducted emissions"
+        category: "conducted"
+        description: "Conducted emissions per EN 55032"
+        frequency_range_mhz: [0.15, 30]
+        limits_db_uv:
+          quasi_peak: 66
+          average: 56
+        equipment: ["EMI receiver", "LISN"]
+        reference: "EN 55032"
+      - id: "RED-RADIATED"
+        name: "Radiated emissions"
+        category: "radiated"
+        description: "Radiated emissions per EN 55032"
+        frequency_range_mhz: [30, 6000]
+        limits_db_uv_m:
+          at_3m: 40
+          at_10m: 30
+        equipment: ["EMI receiver", "biconical antenna", "log-periodic antenna", "semi-anechoic chamber"]
+        reference: "EN 55032"
+      - id: "RED-ETSI-TX"
+        name: "Transmitter parameters"
+        category: "radiated"
+        description: "RF output power, frequency stability, modulation bandwidth"
+        reference: "ETSI EN 300 328 / EN 301 893"
+      - id: "RED-ETSI-SPURIOUS"
+        name: "Spurious emissions"
+        category: "radiated"
+        description: "Out-of-band emissions per ETSI harmonised standard"
+        frequency_range_mhz: [30, 25000]
+        reference: "ETSI EN 300 328 / EN 301 893"
+      - id: "RED-ETSI-RECEIVER"
+        name: "Receiver performance"
+        category: "receiver"
+        description: "Receiver blocking, selectivity, sensitivity"
+        reference: "ETSI EN 300 328 / EN 301 893"
+      - id: "RED-SAR"
+        name: "SAR evaluation"
+        category: "sar"
+        description: "Specific Absorption Rate per EN 62209"
+        limit_w_kg: 2.0
+        averaging_mass_g: 10
+        reference: "EN 62209-1 / EN 62209-2"
+    required_artifacts:
+      - test_report
+      - declaration_of_conformity
+      - technical_documentation
+      - device_photos
+      - label_artwork
+      - user_manual_rf_statement
+      - schematic
+      - block_diagram
+
+  ncc_lpd:
+    name: "NCC LPD"
+    authority: "National Communications Commission"
+    region: "Taiwan"
+    description: "Low Power Device technical regulations"
+    test_recipes:
+      - id: "NCC-LPD-CONDUCTED"
+        name: "Conducted emissions"
+        category: "conducted"
+        description: "Conducted emissions per LP0002"
+        frequency_range_mhz: [0.15, 30]
+        limits_db_uv:
+          quasi_peak: 66
+          average: 56
+        equipment: ["EMI receiver", "LISN"]
+        reference: "LP0002"
+      - id: "NCC-LPD-RADIATED"
+        name: "Radiated emissions"
+        category: "radiated"
+        description: "Radiated emissions per LP0002"
+        frequency_range_mhz: [30, 6000]
+        limits_db_uv_m:
+          at_3m: 40
+        equipment: ["EMI receiver", "antenna set", "OATS or semi-anechoic chamber"]
+        reference: "LP0002"
+      - id: "NCC-LPD-TX"
+        name: "Transmitter parameters"
+        category: "radiated"
+        description: "TX power, frequency tolerance, bandwidth"
+        reference: "LP0002"
+      - id: "NCC-LPD-SPURIOUS"
+        name: "Spurious emissions"
+        category: "radiated"
+        description: "Out-of-band emissions"
+        frequency_range_mhz: [30, 25000]
+        reference: "LP0002"
+      - id: "NCC-SAR"
+        name: "SAR evaluation"
+        category: "sar"
+        description: "SAR test per NCC requirements"
+        limit_w_kg: 2.0
+        averaging_mass_g: 10
+        reference: "LP0002"
+    required_artifacts:
+      - test_report
+      - type_approval_certificate
+      - device_photos
+      - label_artwork
+      - user_manual_rf_statement
+      - schematic
+      - block_diagram
+
+  srrc_srd:
+    name: "SRRC SRD"
+    authority: "State Radio Regulation of China"
+    region: "China"
+    description: "Short-Range Device type approval"
+    test_recipes:
+      - id: "SRRC-CONDUCTED"
+        name: "Conducted emissions"
+        category: "conducted"
+        description: "Conducted emissions per SRRC requirements"
+        frequency_range_mhz: [0.15, 30]
+        limits_db_uv:
+          quasi_peak: 66
+          average: 56
+        equipment: ["EMI receiver", "LISN"]
+        reference: "MIIT [2019] No.52"
+      - id: "SRRC-RADIATED"
+        name: "Radiated emissions"
+        category: "radiated"
+        description: "Radiated emissions per SRRC requirements"
+        frequency_range_mhz: [30, 6000]
+        equipment: ["EMI receiver", "antenna set", "semi-anechoic chamber"]
+        reference: "MIIT [2019] No.52"
+      - id: "SRRC-TX"
+        name: "Transmitter parameters"
+        category: "radiated"
+        description: "TX power, frequency, modulation, bandwidth"
+        reference: "MIIT [2019] No.52"
+      - id: "SRRC-SPURIOUS"
+        name: "Spurious emissions"
+        category: "radiated"
+        description: "Out-of-band and spurious emissions"
+        frequency_range_mhz: [30, 25000]
+        reference: "MIIT [2019] No.52"
+      - id: "SRRC-SAR"
+        name: "SAR evaluation"
+        category: "sar"
+        description: "SAR test per Chinese GB standards"
+        limit_w_kg: 2.0
+        averaging_mass_g: 10
+        reference: "GB 21288"
+    required_artifacts:
+      - test_report
+      - type_approval_certificate
+      - device_photos
+      - label_artwork
+      - user_manual_rf_statement
+      - schematic
+      - block_diagram
+
+artifact_definitions:
+  test_report:
+    name: "Test Report"
+    description: "EMC/RF test report from accredited lab"
+    file_pattern: "**/test_report_*.*"
+  equipment_authorization:
+    name: "Equipment Authorization"
+    description: "FCC equipment authorization application"
+    file_pattern: "**/equipment_authorization.*"
+  declaration_of_conformity:
+    name: "Declaration of Conformity"
+    description: "EU Declaration of Conformity (DoC)"
+    file_pattern: "**/declaration_of_conformity.*"
+  technical_documentation:
+    name: "Technical Documentation"
+    description: "Technical construction file per RED"
+    file_pattern: "**/technical_documentation.*"
+  type_approval_certificate:
+    name: "Type Approval Certificate"
+    description: "Regional type approval certificate"
+    file_pattern: "**/type_approval_certificate.*"
+  device_photos:
+    name: "Device Photos"
+    description: "Internal and external device photographs"
+    file_pattern: "**/device_photos/**"
+  label_artwork:
+    name: "Label Artwork"
+    description: "Product label with regulatory markings"
+    file_pattern: "**/label_artwork.*"
+  user_manual_rf_statement:
+    name: "User Manual RF Statement"
+    description: "RF exposure and compliance statements for user manual"
+    file_pattern: "**/rf_statement.*"
+  schematic:
+    name: "Schematic"
+    description: "Circuit schematic diagram"
+    file_pattern: "**/schematic.*"
+  block_diagram:
+    name: "Block Diagram"
+    description: "System block diagram showing RF chain"
+    file_pattern: "**/block_diagram.*"
+  sar_report:
+    name: "SAR Test Report"
+    description: "Specific Absorption Rate test report from accredited lab"
+    file_pattern: "**/sar_report.*"
