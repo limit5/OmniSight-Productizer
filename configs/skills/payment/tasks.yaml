@@ -1,0 +1,114 @@
+schema_version: 1
+tasks:
+  - id: payment_pci_dss_mapping
+    name: "PCI-DSS Control Mapping"
+    description: "Map PCI-DSS requirements 1-12 to product artifacts and DAG tasks"
+    phase: "compliance_setup"
+    depends_on: []
+    artifacts:
+      - pci_dss_control_matrix
+      - gap_analysis_report
+    test_recipe: pci_dss_control_audit
+
+  - id: payment_pci_pts_setup
+    name: "PCI-PTS Physical Security Setup"
+    description: "Configure PCI-PTS physical security rules for terminal hardware"
+    phase: "compliance_setup"
+    depends_on: []
+    artifacts:
+      - tamper_detection_design
+      - key_storage_architecture
+      - firmware_signing_procedure
+
+  - id: payment_emv_l1_test
+    name: "EMV Level 1 Hardware Test"
+    description: "Run EMV L1 contact and contactless interface tests"
+    phase: "certification_test"
+    depends_on:
+      - payment_pci_pts_setup
+    artifacts:
+      - emv_l1_test_plan
+      - contact_interface_test_report
+      - contactless_interface_test_report
+      - antenna_tuning_report
+    test_recipe: emv_l1_contact_test
+
+  - id: payment_emv_l2_test
+    name: "EMV Level 2 Kernel Test"
+    description: "Run EMV L2 payment kernel transaction flow tests"
+    phase: "certification_test"
+    depends_on:
+      - payment_emv_l1_test
+    artifacts:
+      - emv_l2_test_plan
+      - kernel_certification_report
+      - transaction_flow_test_report
+      - cvm_test_report
+    test_recipe: emv_l2_kernel_test
+
+  - id: payment_emv_l3_test
+    name: "EMV Level 3 Acceptance Test"
+    description: "Run EMV L3 brand-specific acceptance tests"
+    phase: "certification_test"
+    depends_on:
+      - payment_emv_l2_test
+    artifacts:
+      - emv_l3_test_plan
+      - brand_acceptance_report
+      - host_integration_test_report
+      - receipt_format_validation
+    test_recipe: emv_l3_brand_test
+
+  - id: payment_hsm_integration
+    name: "HSM Integration"
+    description: "Integrate with HSM (Thales/Utimaco/SafeNet) for key management"
+    phase: "security_setup"
+    depends_on: []
+    artifacts:
+      - hsm_integration_spec
+      - hsm_fips_certificate
+    test_recipe: hsm_integration_test
+
+  - id: payment_p2pe_setup
+    name: "P2PE Key Injection Setup"
+    description: "Configure DUKPT key injection flow for POI devices"
+    phase: "security_setup"
+    depends_on:
+      - payment_hsm_integration
+    artifacts:
+      - dukpt_implementation_spec
+      - key_injection_procedure
+      - poi_encryption_design
+    test_recipe: p2pe_key_injection_test
+
+  - id: payment_p2pe_validation
+    name: "P2PE Encryption Validation"
+    description: "Validate end-to-end P2PE encryption from POI to HSM"
+    phase: "security_test"
+    depends_on:
+      - payment_p2pe_setup
+    artifacts:
+      - poi_encryption_activation_evidence
+      - decryption_architecture
+    test_recipe: p2pe_encryption_test
+
+  - id: payment_cert_generation
+    name: "Certification Artifact Generation"
+    description: "Generate all required certification artifacts for target standard/level"
+    phase: "certification_output"
+    depends_on:
+      - payment_pci_dss_mapping
+      - payment_emv_l3_test
+      - payment_p2pe_validation
+    artifacts:
+      - certification_bundle
+    test_recipe: cert_artifact_generation_test
+
+  - id: payment_integration_test
+    name: "Payment Integration Test"
+    description: "Full integration test covering PCI-DSS + PCI-PTS + EMV + P2PE + HSM"
+    phase: "integration_test"
+    depends_on:
+      - payment_cert_generation
+    artifacts:
+      - integration_test_report

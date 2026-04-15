@@ -253,12 +253,12 @@ Legend:
 - [x] Unit test: SDK offline queue flushes on reconnect
 
 ### C18. L4-CORE-18 Payment / PCI compliance framework (#239)
-- [ ] PCI-DSS control mapping (req 1-12 → product artifacts)
-- [ ] PCI-PTS physical security rule set
-- [ ] EMV L1 (hardware) / L2 (kernel) / L3 (acceptance) test stubs
-- [ ] P2PE (point-to-point encryption) key injection flow
-- [ ] HSM integration abstraction (Thales / Utimaco / SafeNet)
-- [ ] Cert artifact generator
+- [x] PCI-DSS control mapping (req 1-12 → product artifacts)
+- [x] PCI-PTS physical security rule set
+- [x] EMV L1 (hardware) / L2 (kernel) / L3 (acceptance) test stubs
+- [x] P2PE (point-to-point encryption) key injection flow
+- [x] HSM integration abstraction (Thales / Utimaco / SafeNet)
+- [x] Cert artifact generator
 
 ### C19. L4-CORE-19 Imaging / document pipeline (#240)
 - [ ] Scanner ISP path (CIS/CCD → 8/16-bit grey/RGB)

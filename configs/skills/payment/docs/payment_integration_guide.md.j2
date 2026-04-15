@@ -1,0 +1,138 @@
+# Payment / PCI Compliance Integration Guide
+
+## Overview
+
+This guide covers the integration of the OmniSight Payment / PCI Compliance framework into your embedded payment terminal product.
+
+## Supported Standards
+
+| Standard | Version | Description |
+|----------|---------|-------------|
+| PCI-DSS | v4.0 | Payment Card Industry Data Security Standard |
+| PCI-PTS | v6.x | PIN Transaction Security |
+| EMV | L1/L2/L3 | Chip card transaction standards |
+| P2PE | v3.x | Point-to-Point Encryption |
+
+## Prerequisites
+
+- CORE-05 Skill pack framework installed
+- CORE-15 Security stack configured (secure boot + TEE)
+- CORE-09 Safety & compliance framework (optional, for combined certification)
+
+## Quick Start
+
+### 1. PCI-DSS Control Mapping
+
+```python
+from backend.payment_compliance import (
+    list_pci_dss_requirements,
+    validate_pci_dss_gate,
+)
+
+# List all 12 PCI-DSS requirements
+requirements = list_pci_dss_requirements()
+for req in requirements:
+    print(f"{req.req_id}: {req.title}")
+    print(f"  Artifacts: {req.artifacts}")
+    print(f"  Tasks: {req.tasks}")
+
+# Validate your DAG against PCI-DSS Level {{ level | default('1') }}
+result = validate_pci_dss_gate(dag, "{{ level | default('L1') }}", your_artifacts)
+if result.passed:
+    print("PCI-DSS gate passed!")
+else:
+    print(f"Missing artifacts: {result.missing_artifacts}")
+```
+
+### 2. HSM Integration
+
+```python
+from backend.payment_compliance import (
+    create_hsm_session,
+    hsm_generate_key,
+    hsm_encrypt,
+    close_hsm_session,
+)
+
+# Connect to {{ hsm_vendor | default('Thales payShield 10K') }}
+session = create_hsm_session("{{ hsm_vendor_id | default('thales') }}")
+
+# Generate a Base Derivation Key
+bdk = hsm_generate_key(session.session_id, "bdk", "AES-256")
+
+# Encrypt cardholder data
+encrypted = hsm_encrypt(session.session_id, card_data, bdk["key_id"])
+
+# Clean up
+close_hsm_session(session.session_id)
+```
+
+### 3. P2PE Key Injection
+
+```python
+from backend.payment_compliance import run_p2pe_key_injection
+
+result = run_p2pe_key_injection(
+    hsm_vendor="{{ hsm_vendor_id | default('thales') }}",
+    device_id="terminal-001",
+    injection_method="kif_ceremony",  # or "remote_key_injection"
+)
+print(f"KSN: {result.key_serial_number}")
+print(f"Check value: {result.ipek_check_value}")
+```
+
+### 4. EMV Testing
+
+```python
+from backend.payment_compliance import run_emv_test_stub
+
+# Run all L1 tests
+l1_results = run_emv_test_stub("L1")
+
+# Run specific L2 category
+l2_cvm = run_emv_test_stub("L2", "cardholder_verification")
+
+# Run L3 brand acceptance
+l3_brand = run_emv_test_stub("L3", "brand_acceptance")
+```
+
+### 5. Certification Artifact Generation
+
+```python
+from backend.payment_compliance import generate_cert_artifacts
+
+bundle = generate_cert_artifacts(
+    standard="pci_dss",
+    level="L1",
+    existing_artifacts=["network_diagram", "encryption_inventory"],
+)
+
+# Review gap analysis
+for gap in bundle.gap_analysis:
+    print(f"Need to create: {gap['name']} ({gap['artifact_id']})")
+```
+
+## Compatible SoCs
+
+{% for soc in compatible_socs | default([]) %}
+- **{{ soc.name }}** ({{ soc.soc_id }}): {{ soc.notes }}
+{% endfor %}
+
+## Architecture
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  POI Device  │────▶│  P2PE Layer  │────▶│     HSM      │
+│ (Terminal)   │     │  (DUKPT)     │     │ (Thales/etc) │
+└──────────────┘     └──────────────┘     └──────────────┘
+       │                    │                    │
+       ▼                    ▼                    ▼
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  EMV Kernel  │     │  PCI-PTS     │     │  Key Mgmt    │
+│  L1/L2/L3   │     │  Compliance  │     │  Ceremony    │
+└──────────────┘     └──────────────┘     └──────────────┘
+```
+
+## API Reference
+
+See `/api/payment/` endpoints for full REST API documentation.

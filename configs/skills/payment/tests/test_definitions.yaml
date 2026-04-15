@@ -1,0 +1,109 @@
+schema_version: 1
+test_suites:
+  - id: pci_dss_tests
+    name: "PCI-DSS Compliance Tests"
+    tests:
+      - id: test_pci_dss_level_loading
+        name: "PCI-DSS level config loading"
+        type: unit
+        description: "Verify all 4 PCI-DSS levels load correctly"
+      - id: test_pci_dss_requirement_mapping
+        name: "PCI-DSS req 1-12 mapping"
+        type: unit
+        description: "Verify all 12 requirements map to artifacts and tasks"
+      - id: test_pci_dss_gate_pass
+        name: "PCI-DSS gate pass"
+        type: unit
+        description: "DAG with all required artifacts passes gate"
+      - id: test_pci_dss_gate_fail
+        name: "PCI-DSS gate fail"
+        type: unit
+        description: "DAG with missing artifacts fails gate"
+      - id: test_pci_dss_level_normalize
+        name: "PCI-DSS level normalisation"
+        type: unit
+        description: "Shorthand levels normalise to canonical form"
+
+  - id: pci_pts_tests
+    name: "PCI-PTS Physical Security Tests"
+    tests:
+      - id: test_pts_module_loading
+        name: "PCI-PTS module loading"
+        type: unit
+        description: "Verify core/sred/open modules load"
+      - id: test_pts_tamper_rules
+        name: "PCI-PTS tamper detection rules"
+        type: unit
+        description: "Tamper detection rules have correct severity and artifacts"
+      - id: test_pts_gate_validation
+        name: "PCI-PTS gate validation"
+        type: unit
+        description: "PTS gate validates all module rules"
+
+  - id: emv_tests
+    name: "EMV Test Suite"
+    tests:
+      - id: test_emv_l1_stubs
+        name: "EMV L1 test stubs"
+        type: unit
+        description: "L1 contact + contactless test stubs execute"
+      - id: test_emv_l2_stubs
+        name: "EMV L2 kernel test stubs"
+        type: unit
+        description: "L2 transaction flow + CVM test stubs execute"
+      - id: test_emv_l3_stubs
+        name: "EMV L3 acceptance test stubs"
+        type: unit
+        description: "L3 brand acceptance + host integration stubs execute"
+      - id: test_emv_gate
+        name: "EMV gate validation"
+        type: unit
+        description: "EMV artifact gate pass/fail paths"
+
+  - id: p2pe_hsm_tests
+    name: "P2PE and HSM Tests"
+    tests:
+      - id: test_p2pe_key_injection
+        name: "P2PE DUKPT key injection"
+        type: unit
+        description: "Full key injection flow (BDK→IPEK→device)"
+      - id: test_hsm_session_lifecycle
+        name: "HSM session lifecycle"
+        type: unit
+        description: "Create, use, and close HSM sessions"
+      - id: test_hsm_key_generation
+        name: "HSM key generation"
+        type: unit
+        description: "Generate keys via each HSM vendor"
+      - id: test_hsm_encrypt_decrypt
+        name: "HSM encrypt/decrypt"
+        type: unit
+        description: "Encrypt and decrypt via HSM session"
+      - id: test_hsm_vendor_commands
+        name: "HSM vendor-specific commands"
+        type: unit
+        description: "Verify correct vendor commands used"
+
+  - id: cert_integration_tests
+    name: "Certification and Integration Tests"
+    tests:
+      - id: test_cert_artifact_generation
+        name: "Cert artifact generation"
+        type: unit
+        description: "Generate certification artifact bundles"
+      - id: test_cert_gap_analysis
+        name: "Cert gap analysis"
+        type: unit
+        description: "Gap analysis identifies missing artifacts"
+      - id: test_cert_registry
+        name: "Cert registry integration"
+        type: unit
+        description: "Register and retrieve payment certs for doc suite"
+      - id: test_full_terminal_flow
+        name: "Full terminal certification flow"
+        type: integration
+        description: "End-to-end payment terminal certification"
+      - id: test_rest_endpoints
+        name: "REST endpoint smoke tests"
+        type: integration
+        description: "All payment REST endpoints respond correctly"

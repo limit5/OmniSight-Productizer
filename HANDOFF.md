@@ -7,6 +7,53 @@
 
 ---
 
+## C18 L4-CORE-18 Payment / PCI compliance framework 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。131 項測試全部通過。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| PCI-DSS control mapping (req 1-12 → product artifacts) | ✅ | 4 compliance levels (L1-L4) with validation types (ROC/SAQ), 12 requirements mapped to artifacts + DAG tasks, level normalization, DAG gate validation with per-requirement gap analysis |
+| PCI-PTS physical security rule set | ✅ | 3 modules (Core/SRED/Open Protocols) with 7 rules, severity classification (critical/high), tamper detection + key storage + firmware integrity + secure comms + POI encryption + decryption isolation + protocol hardening, gate validation |
+| EMV L1 (hardware) / L2 (kernel) / L3 (acceptance) test stubs | ✅ | L1: 4 categories (contact/contactless/electrical/mechanical) with 13 test cases. L2: 5 categories (app selection/transaction flow/CVM/risk mgmt/online) with 14 cases. L3: 4 categories (brand acceptance/host integration/receipt/error handling) with 12 cases. Gate validation per level |
+| P2PE (point-to-point encryption) key injection flow | ✅ | 3 domains (encryption/decryption/key_injection) with DUKPT controls. Full key injection simulation: HSM session → BDK generation → KSN assignment → IPEK derivation → device injection → verification. KIF ceremony + remote injection methods |
+| HSM integration abstraction (Thales / Utimaco / SafeNet) | ✅ | 3 HSM vendors (Thales payShield 10K FIPS 140-2 L3, Utimaco CryptoServer FIPS 140-2 L4, SafeNet Luna FIPS 140-2 L3). Session lifecycle (create/use/close), key generation with vendor-specific commands, encrypt/decrypt operations, algorithm validation |
+| Cert artifact generator | ✅ | Generate certification artifact bundles for PCI-DSS/EMV/PCI-PTS. Gap analysis identifies missing vs existing artifacts. 50+ artifact definitions with file patterns. 10 test recipes covering all domains. Doc suite generator integration via `get_payment_certs()` |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/payment_standards.yaml` | 新建——PCI-DSS v4.0 (4 levels + 12 requirements) + PCI-PTS v6 (3 modules + 7 rules) + EMV (3 levels + test categories) + P2PE v3 (3 domains + controls) + 3 HSM vendors + 50+ artifact definitions + 10 test recipes + 5 compatible SoCs |
+| `backend/payment_compliance.py` | 新建——Payment compliance library：10 enums + 16 data models + config loader + PCI-DSS gate validation + PCI-PTS gate validation + EMV test stubs (39 test cases) + P2PE key injection (DUKPT) + HSM session management + HSM key gen/encrypt/decrypt + cert artifact generator + test recipe runner + SoC compatibility + cert registry |
+| `backend/routers/payment.py` | 新建——REST endpoints: GET /payment/pci-dss/levels, /requirements, /pci-pts/modules, /emv/levels, /p2pe/domains, /hsm/vendors, /hsm/sessions, /test-recipes, /artifacts, /socs, /certs. POST /payment/pci-dss/validate, /pci-pts/validate, /emv/test, /emv/validate, /p2pe/key-injection, /hsm/sessions, /hsm/generate-key, /hsm/encrypt, /hsm/decrypt, /test-recipes/{id}/run, /certs/generate, /certs/register. DELETE /hsm/sessions/{id} |
+| `backend/main.py` | 擴充——註冊 payment router |
+| `configs/skills/payment/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-15 + CORE-09 dependencies) |
+| `configs/skills/payment/tasks.yaml` | 新建——10 DAG tasks (PCI-DSS mapping, PTS setup, EMV L1/L2/L3 tests, HSM integration, P2PE setup, P2PE validation, cert generation, integration test) |
+| `configs/skills/payment/scaffolds/` | 新建——3 scaffold files (payment_terminal.c, payment_hsm.py, payment_p2pe.c) |
+| `configs/skills/payment/tests/test_definitions.yaml` | 新建——5 test suites, 22 test definitions |
+| `configs/skills/payment/hil/payment_hil_recipes.yaml` | 新建——5 HIL recipes (EMV contact reader, NFC contactless, tamper detection, P2PE end-to-end, HSM failover) |
+| `configs/skills/payment/docs/payment_integration_guide.md.j2` | 新建——Jinja2 doc template for payment integration guide |
+| `backend/tests/test_payment_compliance.py` | 新建，131 項測試全部通過 |
+| `TODO.md` | 更新——C18 全部標記完成 |
+
+### 架構說明
+
+- **PaymentDomain enum** — pci_dss / pci_pts / emv / p2pe / hsm / certification
+- **PCIDSSLevel enum** — L1 / L2 / L3 / L4
+- **EMVLevel enum** — L1 / L2 / L3
+- **GateVerdict enum** — passed / failed / error
+- **HSMVendor enum** — thales / utimaco / safenet
+- **HSMSessionStatus enum** — connected / disconnected / error
+- **KeyInjectionStatus enum** — success / failed / pending / device_not_ready / hsm_error
+- **TestStatus enum** — passed / failed / pending / skipped / error
+- **CertArtifactStatus enum** — generated / pending / error
+- HSM sessions stored in-memory (production would use persistent store)
+- DUKPT key serial numbers generated via `secrets.token_hex(10)` for uniqueness
+- Doc suite generator integration via existing `_try_payment_certs()` hook in `doc_suite_generator.py`
+
+---
+
 ## C17 L4-CORE-17 Telemetry backend 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。94 項測試全部通過。**

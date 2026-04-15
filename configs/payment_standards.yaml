@@ -1,0 +1,847 @@
+schema_version: 1
+
+pci_dss:
+  name: "PCI-DSS v4.0"
+  description: "Payment Card Industry Data Security Standard"
+  levels:
+    - id: "L1"
+      name: "Level 1"
+      description: "Merchants processing over 6M transactions/year — annual ROC by QSA"
+      validation_type: "roc"
+      required_artifacts:
+        - network_diagram
+        - data_flow_diagram
+        - firewall_ruleset_review
+        - encryption_inventory
+        - access_control_matrix
+        - vulnerability_scan_report
+        - penetration_test_report
+        - incident_response_plan
+        - security_policy_document
+        - aoc
+      required_dag_tasks:
+        - network_segmentation_test
+        - vulnerability_scan
+        - penetration_test
+        - access_review
+        - encryption_validation
+        - log_review
+        - code_review
+    - id: "L2"
+      name: "Level 2"
+      description: "Merchants processing 1M-6M transactions/year — annual SAQ + quarterly ASV"
+      validation_type: "saq_d"
+      required_artifacts:
+        - network_diagram
+        - data_flow_diagram
+        - encryption_inventory
+        - access_control_matrix
+        - vulnerability_scan_report
+        - security_policy_document
+        - saq
+      required_dag_tasks:
+        - vulnerability_scan
+        - access_review
+        - encryption_validation
+        - log_review
+    - id: "L3"
+      name: "Level 3"
+      description: "Merchants processing 20K-1M e-commerce transactions/year"
+      validation_type: "saq"
+      required_artifacts:
+        - network_diagram
+        - encryption_inventory
+        - vulnerability_scan_report
+        - saq
+      required_dag_tasks:
+        - vulnerability_scan
+        - encryption_validation
+    - id: "L4"
+      name: "Level 4"
+      description: "Merchants processing fewer than 20K e-commerce or up to 1M other transactions/year"
+      validation_type: "saq"
+      required_artifacts:
+        - encryption_inventory
+        - vulnerability_scan_report
+        - saq
+      required_dag_tasks:
+        - vulnerability_scan
+        - encryption_validation
+
+  requirements:
+    req_1:
+      id: "req_1"
+      title: "Install and maintain network security controls"
+      description: "Firewalls, network segmentation, DMZ architecture"
+      artifacts:
+        - network_diagram
+        - firewall_ruleset_review
+      tasks:
+        - network_segmentation_test
+    req_2:
+      id: "req_2"
+      title: "Apply secure configurations to all system components"
+      description: "Remove defaults, harden OS/services, configuration baselines"
+      artifacts:
+        - configuration_baseline
+        - hardening_checklist
+      tasks:
+        - configuration_audit
+    req_3:
+      id: "req_3"
+      title: "Protect stored account data"
+      description: "Encryption at rest, key management, data retention, masking"
+      artifacts:
+        - encryption_inventory
+        - key_management_procedure
+        - data_retention_policy
+      tasks:
+        - encryption_validation
+        - key_rotation_test
+    req_4:
+      id: "req_4"
+      title: "Protect cardholder data with strong cryptography during transmission"
+      description: "TLS 1.2+, certificate management, no deprecated protocols"
+      artifacts:
+        - tls_configuration
+        - certificate_inventory
+      tasks:
+        - tls_scan
+    req_5:
+      id: "req_5"
+      title: "Protect all systems and networks from malicious software"
+      description: "Anti-malware, integrity monitoring"
+      artifacts:
+        - antimalware_policy
+      tasks:
+        - malware_scan
+    req_6:
+      id: "req_6"
+      title: "Develop and maintain secure systems and software"
+      description: "Secure SDLC, code review, vulnerability management"
+      artifacts:
+        - secure_sdlc_policy
+        - code_review_report
+      tasks:
+        - code_review
+        - vulnerability_scan
+    req_7:
+      id: "req_7"
+      title: "Restrict access to system components and cardholder data by business need to know"
+      description: "Role-based access, least privilege"
+      artifacts:
+        - access_control_matrix
+      tasks:
+        - access_review
+    req_8:
+      id: "req_8"
+      title: "Identify users and authenticate access to system components"
+      description: "MFA, password policies, unique IDs"
+      artifacts:
+        - authentication_policy
+        - mfa_deployment_evidence
+      tasks:
+        - authentication_audit
+    req_9:
+      id: "req_9"
+      title: "Restrict physical access to cardholder data"
+      description: "Physical security controls, visitor logs, media handling"
+      artifacts:
+        - physical_security_plan
+        - visitor_log_procedure
+      tasks:
+        - physical_security_audit
+    req_10:
+      id: "req_10"
+      title: "Log and monitor all access to system components and cardholder data"
+      description: "Centralized logging, tamper-evident logs, alerting"
+      artifacts:
+        - logging_architecture
+        - log_retention_policy
+      tasks:
+        - log_review
+        - log_integrity_test
+    req_11:
+      id: "req_11"
+      title: "Test security of systems and networks regularly"
+      description: "Vulnerability scanning, penetration testing, IDS/IPS"
+      artifacts:
+        - vulnerability_scan_report
+        - penetration_test_report
+      tasks:
+        - vulnerability_scan
+        - penetration_test
+    req_12:
+      id: "req_12"
+      title: "Support information security with organizational policies and programs"
+      description: "Security policy, awareness training, risk assessment"
+      artifacts:
+        - security_policy_document
+        - incident_response_plan
+        - risk_assessment
+      tasks:
+        - security_awareness_test
+
+pci_pts:
+  name: "PCI-PTS v6.x"
+  description: "PIN Transaction Security — physical and logical security for payment terminals"
+  modules:
+    - id: "core"
+      name: "Core Requirements"
+      description: "Base security requirements for all POI devices"
+      rules:
+        - id: "pts_core_1"
+          title: "Tamper detection and response"
+          description: "Device must detect and respond to physical tampering by erasing sensitive data"
+          severity: "critical"
+          required_artifacts:
+            - tamper_detection_design
+            - tamper_response_test_report
+        - id: "pts_core_2"
+          title: "Secure key storage"
+          description: "Cryptographic keys must be stored in tamper-resistant hardware"
+          severity: "critical"
+          required_artifacts:
+            - key_storage_architecture
+            - key_injection_procedure
+        - id: "pts_core_3"
+          title: "Firmware integrity"
+          description: "Firmware must be signed and verified at boot"
+          severity: "critical"
+          required_artifacts:
+            - firmware_signing_procedure
+            - secure_boot_evidence
+        - id: "pts_core_4"
+          title: "Secure communications"
+          description: "All external communications must use approved cryptographic protocols"
+          severity: "high"
+          required_artifacts:
+            - communication_protocol_spec
+            - tls_configuration
+    - id: "sred"
+      name: "Secure Reading and Exchange of Data (SRED)"
+      description: "Requirements for encrypting account data from point of interaction"
+      rules:
+        - id: "pts_sred_1"
+          title: "Point-of-interaction encryption"
+          description: "Account data must be encrypted immediately upon capture"
+          severity: "critical"
+          required_artifacts:
+            - poi_encryption_design
+            - dukpt_key_management
+        - id: "pts_sred_2"
+          title: "Decryption environment isolation"
+          description: "Decryption must occur only in a secure, isolated environment (HSM)"
+          severity: "critical"
+          required_artifacts:
+            - hsm_integration_spec
+            - decryption_environment_audit
+    - id: "open_protocols"
+      name: "Open Protocols"
+      description: "Requirements for devices using open communication protocols"
+      rules:
+        - id: "pts_open_1"
+          title: "Protocol hardening"
+          description: "Open protocols must be hardened against injection and MITM"
+          severity: "high"
+          required_artifacts:
+            - protocol_hardening_report
+
+emv:
+  name: "EMV Specifications"
+  description: "Europay, Mastercard, Visa — chip card transaction standards"
+  levels:
+    - id: "L1"
+      name: "EMV Level 1 — Electromechanical"
+      description: "Hardware interface between card and terminal (contact + contactless)"
+      test_categories:
+        - contact_interface
+        - contactless_interface
+        - electrical_characteristics
+        - mechanical_characteristics
+      required_artifacts:
+        - emv_l1_test_plan
+        - contact_interface_test_report
+        - contactless_interface_test_report
+        - antenna_tuning_report
+      required_dag_tasks:
+        - emv_l1_contact_test
+        - emv_l1_contactless_test
+    - id: "L2"
+      name: "EMV Level 2 — Kernel"
+      description: "Payment application kernel processing (transaction flow, CVM, risk management)"
+      test_categories:
+        - application_selection
+        - transaction_flow
+        - cardholder_verification
+        - risk_management
+        - online_processing
+      required_artifacts:
+        - emv_l2_test_plan
+        - kernel_certification_report
+        - transaction_flow_test_report
+        - cvm_test_report
+      required_dag_tasks:
+        - emv_l2_kernel_test
+        - emv_l2_transaction_test
+        - emv_l2_cvm_test
+    - id: "L3"
+      name: "EMV Level 3 — Application"
+      description: "End-to-end acceptance testing (brand-specific: Visa, Mastercard, etc.)"
+      test_categories:
+        - brand_acceptance
+        - host_integration
+        - receipt_formatting
+        - error_handling
+      required_artifacts:
+        - emv_l3_test_plan
+        - brand_acceptance_report
+        - host_integration_test_report
+        - receipt_format_validation
+      required_dag_tasks:
+        - emv_l3_brand_test
+        - emv_l3_host_test
+
+p2pe:
+  name: "PCI P2PE v3.x"
+  description: "Point-to-Point Encryption — encrypt cardholder data from POI to decryption environment"
+  domains:
+    - id: "encryption"
+      name: "Encryption Domain"
+      description: "POI device encryption of account data"
+      controls:
+        - id: "p2pe_enc_1"
+          title: "DUKPT key management"
+          description: "Derived Unique Key Per Transaction for symmetric encryption"
+          key_algorithm: "AES-256"
+          derivation: "DUKPT"
+          required_artifacts:
+            - dukpt_implementation_spec
+            - key_derivation_test_report
+        - id: "p2pe_enc_2"
+          title: "Initial key injection"
+          description: "Secure initial key loading into POI device via KIF or remote injection"
+          injection_methods:
+            - "kif_ceremony"
+            - "remote_key_injection"
+          required_artifacts:
+            - key_injection_procedure
+            - kif_audit_report
+        - id: "p2pe_enc_3"
+          title: "Encryption activation"
+          description: "Account data encrypted immediately at point of interaction"
+          required_artifacts:
+            - poi_encryption_activation_evidence
+    - id: "decryption"
+      name: "Decryption Domain"
+      description: "HSM-based decryption environment"
+      controls:
+        - id: "p2pe_dec_1"
+          title: "HSM decryption"
+          description: "Decryption only in FIPS 140-2/3 Level 3+ HSM"
+          required_artifacts:
+            - hsm_fips_certificate
+            - decryption_architecture
+        - id: "p2pe_dec_2"
+          title: "Key management in HSM"
+          description: "All master keys and working keys reside solely within HSM boundary"
+          required_artifacts:
+            - key_hierarchy_document
+            - hsm_key_ceremony_log
+    - id: "key_injection"
+      name: "Key Injection Domain"
+      description: "Secure key injection facility (KIF) requirements"
+      controls:
+        - id: "p2pe_ki_1"
+          title: "KIF physical security"
+          description: "Dual control, split knowledge, tamper-evident bags, CCTV"
+          required_artifacts:
+            - kif_physical_security_plan
+            - kif_access_log
+        - id: "p2pe_ki_2"
+          title: "Key component management"
+          description: "Key components never combined outside HSM, custodian procedures"
+          required_artifacts:
+            - key_custodian_procedure
+            - split_knowledge_evidence
+
+hsm_vendors:
+  - id: "thales"
+    name: "Thales payShield 10K"
+    type: "payment_hsm"
+    fips_level: "FIPS 140-2 Level 3"
+    pci_pts_certified: true
+    protocols:
+      - "host_command"
+      - "racf"
+      - "pkcs11"
+    key_types:
+      - "zmk"
+      - "zpk"
+      - "pvk"
+      - "cvk"
+      - "bdk"
+      - "ipek"
+    supported_algorithms:
+      - "3DES"
+      - "AES-128"
+      - "AES-256"
+      - "RSA-2048"
+      - "RSA-4096"
+      - "ECC-P256"
+    commands:
+      generate_key: "A0"
+      import_key: "A6"
+      translate_pin: "CA"
+      verify_pin: "DA"
+      generate_mac: "MA"
+      encrypt_data: "M0"
+
+  - id: "utimaco"
+    name: "Utimaco CryptoServer Se Gen2"
+    type: "general_purpose_hsm"
+    fips_level: "FIPS 140-2 Level 4"
+    pci_pts_certified: true
+    protocols:
+      - "pkcs11"
+      - "jce"
+      - "cng"
+      - "rest_api"
+    key_types:
+      - "zmk"
+      - "zpk"
+      - "bdk"
+      - "kek"
+    supported_algorithms:
+      - "AES-128"
+      - "AES-256"
+      - "RSA-2048"
+      - "RSA-4096"
+      - "ECC-P256"
+      - "ECC-P384"
+      - "Ed25519"
+    commands:
+      generate_key: "CXI_KEY_GENERATE"
+      import_key: "CXI_KEY_IMPORT"
+      encrypt: "CXI_CRYPT_ENCRYPT"
+      decrypt: "CXI_CRYPT_DECRYPT"
+      sign: "CXI_CRYPT_SIGN"
+
+  - id: "safenet"
+    name: "Thales Luna Network HSM 7 (SafeNet)"
+    type: "general_purpose_hsm"
+    fips_level: "FIPS 140-2 Level 3"
+    pci_pts_certified: false
+    protocols:
+      - "pkcs11"
+      - "jce"
+      - "cng"
+      - "openssl_engine"
+    key_types:
+      - "aes"
+      - "rsa"
+      - "ecc"
+      - "hmac"
+    supported_algorithms:
+      - "AES-128"
+      - "AES-256"
+      - "RSA-2048"
+      - "RSA-4096"
+      - "ECC-P256"
+      - "ECC-P384"
+    commands:
+      generate_key: "C_GenerateKey"
+      import_key: "C_UnwrapKey"
+      encrypt: "C_Encrypt"
+      decrypt: "C_Decrypt"
+      sign: "C_Sign"
+
+artifact_definitions:
+  network_diagram:
+    name: "Network Diagram"
+    description: "Network topology showing CDE boundaries, firewalls, and data flows"
+    file_pattern: "docs/pci/network_diagram.*"
+  data_flow_diagram:
+    name: "Data Flow Diagram"
+    description: "Cardholder data flow from entry to storage/transmission/disposal"
+    file_pattern: "docs/pci/data_flow.*"
+  firewall_ruleset_review:
+    name: "Firewall Ruleset Review"
+    description: "Documented review of all firewall/router rules with justification"
+    file_pattern: "docs/pci/firewall_review.*"
+  encryption_inventory:
+    name: "Encryption Inventory"
+    description: "Inventory of all cryptographic mechanisms protecting cardholder data"
+    file_pattern: "docs/pci/encryption_inventory.*"
+  access_control_matrix:
+    name: "Access Control Matrix"
+    description: "Role-based access control matrix for CDE systems"
+    file_pattern: "docs/pci/access_control_matrix.*"
+  vulnerability_scan_report:
+    name: "Vulnerability Scan Report"
+    description: "Quarterly ASV scan results or internal vulnerability scan"
+    file_pattern: "reports/pci/vuln_scan.*"
+  penetration_test_report:
+    name: "Penetration Test Report"
+    description: "Annual penetration test by qualified tester"
+    file_pattern: "reports/pci/pentest.*"
+  incident_response_plan:
+    name: "Incident Response Plan"
+    description: "Documented plan for responding to security incidents"
+    file_pattern: "docs/pci/incident_response.*"
+  security_policy_document:
+    name: "Security Policy Document"
+    description: "Organizational information security policy"
+    file_pattern: "docs/pci/security_policy.*"
+  aoc:
+    name: "Attestation of Compliance"
+    description: "Signed attestation from QSA or ISA"
+    file_pattern: "docs/pci/aoc.*"
+  saq:
+    name: "Self-Assessment Questionnaire"
+    description: "Applicable SAQ type (A, B, C, D, etc.)"
+    file_pattern: "docs/pci/saq.*"
+  configuration_baseline:
+    name: "Configuration Baseline"
+    description: "Hardened configuration standards for all system components"
+    file_pattern: "docs/pci/config_baseline.*"
+  hardening_checklist:
+    name: "Hardening Checklist"
+    description: "System hardening checklist per component type"
+    file_pattern: "docs/pci/hardening.*"
+  key_management_procedure:
+    name: "Key Management Procedure"
+    description: "Cryptographic key lifecycle management documentation"
+    file_pattern: "docs/pci/key_management.*"
+  data_retention_policy:
+    name: "Data Retention Policy"
+    description: "Cardholder data retention and disposal policy"
+    file_pattern: "docs/pci/data_retention.*"
+  tls_configuration:
+    name: "TLS Configuration"
+    description: "TLS/SSL configuration documentation and cipher suites"
+    file_pattern: "docs/pci/tls_config.*"
+  certificate_inventory:
+    name: "Certificate Inventory"
+    description: "Inventory of all X.509 certificates used"
+    file_pattern: "docs/pci/cert_inventory.*"
+  antimalware_policy:
+    name: "Anti-Malware Policy"
+    description: "Anti-malware deployment and monitoring policy"
+    file_pattern: "docs/pci/antimalware.*"
+  secure_sdlc_policy:
+    name: "Secure SDLC Policy"
+    description: "Secure software development lifecycle policy and procedures"
+    file_pattern: "docs/pci/secure_sdlc.*"
+  code_review_report:
+    name: "Code Review Report"
+    description: "Results of secure code review"
+    file_pattern: "reports/pci/code_review.*"
+  authentication_policy:
+    name: "Authentication Policy"
+    description: "Authentication and MFA deployment policy"
+    file_pattern: "docs/pci/auth_policy.*"
+  mfa_deployment_evidence:
+    name: "MFA Deployment Evidence"
+    description: "Evidence of MFA deployment for all CDE access"
+    file_pattern: "docs/pci/mfa_evidence.*"
+  physical_security_plan:
+    name: "Physical Security Plan"
+    description: "Physical access control and monitoring plan"
+    file_pattern: "docs/pci/physical_security.*"
+  visitor_log_procedure:
+    name: "Visitor Log Procedure"
+    description: "Visitor management and logging procedure"
+    file_pattern: "docs/pci/visitor_log.*"
+  logging_architecture:
+    name: "Logging Architecture"
+    description: "Centralized logging architecture and log management"
+    file_pattern: "docs/pci/logging_arch.*"
+  log_retention_policy:
+    name: "Log Retention Policy"
+    description: "Log retention and archival policy"
+    file_pattern: "docs/pci/log_retention.*"
+  risk_assessment:
+    name: "Risk Assessment"
+    description: "Annual risk assessment results"
+    file_pattern: "docs/pci/risk_assessment.*"
+  tamper_detection_design:
+    name: "Tamper Detection Design"
+    description: "Physical tamper detection and response mechanism design"
+    file_pattern: "docs/pts/tamper_detection.*"
+  tamper_response_test_report:
+    name: "Tamper Response Test Report"
+    description: "Test results for tamper detection and response"
+    file_pattern: "reports/pts/tamper_response.*"
+  key_storage_architecture:
+    name: "Key Storage Architecture"
+    description: "Architecture for secure cryptographic key storage"
+    file_pattern: "docs/pts/key_storage.*"
+  key_injection_procedure:
+    name: "Key Injection Procedure"
+    description: "Procedure for secure key injection into POI devices"
+    file_pattern: "docs/pts/key_injection.*"
+  firmware_signing_procedure:
+    name: "Firmware Signing Procedure"
+    description: "Procedure for signing device firmware"
+    file_pattern: "docs/pts/firmware_signing.*"
+  secure_boot_evidence:
+    name: "Secure Boot Evidence"
+    description: "Evidence of secure boot chain verification"
+    file_pattern: "docs/pts/secure_boot.*"
+  communication_protocol_spec:
+    name: "Communication Protocol Spec"
+    description: "Specification of all external communication protocols"
+    file_pattern: "docs/pts/comm_protocol.*"
+  poi_encryption_design:
+    name: "POI Encryption Design"
+    description: "Point-of-interaction encryption architecture"
+    file_pattern: "docs/p2pe/poi_encryption.*"
+  dukpt_key_management:
+    name: "DUKPT Key Management"
+    description: "DUKPT key hierarchy and derivation documentation"
+    file_pattern: "docs/p2pe/dukpt.*"
+  hsm_integration_spec:
+    name: "HSM Integration Spec"
+    description: "HSM integration architecture and interface specification"
+    file_pattern: "docs/p2pe/hsm_integration.*"
+  decryption_environment_audit:
+    name: "Decryption Environment Audit"
+    description: "Audit report of the secure decryption environment"
+    file_pattern: "reports/p2pe/decryption_env.*"
+  dukpt_implementation_spec:
+    name: "DUKPT Implementation Spec"
+    description: "Detailed DUKPT implementation specification"
+    file_pattern: "docs/p2pe/dukpt_impl.*"
+  key_derivation_test_report:
+    name: "Key Derivation Test Report"
+    description: "Test results for DUKPT key derivation"
+    file_pattern: "reports/p2pe/key_derivation.*"
+  kif_audit_report:
+    name: "KIF Audit Report"
+    description: "Audit report of Key Injection Facility"
+    file_pattern: "reports/p2pe/kif_audit.*"
+  poi_encryption_activation_evidence:
+    name: "POI Encryption Activation Evidence"
+    description: "Evidence that POI encryption is active and functioning"
+    file_pattern: "docs/p2pe/poi_activation.*"
+  hsm_fips_certificate:
+    name: "HSM FIPS Certificate"
+    description: "FIPS 140-2/3 certificate for HSM"
+    file_pattern: "docs/p2pe/hsm_fips.*"
+  decryption_architecture:
+    name: "Decryption Architecture"
+    description: "Architecture of the HSM decryption environment"
+    file_pattern: "docs/p2pe/decryption_arch.*"
+  key_hierarchy_document:
+    name: "Key Hierarchy Document"
+    description: "Documentation of the complete key hierarchy"
+    file_pattern: "docs/p2pe/key_hierarchy.*"
+  hsm_key_ceremony_log:
+    name: "HSM Key Ceremony Log"
+    description: "Log of key ceremony procedures"
+    file_pattern: "docs/p2pe/key_ceremony.*"
+  kif_physical_security_plan:
+    name: "KIF Physical Security Plan"
+    description: "Physical security plan for Key Injection Facility"
+    file_pattern: "docs/p2pe/kif_security.*"
+  kif_access_log:
+    name: "KIF Access Log"
+    description: "Access log for Key Injection Facility"
+    file_pattern: "docs/p2pe/kif_access.*"
+  key_custodian_procedure:
+    name: "Key Custodian Procedure"
+    description: "Procedure for key custodian responsibilities and split knowledge"
+    file_pattern: "docs/p2pe/key_custodian.*"
+  split_knowledge_evidence:
+    name: "Split Knowledge Evidence"
+    description: "Evidence of split knowledge key management"
+    file_pattern: "docs/p2pe/split_knowledge.*"
+  emv_l1_test_plan:
+    name: "EMV L1 Test Plan"
+    description: "Test plan for EMV Level 1 certification"
+    file_pattern: "docs/emv/l1_test_plan.*"
+  contact_interface_test_report:
+    name: "Contact Interface Test Report"
+    description: "EMV L1 contact interface test results"
+    file_pattern: "reports/emv/contact_interface.*"
+  contactless_interface_test_report:
+    name: "Contactless Interface Test Report"
+    description: "EMV L1 contactless interface test results"
+    file_pattern: "reports/emv/contactless_interface.*"
+  antenna_tuning_report:
+    name: "Antenna Tuning Report"
+    description: "NFC antenna tuning and performance report"
+    file_pattern: "reports/emv/antenna_tuning.*"
+  emv_l2_test_plan:
+    name: "EMV L2 Test Plan"
+    description: "Test plan for EMV Level 2 kernel certification"
+    file_pattern: "docs/emv/l2_test_plan.*"
+  kernel_certification_report:
+    name: "Kernel Certification Report"
+    description: "EMV L2 kernel certification test results"
+    file_pattern: "reports/emv/kernel_cert.*"
+  transaction_flow_test_report:
+    name: "Transaction Flow Test Report"
+    description: "EMV L2 transaction flow test results"
+    file_pattern: "reports/emv/transaction_flow.*"
+  cvm_test_report:
+    name: "CVM Test Report"
+    description: "Cardholder Verification Method test results"
+    file_pattern: "reports/emv/cvm.*"
+  emv_l3_test_plan:
+    name: "EMV L3 Test Plan"
+    description: "Test plan for EMV Level 3 acceptance certification"
+    file_pattern: "docs/emv/l3_test_plan.*"
+  brand_acceptance_report:
+    name: "Brand Acceptance Report"
+    description: "Brand-specific acceptance test results"
+    file_pattern: "reports/emv/brand_acceptance.*"
+  host_integration_test_report:
+    name: "Host Integration Test Report"
+    description: "Host system integration test results"
+    file_pattern: "reports/emv/host_integration.*"
+  receipt_format_validation:
+    name: "Receipt Format Validation"
+    description: "Receipt formatting and content validation"
+    file_pattern: "reports/emv/receipt_format.*"
+  protocol_hardening_report:
+    name: "Protocol Hardening Report"
+    description: "Report on protocol hardening measures"
+    file_pattern: "docs/pts/protocol_hardening.*"
+
+test_recipes:
+  - id: "pci_dss_control_audit"
+    name: "PCI-DSS Control Audit"
+    description: "Validate all 12 requirements against produced artifacts"
+    domain: "pci_dss"
+    steps:
+      - "Load requirement mapping"
+      - "Check each requirement for required artifacts"
+      - "Validate DAG tasks cover required testing"
+      - "Generate gap analysis report"
+  - id: "pci_pts_tamper_test"
+    name: "PCI-PTS Tamper Detection Test"
+    description: "Verify tamper detection triggers key erasure"
+    domain: "pci_pts"
+    steps:
+      - "Simulate tamper event"
+      - "Verify key material erased"
+      - "Verify device enters secure state"
+      - "Log tamper response time"
+  - id: "emv_l1_contact_test"
+    name: "EMV L1 Contact Interface Test"
+    description: "Test contact card reader electrical and mechanical compliance"
+    domain: "emv"
+    steps:
+      - "Verify ISO 7816 timing"
+      - "Test ATR handling"
+      - "Verify power supply levels"
+      - "Check contact pin alignment"
+  - id: "emv_l1_contactless_test"
+    name: "EMV L1 Contactless Interface Test"
+    description: "Test NFC/contactless interface per EMVCo specifications"
+    domain: "emv"
+    steps:
+      - "Verify ISO 14443 A/B support"
+      - "Test field strength levels"
+      - "Verify collision handling"
+      - "Check antenna performance"
+  - id: "emv_l2_kernel_test"
+    name: "EMV L2 Kernel Test"
+    description: "Test payment kernel transaction processing"
+    domain: "emv"
+    steps:
+      - "Application selection per EMV Book 1"
+      - "Transaction flow per EMV Book 3"
+      - "CVM processing"
+      - "Risk management"
+      - "Online/offline decision"
+  - id: "emv_l3_brand_test"
+    name: "EMV L3 Brand Acceptance Test"
+    description: "Brand-specific acceptance test suite"
+    domain: "emv"
+    steps:
+      - "Visa payWave test cases"
+      - "Mastercard PayPass test cases"
+      - "Host integration verification"
+      - "Receipt format check"
+  - id: "p2pe_key_injection_test"
+    name: "P2PE Key Injection Test"
+    description: "Test DUKPT key injection flow"
+    domain: "p2pe"
+    steps:
+      - "Initialize HSM connection"
+      - "Generate BDK in HSM"
+      - "Derive IPEK"
+      - "Inject IPEK into device"
+      - "Verify first transaction key derivation"
+      - "Test key exhaustion handling"
+  - id: "hsm_integration_test"
+    name: "HSM Integration Test"
+    description: "Test HSM connectivity and basic operations"
+    domain: "hsm"
+    steps:
+      - "Establish HSM session"
+      - "Generate test key"
+      - "Encrypt/decrypt round-trip"
+      - "Sign/verify round-trip"
+      - "Key import/export"
+      - "Session cleanup"
+  - id: "p2pe_encryption_test"
+    name: "P2PE Encryption Validation"
+    description: "Validate P2PE encryption from POI to HSM"
+    domain: "p2pe"
+    steps:
+      - "Capture card data at POI"
+      - "Verify encrypted at point of interaction"
+      - "Transmit to decryption environment"
+      - "Decrypt in HSM"
+      - "Verify plaintext matches original"
+  - id: "cert_artifact_generation_test"
+    name: "Certification Artifact Generation"
+    description: "Generate all required certification artifacts"
+    domain: "certification"
+    steps:
+      - "Select target standard and level"
+      - "Identify required artifacts"
+      - "Generate artifact templates"
+      - "Validate artifact completeness"
+
+compatible_socs:
+  - soc_id: "imx8m"
+    name: "NXP i.MX 8M"
+    payment_capabilities:
+      - "tee_support"
+      - "secure_boot"
+      - "hardware_crypto"
+    notes: "Suitable for payment terminal with OP-TEE"
+  - soc_id: "stm32mp1"
+    name: "STM32MP1"
+    payment_capabilities:
+      - "tee_support"
+      - "secure_boot"
+      - "hardware_crypto"
+    notes: "Dual Cortex-A7 + M4, good for POS terminals"
+  - soc_id: "rk3566"
+    name: "Rockchip RK3566"
+    payment_capabilities:
+      - "secure_boot"
+      - "hardware_crypto"
+    notes: "Cost-effective for kiosk/self-checkout"
+  - soc_id: "rk3568"
+    name: "Rockchip RK3568"
+    payment_capabilities:
+      - "secure_boot"
+      - "hardware_crypto"
+      - "pcie_for_hsm"
+    notes: "PCIe lane available for HSM daughter card"
+  - soc_id: "x86_64"
+    name: "x86_64"
+    payment_capabilities:
+      - "tee_support"
+      - "secure_boot"
+      - "hardware_crypto"
+      - "sgx_support"
+      - "pcie_for_hsm"
+    notes: "Full HSM card support, Intel SGX for enclave processing"

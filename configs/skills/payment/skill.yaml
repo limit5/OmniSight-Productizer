@@ -1,0 +1,49 @@
+schema_version: 1
+name: payment
+description: "Payment / PCI compliance — PCI-DSS control mapping, PCI-PTS physical security, EMV L1/L2/L3 test stubs, P2PE key injection, HSM integration"
+version: "1.0.0"
+author: "OmniSight"
+license: "Proprietary"
+compatible_socs:
+  - imx8m
+  - stm32mp1
+  - rk3566
+  - rk3568
+  - x86_64
+depends_on_skills: []
+depends_on_core:
+  - CORE-05
+  - CORE-15
+  - CORE-09
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/test_definitions.yaml
+  - kind: hil
+    path: hil/payment_hil_recipes.yaml
+  - kind: docs
+    path: docs/payment_integration_guide.md.j2
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+keywords:
+  - pci-dss
+  - pci-pts
+  - emv
+  - p2pe
+  - dukpt
+  - hsm
+  - thales
+  - utimaco
+  - safenet
+  - payment-terminal
+  - pos
+  - key-injection
+  - encryption
+  - card-reader
+  - nfc
+  - contactless

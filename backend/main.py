@@ -284,6 +284,8 @@ from backend.routers import ota_framework as _ota_framework_router  # C16/OTA-FR
 app.include_router(_ota_framework_router.router, prefix=settings.api_prefix)
 from backend.routers import telemetry_backend as _telemetry_backend_router  # C17/TELEMETRY-BACKEND
 app.include_router(_telemetry_backend_router.router, prefix=settings.api_prefix)
+from backend.routers import payment as _payment_router  # C18/PAYMENT-PCI-COMPLIANCE
+app.include_router(_payment_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

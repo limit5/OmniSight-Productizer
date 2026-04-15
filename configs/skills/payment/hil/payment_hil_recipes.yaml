@@ -1,0 +1,98 @@
+schema_version: 1
+recipes:
+  - id: hil_emv_contact_reader
+    name: "EMV Contact Reader HIL"
+    description: "Hardware-in-the-loop test for EMV contact card reader interface"
+    required_hardware:
+      - contact_card_reader
+      - test_card_set
+      - oscilloscope
+    steps:
+      - "Connect contact reader to test jig"
+      - "Insert EMV test card (Visa/MC/Amex)"
+      - "Measure ATR timing with oscilloscope"
+      - "Verify VCC/RST/CLK levels"
+      - "Run EMV L1 contact test suite"
+      - "Record all timing measurements"
+    pass_criteria:
+      - "All ATR timings within ISO 7816-3 spec"
+      - "VCC in 4.5V-5.5V range"
+      - "No communication errors over 1000 insertions"
+
+  - id: hil_emv_contactless_nfc
+    name: "EMV Contactless NFC HIL"
+    description: "Hardware-in-the-loop test for NFC/contactless interface"
+    required_hardware:
+      - nfc_antenna_module
+      - emvco_reference_picc
+      - field_strength_meter
+    steps:
+      - "Position reference PICC at operating distance"
+      - "Measure field strength at multiple distances"
+      - "Test ISO 14443 Type A activation"
+      - "Test ISO 14443 Type B activation"
+      - "Multi-card collision test"
+      - "Antenna tuning verification"
+    pass_criteria:
+      - "Field strength 1.5-7.5 A/m at operating distance"
+      - "Successful activation for both Type A and B"
+      - "Collision resolution within 3 attempts"
+
+  - id: hil_tamper_detection
+    name: "PCI-PTS Tamper Detection HIL"
+    description: "Hardware-in-the-loop test for physical tamper detection"
+    required_hardware:
+      - payment_terminal_dut
+      - tamper_test_probes
+      - logic_analyzer
+    steps:
+      - "Load test keys into terminal"
+      - "Verify keys present via diagnostic"
+      - "Trigger tamper switch (case open)"
+      - "Verify key erasure within 100ms"
+      - "Verify device enters secure state"
+      - "Attempt recovery (should require re-injection)"
+    pass_criteria:
+      - "Key material erased within 100ms of tamper"
+      - "Device refuses transactions after tamper"
+      - "Re-injection required to resume operations"
+
+  - id: hil_p2pe_encryption
+    name: "P2PE End-to-End Encryption HIL"
+    description: "Hardware-in-the-loop test for P2PE from card swipe to HSM decrypt"
+    required_hardware:
+      - payment_terminal_dut
+      - test_card_set
+      - hsm_test_unit
+      - network_tap
+    steps:
+      - "Inject DUKPT IPEK into terminal via KIF procedure"
+      - "Swipe/insert/tap test card"
+      - "Capture encrypted payload at network tap"
+      - "Verify no plaintext PAN in transit"
+      - "Send to HSM for decryption"
+      - "Verify decrypted PAN matches card"
+      - "Verify KSN incremented"
+    pass_criteria:
+      - "Zero plaintext PAN exposure in network capture"
+      - "HSM decryption produces correct PAN"
+      - "KSN unique per transaction"
+
+  - id: hil_hsm_failover
+    name: "HSM Failover HIL"
+    description: "Hardware-in-the-loop test for HSM failover and recovery"
+    required_hardware:
+      - primary_hsm
+      - secondary_hsm
+      - payment_terminal_dut
+    steps:
+      - "Establish session with primary HSM"
+      - "Process test transactions"
+      - "Simulate primary HSM failure"
+      - "Verify automatic failover to secondary"
+      - "Process transactions on secondary"
+      - "Restore primary and verify re-sync"
+    pass_criteria:
+      - "Failover completes within 5 seconds"
+      - "No transaction loss during failover"
+      - "Key synchronization verified after restore"
