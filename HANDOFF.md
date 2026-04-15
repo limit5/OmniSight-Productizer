@@ -1,9 +1,43 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`92fb722` (master)
+> 最後 commit：`5e21035` (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## B8 DAG toolchain enum / autocomplete 狀態更新（2026-04-15）
+
+**全部 4/4 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Collect toolchain names | ✅ | `_collect_toolchains()` scans `configs/platforms/*.yaml` + `configs/tier_capabilities.yaml` |
+| Expose enum via API | ✅ | `GET /api/v1/system/platforms/toolchains` — returns `{all, by_platform, by_tier}` |
+| Frontend datalist | ✅ | `dag-form-editor.tsx` toolchain `<input>` uses `<datalist id="omnisight-toolchains">` |
+| Semantic validator warning | ✅ | `unknown_toolchain` rule in `dag_validator.py` — warning (not error) at edit time |
+
+### Implementation summary
+
+Backend: Added `_collect_toolchains()` in `system.py` that unions toolchain names from all platform YAMLs and tier_capabilities.yaml. New `GET /system/platforms/toolchains` endpoint exposes this as `{all: [...], by_platform: {...}, by_tier: {...}}`.
+
+Validator: New `unknown_toolchain` rule in `dag_validator.py` emits a **warning** (not a blocking error) when a task's toolchain isn't in the known registry. `ValidationResult` now carries a `warnings` list alongside `errors`. The `/dag/validate` response includes `warnings[]`.
+
+Frontend: `DagFormEditor` fetches toolchains on mount and renders a shared `<datalist>` for all toolchain input fields, providing browser-native autocomplete.
+
+### Files changed
+
+| File | Action |
+|------|--------|
+| `backend/routers/system.py` | Updated — `_collect_toolchains()` + `GET /platforms/toolchains` endpoint |
+| `backend/dag_validator.py` | Updated — `unknown_toolchain` rule, `_load_known_toolchains()`, `warnings` in `ValidationResult` |
+| `backend/routers/dag.py` | Updated — validate response includes `warnings[]` |
+| `components/omnisight/dag-form-editor.tsx` | Updated — `fetchToolchains` + `<datalist>` for toolchain autocomplete |
+| `lib/api.ts` | Updated — `ToolchainsResponse` type + `fetchToolchains()` + `warnings?` in `DAGValidateResponse` |
+| `test/components/dag-form-editor.test.tsx` | Updated — mock includes `fetchToolchains` |
+| `test/integration/toolchain-enum.test.tsx` | **Created** — 2 tests: datalist rendering + list attribute wiring |
+| `TODO.md` | Updated B8 items → `[x]` |
 
 ---
 

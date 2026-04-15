@@ -88,10 +88,10 @@ Legend:
 - [x] Component test: parent click expands, status tallies correct
 
 ### B8. DAG toolchain enum / autocomplete (HANDOFF B)
-- [ ] Collect toolchain names from `get_platform_config` outputs
-- [ ] Expose enum via `GET /platforms/toolchains`
-- [ ] Frontend: DAG Form editor uses `<datalist>` for toolchain field
-- [ ] Semantic validator warn on unknown toolchain at edit time (not runtime)
+- [x] Collect toolchain names from `get_platform_config` outputs
+- [x] Expose enum via `GET /platforms/toolchains`
+- [x] Frontend: DAG Form editor uses `<datalist>` for toolchain field
+- [x] Semantic validator warn on unknown toolchain at edit time (not runtime)
 
 ### B9. ESLint 113 findings batch cleanup (HANDOFF B)
 - [ ] Group findings by rule (likely top 5 rules cover 80%)
