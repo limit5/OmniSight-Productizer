@@ -1,9 +1,33 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：J2 Workflow_run optimistic locking (master)
+> 最後 commit：J3 Session management UI (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## J3 (complete) Session management UI（2026-04-16 完成）
+
+**背景**：多裝置登入場景下，使用者需要能查看所有活躍 session（裝置 / IP / 建立時間 / 最後活動時間），並能撤銷特定 session 或一次登出所有其他裝置。後端 `/auth/sessions` API 已在 Phase 54 建立，J3 新增前端 UI 面板與整合。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| API 函式 | `listSessions()` / `revokeSession()` / `revokeAllOtherSessions()` 於 lib/api.ts | ✅ 完成 |
+| SessionManagerPanel | 列出所有活躍 session，顯示 device / IP / created / last_seen | ✅ 完成 |
+| 每列 Revoke 按鈕 | 非當前 session 顯示 Revoke 按鈕，點擊後即時移除 | ✅ 完成 |
+| 登出其他所有裝置 | "Sign out all others" 按鈕，呼叫 DELETE /auth/sessions | ✅ 完成 |
+| This device 標記 | 當前 session 以藍色邊框 + "This device" badge 標示 | ✅ 完成 |
+| UserMenu 整合 | 使用者選單新增 "Manage sessions" 項目，開啟 modal 對話框 | ✅ 完成 |
+| 單元測試 | 8 項：載入 / badge / revoke / revoke-all / loading / error / edge cases | ✅ 8/8 pass |
+| E2E 測試 | 2 項：revoke 後 401 驗證 / revoke-all-others 只保留當前 session | ✅ 完成 |
+
+**新增/修改檔案**：
+- `lib/api.ts` — 新增 SessionItem 型別 + listSessions / revokeSession / revokeAllOtherSessions API 函式
+- `components/omnisight/session-manager-panel.tsx` — Session 管理面板（新增）
+- `components/omnisight/user-menu.tsx` — 新增 "Manage sessions" 選單項 + modal 對話框
+- `test/components/session-manager-panel.test.tsx` — 8 項單元測試（新增）
+- `e2e/j3-session-management.spec.ts` — 2 項 E2E 測試（新增）
 
 ---
 

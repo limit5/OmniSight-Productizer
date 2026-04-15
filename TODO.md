@@ -426,11 +426,11 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### J3. Session management UI
-- [ ] `components/omnisight/session-manager-panel.tsx`：列 S0 `/auth/sessions` 結果（device / IP / created / last_seen）
-- [ ] 每列 Revoke 按鈕 + 「登出其他所有裝置」按鈕
-- [ ] 當前 session 標記 "This device"
-- [ ] E2E 測試：revoke 後該裝置下次 API call 得 401
-- [ ] 預估：**1 day**
+- [x] `components/omnisight/session-manager-panel.tsx`：列 S0 `/auth/sessions` 結果（device / IP / created / last_seen）
+- [x] 每列 Revoke 按鈕 + 「登出其他所有裝置」按鈕
+- [x] 當前 session 標記 "This device"
+- [x] E2E 測試：revoke 後該裝置下次 API call 得 401
+- [x] 預估：**1 day**
 
 ### J4. localStorage 多 tab 同步
 - [ ] 所有 `omnisight:*` keys 加 `user_id` 前綴（從登入 context 取）
