@@ -342,6 +342,7 @@ function ConflictPanel({
   conflict: IntentConflict
   onPick: (optionId: string) => void
 }) {
+  const priorId = conflict.prior_choice?.option_id
   return (
     <div className="rounded border border-[var(--fui-orange,#f59e0b)] bg-[var(--fui-orange,#f59e0b)]/10 p-2">
       <div className="flex items-start gap-2">
@@ -353,23 +354,48 @@ function ConflictPanel({
           <div className="text-xs text-[var(--foreground)] whitespace-pre-line mb-2">
             {conflict.message}
           </div>
+          {priorId && (
+            // Phase 68-D: prior-choice hint. Small + clear that it's
+            // a suggestion, not an auto-apply. Clicking still counts
+            // as a fresh decision that gets its own L3 row, so
+            // repeated picks naturally strengthen the signal via
+            // Phase 63-E decay rather than a special counter.
+            <div
+              className="text-[10px] font-mono text-[var(--neural-cyan,#67e8f9)] mb-1.5"
+              aria-label="prior choice suggestion"
+            >
+              💡 Last time you picked this option
+            </div>
+          )}
           <div className="flex flex-col gap-1">
-            {conflict.options.map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => onPick(opt.id)}
-                className="text-left text-xs font-mono px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)] text-[var(--foreground)]"
-                title={opt.desc || ""}
-              >
-                <span className="font-semibold">{opt.label}</span>
-                {opt.desc && (
-                  <div className="text-[10px] text-[var(--muted-foreground)] mt-0.5">
-                    {opt.desc}
-                  </div>
-                )}
-              </button>
-            ))}
+            {conflict.options.map((opt) => {
+              const isPrior = opt.id === priorId
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => onPick(opt.id)}
+                  className={
+                    "text-left text-xs font-mono px-2 py-1 rounded border text-[var(--foreground)] " +
+                    (isPrior
+                      ? "border-[var(--neural-cyan,#67e8f9)] bg-[var(--neural-cyan,#67e8f9)]/10 hover:bg-[var(--neural-cyan,#67e8f9)]/20"
+                      : "border-[var(--border)] hover:bg-[var(--muted)]")
+                  }
+                  title={opt.desc || ""}
+                  data-prior={isPrior || undefined}
+                >
+                  <span className="font-semibold flex items-center gap-1">
+                    {isPrior && <span aria-hidden>⭐</span>}
+                    {opt.label}
+                  </span>
+                  {opt.desc && (
+                    <div className="text-[10px] text-[var(--muted-foreground)] mt-0.5">
+                      {opt.desc}
+                    </div>
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
       </div>

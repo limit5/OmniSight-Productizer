@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from backend import auth as _au
 from backend import intent_parser as _ip
+from backend import intent_memory as _imem
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/intent", tags=["intent"])
@@ -90,7 +91,13 @@ async def parse(req: ParseRequest,
             logger.debug("intent/parse: LLM unavailable, heuristic path: %s", exc)
 
     parsed = await _ip.parse_intent(req.text, ask_fn=ask_fn, model=model)
-    return parsed.to_dict()
+    body = parsed.to_dict()
+    # Phase 68-D: annotate each conflict with a `prior_choice` hint
+    # when L3 has a matching record. The UI pre-selects the option
+    # but still requires an explicit click (we deliberately don't
+    # silently steer the operator's current intent).
+    await _imem.annotate_conflicts_with_priors(req.text, body["conflicts"])
+    return body
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -119,4 +126,22 @@ async def clarify(req: ClarifyRequest,
             detail=f"unknown conflict_id={req.conflict_id!r} or "
                    f"option_id={req.option_id!r}",
         )
-    return updated.to_dict()
+
+    # Phase 68-D: persist the operator's pick to L3 so next parse
+    # of a similar prompt carries a `prior_choice` hint. Best-
+    # effort — failure must not block the clarification response.
+    try:
+        await _imem.record_clarification_choice(
+            raw_text=ps.raw_text,
+            conflict_id=req.conflict_id,
+            option_id=req.option_id,
+            operator_email=getattr(_user, "email", None),
+        )
+    except Exception as exc:
+        logger.debug("intent/clarify: memory record failed: %s", exc)
+
+    body = updated.to_dict()
+    # Re-annotate — a subsequent conflict (second round) should
+    # carry its own prior hint if one exists.
+    await _imem.annotate_conflicts_with_priors(ps.raw_text, body["conflicts"])
+    return body

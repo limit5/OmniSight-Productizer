@@ -837,6 +837,10 @@ export interface IntentConflict {
   fields: string[]
   options: IntentConflictOption[]
   severity: "info" | "routine" | "risky" | "destructive"
+  /** Phase 68-D: backend annotates this when the operator resolved
+   * the same conflict on a similar prompt before. UI pre-highlights
+   * the matching option; click still counts as a fresh decision. */
+  prior_choice?: { option_id: string; quality: number; memory_id: string }
 }
 
 export interface ParsedSpec {
