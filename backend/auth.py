@@ -500,18 +500,47 @@ async def ensure_default_admin() -> Optional[User]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _bearer_matches(req: Request) -> bool:
-    expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
-    if not expected:
-        return False
+def _extract_bearer(req: Request) -> str:
+    """Extract the raw bearer token from the Authorization header."""
     h = req.headers.get("authorization") or ""
     if h.startswith("Bearer "):
-        h = h[len("Bearer "):]
-    return bool(h) and h == expected
+        return h[len("Bearer "):]
+    return ""
+
+
+async def _validate_api_key(req: Request) -> "ApiKey | None":
+    """Check if the request carries a valid per-key bearer token (K6).
+    Falls back to legacy OMNISIGHT_DECISION_BEARER env for backwards compat
+    during migration window."""
+    raw = _extract_bearer(req)
+    if not raw:
+        return None
+    from backend import api_keys
+    ip = req.client.host if req.client else ""
+    key = await api_keys.validate_bearer(raw, ip=ip)
+    if key:
+        return key
+    expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
+    if expected and secrets.compare_digest(raw, expected):
+        logger.warning(
+            "[AUTH] Request authenticated via legacy OMNISIGHT_DECISION_BEARER env. "
+            "Migrate to per-key API tokens via Admin UI."
+        )
+        return None  # signal to caller: legacy match
+    return None
 
 
 _ANON_ADMIN = User(id="anonymous", email="anonymous@local", name="(anonymous)",
                    role="admin", enabled=True)
+
+
+def _legacy_bearer_matches(req: Request) -> bool:
+    """Backwards-compat check for the old single-env bearer."""
+    expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
+    if not expected:
+        return False
+    raw = _extract_bearer(req)
+    return bool(raw) and secrets.compare_digest(raw, expected)
 
 
 async def current_user(request: Request) -> User:
@@ -529,14 +558,28 @@ async def current_user(request: Request) -> User:
         request.state.session = None
         return _ANON_ADMIN
 
-    if _bearer_matches(request):
-        bearer_raw = (request.headers.get("authorization") or "")[len("Bearer "):]
-        fp = hashlib.sha256(bearer_raw.encode()).hexdigest()[:12]
-        request.state.session = Session(
-            token=f"bearer:{fp}", user_id="anonymous",
-            csrf_token="", created_at=0, expires_at=0,
-        )
-        return _ANON_ADMIN
+    raw = _extract_bearer(request)
+    if raw:
+        key = getattr(getattr(request, "state", None), "api_key", None)
+        if not key:
+            from backend import api_keys as _ak
+            ip = request.client.host if request.client else ""
+            key = await _ak.validate_bearer(raw, ip=ip)
+        if key:
+            request.state.session = Session(
+                token=f"bearer:{key.id}", user_id=f"apikey:{key.id}",
+                csrf_token="", created_at=0, expires_at=0,
+            )
+            request.state.api_key = key
+            return User(id=f"apikey:{key.id}", email=f"apikey:{key.name}",
+                        name=key.name, role="admin", enabled=True)
+        if _legacy_bearer_matches(request):
+            fp = hashlib.sha256(raw.encode()).hexdigest()[:12]
+            request.state.session = Session(
+                token=f"bearer:{fp}", user_id="anonymous",
+                csrf_token="", created_at=0, expires_at=0,
+            )
+            return _ANON_ADMIN
 
     cookie = request.cookies.get(SESSION_COOKIE) or ""
     sess = await get_session(cookie) if cookie else None
@@ -578,7 +621,7 @@ def csrf_check(request: Request, session: Session | None) -> None:
     callers are exempt (they already proved out-of-band knowledge)."""
     if request.method in {"GET", "HEAD", "OPTIONS"}:
         return
-    if _bearer_matches(request):
+    if _extract_bearer(request):
         return
     mode = auth_mode()
     if mode == "open":

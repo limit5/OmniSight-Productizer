@@ -1786,3 +1786,59 @@ export async function shareReport(
     }),
   })
 }
+
+// ─── API Keys (K6) ─────────────────────────────────────────
+
+export interface ApiKeyItem {
+  id: string
+  name: string
+  key_prefix: string
+  scopes: string[]
+  created_by: string
+  last_used_ip: string | null
+  last_used_at: number | null
+  enabled: boolean
+  created_at: string
+}
+
+export async function listApiKeys(): Promise<{ items: ApiKeyItem[]; count: number }> {
+  return request<{ items: ApiKeyItem[]; count: number }>("/api-keys")
+}
+
+export async function createApiKey(name: string, scopes: string[]): Promise<{ key: ApiKeyItem; secret: string }> {
+  return request<{ key: ApiKeyItem; secret: string }>("/api-keys", {
+    method: "POST",
+    body: JSON.stringify({ name, scopes }),
+  })
+}
+
+export async function rotateApiKey(keyId: string): Promise<{ key: ApiKeyItem; secret: string }> {
+  return request<{ key: ApiKeyItem; secret: string }>(`/api-keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: "POST",
+  })
+}
+
+export async function revokeApiKey(keyId: string): Promise<{ revoked: boolean; id: string }> {
+  return request<{ revoked: boolean; id: string }>(`/api-keys/${encodeURIComponent(keyId)}/revoke`, {
+    method: "POST",
+  })
+}
+
+export async function enableApiKey(keyId: string): Promise<{ enabled: boolean; id: string }> {
+  return request<{ enabled: boolean; id: string }>(`/api-keys/${encodeURIComponent(keyId)}/enable`, {
+    method: "POST",
+  })
+}
+
+export async function deleteApiKey(keyId: string): Promise<{ deleted: boolean; id: string }> {
+  return request<{ deleted: boolean; id: string }>(`/api-keys/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function updateApiKeyScopes(keyId: string, scopes: string[]): Promise<{ id: string; scopes: string[] }> {
+  return request<{ id: string; scopes: string[] }>(`/api-keys/${encodeURIComponent(keyId)}/scopes`, {
+    method: "PATCH",
+    body: JSON.stringify({ scopes }),
+  })
+}

@@ -23,14 +23,17 @@ router = APIRouter(tags=["profile"])
 
 
 def _require_token(authorization: str | None = Header(default=None)) -> None:
+    """Gate for decision mutations. Per-key validation happens in
+    current_user(); this only ensures a bearer is present when the
+    legacy env is set (backwards compat)."""
     expected = os.environ.get("OMNISIGHT_DECISION_BEARER", "").strip()
     if not expected:
         return
     presented = (authorization or "")
     if presented.startswith("Bearer "):
         presented = presented[len("Bearer "):]
-    if presented != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing decision bearer token")
+    if not presented:
+        raise HTTPException(status_code=401, detail="Bearer token required for decision mutations")
 
 
 @router.get("/profile")

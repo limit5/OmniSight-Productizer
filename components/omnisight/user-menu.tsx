@@ -10,11 +10,12 @@
  */
 
 import { useEffect, useRef, useState } from "react"
-import { LogOut, Monitor, Shield, User as UserIcon } from "lucide-react"
+import { Key, LogOut, Monitor, Shield, User as UserIcon } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/auth-context"
 import { SessionManagerPanel } from "./session-manager-panel"
 import { MfaManagementPanel } from "./mfa-management-panel"
+import { ApiKeyManagementPanel } from "./api-key-management-panel"
 
 export function UserMenu() {
   const auth = useAuth()
@@ -22,6 +23,7 @@ export function UserMenu() {
   const [open, setOpen] = useState(false)
   const [showSessions, setShowSessions] = useState(false)
   const [showMfa, setShowMfa] = useState(false)
+  const [showApiKeys, setShowApiKeys] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   // Close on outside click / Escape — same shape as PanelHelp.
@@ -85,6 +87,18 @@ export function UserMenu() {
             <Shield size={12} />
             MFA settings
           </button>
+          {auth.user.role === "admin" && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => { setOpen(false); setShowApiKeys(true) }}
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--secondary)] text-[var(--foreground)]"
+              data-testid="menu-api-keys"
+            >
+              <Key size={12} />
+              API Keys
+            </button>
+          )}
           <button
             type="button"
             role="menuitem"
@@ -140,6 +154,26 @@ export function UserMenu() {
                 onClick={() => setShowMfa(false)}
                 className="px-3 py-1.5 rounded font-mono text-xs bg-[var(--secondary)] text-[var(--foreground)] hover:bg-[var(--secondary)]/80 transition-colors"
                 data-testid="mfa-close"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showApiKeys && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setShowApiKeys(false)}>
+          <div className="absolute inset-0 bg-black/40" />
+          <div
+            className="relative w-full max-w-xl max-h-[80vh] overflow-y-auto bg-[var(--background)] border border-[var(--border)] rounded-lg shadow-xl p-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <ApiKeyManagementPanel />
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={() => setShowApiKeys(false)}
+                className="px-3 py-1.5 rounded font-mono text-xs bg-[var(--secondary)] text-[var(--foreground)] hover:bg-[var(--secondary)]/80 transition-colors"
+                data-testid="api-keys-close"
               >
                 Close
               </button>

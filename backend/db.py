@@ -568,6 +568,22 @@ CREATE TABLE IF NOT EXISTS project_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_runs_created ON project_runs(created_at);
+
+-- K6: Per-key bearer tokens replacing single OMNISIGHT_DECISION_BEARER env.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    key_hash        TEXT NOT NULL,
+    key_prefix      TEXT NOT NULL DEFAULT '',
+    scopes          TEXT NOT NULL DEFAULT '["*"]',
+    created_by      TEXT NOT NULL DEFAULT '',
+    last_used_ip    TEXT,
+    last_used_at    REAL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
 """
 
 

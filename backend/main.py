@@ -82,6 +82,15 @@ async def lifespan(app: FastAPI):
                 "[AUTH] default admin bootstrapped: %s — change password before sharing!",
                 bootstrapped.email,
             )
+        # K6: migrate legacy OMNISIGHT_DECISION_BEARER env to api_keys table.
+        from backend import api_keys as _api_keys
+        legacy_key = await _api_keys.migrate_legacy_bearer()
+        if legacy_key:
+            _log.warning(
+                "[K6] Legacy bearer env migrated to api_keys row %s. "
+                "Create per-service keys and remove OMNISIGHT_DECISION_BEARER.",
+                legacy_key.id,
+            )
         # Trim expired sessions on every cold start.
         try:
             removed = await _auth.cleanup_expired_sessions()
@@ -186,6 +195,35 @@ _PASSWORD_CHANGE_EXEMPT = {
     "/auth/change-password", "/auth/login", "/auth/logout",
     "/auth/whoami", "/health",
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  K6 — API key scope enforcement
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+@app.middleware("http")
+async def _api_key_scope_gate(request, call_next):
+    """If the request carries a per-key bearer token (K6), pre-validate
+    the key's scope whitelist BEFORE the request reaches route handlers.
+    The api_key attribute is set by auth.current_user during dependency
+    injection, but Starlette middleware runs first, so we do an early
+    check here and let current_user re-validate later."""
+    raw = (request.headers.get("authorization") or "")
+    if raw.startswith("Bearer "):
+        raw = raw[len("Bearer "):]
+    if raw and raw.startswith("omni_"):
+        from backend import api_keys as _ak
+        ip = request.client.host if request.client else ""
+        key = await _ak.validate_bearer(raw, ip=ip)
+        if key:
+            rel_path = request.url.path.removeprefix(settings.api_prefix)
+            if not key.scope_allows(rel_path):
+                from starlette.responses import JSONResponse as StarletteJSON
+                return StarletteJSON(
+                    status_code=403,
+                    content={"detail": f"API key scope does not allow access to {rel_path}"},
+                )
+            request.state.api_key = key
+    return await call_next(request)
+
 
 @app.middleware("http")
 async def _must_change_password_gate(request, call_next):
@@ -343,6 +381,8 @@ from backend.routers import uvc_gadget as _uvc_gadget_router  # D1/SKILL-UVC
 app.include_router(_uvc_gadget_router.router, prefix=settings.api_prefix)
 from backend.routers import preferences as _prefs_router  # J4/USER-PREFS
 app.include_router(_prefs_router.router, prefix=settings.api_prefix)
+from backend.routers import api_keys as _api_keys_router  # K6/BEARER-PER-KEY
+app.include_router(_api_keys_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

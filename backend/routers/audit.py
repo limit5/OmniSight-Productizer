@@ -28,17 +28,19 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 
 
 def _require_audit_token(authorization: str | None = Header(default=None)) -> None:
-    """Audit reads can leak operator behaviour, so when the
-    OMNISIGHT_DECISION_BEARER env is set we require it here too.
-    Reuses the same env var to avoid a second secret to manage."""
+    """Audit reads can leak operator behaviour, so when bearer auth is
+    configured (per-key api_keys table or legacy env) we require it.
+    The actual validation happens in current_user(); this gate only
+    checks that a bearer is present when the legacy env is set (for
+    backwards compat). Per-key callers are validated by current_user."""
     expected = os.environ.get("OMNISIGHT_DECISION_BEARER", "").strip()
     if not expected:
         return
     presented = (authorization or "")
     if presented.startswith("Bearer "):
         presented = presented[len("Bearer "):]
-    if presented != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing audit bearer token")
+    if not presented:
+        raise HTTPException(status_code=401, detail="Bearer token required for audit access")
 
 
 @router.get("")
