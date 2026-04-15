@@ -51,12 +51,12 @@ class EventBus:
     """Pub/sub for SSE events with optional persistence."""
 
     def __init__(self) -> None:
-        self._subscribers: set[asyncio.Queue] = set()
+        self._subscribers: dict[asyncio.Queue, str | None] = {}
         self._dropped_events: int = 0  # backpressure telemetry
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, tenant_id: str | None = None) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        self._subscribers.add(q)
+        self._subscribers[q] = tenant_id
         try:
             from backend import metrics as _m
             _m.sse_subscribers.set(len(self._subscribers))
@@ -65,8 +65,7 @@ class EventBus:
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
-        # set.discard is O(1) and safe for missing elements
-        self._subscribers.discard(q)
+        self._subscribers.pop(q, None)
         try:
             from backend import metrics as _m
             _m.sse_subscribers.set(len(self._subscribers))
@@ -75,20 +74,22 @@ class EventBus:
 
     def publish(self, event: str, data: dict[str, Any],
                 session_id: str | None = None,
-                broadcast_scope: str = "global") -> None:
+                broadcast_scope: str = "global",
+                tenant_id: str | None = None) -> None:
         data.setdefault("timestamp", datetime.now().isoformat())
         data["_session_id"] = session_id or ""
         data["_broadcast_scope"] = broadcast_scope
+        data["_tenant_id"] = tenant_id or ""
         data_json = json.dumps(data)
         msg = {"event": event, "data": data_json}
         dead: list[asyncio.Queue] = []
         # Snapshot to allow safe mutation during iteration
-        for q in list(self._subscribers):
+        for q, sub_tenant in list(self._subscribers.items()):
+            if broadcast_scope == "tenant" and tenant_id and sub_tenant and sub_tenant != tenant_id:
+                continue
             try:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
-                # Backpressure: drop slowest subscriber rather than block
-                # publishers. Surface count via subscriber_dropped for telemetry.
                 self._dropped_events += 1
                 dead.append(q)
                 logger.warning(
@@ -101,7 +102,7 @@ class EventBus:
                 except Exception as exc:
                     logger.debug("sse_dropped metric bump failed: %s", exc)
         for q in dead:
-            self._subscribers.discard(q)
+            self._subscribers.pop(q, None)
 
         # Persist important events asynchronously
         if event in _PERSIST_EVENT_TYPES:
@@ -139,41 +140,58 @@ bus = EventBus()
 
 # ─── Convenience publishers (each one also writes to REPORTER VORTEX log) ───
 
+def _auto_tenant(tenant_id: str | None) -> str | None:
+    """Return explicit tenant_id, or read from request context if available."""
+    if tenant_id is not None:
+        return tenant_id
+    try:
+        from backend.db_context import current_tenant_id
+        return current_tenant_id()
+    except Exception:
+        return None
+
+
 def emit_agent_update(agent_id: str, status: str, thought_chain: str = "",
                       session_id: str | None = None,
-                      broadcast_scope: str = "global", **extra: Any) -> None:
+                      broadcast_scope: str = "global",
+                      tenant_id: str | None = None, **extra: Any) -> None:
     bus.publish("agent_update", {
         "agent_id": agent_id,
         "status": status,
         "thought_chain": thought_chain,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     level = "error" if status == "error" else "warn" if status == "warning" else "info"
     _log(f"[AGENT] {agent_id} → {status.upper()}" + (f": {thought_chain[:80]}" if thought_chain else ""), level)
 
 
 def emit_task_update(task_id: str, status: str, assigned_agent_id: str | None = None,
                      session_id: str | None = None,
-                     broadcast_scope: str = "global", **extra: Any) -> None:
+                     broadcast_scope: str = "global",
+                     tenant_id: str | None = None, **extra: Any) -> None:
     bus.publish("task_update", {
         "task_id": task_id,
         "status": status,
         "assigned_agent_id": assigned_agent_id,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     _log(f"[TASK] {task_id} → {status.upper()}" + (f" (agent: {assigned_agent_id})" if assigned_agent_id else ""))
 
 
 def emit_tool_progress(tool_name: str, phase: str, output: str = "",
                        session_id: str | None = None,
-                       broadcast_scope: str = "global", **extra: Any) -> None:
+                       broadcast_scope: str = "global",
+                       tenant_id: str | None = None, **extra: Any) -> None:
     """phase: 'start' | 'done' | 'error'"""
     bus.publish("tool_progress", {
         "tool_name": tool_name,
         "phase": phase,
         "output": output[:1000],
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     if phase == "start":
         _log(f"[TOOL] ⟳ {tool_name} executing...")
     elif phase == "done":
@@ -185,58 +203,67 @@ def emit_tool_progress(tool_name: str, phase: str, output: str = "",
 
 def emit_pipeline_phase(phase: str, detail: str = "",
                         session_id: str | None = None,
-                        broadcast_scope: str = "global", **extra: Any) -> None:
+                        broadcast_scope: str = "global",
+                        tenant_id: str | None = None, **extra: Any) -> None:
     bus.publish("pipeline", {
         "phase": phase,
         "detail": detail,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     level = "error" if "error" in phase else "warn" if "warning" in phase else "info"
     _log(f"[PIPELINE] {phase}: {detail}", level)
 
 
 def emit_workspace(agent_id: str, action: str, detail: str = "",
                    session_id: str | None = None,
-                   broadcast_scope: str = "global", **extra: Any) -> None:
+                   broadcast_scope: str = "global",
+                   tenant_id: str | None = None, **extra: Any) -> None:
     """Workspace lifecycle events."""
     bus.publish("workspace", {
         "agent_id": agent_id,
         "action": action,
         "detail": detail,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     _log(f"[WORKSPACE] {agent_id} {action}: {detail}")
 
 
 def emit_container(agent_id: str, action: str, detail: str = "",
                    session_id: str | None = None,
-                   broadcast_scope: str = "global", **extra: Any) -> None:
+                   broadcast_scope: str = "global",
+                   tenant_id: str | None = None, **extra: Any) -> None:
     """Docker container events."""
     bus.publish("container", {
         "agent_id": agent_id,
         "action": action,
         "detail": detail,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     _log(f"[DOCKER] {agent_id} {action}: {detail}")
 
 
 def emit_invoke(action_type: str, detail: str = "",
                 session_id: str | None = None,
-                broadcast_scope: str = "global", **extra: Any) -> None:
+                broadcast_scope: str = "global",
+                tenant_id: str | None = None, **extra: Any) -> None:
     """INVOKE action events."""
     bus.publish("invoke", {
         "action_type": action_type,
         "detail": detail,
         "timestamp": datetime.now().isoformat(),
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     _log(f"[INVOKE] {action_type}: {detail}")
 
 
 def emit_token_warning(level: str, message: str, usage: float = 0, budget: float = 0,
                        session_id: str | None = None,
-                       broadcast_scope: str = "user", **extra: Any) -> None:
+                       broadcast_scope: str = "user",
+                       tenant_id: str | None = None, **extra: Any) -> None:
     """Token budget warning events.
 
     Levels: ``warn`` (80%), ``downgrade`` (90%), ``frozen`` (100%), ``reset``, ``all_providers_failed``.
@@ -247,14 +274,16 @@ def emit_token_warning(level: str, message: str, usage: float = 0, budget: float
         "usage": usage,
         "budget": budget,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     level_label = {"warn": "warn", "downgrade": "warn", "frozen": "error", "reset": "info"}.get(level, "warn")
     _log(f"[TOKEN] {level.upper()}: {message}", level=level_label)
 
 
 def emit_simulation(sim_id: str, action: str, detail: str = "",
                     session_id: str | None = None,
-                    broadcast_scope: str = "global", **extra: Any) -> None:
+                    broadcast_scope: str = "global",
+                    tenant_id: str | None = None, **extra: Any) -> None:
     """Simulation lifecycle events: start, progress, result."""
     bus.publish("simulation", {
         "sim_id": sim_id,
@@ -262,7 +291,8 @@ def emit_simulation(sim_id: str, action: str, detail: str = "",
         "detail": detail,
         "timestamp": datetime.now().isoformat(),
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
     level_label = "error" if action == "result" and extra.get("status") == "fail" else "info"
     _log(f"[SIM] {sim_id} {action}: {detail}", level=level_label)
 
@@ -271,7 +301,8 @@ def emit_debug_finding(
     task_id: str, agent_id: str, finding_type: str, severity: str, message: str,
     context: dict | None = None,
     session_id: str | None = None,
-    broadcast_scope: str = "global", **extra: Any,
+    broadcast_scope: str = "global",
+    tenant_id: str | None = None, **extra: Any,
 ) -> None:
     """Debug discovery events: stuck loops, repeated errors, loop breaker triggers.
 
@@ -294,7 +325,8 @@ def emit_debug_finding(
         "message": message,
         "timestamp": now,
         **extra,
-    }, session_id=session_id, broadcast_scope=broadcast_scope)
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
 
     # Persist to DB asynchronously (fire-and-forget)
     import asyncio

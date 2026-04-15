@@ -85,7 +85,7 @@ const SSE_EVENT_TYPES = [
   "budget_strategy_changed",
 ] as const
 
-export type BroadcastScope = "session" | "user" | "global"
+export type BroadcastScope = "session" | "user" | "global" | "tenant"
 export type SSEFilterMode = "this_session" | "all_sessions"
 
 type SSEListener = (ev: SSEEvent) => void
@@ -96,6 +96,7 @@ const _sseListeners = new Set<SSEListener>()
 const _sseErrorListeners = new Set<ErrorListener>()
 
 let _currentSessionId: string | null = null
+let _currentTenantId: string | null = null
 let _sseFilterMode: SSEFilterMode = "this_session"
 const _filterModeListeners = new Set<(mode: SSEFilterMode) => void>()
 
@@ -104,6 +105,12 @@ export function setCurrentSessionId(sid: string | null): void {
 }
 export function getCurrentSessionId(): string | null {
   return _currentSessionId
+}
+export function setCurrentTenantId(tid: string | null): void {
+  _currentTenantId = tid
+}
+export function getCurrentTenantId(): string | null {
+  return _currentTenantId
 }
 export function setSSEFilterMode(mode: SSEFilterMode): void {
   _sseFilterMode = mode
@@ -122,7 +129,12 @@ export function onFilterModeChange(cb: (mode: SSEFilterMode) => void): () => voi
 function _shouldDeliverEvent(data: Record<string, unknown>): boolean {
   const scope = (data._broadcast_scope as BroadcastScope) || "global"
   const eventSessionId = (data._session_id as string) || ""
+  const eventTenantId = (data._tenant_id as string) || ""
   if (scope === "global") return true
+  if (scope === "tenant") {
+    if (!_currentTenantId || !eventTenantId) return true
+    return eventTenantId === _currentTenantId
+  }
   if (!_currentSessionId || !eventSessionId) return true
   if (_sseFilterMode === "all_sessions") return true
   if (scope === "user") return true

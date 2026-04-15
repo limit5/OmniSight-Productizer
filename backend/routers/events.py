@@ -9,7 +9,7 @@ Replay:
 import asyncio
 import json
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from sse_starlette.sse import EventSourceResponse
 
 from backend.events import bus
@@ -19,10 +19,20 @@ router = APIRouter(tags=["events"])
 HEARTBEAT_INTERVAL = 15  # seconds
 
 
+def _get_tenant_id() -> str | None:
+    """Best-effort read of request-scoped tenant context."""
+    try:
+        from backend.db_context import current_tenant_id
+        return current_tenant_id()
+    except Exception:
+        return None
+
+
 @router.get("/events")
 async def event_stream():
     """Persistent SSE connection. Pushes all real-time events to the frontend."""
-    queue = bus.subscribe()
+    tenant_id = _get_tenant_id()
+    queue = bus.subscribe(tenant_id=tenant_id)
 
     async def generator():
         try:
