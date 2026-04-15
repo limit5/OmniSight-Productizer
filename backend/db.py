@@ -106,6 +106,8 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # K2 — account lockout after consecutive login failures.
         ("users", "failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
         ("users", "locked_until", "REAL"),
+        # K4 — session rotation + UA binding.
+        ("sessions", "ua_hash", "TEXT NOT NULL DEFAULT ''"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -447,6 +449,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen_at    REAL NOT NULL,
     ip              TEXT NOT NULL DEFAULT '',
     user_agent      TEXT NOT NULL DEFAULT '',
+    ua_hash         TEXT NOT NULL DEFAULT '',
     metadata        TEXT NOT NULL DEFAULT '{}',
     mfa_verified    INTEGER NOT NULL DEFAULT 0,
     rotated_from    TEXT

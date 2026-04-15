@@ -204,3 +204,120 @@ async def test_github_installation_upsert_and_list(_auth_db):
     rows2 = await github_app.list_installations()
     assert len(rows2) == 1
     assert rows2[0]["repos"] == ["acme/repo1", "acme/repo2", "acme/repo3"]
+
+
+# ── K4: session rotation ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rotate_session_creates_new_and_graces_old(_auth_db):
+    import time
+    _, auth = _auth_db
+    u = await auth.create_user("r@b.com", "Bob", role="viewer", password="pw")
+    old_sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="TestBrowser/1.0")
+    old_token = old_sess.token
+
+    new_sess, returned_old = await auth.rotate_session(
+        old_token, ip="1.2.3.4", user_agent="TestBrowser/1.0",
+    )
+    assert returned_old == old_token
+    assert new_sess.token != old_token
+    assert new_sess.user_id == u.id
+
+    old_fetched = await auth.get_session(old_token)
+    assert old_fetched is not None, "old token should still work during grace"
+    assert old_fetched.rotated_from == new_sess.token
+
+    new_fetched = await auth.get_session(new_sess.token)
+    assert new_fetched is not None
+    assert new_fetched.user_id == u.id
+
+
+@pytest.mark.asyncio
+async def test_rotate_session_grace_window_expires(_auth_db):
+    _, auth = _auth_db
+    from backend import db
+    u = await auth.create_user("g@b.com", "Grace", role="viewer", password="pw")
+    old_sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="UA")
+    new_sess, _ = await auth.rotate_session(old_sess.token, ip="1.2.3.4", user_agent="UA")
+
+    await db._conn().execute(
+        "UPDATE sessions SET expires_at=? WHERE token=?",
+        (0.0, old_sess.token),
+    )
+    await db._conn().commit()
+    assert (await auth.get_session(old_sess.token)) is None, \
+        "old token must expire after grace window"
+    assert (await auth.get_session(new_sess.token)) is not None, \
+        "new token must remain valid"
+
+
+@pytest.mark.asyncio
+async def test_rotate_session_nonexistent_raises(_auth_db):
+    _, auth = _auth_db
+    with pytest.raises(ValueError, match="session not found"):
+        await auth.rotate_session("nonexistent-token")
+
+
+@pytest.mark.asyncio
+async def test_rotate_user_sessions_on_role_change(_auth_db):
+    _, auth = _auth_db
+    from backend import db
+    u = await auth.create_user("rc@b.com", "Carol", role="viewer", password="pw")
+    s1 = await auth.create_session(u.id, ip="1.1.1.1", user_agent="UA1")
+    s2 = await auth.create_session(u.id, ip="2.2.2.2", user_agent="UA2")
+
+    count = await auth.rotate_user_sessions(u.id, exclude_token=None)
+    assert count == 2
+
+    fetched1 = await auth.get_session(s1.token)
+    assert fetched1 is not None, "should still be in grace window"
+    assert fetched1.expires_at < s1.expires_at, "expiry should be shortened to grace"
+
+
+# ── K4: UA binding ────────────────────────────────────────────
+
+
+def test_compute_ua_hash_deterministic():
+    from backend.auth import compute_ua_hash
+    h1 = compute_ua_hash("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    h2 = compute_ua_hash("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    assert h1 == h2
+    assert len(h1) == 32
+
+
+def test_compute_ua_hash_different_ua():
+    from backend.auth import compute_ua_hash
+    h1 = compute_ua_hash("Mozilla/5.0 Chrome")
+    h2 = compute_ua_hash("Mozilla/5.0 Firefox")
+    assert h1 != h2
+
+
+def test_compute_ua_hash_empty():
+    from backend.auth import compute_ua_hash
+    assert compute_ua_hash("") == ""
+
+
+@pytest.mark.asyncio
+async def test_ua_binding_match(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user("ua@b.com", "UA", role="viewer", password="pw")
+    sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="MyBrowser/1.0")
+    assert await auth.check_ua_binding(sess, "MyBrowser/1.0") is True
+
+
+@pytest.mark.asyncio
+async def test_ua_binding_mismatch_returns_false(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user("ua2@b.com", "UA2", role="viewer", password="pw")
+    sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="Chrome/120")
+    assert await auth.check_ua_binding(sess, "Firefox/115") is False
+
+
+@pytest.mark.asyncio
+async def test_ua_binding_empty_ua_passes(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user("ua3@b.com", "UA3", role="viewer", password="pw")
+    sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="")
+    assert await auth.check_ua_binding(sess, "") is True
+    assert await auth.check_ua_binding(sess, "SomeUA") is True

@@ -129,9 +129,16 @@ class Session:
 
 
 SESSION_TTL_S = 8 * 60 * 60          # 8 hours
+ROTATION_GRACE_S = 30                # old token stays valid 30s after rotation
 SESSION_COOKIE = "omnisight_session"
 CSRF_COOKIE = "omnisight_csrf"
 CSRF_HEADER = "X-CSRF-Token"
+
+
+def compute_ua_hash(user_agent: str) -> str:
+    if not user_agent:
+        return ""
+    return hashlib.sha256(user_agent.encode("utf-8", errors="replace")).hexdigest()[:32]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -293,17 +300,19 @@ async def create_session(user_id: str, ip: str = "", user_agent: str = "") -> Se
     csrf = secrets.token_urlsafe(24)
     now = time.time()
     expires = now + SESSION_TTL_S
+    ua = (user_agent or "")[:240]
+    ua_h = compute_ua_hash(ua)
     conn = await _conn()
     await conn.execute(
         "INSERT INTO sessions (token, user_id, csrf_token, created_at, "
-        "expires_at, last_seen_at, ip, user_agent) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (token, user_id, csrf, now, expires, now, ip, (user_agent or "")[:240]),
+        "expires_at, last_seen_at, ip, user_agent, ua_hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (token, user_id, csrf, now, expires, now, ip, ua, ua_h),
     )
     await conn.commit()
     return Session(token=token, user_id=user_id, csrf_token=csrf,
                    created_at=now, expires_at=expires, ip=ip,
-                   user_agent=(user_agent or "")[:240], last_seen_at=now)
+                   user_agent=ua, last_seen_at=now)
 
 
 async def get_session(token: str) -> Optional[Session]:
@@ -386,6 +395,64 @@ async def cleanup_expired_sessions() -> int:
     )
     await conn.commit()
     return cur.rowcount or 0
+
+
+async def rotate_session(old_token: str, ip: str = "",
+                         user_agent: str = "") -> tuple[Session, str]:
+    """Create a new session for the same user, mark the old token as
+    rotated (``rotated_from`` → new token) and let it live for a 30-s
+    grace window so in-flight requests finish.
+
+    Returns ``(new_session, old_token)``.
+    """
+    old = await get_session(old_token)
+    if not old:
+        raise ValueError("session not found or expired")
+    new_sess = await create_session(old.user_id, ip=ip, user_agent=user_agent)
+    conn = await _conn()
+    grace_expires = time.time() + ROTATION_GRACE_S
+    await conn.execute(
+        "UPDATE sessions SET rotated_from=?, expires_at=? WHERE token=?",
+        (new_sess.token, grace_expires, old_token),
+    )
+    await conn.commit()
+    logger.info("[AUTH] Session rotated for user %s (grace %ds)",
+                old.user_id, ROTATION_GRACE_S)
+    return new_sess, old_token
+
+
+async def rotate_user_sessions(user_id: str, exclude_token: str | None = None) -> int:
+    """Expire all sessions for *user_id* (except *exclude_token*) with
+    a 30-s grace window. Used when a user's role changes."""
+    conn = await _conn()
+    now = time.time()
+    grace = now + ROTATION_GRACE_S
+    if exclude_token:
+        cur = await conn.execute(
+            "UPDATE sessions SET expires_at=? "
+            "WHERE user_id=? AND token!=? AND expires_at>?",
+            (grace, user_id, exclude_token, now),
+        )
+    else:
+        cur = await conn.execute(
+            "UPDATE sessions SET expires_at=? "
+            "WHERE user_id=? AND expires_at>?",
+            (grace, user_id, now),
+        )
+    await conn.commit()
+    return cur.rowcount or 0
+
+
+async def check_ua_binding(session: Session, current_ua: str) -> bool:
+    """Compare the stored UA hash with the current request's UA.
+    Returns True if matched, False if mismatched (caller should log warning)."""
+    if not session.user_agent and not current_ua:
+        return True
+    stored_hash = compute_ua_hash(session.user_agent)
+    current_hash = compute_ua_hash((current_ua or "")[:240])
+    if not stored_hash or not current_hash:
+        return True
+    return secrets.compare_digest(stored_hash, current_hash)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -477,6 +544,25 @@ async def current_user(request: Request) -> User:
         u = await get_user(sess.user_id)
         if u and u.enabled:
             request.state.session = sess
+            current_ua = request.headers.get("user-agent", "")
+            if not await check_ua_binding(sess, current_ua):
+                try:
+                    from backend import audit as _audit
+                    await _audit.log(
+                        action="ua_mismatch_warning",
+                        entity_kind="session",
+                        entity_id=session_id_from_token(sess.token),
+                        before={"stored_ua": sess.user_agent[:80]},
+                        after={"current_ua": (current_ua or "")[:80]},
+                        actor=u.email,
+                        session_id=sess.token,
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    "[AUTH] UA mismatch for user %s session %s",
+                    u.email, session_id_from_token(sess.token),
+                )
             return u
 
     if mode == "session" and request.method in {"GET", "HEAD", "OPTIONS"}:

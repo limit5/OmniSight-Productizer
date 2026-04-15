@@ -257,8 +257,9 @@ class ChangePasswordRequest(BaseModel):
 
 @router.post("/auth/change-password")
 async def change_password(req: ChangePasswordRequest, request: Request,
+                          response: Response,
                           user: auth.User = Depends(auth.current_user)) -> dict:
-    """Change the current user's password. Clears must_change_password flag."""
+    """Change the current user's password. Rotates session token."""
     verified = await auth.authenticate_password(user.email, req.current_password)
     if not verified:
         raise HTTPException(status_code=401, detail="current password is incorrect")
@@ -273,7 +274,46 @@ async def change_password(req: ChangePasswordRequest, request: Request,
         )
     except Exception as exc:
         logger.debug("password_changed audit emit failed: %s", exc)
-    return {"status": "password_changed", "must_change_password": False}
+
+    old_token = request.cookies.get(auth.SESSION_COOKIE) or ""
+    new_csrf = None
+    if old_token:
+        try:
+            new_sess, _ = await auth.rotate_session(
+                old_token,
+                ip=_client_key(request),
+                user_agent=request.headers.get("user-agent", ""),
+            )
+            secure = _cookie_secure()
+            response.set_cookie(
+                key=auth.SESSION_COOKIE, value=new_sess.token,
+                max_age=auth.SESSION_TTL_S, httponly=True,
+                secure=secure, samesite="lax",
+            )
+            response.set_cookie(
+                key=auth.CSRF_COOKIE, value=new_sess.csrf_token,
+                max_age=auth.SESSION_TTL_S, httponly=False,
+                secure=secure, samesite="lax",
+            )
+            new_csrf = new_sess.csrf_token
+            try:
+                from backend import audit as _audit
+                await _audit.log(
+                    action="session_rotated", entity_kind="session",
+                    entity_id=user.id,
+                    before={"reason": "password_change"},
+                    after={"grace_s": auth.ROTATION_GRACE_S},
+                    actor=user.email, session_id=new_sess.token,
+                )
+            except Exception:
+                pass
+        except ValueError:
+            pass
+
+    result: dict = {"status": "password_changed", "must_change_password": False}
+    if new_csrf:
+        result["csrf_token"] = new_csrf
+    return result
 
 
 @router.get("/auth/oidc/{provider}")
@@ -339,10 +379,12 @@ async def create_user(req: CreateUserRequest,
 
 @router.patch("/users/{user_id}")
 async def patch_user(user_id: str, req: PatchUserRequest,
-                     _: auth.User = Depends(auth.require_admin)) -> dict:
+                     request: Request,
+                     admin_user: auth.User = Depends(auth.require_admin)) -> dict:
     user = await auth.get_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="user not found")
+    old_role = user.role
     sets: list[str] = []
     params: list = []
     if req.role is not None:
@@ -364,6 +406,22 @@ async def patch_user(user_id: str, req: PatchUserRequest,
         f"UPDATE users SET {', '.join(sets)} WHERE id=?", tuple(params),
     )
     await db._conn().commit()
+
+    if req.role is not None and req.role != old_role:
+        count = await auth.rotate_user_sessions(user_id)
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="session_rotated", entity_kind="session",
+                entity_id=user_id,
+                before={"reason": "role_change", "old_role": old_role},
+                after={"new_role": req.role, "rotated_count": count,
+                       "grace_s": auth.ROTATION_GRACE_S},
+                actor=admin_user.email,
+            )
+        except Exception:
+            pass
+
     updated = await auth.get_user(user_id)
     return updated.to_dict() if updated else {"detail": "vanished"}
 
