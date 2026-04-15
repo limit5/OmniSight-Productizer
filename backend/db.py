@@ -15,6 +15,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from backend.db_context import current_tenant_id, tenant_insert_value, tenant_where
+
 logger = logging.getLogger(__name__)
 
 def _resolve_db_path() -> Path:
@@ -671,10 +673,14 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
 async def load_decision_rules() -> list[dict]:
     """Load all persisted decision rules. Returns list of dicts matching
     the in-memory shape used by backend.decision_rules."""
-    async with _conn().execute(
-        "SELECT id, kind_pattern, severity, auto_in_modes, default_option_id, "
-        "priority, enabled, note FROM decision_rules"
-    ) as cur:
+    sql = ("SELECT id, kind_pattern, severity, auto_in_modes, default_option_id, "
+           "priority, enabled, note FROM decision_rules")
+    conditions: list[str] = []
+    params: list = []
+    tenant_where(conditions, params)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    async with _conn().execute(sql, params) as cur:
         rows = await cur.fetchall()
     out: list[dict] = []
     for r in rows:
@@ -698,16 +704,23 @@ async def load_decision_rules() -> list[dict]:
 async def replace_decision_rules(rules: list[dict]) -> None:
     """Atomically swap the decision_rules table. Used when the editor PUTs
     the whole list."""
+    tid = tenant_insert_value()
     db = _conn()
     async with db.execute("BEGIN IMMEDIATE"):
         pass
     try:
-        await db.execute("DELETE FROM decision_rules")
+        t_cond: list[str] = []
+        t_params: list = []
+        tenant_where(t_cond, t_params)
+        del_sql = "DELETE FROM decision_rules"
+        if t_cond:
+            del_sql += " WHERE " + " AND ".join(t_cond)
+        await db.execute(del_sql, t_params)
         for r in rules:
             await db.execute(
                 "INSERT INTO decision_rules (id, kind_pattern, severity, "
-                "auto_in_modes, default_option_id, priority, enabled, note) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "auto_in_modes, default_option_id, priority, enabled, note, tenant_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     r["id"],
                     r["kind_pattern"],
@@ -717,6 +730,7 @@ async def replace_decision_rules(rules: list[dict]) -> None:
                     int(r.get("priority", 100)),
                     1 if r.get("enabled", True) else 0,
                     (r.get("note") or "")[:240],
+                    tid,
                 ),
             )
         await db.commit()
@@ -1045,13 +1059,14 @@ async def list_failed_notifications(limit: int = 50) -> list[dict]:
 
 async def insert_artifact(data: dict) -> None:
     await _conn().execute(
-        """INSERT INTO artifacts (id, task_id, agent_id, name, type, file_path, size, created_at, version, checksum)
+        """INSERT INTO artifacts (id, task_id, agent_id, name, type, file_path, size, created_at, version, checksum, tenant_id)
            VALUES (:id, :task_id, :agent_id, :name, :type, :file_path, :size, :created_at,
-                   :version, :checksum)""",
+                   :version, :checksum, :tenant_id)""",
         {
             **data,
             "version": data.get("version", ""),
             "checksum": data.get("checksum", ""),
+            "tenant_id": tenant_insert_value(),
         },
     )
     await _conn().commit()
@@ -1061,6 +1076,7 @@ async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = 50)
     query = "SELECT * FROM artifacts"
     conditions: list[str] = []
     params: list = []
+    tenant_where(conditions, params)
     if task_id:
         conditions.append("task_id = ?")
         params.append(task_id)
@@ -1077,13 +1093,21 @@ async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = 50)
 
 
 async def get_artifact(artifact_id: str) -> dict | None:
-    async with _conn().execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)) as cur:
+    conditions = ["id = ?"]
+    params: list = [artifact_id]
+    tenant_where(conditions, params)
+    sql = "SELECT * FROM artifacts WHERE " + " AND ".join(conditions)
+    async with _conn().execute(sql, params) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
 
 
 async def delete_artifact(artifact_id: str) -> bool:
-    cur = await _conn().execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+    conditions = ["id = ?"]
+    params: list = [artifact_id]
+    tenant_where(conditions, params)
+    sql = "DELETE FROM artifacts WHERE " + " AND ".join(conditions)
+    cur = await _conn().execute(sql, params)
     await _conn().commit()
     return cur.rowcount > 0
 
@@ -1186,11 +1210,12 @@ async def update_simulation(sim_id: str, data: dict) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def insert_debug_finding(data: dict) -> None:
+    d = {**data, "tenant_id": tenant_insert_value()}
     await _conn().execute(
         """INSERT OR IGNORE INTO debug_findings
-           (id, task_id, agent_id, finding_type, severity, content, context, status, created_at)
-           VALUES (:id, :task_id, :agent_id, :finding_type, :severity, :content, :context, :status, :created_at)""",
-        data,
+           (id, task_id, agent_id, finding_type, severity, content, context, status, created_at, tenant_id)
+           VALUES (:id, :task_id, :agent_id, :finding_type, :severity, :content, :context, :status, :created_at, :tenant_id)""",
+        d,
     )
     await _conn().commit()
 
@@ -1201,6 +1226,7 @@ async def list_debug_findings(
     query = "SELECT * FROM debug_findings"
     conditions: list[str] = []
     params: list = []
+    tenant_where(conditions, params)
     if task_id:
         conditions.append("task_id = ?")
         params.append(task_id)
@@ -1220,10 +1246,13 @@ async def list_debug_findings(
 
 
 async def update_debug_finding(finding_id: str, status: str) -> bool:
-    cur = await _conn().execute(
-        "UPDATE debug_findings SET status = ?, resolved_at = datetime('now') WHERE id = ?",
-        (status, finding_id),
-    )
+    conditions = ["id = ?"]
+    params: list = [finding_id]
+    tenant_where(conditions, params)
+    sql = ("UPDATE debug_findings SET status = ?, resolved_at = datetime('now') WHERE "
+           + " AND ".join(conditions))
+    params_full = [status] + params
+    cur = await _conn().execute(sql, params_full)
     await _conn().commit()
     return cur.rowcount > 0
 
@@ -1234,8 +1263,8 @@ async def update_debug_finding(finding_id: str, status: str) -> bool:
 
 async def insert_event(event_type: str, data_json: str) -> None:
     await _conn().execute(
-        "INSERT INTO event_log (event_type, data_json) VALUES (?, ?)",
-        (event_type, data_json),
+        "INSERT INTO event_log (event_type, data_json, tenant_id) VALUES (?, ?, ?)",
+        (event_type, data_json, tenant_insert_value()),
     )
     await _conn().commit()
 
@@ -1246,6 +1275,7 @@ async def list_events(
     query = "SELECT * FROM event_log"
     conditions: list[str] = []
     params: list = []
+    tenant_where(conditions, params)
     if since:
         conditions.append("created_at >= ?")
         params.append(since)

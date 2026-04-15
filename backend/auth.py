@@ -152,11 +152,13 @@ class User:
     role: str
     enabled: bool = True
     must_change_password: bool = False
+    tenant_id: str = "t-default"
 
     def to_dict(self) -> dict:
         return {"id": self.id, "email": self.email, "name": self.name,
                 "role": self.role, "enabled": self.enabled,
-                "must_change_password": self.must_change_password}
+                "must_change_password": self.must_change_password,
+                "tenant_id": self.tenant_id}
 
 
 @dataclass
@@ -200,7 +202,7 @@ async def _conn():
 async def get_user(user_id: str) -> Optional[User]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, email, name, role, enabled, must_change_password FROM users WHERE id=?",
+        "SELECT id, email, name, role, enabled, must_change_password, tenant_id FROM users WHERE id=?",
         (user_id,),
     ) as cur:
         r = await cur.fetchone()
@@ -208,13 +210,14 @@ async def get_user(user_id: str) -> Optional[User]:
         return None
     return User(id=r["id"], email=r["email"], name=r["name"],
                 role=r["role"], enabled=bool(r["enabled"]),
-                must_change_password=bool(r["must_change_password"]))
+                must_change_password=bool(r["must_change_password"]),
+                tenant_id=r["tenant_id"])
 
 
 async def get_user_by_email(email: str) -> Optional[User]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, email, name, role, enabled, must_change_password FROM users WHERE email=?",
+        "SELECT id, email, name, role, enabled, must_change_password, tenant_id FROM users WHERE email=?",
         (email.lower().strip(),),
     ) as cur:
         r = await cur.fetchone()
@@ -222,26 +225,31 @@ async def get_user_by_email(email: str) -> Optional[User]:
         return None
     return User(id=r["id"], email=r["email"], name=r["name"],
                 role=r["role"], enabled=bool(r["enabled"]),
-                must_change_password=bool(r["must_change_password"]))
+                must_change_password=bool(r["must_change_password"]),
+                tenant_id=r["tenant_id"])
 
 
 async def create_user(email: str, name: str, role: str = "viewer",
                       password: str | None = None,
-                      oidc_provider: str = "", oidc_subject: str = "") -> User:
+                      oidc_provider: str = "", oidc_subject: str = "",
+                      tenant_id: str = "") -> User:
     if role not in ROLES:
         raise ValueError(f"unknown role: {role}")
+    from backend.db_context import tenant_insert_value
+    tid = tenant_id or tenant_insert_value()
     conn = await _conn()
     uid = f"u-{uuid.uuid4().hex[:10]}"
     pw_hash = hash_password(password) if password else ""
     await conn.execute(
         "INSERT INTO users (id, email, name, role, password_hash, "
-        "oidc_provider, oidc_subject, enabled) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+        "oidc_provider, oidc_subject, enabled, tenant_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
         (uid, email.lower().strip(), name, role, pw_hash,
-         oidc_provider, oidc_subject),
+         oidc_provider, oidc_subject, tid),
     )
     await conn.commit()
-    return User(id=uid, email=email.lower().strip(), name=name, role=role)
+    return User(id=uid, email=email.lower().strip(), name=name, role=role,
+                tenant_id=tid)
 
 
 async def check_password_history(user_id: str, plain: str) -> bool:
@@ -625,7 +633,7 @@ async def _validate_api_key(req: Request) -> "ApiKey | None":
 
 
 _ANON_ADMIN = User(id="anonymous", email="anonymous@local", name="(anonymous)",
-                   role="admin", enabled=True)
+                   role="admin", enabled=True, tenant_id="t-default")
 
 
 def _legacy_bearer_matches(req: Request) -> bool:
@@ -757,6 +765,13 @@ async def require_viewer(user: User = Depends(current_user)) -> User:
 
 require_operator = require_role("operator")
 require_admin = require_role("admin")
+
+
+async def require_tenant(user: User = Depends(current_user)) -> User:
+    """Set the request-scoped tenant context from the authenticated user."""
+    from backend.db_context import set_tenant_id
+    set_tenant_id(user.tenant_id)
+    return user
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

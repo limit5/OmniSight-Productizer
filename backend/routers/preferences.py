@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend import auth, db
+from backend.db_context import tenant_insert_value, tenant_where
 
 router = APIRouter(tags=["preferences"])
 
@@ -25,10 +26,11 @@ async def list_preferences(
     user: auth.User = Depends(auth.current_user),
 ) -> dict:
     conn = db._conn()
-    async with conn.execute(
-        "SELECT pref_key, value, updated_at FROM user_preferences WHERE user_id=?",
-        (user.id,),
-    ) as cur:
+    conditions = ["user_id=?"]
+    params: list = [user.id]
+    tenant_where(conditions, params)
+    sql = "SELECT pref_key, value, updated_at FROM user_preferences WHERE " + " AND ".join(conditions)
+    async with conn.execute(sql, params) as cur:
         rows = await cur.fetchall()
     return {
         "items": {r["pref_key"]: r["value"] for r in rows},
@@ -60,10 +62,10 @@ async def set_preference(
     conn = db._conn()
     now = time.time()
     await conn.execute(
-        "INSERT INTO user_preferences (user_id, pref_key, value, updated_at) "
-        "VALUES (?, ?, ?, ?) "
+        "INSERT INTO user_preferences (user_id, pref_key, value, updated_at, tenant_id) "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id, pref_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (user.id, key, body.value, now),
+        (user.id, key, body.value, now, tenant_insert_value()),
     )
     await conn.commit()
     return {"key": key, "value": body.value}

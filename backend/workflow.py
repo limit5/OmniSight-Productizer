@@ -42,6 +42,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
+from backend.db_context import tenant_insert_value, tenant_where
+
 logger = logging.getLogger(__name__)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -133,9 +135,9 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
         metadata=metadata or {},
     )
     await conn.execute(
-        "INSERT INTO workflow_runs (id, kind, started_at, status, metadata) "
-        "VALUES (?, ?, ?, 'running', ?)",
-        (run.id, run.kind, run.started_at, json.dumps(run.metadata)),
+        "INSERT INTO workflow_runs (id, kind, started_at, status, metadata, tenant_id) "
+        "VALUES (?, ?, ?, 'running', ?, ?)",
+        (run.id, run.kind, run.started_at, json.dumps(run.metadata), tenant_insert_value()),
     )
     await conn.commit()
 
@@ -197,10 +199,12 @@ async def mutate_workflow(old_run_id: str, new_dag: Any, *,
 
 async def get_run(run_id: str) -> Optional[WorkflowRun]:
     conn = await _conn()
-    async with conn.execute(
-        "SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
-        "FROM workflow_runs WHERE id = ?", (run_id,),
-    ) as cur:
+    conditions = ["id = ?"]
+    params: list = [run_id]
+    tenant_where(conditions, params)
+    sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
+           "FROM workflow_runs WHERE " + " AND ".join(conditions))
+    async with conn.execute(sql, params) as cur:
         row = await cur.fetchone()
     if not row:
         return None
@@ -215,15 +219,19 @@ async def get_run(run_id: str) -> Optional[WorkflowRun]:
 
 async def list_runs(status: str | None = None, limit: int = 50) -> list[WorkflowRun]:
     conn = await _conn()
+    conditions: list[str] = []
+    p: list = []
+    tenant_where(conditions, p)
     if status:
-        sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
-               "FROM workflow_runs WHERE status=? ORDER BY started_at DESC LIMIT ?")
-        params: tuple = (status, limit)
-    else:
-        sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
-               "FROM workflow_runs ORDER BY started_at DESC LIMIT ?")
-        params = (limit,)
-    async with conn.execute(sql, params) as cur:
+        conditions.append("status = ?")
+        p.append(status)
+    sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
+           "FROM workflow_runs")
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY started_at DESC LIMIT ?"
+    p.append(limit)
+    async with conn.execute(sql, p) as cur:
         rows = await cur.fetchall()
     return [
         WorkflowRun(

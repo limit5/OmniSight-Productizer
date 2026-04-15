@@ -33,6 +33,8 @@ import logging
 import time
 from typing import Any, Optional
 
+from backend.db_context import tenant_insert_value, tenant_where
+
 logger = logging.getLogger(__name__)
 
 # Single-process serialiser for the chain — a fan-in of concurrent
@@ -94,12 +96,12 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
             cur = await conn.execute(
                 "INSERT INTO audit_log "
                 "(ts, actor, action, entity_kind, entity_id, before_json, after_json, "
-                "prev_hash, curr_hash, session_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "prev_hash, curr_hash, session_id, tenant_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (ts, actor, action, entity_kind, entity_id or "",
                  json.dumps(before_d, ensure_ascii=False),
                  json.dumps(after_d, ensure_ascii=False),
-                 prev, curr, session_id),
+                 prev, curr, session_id, tenant_insert_value()),
             )
             await conn.commit()
             new_id = cur.lastrowid
@@ -130,8 +132,9 @@ async def query(*, since: float | None = None, actor: str | None = None,
                 entity_kind: str | None = None, session_id: str | None = None,
                 limit: int = 200) -> list[dict[str, Any]]:
     conn = await _conn()
-    where = []
+    where: list[str] = []
     params: list[Any] = []
+    tenant_where(where, params, table_alias="a")
     if since is not None:
         where.append("a.ts >= ?"); params.append(since)
     if actor:
