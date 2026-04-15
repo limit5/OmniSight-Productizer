@@ -1,9 +1,36 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：D1 SKILL-UVC (master)
+> 最後 commit：S0 Shared foundation (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## S0 (complete) Shared foundation — session management + audit session_id（2026-04-16 完成）
+
+**背景**：為後續 J/K 系列安全強化提供共用基礎設施。需要在 audit_log 追蹤 session 來源、sessions 表預留 MFA/rotation 欄位、並提供 session 管理 API。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Alembic 0007 migration | audit_log +session_id TEXT+index；sessions +metadata/mfa_verified/rotated_from | ✅ 完成 |
+| db.py _migrate 相容 | 既有 DB 透過 ALTER TABLE 加欄位，新 DB 直接 CREATE TABLE 帶欄位 | ✅ 完成 |
+| GET /auth/sessions | 列出當前 user 所有 active sessions（token 遮罩、IP/UA/時戳） | ✅ 完成 |
+| DELETE /auth/sessions/{token_hint} | 依 token_hint 撤銷單一 session（admin 可跨 user） | ✅ 完成 |
+| DELETE /auth/sessions | 登出所有其他裝置（保留當前 session） | ✅ 完成 |
+| request.state.session 注入 | current_user 依賴自動在 request.state 設定 Session 物件 | ✅ 完成 |
+| Bearer token fingerprint | bearer 認證時產生 `bearer:<sha256[:12]>` 作為 session_id | ✅ 完成 |
+| write_audit() helper | 自動從 request context 提取 session_id、actor | ✅ 完成 |
+| audit.log session_id 參數 | log() / log_sync() 接受 session_id，query() 回傳 session_id | ✅ 完成 |
+| 測試 | 13 項新測試：session CRUD/revoke/audit session_id/bearer FP/write_audit | ✅ 32/32 pass |
+
+**新增/修改檔案**：
+- `backend/alembic/versions/0007_session_audit_enhancements.py` — 新 migration
+- `backend/db.py` — schema + _migrate 加欄位
+- `backend/auth.py` — Session dataclass 擴充、list/revoke helpers、current_user 注入 session
+- `backend/audit.py` — session_id 參數 + write_audit() helper
+- `backend/routers/auth.py` — 3 個新 session 管理 endpoint
+- `backend/tests/test_s0_sessions.py` — 13 項測試
 
 ---
 
