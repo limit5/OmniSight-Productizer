@@ -1,9 +1,57 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`5e21035` (master)
+> 最後 commit：`22f8832` (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## B9 ESLint 116 findings batch cleanup 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。ESLint 從 116 findings 降至 0。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Group findings by rule | ✅ | Top rules: no-unused-vars (60), set-state-in-effect (24), exhaustive-deps (9), no-empty (6), preserve-manual-memoization (6) |
+| unused-vars cleanup | ✅ | 35 findings fixed: removed unused imports/functions, prefixed unused args with `_` |
+| no-explicit-any cleanup | ✅ | Already `off` in config — no findings to fix (was estimated at ~25 but config had it disabled) |
+| react-hooks/exhaustive-deps | ✅ | 5 findings: added missing deps (setRepos, engine), 1 intentional suppress (budgetInfo partial dep) |
+| Remaining misc rules | ✅ | 16 set-state-in-effect (suppressed — intentional prop→state sync), 6 no-empty, 3 purity, 2 Link, 2 static-components, 1 refs, 1 no-this-alias |
+| Flip warn→error | ✅ | `@typescript-eslint/no-unused-vars` upgraded from `warn` to `error` in eslint.config.mjs |
+
+### Implementation summary
+
+**Scope reduction**: Added `.agent_workspaces/**` to ESLint ignores — removed ~43 duplicate findings from cloned workspace copies, leaving 73 real findings.
+
+**Fixes by category**:
+- **no-unused-vars (35)**: Removed dead imports (Lucide icons, types, functions), removed unused `StreamPreview` component (~300 LOC), prefixed intentionally-unused args with `_`
+- **react-hooks/set-state-in-effect (16)**: Added eslint-disable-next-line — these are intentional prop→state sync patterns (mount effects, external data sync) that React Compiler flags but are safe
+- **react-hooks/exhaustive-deps (5)**: Added `setRepos` to 3 useCallback deps in source-control-matrix, added `engine` to effect deps in page.tsx, suppressed 1 intentional partial dep
+- **react-hooks/preserve-manual-memoization (3)**: Resolved by fixing the exhaustive-deps in the same callbacks
+- **no-empty (6)**: Added descriptive comments to empty catch blocks
+- **react-hooks/purity (2)**: Replaced `Date.now()` with state+interval, replaced `Math.random()` with `useId()`-based deterministic hash
+- **@next/next/no-html-link-for-pages (2)**: Replaced `<a href="/">` with `<Link>` from next/link
+- **react-hooks/static-components (2)**, **refs (1)**, **no-this-alias (1)**: Suppressed with inline comments — intentional patterns
+
+### Verification
+- `npx eslint .` → 0 findings (0 errors, 0 warnings)
+- `npx tsc --noEmit` → clean
+- `npx vitest run` → 138/138 tests pass (21 test files)
+
+### Files changed (35 files)
+
+| File | Action |
+|------|--------|
+| `eslint.config.mjs` | Updated — added `.agent_workspaces/**` ignore, flipped `no-unused-vars` warn→error |
+| `components/omnisight/vitals-artifacts-panel.tsx` | Updated — removed unused `StreamPreview` component (~300 LOC) + dead imports |
+| `components/omnisight/agent-matrix-wall.tsx` | Updated — removed unused `getMessageIcon` function + `latestHistory` variable |
+| `components/omnisight/orchestrator-ai.tsx` | Updated — removed 6 unused imports, prefixed 2 unused props with `_` |
+| `components/omnisight/task-backlog.tsx` | Updated — removed 5 unused Lucide imports |
+| `components/omnisight/source-control-matrix.tsx` | Updated — added `setRepos` to 3 useCallback deps, removed unused imports |
+| `components/omnisight/pipeline-timeline.tsx` | Updated — replaced `Date.now()` with state+interval |
+| `components/ui/sidebar.tsx` | Updated — replaced `Math.random()` with `useId()`-based hash |
+| 27 other files | Updated — minor unused-var/import removals + eslint-disable for intentional patterns |
 
 ---
 

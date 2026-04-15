@@ -94,12 +94,12 @@ Legend:
 - [x] Semantic validator warn on unknown toolchain at edit time (not runtime)
 
 ### B9. ESLint 113 findings batch cleanup (HANDOFF B)
-- [ ] Group findings by rule (likely top 5 rules cover 80%)
-- [ ] PR 1: unused-vars / prefer-const (~40 findings)
-- [ ] PR 2: no-explicit-any in types files (~25 findings)
-- [ ] PR 3: react-hooks/exhaustive-deps (carefully, per-file review)
-- [ ] PR 4: remaining misc rules
-- [ ] Flip warn → error for cleaned rules in `eslint.config.mjs`
+- [x] Group findings by rule (likely top 5 rules cover 80%)
+- [x] PR 1: unused-vars / prefer-const (~40 findings)
+- [x] PR 2: no-explicit-any in types files (~25 findings)
+- [x] PR 3: react-hooks/exhaustive-deps (carefully, per-file review)
+- [x] PR 4: remaining misc rules
+- [x] Flip warn → error for cleaned rules in `eslint.config.mjs`
 
 ### B10. Pipeline Timeline `omnisight:timeline-focus-run` wiring (HANDOFF B)
 - [ ] Decide: is the NPI-phase Timeline the right target? (Currently mismatched concept)
