@@ -24,8 +24,10 @@ from backend.intent_parser import Field, ParsedSpec
 
 logger = logging.getLogger(__name__)
 
+from backend.tenant_fs import tenant_ingest_root
+
 CLONE_TIMEOUT = 60  # seconds
-_INGEST_ROOT = Path(tempfile.gettempdir()) / "omnisight_ingest"
+_INGEST_ROOT = Path(tempfile.gettempdir()) / "omnisight_ingest"  # legacy fallback
 
 
 @dataclass
@@ -84,6 +86,7 @@ async def clone_repo(
     *,
     shallow: bool = True,
     dest: Path | None = None,
+    tenant_id: str | None = None,
 ) -> Path:
     """Clone a repository with credential validation.
 
@@ -92,12 +95,12 @@ async def clone_repo(
     """
     url = _validate_url(url)
 
-    _INGEST_ROOT.mkdir(parents=True, exist_ok=True)
+    ingest_root = tenant_ingest_root(tenant_id)
     if dest is None:
         parsed = urlparse(url if url.startswith("http") else f"https://{url}")
         repo_name = Path(parsed.path or "repo").stem.rstrip(".git") or "repo"
         repo_name = re.sub(r'[^a-zA-Z0-9_-]', '_', repo_name)
-        dest = _INGEST_ROOT / f"{repo_name}_{os.getpid()}"
+        dest = ingest_root / f"{repo_name}_{os.getpid()}"
 
     if dest.exists():
         shutil.rmtree(dest)
@@ -380,13 +383,18 @@ def map_to_parsed_spec(result: IntrospectionResult) -> ParsedSpec:
     )
 
 
-async def ingest_repo(url: str, *, shallow: bool = True) -> tuple[ParsedSpec, IntrospectionResult]:
+async def ingest_repo(
+    url: str,
+    *,
+    shallow: bool = True,
+    tenant_id: str | None = None,
+) -> tuple[ParsedSpec, IntrospectionResult]:
     """Full pipeline: clone → introspect → map to ParsedSpec.
 
     Returns (ParsedSpec, IntrospectionResult) so callers can access
     both the structured spec and the raw manifest data.
     """
-    repo_path = await clone_repo(url, shallow=shallow)
+    repo_path = await clone_repo(url, shallow=shallow, tenant_id=tenant_id)
     try:
         result = introspect(repo_path)
         spec = map_to_parsed_spec(result)
@@ -395,8 +403,18 @@ async def ingest_repo(url: str, *, shallow: bool = True) -> tuple[ParsedSpec, In
         shutil.rmtree(repo_path, ignore_errors=True)
 
 
-def cleanup_ingest_cache() -> None:
-    """Remove all cached clones from the ingest temp directory."""
-    if _INGEST_ROOT.exists():
-        shutil.rmtree(_INGEST_ROOT, ignore_errors=True)
-        logger.info("Cleaned ingest cache: %s", _INGEST_ROOT)
+def cleanup_ingest_cache(tenant_id: str | None = None) -> None:
+    """Remove cached clones from the tenant's ingest temp directory.
+
+    If *tenant_id* is ``None`` and no tenant context is set, cleans
+    the legacy global ingest root for backward compatibility.
+    """
+    from backend.db_context import current_tenant_id as _ctx_tid
+    tid = tenant_id or _ctx_tid()
+    if tid:
+        root = tenant_ingest_root(tid)
+    else:
+        root = _INGEST_ROOT
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+        logger.info("Cleaned ingest cache: %s", root)

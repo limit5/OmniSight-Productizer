@@ -115,7 +115,7 @@ async def create_release_bundle(
     Returns artifact metadata dict for the bundle itself.
     """
     from backend import db
-    from backend.routers.artifacts import get_artifacts_root
+    from backend.routers.artifacts import get_artifacts_root, _is_valid_artifact_path
 
     if not version:
         version = await resolve_version()
@@ -147,9 +147,7 @@ async def create_release_bundle(
         art = await db.get_artifact(art_meta["id"])
         if art and art.get("file_path"):
             fpath = Path(art["file_path"]).resolve()
-            try:
-                fpath.relative_to(artifacts_root.resolve())
-            except ValueError:
+            if not _is_valid_artifact_path(fpath):
                 continue
             if fpath.exists():
                 safe_name = os.path.basename(art["name"])

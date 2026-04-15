@@ -10,16 +10,29 @@ from fastapi.responses import FileResponse
 
 from backend import db
 from backend.routers import _pagination as _pg
+from backend.tenant_fs import tenant_artifacts_root, tenants_root
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
-# Centralized artifact storage (persists after workspace cleanup)
-_ARTIFACTS_ROOT = Path(__file__).resolve().parent.parent.parent / ".artifacts"
+# Legacy path — kept so we can still serve files that haven't been migrated yet.
+_LEGACY_ARTIFACTS_ROOT = Path(__file__).resolve().parent.parent.parent / ".artifacts"
 
 
-def get_artifacts_root() -> Path:
-    _ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
-    return _ARTIFACTS_ROOT
+def get_artifacts_root(tenant_id: str | None = None) -> Path:
+    """Return the tenant-scoped artifacts directory (auto-created)."""
+    return tenant_artifacts_root(tenant_id)
+
+
+def _is_valid_artifact_path(file_path: Path) -> bool:
+    """Allow files inside any tenant artifacts dir OR the legacy .artifacts/ dir."""
+    resolved = file_path.resolve()
+    for root in (tenants_root().resolve(), _LEGACY_ARTIFACTS_ROOT.resolve()):
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 @router.get("")
@@ -45,10 +58,7 @@ async def download_artifact(artifact_id: str):
         raise HTTPException(status_code=404, detail="Artifact not found")
 
     file_path = Path(artifact["file_path"]).resolve()
-    artifacts_root = get_artifacts_root().resolve()
-    try:
-        file_path.relative_to(artifacts_root)
-    except ValueError:
+    if not _is_valid_artifact_path(file_path):
         raise HTTPException(status_code=403, detail="Access denied: file outside artifact storage")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Artifact file missing from disk")
@@ -77,14 +87,11 @@ async def delete_artifact(artifact_id: str):
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    # Remove file if it exists and is within artifacts root
     file_path = Path(artifact["file_path"]).resolve()
-    artifacts_root = get_artifacts_root().resolve()
-    try:
-        file_path.relative_to(artifacts_root)
+    if _is_valid_artifact_path(file_path):
         if file_path.exists():
             file_path.unlink(missing_ok=True)
-    except ValueError:
+    else:
         logger.warning("Artifact %s file_path outside artifacts root — skipping file deletion", artifact_id)
 
     await db.delete_artifact(artifact_id)
