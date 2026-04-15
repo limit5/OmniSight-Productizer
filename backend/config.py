@@ -9,6 +9,7 @@ _startup_logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     app_name: str = "OmniSight Engine"
     debug: bool = False  # Set OMNISIGHT_DEBUG=true for development
+    env: str = ""  # "production" triggers hard security checks (exit 78 on failure)
     api_prefix: str = "/api/v1"
 
     # Frontend origin for CORS (comma-separated for multiple origins)
@@ -221,8 +222,14 @@ _PROVIDER_PREFIXES: dict[str, tuple[str, ...]] = {
 _MIN_BEARER_LEN = 16  # 128-bit entropy, roughly
 
 
-class ConfigValidationError(RuntimeError):
-    """Startup-time settings rejected — refuse to boot."""
+class ConfigValidationError(SystemExit):
+    """Startup-time settings rejected — refuse to boot (exit 78 = EX_CONFIG)."""
+    def __init__(self, message: str):
+        super().__init__(78)
+        self.message = message
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def validate_startup_config(strict: bool | None = None) -> list[str]:
@@ -309,6 +316,16 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             "exposed URL. Set OMNISIGHT_AUTH_MODE=strict in prod."
         )
         (hard_errors if strict else warnings).append(msg)
+
+    # K1: production environment MUST use strict auth mode.
+    # Exit code 78 (EX_CONFIG from sysexits.h) signals a configuration
+    # error to container orchestrators.
+    env_name = (settings.env or os.environ.get("OMNISIGHT_ENV") or "").strip().lower()
+    if env_name == "production" and auth_mode != "strict":
+        hard_errors.append(
+            f"ENV=production requires OMNISIGHT_AUTH_MODE=strict "
+            f"(current: {auth_mode!r}). Refusing to start — exit 78."
+        )
 
     # The bootstrap admin password ships as `omnisight-admin`. Hard-
     # fail if that's still in use under prod, so an internet-exposed

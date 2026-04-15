@@ -194,6 +194,32 @@ async def whoami(user: auth.User = Depends(auth.current_user)) -> dict:
     }
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=12)
+
+
+@router.post("/auth/change-password")
+async def change_password(req: ChangePasswordRequest, request: Request,
+                          user: auth.User = Depends(auth.current_user)) -> dict:
+    """Change the current user's password. Clears must_change_password flag."""
+    verified = await auth.authenticate_password(user.email, req.current_password)
+    if not verified:
+        raise HTTPException(status_code=401, detail="current password is incorrect")
+    await auth.change_password(user.id, req.new_password)
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="password_changed", entity_kind="auth", entity_id=user.id,
+            before={"must_change_password": user.must_change_password},
+            after={"must_change_password": False},
+            actor=user.email,
+        )
+    except Exception as exc:
+        logger.debug("password_changed audit emit failed: %s", exc)
+    return {"status": "password_changed", "must_change_password": False}
+
+
 @router.get("/auth/oidc/{provider}")
 async def oidc_redirect(provider: str) -> RedirectResponse:
     """Stub — real OIDC flow lands in v1. Returns 501 unless the env

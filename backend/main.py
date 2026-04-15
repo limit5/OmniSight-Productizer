@@ -179,6 +179,43 @@ app.add_middleware(
 # some of these too; we set them at the origin so a future non-CF
 # path (custom domain, on-prem) still gets them.
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  K1 — force password change middleware
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_PASSWORD_CHANGE_EXEMPT = {
+    "/auth/change-password", "/auth/login", "/auth/logout",
+    "/auth/whoami", "/health",
+}
+
+@app.middleware("http")
+async def _must_change_password_gate(request, call_next):
+    from starlette.responses import JSONResponse as StarletteJSON
+    path = request.url.path
+    rel = path.removeprefix(settings.api_prefix)
+    if rel in _PASSWORD_CHANGE_EXEMPT or path in ("/", "/docs", "/openapi.json", "/redoc"):
+        return await call_next(request)
+    from backend import auth as _auth
+    if _auth.auth_mode() == "open":
+        return await call_next(request)
+    cookie = request.cookies.get(_auth.SESSION_COOKIE) or ""
+    if not cookie:
+        return await call_next(request)
+    sess = await _auth.get_session(cookie)
+    if not sess:
+        return await call_next(request)
+    user = await _auth.get_user(sess.user_id)
+    if user and user.must_change_password:
+        return StarletteJSON(
+            status_code=428,
+            content={
+                "detail": "Password change required before accessing any API. "
+                          "POST /api/v1/auth/change-password with "
+                          "{current_password, new_password}.",
+            },
+        )
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def _security_headers(request, call_next):
     response = await call_next(request)

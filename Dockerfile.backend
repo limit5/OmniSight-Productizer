@@ -23,6 +23,7 @@ RUN mkdir -p /app/data /app/.artifacts /app/.sdks
 
 ENV OMNISIGHT_WORKSPACE=/app
 ENV OMNISIGHT_DEBUG=false
+ENV OMNISIGHT_AUTH_MODE=strict
 ENV OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
 
 EXPOSE 8000

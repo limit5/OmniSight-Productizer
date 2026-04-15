@@ -101,6 +101,8 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("sessions", "metadata", "TEXT NOT NULL DEFAULT '{}'"),
         ("sessions", "mfa_verified", "INTEGER NOT NULL DEFAULT 0"),
         ("sessions", "rotated_from", "TEXT"),
+        # K1 — force password change for default-credential admins.
+        ("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -423,6 +425,7 @@ CREATE TABLE IF NOT EXISTS users (
     oidc_provider   TEXT NOT NULL DEFAULT '',
     oidc_subject    TEXT NOT NULL DEFAULT '',
     enabled         INTEGER NOT NULL DEFAULT 1,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     last_login_at   TEXT
 );

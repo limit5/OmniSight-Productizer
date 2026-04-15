@@ -105,10 +105,12 @@ class User:
     name: str
     role: str
     enabled: bool = True
+    must_change_password: bool = False
 
     def to_dict(self) -> dict:
         return {"id": self.id, "email": self.email, "name": self.name,
-                "role": self.role, "enabled": self.enabled}
+                "role": self.role, "enabled": self.enabled,
+                "must_change_password": self.must_change_password}
 
 
 @dataclass
@@ -145,27 +147,29 @@ async def _conn():
 async def get_user(user_id: str) -> Optional[User]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, email, name, role, enabled FROM users WHERE id=?",
+        "SELECT id, email, name, role, enabled, must_change_password FROM users WHERE id=?",
         (user_id,),
     ) as cur:
         r = await cur.fetchone()
     if not r:
         return None
     return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]))
+                role=r["role"], enabled=bool(r["enabled"]),
+                must_change_password=bool(r["must_change_password"]))
 
 
 async def get_user_by_email(email: str) -> Optional[User]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, email, name, role, enabled FROM users WHERE email=?",
+        "SELECT id, email, name, role, enabled, must_change_password FROM users WHERE email=?",
         (email.lower().strip(),),
     ) as cur:
         r = await cur.fetchone()
     if not r:
         return None
     return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]))
+                role=r["role"], enabled=bool(r["enabled"]),
+                must_change_password=bool(r["must_change_password"]))
 
 
 async def create_user(email: str, name: str, role: str = "viewer",
@@ -187,10 +191,21 @@ async def create_user(email: str, name: str, role: str = "viewer",
     return User(id=uid, email=email.lower().strip(), name=name, role=role)
 
 
+async def change_password(user_id: str, new_password: str) -> None:
+    """Update a user's password and clear must_change_password flag."""
+    conn = await _conn()
+    pw_hash = hash_password(new_password)
+    await conn.execute(
+        "UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
+        (pw_hash, user_id),
+    )
+    await conn.commit()
+
+
 async def authenticate_password(email: str, password: str) -> Optional[User]:
     conn = await _conn()
     async with conn.execute(
-        "SELECT id, email, name, role, enabled, password_hash "
+        "SELECT id, email, name, role, enabled, password_hash, must_change_password "
         "FROM users WHERE email=?", (email.lower().strip(),),
     ) as cur:
         r = await cur.fetchone()
@@ -204,7 +219,8 @@ async def authenticate_password(email: str, password: str) -> Optional[User]:
     )
     await conn.commit()
     return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]))
+                role=r["role"], enabled=bool(r["enabled"]),
+                must_change_password=bool(r["must_change_password"]))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -285,7 +301,8 @@ async def cleanup_expired_sessions() -> int:
 
 async def ensure_default_admin() -> Optional[User]:
     """Create a default admin user if the users table is empty.
-    Email + password come from env (or sensible dev defaults)."""
+    Email + password come from env (or sensible dev defaults).
+    If the password is the well-known default, flag must_change_password."""
     conn = await _conn()
     async with conn.execute("SELECT COUNT(*) AS n FROM users") as cur:
         r = await cur.fetchone()
@@ -293,13 +310,27 @@ async def ensure_default_admin() -> Optional[User]:
         return None
     email = (os.environ.get("OMNISIGHT_ADMIN_EMAIL") or "admin@omnisight.local").strip()
     password = (os.environ.get("OMNISIGHT_ADMIN_PASSWORD") or "omnisight-admin").strip()
+    is_default_pw = password == "omnisight-admin"
     user = await create_user(
         email=email, name="OmniSight Admin", role="admin", password=password,
     )
-    logger.warning(
-        "[AUTH] Created default admin: %s (set OMNISIGHT_ADMIN_PASSWORD to change)",
-        email,
-    )
+    if is_default_pw:
+        await conn.execute(
+            "UPDATE users SET must_change_password=1 WHERE id=?", (user.id,),
+        )
+        await conn.commit()
+        user.must_change_password = True
+        logger.warning(
+            "[AUTH] Default admin %s created with default password — "
+            "must_change_password enforced. All API calls will return "
+            "428 until password is changed via POST /auth/change-password.",
+            email,
+        )
+    else:
+        logger.warning(
+            "[AUTH] Created default admin: %s",
+            email,
+        )
     return user
 
 
