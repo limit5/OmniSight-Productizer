@@ -7,6 +7,58 @@
 
 ---
 
+## A2 L1-05 Prod Smoke Test 狀態更新（2026-04-15）
+
+**AI 可完成項目**：2/5 已完成（DAG 定義）。
+**剩餘 3 項為 🅐 operator-blocked**，依賴 A1 prod deploy 完成。
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Pick DAG #1 | ✅ done | `compile-flash` against `host_native` — Phase 64-C-LOCAL fast path |
+| Pick DAG #2 | ✅ done | `cross-compile` against `aarch64` — full cross-compile path |
+| Run via prod UI | 🅐 BLOCKED | 依賴 A1 prod deploy |
+| Verify completion | 🅐 BLOCKED | 依賴上一步 |
+| Attach report | 🅐 BLOCKED | 依賴上一步 |
+
+### Smoke test script
+
+```bash
+# Once A1 prod deploy is complete, run:
+python scripts/prod_smoke_test.py https://<PROD_DOMAIN>
+
+# Or against local dev server:
+python scripts/prod_smoke_test.py http://localhost:8000
+```
+
+**Script capabilities** (`scripts/prod_smoke_test.py`):
+- Submits both DAGs via `POST /api/v1/dag`
+- Polls `GET /api/v1/workflow/runs/{id}` until terminal status
+- Verifies: steps completed, no errors, audit hash-chain intact (`GET /api/v1/audit/verify`)
+- Generates report to `data/smoke-test-report-a2.md`
+- Exit code 0=pass, 1=submit fail, 2=verification fail
+
+### DAG #1: compile-flash (host_native)
+
+| Field | Value |
+|---|---|
+| dag_id | `smoke-compile-flash-host-native` |
+| target_platform | `host_native` |
+| Tasks | `compile` (T1/cmake) → `flash` (T3/flash_board) |
+| T3 resolution | LOCAL (host==target, Phase 64-C-LOCAL tier relaxation) |
+
+### DAG #2: cross-compile (aarch64)
+
+| Field | Value |
+|---|---|
+| dag_id | `smoke-cross-compile-aarch64` |
+| target_platform | `aarch64` |
+| Tasks | `cross-compile` (T1/cmake) → `package` (T1/make) |
+| Toolchain | `aarch64-linux-gnu-gcc` via `configs/platforms/aarch64.yaml` |
+
+**下一步**：operator 完成 A1 部署後，執行上方 script，將 `data/smoke-test-report-a2.md` 內容貼回此段落。
+
+---
+
 ## A1 L1-01 狀態更新（2026-04-15）
 
 **自動化可完成項目**：3/7 已完成（tag + push + runbook）。

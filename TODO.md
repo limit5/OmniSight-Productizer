@@ -26,11 +26,11 @@ Legend:
 - [x] Update HANDOFF with deploy URL + v0.1.0 release notes *(done: runbook + release notes added)*
 
 ### A2. L1-05 Prod smoke test — 2 real DAGs end-to-end (#176)
-- [ ] Pick DAG #1: `compile-flash` template against host_native
-- [ ] Pick DAG #2: `cross-compile` template (uses Phase 64-C-LOCAL)
-- [ ] Run both via production UI; capture workflow_run IDs
-- [ ] Verify steps complete, artifacts persist, audit log hash-chain intact
-- [ ] Attach run report to HANDOFF
+- [x] Pick DAG #1: `compile-flash` template against host_native *(done: defined in `scripts/prod_smoke_test.py` — DAG_1_COMPILE_FLASH_HOST_NATIVE)*
+- [x] Pick DAG #2: `cross-compile` template (uses Phase 64-C-LOCAL) *(done: defined in `scripts/prod_smoke_test.py` — DAG_2_CROSS_COMPILE_AARCH64)*
+- [O] Run both via production UI; capture workflow_run IDs *(🅐 BLOCKED: depends on A1 prod deploy — run `python scripts/prod_smoke_test.py https://<PROD_URL>`)*
+- [O] Verify steps complete, artifacts persist, audit log hash-chain intact *(🅐 BLOCKED: depends on above — script verifies automatically)*
+- [O] Attach run report to HANDOFF *(🅐 BLOCKED: script generates `data/smoke-test-report-a2.md` — paste into HANDOFF after run)*
 
 ---
 
