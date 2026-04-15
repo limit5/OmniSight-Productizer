@@ -312,6 +312,41 @@ META 補充（1-2 day）
 
 更新後 L4 總估：~331-475 day，3 人併行 wall-clock ~6-8 個月。
 
+── 擴充：Depth/3D/Machine-Vision 家族 ──
+新增 3 嵌入（ToF 測距相機 / 3D 列印機 / 產線影像擷取）+ 3 軟體（影像分析 /
+3D 建模 / 瑕疵檢測）。主要圍繞 depth sensing、additive manufacturing、
+機器視覺 AOI。
+
+Layer A 擴充（16-23 day）
+- L4-CORE-23 Depth/3D sensing pipeline（ToF + structured light + stereo +
+  點雲 + PCL/Open3D + ICP/SLAM 元件，6-8 day，ToF 相機 / 3D 建模 /
+  3D 列印床掃描共用）
+- L4-CORE-24 Machine vision & industrial imaging framework（GigE Vision +
+  USB3 Vision + GenICam + 硬體觸發同步 + 多相機 calibration + line-scan，
+  6-9 day，產線擷取 / 瑕疵檢測）
+- L4-CORE-25 Motion control / G-code / CNC abstraction（stepper + heater
+  PID + endstop + 安全熱關閉，4-6 day，3D 列印機；未來覆蓋 CNC/robot arm）
+
+Layer B 擴充 skill pack（19-26 day）
+- SKILL-TOF-CAM（5-7 day）
+- SKILL-3D-PRINTER（G-code + Marlin/Klipper 風格 + bed leveling + thermal
+  safety，7-10 day）
+- SKILL-MACHINE-VISION（多相機同步 + 觸發 + PLC 整合，7-9 day）
+
+Layer C 擴充軟體軌道（32-44 day，SW-IMG-ANALYSIS 高度複用 SW-TRACK-01）
+- SW-IMG-ANALYSIS（OpenCV/PyTorch + batch workflow + annotation UI，
+  7-10 day；複用 SW-TRACK-01 後實質 ~5 day）
+- SW-3D-MODELING（OpenCASCADE + CGAL + VTK + Three.js/WebGL UI +
+  STL/STEP/OBJ I/O + mesh 運算，15-20 day，較重）
+- SW-DEFECT-DETECT（CORE-24 影像源 + AI 異常偵測 + 規則 + MES 回報 +
+  歷史 dashboard，10-14 day）
+
+META 補充
+- 3D 檔案格式矩陣（STL/STEP/OBJ/PLY/glTF/3MF × 讀/寫）
+- 工業視覺介面矩陣（GigE Vision/USB3 Vision/CameraLink/CoaXPress × 觸發方式）
+
+更新後 L4 總估：~398-569 day，3 人併行 wall-clock ~7-10 個月。
+
 - 真 embedding（Phase 67-F）替換 quality_score 做 cosine
 - SSO / OAuth（內部多 operator）
 - Postgres 遷移（>2 concurrent operator）
