@@ -19,11 +19,29 @@ vi.mock("@/lib/api", () => ({
   clarifyIntent: vi.fn(),
   ingestRepo: vi.fn(),
   uploadDocs: vi.fn(),
+  whoami: vi.fn().mockResolvedValue({
+    user: { id: "test-user-1", email: "test@test.com", name: "Test", role: "admin", enabled: true },
+    auth_mode: "open",
+    session_id: null,
+  }),
+  getUserPreference: vi.fn().mockResolvedValue(null),
+  setUserPreference: vi.fn().mockResolvedValue(undefined),
+  setCurrentSessionId: vi.fn(),
 }))
 
 import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
+import { AuthProvider } from "@/lib/auth-context"
+import { I18nProvider } from "@/lib/i18n/context"
 import * as api from "@/lib/api"
 import type { ParsedSpec } from "@/lib/api"
+
+function Wrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <I18nProvider>
+      <AuthProvider>{children}</AuthProvider>
+    </I18nProvider>
+  )
+}
 
 const mockParse = api.parseIntent as ReturnType<typeof vi.fn>
 const mockClarify = api.clarifyIntent as ReturnType<typeof vi.fn>
@@ -65,13 +83,13 @@ describe("SpecTemplateEditor", () => {
     // mount. Clear between tests so the chip-fill test isn't
     // shadowed by a sibling test's persisted "demo" raw_text.
     if (typeof window !== "undefined") {
-      window.localStorage.removeItem("omnisight:intent:last_spec")
+      window.localStorage.clear()
     }
   })
 
   it("debounces prose input into a parseIntent call", async () => {
     const user = userEvent.setup()
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     const ta = screen.getByRole("textbox", { name: /project prose/i })
     await user.type(ta, "build next.js app")
     // Debounced; wait for the single call to fire.
@@ -82,7 +100,7 @@ describe("SpecTemplateEditor", () => {
 
   it("form tab patches field at confidence 1.0 without calling LLM", async () => {
     const user = userEvent.setup()
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     // Switch to Form tab.
     await user.click(screen.getByRole("tab", { name: /form/i }))
     const picker = screen.getByLabelText("target_arch") as HTMLSelectElement
@@ -97,7 +115,7 @@ describe("SpecTemplateEditor", () => {
     const user = userEvent.setup()
     mockParse.mockResolvedValue(conflictSpec)
     mockClarify.mockResolvedValue(okSpec)
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     const ta = screen.getByRole("textbox", { name: /project prose/i })
     await user.type(ta, "static next.js site reads runtime db")
     await waitFor(() => expect(
@@ -116,7 +134,7 @@ describe("SpecTemplateEditor", () => {
     const user = userEvent.setup()
     mockParse.mockResolvedValue(conflictSpec)
     const onReady = vi.fn()
-    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    render(<SpecTemplateEditor onSpecReady={onReady} />, { wrapper: Wrapper })
     const ta = screen.getByRole("textbox", { name: /project prose/i })
     await user.type(ta, "spec with conflict")
     await waitFor(() => expect(
@@ -130,7 +148,7 @@ describe("SpecTemplateEditor", () => {
   it("Continue button fires onSpecReady once spec is clean", async () => {
     const user = userEvent.setup()
     const onReady = vi.fn()
-    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    render(<SpecTemplateEditor onSpecReady={onReady} />, { wrapper: Wrapper })
     const ta = screen.getByRole("textbox", { name: /project prose/i })
     await user.type(ta, "clean build request")
     await waitFor(() => expect(mockParse).toHaveBeenCalled(), { timeout: 1200 })
@@ -143,7 +161,7 @@ describe("SpecTemplateEditor", () => {
 
   it("template chip click fills the prose textarea + triggers parse", async () => {
     const user = userEvent.setup()
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     const ta = screen.getByRole("textbox", { name: /project prose/i }) as HTMLTextAreaElement
     expect(ta.value).toBe("")
     // The CJK template chip exercises the bilingual support — and
@@ -157,9 +175,9 @@ describe("SpecTemplateEditor", () => {
 
   it("Continue persists the spec to localStorage for back-jump restore", async () => {
     const user = userEvent.setup()
-    window.localStorage.removeItem("omnisight:intent:last_spec")
+    window.localStorage.clear()
     const onReady = vi.fn()
-    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    render(<SpecTemplateEditor onSpecReady={onReady} />, { wrapper: Wrapper })
     await user.type(
       screen.getByRole("textbox", { name: /project prose/i }),
       "anything",
@@ -168,14 +186,14 @@ describe("SpecTemplateEditor", () => {
     const btn = await screen.findByRole("button", { name: /continue/i })
     await waitFor(() => expect(btn).not.toBeDisabled())
     await user.click(btn)
-    const stored = window.localStorage.getItem("omnisight:intent:last_spec")
+    const stored = window.localStorage.getItem("omnisight:test-user-1:intent:last_spec")
     expect(stored).not.toBeNull()
     const cached = JSON.parse(stored!)
     expect(cached.framework.value).toBe("nextjs")
   })
 
   it("renders a failure banner when DagEditor dispatches spec-failure-context", async () => {
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     window.dispatchEvent(new CustomEvent("omnisight:spec-failure-context", {
       detail: {
         reason: "API 422: tier_violation on task `flash`",
@@ -193,7 +211,7 @@ describe("SpecTemplateEditor", () => {
 
   it("clears the failure banner on the next prose edit", async () => {
     const user = userEvent.setup()
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     window.dispatchEvent(new CustomEvent("omnisight:spec-failure-context", {
       detail: { reason: "x", rules: [], target_platform: null },
     }))
@@ -209,14 +227,14 @@ describe("SpecTemplateEditor", () => {
 
   it("restores the cached spec on next mount (back-from-DAG path)", async () => {
     window.localStorage.setItem(
-      "omnisight:intent:last_spec",
+      "omnisight:test-user-1:intent:last_spec",
       JSON.stringify({
         ...okSpec,
         raw_text: "previously typed prompt",
         framework: { value: "django", confidence: 0.9 },
       }),
     )
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     const ta = await screen.findByRole(
       "textbox", { name: /project prose/i },
     ) as HTMLTextAreaElement
@@ -226,7 +244,7 @@ describe("SpecTemplateEditor", () => {
   // ─── B5/UX-01: Source tabs ─────────────────────────────────────
 
   it("renders all four source tabs (Prose, From Repo, From Docs, Form)", () => {
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     expect(screen.getByRole("tab", { name: /prose/i })).toBeInTheDocument()
     expect(screen.getByRole("tab", { name: /from repo/i })).toBeInTheDocument()
     expect(screen.getByRole("tab", { name: /from docs/i })).toBeInTheDocument()
@@ -252,7 +270,7 @@ describe("SpecTemplateEditor", () => {
     })
 
     const onReady = vi.fn()
-    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    render(<SpecTemplateEditor onSpecReady={onReady} />, { wrapper: Wrapper })
 
     await user.click(screen.getByRole("tab", { name: /from repo/i }))
     const urlInput = screen.getByLabelText("Repository URL")
@@ -275,7 +293,7 @@ describe("SpecTemplateEditor", () => {
     const user = userEvent.setup()
     mockIngestRepo.mockRejectedValue(new Error("Authentication failed"))
 
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     await user.click(screen.getByRole("tab", { name: /from repo/i }))
     await user.type(screen.getByLabelText("Repository URL"), "https://github.com/private/repo")
     await user.click(screen.getByLabelText("Clone and analyze"))
@@ -297,7 +315,7 @@ describe("SpecTemplateEditor", () => {
       ],
     })
 
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     await user.click(screen.getByRole("tab", { name: /from docs/i }))
 
     expect(screen.getByLabelText("Drop zone")).toBeInTheDocument()
@@ -319,7 +337,7 @@ describe("SpecTemplateEditor", () => {
 
     // Step 1: User sets framework manually in Form tab
     const onReady = vi.fn()
-    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    render(<SpecTemplateEditor onSpecReady={onReady} />, { wrapper: Wrapper })
     await user.click(screen.getByRole("tab", { name: /form/i }))
     const fwInput = screen.getByPlaceholderText("nextjs, django, axum, ...")
     await user.type(fwInput, "my-custom-framework")
@@ -351,7 +369,7 @@ describe("SpecTemplateEditor", () => {
     const user = userEvent.setup()
     mockUploadDocs.mockRejectedValue(new Error("upload-docs failed (500): internal error"))
 
-    render(<SpecTemplateEditor />)
+    render(<SpecTemplateEditor />, { wrapper: Wrapper })
     await user.click(screen.getByRole("tab", { name: /from docs/i }))
     const input = screen.getByLabelText("File upload") as HTMLInputElement
     const file = new File(["content"], "readme.md", { type: "text/markdown" })

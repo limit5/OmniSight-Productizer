@@ -10,6 +10,8 @@ import {
   type ParsedSpec, type IntentField, type IntentConflict,
   type IngestRepoResponse, type DocFileResult,
 } from "@/lib/api"
+import { useAuth } from "@/lib/auth-context"
+import { getUserStorage, onStorageChange } from "@/lib/storage"
 
 // ─── Starter prose templates ───────────────────────────────────
 
@@ -129,6 +131,9 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [failure, setFailure] = useState<DagFailureContext | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const { user } = useAuth()
+  const userId = user?.id ?? null
+  const store = getUserStorage(userId)
 
   useEffect(() => {
     if (typeof window === "undefined" || !spec) return
@@ -169,7 +174,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   useEffect(() => {
     if (typeof window === "undefined") return
     try {
-      const raw = window.localStorage.getItem(LS_LAST_SPEC)
+      const raw = store.getItem(LS_LAST_SPEC)
       if (raw) {
         const cached = JSON.parse(raw) as ParsedSpec
         setSpec(cached)
@@ -179,7 +184,21 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
       console.debug("[SpecTemplateEditor] restore failed:", exc)
     }
     setHydrated(true)
-  }, [])
+  }, [userId]) // eslint-disable-line react-hooks/exhaustive-deps -- re-read when user changes
+
+  // ─── Cross-tab sync for spec changes ──────────────────────────
+  useEffect(() => {
+    if (!userId) return
+    const fullKey = store.key(LS_LAST_SPEC)
+    return onStorageChange((changedKey, newValue) => {
+      if (changedKey !== fullKey || !newValue) return
+      try {
+        const synced = JSON.parse(newValue) as ParsedSpec
+        setSpec(synced)
+        setText(synced.raw_text || "")
+      } catch { /* ignore bad JSON */ }
+    })
+  }, [userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const runParse = useCallback(async (raw: string) => {
     if (!raw.trim()) {
@@ -604,7 +623,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
             onClick={() => {
               if (hydrated && typeof window !== "undefined") {
                 try {
-                  window.localStorage.setItem(LS_LAST_SPEC, JSON.stringify(spec))
+                  store.setItem(LS_LAST_SPEC, JSON.stringify(spec))
                 } catch (exc) {
                   console.debug("[SpecTemplateEditor] persist failed:", exc)
                 }

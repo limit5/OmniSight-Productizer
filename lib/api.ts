@@ -863,6 +863,27 @@ export async function revokeAllOtherSessions(): Promise<{ status: string; revoke
   })
 }
 
+// ─── User preferences (J4) ───────────────────────────────────
+
+export async function getUserPreferences(): Promise<{ items: Record<string, string> }> {
+  return request<{ items: Record<string, string> }>("/user-preferences")
+}
+
+export async function getUserPreference(key: string): Promise<{ key: string; value: string } | null> {
+  try {
+    return await request<{ key: string; value: string }>(`/user-preferences/${encodeURIComponent(key)}`)
+  } catch {
+    return null
+  }
+}
+
+export async function setUserPreference(key: string, value: string): Promise<void> {
+  await request<{ key: string; value: string }>(`/user-preferences/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({ value }),
+  })
+}
+
 // ─── Ops Summary (L1-04) ─────────────────────────────────────
 
 export interface OpsSummary {

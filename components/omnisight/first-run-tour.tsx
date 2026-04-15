@@ -17,6 +17,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { X, ChevronLeft, ChevronRight, Sparkles } from "lucide-react"
 import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
+import { useAuth } from "@/lib/auth-context"
+import { getUserStorage, onStorageChange } from "@/lib/storage"
+import { getUserPreference, setUserPreference } from "@/lib/api"
 
 function useLocale(): Locale {
   try { return _useI18n().locale } catch { return "en" }
@@ -158,42 +161,52 @@ export function FirstRunTour() {
   const [idx, setIdx] = useState(0)
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
+  const { user } = useAuth()
+  const userId = user?.id ?? null
 
-  // Decide whether to start. Runs once on mount.
-  // `?tour=1` starts at step 0; `?tour=2` starts at step 1; or
-  // `?tour=decision-queue` jumps to the matching anchor so teammates
-  // can share a link that opens the tour on a specific step.
   useEffect(() => {
-    if (typeof window === "undefined") return
+    if (typeof window === "undefined" || !userId) return
+    const store = getUserStorage(userId)
     const params = new URLSearchParams(window.location.search)
     const tourParam = params.get("tour")
-    const seen = window.localStorage.getItem(STORAGE_KEY) === "1"
+    const seen = store.getItem(STORAGE_KEY) === "1"
     if (tourParam) {
-      // Numeric 1..5 → zero-indexed step.
       const asNum = parseInt(tourParam, 10)
       if (Number.isFinite(asNum) && asNum >= 1 && asNum <= STEPS.length) {
         setIdx(asNum - 1)
         setActive(true)
         return
       }
-      // Anchor name → find the step with that anchor.
       const anchorIdx = STEPS.findIndex((s) => s.anchor === tourParam)
       if (anchorIdx >= 0) {
         setIdx(anchorIdx)
         setActive(true)
         return
       }
-      // Unknown value — fall back to full tour from step 0.
       setActive(true)
       return
     }
-    if (!seen) setActive(true)
-  }, [])
+    if (seen) return
+    let cancelled = false
+    getUserPreference("tour_seen").then((pref) => {
+      if (cancelled) return
+      if (pref?.value === "1") {
+        store.setItem(STORAGE_KEY, "1")
+      } else {
+        setActive(true)
+      }
+    }).catch(() => {
+      if (!cancelled) setActive(true)
+    })
+    return () => { cancelled = true }
+  }, [userId])
 
   const closeTour = useCallback((remember = true) => {
     setActive(false)
-    if (remember) {
-      try { window.localStorage.setItem(STORAGE_KEY, "1") } catch { /* private mode */ }
+    if (remember && userId) {
+      const store = getUserStorage(userId)
+      store.setItem(STORAGE_KEY, "1")
+      setUserPreference("tour_seen", "1").catch(() => {})
     }
     // Strip ?tour=1 from URL so it doesn't re-fire on back-button.
     if (typeof window !== "undefined") {
@@ -203,7 +216,7 @@ export function FirstRunTour() {
         window.history.replaceState(null, "", u.toString())
       }
     }
-  }, [])
+  }, [userId])
 
   // Find the anchor for the current step; skip missing anchors.
   useLayoutEffect(() => {

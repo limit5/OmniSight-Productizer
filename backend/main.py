@@ -339,6 +339,8 @@ from backend.routers import cloudflare_tunnel as _cf_tunnel_router  # B12/CF-TUN
 app.include_router(_cf_tunnel_router.router, prefix=settings.api_prefix)
 from backend.routers import uvc_gadget as _uvc_gadget_router  # D1/SKILL-UVC
 app.include_router(_uvc_gadget_router.router, prefix=settings.api_prefix)
+from backend.routers import preferences as _prefs_router  # J4/USER-PREFS
+app.include_router(_prefs_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

@@ -10,6 +10,9 @@ import {
 } from "@/components/ui/dialog"
 import { GitBranch, FileUp, PenLine, Workflow } from "lucide-react"
 import type { PanelId } from "@/components/omnisight/mobile-nav"
+import { useAuth } from "@/lib/auth-context"
+import { getUserStorage, onStorageChange } from "@/lib/storage"
+import { getUserPreference, setUserPreference } from "@/lib/api"
 
 const LS_LAST_SPEC = "omnisight:intent:last_spec"
 const LS_WIZARD_SEEN = "omnisight:wizard:seen"
@@ -61,25 +64,55 @@ function navigateToPanel(panel: PanelId) {
 
 export function NewProjectWizard() {
   const [open, setOpen] = useState(false)
+  const { user } = useAuth()
+  const userId = user?.id ?? null
 
   useEffect(() => {
-    if (typeof window === "undefined") return
-    const hasSpec = !!localStorage.getItem(LS_LAST_SPEC)
-    const wizardSeen = !!localStorage.getItem(LS_WIZARD_SEEN)
-    if (!hasSpec && !wizardSeen) {
-      setOpen(true) // eslint-disable-line react-hooks/set-state-in-effect -- mount-time check of localStorage
-    }
-  }, [])
+    if (typeof window === "undefined" || !userId) return
+    const store = getUserStorage(userId)
+    const hasSpec = !!store.getItem(LS_LAST_SPEC)
+    const wizardSeenLocal = !!store.getItem(LS_WIZARD_SEEN)
+    if (hasSpec || wizardSeenLocal) return
+
+    let cancelled = false
+    getUserPreference("wizard_seen").then((pref) => {
+      if (cancelled) return
+      if (pref?.value === "1") {
+        store.setItem(LS_WIZARD_SEEN, "1")
+      } else {
+        setOpen(true)
+      }
+    }).catch(() => {
+      if (!cancelled) setOpen(true)
+    })
+    return () => { cancelled = true }
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId) return
+    const store = getUserStorage(userId)
+    const fullKey = store.key(LS_WIZARD_SEEN)
+    return onStorageChange((changedKey, newValue) => {
+      if (changedKey === fullKey && newValue === "1") setOpen(false)
+    })
+  }, [userId])
+
+  function markWizardSeen() {
+    if (!userId) return
+    const store = getUserStorage(userId)
+    store.setItem(LS_WIZARD_SEEN, "1")
+    setUserPreference("wizard_seen", "1").catch(() => {})
+  }
 
   function handleChoice(choice: WizardChoice) {
-    localStorage.setItem(LS_WIZARD_SEEN, "1")
+    markWizardSeen()
     setOpen(false)
     navigateToPanel(choice.panel)
   }
 
   function handleDismiss(openState: boolean) {
     if (!openState) {
-      localStorage.setItem(LS_WIZARD_SEEN, "1")
+      markWizardSeen()
       setOpen(false)
     }
   }
