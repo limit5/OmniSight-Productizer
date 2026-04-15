@@ -102,10 +102,10 @@ Legend:
 - [x] Flip warn → error for cleaned rules in `eslint.config.mjs`
 
 ### B10. Pipeline Timeline `omnisight:timeline-focus-run` wiring (HANDOFF B)
-- [ ] Decide: is the NPI-phase Timeline the right target? (Currently mismatched concept)
-- [ ] If yes: Timeline listens to event, scrolls to matching workflow_run marker
-- [ ] If no: drop the event; RunHistory inline-expand already covers the need
-- [ ] Update HANDOFF based on decision
+- [x] Decide: is the NPI-phase Timeline the right target? (Currently mismatched concept) *(Decision: NO — Pipeline Timeline tracks NPI lifecycle phases, not individual runs. Concept mismatch confirmed.)*
+- [x] ~~If yes: Timeline listens to event, scrolls to matching workflow_run marker~~ *(N/A — decided NO)*
+- [x] If no: drop the event; RunHistory inline-expand already covers the need *(Done: event dropped. B7 RunHistory project_run aggregation with inline-expand already provides run-level focus.)*
+- [x] Update HANDOFF based on decision
 
 ### B11. Forecast panel reactive to spec context (HANDOFF B)
 - [ ] Listen to `omnisight:spec-updated` event

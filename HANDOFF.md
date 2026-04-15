@@ -1,9 +1,37 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-15
-> 最後 commit：`22f8832` (master)
+> 最後 commit：pending (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## B10 Pipeline Timeline `omnisight:timeline-focus-run` wiring 狀態更新（2026-04-15）
+
+**全部 4/4 項目已完成。決議：取消 event wiring。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| 概念評估 | ✅ | Pipeline Timeline 追蹤 NPI 生命週期階段（SPEC→Develop→Review），非個別 workflow run。將 run-focus event 接到 phase-level timeline 會造成 UX 概念混淆 |
+| 是否為正確目標 | ✅ | **否**。NPI-phase Timeline 與 workflow_run 是不同層次概念 |
+| 替代方案確認 | ✅ | B7 RunHistory project_run aggregation 的 inline-expand 功能已涵蓋 run-level focus 需求 |
+| HANDOFF 更新 | ✅ | 已更新本文件及 TODO.md |
+
+### 決策理由
+
+1. **概念不匹配**：`pipeline-timeline.tsx` 顯示的是 pipeline 執行階段（NPI phases），每個 step 對應一個 `npi_phase`（PRD/EIV/POC/HVT/EVT/DVT/PVT/MP），而非個別的 `workflow_run`
+2. **RunHistory 已具備**：B7（#207）實作了 `project_run` 聚合 + inline-expand，使用者可以：
+   - 在 RunHistory panel 看到所有 workflow runs
+   - 點擊展開查看 step-by-step 執行詳情
+   - 依 status 過濾（running/completed/failed/halted）
+3. **不增加死代碼**：`omnisight:timeline-focus-run` event 在 codebase 中無任何實作引用，僅存在於規劃文件中。取消可避免引入無人使用的 event wiring
+
+### 影響範圍
+
+- **無程式碼變更**：此為架構決策，不涉及任何 source file 修改
+- **TODO.md**：B10 所有 4 項標記為 `[x]` 完成
+- **HANDOFF.md**：小產品清單中該項標記為已取消
 
 ---
 
@@ -526,7 +554,7 @@ After deploy, fill in:
 🅑 **小產品（每項 < 1 day）**
 - DAG `toolchain` 加 enum / autocomplete（消除 typo 只在 runtime 才抓）
 - ESLint 113 finding 分批清；warn → 升硬 gate
-- Pipeline Timeline 接 `omnisight:timeline-focus-run` event（如果未來真的需要）
+- ~~Pipeline Timeline 接 `omnisight:timeline-focus-run` event~~ ✅ **已決議取消**：Pipeline Timeline 追蹤的是 NPI 生命週期階段，非個別 run；B7 RunHistory inline-expand 已涵蓋 run-level focus 需求，不需額外 event wiring
 - Forecast panel 受 spec context 影響（spec 改 target_platform 即時更新預估）
 - **跨 agent 觀察 routing**：`finding_type` 加標準 enum `cross_agent/observation`；
   orchestrator 用單一 rule 處理所有跨 agent 通報（A 發現 B 的問題 → 只回報、不動手、
