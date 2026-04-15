@@ -1,9 +1,58 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I2 Query layer RLS — tenant context + auto-inject WHERE/INSERT filters (master)
+> 最後 commit：I4 Tenant-scoped secrets — encrypted credential storage per tenant (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I4 (complete) Secrets per-tenant — 加密憑證儲存 per tenant（2026-04-16 完成）
+
+**背景**：B12 產出的 `secret_store.py` 提供 Fernet 加密，但所有憑證（git_credentials、provider_keys、cloudflare_tokens）仍為全域共用。I4 將這些憑證改為 tenant-scoped，每個 tenant 擁有獨立的加密憑證庫。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `tenant_secrets` 表 | id / tenant_id / secret_type / key_name / encrypted_value / metadata / created_at / updated_at；UNIQUE(tenant_id, secret_type, key_name) | ✅ 完成 |
+| `backend/secrets.py` | CRUD API：list_secrets / get_secret_value / get_secret_by_name / upsert_secret / delete_secret，全部帶 tenant_id 維度 | ✅ 完成 |
+| `backend/routers/secrets.py` | REST API：GET/POST/PUT/DELETE /secrets，admin-only，自動從 user.tenant_id 設定 context | ✅ 完成 |
+| Migration 0013 | tenant_secrets 表建立 + api_keys 表加入 tenant_id 並回填 t-default | ✅ 完成 |
+| Integration settings | GET /system/settings 回傳 tenant_secrets summary（按 secret_type 分組） | ✅ 完成 |
+| UI：Settings 頁 tenant 視圖 | TENANT SECRETS section：列出/新增/刪除 tenant-scoped secrets，顯示 fingerprint | ✅ 完成 |
+| Frontend API | listTenantSecrets / createTenantSecret / updateTenantSecret / deleteTenantSecret | ✅ 完成 |
+| 測試（18 項） | table schema / CRUD / tenant isolation / encryption round-trip / api_keys tenant_id | ✅ 18/18 pass |
+| 回歸測試 | test_tenants(16) 全數通過 | ✅ 零回歸 |
+
+**新增檔案**：
+- `backend/secrets.py` — tenant-scoped secrets CRUD API
+- `backend/routers/secrets.py` — REST endpoints
+- `backend/alembic/versions/0013_tenant_secrets.py` — migration
+- `tests/test_tenant_secrets.py` — 18 項測試
+
+**修改檔案**：
+- `backend/db.py` — 新增 tenant_secrets 表 schema + api_keys.tenant_id migration + index
+- `backend/main.py` — 註冊 secrets router
+- `backend/routers/integration.py` — settings API 加入 tenant_secrets summary
+- `lib/api.ts` — 前端 API 函數
+- `components/omnisight/integration-settings.tsx` — TenantSecretsSection UI 組件
+
+**Secret Types**：
+- `git_credential` — per-repo Git tokens（GitHub/GitLab/Gerrit）
+- `provider_key` — LLM/SaaS API keys
+- `cloudflare_token` — Cloudflare API tokens
+- `webhook_secret` — inbound webhook HMAC secrets
+- `custom` — 其他任意 secret
+
+**設計決策**：
+- 使用 B12 的 Fernet 加密（`secret_store.py`），所有 plaintext 在寫入 DB 前加密
+- API 回傳 fingerprint（`…last4`）而非明文
+- `get_secret_value` / `get_secret_by_name` 僅供 backend 內部使用
+- UNIQUE constraint 確保同一 tenant 內不會重複 (secret_type, key_name)
+- api_keys 表也加入 tenant_id，既有資料回填 t-default
+
+---
+
+## I3 (complete) SSE per-tenant + per-user filter（2026-04-16 完成）
 
 ---
 

@@ -522,11 +522,11 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### I4. Secrets per-tenant
-- [ ] `git_credentials` / `provider_keys` / `cloudflare_tokens`（B12 產物）全改 tenant-scoped 表
-- [ ] `backend/secrets.py` API 加 tenant_id 維度
-- [ ] Migration：既有共用 credentials 分給 `t-default`
-- [ ] UI：Settings 頁分 tenant 視圖
-- [ ] 預估：**2 day**
+- [x] `git_credentials` / `provider_keys` / `cloudflare_tokens`（B12 產物）全改 tenant-scoped 表
+- [x] `backend/secrets.py` API 加 tenant_id 維度
+- [x] Migration：既有共用 credentials 分給 `t-default`
+- [x] UI：Settings 頁分 tenant 視圖
+- [x] 預估：**2 day**
 
 ### I5. Filesystem namespace
 - [ ] `data/tenants/<tid>/{artifacts,ingest,backups,workflow_runs}/`
