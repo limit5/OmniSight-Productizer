@@ -7,6 +7,54 @@
 
 ---
 
+## C8 L4-CORE-08 Protocol compliance harness 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Wrapper for ODTT (ONVIF Device Test Tool) | ✅ | `backend/compliance_harness.py` — `ODTTWrapper` 支援 headless mode + profiles S/T/G/C/A/D + credentials |
+| Wrapper for USB-IF USBCV | ✅ | `backend/compliance_harness.py` — `USBCVWrapper` 支援 CLI mode + test classes device/hub/hid/video/audio/mass_storage + VID/PID |
+| Wrapper for UAC test suite | ✅ | `backend/compliance_harness.py` — `UACTestWrapper` 支援 headless mode + UAC 1.0/2.0 + sample rate/channels |
+| Normalized report schema | ✅ | `ComplianceReport` + `TestCaseResult` — pass/fail/error/skipped per test case + evidence + duration + metadata |
+| Output → audit_log | ✅ | `log_compliance_report()` / `log_compliance_report_sync()` — 寫入 Phase 53 hash-chain audit_log |
+| Smoke test per wrapper | ✅ | 54 項測試全數通過：report schema (13) + ODTT (6) + USBCV (7) + UAC (7) + registry (5) + audit (2) + edge cases (9) + smoke (3) + all-pass (1) + custom (1) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/compliance_harness.py` | 新建——Protocol compliance harness：ABC `ComplianceTool` + 3 wrappers + registry + audit integration |
+| `backend/routers/compliance.py` | 新建——REST endpoints: GET /compliance/tools, GET /compliance/tools/{name}, POST /compliance/run/{tool_name} |
+| `backend/main.py` | 擴充——註冊 compliance router |
+| `backend/tests/test_compliance_harness.py` | 新建，54 項測試 |
+
+### 架構說明
+
+- **ComplianceTool ABC** — 基底抽象類，定義 `run(device_target, profile)` + `parse_output(raw)` + `check_available()` + `_exec(cmd)` subprocess 執行
+- **ComplianceReport** — 正規化報告 schema：tool_name / protocol / device_under_test / results[] / metadata，computed properties: overall_pass / total / passed_count / failed_count / error_count / skipped_count
+- **TestCaseResult** — 單一測試案例結果：test_id / test_name / verdict (pass/fail/error/skipped) / evidence / duration_s / message
+- **三個 wrapper**：
+  - `ODTTWrapper` — ONVIF Device Test Tool，headless 模式，支援 Profile S/T/G/C/A/D
+  - `USBCVWrapper` — USB-IF USB Command Verifier，CLI 模式，支援 device/hub/hid/video/audio/mass_storage
+  - `UACTestWrapper` — USB Audio Class test suite，headless 模式，支援 UAC 1.0/2.0
+- **Registry** — `_BUILTIN_TOOLS` + `_CUSTOM_TOOLS` dict，支援 `list_tools()` / `get_tool()` / `register_tool()` / `run_tool()`
+- **Audit integration** — `log_compliance_report()` async + `log_compliance_report_sync()` fire-and-forget，寫入 `compliance_test` action 至 audit_log
+- **_parse_tool_output()** — 共用行解析器，每行 regex match `ID NAME VERDICT [TIME] [MSG]`
+- **REST endpoints** — 3 個 endpoints 供 UI/CLI 查詢、執行 compliance tests
+
+### 驗證
+
+- 54 項新增 compliance 測試全數通過
+- 77 項既有 HIL 測試全數通過（無迴歸）
+
+### 下一步
+
+- C9 (#223)：Safety & compliance framework
+- D1 (#218)：SKILL-UVC pilot — 可使用 compliance harness 的 USBCV wrapper
+
+---
+
 ## C7 L4-CORE-07 HIL plugin API 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。**

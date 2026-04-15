@@ -176,12 +176,12 @@ Legend:
 - [x] Integration test: mock HIL plugin lifecycle
 
 ### C8. L4-CORE-08 Protocol compliance harness (#217)
-- [ ] Wrapper for ODTT (ONVIF Device Test Tool) — headless mode or subprocess
-- [ ] Wrapper for USB-IF USBCV
-- [ ] Wrapper for UAC test suite
-- [ ] Normalized report schema (pass/fail per test case + evidence)
-- [ ] Output → audit_log
-- [ ] Smoke test per wrapper
+- [x] Wrapper for ODTT (ONVIF Device Test Tool) — headless mode or subprocess
+- [x] Wrapper for USB-IF USBCV
+- [x] Wrapper for UAC test suite
+- [x] Normalized report schema (pass/fail per test case + evidence)
+- [x] Output → audit_log
+- [x] Smoke test per wrapper
 
 ### C9. L4-CORE-09 Safety & compliance framework (#223)
 - [ ] Rule library: ISO 26262 ASIL A-D / IEC 60601 SW-A/B/C / DO-178 DAL A-E / IEC 61508 SIL 1-4
