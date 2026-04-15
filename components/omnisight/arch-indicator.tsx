@@ -72,7 +72,7 @@ export function ArchIndicator({ compact = false }: { compact?: boolean }) {
   }, [])
 
   useEffect(() => {
-    void refresh()
+    void refresh() // eslint-disable-line react-hooks/set-state-in-effect -- fetch-on-mount populates state from network
     const t = setInterval(() => void refresh(), POLL_MS)
     return () => clearInterval(t)
   }, [refresh])

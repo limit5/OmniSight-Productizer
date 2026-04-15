@@ -13,7 +13,7 @@ import {
   ArrowUpRight,
   ArrowDownRight
 } from "lucide-react"
-import { AI_MODEL_INFO, getModelInfo, type AIModel } from "./agent-matrix-wall"
+import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
 
 // Token usage data per model
 export interface ModelTokenUsage {
@@ -86,6 +86,7 @@ export function TokenUsageStats({ className = "", externalUsage, budgetInfo, onR
       setLocalWarn(budgetInfo.warn_threshold)
       setLocalDegrade(budgetInfo.downgrade_threshold)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-sync when threshold values change, not the whole budgetInfo object
   }, [budgetInfo?.warn_threshold, budgetInfo?.downgrade_threshold])
 
   // Sync from backend when available

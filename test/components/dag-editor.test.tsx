@@ -208,7 +208,7 @@ describe("DagEditor", () => {
     // the effect doesn't throw.
     Element.prototype.scrollIntoView = scrollSpy as unknown as Element["scrollIntoView"]
 
-    const user = userEvent.setup()
+    const _user = userEvent.setup()
     render(<DagEditor />)
     // Wait for the default template to parse / validate.
     await waitFor(() => expect(screen.getByText(/valid/i)).toBeInTheDocument())

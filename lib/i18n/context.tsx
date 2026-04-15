@@ -255,6 +255,7 @@ export function I18nProvider({ children }: I18nProviderProps) {
   
   // Initialize locale from localStorage or browser detection after mount
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time hydration from localStorage/browser detection
     setMounted(true)
     try {
       const savedLocale = localStorage.getItem("omnisight-locale") as Locale | null

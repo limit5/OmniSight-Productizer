@@ -107,7 +107,7 @@ function DeviceCard({
   const Icon = getDeviceIcon(device.type)
   const StatusIcon = getStatusIcon(device.status)
   const statusColor = getStatusColor(device.status)
-  
+
   return (
     <div 
       className={`
@@ -129,6 +129,7 @@ function DeviceCard({
           className="w-8 h-8 rounded flex items-center justify-center shrink-0"
           style={{ backgroundColor: `color-mix(in srgb, ${statusColor} 20%, transparent)` }}
         >
+          {/* eslint-disable-next-line react-hooks/static-components -- Lucide icons are stateless; dynamic selection by device type is intentional */}
           <Icon size={16} style={{ color: statusColor }} />
         </div>
         
@@ -140,9 +141,10 @@ function DeviceCard({
         </div>
         
         {/* Status Icon */}
-        <StatusIcon 
-          size={12} 
-          style={{ color: statusColor }} 
+        {/* eslint-disable-next-line react-hooks/static-components -- Lucide icons are stateless; dynamic selection by device status is intentional */}
+        <StatusIcon
+          size={12}
+          style={{ color: statusColor }}
           className={`shrink-0 ${device.status === "detecting" ? "animate-spin" : ""}`}
         />
       </div>

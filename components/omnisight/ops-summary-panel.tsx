@@ -37,7 +37,7 @@ export function OpsSummaryPanel() {
 
   useEffect(() => {
     mountedRef.current = true
-    void refresh()
+    void refresh() // eslint-disable-line react-hooks/set-state-in-effect -- fetch-on-mount populates state from network
     const t = setInterval(() => void refresh(), POLL_MS)
     return () => {
       mountedRef.current = false

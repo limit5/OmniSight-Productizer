@@ -30,6 +30,7 @@ export default tseslint.config(
       "test-results/**",
       "backend/**",          // Python — ruff handles this.
       "deploy/**",            // shell + yaml templates.
+      ".agent_workspaces/**", // cloned workspaces — lint the originals only.
     ],
   },
 
@@ -49,7 +50,7 @@ export default tseslint.config(
       // imports.
       "no-unused-vars": "off",
       "@typescript-eslint/no-unused-vars": [
-        "warn",
+        "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
       // Console is intentional in dev tooling + components that hit

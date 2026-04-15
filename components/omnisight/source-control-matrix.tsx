@@ -4,12 +4,11 @@ import { useState, useCallback, useRef, useEffect } from "react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   GitBranch,
-  GitCommit, 
-  Plus, 
-  Link2, 
-  Unlink, 
-  Zap, 
-  FolderGit2, 
+  GitCommit,
+  Link2,
+  Unlink,
+  Zap,
+  FolderGit2,
   ExternalLink,
   Check,
   X,
@@ -19,7 +18,6 @@ import {
   FolderTree,
   Sparkles,
   Trash2,
-  RefreshCw,
   Download
 } from "lucide-react"
 import type { Agent } from "./agent-matrix-wall"
@@ -91,7 +89,7 @@ export function SourceControlMatrix({
         agentId: r.tetheredAgentId!,
         status: "active" as const,
       }))
-    setPipelines(pipes)
+    setPipelines(pipes) // eslint-disable-line react-hooks/set-state-in-effect -- derived state from repos
   }, [repos])
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [tetheringMode, setTetheringMode] = useState(false)
@@ -118,7 +116,7 @@ export function SourceControlMatrix({
       agentId,
       status: "establishing"
     }])
-    
+
     // Update pipeline and repo state
     setPipelines(prev => prev.map(p =>
       p.id === pipelineId ? { ...p, status: "active" } : p
@@ -126,26 +124,26 @@ export function SourceControlMatrix({
     setRepos(prev => prev.map(r =>
       r.id === repoId ? { ...r, tetheredAgentId: agentId } : r
     ))
-    
+
     setSelectedRepo(null)
     setTetheringMode(false)
     setBeamTarget(null)
     onTether?.(repoId, agentId)
-  }, [onTether])
+  }, [onTether, setRepos])
 
   // Handle detethering
   const handleDetether = useCallback((repoId: string) => {
     setPipelines(prev => prev.filter(p => p.repoId !== repoId))
-    setRepos(prev => prev.map(r => 
+    setRepos(prev => prev.map(r =>
       r.id === repoId ? { ...r, tetheredAgentId: undefined } : r
     ))
     onDetether?.(repoId)
-  }, [onDetether])
+  }, [onDetether, setRepos])
 
   // Handle genesis initialization
   const handleGenesis = useCallback(() => {
     if (!newRepoName.trim()) return
-    
+
     setIsCreating(true)
 
     const newRepo: Repository = {
@@ -168,7 +166,7 @@ export function SourceControlMatrix({
     setNewRepoName("")
     setTargetAgent("")
     onCreateRepo?.(newRepoName, targetAgent || undefined)
-  }, [newRepoName, targetAgent, handleTether, onCreateRepo])
+  }, [newRepoName, targetAgent, handleTether, onCreateRepo, setRepos])
 
   // Handle manual repo addition
   const handleAddRepo = useCallback(() => {

@@ -17,6 +17,7 @@ export function EmergencyStop({ onStop, onResume, isHalted = false, disabled = f
   // Reset states when halted state changes externally
   useEffect(() => {
     if (!isHalted) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing local UI state from external prop
       setIsActivating(false)
       setShowConfirm(false)
     }

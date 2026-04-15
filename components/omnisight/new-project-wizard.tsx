@@ -67,7 +67,7 @@ export function NewProjectWizard() {
     const hasSpec = !!localStorage.getItem(LS_LAST_SPEC)
     const wizardSeen = !!localStorage.getItem(LS_WIZARD_SEEN)
     if (!hasSpec && !wizardSeen) {
-      setOpen(true)
+      setOpen(true) // eslint-disable-line react-hooks/set-state-in-effect -- mount-time check of localStorage
     }
   }, [])
 

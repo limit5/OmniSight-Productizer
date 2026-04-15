@@ -147,11 +147,13 @@ export function CommandPalette({ onNavigatePanel }: Props) {
   }, [open])
 
   // Reset cursor when query changes so arrows feel right.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing derived state from query change
   useEffect(() => { setCursor(0) }, [q])
 
   // Autofocus input when opening.
   useEffect(() => {
     if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset query/cursor on palette open
       setQ("")
       setCursor(0)
       const t = setTimeout(() => inputRef.current?.focus(), 0)

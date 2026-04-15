@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, MessageSquare, CheckCircle2, XCircle, Clock, FileText, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, Settings, Eye } from "lucide-react"
+import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, Settings, Eye } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 
 export type AgentStatus = "idle" | "running" | "success" | "error" | "warning" | "booting" | "awaiting_confirmation" | "materializing"
@@ -166,16 +166,6 @@ function getStatusColor(status: AgentStatus): string {
   }
 }
 
-function getMessageIcon(type: AgentMessage["type"]) {
-  switch (type) {
-    case "success": return <CheckCircle2 size={12} className="text-[var(--validation-emerald)]" />
-    case "error": return <XCircle size={12} className="text-[var(--critical-red)]" />
-    case "warning": return <AlertTriangle size={12} className="text-[var(--hardware-orange)]" />
-    case "action": return <FileText size={12} className="text-[var(--artifact-purple)]" />
-    default: return <MessageSquare size={12} className="text-[var(--neural-blue)]" />
-  }
-}
-
 function getResultColor(result: AgentHistoryEntry["result"]): string {
   switch (result) {
     case "success": return "var(--validation-emerald)"
@@ -270,9 +260,6 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
   const [expanded, setExpanded] = useState(agent.status === "awaiting_confirmation" || agent.status === "success" || agent.status === "error")
   
   const hasContent = agent.subTasks?.length || agent.history?.length || agent.messages?.length
-  
-  // Get the latest history entry for display
-  const latestHistory = agent.history?.[agent.history.length - 1]
   
   return (
     <div 

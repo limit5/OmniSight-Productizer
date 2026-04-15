@@ -55,6 +55,7 @@ function formatEta(iso: string | null): string {
 export function PipelineTimeline() {
   const [data, setData] = useState<PipelineTimeline | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [now, setNow] = useState(() => Date.now())
   const mountedRef = useRef(true)
 
   const refresh = useCallback(async () => {
@@ -71,6 +72,7 @@ export function PipelineTimeline() {
 
   useEffect(() => {
     mountedRef.current = true
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount populates state from network
     void refresh()
     const interval = setInterval(() => void refresh(), POLL_MS)
     const sub = subscribeEvents((ev: SSEEvent) => {
@@ -87,6 +89,12 @@ export function PipelineTimeline() {
       sub.close()
     }
   }, [refresh])
+
+  // Tick for elapsed-time display on active steps — 1 Hz.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
 
   return (
     <section
@@ -162,7 +170,7 @@ export function PipelineTimeline() {
             const { Icon } = style
             const elapsed =
               step.started_at && !step.completed_at
-                ? (Date.now() - new Date(step.started_at).getTime()) / 1000
+                ? (now - new Date(step.started_at).getTime()) / 1000
                 : null
             const totalSec =
               step.started_at && step.completed_at

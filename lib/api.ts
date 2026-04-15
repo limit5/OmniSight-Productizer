@@ -133,7 +133,7 @@ export function subscribeEvents(
   onEvent: SSEListener,
   onError?: ErrorListener,
 ): { close: () => void; readyState: number } {
-  const es = _ensureSharedEventSource()
+  const _es = _ensureSharedEventSource()
   _sseListeners.add(onEvent)
   if (onError) _sseErrorListeners.add(onError)
 

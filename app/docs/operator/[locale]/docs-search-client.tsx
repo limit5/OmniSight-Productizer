@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import Link from "next/link"
 import { Search, FileText, Home } from "lucide-react"
 
 export interface DocEntry {
@@ -17,7 +18,7 @@ const COPY = {
   ja: { placeholder: "ドキュメントを検索…", heading: "オペレーターマニュアル", empty: "該当なし。", backToApp: "ダッシュボードへ戻る" },
 } as const
 
-type Locale = keyof typeof COPY
+type _Locale = keyof typeof COPY
 
 export function DocsSearchClient({
   locale,
@@ -75,13 +76,13 @@ export function DocsSearchClient({
           <h1 className="font-mono text-lg tracking-[0.15em] text-[var(--neural-cyan,#67e8f9)]">
             {L.heading}
           </h1>
-          <a
+          <Link
             href="/"
             className="flex items-center gap-1 font-mono text-[11px] text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--neural-cyan,#67e8f9)]"
           >
             <Home className="w-3.5 h-3.5" aria-hidden />
             {L.backToApp}
-          </a>
+          </Link>
         </div>
         <div className="relative mb-6">
           <Search

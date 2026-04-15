@@ -367,6 +367,7 @@ function DecisionRow(props: {
     const target = new URLSearchParams(window.location.search).get("decision")
     if (target !== d.id) return
     rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deep-link highlight driven by URL param on mount
     setFocusRing(true)
     const t = setTimeout(() => setFocusRing(false), 3500)
     return () => clearTimeout(t)

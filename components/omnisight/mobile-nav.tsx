@@ -18,7 +18,6 @@ import {
   Workflow,
   Sparkles,
   History,
-  Menu,
   X,
   ChevronLeft,
   ChevronRight
@@ -114,7 +113,7 @@ export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
         
         {/* Quick Access Dots */}
         <div className="flex items-center justify-center gap-1.5 pb-2">
-          {panels.map((panel, idx) => (
+          {panels.map((panel, _idx) => (
             <button
               key={panel.id}
               onClick={() => onPanelChange(panel.id)}

@@ -179,6 +179,7 @@ export function ToastCenter() {
           +{overflow} MORE PENDING
         </div>
       )}
+      {/* eslint-disable-next-line react-hooks/refs -- focusedRef read during render for non-critical visual hint; converting to state would add re-renders on every hover */}
       {toasts.map((t) => {
         const total = t.deadlineAt - t.createdAt
         const remaining = Math.max(0, t.deadlineAt - now)

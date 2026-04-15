@@ -137,7 +137,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   const [repoDetectedFiles, setRepoDetectedFiles] = useState<string[]>([])
 
   // Docs tab state
-  const [docFiles, setDocFiles] = useState<File[]>([])
+  const [, setDocFiles] = useState<File[]>([])
   const [docResults, setDocResults] = useState<DocFileResult[]>([])
   const [docsLoading, setDocsLoading] = useState(false)
   const [docsError, setDocsError] = useState<string | null>(null)

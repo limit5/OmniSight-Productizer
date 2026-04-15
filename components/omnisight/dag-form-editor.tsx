@@ -93,6 +93,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
     const node = rowRefs.current[focusRequest.taskId]
     if (!node) return
     node.scrollIntoView({ behavior: "smooth", block: "center" })
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- visual highlight driven by external focus event
     setFlashed(focusRequest.taskId)
     const t = setTimeout(() => setFlashed(null), 1500)
     return () => clearTimeout(t)

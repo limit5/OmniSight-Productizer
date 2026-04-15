@@ -98,7 +98,7 @@ test.describe("First-run tour deep-link", () => {
     // Forget any prior "tour seen" flag so ?tour= actually reopens it.
     await context.clearCookies()
     await context.addInitScript(() => {
-      try { localStorage.removeItem("omnisight-tour-seen") } catch {}
+      try { localStorage.removeItem("omnisight-tour-seen") } catch { /* expected – storage may be unavailable */ }
     })
   })
 

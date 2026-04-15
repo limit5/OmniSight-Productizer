@@ -117,7 +117,7 @@ export default function Home() {
   useEffect(() => {
     engine.setProviderSwitchCallback(refetchProviders)
     return () => engine.setProviderSwitchCallback(null)
-  }, [refetchProviders])  // engine.setProviderSwitchCallback is a stable ref assignment
+  }, [refetchProviders, engine])  // engine is a stable singleton; listed for exhaustive-deps compliance
 
   // Phase 50D: keep ?panel=… in sync with activePanel and honour the
   // browser back/forward button. Preserves any ?decision=… query so a
@@ -472,14 +472,14 @@ export default function Home() {
               try {
                 const updated = await api.updateNPIState({ business_model: model })
                 engine.setNpiData(updated)
-              } catch {}
+              } catch { /* ignore – NPI update is best-effort */ }
             }}
             onMilestoneStatusChange={async (msId, status) => {
               try {
                 await api.updateNPIMilestone(msId, status)
                 const updated = await api.getNPIState()
                 engine.setNpiData(updated)
-              } catch {}
+              } catch { /* ignore – milestone update is best-effort */ }
             }}
           />
         )
@@ -672,7 +672,7 @@ export default function Home() {
               onSwitchProvider={async (p, m) => { try { await api.switchProvider(p, m); setProviderData(await api.getProviders()); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Switch provider failed:", e) } }}
               onUpdateFallbackChain={async (chain) => { try { await api.updateFallbackChain(chain); setProviderHealth(await api.getProviderHealth()) } catch (e) { console.error("Update chain failed:", e) } }}
             handoffs={handoffs}
-            onLoadHandoffs={async () => { try { setHandoffs(await api.getRecentHandoffs()) } catch {} }}
+            onLoadHandoffs={async () => { try { setHandoffs(await api.getRecentHandoffs()) } catch { /* ignore – handoff load is best-effort */ } }}
             />
           </aside>
 
@@ -708,14 +708,14 @@ export default function Home() {
                 try {
                   const updated = await api.updateNPIState({ business_model: model })
                   engine.setNpiData(updated)
-                } catch {}
+                } catch { /* ignore – NPI update is best-effort */ }
               }}
               onMilestoneStatusChange={async (msId, status) => {
                 try {
                   await api.updateNPIMilestone(msId, status)
                   const updated = await api.getNPIState()
                   engine.setNpiData(updated)
-                } catch {}
+                } catch { /* ignore – milestone update is best-effort */ }
               }}
             />
           </aside>

@@ -203,6 +203,7 @@ export function PanelHelp({ doc, className, tourAnchor }: PanelHelpProps) {
   // the trigger — avoids a one-frame flash at (0,0) on open.
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const [mounted, setMounted] = useState(false)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- known setMounted(true) pattern for SSR hydration guard
   useEffect(() => { setMounted(true) }, [])
 
   // Close on outside click or Escape.

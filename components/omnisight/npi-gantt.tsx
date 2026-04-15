@@ -1,6 +1,6 @@
 "use client"
 
-import { AlertTriangle, CheckCircle2, Clock, Zap, Shield, Package, Rocket, Target } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Zap, Shield, Package, Rocket, Target } from "lucide-react"
 
 interface NPIMilestone {
   id: string

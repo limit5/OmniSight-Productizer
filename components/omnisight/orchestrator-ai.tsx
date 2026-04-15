@@ -8,10 +8,8 @@ import {
   User, 
   Sparkles,
   Zap,
-  AlertTriangle,
   Check,
   X,
-  ArrowRight,
   Target,
   Cpu,
   Code,
@@ -22,12 +20,11 @@ import {
   ChevronDown,
   ChevronUp,
   Crown,
-  Shield,
-  DownloadCloud
+  Shield
 } from "lucide-react"
-import type { Agent, AgentStatus, AIModel } from "./agent-matrix-wall"
-import type { Task, TaskStatus } from "./task-backlog"
-import { AGENT_TYPES, AI_MODEL_INFO, getModelInfo } from "./agent-matrix-wall"
+import type { Agent, AgentStatus } from "./agent-matrix-wall"
+import type { Task } from "./task-backlog"
+import { AGENT_TYPES, getModelInfo } from "./agent-matrix-wall"
 import { HandoffTimeline } from "./handoff-timeline"
 import { matchCommands as slashMatchCommands, CATEGORY_COLORS as slashCategoryColors, type SlashCommand } from "@/lib/slash-commands"
 import { TokenUsageStats } from "./token-usage-stats"
@@ -133,8 +130,8 @@ export function OrchestratorAI({
   onAssignTask,
   onSpawnAgent,
   onForceAssign,
-  onUpdateAgentStatus,
-  onCompleteTask,
+  onUpdateAgentStatus: _onUpdateAgentStatus,
+  onCompleteTask: _onCompleteTask,
   externalMessages = [],
   onSendCommand,
   tokenUsage,
@@ -173,7 +170,7 @@ export function OrchestratorAI({
       const lastExternal = externalMessages[externalMessages.length - 1]
       // Check if this message is already in our state
       if (!messages.find(m => m.id === lastExternal.id)) {
-        setMessages(prev => [...prev, lastExternal])
+        setMessages(prev => [...prev, lastExternal]) // eslint-disable-line react-hooks/set-state-in-effect -- syncing external prop to local state
       }
     }
   }, [externalMessages, messages])
@@ -251,10 +248,10 @@ export function OrchestratorAI({
     
     setSuggestions(newSuggestions.slice(0, 5)) // Limit to 5 suggestions
   }, [agents, tasks])
-  
+
   // Generate suggestions on state changes
   useEffect(() => {
-    generateSuggestions()
+    generateSuggestions() // eslint-disable-line react-hooks/set-state-in-effect -- derived state recomputed when deps change
   }, [generateSuggestions])
   
   // Handle user commands

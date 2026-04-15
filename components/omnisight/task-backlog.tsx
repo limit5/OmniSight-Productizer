@@ -4,24 +4,19 @@ import { useState, useRef, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 import { 
-  Plus, 
-  Send, 
-  Bot, 
-  User, 
-  CheckCircle2, 
-  Circle, 
-  Clock, 
-  ArrowRight, 
+  Plus,
+  Send,
+  Bot,
+  User,
+  CheckCircle2,
+  Circle,
+  ArrowRight,
   Sparkles,
   Trash2,
   Play,
-  Pause,
-  RotateCcw,
   ChevronDown,
   ChevronUp,
   Target,
-  Zap,
-  AlertTriangle,
   X
 } from "lucide-react"
 import type { Agent, AgentStatus } from "./agent-matrix-wall"
@@ -159,7 +154,7 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
   // Sync when external tasks change (from backend)
   useEffect(() => {
     if (externalTasks && externalTasks.length > 0) {
-      setTasks(externalTasks)
+      setTasks(externalTasks) // eslint-disable-line react-hooks/set-state-in-effect -- syncing external prop to local state
     }
   }, [externalTasks])
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(initialChatHistory)

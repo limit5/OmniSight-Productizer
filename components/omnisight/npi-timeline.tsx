@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { ChevronDown, ChevronUp, Target, Zap, Shield, Package, Rocket, CheckCircle2, Clock, AlertTriangle, BarChart3, List } from "lucide-react"
 import { NPIGantt } from "./npi-gantt"
 import { PanelHelp } from "@/components/omnisight/panel-help"
@@ -65,7 +65,7 @@ function getPhaseIcon(shortName: string) {
   return icons[shortName] || Zap
 }
 
-export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChange, onPhaseStatusChange }: NPITimelineProps) {
+export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChange, onPhaseStatusChange: _onPhaseStatusChange }: NPITimelineProps) {
   const [expandedPhase, setExpandedPhase] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<"timeline" | "gantt">("timeline")
 
@@ -199,7 +199,7 @@ export function NPITimeline({ data, onBusinessModelChange, onMilestoneStatusChan
           {/* Vertical line */}
           <div className="absolute left-[11px] top-3 bottom-3 w-px bg-[var(--border)]" />
 
-          {data.phases.map((phase, idx) => {
+          {data.phases.map((phase, _idx) => {
             const cfg = PHASE_STATUS_CONFIG[phase.status] || PHASE_STATUS_CONFIG.pending
             const PhaseIcon = getPhaseIcon(phase.short_name)
             const isExpanded = expandedPhase === phase.id

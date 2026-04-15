@@ -12,6 +12,7 @@
  */
 
 import type { TocEntry } from "@/lib/md-to-html"
+import Link from "next/link"
 import { ArrowLeft, ArrowRight, Home, List } from "lucide-react"
 
 export type DocKind = "reference" | "tutorial" | "troubleshooting"
@@ -91,14 +92,14 @@ export function DocLayout({ locale, route, toc, html }: Props) {
         <div className="min-w-0">
           {/* Breadcrumb */}
           <nav className="mb-4 font-mono text-[11px] text-[var(--muted-foreground,#94a3b8)] flex items-center gap-3 flex-wrap">
-            <a href="/" className="flex items-center gap-1 hover:text-[var(--neural-cyan,#67e8f9)]">
+            <Link href="/" className="flex items-center gap-1 hover:text-[var(--neural-cyan,#67e8f9)]">
               <Home className="w-3 h-3" aria-hidden />
               {L.dashboard}
-            </a>
+            </Link>
             <span aria-hidden>·</span>
-            <a href={`/docs/operator/${locale}`} className="hover:text-[var(--neural-cyan,#67e8f9)]">
+            <Link href={`/docs/operator/${locale}`} className="hover:text-[var(--neural-cyan,#67e8f9)]">
               {L.index}
-            </a>
+            </Link>
             {currentTitle && (
               <>
                 <span aria-hidden>·</span>

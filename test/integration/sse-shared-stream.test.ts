@@ -42,7 +42,7 @@ class TrackedEventSource {
   constructor(url: string) {
     this.url = url
     ctorCount++
-    latestInstance = this
+    latestInstance = this // eslint-disable-line @typescript-eslint/no-this-alias
   }
   addEventListener(type: string, listener: (e: Event) => void) {
     ;(this.listeners[type] ||= []).push(listener)
