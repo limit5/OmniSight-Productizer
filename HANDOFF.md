@@ -7,6 +7,58 @@
 
 ---
 
+## C7 L4-CORE-07 HIL plugin API 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Define plugin protocol: measure/verify/teardown | ✅ | `backend/hil_plugin.py` — ABC `HILPlugin` + dataclasses `Measurement`, `VerifyResult`, `PluginRunSummary` + lifecycle runner `run_plugin_lifecycle()` |
+| Camera family plugin | ✅ | `backend/hil_plugins/camera.py` — focus_sharpness, white_balance, stream_latency metrics |
+| Audio family plugin | ✅ | `backend/hil_plugins/audio.py` — SNR, AEC, THD metrics |
+| Display family plugin | ✅ | `backend/hil_plugins/display.py` — uniformity, touch_latency, color_accuracy metrics |
+| Registry: skill pack declares required HIL plugins | ✅ | `backend/hil_registry.py` — parse `hil_plugins` from skill.yaml, validate requirements, run lifecycle |
+| Integration test: mock HIL plugin lifecycle | ✅ | 77 項測試全數通過：protocol (12) + camera (12) + audio (9) + display (9) + lifecycle runner (6) + registry (5) + skill requirements (5) + skill validation (5) + skill run (4) + mock lifecycle (6) + edge cases (6) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `backend/hil_plugin.py` | 新建——HIL plugin protocol ABC + dataclasses + lifecycle runner |
+| `backend/hil_plugins/__init__.py` | 新建——family plugin package |
+| `backend/hil_plugins/camera.py` | 新建——Camera HIL plugin (focus/WB/stream-latency) |
+| `backend/hil_plugins/audio.py` | 新建——Audio HIL plugin (SNR/AEC/THD) |
+| `backend/hil_plugins/display.py` | 新建——Display HIL plugin (uniformity/touch-latency/color-accuracy) |
+| `backend/hil_registry.py` | 新建——HIL plugin registry + skill pack integration |
+| `backend/routers/hil.py` | 新建——REST endpoints: GET /hil/plugins, GET /hil/plugins/{name}, POST /hil/validate/{skill}, POST /hil/run/{skill} |
+| `backend/main.py` | 擴充——註冊 HIL router |
+| `backend/tests/test_hil_plugin.py` | 新建，77 項測試 |
+
+### 架構說明
+
+- **HILPlugin ABC** — 三個生命週期方法：`measure(metric, **params) → Measurement`、`verify(measurement, criteria) → VerifyResult`、`teardown()`
+- **PluginFamily enum** — camera / audio / display
+- **Family plugins** — 每個 family 實作 ABC，提供領域專屬 metrics：
+  - Camera: focus_sharpness (Laplacian variance), white_balance (Delta-E), stream_latency (ms)
+  - Audio: snr (dB), aec (dB echo return loss), thd (% harmonic distortion)
+  - Display: uniformity (ratio), touch_latency (ms), color_accuracy (Delta-E 2000)
+- **HIL Registry** — `_BUILTIN_PLUGINS` dict 管理已註冊 plugins，支援 `register_builtin()` 自訂擴充
+- **Skill pack 整合** — skill.yaml 新增 `hil_plugins` key（簡易 list 或擴展 dict 格式含 metrics + criteria）
+- **run_plugin_lifecycle()** — measure → verify → teardown 完整生命週期，自動 teardown（含錯誤路徑）
+- **API endpoints** — 4 個 REST endpoints 供 UI / CLI 查詢、驗證、執行 HIL tests
+
+### 驗證
+
+- 77 項新增 HIL 測試全數通過
+- 62 項既有 skill framework 測試全數通過（無迴歸）
+
+### 下一步
+
+- C8 (#217)：Protocol compliance harness
+- D1 (#218)：SKILL-UVC pilot — 可在 skill.yaml 中宣告 `hil_plugins: [camera]`
+
+---
+
 ## C6 L4-CORE-06 Document suite generator 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

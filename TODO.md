@@ -168,12 +168,12 @@ Legend:
 - [x] Unit test per product class
 
 ### C7. L4-CORE-07 HIL plugin API (#216)
-- [ ] Define plugin protocol: `measure()` / `verify()` / `teardown()`
-- [ ] Camera family plugin (focus/WB/stream-latency)
-- [ ] Audio family plugin (SNR/AEC metrics)
-- [ ] Display family plugin (uniformity/touch latency)
-- [ ] Registry: skill pack declares required HIL plugins
-- [ ] Integration test: mock HIL plugin lifecycle
+- [x] Define plugin protocol: `measure()` / `verify()` / `teardown()`
+- [x] Camera family plugin (focus/WB/stream-latency)
+- [x] Audio family plugin (SNR/AEC metrics)
+- [x] Display family plugin (uniformity/touch latency)
+- [x] Registry: skill pack declares required HIL plugins
+- [x] Integration test: mock HIL plugin lifecycle
 
 ### C8. L4-CORE-08 Protocol compliance harness (#217)
 - [ ] Wrapper for ODTT (ONVIF Device Test Tool) — headless mode or subprocess
