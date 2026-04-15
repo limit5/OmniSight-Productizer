@@ -1,9 +1,44 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I4 Tenant-scoped secrets — encrypted credential storage per tenant (master)
+> 最後 commit：I5 Tenant filesystem namespace — per-tenant directory isolation (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I5 (complete) Filesystem namespace — per-tenant 檔案系統隔離（2026-04-16 完成）
+
+**背景**：I1-I4 完成了 DB 層面的多租戶隔離，但所有 tenant 的 artifacts、ingest cache、backups、workflow 輸出仍共用同一組目錄。I5 將檔案系統改為 per-tenant namespace，確保不同 tenant 的檔案在物理層面完全隔離。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/tenant_fs.py` | 中央模組：`tenant_artifacts_root()` / `tenant_ingest_root()` / `tenant_backups_root()` / `tenant_workflow_runs_root()` / `ensure_tenant_dirs()` / `path_belongs_to_tenant()`，自動從 db_context 取 tenant_id | ✅ 完成 |
+| 目錄結構 | `data/tenants/<tid>/{artifacts,backups,workflow_runs}/` + `/tmp/omnisight_ingest/<tid>/` | ✅ 完成 |
+| `get_artifacts_root()` | 改為 tenant-aware，自動讀取 context var 中的 tenant_id | ✅ 完成 |
+| `_INGEST_ROOT` | 改為 `/tmp/omnisight_ingest/<tid>/`，`clone_repo()` / `cleanup_ingest_cache()` 皆接受 tenant_id | ✅ 完成 |
+| `_is_valid_artifact_path()` | 新增路徑驗證函式，同時接受 tenant 目錄與 legacy `.artifacts/` 路徑 | ✅ 完成 |
+| `release.py` | bundle 路徑驗證改用 `_is_valid_artifact_path()` | ✅ 完成 |
+| Migration 0014 | 搬遷 `.artifacts/` → `data/tenants/t-default/artifacts/`；更新 DB 中的 file_path 紀錄 | ✅ 完成 |
+| tid 驗證 | `_validate_tid()` 防止 path traversal 攻擊，僅接受 `[a-zA-Z0-9_-]{1,128}` | ✅ 完成 |
+| 測試（28 項） | 目錄建立 / 跨 tenant 隔離 / tid 驗證 / context fallback / ingest cleanup scoping / path validation | ✅ 28/28 pass |
+| 回歸測試 | test_tenants(16) + test_tenant_secrets(18) + test_repo_ingest(37) 全數通過 | ✅ 零回歸 |
+
+**新增檔案**：
+- `backend/tenant_fs.py` — 中央 tenant filesystem namespace 模組
+- `backend/alembic/versions/0014_tenant_filesystem_namespace.py` — 檔案搬遷 migration
+- `tests/test_tenant_fs.py` — 28 項測試
+
+**修改檔案**：
+- `backend/routers/artifacts.py` — `get_artifacts_root()` 改為 tenant-aware + `_is_valid_artifact_path()`
+- `backend/repo_ingest.py` — `clone_repo()` / `ingest_repo()` / `cleanup_ingest_cache()` 加入 tenant_id 參數
+- `backend/release.py` — bundle 路徑驗證改用 `_is_valid_artifact_path()`
+
+**設計決策**：
+- 寫入路徑自動從 `db_context.current_tenant_id()` 取 tenant，fallback 到 `t-default`
+- Legacy `.artifacts/` 路徑在讀取/驗證時仍被接受（向後相容，migration 後漸進淘汰）
+- `_validate_tid()` 使用嚴格正則防止 `../` 等 path traversal 攻擊
+- Ingest cache 放 `/tmp/` 而非 `data/tenants/` 是因為它是暫存性質，不需持久化
 
 ---
 

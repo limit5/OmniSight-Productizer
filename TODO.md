@@ -529,12 +529,12 @@ Legend:
 - [x] 預估：**2 day**
 
 ### I5. Filesystem namespace
-- [ ] `data/tenants/<tid>/{artifacts,ingest,backups,workflow_runs}/`
-- [ ] 所有寫路徑函式接受 tenant context
-- [ ] `_INGEST_ROOT` 改 `/tmp/omnisight_ingest/<tid>/`
-- [ ] Migration 腳本搬既有檔案到 `t-default`
-- [ ] 測試：跨 tenant 路徑隔離
-- [ ] 預估：**1.5 day**
+- [x] `data/tenants/<tid>/{artifacts,ingest,backups,workflow_runs}/`
+- [x] 所有寫路徑函式接受 tenant context
+- [x] `_INGEST_ROOT` 改 `/tmp/omnisight_ingest/<tid>/`
+- [x] Migration 腳本搬既有檔案到 `t-default`
+- [x] 測試：跨 tenant 路徑隔離
+- [x] 預估：**1.5 day**
 
 ### I6. Sandbox fair-share（DRF per-tenant）
 - [ ] H4a 的 token bucket 改 per-tenant；全域 CAPACITY_MAX 維持 12
