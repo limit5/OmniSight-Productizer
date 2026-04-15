@@ -14,6 +14,8 @@ import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { DagEditor } from "@/components/omnisight/dag-editor"
 import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
+import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
+import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { useAuth } from "@/lib/auth-context"
 import { useRouter } from "next/navigation"
@@ -43,7 +45,7 @@ const agentTemplates: Record<string, Partial<Agent>> = {
 // specific panel, and optionally focus a decision id in the dashboard.
 const VALID_PANELS: ReadonlySet<PanelId> = new Set([
   "host", "spec", "agents", "orchestrator", "tasks", "source", "npi", "vitals",
-  "decisions", "budget", "timeline", "rules", "forecast", "dag",
+  "decisions", "budget", "timeline", "rules", "forecast", "dag", "intent",
 ])
 
 function readPanelFromUrl(): PanelId | null {
@@ -500,6 +502,28 @@ export default function Home() {
         return <ForecastPanel />
       case "dag":
         return <DagEditor />
+      case "intent":
+        return (
+          <SpecTemplateEditor
+            onSpecReady={(spec: ParsedSpec) => {
+              // Hand off to DagEditor: navigate to the DAG panel and
+              // seed it with a template best matching the parsed spec.
+              // DagEditor listens for `omnisight:dag-seed-from-spec`
+              // on window and pre-fills its JSON text accordingly.
+              if (typeof window === "undefined") return
+              window.dispatchEvent(
+                new CustomEvent("omnisight:dag-seed-from-spec", {
+                  detail: { spec },
+                }),
+              )
+              window.dispatchEvent(
+                new CustomEvent("omnisight:navigate", {
+                  detail: { panel: "dag" },
+                }),
+              )
+            }}
+          />
+        )
       default:
         return null
     }

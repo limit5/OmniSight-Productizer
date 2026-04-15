@@ -114,6 +114,29 @@ describe("DagEditor", () => {
     }
   })
 
+  it("dag-seed-from-spec event seeds JSON tab from SpecTemplateEditor handoff", async () => {
+    render(<DagEditor />)
+    // Wait for initial template to load.
+    await waitFor(() => expect(screen.getByText(/valid/i)).toBeInTheDocument())
+
+    // Fire the seed event with an embedded_firmware spec → expect
+    // the cross-compile template to be selected.
+    window.dispatchEvent(new CustomEvent("omnisight:dag-seed-from-spec", {
+      detail: {
+        spec: {
+          project_type: { value: "embedded_firmware", confidence: 0.9 },
+          runtime_model: { value: "unknown", confidence: 0 },
+          framework: { value: "embedded", confidence: 0.7 },
+        },
+      },
+    }))
+
+    const ta = await screen.findByRole("textbox", { name: /dag json editor/i }) as HTMLTextAreaElement
+    await waitFor(() => expect(ta.value).toContain("SAMPLE-cross-compile"))
+    // Seed message surfaces so the operator knows what happened.
+    expect(screen.getByText(/Seeded from spec/i)).toBeInTheDocument()
+  })
+
   it("dag-focus-task event flips to Form tab and scrolls/highlights the row", async () => {
     const scrollSpy = vi.fn()
     // jsdom doesn't implement scrollIntoView; stub before render so

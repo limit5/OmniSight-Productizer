@@ -325,6 +325,44 @@ export function DagEditor() {
       window.removeEventListener("omnisight:dag-focus-task", onFocus as EventListener)
   }, [])
 
+  // Phase 68-D follow-up: SpecTemplateEditor's onSpecReady fires a
+  // `omnisight:dag-seed-from-spec` custom event with the ParsedSpec
+  // on its detail. Pick the template whose shape best matches —
+  // embedded_firmware → cross-compile, web_app SSG → compile-flash,
+  // etc. — and seed the JSON text with it. Operator can edit further
+  // before submit; this is a starter, not a commitment.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onSeed = (e: Event) => {
+      type Seed = { spec?: {
+        project_type?: { value?: string }
+        runtime_model?: { value?: string }
+        framework?: { value?: string }
+      } }
+      const detail = (e as CustomEvent<Seed>).detail?.spec
+      if (!detail) return
+      const pt = detail.project_type?.value
+      const rm = detail.runtime_model?.value
+      const fw = detail.framework?.value
+      // Rule-of-thumb template selection. Simple, additive,
+      // deterministic — no LLM in the loop here.
+      let pickId: string = "minimal"
+      if (pt === "embedded_firmware") pickId = "cross-compile"
+      else if (rm === "ssg" || fw === "nextjs" || fw === "react") pickId = "compile-flash"
+      else if (rm === "batch" || pt === "data_pipeline") pickId = "fine-tune"
+      else if (fw === "rust" || pt === "cli_tool") pickId = "cross-compile"
+      const tpl = TEMPLATES.find((t) => t.id === pickId) || TEMPLATES[0]
+      setText(JSON.stringify(tpl.body, null, 2))
+      setSubmitMessage(
+        `Seeded from spec — template "${tpl.label}". Edit freely before Submit.`,
+      )
+      setTab("json")
+    }
+    window.addEventListener("omnisight:dag-seed-from-spec", onSeed as EventListener)
+    return () =>
+      window.removeEventListener("omnisight:dag-seed-from-spec", onSeed as EventListener)
+  }, [])
+
   // Cancel-previous pattern: keep latest request's signal so a stale
   // response can't clobber a fresher one.
   const inflight = useRef<AbortController | null>(null)
