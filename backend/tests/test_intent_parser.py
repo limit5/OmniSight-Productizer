@@ -233,3 +233,127 @@ async def test_llm_parse_clamps_confidence_to_unit_range():
         }), 10
     p = await ip.parse_intent("x", ask_fn=ask_fn, model="test")
     assert 0.0 <= p.framework.confidence <= 1.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Phase 68-B — YAML conflict library + iterative clarification
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_yaml_loads_and_contains_motivating_rule():
+    rules = ip._load_conflicts_yaml()
+    assert any(r.get("id") == "static_with_runtime_db" for r in rules)
+
+
+@pytest.mark.asyncio
+async def test_embedded_to_cloud_yaml_rule_fires():
+    """The YAML-only `embedded_to_cloud_mismatch` rule — not in the
+    68-A hardcoded path — must fire purely from a ParsedSpec that
+    has project_type=embedded_firmware AND deploy_target=cloud."""
+    # Build a spec directly so we don't have to construct a prompt
+    # that triggers every sub-detection of the heuristic.
+    ps = ip.ParsedSpec(
+        project_type=ip.Field("embedded_firmware", 0.9),
+        deploy_target=ip.Field("cloud", 0.9),
+        raw_text="",
+    )
+    conflicts = ip.detect_conflicts(ps)
+    assert any(c.id == "embedded_to_cloud_mismatch" for c in conflicts)
+
+
+@pytest.mark.asyncio
+async def test_hardware_without_arch_yaml_rule_fires():
+    ps = ip.ParsedSpec(
+        hardware_required=ip.Field("yes", 0.9),
+        target_arch=ip.Field("unknown", 0.0),
+        raw_text="",
+    )
+    conflicts = ip.detect_conflicts(ps)
+    assert any(c.id == "hardware_without_arch" for c in conflicts)
+
+
+def test_rule_with_empty_when_is_disabled():
+    """Safety: an empty/missing `when:` clause would otherwise fire
+    on every parse. Detector must treat it as disabled."""
+    rule = {"id": "x", "fields": [], "options": [], "when": {}}
+    ps = ip.ParsedSpec()
+    assert not ip._rule_matches(rule, ps)
+    rule_none = {"id": "y"}
+    assert not ip._rule_matches(rule_none, ps)
+
+
+def test_malformed_rule_does_not_crash_detector(monkeypatch):
+    """A partial YAML entry must be tolerated — we can't have one
+    typo nuking the whole detector."""
+    bogus = [
+        {"id": "ok", "when": {"project_type": "web_app"}, "options": [], "fields": []},
+        {"id": "bad", "when": {"project_type": {"re": "[invalid-regex"}},
+         "options": [], "fields": []},
+    ]
+    monkeypatch.setattr(ip, "_CONFLICTS_CACHE", bogus)
+    ps = ip.ParsedSpec(project_type=ip.Field("web_app", 0.9))
+    conflicts = ip.detect_conflicts(ps)
+    assert any(c.id == "ok" for c in conflicts)
+    # bad rule logged at debug + skipped — no exception propagates
+
+
+# ─── Iterative clarification ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_apply_clarification_overrides_at_full_confidence():
+    p = await ip.parse_intent(
+        "Build a static Next.js site that reads from a local SQLite at request time."
+    )
+    assert any(c.id == "static_with_runtime_db" for c in p.conflicts)
+    chosen = ip.apply_clarification(p, "static_with_runtime_db", "ssr_runtime")
+    # The operator's pick flips runtime_model to ssr at confidence 1.0.
+    assert chosen.runtime_model.value == "ssr"
+    assert chosen.runtime_model.confidence == 1.0
+    # And the conflict must no longer fire (ssr + runtime DB ≠ conflict).
+    assert not any(c.id == "static_with_runtime_db" for c in chosen.conflicts)
+
+
+def test_apply_clarification_unknown_conflict_is_noop():
+    ps = ip.ParsedSpec(runtime_model=ip.Field("ssg", 0.9))
+    out = ip.apply_clarification(ps, "does-not-exist", "any")
+    assert out is ps  # object identity — truly unchanged
+
+
+def test_apply_clarification_unknown_option_is_noop():
+    ps = ip.ParsedSpec(runtime_model=ip.Field("ssg", 0.9))
+    out = ip.apply_clarification(ps, "static_with_runtime_db", "not-a-real-option")
+    assert out is ps
+
+
+@pytest.mark.asyncio
+async def test_clarification_loop_bounded_by_max_rounds():
+    """Pathological case: operator keeps picking options that don't
+    actually resolve the conflict (here `ssg_build_time` leaves
+    runtime_model=ssg, raw_text's runtime-DB hint intact, so the
+    rule keeps firing). The MAX_CLARIFY_ROUNDS guard is the caller's
+    safety net — verify a loop capped by it does terminate and
+    doesn't spin."""
+    ps = await ip.parse_intent(
+        "Build a static Next.js site reads from sqlite at request time."
+    )
+    rounds = 0
+    while ps.conflicts and rounds < ip.MAX_CLARIFY_ROUNDS:
+        first = ps.conflicts[0]
+        if not first.options:
+            break
+        ps = ip.apply_clarification(ps, first.id, "ssg_build_time")
+        rounds += 1
+    assert rounds == ip.MAX_CLARIFY_ROUNDS
+
+
+@pytest.mark.asyncio
+async def test_choosing_ssr_resolves_static_runtime_conflict():
+    """Sanity: picking the *right* option actually does resolve the
+    conflict in one round. Confirms apply_clarification's override
+    is semantic (flips runtime_model to ssr), not cosmetic."""
+    ps = await ip.parse_intent(
+        "Build a static Next.js site reads from sqlite at request time."
+    )
+    assert any(c.id == "static_with_runtime_db" for c in ps.conflicts)
+    ps2 = ip.apply_clarification(ps, "static_with_runtime_db", "ssr_runtime")
+    assert ps2.runtime_model.value == "ssr"
+    assert not any(c.id == "static_with_runtime_db" for c in ps2.conflicts)

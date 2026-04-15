@@ -1,0 +1,105 @@
+# Phase 68-B — Spec anti-pattern library.
+#
+# Declarative conflict rules consumed by `backend/intent_parser.py`'s
+# `detect_conflicts()`. Edit this file to add a new conflict type
+# rather than patching Python. Every change you'd make to the
+# detector should be expressible here.
+#
+# Schema per rule:
+#   id:       stable identifier; shows up in audit_log + DE proposal
+#   severity: info | routine | risky | destructive  (DE severity)
+#   message:  operator-facing explanation shown in the proposal
+#   when:     conditions that must ALL match for the rule to fire
+#     <field_name>: single value OR list of values OR regex object
+#   fields:   list of ParsedSpec field names involved (UI highlights them)
+#   options:  list of choices the operator picks from; each has
+#     id / label / desc and an `apply` dict of field overrides
+#
+# `when` clause types:
+#   - string       exact match on field.value
+#   - list[str]    field.value in list
+#   - { re: "..." } regex match against raw_text
+#   - { not: ... } negate the inner condition
+#
+# Options' `apply` maps to Field(value, confidence=1.0) — the
+# operator's explicit choice is authoritative (confidence maxed).
+
+schema_version: 1
+
+rules:
+  # ─── Static / runtime split (design-review motivating example) ───
+  - id: static_with_runtime_db
+    severity: routine
+    message: |
+      Spec mentions a static/SSG site but also talks about reading
+      from a database at request time. These two are architecturally
+      at odds — pick one:
+    when:
+      runtime_model: ssg
+      raw_text:
+        re: "(?i)(?:runtime|request\\s*time|on each request|per request|從.{0,10}(?:資料庫|database|db|sqlite).{0,10}(?:拉|fetch|query)|(?:read|fetch|query|load)s?\\s+from\\s+.{0,40}(?:database|db|sqlite|postgres|mysql|redis)|(?:本機|本地|本地端|local).{0,10}(?:資料庫|database|db))"
+    fields: [runtime_model, persistence]
+    options:
+      - id: ssg_build_time
+        label: "SSG — read DB at build time"
+        desc: "`next build` queries the DB once, output is static HTML."
+        apply:
+          runtime_model: ssg
+      - id: ssr_runtime
+        label: "SSR — query at request time"
+        desc: "Node runtime on the target; DB query per request."
+        apply:
+          runtime_model: ssr
+      - id: isr_hybrid
+        label: "ISR — hybrid revalidate"
+        desc: "Best of both; needs Node runtime on target."
+        apply:
+          runtime_model: isr
+
+  # ─── Target-arch / deploy-target consistency ───
+  - id: embedded_to_cloud_mismatch
+    severity: routine
+    message: |
+      Embedded-firmware project being deployed to "cloud" —
+      firmware usually ships to a device, not a cloud VM. Did you
+      mean a cloud management service, or was the target wrong?
+    when:
+      project_type: embedded_firmware
+      deploy_target: cloud
+    fields: [deploy_target]
+    options:
+      - id: edge_device
+        label: "Fix — deploy to edge device"
+        desc: "Flash / OTA push to the physical device."
+        apply:
+          deploy_target: edge_device
+      - id: cloud_mgmt
+        label: "Keep — cloud management plane"
+        desc: "Firmware itself ships to devices; cloud is the fleet-management backend."
+        apply:
+          deploy_target: cloud
+
+  # ─── Hardware required without arch specified ───
+  - id: hardware_without_arch
+    severity: info
+    message: |
+      The spec mentions hardware peripherals but didn't pin a target
+      architecture. The DAG planner will default to host-native — if
+      that's wrong you'll hit toolchain mismatches halfway through.
+    when:
+      hardware_required: yes
+      target_arch: unknown
+    fields: [target_arch]
+    options:
+      - id: x86_64
+        label: "x86_64"
+        apply: { target_arch: x86_64 }
+      - id: arm64
+        label: "arm64 / aarch64"
+        apply: { target_arch: arm64 }
+      - id: arm32
+        label: "arm32 / armv7"
+        apply: { target_arch: arm32 }
+      - id: riscv64
+        label: "riscv64"
+        apply: { target_arch: riscv64 }

@@ -356,44 +356,203 @@ async def _llm_parse(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Conflict detector (smoke — full library is Phase 68-B)
+#  Conflict detector — YAML-driven (Phase 68-B)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def detect_conflicts(parsed: ParsedSpec) -> list[SpecConflict]:
-    """Smoke rules — Phase 68-B will replace this with a YAML-driven
-    table. Kept minimal here so 68-A ships with at least one real
-    conflict demo.
+from pathlib import Path as _Path
+
+_CONFLICTS_PATH = _Path(__file__).resolve().parents[1] / "configs" / "spec_conflicts.yaml"
+_CONFLICTS_CACHE: list[dict] | None = None
+
+
+def _load_conflicts_yaml() -> list[dict]:
+    """Parse + cache the rulebook. `reload_conflicts()` is the
+    supported way to bust the cache; tests call it after swapping
+    the file via monkeypatch."""
+    global _CONFLICTS_CACHE
+    if _CONFLICTS_CACHE is None:
+        try:
+            import yaml  # lazy — yaml isn't on the cold-start path
+            data = yaml.safe_load(_CONFLICTS_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("spec_conflicts.yaml load failed: %s", exc)
+            data = {}
+        rules = (data or {}).get("rules") or []
+        _CONFLICTS_CACHE = rules if isinstance(rules, list) else []
+    return _CONFLICTS_CACHE
+
+
+def reload_conflicts() -> None:
+    """Drop the YAML cache. Call after editing spec_conflicts.yaml
+    in-flight or from a test that monkey-patches the path."""
+    global _CONFLICTS_CACHE
+    _CONFLICTS_CACHE = None
+
+
+def _eval_when_clause(condition: Any, parsed: ParsedSpec, field_name: str) -> bool:
+    """Evaluate a single `when:<field>: <condition>` clause.
+
+    Supported condition shapes:
+      * scalar string     → exact field.value equality
+      * list[str]         → field.value in list
+      * {re: "..."}       → regex on parsed.raw_text (field_name ignored)
+      * {not: X}          → negate X (recursive)
     """
+    raw = parsed.raw_text
+
+    if isinstance(condition, dict):
+        if "not" in condition:
+            return not _eval_when_clause(condition["not"], parsed, field_name)
+        if "re" in condition:
+            try:
+                return bool(re.search(str(condition["re"]), raw))
+            except re.error as exc:
+                logger.debug("spec_conflicts regex bad: %s", exc)
+                return False
+        return False
+
+    if field_name == "raw_text":
+        return raw == condition if isinstance(condition, str) else False
+
+    try:
+        field_val = getattr(parsed, field_name).value
+    except AttributeError:
+        return False
+    if isinstance(condition, list):
+        return field_val in condition
+    if isinstance(condition, str):
+        return field_val == condition
+    if isinstance(condition, bool):
+        # YAML `yes` parses as Python True; treat as string "yes"
+        # which is the canonical ParsedSpec value for hardware_required.
+        return field_val == ("yes" if condition else "no")
+    return False
+
+
+def _rule_matches(rule: dict, parsed: ParsedSpec) -> bool:
+    """All `when:` clauses AND together. Missing / empty `when`
+    means the rule would fire unconditionally — treat as disabled
+    to avoid a YAML typo nuking every parse."""
+    when = rule.get("when") or {}
+    if not isinstance(when, dict) or not when:
+        return False
+    return all(
+        _eval_when_clause(cond, parsed, field_name)
+        for field_name, cond in when.items()
+    )
+
+
+def _rule_to_conflict(rule: dict) -> SpecConflict:
+    """Translate a YAML rule into a SpecConflict instance. Silently
+    coerces missing fields to defaults so a partial entry in YAML
+    doesn't crash the parser."""
+    options = []
+    for opt in (rule.get("options") or []):
+        if not isinstance(opt, dict):
+            continue
+        entry: dict[str, str] = {}
+        for k in ("id", "label", "desc"):
+            if k in opt:
+                entry[k] = str(opt[k])
+        # `apply` survives as a JSON-serialised string so SpecConflict
+        # stays a frozen-tuple-compatible dataclass; apply_clarification
+        # reads it back via the rule lookup, not from the option here.
+        options.append(entry)
+    return SpecConflict(
+        id=str(rule.get("id") or "unnamed"),
+        message=str(rule.get("message") or "").strip(),
+        fields=tuple(rule.get("fields") or ()),
+        options=tuple(options),
+        severity=str(rule.get("severity") or "routine"),  # type: ignore[arg-type]
+    )
+
+
+def detect_conflicts(parsed: ParsedSpec) -> list[SpecConflict]:
+    """Run every YAML rule whose `when:` matches against `parsed`.
+
+    Rule eval errors are swallowed at debug — one bad YAML entry
+    must not disable the whole detector."""
     out: list[SpecConflict] = []
-
-    # SSG + runtime DB query — the motivating example from the
-    # operator's 2026-04-15 design review.
-    if (
-        parsed.runtime_model.value == "ssg"
-        and _RUNTIME_DB_HINT.search(parsed.raw_text)
-    ):
-        out.append(SpecConflict(
-            id="static_with_runtime_db",
-            message=(
-                "Spec mentions a static/SSG site but also talks about "
-                "reading from a local database at runtime. Pick one:"
-            ),
-            fields=("runtime_model", "persistence"),
-            options=(
-                {"id": "ssg_build_time",
-                 "label": "SSG — read DB at build time",
-                 "desc": "Next.js SSG, `next build` queries the DB, deploy only `out/` + static server."},
-                {"id": "ssr_runtime",
-                 "label": "SSR — query at request time",
-                 "desc": "Node runtime on the target, DB query per request."},
-                {"id": "isr_hybrid",
-                 "label": "ISR — hybrid revalidate",
-                 "desc": "Best of both; needs Node runtime on target."},
-            ),
-            severity="routine",
-        ))
-
+    for rule in _load_conflicts_yaml():
+        try:
+            if _rule_matches(rule, parsed):
+                out.append(_rule_to_conflict(rule))
+        except Exception as exc:
+            logger.debug("rule %r eval failed: %s", rule.get("id"), exc)
     return out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Iterative clarification (Phase 68-B)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Pattern: operator sees a conflict proposal, picks one of its
+# options, caller invokes `apply_clarification()` which returns a
+# new ParsedSpec with the option's `apply:` field overrides baked
+# in at confidence 1.0 (operator's choice is authoritative). Caller
+# then re-runs detect_conflicts on the updated spec; if more
+# conflicts remain the cycle repeats, capped at MAX_CLARIFY_ROUNDS.
+# Round bookkeeping is the caller's responsibility, mirroring how
+# Phase 56-DAG-C's mutation loop manages its own retry budget.
+
+MAX_CLARIFY_ROUNDS = 3
+
+
+def apply_clarification(
+    parsed: ParsedSpec,
+    conflict_id: str,
+    option_id: str,
+) -> ParsedSpec:
+    """Apply the chosen option's `apply:` overrides to `parsed` and
+    return a new ParsedSpec with conflicts re-detected.
+
+    Unknown conflict_id / option_id → returns the input unchanged
+    (logged at warning) so an operator racing tabs can't corrupt
+    state by clicking a stale clarification button."""
+    rule = next(
+        (r for r in _load_conflicts_yaml() if r.get("id") == conflict_id),
+        None,
+    )
+    if rule is None:
+        logger.warning("apply_clarification: unknown conflict %r", conflict_id)
+        return parsed
+    opt = next(
+        (o for o in (rule.get("options") or [])
+         if isinstance(o, dict) and o.get("id") == option_id),
+        None,
+    )
+    if opt is None:
+        logger.warning(
+            "apply_clarification: unknown option %r for %r",
+            option_id, conflict_id,
+        )
+        return parsed
+
+    applies: dict[str, str] = opt.get("apply") or {}
+    if not isinstance(applies, dict):
+        return parsed
+
+    updates: dict[str, Field] = {}
+    for name in (
+        "project_type", "runtime_model", "target_arch", "target_os",
+        "framework", "persistence", "deploy_target", "hardware_required",
+    ):
+        if name in applies:
+            updates[name] = Field(str(applies[name]), 1.0)
+
+    new = ParsedSpec(
+        project_type=updates.get("project_type", parsed.project_type),
+        runtime_model=updates.get("runtime_model", parsed.runtime_model),
+        target_arch=updates.get("target_arch", parsed.target_arch),
+        target_os=updates.get("target_os", parsed.target_os),
+        framework=updates.get("framework", parsed.framework),
+        persistence=updates.get("persistence", parsed.persistence),
+        deploy_target=updates.get("deploy_target", parsed.deploy_target),
+        hardware_required=updates.get("hardware_required", parsed.hardware_required),
+        raw_text=parsed.raw_text,
+    )
+    new.conflicts = detect_conflicts(new)
+    return new
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
