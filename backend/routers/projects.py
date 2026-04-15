@@ -17,6 +17,8 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse, HTMLResponse
 
 from backend import project_report as pr
+from backend import project_runs
+from backend.routers import _pagination as _pg
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -24,6 +26,16 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 # In-memory cache of last build per project_id (small & cheap).
 _LAST: dict[str, pr.FinalReport] = {}
+
+
+@router.get("/{project_id}/runs")
+async def list_project_runs(
+    project_id: str,
+    limit: int = _pg.Limit(default=50, max_cap=200),
+) -> dict:
+    """B7 (#207): parent project_runs with materialised child workflow_runs."""
+    items = await project_runs.list_by_project_with_children(project_id, limit)
+    return {"project_runs": items, "count": len(items)}
 
 
 @router.post("/{project_id}/report")

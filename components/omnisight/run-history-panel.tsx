@@ -1,27 +1,24 @@
 "use client"
 
 /**
- * RunHistory panel — list of recent workflow runs.
+ * RunHistory panel — list of recent workflow runs, optionally grouped
+ * under project_run parents when aggregation data is available.
  *
- * Pipeline Timeline tracks NPI phase progression — that's a
- * different concept than a workflow_run, so we don't try to
- * navigate the operator there. Instead, clicking a row expands
- * inline to show the run's steps (fetched on demand from
- * /workflow/runs/{id}). Click again to collapse.
- *
- * Polls every 15 s — recent activity changes shape constantly while
- * a fresh DAG is mid-flight; not bothering with SSE because the
- * operator isn't usually staring at this panel during steady state.
+ * B7 (#207): adds project_run aggregation. When project runs exist,
+ * the panel shows collapsed parent rows with summary stats; clicking
+ * expands to show child workflow_runs. Falls back to flat list when
+ * no project runs are loaded.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   CheckCircle2, Clock3, History, Loader2, XCircle, AlertCircle,
-  Pause, ListTodo, ChevronRight, ChevronDown,
+  Pause, ListTodo, ChevronRight, ChevronDown, FolderOpen,
 } from "lucide-react"
 import {
-  listWorkflowRuns, getWorkflowRun,
+  listWorkflowRuns, getWorkflowRun, listProjectRuns,
   type WorkflowRunSummary, type WorkflowStepDetail,
+  type ProjectRun,
 } from "@/lib/api"
 
 const POLL_MS = 15_000
@@ -60,14 +57,14 @@ function durationString(started: number | null, completed: number | null): strin
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
 }
 
-export function RunHistoryPanel() {
+export function RunHistoryPanel({ projectId }: { projectId?: string }) {
   const [filter, setFilter] = useState<StatusFilter>("all")
   const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null)
+  const [projectRuns, setProjectRuns] = useState<ProjectRun[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const mountedRef = useRef(true)
-  // Inline expansion: which run is open + cached step list per id
-  // so a re-collapse + re-expand within a poll cycle doesn't re-fetch.
   const [openId, setOpenId] = useState<string | null>(null)
+  const [openParentId, setOpenParentId] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, {
     steps: WorkflowStepDetail[]
     in_flight: boolean
@@ -86,7 +83,17 @@ export function RunHistoryPanel() {
       if (!mountedRef.current) return
       setError(exc instanceof Error ? exc.message : String(exc))
     }
-  }, [filter])
+
+    if (projectId) {
+      try {
+        const prs = await listProjectRuns(projectId)
+        if (!mountedRef.current) return
+        setProjectRuns(prs)
+      } catch {
+        // Non-fatal: fall back to flat list
+      }
+    }
+  }, [filter, projectId])
 
   useEffect(() => {
     mountedRef.current = true
@@ -99,13 +106,11 @@ export function RunHistoryPanel() {
   }, [refresh])
 
   const toggleRun = useCallback(async (runId: string) => {
-    // Toggle off: collapse without losing the cache.
     if (openId === runId) {
       setOpenId(null)
       return
     }
     setOpenId(runId)
-    // Already cached → no fetch.
     if (details[runId] && details[runId] !== "loading") return
     setDetails((d) => ({ ...d, [runId]: "loading" }))
     try {
@@ -122,6 +127,19 @@ export function RunHistoryPanel() {
       }))
     }
   }, [openId, details])
+
+  const toggleParent = useCallback((parentId: string) => {
+    setOpenParentId((prev) => prev === parentId ? null : parentId)
+  }, [])
+
+  const hasProjectRuns = projectRuns && projectRuns.length > 0
+
+  const filteredProjectRuns = hasProjectRuns
+    ? projectRuns!.filter((pr) => {
+        if (filter === "all") return true
+        return pr.children.some((c) => c.status === filter)
+      })
+    : null
 
   return (
     <section
@@ -167,14 +185,126 @@ export function RunHistoryPanel() {
         </div>
       )}
 
-      {runs?.length === 0 && (
+      {runs?.length === 0 && !hasProjectRuns && (
         <div className="px-3 py-6 flex flex-col items-center gap-1 text-center font-mono text-xs text-[var(--muted-foreground)]">
           <ListTodo size={20} aria-hidden />
           No runs yet — submit a DAG to populate this list.
         </div>
       )}
 
-      {runs && runs.length > 0 && (
+      {/* Project run aggregation view */}
+      {filteredProjectRuns && filteredProjectRuns.length > 0 && (
+        <ul className="divide-y divide-[var(--neural-border,rgba(148,163,184,0.2))] max-h-[420px] overflow-y-auto" data-testid="project-runs-list">
+          {filteredProjectRuns.map((pr) => {
+            const parentOpen = openParentId === pr.id
+            const Chevron = parentOpen ? ChevronDown : ChevronRight
+            const s = pr.summary
+            return (
+              <li key={pr.id} data-project-run-id={pr.id}>
+                <div
+                  className="px-3 py-2 flex items-center gap-2 hover:bg-white/5 cursor-pointer"
+                  onClick={() => toggleParent(pr.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault()
+                      toggleParent(pr.id)
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={parentOpen}
+                  aria-label={`project run ${pr.label || pr.id}`}
+                >
+                  <Chevron size={10} className="text-[var(--muted-foreground)] shrink-0" aria-hidden />
+                  <FolderOpen size={14} className="text-[var(--neural-cyan,#67e8f9)] shrink-0" aria-hidden />
+                  <div className="flex-1 min-w-0 flex items-center gap-2">
+                    <span className="font-mono text-[11px] text-[var(--foreground)] truncate">
+                      {pr.label || pr.id}
+                    </span>
+                    <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums shrink-0">
+                      {ageString(pr.created_at)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0" data-testid={`summary-${pr.id}`}>
+                    <span className="font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
+                      {s.total}
+                    </span>
+                    {s.completed > 0 && (
+                      <span className="font-mono text-[10px] tabular-nums" style={{ color: "var(--validation-emerald,#10b981)" }}>
+                        {s.completed}✓
+                      </span>
+                    )}
+                    {s.failed > 0 && (
+                      <span className="font-mono text-[10px] tabular-nums" style={{ color: "var(--destructive)" }}>
+                        {s.failed}✗
+                      </span>
+                    )}
+                    {s.running > 0 && (
+                      <span className="font-mono text-[10px] tabular-nums" style={{ color: "var(--neural-cyan,#67e8f9)" }}>
+                        {s.running}⟳
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {parentOpen && (
+                  <ul className="pl-6 bg-white/[0.02] divide-y divide-[var(--neural-border,rgba(148,163,184,0.1))]" aria-label="child workflow runs">
+                    {pr.children
+                      .filter((c) => filter === "all" || c.status === filter)
+                      .map((c) => {
+                        const t = tone(c.status)
+                        const Icon = t.Icon
+                        const childOpen = openId === c.id
+                        const ChildChevron = childOpen ? ChevronDown : ChevronRight
+                        return (
+                          <li key={c.id} data-run-id={c.id} data-status={c.status}>
+                            <div
+                              className="px-3 py-1.5 flex items-center gap-2 hover:bg-white/5 cursor-pointer"
+                              onClick={() => void toggleRun(c.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault()
+                                  void toggleRun(c.id)
+                                }
+                              }}
+                              role="button"
+                              tabIndex={0}
+                              aria-expanded={childOpen}
+                              aria-label={`run ${c.id} status ${c.status}`}
+                            >
+                              <ChildChevron size={10} className="text-[var(--muted-foreground)] shrink-0" aria-hidden />
+                              <Icon
+                                size={14}
+                                className={c.status === "running" ? "animate-spin shrink-0" : "shrink-0"}
+                                style={{ color: t.color }}
+                                aria-hidden
+                              />
+                              <div className="flex-1 min-w-0 grid grid-cols-[1fr_auto_auto] gap-2 items-center">
+                                <span className="font-mono text-[11px] text-[var(--foreground)] truncate" title={c.id}>
+                                  {c.id}
+                                </span>
+                                <span className="font-mono text-[10px] uppercase tracking-wider tabular-nums" style={{ color: t.color }}>
+                                  {c.status}
+                                </span>
+                                <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums" title={`started ${c.started_at}`}>
+                                  {durationString(c.started_at, c.completed_at)} · {ageString(c.started_at)}
+                                </span>
+                              </div>
+                            </div>
+                            {childOpen && <RunDetail data={details[c.id]} />}
+                          </li>
+                        )
+                      })}
+                  </ul>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      {/* Flat list fallback (no project runs or ungrouped runs) */}
+      {!hasProjectRuns && runs && runs.length > 0 && (
         <ul className="divide-y divide-[var(--neural-border,rgba(148,163,184,0.2))] max-h-[420px] overflow-y-auto">
           {runs.map((r) => {
             const t = tone(r.status)

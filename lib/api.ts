@@ -861,6 +861,36 @@ export async function listWorkflowRuns(opts: { status?: string; limit?: number }
   return out.runs
 }
 
+// ─── Project Runs — B7 (#207) aggregation ───
+
+export interface ProjectRunSummary {
+  total: number
+  running: number
+  completed: number
+  failed: number
+  halted: number
+}
+
+export interface ProjectRun {
+  id: string
+  project_id: string
+  label: string
+  created_at: number
+  workflow_run_ids: string[]
+  children: WorkflowRunSummary[]
+  summary: ProjectRunSummary
+}
+
+export async function listProjectRuns(projectId: string, opts: { limit?: number } = {}): Promise<ProjectRun[]> {
+  const params = new URLSearchParams()
+  if (opts.limit) params.set("limit", String(opts.limit))
+  const qs = params.toString()
+  const out = await request<{ project_runs: ProjectRun[]; count: number }>(
+    `/projects/${encodeURIComponent(projectId)}/runs${qs ? `?${qs}` : ""}`,
+  )
+  return out.project_runs
+}
+
 // ─── Intent Parser (Phase 68-A/B/C) ───
 
 export interface IntentField {

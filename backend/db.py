@@ -500,6 +500,19 @@ CREATE TABLE IF NOT EXISTS iq_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_iq_runs_model_ts ON iq_runs(model, ts);
 CREATE INDEX IF NOT EXISTS idx_iq_runs_ts ON iq_runs(ts);
+
+-- B7 (#207): project_run aggregation — groups workflow_runs into a
+-- logical "project run" so the UI can show a parent row with summary
+-- stats and expand to reveal the individual workflow_runs.
+CREATE TABLE IF NOT EXISTS project_runs (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    label           TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    workflow_run_ids TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_runs_created ON project_runs(created_at);
 """
 
 
