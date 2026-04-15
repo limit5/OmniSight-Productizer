@@ -1,0 +1,378 @@
+schema_version: 1
+
+standards:
+  iso26262:
+    name: "ISO 26262"
+    domain: "Automotive functional safety"
+    levels:
+      - id: "ASIL_A"
+        name: "ASIL A"
+        description: "Lowest automotive safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+        review_required: false
+      - id: "ASIL_B"
+        name: "ASIL B"
+        description: "Moderate automotive safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+          - fmea
+          - safety_plan
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+        review_required: true
+      - id: "ASIL_C"
+        name: "ASIL C"
+        description: "High automotive safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+          - fmea
+          - safety_plan
+          - fta
+          - safety_case
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+          - runtime_verification
+        review_required: true
+      - id: "ASIL_D"
+        name: "ASIL D"
+        description: "Highest automotive safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+          - fmea
+          - safety_plan
+          - fta
+          - safety_case
+          - dependent_failure_analysis
+          - formal_verification_report
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+          - runtime_verification
+          - formal_verification
+          - fault_injection_test
+        review_required: true
+
+  iec60601:
+    name: "IEC 60601"
+    domain: "Medical device software safety"
+    levels:
+      - id: "SW_A"
+        name: "Software Class A"
+        description: "No injury or damage to health possible"
+        required_artifacts:
+          - risk_file
+          - software_classification
+          - traceability_matrix
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+        review_required: false
+      - id: "SW_B"
+        name: "Software Class B"
+        description: "Non-serious injury possible"
+        required_artifacts:
+          - risk_file
+          - software_classification
+          - traceability_matrix
+          - hazard_analysis
+          - software_architecture_doc
+          - anomaly_list
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - regression_test
+        review_required: true
+      - id: "SW_C"
+        name: "Software Class C"
+        description: "Death or serious injury possible"
+        required_artifacts:
+          - risk_file
+          - software_classification
+          - traceability_matrix
+          - hazard_analysis
+          - software_architecture_doc
+          - anomaly_list
+          - safety_case
+          - cybersecurity_assessment
+          - clinical_evaluation
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - regression_test
+          - coverage_analysis
+          - penetration_test
+          - fault_injection_test
+        review_required: true
+
+  do178:
+    name: "DO-178C"
+    domain: "Airborne systems software"
+    levels:
+      - id: "DAL_E"
+        name: "DAL E (No Effect)"
+        description: "No effect on aircraft operation or crew workload"
+        required_artifacts:
+          - software_classification
+        required_dag_tasks: []
+        review_required: false
+      - id: "DAL_D"
+        name: "DAL D (Minor)"
+        description: "Minor failure condition"
+        required_artifacts:
+          - software_classification
+          - traceability_matrix
+          - software_plan
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+        review_required: false
+      - id: "DAL_C"
+        name: "DAL C (Major)"
+        description: "Major failure condition"
+        required_artifacts:
+          - software_classification
+          - traceability_matrix
+          - software_plan
+          - hazard_analysis
+          - software_architecture_doc
+          - test_plan
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+        review_required: true
+      - id: "DAL_B"
+        name: "DAL B (Hazardous)"
+        description: "Hazardous/severe-major failure condition"
+        required_artifacts:
+          - software_classification
+          - traceability_matrix
+          - software_plan
+          - hazard_analysis
+          - software_architecture_doc
+          - test_plan
+          - safety_case
+          - configuration_management_plan
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+          - mc_dc_coverage
+          - runtime_verification
+        review_required: true
+      - id: "DAL_A"
+        name: "DAL A (Catastrophic)"
+        description: "Catastrophic failure condition"
+        required_artifacts:
+          - software_classification
+          - traceability_matrix
+          - software_plan
+          - hazard_analysis
+          - software_architecture_doc
+          - test_plan
+          - safety_case
+          - configuration_management_plan
+          - formal_verification_report
+          - independence_assessment
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+          - mc_dc_coverage
+          - runtime_verification
+          - formal_verification
+          - fault_injection_test
+        review_required: true
+
+  iec61508:
+    name: "IEC 61508"
+    domain: "Functional safety of E/E/PE systems"
+    levels:
+      - id: "SIL_1"
+        name: "SIL 1"
+        description: "Lowest safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+        review_required: false
+      - id: "SIL_2"
+        name: "SIL 2"
+        description: "Moderate safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+          - safety_plan
+          - software_architecture_doc
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+        review_required: true
+      - id: "SIL_3"
+        name: "SIL 3"
+        description: "High safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+          - safety_plan
+          - software_architecture_doc
+          - safety_case
+          - fmea
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+          - runtime_verification
+          - fault_injection_test
+        review_required: true
+      - id: "SIL_4"
+        name: "SIL 4"
+        description: "Highest safety integrity level"
+        required_artifacts:
+          - hazard_analysis
+          - risk_assessment
+          - software_classification
+          - traceability_matrix
+          - safety_plan
+          - software_architecture_doc
+          - safety_case
+          - fmea
+          - formal_verification_report
+          - dependent_failure_analysis
+        required_dag_tasks:
+          - static_analysis
+          - unit_test
+          - integration_test
+          - code_review
+          - coverage_analysis
+          - runtime_verification
+          - fault_injection_test
+          - formal_verification
+          - mc_dc_coverage
+        review_required: true
+
+artifact_definitions:
+  hazard_analysis:
+    name: "Hazard Analysis"
+    description: "Systematic identification and evaluation of hazards"
+    file_pattern: "**/hazard_analysis.*"
+  risk_assessment:
+    name: "Risk Assessment"
+    description: "Risk evaluation and mitigation strategy"
+    file_pattern: "**/risk_assessment.*"
+  risk_file:
+    name: "Risk File"
+    description: "Consolidated risk management file (IEC 60601 / ISO 14971)"
+    file_pattern: "**/risk_file.*"
+  software_classification:
+    name: "Software Classification"
+    description: "Software safety classification document"
+    file_pattern: "**/software_classification.*"
+  traceability_matrix:
+    name: "Traceability Matrix"
+    description: "Requirements-to-code-to-test traceability"
+    file_pattern: "**/traceability_matrix.*"
+  fmea:
+    name: "FMEA"
+    description: "Failure Mode and Effects Analysis"
+    file_pattern: "**/fmea.*"
+  fta:
+    name: "FTA"
+    description: "Fault Tree Analysis"
+    file_pattern: "**/fta.*"
+  safety_plan:
+    name: "Safety Plan"
+    description: "Overall safety management plan"
+    file_pattern: "**/safety_plan.*"
+  safety_case:
+    name: "Safety Case"
+    description: "Structured argument that system is safe"
+    file_pattern: "**/safety_case.*"
+  software_architecture_doc:
+    name: "Software Architecture Document"
+    description: "Documented software architecture and design decisions"
+    file_pattern: "**/software_architecture.*"
+  software_plan:
+    name: "Software Plan"
+    description: "Software development and verification plan"
+    file_pattern: "**/software_plan.*"
+  anomaly_list:
+    name: "Anomaly List"
+    description: "Tracked software anomalies and resolutions"
+    file_pattern: "**/anomaly_list.*"
+  test_plan:
+    name: "Test Plan"
+    description: "Comprehensive test plan and strategy"
+    file_pattern: "**/test_plan.*"
+  configuration_management_plan:
+    name: "Configuration Management Plan"
+    description: "CM plan for controlled baselines"
+    file_pattern: "**/configuration_management_plan.*"
+  formal_verification_report:
+    name: "Formal Verification Report"
+    description: "Results of formal methods verification"
+    file_pattern: "**/formal_verification_report.*"
+  independence_assessment:
+    name: "Independence Assessment"
+    description: "Assessment of development/verification independence"
+    file_pattern: "**/independence_assessment.*"
+  dependent_failure_analysis:
+    name: "Dependent Failure Analysis"
+    description: "Analysis of common cause and cascading failures"
+    file_pattern: "**/dependent_failure_analysis.*"
+  cybersecurity_assessment:
+    name: "Cybersecurity Assessment"
+    description: "Security risk assessment per IEC 81001-5-1"
+    file_pattern: "**/cybersecurity_assessment.*"
+  clinical_evaluation:
+    name: "Clinical Evaluation"
+    description: "Clinical evaluation report for medical devices"
+    file_pattern: "**/clinical_evaluation.*"

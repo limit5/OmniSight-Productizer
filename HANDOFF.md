@@ -7,6 +7,58 @@
 
 ---
 
+## C9 L4-CORE-09 Safety & compliance framework 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Rule library: ISO 26262 / IEC 60601 / DO-178C / IEC 61508 | ✅ | `configs/safety_standards.yaml` — 4 standards, 16 levels total (ASIL A-D, SW-A/B/C, DAL A-E, SIL 1-4) with required artifacts + required DAG tasks per level |
+| Each rule is a DAG validator + required artifact list | ✅ | `backend/safety_compliance.py` — `validate_safety_gate()` checks DAG task types + artifact presence; level normalisation accepts shorthand (e.g. "B" → "ASIL_B") |
+| Artifacts: hazard analysis, risk file, software classification, traceability matrix | ✅ | 19 artifact definitions in YAML with name, description, file_pattern; includes FMEA, FTA, safety case, formal verification report, etc. |
+| CLI: `omnisight compliance check --standard iso26262 --asil B` | ✅ | REST endpoints: GET /safety/standards, GET /safety/standards/{id}, GET /safety/artifacts, POST /safety/check, POST /safety/check-multi |
+| Unit test: gate rejects DAG missing required artifact | ✅ | 86 項測試全數通過：config loading (13) + level normalisation (12) + task extraction (5) + gate pass (9) + gate fail (7) + errors (3) + model (5) + alias (1) + multi-standard (3) + doc integration (4) + audit (2) + enums (2) + edge cases (7) + REST endpoints (7) + custom tool (1) + all-pass (1) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/safety_standards.yaml` | 新建——4 safety standards (ISO 26262, IEC 60601, DO-178C, IEC 61508) with 16 levels + 19 artifact definitions |
+| `backend/safety_compliance.py` | 新建——Safety compliance framework：enums + data models + config loader + DAG validator + level normalisation + multi-standard check + doc_suite_generator integration + audit integration |
+| `backend/routers/safety.py` | 新建——REST endpoints: GET /safety/standards, GET /safety/standards/{id}, GET /safety/artifacts, POST /safety/check, POST /safety/check-multi |
+| `backend/main.py` | 擴充——註冊 safety router |
+| `backend/tests/test_safety_compliance.py` | 新建，86 項測試 |
+| `TODO.md` | 更新——C9 全部標記完成 |
+
+### 架構說明
+
+- **SafetyStandard enum** — iso26262 / iec60601 / do178 / iec61508
+- **GateVerdict enum** — passed / failed / error
+- **SafetyStandardDef** — standard_id / name / domain / levels[]，`get_level()` lookup
+- **SafetyLevel** — level_id / name / description / required_artifacts[] / required_dag_tasks[] / review_required
+- **SafetyGateResult** — standard / level / verdict / missing_artifacts / missing_tasks / findings / metadata，computed: passed / total_issues / summary / to_dict
+- **GateFinding** — category / item / message（process, config, structure 等分類）
+- **ArtifactDefinition** — artifact_id / name / description / file_pattern
+- **validate_safety_gate()** — 核心驗證器：載入 standard+level rules → 比對 DAG task types vs required_dag_tasks → 比對 provided artifacts vs required_artifacts → review_required check → 輸出 SafetyGateResult
+- **_extract_task_types()** — 從 DAG task ID + description 抽取 keyword → 對應 task type（支援 alias: lint→static_analysis, sast→static_analysis 等）
+- **_normalize_level()** — 接受 shorthand（"B"→"ASIL_B", "sw-c"→"SW_C", "3"→"SIL_3"）
+- **get_safety_certs()** — doc_suite_generator integration，已與 C6 `_try_safety_certs()` 銜接
+- **log_safety_gate_result()** — async audit_log 寫入，action="safety_gate_check"
+- **REST endpoints** — 5 個 endpoints 供 UI/CLI 查詢 standards、artifacts、執行 compliance check
+
+### 驗證
+
+- 86 項新增 safety compliance 測試全數通過
+- 54 項既有 C8 compliance harness 測試全數通過（無迴歸）
+
+### 下一步
+
+- C10 (#224)：Radio certification pre-compliance
+- D12 (#232-sub)：SKILL-CARDASH — 可使用 safety framework 的 ISO 26262 artifact gate
+- D15 (#232-sub)：SKILL-MEDICAL — 可使用 safety framework 的 IEC 60601 artifact gate
+
+---
+
 ## C8 L4-CORE-08 Protocol compliance harness 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。**

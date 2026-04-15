@@ -184,11 +184,11 @@ Legend:
 - [x] Smoke test per wrapper
 
 ### C9. L4-CORE-09 Safety & compliance framework (#223)
-- [ ] Rule library: ISO 26262 ASIL A-D / IEC 60601 SW-A/B/C / DO-178 DAL A-E / IEC 61508 SIL 1-4
-- [ ] Each rule is a DAG validator + required artifact list
-- [ ] Artifacts: hazard analysis, risk file, software classification, traceability matrix
-- [ ] CLI: `omnisight compliance check --standard iso26262 --asil B`
-- [ ] Unit test: gate rejects DAG missing required artifact
+- [x] Rule library: ISO 26262 ASIL A-D / IEC 60601 SW-A/B/C / DO-178 DAL A-E / IEC 61508 SIL 1-4
+- [x] Each rule is a DAG validator + required artifact list
+- [x] Artifacts: hazard analysis, risk file, software classification, traceability matrix
+- [x] CLI: `omnisight compliance check --standard iso26262 --asil B`
+- [x] Unit test: gate rejects DAG missing required artifact
 
 ### C10. L4-CORE-10 Radio certification pre-compliance (#224)
 - [ ] Test recipe library: FCC Part 15 / CE RED / NCC LPD / SRRC SRD

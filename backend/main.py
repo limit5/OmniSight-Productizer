@@ -266,6 +266,8 @@ from backend.routers import hil as _hil_router  # C7/HIL-PLUGIN-API
 app.include_router(_hil_router.router, prefix=settings.api_prefix)
 from backend.routers import compliance as _compliance_router  # C8/COMPLIANCE-HARNESS
 app.include_router(_compliance_router.router, prefix=settings.api_prefix)
+from backend.routers import safety as _safety_router  # C9/SAFETY-COMPLIANCE
+app.include_router(_safety_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")
