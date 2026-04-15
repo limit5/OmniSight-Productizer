@@ -191,11 +191,11 @@ Legend:
 - [x] Unit test: gate rejects DAG missing required artifact
 
 ### C10. L4-CORE-10 Radio certification pre-compliance (#224)
-- [ ] Test recipe library: FCC Part 15 / CE RED / NCC LPD / SRRC SRD
-- [ ] Conducted + radiated emissions stub runners
-- [ ] SAR test hook (operator-uploads SAR result file)
-- [ ] Per-region cert artifact generator
-- [ ] Unit test: sample radio spec → correct cert checklist
+- [x] Test recipe library: FCC Part 15 / CE RED / NCC LPD / SRRC SRD
+- [x] Conducted + radiated emissions stub runners
+- [x] SAR test hook (operator-uploads SAR result file)
+- [x] Per-region cert artifact generator
+- [x] Unit test: sample radio spec → correct cert checklist
 
 ### C11. L4-CORE-11 Power / battery profiling (#225)
 - [ ] Sleep-state transition detector (entry/exit event trace)

@@ -7,6 +7,44 @@
 
 ---
 
+## C10 L4-CORE-10 Radio certification pre-compliance 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Test recipe library: FCC Part 15 / CE RED / NCC LPD / SRRC SRD | ✅ | `configs/radio_standards.yaml` — 4 regions, 23 test recipes total (conducted/radiated/SAR/receiver), per-region required artifacts + limits |
+| Conducted + radiated emissions stub runners | ✅ | `backend/radio_compliance.py` — `run_emissions_test()` stub returns pending with equipment/reference info; supports binary execution with subprocess when lab tool is available |
+| SAR test hook (operator-uploads SAR result file) | ✅ | `upload_sar_result()` — accepts JSON/text SAR reports, auto-extracts peak SAR value, validates against region-specific limits (FCC 1.6 W/kg @1g, CE/NCC/SRRC 2.0 W/kg @10g) |
+| Per-region cert artifact generator | ✅ | `generate_cert_artifacts()` — generates checklist of required artifacts per region (FCC: equipment authorization, CE: declaration of conformity, etc.) with status tracking |
+| Unit test: sample radio spec → correct cert checklist | ✅ | 92 項測試全數通過：config loading (19) + recipe lookup (6) + emissions runners (12) + SAR hook (13) + cert artifacts (7) + checklist validation (12) + doc integration (4) + audit (3) + data models (9) + sample spec integration (7) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/radio_standards.yaml` | 新建——4 radio regions (FCC/CE RED/NCC LPD/SRRC SRD) with 23 test recipes + 11 artifact definitions |
+| `backend/radio_compliance.py` | 新建——Radio compliance framework：enums + data models + config loader + emissions stub runners + SAR upload hook + cert artifact generator + checklist validator + doc_suite_generator integration + audit integration |
+| `backend/routers/radio.py` | 新建——REST endpoints: GET /radio/regions, GET /radio/regions/{id}, GET /radio/regions/{id}/recipes, GET /radio/artifacts, POST /radio/test/emissions, POST /radio/test/sar, POST /radio/checklist, POST /radio/artifacts/generate |
+| `backend/main.py` | 擴充——註冊 radio router |
+| `backend/tests/test_radio_compliance.py` | 新建，92 項測試 |
+| `TODO.md` | 更新——C10 全部標記完成 |
+
+### 架構說明
+
+- **RadioRegion enum** — fcc / ce_red / ncc_lpd / srrc_srd
+- **EmissionsCategory enum** — conducted / radiated / sar / receiver
+- **TestStatus enum** — passed / failed / pending / skipped / error
+- **RadioRegionDef** — region_id / name / authority / region / test_recipes[] / required_artifacts[]
+- **TestRecipe** — recipe_id / name / category / frequency_range_mhz / reference / equipment / limits
+- **EmissionsTestResult** — recipe_id / region / status / device_under_test / measurements / raw_log_path
+- **SARResult** — region / status / file_path / peak_sar_w_kg / limit_w_kg / averaging_mass_g / within_limit
+- **RadioChecklist** — region / items[] with total/passed/pending/failed/complete computed properties
+- **CertArtifact** — artifact_id / name / region / status / file_path
+- `get_radio_certs()` integrates with `doc_suite_generator._try_radio_certs()` (existing stub in C6)
+
+---
+
 ## C9 L4-CORE-09 Safety & compliance framework 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**
