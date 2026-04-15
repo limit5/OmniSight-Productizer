@@ -1,9 +1,34 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：J6 Audit UI with session filtering (master)
+> 最後 commit：K4 Session rotation + UA binding (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## K4 (complete) Session rotation + binding（2026-04-16 完成）
+
+**背景**：Session token 在敏感操作（密碼變更、權限升級）後未更新，存在 session fixation 風險。K4 實作 token rotation 機制，舊 token 透過 30 秒 grace window 讓 in-flight request 完成，並新增 UA hash 綁定偵測異常存取。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/auth.py` — `rotate_session()` | 建立新 session，舊 token 的 `rotated_from` 指向新 token，`expires_at` 縮短至 now+30s | ✅ 完成 |
+| `backend/auth.py` — `rotate_user_sessions()` | 批次過期某 user 所有 session（用於 role change），30s grace | ✅ 完成 |
+| `backend/auth.py` — UA hash binding | `compute_ua_hash()` SHA256 前 32 字元；`check_ua_binding()` 比對 stored vs current UA | ✅ 完成 |
+| `backend/auth.py` — `current_user()` UA check | UA mismatch 時記 `ua_mismatch_warning` audit + logger.warning，不強制登出 | ✅ 完成 |
+| `backend/routers/auth.py` — password change rotation | `POST /auth/change-password` 完成後自動 rotate session，回傳新 `csrf_token` | ✅ 完成 |
+| `backend/routers/auth.py` — role change rotation | `PATCH /users/{id}` role 變更時 `rotate_user_sessions()` 過期該 user 所有 session | ✅ 完成 |
+| `backend/db.py` — schema + migration | sessions 表新增 `ua_hash TEXT` 欄位 + 自動 migration | ✅ 完成 |
+| 測試（10 項） | rotate 流程、grace window 過期、nonexistent token、batch rotate、UA hash deterministic/different/empty/match/mismatch | ✅ 24/24 pass |
+
+**新增/修改檔案**：
+- `backend/auth.py` — `compute_ua_hash()`, `rotate_session()`, `rotate_user_sessions()`, `check_ua_binding()`, `ROTATION_GRACE_S=30`, `create_session()` 加 ua_hash, `current_user()` 加 UA check
+- `backend/db.py` — sessions schema 加 `ua_hash` + migration entry
+- `backend/routers/auth.py` — change-password 加 rotation + cookie 更新, patch_user 加 role change rotation
+- `backend/tests/test_auth.py` — 10 項新增 K4 測試
+
+**全部測試**：24/24 pass
 
 ---
 

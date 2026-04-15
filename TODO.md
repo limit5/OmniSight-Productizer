@@ -458,10 +458,10 @@ Legend:
 ## 🅚 Priority K-rest — Auth Hardening 完整版（路線 C 第 4 段）
 
 ### K4. Session rotation + binding
-- [ ] 登入成功 / 密碼變更 / 權限升級 → 產新 token，舊 token 寫 `rotated_from` 指向新 token；舊 token grace 30s 允許 in-flight request，之後失效
-- [ ] Session 綁 UA hash（非 IP，移動網路 IP 常變）；UA 變更記警告但不強制登出
-- [ ] 測試：rotate 流程、grace window、UA 變更警告
-- [ ] 預估：**1 day**
+- [x] 登入成功 / 密碼變更 / 權限升級 → 產新 token，舊 token 寫 `rotated_from` 指向新 token；舊 token grace 30s 允許 in-flight request，之後失效
+- [x] Session 綁 UA hash（非 IP，移動網路 IP 常變）；UA 變更記警告但不強制登出
+- [x] 測試：rotate 流程、grace window、UA 變更警告
+- [x] 預估：**1 day**
 
 ### K5. MFA (TOTP) + Passkey (WebAuthn) 骨架
 - [ ] `user_mfa` 表：method (totp/webauthn)、secret/credential、created_at、last_used
