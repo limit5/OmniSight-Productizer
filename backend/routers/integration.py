@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from backend import auth as _au
 from backend.config import settings
+from backend.db_context import set_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,31 @@ def _get_masked_credentials() -> list[dict]:
         return []
 
 
+async def _get_tenant_secrets_summary(user: dict) -> dict:
+    """Fetch tenant-scoped secrets grouped by type for the settings view."""
+    try:
+        tid = user.get("tenant_id", "t-default")
+        set_tenant_id(tid)
+        from backend import secrets as sec
+        items = await sec.list_secrets()
+        grouped: dict[str, list] = {}
+        for s in items:
+            grouped.setdefault(s["secret_type"], []).append({
+                "id": s["id"],
+                "key_name": s["key_name"],
+                "fingerprint": s["fingerprint"],
+                "metadata": s["metadata"],
+                "updated_at": s["updated_at"],
+            })
+        return {"tenant_id": tid, "secrets": grouped}
+    except Exception:
+        return {"tenant_id": user.get("tenant_id", "t-default"), "secrets": {}}
+
+
 @router.get("/settings")
 async def get_settings(_user=Depends(_au.require_operator)):
     """Return all integration settings grouped by category. Tokens are masked."""
+    tenant_secrets = await _get_tenant_secrets_summary(_user)
     return {
         "llm": {
             "provider": settings.llm_provider,
@@ -111,6 +134,7 @@ async def get_settings(_user=Depends(_au.require_operator)):
             "memory_limit": settings.docker_memory_limit,
             "cpu_limit": settings.docker_cpu_limit,
         },
+        "tenant_secrets": tenant_secrets,
     }
 
 

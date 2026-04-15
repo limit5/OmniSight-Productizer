@@ -763,6 +763,44 @@ export async function testIntegration(type: string): Promise<{ status: string; m
   return request<{ status: string; message?: string }>(`/system/test/${type}`, { method: "POST" })
 }
 
+// ─── Tenant Secrets (I4) ───
+
+export interface TenantSecret {
+  id: string
+  key_name: string
+  fingerprint: string
+  secret_type: string
+  metadata: Record<string, unknown>
+  updated_at: string
+}
+
+export async function listTenantSecrets(secretType?: string): Promise<TenantSecret[]> {
+  const q = secretType ? `?secret_type=${encodeURIComponent(secretType)}` : ""
+  return request<TenantSecret[]>(`/secrets${q}`)
+}
+
+export async function createTenantSecret(body: {
+  key_name: string; value: string; secret_type: string; metadata?: Record<string, unknown>
+}): Promise<{ id: string; status: string }> {
+  return request<{ id: string; status: string }>("/secrets", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function updateTenantSecret(id: string, body: {
+  value?: string; metadata?: Record<string, unknown>
+}): Promise<{ id: string; status: string }> {
+  return request<{ id: string; status: string }>(`/secrets/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteTenantSecret(id: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/secrets/${id}`, { method: "DELETE" })
+}
+
 export async function createVendorSDK(body: Record<string, unknown>): Promise<{ status: string; platform: string }> {
   return request<{ status: string; platform: string }>("/system/vendor/sdks", {
     method: "POST",

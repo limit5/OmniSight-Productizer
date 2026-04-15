@@ -119,6 +119,8 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("audit_log", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
         ("artifacts", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
         ("user_preferences", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        # I4: tenant_id on api_keys
+        ("api_keys", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -164,6 +166,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     _tenant_tables = [
         "users", "artifacts", "event_log", "debug_findings",
         "decision_rules", "workflow_runs", "audit_log", "user_preferences",
+        "api_keys",
     ]
     for t in _tenant_tables:
         try:
@@ -654,6 +657,21 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 );
 CREATE INDEX IF NOT EXISTS idx_user_prefs_user ON user_preferences(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_prefs_tenant ON user_preferences(tenant_id);
+
+-- I4: Tenant-scoped secrets (git_credentials, provider_keys, cloudflare_tokens…)
+CREATE TABLE IF NOT EXISTS tenant_secrets (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    secret_type     TEXT NOT NULL,  -- git_credential | provider_key | cloudflare_token | webhook_secret | custom
+    key_name        TEXT NOT NULL,
+    encrypted_value TEXT NOT NULL,
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, secret_type, key_name)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_secrets_tenant ON tenant_secrets(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_secrets_type ON tenant_secrets(tenant_id, secret_type);
 
 -- I1: tenant_id indexes on business tables
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);

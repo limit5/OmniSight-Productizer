@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
-import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff } from "lucide-react"
+import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2 } from "lucide-react"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -122,6 +122,115 @@ function ToggleField({ label, value, onChange }: {
         {value ? "ON" : "OFF"}
       </button>
     </div>
+  )
+}
+
+const SECRET_TYPES = ["git_credential", "provider_key", "cloudflare_token", "webhook_secret", "custom"] as const
+
+function TenantSecretsSection({ settingsData }: { settingsData: Record<string, Record<string, unknown>> }) {
+  const tenantSecrets = settingsData["tenant_secrets"] as { tenant_id?: string; secrets?: Record<string, Array<{ id: string; key_name: string; fingerprint: string; metadata: Record<string, unknown>; updated_at: string }>> } | undefined
+  const tid = tenantSecrets?.tenant_id ?? "t-default"
+  const secrets = tenantSecrets?.secrets ?? {}
+
+  const [adding, setAdding] = useState(false)
+  const [newType, setNewType] = useState<string>("provider_key")
+  const [newName, setNewName] = useState("")
+  const [newValue, setNewValue] = useState("")
+  const [saving, setSaving] = useState(false)
+
+  const handleAdd = useCallback(async () => {
+    if (!newName || !newValue) return
+    setSaving(true)
+    try {
+      await api.createTenantSecret({ key_name: newName, value: newValue, secret_type: newType })
+      setNewName("")
+      setNewValue("")
+      setAdding(false)
+      window.location.reload()
+    } catch (e) {
+      console.error("Failed to add secret:", e)
+    } finally {
+      setSaving(false)
+    }
+  }, [newName, newValue, newType])
+
+  const handleDelete = useCallback(async (id: string) => {
+    try {
+      await api.deleteTenantSecret(id)
+      window.location.reload()
+    } catch (e) {
+      console.error("Failed to delete secret:", e)
+    }
+  }, [])
+
+  const allSecrets = Object.entries(secrets).flatMap(([type, items]) =>
+    items.map(item => ({ ...item, secret_type: type }))
+  )
+
+  return (
+    <SettingsSection title={`TENANT SECRETS — ${tid}`}>
+      {allSecrets.length > 0 ? (
+        <div className="space-y-1">
+          {allSecrets.map(s => (
+            <div key={s.id} className="flex items-center gap-2 p-1.5 rounded border border-[var(--border)] bg-[var(--background)]">
+              <Key size={10} className="text-[var(--hardware-orange)] shrink-0" />
+              <span className="font-mono text-[9px] px-1 py-0.5 rounded bg-[var(--neural-blue)]/10 text-[var(--neural-blue)]">
+                {s.secret_type}
+              </span>
+              <span className="font-mono text-[10px] text-[var(--foreground)] flex-1 truncate">{s.key_name}</span>
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)]">{s.fingerprint}</span>
+              <button
+                onClick={() => handleDelete(s.id)}
+                className="p-0.5 rounded hover:bg-[var(--critical-red)]/10 transition-colors"
+                title="Delete secret"
+              >
+                <Trash2 size={10} className="text-[var(--muted-foreground)] hover:text-[var(--critical-red)]" />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-1 opacity-60">
+          No tenant-scoped secrets. Add credentials below.
+        </div>
+      )}
+
+      {adding ? (
+        <div className="mt-2 p-2 rounded border border-[var(--neural-blue)]/30 bg-[var(--secondary)] space-y-1.5">
+          <div className="flex items-center gap-2">
+            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-14 shrink-0">Type</label>
+            <select
+              value={newType}
+              onChange={e => setNewType(e.target.value)}
+              className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)]"
+            >
+              {SECRET_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <SettingField label="Name" value={newName} onChange={setNewName} />
+          <SettingField label="Value" value={newValue} type="password" onChange={setNewValue} />
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => setAdding(false)} className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]">
+              CANCEL
+            </button>
+            <button
+              onClick={handleAdd}
+              disabled={!newName || !newValue || saving}
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
+            >
+              {saving ? "SAVING..." : "ADD"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 transition-colors"
+        >
+          <Plus size={10} /> Add Secret
+        </button>
+      )}
+    </SettingsSection>
   )
 }
 
@@ -364,6 +473,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
           <SettingsSection title="GITHUB WEBHOOK" integration="github">
             <SettingField label="Secret" value={getVal("webhooks", "github_secret", "github_webhook_secret")} type="password" onChange={v => setVal("github_webhook_secret", v)} />
           </SettingsSection>
+
+          {/* I4: Tenant-scoped secrets */}
+          <TenantSecretsSection settingsData={settingsData} />
 
         </div>
 
