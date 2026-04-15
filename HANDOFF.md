@@ -1,9 +1,46 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I1 Multi-tenancy schema — tenants table + tenant_id on business tables (master)
+> 最後 commit：I2 Query layer RLS — tenant context + auto-inject WHERE/INSERT filters (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I2 (complete) Query Layer RLS — tenant context + 自動注入 WHERE/INSERT（2026-04-16 完成）
+
+**背景**：I1 在所有業務表加入了 `tenant_id` 欄位，但尚無查詢層面的自動隔離。I2 透過 Python `contextvars` 實現 request-scoped tenant context，讓所有 SELECT 自動注入 `WHERE tenant_id = :current`，所有 INSERT 自動填入 `tenant_id`。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/db_context.py` | `current_tenant_id()` / `set_tenant_id()` context var + `tenant_where()` / `tenant_insert_value()` helpers | ✅ 完成 |
+| `auth.py` — User.tenant_id | User dataclass 加入 tenant_id，get_user / get_user_by_email / create_user 全部回傳/寫入 tenant_id | ✅ 完成 |
+| `auth.py` — require_tenant | FastAPI dependency：從 current_user 取 tenant_id 塞入 contextvars | ✅ 完成 |
+| SELECT 自動注入 | db.py: list_artifacts / get_artifact / delete_artifact / list_debug_findings / load_decision_rules / list_events; workflow.py: get_run / list_runs; audit.py: query() | ✅ 完成 |
+| INSERT 自動填入 | db.py: insert_artifact / insert_debug_finding / insert_event / replace_decision_rules; workflow.py: start(); audit.py: log(); auth.py: create_user(); preferences router | ✅ 完成 |
+| RLS 測試（30 項） | context var / tenant_where helper / event_log / artifact / debug_finding / decision_rules / user / workflow / audit 跨 tenant 隔離 + auto-fill | ✅ 30/30 pass |
+| 回歸測試 | 既有 test_tenants(16) + test_db(13) + test_workflow(7) 全數通過 | ✅ 零回歸 |
+
+**新增檔案**：
+- `backend/db_context.py` — tenant context var + helpers
+- `tests/test_rls.py` — 30 項 RLS 測試
+
+**修改檔案**：
+- `backend/auth.py` — User.tenant_id + get_user/get_user_by_email/create_user + require_tenant dependency
+- `backend/db.py` — 所有業務表 CRUD 函數加入 tenant_where/tenant_insert_value
+- `backend/audit.py` — log() INSERT tenant_id + query() WHERE tenant_id
+- `backend/workflow.py` — start() INSERT tenant_id + get_run/list_runs WHERE tenant_id
+- `backend/routers/preferences.py` — user_preferences SELECT/INSERT tenant_id
+
+**設計決策**：
+- 採用 Python `contextvars` 而非 SQLAlchemy event listener（因專案使用 raw aiosqlite）
+- tenant context 為 None 時不注入 filter（向後相容 open 模式，內部 system 操作可跨 tenant）
+- `tenant_insert_value()` 在 context 為 None 時 fallback 到 `t-default`（確保不遺漏）
+
+**注意事項**：
+- Router 端需將 `Depends(auth.current_user)` 改為 `Depends(auth.require_tenant)` 才能啟用 RLS
+- `agents` / `tasks` 表無 tenant_id，不在 RLS 範圍內（設計如此）
+- 未來 Postgres 遷移可透過 DB-level RLS policy 取代 application-level filter
 
 ---
 

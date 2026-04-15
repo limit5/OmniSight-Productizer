@@ -508,12 +508,12 @@ Legend:
 - [x] 預估：**3 day**
 
 ### I2. Query layer RLS（SQLAlchemy global filter）
-- [ ] `backend/db_context.py`：`current_tenant_id()` context var
-- [ ] SQLAlchemy event listener：所有 SELECT 自動注入 `WHERE tenant_id = :current`（Postgres 可改 RLS policy）
-- [ ] INSERT 自動填 `tenant_id = current`
-- [ ] Router 層 `require_tenant` dependency 從 user 取 tenant_id 塞進 context
-- [ ] 測試：跨 tenant 查詢回空、INSERT 無法指定他 tenant
-- [ ] 預估：**2 day**
+- [x] `backend/db_context.py`：`current_tenant_id()` context var
+- [x] SQLAlchemy event listener：所有 SELECT 自動注入 `WHERE tenant_id = :current`（Postgres 可改 RLS policy）
+- [x] INSERT 自動填 `tenant_id = current`
+- [x] Router 層 `require_tenant` dependency 從 user 取 tenant_id 塞進 context
+- [x] 測試：跨 tenant 查詢回空、INSERT 無法指定他 tenant
+- [x] 預估：**2 day**
 
 ### I3. SSE per-tenant + per-user filter（延伸 J1）
 - [ ] Event envelope 加 `tenant_id`；subscriber 自動綁當前 tenant
