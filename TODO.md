@@ -73,11 +73,11 @@ Legend:
 - [x] Component tests: each tab round-trips to the shared spec state
 
 ### B6. UX-04 Project Report panel (#206)
-- [ ] Create `components/omnisight/project-report-panel.tsx`
-- [ ] Three collapsible sections mirroring REPORT-01 output
-- [ ] Markdown download button + copy-to-clipboard
-- [ ] Share link button → POST `/report/share` → returns signed URL
-- [ ] Component tests: renders golden fixture; download triggers correct blob
+- [x] Create `components/omnisight/project-report-panel.tsx`
+- [x] Three collapsible sections mirroring REPORT-01 output
+- [x] Markdown download button + copy-to-clipboard
+- [x] Share link button → POST `/report/share` → returns signed URL
+- [x] Component tests: renders golden fixture; download triggers correct blob
 
 ### B7. UX-03 RunHistory project_run aggregation (#207)
 - [ ] Add `project_runs` table (id, label, created_at, workflow_run_ids[])

@@ -7,6 +7,31 @@
 
 ---
 
+## B6 UX-04 Project Report Panel (#206) 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Create component | ✅ done | `components/omnisight/project-report-panel.tsx` — full panel with header, loading, error, and empty states |
+| Three collapsible sections | ✅ done | Spec / Execution / Outcome sections with chevron toggle, extracted from REPORT-01 markdown |
+| Markdown download + copy | ✅ done | Download creates Blob + anchor click; copy writes to navigator.clipboard with ✓ feedback |
+| Share link button | ✅ done | POST `/report/share` → displays signed URL bar with COPY button |
+| Component tests | ✅ done | 8 tests: golden fixture, collapse toggle, download blob, clipboard, share flow, error, empty, reportId fetch |
+
+### Architecture
+
+- `components/omnisight/project-report-panel.tsx`: New panel component. Props: `runId`, `reportId`, `title`. Uses `extractSection()` to split markdown into 3 collapsible regions. `markdownToHtml()` for lightweight rendering. Matches project design system (holo-glass, font-mono, neural-border, artifact-purple accent).
+- `lib/api.ts`: 3 new functions — `generateReport()`, `getReport()`, `shareReport()` with `ReportResponse` + `ShareReportResponse` types.
+- `test/components/project-report-panel.test.tsx`: 8 tests covering all acceptance criteria.
+
+### Test Results
+
+- Frontend: 131/131 tests pass (20 files), including 8 project-report-panel tests
+- TypeScript: clean compile (zero errors)
+
+---
+
 ## B5 UX-01 SpecTemplateEditor source tabs (#205) 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**
