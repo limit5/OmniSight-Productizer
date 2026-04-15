@@ -198,11 +198,11 @@ Legend:
 - [x] Unit test: sample radio spec → correct cert checklist
 
 ### C11. L4-CORE-11 Power / battery profiling (#225)
-- [ ] Sleep-state transition detector (entry/exit event trace)
-- [ ] Current profiling sampler (external shunt ADC integration)
-- [ ] Battery lifetime model (capacity × avg draw × duty cycle)
-- [ ] Dashboard: mAh/day per feature toggle
-- [ ] Unit test: synthetic current trace → correct lifetime estimate
+- [x] Sleep-state transition detector (entry/exit event trace)
+- [x] Current profiling sampler (external shunt ADC integration)
+- [x] Battery lifetime model (capacity × avg draw × duty cycle)
+- [x] Dashboard: mAh/day per feature toggle
+- [x] Unit test: synthetic current trace → correct lifetime estimate
 
 ### C12. L4-CORE-12 Real-time / determinism track (#226)
 - [ ] RT-linux build profile (`PREEMPT_RT` kernel config)

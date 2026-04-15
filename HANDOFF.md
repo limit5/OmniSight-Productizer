@@ -7,6 +7,60 @@
 
 ---
 
+## C11 L4-CORE-11 Power / battery profiling 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Sleep-state transition detector (entry/exit event trace) | ✅ | `backend/power_profiling.py` — `detect_sleep_transitions()` classifies current levels → 6 sleep states (S0-S5), detects entry/exit transitions with timestamps + current deltas |
+| Current profiling sampler (external shunt ADC integration) | ✅ | `sample_current()` — supports INA219/INA226/ADS1115/internal ADC configs; processes raw samples or returns stub for hardware-pending; computes avg/peak/min + total charge mAh |
+| Battery lifetime model (capacity × avg draw × duty cycle) | ✅ | `estimate_battery_lifetime()` — supports 4 chemistries (Li-Ion/Li-Po/LiFePO4/NiMH), cycle degradation modeling, duty cycle profiles (active/idle/sleep %), returns lifetime hours/days + mAh/day |
+| Dashboard: mAh/day per feature toggle | ✅ | `components/omnisight/power-profiling-panel.tsx` — 3-tab panel (Budget/Domains/States) with battery config, feature toggles, lifetime/draw/mAh summary cards; `compute_feature_power_budget()` backend |
+| Unit test: synthetic current trace → correct lifetime estimate | ✅ | 80 項測試全數通過：config loading (18) + data models (10) + sleep transitions (6) + current sampler (6) + battery lifetime (7) + feature budget (8) + doc integration (3) + audit (3) + edge cases (7) + REST endpoints (7) + acceptance pipeline (4) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/power_profiles.yaml` | 新建——6 sleep states + 10 power domains + 4 ADC configs + 8 feature toggles + 4 battery chemistries |
+| `backend/power_profiling.py` | 新建——Power profiling framework：enums + data models + config loader + sleep transition detector + current sampler + battery lifetime model + feature power budget + doc_suite_generator integration + audit integration |
+| `backend/routers/power.py` | 新建——REST endpoints: GET /power/sleep-states, GET /power/domains, GET /power/adc, GET /power/features, GET /power/chemistries, POST /power/profile, POST /power/transitions, POST /power/lifetime, POST /power/budget |
+| `backend/main.py` | 擴充——註冊 power router |
+| `components/omnisight/power-profiling-panel.tsx` | 新建——Dashboard panel with 3 tabs (mAh/day Budget, Power Domains, Sleep States), battery config, feature toggles |
+| `backend/tests/test_power_profiling.py` | 新建，80 項測試 |
+| `TODO.md` | 更新——C11 全部標記完成 |
+
+### 架構說明
+
+- **SleepState enum** — s0_active / s1_idle / s2_standby / s3_suspend / s4_hibernate / s5_off
+- **TransitionDirection enum** — entry / exit
+- **ProfilingStatus enum** — running / completed / error / pending
+- **SleepStateDef** — state_id / name / description / typical_draw_pct / wake_latency_ms / order
+- **PowerDomainDef** — domain_id / name / typical_active_ma / typical_sleep_ma
+- **ADCConfig** — adc_id / name / interface / max_current_a / resolution_bits / sample_rate_hz / shunt_resistor_ohm + computed lsb_current_a
+- **BatterySpec** — chemistry / capacity_mah / nominal_voltage_v / cycle_count / degradation + computed effective_capacity_mah
+- **DutyCycleProfile** — active/idle/sleep pct + currents + computed avg_current_ma
+- **LifetimeEstimate** — battery + duty_cycle + lifetime_hours/days + mah_per_day
+- **FeaturePowerBudget** — base/total avg current + base/adjusted lifetime + per-feature items
+- `detect_sleep_transitions()` — classifies current → nearest sleep state, emits transition events
+- `sample_current()` — ADC config lookup → raw sample processing or hardware stub
+- `estimate_battery_lifetime()` — capacity × degradation ÷ weighted avg current
+- `compute_feature_power_budget()` — base duty cycle + per-feature extra draw → lifetime impact
+
+### 驗證
+
+- 80 項新增 power profiling 測試全數通過
+- 92 項既有 C10 radio compliance 測試全數通過（無迴歸）
+- 86 項既有 C9 safety compliance 測試全數通過（無迴歸）
+
+### 下一步
+
+- C12 (#226)：Real-time / determinism track
+- 各 Skill Pack 可透過 feature toggles 定義產品功耗特徵
+
+---
+
 ## C10 L4-CORE-10 Radio certification pre-compliance 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。**

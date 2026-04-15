@@ -1,0 +1,193 @@
+schema_version: 1
+
+sleep_states:
+  s0_active:
+    name: "S0 Active"
+    description: "Full-power active state, all subsystems running"
+    typical_draw_pct: 100
+    wake_latency_ms: 0
+    order: 0
+  s1_idle:
+    name: "S1 Idle"
+    description: "CPU clock gated, peripherals active, DRAM self-refresh"
+    typical_draw_pct: 60
+    wake_latency_ms: 1
+    order: 1
+  s2_standby:
+    name: "S2 Standby"
+    description: "CPU powered down, wake-capable peripherals active, DRAM retained"
+    typical_draw_pct: 15
+    wake_latency_ms: 50
+    order: 2
+  s3_suspend:
+    name: "S3 Suspend to RAM"
+    description: "All subsystems off except DRAM and wake sources (GPIO, RTC, USB)"
+    typical_draw_pct: 3
+    wake_latency_ms: 500
+    order: 3
+  s4_hibernate:
+    name: "S4 Hibernate"
+    description: "Context saved to flash/eMMC, DRAM off"
+    typical_draw_pct: 0.5
+    wake_latency_ms: 3000
+    order: 4
+  s5_off:
+    name: "S5 Soft Off"
+    description: "Power rail gated, only RTC battery keeps time"
+    typical_draw_pct: 0.1
+    wake_latency_ms: 5000
+    order: 5
+
+power_domains:
+  cpu:
+    name: "CPU Core"
+    description: "Main application processor"
+    typical_active_ma: 350
+    typical_sleep_ma: 2
+  dsp:
+    name: "DSP"
+    description: "Digital signal processor"
+    typical_active_ma: 120
+    typical_sleep_ma: 1
+  npu:
+    name: "NPU/AI Accelerator"
+    description: "Neural processing unit"
+    typical_active_ma: 200
+    typical_sleep_ma: 0.5
+  dram:
+    name: "DRAM"
+    description: "Main memory"
+    typical_active_ma: 80
+    typical_sleep_ma: 5
+  wifi:
+    name: "WiFi Radio"
+    description: "802.11 radio frontend + baseband"
+    typical_active_ma: 180
+    typical_sleep_ma: 0.5
+  bt:
+    name: "Bluetooth Radio"
+    description: "BLE/Classic BT radio"
+    typical_active_ma: 30
+    typical_sleep_ma: 0.1
+  sensor:
+    name: "Sensor Array"
+    description: "Camera sensor + ISP + companion"
+    typical_active_ma: 250
+    typical_sleep_ma: 1
+  display:
+    name: "Display"
+    description: "LCD/OLED panel + backlight"
+    typical_active_ma: 60
+    typical_sleep_ma: 0
+  storage:
+    name: "Storage"
+    description: "eMMC / SD / NVMe"
+    typical_active_ma: 40
+    typical_sleep_ma: 0.5
+  io:
+    name: "I/O + Misc"
+    description: "USB, GPIO, UART, SPI, I2C, LEDs, misc peripherals"
+    typical_active_ma: 30
+    typical_sleep_ma: 1
+
+adc_configurations:
+  ina219:
+    name: "INA219"
+    description: "TI INA219 high-side current/power monitor (I2C)"
+    interface: "i2c"
+    max_current_a: 3.2
+    resolution_bits: 12
+    sample_rate_hz: 500
+    shunt_resistor_ohm: 0.1
+  ina226:
+    name: "INA226"
+    description: "TI INA226 high/low-side current/power monitor (I2C)"
+    interface: "i2c"
+    max_current_a: 20
+    resolution_bits: 16
+    sample_rate_hz: 1000
+    shunt_resistor_ohm: 0.01
+  ads1115:
+    name: "ADS1115"
+    description: "TI ADS1115 4-channel 16-bit ADC (I2C)"
+    interface: "i2c"
+    max_current_a: 5.0
+    resolution_bits: 16
+    sample_rate_hz: 860
+    shunt_resistor_ohm: 0.05
+  internal_adc:
+    name: "SoC Internal ADC"
+    description: "Built-in SAR ADC on SoC (varies by platform)"
+    interface: "internal"
+    max_current_a: 1.0
+    resolution_bits: 12
+    sample_rate_hz: 100
+    shunt_resistor_ohm: 0.1
+
+feature_toggles:
+  wifi_always_on:
+    name: "WiFi Always-On"
+    description: "WiFi radio remains active continuously"
+    domains_affected: ["wifi"]
+    extra_draw_ma: 180
+  bt_advertising:
+    name: "BLE Advertising"
+    description: "BLE advertising beacon active"
+    domains_affected: ["bt"]
+    extra_draw_ma: 10
+  camera_streaming:
+    name: "Camera Streaming"
+    description: "Continuous camera capture + encode"
+    domains_affected: ["sensor", "npu", "cpu"]
+    extra_draw_ma: 500
+  display_on:
+    name: "Display Active"
+    description: "Display panel powered with backlight at 50%"
+    domains_affected: ["display"]
+    extra_draw_ma: 60
+  gps_tracking:
+    name: "GPS Tracking"
+    description: "Continuous GPS fix acquisition"
+    domains_affected: ["io"]
+    extra_draw_ma: 45
+  ota_download:
+    name: "OTA Download"
+    description: "Firmware download over WiFi"
+    domains_affected: ["wifi", "storage", "cpu"]
+    extra_draw_ma: 300
+  ai_inference:
+    name: "AI Inference Active"
+    description: "NPU running inference pipeline"
+    domains_affected: ["npu", "cpu", "dram"]
+    extra_draw_ma: 350
+  audio_recording:
+    name: "Audio Recording"
+    description: "Microphone + ADC + codec active"
+    domains_affected: ["io", "cpu"]
+    extra_draw_ma: 25
+
+battery_chemistries:
+  li_ion:
+    name: "Li-Ion"
+    nominal_voltage_v: 3.7
+    min_voltage_v: 3.0
+    max_voltage_v: 4.2
+    cycle_degradation_pct_per_100: 2.0
+  li_po:
+    name: "Li-Po"
+    nominal_voltage_v: 3.7
+    min_voltage_v: 3.0
+    max_voltage_v: 4.2
+    cycle_degradation_pct_per_100: 1.5
+  lifepo4:
+    name: "LiFePO4"
+    nominal_voltage_v: 3.2
+    min_voltage_v: 2.5
+    max_voltage_v: 3.65
+    cycle_degradation_pct_per_100: 0.5
+  nimh:
+    name: "NiMH"
+    nominal_voltage_v: 1.2
+    min_voltage_v: 1.0
+    max_voltage_v: 1.45
+    cycle_degradation_pct_per_100: 3.0
