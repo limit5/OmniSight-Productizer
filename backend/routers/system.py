@@ -32,6 +32,40 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 _BASH_TIMEOUT = 5
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
+_TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
+
+
+def _collect_toolchains() -> dict:
+    """Scan platform YAMLs + tier_capabilities to build the toolchain enum."""
+    by_platform: dict[str, str] = {}
+    for p in sorted(_PLATFORMS_DIR.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+            tc = data.get("toolchain")
+            if tc:
+                by_platform[data.get("platform", p.stem)] = tc
+        except Exception:
+            logger.warning("Failed to read platform YAML %s", p)
+
+    by_tier: dict[str, list[str]] = {}
+    try:
+        tier_data = yaml.safe_load(_TIER_RULES_PATH.read_text(encoding="utf-8"))
+        for tid, rules in (tier_data.get("tiers") or {}).items():
+            allowed = rules.get("toolchains_allowed") or []
+            by_tier[tid] = sorted(allowed)
+    except Exception:
+        logger.warning("Failed to read tier_capabilities.yaml")
+
+    all_names: set[str] = set(by_platform.values())
+    for lst in by_tier.values():
+        all_names.update(lst)
+
+    return {
+        "all": sorted(all_names),
+        "by_platform": by_platform,
+        "by_tier": by_tier,
+    }
 
 
 async def _sh(cmd: str) -> str:
@@ -1386,3 +1420,19 @@ async def update_npi_milestone(milestone_id: str, status: str | None = None, due
                 await db.save_npi_state(state)
                 return ms
     raise HTTPException(status_code=404, detail=f"Milestone {milestone_id} not found")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  GET /system/platforms/toolchains — B8
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.get("/platforms/toolchains")
+async def list_toolchains() -> dict:
+    """Return every known toolchain name, grouped by platform and tier.
+
+    Response shape:
+      all:          sorted unique list of all toolchain strings
+      by_platform:  { platform_name: default_toolchain }
+      by_tier:      { tier_id: [allowed_toolchains] }
+    """
+    return _collect_toolchains()

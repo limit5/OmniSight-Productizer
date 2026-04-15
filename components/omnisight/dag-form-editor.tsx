@@ -16,14 +16,14 @@
  * Validation errors render in the parent (DagAuthoringPanel) so the
  * JSON / Form / Canvas tabs share one panel.
  *
- * Deliberate omission still in force:
- *   - `toolchain` is free-text; backend doesn't expose an enum, and
- *     a typo here surfaces as a runtime sandbox error rather than a
- *     validator one. Worth a follow-up if operators trip on it.
+ * B8: `toolchain` field uses a `<datalist>` populated from
+ * `GET /system/platforms/toolchains` for autocomplete. Unknown
+ * toolchains surface as a validator warning at edit time.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ArrowDown, ArrowUp, Plus, Trash2, X } from "lucide-react"
+import { fetchToolchains } from "@/lib/api"
 
 // Mirrors `backend/dag_schema.py`. Kept local rather than hoisting into
 // lib/api.ts because only the form editor needs this shape concrete
@@ -77,15 +77,16 @@ function blankTask(index: number, allIds: string[]): FormTask {
 }
 
 export function DagFormEditor({ value, onChange, focusRequest }: Props) {
-  // Per-row draft for the "add input" text field. Stored outside the
-  // DAG itself so an empty draft doesn't serialise back into the JSON
-  // text tab. Keyed by task index — cleared on commit or row delete.
   const [inputDraft, setInputDraft] = useState<Record<number, string>>({})
-
-  // Refs to every task row DOM node, for scroll-to-row on focus request.
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
-  // Task id currently flashing the highlight ring (null otherwise).
   const [flashed, setFlashed] = useState<string | null>(null)
+  const [knownToolchains, setKnownToolchains] = useState<string[]>([])
+
+  useEffect(() => {
+    fetchToolchains()
+      .then((r) => setKnownToolchains(r.all))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (!focusRequest) return
@@ -270,6 +271,7 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
             <div className="grid grid-cols-2 gap-1">
               <input
                 type="text"
+                list="omnisight-toolchains"
                 value={t.toolchain}
                 onChange={(e) => patchTask(idx, { toolchain: e.target.value })}
                 placeholder="toolchain (e.g. cmake)"
@@ -391,6 +393,14 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
       >
         <Plus size={10} /> Add task
       </button>
+
+      {knownToolchains.length > 0 && (
+        <datalist id="omnisight-toolchains">
+          {knownToolchains.map((tc) => (
+            <option key={tc} value={tc} />
+          ))}
+        </datalist>
+      )}
     </div>
   )
 }

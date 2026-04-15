@@ -1019,14 +1019,16 @@ export interface DAGValidateResponse {
   ok: boolean
   stage: "schema" | "semantic"
   errors: DAGValidationError[]
+  warnings?: DAGValidationError[]
   task_count?: number
-  /** Phase 64-C-LOCAL S4: runner the plan's t3 tasks would dispatch
-   * to — "local" (host==target), "bundle" (artefact handoff),
-   * "ssh"/"qemu" (future runners). */
   t3_runner?: "local" | "bundle" | "ssh" | "qemu"
-  /** The platform profile the resolver used. Useful for diagnosing
-   * why a t3 task isn't picking up LOCAL when the operator expects it. */
   target_platform?: string
+}
+
+export interface ToolchainsResponse {
+  all: string[]
+  by_platform: Record<string, string>
+  by_tier: Record<string, string[]>
 }
 
 export interface DAGSubmitResponse {
@@ -1036,6 +1038,10 @@ export interface DAGSubmitResponse {
   validation_errors: DAGValidationError[]
   mutation_rounds?: number
   supersedes_run_id?: string
+}
+
+export async function fetchToolchains(): Promise<ToolchainsResponse> {
+  return request<ToolchainsResponse>("/system/platforms/toolchains")
 }
 
 export async function validateDag(

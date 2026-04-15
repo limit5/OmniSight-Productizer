@@ -160,6 +160,7 @@ describe("DagFormEditor", () => {
 vi.mock("@/lib/api", () => ({
   validateDag: vi.fn().mockResolvedValue({ ok: true, stage: "semantic", errors: [] }),
   submitDag: vi.fn(),
+  fetchToolchains: vi.fn().mockResolvedValue({ all: ["cmake", "gcc", "flash_board"], by_platform: {}, by_tier: {} }),
 }))
 
 import { DagEditor } from "@/components/omnisight/dag-editor"

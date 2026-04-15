@@ -244,6 +244,10 @@ async def validate_dag(req: DAGValidateRequest,
             {"rule": e.rule, "task_id": e.task_id, "message": e.message}
             for e in result.errors
         ],
+        "warnings": [
+            {"rule": w.rule, "task_id": w.task_id, "message": w.message}
+            for w in result.warnings
+        ],
         "task_count": len(dag.tasks),
         "t3_runner": resolution.kind.value,
         "target_platform": (profile or {}).get("platform") or req.target_platform or "host_native",

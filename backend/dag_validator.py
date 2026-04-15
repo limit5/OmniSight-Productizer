@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
+_PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -47,7 +48,8 @@ _TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
 
 RuleName = Literal[
     "cycle", "unknown_dep", "duplicate_id",
-    "tier_violation", "io_entity", "dep_closure", "mece",
+    "tier_violation", "unknown_toolchain",
+    "io_entity", "dep_closure", "mece",
 ]
 
 
@@ -66,6 +68,7 @@ class ValidationError:
 class ValidationResult:
     ok: bool
     errors: list[ValidationError]
+    warnings: list[ValidationError] = ()  # type: ignore[assignment]
 
     @property
     def by_rule(self) -> dict[RuleName, int]:
@@ -224,6 +227,54 @@ def _check_tier_capability(
             ))
 
 
+# ── Unknown toolchain warning ──
+
+_KNOWN_TOOLCHAINS_CACHE: set[str] | None = None
+
+
+def _load_known_toolchains() -> set[str]:
+    global _KNOWN_TOOLCHAINS_CACHE
+    if _KNOWN_TOOLCHAINS_CACHE is not None:
+        return _KNOWN_TOOLCHAINS_CACHE
+
+    names: set[str] = set()
+    for p in _PLATFORMS_DIR.glob("*.yaml"):
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+            tc = data.get("toolchain")
+            if tc:
+                names.add(tc)
+        except Exception:
+            pass
+
+    rules = _load_tier_rules().get("tiers", {})
+    for tier_rules in rules.values():
+        for tc in tier_rules.get("toolchains_allowed") or []:
+            names.add(tc)
+        for tc in tier_rules.get("toolchains_denied") or []:
+            names.add(tc)
+
+    _KNOWN_TOOLCHAINS_CACHE = names
+    return _KNOWN_TOOLCHAINS_CACHE
+
+
+def reload_known_toolchains_for_tests() -> None:
+    global _KNOWN_TOOLCHAINS_CACHE
+    _KNOWN_TOOLCHAINS_CACHE = None
+
+
+def _check_unknown_toolchain(dag: DAG, errors: list[ValidationError]) -> None:
+    known = _load_known_toolchains()
+    for t in dag.tasks:
+        if t.toolchain and t.toolchain not in known:
+            errors.append(ValidationError(
+                rule="unknown_toolchain", task_id=t.task_id,
+                message=(f"toolchain {t.toolchain!r} is not in the known "
+                         f"toolchain registry — check spelling or add it "
+                         f"to configs/platforms/ or tier_capabilities.yaml"),
+            ))
+
+
 # ── I/O entity matchers ──
 
 # A rough-but-strict file path: must contain a '/', end with a sane
@@ -341,6 +392,9 @@ def validate(
     _check_dep_closure(dag, errors)
     _check_mece(dag, errors)
 
+    warnings: list[ValidationError] = []
+    _check_unknown_toolchain(dag, warnings)
+
     # Best-effort metric publish.
     try:
         from backend import metrics as _m
@@ -353,7 +407,7 @@ def validate(
     except Exception:
         pass
 
-    return ValidationResult(ok=not errors, errors=errors)
+    return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
 
 
 def _result_breakdown(errors: Iterable[ValidationError]) -> dict[str, int]:
