@@ -35,6 +35,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Optional
 
+from backend.hardware_profile import HardwareProfile
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,6 +113,7 @@ class ParsedSpec:
     # orchestrator's system prompt).
     raw_text: str = ""
     conflicts: list[SpecConflict] = field(default_factory=list)
+    hardware_profile: Optional[HardwareProfile] = None
 
     def low_confidence(self, threshold: float = 0.7) -> list[str]:
         """Field names whose confidence sits below `threshold`. Phase
@@ -157,6 +160,9 @@ class ParsedSpec:
                 }
                 for c in self.conflicts
             ],
+            "hardware_profile": (
+                self.hardware_profile.model_dump() if self.hardware_profile else None
+            ),
         }
 
 
