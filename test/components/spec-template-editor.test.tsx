@@ -57,6 +57,12 @@ describe("SpecTemplateEditor", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockParse.mockResolvedValue(okSpec)
+    // Phase 68-D: SpecTemplateEditor restores from localStorage on
+    // mount. Clear between tests so the chip-fill test isn't
+    // shadowed by a sibling test's persisted "demo" raw_text.
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem("omnisight:intent:last_spec")
+    }
   })
 
   it("debounces prose input into a parseIntent call", async () => {
@@ -129,6 +135,20 @@ describe("SpecTemplateEditor", () => {
     await user.click(btn)
     expect(onReady).toHaveBeenCalledTimes(1)
     expect(onReady.mock.calls[0][0].framework.value).toBe("nextjs")
+  })
+
+  it("template chip click fills the prose textarea + triggers parse", async () => {
+    const user = userEvent.setup()
+    render(<SpecTemplateEditor />)
+    const ta = screen.getByRole("textbox", { name: /project prose/i }) as HTMLTextAreaElement
+    expect(ta.value).toBe("")
+    // The CJK template chip exercises the bilingual support — and
+    // confirms a chip click writes the prose into the textarea.
+    await user.click(screen.getByRole("button", { name: /Embedded Static UI/i }))
+    expect(ta.value).toContain("x86_64")
+    expect(ta.value).toContain("Next.js")
+    // Debounced parse fires after the chip-driven setText.
+    await waitFor(() => expect(mockParse).toHaveBeenCalled(), { timeout: 1500 })
   })
 
   it("Continue persists the spec to localStorage for back-jump restore", async () => {

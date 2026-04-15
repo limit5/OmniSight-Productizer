@@ -32,6 +32,56 @@ import {
   type ParsedSpec, type IntentField, type IntentConflict,
 } from "@/lib/api"
 
+// ─── Starter prose templates ───────────────────────────────────
+// Same idea as DAG-E's TEMPLATES list: spare the operator from
+// staring at an empty textarea. Each template is a real, parseable
+// sentence that the heuristic + LLM both extract well; click sets
+// `text`, the existing debounced effect parses it, and the operator
+// can edit before clicking Continue.
+//
+// Mix of CJK and English on purpose — operators in this codebase
+// type both. The intent_parser regex patterns cover both.
+
+interface SpecTemplate { id: string; label: string; prose: string }
+
+const SPEC_TEMPLATES: SpecTemplate[] = [
+  {
+    id: "web_ssg",
+    label: "Web · SSG",
+    prose: "Build a Next.js static site on x86_64 that reads from a local SQLite at build time, deploy locally with nginx.",
+  },
+  {
+    id: "web_ssr",
+    label: "Web · SSR",
+    prose: "FastAPI backend on x86_64 with PostgreSQL, deploy to a cloud VM. SSR React frontend talks to it at request time.",
+  },
+  {
+    id: "embedded_arm64",
+    label: "Embedded · arm64",
+    prose: "Write an arm64 firmware driver for the IMX335 sensor over MIPI CSI, target a Raspberry Pi 4 with FreeRTOS, includes I2C and SPI peripheral access.",
+  },
+  {
+    id: "data_pipeline",
+    label: "Data Pipeline",
+    prose: "Batch processing pipeline in Python: read CSVs from local flat files, transform with pandas, write parquet output. Runs on x86_64.",
+  },
+  {
+    id: "cli_tool",
+    label: "CLI Tool",
+    prose: "Rust CLI tool to scan a directory tree and report duplicate files. x86_64 native, no DB.",
+  },
+  {
+    id: "research",
+    label: "Research / Notebook",
+    prose: "Jupyter notebook for data analysis on x86_64. Reads from local SQLite, no deployment target needed.",
+  },
+  {
+    id: "embedded_static",
+    label: "Embedded Static UI",
+    prose: "x86_64 工業電腦上跑 Next.js 靜態網頁，從本地 SQLite 在 build time 讀資料展示。",
+  },
+]
+
 // ─── Options for the Form tab dropdowns ────────────────────────
 // Match backend/intent_parser.py literal unions so picks round-trip
 // cleanly through the YAML conflict rulebook.
@@ -225,13 +275,31 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
 
       {/* Prose tab */}
       {tab === "prose" && (
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Describe the project. Example: Build a Next.js static site that reads from a local SQLite at build time, deploy on x86_64."
-          aria-label="Project prose"
-          className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
-        />
+        <div className="flex flex-col gap-2">
+          {/* Template chip row — same UX as DAG-E's gallery. Empty
+              textarea is the worst onboarding moment; one click
+              gets the operator a parseable starting point. */}
+          <div className="flex flex-wrap gap-1">
+            {SPEC_TEMPLATES.map((tpl) => (
+              <button
+                key={tpl.id}
+                type="button"
+                onClick={() => setText(tpl.prose)}
+                title={tpl.prose}
+                className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-[var(--border)] hover:bg-[var(--muted)] text-[var(--muted-foreground)]"
+              >
+                {tpl.label}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Describe the project, or click a template chip above to start."
+            aria-label="Project prose"
+            className="w-full min-h-[120px] max-h-[240px] font-mono text-xs leading-relaxed p-2 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)] resize-y"
+          />
+        </div>
       )}
 
       {/* Form tab */}
