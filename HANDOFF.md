@@ -142,7 +142,7 @@
 | Phase | 主題 | 狀態 | 預估 |
 |---|---|---|---|
 | **S0** | Shared foundation：`audit_log.session_id` + `sessions` 預留欄位 + sessions CRUD API + `write_audit` helper | ⏳ 待辦 | 0.5 day |
-| **K1** | 預設配置強化：production 強制 `strict` mode、default admin 密碼強制改、部署 checklist | ⏳ 待辦 | 0.5 day |
+| **K1** | 預設配置強化：production 強制 `strict` mode、default admin 密碼強制改、部署 checklist。**2026-04-16 實測**：`validate_startup_config` 已部分擋開（debug=false hard-fail `open` mode + 預設密碼），但 `OMNISIGHT_DEBUG=true` 全退化 warning；`ensure_default_admin` 仍以 `omnisight-admin` 自動建帳、`POST /api/v1/auth/login` 可直接取得 admin session（HttpOnly cookie、SameSite=lax，無 Secure）；前端 `/login` 導流 + `next` query 正常，但**無首次登入強制改密碼**關卡——對外部署紅線 | ⏳ 待辦 | 0.5 day |
 | **K2** | 登入速率限制 + 帳號鎖定（failed_login_count / locked_until / 指數 backoff） | ⏳ 待辦 | 1 day |
 | **K3** | Cookie flags（HttpOnly/Secure/SameSite）+ CSP + 安全 headers middleware | ⏳ 待辦 | 0.5 day |
 | **J1** | SSE per-session filter（event envelope + broadcast_scope + UI toggle） | ⏳ 待辦 | 0.5 day |
@@ -6211,3 +6211,34 @@ Full suite regression: 91/91 tests passing across 13 component test files.
 **修改檔案**：
 - `backend/main.py` — 註冊 machine_vision router
 - `TODO.md` — 標記 C24 全部 7 項為 `[x]`
+
+---
+
+## K1. 預設配置強化 + 部署檢查 (2026-04-16)
+
+**狀態**: ✅ 完成
+
+### 完成項目
+
+| 功能 | 說明 | 狀態 |
+|---|---|---|
+| 啟動自檢 | `OMNISIGHT_ENV=production` + `AUTH_MODE!=strict` → 拒絕啟動（exit 78 EX_CONFIG） | ✅ 完成 |
+| 密碼強制變更 | Default admin 密碼 `omnisight-admin` → `must_change_password=1`，所有 API 回 428 直到密碼變更 | ✅ 完成 |
+| 變更密碼端點 | `POST /auth/change-password` 驗證舊密碼 + 設定新密碼 + 清除 flag | ✅ 完成 |
+| Docker 預設 | `Dockerfile.backend` + `docker-compose.prod.yml` 預設 `OMNISIGHT_AUTH_MODE=strict` | ✅ 完成 |
+| 部署文件 | `docs/ops/security_baseline.md` — 預部署安全 checklist | ✅ 完成 |
+| 測試 | 8 項全部通過：啟動檢查 ×3 + 密碼旗標 ×3 + 428 閘門 ×2 | ✅ 完成 |
+
+**新增檔案**：
+- `backend/tests/test_k1_security_hardening.py` — 8 項 K1 測試
+- `docs/ops/security_baseline.md` — 部署前安全 checklist
+
+**修改檔案**：
+- `backend/config.py` — 新增 `env` 設定 + production 環境 strict mode 強制檢查
+- `backend/auth.py` — `User.must_change_password` 欄位 + `change_password()` + `ensure_default_admin()` 旗標邏輯
+- `backend/routers/auth.py` — `POST /auth/change-password` 端點
+- `backend/main.py` — 428 middleware（`_must_change_password_gate`）
+- `backend/db.py` — `users.must_change_password` 欄位 + migration
+- `Dockerfile.backend` — 預設 `OMNISIGHT_AUTH_MODE=strict`
+- `docker-compose.prod.yml` — 預設 `OMNISIGHT_AUTH_MODE=strict` + `OMNISIGHT_ENV=production`
+- `TODO.md` — K1 全部 6 項標記為 `[x]`

@@ -380,12 +380,13 @@ Legend:
 > 背景：現行 auth 預設 `OMNISIGHT_AUTH_MODE=open`（無認證）、default admin 密碼為常數 `omnisight-admin`、`authenticate_password` 無速率限制。三者為對外部署前必須解掉的紅燈。
 
 ### K1. 預設配置強化 + 部署檢查
-- [ ] Startup self-check：若 `ENV=production` 但 `OMNISIGHT_AUTH_MODE != strict` → 拒絕啟動（明確錯誤訊息 + 退出碼 78）
-- [ ] 若 default admin 密碼仍為 `omnisight-admin` → 啟動時強制標記 `must_change_password=1`，登入後任何 API 除 `POST /auth/change-password` 全回 428 Precondition Required
-- [ ] Docker `Dockerfile.backend` / compose prod：預設 env `OMNISIGHT_AUTH_MODE=strict`
-- [ ] 文件 `docs/ops/security_baseline.md`：列出部署前 checklist（strict mode、改密碼、bearer token 僅限 CI 白名單 IP）
-- [ ] 測試：啟動模式檢查、未改密碼時 API 拒絕
-- [ ] 預估：**0.5 day**
+> **實測現況（2026-04-16 驗證）**：`backend/config.py` L296-329 `validate_startup_config` 已部分實作——`debug=false` 時會 hard-fail 擋下 `OMNISIGHT_AUTH_MODE=open` 與 `OMNISIGHT_ADMIN_PASSWORD=omnisight-admin`，但 `OMNISIGHT_DEBUG=true` 全退化為 warning。`backend/auth.py` L274-291 `ensure_default_admin()` 仍會自動建 `admin@omnisight.local` / `omnisight-admin`，實測 `POST /api/v1/auth/login` 可直接以該預設密碼取得 admin session + HttpOnly cookie（SameSite=lax，無 Secure flag）。前端 `/login` 導流正常（`next` query param 回原頁），但**無任何「首次登入強制改密碼」關卡**——導流做對、credential baseline 未鎖，這是目前最大對外部署紅線。
+- [x] Startup self-check：若 `ENV=production` 但 `OMNISIGHT_AUTH_MODE != strict` → 拒絕啟動（明確錯誤訊息 + 退出碼 78）；目前只看 `settings.debug` flag，需獨立 `ENV=production` 判斷避免 debug 意外被設 true 繞過
+- [x] 若 default admin 密碼仍為 `omnisight-admin` → 啟動時強制標記 `users.must_change_password=1`，登入後任何 API 除 `POST /auth/change-password` 全回 428 Precondition Required；前端 `/login` 成功 response 檢測此旗標自動導向 `/settings/change-password`
+- [x] Docker `Dockerfile.backend` / compose prod：預設 env `OMNISIGHT_AUTH_MODE=strict`
+- [x] 文件 `docs/ops/security_baseline.md`：列出部署前 checklist（strict mode、改密碼、bearer token 僅限 CI 白名單 IP）
+- [x] 測試：啟動模式檢查、未改密碼時 API 拒絕 428、改完密碼後旗標清除
+- [x] 預估：**0.5 day**
 
 ### K2. 登入速率限制 + 帳號鎖定
 - [ ] `backend/rate_limit.py`：in-process token bucket（未來 I 多 worker 時換 Redis）— 預設 `/auth/login` 每 IP 5/min、每 email 10/hour
