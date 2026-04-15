@@ -17,12 +17,13 @@ Legend:
 ## 🅐 Priority A — Operator blockers
 
 ### A1. L1-01 Real deploy.sh execution + NS migration + v0.1.0 tag (#172)
-- [ ] Run `scripts/deploy.sh prod v0.1.0` against production host
-- [ ] Migrate GoDaddy NS records to Cloudflare
-- [ ] Confirm Cloudflare Tunnel active + cert issued
-- [ ] Smoke GET `/api/health` from public domain
-- [ ] Tag `v0.1.0` on master, push
-- [ ] Update HANDOFF with deploy URL + v0.1.0 release notes
+- [ ] Run `scripts/deploy.sh prod v0.1.0` against production host *(🅐 operator: needs prod host)*
+- [ ] Migrate GoDaddy NS records to Cloudflare *(🅐 operator: needs GoDaddy + CF accounts)*
+- [ ] Confirm Cloudflare Tunnel active + cert issued *(🅐 operator: needs CF dashboard)*
+- [ ] Smoke GET `/api/health` from public domain *(🅐 operator: after deploy)*
+- [x] Tag `v0.1.0` on master *(done: local tag created 2026-04-15)*
+- [ ] Push `v0.1.0` tag to origin *(🅐 operator: `git push origin v0.1.0`)*
+- [x] Update HANDOFF with deploy URL + v0.1.0 release notes *(done: runbook + release notes added)*
 
 ### A2. L1-05 Prod smoke test — 2 real DAGs end-to-end (#176)
 - [ ] Pick DAG #1: `compile-flash` template against host_native

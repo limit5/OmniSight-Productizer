@@ -1,8 +1,84 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
-> 撰寫時間：2026-04-14（Phase 42-46 深度審計後修復進行中）
-> 最後 commit：`8d46e8b` (master) → audit-fix batches in progress
-> 工作目錄狀態：audit-fix batches 1-N 進行中
+> 撰寫時間：2026-04-15
+> 最後 commit：`5b5ff01` (master)
+> Tag：`v0.1.0` — 首個正式 release
+> 工作目錄狀態：clean（v0.1.0 tagged）
+
+---
+
+## v0.1.0 Release Notes（2026-04-15）
+
+### 🏷️ Tag
+
+`v0.1.0` on `master` at commit `5b5ff01`.
+
+### What's included
+
+| Area | Key deliverables |
+|---|---|
+| **Core pipeline** | Multi-agent orchestration engine (Phases 1-68), Intent Parser + spec clarification loop, DAG planner + executor |
+| **Local execution** | Phase 64-C-LOCAL: native-arch T3 fast path with gVisor sandbox |
+| **Security** | 10-layer defence-in-depth: CF Edge → CF Tunnel → Security Headers → Login Gate → Rate Limit → HttpOnly Cookie → CSRF → RBAC → Audit hash chain → Sandbox tiers |
+| **Deploy** | `scripts/deploy.sh` (systemd + WAL-safe backup + health check), `deployment.md` |
+| **Ops** | OpsSummaryPanel (6 KPI), hourly LLM burn-rate kill-switch, audit archival (90d retention), backup self-test |
+| **CI gates** | 4 hard gates: pytest + vitest + tsc + ruff |
+| **Platform** | Platform-aware GraphState, SoC vendor/SDK version tracking, prefetch pipeline |
+
+### 🔧 Operator deployment runbook (A1 — L1-01)
+
+The following steps require **operator access** to production infrastructure:
+
+#### Step 1: Deploy to production host
+
+```bash
+# On the production host (WSL2/Linux with systemd):
+cd /path/to/OmniSight-Productizer
+git fetch --tags
+scripts/deploy.sh prod v0.1.0
+```
+
+Prerequisites:
+- systemd units installed: `omnisight-backend`, `omnisight-frontend`
+- `.env` configured (copy from `.env.example`, fill API keys)
+- `sqlite3` available for WAL-safe backup
+- Python venv with `pip install -r backend/requirements.txt`
+- Node.js + npm for frontend build
+
+#### Step 2: Migrate GoDaddy NS → Cloudflare
+
+1. Log into Cloudflare → Add site → get assigned nameservers
+2. Log into GoDaddy → Domain Settings → Nameservers → Custom → paste Cloudflare NS
+3. Wait for propagation (typically 15 min – 48 hr)
+4. Verify: `dig NS yourdomain.com` shows Cloudflare NS
+
+#### Step 3: Confirm Cloudflare Tunnel + cert
+
+1. Cloudflare Zero Trust → Tunnels → create tunnel → install `cloudflared` on prod host
+2. Configure tunnel to route `yourdomain.com` → `localhost:3000` (frontend) and `/api/*` → `localhost:8000`
+3. Cloudflare auto-issues edge cert; verify: `curl -I https://yourdomain.com`
+4. Update `.env`: `OMNISIGHT_FRONTEND_ORIGIN=https://yourdomain.com`
+
+#### Step 4: Smoke test
+
+```bash
+curl -sf https://yourdomain.com/api/v1/health | python3 -m json.tool
+# Expected: {"status": "OK", ...}
+```
+
+#### Step 5: Push tag
+
+```bash
+git push origin v0.1.0
+```
+
+#### Step 6: Update this section
+
+After deploy, fill in:
+- **Deploy URL**: `https://___________________`
+- **Deploy timestamp**: `____-__-__ __:__`
+- **Health check result**: `{...}`
+- **Cloudflare Tunnel ID**: `____________________`
 
 ---
 
