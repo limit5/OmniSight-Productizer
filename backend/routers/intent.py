@@ -1,26 +1,26 @@
 """Phase 68-C — Intent Parser + Clarification HTTP surface.
 
-Two endpoints:
+Endpoints:
 
   POST /api/v1/intent/parse
-    body:  { text: str, use_llm: bool = true }
-    resp:  ParsedSpec.to_dict()
-
   POST /api/v1/intent/clarify
-    body:  { parsed: ParsedSpec.to_dict(), conflict_id: str,
-             option_id: str }
-    resp:  updated ParsedSpec.to_dict()
+  POST /api/v1/intent/ingest-repo   (B5/UX-01)
+  POST /api/v1/intent/upload-docs   (B5/UX-01)
 
-The SpecTemplateEditor UI (same commit) is the primary consumer.
+The SpecTemplateEditor UI is the primary consumer.
 Authenticated — require_operator — so these can't be hit by a
 bot-harvester probing for the free LLM backend.
 """
 
 from __future__ import annotations
 
+import io
 import logging
+import re
+import tempfile
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 
 from backend import auth as _au
@@ -145,3 +145,97 @@ async def clarify(req: ClarifyRequest,
     # carry its own prior hint if one exists.
     await _imem.annotate_conflicts_with_priors(ps.raw_text, body["conflicts"])
     return body
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /intent/ingest-repo (B5/UX-01)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class IngestRepoRequest(BaseModel):
+    url: str = Field(..., min_length=1, description="Git clone URL")
+
+
+@router.post("/ingest-repo")
+async def ingest_repo(req: IngestRepoRequest,
+                      _user=Depends(_au.require_operator)) -> dict:
+    """Clone a repo, introspect manifests, return a ParsedSpec."""
+    from backend.repo_ingest import ingest_repo as _ingest, IntrospectionResult
+    try:
+        spec, intro = await _ingest(req.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    body = spec.to_dict()
+    body["_ingest_meta"] = {
+        "detected_files": intro.detected_files,
+        "has_package_json": intro.package_json is not None,
+        "has_readme": bool(intro.readme_content),
+        "has_requirements": len(intro.requirements_txt) > 0,
+        "has_cargo": bool(intro.cargo_toml),
+    }
+    return body
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  POST /intent/upload-docs (B5/UX-01)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_ALLOWED_DOC_EXTENSIONS = {".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".csv"}
+_MAX_DOC_SIZE = 2 * 1024 * 1024  # 2 MB per file
+
+
+@router.post("/upload-docs")
+async def upload_docs(
+    files: list[UploadFile] = File(...),
+    _user=Depends(_au.require_operator),
+) -> dict:
+    """Parse uploaded doc files and return a merged ParsedSpec."""
+    if not files:
+        raise HTTPException(status_code=422, detail="No files uploaded")
+
+    file_results: list[dict] = []
+    combined_text_parts: list[str] = []
+
+    for uf in files:
+        name = uf.filename or "unknown"
+        ext = Path(name).suffix.lower()
+        if ext not in _ALLOWED_DOC_EXTENSIONS:
+            file_results.append({"name": name, "status": "rejected", "reason": f"unsupported extension: {ext}"})
+            continue
+
+        content = await uf.read()
+        if len(content) > _MAX_DOC_SIZE:
+            file_results.append({"name": name, "status": "rejected", "reason": "file too large (>2MB)"})
+            continue
+
+        try:
+            text = content.decode("utf-8", errors="replace")
+        except Exception:
+            file_results.append({"name": name, "status": "error", "reason": "decode failed"})
+            continue
+
+        combined_text_parts.append(f"[from {name}]\n{text[:4096]}")
+        file_results.append({"name": name, "status": "parsed", "size": len(content)})
+
+    if not combined_text_parts:
+        return {"spec": None, "files": file_results}
+
+    combined_text = "\n---\n".join(combined_text_parts)
+
+    ask_fn = None
+    model = ""
+    try:
+        from backend.iq_runner import live_ask_fn
+        from backend.config import settings as _s
+        ask_fn = live_ask_fn
+        model = f"{_s.llm_provider}/{_s.get_model_name()}"
+    except Exception as exc:
+        logger.debug("intent/upload-docs: LLM unavailable: %s", exc)
+
+    parsed = await _ip.parse_intent(combined_text, ask_fn=ask_fn, model=model)
+    body = parsed.to_dict()
+    return {"spec": body, "files": file_results}

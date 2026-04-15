@@ -17,6 +17,8 @@ import userEvent from "@testing-library/user-event"
 vi.mock("@/lib/api", () => ({
   parseIntent: vi.fn(),
   clarifyIntent: vi.fn(),
+  ingestRepo: vi.fn(),
+  uploadDocs: vi.fn(),
 }))
 
 import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
@@ -25,6 +27,8 @@ import type { ParsedSpec } from "@/lib/api"
 
 const mockParse = api.parseIntent as ReturnType<typeof vi.fn>
 const mockClarify = api.clarifyIntent as ReturnType<typeof vi.fn>
+const mockIngestRepo = (api as any).ingestRepo as ReturnType<typeof vi.fn>
+const mockUploadDocs = (api as any).uploadDocs as ReturnType<typeof vi.fn>
 
 const okSpec: ParsedSpec = {
   project_type:      { value: "web_app",   confidence: 0.9 },
@@ -217,5 +221,142 @@ describe("SpecTemplateEditor", () => {
       "textbox", { name: /project prose/i },
     ) as HTMLTextAreaElement
     await waitFor(() => expect(ta.value).toBe("previously typed prompt"))
+  })
+
+  // ─── B5/UX-01: Source tabs ─────────────────────────────────────
+
+  it("renders all four source tabs (Prose, From Repo, From Docs, Form)", () => {
+    render(<SpecTemplateEditor />)
+    expect(screen.getByRole("tab", { name: /prose/i })).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: /from repo/i })).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: /from docs/i })).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: /form/i })).toBeInTheDocument()
+  })
+
+  it("Repo tab: URL input triggers ingestRepo and populates spec", async () => {
+    const user = userEvent.setup()
+    const repoSpec: ParsedSpec = {
+      ...okSpec,
+      framework: { value: "fastapi", confidence: 0.95 },
+      raw_text: "[ingested from repo: requirements.txt]",
+    }
+    mockIngestRepo.mockResolvedValue({
+      ...repoSpec,
+      _ingest_meta: {
+        detected_files: ["requirements.txt", "README.md"],
+        has_package_json: false,
+        has_readme: true,
+        has_requirements: true,
+        has_cargo: false,
+      },
+    })
+
+    const onReady = vi.fn()
+    render(<SpecTemplateEditor onSpecReady={onReady} />)
+
+    await user.click(screen.getByRole("tab", { name: /from repo/i }))
+    const urlInput = screen.getByLabelText("Repository URL")
+    await user.type(urlInput, "https://github.com/test/repo.git")
+    await user.click(screen.getByLabelText("Clone and analyze"))
+
+    await waitFor(() => expect(mockIngestRepo).toHaveBeenCalledWith("https://github.com/test/repo.git"))
+    expect(await screen.findByText("requirements.txt")).toBeInTheDocument()
+    expect(screen.getByText("README.md")).toBeInTheDocument()
+
+    // Spec was populated — Continue should be available
+    await user.click(screen.getByRole("tab", { name: /form/i }))
+    await waitFor(() => {
+      const picker = screen.getByLabelText("target_arch") as HTMLSelectElement
+      expect(picker.value).toBe("x86_64")
+    })
+  })
+
+  it("Repo tab: shows error on ingest failure", async () => {
+    const user = userEvent.setup()
+    mockIngestRepo.mockRejectedValue(new Error("Authentication failed"))
+
+    render(<SpecTemplateEditor />)
+    await user.click(screen.getByRole("tab", { name: /from repo/i }))
+    await user.type(screen.getByLabelText("Repository URL"), "https://github.com/private/repo")
+    await user.click(screen.getByLabelText("Clone and analyze"))
+
+    expect(await screen.findByText(/Authentication failed/)).toBeInTheDocument()
+  })
+
+  it("Docs tab: drag-drop zone renders and file upload populates spec", async () => {
+    const user = userEvent.setup()
+    const docsSpec: ParsedSpec = {
+      ...okSpec,
+      framework: { value: "django", confidence: 0.9 },
+    }
+    mockUploadDocs.mockResolvedValue({
+      spec: docsSpec,
+      files: [
+        { name: "spec.md", status: "parsed", size: 512 },
+        { name: "bad.exe", status: "rejected", reason: "unsupported extension: .exe" },
+      ],
+    })
+
+    render(<SpecTemplateEditor />)
+    await user.click(screen.getByRole("tab", { name: /from docs/i }))
+
+    expect(screen.getByLabelText("Drop zone")).toBeInTheDocument()
+
+    // Simulate file selection via the hidden input
+    const input = screen.getByLabelText("File upload") as HTMLInputElement
+    const file = new File(["# My Project\nA Django project"], "spec.md", { type: "text/markdown" })
+    await user.upload(input, file)
+
+    await waitFor(() => expect(mockUploadDocs).toHaveBeenCalled())
+    expect(await screen.findByText("spec.md")).toBeInTheDocument()
+    expect(screen.getByText("parsed")).toBeInTheDocument()
+    expect(screen.getByText("bad.exe")).toBeInTheDocument()
+    expect(screen.getByText("rejected")).toBeInTheDocument()
+  })
+
+  it("merge preserves user prose overrides (confidence 1.0) over ingested data", async () => {
+    const user = userEvent.setup()
+
+    // Step 1: User sets framework manually in Form tab
+    const onReady = vi.fn()
+    render(<SpecTemplateEditor onSpecReady={onReady} />)
+    await user.click(screen.getByRole("tab", { name: /form/i }))
+    const fwInput = screen.getByPlaceholderText("nextjs, django, axum, ...")
+    await user.type(fwInput, "my-custom-framework")
+
+    // Step 2: Ingest from repo — framework should NOT override user pick
+    const repoSpec: ParsedSpec = {
+      ...okSpec,
+      framework: { value: "fastapi", confidence: 0.95 },
+    }
+    mockIngestRepo.mockResolvedValue({
+      ...repoSpec,
+      _ingest_meta: { detected_files: ["requirements.txt"], has_package_json: false, has_readme: false, has_requirements: true, has_cargo: false },
+    })
+
+    await user.click(screen.getByRole("tab", { name: /from repo/i }))
+    await user.type(screen.getByLabelText("Repository URL"), "https://github.com/test/repo")
+    await user.click(screen.getByLabelText("Clone and analyze"))
+    await waitFor(() => expect(mockIngestRepo).toHaveBeenCalled())
+
+    // Verify: framework kept user's pick (confidence 1.0), other fields filled by ingest
+    await user.click(screen.getByRole("tab", { name: /form/i }))
+    await waitFor(() => {
+      const fwField = screen.getByPlaceholderText("nextjs, django, axum, ...") as HTMLInputElement
+      expect(fwField.value).toBe("my-custom-framework")
+    })
+  })
+
+  it("Docs tab: shows error on upload failure", async () => {
+    const user = userEvent.setup()
+    mockUploadDocs.mockRejectedValue(new Error("upload-docs failed (500): internal error"))
+
+    render(<SpecTemplateEditor />)
+    await user.click(screen.getByRole("tab", { name: /from docs/i }))
+    const input = screen.getByLabelText("File upload") as HTMLInputElement
+    const file = new File(["content"], "readme.md", { type: "text/markdown" })
+    await user.upload(input, file)
+
+    expect(await screen.findByText(/upload-docs failed/)).toBeInTheDocument()
   })
 })

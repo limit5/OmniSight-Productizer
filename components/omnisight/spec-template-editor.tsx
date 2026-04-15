@@ -1,46 +1,17 @@
 "use client"
 
-/**
- * Phase 68-C — Spec Template Editor.
- *
- * Free-form prose ↔ structured form tabs. Operator types a natural-
- * language command in the prose tab; the component calls
- * POST /intent/parse (Phase 68-A), renders the resulting ParsedSpec
- * with confidence tints + a conflict panel. The form tab surfaces
- * each field as a dropdown so an operator who prefers structured
- * input can fill it directly at confidence 1.0 — no LLM round trip,
- * no heuristic guesswork.
- *
- * When the parsed spec carries `conflicts[]`, a proposal-style
- * panel shows each conflict's message + radio options; clicking an
- * option calls POST /intent/clarify and re-renders. Fully iterative
- * — the operator can burn multiple rounds if they keep picking
- * non-resolving choices (caller's MAX_CLARIFY_ROUNDS guard is on
- * the backend side).
- *
- * The component does NOT submit to the DAG drafter. That's the
- * caller's job — typically wire `onSpecReady(spec)` to whatever
- * downstream orchestrator you want (DagEditor, raw invoke, etc.).
- */
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  AlertCircle, AlertTriangle, Code, Loader2, ListChecks, Sparkles,
+  AlertCircle, AlertTriangle, Code, FileUp, GitBranch, Loader2,
+  ListChecks, Sparkles, Upload, CheckCircle2, XCircle,
 } from "lucide-react"
 import {
-  parseIntent, clarifyIntent,
+  parseIntent, clarifyIntent, ingestRepo, uploadDocs,
   type ParsedSpec, type IntentField, type IntentConflict,
+  type IngestRepoResponse, type DocFileResult,
 } from "@/lib/api"
 
 // ─── Starter prose templates ───────────────────────────────────
-// Same idea as DAG-E's TEMPLATES list: spare the operator from
-// staring at an empty textarea. Each template is a real, parseable
-// sentence that the heuristic + LLM both extract well; click sets
-// `text`, the existing debounced effect parses it, and the operator
-// can edit before clicking Continue.
-//
-// Mix of CJK and English on purpose — operators in this codebase
-// type both. The intent_parser regex patterns cover both.
 
 interface SpecTemplate { id: string; label: string; prose: string }
 
@@ -83,8 +54,6 @@ const SPEC_TEMPLATES: SpecTemplate[] = [
 ]
 
 // ─── Options for the Form tab dropdowns ────────────────────────
-// Match backend/intent_parser.py literal unions so picks round-trip
-// cleanly through the YAML conflict rulebook.
 
 const OPTS = {
   project_type: [
@@ -108,18 +77,12 @@ type FieldName =
 const DEBOUNCE_MS = 600
 
 interface Props {
-  /** Optional — forwarded to downstream consumers when the operator
-   * clicks "Continue". If omitted the button is hidden (component
-   * still functions as a spec inspector). */
   onSpecReady?: (spec: ParsedSpec) => void
 }
 
-// localStorage key for the last spec the operator handed off via
-// Continue. Picked back up on mount so a "Back to Spec" jump (from
-// a failed DAG submit) lands the operator exactly where they were,
-// not on a blank prose textarea. Survives reload; cleared after a
-// fresh handoff so stale state can't shadow new intent.
 const LS_LAST_SPEC = "omnisight:intent:last_spec"
+
+type SourceTab = "prose" | "repo" | "docs" | "form"
 
 interface DagFailureContext {
   reason: string
@@ -127,31 +90,62 @@ interface DagFailureContext {
   target_platform: string | null
 }
 
+// ─── Merge helper: ingested spec fields fill gaps but don't
+//     override user-set (confidence 1.0) values ────────────────
+
+function mergeIntoSpec(
+  base: ParsedSpec | null,
+  incoming: ParsedSpec,
+): ParsedSpec {
+  if (!base) return incoming
+  const merged = { ...incoming }
+  const fields: FieldName[] = [
+    "project_type", "runtime_model", "target_arch", "target_os",
+    "framework", "persistence", "deploy_target", "hardware_required",
+  ]
+  for (const f of fields) {
+    const baseField = (base as any)[f] as IntentField
+    const incField = (incoming as any)[f] as IntentField
+    if (baseField.confidence >= 1.0) {
+      ;(merged as any)[f] = baseField
+    } else if (incField.confidence > baseField.confidence) {
+      ;(merged as any)[f] = incField
+    } else {
+      ;(merged as any)[f] = baseField
+    }
+  }
+  if (base.raw_text && base.raw_text !== incoming.raw_text) {
+    merged.raw_text = base.raw_text
+  }
+  merged.conflicts = [...(incoming.conflicts || [])]
+  return merged
+}
+
 export function SpecTemplateEditor({ onSpecReady }: Props) {
-  const [tab, setTab] = useState<"prose" | "form">("prose")
+  const [tab, setTab] = useState<SourceTab>("prose")
   const [text, setText] = useState("")
   const [spec, setSpec] = useState<ParsedSpec | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Phase 68 → DAG round-trip: failure context captured on a
-  // back-jump from DagEditor. Cleared once the operator types or
-  // picks anything (intent has changed, banner is stale).
   const [failure, setFailure] = useState<DagFailureContext | null>(null)
-  // Hydration flag: localStorage isn't accessible during SSR, so we
-  // restore on mount and then never write before the first user-
-  // initiated change. Avoids overwriting valid prose with empty
-  // string during the first render pass.
   const [hydrated, setHydrated] = useState(false)
 
-  // Cancel-previous AbortController keyed via a ref so a slow
-  // parse can't clobber a newer one.
+  // Repo tab state
+  const [repoUrl, setRepoUrl] = useState("")
+  const [repoLoading, setRepoLoading] = useState(false)
+  const [repoError, setRepoError] = useState<string | null>(null)
+  const [repoDetectedFiles, setRepoDetectedFiles] = useState<string[]>([])
+
+  // Docs tab state
+  const [docFiles, setDocFiles] = useState<File[]>([])
+  const [docResults, setDocResults] = useState<DocFileResult[]>([])
+  const [docsLoading, setDocsLoading] = useState(false)
+  const [docsError, setDocsError] = useState<string | null>(null)
+
   const inflight = useRef<AbortController | null>(null)
+  const dropRef = useRef<HTMLDivElement>(null)
 
   // ─── DAG → Spec back-jump context ──────────────────────────────
-  // DagEditor dispatches `omnisight:spec-failure-context` right
-  // before navigating us, so we already have the reason in state
-  // when the panel renders. Listening on window means we're
-  // robust to event arrival order (event before mount or after).
   useEffect(() => {
     if (typeof window === "undefined") return
     const onFailure = (e: Event) => {
@@ -175,7 +169,6 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         setText(cached.raw_text || "")
       }
     } catch (exc) {
-      // Bad JSON / quota issues — silently start fresh.
       console.debug("[SpecTemplateEditor] restore failed:", exc)
     }
     setHydrated(true)
@@ -204,8 +197,6 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
     }
   }, [])
 
-  // Debounced prose → parse. The form tab edits spec directly (no
-  // LLM round-trip needed for explicit picks).
   useEffect(() => {
     if (tab !== "prose") return
     const t = setTimeout(() => void runParse(text), DEBOUNCE_MS)
@@ -213,11 +204,8 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   }, [text, tab, runParse])
 
   const patchField = (name: FieldName, value: string) => {
-    // Operator changed something — failure context goes stale.
     if (failure) setFailure(null)
     if (!spec) {
-      // First form edit with no prose parse — synthesize an empty
-      // spec so operator doesn't need to type prose first.
       setSpec({
         project_type:      { value: "unknown",  confidence: 0 },
         runtime_model:     { value: "unknown",  confidence: 0 },
@@ -250,10 +238,66 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
     }
   }
 
+  // ─── Repo ingest handler ─────────────────────────────────────
+  const handleRepoIngest = async () => {
+    if (!repoUrl.trim()) return
+    setRepoLoading(true)
+    setRepoError(null)
+    setRepoDetectedFiles([])
+    try {
+      const result = await ingestRepo(repoUrl.trim())
+      const meta = (result as IngestRepoResponse)._ingest_meta
+      if (meta) setRepoDetectedFiles(meta.detected_files)
+      const cleaned = { ...result } as any
+      delete cleaned._ingest_meta
+      const merged = mergeIntoSpec(spec, cleaned as ParsedSpec)
+      setSpec(merged)
+      setError(null)
+    } catch (exc) {
+      setRepoError(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      setRepoLoading(false)
+    }
+  }
+
+  // ─── Docs upload handler ─────────────────────────────────────
+  const handleDocsUpload = async (filesToUpload: File[]) => {
+    if (filesToUpload.length === 0) return
+    setDocsLoading(true)
+    setDocsError(null)
+    try {
+      const result = await uploadDocs(filesToUpload)
+      setDocResults(result.files)
+      if (result.spec) {
+        const merged = mergeIntoSpec(spec, result.spec)
+        setSpec(merged)
+      }
+      setError(null)
+    } catch (exc) {
+      setDocsError(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      setDocsLoading(false)
+    }
+  }
+
+  const handleFileDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    const droppedFiles = Array.from(e.dataTransfer.files)
+    if (droppedFiles.length === 0) return
+    setDocFiles((prev) => [...prev, ...droppedFiles])
+    void handleDocsUpload(droppedFiles)
+  }
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(e.target.files || [])
+    if (selected.length === 0) return
+    setDocFiles((prev) => [...prev, ...selected])
+    void handleDocsUpload(selected)
+  }
+
   const canContinue = useMemo(() => {
     if (!spec) return false
     if (spec.conflicts.length > 0) return false
-    // "Low confidence" threshold matches backend's 0.7 default.
     for (const n of [
       "project_type", "runtime_model", "target_arch", "target_os",
       "framework", "persistence", "deploy_target",
@@ -262,6 +306,13 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
     }
     return true
   }, [spec])
+
+  const tabDefs: { id: SourceTab; label: string; icon: React.ReactNode }[] = [
+    { id: "prose", label: "Prose", icon: <Code size={10} /> },
+    { id: "repo",  label: "From Repo", icon: <GitBranch size={10} /> },
+    { id: "docs",  label: "From Docs", icon: <FileUp size={10} /> },
+    { id: "form",  label: "Form", icon: <ListChecks size={10} /> },
+  ]
 
   return (
     <div className="flex flex-col gap-3 p-3 rounded-lg bg-[var(--card)] border border-[var(--border)]">
@@ -273,41 +324,31 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         </h3>
         <div className="flex items-center gap-2">
           <div role="tablist" aria-label="Editor mode" className="flex rounded border border-[var(--border)] overflow-hidden">
-            <button
-              type="button" role="tab"
-              aria-selected={tab === "prose"}
-              onClick={() => setTab("prose")}
-              className={`text-xs font-mono px-2 py-0.5 flex items-center gap-1 ${
-                tab === "prose"
-                  ? "bg-[var(--artifact-purple)] text-white"
-                  : "text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
-              }`}
-            >
-              <Code size={10} /> Prose
-            </button>
-            <button
-              type="button" role="tab"
-              aria-selected={tab === "form"}
-              onClick={() => setTab("form")}
-              className={`text-xs font-mono px-2 py-0.5 flex items-center gap-1 ${
-                tab === "form"
-                  ? "bg-[var(--artifact-purple)] text-white"
-                  : "text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
-              }`}
-            >
-              <ListChecks size={10} /> Form
-            </button>
+            {tabDefs.map((t) => (
+              <button
+                key={t.id}
+                type="button" role="tab"
+                aria-selected={tab === t.id}
+                onClick={() => setTab(t.id)}
+                className={`text-xs font-mono px-2 py-0.5 flex items-center gap-1 ${
+                  tab === t.id
+                    ? "bg-[var(--artifact-purple)] text-white"
+                    : "text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+                }`}
+              >
+                {t.icon} {t.label}
+              </button>
+            ))}
           </div>
-          {loading && <Loader2 size={12} className="animate-spin text-[var(--muted-foreground)]" />}
+          {(loading || repoLoading || docsLoading) && (
+            <Loader2 size={12} className="animate-spin text-[var(--muted-foreground)]" />
+          )}
         </div>
       </div>
 
-      {/* Prose tab */}
+      {/* ─── Prose tab ─── */}
       {tab === "prose" && (
         <div className="flex flex-col gap-2">
-          {/* Template chip row — same UX as DAG-E's gallery. Empty
-              textarea is the worst onboarding moment; one click
-              gets the operator a parseable starting point. */}
           <div className="flex flex-wrap gap-1">
             {SPEC_TEMPLATES.map((tpl) => (
               <button
@@ -334,7 +375,132 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         </div>
       )}
 
-      {/* Form tab */}
+      {/* ─── Repo tab ─── */}
+      {tab === "repo" && (
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <input
+              type="url"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              placeholder="https://github.com/user/repo.git"
+              aria-label="Repository URL"
+              className="flex-1 text-xs font-mono px-2 py-1.5 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--artifact-purple)]"
+            />
+            <button
+              type="button"
+              onClick={() => void handleRepoIngest()}
+              disabled={repoLoading || !repoUrl.trim()}
+              aria-label="Clone and analyze"
+              className="text-xs font-mono px-3 py-1.5 rounded bg-[var(--artifact-purple)] text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+            >
+              {repoLoading ? (
+                <><Loader2 size={10} className="animate-spin" /> Cloning…</>
+              ) : (
+                <><GitBranch size={10} /> Analyze</>
+              )}
+            </button>
+          </div>
+          {repoLoading && (
+            <div className="flex items-center gap-2 text-xs font-mono text-[var(--muted-foreground)] p-2 rounded bg-[var(--muted)]/50" role="status" aria-label="Clone progress">
+              <Loader2 size={12} className="animate-spin" />
+              Cloning repository and analyzing manifests…
+            </div>
+          )}
+          {repoError && (
+            <div className="flex items-start gap-2 p-2 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)] font-mono text-xs">
+              <AlertCircle size={12} className="shrink-0 mt-0.5" />
+              <span>{repoError}</span>
+            </div>
+          )}
+          {repoDetectedFiles.length > 0 && (
+            <div className="flex flex-col gap-1 p-2 rounded bg-[var(--muted)]/30 border border-[var(--border)]">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--muted-foreground)]">
+                Detected files
+              </span>
+              <div className="flex flex-wrap gap-1">
+                {repoDetectedFiles.map((f) => (
+                  <span key={f} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--validation-emerald,#10b981)]/10 text-[var(--validation-emerald,#10b981)] border border-[var(--validation-emerald,#10b981)]/30">
+                    {f}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── Docs tab ─── */}
+      {tab === "docs" && (
+        <div className="flex flex-col gap-2">
+          <div
+            ref={dropRef}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleFileDrop}
+            className="flex flex-col items-center justify-center gap-2 p-6 rounded border-2 border-dashed border-[var(--border)] hover:border-[var(--artifact-purple)] bg-[var(--background)] cursor-pointer transition-colors"
+            role="region"
+            aria-label="Drop zone"
+            onClick={() => {
+              const input = dropRef.current?.querySelector("input[type=file]") as HTMLInputElement | null
+              input?.click()
+            }}
+          >
+            <Upload size={20} className="text-[var(--muted-foreground)]" />
+            <span className="text-xs font-mono text-[var(--muted-foreground)]">
+              Drop files here or click to browse
+            </span>
+            <span className="text-[10px] font-mono text-[var(--muted-foreground)]">
+              .txt, .md, .json, .yaml, .yml, .toml, .cfg, .ini, .csv
+            </span>
+            <input
+              type="file"
+              multiple
+              accept=".txt,.md,.json,.yaml,.yml,.toml,.cfg,.ini,.csv"
+              onChange={handleFileSelect}
+              className="hidden"
+              aria-label="File upload"
+            />
+          </div>
+          {docsLoading && (
+            <div className="flex items-center gap-2 text-xs font-mono text-[var(--muted-foreground)]" role="status" aria-label="Upload progress">
+              <Loader2 size={12} className="animate-spin" />
+              Parsing uploaded files…
+            </div>
+          )}
+          {docsError && (
+            <div className="flex items-start gap-2 p-2 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10 text-[var(--destructive)] font-mono text-xs">
+              <AlertCircle size={12} className="shrink-0 mt-0.5" />
+              <span>{docsError}</span>
+            </div>
+          )}
+          {docResults.length > 0 && (
+            <div className="flex flex-col gap-1" role="list" aria-label="Uploaded files">
+              {docResults.map((fr, i) => (
+                <div key={`${fr.name}-${i}`} className="flex items-center gap-2 text-xs font-mono px-2 py-1 rounded bg-[var(--muted)]/30 border border-[var(--border)]" role="listitem">
+                  {fr.status === "parsed" ? (
+                    <CheckCircle2 size={12} className="text-[var(--validation-emerald,#10b981)]" />
+                  ) : (
+                    <XCircle size={12} className="text-[var(--destructive)]" />
+                  )}
+                  <span className="flex-1 truncate">{fr.name}</span>
+                  <span className={`text-[10px] px-1 rounded ${
+                    fr.status === "parsed"
+                      ? "bg-[var(--validation-emerald,#10b981)]/10 text-[var(--validation-emerald,#10b981)]"
+                      : "bg-[var(--destructive)]/10 text-[var(--destructive)]"
+                  }`}>
+                    {fr.status}
+                  </span>
+                  {fr.reason && (
+                    <span className="text-[10px] text-[var(--muted-foreground)]">{fr.reason}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── Form tab ─── */}
       {tab === "form" && (
         <div className="grid grid-cols-2 gap-2">
           {(["project_type", "runtime_model", "target_arch", "target_os",
@@ -348,8 +514,6 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
                 onChange={(v) => patchField(name, v)}
               />
             ))}
-          {/* Framework is free-form — many frameworks exist outside
-              any enum. Separate input so operator can type e.g. "axum". */}
           <label className="flex flex-col gap-0.5 col-span-2">
             <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--muted-foreground)]">
               framework
@@ -374,12 +538,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         </div>
       )}
 
-      {/* DAG failure context banner — shown when the operator
-          back-jumped from a failed DagEditor submit. Auto-clears on
-          any edit (typing in prose or picking a form field), so an
-          intentional re-clarification doesn't leave stale yellow on
-          screen. Hint suggests which fields likely need attention
-          based on the rule names that fired. */}
+      {/* DAG failure context banner */}
       {failure && (
         <div
           role="alert"
@@ -423,7 +582,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         />
       ))}
 
-      {/* Continue button — caller decides what "continue" means */}
+      {/* Continue button */}
       {onSpecReady && spec && (
         <div className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--border)]">
           <span className="text-[10px] font-mono text-[var(--muted-foreground)]">
@@ -436,10 +595,6 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
           <button
             type="button"
             onClick={() => {
-              // Persist BEFORE handoff so a "Back to Spec" jump
-              // from the next panel finds the same state we just
-              // shipped. Best-effort — quota / serialisation
-              // failures don't block the handoff.
               if (hydrated && typeof window !== "undefined") {
                 try {
                   window.localStorage.setItem(LS_LAST_SPEC, JSON.stringify(spec))
@@ -491,7 +646,6 @@ function FieldDropdown({
 }
 
 function ConfidenceBadge({ conf }: { conf: number }) {
-  // Tint + label mirror the backend's threshold (0.7 default).
   let color = "var(--muted-foreground)"
   let label = `${Math.round(conf * 100)}%`
   if (conf === 0) {
@@ -505,7 +659,7 @@ function ConfidenceBadge({ conf }: { conf: number }) {
     color = "var(--validation-emerald, #10b981)"
   } else {
     color = "var(--neural-cyan, #67e8f9)"
-    label = "✓"  // operator-set confidence
+    label = "✓"
   }
   return (
     <span
@@ -537,11 +691,6 @@ function ConflictPanel({
             {conflict.message}
           </div>
           {priorId && (
-            // Phase 68-D: prior-choice hint. Small + clear that it's
-            // a suggestion, not an auto-apply. Clicking still counts
-            // as a fresh decision that gets its own L3 row, so
-            // repeated picks naturally strengthen the signal via
-            // Phase 63-E decay rather than a special counter.
             <div
               className="text-[10px] font-mono text-[var(--neural-cyan,#67e8f9)] mb-1.5"
               aria-label="prior choice suggestion"

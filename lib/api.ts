@@ -917,6 +917,66 @@ export async function clarifyIntent(
   })
 }
 
+// ─── Repo Ingest + Doc Upload (B5/UX-01) ───
+
+export interface IngestMeta {
+  detected_files: string[]
+  has_package_json: boolean
+  has_readme: boolean
+  has_requirements: boolean
+  has_cargo: boolean
+}
+
+export interface IngestRepoResponse extends ParsedSpec {
+  _ingest_meta?: IngestMeta
+}
+
+export async function ingestRepo(url: string): Promise<IngestRepoResponse> {
+  return request<IngestRepoResponse>("/intent/ingest-repo", {
+    method: "POST",
+    body: JSON.stringify({ url }),
+  })
+}
+
+export interface DocFileResult {
+  name: string
+  status: "parsed" | "rejected" | "error"
+  reason?: string
+  size?: number
+}
+
+export interface UploadDocsResponse {
+  spec: ParsedSpec | null
+  files: DocFileResult[]
+}
+
+export async function uploadDocs(files: File[]): Promise<UploadDocsResponse> {
+  const form = new FormData()
+  for (const f of files) form.append("files", f)
+
+  const method = "POST"
+  const baseHeaders: Record<string, string> = {}
+  if (typeof document !== "undefined") {
+    const csrf = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("omnisight_csrf="))
+      ?.split("=")[1]
+    if (csrf) baseHeaders["X-CSRF-Token"] = csrf
+  }
+
+  const res = await fetch(`${API_V1}/intent/upload-docs`, {
+    method,
+    credentials: "include",
+    headers: baseHeaders,
+    body: form,
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`upload-docs failed (${res.status}): ${text}`)
+  }
+  return res.json()
+}
+
 // ─── DAG Authoring (Phase 56-DAG-E) ───
 
 export interface DAGValidationError {
