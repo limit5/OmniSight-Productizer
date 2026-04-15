@@ -113,6 +113,45 @@ Legend:
 - [x] Show delta vs previous estimate (± cycle time / ± token budget)
 - [x] Component test: fire event → estimate re-renders
 
+### B12. UX-CF-TUNNEL-WIZARD — Cloudflare Tunnel 一鍵自動配置（新）
+> 目標：取代現行手動 4 步驟（`cloudflared tunnel login` → `create` → `route dns` → 編輯 `config.yml`）。使用者在 UI 只輸入 CF API Token + 選 Zone + 填 hostname，其餘由系統自動完成。
+
+**Backend**
+- [ ] `backend/cloudflare_client.py`：CF API v4 wrapper（tunnels / dns / zones / accounts）+ 錯誤映射（401 invalid token / 403 missing scope / 409 conflict / 429 rate limit）
+- [ ] `backend/routers/cloudflare_tunnel.py`：
+  - `POST /api/v1/cloudflare/validate-token` — 驗 token 並回傳可用 accounts
+  - `GET  /api/v1/cloudflare/zones?account_id=` — 列使用者可選 zone
+  - `POST /api/v1/cloudflare/provision` — 建 tunnel + ingress config + DNS CNAME（冪等、失敗自動回滾）
+  - `GET  /api/v1/cloudflare/status` — tunnel 連線狀態（connector 是否 up、DNS propagation）
+  - `POST /api/v1/cloudflare/rotate-token`
+  - `DELETE /api/v1/cloudflare/tunnel` — teardown（刪 tunnel + DNS record）
+- [ ] 使用 connector **token 模式**（`cloudflared tunnel run --token <T>`）避免 credentials.json 檔案管理
+- [ ] 整合 `backend/secrets.py`：token at-rest 加密、UI 只見 fingerprint；寫入 Phase 53 audit_log（`cf_tunnel.provision` / `.rotate` / `.delete`）
+- [ ] systemd 橋接：sudoers NOPASSWD rule **僅限** `systemctl {start,stop,restart,status} cloudflared.service`；或 container 模式用 sidecar 免 systemd
+- [ ] 冪等：provision 失敗要清掉已建 tunnel / DNS（plan → apply 兩段式，或 try/rollback 記錄）
+
+**Frontend**
+- [ ] `components/omnisight/cloudflare-tunnel-setup.tsx`：多步 wizard
+  - Step 1 API Token 輸入 + "如何建立 token" 連結（預設 scope 清單）
+  - Step 2 驗證 token → 列 account / zone 選單
+  - Step 3 填 hostname（預設 `omnisight.<zone>` 與 `api.omnisight.<zone>`）
+  - Step 4 Review → 「一鍵 Provision」按鈕
+  - Step 5 即時狀態（SSE）：tunnel 建立 ✓ / DNS ✓ / connector online ✓ / health probe ✓
+- [ ] 既有 tunnel 偵測：顯示現況 + rotate / teardown 按鈕
+- [ ] 錯誤 UI：token scope 不足時明列缺少哪幾個 permission
+
+**測試**
+- [ ] Mock CF API（`respx`）涵蓋：invalid token / missing scope / existing tunnel / DNS 已存在 / rate limit / 部分成功回滾
+- [ ] 整合測試：provision → status → teardown 完整循環
+- [ ] E2E（Playwright）：wizard 四步流程 + 錯誤路徑
+
+**文件 & 安全**
+- [ ] `docs/operations/cloudflare_tunnel_wizard.md`：使用者操作步驟 + token scope 建議
+- [ ] 更新 `docs/operations/deployment.md`：提示 wizard 路徑並保留 CLI 手動模式備援
+- [ ] 安全檢查：token 不得出現於日誌 / SSE payload / error 訊息
+
+**預估**：~6 day（BE 2 + FE 1.5 + systemd 橋接 1 + audit/rollback/test/docs 1.5）
+
 ---
 
 ## 🅒 Priority C — L4 Layer A (shared infrastructure)
@@ -293,12 +332,12 @@ Legend:
 - [x] Unit test with pre-captured frame samples
 
 ### C23. L4-CORE-23 Depth / 3D sensing pipeline (#253)
-- [ ] ToF sensor driver abstraction (Sony IMX556 / Melexis MLX75027)
-- [ ] Structured light capture + decoder
-- [ ] Stereo rectification + disparity (OpenCV SGBM)
-- [ ] Point cloud: PCL + Open3D wrappers
-- [ ] ICP registration + SLAM hooks
-- [ ] Unit test: known scene → expected point count + bounds
+- [x] ToF sensor driver abstraction (Sony IMX556 / Melexis MLX75027)
+- [x] Structured light capture + decoder
+- [x] Stereo rectification + disparity (OpenCV SGBM)
+- [x] Point cloud: PCL + Open3D wrappers
+- [x] ICP registration + SLAM hooks
+- [x] Unit test: known scene → expected point count + bounds
 
 ### C24. L4-CORE-24 Machine vision & industrial imaging framework (#254)
 - [ ] GenICam driver abstraction
@@ -600,6 +639,68 @@ tests / HIL recipes / doc templates) per framework contract.
 
 ---
 
+## 🅖 Priority G — Ops / Reliability（HA 補強）
+
+> 背景：目前為單機 systemd 原型，`scripts/deploy.sh` 以 `systemctl restart` 原地重啟，會有短暫中斷；SQLite 無複製；無負載均衡 / 多副本 / 藍綠 / rolling。Canary、備份、DLQ、watchdog 已具備，但欠缺真正 HA 與零停機。以下 Phase 為補強工作。
+
+### G1. HA-01 Graceful shutdown + readiness/liveness 拆分
+- [ ] Backend 攔截 `SIGTERM`：停收新流量、flush SSE、關閉 DB、等待 in-flight task（timeout 30s）
+- [ ] `/api/v1/health` 拆為 `/healthz`（liveness，永遠快速回 200 if process alive）與 `/readyz`（readiness，檢 DB + migration + 關鍵 provider chain）
+- [ ] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
+- [ ] docker-compose healthcheck 改用 `/readyz`
+- [ ] 單元 + 整合測試：送 SIGTERM 時 in-flight request 仍完成、新連線被拒
+- [ ] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
+
+### G2. HA-02 Reverse proxy + dual backend instance rolling restart
+- [ ] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
+- [ ] `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 volume）
+- [ ] `scripts/deploy.sh` 改為 rolling：取下 A → 重啟 → `/readyz` pass → 取下 B → 重啟
+- [ ] Upstream health check + automatic eject（fail_timeout）
+- [ ] 整合測試：部署中對 `/api/v1/*` 持續打流量，0 個 5xx
+- [ ] 交付：`deploy/reverse-proxy/Caddyfile`、`docker-compose.prod.yml` diff、`scripts/deploy.sh` rolling 模式
+
+### G3. HA-03 Blue-Green 部署策略
+- [ ] `scripts/deploy.sh` 新增 `--strategy blue-green` 旗標
+- [ ] 維護 active/standby symlink 或 proxy upstream 切換（atomic）
+- [ ] Pre-cut smoke（`scripts/prod_smoke_test.py` on standby）→ 切流 → 觀察 5 分鐘 → 保留舊版 24h 供 rollback
+- [ ] Rollback 腳本：`deploy.sh --rollback`（秒級切回 previous color）
+- [ ] 交付：runbook `docs/ops/blue_green_runbook.md`、腳本
+
+### G4. HA-04 SQLite → PostgreSQL 遷移 + streaming replica
+- [ ] Alembic 驗證所有 migration 在 Postgres 上綠（sqlite-isms 掃描：`AUTOINCREMENT`、`WITHOUT ROWID`、dynamic type）
+- [ ] Connection 抽象：`DATABASE_URL` 支援 `postgresql+asyncpg://`
+- [ ] 部署 primary + hot standby（`streaming replication`、`synchronous_commit=on` 可設）
+- [ ] 資料搬移腳本 `scripts/migrate_sqlite_to_pg.py`（含 audit_log hash chain 連續性驗證）
+- [ ] CI 新增 Postgres service matrix（sqlite + pg 兩軌）
+- [ ] 交付：`docs/ops/db_failover.md`、遷移腳本、CI 更新
+
+### G5. HA-05 Multi-node orchestration（K8s manifests 或 Nomad job）
+- [ ] 選型決策文件（K8s vs Nomad vs docker swarm — 比較運維負擔）
+- [ ] Manifests：Deployment（replicas=2, maxUnavailable=0）、Service、Ingress、HPA（CPU 70%）
+- [ ] PDB（PodDisruptionBudget minAvailable=1）
+- [ ] readiness/liveness probe 對接 G1 endpoint
+- [ ] Helm chart `deploy/helm/omnisight/`（values.yaml for staging/prod）
+- [ ] 交付：`deploy/k8s/` 或 `deploy/nomad/`、決策文件
+
+### G6. HA-06 DR runbook + 自動化 restore drill
+- [ ] 每日排程：備份 → 另一主機執行 `restore` → 跑 `backup_selftest.py` + smoke 子集 → 報告
+- [ ] RTO / RPO 目標明文化（建議 RTO ≤ 15min, RPO ≤ 5min）
+- [ ] Runbook：資料庫 primary 掛掉的手動切換步驟、反向代理故障的 fallback
+- [ ] 年度 DR 演練 checklist
+- [ ] 交付：`scripts/dr_drill.sh`、`docs/ops/dr_runbook.md`
+
+### G7. HA-07 Observability for HA signals
+- [ ] Prometheus 指標：`omnisight_backend_instance_up`、`rolling_deploy_5xx_rate`、`replica_lag_seconds`、`readyz_latency`
+- [ ] Grafana dashboard `deploy/observability/grafana/ha.json`
+- [ ] Alert rules：replica lag > 10s / 5xx rate > 1% for 2min / instance down
+- [ ] 交付：dashboard + alert rules
+
+**相依性**：G1 → G2 → G3（rolling → blue-green）；G4 獨立可並行；G5 建議待 G1–G4 穩定後；G6、G7 橫向支援。
+
+**預估**：G1 (2d) + G2 (3d) + G3 (2d) + G4 (5-7d) + G5 (4-5d) + G6 (2d) + G7 (2d) ≈ **20-23 day**。
+
+---
+
 ## 🅕 Priority F — META (matrices / SOPs)
 
 ### F1. META bundle #1 — embedded portfolio (#238)
@@ -647,6 +748,10 @@ E13..E15 (imaging software, depend on C23/C24)
 
 ### Phase 6 — META polish + L4 total estimate validation (1 week)
 F1 + F2 + F3 + cost burndown review
+
+### Phase 7 — Ops / HA 補強（3-4 weeks，可與 Phase 3-5 並行）
+G1 (graceful shutdown + readyz) → G2 (reverse proxy + dual instance) → G3 (blue-green)
+→ G4 (Postgres + replica, 獨立並行) → G5 (K8s/Nomad manifests) → G6 (DR drill) + G7 (HA observability)
 
 ---
 

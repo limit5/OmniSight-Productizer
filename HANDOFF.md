@@ -7,6 +7,92 @@
 
 ---
 
+## B12 (pending) UX-CF-TUNNEL-WIZARD — Cloudflare Tunnel 一鍵自動配置（2026-04-15 登錄）
+
+**背景**：現行流程 100% 手動 — `cloudflared tunnel login` 瀏覽器 OAuth → `tunnel create` 抄 UUID → `route dns` → 編輯 `deploy/cloudflared/config.yml` → `sed` 填 systemd unit → `systemctl enable`。UI / 後端 API 皆無 CF 輸入介面。grep 確認 `backend/config.py` 無任何 CF 環境變數、`components/omnisight/integration-settings.tsx` 無 CF 分支。這是 onboarding 最大摩擦點之一。
+
+**目標**：使用者只在 UI 提供 Cloudflare API Token（不用 `tunnel login`），後端呼叫 CF API v4 自動完成 tunnel 建立 + ingress config + DNS CNAME + connector 啟動。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Backend CF API client | `backend/cloudflare_client.py`（v4 API + 錯誤映射） | ⏳ 待辦 |
+| Backend router | `backend/routers/cloudflare_tunnel.py`：validate-token / zones / provision / status / rotate / teardown | ⏳ 待辦 |
+| Connector token 模式 | `cloudflared tunnel run --token <T>`，免 credentials.json | ⏳ 待辦 |
+| Secrets + Audit | `backend/secrets.py` at-rest 加密 + Phase 53 hash-chain audit_log | ⏳ 待辦 |
+| systemd 橋接 | sudoers NOPASSWD 僅限 `cloudflared.service`，或 container sidecar | ⏳ 待辦 |
+| 冪等 + 回滾 | plan → apply 兩段式，失敗自動清理已建 tunnel/DNS | ⏳ 待辦 |
+| Frontend wizard | `components/omnisight/cloudflare-tunnel-setup.tsx` 5-step + SSE 即時狀態 | ⏳ 待辦 |
+| 測試 | `respx` mock CF API + Playwright E2E | ⏳ 待辦 |
+| 文件 | `docs/operations/cloudflare_tunnel_wizard.md` + 更新 `deployment.md` | ⏳ 待辦 |
+
+**設計決策**：
+- 採 **API Token**（非 cert-based `tunnel login`）— 可程式化、可 rotate、可 scope 限制
+- Token scope 要求：`Account:Cloudflare Tunnel:Edit` + `Zone:DNS:Edit` + `Zone:Zone:Read`
+- Token 永不回傳明文，UI 只顯示 fingerprint
+- 保留 CLI 手動模式作為備援路徑
+
+**風險**：
+1. Backend 啟 cloudflared 需 systemctl 權限 — 用 scoped sudoers rule 或改 container sidecar
+2. Token 是高敏感憑證 — 必須加密 + audit + rotate 能力
+3. Provision 半途失敗要能 cleanup（tunnel 建了但 DNS 失敗 → 回滾）
+
+**預估**：~6 day（BE 2 + FE 1.5 + systemd 橋接 1 + audit/rollback/test/docs 1.5）。詳細 sub-tasks 見 `TODO.md` B12。
+
+**驗收**：新使用者 10 分鐘內從「沒有 tunnel」到「公網 HTTPS 可訪問 `/api/v1/health`」，過程中不需 SSH 進主機或手敲 `cloudflared` 指令。
+
+---
+
+## G (pending) Ops / HA 補強待辦（2026-04-15 登錄）
+
+**背景**：現況為單機 systemd 原型，`scripts/deploy.sh` 原地 `systemctl restart` 有短暫中斷；SQLite 無複製；無 LB / 多副本 / blue-green / rolling。Canary（5% deterministic）、DB online backup、DLQ 重試、watchdog、provider failover 已具備，但欠缺真正 HA 與零停機。詳細拆解見 `TODO.md` Priority G。
+
+| Phase | 主題 | 狀態 | 預估 |
+|---|---|---|---|
+| G1 | Graceful shutdown + liveness/readiness 拆分（`/healthz` vs `/readyz`、SIGTERM drain） | ⏳ 待辦 | 2 day |
+| G2 | Reverse proxy（Caddy/nginx）+ 雙 backend 實例 + rolling restart | ⏳ 待辦 | 3 day |
+| G3 | Blue-Green 部署策略（`deploy.sh --strategy blue-green` + 秒級 rollback） | ⏳ 待辦 | 2 day |
+| G4 | SQLite → PostgreSQL 遷移 + streaming replica + CI pg matrix | ⏳ 待辦 | 5-7 day |
+| G5 | Multi-node orchestration（K8s manifests 或 Nomad job + Helm chart） | ⏳ 待辦 | 4-5 day |
+| G6 | DR runbook + 自動化 restore drill（每日 restore → smoke 驗證） | ⏳ 待辦 | 2 day |
+| G7 | HA observability（Prometheus 指標 + Grafana HA dashboard + alert rules） | ⏳ 待辦 | 2 day |
+
+**相依性**：G1 → G2 → G3；G4 獨立；G5 建議待 G1–G4 穩定後；G6/G7 橫向支援。
+**總預估**：20-23 day，可與 L4 Phase 3-5 並行。
+**驗收標準**：部署過程對 `/api/v1/*` 0 個 5xx；primary DB 失聯 ≤15min RTO 內切回；DR drill 自動每日綠。
+
+---
+
+## C23 L4-CORE-23 Depth / 3D sensing pipeline 狀態更新（2026-04-15）
+
+**全部 6/6 項目已完成。123 項測試全部通過。**
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| ToF sensor driver abstraction | Sony IMX556 + Melexis MLX75027 適配器，`DepthSensor` 抽象基類 | ✅ 完成 |
+| Structured light capture + decoder | Gray code / Phase-shift / Speckle 三種模式，`StructuredLightCodec` 編解碼器 | ✅ 完成 |
+| Stereo rectification + disparity | OpenCV SGBM + BM 演算法，`StereoPipeline` 含整流/視差/深度轉換 | ✅ 完成 |
+| Point cloud: PCL + Open3D wrappers | `PointCloudProcessor` 支援 5 種濾波、法線估計、PCD/PLY/XYZ/LAS 匯出入 | ✅ 完成 |
+| ICP registration + SLAM hooks | 4 種配準演算法 (ICP p2p/p2plane, Colored ICP, NDT) + Visual/LiDAR SLAM | ✅ 完成 |
+| Unit test: known scene → expected point count + bounds | 6 個測試場景 (flat_wall/box/sphere/staircase/corner/empty_room) + 6 個測試配方 + gate 驗證 | ✅ 完成 |
+
+**交付物**：
+- `backend/depth_sensing.py` (3217 行) — 核心模組
+- `backend/routers/depth_sensing.py` (360 行) — 22 個 REST API 端點
+- `backend/tests/test_depth_sensing.py` (955 行) — 16 個測試類、123 個測試案例
+- `configs/depth_sensing.yaml` (400 行) — 感測器/演算法/場景組態
+- `configs/skills/depth_sensing/` — skill manifest + tasks + docs + HIL recipes + scaffolds + test definitions
+
+**架構**：
+- 遵循 C22 barcode_scanner 模式：YAML 驅動組態 + ABC 適配器模式 + 工廠函式 + 合成測試資料
+- 所有感測器擷取皆產生確定性合成資料（基於 sensor_id hash + frame_number），確保測試可重現
+- 深度→點雲使用針孔攝影機模型反投影
+- ICP 模擬迭代收斂過程
+- SLAM 提供軌跡追蹤 + 地圖累積
+
+**下一步**：C24 Machine vision & industrial imaging framework (#254)
+
+---
+
 ## C22 L4-CORE-22 Barcode/scanning SDK abstraction 狀態更新（2026-04-15）
 
 **全部 5/5 項目已完成。146 項測試全部通過。**
