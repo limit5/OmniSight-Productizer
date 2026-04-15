@@ -7,6 +7,52 @@
 
 ---
 
+## C19 L4-CORE-19 Imaging / document pipeline 狀態更新（2026-04-15）
+
+**全部 5/5 項目已完成。166 項測試全部通過。**
+
+| 項目 | 狀態 | 說明 |
+|---|---|---|
+| Scanner ISP path (CIS/CCD → 8/16-bit grey/RGB) | ✅ | 2 sensor types (CIS/CCD), 4 color modes (grey_8bit/grey_16bit/rgb_24bit/rgb_48bit), 8 ISP stages (dark frame subtraction, white balance, gamma correction, color matrix, edge enhancement, noise reduction, binarization, deskew), 6 output formats, full pipeline execution with real pixel processing |
+| OCR integration (Tesseract / PaddleOCR / vendor SDK) | ✅ | 3 OCR engines with abstraction layer, language support, multiple output formats (text/hocr/tsv/pdf/json/xml), preprocessing pipeline (deskew/denoise/binarize/rescale), confidence scoring, region detection |
+| TWAIN driver template (Windows) | ✅ | TWAIN 2.4 protocol, 7-state state machine with validated transitions, 12 capabilities (6 mandatory + 6 optional), C source + header code generation, DS_Entry/Cap_Get/Cap_Set/NativeXfer/MemXfer stubs |
+| SANE backend template (Linux) | ✅ | SANE 1.1 protocol, 10 options (5 mandatory + 5 optional), 11 API functions, C source + header code generation with option descriptors, device enumeration, parameter reporting |
+| ICC color profile embedding | ✅ | 3 standard profiles (sRGB/Adobe RGB/Grey Gamma 2.2), ICC v4 binary generation with proper header/tag table/XYZ data, 4 embedding formats (TIFF tag 34675/JPEG APP2 chunks/PNG iCCP/PDF ICCBased), 4 rendering intents, profile class support (scnr/mntr/prtr) |
+
+### 變更檔案
+
+| 檔案 | 變更 |
+|------|------|
+| `configs/imaging_pipeline.yaml` | 新建——Scanner ISP (2 sensor types + 4 color modes + 8 ISP stages + 6 output formats) + OCR (3 engines + 4 preprocessing steps) + TWAIN 2.4 (12 capabilities + 7 states) + SANE 1.1 (10 options + 11 API functions) + ICC (3 profiles + 4 embedding formats + 4 rendering intents) + 10 test recipes + 5 compatible SoCs + 7 artifact definitions |
+| `backend/imaging_pipeline.py` | 新建——Imaging pipeline library：18 enums + 25 data models + config loader + ISP pipeline (8 processing stages with pixel manipulation) + OCR abstraction (3 engines) + TWAIN state machine + TWAIN driver generator + SANE option system + SANE backend generator + ICC profile binary generation (v4 format) + ICC embedding (4 formats) + test recipes + SoC compatibility + gate validation + cert registry |
+| `backend/routers/imaging_pipeline.py` | 新建——REST endpoints: GET /imaging/sensors, /sensors/{id}, /color-modes, /isp/stages, /output-formats, /ocr/engines, /ocr/engines/{id}, /ocr/preprocessing, /twain/capabilities, /twain/states, /sane/options, /sane/api-functions, /icc/profiles, /icc/profiles/{id}, /icc/classes, /icc/embedding-formats, /icc/rendering-intents, /test-recipes, /socs, /artifacts, /certs. POST /imaging/isp/run, /ocr/run, /twain/transition, /twain/generate, /sane/generate, /icc/generate, /icc/embed, /test-recipes/{id}/run, /validate, /certs/generate |
+| `backend/main.py` | 擴充——註冊 imaging_pipeline router |
+| `configs/skills/imaging/skill.yaml` | 新建——skill manifest (schema v1, 5 artifact kinds, CORE-05 + CORE-07 + CORE-15 dependencies) |
+| `configs/skills/imaging/tasks.yaml` | 新建——10 DAG tasks (ISP config, calibration, OCR setup, TWAIN driver, SANE backend, ICC profiling, ICC embed, quality test, driver test, integration test) |
+| `configs/skills/imaging/scaffolds/` | 新建——3 scaffold files (scanner_isp.c, ocr_wrapper.py, icc_embed.c) |
+| `configs/skills/imaging/tests/test_definitions.yaml` | 新建——5 test suites, 22 test definitions |
+| `configs/skills/imaging/hil/imaging_hil_recipes.yaml` | 新建——5 HIL recipes (flatbed scan, OCR document, ADF duplex, ICC color accuracy, TWAIN/SANE interop) |
+| `configs/skills/imaging/docs/imaging_integration_guide.md.j2` | 新建——Jinja2 doc template for imaging pipeline integration guide |
+| `backend/tests/test_imaging_pipeline.py` | 新建，166 項測試全部通過 |
+| `TODO.md` | 更新——C19 全部標記完成 |
+
+### 架構說明
+
+- **ImagingDomain enum** — scanner_isp / ocr / twain / sane / icc_profiles / integration
+- **SensorType enum** — cis / ccd
+- **ColorMode enum** — grey_8bit / grey_16bit / rgb_24bit / rgb_48bit
+- **OCREngine enum** — tesseract / paddleocr / vendor_sdk
+- **TWAINState enum** — 1 (pre_session) through 7 (transferring)
+- **SANEStatus enum** — SANE_STATUS_GOOD through SANE_STATUS_ACCESS_DENIED
+- **ICCProfileClass enum** — scnr (scanner input) / mntr (display) / prtr (printer output)
+- **RenderingIntent enum** — perceptual / relative_colorimetric / saturation / absolute_colorimetric
+- ISP pipeline executes real pixel processing (dark subtraction, white balance, gamma, CCM, edge enhancement, noise reduction, binarization, deskew)
+- ICC profile binary generated in proper ICC v4 format with header, tag table, and XYZ color data
+- TWAIN state machine enforces valid transitions (1↔2↔3↔4↔5↔6↔7)
+- TWAIN/SANE driver generation produces compilable C source code templates
+
+---
+
 ## C18 L4-CORE-18 Payment / PCI compliance framework 狀態更新（2026-04-15）
 
 **全部 6/6 項目已完成。131 項測試全部通過。**

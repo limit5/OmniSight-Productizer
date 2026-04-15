@@ -286,6 +286,8 @@ from backend.routers import telemetry_backend as _telemetry_backend_router  # C1
 app.include_router(_telemetry_backend_router.router, prefix=settings.api_prefix)
 from backend.routers import payment as _payment_router  # C18/PAYMENT-PCI-COMPLIANCE
 app.include_router(_payment_router.router, prefix=settings.api_prefix)
+from backend.routers import imaging_pipeline as _imaging_pipeline_router  # C19/IMAGING-PIPELINE
+app.include_router(_imaging_pipeline_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

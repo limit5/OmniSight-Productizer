@@ -1,0 +1,88 @@
+schema_version: 1
+hil_recipes:
+  - id: hil_scanner_flatbed
+    name: "Flatbed Scanner Acquisition"
+    description: "HIL test: acquire full page from flatbed scanner via CIS/CCD sensor"
+    equipment:
+      - "Document scanner (CIS or CCD)"
+      - "Calibration target (IT8.7/2 or X-Rite ColorChecker)"
+      - "USB host connection"
+    steps:
+      - "Power on scanner, verify USB enumeration"
+      - "Run dark frame calibration (lid closed)"
+      - "Run white reference calibration (white target)"
+      - "Scan calibration chart at 300 DPI grey"
+      - "Scan calibration chart at 600 DPI RGB"
+      - "Verify ISP output against reference values"
+    pass_criteria:
+      - "Dark frame noise < 3 DN RMS"
+      - "White balance uniformity > 95%"
+      - "Color accuracy ΔE < 3.0 (CIE76)"
+
+  - id: hil_ocr_document
+    name: "OCR Document Recognition"
+    description: "HIL test: scan and OCR a reference document page"
+    equipment:
+      - "Document scanner"
+      - "Reference document (ISO 12233 or custom)"
+    steps:
+      - "Scan reference document at 300 DPI"
+      - "Run ISP pipeline (grey 8-bit)"
+      - "Run OCR engine"
+      - "Compare output text to ground truth"
+    pass_criteria:
+      - "Character accuracy > 99%"
+      - "Word accuracy > 97%"
+      - "Processing time < 5s per page"
+
+  - id: hil_adf_duplex
+    name: "ADF Duplex Scanning"
+    description: "HIL test: scan multi-page document via ADF in duplex mode"
+    equipment:
+      - "Scanner with ADF (20+ page capacity)"
+      - "10-page test document set"
+    steps:
+      - "Load 10 pages into ADF"
+      - "Configure duplex scan (front + back)"
+      - "Start scan via TWAIN or SANE"
+      - "Verify 20 images produced (10 front + 10 back)"
+      - "Verify page order correct"
+    pass_criteria:
+      - "All 20 pages captured"
+      - "No page jams or misfeeds"
+      - "Page order matches physical order"
+
+  - id: hil_icc_color_accuracy
+    name: "ICC Color Accuracy Verification"
+    description: "HIL test: verify ICC profile accuracy against calibration target"
+    equipment:
+      - "Scanner with RGB capability"
+      - "IT8.7/2 calibration target"
+      - "Spectrophotometer (reference measurement)"
+    steps:
+      - "Scan IT8.7/2 target at 600 DPI RGB"
+      - "Apply ISP pipeline with ICC profile"
+      - "Extract patch colors from scan"
+      - "Compare against spectrophotometer reference"
+    pass_criteria:
+      - "Average ΔE < 2.0 (CIE76)"
+      - "Max ΔE < 5.0"
+      - "Grey balance < 1.0 ΔE"
+
+  - id: hil_twain_sane_interop
+    name: "TWAIN/SANE Driver Interoperability"
+    description: "HIL test: verify generated drivers work with standard applications"
+    equipment:
+      - "Windows PC (TWAIN test)"
+      - "Linux PC (SANE test)"
+      - "Scanner hardware"
+    steps:
+      - "Install generated TWAIN driver on Windows"
+      - "Scan from Windows Paint / IrfanView"
+      - "Install generated SANE backend on Linux"
+      - "Scan from scanimage / xsane"
+      - "Compare outputs for consistency"
+    pass_criteria:
+      - "TWAIN driver registers in DSM"
+      - "SANE backend appears in scanimage -L"
+      - "Output images match within 1 DN"

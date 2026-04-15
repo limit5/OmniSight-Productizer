@@ -1,0 +1,563 @@
+schema_version: 1
+
+scanner_isp:
+  name: "Scanner ISP Pipeline"
+  description: "Image Signal Processing path for document scanner sensors (CIS/CCD)"
+  sensor_types:
+    - id: "cis"
+      name: "Contact Image Sensor"
+      description: "Linear contact image sensor — compact, low power, lower optical quality"
+      typical_resolution_dpi: [300, 600]
+      color_modes: ["grey_8bit", "grey_16bit", "rgb_24bit"]
+      interface: "parallel_data"
+      calibration_required: true
+    - id: "ccd"
+      name: "Charge-Coupled Device"
+      description: "CCD line sensor — higher optical quality, requires reduction optics"
+      typical_resolution_dpi: [600, 1200, 2400, 4800]
+      color_modes: ["grey_8bit", "grey_16bit", "rgb_24bit", "rgb_48bit"]
+      interface: "analog_video"
+      calibration_required: true
+
+  bit_depths:
+    - id: "8bit"
+      bits_per_channel: 8
+      description: "Standard 8-bit per channel (256 levels)"
+    - id: "16bit"
+      bits_per_channel: 16
+      description: "High dynamic range 16-bit per channel (65536 levels)"
+
+  color_modes:
+    - id: "grey_8bit"
+      channels: 1
+      bits_per_channel: 8
+      total_bits_per_pixel: 8
+      description: "8-bit greyscale"
+    - id: "grey_16bit"
+      channels: 1
+      bits_per_channel: 16
+      total_bits_per_pixel: 16
+      description: "16-bit greyscale (HDR)"
+    - id: "rgb_24bit"
+      channels: 3
+      bits_per_channel: 8
+      total_bits_per_pixel: 24
+      description: "24-bit RGB color"
+    - id: "rgb_48bit"
+      channels: 3
+      bits_per_channel: 16
+      total_bits_per_pixel: 48
+      description: "48-bit RGB color (HDR)"
+
+  isp_stages:
+    - id: "dark_frame_subtraction"
+      name: "Dark Frame Subtraction"
+      description: "Remove fixed pattern noise using dark reference"
+      order: 1
+      required: true
+    - id: "white_balance"
+      name: "White Balance / Shading Correction"
+      description: "Correct non-uniform illumination across scan line"
+      order: 2
+      required: true
+    - id: "gamma_correction"
+      name: "Gamma Correction"
+      description: "Apply gamma curve (sRGB default γ=2.2)"
+      order: 3
+      required: true
+      parameters:
+        gamma: 2.2
+    - id: "color_matrix"
+      name: "Color Correction Matrix"
+      description: "3×3 CCM to map sensor native to target color space"
+      order: 4
+      required: false
+      applies_to: ["rgb_24bit", "rgb_48bit"]
+    - id: "edge_enhancement"
+      name: "Edge Enhancement / Sharpening"
+      description: "Unsharp mask to compensate for optical blur"
+      order: 5
+      required: false
+      parameters:
+        radius: 1.0
+        amount: 0.5
+    - id: "noise_reduction"
+      name: "Noise Reduction"
+      description: "Temporal or spatial noise filtering"
+      order: 6
+      required: false
+    - id: "binarization"
+      name: "Document Binarization"
+      description: "Adaptive thresholding for B/W document output"
+      order: 7
+      required: false
+      parameters:
+        method: "sauvola"
+        window_size: 15
+        k: 0.2
+    - id: "deskew"
+      name: "Auto Deskew"
+      description: "Detect and correct page skew angle"
+      order: 8
+      required: false
+      parameters:
+        max_angle_degrees: 15
+
+  output_formats:
+    - id: "raw"
+      extension: ".raw"
+      description: "Uncompressed raw pixel data"
+    - id: "tiff"
+      extension: ".tiff"
+      description: "Tagged Image File Format — lossless, ICC profile support"
+    - id: "png"
+      extension: ".png"
+      description: "Portable Network Graphics — lossless compression"
+    - id: "jpeg"
+      extension: ".jpg"
+      description: "JPEG — lossy compression for photos"
+      parameters:
+        quality: 85
+    - id: "pdf"
+      extension: ".pdf"
+      description: "PDF/A — archival document format"
+    - id: "bmp"
+      extension: ".bmp"
+      description: "Windows Bitmap — uncompressed"
+
+ocr:
+  name: "OCR Integration"
+  description: "Optical Character Recognition engine abstraction"
+  engines:
+    - id: "tesseract"
+      name: "Tesseract OCR"
+      description: "Google Tesseract — open-source, LSTM-based"
+      version: "5.x"
+      license: "Apache-2.0"
+      platforms: ["linux", "windows", "macos"]
+      languages_builtin: ["eng", "chi_sim", "chi_tra", "jpn", "kor", "deu", "fra", "spa"]
+      output_formats: ["text", "hocr", "tsv", "pdf", "alto"]
+      capabilities:
+        - page_segmentation
+        - line_detection
+        - word_confidence
+        - layout_analysis
+      install_command: "apt-get install tesseract-ocr"
+    - id: "paddleocr"
+      name: "PaddleOCR"
+      description: "Baidu PaddleOCR — lightweight, multilingual, high accuracy on CJK"
+      version: "2.x"
+      license: "Apache-2.0"
+      platforms: ["linux", "windows", "macos"]
+      languages_builtin: ["ch", "en", "japan", "korean", "german", "french"]
+      output_formats: ["text", "json", "structured"]
+      capabilities:
+        - text_detection
+        - text_recognition
+        - layout_analysis
+        - table_recognition
+        - key_information_extraction
+      install_command: "pip install paddleocr paddlepaddle"
+    - id: "vendor_sdk"
+      name: "Vendor OCR SDK"
+      description: "Proprietary vendor SDK — ABBYY, IRIScan, etc."
+      version: "custom"
+      license: "proprietary"
+      platforms: ["linux", "windows"]
+      languages_builtin: []
+      output_formats: ["text", "xml", "pdf"]
+      capabilities:
+        - page_segmentation
+        - barcode_recognition
+        - form_recognition
+        - handwriting_recognition
+      install_command: ""
+
+  preprocessing:
+    - id: "deskew"
+      description: "Correct page skew before OCR"
+      order: 1
+    - id: "denoise"
+      description: "Remove noise artifacts"
+      order: 2
+    - id: "binarize"
+      description: "Convert to binary for text extraction"
+      order: 3
+    - id: "rescale"
+      description: "Scale to optimal DPI for OCR (typically 300)"
+      order: 4
+      parameters:
+        target_dpi: 300
+
+twain:
+  name: "TWAIN Driver Template"
+  description: "TWAIN protocol driver template for Windows scanner integration"
+  protocol_version: "2.4"
+  platform: "windows"
+  capabilities:
+    mandatory:
+      - id: "CAP_XFERCOUNT"
+        type: "TW_INT16"
+        description: "Number of images to transfer (-1 = all)"
+      - id: "ICAP_XFERMECH"
+        type: "TW_UINT16"
+        description: "Transfer mechanism (native/file/memory)"
+        values: ["TWSX_NATIVE", "TWSX_FILE", "TWSX_MEMORY"]
+      - id: "ICAP_PIXELTYPE"
+        type: "TW_UINT16"
+        description: "Pixel type (B/W, Grey, RGB)"
+        values: ["TWPT_BW", "TWPT_GRAY", "TWPT_RGB"]
+      - id: "ICAP_BITDEPTH"
+        type: "TW_UINT16"
+        description: "Bits per pixel per channel"
+        values: [1, 8, 16]
+      - id: "ICAP_XRESOLUTION"
+        type: "TW_FIX32"
+        description: "Horizontal resolution in DPI"
+      - id: "ICAP_YRESOLUTION"
+        type: "TW_FIX32"
+        description: "Vertical resolution in DPI"
+    optional:
+      - id: "ICAP_COMPRESSION"
+        type: "TW_UINT16"
+        description: "Compression (none, JPEG, etc.)"
+      - id: "CAP_FEEDERENABLED"
+        type: "TW_BOOL"
+        description: "ADF feeder enable"
+      - id: "CAP_AUTOFEED"
+        type: "TW_BOOL"
+        description: "Automatic document feed"
+      - id: "CAP_DUPLEX"
+        type: "TW_UINT16"
+        description: "Duplex scanning support"
+      - id: "ICAP_AUTOMATICBORDERDETECTION"
+        type: "TW_BOOL"
+        description: "Auto crop to page edges"
+      - id: "ICAP_AUTOMATICDESKEW"
+        type: "TW_BOOL"
+        description: "Auto deskew correction"
+
+  state_machine:
+    - state: 1
+      name: "Pre-Session"
+      description: "DSM not loaded"
+    - state: 2
+      name: "Source Manager Loaded"
+      description: "DSM loaded, not opened"
+    - state: 3
+      name: "Source Manager Opened"
+      description: "DSM opened"
+    - state: 4
+      name: "Source Opened"
+      description: "Data source opened"
+    - state: 5
+      name: "Source Enabled"
+      description: "Source enabled, ready to transfer"
+    - state: 6
+      name: "Transfer Ready"
+      description: "Image ready to transfer"
+    - state: 7
+      name: "Transferring"
+      description: "Image data being transferred"
+
+sane:
+  name: "SANE Backend Template"
+  description: "Scanner Access Now Easy backend template for Linux"
+  protocol_version: "1.1"
+  platform: "linux"
+  backend_type: "external"
+  options:
+    mandatory:
+      - id: "mode"
+        type: "SANE_TYPE_STRING"
+        description: "Scan mode"
+        values: ["Lineart", "Gray", "Color"]
+      - id: "resolution"
+        type: "SANE_TYPE_INT"
+        description: "Scan resolution in DPI"
+        unit: "SANE_UNIT_DPI"
+      - id: "tl-x"
+        type: "SANE_TYPE_FIXED"
+        description: "Top-left X of scan area"
+        unit: "SANE_UNIT_MM"
+      - id: "tl-y"
+        type: "SANE_TYPE_FIXED"
+        description: "Top-left Y of scan area"
+        unit: "SANE_UNIT_MM"
+      - id: "br-x"
+        type: "SANE_TYPE_FIXED"
+        description: "Bottom-right X of scan area"
+        unit: "SANE_UNIT_MM"
+      - id: "br-y"
+        type: "SANE_TYPE_FIXED"
+        description: "Bottom-right Y of scan area"
+        unit: "SANE_UNIT_MM"
+    optional:
+      - id: "source"
+        type: "SANE_TYPE_STRING"
+        description: "Scan source (Flatbed / ADF Front / ADF Back / ADF Duplex)"
+        values: ["Flatbed", "ADF Front", "ADF Back", "ADF Duplex"]
+      - id: "depth"
+        type: "SANE_TYPE_INT"
+        description: "Bit depth per channel"
+        values: [8, 16]
+      - id: "brightness"
+        type: "SANE_TYPE_FIXED"
+        description: "Brightness adjustment"
+      - id: "contrast"
+        type: "SANE_TYPE_FIXED"
+        description: "Contrast adjustment"
+      - id: "threshold"
+        type: "SANE_TYPE_FIXED"
+        description: "Binarization threshold"
+
+  api_functions:
+    - name: "sane_init"
+      description: "Initialize SANE backend"
+    - name: "sane_get_devices"
+      description: "Enumerate available scanners"
+    - name: "sane_open"
+      description: "Open a device handle"
+    - name: "sane_get_option_descriptor"
+      description: "Get option metadata"
+    - name: "sane_control_option"
+      description: "Get/set option value"
+    - name: "sane_get_parameters"
+      description: "Get current scan parameters"
+    - name: "sane_start"
+      description: "Start scan acquisition"
+    - name: "sane_read"
+      description: "Read scan data"
+    - name: "sane_cancel"
+      description: "Cancel current scan"
+    - name: "sane_close"
+      description: "Close device handle"
+    - name: "sane_exit"
+      description: "Shutdown SANE backend"
+
+icc_profiles:
+  name: "ICC Color Profile Embedding"
+  description: "ICC v4 color profile management for scanner output"
+  profile_classes:
+    - id: "input"
+      icc_class: "scnr"
+      description: "Scanner input profile — maps device RGB/grey to PCS"
+    - id: "display"
+      icc_class: "mntr"
+      description: "Display profile — for soft-proofing scanned output"
+    - id: "output"
+      icc_class: "prtr"
+      description: "Printer output profile — for print reproduction"
+
+  standard_profiles:
+    - id: "srgb"
+      name: "sRGB IEC61966-2.1"
+      description: "Standard RGB color space"
+      pcs: "XYZ"
+      illuminant: "D65"
+      gamma: 2.2
+      white_point: [0.9505, 1.0, 1.0890]
+      red_primary: [0.4124, 0.2126, 0.0193]
+      green_primary: [0.3576, 0.7152, 0.1192]
+      blue_primary: [0.1805, 0.0722, 0.9505]
+    - id: "adobe_rgb"
+      name: "Adobe RGB (1998)"
+      description: "Wider gamut for professional imaging"
+      pcs: "XYZ"
+      illuminant: "D65"
+      gamma: 2.2
+      white_point: [0.9505, 1.0, 1.0890]
+      red_primary: [0.5767, 0.2974, 0.0270]
+      green_primary: [0.1856, 0.6273, 0.0707]
+      blue_primary: [0.1882, 0.0753, 0.9911]
+    - id: "grey_gamma22"
+      name: "Grey Gamma 2.2"
+      description: "Standard greyscale profile with γ=2.2"
+      pcs: "XYZ"
+      illuminant: "D65"
+      gamma: 2.2
+      white_point: [0.9505, 1.0, 1.0890]
+
+  embedding_formats:
+    - format: "tiff"
+      tag: "InterColorProfile"
+      tag_id: 34675
+      method: "binary_blob"
+    - format: "jpeg"
+      marker: "APP2"
+      method: "icc_profile_chunks"
+      max_chunk_size: 65519
+    - format: "png"
+      chunk_type: "iCCP"
+      method: "compressed_profile"
+    - format: "pdf"
+      key: "/ICCBased"
+      method: "stream_object"
+
+  rendering_intents:
+    - id: "perceptual"
+      value: 0
+      description: "Perceptual — best for photos, compresses gamut"
+    - id: "relative_colorimetric"
+      value: 1
+      description: "Relative colorimetric — maps white point, clips out-of-gamut"
+    - id: "saturation"
+      value: 2
+      description: "Saturation — vivid colors, less accurate"
+    - id: "absolute_colorimetric"
+      value: 3
+      description: "Absolute colorimetric — exact color match, no white point mapping"
+
+test_recipes:
+  - id: "isp_grey_8bit"
+    name: "ISP Grey 8-bit Pipeline Test"
+    description: "Full ISP pipeline test with 8-bit greyscale output"
+    domain: "scanner_isp"
+    steps:
+      - "Generate synthetic CIS raw frame (600 DPI, A4)"
+      - "Apply dark frame subtraction"
+      - "Apply white balance"
+      - "Apply gamma correction"
+      - "Verify output pixel range [0, 255]"
+  - id: "isp_rgb_24bit"
+    name: "ISP RGB 24-bit Pipeline Test"
+    description: "Full ISP pipeline test with 24-bit RGB output"
+    domain: "scanner_isp"
+    steps:
+      - "Generate synthetic CCD raw frame (1200 DPI, A4)"
+      - "Apply dark frame subtraction"
+      - "Apply white balance"
+      - "Apply color correction matrix"
+      - "Apply gamma correction"
+      - "Verify output per-channel range [0, 255]"
+  - id: "ocr_tesseract_basic"
+    name: "Tesseract OCR Basic Test"
+    description: "OCR text extraction with Tesseract"
+    domain: "ocr"
+    steps:
+      - "Generate synthetic document image (300 DPI)"
+      - "Run Tesseract engine"
+      - "Verify text output matches reference"
+  - id: "ocr_paddleocr_basic"
+    name: "PaddleOCR Basic Test"
+    description: "OCR text extraction with PaddleOCR"
+    domain: "ocr"
+    steps:
+      - "Generate synthetic document image (300 DPI)"
+      - "Run PaddleOCR engine"
+      - "Verify text output matches reference"
+  - id: "twain_state_machine"
+    name: "TWAIN State Machine Test"
+    description: "TWAIN driver state transition validation"
+    domain: "twain"
+    steps:
+      - "Initialize TWAIN data source"
+      - "Walk state 1 → 7 → 1"
+      - "Verify all transitions valid"
+  - id: "sane_lifecycle"
+    name: "SANE Backend Lifecycle Test"
+    description: "SANE backend init/scan/cleanup lifecycle"
+    domain: "sane"
+    steps:
+      - "Initialize SANE backend"
+      - "Open device"
+      - "Set scan parameters"
+      - "Start scan → read data → cancel"
+      - "Close device → exit"
+  - id: "icc_embed_tiff"
+    name: "ICC Profile TIFF Embedding Test"
+    description: "Embed ICC profile in TIFF output"
+    domain: "icc_profiles"
+    steps:
+      - "Generate sRGB ICC profile binary"
+      - "Embed in TIFF tag 34675"
+      - "Read back and verify profile matches"
+  - id: "icc_embed_jpeg"
+    name: "ICC Profile JPEG Embedding Test"
+    description: "Embed ICC profile in JPEG output"
+    domain: "icc_profiles"
+    steps:
+      - "Generate sRGB ICC profile binary"
+      - "Embed via APP2 marker chunks"
+      - "Read back and verify profile matches"
+  - id: "icc_embed_png"
+    name: "ICC Profile PNG Embedding Test"
+    description: "Embed ICC profile in PNG output"
+    domain: "icc_profiles"
+    steps:
+      - "Generate sRGB ICC profile binary"
+      - "Embed in iCCP chunk"
+      - "Read back and verify profile matches"
+  - id: "full_scan_pipeline"
+    name: "Full Scan Pipeline End-to-End"
+    description: "Complete scan → ISP → OCR → ICC embed → output"
+    domain: "integration"
+    steps:
+      - "Simulate CIS 300 DPI grey scan"
+      - "Apply ISP pipeline"
+      - "Run OCR (Tesseract)"
+      - "Embed ICC profile"
+      - "Output TIFF with embedded profile"
+      - "Verify OCR text and ICC profile in output"
+
+compatible_socs:
+  - id: "rk3566"
+    name: "Rockchip RK3566"
+    usb_host: true
+    parallel_interface: true
+    dma_channels: 8
+    notes: "Mid-range SoC with USB 3.0 host — good for USB scanner bridge"
+  - id: "rk3568"
+    name: "Rockchip RK3568"
+    usb_host: true
+    parallel_interface: true
+    dma_channels: 8
+    notes: "Higher-performance variant with PCIe for enterprise MFP"
+  - id: "imx8m"
+    name: "NXP i.MX8M"
+    usb_host: true
+    parallel_interface: true
+    dma_channels: 32
+    notes: "Industrial-grade SoC with ECC memory support"
+  - id: "stm32mp1"
+    name: "ST STM32MP1"
+    usb_host: true
+    parallel_interface: true
+    dma_channels: 16
+    notes: "Cortex-A7 + M4 dual core — M4 can handle real-time sensor readout"
+  - id: "x86_64"
+    name: "x86_64 Generic"
+    usb_host: true
+    parallel_interface: false
+    dma_channels: 0
+    notes: "Desktop/server platform for software-only scanner integration"
+
+artifact_definitions:
+  - id: "isp_pipeline_config"
+    name: "ISP Pipeline Configuration"
+    description: "Scanner ISP stage configuration and calibration data"
+    file_pattern: "imaging/isp_config_*.yaml"
+  - id: "ocr_engine_config"
+    name: "OCR Engine Configuration"
+    description: "OCR engine selection, language packs, preprocessing"
+    file_pattern: "imaging/ocr_config_*.yaml"
+  - id: "twain_driver_source"
+    name: "TWAIN Driver Source"
+    description: "Generated TWAIN driver C source for Windows"
+    file_pattern: "imaging/twain_driver_*.c"
+  - id: "sane_backend_source"
+    name: "SANE Backend Source"
+    description: "Generated SANE backend C source for Linux"
+    file_pattern: "imaging/sane_backend_*.c"
+  - id: "icc_profile_binary"
+    name: "ICC Profile Binary"
+    description: "Generated ICC color profile (.icc)"
+    file_pattern: "imaging/profiles/*.icc"
+  - id: "calibration_data"
+    name: "Sensor Calibration Data"
+    description: "Dark frame + white reference calibration data"
+    file_pattern: "imaging/calibration_*.bin"
+  - id: "scan_test_report"
+    name: "Scan Quality Test Report"
+    description: "ISP pipeline quality verification report"
+    file_pattern: "imaging/test_report_*.md"

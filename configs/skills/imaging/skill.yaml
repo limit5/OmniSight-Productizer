@@ -1,0 +1,49 @@
+schema_version: 1
+name: imaging
+description: "Imaging / document pipeline — Scanner ISP (CIS/CCD), OCR (Tesseract/PaddleOCR/vendor SDK), TWAIN driver, SANE backend, ICC color profiles"
+version: "1.0.0"
+author: "OmniSight"
+license: "Proprietary"
+compatible_socs:
+  - rk3566
+  - rk3568
+  - imx8m
+  - stm32mp1
+  - x86_64
+depends_on_skills: []
+depends_on_core:
+  - CORE-05
+  - CORE-07
+  - CORE-15
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/test_definitions.yaml
+  - kind: hil
+    path: hil/imaging_hil_recipes.yaml
+  - kind: docs
+    path: docs/imaging_integration_guide.md.j2
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+keywords:
+  - scanner
+  - cis
+  - ccd
+  - isp
+  - ocr
+  - tesseract
+  - paddleocr
+  - twain
+  - sane
+  - icc
+  - color-profile
+  - document
+  - imaging
+  - scan
+  - deskew
+  - binarization

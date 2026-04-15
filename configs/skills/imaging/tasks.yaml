@@ -1,0 +1,82 @@
+schema_version: 1
+tasks:
+  - id: imaging_isp_config
+    name: "Configure Scanner ISP Pipeline"
+    description: "Select sensor type, color mode, ISP stages, calibration data"
+    depends_on: []
+    artifacts:
+      - isp_pipeline_config
+      - calibration_data
+    estimated_minutes: 30
+
+  - id: imaging_isp_calibration
+    name: "Sensor Calibration"
+    description: "Capture dark frame + white reference, store calibration data"
+    depends_on: [imaging_isp_config]
+    artifacts:
+      - calibration_data
+    estimated_minutes: 60
+
+  - id: imaging_ocr_setup
+    name: "OCR Engine Setup"
+    description: "Select OCR engine, install language packs, configure preprocessing"
+    depends_on: [imaging_isp_config]
+    artifacts:
+      - ocr_engine_config
+    estimated_minutes: 30
+
+  - id: imaging_twain_driver
+    name: "Generate TWAIN Driver"
+    description: "Generate TWAIN data source for Windows scanner integration"
+    depends_on: [imaging_isp_config]
+    artifacts:
+      - twain_driver_source
+    estimated_minutes: 45
+
+  - id: imaging_sane_backend
+    name: "Generate SANE Backend"
+    description: "Generate SANE backend for Linux scanner integration"
+    depends_on: [imaging_isp_config]
+    artifacts:
+      - sane_backend_source
+    estimated_minutes: 45
+
+  - id: imaging_icc_profiling
+    name: "ICC Profile Creation"
+    description: "Create or select ICC color profiles for scanner output"
+    depends_on: [imaging_isp_config]
+    artifacts:
+      - icc_profile_binary
+    estimated_minutes: 30
+
+  - id: imaging_icc_embed
+    name: "ICC Profile Embedding"
+    description: "Embed ICC profiles into output images (TIFF/JPEG/PNG/PDF)"
+    depends_on: [imaging_icc_profiling]
+    artifacts:
+      - icc_profile_binary
+    estimated_minutes: 20
+
+  - id: imaging_quality_test
+    name: "Scan Quality Verification"
+    description: "Run ISP pipeline quality tests and generate report"
+    depends_on: [imaging_isp_calibration, imaging_ocr_setup, imaging_icc_embed]
+    artifacts:
+      - scan_test_report
+    estimated_minutes: 60
+
+  - id: imaging_driver_test
+    name: "Driver Integration Test"
+    description: "Test TWAIN and SANE driver templates with mock scanner"
+    depends_on: [imaging_twain_driver, imaging_sane_backend]
+    artifacts:
+      - scan_test_report
+    estimated_minutes: 45
+
+  - id: imaging_integration_test
+    name: "Full Pipeline Integration Test"
+    description: "End-to-end: scan → ISP → OCR → ICC embed → output"
+    depends_on: [imaging_quality_test, imaging_driver_test]
+    artifacts:
+      - scan_test_report
+    estimated_minutes: 90

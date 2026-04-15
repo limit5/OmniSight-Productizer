@@ -261,11 +261,11 @@ Legend:
 - [x] Cert artifact generator
 
 ### C19. L4-CORE-19 Imaging / document pipeline (#240)
-- [ ] Scanner ISP path (CIS/CCD → 8/16-bit grey/RGB)
-- [ ] OCR integration (Tesseract / PaddleOCR / vendor SDK)
-- [ ] TWAIN driver template (Windows)
-- [ ] SANE backend template (Linux)
-- [ ] ICC color profile embedding
+- [x] Scanner ISP path (CIS/CCD → 8/16-bit grey/RGB)
+- [x] OCR integration (Tesseract / PaddleOCR / vendor SDK)
+- [x] TWAIN driver template (Windows)
+- [x] SANE backend template (Linux)
+- [x] ICC color profile embedding
 
 ### C20. L4-CORE-20 Print pipeline (#241)
 - [ ] IPP/CUPS backend wrapper

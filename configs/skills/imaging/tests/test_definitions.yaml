@@ -1,0 +1,89 @@
+schema_version: 1
+test_suites:
+  - id: imaging_isp_suite
+    name: "Scanner ISP Pipeline Tests"
+    description: "Validate ISP stages for CIS/CCD sensors"
+    tests:
+      - id: test_isp_grey_8bit_cis
+        name: "CIS grey 8-bit pipeline"
+        type: unit
+      - id: test_isp_rgb_24bit_ccd
+        name: "CCD RGB 24-bit pipeline"
+        type: unit
+      - id: test_isp_grey_16bit_ccd
+        name: "CCD grey 16-bit HDR pipeline"
+        type: unit
+      - id: test_isp_binarization
+        name: "Document binarization stage"
+        type: unit
+      - id: test_isp_deskew
+        name: "Auto deskew stage"
+        type: unit
+
+  - id: imaging_ocr_suite
+    name: "OCR Integration Tests"
+    description: "Validate OCR engine abstraction"
+    tests:
+      - id: test_ocr_tesseract
+        name: "Tesseract OCR run"
+        type: unit
+      - id: test_ocr_paddleocr
+        name: "PaddleOCR run"
+        type: unit
+      - id: test_ocr_vendor_sdk
+        name: "Vendor SDK OCR run"
+        type: unit
+      - id: test_ocr_invalid_engine
+        name: "Unknown engine error"
+        type: unit
+
+  - id: imaging_twain_suite
+    name: "TWAIN Driver Tests"
+    description: "Validate TWAIN driver template generation"
+    tests:
+      - id: test_twain_state_machine
+        name: "State machine transitions"
+        type: unit
+      - id: test_twain_capabilities
+        name: "Capability negotiation"
+        type: unit
+      - id: test_twain_driver_gen
+        name: "Driver source generation"
+        type: unit
+
+  - id: imaging_sane_suite
+    name: "SANE Backend Tests"
+    description: "Validate SANE backend template generation"
+    tests:
+      - id: test_sane_options
+        name: "Option enumeration"
+        type: unit
+      - id: test_sane_api_functions
+        name: "API function list"
+        type: unit
+      - id: test_sane_backend_gen
+        name: "Backend source generation"
+        type: unit
+
+  - id: imaging_icc_suite
+    name: "ICC Profile Tests"
+    description: "Validate ICC profile generation and embedding"
+    tests:
+      - id: test_icc_srgb_gen
+        name: "sRGB profile generation"
+        type: unit
+      - id: test_icc_adobe_rgb_gen
+        name: "Adobe RGB profile generation"
+        type: unit
+      - id: test_icc_grey_gen
+        name: "Grey Gamma 2.2 profile generation"
+        type: unit
+      - id: test_icc_embed_tiff
+        name: "TIFF embedding"
+        type: unit
+      - id: test_icc_embed_jpeg
+        name: "JPEG embedding"
+        type: unit
+      - id: test_icc_embed_png
+        name: "PNG embedding"
+        type: unit
