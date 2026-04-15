@@ -863,6 +863,47 @@ export async function revokeAllOtherSessions(): Promise<{ status: string; revoke
   })
 }
 
+// ─── Audit log (J6) ──────────────────────────────────────────
+
+export interface AuditEntry {
+  id: number
+  ts: number
+  actor: string
+  action: string
+  entity_kind: string
+  entity_id: string
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+  prev_hash: string
+  curr_hash: string
+  session_id: string | null
+  session_ip: string | null
+  session_ua: string | null
+}
+
+export interface AuditFilters {
+  since?: number
+  actor?: string
+  entity_kind?: string
+  session_id?: string
+  limit?: number
+}
+
+export async function listAuditEntries(
+  filters?: AuditFilters,
+): Promise<{ items: AuditEntry[]; count: number; filtered_to_self: boolean }> {
+  const params = new URLSearchParams()
+  if (filters?.since) params.set("since", String(filters.since))
+  if (filters?.actor) params.set("actor", filters.actor)
+  if (filters?.entity_kind) params.set("entity_kind", filters.entity_kind)
+  if (filters?.session_id) params.set("session_id", filters.session_id)
+  if (filters?.limit) params.set("limit", String(filters.limit))
+  const qs = params.toString()
+  return request<{ items: AuditEntry[]; count: number; filtered_to_self: boolean }>(
+    `/audit${qs ? `?${qs}` : ""}`,
+  )
+}
+
 // ─── User preferences (J4) ───────────────────────────────────
 
 export async function getUserPreferences(): Promise<{ items: Record<string, string> }> {

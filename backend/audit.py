@@ -127,21 +127,26 @@ def log_sync(action: str, entity_kind: str, entity_id: str | None,
 
 
 async def query(*, since: float | None = None, actor: str | None = None,
-                entity_kind: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+                entity_kind: str | None = None, session_id: str | None = None,
+                limit: int = 200) -> list[dict[str, Any]]:
     conn = await _conn()
     where = []
     params: list[Any] = []
     if since is not None:
-        where.append("ts >= ?"); params.append(since)
+        where.append("a.ts >= ?"); params.append(since)
     if actor:
-        where.append("actor = ?"); params.append(actor)
+        where.append("a.actor = ?"); params.append(actor)
     if entity_kind:
-        where.append("entity_kind = ?"); params.append(entity_kind)
-    sql = ("SELECT id, ts, actor, action, entity_kind, entity_id, "
-           "before_json, after_json, prev_hash, curr_hash, session_id FROM audit_log")
+        where.append("a.entity_kind = ?"); params.append(entity_kind)
+    if session_id:
+        where.append("a.session_id = ?"); params.append(session_id)
+    sql = ("SELECT a.id, a.ts, a.actor, a.action, a.entity_kind, a.entity_id, "
+           "a.before_json, a.after_json, a.prev_hash, a.curr_hash, a.session_id, "
+           "s.ip AS session_ip, s.user_agent AS session_ua "
+           "FROM audit_log a LEFT JOIN sessions s ON a.session_id = s.token")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY a.id DESC LIMIT ?"
     params.append(int(limit))
     async with conn.execute(sql, tuple(params)) as cur:
         rows = await cur.fetchall()
@@ -155,6 +160,8 @@ async def query(*, since: float | None = None, actor: str | None = None,
             "prev_hash": r["prev_hash"],
             "curr_hash": r["curr_hash"],
             "session_id": r["session_id"],
+            "session_ip": r["session_ip"],
+            "session_ua": r["session_ua"],
         }
         for r in rows
     ]

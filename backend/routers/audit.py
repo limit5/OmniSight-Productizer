@@ -16,6 +16,14 @@ from backend import audit
 from backend import auth as _au
 from backend.routers import _pagination as _pg
 
+async def _resolve_session_hint(user_id: str, token_hint: str) -> str | None:
+    """Resolve a masked token_hint back to the full session token."""
+    sessions = await _au.list_sessions(user_id)
+    for s in sessions:
+        if s["token_hint"] == token_hint:
+            return s["token"]
+    return None
+
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
@@ -38,16 +46,22 @@ async def list_audit(
     since: float | None = None,
     actor: str | None = None,
     entity_kind: str | None = None,
+    session_id: str | None = None,
     limit: int = _pg.Limit(default=200, max_cap=500),
     _auth: None = Depends(_require_audit_token),
     user: _au.User = Depends(_au.current_user),
 ) -> dict:
-    # Phase 54 RBAC: non-admin callers can only read entries they
-    # themselves authored. Admins see everything; the optional
-    # `actor` query param narrows further.
     if not _au.role_at_least(user.role, "admin"):
-        actor = user.email  # force-narrow to self
-    rows = await audit.query(since=since, actor=actor, entity_kind=entity_kind, limit=limit)
+        actor = user.email
+    resolved_sid = session_id
+    if session_id and len(session_id) < 20:
+        full = await _resolve_session_hint(user.id, session_id)
+        if full:
+            resolved_sid = full
+    rows = await audit.query(
+        since=since, actor=actor, entity_kind=entity_kind,
+        session_id=resolved_sid, limit=limit,
+    )
     return {"items": rows, "count": len(rows), "filtered_to_self": user.role != "admin"}
 
 

@@ -83,6 +83,25 @@ async def test_query_filters(_audit_db):
 
 
 @pytest.mark.asyncio
+async def test_query_session_id_filter(_audit_db):
+    audit = _audit_db
+    await audit.log("a", "decision", "d1", actor="user", session_id="sess-aaa")
+    await audit.log("b", "operation_mode", "global", actor="user", session_id="sess-bbb")
+    await audit.log("c", "decision", "d2", actor="user", session_id="sess-aaa")
+
+    by_sess = await audit.query(session_id="sess-aaa")
+    assert len(by_sess) == 2
+    assert all(r["session_id"] == "sess-aaa" for r in by_sess)
+
+    by_sess_b = await audit.query(session_id="sess-bbb")
+    assert len(by_sess_b) == 1
+    assert by_sess_b[0]["action"] == "b"
+
+    no_match = await audit.query(session_id="sess-zzz")
+    assert len(no_match) == 0
+
+
+@pytest.mark.asyncio
 async def test_log_failure_does_not_raise(_audit_db, monkeypatch):
     audit = _audit_db
     # Force the write path to blow up by closing the connection

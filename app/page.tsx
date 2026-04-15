@@ -16,6 +16,7 @@ import { DagEditor } from "@/components/omnisight/dag-editor"
 import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
 import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
 import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"
+import { AuditPanel } from "@/components/omnisight/audit-panel"
 import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { useAuth } from "@/lib/auth-context"
@@ -47,7 +48,7 @@ const agentTemplates: Record<string, Partial<Agent>> = {
 // specific panel, and optionally focus a decision id in the dashboard.
 const VALID_PANELS: ReadonlySet<PanelId> = new Set([
   "host", "spec", "agents", "orchestrator", "tasks", "source", "npi", "vitals",
-  "decisions", "budget", "timeline", "rules", "forecast", "dag", "intent", "history",
+  "decisions", "budget", "timeline", "rules", "forecast", "dag", "intent", "history", "audit",
 ])
 
 function readPanelFromUrl(): PanelId | null {
@@ -506,6 +507,8 @@ export default function Home() {
         return <DagEditor />
       case "history":
         return <RunHistoryPanel />
+      case "audit":
+        return <AuditPanel />
       case "intent":
         return (
           <SpecTemplateEditor
