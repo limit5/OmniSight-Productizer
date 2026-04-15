@@ -349,12 +349,12 @@ Legend:
 - [x] PLC integration (Modbus/OPC-UA via CORE-13)
 
 ### C25. L4-CORE-25 Motion control / G-code / CNC abstraction (#255)
-- [ ] G-code interpreter (subset: G0/G1/G28/M104/M109/M140)
-- [ ] Stepper driver abstraction (TMC2209 / A4988 / DRV8825)
-- [ ] Heater + PID loop (hotend + bed)
-- [ ] Endstop handling + homing
-- [ ] Thermal runaway safety shutoff
-- [ ] Unit test: G-code sequence → expected motion trace
+- [x] G-code interpreter (subset: G0/G1/G28/M104/M109/M140)
+- [x] Stepper driver abstraction (TMC2209 / A4988 / DRV8825)
+- [x] Heater + PID loop (hotend + bed)
+- [x] Endstop handling + homing
+- [x] Thermal runaway safety shutoff
+- [x] Unit test: G-code sequence → expected motion trace
 
 ---
 
@@ -800,6 +800,222 @@ tests / HIL recipes / doc templates) per framework contract.
 
 ---
 
+## 🅙 Priority S — Shared Auth/Session Foundation（路線 C 前置共用基礎）
+
+> 背景：J（multi-session hardening）與 K（auth hardening）有 30% schema/API 交集（`audit_log.session_id`、sessions CRUD、sessions 表擴充）。此 S phase 先把共用基礎做完，J 與 K 即可互不干擾增量推進，避免 migration 衝突。
+
+### S0. Shared foundation
+- [ ] Alembic migration：`audit_log` 加 `session_id TEXT` 欄位 + index；既有資料 `session_id=NULL` 表示系統或匿名來源
+- [ ] `sessions` 表預留欄位：`metadata JSONB`（J 存 per-session mode）、`mfa_verified BOOLEAN DEFAULT 0`、`rotated_from TEXT`（K 用）— 一次 ALTER 到位避免日後再 migrate
+- [ ] `GET /api/v1/auth/sessions` — 列當前 user 的 active sessions（遮罩 token，顯示 IP/UA/created_at/last_seen_at）
+- [ ] `DELETE /api/v1/auth/sessions/{token}` — revoke 單一 session（admin 可 revoke 他人）
+- [ ] `DELETE /api/v1/auth/sessions` — 當前 user 的「登出所有其他裝置」
+- [ ] `current_user` 回傳值同時帶 `Session` 物件（或 `request.state.session` 注入），讓後續 audit 寫入可取 `session_id` 不需再查
+- [ ] 所有 audit 寫入點統一經 helper `write_audit(action, actor, session_id=..., ...)` — session_id 自動從 request context 取
+- [ ] 測試：sessions CRUD、revoke 後 cookie 失效、audit_log 正確帶 session_id、bearer token 寫入時 session_id=`bearer:<fingerprint>`
+- [ ] 預估：**0.5 day**
+
+---
+
+## 🅚 Priority K-early — 對外部署紅線安全（路線 C 第 2 段）
+
+> 背景：現行 auth 預設 `OMNISIGHT_AUTH_MODE=open`（無認證）、default admin 密碼為常數 `omnisight-admin`、`authenticate_password` 無速率限制。三者為對外部署前必須解掉的紅燈。
+
+### K1. 預設配置強化 + 部署檢查
+- [ ] Startup self-check：若 `ENV=production` 但 `OMNISIGHT_AUTH_MODE != strict` → 拒絕啟動（明確錯誤訊息 + 退出碼 78）
+- [ ] 若 default admin 密碼仍為 `omnisight-admin` → 啟動時強制標記 `must_change_password=1`，登入後任何 API 除 `POST /auth/change-password` 全回 428 Precondition Required
+- [ ] Docker `Dockerfile.backend` / compose prod：預設 env `OMNISIGHT_AUTH_MODE=strict`
+- [ ] 文件 `docs/ops/security_baseline.md`：列出部署前 checklist（strict mode、改密碼、bearer token 僅限 CI 白名單 IP）
+- [ ] 測試：啟動模式檢查、未改密碼時 API 拒絕
+- [ ] 預估：**0.5 day**
+
+### K2. 登入速率限制 + 帳號鎖定
+- [ ] `backend/rate_limit.py`：in-process token bucket（未來 I 多 worker 時換 Redis）— 預設 `/auth/login` 每 IP 5/min、每 email 10/hour
+- [ ] `users` 表加 `failed_login_count`、`locked_until`；連續 10 次失敗 → 鎖 15 分鐘（指數 backoff 上限 24h）
+- [ ] 鎖定期間 `authenticate_password` 回 `None` 且不走 PBKDF2（省 CPU）
+- [ ] 成功登入 reset counter；audit_log 記錄 `auth.login.fail` / `auth.lockout`
+- [ ] 測試：rate limit 生效、lockout 釋放、時間衰減
+- [ ] 預估：**1 day**
+
+### K3. Cookie flags + CSP 驗證
+- [ ] 驗所有 `Set-Cookie`：session → `HttpOnly + Secure + SameSite=Lax`；CSRF → `Secure + SameSite=Lax`（不可 HttpOnly，前端要讀）
+- [ ] 加入 `secure.py` middleware（若無）設 CSP、`X-Frame-Options=DENY`、`Referrer-Policy=strict-origin`、`Permissions-Policy`
+- [ ] CSP 嚴格模式（nonce-based）避免 inline script；前端 Next.js config 配合
+- [ ] E2E 測試：`curl -I` 驗 response header；Playwright 驗 CSP 阻擋 inline eval
+- [ ] 預估：**0.5 day**
+
+**K-early 總預估**：**2 day**。完成即可對外部署不會被立刻打爆。
+
+---
+
+## 🅙 Priority J — Multi-session Single-user Hardening（路線 C 第 3 段）
+
+> 背景：單人但多處登入（筆電 / 手機 / 多 tab）時目前有 7 類體驗問題：SSE 全域廣播、localStorage 各機器不同步、`_ModeSlot` 全域共用、workflow_run 併發無樂觀鎖、無 session 管理 UI、audit 無 session_id（已由 S0 解掉）、operation mode 全域。此 phase 補齊。
+
+### J1. SSE per-session filter
+- [ ] Event envelope 加 `session_id` + `broadcast_scope: session|user|global`
+- [ ] 前端 SSE client 比對當前 `session_id` 過濾（預設只看自己 session 觸發的 + user-level 通知）
+- [ ] UI toggle：「顯示所有我的 session 事件」/「僅本 session」
+- [ ] 測試：多 session fixture → 驗證過濾正確
+- [ ] 預估：**0.5 day**
+
+### J2. Workflow_run 樂觀鎖
+- [ ] `workflow_runs` 加 `version INTEGER DEFAULT 0` + migration
+- [ ] Retry / cancel / update endpoints：require `If-Match: <version>` header；version 不符回 409
+- [ ] 前端按鈕按下時帶當前 version；409 → 提示「另一處已修改，請重新整理」
+- [ ] 測試：並發 retry 只有一個成功
+- [ ] 預估：**0.5 day**
+
+### J3. Session management UI
+- [ ] `components/omnisight/session-manager-panel.tsx`：列 S0 `/auth/sessions` 結果（device / IP / created / last_seen）
+- [ ] 每列 Revoke 按鈕 + 「登出其他所有裝置」按鈕
+- [ ] 當前 session 標記 "This device"
+- [ ] E2E 測試：revoke 後該裝置下次 API call 得 401
+- [ ] 預估：**1 day**
+
+### J4. localStorage 多 tab 同步
+- [ ] 所有 `omnisight:*` keys 加 `user_id` 前綴（從登入 context 取）
+- [ ] `window.addEventListener('storage', ...)` 跨 tab 同步 spec / locale / wizard 狀態
+- [ ] 首次載入 wizard 判斷改查 server-side `user_preferences` 表（共用電腦第二使用者不被跳過）
+- [ ] 測試：Playwright 雙 tab scenario
+- [ ] 預估：**0.5 day**
+
+### J5. Per-session Operation Mode
+- [ ] Operation Mode 從全域 config 搬到 `sessions.metadata.operation_mode`
+- [ ] `_ModeSlot` 讀取改為 per-session（budget 仍是全域池，但 mode cap 個別計算）
+- [ ] UI mode selector 只影響當前 session，tooltip 顯示「此設定僅影響本裝置」
+- [ ] 測試：A session turbo + B session supervised 各自 mode cap 生效
+- [ ] 預估：**0.5 day**
+
+### J6. Audit UI 帶 session 過濾
+- [ ] Audit 查詢頁加 session filter（列表 + 目前 session 快捷鈕）
+- [ ] 顯示每筆 audit 的 device / IP（從 session 聯結）
+- [ ] 預估：**0.5 day**
+
+**J 總預估**：**3.5 day**
+
+---
+
+## 🅚 Priority K-rest — Auth Hardening 完整版（路線 C 第 4 段）
+
+### K4. Session rotation + binding
+- [ ] 登入成功 / 密碼變更 / 權限升級 → 產新 token，舊 token 寫 `rotated_from` 指向新 token；舊 token grace 30s 允許 in-flight request，之後失效
+- [ ] Session 綁 UA hash（非 IP，移動網路 IP 常變）；UA 變更記警告但不強制登出
+- [ ] 測試：rotate 流程、grace window、UA 變更警告
+- [ ] 預估：**1 day**
+
+### K5. MFA (TOTP) + Passkey (WebAuthn) 骨架
+- [ ] `user_mfa` 表：method (totp/webauthn)、secret/credential、created_at、last_used
+- [ ] TOTP：enrollment QR + verify flow；backup codes（10 組，單次）
+- [ ] WebAuthn：`py_webauthn` 套件、register + authenticate endpoints
+- [ ] 登入流程：密碼 OK → 若有 MFA → `mfa_required=true` response → 驗通過才 `create_session(mfa_verified=True)`
+- [ ] Strict mode 可設 `require_mfa=True` 強制 admin / operator 啟用
+- [ ] UI：Settings → MFA 管理頁
+- [ ] 測試：TOTP drift 容忍、backup code 單次性
+- [ ] 預估：**2.5 day**
+
+### K6. Bearer token per-key + 稽核
+- [ ] 廢除單一 `OMNISIGHT_DECISION_BEARER` env；改 `api_keys` 表（id、name、hashed_key、scopes、created_by、last_used_ip、enabled）
+- [ ] CLI / CI 憑個別 key 呼叫；audit_log 帶 `session_id=bearer:<key_id>` 可追
+- [ ] Admin UI 建 / rotate / revoke key
+- [ ] Migration 舊 env：啟動時偵測 → 自動建一筆 `legacy-bearer` key 並發警告要求盡快換
+- [ ] 測試：scope 限制（只能呼叫白名單 endpoint）、revoke 即時生效
+- [ ] 預估：**1 day**
+
+### K7. 密碼政策 + Argon2id 升級路徑
+- [ ] 密碼強度：最短 12 字、zxcvbn score ≥ 3
+- [ ] 新密碼比對歷史 5 筆（`password_history` 表）
+- [ ] Hash 格式支援 `argon2id$...`；驗證時雙軌（舊 pbkdf2 驗成功後自動 rehash 成 argon2id）
+- [ ] `argon2-cffi` 依賴加入
+- [ ] 測試：升級路徑、舊 hash 仍可驗、下次登入自動升級
+- [ ] 預估：**0.5 day**
+
+**K-rest 總預估**：**5 day**
+
+**路線 C 總預估**：S0 (0.5) + K-early (2) + J (3.5) + K-rest (5) = **11 day**
+
+---
+
+## 🅘 Priority I — Multi-tenancy Foundation（緊接路線 C 之後）
+
+> 背景：完成路線 C 後，auth + session + audit 基礎 hardened，才適合把「單人多 session」擴成「多租戶多 user」。此 phase 是正式多人上線的 gate。相依：**G4（Postgres）** 必須完成（SQLite 無 RLS）、**H1-H4a（host-aware）** 必須完成（I6 才有 token bucket 可拆 per-tenant）、**S0 + K-early** 必須完成（auth baseline）。
+
+### I1. Schema: tenants + tenant_id 欄位 + 回填
+- [ ] 新增 `tenants` 表（id / name / plan / created_at / enabled）
+- [ ] `users` 加 `tenant_id`（一人一 tenant；未來多 tenant 用 `user_tenant_membership` 中介表）
+- [ ] 所有業務表加 `tenant_id`：`workflow_runs` / `debug_findings` / `decisions` / `event_log` / `audit_log` / `spec_*` / `artifacts` / `user_preferences`
+- [ ] Alembic 遷移 + 回填腳本（既有資料歸預設 tenant `t-default`）
+- [ ] 測試：migration 幂等、回填正確
+- [ ] 預估：**3 day**
+
+### I2. Query layer RLS（SQLAlchemy global filter）
+- [ ] `backend/db_context.py`：`current_tenant_id()` context var
+- [ ] SQLAlchemy event listener：所有 SELECT 自動注入 `WHERE tenant_id = :current`（Postgres 可改 RLS policy）
+- [ ] INSERT 自動填 `tenant_id = current`
+- [ ] Router 層 `require_tenant` dependency 從 user 取 tenant_id 塞進 context
+- [ ] 測試：跨 tenant 查詢回空、INSERT 無法指定他 tenant
+- [ ] 預估：**2 day**
+
+### I3. SSE per-tenant + per-user filter（延伸 J1）
+- [ ] Event envelope 加 `tenant_id`；subscriber 自動綁當前 tenant
+- [ ] `broadcast_scope` 擴充 `tenant` 選項
+- [ ] 回歸測試：A tenant 監聽只收到 A 的事件
+- [ ] 預估：**1.5 day**
+
+### I4. Secrets per-tenant
+- [ ] `git_credentials` / `provider_keys` / `cloudflare_tokens`（B12 產物）全改 tenant-scoped 表
+- [ ] `backend/secrets.py` API 加 tenant_id 維度
+- [ ] Migration：既有共用 credentials 分給 `t-default`
+- [ ] UI：Settings 頁分 tenant 視圖
+- [ ] 預估：**2 day**
+
+### I5. Filesystem namespace
+- [ ] `data/tenants/<tid>/{artifacts,ingest,backups,workflow_runs}/`
+- [ ] 所有寫路徑函式接受 tenant context
+- [ ] `_INGEST_ROOT` 改 `/tmp/omnisight_ingest/<tid>/`
+- [ ] Migration 腳本搬既有檔案到 `t-default`
+- [ ] 測試：跨 tenant 路徑隔離
+- [ ] 預估：**1.5 day**
+
+### I6. Sandbox fair-share（DRF per-tenant）
+- [ ] H4a 的 token bucket 改 per-tenant；全域 CAPACITY_MAX 維持 12
+- [ ] Dominant Resource Fairness：每 tenant 拿到 `CAPACITY_MAX / active_tenant_count` 的保證最低值
+- [ ] 空閒時可超用他 tenant 未用額度，他 tenant 來時 30s 內讓出
+- [ ] Turbo 加 per-tenant cap 防單 tenant 獨佔
+- [ ] 測試：兩 tenant 負載模擬、餓死防護
+- [ ] 預估：**1.5 day**
+
+### I7. Frontend tenant-aware
+- [ ] localStorage 前綴改 `omnisight:${tenantId}:${userId}:*`
+- [ ] Tenant switcher UI（若 user 多 tenant）+ 切換時清當前 context
+- [ ] 所有 API client 自動帶 `X-Tenant-Id` header（middleware 雙重驗）
+- [ ] 預估：**1 day**
+
+### I8. Audit log per-tenant hash chain
+- [ ] 每 tenant 獨立 genesis + chain（Phase 53 hash chain 改 per-tenant 分岔）
+- [ ] 跨 tenant 查詢封鎖（admin 明確切 tenant 才能看）
+- [ ] 驗證工具支援 per-tenant chain 完整性
+- [ ] 預估：**1 day**
+
+### I9. Rate limit per-user / per-tenant
+- [ ] K2 的 rate limit 擴充維度：per-IP + per-user + per-tenant
+- [ ] 換 Redis token bucket（為 I10 準備）
+- [ ] Quota config：tenant.plan → limits
+- [ ] 預估：**1 day**
+
+### I10. Multi-worker uvicorn + shared state
+- [ ] uvicorn `--workers N`（N = CPU_cores / 2，16 core → 8 worker）
+- [ ] Shared state 搬 Redis：`_parallel_in_flight` / AIMD budget / SSE subscriber registry / rate limit
+- [ ] Sticky session 若需要（SSE 連線要黏 worker）
+- [ ] 測試：滾動重啟 worker 無事件遺失
+- [ ] 預估：**2 day**
+
+**I 總預估**：**16.5 day**
+
+**相依**：I 必須在 **G4 + H4a + S0 + K-early** 完成後才開工；I 進行中 B12（CF Tunnel wizard）設計需配合 I4 改 tenant-scoped。
+
+---
+
 ## Execution order (recommended)
 
 ### Phase 1 — clear the runway (1-2 weeks)
@@ -835,6 +1051,15 @@ G1 (graceful shutdown + readyz) → G2 (reverse proxy + dual instance) → G3 (b
 ### Phase 8 — Host-aware Coordinator（~1.5 week，可與 Phase 7 並行）
 H1 (host metrics, baseline hardcode) → H2 (load-aware scheduling) → H3 (UI panel)
 → H4a (AIMD + weighted token bucket) → H4b (cost calibration, H1 上線 1 週後執行)
+
+### Phase 9 — Auth/Session 路線 C（~2.5 week）
+S0 (shared foundation, 0.5d) → K-early K1-K3 (對外部署紅線, 2d)
+→ J1-J6 (multi-session UX, 3.5d) → K-rest K4-K7 (MFA / rotate / bearer / argon2id, 5d)
+
+### Phase 10 — Multi-tenancy Foundation（~3.5 week，必須在 G4 + H4a + S0 + K-early 之後）
+I1 (schema + tenant_id) → I2 (RLS) → I3 (SSE filter) → I4 (secrets per-tenant)
+→ I5 (filesystem namespace) → I6 (sandbox fair-share DRF) → I7 (frontend tenant-aware)
+→ I8 (audit per-tenant chain) → I9 (rate limit) → I10 (multi-worker + Redis shared state)
 
 ---
 

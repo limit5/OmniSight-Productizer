@@ -120,6 +120,12 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Event persistence**: DLQ with retry (3x exponential backoff), event_log table, replay API
 - **Debug blackboard**: cross-agent error tracking, loop detection, /system/debug API
 
+### Hardware Abstraction (Layer A Core)
+- **Machine Vision** (C24): GenICam + 4 transport adapters + HW trigger + multi-camera calibration
+- **Depth/3D Sensing** (C23): ToF + structured light + stereo SGBM + point cloud + ICP/SLAM
+- **Barcode Scanner** (C22): 4 vendor adapters + 16 symbologies + 3 decode modes
+- **Motion Control** (C25): G-code interpreter + 3 stepper drivers + PID heaters + thermal runaway safety
+
 ### Slash Commands
 Type `/` in any input field for autocomplete:
 

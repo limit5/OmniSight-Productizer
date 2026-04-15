@@ -1,9 +1,38 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
-> 撰寫時間：2026-04-15
-> 最後 commit：pending (master)
+> 撰寫時間：2026-04-16
+> 最後 commit：C25 motion control (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## C25 (complete) L4-CORE-25 Motion control / G-code / CNC abstraction（2026-04-16 完成）
+
+**背景**：OmniSight 需要統一的動作控制框架，支援 3D 列印 / CNC 加工的 G-code 解析、步進馬達驅動、加熱 PID 控制、限位開關歸零以及熱失控安全保護。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| G-code 解釋器 | 支援 G0/G1/G28/M104/M109/M140，含註解過濾、參數解析 | ✅ 完成 |
+| Stepper 驅動抽象 | TMC2209 (UART/StallGuard) + A4988 + DRV8825，ABC 模式 | ✅ 完成 |
+| Heater + PID | 獨立 hotend/bed PID 迴路，含模擬步進、anti-windup | ✅ 完成 |
+| Endstop + 歸零 | 機械/光學/StallGuard 限位開關 + 單軸/全軸歸零序列 | ✅ 完成 |
+| 熱失控保護 | 雙階段偵測（加溫中/恆溫維持），自動關閉所有加熱器與馬達 | ✅ 完成 |
+| Machine 整合 | 完整 G-code→motion trace pipeline，含時間模擬 | ✅ 完成 |
+| REST API | `/motion/*` — 14 endpoints（machines/load/execute/estop/recipes/gate） | ✅ 完成 |
+| 測試 | 107 項通過：config/parser/drivers/PID/endstops/thermal/machine/recipes/gate | ✅ 完成 |
+
+**新增檔案**：
+- `backend/motion_control.py` — 核心模組（G-code parser + stepper drivers + PID + endstops + thermal runaway + machine integration）
+- `configs/motion_control.yaml` — YAML 配置（6 G-code commands + 3 drivers + 4 axes + 2 heaters + 3 endstop types + 6 test recipes）
+- `backend/routers/motion_control.py` — FastAPI router，14 REST endpoints
+- `backend/tests/test_motion_control.py` — 107 unit tests，13 test classes
+
+**設計決策**：
+- 採 **兩階段熱失控偵測**（Phase 1: 加溫中監控溫度是否持續上升；Phase 2: 達到目標溫度後監控偏差），避免加溫過程中的假陽性
+- PID 模擬器使用 anti-windup guard，確保在目標溫度附近不會過沖
+- TMC2209 支援 StallGuard 無感測器歸零，A4988/DRV8825 僅支援 step/dir 介面
+- Machine 類別整合所有子系統，提供統一的 G-code→trace 執行管道
 
 ---
 
@@ -43,6 +72,78 @@
 - 模組名為 `secret_store.py`（避免與 stdlib `secrets` 衝突）
 
 **驗收**：新使用者 10 分鐘內從「沒有 tunnel」到「公網 HTTPS 可訪問 `/api/v1/health`」，過程中不需 SSH 進主機或手敲 `cloudflared` 指令。
+
+---
+
+## S / J / K / I (pending) 路線 C：Auth Hardening + Multi-session + Multi-tenancy（2026-04-16 登錄）
+
+**背景**：現行 auth (Phase 54) 對單人內網夠用，對外部署 / 多人上線存在三類缺口：(1) 預設 `open` mode + default admin 弱密碼 + 無 login rate limit — **對外部署紅線**；(2) 多處登入 UX 差（SSE 全域廣播、localStorage 不同步、無 session 管理 UI、operation mode 全域）；(3) 完全無 tenant 隔離（SQLite 單表、無 tenant_id、SSE 廣播洩漏風險、secrets 共用）。
+
+**策略**：採「路線 C」— 先做共用基礎，再切「紅線安全」→「UX 紅利」→「完整 hardening」，最後才開多租戶。理由：J 與 K 有 30% schema 交集（`audit_log.session_id`、sessions CRUD、sessions 表欄位），共用基礎一次到位避免 migration 衝突；K-early 先解部署紅線讓系統可對外；J 再補多裝置 UX；K-rest 完成後 auth baseline 穩固，I 才安全地開租戶隔離。
+
+### 路線 C 摘要表
+
+| Phase | 主題 | 狀態 | 預估 |
+|---|---|---|---|
+| **S0** | Shared foundation：`audit_log.session_id` + `sessions` 預留欄位 + sessions CRUD API + `write_audit` helper | ⏳ 待辦 | 0.5 day |
+| **K1** | 預設配置強化：production 強制 `strict` mode、default admin 密碼強制改、部署 checklist | ⏳ 待辦 | 0.5 day |
+| **K2** | 登入速率限制 + 帳號鎖定（failed_login_count / locked_until / 指數 backoff） | ⏳ 待辦 | 1 day |
+| **K3** | Cookie flags（HttpOnly/Secure/SameSite）+ CSP + 安全 headers middleware | ⏳ 待辦 | 0.5 day |
+| **J1** | SSE per-session filter（event envelope + broadcast_scope + UI toggle） | ⏳ 待辦 | 0.5 day |
+| **J2** | `workflow_runs` 樂觀鎖（version 欄位 + If-Match header + 409 處理） | ⏳ 待辦 | 0.5 day |
+| **J3** | Session management UI（列 active sessions + revoke + 登出所有其他裝置） | ⏳ 待辦 | 1 day |
+| **J4** | localStorage 多 tab 同步 + user_id 前綴 + wizard 改 server-side preferences | ⏳ 待辦 | 0.5 day |
+| **J5** | Per-session Operation Mode（搬 `sessions.metadata`，`_ModeSlot` 讀 per-session） | ⏳ 待辦 | 0.5 day |
+| **J6** | Audit UI 帶 session filter + device/IP 顯示 | ⏳ 待辦 | 0.5 day |
+| **K4** | Session rotation + UA binding（登入/改密/提權 rotate；UA 變更警告） | ⏳ 待辦 | 1 day |
+| **K5** | MFA (TOTP) + Passkey (WebAuthn)：enrollment + backup codes + strict mode require_mfa | ⏳ 待辦 | 2.5 day |
+| **K6** | Bearer token 改 per-key：`api_keys` 表 + scopes + audit + legacy env 自動 migrate | ⏳ 待辦 | 1 day |
+| **K7** | 密碼政策（12 字 + zxcvbn ≥ 3 + 歷史 5 筆）+ Argon2id 升級路徑（驗舊 pbkdf2 成功後自動 rehash） | ⏳ 待辦 | 0.5 day |
+
+**路線 C 總預估**：S0 (0.5) + K-early (2) + J (3.5) + K-rest (5) = **11 day**
+
+### Multi-tenancy Phase I（緊接路線 C 之後）
+
+**相依**：必須在 **G4（Postgres）+ H4a（AIMD）+ S0 + K-early** 完成後才開工。
+
+| Phase | 主題 | 預估 |
+|---|---|---|
+| I1 | Schema：`tenants` 表 + 業務表全加 `tenant_id` + Alembic + 回填 `t-default` | 3 day |
+| I2 | Query layer RLS（SQLAlchemy global filter 或 Postgres RLS policy） | 2 day |
+| I3 | SSE per-tenant filter（延伸 J1） | 1.5 day |
+| I4 | Secrets per-tenant（git_credentials / provider_keys / cloudflare_tokens 全 scope 化） | 2 day |
+| I5 | Filesystem namespace `data/tenants/<tid>/*` | 1.5 day |
+| I6 | Sandbox fair-share DRF：H4a token bucket 改 per-tenant + 空閒超用 + 讓出 | 1.5 day |
+| I7 | Frontend tenant-aware：localStorage 前綴 + tenant switcher + `X-Tenant-Id` header | 1 day |
+| I8 | Audit log per-tenant hash chain 分岔 + 跨 tenant 查詢封鎖 | 1 day |
+| I9 | Rate limit per-user/per-tenant（Redis token bucket，換掉 K2 in-process 版） | 1 day |
+| I10 | Multi-worker uvicorn + Redis shared state（`_parallel_in_flight` / AIMD / SSE / rate limit） | 2 day |
+
+**I 總預估**：**16.5 day**
+
+### 整體時序
+
+```
+G4 (Postgres) ──┐
+H1→H4a         ─┼──► S0 ──► K-early ──► J ──► K-rest ──► I1..I10
+                │   0.5d     2d        3.5d    5d       16.5d
+                │   └─────── 路線 C（11d）────┘
+                └──► 並行可能
+```
+
+**關鍵交付里程碑**：
+- K-early 完成：系統可對外部署不會被立刻打爆
+- J 完成：單人多裝置 UX 順暢
+- K-rest 完成：auth baseline 達 SOC2 前置水準（MFA / rotate / 可稽核 bearer / argon2id）
+- I 完成：真正多租戶 production-ready，可開 SaaS
+
+**風險**：
+1. I1 回填腳本在既有資料量大時會長時間鎖表 — 需分批 + 可暫停
+2. K5 MFA 啟用後若使用者遺失裝置 + backup codes 用盡 → admin 緊急 reset 流程要先定義
+3. I10 多 worker 後 SSE sticky session 需反向代理配合（跟 G2 Caddy 配置要對齊）
+4. K6 廢除 legacy bearer 會破壞 CI / scripts — 需提前 2 週通知
+
+**詳細 sub-tasks** 見 `TODO.md` Priority S / K-early / J / K-rest / I 各區段。
 
 ---
 
