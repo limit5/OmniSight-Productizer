@@ -1,9 +1,38 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：K2 Login rate limiting + account lockout (master)
+> 最後 commit：K3 Cookie flags + CSP hardening (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## K3 (complete) Cookie flags + CSP 驗證（2026-04-16 完成）
+
+**背景**：強化 HTTP response header 安全性，防止 XSS、clickjacking、MIME sniffing 等攻擊。Cookie 旗標確保 session/CSRF token 在傳輸層得到保護；CSP nonce-based 策略消除 inline script 執行風險。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Cookie flags 驗證 | session: HttpOnly+Secure+SameSite=Lax；CSRF: Secure+SameSite=Lax（無 HttpOnly） | ✅ 已驗證 |
+| Backend security headers | CSP script-src 移除 unsafe-inline、Referrer-Policy → strict-origin | ✅ 完成 |
+| Next.js CSP middleware | 每次請求生成 nonce，script-src 使用 nonce-based 策略 | ✅ 完成 |
+| Frontend nonce 傳遞 | layout.tsx 讀取 x-nonce header，傳給 Vercel Analytics | ✅ 完成 |
+| 安全 headers 全套 | X-Frame-Options=DENY, X-Content-Type-Options=nosniff, Permissions-Policy, HSTS | ✅ 完成 |
+| Backend 單元測試 | 6 項：cookie flags 2 + security headers 2 + CSP 2 | ✅ 6/6 pass |
+| E2E 測試 spec | Playwright: CSP nonce 驗證、header 驗證、inline eval 阻擋 | ✅ 完成 |
+
+**新增/修改檔案**：
+- `backend/main.py` — CSP script-src 移除 `'unsafe-inline'`、Referrer-Policy 改為 `strict-origin`
+- `middleware.ts` — Next.js Edge middleware，每請求生成 CSP nonce + 設定全套安全 headers
+- `app/layout.tsx` — async layout 讀取 x-nonce header，傳入 Analytics nonce prop
+- `backend/tests/test_k3_cookie_csp.py` — 6 項 backend 測試
+- `e2e/k3-security-headers.spec.ts` — 6 項 E2E 測試（Playwright）
+
+**CSP 策略摘要**：
+- Backend API: `script-src 'self'`（API 不需要 inline script）
+- Frontend HTML: `script-src 'self' 'nonce-{random}'`（每請求唯一 nonce）
+- 兩端都禁止 `unsafe-eval`
+- `style-src 'self' 'unsafe-inline'` 保留（Tailwind CSS 需要）
 
 ---
 

@@ -397,11 +397,11 @@ Legend:
 - [x] 預估：**1 day**
 
 ### K3. Cookie flags + CSP 驗證
-- [ ] 驗所有 `Set-Cookie`：session → `HttpOnly + Secure + SameSite=Lax`；CSRF → `Secure + SameSite=Lax`（不可 HttpOnly，前端要讀）
-- [ ] 加入 `secure.py` middleware（若無）設 CSP、`X-Frame-Options=DENY`、`Referrer-Policy=strict-origin`、`Permissions-Policy`
-- [ ] CSP 嚴格模式（nonce-based）避免 inline script；前端 Next.js config 配合
-- [ ] E2E 測試：`curl -I` 驗 response header；Playwright 驗 CSP 阻擋 inline eval
-- [ ] 預估：**0.5 day**
+- [x] 驗所有 `Set-Cookie`：session → `HttpOnly + Secure + SameSite=Lax`；CSRF → `Secure + SameSite=Lax`（不可 HttpOnly，前端要讀）
+- [x] 加入 `secure.py` middleware（若無）設 CSP、`X-Frame-Options=DENY`、`Referrer-Policy=strict-origin`、`Permissions-Policy`
+- [x] CSP 嚴格模式（nonce-based）避免 inline script；前端 Next.js config 配合
+- [x] E2E 測試：`curl -I` 驗 response header；Playwright 驗 CSP 阻擋 inline eval
+- [x] 預估：**0.5 day**
 
 **K-early 總預估**：**2 day**。完成即可對外部署不會被立刻打爆。
 
