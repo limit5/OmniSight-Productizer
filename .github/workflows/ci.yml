@@ -72,6 +72,47 @@ jobs:
             exit 1
           fi
 
+  openapi-contract:
+    # N3 — fail CI when FastAPI's OpenAPI schema drifts from the committed
+    # `openapi.json` snapshot or the generated `lib/generated/api-types.ts`.
+    # Rationale: the frontend pins its type contract to a file in git;
+    # without this gate a backend schema change could quietly reshape the
+    # wire format with no frontend compile error. Two gates here:
+    #   1. snapshot  — regenerate openapi.json and `git diff --exit-code`
+    #   2. ts types  — regenerate api-types.ts and diff likewise
+    # Either diff means a PR author forgot to run `pnpm run openapi:sync`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install --require-hashes -r backend/requirements.txt
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+      - run: pnpm install --frozen-lockfile --prefer-offline
+      - name: regenerate openapi.json
+        env:
+          OMNISIGHT_DEBUG: "true"
+        run: python scripts/dump_openapi.py
+      - name: regenerate lib/generated/api-types.ts
+        run: pnpm exec openapi-typescript openapi.json -o lib/generated/api-types.ts
+      - name: fail on openapi drift
+        run: |
+          set -eu
+          DIRTY="$(git status --porcelain -- openapi.json lib/generated/api-types.ts || true)"
+          if [ -n "$DIRTY" ]; then
+            echo "::error::OpenAPI contract drift — FastAPI schema changed but the committed snapshot / generated TS types were not refreshed. Run 'pnpm run openapi:sync' locally and commit the result."
+            echo "$DIRTY"
+            git --no-pager diff -- openapi.json | head -120
+            git --no-pager diff -- lib/generated/api-types.ts | head -120
+            exit 1
+          fi
+      # The repo-wide `tsc --noEmit` gate lives in the `lint` job; we
+      # don't duplicate it here. The drift check above is the N3 gate.
+
   renovate-config:
     # N2 — fail CI if `renovate.json` is invalid against the Renovate
     # schema. Cheap (~30s on warm cache) and catches typos before they

@@ -2126,3 +2126,40 @@ export async function updateApiKeyScopes(keyId: string, scopes: string[]): Promi
     body: JSON.stringify({ scopes }),
   })
 }
+
+// ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
+// These type aliases reach into `lib/generated/api-types.ts` (auto-generated
+// from the FastAPI app's OpenAPI schema). The moment any of the referenced
+// routes or schemas is renamed, removed, or reshaped on the backend, `tsc
+// --noEmit` in CI fails — exactly the "FastAPI schema drifts → frontend
+// compile blows up" contract N3 promises.
+//
+// Full replacement of the hand-rolled `ApiAgent` / `ApiTask` etc. with
+// generated equivalents is intentionally out of scope (too much surface to
+// migrate in one pass). Over time, prefer `GetResponse<"/api/v1/...">` from
+// `./generated/openapi` for new endpoints.
+import type {
+  AgentSchema as _N3_AgentSchema,
+  TaskSchema as _N3_TaskSchema,
+  GetResponse as _N3_GetResponse,
+  PostBody as _N3_PostBody,
+} from "./generated/openapi"
+
+// The four route probes below cover the "load-bearing" endpoints of the
+// app (agents + tasks list and create). If any disappears, this file
+// stops compiling.
+type _N3_AgentsListResp = _N3_GetResponse<"/api/v1/agents">
+type _N3_TasksListResp = _N3_GetResponse<"/api/v1/tasks">
+type _N3_AgentCreateBody = _N3_PostBody<"/api/v1/agents">
+type _N3_TaskCreateBody = _N3_PostBody<"/api/v1/tasks">
+
+// `satisfies never extends …` keeps these aliases load-bearing without
+// leaking into the public module signature.
+export type _N3_ContractProbes = [
+  _N3_AgentSchema,
+  _N3_TaskSchema,
+  _N3_AgentsListResp,
+  _N3_TasksListResp,
+  _N3_AgentCreateBody,
+  _N3_TaskCreateBody,
+]

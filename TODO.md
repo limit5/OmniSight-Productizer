@@ -691,11 +691,12 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### N3. OpenAPI 前後端合約測試 + 自動生前端 type
-- [ ] CI 新 step：`curl /openapi.json > openapi.json` → `openapi-typescript openapi.json > lib/generated/api-types.ts`
-- [ ] 前端 `lib/api.ts` 改用生成的 type；FastAPI 改 schema 時前端編譯期即炸
-- [ ] `openapi.json` 納入 git + snapshot 比對；PR diff 顯示 API breaking change
-- [ ] 合約測試：前端 mock 用 schema 自動生 fixture（`msw` + `openapi-msw`）
-- [ ] 預估：**0.5 day**
+- [x] CI 新 step：`python scripts/dump_openapi.py` → `openapi-typescript openapi.json > lib/generated/api-types.ts`（offline via `app.openapi()` — 不需啟 uvicorn）
+- [x] 前端 `lib/api.ts` 改用生成的 type；FastAPI 改 schema 時前端編譯期即炸（`_N3_ContractProbes` tripwire 放在 file 尾端）
+- [x] `openapi.json` 納入 git + snapshot 比對；PR diff 顯示 API breaking change（`openapi-contract` job — `git status --porcelain` 為 CI gate）
+- [x] 合約測試：前端 mock 用 schema 自動生 fixture（`msw` + `openapi-msw`，`test/msw/` 下）
+- [x] 文件 `docs/ops/openapi_contract.md`
+- [x] 預估：**0.5 day**
 
 ### N4. LangChain / LangGraph Adapter 防火牆層
 - [ ] `backend/llm_adapter.py`：所有 `langchain*` / `langgraph*` import 集中此檔；其他模組一律只 import `llm_adapter` 的符號
@@ -1304,6 +1305,153 @@ tests / HIL recipes / doc templates) per framework contract.
 
 ---
 
+## 🅞 Priority O — Enterprise Event-Driven Multi-Agent Orchestration（企業級事件驅動架構）
+
+> 背景：`docs/design/enterprise-multi-agent-event-driven-architecture.md`（2026-04-16 新增）提出把 OmniSight 從「單程序 LangGraph + SQLite」升級為「Orchestrator Gateway + 分散式 Message Queue + Stateless Worker Pool + Merger Agent」。現行系統已具備事件驅動基礎（EventBus / SSE / DLQ / event_log）、DAG 規劃（`backend/routers/dag.py`）、worktree 隔離（`backend/workspace.py`）、CODEOWNERS pre-merge（`backend/codeowners.py`）、Jira/GitHub webhook 雙向同步——此路線目標是補齊「水平擴展 worker pool + Redis 分散式互斥 + LLM merge conflict 仲裁 + CATC payload 形式化」。
+>
+> **審核政策更新（2026-04-16 用戶裁示，覆寫 CLAUDE.md L1 原「AI 最多 +1」規則）**：AI agent 允許**直接 commit** 並推送到 Gerrit code review server。最終合併進 main repo 需**雙簽 +2**：Merger Agent 給 +2（範圍限「衝突解析正確性」，不涵蓋新邏輯審核）**且** 人工給 +2，兩者同時存在才放行。任一方未到齊皆不得 submit。⚠️ 此政策與 CLAUDE.md Safety Rule「AI reviewer max score is +1」衝突，需同步更新 L1 規則（見 O6 註記）。
+>
+> 核心價值：(1) 企業銷售 — JIRA 深度整合是 B2B 硬需求；(2) 並行開發痛點 — Merger Agent 自動化解 merge conflict（但仍需人工終審）；(3) 產品可擴展性 — 突破單 FastAPI 程序瓶頸。
+>
+> 相依（硬前置）：**G4 (Postgres + replica)**、**I10 (Redis shared state)**、**S0 + K-early (auth baseline)**、**M1-M2 (cgroup 硬隔離，已完成)**、**B12 + L (bootstrap 配 Redis/MQ endpoint)**。
+
+### O0. CATC Payload Schema + Validator (#263)
+- [ ] `backend/catc.py`：`TaskCard` dataclass（jira_ticket / acceptance_criteria / navigation{entry_point, impact_scope{allowed,forbidden}} / domain_context / handoff_protocol）
+- [ ] JSON Schema + pydantic validator（拒絕未宣告 impact_scope 的 payload）
+- [ ] Round-trip 測試（dict ↔ dataclass ↔ JSON）
+- [ ] impact_scope glob 語法（`src/camera/*`）解析器 + 單元測試
+- [ ] 與 `backend/codeowners.py` 交集檢查 helper：`check_catc_against_codeowners(card, agent_type)`
+- [ ] 預估：**0.5 day**
+
+### O1. Redis 分散式檔案路徑互斥鎖 (#264)
+- [ ] `backend/dist_lock.py`：`acquire_paths(task_id, paths, ttl_s)` / `release_paths(task_id)` / `extend_lease(task_id, ttl_s)`
+- [ ] 鎖粒度：檔案或資料夾路徑；依 path 字典序排序取得避免死鎖
+- [ ] TTL 預設 30 min；worker heartbeat 每 60 s 呼叫 `extend_lease`；掉線自動 revoke
+- [ ] Lua 腳本保證 atomic（`MULTI/EXEC` + `WATCH`）
+- [ ] 死鎖偵測：background job 偵測鎖依賴循環（依 task → path → task 圖）→ 最低優先權 task 強制 kill + 寫 audit
+- [ ] Metrics：`dist_lock_wait_seconds` / `dist_lock_held_total` / `dist_lock_deadlock_kills_total`
+- [ ] Preemption 政策：鎖超過 TTL × 2 可被更高 priority task 搶佔（搭 DRF）
+- [ ] 整合測試：3 個 task 競爭 10 個 path + heartbeat 失敗 + 死鎖場景
+- [ ] 預估：**2 day**
+
+### O2. Message Queue 抽象層 (#265)
+- [ ] `backend/queue_backend.py`：`QueueBackend` interface（push / pull / ack / nack / dlq）
+- [ ] 預設 backend：Redis Streams（與 I10 Redis 共用連線）
+- [ ] 可插拔 adapter 介面：RabbitMQ / AWS SQS（先宣告接口，不實作）
+- [ ] 任務狀態機：`Queued` → `Blocked_by_Mutex` → `Ready` → `Claimed` → `Running` → `Done / Failed`
+- [ ] Visibility timeout：claim 後 N 分鐘沒 ack → 重新入隊（worker crash 恢復）
+- [ ] 優先權佇列：P0（故障）/ P1（hotfix）/ P2（sprint）/ P3（backlog）
+- [ ] DLQ：3 次失敗進 DLQ，附 root cause + stack + 原 CATC
+- [ ] Metrics：`queue_depth{priority,state}` / `queue_claim_duration_seconds`
+- [ ] 整合測試：push/pull/ack、visibility timeout、DLQ、priority 排序
+- [ ] 預估：**2 day**
+
+### O3. Stateless Agent Worker Pool (#266)
+- [ ] `backend/worker.py`：`Worker` 進程入口——pull from queue → 拿 lock（O1）→ 起 sandbox container（已有 M1 cgroup）→ 執行 agent node → commit code → push to Gerrit → push result event → release lock
+- [ ] Worker heartbeat 寫 Redis（`worker:<id>:alive` with TTL 90 s）
+- [ ] 支援 `--capacity N` 單 worker 並行領幾個任務
+- [ ] 支援 `--tenant-filter` / `--capability-filter`（只領 particular agent_type）
+- [ ] Graceful shutdown：SIGTERM → stop claiming new + 等現有任務完成 + release lock
+- [ ] Worker registration：啟動時註冊到 Redis `workers:active` set
+- [ ] Worker orchestration：systemd unit template + docker-compose profile `workers-N`
+- [ ] Sandbox runtime enforcement：bind-mount 只掛 `impact_scope.allowed` 路徑（延伸 I5 tenant namespace）— 超出範圍物理不可達
+- [ ] Gerrit push：worker 完成任務後自動 `git review`（或等價 HTTP API）推 patchset；commit 訊息含 `Change-Id` + `CATC-Ticket:` trailer
+- [ ] 整合測試：N workers pull 同一 queue、crash recovery、heartbeat loss、graceful shutdown、Gerrit push 失敗重試
+- [ ] 預估：**3 day**
+
+### O4. Orchestrator Gateway Service (#267)
+- [ ] `backend/orchestrator_gateway.py`：獨立 FastAPI app（或現有 backend 內的 router）
+- [ ] `POST /orchestrator/intake` — 接 Jira webhook：解析 User Story → LLM 生成 DAG → 產出 N 張 CATC → impact_scope 互斥檢查 → push queue
+- [ ] `POST /orchestrator/replan` — 手動重規劃（PM approve 後觸發）
+- [ ] `GET /orchestrator/status/{jira_ticket}` — 回傳 DAG 狀態 + 每張 CATC 的 queue/run state + Gerrit patchset review 狀態（兩邊 +2 是否到齊）
+- [ ] DAG validation layer：
+  - [ ] 循環偵測（Tarjan / Kahn）
+  - [ ] impact_scope pairwise 交集檢查（避免同 sprint 內衝突 CATC）
+  - [ ] 複雜度評分 > threshold 時強制 PM approve（flag `require_human_review=true`）
+- [ ] LLM backend 可插拔：DAG 拆分可用 cheaper model（Haiku）、Merger 用 Opus
+- [ ] Token budget gate：整個 intake 流程 token 用量超 budget → reject + SSE 告警
+- [ ] 整合測試：假 Jira webhook → DAG 正確、impact_scope 衝突被擋、token 超標被擋
+- [ ] 預估：**2 day**
+
+### O5. JIRA Bidirectional Sync 深化 (#268)
+- [ ] 抽 `IntentSource` interface：`fetch_story(ticket)` / `create_subtask(parent, payload)` / `update_status(ticket, status)` / `comment(ticket, body)`
+- [ ] JIRA adapter（主）：沿用現有 webhook signature 驗證 + 加 sub-task 批次建立
+- [ ] GitHub Issues / GitLab adapter（次）：保留 vendor-agnostic，小客戶不用 JIRA 也能跑
+- [ ] Sub-task 欄位映射：CATC → JIRA custom field（impact_scope / acceptance_criteria / handoff_protocol）
+- [ ] Status 雙向：JIRA `In Progress` → queue push；Worker Gerrit push → JIRA `Reviewing`；雙 +2 到齊 + Gerrit submit → JIRA `Done`
+- [ ] Audit：所有 JIRA 外呼都進 audit_log（含 request/response hash）
+- [ ] 預估：**2 day**
+
+### O6. Merger Agent (#269) — 衝突解析器，Gerrit patchset 輸出 + AI +2 vote（**不自動合併**）
+- [ ] `backend/merger_agent.py`：specialized LLM wrapper，system prompt 固定為「合併衝突解決專家，保留雙方邏輯意圖，不得新增任何原未出現於雙方 commit 的新邏輯」
+- [ ] 輸入：conflict block（含 `<<<<<<< HEAD` 標記）+ 雙方 commit message + 檔案上下文 20 行
+- [ ] 輸出：resolved patchset（Gerrit-ready `git format-patch` 形式）+ confidence score + rationale + 顯式 diff（只限 conflict 區塊，不改其他行）
+- [ ] **Gerrit 互動流程**（新政策核心）：
+  - [ ] Merger Agent 產出 resolution → `git push HEAD:refs/for/main%topic=merger-PROJ-XXX` 推到 Gerrit（新增 patchset 到原 change）
+  - [ ] Merger Agent 自動呼叫 Gerrit REST `POST /changes/{id}/revisions/{rev}/review` 給 **Code-Review: +2**（scope 限「衝突解析正確性」，comment 說明 confidence + rationale + diff 範圍）
+  - [ ] **絕不自動 submit**——merge 必須等人工 Code-Review: +2 也到齊，Gerrit 本身的 submit-rule 判斷雙 +2 才放行
+  - [ ] Merger Agent 的 Gerrit account 為專屬 `merger-agent-bot`，scope 限定 patchset 推送與 Code-Review 投票（無 Submit 權限）
+- [ ] 自動化 gate（**不自動合併，只決定是否給 +2**）：
+  - [ ] confidence ≥ 0.9 AND 衝突 ≤ 20 行 AND 單檔 AND non-security 檔案 → Merger +2
+  - [ ] 否則 → Merger 僅推 patchset 但**不投票**（或給 Code-Review: 0）+ SSE 告警人工接手雙 +2
+  - [ ] 任何涉及 security-sensitive 檔案（auth/ secrets/ config/ CI config/ `.github/workflows/`）一律**不投票**，人工須自己 +2 兩次或拒絕
+- [ ] 強制 test gate：Merger 在投票前先跑受影響模組的 unit test，失敗則不推 patchset 直接 escalate human
+- [ ] Metrics：`merger_agent_plus_two_rate` / `merger_agent_confidence_histogram` / `merger_agent_abstain_total` / `merger_agent_security_refusal_total`
+- [ ] 失敗次數 ≥ 3 該 change 停止自動重試，escalate human（沿用 CLAUDE.md rule）
+- [ ] 整合測試：簡單 conflict（Merger +2 + mock human +2 → submit）、有歧義 conflict（Merger abstain）、security 檔案（Merger refuse）、test 失敗（Merger 不 push）、僅 Merger +2 無人工 +2（submit-rule 拒絕）、僅人工 +2 無 Merger +2（submit-rule 拒絕）
+- [ ] **CLAUDE.md L1 更新**：Safety Rules「AI reviewer max score is +1」需補一條例外條款——「Merger Agent 於衝突解析 patchset 上可給 +2，但 scope 限衝突區塊正確性；最終 submit 仍需人工 +2 雙簽」；否則實作即違反 L1 immutable rule
+- [ ] 預估：**2.5 day**（原 2d + 0.5d 用於 Gerrit REST 整合 + submit-rule 測試）
+
+### O7. Gerrit Submit-Rule 雙簽閘 + CI/CD Merge 仲裁 Pipeline (#270)
+- [ ] Gerrit `project.config` 更新 submit-rule（Prolog 或 Rules Engine）：要求同一 change 上至少一個 **Code-Review: +2 from `merger-agent-bot`** 且 **Code-Review: +2 from human reviewer**，兩者都到齊才允許 submit
+  - [ ] Submit-rule 測試：只有 merger +2 → reject；只有 human +2 → reject；兩者 +2 → allow；merger +2 + human -1 → reject
+  - [ ] 範本 `.gerrit/project.config.example` + runbook `docs/ops/gerrit_dual_two_rule.md`
+- [ ] Gerrit webhook：偵測 `merge-conflict` 事件 → 呼叫 Orchestrator `POST /orchestrator/merge-conflict` → Orchestrator 喚醒 O6 Merger Agent
+- [ ] Merger Agent 路徑：push resolved patchset → 投票（±2 / 0）→ SSE 通知人工 reviewer（Slack/email webhook）
+- [ ] 人工 reviewer 若 Code-Review: +2 → Gerrit submit-rule 通過 → 自動 merge
+- [ ] 人工 Code-Review: -1 / -2 → Merger Agent 自動 revert 其 +2（寫 comment：「human disagrees, merger withdraws」）→ change 回 work-in-progress
+- [ ] 若 Merger abstain（O6 gate 未過）→ 建 JIRA ticket + assign 原 CATC owner + 等人工雙 +2 或 reject
+- [ ] GitHub Actions workflow 範本 `.github/workflows/merge-arbiter.yml`（for GitHub-native 客戶，無 Gerrit 時退化為 PR + 2 approver required，其中一個必須是 `merger-agent-bot` GitHub App）
+- [ ] 完整 E2E 測試：兩 PR 同改一檔 → 第二個 merge conflict → Merger push 解析 patchset → Merger +2 → 通知人工 → 人工 +2 → submit → 雙方 commit 都留在 main
+- [ ] 預估：**1.5 day**（原 1d + 0.5d Gerrit submit-rule 配置與測試）
+
+### O8. 遷移路徑：從單程序到分散式（Feature Flag + Dual-mode） (#271)
+- [ ] `OMNISIGHT_ORCHESTRATION_MODE=monolith | distributed`（預設 monolith 保留既有行為）
+- [ ] `distributed` 模式：agent 執行路徑從 LangGraph node 改走 queue dispatch
+- [ ] `monolith` 模式：保留現有 LangGraph 呼叫路徑不變
+- [ ] 雙模式 behavior parity 測試：同一 input 在兩種 mode 下產出相同 event sequence
+- [ ] 灰度切換手冊 `docs/ops/orchestration_migration.md`
+- [ ] Rollback 劇本：切回 monolith 時如何處理 in-flight queue 任務
+- [ ] 預估：**2 day**
+
+### O9. 觀測性：鎖 / 佇列 / Merger / 雙簽狀態可視化 (#272)
+- [ ] Dashboard `components/omnisight/orchestration-panel.tsx`：queue depth by priority、held locks by task、**merger agent +2 rate / abstain rate / security refusal rate**、**待人工 +2 的 change 列表（含 merger confidence）**、worker pool capacity
+- [ ] SSE events：`orchestration.queue.tick` / `orchestration.lock.acquired|released` / `orchestration.merger.voted` / `orchestration.change.awaiting_human_plus_two`
+- [ ] Prometheus exporter：所有 O1/O2/O6 metrics 統一 `/metrics` 出口
+- [ ] 告警規則：queue_depth > 100 持續 5min / dist_lock_wait_p99 > 60s / merger_plus_two_rate 異常偏高（可能 LLM 過度自信）/ 雙簽 pending > 24h
+- [ ] 預估：**1 day**
+
+### O10. 安全加固（queue / lock / JIRA token / Gerrit bot）(#273)
+- [ ] Queue 傳輸 TLS + payload HMAC（防 worker 被偽造任務）
+- [ ] JIRA API token 沿用 `backend/secret_store.py` Fernet at-rest + fingerprint 顯示
+- [ ] Redis auth：ACL 分 role（orchestrator write lock、worker read+extend、observer read-only）
+- [ ] Worker attestation：啟動時 TLS 憑證 + tenant claim，orchestrator 驗證後才發任務
+- [ ] **Merger Agent Gerrit 帳號權限最小化**：`merger-agent-bot` 僅能 push to `refs/for/*` + Code-Review ±2；**不得**有 `Submit` / `Push Force` / `Delete Change` / 任何 project admin 權限
+- [ ] Merger Agent 投票 audit：每次 +2 / abstain / refuse 都寫入 hash-chain audit_log，附 change-id / patchset revision / confidence / rationale
+- [ ] 滲透測試案例：偽造 CATC、竊取鎖、注入 merger prompt、worker 偽裝、偽冒 `merger-agent-bot` 投票
+- [ ] 預估：**1.5 day**
+
+**Priority O 總預估**：**20 day**（原 19d + Merger Agent Gerrit 整合與 submit-rule 配置 +1d）（solo ~4 週，2-person team ~2-3 週）。
+
+**建議切段交付**：
+1. **O0 + O1 + O2**（4.5d）— 基礎設施：CATC + Redis lock + Queue。可單獨 ship 作為 I10 的延伸
+2. **O3 + O8**（5d）— Worker pool + migration flag。此時系統 dual-mode 可運行（worker 會 Gerrit push，但人工雙 +2 既有流程不變）
+3. **O4 + O5**（4d）— Orchestrator + JIRA 深化。B2B 銷售可用
+4. **O6 + O7**（4d）— Merger Agent 雙簽閘完整閉環。競品差異化賣點，**同時是 CLAUDE.md L1 政策變更點**
+5. **O9 + O10**（2.5d）— 觀測性與安全加固。正式對外上線前 gate
+
+---
+
 ## Execution order (recommended)
 
 ### Phase 1 — clear the runway (1-2 weeks)
@@ -1363,6 +1511,13 @@ M1 (cgroup CPU/mem) → M2 (disk quota + LRU) → M3 (per-tenant circuit breaker
 L1 (status 偵測 + /bootstrap 路由) → L2 (admin 密碼) → L3 (LLM provider) → L4 (CF Tunnel embed)
 → L5 (服務啟動 + SSE log) → L6 (smoke test + finalize) → L7 (部署模式偵測) → L8 (reset + E2E)
 
+### Phase 14 — Enterprise Event-Driven Orchestration（~4 week，必須在 G4 + I10 + S0 + K-early + B12 + L 之後）
+O0 (CATC schema) → O1 (Redis dist-lock) → O2 (MQ abstraction) — 基礎設施可獨立 ship（4.5d）
+→ O3 (Stateless worker pool + Gerrit push) + O8 (Migration feature flag) — dual-mode 可運行（5d）
+→ O4 (Orchestrator Gateway) + O5 (JIRA 深度整合) — B2B 銷售可用（4d）
+→ O6 (Merger Agent +2 vote) + O7 (Gerrit 雙簽 submit-rule + CI/CD arbiter) — 競品差異化賣點 + CLAUDE.md L1 政策變更點（4d）
+→ O9 (觀測性) + O10 (安全加固) — 對外上線 gate（2.5d）
+
 ---
 
 ## Totals
@@ -1372,7 +1527,8 @@ L1 (status 偵測 + /bootstrap 路由) → L2 (admin 密碼) → L3 (LLM provide
 | A (infrastructure) | 105-149 day |
 | B (skill packs) | 160-225 day |
 | C (software tracks) | 129-187 day |
+| O (enterprise orchestration) | 20 day |
 | META | 4-8 day |
-| **Total** | **~398-569 day** |
+| **Total** | **~418-589 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.

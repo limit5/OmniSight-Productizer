@@ -1,9 +1,39 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N2 — Renovate 自動 PR + group rules + 分層 auto-merge (master)
+> 最後 commit：N3 — OpenAPI 前後端合約測試 + 自動生前端 type (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N3 (complete) OpenAPI 前後端合約測試 + 自動生前端 type（2026-04-16 完成）
+
+**背景**：N1/N2 把依賴版本鎖死 + 自動升級交給 Renovate 之後，仍有一條垂直方向的漂移：FastAPI 後端改 Pydantic model 或重新命名 route 時，`lib/api.ts`（2128 行手刻 interface）完全無感。漂移會一直跑到 runtime 才炸在 real user。N3 把 wire format 升格成 git-committed artifact — 後端改 schema 必須同時更新 `openapi.json` 快照與生成的 TS type，否則 CI 立刻 fail；frontend 也把幾條 load-bearing 路徑/模型從生成檔 import 當作 compile-time tripwire，schema 動了就編譯炸在 editor 裡。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `scripts/dump_openapi.py` | 直接呼叫 `backend.main.app.openapi()`（不啟 uvicorn），寫出 sorted-keys + indent=2 的 `openapi.json`；`--check` mode 比對現有快照並 print 4 KB diff 當 CI 訊息；`OMNISIGHT_DEBUG=true` bypass startup validation 讓 CI 能純 schema dump | ✅ |
+| `openapi.json` @ repo root | 811 KB / 29 917 行 committed snapshot — sorted-keys + 固定 `{title: "OmniSight Engine API", version: "contract"}`（避免 app version bump 汙染 diff） | ✅ |
+| `lib/generated/api-types.ts` | `openapi-typescript@7.13` 從 snapshot 生成 / 33 092 行 / 不手改；`lib/generated/README.md` + `lib/generated/openapi.ts` 提供穩定 re-export（`GetResponse`, `PostBody`, `Schemas`, `AgentSchema`, `TaskSchema`） | ✅ |
+| `lib/api.ts` compile-time tripwire | 尾端新增 `_N3_ContractProbes` tuple：`_N3_GetResponse<"/api/v1/agents">`、`/tasks`、`_N3_PostBody<...>` — 任一路徑在 FastAPI 端被改名/刪除即 `tsc --noEmit` 失敗；hand-rolled `ApiAgent`/`ApiTask` 故意保留（整檔 migration 非 0.5d 範圍） | ✅ |
+| `.github/workflows/ci.yml` → `openapi-contract` job | 新 5-min job：pip install hashes → pnpm install → regenerate `openapi.json` + `lib/generated/api-types.ts` → `git status --porcelain` 非空即 fail + print 120 行 diff；hint 使用者跑 `pnpm run openapi:sync` | ✅ |
+| `package.json` scripts | `openapi:dump` / `openapi:types` / `openapi:sync` / `openapi:check` — 本機一鍵 refresh；`pnpm-lock.yaml` 同時鎖入 `openapi-typescript@7.13.0`, `msw@2.13.3`, `openapi-msw@1.3.0` | ✅ |
+| `test/msw/handlers.ts` | `createOpenApiHttp<paths>({ baseUrl: "" })`（因為 paths keys 已含 `/api/v1/` prefix）；`sampleAgent`/`sampleTask` fixture 都 `satisfies Schemas["Agent"/"Task"]` — schema 動了 fixture 即 compile-error | ✅ |
+| `test/msw/server.ts` | `setupServer(...handlers)` + `useMswServer()` helper；不接進 global `test/setup.ts`（legacy suite 用 `vi.stubGlobal('fetch', …)`，強灌 MSW 會打破 196 個 test） | ✅ |
+| `test/msw/openapi-contract.test.ts` | 2 個 smoke test — `listAgents`/`listTasks` 透過 MSW 走到 `lib/api.ts`；`onUnhandledRequest: "error"` 讓漏 mock 的 call 炸成失敗而非過 | ✅ |
+| `backend/tests/test_openapi_contract.py` | 4 個 pytest：script 存在 / 兩次 dump 結果 byte-identical（determinism gate）/ schema 含 `/api/v1/agents`+`/tasks`+4 個 model（frontend tripwire 的 target）/ committed snapshot 與 live schema 一致（本機快速 gate，與 CI job 做對等保險） | ✅ |
+| `docs/ops/openapi_contract.md` | 新 ~125 行 SOP：why/files table/dev workflow/CI gate/加新 probe/寫新 contract test；註明 non-goals（不全檔 replace `lib/api.ts`、MSW 不 global 注入） | ✅ |
+| 驗證 | `pnpm exec tsc --noEmit` N3 相關 0 errors（pre-existing 18 errors 無變化）；`pnpm exec vitest run` 全部 29 files / 196 + 2 (N3) = 198 tests pass；`backend/tests/test_openapi_contract.py` 4/4 pass | ✅ |
+
+**設計決策**：
+1. **離線 dump**：`app.openapi()` 直接拿 schema，不啟 uvicorn + `curl` — CI 時間 ~1 s（原 N3 spec 寫 `curl /openapi.json`，會需要啟 server、等 ready、tear down）。
+2. **預設 `OMNISIGHT_DEBUG=true`**：`backend.config.validate_startup_config` 在 `debug=False` 會強制檢查 decision bearer / provider keys，CI runner 沒這些 env。dump script 明確 `os.environ.setdefault("OMNISIGHT_DEBUG", "true")` 讓 schema 抽取不被 env-gate 擋。
+3. **`ApiAgent`/`ApiTask` 保留**：N3 spec 寫「前端 `lib/api.ts` 改用生成的 type」— 嚴格完整替換會改 ~2000 行 + 每個 consumer。選擇 *additive tripwire*（load-bearing probe tuple）取代 *destructive replace*，達到「schema 漂移 → frontend 編譯期即炸」的效果而不破壞既有 consumers。
+4. **MSW opt-in**：不灌 global setup 是為了不污染 legacy `vi.stubGlobal('fetch')` test；contract test 明示 `server.listen({ onUnhandledRequest: "error" })`。
+5. **`baseUrl: ""`**：因為 `paths` keys 就是完整路徑 `/api/v1/agents` — 若設 `/api/v1`，handler 端要寫 `/agents` 才能 compile 過，跟 MSW 實際匹配路徑脫節；`openapi-msw` 端的錯誤訊息 `intercepted a request without a matching request handler` 是踩過才懂。
+
+**Renovate 互動**：`openapi-typescript`、`msw`、`openapi-msw` 都走 N2 tier rules — `openapi-typescript` 和 `msw` 的 minor 目前會被 N2 minor tier 拉去人工審（不自動合）；`openapi-msw` 1.x 目前有 2.0 — Renovate 會開 major PR + `deploy/blue-green-required` label + 2 reviewers。
 
 ---
 
@@ -1275,6 +1305,8 @@
 
 **背景**：`docs/design/enterprise-multi-agent-event-driven-architecture.md`（2026-04-16 新增）提出把 OmniSight 從「單程序 LangGraph + SQLite」升級為「Orchestrator Gateway + 分散式 Message Queue + Stateless Worker Pool + Merger Agent」的企業級事件驅動架構。審計結果顯示 **~60% 的設計目標已由既有模組覆蓋**（EventBus / SSE / DLQ / event_log / LangGraph orchestrator / DAG router / WorkspaceManager git worktree / CODEOWNERS pre-merge / Jira+GitHub+GitLab webhook 雙向同步 / I10 Redis shared state），**剩下 40% 為真正新增能力**：CATC payload 形式化、Redis 分散式檔案路徑互斥鎖、LLM 專職 Merger Agent、Stateless worker pool、JIRA 作為唯一 Intent Store。
 
+**審核政策更新（2026-04-16 用戶裁示）**：AI agent 允許**直接 commit** 並推送到 Gerrit code review server。最終合併進 main repo 採**雙簽 +2** 政策——Merger Agent 於「衝突解析 patchset」上可給 Code-Review: +2（scope 限「衝突解析正確性」，不涵蓋新邏輯審核），人工也必須給 +2，**兩者同時存在才放行 submit**。此政策藉由 Gerrit `project.config` 的 submit-rule 強制實現（O7），違反時 Gerrit 本身拒絕 submit。⚠️ **CLAUDE.md Safety Rule「AI reviewer max score is +1」需同步更新**，補一條例外條款：「Merger Agent 於衝突解析 patchset 上可給 +2；最終 submit 仍需人工 +2 雙簽」——否則實作即違反 L1 immutable rule，詳見 O6。
+
 **評估摘要**：
 
 | 向度 | 判斷 | 說明 |
@@ -1285,19 +1317,20 @@
 
 **核心緩解**（詳見 TODO.md Priority O）：
 - 鎖死鎖：path 字典序排序 + TTL + heartbeat lease + 死鎖偵測 job（O1）
-- Merger 語意錯：confidence threshold + 行數上限 + security 檔案白名單 + 強制 test gate + 3 次失敗 escalate human（O6）
+- Merger 語意錯：confidence threshold + 行數上限 + security 檔案白名單 + 強制 test gate + **雙簽 +2 submit-rule（Merger 不能單獨合併）** + 3 次失敗 escalate human（O6 + O7）
 - impact_scope 不準：runtime enforcement — sandbox bind-mount 只掛 allowed 路徑（延伸 I5）（O3）
 - JIRA lock-in：抽 `IntentSource` interface，JIRA 為主、GitHub Issues/GitLab 為次 adapter（O5）
 - 成本：orchestrator 拆 DAG 用 Haiku、Merger 才用 Opus；token budget gate（O4）
+- **Merger Agent 權限越界**：`merger-agent-bot` Gerrit 帳號權限最小化（可 push `refs/for/*` + Code-Review ±2；**不得**有 Submit / Push Force / admin 權限）；所有投票進 hash-chain audit_log（O10）
 
 **切段交付（5 段）**：
 1. O0 + O1 + O2（4.5d）— CATC + Redis lock + Queue 基礎，可獨立 ship 作為 I10 延伸
-2. O3 + O8（5d）— Worker pool + migration feature flag，系統 dual-mode 可運行
+2. O3 + O8（5d）— Worker pool（含 Gerrit push）+ migration feature flag，系統 dual-mode 可運行
 3. O4 + O5（4d）— Orchestrator + JIRA 深度整合，B2B 銷售可用
-4. O6 + O7（3d）— Merger Agent + CI/CD 自動仲裁，競品差異化賣點
+4. O6 + O7（4d）— Merger Agent +2 vote + Gerrit 雙簽 submit-rule + CI/CD arbiter，競品差異化賣點，**同時是 CLAUDE.md L1 政策變更點**
 5. O9 + O10（2.5d）— 觀測性與安全加固，正式對外上線 gate
 
-**總預估**：19 day（solo ~4 週 / 2-person team ~2-3 週）。
+**總預估**：20 day（solo ~4 週 / 2-person team ~2-3 週）。
 
 **硬相依**：
 - **G4**（Postgres + replica）— SQLite 無法支持分散式 worker 狀態
@@ -1314,9 +1347,12 @@
 
 **關鍵風險（需實作前決策）**：
 - Redis 死鎖偵測 job 的 polling 頻率 vs. 成本平衡（建議 10 s cadence 起步）
-- Merger Agent 的 confidence calibration 標準（需先蒐集 baseline dataset 才能定 threshold）
+- Merger Agent 的 confidence calibration 標準（需先蒐集 baseline dataset 才能定 threshold；建議先 shadow-mode 跑 2 週只投 0 不投 +2，蒐集 confidence vs. 實際正確性分布再校準 threshold）
 - distributed 模式下 I10 Redis 必須 HA（至少 Sentinel），否則分散式鎖 backend 成 SPOF
 - JIRA custom field 若客戶管理員不允許建立 → 降級為 JSON 塞 description field（需有 graceful degrade path）
+- **CLAUDE.md L1 immutable rule 修改**：現行「AI reviewer max score is +1」與新政策（Merger +2）直接衝突。需用戶明確更新 L1 規則（加例外條款），否則 O6 實作違反 immutable rule。建議 wording：「AI reviewer max score is +1，EXCEPT Merger Agent on conflict-resolution patchsets may give +2 (scope limited to merge correctness); final submit still requires human +2 co-sign.」
+- **Gerrit `merger-agent-bot` 帳號建立與權限設定**：需 Gerrit admin 建立專屬 bot 帳號、SSH key、groups 配置；權限僅限 `refs/for/*` push + Code-Review ±2；明確禁止 Submit / Push Force / admin 操作
+- **GitHub-native 客戶的降級路徑**：無 Gerrit 時，雙簽 +2 要改用 GitHub branch protection 的「Required approvals: 2, at least one from CODEOWNERS」+ Merger Agent 以 GitHub App 身分 approve——語意近似但非等價（GitHub 沒有 ±2 分級）
 
 **下一步**：等 G4 + I10 落地後啟動 O0。若市場需求提前（B2B 客戶 JIRA 要求），可先以 monolith 模式做 O0 + O5 子集（CATC schema + JIRA sub-task 建立），作為前導 PoC。
 
