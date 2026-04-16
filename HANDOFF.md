@@ -1,9 +1,88 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：M2 (S6) tenant_quota tests — 28 cases, plan→quota, LRU/keep, /storage (master)
+> 最後 commit：M4 — Cgroup-based per-tenant metrics + UI split + AIMD upgrade + usage_report (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## M4 (complete) Cgroup-based Per-tenant Metrics + UI 拆分（2026-04-16 完成）
+
+**背景**：M1/M2/M3 完成資源硬隔離（CPU/mem cgroup、disk quota、LLM circuit per-key）後，仍欠缺三件：(1) 可觀察——operator 無法即時看「哪個 tenant 燒了多少 CPU」，(2) 精準 AIMD——舊決策只看整機 CPU，hot 時連累無辜 tenant derate，(3) 計費基礎——無 cpu_seconds / mem_gb_seconds 累積就開不了 SaaS。M4 補齊這三塊：cgroup v2 scraper → per-tenant Prom gauges → host router（admin/user 分權）→ UI 拆分（admin 看全租戶、user 只看自己）→ 升級 AIMD decision helper（outlier → culprit-only derate）→ UsageAccumulator + usage_report.py。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/host_metrics.py` | cgroup v2 reader (`cpu.stat` usage_usec + `memory.current`)；`sample_once()` 掃 in-memory container registry；`_compute_cpu_percent` 用 prev_sample delta 計 CPU%；cap at num_cores×100 | ✅ 完成 |
+| Aggregation | `aggregate_by_tenant()` 依 `tenant_id` 聚合 CPU%/mem/sandbox_count；delegated disk usage to `tenant_quota.measure_tenant_usage`（同一 source of truth）| ✅ 完成 |
+| Prometheus gauges | `tenant_cpu_percent` / `tenant_mem_used_gb` / `tenant_disk_used_gb` / `tenant_sandbox_count`（Gauge）；`tenant_cpu_seconds_total` / `tenant_mem_gb_seconds_total` / `tenant_derate_total`（Counter）；`metrics.py` 新增 7 個 + NoOp stubs + reset_for_tests | ✅ 完成 |
+| Sampling loop | `run_sampling_loop(interval_s=5)`：sample → aggregate → publish gauges → `accumulate_usage(interval)`；exception swallowing + `persist_failure_total{module=host_metrics}` bump；主 lifespan 註冊 `host_metrics_task` | ✅ 完成 |
+| `/host/metrics` router | `GET /host/metrics[?tenant_id=]` + `/host/metrics/me` + `/host/accounting`（admin only）；ACL：admin 可查任意/全部、viewer/operator 只能查自己（cross-tenant → 403）；無 tenant_id 且非 admin 自動 scope 為 caller self | ✅ 完成 |
+| AIMD 升級 (`backend/tenant_aimd.py`) | `plan_derate()` 決策表：HOT+single-culprit（outlier margin ≥ 150 pp + self ≥ 80%）→ MD 只降該 tenant；HOT+no-outlier → FLAT derate 所有 running；COOL（≤60%）→ AI 每 cycle +5%；floor 0.1、ceiling 1.0；per-tenant state + `tenant_derate_total{reason}` counter | ✅ 完成 |
+| UsageAccumulator | `cpu_seconds_total = cpu% × dt / 100`；`mem_gb_seconds_total = mem_gb × dt`；`reset_accounting(tid)` 支援月結清零；`snapshot_accounting()` 讀取 | ✅ 完成 |
+| `scripts/usage_report.py` | `--live`（in-process, import backend.host_metrics）/ HTTP mode（urllib + admin bearer）；`--format text/json/csv`；自動 prepend repo root 到 sys.path 可直接跑 | ✅ 完成 |
+| UI `TenantUsageSection` | admin：`TENANT USAGE (ALL)` 列 all tenants + highlight self；user：`MY TENANT USAGE` 只顯示自己 bar；三條 bar（CPU/MEM/DISK）+ sandbox_count；5s auto-refresh；掛在 HostDevicePanel SYSTEM INFO 下方 | ✅ 完成 |
+| API client (`lib/api.ts`) | `TenantUsage` type + `getHostMetricsForTenant` / `getMyHostMetrics` / `getAllHostMetrics` / `getHostAccounting` + `TenantAccountingRow` type | ✅ 完成 |
+| main.py lifespan | 註冊 `host_metrics_task = asyncio.create_task(_hm.run_sampling_loop())`，加入 shutdown cancel tuple；`include_router(_host_router.router)` | ✅ 完成 |
+| 測試（64 項） | 32 host_metrics（readers/delta/aggregation/culprit/accounting/snapshot/publish/enumerate）+ 14 tenant_aimd（hot-culprit/hot-flat/cool-recover/hold/config/counter）+ 9 host_router（admin/user ACL/shape/rounding）+ 9 usage_report（renderers/live/http/CLI）| ✅ 64/64 pass |
+
+**新增/修改檔案**：
+- `backend/host_metrics.py` — 新增：cgroup v2 reader + sampler + aggregator + UsageAccumulator + culprit detector + sampling loop
+- `backend/tenant_aimd.py` — 新增：AimdConfig + TenantDerateState + `plan_derate()` 決策函式 + `current_multiplier()` accessor
+- `backend/routers/host.py` — 新增：3 個 REST endpoints + ACL
+- `backend/metrics.py` — 新增 7 個 per-tenant metric（4 gauge + 3 counter）+ NoOp stubs + reset_for_tests 同步
+- `backend/main.py` — lifespan 註冊 host_metrics_task，掛載 host router
+- `lib/api.ts` — `TenantUsage` / `TenantAccountingRow` types + 4 helper
+- `components/omnisight/host-device-panel.tsx` — `TenantUsageSection` + `TenantRow`，5s auto-refresh，admin/user 分視角
+- `scripts/usage_report.py` — 新增：billing 報表 CLI（text/JSON/CSV + live/HTTP 模式）
+- `backend/tests/test_host_metrics.py` — 32 tests
+- `backend/tests/test_tenant_aimd.py` — 14 tests
+- `backend/tests/test_host_router.py` — 9 tests（FastAPI TestClient + dependency_overrides pattern）
+- `backend/tests/test_usage_report.py` — 9 tests（runtime import of script file + stubbed urlopen）
+
+**設計決策**：
+- **Sample source：in-memory container registry 而非 `docker ps`**：`backend.container._containers` 已經在 `start_container` 寫入 + `stop_container` 刪除，且 `tenant_id` 已經 stamped；省下每 5 s 一次 subprocess 啟動成本。代價：只包括 OmniSight 自己啟動的 sandbox；外部手動啟的 container 不會被採樣（是 feature 不是 bug——租戶隔離不該洩漏外部 workload）。
+- **CPU% 用 delta 而非 rate counter**：cgroup `cpu.stat` usage_usec 是 monotonically-increasing counter，必須保留 prev_sample 算 `(usec₂-usec₁)/(t₂-t₁)`。首次看到 container 時只 prime state，回 0%——避免把「從啟動到現在的平均」誤當「瞬時」。
+- **Culprit 判定兩條件**：(1) top tenant 自己 ≥ 80% CPU（避免在整機熱但所有 tenant 都很閒時硬找禍首——可能是非容器化 workload），(2) top 比 second 高 ≥ 150 pp margin（1.5 cores 差距，避免兩個同級 tenant 輪流當禍首）。兩條件都過才鎖定單一 tenant，否則 fallback flat derate。
+- **Disk usage 共用 M2 source**：`_measure_disk_gb` 直接 call `tenant_quota.measure_tenant_usage`——避免 dashboard 顯示的 disk 和 quota 攔截判斷的 disk 出現不同步（過去其他系統踩過這類 bug）。
+- **`accumulate_usage` 用 interval 而非 wall-clock**：billing 不能受 sampler 執行時間波動影響；loop 記 `last_sample_at` 然後傳 `now - last_sample_at` 進 accumulate——即使某次 sample 慢了 2 s，累積值仍然正確（不會雙重計）。
+- **AIMD 與 H2 解耦**：`tenant_aimd.plan_derate()` 是純 function（不寫 budget store），H2 coordinator 未來 implement 時直接 call + apply multiplier。現在測試就鎖定邏輯，防止 H2 寫進來時破壞契約。
+- **UI 單位歸一化**：CPU bar 用 1600% 作 100% width（滿 16 cores），mem bar 用 16 GiB——對應 baseline hardcode（AMD 9950X）；不做動態因為 UI 需要 stable scale 才看得出 tenant 之間的相對強弱。
+- **ACL 策略：無 tenant_id 自動 scope**：非 admin call `/host/metrics` 不帶 `tenant_id` 時，回 `{"tenant": ...}` 而非 `{"tenants": [...]}`，形狀告訴前端「這是你自己」，避免 client 需要先查 whoami 才能決定拉什麼。
+- **usage_report 走 urllib**：刻意不 import `httpx`/`requests`——billing script 要能在 `python3` stdlib-only 環境跑（例如 cronjob 在 minimal container）。
+
+**驗收**：
+- ✅ cgroup v2 reader parse usage_usec + memory.current + 錯誤路徑（6 tests）
+- ✅ CPU% delta：first sample prime、rate 準確、num_cores cap、counter reset、dt=0（6 tests）
+- ✅ Aggregation by tenant_id、empty samples、disk integration（3 tests）
+- ✅ Culprit detection 3 核心 case（single outlier、flat two-hot、below-min-cpu）+ edge（empty、single tenant、snapshot）（6 tests）
+- ✅ Accounting integrate cpu_seconds 正確、skip on dt=0、additive、reset single/all（5 tests）
+- ✅ Snapshot accessors 在無 sample 時 fallback disk、cached read、list all（3 tests）
+- ✅ Prom gauge publish exposes `omnisight_tenant_cpu_percent{tenant_id=...}`（1 test）
+- ✅ Enumerate 過濾 status != "running"（2 tests）
+- ✅ AIMD HOT/culprit derate、repeated halving、floor respected（3 tests）
+- ✅ AIMD HOT/flat (no outlier) derates all（1 test）
+- ✅ AIMD COOL additive increase、caps at baseline、idle-derated tenants climb back（3 tests）
+- ✅ AIMD HOLD（warm band / baseline）（2 tests）
+- ✅ AIMD snapshot + current_multiplier accessor + config override + tenant_derate_total counter（5 tests）
+- ✅ `/host/metrics` admin list all、admin read any tenant、admin-only accounting（3 tests）
+- ✅ `/host/metrics` viewer scope-to-self、explicit self allowed、cross-tenant 403、`/me` 便捷端點（4 tests）
+- ✅ `/host/metrics` 回傳 shape + 小數位 rounding（2 tests）
+- ✅ usage_report renderers（text empty/header+row、json roundtrip、csv header+body、csv empty）（5 tests）
+- ✅ usage_report `--live` 讀 accounting + latest snapshot（1 test）
+- ✅ usage_report HTTP 模式 merge accounting + metrics endpoints（stubbed urlopen）（1 test）
+- ✅ usage_report CLI `--live --format text/json`（2 tests）
+- ✅ 既有 27 項 circuit_breaker、28 項 tenant_quota、21 項 container/cgroup 測試 zero regression
+- ✅ TypeScript 新增檔案 0 type errors（pre-existing 無關 errors 不變）
+- ✅ `from backend.main import app` import 成功，621 routes 包含 `/api/v1/host/metrics` + `/host/metrics/me` + `/host/accounting`
+
+**已知限制 / Follow-up**：
+- cgroup v1 host（WSL2 without v2）目前 `sample_once()` 回空 list；未來可加 `docker stats --no-stream` fallback（代價是 subprocess per 5 s）。
+- AIMD `plan_derate()` 還沒接到實際 DRF/sandbox_capacity——H2 coordinator phase 上線時會 wire in。目前 `tenant_aimd.current_multiplier()` 已就緒供 DRF caller 查詢。
+- 計費累積是 in-memory（進程 lifecycle）；process restart 會丟失。正式計費前需加 persistence（建議：每 1 min dump 到 `data/tenants/<tid>/usage.jsonl`，啟動時 replay；留給後續 phase）。
+- UI 用 hardcoded 1600% / 16 GiB scale——非 baseline 硬體需要另行調整。
+- `tenant_disk_used_gb` 每 5 s 重新走一次 `os.walk`——單 tenant 100+ GB 時 sample 可能吃 5–10 s（同 M2 的 sweep），會影響 CPU% window 精度。可後續 cache（LRU 5 min）避免 hot-path 重算。
+- Admin/user 視角切換仍依賴 `user.role` ——無 `role=admin` cookie 的人看到的永遠是 single-self bar；本次沒加 role-switching UI，設計假設 admin/user 用不同帳號登入。
 
 ---
 

@@ -356,6 +356,18 @@ Legend:
 - [x] Thermal runaway safety shutoff
 - [x] Unit test: G-code sequence → expected motion trace
 
+### C26. L4-CORE-26 HMI embedded web UI framework (#261)
+- [ ] Bundle size budget per platform profile (flash partition aware; CI hard-fail on 超標)
+- [ ] Constrained generator（whitelist Preact / vanilla JS / lit-html；禁 CDN；inline fonts + CSS；禁 analytics）
+- [ ] Backend binding generator：NL + HAL schema → fastcgi/mongoose/civetweb C handler 骨架 + 對應 JS client
+- [ ] QEMU + headless Chromium 驗證 harness（`scripts/simulate.sh` 新增 `hmi` track）
+- [ ] IEC 62443 security baseline gate（CSP / XSS / CSRF / session storage / auth flow）
+- [ ] Embedded browser ABI matrix（aarch64/armv7/riscv64 × 凍結版 Chromium/WebKit 相容性表）
+- [ ] i18n 框架（與 D-series doc templates 共用語言池，en/zh-TW/ja/de 4 語言起步）
+- [ ] 共用 HMI component library（network / OTA / logs viewer — 供 D2 IPCam / D8 Router / D9 5G-GW / D17 Industrial-PC / D24 POS / D25 Kiosk 共用）
+- [ ] Pluggable LLM backend（Opus 4.7 Design Tool / Ollama 本地 / rule-based fallback，沿用 `OMNISIGHT_LLM_PROVIDER`）
+- [ ] Unit + integration tests（generator / QEMU+Chromium / size budget gate）
+
 ---
 
 ## 🅙 Priority S — Shared Auth/Session Foundation（路線 C 前置共用基礎）
@@ -608,13 +620,14 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### M4. Cgroup-based Per-tenant Metrics + UI 拆分
-- [ ] `backend/host_metrics.py` 擴展：從 `/sys/fs/cgroup/<container>/cpu.stat` + `memory.current` 採集 per-container 用量
-- [ ] 依 container label `tenant_id` 聚合 → `tenant_cpu_percent` / `tenant_mem_used_gb` / `tenant_disk_used_gb` / `tenant_sandbox_count` Prometheus metrics
-- [ ] `/api/v1/host/metrics?tenant_id=...` 回該租戶的資源用量（admin 可查任意、user 只能查自己）
-- [ ] UI `host-device-panel` 新增 per-tenant 柱狀圖（admin 視角）+ 當前 tenant bar（user 視角）
-- [ ] AIMD 決策升級：不再只看整機 CPU，同時看「哪個 tenant 是禍首」，derate 只降該 tenant 的 budget（非全體）
-- [ ] 計費基礎：per-tenant `cpu_seconds_total` / `mem_gb_seconds` 累積，輸出 `scripts/usage_report.py`
-- [ ] 預估：**1 day**
+- [x] `backend/host_metrics.py` 擴展：從 `/sys/fs/cgroup/<container>/cpu.stat` + `memory.current` 採集 per-container 用量（cgroup v2 reader + 5s sampling loop in lifespan）
+- [x] 依 container label `tenant_id` 聚合 → `tenant_cpu_percent` / `tenant_mem_used_gb` / `tenant_disk_used_gb` / `tenant_sandbox_count` Prometheus metrics（`metrics.py` 新增 4 gauge + 3 counter — `tenant_cpu_seconds_total`、`tenant_mem_gb_seconds_total`、`tenant_derate_total`）
+- [x] `/api/v1/host/metrics?tenant_id=...` 回該租戶的資源用量（admin 可查任意、user 只能查自己 → 403 on cross-tenant）；另有 `/host/metrics/me`、`/host/accounting`（admin-only billing）
+- [x] UI `host-device-panel` 新增 per-tenant 柱狀圖：admin 看 ALL tenants（highlight self）、user 看 MY TENANT USAGE，5s auto-refresh
+- [x] AIMD 決策升級：`backend/tenant_aimd.py` `plan_derate()` — HOT+culprit → derate 單一禍首；HOT+no-outlier → flat；COOL → additive-increase；per-tenant multiplier state + `tenant_derate_total` Prom counter
+- [x] 計費基礎：`UsageAccumulator` 累積 `cpu_seconds_total` / `mem_gb_seconds_total`；`scripts/usage_report.py` 輸出 text/JSON/CSV（`--live` 走 in-process；HTTP 模式需 admin bearer）
+- [x] 測試：64 cases — 32 host_metrics、14 tenant_aimd、9 host_router、9 usage_report
+- [x] 預估：**1 day**
 
 ### M5. Prewarm Pool 多租戶安全
 - [ ] Config `prewarm_policy`：`shared` / `per_tenant` / `disabled`；多租戶模式預設 `per_tenant`
@@ -1289,7 +1302,7 @@ C1 (SSH runner) → C0 (ProjectClass) → C2/C3/C4/C5 (schema + planner + framew
 
 ### Phase 3 — Layer A fill-out (4-6 weeks)
 C6..C17 sequential (safety / radio / power / RT / connectivity / sensor-fusion / security / OTA / telemetry)
-C18..C25 as demanded by prioritized skill packs
+C18..C26 as demanded by prioritized skill packs (C26 preconditions any D skill shipping an embedded web admin UI)
 
 ### Phase 4 — Skill pack parallel sprint (6-10 weeks, 3-person team)
 D2..D28 parallelized, prioritized by demand:
