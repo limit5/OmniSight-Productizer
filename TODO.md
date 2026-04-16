@@ -1104,12 +1104,12 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### P7. SKILL-IOS (pilot, #292)
-- [ ] SwiftUI app 骨架 generator
-- [ ] Xcode project + SPM/CocoaPods 管理
-- [ ] Push notification（APNs）integration template
-- [ ] StoreKit 2 購買 template
-- [ ] **First mobile skill — validates P0-P6**
-- [ ] 預估：**2.5 day**
+- [x] SwiftUI app 骨架 generator
+- [x] Xcode project + SPM/CocoaPods 管理
+- [x] Push notification（APNs）integration template
+- [x] StoreKit 2 購買 template
+- [x] **First mobile skill — validates P0-P6**
+- [x] 預估：**2.5 day**
 
 ### P8. SKILL-ANDROID (pilot, #293)
 - [ ] Jetpack Compose app 骨架
