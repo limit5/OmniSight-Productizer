@@ -545,10 +545,10 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### I7. Frontend tenant-aware
-- [ ] localStorage 前綴改 `omnisight:${tenantId}:${userId}:*`
-- [ ] Tenant switcher UI（若 user 多 tenant）+ 切換時清當前 context
-- [ ] 所有 API client 自動帶 `X-Tenant-Id` header（middleware 雙重驗）
-- [ ] 預估：**1 day**
+- [x] localStorage 前綴改 `omnisight:${tenantId}:${userId}:*`
+- [x] Tenant switcher UI（若 user 多 tenant）+ 切換時清當前 context
+- [x] 所有 API client 自動帶 `X-Tenant-Id` header（middleware 雙重驗）
+- [x] 預估：**1 day**
 
 ### I8. Audit log per-tenant hash chain
 - [ ] 每 tenant 獨立 genesis + chain（Phase 53 hash chain 改 per-tenant 分岔）

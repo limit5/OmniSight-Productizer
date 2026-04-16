@@ -1,9 +1,55 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I6 Sandbox fair-share DRF per-tenant capacity (master)
+> 最後 commit：I7 Frontend tenant-aware (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I7 (complete) Frontend tenant-aware — localStorage prefix, API header, tenant switcher（2026-04-16 完成）
+
+**背景**：I1-I6 完成了後端多租戶隔離（DB、RLS、SSE、secrets、filesystem、sandbox capacity），但前端仍為全域共享。localStorage 鍵值未依 tenant 隔離，API client 不帶 tenant header，且無 tenant 切換 UI。I7 將前端全面改為 tenant-aware。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| localStorage 前綴 | 鍵格式改為 `omnisight:${tenantId}:${userId}:${key}`，含舊格式自動遷移 | ✅ 完成 |
+| X-Tenant-Id header | 所有 API `request()` 自動帶 `X-Tenant-Id`，backend middleware 雙重驗證 | ✅ 完成 |
+| Backend middleware | `_tenant_header_gate`：non-admin 只能用自己 tenant，admin 可切換任意 tenant | ✅ 完成 |
+| GET /auth/tenants | admin 取全部 tenants、一般用戶取自己 tenant | ✅ 完成 |
+| TenantContext | React context provider 管理 active tenant，與 API layer `setCurrentTenantId()` 同步 | ✅ 完成 |
+| TenantSwitcher UI | header bar 下拉選單，單 tenant 用戶自動隱藏，多 tenant admin 顯示切換器 | ✅ 完成 |
+| AuthUser 擴充 | `tenant_id` 欄位加入 frontend type，`whoami` 已回傳 | ✅ 完成 |
+| 全組件更新 | StorageBridge, FirstRunTour, NewProjectWizard, SpecTemplateEditor 皆改用 tenant-scoped storage | ✅ 完成 |
+| 測試（31 項） | 10 backend + 15 storage + 6 integration，全數通過 | ✅ 31/31 pass |
+| 回歸測試 | 6 test files / 45 tests 全數通過 | ✅ 零回歸 |
+
+**新增檔案**：
+- `lib/tenant-context.tsx` — TenantProvider + useTenant hook
+- `components/omnisight/tenant-switcher.tsx` — TenantSwitcher dropdown UI
+- `backend/tests/test_i7_frontend_tenant.py` — 10 項 backend 測試
+- `test/integration/tenant-aware.test.ts` — 6 項前端整合測試
+
+**修改檔案**：
+- `lib/api.ts` — AuthUser 加 tenant_id、TenantInfo type、listUserTenants()、request() 注入 X-Tenant-Id header
+- `lib/storage.ts` — prefixedKey 加 tenantId 參數、遷移邏輯更新
+- `components/providers.tsx` — TenantProvider 加入 provider hierarchy
+- `components/storage-bridge.tsx` — 傳入 currentTenantId
+- `components/omnisight/first-run-tour.tsx` — getUserStorage 加 tenantId
+- `components/omnisight/new-project-wizard.tsx` — getUserStorage 加 tenantId
+- `components/omnisight/spec-template-editor.tsx` — getUserStorage 加 tenantId
+- `app/page.tsx` — TenantSwitcher 加入 header bar
+- `backend/main.py` — 新增 `_tenant_header_gate` middleware
+- `backend/routers/auth.py` — 新增 GET /auth/tenants endpoint
+- `test/lib/storage.test.ts` — 更新為 tenant-aware 測試
+
+**設計決策**：
+- localStorage 鍵格式 `omnisight:${tenantId}:${userId}:${key}`，tenantId null 時 fallback 到 `t-default`
+- 遷移順序：先找舊 user-scoped key (`omnisight:${userId}:${key}`)，再找 bare legacy key
+- X-Tenant-Id 只在 `_currentTenantId` 非 null 時才注入，不影響 open mode
+- Backend middleware 在 CORS 之後、route handler 之前執行，與 `require_tenant` FastAPI dependency 形成雙重驗證
+- Admin 可跨 tenant 是因為系統管理需求；一般用戶只看到自己的 tenant（不顯示 switcher）
+- TenantSwitcher 在單 tenant 且為 t-default 時完全隱藏，不佔 header 空間
 
 ---
 
