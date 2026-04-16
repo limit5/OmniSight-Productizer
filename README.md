@@ -115,6 +115,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 ### Multi-Tenancy
 - **Tenant isolation**: schema-level (I1), RLS (I2), SSE filter (I3), secrets (I4), filesystem (I5)
 - **Sandbox fair-share**: DRF per-tenant capacity (I6) — CAPACITY_MAX=12, guaranteed minimum per tenant, idle borrowing with 30s grace reclaim, turbo cap prevents single-tenant monopoly
+- **Rate limiting**: 3-dimension (per-IP + per-user + per-tenant) Redis token bucket (I9) — plan-based quotas (free/starter/pro/enterprise), automatic in-memory fallback
 
 ### Reliability & Recovery
 - **Token budget**: 3-tier (80% warn → 90% downgrade → 100% freeze) + daily auto-reset

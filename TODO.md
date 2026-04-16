@@ -557,10 +557,10 @@ Legend:
 - [x] 預估：**1 day**
 
 ### I9. Rate limit per-user / per-tenant
-- [ ] K2 的 rate limit 擴充維度：per-IP + per-user + per-tenant
-- [ ] 換 Redis token bucket（為 I10 準備）
-- [ ] Quota config：tenant.plan → limits
-- [ ] 預估：**1 day**
+- [x] K2 的 rate limit 擴充維度：per-IP + per-user + per-tenant
+- [x] 換 Redis token bucket（為 I10 準備）
+- [x] Quota config：tenant.plan → limits
+- [x] 預估：**1 day**
 
 ### I10. Multi-worker uvicorn + shared state
 - [ ] uvicorn `--workers N`（N = CPU_cores / 2，16 core → 8 worker）

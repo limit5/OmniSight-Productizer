@@ -1,9 +1,55 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I8 Per-tenant audit log hash chain (master)
+> 最後 commit：I9 Per-IP + per-user + per-tenant rate limiting with Redis token bucket (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I9 (complete) Rate limit per-user / per-tenant（2026-04-16 完成）
+
+**背景**：K2 的 rate limit 只涵蓋 login endpoint（per-IP + per-email），不覆蓋一般 API 呼叫，也沒有 per-user/per-tenant 維度。I9 將 rate limit 擴展到三維（per-IP、per-user、per-tenant），並以 Redis token bucket 取代 in-memory 實作（為 I10 multi-worker 準備），同時建立 tenant.plan → limits 的 quota 機制。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Redis token bucket | Lua script 實作原子性 token bucket，自動 fallback in-memory | ✅ 完成 |
+| Per-IP rate limit | 所有 API endpoint 受 per-IP 限制（free=60/min） | ✅ 完成 |
+| Per-user rate limit | 認證使用者受 per-user 限制（free=120/min） | ✅ 完成 |
+| Per-tenant rate limit | 整個 tenant 受聚合限制（free=300/min） | ✅ 完成 |
+| Quota config | `quota.py`: free/starter/pro/enterprise 四級計劃 | ✅ 完成 |
+| K2 backward compat | `ip_limiter()`/`email_limiter()` 保持不變，login 專用 | ✅ 完成 |
+| X-RateLimit headers | 回應附帶 plan/user/tenant 資訊 | ✅ 完成 |
+| secrets.py 重命名 | `backend/secrets.py` → `tenant_secrets.py`（修復 stdlib shadow） | ✅ 完成 |
+| 測試（25 項） | 10 unit + 4 quota + 3 middleware integration + 8 login compat | ✅ 25/25 pass |
+
+**新增/修改檔案**：
+- `backend/rate_limit.py` — 全面重寫：Redis + InMemory + Legacy compat
+- `backend/quota.py` — 新增：plan-based quota config
+- `backend/main.py` — 新增 `_rate_limit_gate` middleware
+- `backend/config.py` — 新增 `redis_url` 設定
+- `backend/requirements.txt` — 新增 `redis>=5.0.0`
+- `backend/secrets.py` → `backend/tenant_secrets.py` — 修復 stdlib shadow
+- `backend/routers/integration.py` + `backend/routers/secrets.py` — import 更新
+- `backend/tests/test_rate_limit.py` — 重寫適配新 API
+- `backend/tests/test_quota.py` — 新增
+- `backend/tests/test_rate_limit_middleware.py` — 新增
+
+**Quota 方案**：
+
+| Plan | Per-IP/min | Per-User/min | Per-Tenant/min |
+|---|---|---|---|
+| free | 60 | 120 | 300 |
+| starter | 120 | 300 | 1,000 |
+| pro | 300 | 600 | 3,000 |
+| enterprise | 600 | 1,200 | 10,000 |
+
+**設計決策**：
+- Redis Lua script 保證原子性，避免 race condition
+- `OMNISIGHT_REDIS_URL` 未設定時自動降級為 in-memory（開發體驗零摩擦）
+- Login endpoint 保留獨立 K2 limiter，不被 I9 middleware 雙重計算（exempt list）
+- 每個 bucket key 帶 dimension prefix（`api:ip:`, `api:user:`, `api:tenant:`）避免命名衝突
+- Health endpoint 免除 rate limit（監控探針不應被限制）
 
 ---
 
