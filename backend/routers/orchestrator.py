@@ -30,9 +30,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend import auth as _au
+from backend import merge_arbiter as _arb
 from backend import orchestrator_gateway as og
 from backend.config import settings
 from backend.queue_backend import PriorityLevel
+from backend.submit_rule import ReviewerVote, evaluate_submit_rule
 
 logger = logging.getLogger(__name__)
 
@@ -265,3 +267,164 @@ async def list_status_endpoint(
 ) -> Any:
     """Operator surface — every intake session in this process."""
     return {"sessions": og.list_sessions()}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  O7 (#270) — Merge-conflict webhook + human-vote reconciliation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class MergeConflictRequest(BaseModel):
+    """Gerrit / GitHub webhook → arbiter intake shape."""
+
+    change_id: str
+    project: str
+    file_path: str
+    conflict_text: str = ""
+    head_commit_message: str = ""
+    incoming_commit_message: str = ""
+    file_context: str = ""
+    patchset_revision: str = ""
+    workspace: str | None = None
+    additional_files: list[str] = Field(default_factory=list)
+    jira_ticket: str = ""
+    catc_owner: str = ""
+
+    model_config = {"extra": "allow"}
+
+
+class HumanVotePayload(BaseModel):
+    """Per-vote shape for reconciliation calls.  ``groups`` comes from
+    the Gerrit account look-up; orchestrator-side cache."""
+
+    voter: str
+    groups: list[str]
+    score: int
+
+
+class HumanVoteRequest(BaseModel):
+    change_id: str
+    project: str
+    commit: str
+    votes: list[HumanVotePayload]
+
+
+@router.post("/merge-conflict")
+async def merge_conflict_endpoint(
+    request: Request,
+    _user=Depends(_au.require_operator),
+) -> Any:
+    """Gerrit webhook entry: a merge conflict was detected on a change.
+
+    Body shape matches :class:`MergeConflictRequest`.  Gerrit's native
+    webhooks plugin posts this payload after the orchestrator's webhook
+    mapper normalises the event.  We re-use the Jira HMAC secret for
+    signature verification so operators only maintain one secret.
+    """
+    raw = await request.body()
+    if len(raw) > 1_048_576:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    _verify_jira_signature(request, raw)
+
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty body")
+    try:
+        body = json.loads(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=400,
+                            detail=f"Invalid JSON: {exc}") from exc
+    try:
+        model = MergeConflictRequest.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid merge-conflict payload: {exc}",
+        ) from exc
+
+    task = _arb.MergeConflictTask(
+        change_id=model.change_id,
+        project=model.project,
+        file_path=model.file_path,
+        conflict_text=model.conflict_text,
+        head_commit_message=model.head_commit_message,
+        incoming_commit_message=model.incoming_commit_message,
+        file_context=model.file_context,
+        patchset_revision=model.patchset_revision,
+        workspace=model.workspace,
+        additional_files=list(model.additional_files),
+        jira_ticket=model.jira_ticket,
+        catc_owner=model.catc_owner,
+    )
+    outcome = await _arb.on_merge_conflict_webhook(task)
+
+    try:
+        from backend import audit
+        await audit.log(
+            action="arbiter_merge_conflict",
+            entity_kind="gerrit_change",
+            entity_id=model.change_id,
+            after=outcome.to_dict(),
+            actor=getattr(_user, "email", "system"),
+        )
+    except Exception as exc:                             # pragma: no cover
+        logger.debug("arbiter audit.log failed: %s", exc)
+
+    return {"ok": True, **outcome.to_dict()}
+
+
+@router.post("/human-vote")
+async def human_vote_endpoint(
+    payload: HumanVoteRequest,
+    _user=Depends(_au.require_operator),
+) -> Any:
+    """Gerrit webhook entry: a human (or AI bot) cast a Code-Review.
+
+    We re-evaluate the submit-rule + drive submit / withdraw flows.
+    """
+    votes = [
+        ReviewerVote(
+            voter=v.voter,
+            groups=frozenset(v.groups),
+            score=v.score,
+        )
+        for v in payload.votes
+    ]
+    outcome = await _arb.on_human_vote_recorded(
+        change_id=payload.change_id,
+        project=payload.project,
+        commit=payload.commit,
+        votes=votes,
+    )
+    try:
+        from backend import audit
+        await audit.log(
+            action="arbiter_human_vote",
+            entity_kind="gerrit_change",
+            entity_id=payload.change_id,
+            after=outcome.to_dict(),
+            actor=getattr(_user, "email", "system"),
+        )
+    except Exception as exc:                             # pragma: no cover
+        logger.debug("arbiter human-vote audit.log failed: %s", exc)
+
+    return {"ok": True, **outcome.to_dict()}
+
+
+@router.post("/check-change-ready")
+async def check_change_ready_endpoint(
+    payload: HumanVoteRequest,
+    _user=Depends(_au.require_viewer),
+) -> Any:
+    """Pure query: evaluate the submit-rule for a given vote set.
+
+    No side-effects; useful from the UI / CLI / observability layer.
+    """
+    votes = [
+        ReviewerVote(
+            voter=v.voter,
+            groups=frozenset(v.groups),
+            score=v.score,
+        )
+        for v in payload.votes
+    ]
+    return {"ok": True, **evaluate_submit_rule(votes).to_dict()}

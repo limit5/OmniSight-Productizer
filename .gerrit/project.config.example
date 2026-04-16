@@ -1,0 +1,84 @@
+# O7 (#270) — OmniSight Gerrit project.config reference.
+#
+# This is the authoritative Gerrit submit-rule policy for OmniSight:
+#
+#   *** A change is only submittable when BOTH of the following hold ***
+#
+#     (A) ≥1 Code-Review: +2 from a member of the `non-ai-reviewer` group
+#         (i.e. a *human* reviewer).  This is the HARD GATE — no
+#         amount of AI approval can substitute for it.
+#
+#     (B) ≥1 Code-Review: +2 from a member of the `ai-reviewer-bots`
+#         group where the voter's account belongs specifically to the
+#         `merger-agent-bot` sub-identity (the O6 Merger Agent has
+#         simulated a clean merge of the conflict block).
+#
+# Rule (A) is the CLAUDE.md L1 Safety Rule promotion.  Rule (B) is the
+# O6 Merger contract — the merge conflict region must be AI-verified by
+# the merger before humans are asked to sign off on it.
+#
+# Group-based, NOT identity-based: adding a new AI reviewer (lint-bot /
+# security-bot / any future bot) only requires adding the account to
+# `ai-reviewer-bots` — no change to this rule.
+#
+# Drop this file into `refs/meta/config` on the target Gerrit project:
+#
+#   git fetch origin refs/meta/config:refs/remotes/origin/meta/config
+#   git checkout meta/config
+#   cp .gerrit/project.config.example project.config
+#   cp .gerrit/rules.pl rules.pl
+#   git add project.config rules.pl
+#   git commit -m "O7: dual-+2 submit rule (human hard gate + merger bot)"
+#   git push origin HEAD:refs/meta/config
+#
+# See ../docs/ops/gerrit_dual_two_rule.md for the full runbook.
+
+[project]
+    description = OmniSight productizer backend + frontend.
+    state = active
+    submitType = REBASE_IF_NECESSARY
+
+[access "refs/heads/*"]
+    # All AI reviewer bots (merger-agent-bot, lint-bot, security-bot, …)
+    # can cast Code-Review votes but NEVER submit.
+    label-Code-Review = -2..+2 group ai-reviewer-bots
+    label-Code-Review = -2..+2 group non-ai-reviewer
+    submit = group non-ai-reviewer
+
+[access "refs/for/refs/heads/*"]
+    # AI reviewer bots push new patchsets; humans push via gerrit push
+    # or gh/GitHub review.
+    push = group ai-reviewer-bots
+    push = group non-ai-reviewer
+
+[label "Code-Review"]
+    function = NoBlock
+    defaultValue = 0
+    value = -2 Blocks submission (veto)
+    value = -1 Disagree
+    value =  0 No score
+    value = +1 Looks good
+    value = +2 Approved (scope-limited for AI, full for humans)
+    copyCondition = is:MIN OR is:MAX
+    # We intentionally do NOT set `function = MaxWithBlock` — the
+    # submit-rule in rules.pl enforces the dual-+2 condition
+    # explicitly (group-aware) rather than by label function alone.
+
+[submit]
+    # Prolog submit-rule lives in rules.pl at the project root on
+    # refs/meta/config.  See rules.pl for full derivation.
+    mergeContent = true
+
+[plugin "webhooks"]
+    # Fired for every merge-conflict event.  Points at the OmniSight
+    # Orchestrator Gateway O7 endpoint — payload includes change-id +
+    # patchset sha so the Merger Agent can pick up the conflict.
+    remote = merge-conflict-webhook
+    url = https://orchestrator.omnisight.internal/api/orchestrator/merge-conflict
+    events = patchset-created
+    events = change-merge-failed
+    connectionTimeout = 5000
+    socketTimeout = 5000
+    maxTries = 3
+    retryInterval = 30000
+    sslVerify = true

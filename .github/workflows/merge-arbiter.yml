@@ -1,0 +1,166 @@
+# O7 (#270) — GitHub-native Merge Arbiter fallback.
+#
+# For customers that run the OmniSight Productizer on GitHub (not
+# Gerrit) this workflow mirrors the dual-+2 submit-rule as a branch
+# protection gate:
+#
+#   - At least one review approval from the `merger-agent-bot` GitHub
+#     App (the O6 Merger Agent, group-equivalent to `merger-agent-bot`).
+#   - At least one review approval from a HUMAN member of the
+#     `non-ai-reviewer` team (the HARD GATE).
+#   - No reviews with CHANGES_REQUESTED.
+#
+# The workflow is triggered on pull-request review events and posts a
+# status check (`merge-arbiter/dual-plus-two`).  Branch protection
+# should require this check to pass before merge.
+#
+# Human +2 remains the hard gate — no AI approval combination can
+# substitute, per CLAUDE.md L1 Safety Rules.
+
+name: merge-arbiter
+
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to re-evaluate"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  statuses: write
+
+jobs:
+  dual-plus-two:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Evaluate dual-+2 rule
+        id: eval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MERGER_BOT_LOGIN: ${{ vars.MERGER_BOT_LOGIN || 'merger-agent-bot[bot]' }}
+          NON_AI_REVIEWER_TEAM: ${{ vars.NON_AI_REVIEWER_TEAM || 'non-ai-reviewer' }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys, pathlib
+          sys.path.insert(0, str(pathlib.Path.cwd()))
+          from backend.submit_rule import (
+              ReviewerVote, evaluate_submit_rule,
+              GROUP_AI_BOTS, GROUP_HUMAN, GROUP_MERGER,
+          )
+          pr = os.environ["PR_NUMBER"]
+          merger_login = os.environ["MERGER_BOT_LOGIN"]
+          human_team = os.environ["NON_AI_REVIEWER_TEAM"]
+
+          # Fetch review list from GitHub
+          reviews = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/${{ github.repository }}/pulls/{pr}/reviews",
+          ]))
+          # Fetch team membership map from GitHub (team -> usernames).
+          # Falls back to an empty list when the repo has no team configured.
+          try:
+              human_members = {m["login"] for m in json.loads(subprocess.check_output([
+                  "gh", "api",
+                  f"orgs/${{ github.repository_owner }}/teams/{human_team}/members",
+              ]))}
+          except subprocess.CalledProcessError:
+              human_members = set()
+
+          votes = []
+          for r in reviews:
+              user = (r.get("user") or {}).get("login", "")
+              state = r.get("state")
+              # Map GH review state → dual-+2 score.  APPROVED → +2,
+              # CHANGES_REQUESTED → -2, COMMENTED → 0, DISMISSED → 0.
+              score = {"APPROVED": 2, "CHANGES_REQUESTED": -2}.get(state, 0)
+
+              # Classify the reviewer.
+              is_merger_bot = user.lower() == merger_login.lower()
+              is_ai_bot = is_merger_bot or user.endswith("[bot]")
+              is_human = (user in human_members) and not is_ai_bot
+
+              groups = set()
+              if is_ai_bot:
+                  groups.add(GROUP_AI_BOTS)
+              if is_merger_bot:
+                  groups.add(GROUP_MERGER)
+              if is_human:
+                  groups.add(GROUP_HUMAN)
+              votes.append(ReviewerVote(voter=user, groups=frozenset(groups), score=score))
+
+          decision = evaluate_submit_rule(votes)
+          print(json.dumps(decision.to_dict(), indent=2))
+          out = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with out.open("a") as fh:
+              fh.write(f"allow={'true' if decision.allow else 'false'}\n")
+              fh.write(f"reason={decision.reason.value}\n")
+              fh.write(f"human_plus_twos={decision.human_plus_twos}\n")
+              fh.write(f"merger_plus_twos={decision.merger_plus_twos}\n")
+              fh.write(f"ai_plus_twos={decision.ai_plus_twos}\n")
+          pathlib.Path("arbiter-decision.json").write_text(json.dumps(decision.to_dict()))
+          PY
+
+      - name: Upload decision artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-arbiter-decision
+          path: arbiter-decision.json
+          retention-days: 7
+
+      - name: Post status check — pass
+        if: steps.eval.outputs.allow == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }} \
+            -f state=success \
+            -f context='merge-arbiter/dual-plus-two' \
+            -f description="Dual-+2 satisfied: ${{ steps.eval.outputs.human_plus_twos }} human, ${{ steps.eval.outputs.merger_plus_twos }} merger."
+
+      - name: Post status check — fail
+        if: steps.eval.outputs.allow != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }} \
+            -f state=failure \
+            -f context='merge-arbiter/dual-plus-two' \
+            -f description="Dual-+2 not met (${{ steps.eval.outputs.reason }}); human +2 is the hard gate."
+
+      - name: Fail job if rule not satisfied
+        if: steps.eval.outputs.allow != 'true'
+        run: |
+          echo "merge-arbiter rejected this PR: reason=${{ steps.eval.outputs.reason }}"
+          echo "  human +2: ${{ steps.eval.outputs.human_plus_twos }}"
+          echo "  merger +2: ${{ steps.eval.outputs.merger_plus_twos }}"
+          echo "  total AI +2: ${{ steps.eval.outputs.ai_plus_twos }}"
+          exit 1
