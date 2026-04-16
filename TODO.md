@@ -860,24 +860,24 @@ Legend:
 - [x] 預估：**2 day**
 
 ### O6. Merger Agent (#269) — 衝突解析器，Gerrit patchset 輸出 + AI +2 vote（**不自動合併**）
-- [ ] `backend/merger_agent.py`：specialized LLM wrapper，system prompt 固定為「合併衝突解決專家，保留雙方邏輯意圖，不得新增任何原未出現於雙方 commit 的新邏輯」
-- [ ] 輸入：conflict block（含 `<<<<<<< HEAD` 標記）+ 雙方 commit message + 檔案上下文 20 行
-- [ ] 輸出：resolved patchset（Gerrit-ready `git format-patch` 形式）+ confidence score + rationale + 顯式 diff（只限 conflict 區塊，不改其他行）
-- [ ] **Gerrit 互動流程**（新政策核心）：
-  - [ ] Merger Agent 產出 resolution → `git push HEAD:refs/for/main%topic=merger-PROJ-XXX` 推到 Gerrit（新增 patchset 到原 change）
-  - [ ] Merger Agent 自動呼叫 Gerrit REST `POST /changes/{id}/revisions/{rev}/review` 給 **Code-Review: +2**（scope 限「衝突解析正確性」，comment 說明 confidence + rationale + diff 範圍）
-  - [ ] **絕不自動 submit**——merge 必須等**人工** Code-Review: +2 也到齊；**不論其他 AI reviewer（lint-bot / security-bot / 任何未來新增的 AI）也投 +2**，submit-rule 仍強制要求人工 +2 才放行（詳見 O7 submit-rule group 設計）
-  - [ ] Merger Agent 的 Gerrit account 為專屬 `merger-agent-bot`，加入 `ai-reviewer-bots` group；scope 限定 patchset 推送與 Code-Review 投票（無 Submit 權限、無法加入 `non-ai-reviewer` group）
-- [ ] 自動化 gate（**不自動合併，只決定是否給 +2**）：
-  - [ ] confidence ≥ 0.9 AND 衝突 ≤ 20 行 AND 單檔 AND non-security 檔案 → Merger +2
-  - [ ] 否則 → Merger 僅推 patchset 但**不投票**（或給 Code-Review: 0）+ SSE 告警人工接手雙 +2
-  - [ ] 任何涉及 security-sensitive 檔案（auth/ secrets/ config/ CI config/ `.github/workflows/`）一律**不投票**，人工須自己 +2 兩次或拒絕
-- [ ] 強制 test gate：Merger 在投票前先跑受影響模組的 unit test，失敗則不推 patchset 直接 escalate human
-- [ ] Metrics：`merger_agent_plus_two_rate` / `merger_agent_confidence_histogram` / `merger_agent_abstain_total` / `merger_agent_security_refusal_total`
-- [ ] 失敗次數 ≥ 3 該 change 停止自動重試，escalate human（沿用 CLAUDE.md rule）
-- [ ] 整合測試：簡單 conflict（Merger +2 + mock human +2 → submit）、有歧義 conflict（Merger abstain）、security 檔案（Merger refuse）、test 失敗（Merger 不 push）、僅 Merger +2 無人工 +2（submit-rule 拒絕）、僅人工 +2 無 Merger +2（submit-rule 拒絕）
-- [ ] **CLAUDE.md L1 更新**：Safety Rules「AI reviewer max score is +1」需補一條例外條款——「Merger Agent 於衝突解析 patchset 上可給 +2，但 scope 限衝突區塊正確性；最終 submit 仍需人工 +2 雙簽」；否則實作即違反 L1 immutable rule
-- [ ] 預估：**2.5 day**（原 2d + 0.5d 用於 Gerrit REST 整合 + submit-rule 測試）
+- [x] `backend/merger_agent.py`：specialized LLM wrapper，system prompt 固定為「合併衝突解決專家，保留雙方邏輯意圖，不得新增任何原未出現於雙方 commit 的新邏輯」
+- [x] 輸入：conflict block（含 `<<<<<<< HEAD` 標記）+ 雙方 commit message + 檔案上下文 20 行
+- [x] 輸出：resolved patchset（Gerrit-ready `git format-patch` 形式）+ confidence score + rationale + 顯式 diff（只限 conflict 區塊，不改其他行）
+- [x] **Gerrit 互動流程**（新政策核心）：
+  - [x] Merger Agent 產出 resolution → `git push HEAD:refs/for/main%topic=merger-PROJ-XXX` 推到 Gerrit（新增 patchset 到原 change）
+  - [x] Merger Agent 自動呼叫 Gerrit REST `POST /changes/{id}/revisions/{rev}/review` 給 **Code-Review: +2**（scope 限「衝突解析正確性」，comment 說明 confidence + rationale + diff 範圍）
+  - [x] **絕不自動 submit**——merge 必須等**人工** Code-Review: +2 也到齊；**不論其他 AI reviewer（lint-bot / security-bot / 任何未來新增的 AI）也投 +2**，submit-rule 仍強制要求人工 +2 才放行（詳見 O7 submit-rule group 設計）
+  - [O] Merger Agent 的 Gerrit account 為專屬 `merger-agent-bot`，加入 `ai-reviewer-bots` group；scope 限定 patchset 推送與 Code-Review 投票（無 Submit 權限、無法加入 `non-ai-reviewer` group）（Gerrit 伺服器端 operator 設定；Python 實作已就緒）
+- [x] 自動化 gate（**不自動合併，只決定是否給 +2**）：
+  - [x] confidence ≥ 0.9 AND 衝突 ≤ 20 行 AND 單檔 AND non-security 檔案 → Merger +2
+  - [x] 否則 → Merger 僅推 patchset 但**不投票**（或給 Code-Review: 0）+ SSE 告警人工接手雙 +2
+  - [x] 任何涉及 security-sensitive 檔案（auth/ secrets/ config/ CI config/ `.github/workflows/`）一律**不投票**，人工須自己 +2 兩次或拒絕
+- [x] 強制 test gate：Merger 在投票前先跑受影響模組的 unit test，失敗則不推 patchset 直接 escalate human
+- [x] Metrics：`merger_agent_plus_two_rate` / `merger_agent_confidence_histogram` / `merger_agent_abstain_total` / `merger_agent_security_refusal_total`
+- [x] 失敗次數 ≥ 3 該 change 停止自動重試，escalate human（沿用 CLAUDE.md rule）
+- [x] 整合測試：簡單 conflict（Merger +2 + mock human +2 → submit）、有歧義 conflict（Merger abstain）、security 檔案（Merger refuse）、test 失敗（Merger 不 push）、僅 Merger +2 無人工 +2（submit-rule 拒絕）、僅人工 +2 無 Merger +2（submit-rule 拒絕）
+- [x] **CLAUDE.md L1 更新**：Safety Rules「AI reviewer max score is +1」需補一條例外條款——「Merger Agent 於衝突解析 patchset 上可給 +2，但 scope 限衝突區塊正確性；最終 submit 仍需人工 +2 雙簽」；否則實作即違反 L1 immutable rule
+- [x] 預估：**2.5 day**（原 2d + 0.5d 用於 Gerrit REST 整合 + submit-rule 測試）
 
 ### O7. Gerrit Submit-Rule 雙簽閘 + CI/CD Merge 仲裁 Pipeline (#270)
 - [ ] Gerrit `project.config` 更新 submit-rule（Prolog 或 Rules Engine）：要求同一 change 上至少一個 **Code-Review: +2 from human group (labeled `non-ai-reviewer`)** 且至少一個 **Code-Review: +2 from `merger-agent-bot` group**；**人工 +2 為 hard gate**——不論其他 AI reviewer 投多少 +2（Merger / lint-bot / security-bot / 未來新增的任何 AI reviewer），缺人工 +2 submit 永遠被拒絕

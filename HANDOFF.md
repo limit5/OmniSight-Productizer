@@ -1,9 +1,53 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
-> 撰寫時間：2026-04-16
-> 最後 commit：O5 — JIRA Bidirectional Sync 深化 (master)
+> 撰寫時間：2026-04-17
+> 最後 commit：O6 — Merger Agent + Gerrit patchset +2（待 commit）
 > Tag：`v0.1.0` — 首個正式 release
-> 工作目錄狀態：clean
+> 工作目錄狀態：O6 實作完成，測試全綠（merger_agent 37 條 + 相鄰 regression 全通過）
+
+---
+
+## O6 (complete) Merger Agent — 衝突解析 + Gerrit +2 投票（2026-04-17 完成）
+
+**背景**：O 區塊第七步。O0–O5 已把 CATC / lock / queue / worker / orchestrator / JIRA bridge 串起來，但兩個 CATC 同改一檔的 merge-conflict 路徑從來沒收斂。O6 補上 Merger Agent：讀 Git `<<<<<<< HEAD / =======/ >>>>>>>` 區塊 + 雙方 commit message + 20 行檔案上下文，LLM 產出 conflict-block-only 的 resolution，推成 Gerrit 新 patchset，並（當 gate 全過）以 `merger-agent-bot` 身分投 **Code-Review: +2**。此 +2 的 scope 限「衝突區塊正確性」——submit 仍需人工 +2 雙簽，由 O7 的 submit-rule 強制。
+
+**交付清單（backend 側）：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `backend/merger_agent.py`（約 780 行，新檔）| 核心模組：`ConflictRequest` / `ResolutionOutcome` / `MergerReason` / `LabelVote` data models；`SYSTEM_PROMPT`（無新邏輯守則）；`parse_conflict_block` / `build_prompt`；`is_security_sensitive`（auth/secrets/config/CI 子字串 matching）；`resolve_conflict()` 端到端（3-strike → security → multi-file → size → LLM → new-logic → confidence → test → push → +2 → audit）；`GitPatchsetPusher`（`git push HEAD:refs/for/main%topic=merger-<change-id>`）；`GerritClientReviewer`（包 `gerrit_client.post_review`）；`MergerDeps` bundle 讓測試無須 monkey-patch |
+| `backend/metrics.py` | 新增 4 個 Merger 計數器：`merger_agent_plus_two_total` / `merger_agent_abstain_total{reason}` / `merger_agent_security_refusal_total` / `merger_agent_confidence`（histogram） |
+| `backend/tests/test_merger_agent.py`（約 480 行，新檔）| 37 條測試：6 條 spec 場景 + security 矩陣 + multi-file/oversized/no-conflict abstain + push fail + 3-strike escalation + success-reset + `GitPatchsetPusher` local git + metric counter + submit-rule simulator |
+| `CLAUDE.md` | L1 Safety Rules 加 Merger +2 例外條款：scope 限衝突區塊，人工 +2 仍為 hard gate |
+| `TODO.md` | O6 全部 `[ ]` → `[x]`；`merger-agent-bot` Gerrit 帳號建立 → `[O]`（operator） |
+
+**驗證結果：**
+
+* `backend/tests/test_merger_agent.py`：**37 條全綠**（含 6 條 spec 場景 + submit-rule truth table + GitPatchsetPusher local workspace）。
+* Regression：`test_gerrit.py` / `test_worker.py` / `test_orchestrator_gateway.py` / `test_queue_backend.py` / `test_dist_lock.py` 合計 155 條通過。
+* `backend.merger_agent` import 乾淨，`MergerDeps` 完全可注入（tests 用 `_FakeLLM` / `_FakePusher` / `_FakeReviewer` + 注入式 `test_runner` / `audit`）。
+
+**設計決策備忘：**
+
+1. **所有 I/O 都插拔**：`MergerLLM` / `PatchsetPusher` / `GerritReviewer` / `TestRunner` / `AuditSink` 五個 protocol，`MergerDeps` 把它們打包。`resolve_conflict` 本體可以當純函式跑——沒有隱含 SSH key / HTTP / DB 相依。
+2. **Gate 順序有意設計**：3-strike → security → multi-file → 無 conflict → oversized → LLM → 新邏輯 → confidence → test → push → vote → audit。Security refusal **不會呼叫 LLM**（省 token、不洩漏密鑰檔內容到 LLM provider）；3-strike 在最前面，避免熱迴圈重跑壞 change。
+3. **new_logic_detected 硬 clamp**：LLM 自報有新邏輯 → confidence 壓到 ≤ 0.3 + reason=`refused_new_logic_detected`；這是「保留雙方意圖、不新增邏輯」守則的最後一道防線（第一道是 SYSTEM_PROMPT，第二道是 human +2）。
+4. **Security-sensitive 子字串 matching**：大小寫不敏感 substring，涵蓋 `auth/` `authz/` `authentication/` `secrets/` `credentials/` `config/` `.env` `.github/workflows/` `ci/` `cicd/` `pipeline.yml` `docker-compose` `dockerfile` `security/` `private_key` `id_rsa`。**不走 regex**——簡單字串比對好複測且不易誤判為 catastrophic backtrack。
+5. **Failure counter 程序內 dict + threading.Lock**：單程序就夠用（worker pool 共享 dict 透過 process-local dict + audit_log persistence）；若未來需要跨 host 共享可以換成 Redis string increment，但目前 B2B 預期 1 orchestrator ≈ 1 process。
+6. **Metrics 語意明確**：`plus_two_total` 單增、`security_refusal_total` 單增、`abstain_total` 依 reason label（8 種 reason 共用一個 counter 便於 Grafana stack chart）；histogram `merger_agent_confidence` 觀測每次 LLM 回應的 confidence 分布（含 abstain），可以抓「LLM 過度自信」訊號。
+7. **Submit-rule 只做測試端模擬**：O6 的 scope 只在 Python agent；真正的 submit-rule 在 O7（Gerrit Prolog rule + `non-ai-reviewer` / `ai-reviewer-bots` group），所以我加了 `_simulate_submit_rule` helper 讓 6 條 spec 場景（尤其是「僅 Merger +2 無人工」「僅人工 +2 無 Merger」「N 個 AI +2 無人工」）能在 O6 層端到端驗證。
+8. **CLAUDE.md L1 政策變更點**：原本「AI reviewer max score is +1」是 immutable 規則，我加了 Merger 例外 bullet 並說清楚 scope + 人工 hard gate。`backend/agents/tools.py::gerrit_submit_review` 仍維持對「general AI agent」的 +1/-1 限制——因為 Merger 走自己的 `GerritClientReviewer` 路徑，不經過 `gerrit_submit_review` 這個 LLM-tool wrapper。
+
+**後續建議（未動到的相鄰工作項）：**
+
+* **O7**：Gerrit `project.config` Prolog submit-rule + `non-ai-reviewer` / `ai-reviewer-bots` group 建立 + webhook 接 `merge-conflict` 事件 → orchestrator `POST /orchestrator/merge-conflict` → 喚醒 O6。測試矩陣已在 O6 的 `_simulate_submit_rule` 驗過邏輯，O7 照抄進 Prolog 即可。
+* **O9 Dashboard**：已 emit `merger.plus_two_voted` / `merger.abstained_*` / `merger.refused_*` SSE（透過 `emit_invoke`），可以直接訂閱畫 funnel（confidence distribution + abstain reasons by rate）。
+* **O10 安全加固**：`merger-agent-bot` Gerrit account 建立（標記為 `[O]` operator task）；push audit 已入 `audit.log()` hash-chain，滿足 SOC2 outbound trail。
+* **intent_bridge hook**：Merger +2 時可呼叫 `intent_bridge.on_merger_voted` 在 JIRA sub-task 加註解「AI Merger voted +2, awaiting human +2」；目前 Merger outcome 已帶 `push_sha` + `review_url`，橋接資料已備妥。
+
+**Operator TODO（`[O]` 項目）：**
+
+* 在 Gerrit 建立 `merger-agent-bot` 帳號並加入 `ai-reviewer-bots` group，授予 `refs/for/*` push + Code-Review ±2 權限；**不得**給 Submit / Push Force / project admin。SSH public key 掛在該帳號下，`backend/config.py::git_ssh_key_path` 指向對應私鑰路徑。
 
 ---
 

@@ -33,6 +33,7 @@ FastAPI (WSL2:8000)               Backend — Multi-agent engine (14 routers, ~8
     +-- Orchestrator Gateway      Jira webhook → LLM DAG split → N CATCs → queue (O4 / /api/v1/orchestrator/*)
     +-- CATC Queue + Workers      Redis Streams queue + stateless worker pool + file-path dist-lock (O0-O3)
     +-- IntentSource Bridge       JIRA / GitHub / GitLab vendor-agnostic adapter + bidirectional status sync + audit (O5)
+    +-- Merger Agent              Conflict-block resolver + Gerrit patchset push + scope-limited +2 vote (O6, human +2 still required for submit)
     +-- LangGraph Pipeline        Orchestrator → Conversation/Specialist → Tool Executor → Summarizer
     +-- 8 LLM Providers           Anthropic, OpenAI, Google, xAI, Groq, DeepSeek, Together, Ollama
     +-- 29 Sandboxed Tools        File, Git, Bash, Simulation, Platform, Review, Report

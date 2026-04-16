@@ -430,6 +430,30 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # O6 (#269): Merger Agent — conflict-resolution +2 votes ────
+    merger_plus_two_total = Counter(
+        "omnisight_merger_agent_plus_two_total",
+        "Merger Agent Code-Review +2 votes cast (scope: conflict correctness)",
+        registry=REGISTRY,
+    )
+    merger_abstain_total = Counter(
+        "omnisight_merger_agent_abstain_total",
+        "Merger Agent abstentions / refusals, partitioned by reason",
+        labelnames=("reason",),
+        registry=REGISTRY,
+    )
+    merger_security_refusal_total = Counter(
+        "omnisight_merger_agent_security_refusal_total",
+        "Merger Agent hard refusals for security-sensitive files",
+        registry=REGISTRY,
+    )
+    merger_confidence = Histogram(
+        "omnisight_merger_agent_confidence",
+        "Merger Agent self-reported confidence per resolved conflict",
+        buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
+        registry=REGISTRY,
+    )
+
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
         "omnisight_memory_decay_total",
@@ -506,6 +530,10 @@ else:
     worker_lifecycle_total = _NoOp()  # type: ignore
     worker_task_total = _NoOp()  # type: ignore
     worker_task_seconds = _NoOp()  # type: ignore
+    merger_plus_two_total = _NoOp()  # type: ignore
+    merger_abstain_total = _NoOp()  # type: ignore
+    merger_security_refusal_total = _NoOp()  # type: ignore
+    merger_confidence = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -546,6 +574,8 @@ def reset_for_tests() -> None:
     global queue_depth, queue_claim_duration_seconds
     global worker_active, worker_inflight, worker_heartbeat_total
     global worker_lifecycle_total, worker_task_total, worker_task_seconds
+    global merger_plus_two_total, merger_abstain_total
+    global merger_security_refusal_total, merger_confidence
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -790,6 +820,25 @@ def reset_for_tests() -> None:
     worker_task_seconds = Histogram(
         "omnisight_worker_task_seconds", "End-to-end task seconds",
         buckets=(0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800),
+        registry=REGISTRY,
+    )
+    merger_plus_two_total = Counter(
+        "omnisight_merger_agent_plus_two_total",
+        "Merger Agent +2 votes", registry=REGISTRY,
+    )
+    merger_abstain_total = Counter(
+        "omnisight_merger_agent_abstain_total",
+        "Merger Agent abstentions by reason",
+        labelnames=("reason",), registry=REGISTRY,
+    )
+    merger_security_refusal_total = Counter(
+        "omnisight_merger_agent_security_refusal_total",
+        "Merger Agent security-file refusals", registry=REGISTRY,
+    )
+    merger_confidence = Histogram(
+        "omnisight_merger_agent_confidence",
+        "Merger Agent confidence",
+        buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
         registry=REGISTRY,
     )
     process_start_time = Gauge(
