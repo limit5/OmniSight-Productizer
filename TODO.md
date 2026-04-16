@@ -880,24 +880,25 @@ Legend:
 - [x] 預估：**2.5 day**（原 2d + 0.5d 用於 Gerrit REST 整合 + submit-rule 測試）
 
 ### O7. Gerrit Submit-Rule 雙簽閘 + CI/CD Merge 仲裁 Pipeline (#270)
-- [ ] Gerrit `project.config` 更新 submit-rule（Prolog 或 Rules Engine）：要求同一 change 上至少一個 **Code-Review: +2 from human group (labeled `non-ai-reviewer`)** 且至少一個 **Code-Review: +2 from `merger-agent-bot` group**；**人工 +2 為 hard gate**——不論其他 AI reviewer 投多少 +2（Merger / lint-bot / security-bot / 未來新增的任何 AI reviewer），缺人工 +2 submit 永遠被拒絕
-  - [ ] Group 配置：Gerrit 建 `non-ai-reviewer` group（human only，bot 帳號不得加入）+ `ai-reviewer-bots` group（所有 AI reviewer 都屬此 group）；submit-rule 以 group membership 判斷而非個別帳號（未來新增 AI reviewer 不需改 rule）
-  - [ ] Submit-rule 測試矩陣：
-    - [ ] 只有 merger +2，無人工 → reject
-    - [ ] 只有人工 +2，無 merger → reject（仍需 merger 對衝突區塊簽核）
-    - [ ] merger +2 + 人工 +2 → allow
-    - [ ] merger +2 + 人工 -1 → reject
-    - [ ] **Nx AI +2（merger + lint-bot + security-bot + 其他）+ 0 人工 → reject**（核心測試：任何 AI 組合無人工皆不放行）
-    - [ ] Nx AI +2 + 人工 +2 → allow（人工 +2 是 hard gate，AI 只能加分不能取代）
-  - [ ] 範本 `.gerrit/project.config.example` + runbook `docs/ops/gerrit_dual_two_rule.md`（明確記載「人工 +2 強制最終放行」政策與 group 設計）
-- [ ] Gerrit webhook：偵測 `merge-conflict` 事件 → 呼叫 Orchestrator `POST /orchestrator/merge-conflict` → Orchestrator 喚醒 O6 Merger Agent
-- [ ] Merger Agent 路徑：push resolved patchset → 投票（±2 / 0）→ SSE 通知人工 reviewer（Slack/email webhook）
-- [ ] 人工 reviewer 若 Code-Review: +2 → Gerrit submit-rule 通過 → 自動 merge
-- [ ] 人工 Code-Review: -1 / -2 → Merger Agent 自動 revert 其 +2（寫 comment：「human disagrees, merger withdraws」）→ change 回 work-in-progress
-- [ ] 若 Merger abstain（O6 gate 未過）→ 建 JIRA ticket + assign 原 CATC owner + 等人工雙 +2 或 reject
-- [ ] GitHub Actions workflow 範本 `.github/workflows/merge-arbiter.yml`（for GitHub-native 客戶，無 Gerrit 時退化為 PR + 2 approver required，其中一個必須是 `merger-agent-bot` GitHub App）
-- [ ] 完整 E2E 測試：兩 PR 同改一檔 → 第二個 merge conflict → Merger push 解析 patchset → Merger +2 → 通知人工 → 人工 +2 → submit → 雙方 commit 都留在 main
-- [ ] 預估：**1.5 day**（原 1d + 0.5d Gerrit submit-rule 配置與測試）
+- [x] Gerrit `project.config` 更新 submit-rule（Prolog 或 Rules Engine）：要求同一 change 上至少一個 **Code-Review: +2 from human group (labeled `non-ai-reviewer`)** 且至少一個 **Code-Review: +2 from `merger-agent-bot` group**；**人工 +2 為 hard gate**——不論其他 AI reviewer 投多少 +2（Merger / lint-bot / security-bot / 未來新增的任何 AI reviewer），缺人工 +2 submit 永遠被拒絕（`.gerrit/rules.pl` + `.gerrit/project.config.example`；Python SSOT mirror `backend/submit_rule.py`）
+  - [O] Group 配置：Gerrit 建 `non-ai-reviewer` group（human only，bot 帳號不得加入）+ `ai-reviewer-bots` group（所有 AI reviewer 都屬此 group）；submit-rule 以 group membership 判斷而非個別帳號（未來新增 AI reviewer 不需改 rule）— operator must run `gerrit create-group` commands per `docs/ops/gerrit_dual_two_rule.md §1`
+  - [x] Submit-rule 測試矩陣：
+    - [x] 只有 merger +2，無人工 → reject（`test_submit_rule_matrix.py::test_merger_plus_two_alone_rejects`）
+    - [x] 只有人工 +2，無 merger → reject（`::test_human_plus_two_alone_rejects`）
+    - [x] merger +2 + 人工 +2 → allow（`::test_merger_plus_two_plus_human_plus_two_allows`）
+    - [x] merger +2 + 人工 -1 → reject（`::test_merger_plus_two_plus_human_minus_one_rejects`）
+    - [x] **Nx AI +2（merger + lint-bot + security-bot + 其他）+ 0 人工 → reject**（`::test_n_ai_plus_twos_without_human_rejects`，6 個 AI +2 仍拒絕）
+    - [x] Nx AI +2 + 人工 +2 → allow（`::test_n_ai_plus_twos_plus_human_plus_two_allows`）
+  - [x] 範本 `.gerrit/project.config.example` + runbook `docs/ops/gerrit_dual_two_rule.md`（明確記載「人工 +2 強制最終放行」政策與 group 設計）
+- [x] Gerrit webhook：偵測 `merge-conflict` 事件 → 呼叫 Orchestrator `POST /orchestrator/merge-conflict` → Orchestrator 喚醒 O6 Merger Agent（`backend/routers/orchestrator.py` endpoint + `.gerrit/project.config.example` webhook plugin stanza；operator 必須在 Gerrit 伺服器 enable webhooks plugin — 見 [O] 下）
+  - [O] Gerrit 伺服器端 webhooks plugin 實際啟用與 TLS 憑證配置（code side 已備）
+- [x] Merger Agent 路徑：push resolved patchset → 投票（±2 / 0）→ SSE 通知人工 reviewer（Slack/email webhook）— SSE event `orchestration.change.awaiting_human_plus_two`
+- [x] 人工 reviewer 若 Code-Review: +2 → Gerrit submit-rule 通過 → 自動 merge（`on_human_vote_recorded` → `GerritSubmitter.submit`）
+- [x] 人工 Code-Review: -1 / -2 → Merger Agent 自動 revert 其 +2（寫 comment：「human disagrees, merger withdraws」）→ change 回 work-in-progress（`GerritVoteRevoker.revoke` + `_reset_failure(change_id)`）
+- [x] 若 Merger abstain（O6 gate 未過）→ 建 JIRA ticket + assign 原 CATC owner + 等人工雙 +2 或 reject（`_handle_non_plus_two` + de-dupe 同一 change）
+- [x] GitHub Actions workflow 範本 `.github/workflows/merge-arbiter.yml`（for GitHub-native 客戶，無 Gerrit 時退化為 PR + 2 approver required，其中一個必須是 `merger-agent-bot` GitHub App）
+- [x] 完整 E2E 測試：兩 PR 同改一檔 → 第二個 merge conflict → Merger push 解析 patchset → Merger +2 → 通知人工 → 人工 +2 → submit → 雙方 commit 都留在 main（`test_merge_arbiter.py::test_e2e_happy_path_webhook_to_submit`）
+- [x] 預估：**1.5 day**（原 1d + 0.5d Gerrit submit-rule 配置與測試）
 
 ### O8. 遷移路徑：從單程序到分散式（Feature Flag + Dual-mode） (#271)
 - [ ] `OMNISIGHT_ORCHESTRATION_MODE=monolith | distributed`（預設 monolith 保留既有行為）

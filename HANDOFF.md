@@ -1,9 +1,62 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：O6 — Merger Agent + Gerrit patchset +2（待 commit）
+> 最後 commit：O7 — Gerrit dual-+2 submit-rule + Merge Arbiter pipeline (#270)
 > Tag：`v0.1.0` — 首個正式 release
-> 工作目錄狀態：O6 實作完成，測試全綠（merger_agent 37 條 + 相鄰 regression 全通過）
+> 工作目錄狀態：O7 實作完成，測試全綠（O7 新增 33 條 + 既有 merger/orchestrator 63 條全通過）
+
+---
+
+## O7 (complete) Gerrit Submit-Rule 雙簽閘 + CI/CD Merge 仲裁 Pipeline (#270)（2026-04-17 完成）
+
+**背景**：O6 讓 Merger Agent 能對衝突區塊投 `Code-Review: +2`，但「+2 之後真的能 merge 嗎」這條路過去一直是空的。O7 補上最後一哩：Gerrit 伺服器端的 submit-rule（Prolog）+ orchestrator 端的 Merge Arbiter（webhook → merger → 人工投票 reconciliation）+ GitHub Actions 的 fallback workflow，讓「**人工 +2 為 hard gate，無論幾個 AI +2 都不能取代**」這條 CLAUDE.md L1 Safety Rule 真的被 submit 端強制執行。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `.gerrit/rules.pl` | Prolog submit-rule：`has_human_plus_two`（檢查 `non-ai-reviewer` group）+ `has_merger_plus_two`（檢查 `merger-agent-bot` group）+ negative-vote kill-switch；group-based，未來加 AI reviewer 免改 rule |
+| `.gerrit/project.config.example` | 對應的 `project.config`：access rules（AI bots 不得 submit）+ webhooks plugin 指向 `/orchestrator/merge-conflict` |
+| `backend/submit_rule.py`（~260 行，新檔）| Python SSOT 評估器：`ReviewerVote` / `SubmitDecision` / `SubmitReason` + `evaluate_submit_rule()`；orchestrator + GitHub fallback + 測試矩陣都用同一份邏輯，確保 Prolog rule 與 Python 判斷不會語意漂移 |
+| `backend/merge_arbiter.py`（~490 行，新檔）| Webhook 驅動的仲裁器：`MergeConflictTask` / `ArbiterOutcome` / `ArbiterReason`；`on_merge_conflict_webhook`（喚醒 merger → 分支路由：+2 → SSE `awaiting_human_plus_two`；abstain → 開 JIRA ticket + de-dupe；refuse → SSE + audit）；`on_human_vote_recorded`（人工 +2 → `submit_change`；人工 -1/-2 → `post_review{Code-Review:0}` + "human disagrees, merger withdraws" + WIP + 清 strike counter）；所有對外呼叫 inject-at-call-time |
+| `backend/routers/orchestrator.py` | 新增三個 endpoint：`POST /orchestrator/merge-conflict`（Gerrit webhook intake，共用 Jira HMAC 秘鑰）、`POST /orchestrator/human-vote`（Gerrit Code-Review event reconciliation）、`POST /orchestrator/check-change-ready`（pure query，供 UI / CLI） |
+| `.github/workflows/merge-arbiter.yml` | GitHub-native fallback：import `backend/submit_rule.py` 同一份評估器讀 PR reviews，post `merge-arbiter/dual-plus-two` status check |
+| `docs/ops/gerrit_dual_two_rule.md` | Runbook：group 設計、建立指令、installing on refs/meta/config、測試矩陣、operational flows、emergency rollback、GitHub fallback mapping |
+| `backend/tests/test_submit_rule_matrix.py`（16 條）| 8-row 測試矩陣釘成 contract：merger-only reject / human-only reject / 雙 +2 allow / merger +2 + human -1 reject / **6 個 AI +2 + 0 人工 → reject**（核心案例）/ N AI +2 + 人工 +2 → allow / 空 vote list / 只有 +1 / 惡意把 merger bot 加到 human group 仍拒絕等 |
+| `backend/tests/test_merge_arbiter.py`（12 條）| Arbiter unit test：webhook 合法/不合法 payload、+2 路徑 SSE、abstain 開 JIRA 並 de-dupe、security/test_failure/escalated 路由對應、人工 +2 走 submit、人工 -1 走 revoke + WIP、人工 +1 below-gate、E2E happy path |
+| `backend/tests/test_merge_arbiter_http.py`（5 條）| HTTP surface：`/merge-conflict` 端到端、缺欄位 400、`/human-vote` 雙 +2 submit、`/human-vote` 負分 revoke、`/check-change-ready` 純查詢 |
+
+**驗證結果：**
+
+* `test_submit_rule_matrix.py`：**16/16 綠**。
+* `test_merge_arbiter.py`：**12/12 綠**。
+* `test_merge_arbiter_http.py`：**5/5 綠**。
+* Regression：`test_merger_agent.py`（37 條）+ `test_orchestrator_gateway.py`（26 條）全綠。
+* Import 乾淨：`from backend import submit_rule, merge_arbiter` OK。
+
+**設計決策備忘：**
+
+1. **Python SSOT 鏡像 Prolog**：測試矩陣沒塞到 Gerrit Prolog sandbox（太依賴 Gerrit 伺服器環境），改用純 Python `evaluate_submit_rule` 配 16 條 `test_submit_rule_matrix.py` 鎖住 8-row truth table。Prolog side 是 production 最終守門員，Python side 是 orchestrator / GitHub fallback / 測試矩陣共用的唯一判斷源。**Prolog 改動必須同步改 Python，反之亦然**——runbook 有記。
+2. **Group-based 而非 identity-based**：Prolog rule 用 `gerrit:user_in_group/1` 檢查 `non-ai-reviewer` 與 `merger-agent-bot`。未來加 `perf-bot` / `style-bot`，operator 把帳號丟進 `ai-reviewer-bots` group 即可，`rules.pl` 不用動。Python side 對應用 `GROUP_HUMAN` / `GROUP_AI_BOTS` / `GROUP_MERGER` 常量 + `is_human()` 硬守「帶 ai-reviewer-bots → False」，避免 operator 誤把 bot 加到人工 group 的情境。
+3. **人工 -1/-2 → revoke 而非 retry**：Merger 投 +2 後人工反對，Arbiter 呼叫 `post_review{Code-Review:0, "human disagrees, merger withdraws"}`，不試圖重跑 merger。理由：(a) 人工反對代表 merger 的策略判斷被挑戰，重跑同一個 LLM 大概率產同答案；(b) `_reset_failure(change_id)` 把 strike counter 歸零讓下一個 patchset 重新進 merger，避開「3-strike stuck」bug。
+4. **Merger abstain → JIRA ticket（de-duped）**：Arbiter 保留 process-local `_pending_abstains[change_id]`，同一個 change 的同一個 abstain reason 只開一次 ticket，避免 Gerrit webhook 重送造成 JIRA 洪水。Ticket opener 走 protocol，tests 注入 stub；`_DefaultJiraOpener` 目前回傳「deferred」——實際 JIRA bulk create 走 `intent_bridge`，待 O9/O10 時把 `jira_adapter` 的 tenant-scoped client 注入進來。
+5. **GitHub fallback 有意「不翻譯」**：workflow 直接 `import backend.submit_rule` 跑評估，不在 YAML 裡重寫 policy。GH review state 到 Code-Review score 的映射（APPROVED→+2 / CHANGES_REQUESTED→-2）寫在 step script 裡，是唯一的 adapter code。新增一條 policy case 只需改 Python，YAML 不動。
+6. **Webhook 安全沿用 Jira HMAC secret**：`/merge-conflict` 與 `/intake` 共用 `settings.jira_webhook_secret`，operator 只維護一個秘鑰。多 tenant 後若要 per-tenant secret，改 `_verify_jira_signature` 即可（已有 `X-Jira-Webhook-Secret` header alt）。
+7. **SubmitDecision shape 是 audit 契約**：`to_dict()` 的欄位（`allow` / `reason` / `missing` / `human_plus_twos` / `merger_plus_twos` / `ai_plus_twos` / `negative_votes` / `negative_voters`）進 audit_log + SSE event + check-change-ready 回應；改欄位名或型別是 breaking change，須同步 bump schema 版本。
+
+**後續建議（未動到的相鄰工作項）：**
+
+* **O8 雙模式遷移**：`OMNISIGHT_ORCHESTRATION_MODE=distributed` 時，merge arbiter 接 queue dispatch；O7 的 endpoints 已無狀態，搬 queue 是純 routing 改動。
+* **O9 Dashboard**：已 emit SSE `orchestration.change.awaiting_human_plus_two` / `change.merger_abstain` / `change.submitted` / `change.work_in_progress` / `change.awaiting_more_votes`，UI 可直接訂閱。建議畫：「waiting for human +2 ≥ 24h 的 change 列表」、「human disagree rate（-1/-2 after merger +2）」。
+* **O10 安全加固**：`merger-agent-bot` 權限在 `.gerrit/project.config.example` 已寫明（`push to refs/for/*` + `Code-Review -2..+2`，**no submit**）；HMAC 驗證 / rate-limit / JWT scope 驗證可在 O10 加。
+* **jira_adapter tenant binding**：`_DefaultJiraOpener` 目前回傳 deferred；連回 `intent_bridge` 的 tenant-scoped JIRA client 是 ~30 行 glue，留給下個 iteration。
+
+**Operator TODO（`[O]` 項目，TODO.md 已標記）：**
+
+1. **建立 Gerrit groups**（詳見 `docs/ops/gerrit_dual_two_rule.md §1`）：`non-ai-reviewer`（humans only）、`ai-reviewer-bots`（umbrella for all AI）、`merger-agent-bot`（inherits from `ai-reviewer-bots`）。
+2. **Push `project.config` + `rules.pl` 到 `refs/meta/config`**（runbook §2）。
+3. **啟用 Gerrit webhooks plugin** 指向 `https://orchestrator.<domain>/api/v1/orchestrator/merge-conflict`，帶 `Authorization: Bearer $JIRA_WEBHOOK_SECRET`。
+4. **GitHub 客戶**：設 branch protection 要 `merge-arbiter/dual-plus-two` status 通過，並把 `merger-agent-bot` GitHub App + `non-ai-reviewer` team 設好。
 
 ---
 
