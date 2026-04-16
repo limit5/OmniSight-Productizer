@@ -774,6 +774,10 @@ async def intake(
     session.last_updated_at = time.time()
     _publish_intake_event(session, event="queued")
 
+    # O5 — drive IntentSource bridge: create sub-tasks + flip parent to
+    # In Progress.  Best-effort: bridge errors never break intake.
+    await _notify_intent_bridge_queued(session, dag, cards, pushed)
+
     return IntakeOutcome(
         jira_ticket=jira_ticket,
         dag=dag,
@@ -942,6 +946,33 @@ def _gerrit_status_stub(task_id: str) -> dict[str, Any]:
         "human_vote": 0,
         "both_plus_2": False,
     }
+
+
+async def _notify_intent_bridge_queued(session: IntakeSession,
+                                       dag: DAG,
+                                       cards: list[TaskCard],
+                                       pushed: list[PushedCard]) -> None:
+    """Drive ``intent_bridge.on_intake_queued`` with the list of created
+    CATCs.  Any failure is swallowed — the intake has already succeeded."""
+    try:
+        from backend import intent_bridge
+    except Exception as exc:  # pragma: no cover
+        logger.debug("intent_bridge import failed: %s", exc)
+        return
+    try:
+        cards_with_task_ids = [
+            (pushed_card.task_id, card)
+            for pushed_card, card in zip(pushed, cards)
+        ]
+        await intent_bridge.on_intake_queued(
+            parent=session.jira_ticket,
+            vendor=None,
+            cards_with_task_ids=cards_with_task_ids,
+            dag_id=dag.dag_id,
+        )
+    except Exception as exc:
+        logger.warning("intent_bridge.on_intake_queued failed for %s: %s",
+                       session.jira_ticket, exc)
 
 
 def _publish_intake_event(session: IntakeSession, *, event: str) -> None:

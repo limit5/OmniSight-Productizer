@@ -47,6 +47,7 @@ systemd unit and the docker-compose profile use.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import concurrent.futures
 import json
 import logging
@@ -1005,6 +1006,14 @@ class Worker:
                     raise WorkerTaskFailed(
                         f"gerrit push failed: {push_result.reason}",
                     )
+                # O5 — notify intent_bridge so the sub-task in the
+                # tracker flips to "In Review" while humans + AI +2.
+                _notify_intent_bridge_gerrit_pushed(
+                    task_id=task_id,
+                    card=card,
+                    change_id=change_id,
+                    review_url=push_result.review_url,
+                )
                 queue_backend.ack(msg.message_id)
                 outcome.status = "acked"
                 try:
@@ -1234,6 +1243,80 @@ def _bump_workers_active(store: HeartbeatStore) -> None:
         metrics.worker_active.set(len(store.list_active()))
     except Exception:
         pass
+
+
+def _notify_intent_bridge_gerrit_pushed(*, task_id: str, card: TaskCard,
+                                       change_id: str,
+                                       review_url: str) -> None:
+    """Best-effort async dispatch to ``intent_bridge.on_worker_gerrit_pushed``.
+
+    The worker runs on a synchronous thread pool, so we schedule the
+    coroutine onto the running loop if there is one; otherwise create
+    a disposable loop for this single call.  Errors are swallowed — the
+    Gerrit push itself has already succeeded.
+    """
+    try:
+        from backend import intent_bridge
+    except Exception as exc:
+        logger.debug("intent_bridge import failed in worker: %s", exc)
+        return
+    # The orchestrator recorded the parent under ``card.jira_ticket``
+    # only when the card is itself the parent; for CATCs (sub-tasks)
+    # we need to find the parent.  The bridge's record lookup does
+    # that by CATC task_id + sub-task ticket so pass both.
+    from backend import intent_bridge as _ib
+
+    # Derive parent ticket: strip the trailing index we appended in
+    # ``_subtask_key`` (PROJ-7001 → PROJ-7).  When we can't recover
+    # the parent, pass an empty string — the bridge will still update
+    # the sub-task's own status.
+    subtask = card.jira_ticket
+    parent = _derive_parent_from_subtask(subtask)
+
+    async def _go() -> None:
+        try:
+            await _ib.on_worker_gerrit_pushed(
+                task_id=task_id,
+                jira_ticket=subtask,
+                parent=parent,
+                change_id=change_id,
+                review_url=review_url,
+                vendor=None,
+            )
+        except Exception as exc:
+            logger.debug("intent_bridge gerrit_pushed hook failed: %s", exc)
+
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (worker default) — run to completion
+            # synchronously on a disposable loop.
+            asyncio.run(_go())
+            return
+        loop.create_task(_go())
+    except Exception as exc:
+        logger.debug("intent_bridge gerrit_pushed dispatch failed: %s", exc)
+
+
+def _derive_parent_from_subtask(subtask: str) -> str:
+    """Reverse the ``_subtask_key`` encoding in orchestrator_gateway.
+
+    ``PROJ-7001`` → ``PROJ-7`` (last three digits were the 1-based
+    CATC index).  When the encoding doesn't match, fall back to
+    searching the bridge registry.
+    """
+    import re as _re
+    m = _re.match(r"^([A-Z][A-Z0-9_]*)-(\d+)$", subtask or "")
+    if not m:
+        return ""
+    prefix, num_s = m.group(1), m.group(2)
+    num = int(num_s)
+    if num < 1001:
+        return ""
+    parent_num, _remainder = divmod(num, 1000)
+    # Index 1 of parent 7 becomes 7001; reverse: 7001 // 1000 = 7.
+    return f"{prefix}-{parent_num}"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

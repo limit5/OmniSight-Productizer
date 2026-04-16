@@ -562,6 +562,19 @@ app.include_router(_hmi_router.router, prefix=settings.api_prefix)
 from backend.routers import orchestrator as _orchestrator_router  # O4/ORCHESTRATOR-GATEWAY
 app.include_router(_orchestrator_router.router, prefix=settings.api_prefix)
 
+# O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
+# Done as a one-shot side-effect here so unit tests that don't import
+# main can still exercise the registry directly (they just register
+# fakes).
+try:
+    from backend import intent_sources_bootstrap as _intent_sources_bootstrap
+    _intent_sources_bootstrap.register_defaults()
+except Exception as _exc:  # pragma: no cover
+    import logging as _lg
+    _lg.getLogger(__name__).warning(
+        "intent_sources bootstrap failed: %s", _exc,
+    )
+
 
 @app.get("/")
 async def root():

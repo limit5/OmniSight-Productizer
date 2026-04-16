@@ -279,6 +279,18 @@ async def _on_change_merged(event: dict) -> None:
     from backend.notifications import notify
     await notify("info", f"Merged: {subject}", source="gerrit")
 
+    # O5 (#268) — drive IntentSource bridge to flip the sub-task (and
+    # parent, when all sub-tasks are merged) to Done.  Best-effort.
+    commit_msg = (event.get("change", {}) or {}).get("commitMessage", "") or \
+        subject
+    try:
+        from backend import intent_bridge
+        await intent_bridge.on_gerrit_change_merged(
+            change_id=change_id, commit_msg=commit_msg, vendor=None,
+        )
+    except Exception as exc:
+        logger.warning("intent_bridge.on_gerrit_change_merged failed: %s", exc)
+
     # Trigger replication
     targets = [t.strip() for t in settings.gerrit_replication_targets.split(",") if t.strip()]
     if not targets:

@@ -1,9 +1,49 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：O4 — Orchestrator Gateway Service (master)
+> 最後 commit：O5 — JIRA Bidirectional Sync 深化 (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## O5 (complete) JIRA Bidirectional Sync 深化（2026-04-16 完成）
+
+**背景**：O 區塊第六步。O4 交付後 Orchestrator Gateway 已能接 Jira webhook，但「從 Jira 拉到」與「往 Jira / GitHub / GitLab 寫回」兩邊都用散落在 `backend/issue_tracker.py`、`backend/routers/webhooks.py` 的硬寫 code。這一步把雙向流收斂到單一 `IntentSource` protocol，讓 JIRA（主）/ GitHub Issues / GitLab（次）三個 tracker 共用同一條 orchestrator → worker → Gerrit → tracker 的 feedback loop。每個對外呼叫都強制進 audit_log（帶 request/response hash），滿足 SOC2 / ISO 27001 的 outbound API trail 要求。
+
+**交付清單（backend 側）：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `backend/intent_source.py` | Protocol + data models（`IntentStory` / `SubtaskPayload` / `SubtaskRef` / `IntentStatus`）、registry、`audit_outbound` helper、`curl` 透傳 HTTP client |
+| `backend/jira_adapter.py` | JIRA REST v2 adapter；bulk sub-task create + custom field map（`impact_scope_{allowed,forbidden}` / `acceptance_criteria` / `handoff_protocol` / `domain_context`）+ `transitions` 語意匹配 |
+| `backend/github_adapter.py` | GitHub Issues adapter；以 child Issue + parent checklist 模擬 sub-task；HMAC-SHA256 webhook 驗證 |
+| `backend/gitlab_adapter.py` | GitLab Issues adapter；`X-Gitlab-Token` shared-secret 驗證 |
+| `backend/intent_bridge.py` | 狀態橋：`on_intake_queued` / `on_worker_gerrit_pushed` / `on_gerrit_change_merged` 三個 hook 驅動 `in_progress → reviewing → done` |
+| `backend/intent_sources_bootstrap.py` | 啟動時把三個 factory 注入 registry（在 `backend/main.py` 尾端呼叫 once） |
+| `backend/orchestrator_gateway.py` | `intake()` 尾端加 `_notify_intent_bridge_queued`：CATC 進 queue 後馬上產生 N 張 JIRA sub-task + 把 parent 轉 `In Progress` |
+| `backend/worker.py` | Worker push Gerrit 成功後呼叫 `intent_bridge.on_worker_gerrit_pushed`，sub-task 自動轉 `Reviewing` |
+| `backend/routers/webhooks.py` | Gerrit `change-merged` 時呼叫 `intent_bridge.on_gerrit_change_merged`，sub-task / parent 依序轉 `Done` |
+
+**驗證結果：**
+
+* 新增單元 + 整合測試 **52** 條（`test_intent_source.py` 18 / `test_jira_adapter.py` 15 / `test_github_gitlab_adapters.py` 13 / `test_intent_bridge.py` 6）；全綠。
+* Regression：`test_orchestrator_gateway.py` 26 條 + `test_worker.py` 32 條 + `test_webhooks.py` + `test_external_webhooks.py` + `test_audit.py` + `test_catc.py` + `test_queue_backend.py` + `test_dist_lock.py` 合計 266 條全部通過（0 failures）。
+* `backend.main` import 乾淨；bootstrap 能正確 register `jira` / `github` / `gitlab` 三個 vendor。
+
+**設計決策備忘：**
+
+1. **Ticket 命名空間**：JIRA 繼續用 `PROJ-123`；GitHub 用 `owner/repo#42`（避免跨 repo 號碼衝突）；GitLab 用 `group/project#17`（對齊原生 `@iid`）。`detect_vendor()` 會優先判 headers，再退回 body heuristic。
+2. **Audit hash**：`payload_hash(obj)` 做 canonical JSON（sorted keys）→ sha256；所以同一 payload 跨執行產出同一 hash，可以做跨 log 追蹤但 payload 本身不落檔（只存 256-byte preview）。
+3. **CATC → JIRA 欄位對應**：custom field id 是 per-instance 的（`customfield_10050` 等），所以 `JiraFieldMap` 吃 env override（`OMNISIGHT_JIRA_FIELD_*`），專案上線時 ops 一次設定。
+4. **雙向狀態流**：orchestrator intake 完成後 `in_progress`（parent + children 同時）；worker push Gerrit 時該 CATC 的 sub-task 轉 `reviewing`；Gerrit `change-merged` webhook 觸發時，sub-task 轉 `done`，若 parent 下所有 sub-task 都 `done` 則 parent 也轉 `done`。這對齊 O7 的 **雙 +2 hard gate**：`Done` 意味著 Gerrit submit-rule（人工 +2 + AI +2）已經通過。
+5. **錯誤吞噬政策**：橋接失敗不會 break intake / worker / webhook 主流程——只會 log warning + 發 SSE `intent_bridge:error` 事件。這延續 O4 的「audit 不擋 train」精神。
+
+**後續建議（未動到的相鄰工作項）：**
+
+* O6（Merger Agent）需要新增一個 intent_bridge hook `on_merger_voted` —— Merger +2 時在 sub-task 上加 comment「AI Merger voted +2, awaiting human +2」。
+* O9（觀測 Dashboard）可以訂 `intent_bridge:queued|reviewing|done_subtask|done_parent|error` 五個 SSE 事件繪 funnel。
+* O10 的 JIRA token 加固：目前走 `settings.notification_jira_token`（env 明碼），之後接 `backend/api_keys.py` rotation 框架。
 
 ---
 

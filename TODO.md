@@ -851,13 +851,13 @@ Legend:
 - [x] 預估：**2 day**
 
 ### O5. JIRA Bidirectional Sync 深化 (#268)
-- [ ] 抽 `IntentSource` interface：`fetch_story(ticket)` / `create_subtask(parent, payload)` / `update_status(ticket, status)` / `comment(ticket, body)`
-- [ ] JIRA adapter（主）：沿用現有 webhook signature 驗證 + 加 sub-task 批次建立
-- [ ] GitHub Issues / GitLab adapter（次）：保留 vendor-agnostic，小客戶不用 JIRA 也能跑
-- [ ] Sub-task 欄位映射：CATC → JIRA custom field（impact_scope / acceptance_criteria / handoff_protocol）
-- [ ] Status 雙向：JIRA `In Progress` → queue push；Worker Gerrit push → JIRA `Reviewing`；雙 +2 到齊 + Gerrit submit → JIRA `Done`
-- [ ] Audit：所有 JIRA 外呼都進 audit_log（含 request/response hash）
-- [ ] 預估：**2 day**
+- [x] 抽 `IntentSource` interface：`fetch_story(ticket)` / `create_subtask(parent, payload)` / `update_status(ticket, status)` / `comment(ticket, body)`
+- [x] JIRA adapter（主）：沿用現有 webhook signature 驗證 + 加 sub-task 批次建立
+- [x] GitHub Issues / GitLab adapter（次）：保留 vendor-agnostic，小客戶不用 JIRA 也能跑
+- [x] Sub-task 欄位映射：CATC → JIRA custom field（impact_scope / acceptance_criteria / handoff_protocol）
+- [x] Status 雙向：JIRA `In Progress` → queue push；Worker Gerrit push → JIRA `Reviewing`；雙 +2 到齊 + Gerrit submit → JIRA `Done`
+- [x] Audit：所有 JIRA 外呼都進 audit_log（含 request/response hash）
+- [x] 預估：**2 day**
 
 ### O6. Merger Agent (#269) — 衝突解析器，Gerrit patchset 輸出 + AI +2 vote（**不自動合併**）
 - [ ] `backend/merger_agent.py`：specialized LLM wrapper，system prompt 固定為「合併衝突解決專家，保留雙方邏輯意圖，不得新增任何原未出現於雙方 commit 的新邏輯」
