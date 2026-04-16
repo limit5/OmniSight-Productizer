@@ -44,6 +44,57 @@ DOCKER_IMAGE = f"omnisight-agent:{_dockerfile_hash()}"
 DOCKER_TIMEOUT = 60  # seconds for commands
 BUILD_TIMEOUT = 300  # seconds for image build
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  M1: DRF token → cgroup hard-limit mapping
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 1 DRF token (I6 SandboxCostWeight unit) ≈ 1 CPU core × 512 MiB RAM.
+# We translate the per-tenant budget acquired from sandbox_capacity into
+# concrete docker flags so the kernel — not just the scheduler — enforces
+# the share. `--cpus` is the CFS quota cap, `--cpu-shares` becomes the
+# cgroup v2 `cpu.weight` proportional share under contention, and
+# `--memory` is the hard OOM trigger.
+#
+# Both bounds clamp to sane safety rails so a buggy caller can't ask for
+# 10 000 cores; defaults preserve the legacy `_settings.docker_*_limit`
+# behaviour when no tenant_budget is supplied (callers that haven't been
+# updated yet still work).
+M1_TOKEN_CPU = 1.0          # 1 token → 1.0 CPU core
+M1_TOKEN_MEM_MB = 512       # 1 token → 512 MiB
+M1_TOKEN_SHARES = 1024      # 1 token → 1024 cpu-shares (Docker default)
+M1_MAX_TOKENS = 12.0        # safety clamp; matches CAPACITY_MAX
+M1_MIN_TOKENS = 0.25        # never starve below 0.25 token (256 MiB / 0.25 cpu)
+
+
+def _compute_resource_limits(
+    tenant_budget: float | None,
+) -> tuple[str, str, int]:
+    """Translate DRF token budget → (--cpus, --memory, --cpu-shares).
+
+    `tenant_budget` is the SandboxCostWeight value the I6 layer accepted
+    on this tenant's behalf (1.0 lightweight, 4.0 compile, …). When None
+    we fall back to the legacy settings.docker_{cpu,memory}_limit so the
+    pre-M1 callsites don't change behaviour.
+    """
+    from backend.config import settings as _settings
+
+    if tenant_budget is None or tenant_budget <= 0:
+        # Legacy path — keep current behaviour. cpu-shares stays at the
+        # Docker default (1024), so unbudgeted containers don't get an
+        # unfair edge over budgeted ones.
+        return (
+            str(_settings.docker_cpu_limit or "2"),
+            str(_settings.docker_memory_limit or "1g"),
+            1024,
+        )
+
+    tokens = max(M1_MIN_TOKENS, min(float(tenant_budget), M1_MAX_TOKENS))
+    cpus = f"{tokens * M1_TOKEN_CPU:.2f}"
+    mem_mib = int(round(tokens * M1_TOKEN_MEM_MB))
+    mem = f"{mem_mib}m"
+    shares = max(2, int(round(tokens * M1_TOKEN_SHARES)))
+    return cpus, mem, shares
+
 
 # Phase 64-A S1: cache for runtime probe. None = not probed yet.
 _RUNTIME_RESOLVED: str | None = None
@@ -210,6 +261,151 @@ async def _lifetime_killswitch(agent_id: str, container_name: str,
         pass
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  M1: OOM watchdog
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OOM_POLL_INTERVAL_S = float("0.5")  # how often to inspect a (still-running) container
+OOM_POLL_TIMEOUT = 8                # seconds for a single docker inspect
+
+
+async def _oom_watchdog(agent_id: str, container_name: str,
+                        tenant_id: str, *, tier: str = "t1",
+                        memory_limit: str = "") -> None:
+    """Poll `docker inspect .State` until the container exits, then
+    record an audit + metric if it was OOM-killed.
+
+    The watchdog deliberately polls instead of `docker events` so that:
+      * we don't share a single global event stream across containers
+        (one bad event-stream consumer breaks all watchdogs);
+      * cancel-on-stop is trivial (just `task.cancel()`);
+      * we work even when the daemon is rate-limiting events.
+
+    Cancelled cleanly when stop_container removes the container.
+    """
+    try:
+        while True:
+            try:
+                await asyncio.sleep(OOM_POLL_INTERVAL_S)
+            except asyncio.CancelledError:
+                return  # caller stopped us → done
+            rc, out, _ = await _run(
+                f"docker inspect --format "
+                f"'{{{{.State.Status}}}}|{{{{.State.OOMKilled}}}}|"
+                f"{{{{.State.ExitCode}}}}' {container_name}",
+                timeout=OOM_POLL_TIMEOUT,
+            )
+            if rc != 0:
+                # container removed (exit + auto-rm or stop_container ran)
+                # — in either case we can't read the OOM bit any more.
+                return
+            parts = out.strip().split("|")
+            if len(parts) < 3:
+                continue
+            status, oom_str, exit_str = parts[0], parts[1].lower(), parts[2]
+            if status not in ("exited", "dead"):
+                continue
+            # Reached terminal state — decide if it was an OOM.
+            oom_killed = oom_str == "true"
+            # Some kernels don't set OOMKilled but still SIGKILL via
+            # cgroup memory.events; exit code 137 = 128 + SIGKILL.
+            try:
+                exit_code = int(exit_str)
+            except ValueError:
+                exit_code = 0
+            if not oom_killed and exit_code == 137:
+                # Best-effort: re-check via memory.events oom counter.
+                oom_killed = await _read_cgroup_oom_count(container_name) > 0
+            if oom_killed:
+                await _record_sandbox_oom(
+                    agent_id, container_name, tenant_id,
+                    tier=tier, memory_limit=memory_limit,
+                    exit_code=exit_code,
+                )
+            return
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:  # never let the watchdog crash silently
+        logger.debug("oom watchdog for %s aborted: %s", container_name, exc)
+
+
+async def _read_cgroup_oom_count(container_name: str) -> int:
+    """Best-effort read of the kernel oom counter from the container's
+    cgroup. Returns 0 on any failure (cgroup gone, permission denied,
+    cgroup v1, etc.) — we'd rather under-report than crash."""
+    rc, cid, _ = await _run(
+        f"docker inspect --format '{{{{.Id}}}}' {container_name}", timeout=5,
+    )
+    if rc != 0 or not cid.strip():
+        return 0
+    cid = cid.strip().strip("'\"")
+    # cgroup v2 path under systemd-managed docker:
+    candidate = Path(
+        f"/sys/fs/cgroup/system.slice/docker-{cid}.scope/memory.events"
+    )
+    if not candidate.is_file():
+        # rootless / cgroupns / non-systemd layouts vary; try the
+        # generic v2 path that the daemon writes when in cgroupfs mode.
+        candidate = Path(f"/sys/fs/cgroup/docker/{cid}/memory.events")
+    if not candidate.is_file():
+        return 0
+    try:
+        for line in candidate.read_text().splitlines():
+            if line.startswith("oom_kill "):
+                return int(line.split()[1])
+    except Exception:
+        return 0
+    return 0
+
+
+async def _record_sandbox_oom(agent_id: str, container_name: str,
+                              tenant_id: str, *, tier: str,
+                              memory_limit: str, exit_code: int) -> None:
+    """Atomic side-effects for a confirmed OOM kill: metric, audit row,
+    SSE event, in-memory status bump. Each side-effect is best-effort
+    so a single failure (e.g., audit table missing in tests) doesn't
+    swallow the others."""
+    info = _containers.get(agent_id)
+    if info is not None and info.container_name == container_name:
+        info.status = "killed_oom"
+    logger.warning(
+        "[SANDBOX OOM] %s (tenant=%s, mem=%s) — kernel OOM-killer fired",
+        container_name, tenant_id, memory_limit,
+    )
+    try:
+        from backend import metrics as _m
+        _m.sandbox_oom_total.labels(tenant_id=tenant_id, tier=tier).inc()
+    except Exception:
+        pass
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="sandbox.oom",
+            entity_kind="container",
+            entity_id=container_name,
+            after={
+                "agent_id": agent_id,
+                "tenant_id": tenant_id,
+                "tier": tier,
+                "memory_limit": memory_limit,
+                "exit_code": exit_code,
+                "reason": "cgroup_oom_killer",
+            },
+            actor="system:oom-watchdog",
+        )
+    except Exception as exc:
+        logger.debug("audit log for sandbox.oom failed: %s", exc)
+    try:
+        emit_container(agent_id, "oom_killed",
+                       f"{container_name} (tenant={tenant_id}, mem={memory_limit})")
+        emit_agent_update(
+            agent_id, "error",
+            f"Sandbox OOM-killed (tenant={tenant_id}, memory={memory_limit})",
+        )
+    except Exception:
+        pass
+
+
 async def assert_image_trusted(image: str = DOCKER_IMAGE) -> None:
     """Reject launch if the configured allow-list is non-empty and the
     image's digest isn't in it. Empty allow-list = open mode (today's
@@ -258,10 +454,19 @@ class ContainerInfo:
     workspace_path: Path
     image: str
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    status: str = "running"  # running | stopped | removed | killed_lifetime
+    status: str = "running"  # running | stopped | removed | killed_lifetime | killed_oom
     # Phase 64-A S4: handle to the lifetime-cap watchdog so stop_container
     # can cancel it cleanly when the agent finishes naturally.
     lifetime_task: object | None = None  # asyncio.Task
+    # M1: handle to the OOM watchdog (similar lifecycle to lifetime_task).
+    oom_task: object | None = None  # asyncio.Task
+    # M1: tenant_id + tokens used for this container, recorded so the
+    # OOM watchdog and audit trail can attribute the kill correctly.
+    tenant_id: str = "t-default"
+    tenant_budget: float = 0.0
+    cpus: str = ""
+    memory: str = ""
+    cpu_shares: int = 1024
 
 
 # Registry of active containers
@@ -311,7 +516,9 @@ async def ensure_image() -> bool:
 
 
 async def start_container(agent_id: str, workspace_path: Path,
-                          *, tier: str = "t1") -> ContainerInfo:
+                          *, tier: str = "t1",
+                          tenant_id: str | None = None,
+                          tenant_budget: float | None = None) -> ContainerInfo:
     """Start a Docker container for an agent with its workspace mounted.
 
     The workspace directory is bind-mounted to /workspace inside the
@@ -323,6 +530,19 @@ async def start_container(agent_id: str, workspace_path: Path,
         bridge with public-internet egress (RFC1918 still DROPped by
         the host iptables script). Caller is responsible for any
         Decision-Engine gate (sandbox/networked, severity=risky).
+
+    M1 — Resource hard isolation:
+
+      * ``tenant_id``: stamped as a docker label so M4 cgroup metrics
+        can aggregate per-tenant usage and the OOM watchdog can attach
+        the right tenant to ``sandbox.oom`` audit rows. Defaults to
+        ``current_tenant_id()`` from the request context, then
+        ``"t-default"``.
+      * ``tenant_budget``: DRF tokens (SandboxCostWeight) the I6 layer
+        granted this launch. Translated by ``_compute_resource_limits``
+        into ``--cpus`` (CFS quota cap), ``--memory`` (OOM trigger),
+        and ``--cpu-shares`` (cgroup v2 cpu.weight proportional share).
+        ``None`` = legacy settings.docker_*_limit fallback.
     """
     container_name = f"omnisight-agent-{agent_id}"
 
@@ -404,8 +624,23 @@ async def start_container(agent_id: str, workspace_path: Path,
 
     # Start container with workspace mounted + resource limits
     from backend.config import settings as _settings
-    mem = _settings.docker_memory_limit or "1g"
-    cpus = _settings.docker_cpu_limit or "2"
+
+    # M1 — translate DRF token budget into cgroup hard limits. When
+    # tenant_budget is None this preserves the legacy behaviour
+    # (settings-based --cpus / --memory, default cpu-shares).
+    cpus, mem, cpu_shares = _compute_resource_limits(tenant_budget)
+
+    # M1 — resolve effective tenant_id. Caller wins; otherwise pull
+    # from the request context so M4 cgroup metrics + the OOM watchdog
+    # can label correctly even when older callers haven't been updated.
+    if tenant_id is None:
+        try:
+            from backend.db_context import current_tenant_id as _ctid
+            tenant_id = _ctid()
+        except Exception:
+            tenant_id = None
+    effective_tenant_id = tenant_id or "t-default"
+
     # Phase 64-A S1: gVisor (runsc) when available; runc fallback otherwise.
     runtime = await resolve_runtime()
     # Phase 64-A S2 / 64-B / 64-C-LOCAL S2: pick the network arg per tier.
@@ -423,14 +658,23 @@ async def start_container(agent_id: str, workspace_path: Path,
         network_arg = "--network host"
     else:
         network_arg = await _sn.resolve_network_arg()
+    # M1: per-tenant labels + cpu-shares for cgroup v2 cpu.weight.
+    # The "tenant_id" / "tokens" labels are what M4 will key its
+    # /sys/fs/cgroup scrape off, and what the OOM watchdog reads back
+    # via `docker inspect`. Quote values defensively in case a future
+    # tenant_id ever contains a shell metacharacter.
+    tokens_label = f"{tenant_budget:.2f}" if tenant_budget else "0"
     rc, out, err = await _run(
         f"docker run -d "
         f"--runtime={runtime} "
         f"--name {container_name} "
+        f"--label tenant_id={effective_tenant_id} "
+        f"--label tokens={tokens_label} "
         f"{mounts}"
         f"-w /workspace "
         f"{network_arg} "
-        f"--memory={mem} --cpus={cpus} --pids-limit=256 "
+        f"--memory={mem} --cpus={cpus} --cpu-shares={cpu_shares} "
+        f"--pids-limit=256 "
         f"{DOCKER_IMAGE}"
     )
     if rc != 0:
@@ -459,6 +703,11 @@ async def start_container(agent_id: str, workspace_path: Path,
         container_name=container_name,
         workspace_path=workspace_path,
         image=DOCKER_IMAGE,
+        tenant_id=effective_tenant_id,
+        tenant_budget=float(tenant_budget or 0.0),
+        cpus=cpus,
+        memory=mem,
+        cpu_shares=cpu_shares,
     )
     _containers[agent_id] = info
 
@@ -483,6 +732,13 @@ async def start_container(agent_id: str, workspace_path: Path,
                 "tier": tier,
                 "runtime": runtime,
                 "network": network_arg.split()[-1],  # "none" or bridge name
+                # M1: persist the kernel-enforced share so an auditor can
+                # reconstruct who got what at launch time.
+                "tenant_id": effective_tenant_id,
+                "tenant_budget": float(tenant_budget or 0.0),
+                "cpus": cpus,
+                "memory": mem,
+                "cpu_shares": cpu_shares,
             },
             actor=f"agent:{agent_id}",
         )
@@ -497,21 +753,40 @@ async def start_container(agent_id: str, workspace_path: Path,
             name=f"sandbox-lifetime-{container_name}",
         )
 
+    # M1: start the OOM watchdog. Polls docker inspect; on terminal
+    # state, attributes any cgroup OOM kill to the right tenant. No
+    # cost when the container exits cleanly — the watchdog just
+    # returns.
+    info.oom_task = asyncio.create_task(
+        _oom_watchdog(
+            agent_id, container_name, effective_tenant_id,
+            tier=tier, memory_limit=mem,
+        ),
+        name=f"sandbox-oom-{container_name}",
+    )
+
     emit_container(agent_id, "started", f"{container_name} ({container_id})")
     emit_agent_update(agent_id, "running", f"Container {container_id} running")
     logger.info("Container started: %s (%s)", container_name, container_id)
     return info
 
 
-async def start_networked_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
+async def start_networked_container(agent_id: str, workspace_path: Path,
+                                    *, tenant_id: str | None = None,
+                                    tenant_budget: float | None = None) -> ContainerInfo:
     """Phase 64-B convenience wrapper. Equivalent to
     ``start_container(..., tier="networked")``. Use this from MLOps /
     third-party-API agent paths *after* the caller has cleared the
     Decision Engine ``sandbox/networked`` gate (severity=risky)."""
-    return await start_container(agent_id, workspace_path, tier="networked")
+    return await start_container(
+        agent_id, workspace_path, tier="networked",
+        tenant_id=tenant_id, tenant_budget=tenant_budget,
+    )
 
 
-async def start_t3_local_container(agent_id: str, workspace_path: Path) -> ContainerInfo:
+async def start_t3_local_container(agent_id: str, workspace_path: Path,
+                                   *, tenant_id: str | None = None,
+                                   tenant_budget: float | None = None) -> ContainerInfo:
     """Phase 64-C-LOCAL S2 — T3 executor for the host==target path.
 
     Used by the T3 runner when `t3_resolver.resolve_t3_runner()` has
@@ -530,7 +805,10 @@ async def start_t3_local_container(agent_id: str, workspace_path: Path) -> Conta
     the sandbox) as a separate pipeline step. That keeps the sandbox
     a containment boundary even on the happy-path.
     """
-    return await start_container(agent_id, workspace_path, tier="t3-local")
+    return await start_container(
+        agent_id, workspace_path, tier="t3-local",
+        tenant_id=tenant_id, tenant_budget=tenant_budget,
+    )
 
 
 async def dispatch_t3(
@@ -538,6 +816,9 @@ async def dispatch_t3(
     workspace_path: Path,
     target_arch: str = "",
     target_os: str = "linux",
+    *,
+    tenant_id: str | None = None,
+    tenant_budget: float | None = None,
 ) -> tuple[Optional["ContainerInfo"], "T3RunnerKind"]:
     """Phase 64-C-LOCAL S2 — single entry point for the T3 dispatcher.
 
@@ -561,7 +842,10 @@ async def dispatch_t3(
         res.kind.value, res.reason,
     )
     if res.kind == T3RunnerKind.LOCAL:
-        info = await start_t3_local_container(agent_id, workspace_path)
+        info = await start_t3_local_container(
+            agent_id, workspace_path,
+            tenant_id=tenant_id, tenant_budget=tenant_budget,
+        )
         return info, res.kind
     if res.kind == T3RunnerKind.SSH:
         from backend.ssh_runner import find_target_for_arch, SSHRunnerInfo
@@ -636,6 +920,16 @@ async def stop_container(agent_id: str) -> bool:
     if task is not None:
         try:
             task.cancel()
+        except Exception:
+            pass
+
+    # M1: cancel the OOM watchdog. We're tearing the container down
+    # explicitly, so any poll-after-this would just hit "no such
+    # container" and noisy-log.
+    oom = getattr(info, "oom_task", None)
+    if oom is not None:
+        try:
+            oom.cancel()
         except Exception:
             pass
 

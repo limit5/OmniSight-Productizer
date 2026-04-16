@@ -163,6 +163,16 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # M1: per-tenant OOM kills inside the sandbox cgroup. Fires when
+    # docker reports `State.OOMKilled=true` on container exit. Used by
+    # ops to alert on tenants chronically blowing past their memory cap.
+    sandbox_oom_total = Counter(
+        "omnisight_sandbox_oom_total",
+        "Sandbox containers killed by the cgroup OOM-killer",
+        labelnames=("tenant_id", "tier"),
+        registry=REGISTRY,
+    )
+
     # Phase 62: skills extraction (Knowledge Generation L1) ─────
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total",
@@ -340,6 +350,7 @@ else:
     sandbox_lifetime_killed_total = _NoOp()  # type: ignore
     sandbox_launch_total = _NoOp()  # type: ignore
     sandbox_output_truncated_total = _NoOp()  # type: ignore
+    sandbox_oom_total = _NoOp()  # type: ignore
     skill_extracted_total = _NoOp()  # type: ignore
     skill_promoted_total = _NoOp()  # type: ignore
     intelligence_score = _NoOp()  # type: ignore
@@ -381,6 +392,7 @@ def reset_for_tests() -> None:
     global auth_login_total, subprocess_orphan_total, persist_failure_total
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
     global sandbox_launch_total, sandbox_output_truncated_total
+    global sandbox_oom_total
     global skill_extracted_total, skill_promoted_total
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
@@ -461,6 +473,11 @@ def reset_for_tests() -> None:
         "omnisight_sandbox_output_truncated_total",
         "exec_in_container outputs that exceeded sandbox_max_output_bytes",
         labelnames=("tier",), registry=REGISTRY,
+    )
+    sandbox_oom_total = Counter(
+        "omnisight_sandbox_oom_total",
+        "Sandbox containers killed by the cgroup OOM-killer",
+        labelnames=("tenant_id", "tier"), registry=REGISTRY,
     )
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total", "Skill extraction events",
