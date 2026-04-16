@@ -1090,11 +1090,11 @@ Legend:
 - [x] 預估：**1 day**
 
 ### P5. Store 提交自動化 (#290)
-- [ ] App Store Connect API 整合：create version / upload build / submit for review / screenshot upload
-- [ ] Google Play Developer API：upload .aab / manage tracks（internal / alpha / beta / production）
-- [ ] 提交流程走 O7 雙簽 +2：Merger Agent 驗技術正確性 + 人工終審（store guideline 合規）
-- [ ] TestFlight / Firebase App Distribution 內部派發
-- [ ] 預估：**2.5 day**
+- [x] App Store Connect API 整合：create version / upload build / submit for review / screenshot upload
+- [x] Google Play Developer API：upload .aab / manage tracks（internal / alpha / beta / production）
+- [x] 提交流程走 O7 雙簽 +2：Merger Agent 驗技術正確性 + 人工終審（store guideline 合規）
+- [x] TestFlight / Firebase App Distribution 內部派發
+- [x] 預估：**2.5 day**
 
 ### P6. Store 合規 gates (#291)
 - [ ] App Store Review Guidelines 自動檢查（明顯違規 pattern：假付費、誤導性 copy、未宣告 private API）
