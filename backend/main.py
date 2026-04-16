@@ -490,6 +490,8 @@ from backend.routers import observability as _obs_router  # Phase 52
 app.include_router(_obs_router.router, prefix=settings.api_prefix)
 from backend.routers import orchestration_observability as _orch_obs_router  # O9 (#272)
 app.include_router(_orch_obs_router.router, prefix=settings.api_prefix)
+from backend.routers import web_observability as _web_obs_router  # W10 (#284)
+app.include_router(_web_obs_router.router, prefix=settings.api_prefix)
 from backend.routers import skills as _skills_router  # Phase 62
 app.include_router(_skills_router.router, prefix=settings.api_prefix)
 from backend.routers import dag as _dag_router  # Phase 56-DAG-D

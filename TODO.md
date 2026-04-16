@@ -1026,10 +1026,10 @@ Legend:
 - [x] 預估：**1 day**
 
 ### W10. Web 觀測性與監控 (#284)
-- [ ] Sentry / Datadog RUM adapter
-- [ ] Core Web Vitals 即時 dashboard
-- [ ] Error tracking → JIRA ticket（透過 O5 IntentSource）
-- [ ] 預估：**0.5 day**
+- [x] Sentry / Datadog RUM adapter
+- [x] Core Web Vitals 即時 dashboard
+- [x] Error tracking → JIRA ticket（透過 O5 IntentSource）
+- [x] 預估：**0.5 day**
 
 **Priority W 總預估**：**13.5 day**
 
