@@ -17,9 +17,61 @@ permissions:
 #   frontend-e2e      playwright chromium (hard gate) + firefox / webkit
 #                     (advisory until Chromium-only assumptions are
 #                     confirmed clean across all three)
+#   lockfile-drift    N1 — fail if requirements.in / package.json / Node
+#                     version files change without their lockfile updated
 # Each job has its own timeout so a hung step doesn't block the matrix.
 
 jobs:
+
+  lockfile-drift:
+    # N1 — fail CI when a source-of-truth manifest changes but its lockfile
+    # doesn't, OR when a stray npm/yarn lockfile reappears. Runs first so
+    # developers see drift before the heavy jobs fan out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: install pip-tools
+        run: pip install "pip-tools==7.5.3"
+      - name: reject stray lockfiles (single-lockfile policy)
+        run: |
+          set -eu
+          STRAY=""
+          for f in package-lock.json yarn.lock; do
+            if [ -f "$f" ]; then STRAY="$STRAY $f"; fi
+          done
+          if [ -n "$STRAY" ]; then
+            echo "::error::Stray lockfile(s) found:$STRAY — pnpm-lock.yaml is canonical (N1 policy)"
+            exit 1
+          fi
+      - name: pnpm lockfile up to date
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: pip-compile lockfile up to date
+        run: |
+          set -eu
+          pip-compile --quiet --generate-hashes \
+            --output-file=backend/requirements.txt.ci \
+            backend/requirements.in
+          if ! diff -u backend/requirements.txt backend/requirements.txt.ci; then
+            echo "::error::backend/requirements.txt is out of sync with requirements.in — run 'pip-compile --generate-hashes backend/requirements.in'"
+            exit 1
+          fi
+          rm -f backend/requirements.txt.ci
+      - name: working tree clean after lock regeneration
+        run: |
+          set -eu
+          DIRTY="$(git status --porcelain | grep -E 'lock\.(json|yaml)$|requirements\.txt$' || true)"
+          if [ -n "$DIRTY" ]; then
+            echo "::error::Lockfile drift detected:"
+            echo "$DIRTY"
+            exit 1
+          fi
 
   lint:
     runs-on: ubuntu-latest
@@ -37,15 +89,17 @@ jobs:
         # (E402 lazy imports, E741 ambiguous binders, E702 one-line
         # tuple swaps). New real-bug violations (F-series) fail CI.
         run: ruff check backend
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
       - uses: actions/setup-node@v4
-        with: { node-version: "20", cache: npm }
-      - run: npm ci --no-audit --prefer-offline
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - name: tsc --noEmit
         # Tech debt TS B1-B3 cleared all 15 pre-existing errors;
         # tsc is now a real gate. New type errors fail CI.
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
       - name: eslint
-        run: npm run lint || true
+        run: pnpm run lint || true
 
   backend-tests:
     runs-on: ubuntu-latest
@@ -66,7 +120,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
-      - run: pip install -r backend/requirements.txt
+      - run: pip install --require-hashes -r backend/requirements.txt
       - name: pytest ${{ matrix.shard.name }}
         env:
           OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-${{ matrix.shard.name }}.db
@@ -92,7 +146,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
-      - run: pip install -r backend/requirements.txt
+      - run: pip install --require-hashes -r backend/requirements.txt
       - name: alembic upgrade head (fresh DB)
         env:
           OMNISIGHT_DATABASE_PATH: /tmp/ci-alembic.db
@@ -106,11 +160,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
       - uses: actions/setup-node@v4
-        with: { node-version: "20", cache: npm }
-      - run: npm ci --no-audit --prefer-offline
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - name: vitest with coverage
-        run: npx vitest run --coverage
+        run: pnpm exec vitest run --coverage
       - name: upload coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -137,19 +193,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
-      - run: pip install -r backend/requirements.txt
+      - run: pip install --require-hashes -r backend/requirements.txt
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
       - uses: actions/setup-node@v4
-        with: { node-version: "20", cache: npm }
-      - run: npm ci --no-audit --prefer-offline
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+      - run: pnpm install --frozen-lockfile --prefer-offline
       - name: install playwright + system libs
-        run: npx playwright install --with-deps ${{ matrix.browser }}
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
       - name: run playwright (${{ matrix.browser }})
         env:
           # playwright.config.ts gates the extra projects behind this
           # env var — set it so the matrix browser is actually picked
           # up (`--project` needs the project to exist).
           OMNISIGHT_PW_BROWSERS: all
-        run: npx playwright test --project=${{ matrix.browser }} --reporter=line
+        run: pnpm exec playwright test --project=${{ matrix.browser }} --reporter=line
       - name: upload report
         if: failure()
         uses: actions/upload-artifact@v4

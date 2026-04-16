@@ -671,12 +671,12 @@ Legend:
 > **現在最該先做**：N1 + N2 + N5（~1.5 day），建最低限度堤壩；其餘隨開發節奏補齊。
 
 ### N1. 全量鎖定 + 單一 lockfile + Node/Python 版本固定
-- [ ] `package.json` 加 `"engines": {"node": ">=20.17.0 <21", "pnpm": ">=9"}`；repo root 加 `.nvmrc` / `.node-version` 寫 `20.17.0`
-- [ ] 收斂到單一 lockfile：選 `pnpm-lock.yaml`，刪 `package-lock.json`；`.gitignore` 排除另一個；CI 檢查 `git status --porcelain | grep -E 'lock\.(json|yaml)$'` 必須乾淨
-- [ ] Python 全量鎖：導入 `pip-tools`（或 `uv`），`backend/requirements.in` 寫人讀範圍 → `backend/requirements.txt` 由 `pip-compile --generate-hashes` 生出含 transitive hash 的鎖檔
-- [ ] Docker `Dockerfile.backend` 改為 `pip install --require-hashes -r requirements.txt`
-- [ ] CI 新增 lockfile drift 檢查（若 `requirements.in` 或 `package.json` 變動但 lock 未更新 → fail）
-- [ ] 預估：**0.5 day**
+- [x] `package.json` 加 `"engines": {"node": ">=20.17.0 <21", "pnpm": ">=9"}`；repo root 加 `.nvmrc` / `.node-version` 寫 `20.17.0`
+- [x] 收斂到單一 lockfile：選 `pnpm-lock.yaml`，刪 `package-lock.json`；`.gitignore` 排除另一個；CI 檢查 `git status --porcelain | grep -E 'lock\.(json|yaml)$'` 必須乾淨
+- [x] Python 全量鎖：導入 `pip-tools`（或 `uv`），`backend/requirements.in` 寫人讀範圍 → `backend/requirements.txt` 由 `pip-compile --generate-hashes` 生出含 transitive hash 的鎖檔
+- [x] Docker `Dockerfile.backend` 改為 `pip install --require-hashes -r requirements.txt`
+- [x] CI 新增 lockfile drift 檢查（若 `requirements.in` 或 `package.json` 變動但 lock 未更新 → fail）
+- [x] 預估：**0.5 day**
 
 ### N2. Renovate 自動 PR + group rules + 分層 auto-merge
 - [ ] `renovate.json` 基本 config；排程 `every weekend` 降低雜訊

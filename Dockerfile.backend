@@ -7,9 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ git openssh-client curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps
+# Python deps — N1 policy: hashed lockfile, fail if any transitive
+# wheel hash doesn't match the lock. `requirements.txt` is generated
+# from `backend/requirements.in` via `pip-compile --generate-hashes`.
 COPY backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # Application code
 COPY backend/ ./backend/

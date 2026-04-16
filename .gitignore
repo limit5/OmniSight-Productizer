@@ -3,6 +3,10 @@
 # dependencies
 /node_modules
 
+# N1: single-lockfile policy — pnpm is canonical, block npm/yarn lockfiles
+package-lock.json
+yarn.lock
+
 # next.js
 /.next/
 /out/

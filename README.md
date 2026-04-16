@@ -51,15 +51,16 @@ cp .env.example .env
 #   then edit .env — at minimum set OMNISIGHT_LLM_PROVIDER + its API key.
 #   Without one, agents run in rule-based fallback mode (see below).
 
-# 1. Backend
+# 1. Backend  (Python deps are hash-locked; N1 policy)
 cd OmniSight-Productizer
 python3 -m pip install --upgrade pip   # avoid Python 3.12 resolver bugs
-pip install -r backend/requirements.txt
+pip install --require-hashes -r backend/requirements.txt
 python3 -m uvicorn backend.main:app --port 8000
 
-# 2. Frontend (new terminal)
-npm install
-npm run dev
+# 2. Frontend (new terminal)  —  pnpm is canonical (N1 policy)
+#    Requires Node 20.17.x (.nvmrc); run `nvm use` first if you have nvm.
+pnpm install --frozen-lockfile
+pnpm run dev
 
 # 3. Browser
 open http://localhost:3000
@@ -233,6 +234,35 @@ Tier-1 sandbox egress is now controlled per tenant through DB-backed policy plus
 | Audit chain | `tenant_egress.upsert`, `request_submit`, `request_approve`, `request_reject` all enter the per-tenant `audit_log` hash chain — answers "who allowed `evil.com` for tenant X" via a single `audit.query(entity_kind='tenant_egress')`. |
 
 Operators wanting to keep the pre-M6 single-tenant flow do nothing — the legacy env still works and the t-default policy gets a `legacy-migration` audit row on first upgrade.
+
+## Dependency Governance (N1)
+
+Dependencies are fully locked and every lockfile drift fails CI before the rest of the pipeline runs. Use this section when onboarding or upgrading.
+
+| Layer | Tool / file | What changes through it |
+|---|---|---|
+| Node version | `.nvmrc` + `.node-version` (both `20.17.0`) + `package.json` `engines.node` `>=20.17.0 <21` | `nvm use` / `fnm use` / `asdf install` / Volta / `actions/setup-node@v4` `node-version-file: .nvmrc` all resolve to the same version |
+| JS package manager | `package.json` `packageManager: pnpm@9.15.4` + `engines.pnpm: >=9` | Node 20's built-in `corepack` downloads and pins pnpm automatically — contributors don't need a global install |
+| JS dependency graph | `pnpm-lock.yaml` (canonical, committed) | `pnpm install --frozen-lockfile` everywhere (local dev, Dockerfile.frontend, CI, release). `package-lock.json` and `yarn.lock` are both `.gitignore`d and the CI drift gate rejects any stray copy |
+| Python ranges | `backend/requirements.in` (human-readable) | Edit this file to add/remove/bump a package, then regenerate |
+| Python lock | `backend/requirements.txt` (pip-compile output with `--generate-hashes`) | Regenerate with `pip-compile --generate-hashes backend/requirements.in` — every pin carries at least one `sha256:` hash |
+| Python install | `pip install --require-hashes -r backend/requirements.txt` | Used in `Dockerfile.backend`, `scripts/deploy.sh`, and every CI job. A missing/mismatched hash aborts install |
+| CI drift gate | `.github/workflows/ci.yml` `lockfile-drift` job | Runs first. Rejects stray `package-lock.json`/`yarn.lock`, re-runs `pnpm install --frozen-lockfile` + `pip-compile`, fails the build if anything diffs |
+
+**Typical flows:**
+
+```bash
+# Add a Python dep
+echo "somelib==1.2.3" >> backend/requirements.in
+pip-compile --generate-hashes backend/requirements.in
+git add backend/requirements.in backend/requirements.txt
+
+# Bump a JS dep
+pnpm update some-package
+git add package.json pnpm-lock.yaml
+```
+
+If CI fails with `Lockfile drift detected`, re-run the corresponding regenerate command locally, commit the lock, push.
 
 ## Theme
 

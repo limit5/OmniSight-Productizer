@@ -2,9 +2,13 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Dependencies
-COPY package.json package-lock.json* ./
-RUN npm ci
+# N1: pnpm is the canonical package manager; install the version pinned
+# by `packageManager` in package.json via corepack.
+RUN corepack enable
+
+# Dependencies — copy lockfile + manifest first for layer caching.
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prefer-offline
 
 # Source code
 COPY . .
@@ -12,7 +16,7 @@ COPY . .
 # Build (standalone output for slim production image)
 ARG BACKEND_URL=http://backend:8000
 ENV BACKEND_URL=${BACKEND_URL}
-RUN npm run build
+RUN pnpm run build
 
 # ── Production image ──
 FROM node:20-alpine AS runner

@@ -87,12 +87,12 @@ fi
 # 3. Build
 # ───────────────────────────────────────────────────────────────────
 
-log "installing backend deps"
-pip install --quiet -r backend/requirements.txt
+log "installing backend deps (hash-verified, N1)"
+pip install --quiet --require-hashes -r backend/requirements.txt
 
-log "installing frontend deps + building"
-npm ci --no-audit --prefer-offline
-npm run build
+log "installing frontend deps + building (pnpm, N1)"
+pnpm install --frozen-lockfile --prefer-offline
+pnpm run build
 
 # ───────────────────────────────────────────────────────────────────
 # 4. Restart + health check
