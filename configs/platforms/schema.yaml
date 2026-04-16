@@ -83,10 +83,16 @@ optional:
   - memory_limit_mb
   - build_cmd
   - deploy_provider      # vercel | netlify | cloudflare-pages | docker-nginx
-  # Mobile-specific (P-series)
+  # Mobile-specific (P-series, P0 #285)
   - mobile_platform      # ios | android | react-native | flutter
-  - min_os_version
+  - mobile_abi           # arm64 | arm64_simulator | x86_64_simulator | arm64-v8a | armeabi-v7a
+  - min_os_version       # iOS deploy target ("16.0") OR Android minSdkVersion ("24")
+  - target_os_version    # iOS SDK version ("17.5") OR Android targetSdkVersion ("35")
   - signing_identity
+  - sdk_root             # xcode-select -p path OR $ANDROID_SDK_ROOT
+  - ndk_root             # Android NDK path (unused for iOS, keep empty)
+  - toolchain_path       # clang / c++ / llvm-ar etc resolved path for the ABI
+  - emulator_spec        # mapping: device model + os_version + avd/simulator runtime id
   # Software-specific (X-series)
   - software_runtime     # python | node | jvm | native
   - packaging            # pip | npm | jar | deb | rpm

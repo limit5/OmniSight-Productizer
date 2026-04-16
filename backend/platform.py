@@ -195,12 +195,26 @@ def _resolve_web(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_mobile(data: dict[str, Any]) -> dict[str, Any]:
-    """Build toolchain block for a mobile target (P-series consumer)."""
+    """Build toolchain block for a mobile target (P-series consumer, P0 #285).
+
+    Surfaces iOS / Android build knobs that the P1 toolchain integration
+    (Docker image + fastlane + gradle wrapper) will consume. None of
+    these are required — partial profiles still resolve so the P2
+    simulate-track gate can run against a profile that hasn't finished
+    plumbing signing yet.
+    """
     return {
         "kind": "mobile",
         "mobile_platform": data.get("mobile_platform", ""),
+        "mobile_abi": data.get("mobile_abi", ""),
         "min_os_version": data.get("min_os_version", ""),
+        "target_os_version": data.get("target_os_version", ""),
         "signing_identity": data.get("signing_identity", ""),
+        "sdk_version": data.get("sdk_version", ""),
+        "sdk_root": data.get("sdk_root", ""),
+        "ndk_root": data.get("ndk_root", ""),
+        "toolchain_path": data.get("toolchain_path", ""),
+        "emulator_spec": dict(data.get("emulator_spec") or {}),
         "build_cmd": data.get("build_cmd", ""),
     }
 

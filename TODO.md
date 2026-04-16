@@ -1050,12 +1050,12 @@ Legend:
 > 相依（硬前置）：**W0 platform profile schema 泛化**（W/P/X 共用）、**O0-O10（全 Priority O）**（簽章推送走分散式鎖 + 人工雙 +2 簽章驗證）、**B12 secret_store.py 擴充 HSM 模式**（P3 前置）。
 
 ### P0. Mobile platform profiles (#285)
-- [ ] `configs/platforms/ios-arm64.yaml` — iOS Device ABI
-- [ ] `configs/platforms/ios-simulator.yaml` — iOS Simulator (x86_64 + arm64)
-- [ ] `configs/platforms/android-arm64-v8a.yaml`
-- [ ] `configs/platforms/android-armeabi-v7a.yaml`
-- [ ] 每 profile 宣告：SDK version / min API level / toolchain path / emulator spec
-- [ ] 預估：**1 day**
+- [x] `configs/platforms/ios-arm64.yaml` — iOS Device ABI
+- [x] `configs/platforms/ios-simulator.yaml` — iOS Simulator (x86_64 + arm64)
+- [x] `configs/platforms/android-arm64-v8a.yaml`
+- [x] `configs/platforms/android-armeabi-v7a.yaml`
+- [x] 每 profile 宣告：SDK version / min API level / toolchain path / emulator spec
+- [x] 預估：**1 day**
 
 ### P1. Mobile toolchains 整合 (#286)
 - [ ] Docker image base：`ghcr.io/omnisight/mobile-build`（Xcode CLI 16 + Android SDK 35 + Gradle 8 + CocoaPods 1.15）

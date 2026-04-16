@@ -1,0 +1,85 @@
+# OmniSight Platform Profile: Android armeabi-v7a — P0 #285
+#
+# 32-bit ARM Android build target — the LEGACY ABI required only for
+# backward compatibility with pre-2019 devices that cannot run
+# arm64-v8a. Google Play's 64-bit requirement (effective 2019-08-01)
+# mandates that apps publish an arm64-v8a slice, but many SKUs still
+# publish a *paired* armeabi-v7a slice to cover:
+#   * older Android TV boxes / embedded Android tablets (industrial
+#     condition-monitoring dashboards OmniSight customers run)
+#   * some low-cost Android 8.1 / 9 devices in APAC + EMEA markets
+#   * Chromebook App Runtime that emulates armeabi-v7a in x86 hosts
+#
+# Why this is a separate profile (not a sub-variant of arm64-v8a):
+#   Play Store Console treats each ABI as a separate bundle artifact;
+#   the profile is what `scripts/simulate.sh mobile` dispatches on
+#   when generating the matrix (two-row build matrix per project =
+#   v7a + v8a). Collapsing them would force a build-time flag when a
+#   profile is the cleaner contract.
+#
+# Why NOT armeabi (legacy v5 / v6):
+#   Google Play stopped accepting armeabi-only uploads in 2019; we do
+#   not ship a profile for it. If a customer genuinely needs v5/v6 for
+#   a captive industrial device, they can fork this profile and swap
+#   `-march=armv5te` — but we refuse to maintain it in-tree.
+#
+# SDK / API level rationale:
+#   Kept in lockstep with `android-arm64-v8a.yaml` — same compile SDK,
+#   same target SDK, same minSdkVersion. Drift between the two Android
+#   profiles would silently break one ABI slice at Play upload time.
+#
+# 32-bit specific caveats surfaced for the P1 toolchain layer:
+#   * Data-type sizes differ (long is 32-bit here) — native code that
+#     implicitly casts `long` / pointer sizes will silently corrupt.
+#   * 4 GiB virtual address space ceiling per process — apps with
+#     large native heaps (ML models, video frame buffers) should
+#     consider dropping v7a before shipping.
+#   * NEON is assumed present (Play 64-bit policy's practical side
+#     effect: no < armv7a+neon device still takes updates).
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * scripts/simulate.sh mobile track (ABI-pair smoke)          [P2 #287]
+#   * backend/deploy/play_store.py (Play Developer API adapter)  [P5 #290]
+#   * configs/skills/skill-android/ scaffold generator           [P8 #293]
+
+platform: android-armeabi-v7a
+label: "Android — armeabi-v7a (32-bit, legacy ABI)"
+target_kind: mobile
+
+mobile_platform: android
+mobile_abi: armeabi-v7a
+
+# Pinned in lockstep with android-arm64-v8a.yaml.
+sdk_version: "35"
+target_os_version: "35"
+min_os_version: "24"
+
+sdk_root: "/opt/android/sdk"
+ndk_root: "/opt/android/sdk/ndk/27.0.12077973"
+
+# Per-ABI clang binary: note `armv7a-linux-androideabi24-clang` — the
+# `eabi` suffix is the armeabi-v7a convention (distinguishes soft vs
+# hard-float ABIs, though Android mandates soft-float hard-fp-abi).
+toolchain_path: "/opt/android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
+
+signing_identity: ""
+
+build_cmd: "./gradlew bundleRelease -PtargetAbi=armeabi-v7a"
+
+# Emulator spec — 32-bit AVD. Pixel 2 API 28 (Android 9) is the
+# canonical legacy-ABI reference: still under Play support, widely
+# available as an AVD system image, exercises the ABI parity
+# validation path without needing an ancient device.
+emulator_spec:
+  kind: avd
+  device_model: "pixel_2"
+  avd_name: "omnisight_pixel2_api28_v7a"
+  api_level: "28"
+  system_image: "system-images;android-28;google_apis;armeabi-v7a"
+  notes: >-
+    The 32-bit ABI emulator is slower than arm64-v8a on modern hosts
+    (no KVM acceleration for 32-bit guests on 64-bit kernels). P2
+    simulate-track treats v7a smoke as opt-in: the default matrix
+    runs v8a only; enable v7a via `OMNISIGHT_ANDROID_ABI_MATRIX=both`
+    when a project specifically targets legacy SKUs.

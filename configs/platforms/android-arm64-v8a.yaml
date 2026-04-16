@@ -1,0 +1,97 @@
+# OmniSight Platform Profile: Android arm64-v8a — P0 #285
+#
+# 64-bit ARM Android build target — the primary ABI for modern
+# Android devices (99%+ of 2024-2026 shipments). Since 2019 Google
+# Play has required all native binaries to ship an arm64-v8a slice
+# alongside any 32-bit variant, so this is the NON-NEGOTIABLE Android
+# ABI for Play Store submission.
+#
+# Why this is a Linux-friendly build (vs iOS):
+#   Android's native toolchain (Android NDK r27 + Gradle 8 + CMake
+#   3.22+) runs on Linux / macOS / Windows. The P1 Docker image
+#   (ghcr.io/omnisight/mobile-build) ships the full NDK for arm64-v8a
+#   AND armeabi-v7a — these two ABIs are handled on the same image
+#   because NDK + gradle wrapper are single installs with per-ABI
+#   target flags. Linux CI boxes are fine.
+#
+# SDK / API level rationale:
+#   * `sdk_version: 35` — Android 15 (API 35) is the 2025-Q3 target
+#     compile SDK; Google Play enforces "compile against latest API"
+#     within 12 months of OS release (2025-08 deadline met).
+#   * `min_os_version: 24` — Android 7.0 (Nougat) is the effective
+#     floor in 2026: Android 6.x is < 1% of active devices per
+#     Google's distribution dashboard, and API 24 is where TLS 1.2 /
+#     runtime permissions stop needing compat shims.
+#   * `target_os_version: 35` — must match `sdk_version` per Play
+#     policy (apps can compile against any API >= minSdk, but
+#     targetSdk must be current-minus-one at most).
+#
+# Signing (per-app keystore):
+#   `signing_identity` is empty in the profile; P3 (#288) injects the
+#   keystore + key alias + passwords from secret_store HSM at build
+#   time. Play App Signing is handled by Play itself after upload —
+#   see P5 (#290) upload adapter.
+#
+# AAB vs APK:
+#   Play Store requires .aab (Android App Bundle) for new apps since
+#   2021-08. The profile's `build_cmd` produces .aab by default;
+#   Firebase App Distribution / sideload testing still consume .apk
+#   via `gradle assembleRelease`.
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * scripts/simulate.sh mobile track (Android Emulator + Espresso) [P2 #287]
+#   * backend/deploy/play_store.py (Play Developer API adapter)      [P5 #290]
+#   * configs/skills/skill-android/ scaffold generator               [P8 #293]
+
+platform: android-arm64-v8a
+label: "Android — arm64-v8a (64-bit, primary ABI)"
+target_kind: mobile
+
+mobile_platform: android
+mobile_abi: arm64-v8a
+
+# Android 15 (API 35) — matches targetSdkVersion on new submissions.
+sdk_version: "35"
+target_os_version: "35"
+
+# Effective Play minimum in 2026; < API 24 is deprecated territory.
+min_os_version: "24"
+
+# Pinned in the P1 Docker image for reproducibility. Projects can
+# override via ANDROID_SDK_ROOT / ANDROID_NDK_ROOT env but the
+# profile declares the baked-in default.
+sdk_root: "/opt/android/sdk"
+ndk_root: "/opt/android/sdk/ndk/27.0.12077973"
+
+# Per-ABI clang binary under the NDK toolchains tree. This is the
+# exact binary gradle + CMake invoke when ABI=arm64-v8a.
+toolchain_path: "/opt/android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+
+# Keystore material injected at build time from P3 secret_store.
+signing_identity: ""
+
+# Produce .aab by default (Play Store requirement). Debug APK uses
+# `gradle assembleDebug`; release .apk for sideload uses
+# `gradle assembleRelease`.
+build_cmd: "./gradlew bundleRelease"
+
+# Emulator spec — booted by P2 simulate-track before Espresso runs.
+# Pixel 8 + API 34 system image is the reference AVD; CI overrides via
+# OMNISIGHT_ANDROID_AVD_NAME / _API_LEVEL.
+emulator_spec:
+  kind: avd
+  device_model: "pixel_8"
+  avd_name: "omnisight_pixel8_api34"
+  api_level: "34"
+  system_image: "system-images;android-34;google_apis;arm64-v8a"
+  # Host architecture the AVD needs:
+  #   * arm64-v8a system image on Linux → requires KVM + qemu-kvm-arm
+  #   * alternately x86_64 system image via Google's translation layer
+  # We default to native arm64-v8a for ABI parity (Espresso runs
+  # identically to real hardware); CI on x86_64 hosts may switch to
+  # x86_64 system image for perf at the cost of ABI-drift risk.
+  notes: >-
+    P2 simulate-track creates this AVD on demand if missing. Real-
+    device verification handled by P2 cloud device farm integration
+    (Firebase Test Lab / AWS Device Farm).

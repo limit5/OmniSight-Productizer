@@ -1,0 +1,79 @@
+# OmniSight Platform Profile: iOS Simulator (x86_64 + arm64) — P0 #285
+#
+# iOS Simulator build target — the ABI that runs inside `Simulator.app`
+# on a macOS host. It is deliberately split from `ios-arm64.yaml`
+# because:
+#   * SDK root is `iphonesimulator`, not `iphoneos`.
+#   * Output is a universal binary (x86_64 + arm64): x86_64 slice for
+#     Intel Macs that still exist in CI fleets, arm64 slice for Apple
+#     Silicon hosts running the simulator natively (NOT Rosetta).
+#   * Apple signs simulator builds with a dev-only certificate — no
+#     Provisioning Profile is consumed, so the signing flow differs
+#     from the device path.
+#
+# Why x86_64 is still here in 2026:
+#   Many self-hosted macOS CI runners are still Intel minis / mac2-M1
+#   hybrids. Shipping an arm64-only simulator slice breaks them
+#   silently (build succeeds, simulator refuses to launch). Until the
+#   entire fleet is Apple Silicon, we keep the fat binary.
+#
+# SDK / deployment target:
+#   Kept in lockstep with `ios-arm64.yaml`. If they drift, app-store
+#   device builds and local simulator smoke tests will diverge — that
+#   causes the class of bug where "works on simulator, crashes on
+#   device". Pin both profiles to the same baseline and bump them
+#   together as a Phase gate (not ad-hoc).
+#
+# Simulator spec:
+#   Default to iPhone 15 Pro + iOS 17.5, matching the
+#   `ios-arm64` paired target. `scripts/simulate.sh mobile` boots this
+#   runtime before running XCUITest. CI overrides via
+#   `OMNISIGHT_IOS_SIM_DEVICE` / `OMNISIGHT_IOS_SIM_RUNTIME` env.
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * scripts/simulate.sh mobile track (XCUITest launch) [P2 #287]
+#   * configs/skills/skill-ios/ scaffold generator       [P7 #292]
+
+platform: ios-simulator
+label: "iOS — Simulator (x86_64 + arm64)"
+target_kind: mobile
+
+mobile_platform: ios
+mobile_abi: arm64_simulator   # plus x86_64 slice — see note above
+
+sdk_version: "17.5"
+target_os_version: "17.5"
+min_os_version: "16.0"
+
+sdk_root: "/Applications/Xcode.app/Contents/Developer"
+toolchain_path: "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+ndk_root: ""
+
+# No real signing in simulator — Xcode auto-signs with the local dev
+# identity. Left empty to reflect that the profile does not consume
+# P3 secret_store material for this ABI.
+signing_identity: ""
+
+# -sdk iphonesimulator is the only difference from the device build
+# from a command-line perspective; fat binary is produced via
+# `-destination 'generic/platform=iOS Simulator'`.
+build_cmd: "xcodebuild -sdk iphonesimulator -configuration Debug -destination 'generic/platform=iOS Simulator'"
+
+# Simulator spec — booted by P2 simulate-track before XCUITest runs.
+emulator_spec:
+  kind: simulator
+  device_model: "iPhone 15 Pro"
+  runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-5"
+  # xcrun simctl boot identifier; CI generates a fresh UDID per run
+  # to avoid contaminated simulator state (notifications permission,
+  # location dialog, etc). Leave blank => P2 creates on demand.
+  udid: ""
+  # Slices in the produced .app bundle (lipo verification).
+  slices:
+    - x86_64
+    - arm64
+  notes: >-
+    Keep in lockstep with ios-arm64.yaml SDK/min-OS. Divergence causes
+    "works on simulator, crashes on device" — a regression class the
+    P2 simulate-track is specifically designed to catch early.

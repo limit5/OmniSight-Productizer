@@ -1,0 +1,88 @@
+# OmniSight Platform Profile: iOS Device (arm64) — P0 #285
+#
+# On-device iOS build target. This is the ABI that ships to the App
+# Store and runs on real hardware (iPhone 12 and later are arm64-only;
+# legacy armv7 / armv7s are deprecated and not covered here). Apple
+# Silicon is the only supported device ABI from iOS 11 onward, so
+# "iOS Device" ≡ arm64.
+#
+# Hard macOS-host requirement:
+#   iOS app binaries can ONLY be produced on a macOS host with Xcode.
+#   The P1 Docker image (ghcr.io/omnisight/mobile-build) exists for
+#   Android/Flutter-Android; iOS cross-compilation from Linux is NOT
+#   supported (Apple licensing + proprietary Mach-O linker). Operators
+#   wire remote macOS builders through `OMNISIGHT_MACOS_BUILDER` —
+#   see P1 (#286) for the delegation matrix.
+#
+# SDK / deployment target rationale:
+#   * `sdk_version: 17.5` — Xcode 16 RC ships iOS 17.5 SDK baseline.
+#   * `min_os_version: 16.0` — App Store's effective floor in 2026:
+#     older iOS 15 share is < 3% per Apple's 2025-Q4 disclosure, and
+#     iOS 16 introduced the StoreKit 2 APIs P7 (#292) pilot relies on.
+#     Raising this by a point release breaks BOM for paying customers
+#     — treat as a scoped decision.
+#
+# Signing & provisioning flow:
+#   `signing_identity` is intentionally empty in the profile —
+#   per-project value injected by P3 (#288) from the extended
+#   secret_store HSM layer at build time (Developer ID Certificate +
+#   Provisioning Profile pair). The profile encodes the *shape* of the
+#   target, not the project-specific signing material.
+#
+# Simulator vs device:
+#   This profile is device-only. Simulator builds live in
+#   `ios-simulator.yaml` because the simulator is a MATERIALLY different
+#   ABI (x86_64 + arm64 universal binary for Apple Silicon Macs, plus
+#   the `iphonesimulator` SDK root not `iphoneos`), and conflating them
+#   would break `scripts/simulate.sh mobile` track dispatch (P2 #287).
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=mobile
+#   * scripts/simulate.sh mobile track                        [P2 #287]
+#   * backend/deploy/app_store.py (App Store Connect adapter) [P5 #290]
+#   * configs/skills/skill-ios/ scaffold generator            [P7 #292]
+
+platform: ios-arm64
+label: "iOS — Device (arm64)"
+target_kind: mobile
+
+mobile_platform: ios
+mobile_abi: arm64
+
+# iOS SDK version baked into Xcode 16 RC.
+sdk_version: "17.5"
+
+# SDK target (the one projects compile against, `-sdk iphoneos17.5`).
+target_os_version: "17.5"
+
+# App Store deploy target; anything lower loses StoreKit 2 (P7 dep).
+min_os_version: "16.0"
+
+# Apple toolchain is invoked via `xcrun`; the literal clang++ path
+# varies per Xcode install (`xcode-select -p` is the canonical
+# discovery). Projects override via `DEVELOPER_DIR` env.
+sdk_root: "/Applications/Xcode.app/Contents/Developer"
+toolchain_path: "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+
+# NDK concept is Android-only; left empty for iOS.
+ndk_root: ""
+
+# Signing material injected at build time from P3 secret_store (HSM).
+signing_identity: ""
+
+# xcodebuild is the canonical iOS build command. Fastlane / gym wrap
+# this; projects may override in project.yml / Fastfile.
+build_cmd: "xcodebuild -sdk iphoneos -configuration Release"
+
+# Emulator spec is n/a for device builds (real hardware). We still
+# record the paired simulator runtime so the P2 simulate-track can
+# auto-boot a matching simulator when iterating against this profile.
+emulator_spec:
+  kind: paired_simulator
+  paired_profile: ios-simulator
+  device_model: "iPhone 15 Pro"
+  runtime: "com.apple.CoreSimulator.SimRuntime.iOS-17-5"
+  notes: >-
+    Device builds cannot self-run; pair with ios-simulator profile for
+    local iteration. Real-device verification happens through P2 cloud
+    device farm integration (Firebase Test Lab / BrowserStack).
