@@ -55,7 +55,7 @@ async def _get_tenant_secrets_summary(user: dict) -> dict:
     try:
         tid = user.get("tenant_id", "t-default")
         set_tenant_id(tid)
-        from backend import secrets as sec
+        from backend import tenant_secrets as sec
         items = await sec.list_secrets()
         grouped: dict[str, list] = {}
         for s in items:

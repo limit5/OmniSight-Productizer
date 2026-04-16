@@ -200,6 +200,118 @@ _PASSWORD_CHANGE_EXEMPT = {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  I9 — Per-IP / per-user / per-tenant rate limiting
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_RATE_LIMIT_EXEMPT = {"/health", "/auth/login", "/auth/logout"}
+
+
+@app.middleware("http")
+async def _rate_limit_gate(request, call_next):
+    """I9: Three-dimensional rate limiting (IP, user, tenant).
+
+    Limits are derived from the tenant's plan via quota.py.
+    Login endpoints have their own dedicated K2 limiters and are
+    exempt here to avoid double-counting.
+    """
+    from starlette.responses import JSONResponse as StarletteJSON
+
+    rel = request.url.path.removeprefix(settings.api_prefix)
+    if rel in _RATE_LIMIT_EXEMPT:
+        return await call_next(request)
+
+    from backend.rate_limit import get_limiter
+    from backend.quota import quota_for_plan
+
+    limiter = get_limiter()
+
+    # --- resolve client IP ---
+    client_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+    if not client_ip:
+        client_ip = (request.client.host if request.client else "") or "unknown"
+
+    # --- resolve user + tenant (best-effort, no auth required) ---
+    user_id: str | None = None
+    tenant_id: str | None = None
+    plan = "free"
+
+    from backend import auth as _auth
+    if _auth.auth_mode() != "open":
+        cookie = request.cookies.get(_auth.SESSION_COOKIE) or ""
+        if cookie:
+            sess = await _auth.get_session(cookie)
+            if sess:
+                user_obj = await _auth.get_user(sess.user_id)
+                if user_obj:
+                    user_id = user_obj.id
+                    tenant_id = user_obj.tenant_id
+    else:
+        tenant_id = request.headers.get("x-tenant-id") or "t-default"
+
+    if tenant_id:
+        try:
+            from backend.db import _conn
+            async with _conn().execute(
+                "SELECT plan FROM tenants WHERE id = ?", (tenant_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    plan = row[0] or "free"
+        except Exception:
+            pass
+
+    quota = quota_for_plan(plan)
+
+    # --- per-IP check ---
+    ip_ok, ip_wait = limiter.allow(
+        f"api:ip:{client_ip}", quota.per_ip.capacity, quota.per_ip.window_seconds,
+    )
+    if not ip_ok:
+        retry = int(ip_wait) + 1
+        return StarletteJSON(
+            status_code=429,
+            content={"detail": f"IP rate limit exceeded; retry in {retry}s"},
+            headers={"Retry-After": str(retry)},
+        )
+
+    # --- per-user check ---
+    if user_id:
+        user_ok, user_wait = limiter.allow(
+            f"api:user:{user_id}", quota.per_user.capacity, quota.per_user.window_seconds,
+        )
+        if not user_ok:
+            retry = int(user_wait) + 1
+            return StarletteJSON(
+                status_code=429,
+                content={"detail": f"User rate limit exceeded; retry in {retry}s"},
+                headers={"Retry-After": str(retry)},
+            )
+
+    # --- per-tenant check ---
+    if tenant_id:
+        tenant_ok, tenant_wait = limiter.allow(
+            f"api:tenant:{tenant_id}", quota.per_tenant.capacity, quota.per_tenant.window_seconds,
+        )
+        if not tenant_ok:
+            retry = int(tenant_wait) + 1
+            return StarletteJSON(
+                status_code=429,
+                content={"detail": f"Tenant rate limit exceeded; retry in {retry}s"},
+                headers={"Retry-After": str(retry)},
+            )
+
+    response = await call_next(request)
+
+    # Inject rate-limit headers for observability
+    response.headers["X-RateLimit-Plan"] = plan
+    if user_id:
+        response.headers["X-RateLimit-User"] = user_id
+    if tenant_id:
+        response.headers["X-RateLimit-Tenant"] = tenant_id
+
+    return response
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  K6 — API key scope enforcement
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @app.middleware("http")

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend import auth as _au
-from backend import secrets as sec
+from backend import tenant_secrets as sec
 from backend.db_context import require_current_tenant, set_tenant_id
 
 logger = logging.getLogger(__name__)

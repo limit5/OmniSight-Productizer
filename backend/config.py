@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # Database
     database_path: str = ""  # SQLite path (empty = default data/omnisight.db)
 
+    # I9: Redis (rate limiting, future session store)
+    redis_url: str = ""  # e.g. redis://localhost:6379/0
+
     # ── LLM Provider Configuration ──
     # Which provider to use: anthropic | google | openai | xai | groq | deepseek | together | ollama
     llm_provider: str = "anthropic"
