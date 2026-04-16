@@ -716,14 +716,14 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### N6. 升級 Runbook + Rollback + CVE/EOL 監控
-- [ ] `docs/ops/dependency_upgrade_runbook.md`：
+- [x] `docs/ops/dependency_upgrade_runbook.md`：
   - 升級前：image snapshot、DB backup、lockfile clean 確認
   - 升級中：staging 24h 觀察、smoke test 清單
   - 升級後：監控指標（error rate / latency p99 / memory）72h
   - Rollback：`git revert` + `docker compose pull <prev-tag>` 步驟
-- [ ] CVE 掃描：`osv-scanner` 或 Snyk 每日跑、嚴重 CVE 自動開 PR
-- [ ] EOL 監控：`scripts/check_eol.py` 每月查 Python / Node / FastAPI / Next.js 官方 EOL schedule（endoflife.date API），剩 6 個月內發 warning
-- [ ] 預估：**0.5 day**
+- [x] CVE 掃描：`osv-scanner` 或 Snyk 每日跑、嚴重 CVE 自動開 PR
+- [x] EOL 監控：`scripts/check_eol.py` 每月查 Python / Node / FastAPI / Next.js 官方 EOL schedule（endoflife.date API），剩 6 個月內發 warning
+- [x] 預估：**0.5 day**
 
 ### N7. Multi-version CI Matrix
 - [ ] Python matrix：3.12 + 3.13

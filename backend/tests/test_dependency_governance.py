@@ -445,3 +445,232 @@ def test_n5_doc_exists() -> None:
         assert phrase.lower() in body.lower(), (
             f"docs/ops/upgrade_preview.md missing key term: {phrase!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# N6 — Upgrade Runbook + CVE scan + EOL monitor guards
+# ---------------------------------------------------------------------------
+#
+# N6 adds three artefacts:
+#   1. docs/ops/dependency_upgrade_runbook.md — the four-phase upgrade
+#      procedure with rollback instructions.
+#   2. .github/workflows/cve-scan.yml — daily OSV-Scanner run +
+#      scripts/cve_triage.py issue renderer.
+#   3. .github/workflows/eol-check.yml — monthly endoflife.date check +
+#      scripts/check_eol.py issue renderer.
+#
+# These guards pin the *shape* of each artefact (file presence, cron,
+# permissions, key sections) so a careless edit can't silently disarm
+# the CVE/EOL early-warning system. Behaviour of the Python scripts
+# is covered by test_cve_triage.py and test_check_eol.py.
+
+N6_RUNBOOK = REPO_ROOT / "docs" / "ops" / "dependency_upgrade_runbook.md"
+N6_CVE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cve-scan.yml"
+N6_EOL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "eol-check.yml"
+N6_CVE_SCRIPT = REPO_ROOT / "scripts" / "cve_triage.py"
+N6_EOL_SCRIPT = REPO_ROOT / "scripts" / "check_eol.py"
+
+
+# ----- Runbook -------------------------------------------------------------
+
+def test_n6_runbook_exists() -> None:
+    assert N6_RUNBOOK.is_file(), (
+        "N6 requires docs/ops/dependency_upgrade_runbook.md"
+    )
+
+
+def test_n6_runbook_has_four_phases() -> None:
+    body = N6_RUNBOOK.read_text(encoding="utf-8")
+    for phase in (
+        "Phase 1 — Pre-upgrade",
+        "Phase 2 — During upgrade",
+        "Phase 3 — Post-upgrade",
+        "Phase 4 — Rollback",
+    ):
+        assert phase in body, f"Runbook missing phase header: {phase!r}"
+
+
+def test_n6_runbook_covers_required_topics() -> None:
+    # Contract: the N6 TODO enumerates image snapshot, DB backup,
+    # lockfile-clean, staging 24h, smoke test, 72h monitoring, and
+    # rollback via git revert + docker compose pull. All must be in
+    # the doc or operators will improvise.
+    body = N6_RUNBOOK.read_text(encoding="utf-8").lower()
+    required = [
+        "image snapshot",
+        "db",       # "DB backup" / "DB snapshot"
+        "backup",
+        "lockfile",
+        "staging",
+        "24h",      # 24h soak
+        "smoke",
+        "72h",
+        "error rate",
+        "latency",
+        "memory",
+        "rollback",
+        "git revert",
+        "docker compose",
+    ]
+    missing = [phrase for phrase in required if phrase not in body]
+    assert not missing, (
+        f"dependency_upgrade_runbook.md missing key phrases: {missing}"
+    )
+
+
+def test_n6_runbook_links_preview_and_renovate_docs() -> None:
+    # Operators jump between docs; broken links make the SOP useless.
+    body = N6_RUNBOOK.read_text(encoding="utf-8")
+    assert "renovate_policy.md" in body, (
+        "Runbook must reference renovate_policy.md (cross-link to N2)"
+    )
+    assert "upgrade_preview.md" in body, (
+        "Runbook must reference upgrade_preview.md (cross-link to N5)"
+    )
+
+
+# ----- CVE scan workflow + script -----------------------------------------
+
+@pytest.fixture(scope="module")
+def cve_workflow_text() -> str:
+    return N6_CVE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_n6_cve_workflow_exists(cve_workflow_text: str) -> None:
+    assert N6_CVE_WORKFLOW.is_file(), (
+        "N6 requires .github/workflows/cve-scan.yml"
+    )
+    assert "Daily CVE Scan" in cve_workflow_text, (
+        "CVE workflow `name:` must read 'Daily CVE Scan'"
+    )
+
+
+def test_n6_cve_workflow_runs_daily(cve_workflow_text: str) -> None:
+    # Must be cron-driven — daily is the cadence the TODO commits to.
+    assert "schedule:" in cve_workflow_text
+    assert "cron:" in cve_workflow_text
+    assert "workflow_dispatch:" in cve_workflow_text
+
+
+def test_n6_cve_workflow_uses_osv_scanner(cve_workflow_text: str) -> None:
+    # The TODO calls out osv-scanner (or Snyk). We standardise on
+    # osv-scanner because it's Google-backed, free, and requires no
+    # secret management.
+    assert "osv-scanner" in cve_workflow_text.lower(), (
+        "CVE workflow must invoke osv-scanner (N6 TODO: 'osv-scanner or Snyk')"
+    )
+
+
+def test_n6_cve_workflow_has_required_permissions(cve_workflow_text: str) -> None:
+    # issues:write is what gh issue create needs; security-events:write
+    # is what the codeql SARIF upload needs.
+    assert "issues: write" in cve_workflow_text, (
+        "CVE workflow must grant issues:write to open tracking issues"
+    )
+
+
+def test_n6_cve_workflow_calls_triage_script(cve_workflow_text: str) -> None:
+    assert "scripts/cve_triage.py" in cve_workflow_text, (
+        "CVE workflow must call scripts/cve_triage.py to render the issue"
+    )
+
+
+def test_n6_cve_workflow_labels_tracking_issue(cve_workflow_text: str) -> None:
+    # Labels are the operator's triage handle. The doc calls out
+    # security/cve as the label and priority/critical for urgency.
+    assert "security/cve" in cve_workflow_text, (
+        "CVE workflow must label issues with security/cve"
+    )
+
+
+def test_n6_cve_script_is_stdlib_only() -> None:
+    assert N6_CVE_SCRIPT.is_file(), "N6 requires scripts/cve_triage.py"
+    src = N6_CVE_SCRIPT.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "import yaml",
+        "from pydantic",
+        "import aiohttp",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"scripts/cve_triage.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+# ----- EOL check workflow + script ----------------------------------------
+
+@pytest.fixture(scope="module")
+def eol_workflow_text() -> str:
+    return N6_EOL_WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_n6_eol_workflow_exists(eol_workflow_text: str) -> None:
+    assert N6_EOL_WORKFLOW.is_file(), (
+        "N6 requires .github/workflows/eol-check.yml"
+    )
+    assert "Monthly EOL Check" in eol_workflow_text, (
+        "EOL workflow `name:` must read 'Monthly EOL Check'"
+    )
+
+
+def test_n6_eol_workflow_runs_monthly(eol_workflow_text: str) -> None:
+    # Pattern "0 7 1 * *" = monthly on the 1st. We don't pin the exact
+    # hour (operators can shift Asia/Taipei offset) — just assert the
+    # `day-of-month` field is "1".
+    assert "cron:" in eol_workflow_text
+    assert re.search(r'cron:\s*"[^"]*\s1\s\*\s\*"', eol_workflow_text), (
+        "EOL workflow cron must fire monthly (day-of-month = 1), "
+        "got: " + eol_workflow_text
+    )
+
+
+def test_n6_eol_workflow_calls_check_eol(eol_workflow_text: str) -> None:
+    assert "scripts/check_eol.py" in eol_workflow_text, (
+        "EOL workflow must invoke scripts/check_eol.py"
+    )
+
+
+def test_n6_eol_workflow_opens_tracking_issue(eol_workflow_text: str) -> None:
+    assert "eol-warning" in eol_workflow_text, (
+        "EOL workflow must label tracking issues eol-warning"
+    )
+    assert "gh issue create" in eol_workflow_text
+
+
+def test_n6_eol_workflow_uses_six_month_horizon(eol_workflow_text: str) -> None:
+    # N6 TODO: "剩 6 個月內發 warning". 180 days is the closest fixed
+    # horizon; the script defaults there, but the workflow must pass
+    # it explicitly so operators can see the threshold without
+    # reading Python source.
+    assert "180" in eol_workflow_text, (
+        "EOL workflow must pass --warn-days 180 (6-month horizon per N6 TODO)"
+    )
+
+
+def test_n6_eol_script_is_stdlib_only() -> None:
+    assert N6_EOL_SCRIPT.is_file(), "N6 requires scripts/check_eol.py"
+    src = N6_EOL_SCRIPT.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "import yaml",
+        "from pydantic",
+        "import aiohttp",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"scripts/check_eol.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+def test_n6_eol_script_covers_four_tracked_products() -> None:
+    # The TODO calls out Python / Node / FastAPI / Next.js. The script
+    # must have all four in its `build_products` list.
+    src = N6_EOL_SCRIPT.read_text(encoding="utf-8")
+    for product in ('name="Python"', 'name="Node.js"',
+                    'name="FastAPI"', 'name="Next.js"'):
+        assert product in src, (
+            f"check_eol.py must track {product} (N6 TODO)"
+        )

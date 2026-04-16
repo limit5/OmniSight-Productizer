@@ -1,0 +1,96 @@
+name: Monthly EOL Check
+
+# N6 — monthly end-of-life check for strategic platform dependencies.
+#
+# Queries endoflife.date for Python, Node.js, FastAPI, and Next.js
+# release cycles, compares against what this repo pins, and opens a
+# tracking issue if any pinned version reaches EOL within 6 months.
+#
+# Why monthly (not weekly / nightly):
+#   * EOL dates move at most 1x/year per product — a monthly cadence
+#     catches them with several months of lead time. Weekly would
+#     mean 52 identical "still 5 months to Python EOL" issues a year.
+#   * Still cheap (<1 min runtime, no pip install, no pnpm install —
+#     stdlib-only `scripts/check_eol.py`), so downgrading to quarterly
+#     wouldn't save meaningful cost.
+#
+# The workflow is read-only: it never mutates the repo and never
+# opens a PR. Upgrading the flagged dependency happens via the normal
+# N2 Renovate path or a manual PR following the upgrade runbook (N6).
+
+on:
+  schedule:
+    # 1st of each month at 07:00 UTC = 15:00 Asia/Taipei. Mid-month-1
+    # timing means the first business day of the month is when
+    # operators see the check — a natural fit for quarterly planning.
+    - cron: "0 7 1 * *"
+  workflow_dispatch:
+    # Manual trigger when investigating a specific product's cycle
+    # (e.g. "did Node 22 LTS start yet?").
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: eol-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # stdlib-only script; use the Python the runner already ships
+      # with. Pinning to 3.12 is a safety net — the script only uses
+      # stdlib features available in 3.9+ so drift is low-risk.
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: run EOL check
+        id: eol
+        run: |
+          set -eu
+          python3 scripts/check_eol.py \
+              --out eol-issue-body.md \
+              --warn-days 180
+
+      - name: upload EOL report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eol-check-${{ github.run_id }}
+          path: eol-issue-body.md
+          retention-days: 90
+
+      - name: close prior EOL tracking issue
+        if: steps.eol.outputs.has_warnings == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          numbers="$(gh issue list --label eol-warning --state open \
+              --json number -q '.[].number' || true)"
+          for n in $numbers; do
+            gh issue close "$n" --reason "not planned" \
+                --comment "Superseded by run #${{ github.run_id }}." || true
+          done
+
+      - name: open EOL tracking issue
+        if: steps.eol.outputs.has_warnings == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          DATE="$(date -u +%Y-%m-%d)"
+          gh issue create \
+              --title "Dependency EOL warning — ${DATE}" \
+              --label "eol-warning" \
+              --body-file eol-issue-body.md
+
+      - name: summary
+        if: always()
+        run: |
+          echo "::notice::EOL check complete. Warnings: ${{ steps.eol.outputs.has_warnings }} · Errors: ${{ steps.eol.outputs.error_count }}"
