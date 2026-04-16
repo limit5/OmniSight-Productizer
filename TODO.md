@@ -981,13 +981,13 @@ Legend:
 - [x] 預估：**1 day**
 
 ### W4. Deploy adapters (#278)
-- [ ] `backend/deploy/vercel.py`（Vercel REST API：project create / env set / deploy）
-- [ ] `backend/deploy/netlify.py`
-- [ ] `backend/deploy/cloudflare_pages.py`（沿用 B12 CF API client）
-- [ ] `backend/deploy/docker_nginx.py`（靜態站 + nginx 配置生成）
-- [ ] 統一 `WebDeployAdapter` interface：`provision()` / `deploy(build_artifact)` / `rollback()` / `get_url()`
-- [ ] Secret：API token 沿用 `backend/secret_store.py` Fernet
-- [ ] 預估：**2 day**
+- [x] `backend/deploy/vercel.py`（Vercel REST API：project create / env set / deploy）
+- [x] `backend/deploy/netlify.py`
+- [x] `backend/deploy/cloudflare_pages.py`（沿用 B12 CF API client）
+- [x] `backend/deploy/docker_nginx.py`（靜態站 + nginx 配置生成）
+- [x] 統一 `WebDeployAdapter` interface：`provision()` / `deploy(build_artifact)` / `rollback()` / `get_url()`
+- [x] Secret：API token 沿用 `backend/secret_store.py` Fernet
+- [x] 預估：**2 day**
 
 ### W5. Compliance gates（WCAG / GDPR / SPDX license scan）(#279)
 - [ ] WCAG 2.2 AA：axe-core 自動掃 + manual checklist（focus order / contrast / screen reader labels）

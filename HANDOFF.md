@@ -1,9 +1,63 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：W3 — Web role skills (#277) — `configs/roles/web/` 落 6 個 `.skill.md`（frontend-react / frontend-vue / frontend-svelte / a11y / seo / perf），每個均引用 W2 `LIGHTHOUSE_MIN_*` 與 W1 bundle budget，role-specific tool whitelist（非 `[all]`）+ 51 條 contract test 全綠
-> Tag：`v0.1.0` — 首個正式 release（W3 role skills 為 prompt 層 declarative 擴充，不 bump tag）
-> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0 + W1 + W2 + W3 landed，W4 deploy adapters 為下一站）。W3 新增 6 個 role skill + 51 條測試，既有 prompt_loader / W1 / W2 測試零 regression（128/128 綠）
+> 最後 commit：W4 — Deploy adapters (#278) — `backend/deploy/` 五檔落地（`base.py` + 4 adapter），統一 `WebDeployAdapter` 介面（provision / deploy / rollback / get_url），token 全走 `secret_store.Fernet`，82 條 adapter 測試 + 210 條 adjacent regression 全綠
+> Tag：`v0.1.0` — 無 bump（W4 為 backend 驅動層新增，無破壞性 API 變動；v0.2.0 預計在 W6 Next.js pilot 拉首支可售 SKU 時打）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0 + W1 + W2 + W3 + W4 landed，W5 compliance gates 為下一站）。W4 新增 5 個 deploy 模組 + 82 條測試，adjacent suite（cloudflare_tunnel / web_simulator / web_simulate / web_role_skills / platform_* / prompt_loader）292/292 零 regression
+
+---
+
+## W4 (complete) Deploy adapters (#278)（2026-04-17 完成）
+
+**背景**：W0（schema）→ W1（4 個 platform profile）→ W2（simulate-track）→ W3（6 個 role skill）把 **宣告 + QA gate + prompt layer** 鋪完，下一步才輪到真正把 bundle 推上去的 **deploy driver**。W4 是 **2-day** 在 `backend/deploy/` 落 **4 個 provider adapter** 的核心步驟，讓 LLM 生出來的前端碼在跑完 simulate-track 綠燈後能被同一組 API 直接送到 Vercel / Netlify / CF Pages / docker-nginx，無需為每家雲切一次 `if provider == ...`。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `backend/deploy/__init__.py`（新檔，~2.8 KiB） | Public package surface：`WebDeployAdapter` / `BuildArtifact` / `ProvisionResult` / `DeployResult` / `DeployError` 全家桶 re-export，加 `get_adapter(provider)` factory + `list_providers()` enumeration。factory 接受 alias（`cloudflare` / `cf-pages` → CF Pages；`docker` / `nginx` → docker_nginx；大小寫與底線不敏感）；lazy import 讓某個 adapter 的可選依賴掉 rails 時不影響其他三家。 |
+| `backend/deploy/base.py`（新檔，~6.9 KiB） | 統一 `WebDeployAdapter` ABC：四個 abstract method（`provision` / `deploy` / `rollback` / `get_url`）+ `from_encrypted_token(ciphertext)` 走 `backend.secret_store.decrypt()`、`from_plaintext_token` 給 CLI/test 用。dataclasses：`BuildArtifact(path, framework, commit_sha, branch, metadata)` + `ProvisionResult` + `DeployResult`。error hierarchy：`DeployError` → `InvalidDeployTokenError`(401) / `MissingDeployScopeError`(403) / `DeployConflictError`(409) / `DeployRateLimitError`(429, `retry_after`) / `DeployArtifactError` / `RollbackUnavailableError` — 全部帶 `status` 與 `provider` 欄位讓 router 直接對應 HTTP status。`token_fingerprint(tok)` log-safe 只露末四碼。 |
+| `backend/deploy/vercel.py`（新檔，~9.8 KiB） | Vercel REST API adapter：`/v9/projects` GET/POST（idempotent provision）、`/v10/projects/:id/env` upsert（?upsert=true 失敗回退 DELETE + POST）、`/v2/files` SHA1 digest 上傳（同 bytes dedupe）、`/v13/deployments` 建 deployment、`/v6/deployments` list + `/v13/deployments/:id/promote` rollback。支援 `team_id` 查詢參數。`_collect_files()` 走 `rglob` + SHA1，manifest 對齊 Vercel 的 `{file, sha, size}` contract。 |
+| `backend/deploy/netlify.py`（新檔，~8.6 KiB） | Netlify REST API adapter：`/sites?name=` find-by-name、`/sites` POST（可選 `/{account_slug}/sites` team scope）、`/sites/:id` PATCH 灌 `build_settings.env`。deploy 走 Netlify 原生 digest flow（`/sites/:id/deploys` 帶 SHA1 manifest → server 回 `required[]` → PUT `/deploys/:id/files/<path>` 只傳缺的 sha）— 省上傳、對齊 netlify CLI 內部實作。rollback 支援 site-level POST `/sites/:id/rollback`（回前個 production）+ by-id POST `/deploys/:id/restore`；404/422 → `RollbackUnavailableError`。 |
+| `backend/deploy/cloudflare_pages.py`（新檔，~8.6 KiB） | CF Pages adapter：走 CF v4 `/accounts/:acct/pages/projects[/:name[/deployments[/:id/retry]]]`；reuse B12 `cloudflare_client` 的 error taxonomy（`CloudflareAPIError` subclasses 經 `_translate_cf_error()` 映到 W4 `DeployError` 家族，保持 401/403/409/429 對齊）。`account_id` 為 required（constructor 直接 `ValueError`）。env 灌到 `deployment_configs.{production,preview}.env_vars` — 兩環境同時更新。**manifest 用 SHA256**（CF Pages 規格 vs. Vercel 的 SHA1，測試明確 pin `\|[0-9a-f]{64}\|` regex 防誤退回 SHA1）。rollback 走 `/deployments/:id/retry`。 |
+| `backend/deploy/docker_nginx.py`（新檔，~10.1 KiB） | 離線 adapter：不打任何 REST API，`provision()` 直接把 `Dockerfile`（兩階段 nginx:1.27-alpine + HEALTHCHECK）/ `nginx.conf`（SPA-safe `try_files` + `/healthz` + 長快取 fingerprint 資產）/ `.dockerignore` / `docker-compose.yml` / `deploy.sh`（chmod 0o755）全渲染到 `<output_dir>/` — 符合空氣隔離 infra「backend 無 Docker socket → 交給 ops」的操作模型。`deploy()` 把 build artifact 拷到 `public/` 下；`run_docker_build=True` 時才呼 subprocess `docker build` + `docker run`。`_copy_tree()` 內建 self-containment guard（refuse copying parent into own descendant）— tests 一度踩到 tmp_path self-recurse，guard 讓真實 user 不會重演。rollback：**only when** `run_docker_build=True`（disk-only render 本來就沒 state 可退）。 |
+| `backend/tests/test_deploy_base.py`（新檔，29 條） | factory / interface contract：`list_providers()` 四支 / alias 解析矩陣（10 組 parametrize，含大小寫與底線變體）/ 每個 adapter 的 `provider` classvar 唯一 / `token_fingerprint` 遮短 token 露末四 / `BuildArtifact` path coercion + validate 缺資料夾/錯誤型別 raise / `secret_store` round-trip 的 ciphertext → adapter / ABC 不能直接 instantiate / `RollbackUnavailableError` 是 `DeployError` subclass。 |
+| `backend/tests/test_deploy_vercel.py`（新檔，16 條） | respx-mocked：creates-when-absent + reuse-existing / env upsert 409 → DELETE→POST 回退 / 401/403/429 → typed exception + retry_after / team_id → query param / file upload SHA1 dedupe / deploy manifest 含 `files[]` + `sha` + `commitSha` / rollback 回前個 READY + by-id promote + 無歷史 raise / get_url 在 provision 前為 None、之後 cached。 |
+| `backend/tests/test_deploy_netlify.py`（新檔，14 條） | respx-mocked：digest deploy 只上傳 server `required[]` 要的 sha（省 PUT call）/ required=[] → 零 upload / PATCH env 體內含 `build_settings` + `API_URL` / account_slug → `/{slug}/sites` / 401/403/422(=conflict)/429 映射 / rollback without id → `/sites/:id/rollback`、with id → `/deploys/:id/restore` / 404 → `RollbackUnavailableError` / lazy site_id lookup. |
+| `backend/tests/test_deploy_cloudflare_pages.py`（新檔，11 條） | respx-mocked：missing account_id 建構即 ValueError / create-when-absent + reuse / PATCH env 體含 `deployment_configs` + `API_URL` / 401/403/429 映射 + `retry_after=15` / git source provisioning / manifest hash 用 **SHA256 regex pin**（64 hex）防退 SHA1 / rollback 找前個 success deployment + by-id retry + 無歷史 raise / cached URL. |
+| `backend/tests/test_deploy_docker_nginx.py`（新檔，12 條） | 純 filesystem：provision 寫滿六檔 / Dockerfile 含 `FROM nginx:1.27-alpine` + `EXPOSE 8082` + `HEALTHCHECK` / nginx.conf `listen 8082` + `try_files $uri $uri/ /index.html` + 無模板 placeholder leak / `.env.deploy` 含 `API_URL=...` / `deploy.sh` 有 exec bit / compose 含 project name + 8082:8082 port / deploy 拷檔（2 檔）→ `files_copied=2` / deploy-before-provision 自動 provision / 第二次 deploy **替換** public 樹不留舊檔 / 空 artifact → `DeployArtifactError` / rollback 在 `run_docker_build=False` → `RollbackUnavailableError` / `public_url` override + factory alias. |
+| `TODO.md` | W4 八個 `[ ]` → `[x]`。 |
+
+**驗證結果：**
+
+* 新測試：`test_deploy_base.py`(29) + `test_deploy_vercel.py`(16) + `test_deploy_netlify.py`(14) + `test_deploy_cloudflare_pages.py`(11) + `test_deploy_docker_nginx.py`(12) = **82/82 綠**（<2s）。
+* Adjacent regression suite：`test_cloudflare_tunnel`(既有 B12) + `test_web_simulator` + `test_web_simulate` + `test_web_role_skills` + `test_platform_web_profiles` + `test_platform_schema` + `test_prompt_loader` = **210/210 綠**（<17s）。
+* 合併跑：**292 passed**（含 W4 82 + regression 210）。
+
+**設計決策備忘：**
+
+1. **四個 adapter 全放 `backend/deploy/` package 而非 flat `backend/deploy_*.py`**：W4 是明確「一組同介面的 provider」，package 讓 `get_adapter("vercel")` 的 lazy import 不需要掃平頂層（避免某個 optional dep 缺席一家就炸其他三家）。`backend/deploy/__init__.py` 同時扮演 public facade — router / HMI 只需 `from backend.deploy import get_adapter, BuildArtifact`，不用知道 vendor 檔名。
+2. **Token 必走 `secret_store.decrypt()` 雙入口**：`from_encrypted_token(ciphertext)` 是正式 path（router / DB），`from_plaintext_token(token)` 僅給 CLI / 單元測試。兩者都回 `WebDeployAdapter` 實例、絕不把明文 token 寫進 log — `token_fp()` 只露末四碼。這對齊 B12 `cloudflare_client.token_fingerprint` 的既有習慣，reviewer 一眼就知道為什麼 log 裡只見 `…ABCD`。
+3. **Error hierarchy 攜帶 HTTP status + provider**：`DeployError.status` / `.provider` 兩欄讓上層 router（W5 / W6 時會接）可以直接 `raise HTTPException(status_code=e.status, detail=f"[{e.provider}] {e}")`，不用 pattern match 錯誤訊息字串。`DeployRateLimitError` 再多一欄 `retry_after`（秒）— 對齊 B12 `CloudflareClient.RateLimitError` 慣例，讓 event bus 的 AIMD 降速邏輯能吃到同一個欄位名。
+4. **CF Pages adapter 沒直接 reuse `CloudflareClient`**：原先想 sub-class B12 client，但 CF Pages 有 Pages-specific endpoint（`/pages/projects/:name/deployments/:id/retry` 等），而 B12 client 的 surface 是 tunnel-focused（account / zone / cfd_tunnel / dns）。強行塞會讓 tunnel 模組背負 Pages 方法、或 Pages 模組繼承不該繼承的 tunnel 方法。折衷：**共用 `CF_API_BASE` 常數 + error taxonomy**（`_translate_cf_error()` 把 `CloudflareAPIError` 家族映到 `DeployError` 家族，保持 401/403/409/429 對齊），其餘 HTTP 自己走 httpx。這符合 W4 原本「沿用 B12 CF API client」的 spirit（error taxonomy 對齊）而非字面（繼承全家桶）。
+5. **digest upload 對齊各 provider 的真實規格**：Vercel 用 **SHA1** manifest（`{file, sha, size}`，header `x-vercel-digest`），Netlify 用 **SHA1** 但 manifest key 要加前置 `/`（`{"/index.html": "<sha1>"}`），CF Pages 用 **SHA256**（`{"index.html": {"hash": "<sha256>", "size": N}}`）。測試裡 `test_deploy_cloudflare_pages.py` 用正則 `[0-9a-f]{64}` 明確 pin SHA256 — 防未來有人誤 DRY 成 SHA1 helper。這種 per-provider 小差異是「乾的封裝會吞掉重要資訊」的典型案例，我選擇讓 adapter 各自保持直白。
+6. **docker_nginx 不預設跑 `docker build`**：預設僅在磁碟上渲染 build context（Dockerfile + nginx.conf + compose + deploy.sh），因為 OmniSight backend 經常部署在沒有 Docker socket 的環境（air-gapped / 小 VPS / CI worker）。`run_docker_build=True` 是 opt-in；rollback 也只在 opt-in 時可用（disk-only 沒 state 可退）。這比較符合「adapter 負責產可部署 artifact」的分工，真正的 docker daemon 互動交給 deploy.sh 在目標 host 上執行。
+7. **`_copy_tree` 加 self-containment guard**：開發時測試 fixture 一度把 `build_site = tmp_path`，而 `output_dir = tmp_path / "deploy-ctx"` — `rglob` 會把 deploy-ctx 自己吃進去，無限遞迴拷到「File name too long」OSError。修測試 fixture 是一半，真正的 defensive fix 是在 adapter 的 `_copy_tree` 加 `dst.relative_to(src)` check（raise `DeployArtifactError`），這樣真實 user 把 artifact 根目錄不小心指到 output_dir 的父目錄時會立刻紅燈而不是噴 OS error。
+8. **deploy artifact SHA1 dedupe（Vercel）而非同時並行上傳**：同樣 bytes 的檔（例：多個空白 `favicon.ico` / 重複 logo）只上傳一次 — 測試 `test_deploy_dedupes_upload_of_identical_files` pin `upload.call_count == 1`。並行 upload（asyncio.gather）留給未來優化：第一個 cut 保持順序以簡化 error 模型（任何一個 upload 炸就 early-return，不用 cancel 其他 in-flight 的 request）。
+9. **vercel 的 env upsert 用 `?upsert=true`，失敗才回退 DELETE+POST**：Vercel 的 v10 env API 有兩派歷史寫法——新派支援 upsert 參數、舊派不支援會回 409。我們先 POST `?upsert=true`，抓到 `DeployConflictError` 再回退 DELETE+POST。這種「optimistic → fallback」的寫法比「always DELETE+POST」少一半 API call，對 rate limit 友善；測試 `test_env_upsert_handles_conflict_by_delete_then_recreate` pin 兩條路徑都走過（side_effect + delete route）。
+10. **沒寫 `provision()` 的 env var 減法**：env dict 只 **加** 不 **減** — 如果 caller 傳 `{}` 或不傳 env，adapter 不會 delete 遠端既有的 env var。這是刻意的保守預設：prod token 刪錯會斷線上，誤刪得靠 time-travel DB backup 才救得回。未來要加「full-sync / delete unknown」semantics，得是顯式 `env_strict=True` flag + 審計 log，不會偷偷塞進這層。
+
+**後續建議（unblocks 的下游）：**
+
+* **W5 compliance gates**：WCAG / GDPR / SPDX 掃描完後，可以把結果直接 POST 到 Vercel / Netlify 的 deployment metadata（兩家都接受 `meta` / `context` 自由欄位），讓審計員在 provider UI 一眼看到合規掃描結果而不用跑去 GitHub PR。
+* **W6 Next.js pilot**：agent 只要 `adapter = get_adapter("vercel").from_encrypted_token(ciphertext, project_name="pilot-site")`，`await adapter.provision(env={...})` → `await adapter.deploy(BuildArtifact(path=Path(".vercel/output")))` 兩行就把 pilot 的 Next.js app 送上 Vercel。不用在 vertical 裡重寫一次 REST call。
+* **W7 Nuxt / W8 Astro / W9 SvelteKit**：Nuxt 與 SvelteKit 走 `web-ssr-node` profile → 用 `docker-nginx` 或 Vercel serverless；Astro 走 `web-static` → 任一 adapter 都可 — 由 profile 的 `deploy_provider` 直接映到 `get_adapter()` 的 key。
+* **B11 one-click deploy router**：未來若要在 HMI form 開「一鍵部署」按鈕，routers/ 下接 `deploy_router.py` 就能重用這四個 adapter，token 從 `secret_store.encrypt()` 存進 DB。error → HTTPException 的對應已經在 `DeployError.status` 欄位上完成。
+* **觀測性**：所有 adapter log 都用 `logger.info("{provider}.{method} project=%s fp=%s ...", ...)` 格式 — event bus / structured logger 直接 grep `provider=` + `method=` 就能聚合每家的 provision/deploy/rollback 速率與失敗率，不用額外 instrumentation。
+
+**Operator TODO（`[O]` 項目）：**
+
+* 無 — W4 純 Python backend 模組 + 測試。真正需要 operator 介入的是 **W6 / W7 / W8 / W9 首次部署時**（要到 Vercel / Netlify / CF Dashboard 新增 API token、貼進 HMI secret store）。那屬於 vertical 啟動流程，不屬 W4。
 
 ---
 
