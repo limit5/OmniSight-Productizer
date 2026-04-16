@@ -1097,11 +1097,11 @@ Legend:
 - [x] 預估：**2.5 day**
 
 ### P6. Store 合規 gates (#291)
-- [ ] App Store Review Guidelines 自動檢查（明顯違規 pattern：假付費、誤導性 copy、未宣告 private API）
-- [ ] Google Play Policy 自動檢查（背景位置權限、SDK 版本、資料安全區塊填寫）
-- [ ] Privacy nutrition label / Data Safety Form 自動生成（依 SDK 依賴推導）
-- [ ] 整合 C18 compliance harness
-- [ ] 預估：**1.5 day**
+- [x] App Store Review Guidelines 自動檢查（明顯違規 pattern：假付費、誤導性 copy、未宣告 private API）
+- [x] Google Play Policy 自動檢查（背景位置權限、SDK 版本、資料安全區塊填寫）
+- [x] Privacy nutrition label / Data Safety Form 自動生成（依 SDK 依賴推導）
+- [x] 整合 C18 compliance harness
+- [x] 預估：**1.5 day**
 
 ### P7. SKILL-IOS (pilot, #292)
 - [ ] SwiftUI app 骨架 generator
