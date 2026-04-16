@@ -948,11 +948,11 @@ Legend:
 > 相依（硬前置）：**W0 platform profile schema 泛化**（本 Priority 內前置，P/X 共用）、**O0-O3**（CATC + Worker pool）、**C26 HMI framework**（generator pattern 復用）。
 
 ### W0. Platform profile schema 泛化（W/P/X 共用前置）(#274)
-- [ ] `configs/platforms/schema.yaml` 擴充：toolchain 欄位改為 `optional`；新增 `target_kind: embedded | web | mobile | software` enum
-- [ ] 既有 aarch64/armv7/riscv64/vendor-example profile 補 `target_kind: embedded`
-- [ ] `backend/platform.py` 的 `get_platform_config()` 依 `target_kind` 分派不同 build toolchain resolver
-- [ ] 測試：既有 embedded profile behavior parity（零 regression）
-- [ ] 預估：**1 day**
+- [x] `configs/platforms/schema.yaml` 擴充：toolchain 欄位改為 `optional`；新增 `target_kind: embedded | web | mobile | software` enum
+- [x] 既有 aarch64/armv7/riscv64/vendor-example profile 補 `target_kind: embedded`
+- [x] `backend/platform.py` 的 `get_platform_config()` 依 `target_kind` 分派不同 build toolchain resolver
+- [x] 測試：既有 embedded profile behavior parity（零 regression）
+- [x] 預估：**1 day**
 
 ### W1. Web platform profiles (#275)
 - [ ] `configs/platforms/web-static.yaml` — 純靜態站（SSG）

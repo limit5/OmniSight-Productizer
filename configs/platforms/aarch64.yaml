@@ -1,6 +1,7 @@
 # OmniSight Platform Profile: AArch64 (ARM 64-bit)
 platform: aarch64
 label: "ARM 64-bit (AArch64)"
+target_kind: embedded    # W0 #274 — dispatch signal for backend/platform.py
 
 # Vendor info (optional — empty = generic platform)
 vendor_id: ""

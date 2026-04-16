@@ -1,9 +1,58 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：O10 — security hardening (queue HMAC / Redis ACL / worker attestation / merger audit chain / pentest suite) (#273)
-> Tag：`v0.1.0` — 首個正式 release（O10 為 security gate，不 bump tag）
-> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成。O10 新增 74 條測試 (51 security_hardening + 23 pentest) + O9/O8 既有 275+ 條全綠
+> 最後 commit：W0 — Platform profile schema 泛化 (#274) — 前置 refactor，unblocks Priority W/P/X vertical
+> Tag：`v0.1.0` — 首個正式 release（W0 是 schema refactor，不 bump tag）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 開跑（W0 landed）。W0 新增 29 條 test_platform_schema + 全 suite zero regression
+
+---
+
+## W0 (complete) Platform profile schema 泛化（W/P/X 共用前置）(#274)（2026-04-17 完成）
+
+**背景**：既有 `configs/platforms/*.yaml` 的 shape 是嵌入式 cross-compile 為核心設計的——`toolchain: aarch64-linux-gnu-gcc` / `cross_prefix` / `sysroot_path` / `cmake_toolchain_file` / `kernel_arch`。Priority W（Web 前端）、P（Mobile）、X（Software）三條新 vertical 要接同一個 profile loader，但他們的「build toolchain」是 Node runtime + bundler / xcodebuild+gradle / 系統 python，不是 gcc。如果不先把 schema 的 kind 抽象出來，W1 的第一個 web-static profile 會被逼著假造一個 `toolchain: "noop"` 欄位，完全失去 dispatch 意義。
+
+W0 是 **1-day 的前置 refactor**：擴充 schema、補 enum、加 dispatcher，讓 W1/W2/W3/W4/P/X 每一條 vertical 可以宣告 `target_kind: web|mobile|software`，由 `backend.platform.get_platform_config()` 分派去正確的 toolchain resolver。零 runtime 行為變更——既有 embedded profile 走原路徑。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `configs/platforms/schema.yaml`（新檔） | Schema 宣告檔：`target_kinds: [embedded, web, mobile, software]`、`required` / `required_when_embedded` / `optional` 三組欄位清單。toolchain 從 required 降為 optional。附註 migration rule（缺 `target_kind` → embedded）+ 每個 kind 的領域欄位（web: runtime/bundle_budget/build_cmd；mobile: mobile_platform/min_os_version；software: software_runtime/packaging）。檔案本身是 declarative schema，不被 loader 當 profile 讀。 |
+| `configs/platforms/{aarch64,armv7,riscv64,vendor-example,host_native}.yaml` | 每一個在樹上的 profile 都補上 `target_kind: embedded` 顯式宣告（commented 附 W0 #274 reference）。向後相容性保留：缺欄位也仍然走 embedded resolver。 |
+| `backend/platform.py`（~190 行，新檔） | Library-layer loader：`TARGET_KINDS` frozenset / `PlatformProfileError` / `load_raw_profile()` (path-escape 防護、拒絕 schema.yaml) / `target_kind_of()` (default→embedded, invalid→raise) / `validate_profile()` (advisory, 累積錯誤不 raise) / `resolve_build_toolchain()` (四個 `_resolve_{kind}` dispatcher) / `get_platform_config()` (synchronous, 回傳含 build_toolchain 的 dict) / `list_profile_ids()` (enumerate, skip `_NON_PROFILE_FILES`)。**注意**：不取代既有 `backend.agents.tools.get_platform_config`（LangChain `@tool` 文字輸出版），那個仍保持向後相容；新模組是 library 層給 W1+ 消費。 |
+| `backend/ssh_runner.py` / `backend/routers/system.py`（3 處 callsite） | 所有 `platforms_dir.glob("*.yaml")` 迴圈都 `import _NON_PROFILE_FILES from backend.platform` 並在頂部 `if yf.name in _NON_PROFILE_FILES: continue` 跳過 schema.yaml。否則 `/vendor/sdks` endpoint 會把 schema.yaml 當成一個 platform 回報給前端，UI 出現空白列。 |
+| `backend/tests/test_platform_schema.py`（29 條，新檔） | 六個 section：schema declaration (5) / existing embedded zero-regression (5) / dispatch by kind (5) / validate_profile (4) / invalid kind raises (1) / path-traversal hardening (4) + parity check：aarch64/armv7/riscv64 的 `build_toolchain.{arch, cross_prefix}` 一字不差對到歷史 text tool 的輸出。 |
+| `backend/tests/test_vendor_sdk.py` | `test_all_profiles_have_required_fields` 的 glob 補 `if f.name in _NON_PROFILE_FILES` 跳過 schema.yaml——這是 W0 唯一一處動到既有 test（而不是新增）。 |
+| `TODO.md` | W0 四個 `[ ]` → `[x]`。 |
+
+**驗證結果：**
+
+* `backend/tests/test_platform_schema.py`：**29/29 綠**（<0.1s）。
+* Regression sweep（platform-adjacent suite）：`test_platform_default.py`（5）+ `test_platform_tags_for_rag.py`（9）+ `test_host_native.py`（8）+ `test_sdk_discovery.py`（16）+ `test_vendor_sdk.py`（13）+ `test_hardware_deploy.py`（20）+ `test_npu_deploy.py`（17）合計 **117/117 綠**，含新測試。
+* Import 乾淨：`python3 -c "from backend.platform import get_platform_config, TARGET_KINDS; print(sorted(TARGET_KINDS))"` → `['embedded', 'mobile', 'software', 'web']`。
+* 模組不衝突 stdlib：確認 `backend.platform` 不會 shadow `import platform`（stdlib 的 `platform.machine()`），因為引用者都用 fully-qualified `from backend import platform` / `from backend.platform import ...` 或 `from backend.platform import _NON_PROFILE_FILES`。
+
+**設計決策備忘：**
+
+1. **`backend/platform.py` 新檔而非 patch `agents/tools.py`**：既有的 `@tool`-decorated `get_platform_config` 回傳文字，是 LLM agent surface；W0 需要的是 dict API 給 python 端 dispatcher 消費。兩者 side-by-side 存在直到 W1 land 時再決定是否把 agent 版 migrate 過來。避免在 W0 就同時動 agent signal，縮小 blast radius。
+2. **`target_kind` 缺省 = embedded**：schema.yaml 明文寫這個 migration rule。理由：零 regression 是 W0 的 hard constraint，既有 profile 若忘記補 `target_kind: embedded` 仍 must 走原 resolver。在 validate_profile 裡也不把缺失算 error（只在 kernel_arch 缺席時才 warn，因為 embedded 確實需要它做 ARCH= dispatch）。
+3. **Invalid `target_kind` 拋 error vs silent fallback**：選拋 `PlatformProfileError`。理由：typo（`embeded`）若 silent 降為 embedded，operator 會被 toolchain 決策誤導卻不自知；raise 訊息明列合法集合給他一行修。
+4. **schema.yaml 自己也住 `configs/platforms/`**：有人會問為什麼不放 `configs/platform_schema.yaml` 避免枚舉衝突。選留原路：schema 就該和它描述的 profile 住同層級（operator 打開資料夾第一眼就看到 schema），代價是每個 enumerator 要加 3 行 skip——用 `_NON_PROFILE_FILES` frozenset 當 single source of truth 把這 3 行壓到可以 grep 的一處。
+5. **dispatcher 預留 4 個 resolver，目前只有 embedded 實作完整**：web/mobile/software 的 resolver 回傳的 dict 結構是 W1/P/X 會擴的 contract 骨架。刻意不在 W0 塞 node version check、xcodebuild discovery 之類——那是各 vertical 自己的工作，W0 只負責「把 dispatch 路由通」。
+6. **`_NON_PROFILE_FILES` 前綴底線 vs public**：用 `_` 前綴因為是 cross-module implementation 細節（「哪些檔名不是 profile」）而不是穩定的 API 契約；未來若要加 `.locked.yaml` 或類似特殊檔時可以自由擴充不破壞外部依賴者。三個 callsite 明寫 `from backend.platform import _NON_PROFILE_FILES` 而不是複製 set——single source of truth。
+
+**後續建議（unblocks 的下游）：**
+
+* **W1 web platform profiles**：可以直接寫 `configs/platforms/web-static.yaml` 宣告 `target_kind: web` + `runtime: static` + `bundle_size_budget: 500KiB`，loader 會自動走 `_resolve_web()`。schema.yaml 裡 web-specific 欄位名（runtime / bundle_size_budget / deploy_provider）已經保留。
+* **W2 simulate.sh web track**：`scripts/simulate.sh --type=web` 可以呼叫 `python -c "from backend.platform import get_platform_config; ..."` 拿 build_toolchain.build_cmd，不需要再 hard-code node 假設。
+* **P1 mobile profiles**：`target_kind: mobile` + `mobile_platform: ios|android` 已經被 `_resolve_mobile` 認得。
+* **X1 software profiles**（linux/windows/macos native）：`target_kind: software` + `software_runtime` + `packaging` 已經被 `_resolve_software` 認得。
+* **agent-facing tool migrate**：下一輪可以讓 `backend/agents/tools.py::get_platform_config` 內部改呼 `backend.platform.get_platform_config()`，輸出文字格式不變——縮減 duplicate parse 邏輯。
+* **CI schema-lint**：加一個 pytest 迴圈「讀所有 non-schema yaml，呼叫 validate_profile，assert 無 error」——這條 gate 現在用 `test_existing_profiles_declare_embedded_target_kind` 的 parametrize 形式覆蓋在 W0 suite 裡；未來 web/mobile profile 增加時，把 parametrize 擴成「對每個 id，assert validate_profile 的結果與該 kind 的 required 集合相符」。
+
+**Operator TODO（`[O]` 項目）：**
+
+* 無——W0 純 repo 內部 refactor，不需要任何人工操作。
 
 ---
 

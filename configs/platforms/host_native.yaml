@@ -17,6 +17,7 @@
 
 platform: host_native
 label: "Host Native (no cross-compile)"
+target_kind: embedded    # W0 #274 — embedded-track parity for host builds
 
 vendor_id: ""
 sdk_version: ""

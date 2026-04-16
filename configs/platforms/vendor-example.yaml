@@ -5,6 +5,7 @@
 
 platform: vendor-example
 label: "Example Vendor SoC (ARM Cortex-A75)"
+target_kind: embedded    # W0 #274 — dispatch signal for backend/platform.py
 
 # Vendor identification
 vendor_id: example-vendor

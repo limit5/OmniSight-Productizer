@@ -1,0 +1,92 @@
+# OmniSight Platform Profile Schema (W0 #274)
+#
+# Declares the contract every `configs/platforms/<id>.yaml` must satisfy.
+# Used by `backend/platform.py::validate_profile()` to reject malformed
+# profiles before they hit the toolchain resolver, and by the W/P/X
+# vertical tracks (web / mobile / software) to dispatch on `target_kind`.
+#
+# Historical context:
+#   * pre-W0 every profile implicitly assumed `target_kind: embedded`
+#     — `toolchain`, `cross_prefix`, `sysroot_path` were all treated as
+#     required.
+#   * W0 generalises the schema so non-embedded profiles (Next.js SSR,
+#     React Native, pure software) can share the same loader without
+#     faking an `aarch64-linux-gnu-gcc` entry they never use.
+#
+# Migration rule:
+#   profiles that omit `target_kind` are treated as `embedded` for
+#   backward compatibility (see backend/platform.py::get_platform_config).
+#   We still prefer every profile to declare it explicitly — the existing
+#   aarch64 / armv7 / riscv64 / vendor-example / host_native profiles
+#   were updated in this Phase.
+#
+# NOTE: this file is consumed at import time, not served to clients.
+#       It is a schema declaration, not an actual profile — loaders must
+#       skip `schema.yaml` when enumerating profile ids.
+
+schema_version: 1
+
+# Valid values for the top-level `target_kind` enum.
+target_kinds:
+  - embedded   # SoC / EVK / cross-compiled firmware (C/C++/Rust)
+  - web        # Next.js / Nuxt.js / Astro / static sites / SSR / edge
+  - mobile     # iOS / Android / React Native / Flutter
+  - software   # pure server-side / CLI / desktop apps on host arch
+
+# Required fields every profile must declare (regardless of target_kind).
+required:
+  - platform   # unique profile id (must match filename sans .yaml)
+  - label      # human-readable name shown in the UI
+
+# Fields that are required only when target_kind == embedded.
+# Non-embedded profiles may omit these without validation errors.
+required_when_embedded:
+  - kernel_arch    # arm64 | arm | riscv | x86_64 | ...
+  # Note: even for embedded, `toolchain` is optional — host_native ships
+  # `toolchain: gcc` pointing at the system default, and some vendor
+  # SDKs express toolchain through `cmake_toolchain_file` instead.
+
+# Optional common fields (any target_kind may declare these).
+optional:
+  # Cross-compile (embedded-centric but free for any kind)
+  - toolchain            # gcc/clang executable name OR empty (host toolchain)
+  - cross_prefix         # e.g. aarch64-linux-gnu-
+  - qemu                 # qemu-*-static binary for emulation
+  - arch_flags           # -march=... -mfpu=... etc
+  - sysroot_path         # filesystem path to target sysroot
+  - cmake_toolchain_file # absolute path to *.cmake
+  - docker_packages      # list of apt packages to install in build container
+  # Vendor SDK (embedded)
+  - vendor_id
+  - sdk_version
+  - soc_model
+  - supported_boards
+  - sdk_git_url
+  - sdk_git_branch
+  - sdk_install_script
+  # NPU / accel (embedded)
+  - npu_enabled
+  - npu_type
+  - npu_sdk_path
+  - npu_runtime_lib
+  - npu_model_format
+  - npu_toolchain_version
+  # Deploy (embedded)
+  - deploy_method
+  - deploy_target_ip
+  - deploy_user
+  - deploy_path
+  # Web-specific (W1 #275)
+  - runtime              # node20 | cloudflare-workers | vercel-edge | static
+  - runtime_version
+  - bundle_size_budget   # e.g. "500KiB" or "5MiB"
+  - memory_limit_mb
+  - build_cmd
+  - deploy_provider      # vercel | netlify | cloudflare-pages | docker-nginx
+  # Mobile-specific (P-series)
+  - mobile_platform      # ios | android | react-native | flutter
+  - min_os_version
+  - signing_identity
+  # Software-specific (X-series)
+  - software_runtime     # python | node | jvm | native
+  - packaging            # pip | npm | jar | deb | rpm

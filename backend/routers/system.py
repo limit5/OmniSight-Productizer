@@ -38,8 +38,12 @@ _TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
 
 def _collect_toolchains() -> dict:
     """Scan platform YAMLs + tier_capabilities to build the toolchain enum."""
+    # W0 #274: skip schema.yaml — it's a schema declaration, not a profile.
+    from backend.platform import _NON_PROFILE_FILES
     by_platform: dict[str, str] = {}
     for p in sorted(_PLATFORMS_DIR.glob("*.yaml")):
+        if p.name in _NON_PROFILE_FILES:
+            continue
         try:
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
             tc = data.get("toolchain")
@@ -243,7 +247,11 @@ async def get_evk_status():
     if not platforms_dir.is_dir():
         return results
 
+    # W0 #274: skip schema.yaml — it's a schema declaration, not a profile.
+    from backend.platform import _NON_PROFILE_FILES
     for yf in sorted(platforms_dir.glob("*.yaml")):
+        if yf.name in _NON_PROFILE_FILES:
+            continue
         try:
             data = yaml.safe_load(yf.read_text(encoding="utf-8")) or {}
         except Exception:
@@ -829,8 +837,12 @@ async def list_vendor_sdks():
     platforms_dir = _PROJECT_ROOT / "configs" / "platforms"
     if not platforms_dir.is_dir():
         return []
+    # W0 #274: skip schema.yaml — it's a schema declaration, not a profile.
+    from backend.platform import _NON_PROFILE_FILES
     results = []
     for f in sorted(platforms_dir.glob("*.yaml")):
+        if f.name in _NON_PROFILE_FILES:
+            continue
         try:
             data = yaml.safe_load(f.read_text()) or {}
             vendor_id = data.get("vendor_id", "")

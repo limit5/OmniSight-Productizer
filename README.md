@@ -107,6 +107,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Multi-track**: algo (data-driven replay + Valgrind) / hw (mock sysfs + QEMU cross-run) / npu / deploy / **hmi** (C26 — constrained HMI bundle + IEC 62443 gate + budget gate)
 - **simulate.sh**: unified test runner with JSON report, coverage enforcement, cmake toolchain support
 - **4 platform profiles**: aarch64, armv7, riscv64, vendor-example (extensible for any SoC)
+- **Generalized profile schema (W0 #274)**: `target_kind: embedded | web | mobile | software` + `configs/platforms/schema.yaml` + `backend/platform.py::get_platform_config()` dispatcher — unblocks Priority W (Next.js / Nuxt.js) / P (iOS / Android) / X (software-only) verticals without touching the embedded fast path
 
 ### HMI Embedded Web UI Framework (C26 / L4-CORE-26)
 - **Constrained generator**: whitelist Preact / lit-html / vanilla JS; inlines CSS + i18n JSON; rejects CDN / analytics / `eval` / inline event attrs

@@ -1,6 +1,7 @@
 # OmniSight Platform Profile: ARMv7 (ARM 32-bit)
 platform: armv7
 label: "ARM 32-bit (ARMv7-A)"
+target_kind: embedded    # W0 #274 — dispatch signal for backend/platform.py
 
 toolchain: arm-linux-gnueabihf-gcc
 cross_prefix: arm-linux-gnueabihf-

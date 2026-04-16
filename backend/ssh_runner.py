@@ -126,8 +126,11 @@ def find_target_for_arch(target_arch: str, target_os: str = "linux") -> SSHTarge
     # Fallback: check platform profile deploy fields
     try:
         import yaml
+        from backend.platform import _NON_PROFILE_FILES  # W0 #274
         platforms_dir = _PROJECT_ROOT / "configs" / "platforms"
         for yf in platforms_dir.glob("*.yaml"):
+            if yf.name in _NON_PROFILE_FILES:
+                continue
             data = yaml.safe_load(yf.read_text()) or {}
             profile_arch = _canon_arch(data.get("kernel_arch") or data.get("arch") or "")
             if profile_arch == wanted and data.get("deploy_method") == "ssh":

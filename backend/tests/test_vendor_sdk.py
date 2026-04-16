@@ -28,7 +28,12 @@ class TestPlatformProfiles:
     def test_all_profiles_have_required_fields(self):
         import yaml
         platforms_dir = Path(__file__).resolve().parent.parent.parent / "configs" / "platforms"
+        # W0 #274: schema.yaml is a schema declaration, not a target
+        # profile — the loader skips it and so must this enumerator.
+        from backend.platform import _NON_PROFILE_FILES
         for f in platforms_dir.glob("*.yaml"):
+            if f.name in _NON_PROFILE_FILES:
+                continue
             data = yaml.safe_load(f.read_text())
             assert "platform" in data, f"{f.name} missing 'platform'"
             assert "toolchain" in data, f"{f.name} missing 'toolchain'"
