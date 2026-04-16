@@ -6,10 +6,12 @@
 ;   sudo systemctl daemon-reload
 ;   sudo systemctl enable --now omnisight-backend
 ;
-; Graceful shutdown: the FastAPI lifespan cancels six background loops
+; I10: multi-worker mode. Set OMNISIGHT_WORKERS in .env (default: CPU/2, min 2).
+; Requires OMNISIGHT_REDIS_URL for cross-worker shared state + SSE delivery.
+;
+; Graceful shutdown: the FastAPI lifespan cancels background loops per worker
 ; (watchdog / decision sweep / DLQ retry / IQ nightly / finetune nightly /
-; memory decay). uvicorn's default SIGTERM is honoured — no extra
-; KillMode needed.
+; memory decay / pubsub listener). uvicorn's default SIGTERM is honoured.
 
 [Unit]
 Description=OmniSight backend (FastAPI / uvicorn)
@@ -23,11 +25,13 @@ Type=exec
 User=USERNAME
 WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
 EnvironmentFile=/home/USER_HOME/work/sora/OmniSight-Productizer/.env
-ExecStart=/usr/bin/python3 -m uvicorn backend.main:app \
+ExecStart=/bin/sh -c '\
+    WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c "import os; print(max(2, os.cpu_count() // 2))")}; \
+    exec python3 -m uvicorn backend.main:app \
     --host 127.0.0.1 \
     --port 8000 \
-    --workers 1 \
-    --no-access-log
+    --workers $$WORKERS \
+    --no-access-log'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

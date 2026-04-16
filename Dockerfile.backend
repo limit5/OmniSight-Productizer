@@ -28,4 +28,7 @@ ENV OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# I10: OMNISIGHT_WORKERS env controls worker count (default: CPU/2, min 2).
+# Requires OMNISIGHT_REDIS_URL for cross-worker shared state.
+ENV OMNISIGHT_WORKERS=""
+CMD ["sh", "-c", "WORKERS=${OMNISIGHT_WORKERS:-$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers $WORKERS"]

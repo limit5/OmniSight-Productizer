@@ -127,8 +127,11 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.error("Startup failed: %s", exc, exc_info=True)
         raise
-    # Start watchdog for stuck agent detection
+    # I10: start cross-worker pub/sub listener for multi-worker SSE
     import asyncio
+    from backend import shared_state as _ss
+    pubsub_task = asyncio.create_task(_ss.start_pubsub_listener())
+    # Start watchdog for stuck agent detection
     watchdog_task = asyncio.create_task(invoke.run_watchdog())
     # Phase 47D: DecisionEngine timeout sweep (30 s cadence)
     from backend import decision_engine as _de
@@ -149,12 +152,13 @@ async def lifespan(app: FastAPI):
     from backend import sandbox_capacity as _sc
     drf_task = asyncio.create_task(_sc.run_sweep_loop())
     yield
-    for t in (watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task):
         t.cancel()
         try:
             await t
         except asyncio.CancelledError:
             pass
+    await _ss.close()
     await db.close()
 
 

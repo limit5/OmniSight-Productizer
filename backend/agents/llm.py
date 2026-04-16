@@ -105,7 +105,7 @@ def get_llm(
     """
     # Check token freeze — return None to trigger rule-based fallback
     from backend.routers import system as _sys_mod
-    if _sys_mod.token_frozen:
+    if _sys_mod.is_token_frozen():
         logger.info("Token budget frozen — LLM disabled, using rule-based fallback")
         return None
 

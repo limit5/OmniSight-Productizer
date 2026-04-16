@@ -138,9 +138,17 @@ class CapacityExhausted(Exception):
 # atomically enforce the *current* cap on every acquire, regardless of how
 # many acquires are already in flight. Rebuilding the Semaphore on mode
 # change let existing holders keep the old cap.
+#
+# I10: _parallel_in_flight is now shared across workers via Redis counter.
+# The local _parallel_async_cond still coordinates within a single worker's
+# event loop; cross-worker coordination uses the Redis counter as the
+# source of truth for the global slot count.
 _parallel_lock = threading.Lock()
-_parallel_in_flight: int = 0
 _parallel_async_cond: asyncio.Condition | None = None
+
+from backend.shared_state import SharedCounter as _SharedCounter, SharedKV as _SharedKV
+_shared_parallel = _SharedCounter("parallel_in_flight")
+_shared_mode = _SharedKV("decision_engine")
 
 
 class _ModeSlot:
@@ -184,7 +192,7 @@ class _ModeSlot:
         return mode == OperationMode.turbo
 
     async def __aenter__(self) -> "_ModeSlot":
-        global _parallel_in_flight, _parallel_async_cond
+        global _parallel_async_cond
         if _parallel_async_cond is None:
             _parallel_async_cond = asyncio.Condition()
 
@@ -201,29 +209,27 @@ class _ModeSlot:
                     f"DRF capacity exhausted for tenant {self._tenant_id}"
                 )
             self._drf_acquired = True
-            with _parallel_lock:
-                _parallel_in_flight += 1
+            _shared_parallel.increment()
             return self
 
         while True:
             async with _parallel_async_cond:
                 cap = await self._get_cap_async()
-                with _parallel_lock:
-                    if _parallel_in_flight < cap:
-                        _parallel_in_flight += 1
-                        return self
+                current = _shared_parallel.get()
+                if current < cap:
+                    _shared_parallel.increment()
+                    return self
                 await _parallel_async_cond.wait()
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        global _parallel_in_flight, _parallel_async_cond
+        global _parallel_async_cond
 
         if self._drf_acquired:
             from backend import sandbox_capacity as _sc
             _sc.release(self._tenant_id, self._cost)
             self._drf_acquired = False
 
-        with _parallel_lock:
-            _parallel_in_flight = max(0, _parallel_in_flight - 1)
+        _shared_parallel.decrement()
         if _parallel_async_cond is not None:
             async with _parallel_async_cond:
                 _parallel_async_cond.notify_all()
@@ -232,21 +238,18 @@ class _ModeSlot:
         if self._tenant_id is not None:
             from backend import sandbox_capacity as _sc
             return not _sc.try_acquire(self._tenant_id, self._cost, self._is_turbo())
-        with _parallel_lock:
-            return _parallel_in_flight >= self._get_cap()
+        return _shared_parallel.get() >= self._get_cap()
 
     async def acquire(self) -> bool:
         await self.__aenter__()
         return True
 
     def release(self) -> None:
-        global _parallel_in_flight
         if self._drf_acquired:
             from backend import sandbox_capacity as _sc
             _sc.release(self._tenant_id, self._cost)
             self._drf_acquired = False
-        with _parallel_lock:
-            _parallel_in_flight = max(0, _parallel_in_flight - 1)
+        _shared_parallel.decrement()
 
 
 _mode_slot_singleton = _ModeSlot()
@@ -280,8 +283,7 @@ def parallel_slot(
 
 def parallel_in_flight() -> int:
     """Current number of held slots (observational / SSE telemetry)."""
-    with _parallel_lock:
-        return _parallel_in_flight
+    return _shared_parallel.get()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -291,6 +293,12 @@ def parallel_in_flight() -> int:
 
 def get_mode() -> OperationMode:
     """Return the global (fallback) operation mode."""
+    stored = _shared_mode.get("current_mode")
+    if stored:
+        try:
+            return OperationMode(stored)
+        except ValueError:
+            pass
     with _state_lock:
         return _current_mode
 
@@ -396,6 +404,7 @@ def set_mode(mode: OperationMode | str) -> OperationMode:
     with _state_lock:
         prev = _current_mode
         _current_mode = mode
+    _shared_mode.set("current_mode", mode.value)
     cur_inflight = parallel_in_flight()
     new_cap = _PARALLEL_BUDGET[mode]
     try:
@@ -753,12 +762,13 @@ def _emit(event: str, dec: Decision) -> None:
 
 def _reset_for_tests() -> None:
     """Clear global state between tests. Not for production use."""
-    global _current_mode, _parallel_in_flight, _parallel_async_cond
+    global _current_mode, _parallel_async_cond
     with _state_lock:
         _pending.clear()
         _history.clear()
         _current_mode = OperationMode.supervised
-    _parallel_in_flight = 0
+    _shared_parallel.set(0)
+    _shared_mode.set("current_mode", "supervised")
     _parallel_async_cond = None
 
 

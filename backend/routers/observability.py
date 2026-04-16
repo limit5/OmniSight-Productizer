@@ -225,7 +225,7 @@ async def ops_summary() -> dict:
         "daily_cost_usd": _sys.get_daily_cost(),
         "hourly_cost_usd": _sys.get_hourly_cost()
             if hasattr(_sys, "get_hourly_cost") else 0.0,
-        "token_frozen": bool(getattr(_sys, "token_frozen", False)),
+        "token_frozen": bool(getattr(_sys, "is_token_frozen", lambda: getattr(_sys, "token_frozen", False))()),
         "budget_level": getattr(_sys, "_last_budget_level", "") or "normal",
         # DE load
         "decisions_pending": pending,

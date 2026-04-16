@@ -357,7 +357,7 @@ async def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) ->
             await asyncio.sleep(delay)
             try:
                 from backend.routers import system as _sys_mod
-                if getattr(_sys_mod, "token_frozen", False):
+                if getattr(_sys_mod, "is_token_frozen", lambda: getattr(_sys_mod, "token_frozen", False))():
                     logger.warning("Token budget frozen mid-retry — aborting %s", category)
                     return None
             except Exception:

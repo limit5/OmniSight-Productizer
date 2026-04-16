@@ -19,8 +19,11 @@ class Settings(BaseSettings):
     # Database
     database_path: str = ""  # SQLite path (empty = default data/omnisight.db)
 
-    # I9: Redis (rate limiting, future session store)
+    # I9/I10: Redis (rate limiting, multi-worker shared state)
     redis_url: str = ""  # e.g. redis://localhost:6379/0
+
+    # I10: uvicorn worker count (0 = auto: CPU_count / 2, min 2)
+    workers: int = 0
 
     # ── LLM Provider Configuration ──
     # Which provider to use: anthropic | google | openai | xai | groq | deepseek | together | ollama

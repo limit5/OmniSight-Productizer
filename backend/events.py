@@ -48,11 +48,17 @@ _PERSIST_EVENT_TYPES = frozenset({
 
 
 class EventBus:
-    """Pub/sub for SSE events with optional persistence."""
+    """Pub/sub for SSE events with optional persistence.
+
+    I10: cross-worker delivery via Redis Pub/Sub.  When Redis is available,
+    ``publish()`` sends events to all workers; each worker's pub/sub listener
+    calls ``_deliver_local()`` to fan out to that worker's SSE subscribers.
+    """
 
     def __init__(self) -> None:
         self._subscribers: dict[asyncio.Queue, str | None] = {}
         self._dropped_events: int = 0  # backpressure telemetry
+        self._worker_id = f"w-{id(self):x}"
 
     def subscribe(self, tenant_id: str | None = None) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -72,18 +78,12 @@ class EventBus:
         except Exception as exc:
             logger.debug("sse_subscribers gauge set failed: %s", exc)
 
-    def publish(self, event: str, data: dict[str, Any],
-                session_id: str | None = None,
-                broadcast_scope: str = "global",
-                tenant_id: str | None = None) -> None:
-        data.setdefault("timestamp", datetime.now().isoformat())
-        data["_session_id"] = session_id or ""
-        data["_broadcast_scope"] = broadcast_scope
-        data["_tenant_id"] = tenant_id or ""
-        data_json = json.dumps(data)
+    def _deliver_local(self, event: str, data_json: str,
+                       broadcast_scope: str = "global",
+                       tenant_id: str | None = None) -> None:
+        """Fan out a pre-serialised event to this worker's SSE subscribers."""
         msg = {"event": event, "data": data_json}
         dead: list[asyncio.Queue] = []
-        # Snapshot to allow safe mutation during iteration
         for q, sub_tenant in list(self._subscribers.items()):
             if broadcast_scope == "tenant" and tenant_id and sub_tenant and sub_tenant != tenant_id:
                 continue
@@ -103,6 +103,33 @@ class EventBus:
                     logger.debug("sse_dropped metric bump failed: %s", exc)
         for q in dead:
             self._subscribers.pop(q, None)
+
+    def publish(self, event: str, data: dict[str, Any],
+                session_id: str | None = None,
+                broadcast_scope: str = "global",
+                tenant_id: str | None = None) -> None:
+        data.setdefault("timestamp", datetime.now().isoformat())
+        data["_session_id"] = session_id or ""
+        data["_broadcast_scope"] = broadcast_scope
+        data["_tenant_id"] = tenant_id or ""
+        data_json = json.dumps(data)
+
+        # I10: try cross-worker delivery via Redis Pub/Sub
+        cross_worker = False
+        try:
+            from backend.shared_state import publish_cross_worker
+            cross_worker = publish_cross_worker("sse", {
+                "event": event,
+                "data_json": data_json,
+                "broadcast_scope": broadcast_scope,
+                "tenant_id": tenant_id or "",
+                "origin_worker": self._worker_id,
+            })
+        except Exception:
+            pass
+
+        if not cross_worker:
+            self._deliver_local(event, data_json, broadcast_scope, tenant_id)
 
         # Persist important events asynchronously
         if event in _PERSIST_EVENT_TYPES:
@@ -136,6 +163,29 @@ async def _persist_event(event_type: str, data_json: str) -> None:
 
 # Singleton
 bus = EventBus()
+
+
+# I10: register cross-worker callback so events from other workers
+# get delivered to this worker's local SSE subscribers.
+def _on_cross_worker_event(event: str, data: dict) -> None:
+    if event != "sse":
+        return
+    origin = data.get("origin_worker", "")
+    if origin == bus._worker_id:
+        return
+    bus._deliver_local(
+        data.get("event", ""),
+        data.get("data_json", "{}"),
+        data.get("broadcast_scope", "global"),
+        data.get("tenant_id") or None,
+    )
+
+
+try:
+    from backend.shared_state import register_cross_worker_callback
+    register_cross_worker_callback(_on_cross_worker_event)
+except Exception:
+    pass
 
 
 # ─── Convenience publishers (each one also writes to REPORTER VORTEX log) ───

@@ -967,21 +967,28 @@ async def get_repos():
 #  Logs — real system log ring buffer
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+from backend.shared_state import SharedLogBuffer as _SharedLogBuffer
+_log_buffer_shared = _SharedLogBuffer("system", maxlen=200)
 _log_buffer: deque[dict] = deque(maxlen=200)
 
 
 def add_system_log(message: str, level: str = "info") -> None:
     """Add a log entry (called from other modules)."""
-    _log_buffer.append({
+    entry = {
         "timestamp": datetime.now().strftime("%H:%M:%S"),
         "message": message,
         "level": level,
-    })
+    }
+    _log_buffer.append(entry)
+    _log_buffer_shared.append(entry)
 
 
 def get_recent_logs(limit: int = 50) -> list[dict]:
     """Return recent log entries (most recent first). Used by conversation node."""
-    return list(reversed(list(_log_buffer)))[:limit]
+    logs = _log_buffer_shared.get_recent(limit)
+    if not logs:
+        logs = list(_log_buffer)[-limit:]
+    return list(reversed(logs))
 
 
 # Seed with startup log
@@ -992,14 +999,27 @@ add_system_log(f"Python {platform.python_version()} on {platform.system()}", "in
 @router.get("/logs")
 async def get_logs(limit: int = _pg.Limit(default=50, max_cap=500)):
     """Return recent system logs."""
-    return list(_log_buffer)[-limit:]
+    logs = _log_buffer_shared.get_recent(limit)
+    if not logs:
+        logs = list(_log_buffer)[-limit:]
+    return logs
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Token usage tracking (in-memory + SQLite)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+from backend.shared_state import SharedTokenUsage as _SharedTokenUsage
+from backend.shared_state import SharedFlag as _SharedFlag
+from backend.shared_state import SharedHourlyLedger as _SharedHourlyLedger
+from backend.shared_state import SharedKV as _SharedKV
+
+_token_usage_shared = _SharedTokenUsage()
 _token_usage: dict[str, dict] = {}
+
+_budget_flags = _SharedKV("token_budget")
+_token_frozen_shared = _SharedFlag("token_frozen")
+_hourly_ledger_shared = _SharedHourlyLedger(window_seconds=3600.0)
 
 _PRICING = {
     "claude-sonnet-4-20250514": (3.0, 15.0),
@@ -1036,10 +1056,13 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
     u["last_used"] = datetime.now().strftime("%H:%M:%S")
     inp_rate, out_rate = _PRICING.get(model, (1.0, 3.0))
     u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
-    # L1-06: feed the rolling hourly burn-rate ledger with this call's
-    # spend delta (not cumulative) so the 60-min window can accumulate
-    # correctly and age entries out.
-    _record_hourly(u["cost"] - prev_cost)
+    cost_delta = u["cost"] - prev_cost
+    _record_hourly(cost_delta)
+
+    # I10: track in shared state for cross-worker visibility
+    _token_usage_shared.track(model, input_tokens, output_tokens, latency_ms, cost_delta)
+    if cost_delta > 0:
+        _hourly_ledger_shared.record(cost_delta)
 
     # Persist asynchronously (fire-and-forget) + check budget
     import asyncio
@@ -1066,12 +1089,13 @@ _last_budget_level: str = ""  # Track to avoid repeat events
 _token_daily_reset_date: str = ""
 
 # L1-06: rolling hourly spend ledger. Each entry is (timestamp_s, cost_usd).
-# The ledger is prunsed on every append so memory stays bounded by the
-# 60-min window. Breaching `token_budget_hourly` flips `token_frozen`
-# exactly like the daily cap; the unfreeze happens naturally once
-# enough old rows age out of the window.
 _hourly_ledger: list[tuple[float, float]] = []
 _HOURLY_WINDOW_S = 3600
+
+
+def is_token_frozen() -> bool:
+    """Check if token usage is frozen (shared across workers)."""
+    return token_frozen or _token_frozen_shared.get()
 
 
 def _maybe_reset_daily_budget() -> None:
@@ -1081,9 +1105,11 @@ def _maybe_reset_daily_budget() -> None:
     today = _dt.now().strftime("%Y-%m-%d")
     if today != _token_daily_reset_date:
         _token_daily_reset_date = today
-        if token_frozen:
+        if token_frozen or _token_frozen_shared.get():
             token_frozen = False
+            _token_frozen_shared.set(False)
             _last_budget_level = "normal"
+            _budget_flags.set("level", "normal")
             from backend.events import emit_token_warning
             emit_token_warning("reset", "Daily token budget auto-reset")
             logger.info("Daily token budget auto-reset")
@@ -1091,6 +1117,9 @@ def _maybe_reset_daily_budget() -> None:
 
 def get_daily_cost() -> float:
     """Sum all model costs for the current session."""
+    shared_cost = _token_usage_shared.total_cost()
+    if shared_cost > 0:
+        return round(shared_cost, 4)
     return round(sum(u.get("cost", 0) for u in _token_usage.values()), 4)
 
 
@@ -1103,14 +1132,15 @@ def _record_hourly(cost_delta: float) -> None:
     now = _time.time()
     _hourly_ledger.append((now, cost_delta))
     cutoff = now - _HOURLY_WINDOW_S
-    # Prune in-place from the front. Usually just a handful of entries
-    # age out per call so this stays O(k) amortised.
     while _hourly_ledger and _hourly_ledger[0][0] < cutoff:
         _hourly_ledger.pop(0)
 
 
 def get_hourly_cost() -> float:
     """Sum cost deltas recorded in the last 60 minutes."""
+    shared_cost = _hourly_ledger_shared.total_in_window()
+    if shared_cost > 0:
+        return round(shared_cost, 4)
     import time as _time
     cutoff = _time.time() - _HOURLY_WINDOW_S
     return round(
@@ -1142,7 +1172,9 @@ async def _check_token_budget() -> None:
         hourly = get_hourly_cost()
         if hourly >= hourly_cap and _last_budget_level != "frozen":
             token_frozen = True
+            _token_frozen_shared.set(True)
             _last_budget_level = "hourly_frozen"
+            _budget_flags.set("level", "hourly_frozen")
             msg = (
                 f"Hourly burn-rate cap exceeded "
                 f"(${hourly:.4f} in last 60 min / ${hourly_cap:.2f}). "
@@ -1165,7 +1197,9 @@ async def _check_token_budget() -> None:
 
     if ratio >= settings.token_freeze_threshold and _last_budget_level != "frozen":
         token_frozen = True
+        _token_frozen_shared.set(True)
         _last_budget_level = "frozen"
+        _budget_flags.set("level", "frozen")
         emit_token_warning("frozen", f"Token budget exhausted (${cost:.4f}/${budget:.2f}). All LLM calls frozen.", cost, budget)
         await notify("critical", "Token budget exhausted — LLM frozen",
                       message=f"Daily cost ${cost:.4f} exceeded budget ${budget:.2f}. All LLM calls disabled.",
@@ -1198,11 +1232,16 @@ async def load_token_usage_from_db() -> None:
     from backend import db
     for row in await db.list_token_usage():
         _token_usage[row["model"]] = row
+    if _token_usage:
+        _token_usage_shared.set_all(_token_usage)
 
 
 @router.get("/tokens")
 async def get_token_usage():
     """Return token usage stats per model."""
+    shared = _token_usage_shared.get_all()
+    if shared:
+        return list(shared.values())
     return list(_token_usage.values())
 
 
@@ -1222,8 +1261,12 @@ async def reset_token_usage():
     """Reset all token usage counters."""
     global token_frozen, _last_budget_level
     _token_usage.clear()
+    _token_usage_shared.clear()
     token_frozen = False
+    _token_frozen_shared.set(False)
     _last_budget_level = ""
+    _budget_flags.set("level", "normal")
+    _hourly_ledger_shared.clear()
     from backend import db
     await db.clear_token_usage()
     from backend.events import emit_token_warning
@@ -1241,8 +1284,8 @@ async def get_token_budget():
         "budget": budget,
         "usage": cost,
         "ratio": round(cost / budget, 4) if budget > 0 else 0,
-        "frozen": token_frozen,
-        "level": _last_budget_level or "normal",
+        "frozen": is_token_frozen(),
+        "level": _budget_flags.get("level", _last_budget_level or "normal"),
         "warn_threshold": settings.token_warn_threshold,
         "downgrade_threshold": settings.token_downgrade_threshold,
         "freeze_threshold": settings.token_freeze_threshold,

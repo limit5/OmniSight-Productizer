@@ -39,5 +39,6 @@ webauthn==2.7.1
 # K7 — Password policy + Argon2id
 argon2-cffi>=23.1.0
 zxcvbn-python>=4.4.28
-# I9 — Redis-backed rate limiting
+# I9/I10 — Redis-backed rate limiting + multi-worker shared state
 redis>=5.0.0
+redis[hiredis]>=5.0.0
