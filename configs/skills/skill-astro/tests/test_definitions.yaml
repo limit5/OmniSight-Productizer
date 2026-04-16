@@ -1,0 +1,112 @@
+# SKILL-ASTRO test definitions — W8 #282
+#
+# Authoritative list consumed by `backend/tests/test_skill_astro.py`.
+# Each entry maps a cross-stack gate to the Python target that
+# exercises it. Mirrors the W6 SKILL-NEXTJS / W7 SKILL-NUXT plans
+# where gates overlap so regressions in the shared framework surface
+# on all three skill packs simultaneously.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-react-static
+        name: "Render: react + static target"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-vue-vercel
+        name: "Render: vue + vercel target"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-svelte-cloudflare
+        name: "Render: svelte + cloudflare target"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-islands-none-pure-static
+        name: "Render: islands=none removes hydration integrations"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-cms-sanity
+        name: "Render: cms=sanity ships Sanity adapter + webhook"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-cms-contentful
+        name: "Render: cms=contentful ships Contentful adapter + webhook"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-cms-none-no-adapter-leak
+        name: "Render: cms=none skips Sanity and Contentful files"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-astro-output-mode-pins
+        name: "Rendered astro.config.mjs pins output + adapter"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by islands/cms/target skipped correctly"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+
+  - id: framework-binding
+    name: "W0-W5 framework binding tests"
+    tests:
+      - id: w0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.astro_scaffolder.render_project
+      - id: w1-profile-budget-propagation
+        name: "Bundle budget from profile propagates into scaffold context"
+        type: integration
+        target: backend.astro_scaffolder._render_context
+      - id: w3-role-react-alignment
+        name: "Scaffold honours frontend-react / a11y anti-patterns"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: w4-vercel-adapter-constructs
+        name: "VercelAdapter constructs against rendered project"
+        type: integration
+        target: backend.astro_scaffolder.dry_run_deploy
+      - id: w4-cloudflare-adapter-constructs
+        name: "CloudflarePagesAdapter constructs against rendered project"
+        type: integration
+        target: backend.astro_scaffolder.dry_run_deploy
+      - id: w4-docker-adapter-for-static-and-node
+        name: "DockerNginxAdapter constructs for static/node targets"
+        type: integration
+        target: backend.astro_scaffolder.dry_run_deploy
+      - id: w5-compliance-runs
+        name: "W5 compliance bundle runs against rendered project"
+        type: integration
+        target: backend.astro_scaffolder.pilot_report
+
+  - id: content-vertical
+    name: "Content-vertical specific tests"
+    tests:
+      - id: content-collection-config-shipped
+        name: "src/content/config.ts declares a typed blog collection"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: content-seed-mdx-present
+        name: "Seed .mdx entry has frontmatter matching Zod schema"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+      - id: rss-sitemap-integrations
+        name: "Astro RSS + sitemap integrations wired in astro.config.mjs"
+        type: unit
+        target: backend.astro_scaffolder.render_project
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-astro appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-astro') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

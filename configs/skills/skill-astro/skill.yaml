@@ -1,0 +1,99 @@
+# W8 #282 — SKILL-ASTRO manifest.
+#
+# Third web-vertical skill pack. Follows the W6 SKILL-NEXTJS pilot
+# (#280) and the W7 SKILL-NUXT cross-stack confirmation (#281). Where
+# the two siblings are whole-app JS frameworks, Astro is the
+# content-first vertical — SSG-by-default with optional SSR, Islands
+# architecture for selectively hydrated components, and first-class
+# MDX + headless-CMS adapters (Sanity / Contentful) that slot into
+# the W0-W5 framework through the same ScaffoldOptions /
+# render_project / dry_run_deploy / pilot_report contract the n=1
+# pilot and n=2 cross-stack validation established.
+#
+# Exercise:
+#   * W0  target_kind=web schema                    (configs/platforms/schema.yaml)
+#   * W1  web-static / web-ssr-node / web-vercel /  (configs/platforms/web-*.yaml)
+#         web-edge-cloudflare profiles
+#   * W2  Lighthouse / Bundle / a11y / SEO gates    (backend/web_simulator.py)
+#   * W3  frontend-{react,vue,svelte} / a11y /      (configs/roles/web/)
+#         seo / perf roles
+#   * W4  Vercel + CloudflarePages + Docker-nginx   (backend/deploy/)
+#         deploy adapters (static sites also dry-run via DockerNginx)
+#   * W5  WCAG / GDPR / SPDX compliance gates       (backend/web_compliance/)
+#
+# Scaffolds in `scaffolds/` provide an Astro 5 skeleton with
+# content-collection-backed MDX, an island component in the chosen
+# hydration framework (react / vue / svelte), a Sanity- or
+# Contentful-ready CMS source adapter, a multi-target `astro.config.mjs`
+# whose `output` / `adapter` pair resolves from the requested target
+# at generate time, Playwright E2E + Vitest unit harness, and WCAG /
+# GDPR / SPDX compliance gates enabled by default.
+
+schema_version: 1
+name: skill-astro
+description: >
+  Astro 5 skill pack for content-heavy sites. Generates a
+  production-ready SSG-by-default site with Islands architecture
+  (react / vue / svelte hydration), first-class MDX and
+  content-collection support, multi-target output (static export /
+  @astrojs/node / @astrojs/vercel / @astrojs/cloudflare), headless
+  CMS source adapters for Sanity and Contentful, Vitest unit +
+  Playwright E2E harness, and WCAG / GDPR / SPDX compliance gates
+  enabled by default. Third web skill — with W6 SKILL-NEXTJS as the
+  pilot (n=1) and W7 SKILL-NUXT as the cross-stack validator (n=2),
+  W8 SKILL-ASTRO (n=3) is the "content vertical" consumer: it
+  extends the framework onto a stack where SSG is the norm and SSR
+  is opt-in, proving the W0-W5 abstractions also hold for the class
+  of sites (marketing, docs, blogs, e-commerce catalogues) that
+  don't need a server at all by default.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills:
+  - enterprise_web
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+  - CORE-21  # enterprise web reference
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - astro
+  - astro-5
+  - islands
+  - content-collections
+  - mdx
+  - sanity
+  - contentful
+  - headless-cms
+  - static-site
+  - ssg
+  - ssr-hybrid
+  - node-adapter
+  - vercel-adapter
+  - cloudflare-adapter
+  - playwright
+  - vitest
+  - wcag-aa
+  - gdpr
+  - spdx
+  - w8

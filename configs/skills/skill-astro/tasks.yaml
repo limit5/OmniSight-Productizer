@@ -1,0 +1,196 @@
+# W8 #282 — SKILL-ASTRO DAG tasks.
+#
+# Mirrors the W6 SKILL-NEXTJS (`nx-`) + W7 SKILL-NUXT (`nu-`) DAG
+# shape so operators can audit the three web skill packs side-by-side.
+# SKILL-ASTRO uses an ``as-`` prefix to keep namespaces clean when all
+# three packs run in the same orchestrator queue.
+
+tasks:
+  - id: as-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render Astro 5 project from scaffolds/: package.json (Astro 5
+      deps, chosen island integration, @astrojs/mdx, Playwright,
+      vitest), astro.config.mjs (output + adapter resolved from
+      target), tsconfig, .gitignore. Idempotent.
+    depends_on: []
+    artifacts: [as_skeleton]
+    estimated_hours: 2
+    framework_gate: w0-platform-schema
+
+  - id: as-islands-integration
+    name: "Islands hydration framework wired"
+    description: >
+      Emit the chosen island integration (@astrojs/react /
+      @astrojs/vue / @astrojs/svelte) via `npx astro add` equivalent
+      — the scaffold embeds the integration import in
+      astro.config.mjs, ships the integration-specific dependency in
+      package.json, and emits a sample island component using the
+      framework's own `client:` directive (defaults to
+      `client:visible` for the LCP-friendly path). `islands=none`
+      skips the integration entirely for a pure-static build.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_islands]
+    estimated_hours: 1
+    framework_gate: w3-role-frontend-react
+
+  - id: as-content-collections
+    name: "Content collections + MDX"
+    description: >
+      Emit `src/content/config.ts` declaring a `blog` collection with
+      a Zod schema (title / description / pubDate / author / tags),
+      one `.mdx` seed entry with frontmatter, and a dynamic route
+      `[...slug].astro` that renders the collection. MDX plugin is
+      wired in astro.config.mjs with GFM + syntax highlighting —
+      this is the whole point of the content-heavy vertical.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_content]
+    estimated_hours: 1
+    framework_gate: w3-role-frontend-react
+
+  - id: as-cms-sanity
+    name: "Sanity CMS source adapter"
+    description: >
+      Emit `src/lib/cms/sanity.ts` — a typed fetch wrapper around
+      @sanity/client with GROQ queries for the content collection
+      above, a preview-mode token read from env, and a webhook
+      handler at `src/pages/api/webhooks/sanity.ts` for
+      on-publish revalidation (Sanity calls this after editors hit
+      "publish"). Gated by `cms=sanity`.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_cms_sanity]
+    estimated_hours: 2
+
+  - id: as-cms-contentful
+    name: "Contentful CMS source adapter"
+    description: >
+      Emit `src/lib/cms/contentful.ts` — typed Contentful Delivery
+      API client with entry/asset fetchers, preview API support via
+      `CONTENTFUL_PREVIEW_TOKEN`, and the `src/pages/api/webhooks/
+      contentful.ts` handler for Contentful's Content Preview
+      webhook. Gated by `cms=contentful`.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_cms_contentful]
+    estimated_hours: 2
+
+  - id: as-build-static
+    name: "Static output (SSG)"
+    description: >
+      Emit `astro.config.mjs` snippet with `output: "static"` +
+      bind to `configs/platforms/web-static.yaml`. Enforces the
+      500 KiB critical-path budget the W1 `web-static` profile sets.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_build_static]
+    estimated_hours: 1
+    framework_gate: w1-web-static-profile
+
+  - id: as-build-node
+    name: "@astrojs/node SSR adapter"
+    description: >
+      Emit `astro.config.mjs` with `output: "server"` +
+      `adapter: node({mode: 'standalone'})`, Dockerfile, and bind
+      to `configs/platforms/web-ssr-node.yaml`. Enforces the 5 MiB
+      server-bundle ceiling.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_build_node]
+    estimated_hours: 1
+    framework_gate: w1-web-ssr-node-profile
+
+  - id: as-build-vercel
+    name: "@astrojs/vercel adapter"
+    description: >
+      Emit `vercel.json` and pin `adapter: vercel()` —
+      `output: "server"`; bind to `configs/platforms/web-vercel.yaml`.
+      Routes the build through Vercel's Build Output API.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_build_vercel]
+    estimated_hours: 1
+    framework_gate: w1-web-vercel-profile
+
+  - id: as-build-cloudflare
+    name: "@astrojs/cloudflare adapter"
+    description: >
+      Emit `wrangler.toml` + `adapter: cloudflare()` —
+      `output: "server"`; bind to
+      `configs/platforms/web-edge-cloudflare.yaml`.
+      Compiles to the V8-isolate bundle under the 1 MiB ceiling.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_build_cloudflare]
+    estimated_hours: 1
+    framework_gate: w1-web-edge-cloudflare-profile
+
+  - id: as-playwright
+    name: "Playwright E2E skeleton"
+    description: >
+      Render `e2e/smoke.spec.ts` + `playwright.config.ts`. Harness
+      lines up with the W2 simulate-track.
+    depends_on: [as-scaffold-init, as-content-collections]
+    artifacts: [as_playwright]
+    estimated_hours: 1
+    framework_gate: w2-simulate-e2e
+
+  - id: as-vitest
+    name: "Vitest unit skeleton"
+    description: >
+      Render `vitest.config.ts` + `tests/unit/cms.test.ts` covering
+      the CMS source adapter's query builder + webhook signature
+      verifier. Runs without a live CMS thanks to dependency
+      injection stubs.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_vitest]
+    estimated_hours: 1
+    framework_gate: w2-simulate-unit
+
+  - id: as-compliance-wire
+    name: "Compliance gates wired"
+    description: >
+      Generate `docs/privacy/retention.md` stub, cookie consent
+      island component, erasure route, and SPDX allowlist override.
+      All three W5 gates pass on the rendered project out of the box.
+    depends_on: [as-scaffold-init]
+    artifacts: [as_compliance]
+    estimated_hours: 1
+    framework_gate: w5-compliance
+
+  - id: as-deploy-smoke
+    name: "W4 deploy adapter smoke"
+    description: >
+      Dry-run provision via every adapter selected by the target
+      option (VercelAdapter / CloudflarePagesAdapter /
+      DockerNginxAdapter — static sites also dry-run DockerNginx as
+      a "serve from nginx" reference) against sandbox fixtures;
+      validate BuildArtifact → DeployResult round-trip.
+    depends_on:
+      - as-build-static
+      - as-build-node
+      - as-build-vercel
+      - as-build-cloudflare
+      - as-compliance-wire
+    artifacts: [as_deploy_smoke]
+    estimated_hours: 1
+    framework_gate: w4-deploy-adapters
+
+  - id: as-content-vertical-validation
+    name: "Content-vertical framework validation"
+    description: >
+      Full-stack smoke: scaffold → content collection parse →
+      MDX build → simulate (W2) → compliance (W5) → deploy adapter
+      dry-run (W4). Green-lighting this means the W0-W5 framework
+      survived a third consumer class (content-heavy / CMS-backed),
+      not just a whole-app JS framework — raising the bar from
+      "cross-stack" (W7, n=2) to "cross-stack AND cross-shape"
+      (W8, n=3).
+    depends_on:
+      - as-islands-integration
+      - as-content-collections
+      - as-build-static
+      - as-build-node
+      - as-build-vercel
+      - as-build-cloudflare
+      - as-playwright
+      - as-vitest
+      - as-compliance-wire
+      - as-deploy-smoke
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: w8-content-vertical

@@ -1,0 +1,47 @@
+---
+title: "Hello, World from {{ project_name }}"
+description: "First post in the blog collection. Edit me or delete me."
+pubDate: "2026-01-01"
+author: "{{ project_name }} team"
+tags: ["astro", "mdx", "w8"]
+---
+
+{% if islands != "none" -%}
+import Counter from "../../components/Counter{{ island_ext }}"
+
+{% endif -%}
+# Hello, World
+
+This is the seed blog post for **{{ project_name }}**, rendered from
+a content collection by SKILL-ASTRO (W8 #282).
+
+The frontmatter above is enforced by the Zod schema in
+`src/content/config.ts` — if a required field is missing or the type
+is wrong, the build fails. That's the content-collection idiom: the
+schema is the contract.
+
+{% if islands != "none" -%}
+## Islands architecture in action
+
+The component below is an interactive island. It only ships JS for
+this specific component, and only hydrates once it enters the
+viewport (`client:visible`) — the rest of the page is static HTML.
+
+<Counter client:visible initial={3} />
+
+{% else -%}
+## Islands architecture disabled
+
+This render was generated with `islands=none` — every page is pure
+static HTML. Add a framework integration
+(`@astrojs/{react,vue,svelte}`) and import a client-hydrated
+component to enable islands.
+
+{% endif -%}
+## What to do next
+
+1. Replace this post with your own content.
+2. If you picked `cms=sanity` or `cms=contentful`, wire the CMS
+   source at `src/lib/cms/` into a dedicated route.
+3. Customise `BaseLayout.astro` for your branding.
+4. Run `npm run build:<target>` with the W1 profile of your choice.

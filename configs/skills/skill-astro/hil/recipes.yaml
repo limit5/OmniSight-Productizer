@@ -1,0 +1,133 @@
+# SKILL-ASTRO HIL (hardware-in-the-loop) recipes — W8 #282
+#
+# "Hardware" here is the deploy target (static CDN / Node container
+# / Vercel POP / Cloudflare Edge). Each recipe describes a physical-
+# side probe that can only run after a real deploy (not a dry-run) —
+# used by the operator-run Step 7 smoke, not by CI.
+
+recipes:
+  - id: static-cdn-smoke
+    name: "Static CDN cold-cache smoke"
+    description: >
+      Hit the deployed static URL five times from a cold CDN edge,
+      assert P95 TTFB ≤ 400ms (CDN origin fetch + cache miss). The
+      500 KiB bundle ceiling from web-static.yaml should keep LCP
+      under 1.5s even on a cold miss.
+    targets: [web-static]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}"
+      iterations: 5
+      p95_ms_ceiling: 400
+
+  - id: node-container-smoke
+    name: "Node SSR container cold-start smoke"
+    description: >
+      Launch the built Node container (@astrojs/node standalone),
+      hit the deployed URL five times from a cold process, assert
+      P95 TTFB ≤ 800ms. Validates the node adapter bundle boots and
+      runtime env is picked up from the container env.
+    targets: [web-ssr-node]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}"
+      iterations: 5
+      p95_ms_ceiling: 800
+
+  - id: vercel-smoke-ssr
+    name: "Vercel SSR cold-start smoke"
+    description: >
+      Hit the newly deployed URL five times from a cold region,
+      assert P95 TTFB ≤ 600ms. Validates @astrojs/vercel produces
+      a functions/ artifact the Vercel runtime can invoke (Node 20
+      serverless, 1024 MB memory per web-vercel.yaml).
+    targets: [web-vercel]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}"
+      iterations: 5
+      p95_ms_ceiling: 600
+
+  - id: cloudflare-edge-latency
+    name: "Cloudflare Pages edge latency"
+    description: >
+      Hit the sitemap from three PoPs (SJC / FRA / SIN); P95 latency
+      ≤ 200ms. Confirms @astrojs/cloudflare stayed under the 1 MiB
+      V8-isolate cap end-to-end.
+    targets: [web-edge-cloudflare]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}/sitemap-index.xml"
+      pops: [sjc, fra, sin]
+      p95_ms_ceiling: 200
+
+  - id: mdx-parse-smoke
+    name: "MDX frontmatter parse smoke"
+    description: >
+      Curl a blog post URL, assert (a) 200 OK, (b) the MDX title
+      from frontmatter appears in the <title> tag, (c) the
+      generated RSS feed `/rss.xml` lists the same post. Guarantees
+      the content-collection pipeline survived the build.
+    targets: [web-static, web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: http_content_assertion
+      url: "${DEPLOY_URL}/blog/hello-world"
+      assertions:
+        status: 200
+        contains:
+          - "<title>Hello, World"
+          - "application/rss+xml"
+
+  - id: cms-webhook-roundtrip
+    name: "CMS webhook on-publish round-trip"
+    description: >
+      Fire a simulated Sanity / Contentful webhook at the deployed
+      `/api/webhooks/<cms>` endpoint, assert 200 OK + cache tag
+      invalidation response. Validates the CMS integration survived
+      the target's edge runtime (edge runtimes have tighter
+      request-body limits than Node).
+    targets: [web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: http_post
+      url: "${DEPLOY_URL}/api/webhooks/${CMS}"
+      headers:
+        Content-Type: application/json
+      body_path: "test_fixtures/cms/sample-publish.json"
+      assert_status: 200
+
+  - id: lighthouse-production
+    name: "Lighthouse against production URL"
+    description: >
+      Run the W2 simulate-track Lighthouse gate against the live
+      deploy — not the dev server. Content-first sites are the ones
+      that score highest on Lighthouse, so we tighten the perf
+      ceiling from the whole-app default 80 to 90 here.
+    targets: [web-static, web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: lighthouse
+      url: "${DEPLOY_URL}"
+      thresholds:
+        performance: 90
+        accessibility: 90
+        seo: 95
+
+  - id: wcag-live
+    name: "Live WCAG AA axe-core run"
+    description: >
+      Run axe-core against the deployed URL; 0 critical + 0 serious
+      expected. Matches the W5 WCAG gate threshold.
+    targets: [web-static, web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: wcag
+      url: "${DEPLOY_URL}"
+
+  - id: rollback-smoke
+    name: "W4 rollback path smoke"
+    description: >
+      Push an intentionally broken Astro build, invoke
+      ``adapter.rollback()``, assert production URL serves the
+      previous good deployment within 60s.
+    targets: [web-static, web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: rollback
+      timeout_s: 60
