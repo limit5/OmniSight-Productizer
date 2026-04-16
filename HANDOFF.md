@@ -7219,3 +7219,98 @@ Full suite regression: 91/91 tests passing across 13 component test files.
 - `backend/tests/test_i3_sse_tenant_filter.py` — 15 個新增測試
 - `test/integration/sse-tenant-filter.test.ts` — 6 個前端整合測試
 - `TODO.md` — I3 全部 3 項標記為 `[x]`
+
+---
+
+## M3. Per-tenant-per-provider Circuit Breaker — 完成 ✅
+
+**日期**：2026-04-16
+**狀態**：✅ 完成
+**Commits**：`M3 (S1-S4): per-tenant-per-provider-per-key circuit breaker`、`M3 (S4): test_circuit_breaker — 27 cases`
+
+### 背景與目標
+Phase 25 的 `provider_chain` 用單一 global `_provider_failures: dict[str, float]` 記錄 provider 失敗，5 分鐘 cooldown 對「整個部署」生效。多租戶下：tenant A 的 OpenAI key 壞掉一次，tenant B 的下一通 OpenAI 呼叫也被踢去 fallback。M3 把 cooldown 改成 `(tenant_id, provider, api_key_fingerprint)` 三元組獨立 circuit state，A/B 互不干擾。
+
+### 實作內容
+
+1. **新模組 `backend/circuit_breaker.py`**
+   - 內部 `_state: dict[(tid, provider, fp), state]`，每 entry 記錄 `open / opened_at / last_failure / failure_count / reason`
+   - `COOLDOWN_SECONDS = 300`（與舊 `PROVIDER_COOLDOWN` 對齊，operator 預期不變）
+   - LRU 上限：`_MAX_KEYS=1024 / _EVICT_TARGET=768`，超過時依 `last_seen` 修剪，與舊 `_PROVIDER_FAILURES_MAX` 行為一致
+   - 公開 API：`record_failure / record_success / is_open / cooldown_remaining / snapshot / reset / active_fingerprint`
+   - 自動 half-open：cooldown 過期後 `is_open` 直接回 False（無需顯式 success），給下一通呼叫機會 ride-through
+
+2. **Audit + SSE 整合**
+   - 只在 closed→open 與 open→close 兩個 transition 才推 SSE event 與 audit；持續失敗只刷新時間戳，避免暴擊 audit chain
+   - `audit.log_sync(action="circuit.open"|"circuit.close", entity_kind="circuit", entity_id="<provider>/<fingerprint>")`
+   - 用 `set_tenant_id(tenant_id)` wrap 寫入，確保 audit 進對的 per-tenant hash chain
+   - SSE event type `circuit_state`，`broadcast_scope="tenant"`，UI 才能即時 refresh
+
+3. **`backend/agents/llm.py` 失效路徑改寫**
+   - `_record_provider_failure(provider, *, reason)` 同時更新 legacy `_provider_failures` 與新 breaker（雙寫，向後相容）
+   - 新增 `_record_provider_success(provider)` 與 `_per_tenant_circuit_open(provider)` helper
+   - `get_llm()` failover loop：
+     - Primary 失敗時 `_record_provider_failure(provider, reason="primary_init_failed")`
+     - Primary 成功時 `_record_provider_success(provider)` 立即關閉先前的 circuit
+     - Fallback 迭代時優先檢查 `_per_tenant_circuit_open()`，再 fallback 檢查 legacy global cooldown
+   - 每筆 fingerprint 從 `circuit_breaker.active_fingerprint(provider)` 取得（讀 `settings.<provider>_api_key`，沒設就回 `no-key` sentinel）
+
+4. **`backend/model_router.py` 同步**
+   - `_is_provider_available()` 先查 per-tenant breaker，再查 legacy global cooldown
+   - Smart routing 決策現在會被 per-tenant circuit 影響（A tenant 觸發 anthropic circuit 時，A 的 task 自動 downgrade 到 openai/groq）
+
+5. **REST 新增**
+   - `GET /providers/circuits[?scope=tenant|all]` — 預設只看當前 tenant；`scope=all` 給 admin diagnostic
+     - Response：`{tenant_id, scope, cooldown_seconds, circuits: [{tenant_id, provider, fingerprint, open, cooldown_remaining, failure_count, reason, ...}]}`
+   - `POST /providers/circuits/reset {provider?, fingerprint?, scope?}` — operator override；預設只清當前 tenant 的 entry
+   - `GET /providers/health` — `cooldown_remaining` 改取 max(legacy, per-tenant)，所以 per-tenant breaker 觸發時 health 也會反映
+
+6. **Frontend (`integration-settings.tsx`)**
+   - 新增 `<CircuitBreakerSection />` 嵌入 LLM Providers 設定區塊
+   - 列出當前 tenant 所有 (provider, fingerprint) 的 circuit 狀態：綠/紅 dot + OPEN/CLOSED pill + cooldown 倒數 + failure count
+   - Per-row RESET 按鈕 + RESET ALL；10 秒自動 refresh（tick down 倒數）
+   - 對應 `lib/api.ts` 新增 `CircuitBreakerEntry`、`CircuitBreakerResponse`、`getCircuitBreakers`、`resetCircuitBreaker`
+
+### 測試（27 + 8 既有 = 35 全 pass）
+
+**新增 `backend/tests/test_circuit_breaker.py` 27 cases**：
+
+- **TestPerTenantIsolation (3)**：A 的 failure 不影響 B；同 key 跨 tenant 各自獨立；空 provider no-op
+- **TestRecovery (3)**：record_success 關閉；cooldown 過期 auto half-open；重複 failure 刷新 cooldown
+- **TestSnapshot (3)**：filter by tenant / by provider；包含 fingerprint + reason
+- **TestReset (3)**：scope tenant；指定 provider；scope all
+- **TestMemoryBound (1)**：超過 `_MAX_KEYS` 時 LRU 修剪生效
+- **TestSSEBus (3)**：open emit；重複 failure 只 emit 一次；close emit
+- **TestAuditIntegration (1)**：audit chain 寫入 `circuit.open` + `circuit.close`，`entity_id="<provider>/<fingerprint>"`
+- **TestActiveFingerprint (3)**：無 key sentinel；configured key 回 `…XYZW`；未知 provider sentinel
+- **TestCircuitsEndpoint (4)**：`/providers/circuits` 預設 scope=tenant；scope=all；reset 預設只清當 tenant；reset scope=all
+- **TestProviderHealthIntegration (1)**：`/providers/health` 反映 per-tenant cooldown
+- **TestModelRouterIntegration (1)**：breaker 開時 `_is_provider_available` 回 False
+- **TestGetLLMFailover (1)**：fallback chain 中 per-tenant circuit 開的 provider 被跳過
+
+**回歸測試（76 既有 pass）**：
+- `test_provider_chain.py`（8）：legacy `_provider_failures` 與 `PROVIDER_COOLDOWN` 仍可用
+- `test_audit.py`、`test_tenant_quota.py`：未受影響
+- `test_intent_router / test_finetune_nightly / test_recovery / test_sandbox_t1_runtime`（52）：未受影響
+- `test_shared_state / test_i3_sse_tenant_filter / test_i7_frontend_tenant`（60）：未受影響
+
+### 修改檔案
+- `backend/circuit_breaker.py` — **新增**，per-tenant per-key circuit 核心邏輯
+- `backend/agents/llm.py` — `_record_provider_failure` 雙寫；新增 `_record_provider_success` / `_per_tenant_circuit_open`；`get_llm()` failover 改查 per-tenant breaker
+- `backend/model_router.py` — `_is_provider_available()` 先查 per-tenant breaker
+- `backend/routers/providers.py` — 新增 `GET /providers/circuits`、`POST /providers/circuits/reset`；`/providers/health` overlap per-tenant cooldown
+- `lib/api.ts` — 新增 `CircuitBreakerEntry`、`CircuitBreakerResponse`、`getCircuitBreakers`、`resetCircuitBreaker`
+- `components/omnisight/integration-settings.tsx` — 新增 `<CircuitBreakerSection />`，掛在 LLM Providers 區塊
+- `backend/tests/test_circuit_breaker.py` — **新增** 27 cases
+- `TODO.md` — M3 全部 6 項標 `[x]`
+- `README.md` — Multi-Tenancy + Reliability 區段補上 M3
+- `HANDOFF.md` — 本段
+
+### 設計取捨
+
+- **Backward compat 雙寫**：保留 legacy `_provider_failures` + `PROVIDER_COOLDOWN`，因為 `test_provider_chain.py` 與 `model_router._is_provider_available` 還在用；同時新 breaker 是失效決策的「優先來源」（per-tenant breaker 開 → 直接跳過該 fallback，不管 legacy 怎麼寫）
+- **Fingerprint 來源**：M3 階段仍使用 process-wide `settings.<provider>_api_key`（per-tenant secret 整合是後續 milestone）；但 (tenant_id, provider, fp) triple 已經足以隔離——同一把 global key 在不同 tenant 下的 circuit state 各自獨立，因為 key 名稱包含 tenant_id
+- **Sentinel `no-key`**：未設 key 的 provider（Ollama 或還沒填 key 的）也照常進 circuit 系統，避免空字串污染 audit log
+- **Audit 寫入時 wrap tenant context**：背景 sweep 之類的 system actor 也能正確寫入「受影響的 tenant」的 chain，而不是 caller 的 chain
+- **SSE 只 emit transition**：避免 100 次連續失敗灌爆 audit + SSE 隊列；只在 closed→open / open→close 才寫
+- **No DB persistence**：circuit state 是 in-memory（process restart 後從 closed 開始）；故意保留簡單性，因為 cooldown 只 5 分鐘，restart 後 ride-through 一次失敗就會重新開，影響可忽略

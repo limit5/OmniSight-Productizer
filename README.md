@@ -116,10 +116,11 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Tenant isolation**: schema-level (I1), RLS (I2), SSE filter (I3), secrets (I4), filesystem (I5)
 - **Sandbox fair-share**: DRF per-tenant capacity (I6) — CAPACITY_MAX=12, guaranteed minimum per tenant, idle borrowing with 30s grace reclaim, turbo cap prevents single-tenant monopoly
 - **Rate limiting**: 3-dimension (per-IP + per-user + per-tenant) Redis token bucket (I9) — plan-based quotas (free/starter/pro/enterprise), automatic in-memory fallback
+- **Resource hard isolation**: cgroup CPU/mem (M1), per-tenant disk quota + LRU sweep (M2), per-tenant per-key LLM circuit breaker (M3)
 
 ### Reliability & Recovery
 - **Token budget**: 3-tier (80% warn → 90% downgrade → 100% freeze) + daily auto-reset
-- **Provider failover**: chain with 5min circuit breaker cooldown + health UI
+- **Provider failover**: per-tenant per-key circuit breaker (M3) — `(tenant_id, provider, api_key_fingerprint)` triple, 5min cooldown, audit on open/close, `/providers/circuits` REST + Settings UI panel; tenant A's bad key cannot derail tenant B
 - **Watchdog**: 30min task timeout, 2hr stuck detection, dynamic reallocation
 - **Startup cleanup**: reset stuck agents/simulations, orphan containers, git locks
 - **Event persistence**: DLQ with retry (3x exponential backoff), event_log table, replay API

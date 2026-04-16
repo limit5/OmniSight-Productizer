@@ -599,12 +599,13 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### M3. Per-tenant-per-provider Circuit Breaker
-- [ ] 現行 `provider_chain` 5min cooldown 改 key：`(tenant_id, provider, api_key_fingerprint)` → 獨立 circuit state
-- [ ] Tenant A 的 OpenAI key 壞掉不會影響 Tenant B 的同 provider
-- [ ] Audit：circuit open/close 事件帶 tenant_id
-- [ ] UI：Settings → LLM Providers 顯示各 key 當前 circuit 狀態
-- [ ] 測試：A key 故障 → A fallback、B 不受影響
-- [ ] 預估：**0.5 day**
+- [x] 現行 `provider_chain` 5min cooldown 改 key：`(tenant_id, provider, api_key_fingerprint)` → 獨立 circuit state（`backend/circuit_breaker.py`，COOLDOWN_SECONDS=300，LRU 1024 cap）
+- [x] Tenant A 的 OpenAI key 壞掉不會影響 Tenant B 的同 provider（`get_llm()`、`model_router._is_provider_available` 都先查 per-tenant breaker，再退回 legacy global cooldown）
+- [x] Audit：circuit open/close 事件帶 tenant_id（`audit.log_sync circuit.open / circuit.close`，`entity_id="<provider>/<fingerprint>"`，寫入該 tenant 的 hash chain）
+- [x] UI：Settings → LLM Providers 顯示各 key 當前 circuit 狀態（`integration-settings.tsx CircuitBreakerSection`，open/closed pill + per-row RESET + RESET ALL；10s auto-refresh）
+- [x] 測試：A key 故障 → A fallback、B 不受影響（27 cases in `test_circuit_breaker.py`：isolation、recovery、cooldown、SSE、audit、`/providers/circuits` REST、`get_llm` failover）
+- [x] 新增 REST：`GET /providers/circuits[?scope=all]`、`POST /providers/circuits/reset`；`/providers/health` 同步顯示 per-tenant cooldown
+- [x] 預估：**0.5 day**
 
 ### M4. Cgroup-based Per-tenant Metrics + UI 拆分
 - [ ] `backend/host_metrics.py` 擴展：從 `/sys/fs/cgroup/<container>/cpu.stat` + `memory.current` 採集 per-container 用量
