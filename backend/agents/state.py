@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from langgraph.graph import add_messages
 from pydantic import BaseModel, Field
-from langchain_core.messages import BaseMessage
+
+from backend.llm_adapter import BaseMessage, add_messages
 
 
 class AgentAction(BaseModel):

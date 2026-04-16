@@ -15,10 +15,12 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.outputs import LLMResult
-
+from backend.llm_adapter import (
+    BaseCallbackHandler,
+    BaseChatModel,
+    LLMResult,
+    build_chat_model,
+)
 from backend.config import settings
 
 if TYPE_CHECKING:
@@ -221,129 +223,57 @@ def get_llm(
 
 
 def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
-    """Instantiate the appropriate LangChain chat model."""
+    """Instantiate a configured chat model via the adapter firewall.
+
+    All provider-specific instantiation logic (class imports, argument
+    shapes, base URLs) lives in `backend.llm_adapter.build_chat_model`.
+    This function is now just a settings-lookup + credential-gate shim.
+    """
     temp = settings.llm_temperature
 
-    if provider == "anthropic":
-        key = settings.anthropic_api_key
-        if not key:
-            logger.info("No OMNISIGHT_ANTHROPIC_API_KEY set")
-            return None
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(
-            model=model or "claude-sonnet-4-20250514",
-            anthropic_api_key=key,
-            temperature=temp,
-            max_tokens=4096,
-            max_retries=3,
-        )
-
-    if provider == "google":
-        key = settings.google_api_key
-        if not key:
-            logger.info("No OMNISIGHT_GOOGLE_API_KEY set")
-            return None
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(
-            model=model or "gemini-1.5-pro",
-            google_api_key=key,
-            temperature=temp,
-        )
-
-    if provider == "openai":
-        key = settings.openai_api_key
-        if not key:
-            logger.info("No OMNISIGHT_OPENAI_API_KEY set")
-            return None
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model or "gpt-4o",
-            api_key=key,
-            temperature=temp,
-            max_retries=3,
-        )
-
-    if provider == "xai":
-        key = settings.xai_api_key
-        if not key:
-            logger.info("No OMNISIGHT_XAI_API_KEY set")
-            return None
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model or "grok-3-mini",
-            api_key=key,
-            base_url="https://api.x.ai/v1",
-            temperature=temp,
-            max_retries=3,
-        )
-
-    if provider == "groq":
-        key = settings.groq_api_key
-        if not key:
-            logger.info("No OMNISIGHT_GROQ_API_KEY set")
-            return None
-        from langchain_groq import ChatGroq
-        return ChatGroq(
-            model=model or "llama-3.3-70b-versatile",
-            groq_api_key=key,
-            temperature=temp,
-            max_retries=3,
-        )
-
-    if provider == "deepseek":
-        key = settings.deepseek_api_key
-        if not key:
-            logger.info("No OMNISIGHT_DEEPSEEK_API_KEY set")
-            return None
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model or "deepseek-chat",
-            api_key=key,
-            base_url="https://api.deepseek.com",
-            temperature=temp,
-            max_retries=3,
-        )
-
-    if provider == "together":
-        key = settings.together_api_key
-        if not key:
-            logger.info("No OMNISIGHT_TOGETHER_API_KEY set")
-            return None
-        from langchain_together import ChatTogether
-        return ChatTogether(
-            model=model or "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-            together_api_key=key,
-            temperature=temp,
-        )
-
-    if provider == "openrouter":
-        key = settings.openrouter_api_key
-        if not key:
-            logger.info("No OMNISIGHT_OPENROUTER_API_KEY set")
-            return None
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model or "anthropic/claude-sonnet-4",
-            api_key=key,
-            max_retries=3,
-            base_url="https://openrouter.ai/api/v1",
-            temperature=temp,
-            default_headers={
+    # Provider → (api_key_attr, extra kwargs) — the adapter knows the
+    # default model name, base_url, and class to use for each provider.
+    _PROVIDER_CREDS: dict[str, tuple[str | None, dict]] = {
+        "anthropic": ("anthropic_api_key", {}),
+        "google": ("google_api_key", {}),
+        "openai": ("openai_api_key", {}),
+        "xai": ("xai_api_key", {}),
+        "groq": ("groq_api_key", {}),
+        "deepseek": ("deepseek_api_key", {}),
+        "together": ("together_api_key", {}),
+        "openrouter": ("openrouter_api_key", {
+            "default_headers": {
                 "HTTP-Referer": "https://omnisight.local",
                 "X-Title": "OmniSight Productizer",
             },
-        )
+        }),
+        # Ollama is keyless but needs base_url threaded through
+        "ollama": (None, {"base_url": settings.ollama_base_url}),
+    }
 
-    if provider == "ollama":
-        from langchain_ollama import ChatOllama
-        return ChatOllama(
-            model=model or "llama3.1",
-            base_url=settings.ollama_base_url,
+    if provider not in _PROVIDER_CREDS:
+        logger.warning("Unknown LLM provider: %s", provider)
+        return None
+
+    key_attr, extra_kwargs = _PROVIDER_CREDS[provider]
+    api_key: str | None = None
+    if key_attr is not None:
+        api_key = getattr(settings, key_attr, None)
+        if not api_key:
+            logger.info("No OMNISIGHT_%s_API_KEY set", provider.upper())
+            return None
+
+    try:
+        return build_chat_model(
+            provider=provider,
+            model=model,
             temperature=temp,
+            api_key=api_key,
+            **extra_kwargs,
         )
-
-    logger.warning("Unknown LLM provider: %s", provider)
-    return None
+    except (ValueError, ImportError) as exc:
+        logger.warning("Failed to build chat model for %s: %s", provider, exc)
+        return None
 
 
 def list_providers() -> list[dict]:

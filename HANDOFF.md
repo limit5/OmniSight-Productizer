@@ -1,9 +1,64 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N3 — OpenAPI 前後端合約測試 + 自動生前端 type (master)
+> 最後 commit：N4 — LangChain/LangGraph Adapter 防火牆層 (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N4 (complete) LangChain / LangGraph Adapter 防火牆層（2026-04-16 完成）
+
+**背景**：專案之前散落 8 個檔案直接 `from langchain*` / `from langgraph*` import（`backend/agents/{llm,graph,state,nodes,tools}.py`、`backend/routers/invoke.py`、`backend/tests/test_tiered_memory.py`、以及每次要 bump LangChain 版本時要改的那堆 provider factory）。LangChain 的 API 常常以 patch 粒度微變（`ChatAnthropic` 的 `max_tokens` 參數、`tool_calls` 的回傳形狀、`AIMessage` 的 `content` 是 str 還是 block list），每次升級都要追 8 個 import 點改。N4 把這層外漆成防火牆 — `backend/llm_adapter.py` 成為**唯一**能 import `langchain*` / `langgraph*` 的檔案，其他所有模組一律從 adapter 轉一次；升 LangChain 只要動 adapter + 跑 adapter 的 50 個單元測試。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/llm_adapter.py` | 新增 ~400 行：集中所有 `langchain_core.*`、`langchain_anthropic`、`langchain_google_genai`、`langchain_openai`、`langchain_groq`、`langchain_together`、`langchain_ollama`、`langgraph.graph` 的 import。對外 re-export：`BaseMessage` / `HumanMessage` / `AIMessage` / `SystemMessage` / `ToolMessage` / `RemoveMessage`；`StateGraph` / `END` / `add_messages`；`tool` decorator；`BaseChatModel` / `BaseCallbackHandler` / `LLMResult` 三個 type alias | ✅ |
+| Stable interface（4 支公開方法） | `invoke_chat(messages, provider?, model?, llm?) → str`（一次同步 chat）<br>`stream_chat(...)` → `AsyncIterator[str]`（chunk-by-chunk 串流）<br>`embed(texts, provider?, model?) → list[list[float]]`（OpenAI + Ollama）<br>`tool_call(messages, tools, ...) → AdapterToolResponse`（dataclass `{text, tool_calls[AdapterToolCall], raw_message}`） | ✅ |
+| `build_chat_model(provider, model, **kwargs)` | 唯一 LangChain class factory，接收 `temperature` / `max_tokens` / `max_retries` / `api_key` / `base_url` / `default_headers`，內部 dispatch 到 ChatAnthropic / ChatGoogleGenerativeAI / ChatOpenAI (openai+xai+deepseek+openrouter 共用) / ChatGroq / ChatTogether / ChatOllama。未知 provider 丟 `ValueError`，extras 沒裝丟 `ImportError` | ✅ |
+| `_coerce_messages()` + `_message_text()` 工具函式 | 接受 `BaseMessage` / `("role", "content")` tuple / `{"role": ..., "content": ...}` dict 三種形式，讓 caller 不用 import message class 就能寫。`_message_text()` handle 各 provider content shape（str / list[str] / list[{type:"text", text}] / None） | ✅ |
+| `backend/agents/llm.py` 重構 | `_create_llm()` 從 9 個 provider 各自的 `from langchain_xxx import Chat...` 塊，縮到單一 `_PROVIDER_CREDS` 表 + 一次 `build_chat_model(...)` 呼叫。原 120 行 provider 實例化壓到 40 行。其他 API（`get_llm` / 失敗 cooldown / 每 tenant circuit breaker）行為不變 | ✅ |
+| `backend/agents/state.py` 重構 | `from langgraph.graph import add_messages` + `from langchain_core.messages import BaseMessage` → 合併成 `from backend.llm_adapter import BaseMessage, add_messages` | ✅ |
+| `backend/agents/graph.py` 重構 | `from langgraph.graph import StateGraph, END` + `from langchain_core.messages import HumanMessage` → 合併成 `from backend.llm_adapter import END, HumanMessage, StateGraph` | ✅ |
+| `backend/agents/nodes.py` 重構 | `from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolMessage` → `from backend.llm_adapter import ...` | ✅ |
+| `backend/agents/tools.py` 重構 | `from langchain_core.tools import tool` → `from backend.llm_adapter import tool`；行內 `from langchain_core.messages import SystemMessage, HumanMessage`（在 `summarize_state` 裡）→ 走 adapter | ✅ |
+| `backend/routers/invoke.py` 重構 | `_llm_decompose` 裡的行內 `from langchain_core.messages import SystemMessage, HumanMessage` → 走 adapter | ✅ |
+| `backend/tests/test_tiered_memory.py` 重構 | Module-level `from langchain_core.messages import HumanMessage, AIMessage` → 走 adapter。跑完 28/28 test 仍綠 | ✅ |
+| `scripts/check_llm_adapter_firewall.py` | 新增 ~100 行 CI gate：stdlib-only (`ast` + `pathlib`) 的靜態掃描器，walk `backend/` 找 `from langchain*` / `import langchain*` / `from langgraph*` / `import langgraph*`。跳過 `__pycache__` / `.venv` / `site-packages` / `node_modules`。違反時用 GitHub Actions `::error file=...,line=...::` 格式輸出，reviewer 在 PR diff 直接看到紅線 | ✅ |
+| Firewall 允許 2 個例外 | `backend/llm_adapter.py`（adapter 本體）+ `backend/tests/test_llm_adapter.py`（adapter 測試需要 `assert adapter.HumanMessage is langchain_core.messages.HumanMessage` 驗證 re-export identity） — 其他任何檔案 `from langchain*` CI 即 fail | ✅ |
+| `.github/workflows/ci.yml` → `llm-adapter-firewall` job | 新 3-min CI job（與 `lint` / `renovate-config` 平行跑）：只跑 `python3 scripts/check_llm_adapter_firewall.py`。無需 pip install（純 stdlib），比 ruff/tsc 輕太多 | ✅ |
+| `backend/tests/test_llm_adapter.py` | 新增 50 個單元測試分 10 個 TestClass：<br>• `TestReExports` (5) — adapter symbol 是 `is` LangChain class（identity，非 equality）<br>• `TestCoerceMessages` (7) — tuple/dict/mixed/unknown role/rejection<br>• `TestMessageText` (5) — str / list blocks / None / no attr<br>• `TestInvokeChat` (4) — 無 LLM 時回 `""`、有 LLM 時 invoke + coerce messages、override llm / provider+model 兩路徑<br>• `TestStreamChat` (3) — 無 LLM 空 iter、yield 順序、skip 空 chunk<br>• `TestToolCall` (5) — 無 LLM empty response、dict tool_calls、attr tool_calls、no tool_calls、`bind_tools` 確實被呼叫<br>• `TestEmbed` (4) — 空 input、no key 回 []、有 key 會 call `embed_documents`、unknown provider raise<br>• `TestBuildChatModel` (4) — unknown raise、anthropic 路徑、openai family 共用、openrouter default_headers<br>• `TestFirewallScript` (7) — 掃當前 repo pass、檢測違反 langchain、langgraph、missing backend、missing adapter、skip vendored<br>• `TestCallerIntegration` (3) + `TestPublicAPISurface` (2) — dogfood 驗證 | ✅ |
+| 驗證 | `python3 -m pytest backend/tests/test_llm_adapter.py -q` → **50/50 pass**；`test_tiered_memory.py` 28/28 pass；`test_graph.py` + `test_nodes.py` + `test_tools.py` + `test_cross_agent_router.py` 67/67 pass；`test_dispatch.py` + `test_model_validation.py` + `test_orchestrator_enhanced.py` + `test_smart_routing.py` 56/56 pass。`ruff check` 新/改檔 0 error。`python3 scripts/check_llm_adapter_firewall.py` → `[N4] OK — no langchain*/langgraph* imports outside the adapter.` | ✅ |
+
+**設計決策**：
+1. **為什麼是 firewall 不是 full wrapper**：完全 wrap 掉 LangChain message class（寫自家 `AdapterHumanMessage` 然後在呼叫 LangChain 前 convert）會爆炸性增加維護面 — 每次 LangChain 新增欄位（e.g. `AIMessage.reasoning_content`）都要追。選擇「message class 直接 re-export、但所有 import site 只看到 adapter」的折衷方案 — 升級 LangChain 時若 message class 介面有破壞性變更，改 adapter 一個檔案；若只是新欄位，caller 自動看到、零改動。
+2. **為什麼 `AdapterToolResponse` 是 dataclass 而非 pydantic**：tool-call 回傳形狀在 LangChain 內部隨 provider 變（OpenAI 是 list[dict]、Anthropic 是 list[ToolUseBlock]、Google 是另一種），adapter 內部 normalize。dataclass 比 pydantic 零成本、caller 不用跟進 pydantic 版本。
+3. **為什麼 firewall script 用 `ast` 不用 regex**：regex 會誤判 docstring / 字串內容的 `from langchain`（本 HANDOFF.md 如果被誤掃就會炸）。`ast.parse` 只看實際 import 節點、完全跳過 comment/string。
+4. **為什麼 CI job 獨立而非塞進 `lint`**：script 零 dep、3 秒跑完；獨立 job 有獨立 status check，PR reviewer 看 check 名稱 `llm-adapter-firewall` 就知道踩到哪條 rule，不用打開 lint log 找。
+5. **為什麼允許 `test_llm_adapter.py` 是唯一 test 例外**：`TestReExports.test_message_classes_match_langchain()` 的核心斷言是 `assert adapter.HumanMessage is langchain_core.messages.HumanMessage`；沒有這個測試就無法驗證 adapter 真的 re-export 到正確的類別（未來 LangChain 若搬 module、adapter 若打錯路徑，identity 斷言是唯一能炸的防線）。
+6. **為什麼 `embed()` 只支援 openai + ollama**：專案目前只有這兩個 embedding credential（看 `backend/config.py`、`settings.openai_api_key` / `settings.ollama_base_url`），寫其他 provider 會是 dead code。未來新增時加 branch 即可，caller 不用動。
+7. **為什麼 `_create_llm` 還留在 `agents/llm.py` 而不搬到 adapter**：`get_llm()` 的責任是「結合 settings、circuit breaker、token freeze、failover chain」— 是業務邏輯，不是 LangChain 抽象。adapter 只負責「把 provider 名稱 + credentials 變成可呼叫的 chat model」。
+
+**新增/修改檔案**：
+- `backend/llm_adapter.py` — 新增（~400 行）
+- `scripts/check_llm_adapter_firewall.py` — 新增（~140 行）
+- `backend/tests/test_llm_adapter.py` — 新增（~460 行、50 tests）
+- `.github/workflows/ci.yml` — 新 `llm-adapter-firewall` job（位於 `renovate-config` 與 `lint` 之間）
+- `backend/agents/llm.py` — refactor `_create_llm` 走 adapter
+- `backend/agents/state.py` / `graph.py` / `nodes.py` / `tools.py` / `routers/invoke.py` / `tests/test_tiered_memory.py` — 全部改成 `from backend.llm_adapter import ...`
+- `TODO.md` — N4 6 個 checkbox 標 `[x]`
+- `HANDOFF.md` — 本段
+- `README.md` — 待補：Adapter firewall 章節
+
+**與前序 Phase 的互動**：
+- **N1（lockfile）**：`backend/requirements.in` 的 `langchain-*` / `langgraph` pin 沒動 — adapter 僅改 import 路徑，不改 dep 版本。
+- **N2（Renovate group）**：`langchain*` / `langgraph` 的 Renovate group PR 未來還是會開；區別是 *審 PR 的人只要跑 adapter 測試* 而不是全 repo agent 測試。
+- **N3（OpenAPI contract）**：本 Phase 不改 HTTP schema，`openapi.json` 無變動。
+
+**Risk 評估**：
+- ✅ **Low risk**：adapter 是 pure re-export + 4 個 thin wrapper；所有 pre-existing 測試 150+ 條仍綠。
+- ⚠️ **Known gotcha**：若未來貢獻者新增檔案後忘了跑 lint，CI `llm-adapter-firewall` job 會擋 PR，error message 明確指出「Import from `backend.llm_adapter` instead」。
+- ✅ **Reversibility**：若 adapter 層出問題，每個 caller 都可以 revert 單一 import line 回 `from langchain_core.messages import ...`；無 data migration、無 breaking change。
 
 ---
 

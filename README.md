@@ -279,6 +279,32 @@ Group rules keep peer-coupled families together so the lockfile stays internally
 
 CI validates `renovate.json` against the Renovate JSON schema in the `renovate-config` job before any other gate runs — typos cannot silently disable the bot.
 
+### LangChain / LangGraph adapter firewall (N4)
+
+All `langchain*` and `langgraph*` imports are funneled through a single module, [`backend/llm_adapter.py`](backend/llm_adapter.py). Every other backend module imports message classes, graph primitives, and provider factories from the adapter — never from LangChain directly.
+
+Why: LangChain ships breaking changes at patch cadence (message shapes, tool-call formats, provider arg names). Keeping the surface contained to one file means a LangChain upgrade is a one-file change plus running the adapter test suite, not an 8-file sweep across agents/, routers/, and tests.
+
+The adapter exposes a stable, version-decoupled API:
+
+| Symbol | Purpose |
+|---|---|
+| `invoke_chat(messages, ...)` | Single synchronous chat turn → text |
+| `stream_chat(messages, ...)` | Async iterator of text chunks |
+| `tool_call(messages, tools, ...)` | Chat with tools bound → normalized `AdapterToolResponse` |
+| `embed(texts, ...)` | Provider-agnostic embeddings (OpenAI + Ollama) |
+| `build_chat_model(provider, ...)` | Provider factory (only `agents.llm` should use directly) |
+| `HumanMessage` / `AIMessage` / `SystemMessage` / … | Re-exported LangChain message primitives |
+| `StateGraph` / `END` / `add_messages` | Re-exported LangGraph primitives |
+| `tool` | Re-exported `@tool` decorator |
+
+A CI gate (`llm-adapter-firewall` job, runs in parallel with `lint`) enforces the firewall by scanning every `backend/**/*.py` for forbidden imports using stdlib `ast`. The script — [`scripts/check_llm_adapter_firewall.py`](scripts/check_llm_adapter_firewall.py) — exits non-zero with `::error file=...,line=...::` annotations if any file other than `backend/llm_adapter.py` (plus its own test file) imports from `langchain*` or `langgraph*`. Upgrades follow this workflow:
+
+1. Bump the `langchain-*` / `langgraph` pin in `backend/requirements.in`.
+2. Regenerate `backend/requirements.txt` via `pip-compile --generate-hashes`.
+3. Run `pytest backend/tests/test_llm_adapter.py` — 50 tests cover all public symbols.
+4. If any test fails, the fix is isolated to `backend/llm_adapter.py`; no other file needs changes.
+
 ## Theme
 
 The UI is deliberately **dark-only** — the "FUI" (fictional user interface)

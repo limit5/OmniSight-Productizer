@@ -126,6 +126,25 @@ jobs:
       - name: validate renovate.json
         run: npx --yes --package renovate@39 -- renovate-config-validator --strict renovate.json
 
+  llm-adapter-firewall:
+    # N4 — fail CI if any file under `backend/` (other than
+    # `backend/llm_adapter.py`) imports from `langchain*` or
+    # `langgraph*`. The adapter is the single bridge between this
+    # repo and LangChain; keeping every other call site behind it
+    # means LangChain upgrades are a one-file change.
+    #
+    # Runs in parallel with `lint` and `renovate-config`. No Python
+    # deps required — the script only uses stdlib `ast` to parse
+    # import statements.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: check llm_adapter firewall
+        run: python3 scripts/check_llm_adapter_firewall.py
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 8

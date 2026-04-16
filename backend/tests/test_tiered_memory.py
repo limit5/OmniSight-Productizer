@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from backend.agents.state import GraphState
-from langchain_core.messages import HumanMessage, AIMessage
+from backend.llm_adapter import HumanMessage, AIMessage
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

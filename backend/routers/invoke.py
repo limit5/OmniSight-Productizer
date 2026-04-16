@@ -681,7 +681,7 @@ async def _llm_decompose(text: str) -> list[str] | None:
         if not llm:
             return None
 
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from backend.llm_adapter import SystemMessage, HumanMessage
         resp = llm.invoke([
             SystemMessage(content=(
                 "You are a task decomposition assistant. Given a compound task, "

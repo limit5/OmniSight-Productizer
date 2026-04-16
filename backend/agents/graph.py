@@ -45,9 +45,7 @@ Graph structure (with tool calling and self-healing loop):
 
 from __future__ import annotations
 
-from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage
-
+from backend.llm_adapter import END, HumanMessage, StateGraph
 from backend.agents.state import GraphState
 from backend.agents.nodes import (
     orchestrator_node,

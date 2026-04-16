@@ -699,12 +699,12 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### N4. LangChain / LangGraph Adapter 防火牆層
-- [ ] `backend/llm_adapter.py`：所有 `langchain*` / `langgraph*` import 集中此檔；其他模組一律只 import `llm_adapter` 的符號
-- [ ] Adapter 公開 stable interface：`invoke_chat`、`stream_chat`、`embed`、`tool_call`（與 LangChain 版本解耦）
-- [ ] 掃全專案：若 `backend/**` 除 `llm_adapter.py` 外仍有 `from langchain` → CI fail
-- [ ] 升 LangChain 時只需改 adapter 層 + 跑 adapter 測試
-- [ ] 單元測試覆蓋 adapter 所有公開方法
-- [ ] 預估：**1 day**
+- [x] `backend/llm_adapter.py`：所有 `langchain*` / `langgraph*` import 集中此檔；其他模組一律只 import `llm_adapter` 的符號
+- [x] Adapter 公開 stable interface：`invoke_chat`、`stream_chat`、`embed`、`tool_call`（與 LangChain 版本解耦）
+- [x] 掃全專案：若 `backend/**` 除 `llm_adapter.py` 外仍有 `from langchain` → CI fail（`scripts/check_llm_adapter_firewall.py` + CI job `llm-adapter-firewall`）
+- [x] 升 LangChain 時只需改 adapter 層 + 跑 adapter 測試
+- [x] 單元測試覆蓋 adapter 所有公開方法（`backend/tests/test_llm_adapter.py` — 50 tests）
+- [x] 預估：**1 day**
 
 ### N5. Nightly Upgrade-Preview CI
 - [ ] `.github/workflows/upgrade-preview.yml`：cron nightly

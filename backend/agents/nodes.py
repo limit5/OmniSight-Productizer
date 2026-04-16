@@ -16,8 +16,7 @@ import json
 import logging
 import re
 
-from langchain_core.messages import AIMessage, RemoveMessage, SystemMessage, ToolMessage
-
+from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm

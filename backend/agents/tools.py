@@ -23,7 +23,8 @@ import re
 from pathlib import Path
 
 import yaml
-from langchain_core.tools import tool
+
+from backend.llm_adapter import tool
 
 logger = logging.getLogger(__name__)
 
@@ -1470,7 +1471,7 @@ async def summarize_state(
         from backend.agents.llm import get_llm
         llm = get_llm()
         if llm:
-            from langchain_core.messages import SystemMessage, HumanMessage
+            from backend.llm_adapter import SystemMessage, HumanMessage
             sys = SystemMessage(content=(
                 "You are a concise summarizer for an embedded AI camera development system. "
                 "Compress the following conversation into a structured digest with these sections:\n"
