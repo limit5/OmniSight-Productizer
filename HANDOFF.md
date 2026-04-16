@@ -1,9 +1,79 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：O3 — Stateless Agent Worker Pool (master)
+> 最後 commit：O4 — Orchestrator Gateway Service (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## O4 (complete) Orchestrator Gateway Service（2026-04-16 完成）
+
+**背景**：O 區塊第五步。O0 ~ O3 把 CATC schema、分散式鎖、Queue、Worker Pool 全部做完，但都還是「手工塞 CATC 進 queue」才能跑。O4 把整個前段接上：Jira 送 webhook → Orchestrator Gateway 解析成 User Story → LLM 自動拆成 DAG → 每個 DAG task 轉成一張 CATC → 四道驗證關卡（schema / cycle / impact_scope pairwise 互斥 / token budget）全部過關 → push 到 O2 queue → Worker pull 出來跑。單一 Jira Story 從此能自動 fan-out 成 N 張並行 CATC，這是「Agent-software-beta 能接 B2B Jira 專案」的最低可銷售單位。
+
+### 做了什麼
+
+**三層服務化**：
+- `backend/orchestrator_gateway.py`（約 650 行）— 純服務層。無 FastAPI 相依，可直接 import 給測試與 CLI 用。
+- `backend/routers/orchestrator.py`（約 230 行）— FastAPI 薄層：`POST /intake` / `POST /replan` / `GET /status/{jira_ticket}` / `GET /status`（operator 列表）。
+- `backend/main.py` — 把 router 用 `settings.api_prefix` mount 進主 app。
+
+**Pipeline**（`intake()` 一口氣完成，任一步驟失敗拋 `IntakeError(reason)`）：
+1. **`parse_jira_webhook`** — 支援 Jira v3 `issue.fields.summary/description`（含 ADF 巢狀）、flat `{jira_ticket, summary}`、混用 shape。key 必須吻合 `^[A-Z][A-Z0-9_]*-\d+$`（同 CATC）。
+2. **LLM splitter（可插拔）** — 預設走 `iq_runner.live_ask_fn` 呼叫 Haiku（`DEFAULT_SPLIT_MODEL=anthropic/claude-haiku-4-5-20251001`），Merger Agent 保留 Opus（`DEFAULT_MERGE_MODEL=anthropic/claude-opus-4-6`）。單元測試直接丟 `splitter=async_fn` 覆蓋，不碰網路。Prompt 裡明定 schema、禁止 cycle / 同 expected_output。
+3. **Token budget gate** — 預設 60 000 tokens（`OMNISIGHT_ORCH_TOKEN_BUDGET` 可覆寫），超過直接 reject `token_budget_exceeded`，並 emit SSE `token_warning/frozen` 給前端。
+4. **`dag_planner.parse_response`** — reuse 既有 extractor（容忍 ```json fences / prose preamble），parse 失敗 → reason=`schema_invalid`。
+5. **`dag_validator.validate`** — reuse 既有 7-rule semantic validator（cycle / unknown_dep / duplicate_id / tier_violation / io_entity / dep_closure / mece），cycle 另走 `cycle_detected` reason。
+6. **`build_catcs_from_dag`** — 每個 DAG task 對映一張 `TaskCard`：
+   - `jira_ticket`：穩定的子任務鍵 `<PROJ>-<base*1000+idx+1>`（過 CATC 正則）。
+   - `impact_scope.allowed`：從 `expected_output` 推導——若是檔案路徑取 parent 目錄 `foo/**`，否則退回 `artifacts/<slug>/**`（讀 upstream 不算寫，不放進 allowed）。
+   - `impact_scope.forbidden`：intake 呼叫方可以全域塞入（如 `test_assets/**`，對齊 CLAUDE.md L1 ground-truth 規則）。
+7. **`check_impact_scope_intersect`（dep-aware）** — pairwise 掃所有 CATC 的 `allowed` globs，用 `catc.globs_overlap`（prefix-overlap + concrete match）判斷衝突。**關鍵設計**：若兩 task 在 DAG 裡有傳遞依賴（BFS forward + reverse），跳過檢查——dist-lock 會在 runtime 把它們序列化，本來就不會並行打架。只有真正能在同 sprint 裡並行觸發爭用的對才會被擋。
+8. **複雜度評分 + Human Review gate** — `complexity_score = 2n + edges + 3*max_fan + (5 if depth>=4 else 0)`；超過 `COMPLEXITY_THRESHOLD=30` → `state=pending` + `require_human_review=true`，CATC **不 push**，等 `POST /replan` 帶 `approver + override_human_review=true` 才放行。
+9. **Queue push** — 每張 CATC 走 `queue_backend.push(card, priority)` 進入 O2，預設 P2（sprint），intake API 可帶 `priority` 覆寫（P0 incident ~ P3 backlog）。
+10. **Audit trail** — 每次 `intake` / `replan` 都寫 `backend.audit.log(action=orchestrator_intake)`，grep 得到 actor + ticket + full outcome dict。
+
+**Replan 路徑**：
+- 簡單 override：`new_story=None + override_human_review=true` → 直接把既存 DAG build CATCs → queue push（略過 LLM 重呼叫）。
+- 重規劃：帶 `new_story` → 把新故事送回 `intake()` 重跑整條 pipeline，`session.replan_count += 1`。
+- 未知 ticket → reason=`missing_fields`。
+
+**狀態查詢**（`GET /status/{jira_ticket}`）：
+- 回傳完整 snapshot：DAG model_dump、每張 CATC 的 `message_id` / `queue_state`（live 從 queue_backend 讀）/ `delivery_count` / `priority` / `allowed` / `forbidden`，外加 Gerrit `patchset` / `ai_vote` / `human_vote` / `both_plus_2` 四個 stub 欄位（shape 提前固定，O6 + O7 補實作）。
+- 404 when ticket 從未進 intake。
+
+### 測試（26 / 26 全 pass，`backend/tests/test_orchestrator_gateway.py`）
+
+- **Parsing (3)**：Jira v3 nested / flat shape / ADF description。
+- **Build CATCs (3)**：每 task 一張卡、subtask key 合法、forbidden_globs 全域套用。
+- **Pairwise intersect (3)**：獨立 DAG 無衝突 / 同 directory 無 dep 有衝突 / 有 dep 抑制誤報。
+- **Complexity (2)**：2-task 遠低於 threshold / 8-task deep chain 超過 threshold。
+- **intake() E2E (7)**：happy path 推進 queue、cycle rejected、impact_scope 衝突 rejected、token 超標 rejected、缺 key rejected、空 LLM 回應 rejected、複雜 DAG pending human review。
+- **replan() (3)**：override 把 10-task pending DAG 推進 queue、新故事重跑 splitter、未知 ticket reject。
+- **HTTP surface (5)**：透過 `client` async fixture（繞開 FastAPI lifespan 啟動驗證）跑 intake → status round-trip、unknown 404、conflict 400、token 402、replan override 200。
+
+### 修改檔案
+
+- **新增** `backend/orchestrator_gateway.py`
+- **新增** `backend/routers/orchestrator.py`
+- **新增** `backend/tests/test_orchestrator_gateway.py`
+- **改動** `backend/main.py`（mount O4 router）
+- **改動** `TODO.md`（O4 全 checkbox → `[x]`）
+- **改動** `HANDOFF.md`（本段）
+
+### 設計取捨
+
+- **服務層 / FastAPI 層分家**：單元測試不用 TestClient / 資料庫就能驗證 90 % 行為；router 只負責 auth、JSON 轉型、錯誤碼映射。類似的分法 O2/O3 已經驗證過好用。
+- **In-memory session registry**：process-local dict 而非 DB。v1 重點是 B2B 銷售 demo，單機足夠；等 multi-worker 需要跨機查 status 再搬去 `dag_storage` 表，API shape 提前固定好 snapshot 欄位不會破相容。
+- **impact_scope check 走 dep-aware**：沒做會誤殺「B 依賴 A 但都改同一目錄」的正常序列，真實 embedded 專案這種鏈超常見（先改 header 再改 impl）。
+- **複雜度用加權和而非 LLM 評估**：100 % 確定性、秒級、無 token 成本；prompt 裡評分會飄。threshold=30 是保守值（2-3 task 完全 open，10 task linear chain 剛好壓線）。
+- **subtask key 生成公式**：`base*1000+idx+1` 讓 Jira 側可以用 `PROJ-402001 / PROJ-402002` 等「看就知道是 PROJ-402 的子任務」，但又不會踩到真實 Jira 鍵空間（真的 PROJ-402001 通常不存在）。
+- **pluggable LLM 用 Callable 而非 registry**：測試一行 `monkeypatch.setattr(…, _deterministic_split(dag))` 就能注入；Registry 是未來的事，現在用不到。
+- **token budget 是 hard gate 而非 warning**：否則 runaway splitter（無限 retry）會燒錢。超標=reject + SSE `frozen`，operator 當下看得到。
+- **complexity pending 是 `state=pending` 而非 raise**：因為這不是 *invalid* intake（Jira 收得好好的）——只是等人類批。HTTP 走 200（帶 `state=pending`）而非 409，ops UX 更好（409 讓 curl reader 以為爛了）。
+- **Gerrit 四欄 stub 先放進 status response**：API schema 提前鎖住，O6 / O7 補實作時不用動前端。
+- **audit 寫在 router 而非 service**：服務層不知道 actor identity；只有 FastAPI 拿得到 `Depends(require_operator)` 的 user。
+- **Jira webhook HMAC 可選**：secret 未設 → 只允許 `require_operator`（dev）；secret 已設 → 強制驗 Bearer / `X-Jira-Webhook-Secret`。匹配既有 `/webhooks/jira` 語意，Jira automation 可雙接。
 
 ---
 

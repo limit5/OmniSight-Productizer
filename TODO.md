@@ -837,18 +837,18 @@ Legend:
 - [x] 預估：**3 day**
 
 ### O4. Orchestrator Gateway Service (#267)
-- [ ] `backend/orchestrator_gateway.py`：獨立 FastAPI app（或現有 backend 內的 router）
-- [ ] `POST /orchestrator/intake` — 接 Jira webhook：解析 User Story → LLM 生成 DAG → 產出 N 張 CATC → impact_scope 互斥檢查 → push queue
-- [ ] `POST /orchestrator/replan` — 手動重規劃（PM approve 後觸發）
-- [ ] `GET /orchestrator/status/{jira_ticket}` — 回傳 DAG 狀態 + 每張 CATC 的 queue/run state + Gerrit patchset review 狀態（兩邊 +2 是否到齊）
-- [ ] DAG validation layer：
-  - [ ] 循環偵測（Tarjan / Kahn）
-  - [ ] impact_scope pairwise 交集檢查（避免同 sprint 內衝突 CATC）
-  - [ ] 複雜度評分 > threshold 時強制 PM approve（flag `require_human_review=true`）
-- [ ] LLM backend 可插拔：DAG 拆分可用 cheaper model（Haiku）、Merger 用 Opus
-- [ ] Token budget gate：整個 intake 流程 token 用量超 budget → reject + SSE 告警
-- [ ] 整合測試：假 Jira webhook → DAG 正確、impact_scope 衝突被擋、token 超標被擋
-- [ ] 預估：**2 day**
+- [x] `backend/orchestrator_gateway.py`：獨立 FastAPI app（或現有 backend 內的 router）
+- [x] `POST /orchestrator/intake` — 接 Jira webhook：解析 User Story → LLM 生成 DAG → 產出 N 張 CATC → impact_scope 互斥檢查 → push queue
+- [x] `POST /orchestrator/replan` — 手動重規劃（PM approve 後觸發）
+- [x] `GET /orchestrator/status/{jira_ticket}` — 回傳 DAG 狀態 + 每張 CATC 的 queue/run state + Gerrit patchset review 狀態（兩邊 +2 是否到齊）
+- [x] DAG validation layer：
+  - [x] 循環偵測（Tarjan / Kahn）
+  - [x] impact_scope pairwise 交集檢查（避免同 sprint 內衝突 CATC）
+  - [x] 複雜度評分 > threshold 時強制 PM approve（flag `require_human_review=true`）
+- [x] LLM backend 可插拔：DAG 拆分可用 cheaper model（Haiku）、Merger 用 Opus
+- [x] Token budget gate：整個 intake 流程 token 用量超 budget → reject + SSE 告警
+- [x] 整合測試：假 Jira webhook → DAG 正確、impact_scope 衝突被擋、token 超標被擋
+- [x] 預估：**2 day**
 
 ### O5. JIRA Bidirectional Sync 深化 (#268)
 - [ ] 抽 `IntentSource` interface：`fetch_story(ticket)` / `create_subtask(parent, payload)` / `update_status(ticket, status)` / `comment(ticket, body)`
