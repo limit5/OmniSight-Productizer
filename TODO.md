@@ -1081,13 +1081,13 @@ Legend:
 - [x] 預估：**2 day**
 
 ### P4. Mobile role skills (#289)
-- [ ] `configs/roles/ios-swift.md`（SwiftUI / UIKit / Combine）
-- [ ] `configs/roles/android-kotlin.md`（Jetpack Compose / Kotlin Coroutines）
-- [ ] `configs/roles/flutter-dart.md`
-- [ ] `configs/roles/react-native.md`
-- [ ] `configs/roles/kmp.md`（Kotlin Multiplatform）
-- [ ] `configs/roles/mobile-a11y.md`（iOS VoiceOver + Android TalkBack）
-- [ ] 預估：**1 day**
+- [x] `configs/roles/mobile/ios-swift.skill.md`（SwiftUI / UIKit / Combine）
+- [x] `configs/roles/mobile/android-kotlin.skill.md`（Jetpack Compose / Kotlin Coroutines）
+- [x] `configs/roles/mobile/flutter-dart.skill.md`
+- [x] `configs/roles/mobile/react-native.skill.md`
+- [x] `configs/roles/mobile/kmp.skill.md`（Kotlin Multiplatform）
+- [x] `configs/roles/mobile/mobile-a11y.skill.md`（iOS VoiceOver + Android TalkBack）
+- [x] 預估：**1 day**
 
 ### P5. Store 提交自動化 (#290)
 - [ ] App Store Connect API 整合：create version / upload build / submit for review / screenshot upload

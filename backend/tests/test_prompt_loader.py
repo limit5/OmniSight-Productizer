@@ -163,3 +163,57 @@ class TestListAvailable:
         assert "claude" in families
         assert "gpt" in families
         assert "gemini" in families
+
+
+class TestMobileRoleSkills:
+    """P4 #289 — Mobile role skills (ios-swift / android-kotlin / flutter-dart /
+    react-native / kmp / mobile-a11y) must be discoverable under category=mobile
+    and carry the right keywords/content to route agent work to them."""
+
+    _EXPECTED = {
+        "ios-swift": ["SwiftUI", "Combine", "XCUITest"],
+        "android-kotlin": ["Jetpack Compose", "Coroutines", "Espresso"],
+        "flutter-dart": ["Flutter", "Dart", "Riverpod"],
+        "react-native": ["React Native", "TurboModule", "Hermes"],
+        "kmp": ["Kotlin Multiplatform", "expect", "xcframework"],
+        "mobile-a11y": ["VoiceOver", "TalkBack", "Dynamic Type"],
+    }
+
+    def test_all_six_mobile_skills_present(self):
+        roles = list_available_roles()
+        mobile_ids = {r["role_id"] for r in roles if r["category"] == "mobile"}
+        assert set(self._EXPECTED.keys()).issubset(mobile_ids), (
+            f"missing mobile role skills: {set(self._EXPECTED.keys()) - mobile_ids}"
+        )
+
+    def test_each_mobile_skill_loads_with_signature_content(self):
+        for role_id, markers in self._EXPECTED.items():
+            content = load_role_skill("mobile", role_id)
+            assert content, f"load_role_skill('mobile', '{role_id}') returned empty"
+            for marker in markers:
+                assert marker in content, (
+                    f"expected '{marker}' in mobile/{role_id} skill content"
+                )
+
+    def test_mobile_skills_expose_metadata(self):
+        roles = {
+            r["role_id"]: r
+            for r in list_available_roles()
+            if r["category"] == "mobile"
+        }
+        for role_id in self._EXPECTED:
+            meta = roles[role_id]
+            assert meta["label"], f"mobile/{role_id} missing label"
+            assert meta["description"], f"mobile/{role_id} missing description"
+            assert meta["keywords"], f"mobile/{role_id} missing keywords"
+
+    def test_mobile_a11y_covers_both_platforms(self):
+        content = load_role_skill("mobile", "mobile-a11y")
+        assert "VoiceOver" in content and "TalkBack" in content, (
+            "mobile-a11y must cover both iOS VoiceOver and Android TalkBack"
+        )
+
+    def test_kmp_references_dual_platform_profiles(self):
+        content = load_role_skill("mobile", "kmp")
+        assert "ios-arm64" in content or "iOS" in content
+        assert "android-arm64" in content or "Android" in content

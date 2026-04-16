@@ -9905,3 +9905,65 @@ Priority P 行動端 vertical 第三塊地基。P0 (#285) 已產出四個 mobile
 - **iOS simulator 不支援 Linux 上 boot**：明確回 `mock` + `detail="xcrun not on PATH (non-macOS host)"`。這不是 bug，是 P1 (#286) 定的 constraint — iOS 需要 `OMNISIGHT_MACOS_BUILDER` 委派到遠端 macOS。P2 simulate-track 在 Linux 只負責驗證 argv 可 build、mobile profile 能 resolve；實跑是 P5 (#290) App Store upload 的責任。
 - **Mobile JSON block shape 與 web/hmi 對齊**：扁平欄位（不巢狀二層），數字 default 0，字串 default ""；這讓下游 dashboard 面板可共用「展開 `.web` / `.mobile` / `.hmi` 的第一層欄位」的 renderer。
 - **`MOBILE_APP_PATH` 缺省回落 WORKSPACE 根**：Agent 跑 `simulate.sh --type=mobile --module=android-arm64-v8a` 不帶 app path 時，driver 的 framework autodetect 會從 repo 根掃 — 可能掃到零個 marker、走 platform fallback 變 `espresso`。這是故意的 smoke 行為，確保「只給 profile id」的最簡單呼叫也能跑完 pipeline 產 envelope。
+
+---
+
+## 2026-04-17 — P4 Mobile role skills (#289)
+
+### 範圍
+補齊 O5 mobile track 的第四塊拼圖：agent routing 需要對應到具體技術棧的行為規範。此前 `configs/roles/` 只有 firmware / software / web / validator / reporter / reviewer / devops 六個 category，mobile 相關 agent 沒有可以 `load_role_skill("mobile", ...)` 的落點，導致 P2 simulate-track（mobile）以及 P7 (#292) 的 `skill-ios` / P8 (#293) 的 `skill-android` scaffold generator 都只能套用通用 role 的系統提示。
+
+### 子階段
+
+#### 子階段 1 — 決定 layout
+- **選項 A：扁平 `configs/roles/ios-swift.md`**（TODO 原字面）。
+- **選項 B：`configs/roles/mobile/<role>.skill.md`**（對齊現有 firmware/software/web 等 category 子資料夾、`.skill.md` 後綴）。
+- **採選項 B**。`backend/prompt_loader.py::list_available_roles` 已寫死走 `_ROLES_DIR / <category> / *.skill.md` glob（L229–244），扁平檔案不會被 discovered。`load_role_skill(category, role_id)` 也以 `<category>/<role_id>.skill.md` 解析（L138）。改 prompt_loader 以支援扁平，會破壞既有 10+ 個角色的載入路徑；而照子資料夾新增是零破壞。
+
+#### 子階段 2 — 6 個 skill file 一次寫完
+每個 skill 都沿用現有 frontmatter schema（`role_id` / `category` / `label` / `label_en` / `keywords` / `tools` / `priority_tools` / `description`）＋ 四大 markdown 段：
+1. **核心職責** — 此角色負責哪些技術決策。
+2. **技術棧預設** — 版本與套件 pinning（與 `configs/platforms/` 的 min/target 一致）。
+3. **作業流程** — 落到 `scripts/simulate.sh --type=mobile` 與 P1–P3 的具體整合步驟。
+4. **品質標準（對齊 P2 mobile simulate-track）** — 量化門檻（測試覆蓋率 / bundle size / 啟動時間 / a11y violations）。
+5. **Anti-patterns** + **必備檢查清單**。
+
+| 角色 | 關鍵字主軸 | 平台對齊 |
+| --- | --- | --- |
+| `ios-swift` | SwiftUI / Combine / XCUITest / Swift Concurrency | `ios-arm64.yaml`（min 16.0、sdk 17.5） |
+| `android-kotlin` | Jetpack Compose / Coroutines / Espresso / R8 | `android-arm64-v8a.yaml`（min 24、sdk 35） |
+| `flutter-dart` | Flutter 3.22+ / Dart 3.4+ / Riverpod / go_router | 雙平台 profile |
+| `react-native` | RN 0.75+ New Architecture（Fabric + TurboModules + Hermes） | 雙平台 profile |
+| `kmp` | Kotlin Multiplatform（shared commonMain）＋ optional CMP | 雙平台 profile |
+| `mobile-a11y` | VoiceOver + TalkBack / Dynamic Type / Accessibility Scanner | 橫向對齊，非平台專屬 |
+
+所有 skill 都顯式引用 P1（toolchain delegation）、P2（simulate-track）、P3（secret_store / signing material），確保 agent 知道不要把 keystore / provisioning profile / API key 寫進 repo，且知道 iOS build 在 Linux 要透過 `OMNISIGHT_MACOS_BUILDER` 委派。
+
+#### 子階段 3 — 測試
+在 `backend/tests/test_prompt_loader.py` 新增 `TestMobileRoleSkills`（5 cases）：
+- `test_all_six_mobile_skills_present` — 驗 6 個 role_id 都在 `list_available_roles()` 裡以 category=mobile 出現。
+- `test_each_mobile_skill_loads_with_signature_content` — 每個 skill `load_role_skill` 回非空，且含關鍵 marker（如 `ios-swift` 必含 `SwiftUI` + `Combine` + `XCUITest`；`react-native` 必含 `TurboModule` + `Hermes`）。
+- `test_mobile_skills_expose_metadata` — `label` / `description` / `keywords` 三必填 frontmatter 欄位非空。
+- `test_mobile_a11y_covers_both_platforms` — `mobile-a11y` 同時覆蓋 VoiceOver + TalkBack。
+- `test_kmp_references_dual_platform_profiles` — KMP 文件同時提到 iOS 與 Android 側。
+
+全 27 cases（22 既有 + 5 新）pass：`pytest backend/tests/test_prompt_loader.py`。
+
+### 修改檔案
+- **新增** `configs/roles/mobile/ios-swift.skill.md`
+- **新增** `configs/roles/mobile/android-kotlin.skill.md`
+- **新增** `configs/roles/mobile/flutter-dart.skill.md`
+- **新增** `configs/roles/mobile/react-native.skill.md`
+- **新增** `configs/roles/mobile/kmp.skill.md`
+- **新增** `configs/roles/mobile/mobile-a11y.skill.md`
+- **改動** `backend/tests/test_prompt_loader.py`（+5 cases，`TestMobileRoleSkills`）
+- **改動** `TODO.md`（P4 六項 `[x]`）
+- **改動** `HANDOFF.md`（本段）
+
+### 設計取捨
+- **子資料夾 `configs/roles/mobile/` vs 扁平檔名** — `prompt_loader.py` 的 role discovery 以 category 子資料夾為索引鍵，改扁平會牽動 discovery / routing / 既有 role label API 三層，外加破壞 agent 啟動時的 `(category, role_id)` pair 語意。沿用既有 convention 零風險。TODO 原字面為扁平檔名，但實作時以程式既有慣例為準。
+- **所有 skill 把品質門檻量化並對齊 P2 simulate-track** — 若只寫「要無障礙」「要有測試」，agent 在實作時無法判斷 PR 何時算 ready。每個 skill 都落到具體數字（覆蓋率 ≥ 70%、對比 ≥ 4.5:1、ipa ≤ 30MB、p95 啟動 ≤ 1.5s），這些數值跟 P2 mobile gate 的 fail/pass threshold 對齊，避免 skill 文件與 simulate-track gate 漂移。
+- **每個 skill 都點名 P1 / P2 / P3 的整合方式** — 例如 ios-swift 明寫「簽章材料由 P3 `secret_store` HSM 注入、嚴禁 `.p12` 進 repo」；android-kotlin 明寫「走 P1 Docker image」。這讓 agent 在 sub-step 3（實作）時不需要額外查 HANDOFF 歷史就知道 toolchain/signing 的流向。
+- **`react-native` 要求新專案直上 New Architecture** — 0.75+ 已是 2026 主流，若允許停 legacy bridge 會讓後續 P5 上架流程遇到 TurboModule-only 依賴時炸。明確在 anti-patterns 列「同時載入 legacy + Turbo」。
+- **`kmp` 對 Compose Multiplatform 採保守態度** — 目前 iOS 端仍為 Beta，CMP 是「可選」不是「預設」，避免 agent 把 iOS UI 層強制走 CMP 導致與 P7 skill-ios scaffold 打架。
+- **`mobile-a11y` 與 `web/a11y.skill.md` 分離** — 行動端 a11y 的契約是 VoiceOver + TalkBack（兩個 OS 級 screen reader），與 Web 的 axe-core / Lighthouse 是不同 tooling chain。強行共用會讓 P2 mobile track 的 a11y gate 邏輯無法落地。
