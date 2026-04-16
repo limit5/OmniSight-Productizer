@@ -901,13 +901,13 @@ Legend:
 - [x] 預估：**1.5 day**（原 1d + 0.5d Gerrit submit-rule 配置與測試）
 
 ### O8. 遷移路徑：從單程序到分散式（Feature Flag + Dual-mode） (#271)
-- [ ] `OMNISIGHT_ORCHESTRATION_MODE=monolith | distributed`（預設 monolith 保留既有行為）
-- [ ] `distributed` 模式：agent 執行路徑從 LangGraph node 改走 queue dispatch
-- [ ] `monolith` 模式：保留現有 LangGraph 呼叫路徑不變
-- [ ] 雙模式 behavior parity 測試：同一 input 在兩種 mode 下產出相同 event sequence
-- [ ] 灰度切換手冊 `docs/ops/orchestration_migration.md`
-- [ ] Rollback 劇本：切回 monolith 時如何處理 in-flight queue 任務
-- [ ] 預估：**2 day**
+- [x] `OMNISIGHT_ORCHESTRATION_MODE=monolith | distributed`（預設 monolith 保留既有行為）（`backend/config.py` + `backend/orchestration_mode.py::current_mode` — env > settings > default）
+- [x] `distributed` 模式：agent 執行路徑從 LangGraph node 改走 queue dispatch（`_distributed_dispatch` → `_build_catc_from_request` → `queue_backend.push` → wait for worker ack/DLQ/timeout）
+- [x] `monolith` 模式：保留現有 LangGraph 呼叫路徑不變（`_monolith_dispatch` → `backend.agents.graph.run_graph`）
+- [x] 雙模式 behavior parity 測試：同一 input 在兩種 mode 下產出相同 event sequence（`PARITY_EVENT_SEQUENCE` + `test_orchestration_mode.py::TestDualModeParity`，含 happy path + failure path）
+- [x] 灰度切換手冊 `docs/ops/orchestration_migration.md`（pre-flight, per-tenant 灰度, Prometheus invariants, SSE spot-check, troubleshooting）
+- [x] Rollback 劇本：切回 monolith 時如何處理 in-flight queue 任務（soft `wait` strategy + hard `redispatch_monolith` strategy，CLI：`python -m backend.orchestration_drain`）
+- [x] 預估：**2 day**
 
 ### O9. 觀測性：鎖 / 佇列 / Merger / 雙簽狀態可視化 (#272)
 - [ ] Dashboard `components/omnisight/orchestration-panel.tsx`：queue depth by priority、held locks by task、**merger agent +2 rate / abstain rate / security refusal rate**、**待人工 +2 的 change 列表（含 merger confidence）**、worker pool capacity

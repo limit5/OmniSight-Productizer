@@ -1,9 +1,54 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：O7 — Gerrit dual-+2 submit-rule + Merge Arbiter pipeline (#270)
-> Tag：`v0.1.0` — 首個正式 release
-> 工作目錄狀態：O7 實作完成，測試全綠（O7 新增 33 條 + 既有 merger/orchestrator 63 條全通過）
+> 最後 commit：O8 — monolith↔distributed feature flag + dual-mode parity (#271)
+> Tag：`v0.1.0` — 首個正式 release（O8 為 migration infra，不 bump tag）
+> 工作目錄狀態：O8 實作完成，測試全綠（O8 新增 26 條 + 既有 queue/worker/merger/orchestrator/arbiter 190 條 + graph/catc/lock 85 條全通過）
+
+---
+
+## O8 (complete) 遷移路徑：monolith ↔ distributed feature flag + dual-mode（2026-04-17 完成）
+
+**背景**：O0–O7 把 enterprise 分散式 pipeline（CATC / queue / dist-lock / worker / orchestrator / merger / submit-rule）全搭起來了，但既有「chat / invoke / webhook → LangGraph graph in-process」的路徑還沒讓出位置。O8 不是重寫，而是**在兩條路徑上架一個 single seam**：`backend.orchestration_mode.dispatch()` 成為唯一的 agent-task 執行入口，由 `OMNISIGHT_ORCHESTRATION_MODE` 在 per-dispatch 層決定走 monolith（legacy、in-proc run_graph）還是 distributed（push CATC → worker pool → ack/DLQ）。預設永遠是 `monolith`：升 binary 本身**絕不**改變 runtime 行為，operator 必須明確 per-tenant 翻 flag 才會生效。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `backend/orchestration_mode.py`（~480 行，新檔）| 核心模組：`OrchestrationMode` enum + `current_mode()`（env > override > settings > default 解析）+ `set_mode_override()`（test 用）+ `DispatchRequest` / `DispatchOutcome` data models + `dispatch()` async entry point（兩個 mode 共用同一 4-step SSE 序列 `PARITY_EVENT_SEQUENCE`）+ `_monolith_dispatch`（forwards to `run_graph`）+ `_distributed_dispatch`（synth CATC → `queue_backend.push` → poll 直到 Done/DLQ/timeout，DLQ 分支 probe `dlq_list` 以區分 ack 與 DLQ 的「get 返回 None」）+ in-flight registry（`_register_inflight` / `_unregister_inflight` / `list_inflight()`）+ `drain_distributed_inflight()` rollback 助手（`wait` 與 `redispatch_monolith` 兩策略）|
+| `backend/orchestration_drain.py`（~60 行，新檔）| CLI：`python -m backend.orchestration_drain --strategy {wait,redispatch_monolith} --wait-s <float>` → 跑 `drain_distributed_inflight` → 列印單行 JSON `DrainReport` → exit 0（clean）或 2（still_pending）供 ops 腳本判讀 |
+| `backend/config.py` | 新增 `orchestration_mode: str = "monolith"` + `orchestration_distributed_wait_s: float = 600.0` 兩個 settings，env prefix `OMNISIGHT_` 沿用既有 pydantic 機制，預設值選定原則：「升 binary 不改 runtime 行為」 |
+| `docs/ops/orchestration_migration.md`（~230 行，新檔）| Runbook：§1 grey-deploy（pre-flight health checks → per-tenant 翻 flag → widen cohort）、§2 rollback（soft `wait` / hard `redispatch_monolith` / emergency stop 三條路徑）、§3 parity 驗證（synthetic probe + Prometheus invariants + SSE spot-check）、§4 troubleshooting（timeout / push failure / CI parity fail / 殘留 inflight）、Appendix config reference |
+| `backend/tests/test_orchestration_mode.py`（26 條，新檔）| Mode resolution（env > override > settings + unknown fallback + 大小寫不敏感）+ Monolith dispatch（回傳 run_graph state、parity sequence、graph 例外變 outcome 不 raise）+ Distributed dispatch（CATC push + wait ack、no-worker timeout、DLQ 路徑、queue push failure 回報、auto-mint ticket）+ Dual-mode parity（happy + failure 兩組）+ Drain（empty / wait-drained / wait-timeout / redispatch_monolith / invalid strategy 五條）+ CLI（exit 0 / exit 2）+ Misc（settings surface、snapshot copy 不受 mutation 影響、synth ticket 符合 CATC regex、type guard）|
+| `TODO.md` | O8 全部 `[ ]` → `[x]`，每條標註對應檔案 / 函式 |
+
+**驗證結果：**
+
+* `backend/tests/test_orchestration_mode.py`：**26/26 綠**。
+* Regression：`test_queue_backend.py`（49 條）+ `test_orchestrator_gateway.py`（26 條）+ `test_worker.py`（32 條）+ `test_merger_agent.py`（37 條）+ `test_merge_arbiter.py`（12 條）+ `test_merge_arbiter_http.py`（5 條）+ `test_submit_rule_matrix.py`（16 條）+ `test_config.py`（13 條）+ `test_graph.py`（9 條）+ `test_catc.py`（35 條）+ `test_dist_lock.py`（41 條）合計 **275 條全綠**。
+* Import 乾淨：`from backend import orchestration_mode, orchestration_drain` OK；`python3 -c "from backend.orchestration_mode import current_mode; print(current_mode())"` → `OrchestrationMode.monolith`（fixture-free default）。
+
+**設計決策備忘：**
+
+1. **Seam not rewrite**：O8 **沒有**改動 `run_graph` 的 signature 或行為，也沒動 `queue_backend` / `worker` / `orchestrator_gateway` 任何一行。`dispatch()` 是**新的**單一 entry point，呼叫方（chat / invoke / webhook router）是否要改走它是 follow-up 工作；現役 callers 繼續直接呼叫 `run_graph` 不會壞。這讓 O8 的風險半徑縮到 config + 一個新模組 + 一支 CLI，任何時候想放棄都可以 revert 而不影響任何其它 phase 的交付。
+2. **Event parity = UI / audit 契約**：`PARITY_EVENT_SEQUENCE` 是 frozen tuple，兩個 mode 的 `dispatch()` **必須**按順序發出這四個 event。`test_same_command_produces_same_event_sequence_in_both_modes` + `test_parity_holds_on_failure_path_too` 把這條線釘在 CI；未來任何一條路徑新加 stage 都必須同步更新 tuple 與對向 mode，CI 強制兩邊同步演化。
+3. **Distributed 失敗分類 fail-safe**：InMemory queue 在 `ack()` 與 DLQ 兩條路徑都會把 `_messages` 裡的記錄刪除 → `get(msg_id)` 返回 None。如果只憑 `None` 判「成功」會把 DLQ 誤算成 ack、UI 上顯示「完成」但真相是 worker 三試皆敗。所以 `_distributed_dispatch` 在 `None` 分支會**額外 probe `dlq_list()`**：若找得到該 msg_id → 回 `ok=False + error=root_cause`；找不到才算 ack。**silent success is never assumed on disappearance**。
+4. **In-flight registry 明確 process-local**：這是個 orchestrator-pod-local 的 tracking dict，不是 cross-host ground truth。cross-host accounting 永遠以 queue 自己的 `depth()` / `dlq_list()` 為準，registry 只服務 (a) 本 orchestrator 的 rollback drain、(b) tests。runbook 明確要求 operator 在 multi-shard 部署下**每個 pod 各跑一次 drain**，而不是依賴單一入口做全局 drain。
+5. **Rollback 兩策略涵蓋不同風險**：`wait` 是 worker pool 還在的 soft path（停 enqueue、等自然終結）；`redispatch_monolith` 是 worker pool 要倒的 hard path（forcibly 把每條 still-pending 的 original user_command 拉回 monolith 路徑跑一次）。後者**不會**試圖 dequeue / ack 原 message（worker 可能還會自然 finish），依賴的是 agent 執行的 idempotency（Gerrit push、JIRA comment 等 O10 要求的 protocol 保證）。重複 = safe，丟失 = not safe，所以選重複。
+6. **`_synth_jira_ticket()` 的 deterministic uniqueness**：monotonic counter + `int(time.time() * 1000)` + 避開 CATC 64-char 限制。Tests 可以 `synthesised_jira_ticket="OPTEST-1"` 注入固定值得到決定性；production 不注入、同一 process 內用 counter 保證不撞、不同 process 靠 ms timestamp + lag 降低衝突率，碰撞時下游 CATC validator 會 reject、synth 端不重試（ticket 衝突是 operator-visible 的 audit 訊號，不該靜默處理）。
+7. **CLI exit code 2 ≠ 失敗**：`orchestration_drain --strategy wait` 在 `still_pending > 0` 時 return 2 而不是 0——這是給 ops script 的**「半結束」訊號**：drain 技術上跑完了，但還有殘留。exit 0 代表「可以關 worker pool 了」；exit 2 代表「延長 wait-s 或轉 redispatch_monolith」。絕對不要把 2 當 failure 來重試同一命令，那會無窮輪迴。
+8. **`_mode_override` 僅用於 test 與極端 ops 場景**：正常部署翻 env var。override 存在是因為 runbook §2.3（emergency stop）有時需要程式內同步翻，避免 race——例如 SIGUSR1 handler 把 override 設成 `monolith` 後才開始 drain。runbook 沒教這個用法，但 hook 在 `set_mode_override()` 公開 API 已備妥。
+
+**後續建議（未動到的相鄰工作項）：**
+
+* **Migration 實際呼叫面**：`backend/routers/chat.py` / `backend/routers/invoke.py` / `backend/routers/webhooks.py` 現在仍直接呼叫 `run_graph`。未來把它們改走 `dispatch(DispatchRequest(user_command=...))` 才算 migrate 完成，O8 只交付 seam + 契約，callers 遷移是獨立 PR（per-router），churn 小、每條 PR 可獨立 revert。
+* **O9 Dashboard**：`orchestration.dispatch.started|routed|executed|completed` 四個 SSE event 已經發出，UI 可以直接訂閱畫「dispatch funnel by mode」——monolith vs distributed 的 completion rate、failure rate、p99 latency。Prometheus invariants 也列在 runbook §3.2。
+* **O10 安全加固**：distributed 路徑的 CATC 走一般 queue → worker pool，O10 要加的 HMAC + TLS + worker attestation 全自動適用，O8 沒引入新的信任邊界。`orchestration_drain` CLI 當前**不**做任何身分驗證——如果 ops 是 SSH 直入 pod 執行就 OK；若未來要 exposed 成 HTTP endpoint，必須掛 O10 的 `merger-agent-bot` 類帳號驗證模式。
+* **Distributed sandbox worker 的 agent_sub_type / model 傳遞**：目前 `_build_catc_from_request` 把 `model_name` / `agent_sub_type` 寫進 `handoff_protocol` 字串，worker 側需要 parse 回來才能用；這邏輯目前在 worker 端是 best-effort skip（stub executor 無視）。Real production deployment 需要在 worker 側加一個 parser 把這些欄位 materialize 成 `AgentExecutor` 的 kwargs。O8 scope 內 stub executor 已足夠證明 contract，production hooks 留給 migration 時一併補。
+
+**Operator TODO（`[O]` 項目，TODO.md 目前未增加）：**
+
+* 暫無。O8 所有 code side 都完成；operator 要實際翻 `OMNISIGHT_ORCHESTRATION_MODE=distributed` 前得先部署 worker pool（`python -m backend.worker run`），那部分在 O3 runbook 已有，不屬 O8 新增 operator-blocked 工作。
 
 ---
 

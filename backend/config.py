@@ -172,6 +172,23 @@ class Settings(BaseSettings):
     # 0 = disabled. Default 10 KB matches the design spec.
     sandbox_max_output_bytes: int = 10_000
 
+    # O8 (#271): orchestration execution mode. "monolith" keeps every
+    # agent run going through the LangGraph StateGraph in-process (legacy
+    # path since v0.1.0). "distributed" routes the same run through
+    # queue_backend.push → worker pool → Gerrit so a single orchestrator
+    # can scale horizontally. Both modes MUST emit the same SSE event
+    # sequence — parity is enforced by test_orchestration_mode.py. Default
+    # stays "monolith" so upgrading the binary alone never changes runtime
+    # behaviour; operators flip the env var explicitly per tenant/stage.
+    orchestration_mode: str = "monolith"
+    # O8 rollback knob: how long dispatch() will block waiting for a
+    # distributed worker to finish before falling back to the monolith
+    # path. 0 disables the fallback (production default — surface the
+    # timeout instead of silently executing twice). Non-zero enables the
+    # grey-deploy dual-write: useful during migration to see "did the
+    # queue eat my task?" without blocking the user indefinitely.
+    orchestration_distributed_wait_s: float = 600.0
+
     # M5: prewarm pool multi-tenant safety. Values:
     #   * "per_tenant" — pool bucketed by tenant_id; A's prewarm cannot
     #     be consumed by B (default; SaaS-safe).

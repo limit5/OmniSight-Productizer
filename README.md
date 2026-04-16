@@ -35,6 +35,7 @@ FastAPI (WSL2:8000)               Backend — Multi-agent engine (14 routers, ~8
     +-- IntentSource Bridge       JIRA / GitHub / GitLab vendor-agnostic adapter + bidirectional status sync + audit (O5)
     +-- Merger Agent              Conflict-block resolver + Gerrit patchset push + scope-limited +2 vote (O6, human +2 still required for submit)
     +-- Merge Arbiter             Gerrit webhook → merger → human-vote reconciliation; dual-+2 SSOT evaluator + GitHub Actions fallback (O7 / /api/v1/orchestrator/merge-conflict, /human-vote, /check-change-ready)
+    +-- Orchestration Mode Flag   monolith (run_graph in-proc, default) ↔ distributed (queue dispatch) feature flag + parity-locked SSE sequence + rollback drain CLI (O8 / OMNISIGHT_ORCHESTRATION_MODE, docs/ops/orchestration_migration.md)
     +-- LangGraph Pipeline        Orchestrator → Conversation/Specialist → Tool Executor → Summarizer
     +-- 8 LLM Providers           Anthropic, OpenAI, Google, xAI, Groq, DeepSeek, Together, Ollama
     +-- 29 Sandboxed Tools        File, Git, Bash, Simulation, Platform, Review, Report
