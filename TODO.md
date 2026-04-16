@@ -1015,15 +1015,15 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### W8. SKILL-ASTRO（選配, #282）
-- [ ] Astro 5 content-heavy 站骨架
-- [ ] Islands architecture + MDX 支援
-- [ ] Sanity/Contentful CMS 接口
-- [ ] 預估：**1 day**
+- [x] Astro 5 content-heavy 站骨架
+- [x] Islands architecture + MDX 支援
+- [x] Sanity/Contentful CMS 接口
+- [x] 預估：**1 day**
 
 ### W9. 共用 CMS adapters（Headless CMS 接口 library）(#283)
-- [ ] Sanity / Strapi / Contentful / Directus adapters
-- [ ] 統一 `CMSSource` interface：`fetch(query)` / `webhook_handler(payload)`
-- [ ] 預估：**1 day**
+- [x] Sanity / Strapi / Contentful / Directus adapters
+- [x] 統一 `CMSSource` interface：`fetch(query)` / `webhook_handler(payload)`
+- [x] 預估：**1 day**
 
 ### W10. Web 觀測性與監控 (#284)
 - [ ] Sentry / Datadog RUM adapter
