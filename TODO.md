@@ -563,11 +563,11 @@ Legend:
 - [x] 預估：**1 day**
 
 ### I10. Multi-worker uvicorn + shared state
-- [ ] uvicorn `--workers N`（N = CPU_cores / 2，16 core → 8 worker）
-- [ ] Shared state 搬 Redis：`_parallel_in_flight` / AIMD budget / SSE subscriber registry / rate limit
-- [ ] Sticky session 若需要（SSE 連線要黏 worker）
-- [ ] 測試：滾動重啟 worker 無事件遺失
-- [ ] 預估：**2 day**
+- [x] uvicorn `--workers N`（N = CPU_cores / 2，16 core → 8 worker）
+- [x] Shared state 搬 Redis：`_parallel_in_flight` / AIMD budget / SSE subscriber registry / rate limit
+- [x] Sticky session 若需要（SSE 連線要黏 worker）
+- [x] 測試：滾動重啟 worker 無事件遺失
+- [x] 預估：**2 day**
 
 **I 總預估**：**16.5 day**
 

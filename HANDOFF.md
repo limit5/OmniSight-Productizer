@@ -1,9 +1,52 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I9 Per-IP + per-user + per-tenant rate limiting with Redis token bucket (master)
+> 最後 commit：I10 Multi-worker uvicorn + Redis shared state (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I10 (complete) Multi-worker uvicorn + shared state（2026-04-16 完成）
+
+**背景**：I1–I9 完成 multi-tenancy 基礎，但所有 state 仍在單一 worker 的 process memory 中。I10 將 14+ 個 in-memory state 搬到 Redis，支援 uvicorn `--workers N`（N = CPU/2）多 worker 並行，SSE 事件跨 worker 傳遞不遺失。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/shared_state.py` | Redis-backed primitives（counter, KV, flag, log buffer, token usage, hourly ledger, halt flag, pub/sub），自動降級 in-memory | ✅ 完成 |
+| EventBus cross-worker | Redis Pub/Sub 跨 worker SSE 事件廣播，origin worker 過濾避免重複 | ✅ 完成 |
+| Decision Engine shared | `_parallel_in_flight` → SharedCounter, `_current_mode` → SharedKV | ✅ 完成 |
+| Token budget shared | `token_frozen` → SharedFlag, usage → SharedTokenUsage, hourly → SharedHourlyLedger | ✅ 完成 |
+| System log shared | `_log_buffer` → SharedLogBuffer (Redis list) | ✅ 完成 |
+| Uvicorn multi-worker | Dockerfile + systemd：`OMNISIGHT_WORKERS` env（default CPU/2, min 2） | ✅ 完成 |
+| Config | `workers` setting + `redis[hiredis]` dependency | ✅ 完成 |
+| Sticky session | 不需要：Redis Pub/Sub 解決 SSE 跨 worker，無需 sticky session | ✅ N/A |
+| 測試（35 項） | shared state primitives + cross-worker delivery + decision engine + token budget | ✅ 35/35 pass |
+
+**新增/修改檔案**：
+- `backend/shared_state.py` — 新增：Redis-backed shared state primitives
+- `backend/events.py` — EventBus 新增 cross-worker pub/sub delivery
+- `backend/decision_engine.py` — parallel_in_flight + mode 改用 shared state
+- `backend/routers/system.py` — log buffer + token usage + budget flags 改用 shared state
+- `backend/agents/llm.py` — 改用 `is_token_frozen()` 跨 worker 檢查
+- `backend/agents/nodes.py` — 同上
+- `backend/routers/observability.py` — 同上
+- `backend/main.py` — 啟動 pubsub listener + 關閉 shared_state
+- `backend/config.py` — 新增 `workers` setting
+- `backend/requirements.txt` — 新增 `redis[hiredis]`
+- `Dockerfile.backend` — 動態 worker 數量
+- `deploy/systemd/omnisight-backend.service` — 動態 worker 數量
+- `backend/tests/test_shared_state.py` — 35 項新增測試
+
+**設計決策**：
+- Redis 不可用時自動降級 in-memory（開發環境零依賴）
+- 每個 shared primitive 都有 `threading.Lock` 保護的 in-memory fallback
+- EventBus 用 `origin_worker` id 過濾，避免同 worker 收到自己發的事件
+- `_parallel_in_flight` 用 Redis INCR/DECR 保證原子性，跨 worker 的 slot 計數一致
+- Token budget `frozen` flag 用 SharedFlag，任何 worker 觸發凍結立即對所有 worker 生效
+- Hourly ledger 用 Redis sorted set（score = timestamp），自動 window 老化
+- Sticky session 不需要：Redis Pub/Sub 確保所有 worker 收到所有 SSE 事件
+- Worker 數量 default CPU/2（符合 I/O-bound FastAPI workload 最佳實踐）
 
 ---
 
