@@ -130,6 +130,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Rate limiting**: 3-dimension (per-IP + per-user + per-tenant) Redis token bucket (I9) — plan-based quotas (free/starter/pro/enterprise), automatic in-memory fallback
 - **Resource hard isolation**: cgroup CPU/mem (M1), per-tenant disk quota + LRU sweep (M2), per-tenant per-key LLM circuit breaker (M3)
 - **Per-tenant observability + billing (M4)**: cgroup v2 scraper (`backend/host_metrics.py`) samples every running sandbox by `tenant_id` label → 7 Prometheus metrics (`tenant_cpu_percent`, `tenant_mem_used_gb`, `tenant_disk_used_gb`, `tenant_sandbox_count` + `tenant_cpu_seconds_total` / `tenant_mem_gb_seconds_total` / `tenant_derate_total`); `/host/metrics` REST with admin/user ACL; culprit-aware AIMD (`tenant_aimd.plan_derate()`) derates only the outlier tenant instead of flat host-wide; `scripts/usage_report.py` renders billing-ready text/JSON/CSV
+- **Per-tenant egress allowlist (M6)**: DB-backed `tenant_egress_policies` (`allowed_hosts[]` + `allowed_cidrs[]` + `default_action`) replaces the global `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` env. Sandbox launch path consults per-tenant policy first, falls back to legacy env when DB row missing. `python -m backend.tenant_egress emit-rules` produces a JSON rule plan that `scripts/apply_tenant_egress.sh` materialises as iptables `-m owner --uid-owner <sandbox_uid>` chains. Settings → Network Egress UI lets viewer/operator file `host`/`cidr` requests; admin one-click approve merges into the live policy. Default-deny: empty allow-list → `--network none`
 
 ### Reliability & Recovery
 - **Token budget**: 3-tier (80% warn → 90% downgrade → 100% freeze) + daily auto-reset
@@ -218,6 +219,20 @@ Speculative Tier-1 container pre-warm (Phase 67-C) is now tenant-scoped. The pol
 Regardless of policy, every `consume()` force-clears the tenant's `/tmp/omnisight_ingest/<tid>/` namespace before handing the container to the real task — so no speculative scratch-file residue ever leaks into a real workspace. Cleanup failures are logged but never void a valid pre-warm hit.
 
 Pre-warm itself remains opt-in via `OMNISIGHT_PREWARM_ENABLED=true`; `policy=disabled` takes precedence when both are set.
+
+## Per-tenant Egress Allowlist (M6)
+
+Tier-1 sandbox egress is now controlled per tenant through DB-backed policy plus an admin approval workflow. The legacy global `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` env is auto-migrated into `t-default` on first boot and remains a fallback when no DB row exists.
+
+| Layer | What happens |
+|---|---|
+| `tenant_egress_policies` table | One row per tenant: `allowed_hosts[]`, `allowed_cidrs[]`, `default_action` (`deny` recommended). DB is the source of truth. |
+| Sandbox launch | `start_container` resolves `tenant_id` → `sandbox_net.resolve_network_arg(tenant_id=…)` consults the policy. Empty allow-list = `--network none` (full air-gap). Any allowed host/CIDR opens the bridge. |
+| Iptables installer | Operator runs `sudo scripts/apply_tenant_egress.sh --tenant <tid> --uid <sandbox_uid>` (or `--all`). The script reads the JSON rule plan from `python -m backend.tenant_egress emit-rules` and installs an `OMNISIGHT-EGRESS-<tid>` chain hooked into `OUTPUT -m owner --uid-owner <uid>`, with a terminal `DROP` (when `default_action=deny`). |
+| Approval workflow | Viewer/operator file additions via the Settings → Network Egress UI. The request lands as `pending` in `tenant_egress_requests`. Admin clicks `approve` (or `reject`); approval merges the value into the live policy and audits the decision. |
+| Audit chain | `tenant_egress.upsert`, `request_submit`, `request_approve`, `request_reject` all enter the per-tenant `audit_log` hash chain — answers "who allowed `evil.com` for tenant X" via a single `audit.query(entity_kind='tenant_egress')`. |
+
+Operators wanting to keep the pre-M6 single-tenant flow do nothing — the legacy env still works and the t-default policy gets a `legacy-migration` audit row on first upgrade.
 
 ## Theme
 

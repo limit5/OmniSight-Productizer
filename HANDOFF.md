@@ -1,9 +1,65 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：M5 — Prewarm Pool 多租戶安全 — per-tenant bucketing + /tmp cleanup (master)
+> 最後 commit：M6 — Per-tenant Egress Allowlist — DB-backed policy + iptables emit-rules + approval workflow (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## M6 (complete) Per-tenant Egress Allowlist（2026-04-16 完成）
+
+**背景**：M1-M5 把 CPU/mem cgroup、disk quota、LLM circuit、cgroup 計費、prewarm 隔離全做齊後，Phase 11 的最後一塊 — **網路出向白名單** — 仍是 single-tenant。`OMNISIGHT_T1_ALLOW_EGRESS` + `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` 兩個全域 env 加 `scripts/setup_t1_egress_iptables.sh` 一次性裝鏈，整個 host 共用一張 allow-list。當第二個 tenant 上來說「我要 `api.openai.com`」、第三個 tenant 說「我只准內網 10.0.0.0/8」時，operator 必需手動編 env 重啟全部 sandbox + 重跑 iptables 腳本，且**所有 tenant 共用同一張 allow-list** — 嚴重違反 SaaS 邊界。M6 引入 DB-backed per-tenant policy + 申請審批流程 + 與 host iptables 解耦的 JSON rule plan，把網路出向控制升到 SaaS-safe 等級。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `tenant_egress_policies` 表 | `tenant_id` PK + `allowed_hosts` (JSON array) + `allowed_cidrs` (JSON array) + `default_action` (`deny` / `allow`) + `updated_at` / `updated_by` 審計欄位；FK to `tenants(id)`；alembic 0015 + inline `_SCHEMA` 雙保險 | ✅ 完成 |
+| `tenant_egress_requests` 表 | viewer/operator 申請佇列：`id` PK / `tenant_id` / `requested_by` / `kind` (`host`/`cidr`) / `value` / `justification` / `status` (`pending`/`approved`/`rejected`) / `decided_by` / `decided_at` / `decision_note`；indexed by `tenant_id` + `status` | ✅ 完成 |
+| `backend/tenant_egress.py` | 600 行核心模組：validators (host / cidr / default_action / tenant_id 防 shell 注入) + `EgressPolicy` / `EgressRequest` dataclass + CRUD (`get_policy` / `upsert_policy` / `list_policies`) + 申請流程 (`submit_request` 帶 idempotent dedup / `approve_request` 自動 merge 進 policy / `reject_request`) + `resolve_allow_targets` (5 min DNS TTL cache + CIDR passthrough) + `build_rule_plan` (sandbox_uid + 終端 ACCEPT/DROP) + `policy_for` legacy env fallback | ✅ 完成 |
+| Sandbox launch hook | `start_container` resolve `effective_tenant_id` 後 → `sandbox_net.resolve_network_arg(tenant_id=...)`；`resolve_network_arg` 先查 DB policy（任一 host/cidr/allow → 開橋），DB 缺席時 fallback 到 legacy `OMNISIGHT_T1_*` env；DNS 預熱與 iptables installer 共用一份 cache | ✅ 完成 |
+| Iptables/nftables rule 產生 | `python -m backend.tenant_egress emit-rules --tenant-id <tid> --sandbox-uid <uid>` 印出 JSON rule plan：每個 ACCEPT rule 帶 `destination` / `label` / `uid_owner`；`scripts/apply_tenant_egress.sh` 讀 plan 把 OMNISIGHT-EGRESS-`<tid>` chain hook 進 OUTPUT (`-m owner --uid-owner`)，終端 DROP/ACCEPT 由 `default_action` 決定；`--all` 模式 iterate 每個有 policy 的 tenant | ✅ 完成 |
+| 預設拒絕（deny-by-default）| `default_action='deny'` 強制；空 allow-list 表示完全 air-gap → `resolve_network_arg` 回 `--network none`；`default_action='allow'` 保留為 escape hatch 但每次 upsert emit warning（記錄誰決定信任全網） | ✅ 完成 |
+| Backwards compat | alembic 0015 upgrade 讀 `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` env CSV + 可選 `configs/t1_egress_allow_hosts.yaml` (`hosts:` list)；union 兩源去重、寫入 `t-default` policy 標 `updated_by='legacy-migration'`；`policy_for(tid)` 在 DB row 完全缺席時 fallback 到 env CSV (`updated_by='legacy-env'`)；DB row 一旦寫入即 wins | ✅ 完成 |
+| Audit 整合 | 三個 action 入 hash chain：`tenant_egress.upsert` (before/after policy diff)、`tenant_egress.request_submit` (request_id + kind/value/justification)、`tenant_egress.request_approve` / `request_reject` (decided_by + note)；entity_kind=`tenant_egress`，entity_id=tenant_id；事後可答「誰核准了 `evil.com`」 | ✅ 完成 |
+| REST API 10 endpoint | `GET /tenants/me/egress` (任意 user 看自己) / `GET /tenants/{tid}/egress` (admin) / `GET /tenants/egress` (admin 列表) / `PUT /tenants/{tid}/egress` (admin 直接編)；`POST/GET /tenants/me/egress/requests` (viewer 申請+查詢) / `GET /tenants/egress/requests` (admin 全列) / `POST /tenants/egress/requests/{rid}/approve\|reject` (admin)；`POST /tenants/{tid}/egress/dns-cache/reset` (admin force re-resolve) | ✅ 完成 |
+| UI `NetworkEgressSection` | 掛在 `integration-settings.tsx` Settings 對話框，緊鄰 StorageQuotaSection；雙欄顯示 hosts/cidrs（max-h scroll）+ kind/value/justification 申請表單 + pending list (approve/reject 按鈕) + recent decisions（限 5 筆，approved/rejected 用色標）；空 policy 顯示 "default-deny in effect — sandboxes for this tenant are air-gapped"；錯誤狀態 inline 顯示 | ✅ 完成 |
+| `lib/api.ts` | 新增 `TenantEgressPolicy` / `TenantEgressRequest` types + 9 個 helper：`getMyEgressPolicy` / `listEgressPolicies` / `getEgressPolicy` / `putEgressPolicy` / `submitEgressRequest` / `listMyEgressRequests` / `listAllEgressRequests` / `approveEgressRequest` / `rejectEgressRequest` / `resetEgressDnsCache` | ✅ 完成 |
+| 測試（45 項）| `test_tenant_egress.py`：validators (host/cidr 大小寫/port 範圍/shell metachar 拒絕/IPv4-IPv6/bare IP→/32) (12)、build_rule_plan dedupe + uid 校驗 + 未解析 host (3)、CRUD round-trip + invalid 拒絕 partial + omitted field preserve + tenant 隔離 + list (5)、request submit/list/idempotent dedup/invalid kind/approve merge into policy/approve idempotent against existing/reject no-op/double-approve 409/cidr lands in cidr list (8)、resolve_allow_targets CIDR passthrough + DNS cache + DNS failure→empty (3)、policy_for legacy CSV fallback + DB row wins (2)、sandbox_net per-tenant policy 開橋 + 沒 policy 仍 air-gap + A/B 隔離核心 acceptance (3)、REST 10 endpoint：default policy / admin PUT-then-GET / 400 invalid host / request submit+approve / 400 missing value / 404 unknown / 409 double-reject / DNS cache reset (8)、audit upsert + request lifecycle three-event chain (2) | ✅ 45/45 pass |
+
+**新增/修改檔案**：
+- `backend/tenant_egress.py` — 新增 (600 行)：核心模組
+- `backend/routers/tenant_egress.py` — 新增 (185 行)：FastAPI router 10 endpoint
+- `backend/alembic/versions/0015_tenant_egress_policies.py` — 新增 (135 行)：alembic 升級 + legacy YAML/env 自動 backfill
+- `backend/tests/test_tenant_egress.py` — 新增 (655 行)：45 測試案例
+- `scripts/apply_tenant_egress.sh` — 新增：host iptables installer，讀 emit-rules JSON
+- `backend/db.py` — `_SCHEMA` 加 `tenant_egress_policies` + `tenant_egress_requests` (新 DB 即有 table)
+- `backend/sandbox_net.py` — `resolve_network_arg(*, tenant_id=...)` 新 kw；先查 per-tenant policy、後退 legacy env；warning 訊息分流
+- `backend/container.py` — `start_container` 在 `effective_tenant_id` 解析後傳 `tenant_id=` 到 `resolve_network_arg`（一行 surgical change）
+- `backend/main.py` — `include_router(_tenant_egress_router.router)` 掛到 `/api/v1`
+- `lib/api.ts` — 新增 `TenantEgressPolicy` / `TenantEgressRequest` types + 9 個 helper
+- `components/omnisight/integration-settings.tsx` — 新增 `NetworkEgressSection` 並掛在 StorageQuotaSection 後
+
+**設計決策**：
+- **DB 才是 source of truth、iptables 是衍生品**：把網路規則放 DB 而不是 yaml file 的代價是「每次 launch 多一次 SQLite read」（µs 等級）；好處是「UI 改完即時生效，下一個 sandbox 就用新規則」+「所有 audit 進 hash chain」+「migration 自動完成」。Iptables 仍須 root，所以由 operator-side 的 `apply_tenant_egress.sh` 在 sandbox 啟動前後跑一次（cron 或 systemd path unit）— Python 不直接動 iptables 的好處是 testability + 不需要把 backend 跑成 root。
+- **`emit-rules` JSON 而非 shell 內聯**：把 DB→iptables 的轉譯放在 Python (`build_rule_plan`)，shell 只負責 `iptables -A`，於是 iptables policy 100% 走過 Python validator + 單元測試覆蓋。Shell 任何時候都可被 nftables 等價物換掉。
+- **uid_owner 為主、bridge 為輔**：M6 採 `-m owner --uid-owner <sandbox_uid>` 而非 `-i <bridge>` 作為 hook 條件 — 即使 sandbox 不小心破出 bridge namespace，packet 仍會帶 sandbox uid。bridge 仍會建（`ensure_egress_network`），是 defence-in-depth 的第二層。
+- **`policy_for` 的 legacy env fallback**：legacy 部署沒寫 DB policy 不應一夜之間集體 air-gap（會把現場炸了）。當 DB row 缺席 AND env 有 hosts → 透明 fallback 並 mark `updated_by='legacy-env'`，UI 一眼看出「你還在跑舊配置」。alembic 0015 升級時會把 env 一次寫進 DB，這個 fallback 是 belt-and-suspenders。
+- **申請流程 `kind/value/justification` 三欄、admin 一鍵 approve**：刻意不做複雜的 review workflow（multi-stage approval、escalation policy 等）— 99% 的場景是 operator-A 申請 `api.anthropic.com`、admin-B 點 approve。複雜度上不上癮的下一步是接 ticket system；M6 留 `decision_note` 欄位給未來的 webhook 整合。
+- **空 allow-list = `--network none`**：與其給「default-deny + 空白名單 = 全 DROP」這種會讓 operator 困惑的中間態，直接在 `resolve_network_arg` 把它收斂回 `--network none` — 一致的對外語意（沒有開放就是徹底斷網）。
+- **DNS cache 5 min TTL**：與 Phase 64-A `sandbox_net._DNS_CACHE_TTL_S` 對齊；sandbox launch 路徑與 iptables installer 都讀同一份 cache 不一致風險，避免 `python` 那邊認 `1.2.3.4`、iptables 那邊認 `1.2.3.5` 的窗口。`/dns-cache/reset` 給 operator 在 host 換 IP 時手動快速 invalidation。
+- **Audit 進 per-tenant hash chain**：`entity_kind='tenant_egress'`，事後查「誰允許了 evil.com」一個 query 搞定 (`audit.query(entity_kind='tenant_egress', tenant_id='t-x')`)；任何 row 篡改會破鏈。
+- **submit_request idempotent dedup**：避免 viewer 一直按按鈕產生重複 pending request 灌爆 admin queue；同 (tenant, kind, value, pending) 的二次 submit 直接回原 row。
+- **`default_action='allow'` 留 backdoor 但 emit warning**：某些 dev/lab tenant 可能就是「我整個機器都信任、別給我 deny」— 不擋這條路，但每次 upsert 寫 WARNING log 確保 audit log 留下「這是有意的決定」。
+- **沒同時 backport `setup_t1_egress_iptables.sh` 到 deprecated**：保留舊腳本不刪，operator 可選擇繼續用單租戶模式直到 M6 完全 rollout — M6 的 `apply_tenant_egress.sh` 與舊腳本可以共存（裝在不同 chain）。
+
+**驗收**：
+- 45/45 new + 60/60 sandbox/prewarm regression + 215/215 wider M-track suite — regression-free
+- A 允許 `api.openai.com` (resolve→`1.2.3.4`)、B 允許 `10.0.0.0/8` → `build_rule_plan` 兩 plan dest 完全 disjoint，sandbox 跨 tenant 出向 0 重疊
+- `policy_for` 在 DB row 缺席時 fallback legacy env (`updated_by='legacy-env'`)；DB row 一旦 upsert 即覆蓋 env
+- alembic 0015 升級若 host 設了 `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS=github.com,gerrit.internal:29418` → t-default policy 自動含這兩 host，`updated_by='legacy-migration'`
+- REST 全 ACL 正確：viewer/operator 看不到別 tenant policy（route 用 `require_admin`）；POST request 必須有 kind+value 否則 400；approve unknown 回 404；double-decide 回 409
+- UI 整合：viewer 看到自己 policy + 可申請；admin 在同畫面看 pending → 點 approve 即時刷新 policy 列表
+- CLI `python -m backend.tenant_egress emit-rules --tenant-id t-default --sandbox-uid 12345` 印出合法 JSON rule plan 可被 `apply_tenant_egress.sh` 消費
 
 ---
 

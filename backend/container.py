@@ -704,7 +704,9 @@ async def start_container(agent_id: str, workspace_path: Path,
         # operator falls back to tier="networked" + egress rules.
         network_arg = "--network host"
     else:
-        network_arg = await _sn.resolve_network_arg()
+        # M6 — let the per-tenant egress policy participate in the
+        # decision. tenant_id is fully resolved a few lines above.
+        network_arg = await _sn.resolve_network_arg(tenant_id=effective_tenant_id)
     # M1: per-tenant labels + cpu-shares for cgroup v2 cpu.weight.
     # The "tenant_id" / "tokens" labels are what M4 will key its
     # /sys/fs/cgroup scrape off, and what the OOM watchdog reads back

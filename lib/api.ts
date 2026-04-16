@@ -611,6 +611,111 @@ export async function getHostAccounting(): Promise<{ tenants: TenantAccountingRo
   return request<{ tenants: TenantAccountingRow[] }>("/host/accounting")
 }
 
+// M6 — Per-tenant egress allow-list
+export interface TenantEgressPolicy {
+  tenant_id: string
+  allowed_hosts: string[]
+  allowed_cidrs: string[]
+  default_action: "deny" | "allow"
+  updated_at: string | null
+  updated_by: string
+}
+
+export interface TenantEgressRequest {
+  id: string
+  tenant_id: string
+  requested_by: string
+  kind: "host" | "cidr"
+  value: string
+  justification: string
+  status: "pending" | "approved" | "rejected"
+  decided_by: string | null
+  decided_at: string | null
+  decision_note: string
+  created_at: string
+}
+
+export async function getMyEgressPolicy(): Promise<{ policy: TenantEgressPolicy }> {
+  return request<{ policy: TenantEgressPolicy }>("/tenants/me/egress")
+}
+
+export async function listEgressPolicies(): Promise<{ policies: TenantEgressPolicy[] }> {
+  return request<{ policies: TenantEgressPolicy[] }>("/tenants/egress")
+}
+
+export async function getEgressPolicy(tenantId: string): Promise<{ policy: TenantEgressPolicy }> {
+  return request<{ policy: TenantEgressPolicy }>(`/tenants/${encodeURIComponent(tenantId)}/egress`)
+}
+
+export async function putEgressPolicy(
+  tenantId: string,
+  body: Partial<Pick<TenantEgressPolicy, "allowed_hosts" | "allowed_cidrs" | "default_action">>,
+): Promise<{ policy: TenantEgressPolicy }> {
+  return request<{ policy: TenantEgressPolicy }>(`/tenants/${encodeURIComponent(tenantId)}/egress`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function submitEgressRequest(body: {
+  kind: "host" | "cidr"
+  value: string
+  justification?: string
+}): Promise<{ request: TenantEgressRequest }> {
+  return request<{ request: TenantEgressRequest }>("/tenants/me/egress/requests", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function listMyEgressRequests(
+  status?: "pending" | "approved" | "rejected",
+): Promise<{ requests: TenantEgressRequest[] }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : ""
+  return request<{ requests: TenantEgressRequest[] }>(`/tenants/me/egress/requests${qs}`)
+}
+
+export async function listAllEgressRequests(opts?: {
+  tenant_id?: string
+  status?: "pending" | "approved" | "rejected"
+}): Promise<{ requests: TenantEgressRequest[] }> {
+  const params = new URLSearchParams()
+  if (opts?.tenant_id) params.set("tenant_id", opts.tenant_id)
+  if (opts?.status) params.set("status", opts.status)
+  const qs = params.toString()
+  return request<{ requests: TenantEgressRequest[] }>(
+    `/tenants/egress/requests${qs ? `?${qs}` : ""}`,
+  )
+}
+
+export async function approveEgressRequest(
+  rid: string,
+  note?: string,
+): Promise<{ request: TenantEgressRequest; policy: TenantEgressPolicy }> {
+  return request(`/tenants/egress/requests/${encodeURIComponent(rid)}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ note: note ?? "" }),
+  })
+}
+
+export async function rejectEgressRequest(
+  rid: string,
+  note?: string,
+): Promise<{ request: TenantEgressRequest }> {
+  return request(`/tenants/egress/requests/${encodeURIComponent(rid)}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ note: note ?? "" }),
+  })
+}
+
+export async function resetEgressDnsCache(
+  tenantId: string,
+): Promise<{ tenant_id: string; resolved: Record<string, string[]> }> {
+  return request(`/tenants/${encodeURIComponent(tenantId)}/egress/dns-cache/reset`, {
+    method: "POST",
+  })
+}
+
 export async function switchProvider(provider: string, model?: string) {
   return request<{ status: string; provider: string; model: string }>(
     "/providers/switch",

@@ -520,6 +520,239 @@ function CircuitBreakerSection() {
   )
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  M6 — Network Egress (per-tenant allow-list + request flow)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function NetworkEgressSection() {
+  const [policy, setPolicy] = useState<api.TenantEgressPolicy | null>(null)
+  const [requests, setRequests] = useState<api.TenantEgressRequest[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [draftKind, setDraftKind] = useState<"host" | "cidr">("host")
+  const [draftValue, setDraftValue] = useState("")
+  const [draftJustify, setDraftJustify] = useState("")
+
+  const refresh = useCallback(async () => {
+    try {
+      setError(null)
+      const [p, r] = await Promise.all([
+        api.getMyEgressPolicy(),
+        api.listMyEgressRequests(),
+      ])
+      setPolicy(p.policy)
+      setRequests(r.requests)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const handleSubmit = useCallback(async () => {
+    if (!draftValue.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.submitEgressRequest({
+        kind: draftKind,
+        value: draftValue.trim(),
+        justification: draftJustify.trim(),
+      })
+      setDraftValue("")
+      setDraftJustify("")
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [draftKind, draftValue, draftJustify, refresh])
+
+  const handleApprove = useCallback(async (rid: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.approveEgressRequest(rid)
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [refresh])
+
+  const handleReject = useCallback(async (rid: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.rejectEgressRequest(rid)
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [refresh])
+
+  if (!policy) {
+    return (
+      <SettingsSection title="NETWORK EGRESS">
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-1 opacity-60">
+          {error ? `Failed: ${error}` : "Loading…"}
+        </div>
+      </SettingsSection>
+    )
+  }
+
+  const pending = requests.filter(r => r.status === "pending")
+  const recent = requests.filter(r => r.status !== "pending").slice(0, 5)
+
+  return (
+    <SettingsSection title={`NETWORK EGRESS — ${policy.tenant_id} (default: ${policy.default_action})`}>
+      <div className="space-y-2">
+        {/* Allow-list summary */}
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)] mb-0.5">
+              ALLOWED HOSTS ({policy.allowed_hosts.length})
+            </div>
+            <div className="font-mono text-[9px] text-[var(--foreground)] space-y-0.5 max-h-24 overflow-auto">
+              {policy.allowed_hosts.length === 0 ? (
+                <span className="opacity-50">— none —</span>
+              ) : policy.allowed_hosts.map(h => (
+                <div key={h}>{h}</div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)] mb-0.5">
+              ALLOWED CIDRS ({policy.allowed_cidrs.length})
+            </div>
+            <div className="font-mono text-[9px] text-[var(--foreground)] space-y-0.5 max-h-24 overflow-auto">
+              {policy.allowed_cidrs.length === 0 ? (
+                <span className="opacity-50">— none —</span>
+              ) : policy.allowed_cidrs.map(c => (
+                <div key={c}>{c}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Submit a request */}
+        <div className="border-t border-[var(--border)] pt-2 space-y-1">
+          <div className="font-mono text-[9px] text-[var(--muted-foreground)]">REQUEST AN ADDITION</div>
+          <div className="flex items-center gap-1.5">
+            <select
+              value={draftKind}
+              onChange={e => setDraftKind(e.target.value as "host" | "cidr")}
+              className="font-mono text-[10px] bg-[var(--secondary)] border border-[var(--border)] rounded px-1.5 py-0.5"
+            >
+              <option value="host">host</option>
+              <option value="cidr">cidr</option>
+            </select>
+            <input
+              type="text"
+              value={draftValue}
+              onChange={e => setDraftValue(e.target.value)}
+              placeholder={draftKind === "host" ? "api.openai.com[:443]" : "10.0.0.0/8"}
+              className="flex-1 font-mono text-[10px] bg-[var(--secondary)] border border-[var(--border)] rounded px-1.5 py-0.5"
+            />
+            <button
+              onClick={handleSubmit}
+              disabled={busy || !draftValue.trim()}
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)]/15 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/25 disabled:opacity-30 transition-colors"
+            >
+              <Plus size={10} className="inline -mt-0.5 mr-0.5" /> SUBMIT
+            </button>
+          </div>
+          <input
+            type="text"
+            value={draftJustify}
+            onChange={e => setDraftJustify(e.target.value)}
+            placeholder="(optional) justification — why does the agent need this?"
+            className="w-full font-mono text-[10px] bg-[var(--secondary)] border border-[var(--border)] rounded px-1.5 py-0.5"
+          />
+        </div>
+
+        {/* Pending requests */}
+        {pending.length > 0 && (
+          <div className="border-t border-[var(--border)] pt-2 space-y-0.5">
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)]">
+              PENDING ({pending.length}) — admin can approve/reject
+            </div>
+            {pending.map(r => (
+              <div
+                key={r.id}
+                className="flex items-center gap-2 font-mono text-[9px] py-0.5"
+              >
+                <span className="px-1 py-0.5 rounded bg-[var(--hardware-orange)]/15 text-[var(--hardware-orange)] uppercase">
+                  {r.kind}
+                </span>
+                <span className="flex-1 truncate text-[var(--foreground)]">{r.value}</span>
+                <span className="text-[var(--muted-foreground)] truncate max-w-[120px]" title={r.requested_by}>
+                  {r.requested_by.replace(/^user:/, "")}
+                </span>
+                <button
+                  onClick={() => handleApprove(r.id)}
+                  disabled={busy}
+                  className="px-1.5 py-0 rounded text-[9px] bg-[var(--validation-emerald)]/15 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/25 disabled:opacity-30"
+                >
+                  approve
+                </button>
+                <button
+                  onClick={() => handleReject(r.id)}
+                  disabled={busy}
+                  className="px-1.5 py-0 rounded text-[9px] bg-[var(--critical-red)]/15 text-[var(--critical-red)] hover:bg-[var(--critical-red)]/25 disabled:opacity-30"
+                >
+                  reject
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Decided history */}
+        {recent.length > 0 && (
+          <div className="border-t border-[var(--border)] pt-2 space-y-0.5">
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)]">RECENT DECISIONS</div>
+            {recent.map(r => (
+              <div
+                key={r.id}
+                className="flex items-center gap-2 font-mono text-[9px] py-0.5 opacity-80"
+              >
+                <span
+                  className={`px-1 py-0.5 rounded uppercase ${
+                    r.status === "approved"
+                      ? "bg-[var(--validation-emerald)]/15 text-[var(--validation-emerald)]"
+                      : "bg-[var(--critical-red)]/15 text-[var(--critical-red)]"
+                  }`}
+                >
+                  {r.status}
+                </span>
+                <span className="flex-1 truncate">{r.kind}: {r.value}</span>
+                <span className="text-[var(--muted-foreground)] truncate max-w-[120px]" title={r.decided_by ?? ""}>
+                  by {(r.decided_by ?? "").replace(/^user:/, "") || "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {error && (
+          <div className="font-mono text-[9px] text-[var(--critical-red)]">{error}</div>
+        )}
+
+        <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60">
+          {policy.allowed_hosts.length === 0 && policy.allowed_cidrs.length === 0 && policy.default_action === "deny"
+            ? "Default-deny in effect — sandboxes for this tenant are air-gapped (--network none)."
+            : "iptables installer reads this policy via `python -m backend.tenant_egress emit-rules`."}
+        </div>
+      </div>
+    </SettingsSection>
+  )
+}
+
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
@@ -767,6 +1000,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
           {/* M2: Per-tenant disk quota + LRU cleanup */}
           <StorageQuotaSection />
+
+          {/* M6: Per-tenant egress allow-list + approval workflow */}
+          <NetworkEgressSection />
 
         </div>
 

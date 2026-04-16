@@ -184,23 +184,57 @@ async def resolve_t2_network_arg(*, runner=None) -> str:
     return f"--network {T2_NETWORK_NAME}"
 
 
-async def resolve_network_arg(*, runner=None) -> str:
+async def resolve_network_arg(
+    *, runner=None, tenant_id: str | None = None,
+) -> str:
     """Decide what `--network ...` flag to pass `docker run` for a
-    Tier-1 sandbox. Honours the double-gate.
+    Tier-1 sandbox. Honours the double-gate AND the M6 per-tenant
+    egress policy.
+
+    Per-tenant policy (DB-backed) wins when present; falls back to the
+    legacy global ``OMNISIGHT_T1_*`` env knobs otherwise so pre-M6
+    deployments don't change behaviour.
 
     Returns either ``"--network none"`` (default, hardened) or
-    ``f"--network {T1_NETWORK_NAME}"`` when both gates open.
+    ``f"--network {T1_NETWORK_NAME}"`` when egress is permitted.
     """
+    # ── M6: per-tenant policy gate ─────────────────────────
+    # Empty allow-list (hosts AND cidrs) under default deny means the
+    # tenant is air-gapped regardless of global env. If either source
+    # has entries, we open the bridge so iptables can selectively allow.
+    db_policy_grants_egress = False
+    try:
+        from backend import tenant_egress as _te
+        pol = await _te.policy_for(tenant_id)
+        if pol.allowed_hosts or pol.allowed_cidrs or pol.default_action == "allow":
+            db_policy_grants_egress = True
+            # Warm DNS cache so the iptables installer is in lockstep.
+            resolved = await _te.resolve_allow_targets(pol)
+            unresolved = [h for h in pol.allowed_hosts
+                          if not resolved.get(h)]
+            if unresolved:
+                logger.warning(
+                    "Tier-1 egress (tenant=%s) hosts that failed DNS: %s — "
+                    "they will be unreachable from the sandbox.",
+                    pol.tenant_id, unresolved,
+                )
+    except Exception as exc:  # DB not initialised in some test paths
+        logger.debug("tenant_egress policy lookup skipped: %s", exc)
+
     from backend.config import settings as _settings
-    allow = bool(_settings.t1_allow_egress)
+    allow_env = bool(_settings.t1_allow_egress)
     hosts_raw = (_settings.t1_egress_allow_hosts or "").strip()
-    if not allow or not hosts_raw:
-        if allow and not hosts_raw:
+    legacy_grants_egress = bool(allow_env and hosts_raw)
+
+    if not (db_policy_grants_egress or legacy_grants_egress):
+        # Air-gap path. Keep the legacy warnings so operators noticing
+        # an env-vs-flag mismatch still get the hint.
+        if allow_env and not hosts_raw:
             logger.warning(
                 "OMNISIGHT_T1_ALLOW_EGRESS=true but allow-hosts is empty — "
                 "keeping air-gap (--network none).",
             )
-        if hosts_raw and not allow:
+        if hosts_raw and not allow_env:
             logger.warning(
                 "OMNISIGHT_T1_EGRESS_ALLOW_HOSTS configured but "
                 "OMNISIGHT_T1_ALLOW_EGRESS is false — keeping air-gap.",
@@ -214,13 +248,14 @@ async def resolve_network_arg(*, runner=None) -> str:
             exc,
         )
         return "--network none"
-    # Trigger DNS resolve so the cache is warm; iptables script (if
-    # installed) will read the same hosts.
-    resolved = await resolve_allow_ips()
-    unresolved = [h for h, ips in resolved.items() if not ips]
-    if unresolved:
-        logger.warning(
-            "Tier-1 egress hosts that failed DNS: %s — they will be "
-            "unreachable from the sandbox.", unresolved,
-        )
+    # Legacy DNS warm-up still runs when the legacy CSV is the source
+    # (the M6 policy path warmed its own cache above).
+    if legacy_grants_egress and not db_policy_grants_egress:
+        resolved = await resolve_allow_ips()
+        unresolved = [h for h, ips in resolved.items() if not ips]
+        if unresolved:
+            logger.warning(
+                "Tier-1 egress hosts that failed DNS: %s — they will be "
+                "unreachable from the sandbox.", unresolved,
+            )
     return f"--network {T1_NETWORK_NAME}"

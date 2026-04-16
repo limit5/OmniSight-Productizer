@@ -673,6 +673,33 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
 CREATE INDEX IF NOT EXISTS idx_tenant_secrets_tenant ON tenant_secrets(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tenant_secrets_type ON tenant_secrets(tenant_id, secret_type);
 
+-- M6: per-tenant egress allowlist (one row per tenant)
+CREATE TABLE IF NOT EXISTS tenant_egress_policies (
+    tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id),
+    allowed_hosts   TEXT NOT NULL DEFAULT '[]',
+    allowed_cidrs   TEXT NOT NULL DEFAULT '[]',
+    default_action  TEXT NOT NULL DEFAULT 'deny',
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_by      TEXT NOT NULL DEFAULT 'system'
+);
+
+-- M6: pending operator/viewer requests awaiting admin approval
+CREATE TABLE IF NOT EXISTS tenant_egress_requests (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+    requested_by    TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    value           TEXT NOT NULL,
+    justification   TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    decided_by      TEXT,
+    decided_at      TEXT,
+    decision_note   TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_egress_req_tenant ON tenant_egress_requests(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_egress_req_status ON tenant_egress_requests(status);
+
 -- I1: tenant_id indexes on business tables
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_tenant ON artifacts(tenant_id);

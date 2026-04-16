@@ -501,6 +501,8 @@ from backend.routers import secrets as _secrets_router  # I4/TENANT-SECRETS
 app.include_router(_secrets_router.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
 app.include_router(_host_router.router, prefix=settings.api_prefix)
+from backend.routers import tenant_egress as _tenant_egress_router  # M6
+app.include_router(_tenant_egress_router.router, prefix=settings.api_prefix)
 from backend.routers import decisions as _decisions_router  # Phase 47A
 app.include_router(_decisions_router.router, prefix=settings.api_prefix)
 from backend.routers import memory as _memory_router  # Phase 63-E

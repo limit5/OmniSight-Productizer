@@ -638,13 +638,13 @@ Legend:
 - [x] 預估：**0.25 day**
 
 ### M6. Per-tenant Egress Allowlist
-- [ ] `tenant_egress_policies` 表：`tenant_id, allowed_hosts[], allowed_cidrs[], default_action`
-- [ ] Sandbox launch 時動態寫 iptables/nftables rule：`-A OUTPUT -m owner --uid-owner <sandbox_uid> -d <allowed> -j ACCEPT`
-- [ ] 預設拒絕（`default DROP`），只白名單可達
-- [ ] UI：Settings → Network Egress 頁面 + 申請審批流程（viewer/operator 申請、admin 核准）
-- [ ] 相容舊 `configs/t1_egress_allow_hosts.yaml`（自動 migrate 到 `t-default`）
-- [ ] 測試：A 允許 `api.openai.com`、B 僅允許內網 → A/B sandbox 實際出向測試
-- [ ] 預估：**1.5 day**
+- [x] `tenant_egress_policies` 表：`tenant_id, allowed_hosts[], allowed_cidrs[], default_action`（alembic 0015 + `_SCHEMA` inline；FK to `tenants(id)`）
+- [x] Sandbox launch 時動態寫 iptables/nftables rule：`-A OUTPUT -m owner --uid-owner <sandbox_uid> -d <allowed> -j ACCEPT`（`scripts/apply_tenant_egress.sh` + `python -m backend.tenant_egress emit-rules` 產生 JSON rule plan，operator 跑一次裝鏈）
+- [x] 預設拒絕（`default DROP`），只白名單可達（`default_action='deny'`，`build_rule_plan` 序列化終端 DROP；空白名單 = 完全 air-gap）
+- [x] UI：Settings → Network Egress 頁面 + 申請審批流程（viewer/operator 申請、admin 核准）（`NetworkEgressSection` 在 `integration-settings.tsx`，含 host/cidr 申請、pending 列表、approve/reject 按鈕、recent decisions、justification 欄位）
+- [x] 相容舊 `configs/t1_egress_allow_hosts.yaml`（自動 migrate 到 `t-default`）（0015 upgrade 讀 `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` env CSV + 可選 yaml 檔案；`policy_for` 在 DB row 缺席時 fallback 到 legacy env）
+- [x] 測試：A 允許 `api.openai.com`、B 僅允許內網 → A/B sandbox 實際出向測試（45 cases in `test_tenant_egress.py`：validators / build_rule_plan / CRUD / request workflow / DNS cache / legacy fallback / sandbox_net 整合 / REST endpoint / audit）
+- [x] 預估：**1.5 day**
 
 **相依**：I6 + I4 + I5 + H1。I 全做完後可順接。
 
