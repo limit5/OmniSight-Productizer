@@ -359,6 +359,27 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # O1 (#264): Redis distributed file-path mutex lock ────────
+    dist_lock_wait_seconds = Histogram(
+        "omnisight_dist_lock_wait_seconds",
+        "Seconds spent in acquire_paths before outcome",
+        labelnames=("outcome",),  # acquired | conflict
+        buckets=(0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300),
+        registry=REGISTRY,
+    )
+    dist_lock_held_total = Counter(
+        "omnisight_dist_lock_held_total",
+        "Lock ownership transitions by outcome",
+        labelnames=("outcome",),  # acquired | conflict | released | preempted
+        registry=REGISTRY,
+    )
+    dist_lock_deadlock_kills_total = Counter(
+        "omnisight_dist_lock_deadlock_kills_total",
+        "Tasks force-killed by the deadlock sweep",
+        labelnames=("reason",),
+        registry=REGISTRY,
+    )
+
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
         "omnisight_memory_decay_total",
@@ -424,6 +445,9 @@ else:
     rag_prefetch_total = _NoOp()  # type: ignore
     memory_decay_total = _NoOp()  # type: ignore
     t3_runner_dispatch_total = _NoOp()  # type: ignore
+    dist_lock_wait_seconds = _NoOp()  # type: ignore
+    dist_lock_held_total = _NoOp()  # type: ignore
+    dist_lock_deadlock_kills_total = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -460,6 +484,7 @@ def reset_for_tests() -> None:
     global rag_prefetch_total
     global memory_decay_total
     global t3_runner_dispatch_total
+    global dist_lock_wait_seconds, dist_lock_held_total, dist_lock_deadlock_kills_total
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -656,6 +681,20 @@ def reset_for_tests() -> None:
         "omnisight_t3_runner_dispatch_total",
         "T3 task dispatches by runner class",
         labelnames=("runner",), registry=REGISTRY,
+    )
+    dist_lock_wait_seconds = Histogram(
+        "omnisight_dist_lock_wait_seconds", "Dist-lock acquire wait",
+        labelnames=("outcome",),
+        buckets=(0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300),
+        registry=REGISTRY,
+    )
+    dist_lock_held_total = Counter(
+        "omnisight_dist_lock_held_total", "Dist-lock ownership transitions",
+        labelnames=("outcome",), registry=REGISTRY,
+    )
+    dist_lock_deadlock_kills_total = Counter(
+        "omnisight_dist_lock_deadlock_kills_total", "Deadlock-sweep kills",
+        labelnames=("reason",), registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

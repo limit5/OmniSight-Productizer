@@ -801,15 +801,15 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### O1. Redis 分散式檔案路徑互斥鎖 (#264)
-- [ ] `backend/dist_lock.py`：`acquire_paths(task_id, paths, ttl_s)` / `release_paths(task_id)` / `extend_lease(task_id, ttl_s)`
-- [ ] 鎖粒度：檔案或資料夾路徑；依 path 字典序排序取得避免死鎖
-- [ ] TTL 預設 30 min；worker heartbeat 每 60 s 呼叫 `extend_lease`；掉線自動 revoke
-- [ ] Lua 腳本保證 atomic（`MULTI/EXEC` + `WATCH`）
-- [ ] 死鎖偵測：background job 偵測鎖依賴循環（依 task → path → task 圖）→ 最低優先權 task 強制 kill + 寫 audit
-- [ ] Metrics：`dist_lock_wait_seconds` / `dist_lock_held_total` / `dist_lock_deadlock_kills_total`
-- [ ] Preemption 政策：鎖超過 TTL × 2 可被更高 priority task 搶佔（搭 DRF）
-- [ ] 整合測試：3 個 task 競爭 10 個 path + heartbeat 失敗 + 死鎖場景
-- [ ] 預估：**2 day**
+- [x] `backend/dist_lock.py`：`acquire_paths(task_id, paths, ttl_s)` / `release_paths(task_id)` / `extend_lease(task_id, ttl_s)`
+- [x] 鎖粒度：檔案或資料夾路徑；依 path 字典序排序取得避免死鎖
+- [x] TTL 預設 30 min；worker heartbeat 每 60 s 呼叫 `extend_lease`；掉線自動 revoke
+- [x] Lua 腳本保證 atomic（`MULTI/EXEC` + `WATCH`）
+- [x] 死鎖偵測：background job 偵測鎖依賴循環（依 task → path → task 圖）→ 最低優先權 task 強制 kill + 寫 audit
+- [x] Metrics：`dist_lock_wait_seconds` / `dist_lock_held_total` / `dist_lock_deadlock_kills_total`
+- [x] Preemption 政策：鎖超過 TTL × 2 可被更高 priority task 搶佔（搭 DRF）
+- [x] 整合測試：3 個 task 競爭 10 個 path + heartbeat 失敗 + 死鎖場景
+- [x] 預估：**2 day**
 
 ### O2. Message Queue 抽象層 (#265)
 - [ ] `backend/queue_backend.py`：`QueueBackend` interface（push / pull / ack / nack / dlq）

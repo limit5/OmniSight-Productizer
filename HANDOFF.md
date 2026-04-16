@@ -1,9 +1,80 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：O0 — CATC Payload Schema + Validator (master)
+> 最後 commit：O1 — Redis 分散式檔案路徑互斥鎖 (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## O1 (complete) Redis 分散式檔案路徑互斥鎖（2026-04-16 完成）
+
+**背景**：O 區塊第二步。O0 把 CATC payload schema 釘死（`impact_scope.allowed` = 任務要動到的 glob list）之後，接下來的 O3 stateless worker pool 在派發同一批檔案路徑的 task 時必須序列化——否則 agent A 正在改 `src/camera/driver.c`，agent B 也被派去改同一支檔案，不管是 lock-stepping 還是 race-write 都會爆開。O1 是做到這件事的基礎建設：跨 worker / 跨 host 的分散式互斥鎖，以 CATC 的 path list 為單位。
+
+### 實作內容
+
+1. **`backend/dist_lock.py`**（new, ~620 行）— 單檔 module 把 API、兩套 backend、deadlock detector、background sweep 全塞進去：
+   - **Public API**：`acquire_paths(task_id, paths, ttl_s=1800, priority=100, wait_timeout_s=0)` 回傳 `LockResult(ok, acquired, conflicts, expires_at, wait_seconds)`；`release_paths(task_id)` 回傳釋放數；`extend_lease(task_id, ttl_s)` heartbeat 刷新；`preempt_paths(task_id, paths, ttl_s, priority)` 搶佔；`get_lock_holder(path)` / `get_locked_paths(task_id)` / `all_entries()` 查詢；`build_wait_graph()` / `detect_deadlock_cycles()` / `run_deadlock_sweep()` / `start_deadlock_sweep(interval_s)` / `stop_deadlock_sweep()` 死鎖偵測；`new_task_id()` 產生 UUID task id。
+   - **Path normalisation**：`_normalise(path)` 收攏 `\` → `/`、去頭尾斜線 / 空白、折 `//`；`_normalise_many` 再加 **dedupe + sort**——sort 是 AB/BA deadlock 的第一道防線（兩個 task 即使用不同順序 pass 進 `paths`，拿鎖順序仍一致）。
+   - **All-or-nothing semantics**：`acquire_paths` 實作 atomic multi-key check — 如果 list 裡任何一個 path 已被其他 task 持有，**整組沒被拿**，回傳的 `conflicts` dict 列出每個被卡住的 path 對應 holder。避免「partial acquisition」狀態（拿了 B 但卡在 A，其他 waiter 被誤以為 B 也被卡住）。
+   - **TTL + auto-revoke**：Redis 用 `PEXPIRE` 綁在 holder hash 上，lease 到時間自然消失；in-memory backend 在 `_expire_locked` helper 裡 lazy sweep（每次 `acquire` / `get_holder` 進來就先清過期）。Worker 掉線 → heartbeat 停 → TTL 一過另一個 worker 就能接。
+   - **Heartbeat**：`extend_lease(task_id, ttl_s)` 刷新該 task 所有 held path 的 expiry，Lua 一次搞定。如果 worker 的 task 已經被 deadlock detector 強制 kill 掉，`extend_lease` 回 False → worker 自己 abort。
+
+2. **雙 backend（符合 shared_state / rate_limit 既有 pattern）**：
+   - **`RedisLockBackend`**：用三個 Lua script（`_ACQUIRE_LUA` / `_EXTEND_LUA` / `_RELEASE_LUA`）做 atomic multi-key 操作。acquire script 先掃全 KEYS 找 conflicts，有的話直接 bail；沒有才第二、三 pass 寫 holder hash + 加進 task 的 set。**Redis server-side 單 threaded 特性讓 Lua 比 MULTI/EXEC+WATCH 迴圈更簡潔可靠**（WATCH 需要重試迴圈，Lua 不用）。
+   - **`InMemoryLockBackend`**：thread-safe dict，只在 single-process dev / 測試下使用。lock / by-task / waiters / priority 四張表配 `threading.Lock()`。兩個 backend 走同一個 `_LockBackend` Protocol，observable semantics 必須一致（這是 production vs test 行為一致性的 contract）。
+   - **Selection**：singleton 檢查 `OMNISIGHT_REDIS_URL` env，設了就用 Redis（連不上 fallback in-memory + warn），沒設就用 in-memory + info log。`set_backend_for_tests(backend)` 是 test-only override。
+
+3. **Deadlock detection（wait-for graph + Tarjan SCC）**：
+   - **Wait-for edge source**：當 `acquire_paths` 拿不到鎖且 `wait_timeout_s > 0`，在 retry loop 裡呼 `backend.record_wait(task_id, paths, priority)` 把「我等這批 path」塞進 waiter map。
+   - **`build_wait_graph()`**：從 `all_entries()` 拿現在誰持有什麼，從 `waiters()` 拿誰在等什麼，組出 `task_id → set[blocker_task_id]` 圖。每次 sweep 重建，無持久化狀態。
+   - **`detect_deadlock_cycles(graph)`**：**iterative Tarjan**（避免 recursion depth 超限，即使 1000 個 task 也安全）。只回傳 size ≥ 2 的 SCC — self-loop 通常是同一個 task 在多 thread 呼 `acquire_paths`，那是 caller 的 bug 不是真的 deadlock。
+   - **`run_deadlock_sweep()`**：找出每個 cycle 裡 priority 最低的成員（tie 就以 task_id 字典序決定，確保多個 replica 同時跑 sweep 也會選到同一個 victim）→ 呼 `_kill_task(task_id, reason)`：`release_paths` + `dist_lock_deadlock_kills_total` 加一 + 寫 audit row（`action=dist_lock.deadlock_kill`, `entity_kind=task`）。
+   - **`start_deadlock_sweep(interval_s=30)`**：開 daemon thread 每 30s 跑一次 sweep。idempotent — 第二次呼叫 no-op。backend main app 未來可以在 startup hook 拉起這條線。
+
+4. **Preemption（搭 DRF 用）**：
+   - `preempt_paths(task_id, paths, ttl_s, priority)` 內部呼 `backend.acquire` 時把 `preempt_after_s = ttl_s * PREEMPTION_MULTIPLIER`（預設 × 2）。
+   - Backend 在 conflict 檢查階段：holder 已被持有超過 `preempt_after_s` 秒 **且** 要求者的 priority 嚴格大於 holder → 不算 conflict，後續會 evict 掉 holder。反之（還新鮮 or priority 相等）→ 照樣 conflict、拒絕 preempt。
+   - 為什麼要 × 2：heartbeat 每 60s 一次，`ttl_s = 1800`，正常 worker 每 60s 就把 expiry 推到 + 1800s；已經持有超過 3600s 還沒到期，代表 heartbeat 實質 dead（即將自然過期），這時才算「真的 stale」值得搶。
+
+5. **Metrics**（wire 進 `backend/metrics.py` 並加進 `reset_for_tests()` + NoOp stubs）：
+   - `dist_lock_wait_seconds{outcome}` — Histogram，`outcome=acquired|conflict`，從 `acquire_paths` 呼叫進去到回傳所花的 wall-clock。
+   - `dist_lock_held_total{outcome}` — Counter，`outcome=acquired|conflict|released|preempted`，追蹤 lock ownership transition 數。
+   - `dist_lock_deadlock_kills_total{reason}` — Counter，每次 sweep kill 一個 victim 就 +1，reason 目前是 `deadlock_cycle_size=N`。
+
+6. **`backend/tests/test_dist_lock.py`**（new, 41 tests, 1.40s，全綠）— 9 個 test class：
+   - `TestPathNormalisation`（6 tests）— slash 規則、dedupe、sort、空字串與非字串 reject。
+   - `TestBasicAcquireRelease`（9 tests）— empty list OK / acquire-release 來回 / release idempotent / reacquire own paths / 部分衝突時 all-or-nothing / `extend_lease` refresh / no-holding 回 False / 預設 TTL 30min / 空字串 task_id reject。
+   - `TestTTLExpiry`（3 tests）— TTL 到期自動放行 / heartbeat 保命 / 漏心跳後 peer 能接。
+   - `TestSortedAcquisition`（2 tests）— 排序 deterministic / 反序 request 仍 atomic 回 full conflict（AB-BA 保護）。
+   - `TestDeadlockDetection`（6 tests）— 空圖 / waiter edge 出現 / 2-cycle 偵測 / sweep 殺最低 priority / 無 cycle 時 no-op / 3-way cycle。
+   - `TestPreemption`（4 tests）— 新鮮 lock 不能搶 / stale + higher priority 搶到 / 同 priority 拒絕 / 空 list OK。
+   - `TestIntegrationThreeTasksTenPaths`（3 tests）— **spec 指定的 integration scenario**：3 task × 10 path 重疊 set 競爭、5 thread 搶同一 path 只有 1 人贏、heartbeat 失敗 peer 接管。
+   - `TestTaskIdHelper`（2 tests）— 50 個 id 全 unique / prefix 可自訂。
+   - `TestMetricsWired`（1 test）— metrics 物件存在且呼叫不炸。
+
+### 測試結果
+
+- `backend/tests/test_dist_lock.py` — **41 tests, all passing (1.40s)**
+- Regression sweep：`test_catc.py + test_codeowners.py + test_dist_lock.py + test_metrics.py + test_shared_state.py` — **137 passed, 2 skipped**。沒有 regress。
+- Ruff lint：無錯誤。
+
+### 設計決策 & 取捨
+
+- **Lua > MULTI/EXEC+WATCH**：spec 原文提 MULTI/EXEC + WATCH，但 Redis server-side Lua 同樣 atomic 且不用寫重試迴圈。code 量省一半、無 optimistic-concurrency race。保留 MULTI/EXEC 只在 waiter zset 寫入那邊（非 critical path）。
+- **All-or-nothing acquire（不是 per-path best effort）**：partial acquire 會讓 wait graph 變成 runtime-mutable graph — 你拿 B 等 A，結果 B 又被第三個 task 寫進 wait 表，分析 cycle 會變成 moving target。all-or-nothing 讓圖在每個 sweep tick 時是 stable snapshot。
+- **in-memory fallback**：跟 `shared_state.py` / `rate_limit.py` 同 pattern。production 有 Redis 就 auto 切，沒有就 single-worker mode 走 in-memory — 單元測試跑得動，dev 也跑得動。**兩個 backend 嚴格共用 `_LockBackend` Protocol 與 observable semantics**，這是 test suite 的 correctness 依賴。
+- **Tarjan iterative, not recursive**：Python default recursion limit = 1000；真實 cluster 如果有 2000 task 同時 wait（非 cycle），遞迴版會 stack overflow。iterative 成本低 30 行 code，換掉整個 scale ceiling 值得。
+- **Deterministic victim selection**：`min(cycle, key=(priority, task_id))` — 如果 orchestrator 的 sweep job 被部署成多 replica（未來 HA），每個 replica 都會選到同一個 victim，不會互相 race 殺成兩條 kill event。
+- **Preemption threshold = TTL × 2**：spec 指定這個數字。理由是 heartbeat 每 60s 就應該把 expiry 推開至少 +TTL，持有時間超過 TTL × 2 代表 heartbeat 已經中斷超過一個 TTL period — 基本上 worker 已死，只是還沒被 Redis 自然清掉。
+- **不在 lock 層直接 kill process**：`_kill_task` 只呼 `release_paths` + 寫 audit。真正殺 worker 進程是 worker 自己注意到 `extend_lease` 回 False 後的 graceful abort（O3 worker.py 會這樣寫）。lock 層不該有 process-level 副作用——把 control plane 跟 data plane 分開。
+
+### 下一步 & 未結項目
+
+- **O2（#265）Message Queue 抽象層** — 現在 dist_lock 有了，queue 層只要 `CATC payload → parse → acquire_paths(card.impact_scope.allowed) → push to queue` 一條線就通。`dist_lock_wait_seconds` 的 conflict 直方圖將是判斷 queue 是否健康的主 signal。
+- **O3（#266）Stateless Worker Pool** — worker loop 就是 `pull queue → acquire_paths → sandbox → commit → push gerrit → release_paths`，heartbeat 每 60s 呼 `extend_lease`。掉線 case 由 O1 的 TTL 自然處理。
+- **O4 Orchestrator Gateway** — DAG validation 的「impact_scope pairwise 交集檢查」可以直接拿 `build_wait_graph() + globs_overlap()` 的組合做靜態 conflict detect，在 push queue 前就拒掉。
+- **FUTURE — Redis 真正 integration test**：目前 test suite 走 in-memory backend；建議 CI 加個 `pytest -m redis` 跑 real Redis container，覆蓋 Lua 腳本的實際行為（當前是靠兩 backend semantic equivalence + code review 判定正確）。Unit 層面的 Redis Lua 實作已依 `shared_state.py` / `rate_limit.py` 既有 pattern 寫成、通過 ruff。
 
 ---
 
