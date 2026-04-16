@@ -151,8 +151,12 @@ async def lifespan(app: FastAPI):
     # I6: DRF per-tenant sandbox capacity grace deadline sweep
     from backend import sandbox_capacity as _sc
     drf_task = asyncio.create_task(_sc.run_sweep_loop())
+    # M2: per-tenant disk quota sweep (5 min) — emits SSE soft warnings
+    # and triggers LRU cleanup when over soft threshold.
+    from backend import tenant_quota as _tq
+    quota_task = asyncio.create_task(_tq.run_quota_sweep_loop())
     yield
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task):
         t.cancel()
         try:
             await t
@@ -543,6 +547,8 @@ from backend.routers import preferences as _prefs_router  # J4/USER-PREFS
 app.include_router(_prefs_router.router, prefix=settings.api_prefix)
 from backend.routers import api_keys as _api_keys_router  # K6/BEARER-PER-KEY
 app.include_router(_api_keys_router.router, prefix=settings.api_prefix)
+from backend.routers import storage as _storage_router  # M2/DISK-QUOTA-LRU
+app.include_router(_storage_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

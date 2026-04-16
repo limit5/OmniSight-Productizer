@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
-import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2 } from "lucide-react"
+import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw } from "lucide-react"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -230,6 +230,169 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
           <Plus size={10} /> Add Secret
         </button>
       )}
+    </SettingsSection>
+  )
+}
+
+function formatBytes(n: number): string {
+  if (n === 0) return "0 B"
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"]
+  const exp = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1)
+  const v = n / Math.pow(1024, exp)
+  return `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[exp]}`
+}
+
+function StorageQuotaSection() {
+  const [usage, setUsage] = useState<api.TenantStorageUsage | null>(null)
+  const [cleaning, setCleaning] = useState(false)
+  const [lastSummary, setLastSummary] = useState<api.TenantStorageCleanupSummary | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      setError(null)
+      const u = await api.getStorageUsage()
+      setUsage(u)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const handleCleanup = useCallback(async () => {
+    if (!usage) return
+    setCleaning(true)
+    setError(null)
+    try {
+      const s = await api.triggerStorageCleanup(usage.tenant_id)
+      setLastSummary(s)
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setCleaning(false)
+    }
+  }, [usage, refresh])
+
+  if (!usage) {
+    return (
+      <SettingsSection title="STORAGE QUOTA">
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-1 opacity-60">
+          {error ? `Failed: ${error}` : "Loading…"}
+        </div>
+      </SettingsSection>
+    )
+  }
+
+  const pctSoft = Math.min(100, (usage.usage.total_bytes / usage.quota.soft_bytes) * 100)
+  const pctHard = Math.min(100, (usage.usage.total_bytes / usage.quota.hard_bytes) * 100)
+  const barColor =
+    usage.over_hard ? "var(--critical-red)" :
+    usage.over_soft ? "var(--hardware-orange)" :
+    "var(--validation-emerald)"
+
+  return (
+    <SettingsSection title={`STORAGE QUOTA — ${usage.tenant_id} (${usage.plan})`}>
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <HardDrive size={10} className="text-[var(--neural-blue)]" />
+            <span className="font-mono text-[10px] text-[var(--foreground)]">
+              {formatBytes(usage.usage.total_bytes)}
+            </span>
+            <span className="font-mono text-[9px] text-[var(--muted-foreground)]">
+              / {formatBytes(usage.quota.soft_bytes)} soft / {formatBytes(usage.quota.hard_bytes)} hard
+            </span>
+          </div>
+          {usage.over_hard ? (
+            <span className="font-mono text-[8px] px-1.5 py-0.5 rounded bg-[var(--critical-red)]/15 text-[var(--critical-red)] uppercase">
+              hard breach
+            </span>
+          ) : usage.over_soft ? (
+            <span className="font-mono text-[8px] px-1.5 py-0.5 rounded bg-[var(--hardware-orange)]/15 text-[var(--hardware-orange)] uppercase">
+              over soft
+            </span>
+          ) : (
+            <span className="font-mono text-[8px] px-1.5 py-0.5 rounded bg-[var(--validation-emerald)]/15 text-[var(--validation-emerald)] uppercase">
+              healthy
+            </span>
+          )}
+        </div>
+
+        {/* Stacked bars: soft + hard */}
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[8px] text-[var(--muted-foreground)] w-10 shrink-0">soft</span>
+            <div className="flex-1 h-1.5 rounded bg-[var(--secondary)] overflow-hidden">
+              <div
+                className="h-full transition-all"
+                style={{ width: `${pctSoft}%`, backgroundColor: barColor }}
+              />
+            </div>
+            <span className="font-mono text-[8px] text-[var(--muted-foreground)] w-10 shrink-0 text-right">
+              {pctSoft.toFixed(0)}%
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[8px] text-[var(--muted-foreground)] w-10 shrink-0">hard</span>
+            <div className="flex-1 h-1.5 rounded bg-[var(--secondary)] overflow-hidden">
+              <div
+                className="h-full transition-all"
+                style={{ width: `${pctHard}%`, backgroundColor: barColor }}
+              />
+            </div>
+            <span className="font-mono text-[8px] text-[var(--muted-foreground)] w-10 shrink-0 text-right">
+              {pctHard.toFixed(0)}%
+            </span>
+          </div>
+        </div>
+
+        {/* Breakdown */}
+        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 pt-1">
+          {[
+            ["artifacts", usage.usage.artifacts_bytes],
+            ["workflow_runs", usage.usage.workflow_runs_bytes],
+            ["backups", usage.usage.backups_bytes],
+            ["ingest_tmp", usage.usage.ingest_tmp_bytes],
+          ].map(([label, bytes]) => (
+            <div key={String(label)} className="flex items-center justify-between">
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)]">{label}</span>
+              <span className="font-mono text-[9px] text-[var(--foreground)]">{formatBytes(Number(bytes))}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2 justify-end pt-1">
+          {lastSummary && (
+            <span className="font-mono text-[8px] text-[var(--muted-foreground)] mr-auto">
+              freed {formatBytes(lastSummary.usage_before_bytes - lastSummary.usage_after_bytes)} ({lastSummary.deleted.length} run{lastSummary.deleted.length === 1 ? "" : "s"})
+              {lastSummary.skipped_keep.length > 0 ? `, kept ${lastSummary.skipped_keep.length}` : ""}
+            </span>
+          )}
+          <button
+            onClick={refresh}
+            disabled={cleaning}
+            title="Refresh usage"
+            className="p-1 rounded text-[var(--muted-foreground)] hover:bg-[var(--neural-blue)]/10 hover:text-[var(--neural-blue)] disabled:opacity-30 transition-colors"
+          >
+            <RefreshCw size={10} className={cleaning ? "animate-spin" : ""} />
+          </button>
+          <button
+            onClick={handleCleanup}
+            disabled={cleaning}
+            className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)]/15 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/25 disabled:opacity-30 transition-colors"
+          >
+            {cleaning ? "CLEANING…" : "RUN LRU CLEANUP"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="font-mono text-[9px] text-[var(--critical-red)] pt-1">
+            {error}
+          </div>
+        )}
+      </div>
     </SettingsSection>
   )
 }
@@ -476,6 +639,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
           {/* I4: Tenant-scoped secrets */}
           <TenantSecretsSection settingsData={settingsData} />
+
+          {/* M2: Per-tenant disk quota + LRU cleanup */}
+          <StorageQuotaSection />
 
         </div>
 

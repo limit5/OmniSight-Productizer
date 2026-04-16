@@ -556,6 +556,47 @@ async def start_container(agent_id: str, workspace_path: Path,
     if agent_id in _containers:
         await stop_container(agent_id)
 
+    # M2: hard-quota gate. If the tenant is at/over their disk quota,
+    # refuse the launch with QuotaExceeded — the sandbox-create router
+    # translates this into HTTP 507 (RFC 4918 Insufficient Storage).
+    # We resolve the tenant first so the gate fires even when callers
+    # don't pass tenant_id explicitly.
+    _gate_tenant_id = tenant_id
+    if _gate_tenant_id is None:
+        try:
+            from backend.db_context import current_tenant_id as _ctid
+            _gate_tenant_id = _ctid()
+        except Exception:
+            _gate_tenant_id = None
+    try:
+        from backend import tenant_quota as _tq
+        _tq.check_hard_quota(_gate_tenant_id or "t-default")
+    except Exception as exc:
+        if exc.__class__.__name__ == "QuotaExceeded":
+            try:
+                from backend import metrics as _m
+                _m.sandbox_launch_total.labels(
+                    tier=tier, runtime="?", result="quota_exceeded",
+                ).inc()
+            except Exception:
+                pass
+            try:
+                from backend import audit as _audit
+                await _audit.log(
+                    action="sandbox_quota_exceeded",
+                    entity_kind="container",
+                    entity_id=container_name,
+                    after={
+                        "tenant_id": _gate_tenant_id or "t-default",
+                        "used_bytes": getattr(exc, "used", 0),
+                        "hard_bytes": getattr(exc, "hard", 0),
+                    },
+                    actor=f"agent:{agent_id}",
+                )
+            except Exception:
+                pass
+            raise
+
     emit_pipeline_phase("container_start", f"Starting container for {agent_id}")
 
     # Ensure image exists
@@ -943,6 +984,20 @@ async def stop_container(agent_id: str) -> bool:
 
     await _run(f"docker stop {info.container_name} 2>/dev/null", timeout=15)
     await _run(f"docker rm -f {info.container_name} 2>/dev/null", timeout=15)
+
+    # M2: force-clear the tenant's /tmp/omnisight_ingest/<tid>/ namespace
+    # so a sandbox's scratch space doesn't accumulate across runs. Best-
+    # effort: a failure must never block the actual container teardown.
+    try:
+        from backend import tenant_quota as _tq
+        freed = _tq.cleanup_tenant_tmp(info.tenant_id or "t-default")
+        if freed:
+            logger.debug(
+                "tenant tmp cleared on container stop: %s freed=%d",
+                info.tenant_id, freed,
+            )
+    except Exception as exc:
+        logger.debug("tenant tmp cleanup failed: %s", exc)
 
     info.status = "removed"
     emit_container(agent_id, "stopped", info.container_name)

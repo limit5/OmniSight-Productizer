@@ -804,6 +804,49 @@ export async function deleteTenantSecret(id: string): Promise<{ status: string }
   return request<{ status: string }>(`/secrets/${id}`, { method: "DELETE" })
 }
 
+// ─── M2: Per-tenant Disk Quota ───
+
+export interface TenantStorageUsage {
+  tenant_id: string
+  plan: string
+  quota: { soft_bytes: number; hard_bytes: number; keep_recent_runs: number }
+  usage: {
+    artifacts_bytes: number
+    workflow_runs_bytes: number
+    backups_bytes: number
+    ingest_tmp_bytes: number
+    total_bytes: number
+  }
+  over_soft: boolean
+  over_hard: boolean
+}
+
+export interface TenantStorageCleanupSummary {
+  tenant_id: string
+  usage_before_bytes: number
+  usage_after_bytes: number
+  target_bytes: number
+  deleted: Array<{ run_id: string; freed_bytes: number }>
+  skipped_keep: string[]
+  skipped_recent: string[]
+}
+
+export async function getStorageUsage(tenantId?: string): Promise<TenantStorageUsage> {
+  const q = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : ""
+  return request<TenantStorageUsage>(`/storage/usage${q}`)
+}
+
+export async function triggerStorageCleanup(
+  tenantId?: string,
+  targetBytes?: number,
+): Promise<TenantStorageCleanupSummary> {
+  const params = new URLSearchParams()
+  if (tenantId) params.set("tenant_id", tenantId)
+  if (targetBytes !== undefined) params.set("target_bytes", String(targetBytes))
+  const q = params.toString() ? `?${params.toString()}` : ""
+  return request<TenantStorageCleanupSummary>(`/storage/cleanup${q}`, { method: "POST" })
+}
+
 export async function createVendorSDK(body: Record<string, unknown>): Promise<{ status: string; platform: string }> {
   return request<{ status: string; platform: string }>("/system/vendor/sdks", {
     method: "POST",

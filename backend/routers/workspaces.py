@@ -216,6 +216,20 @@ async def start_agent_container(agent_id: str):
     try:
         info = await start_container(agent_id, ws.path)
     except Exception as exc:
+        # M2: hard quota → 507 Insufficient Storage so clients can
+        # distinguish a billing/cleanup signal from a generic 5xx.
+        from backend.tenant_quota import QuotaExceeded
+        if isinstance(exc, QuotaExceeded):
+            raise HTTPException(
+                status_code=507,
+                detail={
+                    "error": "tenant_disk_quota_exceeded",
+                    "tenant_id": exc.tenant_id,
+                    "used_bytes": exc.used,
+                    "hard_bytes": exc.hard,
+                    "message": str(exc),
+                },
+            )
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {
