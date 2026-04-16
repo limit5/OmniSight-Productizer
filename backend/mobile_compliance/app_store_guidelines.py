@@ -405,7 +405,11 @@ def _scan_private_api(
                 continue
 
             for sym in PRIVATE_API_SYMBOLS:
-                if sym in line:
+                # Match either the full Obj-C selector ('foo:bar:') OR
+                # the bare base name (Swift call site drops the colons:
+                # '_setBackgroundStyle(0)' vs ObjC '_setBackgroundStyle:').
+                base = sym.split(":", 1)[0]
+                if sym in line or (base and base in line):
                     findings.append(ASCFinding(
                         rule_id="2.5.1",
                         severity="blocker",
