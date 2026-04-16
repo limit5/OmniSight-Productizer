@@ -1,9 +1,58 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：W2 — Web simulate track (#276) — `scripts/simulate.sh web` 接上 Lighthouse / bundle / a11y / SEO / E2E / 視覺迴歸六道閘，新增 `backend/web_simulator.py` 驅動層 + 53 條測試全綠
-> Tag：`v0.1.0` — 首個正式 release（W2 擴增 simulate-track 不 bump tag）
-> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0 + W1 + W2 landed，W3 role skills 為下一站）。W2 新增 53 條測試（32 unit + 21 integration）+ HMI/schema/web-profiles 既有 60 條零 regression
+> 最後 commit：W3 — Web role skills (#277) — `configs/roles/web/` 落 6 個 `.skill.md`（frontend-react / frontend-vue / frontend-svelte / a11y / seo / perf），每個均引用 W2 `LIGHTHOUSE_MIN_*` 與 W1 bundle budget，role-specific tool whitelist（非 `[all]`）+ 51 條 contract test 全綠
+> Tag：`v0.1.0` — 首個正式 release（W3 role skills 為 prompt 層 declarative 擴充，不 bump tag）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0 + W1 + W2 + W3 landed，W4 deploy adapters 為下一站）。W3 新增 6 個 role skill + 51 條測試，既有 prompt_loader / W1 / W2 測試零 regression（128/128 綠）
+
+---
+
+## W3 (complete) Web role skills (#277)（2026-04-17 完成）
+
+**背景**：W0（schema）→ W1（4 個 platform profile）→ W2（simulate-track 六道閘）已把 declarative 輸入 + 可執行 gate 鋪好，但上游 **prompt 層還沒有對應的前端 role** — agent router 只知道 `firmware/bsp`、`software/algorithm`、`validator/sdet` 這些 embedded 方向的 role，碰到「幫我寫 React 元件」會 fall back 到 generic software prompt，拿不到 Lighthouse / bundle budget / WCAG 2.2 這些 web 專門 spec。W3 是 **0.5-day 在 `configs/roles/web/` 落 6 個 `.skill.md`** 的小步驟，讓 LLM 生出來的前端碼在 prompt 階段就被 W2 gate 數字約束，而不是等到 CI 才失守。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `configs/roles/web/frontend-react.skill.md`（新檔，~1.9 KiB） | React 18 + Next.js 14 App Router + RSC / Server Actions + TanStack Query + TypeScript strict。核心 prompt：Server vs Client Component 邊界、`"use client"` 只標 leaf、`useEffect` 不做 data fetching。品質標準直接引用 `LIGHTHOUSE_MIN_PERF=80` / `LIGHTHOUSE_MIN_A11Y=90` / `LIGHTHOUSE_MIN_SEO=95` 與 W1 四個 profile 的 bundle_size_budget（500 KiB / 5 MiB / 1 MiB / 50 MiB），所以 LLM 生出來的元件在被 `scripts/simulate.sh --type=web` 跑之前就自我約束。Tool whitelist 12 個（檔案 I/O + git + bash，不含 DB/網路抓取類）。 |
+| `configs/roles/web/frontend-vue.skill.md`（新檔，~1.6 KiB） | Vue 3.4 Composition API + Nuxt 3.9 + Pinia + `<script setup lang="ts">` 全 strict TypeScript。`defineProps<Props>()` 為預設，禁混 Options API。SSR hydration mismatch zero-tolerance。同一套 Lighthouse + bundle budget 引用。 |
+| `configs/roles/web/frontend-svelte.skill.md`（新檔，~1.8 KiB） | Svelte 5 Runes (`$state` / `$derived` / `$effect` / `$props`) + SvelteKit 2.x + adapter 選型對齊 W1 四個 profile（`adapter-static` / `adapter-node` / `adapter-cloudflare` / `adapter-vercel`）。明確禁用 Svelte 4 的 `export let` / `$:`。強制 progressive enhancement（Form Actions `use:enhance`）。 |
+| `configs/roles/web/a11y.skill.md`（新檔，~2.4 KiB） | WCAG 2.2 AA。明確列出 **2.2 相對 2.1 的新增條款**：2.4.11 Focus Not Obscured / 2.5.7 Dragging Movements / 2.5.8 Target Size 24×24 CSS px / 3.3.7 Redundant Entry / 3.3.8 Accessible Authentication / 3.2.6 Consistent Help — 這些是審查員最容易漏、LLM 最容易忘的。引用 `LIGHTHOUSE_MIN_A11Y` + axe 0 critical。內含 8 項 PR self-audit checklist。Tool whitelist 5 個（檔案 I/O + bash，read-heavy 審查類）。 |
+| `configs/roles/web/seo.skill.md`（新檔，~2.7 KiB） | Technical SEO。五個必要 meta tag 與 W2 `run_seo_lint()` 完全對齊（title / description / viewport / canonical / og）。涵蓋 Open Graph 五欄 + Twitter Card + JSON-LD 結構化資料（Schema.org）+ robots.txt / sitemap.xml。引用 `LIGHTHOUSE_MIN_SEO=95`。內含 10 項 PR self-audit checklist。 |
+| `configs/roles/web/perf.skill.md`（新檔，~3.8 KiB） | **Core Web Vitals 正本清源**：LCP ≤ 2.5s / INP ≤ 200ms / CLS ≤ 0.1。明確標註 **INP 於 2024-03-12 取代 FID**，pin 成 test 防止 LLM 退回去用 FID。含 LCP / INP / CLS 各自的優化 pattern（`fetchpriority=high` / Web Workers / `aspect-ratio`）。完整覆蓋 W1 四個 bundle budget + 單 chunk = budget/2 heuristic（對齊 W2 `run_bundle_gate()`）。10 項 PR checklist。 |
+| `backend/tests/test_web_role_skills.py`（新檔，51 條） | contract test 分五層：(1) enumeration — 6 個 role 都被 `list_available_roles()` discover；(2) frontmatter contract — 必要欄位齊全 / `role_id` matches filename / `tools` 非 `[all]` / ≥ 5 關鍵字；(3) 三個 frontend role 都引用 W2 三個 `LIGHTHOUSE_MIN_*` 常數 + bundle budget + `simulate.sh` 用法；(4) a11y role 覆蓋 WCAG 2.2 四個新條款（2.4.11 / 2.5.7 / 2.5.8 / 3.3.8）；(5) perf role 覆蓋 LCP/INP/CLS 三個指標 + INP 計數 ≥ FID 計數（防退回 deprecated 指標）+ 2.5/200/0.1 三個具體閾值 + 四個 W1 bundle budget 都寫在 role 裡。 |
+| `TODO.md` | W3 八個 `[ ]` → `[x]`，路徑更新為實際檔案位置。 |
+
+**驗證結果：**
+
+* 新測試：`backend/tests/test_web_role_skills.py` **51/51 綠**（<0.2s）。
+* 既有測試零 regression：`test_prompt_loader.py`（20）+ `test_web_simulator.py`（32）+ `test_web_simulate.py`（21）+ `test_platform_web_profiles.py`（24）+ `test_platform_schema.py`（29）= **128 passed in 4.23s**。
+* `list_available_roles()` 隱式驗證：web 類別下 6 個 role 被枚舉，總 role 數從 20 升至 26。
+* 每個 role 都可由 `load_role_skill("web", "<role_id>")` 成功載入 + `get_role_keywords("web", "<role_id>")` 抓到 ≥ 5 個關鍵字。
+
+**設計決策備忘：**
+
+1. **檔案放 `configs/roles/web/*.skill.md` 而不是 TODO 原寫的 `configs/roles/frontend-react.md` flat layout**：原 flat 寫法過不了 `list_available_roles()` 的 category scanning（它只看 `{category}/*.skill.md`），放在 flat 層的檔案會變成「存在但不被 prompt layer 載入」的孤兒。新增 `web` 這個 category 與既有 firmware / software / validator / reporter / devops / reviewer 並列，是最小改動最大效果的落點。TODO 的命名差異在提交時更新，檔名語意對等（`frontend-react.md` → `web/frontend-react.skill.md`）。
+2. **Tool whitelist 特別設計為「frontend vs 審查類」兩檔**：frontend-react / vue / svelte 有 12 個工具（含 git 全家桶、bash、檔案 I/O）— 因為會實際寫程式。a11y / seo / perf 只給 5 個（read_file / write_file / list_directory / search_in_files / run_bash，無 git 寫入類）— 這三個角色是審查 + 建議，不該直接 commit。這樣在 agent router 拉到 a11y role 時，它連誤 `git_commit` 也做不到，tool-level 就守住邊界。
+3. **WCAG 2.2 AA 而非 2.1**：2026 年還用 2.1 基準會被當 legacy — 2.2 正式版 2023-10-05 發布、2024 起多數歐盟公部門招標已改寫 2.2。關鍵的 2.5.8 Target Size 24×24 CSS px 對 mobile-first UI 影響最大，LLM 生 `<button>` 時若沒看到這條，會寫出 16px 小 icon button 直接失守。測試裡 pin 2.4.11 / 2.5.7 / 2.5.8 / 3.3.8 四條 2.2-specific criteria 就是防這個。
+4. **INP 而非 FID，且 test pin `body.count("INP") >= body.count("FID")`**：INP 於 2024-03-12 正式取代 FID 成為 CWV 指標。但 LLM 訓練資料有大量 FID-era 內容，會順手寫 FID 當目標。role 文件裡明確寫「INP 於 2024-03-12 取代 FID」並用測試 pin 住計數比例，未來有人誤 revert 成 FID 主場會立刻紅燈。
+5. **frontend role 引用 W2 常數名字而不只是數字**：寫的是「Lighthouse Performance ≥ 80（`LIGHTHOUSE_MIN_PERF`）」而非純「≥ 80」。兩個好處：(a) test 能同時驗數字 + 常數名稱（`test_frontend_role_mentions_lighthouse_gates`）；(b) 如果 W2 未來調高 baseline（例：perf ≥ 85），改 `backend/web_simulator.py` 一個地方 + 更新 role 文件即可，reviewer 一搜 `LIGHTHOUSE_MIN_PERF` 就找到所有要改的地方。
+6. **a11y / seo / perf 都附 PR self-audit checklist**：這三個 role 的產出常是「審查報告」不是「新程式碼」，checklist 格式讓 agent 可直接填 `- [x]` 當 PR 回覆 body。相比純 prose 敘述，checklist 更容易被下游 `reviewer/code-review.skill.md` 的 review 流程消費。
+7. **沒有順手建立 `software/frontend-*.skill.md` 的 symlink / alias**：曾考慮讓舊的 `software/` 類別也能 resolve frontend role（向下相容），但 symlink 在 git 上跨 OS 不穩定，且 category 本來就是 taxonomy 的一部分 — 把 frontend 放 software 會讓 embedded 工程師誤拉到 React role。保持 `web/` 獨立乾淨。
+8. **沒實作「role auto-select by task keyword」的 router**：W3 只負責宣告 role 檔案 + 測試可被 discover。task 到 role 的 match 由上層 task dispatcher（`match_task_skill` 已存在）負責；role 的 `keywords` frontmatter 已經填好（react/vue/svelte/lcp/inp/wcag…），未來 `match_role_for_task()` 要接就有資料可吃。不在 W3 範圍。
+
+**後續建議（unblocks 的下游）：**
+
+* **W4 deploy adapters**：Vercel / CF / Netlify / docker-nginx 的 adapter 在 `provision()` 階段可以 `load_role_skill("web", "frontend-<framework>")` 把 role 文字灌進 PR 描述，說明「此部署由 X role 負責」。
+* **W5 compliance gates**：WCAG 2.2 AA gate 落 axe-core 全量掃時，可以把 `a11y.skill.md` 的 PR checklist 當 machine-readable spec（grep `- [ ]` 抽條目）。
+* **W6 Next.js pilot / W7 Nuxt / W8 Astro / W9 SvelteKit**：各 vertical 的 LLM agent 直接 `load_role_skill("web", "frontend-react")` 等即可拿到 domain prompt。四個 framework-specific role 已就位。
+* **B11 role router upgrade**：未來若要實作「根據 task title 自動挑 role」，web category 的 keywords 已經佈好（react / vue / svelte / wcag / lcp / inp 等），不用再加欄位。
+* **Prompt tokens 預算**：6 個 role 文件總計約 14 KiB，每次 load_role_skill() 只會載入一個（≤ 6 KiB，在 `_MAX_ROLE_SKILL` 預算內），不會撐爆 system prompt。
+
+**Operator TODO（`[O]` 項目）：**
+
+* 無 — W3 純 declarative markdown + tests + 常態 Python 匯入，無 SSH / 第三方後台 / 外部帳號操作。
 
 ---
 

@@ -971,14 +971,14 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### W3. Web role skills (#277)
-- [ ] `configs/roles/frontend-react.md`
-- [ ] `configs/roles/frontend-vue.md`
-- [ ] `configs/roles/frontend-svelte.md`
-- [ ] `configs/roles/web-a11y.md`（WCAG 2.2 AA）
-- [ ] `configs/roles/web-seo.md`
-- [ ] `configs/roles/web-perf.md`（Core Web Vitals）
-- [ ] 每個 role 提供 domain-specific prompt + role-specific tool whitelist
-- [ ] 預估：**1 day**
+- [x] `configs/roles/web/frontend-react.skill.md`（命名對齊既有 `{category}/{role_id}.skill.md` 慣例，prompt_loader 自動 discover）
+- [x] `configs/roles/web/frontend-vue.skill.md`
+- [x] `configs/roles/web/frontend-svelte.skill.md`
+- [x] `configs/roles/web/a11y.skill.md`（WCAG 2.2 AA，含 2.4.11 / 2.5.7 / 2.5.8 / 3.3.8 新增條款）
+- [x] `configs/roles/web/seo.skill.md`
+- [x] `configs/roles/web/perf.skill.md`（Core Web Vitals：LCP / INP / CLS，INP 取代 FID）
+- [x] 每個 role 提供 domain-specific prompt + role-specific tool whitelist（非 `[all]`，frontend 12 工具 / 審查類 5 工具）
+- [x] 預估：**1 day**
 
 ### W4. Deploy adapters (#278)
 - [ ] `backend/deploy/vercel.py`（Vercel REST API：project create / env set / deploy）
