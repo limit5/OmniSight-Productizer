@@ -69,11 +69,17 @@ import threading as _threading
 _provider_failures_lock = _threading.Lock()
 
 
-def _record_provider_failure(provider: str, ts: float | None = None) -> None:
+def _record_provider_failure(provider: str, ts: float | None = None,
+                              *, reason: str | None = None) -> None:
     """Record a provider failure timestamp; prune stale entries to bound size.
 
-    Without this, a steady stream of unique provider names (config typos,
-    misrouted models) could grow the dict without bound.
+    Also records the failure on the per-tenant-per-key circuit breaker
+    (M3) so a single tenant's bad key cannot affect other tenants.
+
+    The legacy global ``_provider_failures`` dict is kept in sync for
+    backward compatibility (existing callers / metrics / tests still
+    read it), but the *authoritative* state for failover decisions is
+    now ``backend.circuit_breaker``.
     """
     import time as _t
     now = _t.time()
@@ -86,6 +92,42 @@ def _record_provider_failure(provider: str, ts: float | None = None) -> None:
             while len(_provider_failures) > _PROVIDER_FAILURES_MAX:
                 oldest = min(_provider_failures, key=_provider_failures.get)
                 _provider_failures.pop(oldest, None)
+    try:
+        from backend import circuit_breaker
+        from backend.db_context import current_tenant_id
+        tid = current_tenant_id() or "t-default"
+        fp = circuit_breaker.active_fingerprint(provider)
+        circuit_breaker.record_failure(tid, provider, fp, reason=reason)
+    except Exception as exc:
+        logger.debug("circuit_breaker.record_failure skipped: %s", exc)
+
+
+def _record_provider_success(provider: str) -> None:
+    """Mark the per-tenant-per-key circuit as closed after a healthy call."""
+    try:
+        from backend import circuit_breaker
+        from backend.db_context import current_tenant_id
+        tid = current_tenant_id() or "t-default"
+        fp = circuit_breaker.active_fingerprint(provider)
+        circuit_breaker.record_success(tid, provider, fp)
+    except Exception as exc:
+        logger.debug("circuit_breaker.record_success skipped: %s", exc)
+
+
+def _per_tenant_circuit_open(provider: str) -> bool:
+    """Return True if the per-tenant per-key circuit is open for the
+    *current* request context.  Falls back to False on any error so the
+    breaker never blocks the happy path due to its own bug.
+    """
+    try:
+        from backend import circuit_breaker
+        from backend.db_context import current_tenant_id
+        tid = current_tenant_id() or "t-default"
+        fp = circuit_breaker.active_fingerprint(provider)
+        return circuit_breaker.is_open(tid, provider, fp)
+    except Exception as exc:
+        logger.debug("circuit_breaker.is_open skipped: %s", exc)
+        return False
 
 
 def get_llm(
@@ -120,33 +162,47 @@ def get_llm(
     try:
         llm = _create_llm(provider, model)
 
-        # Failover: if primary fails, try fallback chain with cooldown
+        # Failover: if primary fails, try fallback chain with cooldown.
+        # M3: cooldown decisions consult the per-tenant per-key breaker
+        # so one tenant's bad key cannot push other tenants down-chain.
         if llm is None:
+            # Primary provider also failed — record so its breaker opens.
+            _record_provider_failure(provider, reason="primary_init_failed")
             chain = [p.strip() for p in settings.llm_fallback_chain.split(",") if p.strip()]
             for fallback_provider in chain:
                 if fallback_provider == provider:
                     continue  # Skip the one that already failed
-                # Circuit breaker: skip providers that failed recently
+                # Per-tenant per-key breaker takes precedence; legacy
+                # global cooldown is consulted as a secondary guard so
+                # operator-set bypasses still work (and tests that
+                # manipulate _provider_failures directly keep passing).
+                if _per_tenant_circuit_open(fallback_provider):
+                    logger.debug("Skipping %s (per-tenant circuit open)", fallback_provider)
+                    continue
                 last_fail = _provider_failures.get(fallback_provider, 0)
                 if time.time() - last_fail < PROVIDER_COOLDOWN:
-                    logger.debug("Skipping %s (cooldown, failed %ds ago)", fallback_provider, int(time.time() - last_fail))
+                    logger.debug("Skipping %s (legacy cooldown, failed %ds ago)", fallback_provider, int(time.time() - last_fail))
                     continue
                 try:
                     llm = _create_llm(fallback_provider, None)
-                except Exception:
-                    _record_provider_failure(fallback_provider)
+                except Exception as exc:
+                    _record_provider_failure(fallback_provider, reason=str(exc)[:120])
                     continue
                 if llm is not None:
                     provider = fallback_provider
                     model = None
+                    _record_provider_success(fallback_provider)
                     logger.info("Failover: %s → %s", settings.llm_provider, fallback_provider)
                     break
                 else:
-                    _record_provider_failure(fallback_provider)
+                    _record_provider_failure(fallback_provider, reason="missing_credentials")
             if llm is None:
                 from backend.events import emit_token_warning
                 emit_token_warning("all_providers_failed", "All LLM providers failed. Using rule-based fallback.")
                 return None
+        else:
+            # Primary succeeded; close any prior circuit for this key.
+            _record_provider_success(provider)
 
         # Inject token tracking callback (graceful if provider doesn't support it)
         model_name = model or (llm.model_name if hasattr(llm, "model_name") else f"{provider}:default")

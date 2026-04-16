@@ -540,6 +540,42 @@ export async function updateFallbackChain(chain: string[]): Promise<{ status: st
   })
 }
 
+// M3 — Per-tenant per-provider per-key circuit breaker
+export interface CircuitBreakerEntry {
+  tenant_id: string
+  provider: string
+  fingerprint: string
+  open: boolean
+  cooldown_remaining: number
+  failure_count: number
+  last_failure: number | null
+  opened_at: number | null
+  closed_at: number | null
+  reason: string | null
+}
+
+export interface CircuitBreakerResponse {
+  tenant_id: string
+  scope: "tenant" | "all"
+  cooldown_seconds: number
+  circuits: CircuitBreakerEntry[]
+}
+
+export async function getCircuitBreakers(scope: "tenant" | "all" = "tenant"): Promise<CircuitBreakerResponse> {
+  return request<CircuitBreakerResponse>(`/providers/circuits?scope=${scope}`)
+}
+
+export async function resetCircuitBreaker(opts: { provider?: string; fingerprint?: string; scope?: "tenant" | "all" } = {}): Promise<{ status: string; cleared: number; tenant_id: string; scope: string }> {
+  return request<{ status: string; cleared: number; tenant_id: string; scope: string }>("/providers/circuits/reset", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: opts.provider ?? null,
+      fingerprint: opts.fingerprint ?? null,
+      scope: opts.scope ?? "tenant",
+    }),
+  })
+}
+
 export async function switchProvider(provider: string, model?: string) {
   return request<{ status: string; provider: string; model: string }>(
     "/providers/switch",

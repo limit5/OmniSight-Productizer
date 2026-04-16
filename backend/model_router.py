@@ -152,15 +152,26 @@ def _is_provider_available(model_spec: str) -> bool:
             return False
     except Exception:
         return False
-    # Also check cooldown
-    try:
-        from backend.agents.llm import _provider_failures, PROVIDER_COOLDOWN
-        import time
-        provider = model_spec.split(":")[0] if ":" in model_spec else ""
-        if provider and time.time() - _provider_failures.get(provider, 0) < PROVIDER_COOLDOWN:
-            return False
-    except Exception:
-        pass
+    # Also check cooldown — prefer the per-tenant per-key breaker; fall
+    # back to the legacy global one for safety.
+    provider = model_spec.split(":")[0] if ":" in model_spec else ""
+    if provider:
+        try:
+            from backend import circuit_breaker
+            from backend.db_context import current_tenant_id
+            tid = current_tenant_id() or "t-default"
+            fp = circuit_breaker.active_fingerprint(provider)
+            if circuit_breaker.is_open(tid, provider, fp):
+                return False
+        except Exception:
+            pass
+        try:
+            from backend.agents.llm import _provider_failures, PROVIDER_COOLDOWN
+            import time
+            if time.time() - _provider_failures.get(provider, 0) < PROVIDER_COOLDOWN:
+                return False
+        except Exception:
+            pass
     return True
 
 

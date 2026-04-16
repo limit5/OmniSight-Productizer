@@ -397,6 +397,129 @@ function StorageQuotaSection() {
   )
 }
 
+function CircuitBreakerSection() {
+  const [data, setData] = useState<api.CircuitBreakerResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [resetting, setResetting] = useState(false)
+
+  const refresh = useCallback(async () => {
+    try {
+      setError(null)
+      const r = await api.getCircuitBreakers("tenant")
+      setData(r)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    // M3: cooldown ticks every second; refresh every 10s so stale state
+    // doesn't linger after a key recovers without manual reload.
+    const id = setInterval(refresh, 10_000)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  const handleReset = useCallback(async (provider?: string, fingerprint?: string) => {
+    setResetting(true)
+    try {
+      await api.resetCircuitBreaker({ provider, fingerprint })
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setResetting(false)
+    }
+  }, [refresh])
+
+  return (
+    <div className="pt-2 border-t border-[var(--border)]/50 mt-1">
+      <div className="flex items-center justify-between pb-1">
+        <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">
+          Circuit Breakers — {data?.tenant_id ?? "?"}
+        </span>
+        <div className="flex items-center gap-1">
+          {data && data.circuits.length > 0 && (
+            <button
+              onClick={() => handleReset()}
+              disabled={resetting}
+              className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--neural-blue)]/15 hover:text-[var(--neural-blue)] disabled:opacity-30 transition-colors"
+              title="Reset all circuits for this tenant"
+            >
+              RESET ALL
+            </button>
+          )}
+          <button
+            onClick={refresh}
+            disabled={resetting}
+            title="Refresh circuit state"
+            className="p-0.5 rounded text-[var(--muted-foreground)] hover:bg-[var(--neural-blue)]/10 hover:text-[var(--neural-blue)] disabled:opacity-30 transition-colors"
+          >
+            <RefreshCw size={9} className={resetting ? "animate-spin" : ""} />
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="font-mono text-[9px] text-[var(--critical-red)] py-1">{error}</div>
+      )}
+
+      {!data ? (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60 py-1">
+          Loading…
+        </div>
+      ) : data.circuits.length === 0 ? (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60 py-1">
+          All circuits healthy — no failures recorded for this tenant.
+        </div>
+      ) : (
+        <div className="space-y-1">
+          {data.circuits.map((c) => {
+            const open = c.open
+            const colorVar = open ? "var(--critical-red)" : "var(--validation-emerald)"
+            return (
+              <div
+                key={`${c.provider}/${c.fingerprint}`}
+                className="flex items-center gap-2 p-1.5 rounded border border-[var(--border)] bg-[var(--background)]"
+              >
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: colorVar }}
+                />
+                <span className="font-mono text-[10px] text-[var(--foreground)] w-16 shrink-0 truncate">
+                  {c.provider}
+                </span>
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)] flex-1 truncate">
+                  {c.fingerprint}
+                </span>
+                <span
+                  className="font-mono text-[8px] px-1.5 py-0.5 rounded uppercase shrink-0"
+                  style={{ backgroundColor: `${colorVar}20`, color: colorVar }}
+                >
+                  {open ? `OPEN ${c.cooldown_remaining}s` : "CLOSED"}
+                </span>
+                <span className="font-mono text-[8px] text-[var(--muted-foreground)] shrink-0">
+                  {c.failure_count} fail{c.failure_count === 1 ? "" : "s"}
+                </span>
+                {open && (
+                  <button
+                    onClick={() => handleReset(c.provider, c.fingerprint)}
+                    disabled={resetting}
+                    title={c.reason ?? "Reset this circuit"}
+                    className="px-1 py-0.5 rounded font-mono text-[8px] bg-[var(--neural-blue)]/15 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/25 disabled:opacity-30 transition-colors shrink-0"
+                  >
+                    RESET
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
@@ -565,6 +688,8 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             <div className="pt-1">
               <SettingField label="Fallback" value={getVal("llm", "fallback_chain")} onChange={v => setVal("llm_fallback_chain", v)} />
             </div>
+            {/* M3: per-tenant per-provider per-key circuit breaker state */}
+            <CircuitBreakerSection />
           </SettingsSection>
 
           <SettingsSection title="GIT REPOSITORIES" integration="ssh">
