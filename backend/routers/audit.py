@@ -1,7 +1,8 @@
-"""Phase 53 — audit query API.
+"""Phase 53 / I8 — audit query API with per-tenant hash chain.
 
 GET  /audit?since=&actor=&entity_kind=&limit=
-GET  /audit/verify    walk the chain, return {ok, first_bad_id?}
+GET  /audit/verify?tenant_id=     per-tenant chain verify (admin only)
+GET  /audit/verify-all            all tenants at once (admin only)
 
 The mutator endpoints (decision_engine.set_mode/resolve/undo) write
 to the audit log automatically; this router is read-only.
@@ -10,10 +11,11 @@ to the audit log automatically; this router is read-only.
 from __future__ import annotations
 
 import os
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from backend import audit
 from backend import auth as _au
+from backend.db_context import current_tenant_id
 from backend.routers import _pagination as _pg
 
 async def _resolve_session_hint(user_id: str, token_hint: str) -> str | None:
@@ -64,11 +66,32 @@ async def list_audit(
         since=since, actor=actor, entity_kind=entity_kind,
         session_id=resolved_sid, limit=limit,
     )
-    return {"items": rows, "count": len(rows), "filtered_to_self": user.role != "admin"}
+    tid = current_tenant_id() or user.tenant_id
+    return {"items": rows, "count": len(rows), "filtered_to_self": user.role != "admin",
+            "tenant_id": tid}
 
 
 @router.get("/verify")
-async def verify_chain(_auth: None = Depends(_require_audit_token),
-                       _user: _au.User = Depends(_au.require_admin)) -> dict:
-    ok, bad = await audit.verify_chain()
-    return {"ok": ok, "first_bad_id": bad}
+async def verify_chain(
+    tenant_id: str | None = Query(default=None, description="Tenant to verify (admin only, defaults to current tenant)"),
+    _auth: None = Depends(_require_audit_token),
+    user: _au.User = Depends(_au.require_admin),
+) -> dict:
+    tid = tenant_id or current_tenant_id() or user.tenant_id
+    ok, bad = await audit.verify_chain(tenant_id=tid)
+    return {"ok": ok, "first_bad_id": bad, "tenant_id": tid}
+
+
+@router.get("/verify-all")
+async def verify_all_chains(
+    _auth: None = Depends(_require_audit_token),
+    _user: _au.User = Depends(_au.require_admin),
+) -> dict:
+    results = await audit.verify_all_chains()
+    tenants = []
+    all_ok = True
+    for tid, (ok, bad) in sorted(results.items()):
+        tenants.append({"tenant_id": tid, "ok": ok, "first_bad_id": bad})
+        if not ok:
+            all_ok = False
+    return {"ok": all_ok, "tenants": tenants}

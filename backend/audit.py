@@ -1,10 +1,9 @@
-"""Phase 53 — audit & compliance layer.
+"""Phase 53 / I8 — audit & compliance layer with per-tenant hash chains.
 
 Append-only hash-chained log of every state-changing operation worth
-auditing. Implementation is intentionally minimal — one table, one
-write path, one read path, one verify path. Entry points hooked from
-`decision_engine.set_mode/set_strategy/resolve` and any callers that
-go through `audit.log()`.
+auditing. Each tenant maintains an independent hash chain starting from
+its own genesis row (empty prev_hash). This prevents cross-tenant chain
+interference and enables per-tenant integrity verification.
 
 Hash chain: each row's `curr_hash` is `sha256(prev_hash || canonical(row))`.
 A tampered row breaks the chain from that point onward. `verify_chain()`
@@ -18,10 +17,12 @@ of paper).
 Public API:
     await audit.log(action, entity_kind, entity_id, before, after, actor=...)
     await audit.query(since=..., actor=..., entity_kind=..., limit=...)
-    await audit.verify_chain()  # returns (ok, first_bad_id_or_None)
+    await audit.verify_chain(tenant_id=...)  # per-tenant chain verify
+    await audit.verify_all_chains()          # all tenants at once
 
 CLI:
-    python -m backend.audit verify
+    python -m backend.audit verify [--tenant TENANT_ID]
+    python -m backend.audit verify-all
 """
 
 from __future__ import annotations
@@ -58,10 +59,12 @@ async def _conn():
     return db._conn()
 
 
-async def _last_hash() -> str:
+async def _last_hash_for_tenant(tenant_id: str) -> str:
+    """Get the last hash in a specific tenant's chain."""
     conn = await _conn()
     async with conn.execute(
-        "SELECT curr_hash FROM audit_log ORDER BY id DESC LIMIT 1"
+        "SELECT curr_hash FROM audit_log WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
+        (tenant_id,),
     ) as cur:
         row = await cur.fetchone()
     return row["curr_hash"] if row else ""
@@ -90,8 +93,9 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
 
     try:
         conn = await _conn()
+        tid = tenant_insert_value()
         async with _chain_lock:
-            prev = await _last_hash()
+            prev = await _last_hash_for_tenant(tid)
             curr = _hash(prev, payload_canon + str(round(ts, 6)))
             cur = await conn.execute(
                 "INSERT INTO audit_log "
@@ -101,7 +105,7 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
                 (ts, actor, action, entity_kind, entity_id or "",
                  json.dumps(before_d, ensure_ascii=False),
                  json.dumps(after_d, ensure_ascii=False),
-                 prev, curr, session_id, tenant_insert_value()),
+                 prev, curr, session_id, tid),
             )
             await conn.commit()
             new_id = cur.lastrowid
@@ -188,17 +192,21 @@ async def write_audit(request, action: str, entity_kind: str,
     return await log(action, entity_kind, entity_id, before, after, actor, session_id=sid)
 
 
-async def verify_chain() -> tuple[bool, Optional[int]]:
-    """Walk the chain in id order. Returns (True, None) if the chain
-    is intact, otherwise (False, first_bad_id). first_bad_id is the
-    earliest row whose curr_hash doesn't match the recomputed value
-    given the prior row's curr_hash."""
+async def verify_chain(tenant_id: str | None = None) -> tuple[bool, Optional[int]]:
+    """Walk a single tenant's chain in id order. Returns (True, None)
+    if intact, otherwise (False, first_bad_id).
+
+    If *tenant_id* is None, uses the current context tenant (falls back
+    to "t-default")."""
+    from backend.db_context import current_tenant_id
+    tid = tenant_id or current_tenant_id() or "t-default"
     conn = await _conn()
     prev_hash = ""
     async with conn.execute(
         "SELECT id, ts, actor, action, entity_kind, entity_id, "
         "before_json, after_json, prev_hash, curr_hash "
-        "FROM audit_log ORDER BY id ASC"
+        "FROM audit_log WHERE tenant_id = ? ORDER BY id ASC",
+        (tid,),
     ) as cur:
         async for r in cur:
             payload = {
@@ -216,6 +224,20 @@ async def verify_chain() -> tuple[bool, Optional[int]]:
     return (True, None)
 
 
+async def verify_all_chains() -> dict[str, tuple[bool, Optional[int]]]:
+    """Verify every tenant's chain independently. Returns a dict mapping
+    tenant_id → (ok, first_bad_id_or_None)."""
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT DISTINCT tenant_id FROM audit_log ORDER BY tenant_id"
+    ) as cur:
+        tenants = [r["tenant_id"] for r in await cur.fetchall()]
+    results: dict[str, tuple[bool, Optional[int]]] = {}
+    for tid in tenants:
+        results[tid] = await verify_chain(tenant_id=tid)
+    return results
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI: `python -m backend.audit verify`
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -223,8 +245,9 @@ async def verify_chain() -> tuple[bool, Optional[int]]:
 
 def _cli_main(argv: list[str]) -> int:
     import sys
-    if len(argv) < 1 or argv[0] not in {"verify", "tail"}:
-        print("usage: python -m backend.audit verify | tail [N]", file=sys.stderr)
+    if len(argv) < 1 or argv[0] not in {"verify", "verify-all", "tail"}:
+        print("usage: python -m backend.audit verify [--tenant TID] | verify-all | tail [N]",
+              file=sys.stderr)
         return 2
 
     async def _run() -> int:
@@ -232,12 +255,42 @@ def _cli_main(argv: list[str]) -> int:
         await db.init()
         try:
             if argv[0] == "verify":
-                ok, bad = await verify_chain()
+                tid: str | None = None
+                if "--tenant" in argv:
+                    idx = argv.index("--tenant")
+                    if idx + 1 < len(argv):
+                        tid = argv[idx + 1]
+                    else:
+                        print("--tenant requires a value", file=sys.stderr)
+                        return 2
+                if tid:
+                    ok, bad = await verify_chain(tenant_id=tid)
+                    label = f"[{tid}] "
+                else:
+                    from backend.db_context import set_tenant_id
+                    set_tenant_id("t-default")
+                    ok, bad = await verify_chain()
+                    label = "[t-default] "
                 if ok:
-                    print("audit chain OK")
+                    print(f"audit chain {label}OK")
                     return 0
-                print(f"audit chain BROKEN at row id={bad}", file=sys.stderr)
+                print(f"audit chain {label}BROKEN at row id={bad}", file=sys.stderr)
                 return 1
+
+            if argv[0] == "verify-all":
+                results = await verify_all_chains()
+                if not results:
+                    print("no audit entries found")
+                    return 0
+                failed = False
+                for tid, (ok, bad) in sorted(results.items()):
+                    if ok:
+                        print(f"  [{tid}] OK")
+                    else:
+                        print(f"  [{tid}] BROKEN at row id={bad}", file=sys.stderr)
+                        failed = True
+                return 1 if failed else 0
+
             n = int(argv[1]) if len(argv) > 1 else 20
             rows = await query(limit=n)
             for r in rows:
