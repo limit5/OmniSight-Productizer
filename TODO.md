@@ -1058,11 +1058,11 @@ Legend:
 - [x] 預估：**1 day**
 
 ### P1. Mobile toolchains 整合 (#286)
-- [ ] Docker image base：`ghcr.io/omnisight/mobile-build`（Xcode CLI 16 + Android SDK 35 + Gradle 8 + CocoaPods 1.15）
-- [ ] **macOS 限制**：iOS build 需真實 macOS host（Linux 不可）；支援 `OMNISIGHT_MACOS_BUILDER=self-hosted|macstadium|cirrus-ci|github-macos-runner` 遠端委派
-- [ ] Android build 可純 Linux Docker 跑
-- [ ] Fastlane / gym / gradle wrapper 整合
-- [ ] 預估：**2 day**
+- [x] Docker image base：`ghcr.io/omnisight/mobile-build`（Xcode CLI 16 + Android SDK 35 + Gradle 8 + CocoaPods 1.15）
+- [x] **macOS 限制**：iOS build 需真實 macOS host（Linux 不可）；支援 `OMNISIGHT_MACOS_BUILDER=self-hosted|macstadium|cirrus-ci|github-macos-runner` 遠端委派
+- [x] Android build 可純 Linux Docker 跑
+- [x] Fastlane / gym / gradle wrapper 整合
+- [x] 預估：**2 day**
 
 ### P2. Mobile simulate track (#287)
 - [ ] `scripts/simulate.sh` 新增 `mobile` track：iOS Simulator + Android Emulator 雙平台 smoke + UI test

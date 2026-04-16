@@ -1,0 +1,160 @@
+# OmniSight Mobile Build — ghcr.io/omnisight/mobile-build (P1 #286)
+#
+# Linux-only image for Android + cross-platform mobile-framework
+# build runs (Flutter-Android, React-Native-Android, KMP-Android).
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  iOS builds are NOT handled by this image.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Xcode / xcodebuild / the Mach-O linker are proprietary to Apple and
+# Apple's SLA forbids running them on non-Apple hardware. The only
+# legitimate way to produce an iOS .ipa is on a macOS host. The
+# backend.mobile_toolchain resolver reads the `OMNISIGHT_MACOS_BUILDER`
+# environment variable and delegates iOS builds to:
+#   * self-hosted       — operator-provisioned macOS runner (SSH)
+#   * macstadium        — MacStadium dedicated-host API
+#   * cirrus-ci         — Cirrus CI macOS task (free for OSS)
+#   * github-macos-runner  — GitHub Actions `macos-14` / `macos-15`
+# See backend/mobile_toolchain.py for the delegation matrix.
+#
+# Android / Gradle / CocoaPods are fine on Linux — those pieces live
+# here. CocoaPods is useful even on Linux for iOS projects that need
+# dependency resolution (Podfile.lock generation) without actually
+# compiling; the real `pod install` that links against Xcode still has
+# to run on the macOS builder.
+#
+# Versions pinned in this image:
+#   * Ubuntu 22.04 (LTS until 2027-04)
+#   * OpenJDK 17  — required by Gradle 8 and AGP 8
+#   * Android command-line-tools 11076708 (2024-09)
+#   * Android SDK platform 35 (Android 15) — matches P0 profile
+#   * Android build-tools 35.0.0
+#   * Android NDK r27 (27.0.12077973) — matches P0 profile toolchain_path
+#   * Gradle 8.7 — default invoked via ./gradlew wrapper (project-pinned)
+#   * Ruby 3.1 + Fastlane 2.221 + CocoaPods 1.15
+#   * Python 3.10 (ubuntu default) — for scripts/ + backend helpers
+#
+# Size budget: ~4.5 GiB (SDK platform 35 + NDK r27 dominate; NDK alone
+# is ~2 GiB). Non-negotiable — the Play Store submission pipeline
+# requires all of it.
+#
+# Consumed by:
+#   * backend/mobile_toolchain.py                        [P1 #286]
+#   * scripts/simulate.sh mobile track (Linux half)      [P2 #287]
+#   * P4 role skills (#289) gradle-based CI templates
+#   * P8 SKILL-ANDROID scaffold (#293)
+
+FROM ubuntu:22.04
+
+LABEL maintainer="OmniSight Engine"
+LABEL org.opencontainers.image.title="omnisight/mobile-build"
+LABEL org.opencontainers.image.description="Linux mobile build toolchain (Android + cross-platform). iOS delegated to macOS hosts via OMNISIGHT_MACOS_BUILDER."
+LABEL org.opencontainers.image.source="https://github.com/omnisight/productizer"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# ── Base tooling ──────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget unzip zip git openssh-client \
+        build-essential cmake make pkg-config file jq \
+        python3 python3-pip \
+        openjdk-17-jdk-headless \
+        ruby ruby-dev ruby-bundler \
+        libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libssl-dev \
+        qemu-kvm libvirt-daemon-system bridge-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# ── Android SDK (command-line-tools → sdkmanager) ────────────────
+ENV ANDROID_SDK_ROOT=/opt/android/sdk
+ENV ANDROID_HOME=${ANDROID_SDK_ROOT}
+ENV ANDROID_NDK_VERSION=27.0.12077973
+ENV ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}
+ENV ANDROID_COMPILE_SDK=35
+ENV ANDROID_BUILD_TOOLS=35.0.0
+ENV ANDROID_CMDLINE_TOOLS=11076708
+
+RUN mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools \
+ && cd /tmp \
+ && curl -fsSLo cmdtools.zip \
+      "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip" \
+ && unzip -q cmdtools.zip -d ${ANDROID_SDK_ROOT}/cmdline-tools \
+ && mv ${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools ${ANDROID_SDK_ROOT}/cmdline-tools/latest \
+ && rm -f cmdtools.zip
+
+ENV PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}"
+
+# Accept licences (interactive `yes |` — scripted).
+RUN yes | sdkmanager --licenses >/dev/null 2>&1 || true \
+ && sdkmanager --install \
+        "platform-tools" \
+        "platforms;android-${ANDROID_COMPILE_SDK}" \
+        "platforms;android-34" \
+        "build-tools;${ANDROID_BUILD_TOOLS}" \
+        "ndk;${ANDROID_NDK_VERSION}" \
+        "cmake;3.22.1" \
+        "emulator" \
+        "system-images;android-34;google_apis;arm64-v8a" \
+    >/dev/null
+
+# ── Gradle 8.7 ─────────────────────────────────────────────────────
+# Projects use the Gradle wrapper (`./gradlew`), so this binary is a
+# fallback for wrapper-less scripts + `gradle wrapper --gradle-version`
+# bootstrap of fresh scaffolds (P8 #293).
+ENV GRADLE_VERSION=8.7
+RUN curl -fsSLo /tmp/gradle.zip \
+        "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+ && unzip -q /tmp/gradle.zip -d /opt \
+ && ln -s /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle \
+ && rm -f /tmp/gradle.zip
+ENV GRADLE_HOME=/opt/gradle-${GRADLE_VERSION}
+
+# ── Ruby gems: Fastlane + CocoaPods ───────────────────────────────
+# `fastlane supply` (Play) works entirely on Linux. `fastlane gym`
+# (iOS) is installed here so the same Fastfile loads without missing
+# gem; actual `gym` invocation MUST run on a macOS builder — the
+# delegation matrix in backend/mobile_toolchain.py enforces that.
+# CocoaPods on Linux can resolve Podfile.lock but cannot perform
+# the full `pod install` link step (needs Xcode).
+ENV COCOAPODS_VERSION=1.15.2
+ENV FASTLANE_VERSION=2.221.1
+RUN gem install --no-document bundler \
+ && gem install --no-document fastlane -v ${FASTLANE_VERSION} \
+ && gem install --no-document cocoapods -v ${COCOAPODS_VERSION} \
+ && gem install --no-document cocoapods-core \
+ && fastlane --version | head -n1
+
+# ── Python helpers ─────────────────────────────────────────────────
+# Flutter / React Native are provisioned per-project — this image
+# only ships the Android halves. Flutter SDK tarballs are too large
+# to bake into the base image (>600 MiB); P8 scaffold installs them
+# on demand using the pinned version from the role skill.
+
+RUN pip3 install --no-cache-dir --break-system-packages \
+        pyyaml \
+        "requests<3" \
+        aiohttp
+
+# ── OmniSight runtime hooks ───────────────────────────────────────
+# Non-root `builder` user — Android SDK / Gradle caches live under
+# its HOME so subsequent runs on the same volume skip re-downloads.
+RUN groupadd --gid 1000 builder \
+ && useradd --uid 1000 --gid builder --create-home --shell /bin/bash builder \
+ && mkdir -p /workspace \
+ && chown -R builder:builder /workspace ${ANDROID_SDK_ROOT} /opt/gradle-${GRADLE_VERSION}
+
+# Git configuration — prevent "detected dubious ownership" when
+# workspaces are bind-mounted from the host with a different uid.
+RUN git config --system init.defaultBranch main \
+ && git config --system safe.directory '*'
+
+USER builder
+WORKDIR /workspace
+
+# Sanity line — printed once at container start so CI logs show
+# exactly what ABI matrix the image can service.
+CMD ["bash", "-lc", "echo '[omnisight/mobile-build] Android SDK '${ANDROID_COMPILE_SDK}' / NDK '${ANDROID_NDK_VERSION}' / Gradle '${GRADLE_VERSION}' / Fastlane '${FASTLANE_VERSION}' / CocoaPods '${COCOAPODS_VERSION}'  —  iOS build requires macOS (OMNISIGHT_MACOS_BUILDER).'; exec bash"]
