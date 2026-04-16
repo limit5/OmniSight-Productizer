@@ -1,9 +1,59 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I10 Multi-worker uvicorn + Redis shared state (master)
+> 最後 commit：M1 Cgroup CPU/Memory 硬隔離（對映 DRF token） (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## M1 (complete) Cgroup CPU/Memory 硬隔離（對映 DRF token）（2026-04-16 完成）
+
+**背景**：I 系列把資料 plane 做成硬隔離（RLS/SSE filter/secrets/audit），但資源層仍是「公平排隊」而非「硬邊界」——一個 tenant 的 compile 吃滿 CPU 會經 AIMD derate 拖慢無辜 tenant。M1 把 I6 DRF token bucket 已經算好的份額，向下打到 docker run 的 `--cpus`/`--memory`/`--cpu-shares`，由 kernel cgroup 強制執行；OOM 也由 cgroup OOM-killer 觸發、watchdog 歸因到正確 tenant，不再影響其他 tenant。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `_compute_resource_limits(tokens)` | 1 token = 1 core × 512 MiB × 1024 cpu-shares；clamp [0.25, 12]；無 budget 時 fallback `settings.docker_*_limit` | ✅ 完成 |
+| `start_container(tenant_id=, tenant_budget=)` | 新增 kw-only 參數；`docker run` 加 `--cpus` `--memory` `--cpu-shares` `--label tenant_id=` `--label tokens=` | ✅ 完成 |
+| Pass-through wrappers | `start_networked_container` / `start_t3_local_container` / `dispatch_t3` 也接 tenant_id + tenant_budget | ✅ 完成 |
+| Tenant 自動解析 | `tenant_id=None` 時讀 `db_context.current_tenant_id()`，再 fallback `t-default` | ✅ 完成 |
+| Audit row | `sandbox_launched.after` 加上 `tenant_id` / `tenant_budget` / `cpus` / `memory` / `cpu_shares` | ✅ 完成 |
+| OOM watchdog | `_oom_watchdog` 持續 poll `docker inspect .State`；exit 後檢查 `OOMKilled=true` 或 exit_code=137 + cgroup `memory.events.oom_kill` | ✅ 完成 |
+| `sandbox.oom` audit | actor=`system:oom-watchdog`，after 帶 `tenant_id`/`memory_limit`/`exit_code`/`reason` | ✅ 完成 |
+| `sandbox_oom_total{tenant_id, tier}` | 新增 Prometheus counter；註冊 + reset_for_tests + NoOp stub 三處同步 | ✅ 完成 |
+| `backend/cgroup_verify.py` | 讀 `cpu.weight` (v2) / `cpu.shares` (v1)，`verify_weight_ratio(a, b, expected)` 容差 20%；CLI `python -m backend.cgroup_verify a b` | ✅ 完成 |
+| ContainerInfo 擴充 | 新增 `tenant_id`/`tenant_budget`/`cpus`/`memory`/`cpu_shares`/`oom_task` 欄位（`status` 加 `killed_oom`） | ✅ 完成 |
+| stop_container 清理 | 同時 cancel `lifetime_task` 與 `oom_task`，避免對已移除 container poll | ✅ 完成 |
+| 測試（21 項） | 7 unit (mapping clamp/fallback) + 4 docker-stub integration (run flags / audit / context resolve / legacy) + 3 OOM watchdog + 7 cgroup_verify | ✅ 21/21 pass |
+
+**新增/修改檔案**：
+- `backend/container.py` — `_compute_resource_limits` + `_oom_watchdog` + `_record_sandbox_oom` + `_read_cgroup_oom_count`；`start_container` / 三個 wrapper / `dispatch_t3` 接 kw-only 參數；ContainerInfo 擴充
+- `backend/cgroup_verify.py` — 新增 cgroup v2/v1 `cpu.weight`/`cpu.shares` 讀取 + 比例驗證 helper + CLI
+- `backend/metrics.py` — 新增 `sandbox_oom_total{tenant_id, tier}`（含 NoOp stub + reset_for_tests）
+- `backend/tests/test_container_tenant_budget.py` — 新增 14 項測試
+- `backend/tests/test_cgroup_verify.py` — 新增 7 項測試
+- `backend/tests/test_t3_dispatch.py` — `fake_starter` 簽章吸收 `**kwargs` 以容納新 kwargs
+
+**設計決策**：
+- **1 token ≈ 1 core × 512 MiB**：對映 SandboxCostWeight 五級枚舉。compile=4 → 4 cores / 2 GiB；lightweight=1 → 1 core / 512 MiB；ssh-remote=0.5 → 0.5 core / 256 MiB（夠跑 SSH 用戶端）。
+- **`--cpu-shares` 同時帶上**：cgroup v2 下 docker 自動翻譯成 `cpu.weight`，提供「contention 時按比例分配」；`--cpus` 提供「單 tenant 不可超過 X core 的硬上限」。兩者協作即可同時保證公平 + 防超用。
+- **OOM 用 polling 而非 docker events**：每個 container 各自 watchdog 簡單 + cancel-on-stop trivial，避免單一 events 流崩潰時所有 watchdog 全死。
+- **OOM 雙路徑偵測**：`State.OOMKilled=true` 為主；某些 kernel 不設此 flag 但 SIGKILL（exit code 137），回退讀 cgroup `memory.events.oom_kill` counter。
+- **`tenant_id` label 強制存在**：M4 將從 `/sys/fs/cgroup/<container>/cpu.stat` 配對 container `tenant_id` label 聚合 per-tenant metrics；M1 先把這個 label 鋪好。
+- **Backward compat**：`tenant_budget=None` 走原本 `settings.docker_cpu_limit` / `docker_memory_limit` 路徑，舊 callsite 不需改。新 callsite（decision_engine `_ModeSlot` DRF acquire 點）後續 follow-up 可漸進升級。
+- **Watchdog test isolation**：`_oom_watchdog` 在每次 sleep 後檢查 `_containers.get(agent_id)`，若已被移除（測試 reset / crash 復原）就退出，避免 dangling task。
+
+**驗收**：
+- ✅ `--cpus=4.00 --memory=2048m --cpu-shares=4096` 正確生成（test_tenant_budget_emits_correct_docker_run_flags）
+- ✅ Audit row 帶完整 tenant_id + cpus + memory + cpu_shares（test_tenant_budget_recorded_in_audit）
+- ✅ OOMKilled → `sandbox.oom` audit + `sandbox_oom_total{tenant_id}` 增計（test_oom_watchdog_records_sandbox_oom）
+- ✅ 4:1 cpu.weight 比例驗證在容差內（test_four_to_one_ratio_within_tolerance）
+- ✅ Clean exit 不誤報 OOM（test_oom_watchdog_silent_on_clean_exit）
+
+**已知限制 / Follow-up**：
+- 真機 cgroup 並發 4:1 CPU 公平性實測需要 Docker daemon + 多核 host，已交付 `python -m backend.cgroup_verify <c1> <c2> 4.0` CLI 給運維手動驗證。
+- `decision_engine._ModeSlot` 目前 acquire DRF token 後不會把 cost 傳給 `start_container` — Phase M5/M6 串完後可一起補完整 e2e DRF→cgroup pipeline。
+- `sandbox_prewarm.py` 仍以 `starter(agent_id, workspace_path)` 兩個位置參數呼叫，新 kwargs 都用預設值；prewarm 容器目前都走 legacy fallback。
 
 ---
 

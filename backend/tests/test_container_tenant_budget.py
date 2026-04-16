@@ -106,31 +106,34 @@ async def db_for_audit(monkeypatch):
             await db.close()
 
 
+def _cancel_watchdogs() -> list[asyncio.Task]:
+    out: list[asyncio.Task] = []
+    for info in list(ct._containers.values()):
+        for tname in ("oom_task", "lifetime_task"):
+            t = getattr(info, tname, None)
+            if t is not None:
+                try:
+                    t.cancel()
+                    out.append(t)
+                except Exception:
+                    pass
+    return out
+
+
 @pytest.fixture(autouse=True)
-def _reset_state():
+async def _reset_state():
     from backend import metrics as m
     if m.is_available():
         m.reset_for_tests()
-    # cancel any leftover OOM watchdogs so we don't leak across tests
-    for info in list(ct._containers.values()):
-        for tname in ("oom_task", "lifetime_task"):
-            t = getattr(info, tname, None)
-            if t is not None:
-                try:
-                    t.cancel()
-                except Exception:
-                    pass
+    pending = _cancel_watchdogs()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     ct._containers.clear()
     ct._reset_runtime_cache_for_tests()
     yield
-    for info in list(ct._containers.values()):
-        for tname in ("oom_task", "lifetime_task"):
-            t = getattr(info, tname, None)
-            if t is not None:
-                try:
-                    t.cancel()
-                except Exception:
-                    pass
+    pending = _cancel_watchdogs()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     ct._containers.clear()
 
 
