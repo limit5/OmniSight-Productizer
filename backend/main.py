@@ -145,8 +145,11 @@ async def lifespan(app: FastAPI):
     # Phase 63-E: Memory decay loop (opt-in L3, gated by env).
     from backend import memory_decay as _md
     md_task = asyncio.create_task(_md.run_decay_loop())
+    # I6: DRF per-tenant sandbox capacity grace deadline sweep
+    from backend import sandbox_capacity as _sc
+    drf_task = asyncio.create_task(_sc.run_sweep_loop())
     yield
-    for t in (watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task):
+    for t in (watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task):
         t.cancel()
         try:
             await t

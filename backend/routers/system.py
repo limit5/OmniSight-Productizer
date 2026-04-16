@@ -606,6 +606,20 @@ def _yaml_to_spec(data: dict, parent_type: str = "hardware") -> list[dict]:
     return result
 
 
+@router.get("/sandbox/capacity")
+async def get_sandbox_capacity():
+    """I6: DRF per-tenant sandbox capacity snapshot."""
+    from backend import sandbox_capacity as _sc
+    return _sc.snapshot()
+
+
+@router.get("/sandbox/capacity/{tenant_id}")
+async def get_tenant_capacity(tenant_id: str):
+    """I6: Per-tenant sandbox capacity usage."""
+    from backend import sandbox_capacity as _sc
+    return _sc.tenant_usage(tenant_id)
+
+
 @router.get("/sse-schema")
 async def get_sse_schema():
     """A4/C7: return JSON-Schema for every SSE event type keyed by event

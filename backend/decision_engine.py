@@ -125,6 +125,10 @@ class DecisionQueueFull(Exception):
     """Raised when the pending-decision queue is at capacity."""
 
 
+class CapacityExhausted(Exception):
+    """Raised when DRF per-tenant capacity cannot be acquired."""
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Parallelism budget
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -147,13 +151,22 @@ class _ModeSlot:
     switch immediately tightens or loosens the limit for new acquirers.
     Existing holders retain their slot until they release.
 
-    The budget pool (in-flight counter) is global — all sessions share
-    the same pool. The *cap* is per-session: a turbo session sees cap 8,
-    a supervised session sees cap 2.
+    I6: when *tenant_id* is set, delegates to sandbox_capacity for
+    DRF-based per-tenant token budgeting. The mode cap still applies
+    as a parallel session-level ceiling, but the global token pool is
+    managed by the DRF module.
     """
 
-    def __init__(self, session_token: str | None = None) -> None:
+    def __init__(
+        self,
+        session_token: str | None = None,
+        tenant_id: str | None = None,
+        cost: float = 1.0,
+    ) -> None:
         self._session_token = session_token
+        self._tenant_id = tenant_id
+        self._cost = cost
+        self._drf_acquired = False
 
     def _get_cap(self) -> int:
         mode = get_session_mode(self._session_token) if self._session_token else get_mode()
@@ -166,10 +179,32 @@ class _ModeSlot:
             mode = get_mode()
         return _PARALLEL_BUDGET[mode]
 
+    def _is_turbo(self) -> bool:
+        mode = get_session_mode(self._session_token) if self._session_token else get_mode()
+        return mode == OperationMode.turbo
+
     async def __aenter__(self) -> "_ModeSlot":
         global _parallel_in_flight, _parallel_async_cond
         if _parallel_async_cond is None:
             _parallel_async_cond = asyncio.Condition()
+
+        if self._tenant_id is not None:
+            from backend import sandbox_capacity as _sc
+            ok = await _sc.acquire_with_reclaim(
+                tenant_id=self._tenant_id,
+                cost=self._cost,
+                is_turbo=self._is_turbo(),
+                timeout_s=60.0,
+            )
+            if not ok:
+                raise CapacityExhausted(
+                    f"DRF capacity exhausted for tenant {self._tenant_id}"
+                )
+            self._drf_acquired = True
+            with _parallel_lock:
+                _parallel_in_flight += 1
+            return self
+
         while True:
             async with _parallel_async_cond:
                 cap = await self._get_cap_async()
@@ -181,6 +216,12 @@ class _ModeSlot:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         global _parallel_in_flight, _parallel_async_cond
+
+        if self._drf_acquired:
+            from backend import sandbox_capacity as _sc
+            _sc.release(self._tenant_id, self._cost)
+            self._drf_acquired = False
+
         with _parallel_lock:
             _parallel_in_flight = max(0, _parallel_in_flight - 1)
         if _parallel_async_cond is not None:
@@ -188,6 +229,9 @@ class _ModeSlot:
                 _parallel_async_cond.notify_all()
 
     def locked(self) -> bool:
+        if self._tenant_id is not None:
+            from backend import sandbox_capacity as _sc
+            return not _sc.try_acquire(self._tenant_id, self._cost, self._is_turbo())
         with _parallel_lock:
             return _parallel_in_flight >= self._get_cap()
 
@@ -197,6 +241,10 @@ class _ModeSlot:
 
     def release(self) -> None:
         global _parallel_in_flight
+        if self._drf_acquired:
+            from backend import sandbox_capacity as _sc
+            _sc.release(self._tenant_id, self._cost)
+            self._drf_acquired = False
         with _parallel_lock:
             _parallel_in_flight = max(0, _parallel_in_flight - 1)
 
@@ -204,7 +252,11 @@ class _ModeSlot:
 _mode_slot_singleton = _ModeSlot()
 
 
-def parallel_slot(session_token: str | None = None) -> _ModeSlot:
+def parallel_slot(
+    session_token: str | None = None,
+    tenant_id: str | None = None,
+    cost: float = 1.0,
+) -> _ModeSlot:
     """Acquire this in invoke/pipeline runs to respect mode parallelism.
 
     Use as::
@@ -213,11 +265,16 @@ def parallel_slot(session_token: str | None = None) -> _ModeSlot:
             ...real work...
 
     Pass *session_token* to use the per-session mode cap (J5).
+    Pass *tenant_id* + *cost* to use DRF per-tenant capacity (I6).
     The cap is re-read on every acquire; switching mode mid-flight takes
     effect immediately for *new* acquirers without revoking existing ones.
     """
-    if session_token:
-        return _ModeSlot(session_token=session_token)
+    if session_token or tenant_id:
+        return _ModeSlot(
+            session_token=session_token,
+            tenant_id=tenant_id,
+            cost=cost,
+        )
     return _mode_slot_singleton
 
 

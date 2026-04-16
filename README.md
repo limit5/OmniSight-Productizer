@@ -112,6 +112,10 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **4 business models**: ODM, OEM, JDM, OBM
 - **Gantt chart**: horizontal progress bars with Timeline/Gantt toggle
 
+### Multi-Tenancy
+- **Tenant isolation**: schema-level (I1), RLS (I2), SSE filter (I3), secrets (I4), filesystem (I5)
+- **Sandbox fair-share**: DRF per-tenant capacity (I6) — CAPACITY_MAX=12, guaranteed minimum per tenant, idle borrowing with 30s grace reclaim, turbo cap prevents single-tenant monopoly
+
 ### Reliability & Recovery
 - **Token budget**: 3-tier (80% warn → 90% downgrade → 100% freeze) + daily auto-reset
 - **Provider failover**: chain with 5min circuit breaker cooldown + health UI

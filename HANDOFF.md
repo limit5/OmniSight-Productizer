@@ -1,9 +1,45 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I5 Tenant filesystem namespace — per-tenant directory isolation (master)
+> 最後 commit：I6 Sandbox fair-share DRF per-tenant capacity (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I6 (complete) Sandbox fair-share — DRF per-tenant capacity（2026-04-16 完成）
+
+**背景**：I1-I5 完成了 DB、RLS、SSE、secrets、filesystem 的多租戶隔離，但 sandbox 執行的並行度（_ModeSlot）仍為全域共享。單一 tenant 可佔滿所有 sandbox slot，餓死其他 tenant。I6 實作 Dominant Resource Fairness (DRF)，確保每個 tenant 有公平的最低保障額度，同時允許空閒借用。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/sandbox_capacity.py` | 中央 DRF 模組：CAPACITY_MAX=12、per-tenant token bucket、SandboxCostWeight 枚舉、guaranteed minimum 計算、idle borrowing、grace period reclaim | ✅ 完成 |
+| DRF 保障 | `CAPACITY_MAX / active_tenant_count` 動態計算每 tenant 最低保障額度 | ✅ 完成 |
+| 空閒借用 | tenant 可超用他 tenant 未用額度，owner tenant 來時觸發 30s grace period 讓出 | ✅ 完成 |
+| Turbo per-tenant cap | `TURBO_TENANT_CAP_RATIO=0.75`，防止 turbo mode 單 tenant 獨佔（最多用 75% = 9 tokens） | ✅ 完成 |
+| `_ModeSlot` 整合 | decision_engine.py 的 `parallel_slot()` 新增 `tenant_id` + `cost` 參數，啟用 DRF 路徑 | ✅ 完成 |
+| API endpoints | `GET /system/sandbox/capacity` 全域快照 + `GET /system/sandbox/capacity/{tid}` 單 tenant 用量 | ✅ 完成 |
+| Background sweep | `run_sweep_loop()` 每 5s 強制執行過期 grace deadline，釋放借用容量 | ✅ 完成 |
+| SSE 事件 | `sandbox_capacity_reclaim` + `sandbox_capacity_grace_enforced` | ✅ 完成 |
+| 測試（33 項） | 基本 acquire/release、DRF guaranteed minimum、idle borrowing、grace reclaim、turbo cap、兩 tenant 負載模擬、餓死防護、async acquire、snapshot、cost weight、reset | ✅ 33/33 pass |
+| 回歸測試 | decision_engine(20) + tenant_fs(28) 全數通過 | ✅ 零回歸 |
+
+**新增檔案**：
+- `backend/sandbox_capacity.py` — DRF per-tenant sandbox capacity 模組
+- `backend/tests/test_sandbox_capacity.py` — 33 項測試
+
+**修改檔案**：
+- `backend/decision_engine.py` — `_ModeSlot` 擴充 tenant_id/cost 參數 + DRF 路徑 + `CapacityExhausted` 異常
+- `backend/routers/system.py` — 新增 `/sandbox/capacity` API endpoints
+- `backend/main.py` — 註冊 DRF sweep background task
+
+**設計決策**：
+- CAPACITY_MAX=12 tokens 硬上限（可由 `OMNISIGHT_CAPACITY_MAX` 環境變數覆蓋）
+- SandboxCostWeight 五級：lightweight=1 / networked=2 / qemu=3 / compile=4 / remote=0.5
+- Grace period 30s（可由 `OMNISIGHT_DRF_GRACE_S` 覆蓋），超時強制釋放
+- Turbo cap 75%（可由 `OMNISIGHT_TURBO_TENANT_CAP_RATIO` 覆蓋）
+- 不修改 `parallel_slot()` 的預設行為——無 tenant_id 時走舊路徑，完全向後相容
+- Sweep 間隔 5s（可由 `OMNISIGHT_DRF_SWEEP_S` 覆蓋），在 main.py lifespan 註冊
 
 ---
 

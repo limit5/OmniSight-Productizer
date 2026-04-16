@@ -537,12 +537,12 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### I6. Sandbox fair-share（DRF per-tenant）
-- [ ] H4a 的 token bucket 改 per-tenant；全域 CAPACITY_MAX 維持 12
-- [ ] Dominant Resource Fairness：每 tenant 拿到 `CAPACITY_MAX / active_tenant_count` 的保證最低值
-- [ ] 空閒時可超用他 tenant 未用額度，他 tenant 來時 30s 內讓出
-- [ ] Turbo 加 per-tenant cap 防單 tenant 獨佔
-- [ ] 測試：兩 tenant 負載模擬、餓死防護
-- [ ] 預估：**1.5 day**
+- [x] H4a 的 token bucket 改 per-tenant；全域 CAPACITY_MAX 維持 12
+- [x] Dominant Resource Fairness：每 tenant 拿到 `CAPACITY_MAX / active_tenant_count` 的保證最低值
+- [x] 空閒時可超用他 tenant 未用額度，他 tenant 來時 30s 內讓出
+- [x] Turbo 加 per-tenant cap 防單 tenant 獨佔
+- [x] 測試：兩 tenant 負載模擬、餓死防護
+- [x] 預估：**1.5 day**
 
 ### I7. Frontend tenant-aware
 - [ ] localStorage 前綴改 `omnisight:${tenantId}:${userId}:*`
