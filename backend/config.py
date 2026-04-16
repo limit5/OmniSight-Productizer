@@ -172,6 +172,19 @@ class Settings(BaseSettings):
     # 0 = disabled. Default 10 KB matches the design spec.
     sandbox_max_output_bytes: int = 10_000
 
+    # M5: prewarm pool multi-tenant safety. Values:
+    #   * "per_tenant" — pool bucketed by tenant_id; A's prewarm cannot
+    #     be consumed by B (default; SaaS-safe).
+    #   * "shared" — single global pool (legacy v1 behavior). Faster but
+    #     cross-tenant filesystem residue risk; only safe for single
+    #     tenant or fully-trusted deployments.
+    #   * "disabled" — skip prewarm entirely, trade 300ms cold-start for
+    #     zero speculative-container residue (high-security customers).
+    # Orthogonal to OMNISIGHT_PREWARM_ENABLED: if the env flag is off,
+    # prewarm is off regardless. When the env flag is on, this policy
+    # controls bucketing + cleanup semantics.
+    prewarm_policy: str = "per_tenant"
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:
@@ -304,6 +317,22 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             "t1_allow_egress=true but t1_egress_allow_hosts is empty — "
             "no hosts will actually be reachable. Did you forget the "
             "whitelist?"
+        )
+
+    # ── M5: prewarm policy whitelist ──
+    policy = (settings.prewarm_policy or "").strip().lower()
+    if policy not in {"disabled", "shared", "per_tenant"}:
+        msg = (
+            f"OMNISIGHT_PREWARM_POLICY={settings.prewarm_policy!r} is "
+            "invalid. Valid: disabled / shared / per_tenant. "
+            "Defaulting to 'per_tenant' at runtime."
+        )
+        (hard_errors if strict else warnings).append(msg)
+    elif policy == "shared":
+        warnings.append(
+            "OMNISIGHT_PREWARM_POLICY=shared — pre-warmed containers are "
+            "not tenant-bucketed. Only safe on single-tenant or fully-"
+            "trusted deployments. Use 'per_tenant' for SaaS."
         )
 
     # ── Internet-exposure auth (Phase 54 + L1) ──

@@ -150,32 +150,58 @@ def _prewarm_enabled() -> bool:
     """Pre-warm is opt-in. Default OFF because v1 cannot yet mount the
     per-agent workspace into the pre-warmed container (that requires
     agent→task assignment which happens LATER). Operators that run a
-    shared workspace layout can turn this on experimentally."""
+    shared workspace layout can turn this on experimentally.
+
+    M5: even with OMNISIGHT_PREWARM_ENABLED=true, ``prewarm_policy``
+    can short-circuit ("disabled") — skip the background hook entirely
+    in that case to keep metrics clean and save a task schedule.
+    """
     import os as _os
     raw = (_os.environ.get("OMNISIGHT_PREWARM_ENABLED") or "false").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        from backend import sandbox_prewarm as _pw
+        if _pw.get_policy() == "disabled":
+            return False
+    except Exception:
+        pass
+    return True
 
 
 async def _prewarm_in_background(dag: DAG) -> None:
     """Fire-and-forget hook. Always swallows exceptions — pre-warm
-    failure must not surface to the DAG submit caller."""
+    failure must not surface to the DAG submit caller.
+
+    M5: resolve the current tenant from the request context so the
+    speculative container lands in the right per-tenant bucket.
+    """
     try:
         from pathlib import Path
         from backend.workspace import _WORKSPACES_ROOT  # type: ignore[attr-defined]
         from backend import sandbox_prewarm as _pw
+        from backend.db_context import current_tenant_id
+        tid = current_tenant_id()
         shared = Path(_WORKSPACES_ROOT) / "_prewarm"
         shared.mkdir(parents=True, exist_ok=True)
-        await _pw.prewarm_for(dag, shared)
+        await _pw.prewarm_for(dag, shared, tenant_id=tid)
     except Exception as exc:
         logger.debug("prewarm hook swallowed error: %s", exc)
 
 
 async def _cancel_prewarm(reason: str) -> None:
     """Mutation / abort path — drop stale pre-warms so their lifetime
-    budget isn't burned waiting for a task that'll never consume."""
+    budget isn't burned waiting for a task that'll never consume.
+
+    M5: scoped to the current tenant — cancelling another tenant's
+    speculation on our mutation would be both wrong and a covert DoS
+    vector.
+    """
     try:
         from backend import sandbox_prewarm as _pw
-        n = await _pw.cancel_all(reason=reason)
+        from backend.db_context import current_tenant_id
+        tid = current_tenant_id()
+        n = await _pw.cancel_all(reason=reason, tenant_id=tid)
         if n:
             logger.info("prewarm: cancelled %d container(s) on %s", n, reason)
     except Exception as exc:

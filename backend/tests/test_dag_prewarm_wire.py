@@ -147,7 +147,8 @@ async def test_mutate_path_cancels_prior_prewarms(client, monkeypatch):
 
     cancel_calls: list[str] = []
 
-    async def fake_cancel(*, stopper=None, reason: str = "dag_mutated") -> int:
+    async def fake_cancel(*, stopper=None, reason: str = "dag_mutated",
+                          tenant_id=None) -> int:
         cancel_calls.append(reason)
         return 0
     monkeypatch.setattr(pw, "cancel_all", fake_cancel)
@@ -174,7 +175,8 @@ async def test_non_mutate_path_does_not_cancel(client, monkeypatch):
 
     cancel_calls: list[str] = []
 
-    async def fake_cancel(*, stopper=None, reason: str = "dag_mutated") -> int:
+    async def fake_cancel(*, stopper=None, reason: str = "dag_mutated",
+                          tenant_id=None) -> int:
         cancel_calls.append(reason)
         return 0
     monkeypatch.setattr(pw, "cancel_all", fake_cancel)
