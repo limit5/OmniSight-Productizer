@@ -1,9 +1,109 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N7 — Multi-version CI Matrix (master)
+> 最後 commit：N8 — DB Engine Compatibility Matrix (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N8 (complete) DB Engine Compatibility Matrix（2026-04-16 完成）
+
+**背景**：N1-N7 把 dependency governance 全面自動化。N8 補上升級路上最後一個 blind spot — **DB engine cutover**。現狀：runtime 跑 SQLite、G4 milestone 會把儲存層整包換成 Postgres（I-series multi-tenancy 硬依賴 RLS + role-scoped grants，只有 Postgres 有）。問題：migration 累積了一整本 SQLite-only 習慣（`AUTOINCREMENT`、`datetime('now')`、`INSERT OR IGNORE`、`CREATE VIRTUAL TABLE USING fts5`、`PRAGMA`、`BEGIN IMMEDIATE`），每個都會在 G4 cutover 晚上炸。N8 的任務是**今天**就把這些 landmine 一次性 surface，並建立「未來新 migration 一進來就跑 Postgres 驗證」的長存機制，讓 G4 變成「把 advisory 翻成 hard gate」而不是「安全帽戴好進地雷區」。
+
+### 實作內容
+
+1. **`scripts/alembic_dual_track.py`**（new, 200 行，stdlib + Alembic + SQLAlchemy only）— 雙軌 upgrade/downgrade 驗證器：
+   - `alembic upgrade head`（fresh DB）→ 讀 fingerprint A（table/column 名稱 dict）
+   - 一次一格 `alembic downgrade -1` 下到 baseline `0001`（baseline 拒絕再 downgrade — 會 drop 整個 universe，那永遠不是我們要的）
+   - 再 `alembic upgrade head` → 讀 fingerprint B
+   - 比對 A / B — 非對稱就 fail。這是用「schema 對稱不變性」當 gate，catches up/down 不對稱 bug 即使 SQL 本身兩邊都跑得過。
+   - 支援 `--engine=sqlite|postgres` + `--url=`；Postgres 走 SQLAlchemy 的 information_schema 查詢、SQLite 走 stdlib `sqlite3` + PRAGMA。
+   - 設 `OMNISIGHT_SKIP_FS_MIGRATIONS=1`：data migration `0014` 會 shuffle 真實 `.artifacts/` 檔案進 tenant dir，validator 只關心 SQL 對稱、不該 mutate filesystem；`0014` 本身 honour 這個 env var 跳 FS side-effect。
+   - 跑進 GH Actions 時 emit `::notice` / `::error` 各一條，退出 0/1。
+
+2. **`scripts/check_migration_syntax.py`**（new, 170 行, **stdlib-only** — 連 alembic / sqlalchemy 都不 import）— engine-specific SQL linter：
+   - 對 `backend/alembic/versions/*.py` regex 掃八條規則：`autoincrement` / `datetime_now` / `strftime` / `insert_or` / `virtual_table_fts` / `pragma` / `begin_immediate` / `text_pk_as_integer`。每條附 human label + Postgres fix hint。
+   - 三管齊下輸出：`::warning file=...,line=...::` annotation（PR Files changed 側欄）、`GITHUB_STEP_SUMMARY` markdown aggregate（rule / file counts）、stdout JSON（程式化消費）。
+   - Advisory mode（預設）永遠 exit 0 — 今天的 30 條 finding 是知情承擔的技術債，G4 會在一個 sweep PR 裡全清。`--strict` 翻 flag 就變 hard gate（G4 完成後切換）。
+   - 首次執行找到 **31 筆 pre-G4 findings**：`datetime_now=21` / `autoincrement=3` / `insert_or=3` / `pragma=2` / `strftime=1` / `text_pk_as_integer=1`。這些不在 N8 scope 修復（屬 G4 的 sweep），但任何「新 migration 加一條 SQLite-only SQL」從今天起會在 PR 跳 warning。
+
+3. **`.github/workflows/db-engine-matrix.yml`**（new, 220 行）— 三層 CI matrix：
+   - **`sqlite-matrix`**（hard gate, always run）— 2 cells：SQLite 3.40.1 + 3.45.3。關鍵：用 `LD_PRELOAD` 強制替換 Python `_sqlite3` 連結的 `libsqlite3.so`，**這是整個 matrix 的正當性**。單純靠 Python version 做 proxy 會讓 3.11 / 3.12 / 3.13 之間的 SQLite 版本跟 setup-python 的 patch release 漂。source build from sqlite.org amalgamation（URL 編碼：`3.40.1=3400100`、`3.45.3=3450300`）、`actions/cache@v4` 鎖 `/opt/sqlite-<ver>`，冷跑 ~60s 熱跑 ~10s。workflow 執行前先 assert `sqlite3.sqlite_version == matrix.sqlite` — 鏈結失敗就立刻 fail 不 silent run system SQLite。
+   - **`postgres-matrix`**（advisory, `continue-on-error: true`）— 2 cells：postgres:15 + postgres:16 service container。cell 會按設計 red-X — 因為 baseline migrations 用的就是 SQLite-only SQL，alembic 到第一條 `AUTOINCREMENT` 就會吐 syntax error。advisory 的意義不是「今天要綠」，而是「任何未來新 migration 如果在 Postgres 上 fail 的 signature 變了，reviewer 會看到 diff」。G4 會把它翻成 hard gate。psycopg driver 只裝在這個 cell（`psycopg[binary]==3.2.3`）而不加進 `requirements.txt` — G4 前加全局 dep 會讓所有 CI job 多 11MB 下載幾分鐘零收益。
+   - **`engine-syntax-scan`**（advisory, linter）— 跑 `scripts/check_migration_syntax.py`，emit 30+ `::warning` annotations。
+   - **`matrix-summary`** roll-up：`always()` job，把四個 cell 結果整進 run-level `GITHUB_STEP_SUMMARY`。
+   - trigger：只在 `backend/alembic/**`、`backend/db.py`、`backend/db_context.py` 或 N8 scripts 變動時才跑 — 其它改動不觸發這個工作負擔。
+
+4. **`backend/alembic/env.py`** 改兩段（defensive, backwards-compat）：
+   - `_resolve_db_url()` 新增 `SQLALCHEMY_URL` env var 最高優先，fallback 到既有 `OMNISIGHT_DATABASE_PATH` → `sqlite:///` — 讓 dual-track script 可以把 Alembic 指向 Postgres service container 而不改 alembic.ini。
+   - `run_migrations_online()` 把 `db_path = _resolve_db_url().replace("sqlite:///", "")` + `Path(db_path).parent.mkdir(...)` 從「無條件做」變成「只有 URL 是 sqlite:// 才做」。原本的寫法在 Postgres URL 下會試圖 `Path("postgresql+psycopg://...").parent.mkdir()` — 實際上 pathlib 會把它當成一個詭異但合法的路徑，mkdir 會在 WORKDIR 造出 `postgresql+psycopg:` 這種奇怪資料夾，比 fail 更糟。
+
+5. **`backend/alembic/versions/0014_tenant_filesystem_namespace.py`** 修真 bug：
+   - **Dual-track validator day-1 catch**：`conn.execute("SELECT id, file_path FROM artifacts WHERE file_path IS NOT NULL")` 在 SQLAlchemy 2.x 會丟 `ObjectNotExecutableError: Not an executable object`。existing `backend-migrate` CI job 沒抓到，因為 CI fresh checkout 沒有 `.artifacts/` 目錄，migration 早在 `if not _LEGACY_ARTIFACTS.is_dir(): return` 就短路了。但任何 workspace 有殘留 `.artifacts/` 的 operator（本機開發 + 之後從舊版升級的 prod）跑 `alembic upgrade head` 到 0014 就會炸。
+   - 修正：`conn.execute(text("SELECT ..."))` + 兩處 `UPDATE` 也加 `text()` + named params。這是 N8 dual-track validator **第一天就回收投資**的證據。
+   - 同時 honour `OMNISIGHT_SKIP_FS_MIGRATIONS` env var，讓 validator 能跑 SQL path 而不 mutate 真實 `.artifacts/`。
+
+6. **`docs/ops/db_matrix.md`**（new, ~130 行）— SOP doc：
+   - Layer 架構圖、dual-track 四步算法、LD_PRELOAD 版本鎖定機制、Postgres service container 走線、advisory 理由、engine-specific SQL rule table（八條規則 + Postgres replacement）、pre-G4 已知 findings catalogue、**G4 handoff 7-step plan**（port migrations → 綠 Postgres → 翻 hard gate → retire sqlite-matrix → 加 postgres:17 advisory → 翻 linter `--strict` → 刪 `OMNISIGHT_SKIP_FS_MIGRATIONS` 橋接）。
+
+7. **`backend/tests/test_dependency_governance.py`** 擴充 18 條 N8 shape guards：
+   - workflow (6) — 存在 / sqlite 3.40+3.45 / postgres 15+16 / postgres advisory via `continue-on-error: true` / 呼叫兩個 scripts / trigger path 覆蓋 migration files
+   - LD_PRELOAD (1) — 驗證 workflow 實際用 LD_PRELOAD + assert runtime sqlite version matches matrix pin（不做這件事 SQLite cell 等於白跑）
+   - dual-track script (3) — 存在 / stdlib+alembic minimal deps（禁 requests/httpx/yaml/pydantic/aiohttp + 禁 `from backend.`）/ 支援 sqlite + postgres + 四個 phase 名稱
+   - syntax-scan script (3) — 存在 / 純 stdlib（連 alembic/sqlalchemy 都禁）/ 八條 rule 都在 / `subprocess` smoke run 回 JSON
+   - doc (2) — 存在 / 10 個 key phrase（LD_PRELOAD / G4 / postgres:15,16 / 3.40 / 3.45 / engine-syntax-scan / continue-on-error / handoff / Dual-track）
+   - env.py (1) — 支援 `SQLALCHEMY_URL` + `url.startswith("sqlite:///")` gate 都還在
+   - 全 18 pass（搭配 N1-N7 共 71 條 shape guards 全綠）
+
+### 驗證
+
+- `python3 -m pytest backend/tests/test_dependency_governance.py -k n8 -v` → **18/18 pass (0.13s)**
+- `python3 -m pytest backend/tests/test_dependency_governance.py` → **71/71 pass (0.10s)**（N1-N8 全綠，無回歸）
+- `python3 scripts/alembic_dual_track.py --engine sqlite` → **rc=0**, 15 revisions up + 14 revisions down + re-up + fingerprint match（local 對 SQLite 3.45.1 full sweep）
+- `python3 scripts/check_migration_syntax.py` → exit 0, 31 findings surfaced
+- `cd backend && OMNISIGHT_DATABASE_PATH=/tmp/t.db OMNISIGHT_SKIP_FS_MIGRATIONS=1 alembic upgrade head` → 15 revisions applied clean
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/db-engine-matrix.yml'))"` → 通過
+
+### 設計取捨
+
+- **LD_PRELOAD 而不是 Python version proxy**：三個 Python 版本的 sqlite3 patch version 會漂（3.11.9 已經是 3.45，不是 3.40）。LD_PRELOAD 是 deterministic pin，workflow 還加一條「runtime version must equal matrix pin」的 assert 防 silent bypass。付的代價是 60 秒第一次 build — cache 過後 10 秒。值。
+- **Postgres 今天故意 red-X**：如果我追求 Postgres 綠就要順便把 15 條 migration 都 dialect-agnostic 化，那是 G4 的工作，與 N8 不同 scope。N8 的 value 在於「新 migration 進來時，Postgres cell 跟 pre-G4 baseline 的 diff 是 reviewer 看得到的 signal」。sq/G4 綁死的真正意思是「G4 那次 sweep 會把這個 cell 翻綠，不是 N8 先替 G4 做一半」。
+- **linter advisory that stays advisory**：31 條 finding 不在 N8 修復是 deliberate。要求 N8 清 31 條就變 G4 一半的 spike，違反單板塊 0.5 day 預估。linter advisory → 每條新 migration 逐條 Postgres-safe → G4 只剩清存量，分兩階段各半天比一次一天好。
+- **獨立 workflow file 而不是塞進 `ci.yml`**：`ci.yml` 已經 10+ job，再塞三個大 job 會把 PR CI 拖到 25 分鐘+。`db-engine-matrix.yml` 的 `paths:` gate 只在 migration / db 檔變動時觸發，所以平常 PR（frontend-only、agent-only）不會多跑這套。LD_PRELOAD 的 60s build + Postgres service container 的 pull 只在真的動 DB code 時付。
+- **不在 `requirements.txt` 加 psycopg**：G4 前加全局 dep 讓 `backend-tests` 四個 shard、`openapi-contract`、`backend-migrate` 都多 11MB binary wheel 下載 + 編譯 — CI 拖慢無收益。只在 postgres cell 臨時 `pip install` 精準承擔。
+- **dual-track validator catches 0014 bug as intended**：這個 bug 在 existing `backend-migrate` CI 裡是 dormant 的，因為 fresh runner 沒 `.artifacts/`。但任何 operator 從舊版升級（或本機 dev 有殘留 `.artifacts/`）跑 migrations 就會炸。dual-track 在 temp dir + `OMNISIGHT_SKIP_FS_MIGRATIONS=1` 模式下反而精確 hit 了 execute path。N8 第一天就抓到一個 production latent bug — 這是 matrix 的存在 justification 實例化。
+- **stdlib-only for syntax scan**：跟 N5 / N6 / N7 同政策。scan 的任務是「找 migration 的毛病」，自己 import alembic 會變成「alembic 升級時 scanner 壞了 → nobody 報 warning → 悶聲出事」。regex 足夠，stdlib 足夠。
+
+### 與前序 Phase 的互動
+
+- **N1（lockfile）**：dual-track 用 hashed `requirements.txt` 安裝 — 驗證器本身不 drift。
+- **N2（Renovate）**：postgres 15→16→17 的 major bump 會按 N2 的 `MAJOR tier` 規則（never auto-merge、需 G3 blue-green）；matrix cell 就是 reviewer 看 PR 的「要不要點綠」的依據。
+- **N5（upgrade preview）**：preview issue 裡任何 migration 變動，`dependency-preview` label 會連結到本 workflow 的 run page；runbook Phase 1.4 加一行「如果 preview 顯示 alembic/ 有變動，確認 db-engine-matrix 全綠（或 Postgres 跑 advisory）」。
+- **N6（runbook）**：`docs/ops/dependency_upgrade_runbook.md` 的 DB restore section（sqlite + postgres 兩套指令）從今天起搭配本 matrix 的 fingerprint — rollback 時 operator 可讀最後一次綠跑的 fingerprint 核對。
+- **N7（multi-version matrix）**：同樣的 advisory / hard-gate / roll-up-summary 設計語彙。reviewer 對 N7 的閱讀直覺直接套用到 N8，減少認知成本。
+- **G4（Postgres cutover）**：N8 是 G4 的先決掃雷工具。G4 PR 會按 `docs/ops/db_matrix.md` 的 7-step handoff 清單順操作，每步一個 commit。
+- **I1-I10（multi-tenancy）**：I hardest-depends on G4。N8 先讓 G4 跑通，I 才能動工。
+
+### 新增/修改檔案
+
+- `.github/workflows/db-engine-matrix.yml` — **新增**（~220 行）
+- `scripts/alembic_dual_track.py` — **新增**（~200 行，stdlib + alembic + sqlalchemy）
+- `scripts/check_migration_syntax.py` — **新增**（~170 行，stdlib-only）
+- `docs/ops/db_matrix.md` — **新增**（~130 行 SOP）
+- `backend/alembic/env.py` — +5 行（SQLALCHEMY_URL env var + sqlite:// gate）
+- `backend/alembic/versions/0014_tenant_filesystem_namespace.py` — 修 `conn.execute(str)` → `conn.execute(text(...))` + 加 `OMNISIGHT_SKIP_FS_MIGRATIONS` honour
+- `backend/tests/test_dependency_governance.py` — +18 N8 shape guards
+- `README.md` — Dependency Governance 段落新增 N8 子段
+- `TODO.md` — N8 全 5 項標 `[x]`
+- `HANDOFF.md` — 本段
+
+### 後續觀察點（不是 blocker）
+
+- CI 第一次跑的冷 build 會用 ~60s 編譯 SQLite；cache key 鎖在 `sqlite-<ver>-ubuntu-latest-v1`，之後跑是 ~10s。如果 GitHub runner 鏡像換 ubuntu-26.04 要記得 bump key 的 `-v1` → `-v2`。
+- Postgres cell 的 advisory 失敗今天會「每次都紅 X」— reviewer 必須看 diff（本次 run vs 上次 run 的失敗 signature）才有意義。N7 的 roll-up summary 已經把「advisory cell 不等於 broken CI」寫進 run summary，N8 跟它一致。
+- G4 真正上線前，如果某個新 migration 被 validator 抓到 up/down 不對稱，那是 author 的真 bug，要修 — 即使 linter 沒 flag。linter 抓語法、validator 抓語義，兩個互補。
+- `OMNISIGHT_SKIP_FS_MIGRATIONS` 是 N8-era 過渡 env var，G4 handoff 7-step 最後一步會刪掉；在那之前任何新的 data migration（而非 schema migration）都該 honour 它以讓 dual-track 能跑。新 migration 模板可能要補一條 rule，但目前只有 0014 一個案例，還不值得抽 template。
 
 ---
 

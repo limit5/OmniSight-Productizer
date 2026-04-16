@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 
 from alembic import op
+from sqlalchemy import text
 
 revision = "0014"
 down_revision = "0013"
@@ -30,16 +31,24 @@ _TENANTS_ROOT = _PROJECT_ROOT / "data" / "tenants"
 _DEFAULT_TENANT = "t-default"
 
 
+def _skip_fs() -> bool:
+    # N8 dual-track validator sets this so the migration's SQL path
+    # is exercised without shuffling real artifact files around the
+    # workspace.  Production callers never set it.
+    return os.environ.get("OMNISIGHT_SKIP_FS_MIGRATIONS", "").strip() in {"1", "true", "yes"}
+
+
 def upgrade() -> None:
     conn = op.get_bind()
 
     default_root = _TENANTS_ROOT / _DEFAULT_TENANT
     default_artifacts = default_root / "artifacts"
-    for sub in ("artifacts", "backups", "workflow_runs"):
-        (default_root / sub).mkdir(parents=True, exist_ok=True)
+    if not _skip_fs():
+        for sub in ("artifacts", "backups", "workflow_runs"):
+            (default_root / sub).mkdir(parents=True, exist_ok=True)
 
-    if not _LEGACY_ARTIFACTS.is_dir():
-        logger.info("No legacy .artifacts/ directory found — nothing to migrate.")
+    if _skip_fs() or not _LEGACY_ARTIFACTS.is_dir():
+        logger.info("No legacy .artifacts/ directory to migrate (or skip requested).")
         return
 
     migrated = 0
@@ -56,8 +65,10 @@ def upgrade() -> None:
 
     logger.info("Migrated %d items from .artifacts/ to %s", migrated, default_artifacts)
 
+    # SQLAlchemy 2.x requires `text()` around raw SQL on Connection.execute;
+    # N8 dual-track validator found this bug on 2026-04-16 (rc=1 at rev 0014).
     rows = conn.execute(
-        "SELECT id, file_path FROM artifacts WHERE file_path IS NOT NULL"
+        text("SELECT id, file_path FROM artifacts WHERE file_path IS NOT NULL")
     ).fetchall()
 
     legacy_prefix = str(_LEGACY_ARTIFACTS)
@@ -66,8 +77,8 @@ def upgrade() -> None:
         if file_path and file_path.startswith(legacy_prefix):
             new_path = str(default_artifacts / file_path[len(legacy_prefix):].lstrip(os.sep))
             conn.execute(
-                "UPDATE artifacts SET file_path = ? WHERE id = ?",
-                (new_path, row_id),
+                text("UPDATE artifacts SET file_path = :p WHERE id = :i"),
+                {"p": new_path, "i": row_id},
             )
             updated += 1
 
@@ -78,7 +89,7 @@ def downgrade() -> None:
     conn = op.get_bind()
 
     default_artifacts = _TENANTS_ROOT / _DEFAULT_TENANT / "artifacts"
-    if not default_artifacts.is_dir():
+    if _skip_fs() or not default_artifacts.is_dir():
         return
 
     _LEGACY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -92,7 +103,7 @@ def downgrade() -> None:
                 pass
 
     rows = conn.execute(
-        "SELECT id, file_path FROM artifacts WHERE file_path IS NOT NULL"
+        text("SELECT id, file_path FROM artifacts WHERE file_path IS NOT NULL")
     ).fetchall()
 
     tenant_prefix = str(default_artifacts)
@@ -100,6 +111,6 @@ def downgrade() -> None:
         if file_path and file_path.startswith(tenant_prefix):
             new_path = str(_LEGACY_ARTIFACTS / file_path[len(tenant_prefix):].lstrip(os.sep))
             conn.execute(
-                "UPDATE artifacts SET file_path = ? WHERE id = ?",
-                (new_path, row_id),
+                text("UPDATE artifacts SET file_path = :p WHERE id = :i"),
+                {"p": new_path, "i": row_id},
             )

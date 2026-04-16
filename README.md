@@ -305,6 +305,12 @@ A CI gate (`llm-adapter-firewall` job, runs in parallel with `lint`) enforces th
 3. Run `pytest backend/tests/test_llm_adapter.py` — 50 tests cover all public symbols.
 4. If any test fails, the fix is isolated to `backend/llm_adapter.py`; no other file needs changes.
 
+### DB engine compatibility matrix (N8)
+
+A dedicated workflow ([`.github/workflows/db-engine-matrix.yml`](.github/workflows/db-engine-matrix.yml)) exercises every committed Alembic migration against two engines ahead of the G4 Postgres cutover. **Hard gate:** SQLite 3.40.1 + 3.45.3 (the floor and ceiling of what production has ever run). **Advisory:** Postgres 15 + 16 (red-X by design today — the baseline migrations use SQLite-only idioms; the cells go hard-gate after G4 ports the SQL). **Advisory:** an engine-specific SQL linter ([`scripts/check_migration_syntax.py`](scripts/check_migration_syntax.py)) emits `::warning ...` annotations for every `AUTOINCREMENT`, `datetime('now')`, `INSERT OR IGNORE`, `CREATE VIRTUAL TABLE USING fts5`, `PRAGMA`, `BEGIN IMMEDIATE`, and related SQLite idiom it finds in migration files.
+
+The dual-track validator ([`scripts/alembic_dual_track.py`](scripts/alembic_dual_track.py)) runs `upgrade head → step-down to revision 0001 → re-upgrade head`, then diff-checks the two schema fingerprints. An asymmetric up/down pair fails the cell. Already earned its keep on day one: caught a latent SQLAlchemy-2.x bug in migration 0014 where `conn.execute("SELECT …")` needs a `text()` wrapper. SQLite versions are pinned deterministically via `LD_PRELOAD` of a source-built `libsqlite3.so` (cached across runs); the workflow asserts `sqlite3.sqlite_version` matches the matrix pin before running migrations. Full SOP + G4 handoff plan in [`docs/ops/db_matrix.md`](docs/ops/db_matrix.md).
+
 ### Multi-version CI matrix (N7)
 
 A nightly workflow ([`.github/workflows/multi-version-matrix.yml`](.github/workflows/multi-version-matrix.yml)) exercises the test suite against the **next** versions of every interpreter and the FastAPI minor stream — Python 3.12 (gate) + 3.13 (advisory), Node 20.x (gate) + 22.x (advisory), FastAPI pinned (gate) + latest minor (advisory). PRs continue to run only the gate cells via [`ci.yml`](.github/workflows/ci.yml), so PR latency is unchanged; advisory cells use `continue-on-error: true` so a deprecation in Python 3.13 cannot red-X a green run. The matrix's job is to surface what the next upgrade will require *before* it lands.

@@ -27,6 +27,13 @@ if config.config_file_name is not None:
 
 
 def _resolve_db_url() -> str:
+    # N8: SQLALCHEMY_URL wins so the dual-track validator can point
+    # Alembic at a Postgres service container. Falls back to the
+    # legacy OMNISIGHT_DATABASE_PATH → sqlite:// path so SQLite-only
+    # callers (dev, existing CI jobs) are untouched.
+    full = os.environ.get("SQLALCHEMY_URL", "").strip()
+    if full:
+        return full
     env = os.environ.get("OMNISIGHT_DATABASE_PATH", "").strip()
     if env:
         return f"sqlite:///{env}"
@@ -50,9 +57,12 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    db_path = _resolve_db_url().replace("sqlite:///", "")
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(_resolve_db_url(), poolclass=pool.NullPool)
+    url = _resolve_db_url()
+    # Only pre-create a parent directory when the URL is SQLite;
+    # Postgres/MySQL URLs point at a network server, not a file path.
+    if url.startswith("sqlite:///"):
+        Path(url.replace("sqlite:///", "")).parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(url, poolclass=pool.NullPool)
     with engine.connect() as conn:
         context.configure(
             connection=conn,

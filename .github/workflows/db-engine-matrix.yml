@@ -1,0 +1,282 @@
+name: DB Engine Compatibility Matrix
+
+# N8 — catch engine-specific SQL landmines before the G4 Postgres
+# cutover. Three layers:
+#
+#   sqlite-matrix        hard gate — exercises every committed Alembic
+#                        revision on SQLite 3.40 and 3.45 (upgrade head
+#                        → step-down to baseline → re-upgrade head,
+#                        fingerprints compared). Today's production
+#                        engine; regression here blocks merge.
+#
+#   postgres-matrix      advisory — same dual-track script pointed at
+#                        Postgres 15 and 16 service containers. Today
+#                        the baseline migrations use SQLite-only idioms
+#                        (AUTOINCREMENT, datetime('now'), INSERT OR
+#                        IGNORE, CREATE VIRTUAL TABLE fts5, …) so the
+#                        cells red-X by design. Their purpose is to
+#                        catch a NEW migration that works on Postgres
+#                        but quietly regresses — the pre-G4 floor is
+#                        "don't make things worse".
+#
+#   engine-syntax-scan   advisory — static regex scan over every
+#                        migration file (scripts/check_migration_syntax.py)
+#                        emits `::warning ...` annotations per finding
+#                        and a rule/file aggregate on the run summary.
+#                        Flipped to --strict once G4 is live.
+#
+# When G4 lands:
+#   * Drop `sqlite-matrix` entirely (SQLite retires).
+#   * Move `postgres-matrix` to hard gate and expand to 15/16/17.
+#   * Change `engine-syntax-scan` to `--strict`.
+# The SOP doc `docs/ops/db_matrix.md` tracks the G4 handoff.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'backend/alembic/**'
+      - 'backend/db.py'
+      - 'backend/db_context.py'
+      - 'scripts/alembic_dual_track.py'
+      - 'scripts/check_migration_syntax.py'
+      - '.github/workflows/db-engine-matrix.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'backend/alembic/**'
+      - 'backend/db.py'
+      - 'backend/db_context.py'
+      - 'scripts/alembic_dual_track.py'
+      - 'scripts/check_migration_syntax.py'
+      - '.github/workflows/db-engine-matrix.yml'
+  workflow_dispatch:
+    # Manual trigger when planning a Postgres migration or when the
+    # G4 branch needs a full sweep ahead of merge.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-engine-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────
+  # SQLite dual-track — hard gate (today's production engine)
+  # ─────────────────────────────────────────────────────────────────
+  sqlite-matrix:
+    name: sqlite ${{ matrix.sqlite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.40.1 = released 2023-01, lower floor for OmniSight (Debian
+        # bookworm's system SQLite). 3.45.3 = what Python 3.12 ships
+        # with as of 2026-04; the pinned baseline. Version IDs encode
+        # as NNNNMMPPP in the sqlite.org amalgamation URL:
+        #   3.40.1 -> 3400100 (released 2023, y=2023)
+        #   3.45.3 -> 3450300 (released 2024, y=2024)
+        include:
+          - sqlite: "3.40.1"
+            amalgamation_year: "2023"
+            amalgamation_version: "3400100"
+          - sqlite: "3.45.3"
+            amalgamation_year: "2024"
+            amalgamation_version: "3450300"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - run: pip install --require-hashes -r backend/requirements.txt
+
+      # Cache the compiled SQLite so a warm run takes ~10s instead of ~60s.
+      - name: cache sqlite ${{ matrix.sqlite }}
+        id: sqlite-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/sqlite-${{ matrix.sqlite }}
+          key: sqlite-${{ matrix.sqlite }}-ubuntu-latest-v1
+
+      - name: build sqlite ${{ matrix.sqlite }} from amalgamation
+        if: steps.sqlite-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          VERSION="${{ matrix.sqlite }}"
+          YEAR="${{ matrix.amalgamation_year }}"
+          PKG="sqlite-autoconf-${{ matrix.amalgamation_version }}"
+          mkdir -p /tmp/sqlite-build && cd /tmp/sqlite-build
+          curl -fsSLO "https://www.sqlite.org/${YEAR}/${PKG}.tar.gz"
+          tar -xzf "${PKG}.tar.gz"
+          cd "${PKG}"
+          # Minimal configure — we only need the .so for LD_PRELOAD.
+          ./configure --prefix="/opt/sqlite-${VERSION}" --disable-static
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: verify LD_PRELOAD swaps sqlite version
+        run: |
+          set -eu
+          export LD_PRELOAD="/opt/sqlite-${{ matrix.sqlite }}/lib/libsqlite3.so"
+          RUNTIME="$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
+          echo "Python sqlite3 runtime version = ${RUNTIME}"
+          # Exact pin: we asked for 3.40.1 or 3.45.3, we should see it.
+          test "${RUNTIME}" = "${{ matrix.sqlite }}" || {
+            echo "::error::LD_PRELOAD failed to pin sqlite to ${{ matrix.sqlite }} (got ${RUNTIME})"
+            exit 1
+          }
+
+      - name: dual-track upgrade/downgrade sweep
+        env:
+          LD_PRELOAD: /opt/sqlite-${{ matrix.sqlite }}/lib/libsqlite3.so
+        run: |
+          set -eu
+          python3 scripts/alembic_dual_track.py --engine sqlite \
+              | tee _dualtrack-sqlite-${{ matrix.sqlite }}.json
+          # Script exits 1 on any validation failure; CI respects it.
+
+      - name: upload dual-track report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dualtrack-sqlite-${{ matrix.sqlite }}
+          path: _dualtrack-sqlite-${{ matrix.sqlite }}.json
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # Postgres dual-track — advisory until G4
+  # ─────────────────────────────────────────────────────────────────
+  postgres-matrix:
+    name: postgres ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true   # advisory — see workflow header comment
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "16"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: omnisight
+          POSTGRES_PASSWORD: omnisight
+          POSTGRES_DB: omnitest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: install backend deps + psycopg driver
+        # psycopg (v3) is the modern Postgres driver SQLAlchemy 2.x
+        # prefers; it is NOT in requirements.txt today because G4
+        # hasn't landed. We install it only in this advisory cell.
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install "psycopg[binary]==3.2.3"
+
+      - name: wait for postgres
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U omnisight; then exit 0; fi
+            sleep 2
+          done
+          echo "::error::postgres never became ready"; exit 1
+
+      - name: dual-track upgrade/downgrade sweep
+        id: dualtrack
+        continue-on-error: true
+        run: |
+          set -eu
+          URL="postgresql+psycopg://omnisight:omnisight@127.0.0.1:5432/omnitest"
+          python3 scripts/alembic_dual_track.py \
+              --engine postgres --url "$URL" \
+              | tee _dualtrack-postgres-${{ matrix.postgres }}.json
+
+      - name: annotate expected failure reason
+        if: steps.dualtrack.outcome == 'failure'
+        run: |
+          echo "::warning::Postgres cell failed as expected pre-G4 — "\
+               "the baseline Alembic revisions use SQLite-only SQL "\
+               "(AUTOINCREMENT, datetime('now'), INSERT OR IGNORE, …). "\
+               "This cell turns into a hard gate once G4 ports the "\
+               "migrations; see docs/ops/db_matrix.md."
+
+      - name: upload dual-track report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dualtrack-postgres-${{ matrix.postgres }}
+          path: _dualtrack-postgres-${{ matrix.postgres }}.json
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # Engine-specific SQL scan — advisory linter
+  # ─────────────────────────────────────────────────────────────────
+  engine-syntax-scan:
+    name: engine-syntax-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+        # Stdlib-only script — no pip install step needed.
+
+      - name: flag SQLite-only SQL in migrations
+        # Advisory: always exit 0 so reviewers see warnings without
+        # blocking the PR. Flip to --strict once every pre-G4 finding
+        # has been ported; track progress via the run summary delta.
+        run: |
+          set -eu
+          python3 scripts/check_migration_syntax.py \
+              | tee _engine-syntax-scan.json
+
+      - name: upload scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-syntax-scan
+          path: _engine-syntax-scan.json
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # Roll-up summary — fans per-cell outcomes into one comment
+  # ─────────────────────────────────────────────────────────────────
+  matrix-summary:
+    name: summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: always()
+    needs: [sqlite-matrix, postgres-matrix, engine-syntax-scan]
+    steps:
+      - name: write run-level summary
+        run: |
+          {
+            echo "## N8 DB engine compatibility matrix"
+            echo ""
+            echo "| Layer | Status | Gate |"
+            echo "|---|---|---|"
+            echo "| sqlite 3.40.1          | ${{ needs.sqlite-matrix.result }}      | hard        |"
+            echo "| sqlite 3.45.3          | ${{ needs.sqlite-matrix.result }}      | hard        |"
+            echo "| postgres 15            | ${{ needs.postgres-matrix.result }}    | advisory*   |"
+            echo "| postgres 16            | ${{ needs.postgres-matrix.result }}    | advisory*   |"
+            echo "| engine-syntax-scan     | ${{ needs.engine-syntax-scan.result }} | advisory*   |"
+            echo ""
+            echo "\`*\` Advisory cells turn into hard gates after G4. See \`docs/ops/db_matrix.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"

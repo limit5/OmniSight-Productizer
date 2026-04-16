@@ -734,11 +734,11 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### N8. DB Engine Compatibility Matrix（與 G4 綁）
-- [ ] CI matrix：SQLite 3.40 + 3.45；Postgres 15 + 16
-- [ ] Alembic migration 雙軌驗證：每條 migration 對 SQLite 與 Postgres 各跑一次 upgrade/downgrade
-- [ ] 標記 migration 中的 engine-specific 語法（警示 reviewer）
-- [ ] 與 G4 共用：G4 完成後 N8 退役 SQLite，只留 Postgres matrix（15/16/17）
-- [ ] 預估：**0.5 day**
+- [x] CI matrix：SQLite 3.40 + 3.45；Postgres 15 + 16
+- [x] Alembic migration 雙軌驗證：每條 migration 對 SQLite 與 Postgres 各跑一次 upgrade/downgrade
+- [x] 標記 migration 中的 engine-specific 語法（警示 reviewer）
+- [x] 與 G4 共用：G4 完成後 N8 退役 SQLite，只留 Postgres matrix（15/16/17）
+- [x] 預估：**0.5 day**
 
 ### N9. Framework Fallback Branches
 - [ ] 長青分支 `compat/nextjs-15`：固定在 Next 15 最後穩定版、weekly rebase master（只取非 Next 相關 commit）

@@ -674,3 +674,223 @@ def test_n6_eol_script_covers_four_tracked_products() -> None:
         assert product in src, (
             f"check_eol.py must track {product} (N6 TODO)"
         )
+
+
+# ---------------------------------------------------------------------------
+# N8 — DB Engine Compatibility Matrix
+# ---------------------------------------------------------------------------
+
+N8_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "db-engine-matrix.yml"
+N8_DUAL_TRACK = REPO_ROOT / "scripts" / "alembic_dual_track.py"
+N8_SYNTAX_SCAN = REPO_ROOT / "scripts" / "check_migration_syntax.py"
+N8_DOC = REPO_ROOT / "docs" / "ops" / "db_matrix.md"
+
+
+@pytest.fixture(scope="module")
+def n8_workflow_text() -> str:
+    return N8_WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_n8_workflow_exists(n8_workflow_text: str) -> None:
+    assert N8_WORKFLOW.is_file(), (
+        "N8 requires .github/workflows/db-engine-matrix.yml"
+    )
+    assert "DB Engine Compatibility Matrix" in n8_workflow_text
+
+
+def test_n8_workflow_has_sqlite_matrix_3_40_and_3_45(n8_workflow_text: str) -> None:
+    # The TODO pins SQLite 3.40 + 3.45 as the pre-G4 hard-gate cells.
+    assert "3.40.1" in n8_workflow_text, (
+        "N8 sqlite-matrix must include 3.40 (pre-G4 floor)"
+    )
+    assert "3.45.3" in n8_workflow_text, (
+        "N8 sqlite-matrix must include 3.45 (baseline-pinned)"
+    )
+    assert "sqlite-matrix:" in n8_workflow_text
+
+
+def test_n8_workflow_has_postgres_matrix_15_and_16(n8_workflow_text: str) -> None:
+    # Postgres 15 + 16 are the advisory cells (become hard-gate post-G4).
+    assert re.search(r"postgres:\s*\[\s*\"15\"\s*,\s*\"16\"", n8_workflow_text), (
+        "N8 postgres-matrix must target versions [\"15\", \"16\"]"
+    )
+    assert "postgres-matrix:" in n8_workflow_text
+
+
+def test_n8_postgres_matrix_is_advisory(n8_workflow_text: str) -> None:
+    # Pre-G4, the Postgres job must be advisory — the baseline migrations
+    # use SQLite-only SQL and WILL fail. A hard gate here would red-X
+    # every PR, which is not the intent. Post-G4, this assertion flips.
+    # Verify by finding the postgres-matrix job block and checking it
+    # sets continue-on-error: true at the job level.
+    postgres_block = re.search(
+        r"postgres-matrix:(.*?)(?=\n  [a-z-]+:\n|\Z)",
+        n8_workflow_text, re.DOTALL,
+    )
+    assert postgres_block, "postgres-matrix job block not found"
+    assert "continue-on-error: true" in postgres_block.group(1), (
+        "pre-G4 postgres-matrix must set continue-on-error: true"
+    )
+
+
+def test_n8_workflow_runs_dual_track_script(n8_workflow_text: str) -> None:
+    assert "scripts/alembic_dual_track.py" in n8_workflow_text
+    assert "--engine sqlite" in n8_workflow_text
+    assert "--engine postgres" in n8_workflow_text
+
+
+def test_n8_workflow_runs_syntax_scan(n8_workflow_text: str) -> None:
+    assert "scripts/check_migration_syntax.py" in n8_workflow_text
+    assert "engine-syntax-scan:" in n8_workflow_text
+
+
+def test_n8_workflow_triggers_on_migration_changes(n8_workflow_text: str) -> None:
+    # The matrix exists to guard migration changes; drift from this
+    # path list means the gate silently stops firing.
+    for needle in (
+        "'backend/alembic/**'",
+        "'backend/db.py'",
+        "'scripts/alembic_dual_track.py'",
+        "'scripts/check_migration_syntax.py'",
+    ):
+        assert needle in n8_workflow_text, (
+            f"N8 workflow must trigger on {needle}"
+        )
+
+
+def test_n8_workflow_pins_sqlite_via_ld_preload(n8_workflow_text: str) -> None:
+    # The whole point of the SQLite cell is that the matrix versions
+    # are actually swapped in at runtime. LD_PRELOAD is how we do it;
+    # if it disappears, the cell silently runs against the system
+    # SQLite and both rows look identical.
+    assert "LD_PRELOAD" in n8_workflow_text, (
+        "N8 sqlite-matrix must use LD_PRELOAD to swap libsqlite3.so"
+    )
+    assert "verify LD_PRELOAD swaps sqlite version" in n8_workflow_text, (
+        "N8 must assert the runtime sqlite version matches the matrix pin"
+    )
+
+
+def test_n8_dual_track_script_exists() -> None:
+    assert N8_DUAL_TRACK.is_file(), "N8 requires scripts/alembic_dual_track.py"
+
+
+def test_n8_dual_track_script_is_stdlib_plus_alembic_only() -> None:
+    # Same self-defense argument as N5/N6/N7: the script that catches
+    # engine-incompat bugs cannot depend on the layer it validates.
+    # Alembic + SQLAlchemy are allowed (they're the subject under
+    # test); everything else is forbidden.
+    src = N8_DUAL_TRACK.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "import yaml",
+        "from pydantic",
+        "import aiohttp",
+        "from backend.",  # don't import the app being migrated
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"scripts/alembic_dual_track.py must stay minimal, found {needle!r}"
+        )
+
+
+def test_n8_dual_track_supports_both_engines() -> None:
+    src = N8_DUAL_TRACK.read_text(encoding="utf-8")
+    assert '"sqlite"' in src
+    assert '"postgres"' in src
+    # The TODO calls for upgrade/downgrade per migration; verify the
+    # four phases (upgrade head → downgrade per-rev → re-upgrade → drift check)
+    # are all present in the script.
+    for phase in ("upgrade-head", "downgrade-from-", "re-upgrade-head"):
+        assert phase in src, f"dual-track must record phase {phase!r}"
+
+
+def test_n8_syntax_scan_script_exists() -> None:
+    assert N8_SYNTAX_SCAN.is_file(), "N8 requires scripts/check_migration_syntax.py"
+
+
+def test_n8_syntax_scan_script_is_stdlib_only() -> None:
+    src = N8_SYNTAX_SCAN.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "import yaml",
+        "from pydantic",
+        "import aiohttp",
+        "import sqlalchemy",
+        "from alembic",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"scripts/check_migration_syntax.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+def test_n8_syntax_scan_covers_required_rules() -> None:
+    # The rules catalogued in docs/ops/db_matrix.md must all be live
+    # in the linter — drift means a reviewer reads the SOP, trusts
+    # the linter to catch a pattern, and the linter silently misses.
+    src = N8_SYNTAX_SCAN.read_text(encoding="utf-8")
+    for rule in (
+        '"autoincrement"',
+        '"datetime_now"',
+        '"strftime"',
+        '"insert_or"',
+        '"virtual_table_fts"',
+        '"pragma"',
+        '"begin_immediate"',
+        '"text_pk_as_integer"',
+    ):
+        assert rule in src, f"check_migration_syntax.py must carry rule {rule}"
+
+
+def test_n8_syntax_scan_runs_without_error() -> None:
+    # Smoke test: the script actually executes and returns valid JSON.
+    import subprocess
+    proc = subprocess.run(
+        ["python3", str(N8_SYNTAX_SCAN)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"check_migration_syntax.py exited {proc.returncode}: {proc.stderr[-300:]}"
+    )
+    payload = json.loads(proc.stdout)
+    assert "total" in payload and "findings" in payload
+    assert isinstance(payload["total"], int)
+
+
+def test_n8_doc_exists() -> None:
+    assert N8_DOC.is_file(), "N8 requires docs/ops/db_matrix.md"
+
+
+def test_n8_doc_covers_key_phrases() -> None:
+    body = N8_DOC.read_text(encoding="utf-8")
+    required = [
+        "Dual-track",         # script name / concept
+        "LD_PRELOAD",         # SQLite pinning mechanism
+        "G4",                 # handoff milestone
+        "postgres:15",        # Postgres matrix cell
+        "postgres:16",        # Postgres matrix cell
+        "3.40",               # SQLite matrix cell
+        "3.45",               # SQLite matrix cell
+        "engine-syntax-scan", # linter job name
+        "continue-on-error",  # advisory-mode explanation
+        "handoff",            # G4 transition plan
+    ]
+    missing = [p for p in required if p not in body]
+    assert not missing, f"db_matrix.md missing key phrases: {missing}"
+
+
+def test_n8_alembic_env_supports_postgres_url() -> None:
+    # N8 requires Alembic's env.py to honour SQLALCHEMY_URL so the
+    # dual-track script can point it at a Postgres service container.
+    env_py = (REPO_ROOT / "backend" / "alembic" / "env.py").read_text(encoding="utf-8")
+    assert "SQLALCHEMY_URL" in env_py, (
+        "backend/alembic/env.py must read SQLALCHEMY_URL (N8 Postgres support)"
+    )
+    # And the online-migration code path must not blindly treat the URL
+    # as a SQLite file path (that was the pre-N8 bug).
+    assert 'url.startswith("sqlite:///")' in env_py, (
+        "env.py must gate the mkdir-parent step on the sqlite dialect"
+    )
