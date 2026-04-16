@@ -910,11 +910,11 @@ Legend:
 - [x] 預估：**2 day**
 
 ### O9. 觀測性：鎖 / 佇列 / Merger / 雙簽狀態可視化 (#272)
-- [ ] Dashboard `components/omnisight/orchestration-panel.tsx`：queue depth by priority、held locks by task、**merger agent +2 rate / abstain rate / security refusal rate**、**待人工 +2 的 change 列表（含 merger confidence）**、worker pool capacity
-- [ ] SSE events：`orchestration.queue.tick` / `orchestration.lock.acquired|released` / `orchestration.merger.voted` / `orchestration.change.awaiting_human_plus_two`
-- [ ] Prometheus exporter：所有 O1/O2/O6 metrics 統一 `/metrics` 出口
-- [ ] 告警規則：queue_depth > 100 持續 5min / dist_lock_wait_p99 > 60s / merger_plus_two_rate 異常偏高（可能 LLM 過度自信）/ 雙簽 pending > 24h
-- [ ] 預估：**1 day**
+- [x] Dashboard `components/omnisight/orchestration-panel.tsx`：queue depth by priority、held locks by task、**merger agent +2 rate / abstain rate / security refusal rate**、**待人工 +2 的 change 列表（含 merger confidence）**、worker pool capacity
+- [x] SSE events：`orchestration.queue.tick` / `orchestration.lock.acquired|released` / `orchestration.merger.voted` / `orchestration.change.awaiting_human_plus_two`
+- [x] Prometheus exporter：所有 O1/O2/O6 metrics 統一 `/metrics` 出口
+- [x] 告警規則：queue_depth > 100 持續 5min / dist_lock_wait_p99 > 60s / merger_plus_two_rate 異常偏高（可能 LLM 過度自信）/ 雙簽 pending > 24h
+- [x] 預估：**1 day**
 
 ### O10. 安全加固（queue / lock / JIRA token / Gerrit bot）(#273)
 - [ ] Queue 傳輸 TLS + payload HMAC（防 worker 被偽造任務）

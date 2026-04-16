@@ -14,6 +14,7 @@ import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { DagEditor } from "@/components/omnisight/dag-editor"
 import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
+import { OrchestrationPanel } from "@/components/omnisight/orchestration-panel"
 import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
 import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"
 import { AuditPanel } from "@/components/omnisight/audit-panel"
@@ -729,6 +730,7 @@ export default function Home() {
               OpsSummary leads — it's the "is anything on fire?" glance. */}
           <aside className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden space-y-3">
             <OpsSummaryPanel />
+            <OrchestrationPanel />
             <PipelineTimeline />
             <DecisionDashboard />
             <BudgetStrategyPanel />

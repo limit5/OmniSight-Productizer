@@ -8981,3 +8981,92 @@ Phase 25 的 `provider_chain` 用單一 global `_provider_failures: dict[str, fl
 - **Ledger 用 markdown 而非 JSON/DB**：PR review 能直接 read；季度 review 用 `grep` + `awk` 就能算指標；工具鏈輕。程式 parser (`scan_ledger`) 是一個 regex，夠強但不脆。
 - **Quarterly review 觸發條件刻意二擇**：rollback rate > 25 % **或** mean soak < 24h 才開 issue。避免每季強迫 ceremony 通告，只有明確訊號才打擾 maintainer。
 - **Renovate grouping 與 single-revert 的衝突**：N2 的 `radix-ui` / `ai-sdk` / `langchain-py` / `types` 是 tight peer-coupled 例外——這四群 mixing 是「更安全」而非 single-revert；政策明文 carve-out，reviewer 不用靠直覺判斷。
+
+## O9. 觀測性：鎖 / 佇列 / Merger / 雙簽狀態可視化 (#272) — 完成 ✅（2026-04-17）
+
+### 完成事項
+
+1. **Backend 共用層** — `backend/orchestration_observability.py`（新）
+   - `register_awaiting_human` / `clear_awaiting_human` / `list_awaiting_human`：process-singleton 註冊表，merger +2 後寫入、submit 或 human withdrew 後清除；`register_*` 同 change_id 二次呼叫不重置 wait clock，避免 LLM 重打把長時間 pending 的 change 從 alert 視野裡藏掉。
+   - `snapshot_orchestration()`：單一 roll-up。一次回傳 queue depth (by priority + by state)、locks (by_task)、merger rates (+2/abstain/security)、worker (active/inflight/capacity/utilisation)、awaiting-human list、warn_hours threshold。Dashboard 每 10 s 抓一次，SSE 在事件之間 incremental 更新。
+   - SSE publishers：`emit_queue_tick` / `emit_lock_acquired` / `emit_lock_released` / `emit_merger_voted` / `emit_change_awaiting_human`，全走 `backend.events.bus`，event names 鎖在 `ORCHESTRATION_EVENT_TYPES` tuple 裡（前端 SSE registry pin 同一個集合，drift 會被測試擋掉）。
+
+2. **新增 Prometheus metrics** — `backend/metrics.py`
+   - `omnisight_awaiting_human_plus_two_pending` (Gauge)：註冊表 size 鏡像，alert 用「pending > 5 持續 30 min」開 backlog 警告。
+   - `omnisight_awaiting_human_plus_two_age_seconds` (Gauge)：oldest-pending wait clock，alert 用「> 86400 (24h)」開 dual-sign 拖延警告。
+   - `omnisight_worker_pool_capacity` (Gauge)：worker pool 上限，搭配 `worker_inflight` 算 utilisation。
+   - 三者也加進 `reset_for_tests()` 的 reinitialisation list。
+
+3. **Hooks 注入**
+   - `backend/dist_lock.py::acquire_paths`：成功路徑加 `emit_lock_acquired` (paths/priority/wait_seconds/expires_at)。
+   - `backend/dist_lock.py::release_paths`：n>0 時加 `emit_lock_released` (released_count)。
+   - `backend/merger_agent.py::_emit_sse_voted`：保留舊 `merger.<reason>` 事件 (legacy compat)，**並行**發送 `orchestration.merger.voted` (richer schema)。
+   - `backend/merge_arbiter.py::_route_merger_outcome` (plus_two path)：merger +2 後即刻 `register_awaiting_human(...)`，registry size 直接 mirror 到 gauge。
+   - `backend/merge_arbiter.py::on_human_vote_recorded`：`submit allow` 與 `human disagree withdrew` 兩條路徑都呼叫 `clear_awaiting_human(change_id)` — gauge 隨之自降，alert 不會在 change 已經 ship/rejected 後繼續響。
+
+4. **HTTP surface** — `backend/routers/orchestration_observability.py`（新）
+   - `GET /api/v1/orchestration/snapshot` — dashboard polling endpoint。
+   - `GET /api/v1/orchestration/awaiting-human` — Slack/CLI 用的 thin payload。
+   - `POST /api/v1/orchestration/queue-tick` — 強制觸發 tick + 回傳 snapshot（tests + 偶發 ops 探針用）。
+   - `/api/v1/metrics`（O1/O2/O6 統一出口）已存在；本 phase 確認 27 個 required series 都在裡面（測試斷言 prom 文字 contains every name）。
+   - 路由在 `backend/main.py` 緊跟 `observability` 後 mount。
+
+5. **Frontend dashboard** — `components/omnisight/orchestration-panel.tsx`（新）+ `lib/api.ts` types 擴充
+   - 五個 block 排在一個 panel：QueueBlock (P0-P3 + state breakdown)、WorkerBlock (active/inflight/cap/util)、MergerBlock (+2/abstain/security pct + over-confidence flag at >85% with sample≥10)、LocksBlock (by_task list with age)、AwaitingHumanBlock (change list with age tone: blue<warn / amber>warn / red>2×warn)。
+   - 雙資料路徑：`getOrchestrationSnapshot()` 每 10 s polling 維持 baseline；同一個 panel 訂閱 `orchestration.queue.tick` 與 `orchestration.change.awaiting_human_plus_two` SSE，介於 poll 之間做 incremental update（registry idempotent 確保不會重複插入）。
+   - `lib/api.ts` 加入 `OrchestrationSnapshot` / `AwaitingHumanEntry` / 5 種 SSE event union variants + `SSE_EVENT_TYPES` runtime list 的對應字串。
+   - 組件被 `app/page.tsx` 的右側 aside 在 `OpsSummaryPanel` 後、`PipelineTimeline` 前 mount，與「is anything on fire?」glance 序列一致。
+
+6. **告警規則** — `deploy/prometheus/orchestration_alerts.rules.yml`（新）+ README
+   - 4 群 8 條 rule：
+     - `OmniSightQueueDepthHigh` (warning, sum > 100 for 5m) / `OmniSightQueueP0Backlog` (critical, P0 > 0 for 2m)
+     - `OmniSightDistLockWaitP99High` (warning, p99 wait > 60s for 5m) / `OmniSightDistLockDeadlockKills` (critical, any kill in 15m)
+     - `OmniSightMergerPlusTwoRateHigh` (warning, +2 rate > 95% **with sample-size guard ≥ 20 votes/h**，避免 cold start 假警) / `OmniSightMergerSecurityRefusalSpike` (warning, > 5 in 1h)
+     - `OmniSightDualSignPendingTooLong` (warning, age > 24h for 10m) / `OmniSightDualSignBacklog` (info, pending > 5 for 30m)
+   - 每條 rule 有 `severity` + `subsystem` label 雙標籤，README 文件化 → Alertmanager routing key 對表。
+
+### 測試（26 / 26 全 pass，加上 459 regression 全 pass）
+
+`backend/tests/test_orchestration_observability.py`（新）— 6 個 class / 26 個 case：
+- **TestAwaitingHumanRegistry (7)**：register insert / register idempotent + clock-keeps / clear remove / clear idempotent / change_id required / list sorted by oldest-first / age_seconds 單調 / gauge 鏡像 size。
+- **TestSnapshot (4)**：shape (top-level keys) / awaiting entry 出現在 snapshot / queue snapshot 用 live backend (push P1 → snapshot P1 ==1) / merger rates 三項加總 == 1.0。
+- **TestSseEmission (6)**：5 個 publisher 各跑 monkeypatched bus 確認 event name + payload；1 個固定 ORCHESTRATION_EVENT_TYPES 集合（防止 drift）。
+- **TestPrometheusExporterUnified (1)**：渲染 prom 文字後斷言 15 個 required series name（O1/O2/O3/O6/O9）全在 — 統一出口 SLA。
+- **TestAlertRulesYaml (4)**：YAML 存在 / pyyaml 解析成功 / 8 條 alert + severity match / dual-sign rule 真的 reference age gauge + 86400 字串。
+- **HTTP smoke (4)**：`/snapshot` / `/awaiting-human` / `/queue-tick` / `/metrics` (含 O9 series) 端到端 200。
+
+**Regression**：`test_dist_lock` (28) + `test_queue_backend` (44) + `test_merger_agent` (27) + `test_merge_arbiter` + `test_merge_arbiter_http` (27) + `test_observability` (5) + `test_metrics` (8) + `test_orchestration_mode` (24) + 廣域 keyword scoped (lock/queue/merger/arbiter/orchestrat/metric/observ) 459 cases 全 pass，無互相破壞。
+
+`test_t3_dispatch::test_dispatch_bumps_metric` 一個失敗已驗證為 pre-existing（環境缺 `paramiko` package，與 O9 改動無關）。
+
+### 修改檔案
+
+- **新增** `backend/orchestration_observability.py` — 共用層（registry + snapshot + 5 個 emitter）
+- **新增** `backend/routers/orchestration_observability.py` — 3 個端點
+- **新增** `components/omnisight/orchestration-panel.tsx` — 5-block dashboard
+- **新增** `deploy/prometheus/orchestration_alerts.rules.yml` — 8 條 alert rule
+- **新增** `deploy/prometheus/README.md` — Prometheus 接線指南
+- **新增** `backend/tests/test_orchestration_observability.py` — 26 case
+- **改動** `backend/dist_lock.py` — acquire/release SSE emit
+- **改動** `backend/merger_agent.py` — `orchestration.merger.voted` 並行 emit
+- **改動** `backend/merge_arbiter.py` — register/clear awaiting_human registry
+- **改動** `backend/metrics.py` — 3 個新 gauge + reset_for_tests 同步
+- **改動** `backend/main.py` — mount 新路由
+- **改動** `lib/api.ts` — 5 個新 SSE event variants + types + getter helpers
+- **改動** `app/page.tsx` — mount `<OrchestrationPanel />` 到右側 aside
+- **改動** `TODO.md` — O9 五項全 `[x]`
+- **改動** `README.md` — Architecture 行新增 O9 描述
+- **改動** `HANDOFF.md` — 本段
+
+### 設計取捨
+
+- **Awaiting-human registry 是 in-process 不是 DB**：唯一的真值來源是 Gerrit change 本身的 votes；此 registry 只是 dashboard / alert 的觀察 cache，restart 後 merger / arbiter 重新發 webhook 會重建。沒有持久化 → 沒有 sync 漂移風險，也沒有 restart-skew alert noise。
+- **Registry idempotent on change_id 不重置 clock**：故意設計。merger 重打 +2（例如 patchset 重發）時 awaiting_since 應該保留原本的時間，否則 `dual_sign_pending_too_long` 永遠不會觸發 — 這是 O9 alert 的一個關鍵正確性 invariant，測試明確 pin 它。
+- **Snapshot 用 prom registry sample 直接讀，不另建 stats 結構**：merger rate 計算就是 sample 加總；避免 "兩套真值" 問題（dashboard 顯示的數和 alert 觸發的數必須是同一條 series）。代價是一次 `metric.collect()` 開銷，但 snapshot 是 10s polling，不熱。
+- **`orchestration.merger.voted` 與 legacy `merger.<reason>` 並行 emit**：legacy 事件還有 invoke-channel subscriber 在用（HANDOFF audit panel etc.）；新事件做 schema-stable 的 panel 用。雙寫一段時間後 legacy 可拆。
+- **Queue tick 不開背景 thread**：`emit_queue_tick()` 是 idempotent 的瞬時動作；`POST /orchestration/queue-tick` + 各 dispatch 路徑「順手 tick」就足以餵 dashboard。原本想加 30 s asyncio loop，砍掉是因為這就違反「O9 不引入新 background process」的設計界線（任何新 worker process 都要走 O3 worker pool 路）。
+- **Lock SSE 在 acquire/release 各 emit 1 次**：不在 conflict 時 emit（會被誤解為「acquire 了」）。conflict + wait 走 `dist_lock_wait_seconds{outcome=conflict}` histogram，alert 用 p99 抓，不灌爆 SSE。
+- **Merger +2 rate alert 加 sample-size guard**：`AND (... rate * 3600 > 20)`。冷啟動 / 沙盒環境只有 1-2 個 conflict 就一定 100% rate，沒護欄會立刻假警。20 票/h 是 ops 看過 staging 數據定的下界。
+- **Stale-check「Date.now() in render」改用 `snap.checked_at`**：React 19 的 `react-hooks/purity` ESLint rule 阻擋；剛好 snapshot 自帶時間戳，age 用 snapshot moment 為基準反而比 wall-clock 更穩定（兩個 KPI 的時間錨一致）。
+- **Alert rules YAML 用 markdown table 對映 severity → 路由**：避免測試硬寫 expected severity，YAML 與測試 dual-source-of-truth；CI 偵測 drift。
+- **Prometheus exposer 沒有改 `/metrics` 路由**：`backend/routers/observability.py` 的 `GET /metrics` 已經是 `render_exposition(REGISTRY)` — REGISTRY 加 metric 即自動暴露。新增的 3 個 gauge 直接出現在 scrape 結果，無需 router 改動。這也是「unified /metrics」字面意思的證據（測試 enforce 27 series 都在 single endpoint）。

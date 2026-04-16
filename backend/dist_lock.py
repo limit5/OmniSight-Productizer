@@ -716,6 +716,17 @@ def acquire_paths(task_id: str, paths: Iterable[str], ttl_s: float = DEFAULT_TTL
             metrics.dist_lock_wait_seconds.labels(outcome="acquired").observe(res.wait_seconds)
             metrics.dist_lock_held_total.labels(outcome="acquired").inc(len(res.acquired))
             backend.clear_waits(task_id)
+            try:
+                from backend.orchestration_observability import emit_lock_acquired
+                emit_lock_acquired(
+                    task_id=task_id,
+                    paths=res.acquired,
+                    priority=priority,
+                    wait_seconds=res.wait_seconds,
+                    expires_at=res.expires_at,
+                )
+            except Exception as exc:                              # pragma: no cover
+                logger.debug("emit_lock_acquired failed: %s", exc)
             return res
 
         if wait_timeout_s <= 0 or time.time() >= deadline:
@@ -737,6 +748,11 @@ def release_paths(task_id: str) -> int:
     n = backend.release(task_id)
     if n > 0:
         metrics.dist_lock_held_total.labels(outcome="released").inc(n)
+        try:
+            from backend.orchestration_observability import emit_lock_released
+            emit_lock_released(task_id=task_id, released_count=n)
+        except Exception as exc:                                 # pragma: no cover
+            logger.debug("emit_lock_released failed: %s", exc)
     return n
 
 

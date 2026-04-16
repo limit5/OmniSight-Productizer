@@ -396,6 +396,26 @@ async def _route_merger_outcome(
     if outcome.reason is ma.MergerReason.plus_two_voted:
         now = time.time()
         _pending_abstains.pop(task.change_id, None)       # clear stale
+        # O9 (#272) — register in the awaiting-human-+2 dashboard
+        # registry so the orchestration panel + Prometheus gauge can
+        # surface the dual-sign-pending count.
+        try:
+            from backend.orchestration_observability import (
+                register_awaiting_human,
+            )
+            register_awaiting_human(
+                change_id=task.change_id,
+                project=task.project,
+                file_path=task.file_path,
+                merger_confidence=outcome.confidence,
+                merger_rationale=outcome.rationale,
+                review_url=outcome.review_url,
+                push_sha=outcome.push_sha,
+                awaiting_since=now,
+                jira_ticket=task.jira_ticket,
+            )
+        except Exception as exc:                          # pragma: no cover
+            logger.debug("arbiter: awaiting-human registry update failed: %s", exc)
         await deps.notifier.notify(
             kind="change.awaiting_human_plus_two",
             change_id=task.change_id,
@@ -556,6 +576,12 @@ async def on_human_vote_recorded(
         # clear only this change's strike counter, not the whole
         # registry, so other in-flight merges are unaffected.
         ma._reset_failure(change_id)  # type: ignore[attr-defined]
+        # O9 (#272) — drop from awaiting-human dashboard registry.
+        try:
+            from backend.orchestration_observability import clear_awaiting_human
+            clear_awaiting_human(change_id)
+        except Exception as exc:                              # pragma: no cover
+            logger.debug("arbiter: awaiting-human clear (withdrew) failed: %s", exc)
         return ArbiterOutcome(
             change_id=change_id,
             reason=ArbiterReason.human_disagreed_merger_withdrew,
@@ -572,6 +598,14 @@ async def on_human_vote_recorded(
     if decision.allow:
         submit_res = await deps.submitter.submit(commit=commit, project=project)
         submit_ok = "error" not in submit_res
+        # O9 (#272) — change is shipping; drop from awaiting-human registry
+        # regardless of submit_ok (a failed submit is operator-visible
+        # via the "change.submitted" SSE event with submit_ok=false).
+        try:
+            from backend.orchestration_observability import clear_awaiting_human
+            clear_awaiting_human(change_id)
+        except Exception as exc:                              # pragma: no cover
+            logger.debug("arbiter: awaiting-human clear (submitted) failed: %s", exc)
         await deps.notifier.notify(
             kind="change.submitted",
             change_id=change_id,

@@ -462,6 +462,23 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # O9 (#272): orchestration observability ───────────────────
+    awaiting_human_pending = Gauge(
+        "omnisight_awaiting_human_plus_two_pending",
+        "Number of changes for which the Merger has +2'd but no human +2 yet",
+        registry=REGISTRY,
+    )
+    awaiting_human_age_seconds = Gauge(
+        "omnisight_awaiting_human_plus_two_age_seconds",
+        "Wall-clock age of the oldest still-pending dual-sign change",
+        registry=REGISTRY,
+    )
+    worker_pool_capacity = Gauge(
+        "omnisight_worker_pool_capacity",
+        "Configured maximum concurrent in-flight tasks for this worker pool",
+        registry=REGISTRY,
+    )
+
     # Process up-time
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds",
@@ -534,6 +551,9 @@ else:
     merger_abstain_total = _NoOp()  # type: ignore
     merger_security_refusal_total = _NoOp()  # type: ignore
     merger_confidence = _NoOp()  # type: ignore
+    awaiting_human_pending = _NoOp()  # type: ignore
+    awaiting_human_age_seconds = _NoOp()  # type: ignore
+    worker_pool_capacity = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -576,6 +596,8 @@ def reset_for_tests() -> None:
     global worker_lifecycle_total, worker_task_total, worker_task_seconds
     global merger_plus_two_total, merger_abstain_total
     global merger_security_refusal_total, merger_confidence
+    global awaiting_human_pending, awaiting_human_age_seconds
+    global worker_pool_capacity
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -839,6 +861,21 @@ def reset_for_tests() -> None:
         "omnisight_merger_agent_confidence",
         "Merger Agent confidence",
         buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
+        registry=REGISTRY,
+    )
+    awaiting_human_pending = Gauge(
+        "omnisight_awaiting_human_plus_two_pending",
+        "Number of changes waiting for the human +2 hard gate",
+        registry=REGISTRY,
+    )
+    awaiting_human_age_seconds = Gauge(
+        "omnisight_awaiting_human_plus_two_age_seconds",
+        "Wall-clock age of the oldest still-pending dual-sign change",
+        registry=REGISTRY,
+    )
+    worker_pool_capacity = Gauge(
+        "omnisight_worker_pool_capacity",
+        "Configured maximum concurrent in-flight tasks",
         registry=REGISTRY,
     )
     process_start_time = Gauge(

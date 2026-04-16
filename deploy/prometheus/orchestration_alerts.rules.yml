@@ -1,0 +1,155 @@
+# O9 (#272) — Orchestration alerting rules.
+#
+# Load into Prometheus by adding a `rule_files:` entry pointing here.
+# Mirror the symbolic alert names into Alertmanager routes — the
+# `severity` label is the only routing key the on-call rotation looks at.
+#
+# Thresholds are deliberately ops-tunable via PromQL constants in the
+# `expr` field rather than env vars; a quarterly review may move them.
+
+groups:
+  - name: omnisight_orchestration_queue
+    interval: 30s
+    rules:
+      # Queue back-pressure: messages piling up across all priorities.
+      - alert: OmniSightQueueDepthHigh
+        expr: sum(omnisight_queue_depth) > 100
+        for: 5m
+        labels:
+          severity: warning
+          subsystem: orchestration_queue
+        annotations:
+          summary: "Queue depth > 100 for 5 min — workers can't keep up"
+          description: |
+            Total queued tasks ({{ $value }}) sustained over 100 for 5 minutes.
+            Either the worker pool needs scaling or upstream is bursting; check
+            `omnisight_worker_active` and `omnisight_worker_inflight` first.
+          runbook_url: "https://internal.docs/omnisight/o9-queue-backpressure"
+
+      # P0 (incident) bucket should never sit waiting.
+      - alert: OmniSightQueueP0Backlog
+        expr: omnisight_queue_depth{priority="P0"} > 0
+        for: 2m
+        labels:
+          severity: critical
+          subsystem: orchestration_queue
+        annotations:
+          summary: "P0 queue has backlog — incident task delayed"
+          description: |
+            P0 (incident) tasks are being held in the queue for over 2 min.
+            P0 is supposed to drain immediately; investigate worker liveness.
+
+  - name: omnisight_orchestration_locks
+    interval: 30s
+    rules:
+      # Lock acquisition tail latency: p99 wait > 60s means contention.
+      - alert: OmniSightDistLockWaitP99High
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(omnisight_dist_lock_wait_seconds_bucket[5m]))
+          ) > 60
+        for: 5m
+        labels:
+          severity: warning
+          subsystem: orchestration_locks
+        annotations:
+          summary: "dist_lock acquire p99 > 60s for 5 min"
+          description: |
+            Worker tasks are blocked acquiring file-path locks for over 60 s
+            at p99 over 5 min. Likely either a deadlock cycle the sweep hasn't
+            resolved or a long-held lease past its TTL.
+
+      # Deadlock kills: any non-zero rate is suspicious.
+      - alert: OmniSightDistLockDeadlockKills
+        expr: increase(omnisight_dist_lock_deadlock_kills_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          subsystem: orchestration_locks
+        annotations:
+          summary: "Deadlock detector killed at least one task"
+          description: |
+            The Tarjan-cycle deadlock sweep force-killed at least one task in
+            the last 15 min. Inspect the event log for `dist_lock` lease
+            contention patterns.
+
+  - name: omnisight_orchestration_merger
+    interval: 60s
+    rules:
+      # Anomalously high +2 rate (LLM over-confidence) — alert above 95 %
+      # over a 1-h window with at least 20 votes (ignore tiny samples).
+      - alert: OmniSightMergerPlusTwoRateHigh
+        expr: |
+          (
+            rate(omnisight_merger_agent_plus_two_total[1h])
+            /
+            (
+              rate(omnisight_merger_agent_plus_two_total[1h])
+              + sum(rate(omnisight_merger_agent_abstain_total[1h]))
+              + rate(omnisight_merger_agent_security_refusal_total[1h])
+            )
+          ) > 0.95
+          and
+          (
+            rate(omnisight_merger_agent_plus_two_total[1h])
+            + sum(rate(omnisight_merger_agent_abstain_total[1h]))
+            + rate(omnisight_merger_agent_security_refusal_total[1h])
+          ) * 3600 > 20
+        for: 1h
+        labels:
+          severity: warning
+          subsystem: orchestration_merger
+        annotations:
+          summary: "Merger Agent +2 rate > 95% (LLM over-confidence?)"
+          description: |
+            Over the last hour, the Merger Agent voted +2 on more than 95 %
+            of conflict-resolution invocations (sample > 20). Consider
+            tightening MIN_CONFIDENCE_FOR_PLUS_TWO or auditing recent diffs.
+
+      # Security-file refusal should be rare; spike means policy or pipeline
+      # changed in a way that's now routing security paths to the merger.
+      - alert: OmniSightMergerSecurityRefusalSpike
+        expr: increase(omnisight_merger_agent_security_refusal_total[1h]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          subsystem: orchestration_merger
+        annotations:
+          summary: "Merger refused security-sensitive file > 5 times in 1h"
+          description: |
+            The Merger Agent has refused to vote on security-sensitive
+            files (auth/, config/, secrets/, etc.) more than 5 times in the
+            last hour. Likely a misrouted CATC; review the source pipeline.
+
+  - name: omnisight_orchestration_dual_sign
+    interval: 60s
+    rules:
+      # Pending dual-sign over 24h — long enough to be operationally rude,
+      # short enough that it's not "abandoned change" territory yet.
+      - alert: OmniSightDualSignPendingTooLong
+        expr: omnisight_awaiting_human_plus_two_age_seconds > 86400
+        for: 10m
+        labels:
+          severity: warning
+          subsystem: orchestration_dual_sign
+        annotations:
+          summary: "A change has been awaiting human +2 for over 24h"
+          description: |
+            At least one change has had a Merger +2 with no human +2 for over
+            24 hours. Page the on-call reviewer or expand the
+            `non-ai-reviewer` group.
+
+      # Multiple pending dual-signs at the same time — backlog forming.
+      - alert: OmniSightDualSignBacklog
+        expr: omnisight_awaiting_human_plus_two_pending > 5
+        for: 30m
+        labels:
+          severity: info
+          subsystem: orchestration_dual_sign
+        annotations:
+          summary: "More than 5 changes awaiting human +2 for 30 min"
+          description: |
+            More than 5 changes are sitting in the dual-sign-pending state.
+            Either reviewer capacity is short or the merger has had a busy
+            burst; check the Orchestration panel.

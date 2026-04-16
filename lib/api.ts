@@ -51,6 +51,57 @@ export type SSEEvent =
   | { event: "decision_resolved"; data: DecisionPayload & { timestamp: string } }
   | { event: "decision_undone"; data: DecisionPayload & { timestamp: string } }
   | { event: "budget_strategy_changed"; data: { strategy: BudgetStrategyId; previous: BudgetStrategyId; tuning: BudgetTuning; timestamp: string } }
+  // ─── O9 (#272) Orchestration observability ───
+  | {
+      event: "orchestration.queue.tick"
+      data: {
+        queue: OrchestrationQueueSnapshot
+        workers: OrchestrationWorkerSnapshot
+        timestamp: string
+      }
+    }
+  | {
+      event: "orchestration.lock.acquired"
+      data: {
+        task_id: string
+        paths: string[]
+        priority: number
+        wait_seconds: number
+        expires_at: number
+        timestamp: string
+      }
+    }
+  | {
+      event: "orchestration.lock.released"
+      data: { task_id: string; released_count: number; timestamp: string }
+    }
+  | {
+      event: "orchestration.merger.voted"
+      data: {
+        change_id: string
+        file_path: string
+        reason: string
+        voted_score: number
+        confidence: number
+        push_sha: string
+        review_url: string
+        timestamp: string
+      }
+    }
+  | {
+      event: "orchestration.change.awaiting_human_plus_two"
+      data: {
+        change_id: string
+        project: string
+        file_path: string
+        merger_confidence: number
+        review_url: string
+        push_sha: string
+        awaiting_since: number
+        jira_ticket: string
+        timestamp: string
+      }
+    }
 
 // ─── Global SSE manager ───
 // 48A-Fix P0: a single EventSource per origin, shared across every caller.
@@ -83,6 +134,12 @@ const SSE_EVENT_TYPES = [
   "decision_resolved",
   "decision_undone",
   "budget_strategy_changed",
+  // ─── O9 (#272) Orchestration observability ───
+  "orchestration.queue.tick",
+  "orchestration.lock.acquired",
+  "orchestration.lock.released",
+  "orchestration.merger.voted",
+  "orchestration.change.awaiting_human_plus_two",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
@@ -1331,6 +1388,78 @@ export interface OpsSummary {
 
 export async function getOpsSummary(): Promise<OpsSummary> {
   return request<OpsSummary>("/ops/summary")
+}
+
+// ─── O9 (#272) Orchestration Observability ───────────────────
+
+export interface OrchestrationQueueSnapshot {
+  by_priority: Record<string, number>   // P0..P3
+  by_state: Record<string, number>      // Queued / Ready / Claimed / ...
+  total: number
+}
+
+export interface OrchestrationLockBucket {
+  task_id: string
+  paths: string[]
+  oldest_acquired_at: number
+  earliest_expiry: number
+}
+
+export interface OrchestrationLockSnapshot {
+  by_task: Record<string, OrchestrationLockBucket>
+  total_paths: number
+  total_tasks: number
+}
+
+export interface OrchestrationMergerSnapshot {
+  plus_two_total: number
+  abstain_total: number
+  security_refusal_total: number
+  total_votes: number
+  plus_two_rate: number          // 0..1
+  abstain_rate: number           // 0..1
+  security_refusal_rate: number  // 0..1
+}
+
+export interface OrchestrationWorkerSnapshot {
+  active: number
+  inflight: number
+  capacity: number
+  utilisation: number            // 0..1, 0 if capacity unset
+}
+
+export interface AwaitingHumanEntry {
+  change_id: string
+  project: string
+  file_path: string
+  merger_confidence: number
+  merger_rationale: string
+  review_url: string
+  push_sha: string
+  awaiting_since: number
+  jira_ticket: string
+  age_seconds: number
+}
+
+export interface OrchestrationSnapshot {
+  checked_at: number
+  queue: OrchestrationQueueSnapshot
+  locks: OrchestrationLockSnapshot
+  merger: OrchestrationMergerSnapshot
+  workers: OrchestrationWorkerSnapshot
+  awaiting_human_plus_two: AwaitingHumanEntry[]
+  awaiting_human_warn_hours: number
+}
+
+export async function getOrchestrationSnapshot(): Promise<OrchestrationSnapshot> {
+  return request<OrchestrationSnapshot>("/orchestration/snapshot")
+}
+
+export async function getAwaitingHumanList(): Promise<{
+  items: AwaitingHumanEntry[]
+  warn_hours: number
+}> {
+  return request("/orchestration/awaiting-human")
 }
 
 // ─── Workflow runs (RunHistory panel) ───

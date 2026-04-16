@@ -1100,7 +1100,14 @@ def _observe_metric(outcome: ResolutionOutcome) -> None:
 
 
 def _emit_sse_voted(outcome: ResolutionOutcome) -> None:
-    """Best-effort SSE emit so the orchestration UI updates in real time."""
+    """Best-effort SSE emit so the orchestration UI updates in real time.
+
+    Two events fire:
+      * legacy ``merger.<reason>`` (kept for backward compat with the
+        invoke-channel subscribers).
+      * O9 ``orchestration.merger.voted`` — structured event the
+        orchestration dashboard subscribes to with a stable schema.
+    """
     try:
         from backend.events import emit_invoke
         emit_invoke(
@@ -1113,7 +1120,21 @@ def _emit_sse_voted(outcome: ResolutionOutcome) -> None:
             push_sha=outcome.push_sha,
         )
     except Exception as exc:                           # pragma: no cover
-        logger.debug("merger_agent: SSE emit failed: %s", exc)
+        logger.debug("merger_agent: legacy SSE emit failed: %s", exc)
+
+    try:
+        from backend.orchestration_observability import emit_merger_voted
+        emit_merger_voted(
+            change_id=outcome.change_id,
+            file_path=outcome.file_path,
+            reason=outcome.reason.value,
+            voted_score=int(outcome.voted_score),
+            confidence=outcome.confidence,
+            push_sha=outcome.push_sha,
+            review_url=outcome.review_url,
+        )
+    except Exception as exc:                           # pragma: no cover
+        logger.debug("merger_agent: orchestration SSE emit failed: %s", exc)
 
 
 __all__ = [
