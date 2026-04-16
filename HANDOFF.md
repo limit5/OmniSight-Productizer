@@ -1,9 +1,75 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N1 — 全量鎖定 + 單一 lockfile + Node/Python 版本固定 (master)
+> 最後 commit：N2 — Renovate 自動 PR + group rules + 分層 auto-merge (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N2 (complete) Renovate 自動 PR + group rules + 分層 auto-merge（2026-04-16 完成）
+
+**背景**：N1 把 lockfile + Node/Python 版本鎖死之後，倒過來的問題是「凍住」— 每次想升 dep 都要手動 `pnpm update` / `pip-compile --upgrade`，而且常常忘記哪些套件其實是 peer-coupled（升半套會炸）。N2 把整套升級流程交給 Renovate：weekend batch 開 PR、按家族分組（peer 套件不會分散）、按風險分層（patch 自動合、major 強制走 blue-green），CVE 出現時立刻插隊。N1 是堤壩、N2 是供水管 — 兩個一起跑才不會「鎖死也是死」。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `renovate.json` | repo root 新增 ~150 行 config：schedule `every weekend` (Asia/Taipei) + dependency dashboard + lockFileMaintenance 月度 + pip-compile manager 對 `backend/requirements.txt` + `pip_requirements: enabled: false`（避免雙 manager 衝突） | ✅ |
+| Group rule: `@radix-ui/*` | `matchPackageNames: ["@radix-ui/{/,}**"]` → 一個 PR 含全部 Radix 改動，peer-dep `react`/`react-dom` 不會被部分升 | ✅ |
+| Group rule: `@ai-sdk/*` | 同上，跟 `ai` core 一起動 — 避免 provider 與 core 對不上 | ✅ |
+| Group rule: `langchain*` / `langgraph` | `matchManagers: ["pip-compile", ...]` + `matchPackageNames: ["/^langchain/", "/^langgraph/"]` — 鎖到 Python managers 才不會把 npm 上的 `langchain` 也吃進來 | ✅ |
+| Group rule: `@types/*` | dev-only，automerge patch + minor + digest（覆寫全域 minor tier） | ✅ |
+| Group rule: `github-actions` + `docker-base-images` | 額外延伸：GHA pin digest、Docker 基底分組 | ✅ |
+| Tier: PATCH | `automerge: true` + `platformAutomerge: true` + `minimumReleaseAge: 3 days`，CI 綠自動合（含 security 落到此 tier 也合） | ✅ |
+| Tier: MINOR | `automerge: false` + `reviewersFromCodeOwners: true` + `minimumReleaseAge: 5 days`，需 1 人審 | ✅ |
+| Tier: MAJOR | `automerge: false`（任何狀況都不自動合） + `reviewersFromCodeOwners` + `minimumReleaseAge: 14 days` + `addLabels: deploy/blue-green-required` + `prBodyNotes` 列三項 checklist（2 approvals / G3 blue-green / smoke test 結果貼上 PR） | ✅ |
+| Tier: ENGINES | `matchDepTypes: ["engines"]` → 強制走 review、不 automerge（Node/pnpm/Python 升版同時影響本機 + CI + Docker，視為 major） | ✅ |
+| Security path | `vulnerabilityAlerts.enabled` + `schedule: ["at any time"]` + `automerge: true` + `osvVulnerabilityAlerts: true`；外加一條 packageRule `isVulnerabilityAlert: true` + `prPriority: 100` 把 PR 推到佇列最前 | ✅ |
+| `extends` | `config:recommended` + `:semanticCommits` + `:separateMajorReleases` + `:dependencyDashboard` + `:enableVulnerabilityAlertsWithLabel(security)` | ✅ |
+| `pip-compile` 管理 | Renovate 的 pip-compile manager 掃 `backend/requirements.txt`（lockfile）並自動跑 `pip-compile --generate-hashes`，與 N1 的 `lockfile-drift` CI gate 完全相容 | ✅ |
+| `prBodyTemplate` | 自訂模板：tier label + 連結到 `docs/ops/renovate_policy.md`，PR reviewer 一眼看出該 PR 該怎麼處理 | ✅ |
+| `docs/ops/renovate_policy.md` | 新增 ~140 行 SOP：tier 表 / group rule 表 / vulnerability handling / 與 N1+N5 的 interaction / disable+override 操作 / Operator bootstrap checklist (5 步) | ✅ |
+| CI `renovate-config` job | `.github/workflows/ci.yml` 新增第二個 fast job（5 min timeout）：跑 `npx --yes --package renovate@39 -- renovate-config-validator --strict renovate.json`，schema typo 立刻擋 PR | ✅ |
+| 單元測試 | `backend/tests/test_dependency_governance.py` +14 test（總計 26 test）：JSON 結構 / schedule=`every weekend` / vulnerability immediate+automerge / security `prPriority>=100` / patch automerges / minor 不 automerge / major `automerge:false` 且帶 `deploy/blue-green-required` label / 4 個必要 group 都存在 / langchain group 鎖到 pip-compile / `@types/*` automerge minor / pip-compile fileMatch 對 `requirements.txt` / CI 有 `renovate-config` job / policy doc 含 4 個關鍵詞 — 26/26 pass | ✅ |
+
+**新增/修改檔案**：
+- `renovate.json` — 新增（~150 行）
+- `.github/workflows/ci.yml` — 新增 `renovate-config` job（在 `lint` 之前）
+- `docs/ops/renovate_policy.md` — 新增（~140 行 SOP）
+- `backend/tests/test_dependency_governance.py` — 加 14 個 N2 test
+- `TODO.md` — N2 段落 6 個 checkbox 標 `[x]`，新增第 7 個 `[O]` operator-blocked（GitHub repo settings）
+- `README.md` — Dependency Governance 段落擴充 N2 sub-section
+- `HANDOFF.md` — 本段
+
+**設計決策**：
+- **why `every weekend` 而非 daily**：開發者週間在改 feature，週末看 dep PR 心智更乾淨；Renovate 一次 batch 開完一週的累積，比每天滴水好 review。Security PR 走 `at any time` 不受影響。
+- **why `platformAutomerge: true`（GitHub native）而非 Renovate-side automerge**：GitHub native 會走 PR 的「auto-merge queue」— PR 一開就掛上、CI 一綠 GitHub 自己合，省一輪 webhook 來回；缺點是需要 repo Settings 開 `Allow auto-merge`（已列入 operator bootstrap checklist）。
+- **why `minimumReleaseAge` 分層（patch 3d / minor 5d / major 14d）**：不同 risk 給不同「上游 yank window」— major 14 天足以讓上游發現重大 regression 並 yank；patch 3 天主要防「發布者意外推 .0 又馬上 .1」。
+- **why major 即使 CI 綠也不 automerge**：major 經常帶語義變更（API 改 / 行為改），CI 只能驗 typing + smoke，不能驗業務邏輯。逼 review + blue-green 是用「人 + 流量切換」補 CI 的盲區。
+- **why langchain group 鎖 `matchManagers: ["pip-compile", ...]`**：npm 上有同名 `langchain` 套件（JS port），不鎖 manager 會把兩邊吃進同個 group PR，鎖完無法 review。
+- **why pip-compile manager 對 `requirements.txt` 而非 `requirements.in`**：Renovate 的 `pip-compile` manager 設計上掃 lockfile（`requirements.txt`）抓套件版本、用 `requirements.in` 當 input 重生 lockfile。對 `.in` 設定 fileMatch 會讓 manager 完全不啟動 — 用 validator 跑出來的 migration 提示確認此事。
+- **why 把 `pip_requirements` `enabled: false`**：避免 pip-compile manager 與基本 pip_requirements manager 對同檔重複開 PR。
+- **why CVE 同時走 vulnerabilityAlerts + isVulnerabilityAlert packageRule**：前者控「何時開」（at any time）、後者控「PR 屬性」（prPriority=100、強制 automerge label）— 前者是 trigger、後者是 packageRule，兩個是 Renovate 不同 layer。
+- **why 加 `engines` deptype rule**：Node/pnpm/Python 引擎升版牽連本機 dev、CI matrix、Docker base，視覺上看起來是 patch 但 blast radius 是全 repo，獨立成 tier。
+- **why CI validator 用 `--strict`**：strict 把 deprecated field 也當錯誤，逼開發者用最新語法（避免未來升 Renovate version 時舊 config 突然 break）。
+- **why 有 `[O] operator-blocked` 列入 TODO**：Renovate App 安裝 / Settings 開 auto-merge / branch protection 都不能在 repo file 內表達，必須走 GitHub UI；明標 `[O]` 讓 operator 一眼看到「這條 AI 做不了」。
+
+**驗收**：
+- `npx renovate-config-validator --strict renovate.json` → `INFO: Config validated successfully` 無 warning
+- `pytest backend/tests/test_dependency_governance.py` → 26/26 pass（12 N1 baseline + 14 N2 新增）
+- `git status --short` 只包含 N2 預期 file set
+- CI workflow YAML 通過 syntax check（`renovate-config:` job 與 `lint:` 並行；不影響既有 `lockfile-drift` 順序）
+
+**遺留 / 後續工作**：
+- **Operator-blocked**（`[O]` in TODO）：
+  1. 在 repo / org 安裝 [Renovate GitHub App](https://github.com/apps/renovate)
+  2. **Settings → General → Pull Requests → Allow auto-merge**: on
+  3. **Settings → Branches → master**: minor=1 reviewer、major=2 reviewers（若 plan 支援 label-conditional rule 可分開設）
+  4. **Settings → Code security → Dependabot alerts**: on（Renovate 透過 GitHub advisory feed 抓 CVE）
+  5. 維護 `.github/CODEOWNERS`（目前空，degrades gracefully 但週末 batch 第一波會 fall back 到 default reviewer）
+- **N3 OpenAPI 合約測試**：可獨立進行
+- **N5 Nightly Upgrade-Preview**：和 N2 互補（N5 預警 / N2 執行），N5 完成後 weekend batch 前一晚就能看到「明天會合什麼、會不會炸」
+- **N7 Multi-version CI Matrix**：`engines` tier rule 已預設保守處理 Node/pnpm/Python 升版；N7 真正落地後升版 PR 才有完整 matrix 可驗
+- **N10 G3 blue-green**：N2 的 major-tier `deploy/blue-green-required` label 是 N10 的「鉤子」— N10 deploy script 應 refuse 任何帶此 label 但未走 blue-green 的 commit。目前 label 純資訊性、無強制力。
 
 ---
 
@@ -1202,6 +1268,57 @@
 **下一步建議（非本 phase 範圍）**：
 - 一支 D-pilot skill（建議 `SKILL-HMI-WEBUI` 或直接 D2 IPCam admin UI）跑端到端 flow：skill 宣告 HAL schema → `hmi_binding.generate_binding()` → `hmi_generator.generate_bundle()` → `simulate.sh --type=hmi` → CI 產出 `hmi/rootfs_overlay.tar`。類似 D1 SKILL-UVC 之於 C5。
 - `hmi_llm` 加 prompt caching（anthropic pattern），讓 NL prompt 相同的 binding generation 可以重複 hit cache。
+
+---
+
+## O (pending) Enterprise Event-Driven Multi-Agent Orchestration（2026-04-16 登錄）
+
+**背景**：`docs/design/enterprise-multi-agent-event-driven-architecture.md`（2026-04-16 新增）提出把 OmniSight 從「單程序 LangGraph + SQLite」升級為「Orchestrator Gateway + 分散式 Message Queue + Stateless Worker Pool + Merger Agent」的企業級事件驅動架構。審計結果顯示 **~60% 的設計目標已由既有模組覆蓋**（EventBus / SSE / DLQ / event_log / LangGraph orchestrator / DAG router / WorkspaceManager git worktree / CODEOWNERS pre-merge / Jira+GitHub+GitLab webhook 雙向同步 / I10 Redis shared state），**剩下 40% 為真正新增能力**：CATC payload 形式化、Redis 分散式檔案路徑互斥鎖、LLM 專職 Merger Agent、Stateless worker pool、JIRA 作為唯一 Intent Store。
+
+**評估摘要**：
+
+| 向度 | 判斷 | 說明 |
+|---|---|---|
+| 效益 | 高 | 水平擴展突破單程序瓶頸、Merger Agent 解多 agent 並行痛點、B2B 銷售 JIRA 深度整合、CATC 提升 agent cold-start 速度 |
+| 影響 | 中-高 | LangGraph 呼叫路徑要重構為 dispatch pattern；I10 Redis shared state 成硬相依；token budget 3-tier 須重算；bootstrap wizard L 系列需加 Redis/MQ endpoint 配置 |
+| 副作用 | 高 | Redis lock 死鎖/held-on-crash、Merger Agent 語意錯誤、impact_scope 宣告不準、JIRA SPOF/vendor lock-in、head-of-line blocking、LLM DAG 拆分錯誤、queue/secret 安全面、成本爆炸（每 CATC + 每 conflict 都是 LLM call） |
+
+**核心緩解**（詳見 TODO.md Priority O）：
+- 鎖死鎖：path 字典序排序 + TTL + heartbeat lease + 死鎖偵測 job（O1）
+- Merger 語意錯：confidence threshold + 行數上限 + security 檔案白名單 + 強制 test gate + 3 次失敗 escalate human（O6）
+- impact_scope 不準：runtime enforcement — sandbox bind-mount 只掛 allowed 路徑（延伸 I5）（O3）
+- JIRA lock-in：抽 `IntentSource` interface，JIRA 為主、GitHub Issues/GitLab 為次 adapter（O5）
+- 成本：orchestrator 拆 DAG 用 Haiku、Merger 才用 Opus；token budget gate（O4）
+
+**切段交付（5 段）**：
+1. O0 + O1 + O2（4.5d）— CATC + Redis lock + Queue 基礎，可獨立 ship 作為 I10 延伸
+2. O3 + O8（5d）— Worker pool + migration feature flag，系統 dual-mode 可運行
+3. O4 + O5（4d）— Orchestrator + JIRA 深度整合，B2B 銷售可用
+4. O6 + O7（3d）— Merger Agent + CI/CD 自動仲裁，競品差異化賣點
+5. O9 + O10（2.5d）— 觀測性與安全加固，正式對外上線 gate
+
+**總預估**：19 day（solo ~4 週 / 2-person team ~2-3 週）。
+
+**硬相依**：
+- **G4**（Postgres + replica）— SQLite 無法支持分散式 worker 狀態
+- **I10**（Redis shared state）— O1 Redis lock 的 backend
+- **S0 + K-early**（auth baseline）— worker 暴露網路前必須 hardened
+- **M1-M2**（cgroup 硬隔離，已完成）— worker 資源隔離
+- **B12 + L**（bootstrap wizard）— 需加 Redis/MQ endpoint 配置步驟
+
+**與既有系統的整合策略**：
+- CODEOWNERS（既有）**不汰換**，改為分層：CODEOWNERS 決定 file owner（review accountability）、Redis lock 決定 runtime 互斥（write collision prevention）
+- LangGraph（既有）**不汰換**，以 `OMNISIGHT_ORCHESTRATION_MODE=monolith|distributed` feature flag 切換；monolith 模式完全保留既有行為作為 fallback / rollback 路徑（O8）
+- Jira webhook（既有 Phase 26/27）**擴充**而非重做：補 sub-task 批次建立 + CATC 欄位映射 + 雙向狀態同步（O5）
+- `backend/routers/dag.py`（既有）**擴充**為 Orchestrator Gateway 的 DAG validation layer（O4）
+
+**關鍵風險（需實作前決策）**：
+- Redis 死鎖偵測 job 的 polling 頻率 vs. 成本平衡（建議 10 s cadence 起步）
+- Merger Agent 的 confidence calibration 標準（需先蒐集 baseline dataset 才能定 threshold）
+- distributed 模式下 I10 Redis 必須 HA（至少 Sentinel），否則分散式鎖 backend 成 SPOF
+- JIRA custom field 若客戶管理員不允許建立 → 降級為 JSON 塞 description field（需有 graceful degrade path）
+
+**下一步**：等 G4 + I10 落地後啟動 O0。若市場需求提前（B2B 客戶 JIRA 要求），可先以 monolith 模式做 O0 + O5 子集（CATC schema + JIRA sub-task 建立），作為前導 PoC。
 
 ---
 

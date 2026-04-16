@@ -679,15 +679,16 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### N2. Renovate 自動 PR + group rules + 分層 auto-merge
-- [ ] `renovate.json` 基本 config；排程 `every weekend` 降低雜訊
-- [ ] Group rules：`@radix-ui/*` 一組（peer 連動）、`@ai-sdk/*` 一組、`langchain*` 一組、`@types/*` 一組
-- [ ] 分層 auto-merge：
+- [x] `renovate.json` 基本 config；排程 `every weekend` 降低雜訊
+- [x] Group rules：`@radix-ui/*` 一組（peer 連動）、`@ai-sdk/*` 一組、`langchain*` 一組、`@types/*` 一組
+- [x] 分層 auto-merge：
   - patch：CI 綠自動合（含 security）
   - minor：需 1 人審
   - major：單獨 PR + 2 人審 + 必走 G3 blue-green（見 N10）
-- [ ] Security PR 優先級最高、立即開
-- [ ] 文件 `docs/ops/renovate_policy.md`
-- [ ] 預估：**0.5 day**
+- [x] Security PR 優先級最高、立即開
+- [x] 文件 `docs/ops/renovate_policy.md`
+- [O] **Operator-blocked**：在 GitHub Repo Settings 安裝 Renovate App、開 `Allow auto-merge`、配置 branch protection（minor=1 reviewer / major=2 reviewers）— 詳見 `docs/ops/renovate_policy.md` "Bootstrap checklist (operator)"
+- [x] 預估：**0.5 day**
 
 ### N3. OpenAPI 前後端合約測試 + 自動生前端 type
 - [ ] CI 新 step：`curl /openapi.json > openapi.json` → `openapi-typescript openapi.json > lib/generated/api-types.ts`

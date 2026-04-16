@@ -1,0 +1,151 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":separateMajorReleases",
+    ":dependencyDashboard",
+    ":enableVulnerabilityAlertsWithLabel(security)"
+  ],
+  "timezone": "Asia/Taipei",
+  "schedule": ["every weekend"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 8,
+  "prHourlyLimit": 4,
+  "rebaseWhen": "behind-base-branch",
+  "rangeStrategy": "bump",
+  "configMigration": true,
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Renovate Dependency Dashboard (N2 policy)",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 4am on the first day of the month"],
+    "commitMessageAction": "Lock file maintenance",
+    "automerge": false
+  },
+  "pip-compile": {
+    "fileMatch": ["(^|/)backend/requirements\\.txt$"]
+  },
+  "pip_requirements": {
+    "enabled": false
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security", "priority/critical"],
+    "schedule": ["at any time"],
+    "automerge": true,
+    "automergeType": "pr",
+    "platformAutomerge": true,
+    "minimumReleaseAge": "0 days"
+  },
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "description": "Security PRs (CVE-flagged) — highest priority, immediate, auto-merge after CI green.",
+      "matchPackageNames": ["*"],
+      "matchDatasources": ["*"],
+      "isVulnerabilityAlert": true,
+      "prPriority": 100,
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "minimumReleaseAge": "0 days",
+      "addLabels": ["security", "priority/critical", "auto-merge"]
+    },
+    {
+      "description": "Tier: PATCH — auto-merge when CI green.",
+      "matchUpdateTypes": ["patch", "pin", "digest"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "minimumReleaseAge": "3 days",
+      "addLabels": ["tier/patch", "auto-merge"]
+    },
+    {
+      "description": "Tier: MINOR — needs 1 human reviewer, no auto-merge.",
+      "matchUpdateTypes": ["minor"],
+      "automerge": false,
+      "minimumReleaseAge": "5 days",
+      "reviewersFromCodeOwners": true,
+      "addLabels": ["tier/minor", "needs-review"]
+    },
+    {
+      "description": "Tier: MAJOR — single PR, 2 reviewers, must run G3 blue-green (see N10).",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "minimumReleaseAge": "14 days",
+      "reviewersFromCodeOwners": true,
+      "addLabels": ["tier/major", "needs-review", "deploy/blue-green-required"],
+      "prBodyNotes": [
+        ":warning: **Major version bump.** Per N2 policy this PR must:",
+        "1. receive **2 human approvals** (auto-merge is disabled regardless of CI),",
+        "2. run the **G3 blue-green deploy** path (see `docs/ops/renovate_policy.md` and TODO N10),",
+        "3. include manual smoke-test results in the PR description before merge."
+      ]
+    },
+    {
+      "description": "Group: @radix-ui/* — peer-coupled UI primitives, always one PR.",
+      "matchPackageNames": ["@radix-ui/{/,}**"],
+      "groupName": "radix-ui",
+      "groupSlug": "radix-ui",
+      "addLabels": ["group/radix-ui"]
+    },
+    {
+      "description": "Group: @ai-sdk/* — Vercel AI SDK provider modules, peer-coupled.",
+      "matchPackageNames": ["@ai-sdk/{/,}**"],
+      "groupName": "ai-sdk",
+      "groupSlug": "ai-sdk",
+      "addLabels": ["group/ai-sdk"]
+    },
+    {
+      "description": "Group: langchain* / langgraph (Python) — peer-coupled provider matrix.",
+      "matchManagers": ["pip-compile", "pip_requirements", "pip_setup", "pep621"],
+      "matchPackageNames": ["/^langchain/", "/^langgraph/"],
+      "groupName": "langchain-python",
+      "groupSlug": "langchain-py",
+      "addLabels": ["group/langchain"]
+    },
+    {
+      "description": "Group: @types/* — TypeScript type defs, dev-only, low risk; auto-merge minor too.",
+      "matchPackageNames": ["@types/{/,}**"],
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["patch", "minor", "digest"],
+      "groupName": "types",
+      "groupSlug": "types",
+      "addLabels": ["group/types"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "minimumReleaseAge": "1 day"
+    },
+    {
+      "description": "Engines bumps (Node/pnpm/Python) — never auto-merge, force major-tier review.",
+      "matchDepTypes": ["engines"],
+      "automerge": false,
+      "addLabels": ["tier/engines", "needs-review"]
+    },
+    {
+      "description": "GitHub Actions — pin to digest, group together, auto-merge minor/patch.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["patch", "minor", "digest"],
+      "groupName": "github-actions",
+      "groupSlug": "gha",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "addLabels": ["group/github-actions"]
+    },
+    {
+      "description": "Docker base images — peer-coupled with deploy, no auto-merge for major.",
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "groupName": "docker-base-images",
+      "groupSlug": "docker-base",
+      "addLabels": ["group/docker"]
+    }
+  ],
+  "github-actions": {
+    "pinDigests": true,
+    "fileMatch": ["^\\.github/workflows/[^/]+\\.ya?ml$"]
+  },
+  "prBodyTemplate": "{{{header}}}\n\n{{{table}}}\n\n{{{notes}}}\n\n---\n\n**Tier rule:** see labels (`tier/patch`, `tier/minor`, `tier/major`).\n**Policy:** [docs/ops/renovate_policy.md](docs/ops/renovate_policy.md).\n\n{{{changelogs}}}\n\n{{{configDescription}}}\n\n{{{controls}}}\n\n{{{footer}}}\n"
+}

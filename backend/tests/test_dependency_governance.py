@@ -154,3 +154,171 @@ def test_ci_has_lockfile_drift_job() -> None:
     # The drift job must actually regenerate and diff the Python lock.
     assert "pip-compile" in ci, "lockfile-drift job must re-run pip-compile"
     assert "--frozen-lockfile" in ci, "lockfile-drift job must enforce pnpm frozen lockfile"
+
+
+# ---------------------------------------------------------------------------
+# N2 — Renovate policy guards
+# ---------------------------------------------------------------------------
+#
+# These tests are static-only: they validate the *shape* of `renovate.json`
+# (groups present, tier rules wired, security path immediate) so a bad
+# edit can't silently disable Renovate or weaken the auto-merge tiers.
+# Schema-level validation is enforced by the CI `renovate-config` job
+# which runs `renovate-config-validator --strict`.
+
+@pytest.fixture(scope="module")
+def renovate_config() -> dict:
+    return json.loads((REPO_ROOT / "renovate.json").read_text(encoding="utf-8"))
+
+
+def test_renovate_config_exists_and_is_json(renovate_config: dict) -> None:
+    assert isinstance(renovate_config, dict)
+    assert renovate_config.get("$schema", "").endswith("renovate-schema.json"), (
+        "renovate.json must declare the renovate-schema.json $schema for editor support"
+    )
+
+
+def test_renovate_schedule_is_weekend(renovate_config: dict) -> None:
+    sched = renovate_config.get("schedule")
+    assert sched == ["every weekend"], (
+        f"N2 policy requires schedule=['every weekend'] (low weekday noise), got {sched!r}"
+    )
+
+
+def test_renovate_vulnerability_alerts_immediate_and_automerge(renovate_config: dict) -> None:
+    v = renovate_config.get("vulnerabilityAlerts", {})
+    assert v.get("enabled") is True, "vulnerabilityAlerts must be enabled (N2)"
+    assert v.get("automerge") is True, "vulnerabilityAlerts must auto-merge (N2 fastest path)"
+    assert v.get("schedule") == ["at any time"], (
+        "vulnerabilityAlerts must override the weekend schedule (open immediately)"
+    )
+    assert renovate_config.get("osvVulnerabilityAlerts") is True, (
+        "OSV scanning catches CVEs before GHSA picks them up"
+    )
+
+
+def _find_rule(rules: list, predicate) -> dict | None:
+    for r in rules:
+        if predicate(r):
+            return r
+    return None
+
+
+def test_renovate_security_priority_is_max(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    sec = _find_rule(rules, lambda r: r.get("isVulnerabilityAlert") is True)
+    assert sec is not None, "Need a packageRule with isVulnerabilityAlert: true (N2 priority)"
+    assert sec.get("prPriority", 0) >= 100, (
+        "Security PR rule must set prPriority >= 100 to jump the queue"
+    )
+    assert sec.get("automerge") is True, "Security PRs must auto-merge"
+
+
+def test_renovate_tier_patch_automerges(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    patch_rule = _find_rule(
+        rules,
+        lambda r: r.get("matchUpdateTypes") == ["patch", "pin", "digest"],
+    )
+    assert patch_rule is not None, "N2: missing PATCH tier rule"
+    assert patch_rule.get("automerge") is True, "patch tier must auto-merge on green CI"
+    assert patch_rule.get("platformAutomerge") is True, (
+        "patch tier must use GitHub native auto-merge (platformAutomerge)"
+    )
+
+
+def test_renovate_tier_minor_no_automerge(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    minor_rule = _find_rule(rules, lambda r: r.get("matchUpdateTypes") == ["minor"])
+    assert minor_rule is not None, "N2: missing MINOR tier rule"
+    assert minor_rule.get("automerge") is False, (
+        "minor tier must NOT auto-merge (1 human reviewer required)"
+    )
+
+
+def test_renovate_tier_major_blocked_and_blue_green(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    major_rule = _find_rule(rules, lambda r: r.get("matchUpdateTypes") == ["major"])
+    assert major_rule is not None, "N2: missing MAJOR tier rule"
+    assert major_rule.get("automerge") is False, (
+        "major tier must NEVER auto-merge (2 reviewers + blue-green required)"
+    )
+    labels = major_rule.get("addLabels", [])
+    assert "deploy/blue-green-required" in labels, (
+        "major-tier PRs must be labelled deploy/blue-green-required so the deploy "
+        "gate refuses non-blue-green merges (couples N2 to N10)"
+    )
+
+
+def test_renovate_groups_cover_required_families(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    groups = {r["groupSlug"] for r in rules if "groupSlug" in r}
+    required = {"radix-ui", "ai-sdk", "langchain-py", "types"}
+    missing = required - groups
+    assert not missing, (
+        f"N2 requires group rules for {required}; missing groupSlug(s): {missing}"
+    )
+
+
+def test_renovate_radix_group_pattern(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    radix = _find_rule(rules, lambda r: r.get("groupSlug") == "radix-ui")
+    assert radix is not None
+    names = radix.get("matchPackageNames", [])
+    assert any("@radix-ui" in n for n in names), (
+        f"radix-ui group must match @radix-ui/* package names, got {names!r}"
+    )
+
+
+def test_renovate_langchain_group_targets_python_managers(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    lc = _find_rule(rules, lambda r: r.get("groupSlug") == "langchain-py")
+    assert lc is not None
+    managers = lc.get("matchManagers", [])
+    assert "pip-compile" in managers, (
+        "langchain group must scope to Python managers (pip-compile) so the "
+        "JS `langchain` package on npm doesn't accidentally land in the same PR"
+    )
+
+
+def test_renovate_types_group_automerges_minor(renovate_config: dict) -> None:
+    rules = renovate_config["packageRules"]
+    types_rule = _find_rule(rules, lambda r: r.get("groupSlug") == "types")
+    assert types_rule is not None
+    assert types_rule.get("automerge") is True, "@types/* group must auto-merge"
+    update_types = types_rule.get("matchUpdateTypes", [])
+    assert "minor" in update_types, (
+        "@types/* group must auto-merge minor in addition to patch — they are "
+        "dev-only DefinitelyTyped packages"
+    )
+
+
+def test_renovate_pip_compile_targets_lockfile(renovate_config: dict) -> None:
+    pc = renovate_config.get("pip-compile", {})
+    fm = pc.get("fileMatch", [])
+    # Renovate's pip-compile manager scans the *lockfile* (requirements.txt)
+    # and uses the .in file to keep it fresh — matching the .in file
+    # disables the manager entirely.
+    assert any("requirements\\.txt" in f for f in fm), (
+        f"pip-compile manager must match requirements.txt, got {fm!r}"
+    )
+
+
+def test_ci_has_renovate_config_validation_job() -> None:
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "renovate-config:" in ci, (
+        "CI must define a `renovate-config` job that schema-validates renovate.json (N2)"
+    )
+    assert "renovate-config-validator" in ci, (
+        "renovate-config job must invoke renovate-config-validator"
+    )
+
+
+def test_renovate_policy_doc_exists() -> None:
+    doc = REPO_ROOT / "docs" / "ops" / "renovate_policy.md"
+    assert doc.is_file(), "N2 requires docs/ops/renovate_policy.md to be checked in"
+    body = doc.read_text(encoding="utf-8")
+    # The doc is the contract — these phrases must be present so the
+    # policy doesn't silently lose its teeth via doc rot.
+    for phrase in ("auto-merge", "blue-green", "every weekend", "vulnerability"):
+        assert phrase.lower() in body.lower(), f"renovate_policy.md missing key term: {phrase!r}"

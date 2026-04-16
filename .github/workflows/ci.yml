@@ -72,6 +72,19 @@ jobs:
             exit 1
           fi
 
+  renovate-config:
+    # N2 — fail CI if `renovate.json` is invalid against the Renovate
+    # schema. Cheap (~30s on warm cache) and catches typos before they
+    # silently disable the entire bot. Runs in parallel with lint.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: ".nvmrc" }
+      - name: validate renovate.json
+        run: npx --yes --package renovate@39 -- renovate-config-validator --strict renovate.json
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 8

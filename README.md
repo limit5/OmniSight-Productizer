@@ -264,6 +264,21 @@ git add package.json pnpm-lock.yaml
 
 If CI fails with `Lockfile drift detected`, re-run the corresponding regenerate command locally, commit the lock, push.
 
+### Renovate auto-PRs (N2)
+
+[Renovate](https://docs.renovatebot.com/) opens dependency PRs every weekend (`Asia/Taipei`) per the policy in [`renovate.json`](renovate.json). Full SOP — group rules, tiered auto-merge, vulnerability handling, operator bootstrap — lives in [`docs/ops/renovate_policy.md`](docs/ops/renovate_policy.md).
+
+| Update type | Auto-merge? | Reviewers | Notes |
+|---|---|---|---|
+| CVE / vulnerability | yes (CI green) | none | Opens immediately, jumps the queue (`prPriority: 100`) |
+| patch / pin / digest | yes (CI green) | none | 3-day upstream wait |
+| minor | no | 1 (CODEOWNERS) | 5-day wait |
+| major | no — never | 2 + G3 blue-green | 14-day wait, label `deploy/blue-green-required` |
+
+Group rules keep peer-coupled families together so the lockfile stays internally consistent: `@radix-ui/*`, `@ai-sdk/*`, `langchain*`/`langgraph` (Python), `@types/*`, GitHub Actions, and Docker base images each merge as one PR.
+
+CI validates `renovate.json` against the Renovate JSON schema in the `renovate-config` job before any other gate runs — typos cannot silently disable the bot.
+
 ## Theme
 
 The UI is deliberately **dark-only** — the "FUI" (fictional user interface)
