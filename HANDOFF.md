@@ -1,9 +1,36 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：I7 Frontend tenant-aware (master)
+> 最後 commit：I8 Per-tenant audit log hash chain (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## I8 (complete) Audit log per-tenant hash chain（2026-04-16 完成）
+
+**背景**：Phase 53 的 audit hash chain 是全域共享的，所有 tenant 的 audit log 串成同一條鏈。I8 將 hash chain 改為 per-tenant 分岔，每個 tenant 有獨立的 genesis（empty prev_hash）和獨立的鏈。同時加強跨 tenant 查詢封鎖和驗證工具。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Per-tenant hash chain | `_last_hash_for_tenant(tid)` 取代全域 `_last_hash()`，每 tenant 獨立鏈 | ✅ 完成 |
+| 跨 tenant 查詢封鎖 | `tenant_where()` + middleware `_tenant_header_gate` 雙重隔離，non-admin 403 | ✅ 完成 |
+| `verify_chain(tenant_id=)` | 單 tenant chain 驗證，支援顯式指定 tenant_id | ✅ 完成 |
+| `verify_all_chains()` | 批量驗證所有 tenant 的 chain 完整性 | ✅ 完成 |
+| API `/audit/verify?tenant_id=` | Admin-only，可指定 tenant 驗證 | ✅ 完成 |
+| API `/audit/verify-all` | Admin-only，一次驗證所有 tenant | ✅ 完成 |
+| CLI `--tenant` + `verify-all` | `python -m backend.audit verify --tenant TID` / `verify-all` | ✅ 完成 |
+| 測試（13 項） | 6 原有 + 7 新增 per-tenant（隔離、genesis、tampering、interleave、query isolation） | ✅ 13/13 pass |
+
+**修改檔案**：
+- `backend/audit.py` — 核心 hash chain 改 per-tenant scoped
+- `backend/routers/audit.py` — 新增 verify-all endpoint + tenant_id 參數
+- `backend/tests/test_audit.py` — 7 項新增 per-tenant 測試
+
+**設計決策**：
+- Hash chain 以 `tenant_id` 為分岔鍵，同 tenant 內 rows 串鏈，跨 tenant 不互相影響
+- Interleaved writes（交替寫入不同 tenant）不會破壞任何一方的 chain
+- 已有的跨 tenant 存取管控（middleware + `tenant_where()`）天然封鎖跨 tenant 查詢
 
 ---
 

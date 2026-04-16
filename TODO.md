@@ -551,10 +551,10 @@ Legend:
 - [x] 預估：**1 day**
 
 ### I8. Audit log per-tenant hash chain
-- [ ] 每 tenant 獨立 genesis + chain（Phase 53 hash chain 改 per-tenant 分岔）
-- [ ] 跨 tenant 查詢封鎖（admin 明確切 tenant 才能看）
-- [ ] 驗證工具支援 per-tenant chain 完整性
-- [ ] 預估：**1 day**
+- [x] 每 tenant 獨立 genesis + chain（Phase 53 hash chain 改 per-tenant 分岔）
+- [x] 跨 tenant 查詢封鎖（admin 明確切 tenant 才能看）
+- [x] 驗證工具支援 per-tenant chain 完整性
+- [x] 預估：**1 day**
 
 ### I9. Rate limit per-user / per-tenant
 - [ ] K2 的 rate limit 擴充維度：per-IP + per-user + per-tenant
