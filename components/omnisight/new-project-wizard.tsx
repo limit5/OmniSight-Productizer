@@ -11,6 +11,7 @@ import {
 import { GitBranch, FileUp, PenLine, Workflow } from "lucide-react"
 import type { PanelId } from "@/components/omnisight/mobile-nav"
 import { useAuth } from "@/lib/auth-context"
+import { useTenant } from "@/lib/tenant-context"
 import { getUserStorage, onStorageChange } from "@/lib/storage"
 import { getUserPreference, setUserPreference } from "@/lib/api"
 
@@ -65,11 +66,12 @@ function navigateToPanel(panel: PanelId) {
 export function NewProjectWizard() {
   const [open, setOpen] = useState(false)
   const { user } = useAuth()
+  const { currentTenantId } = useTenant()
   const userId = user?.id ?? null
 
   useEffect(() => {
     if (typeof window === "undefined" || !userId) return
-    const store = getUserStorage(userId)
+    const store = getUserStorage(currentTenantId, userId)
     const hasSpec = !!store.getItem(LS_LAST_SPEC)
     const wizardSeenLocal = !!store.getItem(LS_WIZARD_SEEN)
     if (hasSpec || wizardSeenLocal) return
@@ -90,7 +92,7 @@ export function NewProjectWizard() {
 
   useEffect(() => {
     if (!userId) return
-    const store = getUserStorage(userId)
+    const store = getUserStorage(currentTenantId, userId)
     const fullKey = store.key(LS_WIZARD_SEEN)
     return onStorageChange((changedKey, newValue) => {
       if (changedKey === fullKey && newValue === "1") setOpen(false)
@@ -99,7 +101,7 @@ export function NewProjectWizard() {
 
   function markWizardSeen() {
     if (!userId) return
-    const store = getUserStorage(userId)
+    const store = getUserStorage(currentTenantId, userId)
     store.setItem(LS_WIZARD_SEEN, "1")
     setUserPreference("wizard_seen", "1").catch(() => {})
   }

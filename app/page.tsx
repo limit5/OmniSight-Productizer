@@ -19,6 +19,7 @@ import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"
 import { AuditPanel } from "@/components/omnisight/audit-panel"
 import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
+import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
 import { useAuth } from "@/lib/auth-context"
 import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
@@ -567,7 +568,8 @@ export default function Home() {
           unreadNotifications={engine.unreadCount}
           onToggleNotifications={() => setShowNotifications(prev => !prev)}
           settingsButton={
-            <span className="inline-flex items-center gap-0.5">
+            <span className="inline-flex items-center gap-1">
+              <TenantSwitcher />
               <UserMenu />
               <SettingsButton onClick={() => setShowSettings(true)} />
             </span>

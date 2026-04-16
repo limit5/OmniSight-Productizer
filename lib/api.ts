@@ -232,6 +232,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const baseHeaders: Record<string, string> = {
         "Content-Type": "application/json",
       }
+      if (_currentTenantId) {
+        baseHeaders["X-Tenant-Id"] = _currentTenantId
+      }
       if (typeof document !== "undefined"
           && !["GET", "HEAD", "OPTIONS"].includes(method)) {
         const csrf = readCookie("omnisight_csrf")
@@ -862,6 +865,14 @@ export interface AuthUser {
   name: string
   role: "viewer" | "operator" | "admin"
   enabled: boolean
+  tenant_id: string
+}
+
+export interface TenantInfo {
+  id: string
+  name: string
+  plan: string
+  enabled: boolean
 }
 
 export interface WhoamiResponse {
@@ -872,6 +883,10 @@ export interface WhoamiResponse {
 
 export async function whoami(): Promise<WhoamiResponse> {
   return request<WhoamiResponse>("/auth/whoami")
+}
+
+export async function listUserTenants(): Promise<TenantInfo[]> {
+  return request<TenantInfo[]>("/auth/tenants")
 }
 
 export async function login(email: string, password: string): Promise<LoginResponse> {

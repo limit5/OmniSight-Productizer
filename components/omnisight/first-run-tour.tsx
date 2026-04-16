@@ -18,6 +18,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { X, ChevronLeft, ChevronRight, Sparkles } from "lucide-react"
 import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
 import { useAuth } from "@/lib/auth-context"
+import { useTenant } from "@/lib/tenant-context"
 import { getUserStorage, onStorageChange } from "@/lib/storage"
 import { getUserPreference, setUserPreference } from "@/lib/api"
 
@@ -162,11 +163,12 @@ export function FirstRunTour() {
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
   const { user } = useAuth()
+  const { currentTenantId } = useTenant()
   const userId = user?.id ?? null
 
   useEffect(() => {
     if (typeof window === "undefined" || !userId) return
-    const store = getUserStorage(userId)
+    const store = getUserStorage(currentTenantId, userId)
     const params = new URLSearchParams(window.location.search)
     const tourParam = params.get("tour")
     const seen = store.getItem(STORAGE_KEY) === "1"
@@ -199,16 +201,15 @@ export function FirstRunTour() {
       if (!cancelled) setActive(true)
     })
     return () => { cancelled = true }
-  }, [userId])
+  }, [userId, currentTenantId])
 
   const closeTour = useCallback((remember = true) => {
     setActive(false)
     if (remember && userId) {
-      const store = getUserStorage(userId)
+      const store = getUserStorage(currentTenantId, userId)
       store.setItem(STORAGE_KEY, "1")
       setUserPreference("tour_seen", "1").catch(() => {})
     }
-    // Strip ?tour=1 from URL so it doesn't re-fire on back-button.
     if (typeof window !== "undefined") {
       const u = new URL(window.location.href)
       if (u.searchParams.has("tour")) {
@@ -216,7 +217,7 @@ export function FirstRunTour() {
         window.history.replaceState(null, "", u.toString())
       }
     }
-  }, [userId])
+  }, [userId, currentTenantId])
 
   // Find the anchor for the current step; skip missing anchors.
   useLayoutEffect(() => {

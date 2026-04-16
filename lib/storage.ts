@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { useAuth } from "@/lib/auth-context"
+import { useTenant } from "@/lib/tenant-context"
 
 const LEGACY_KEYS: Record<string, string> = {
   "omnisight-locale": "omnisight:locale",
@@ -10,49 +11,63 @@ const LEGACY_KEYS: Record<string, string> = {
   "omnisight-tour-seen": "omnisight:tour:seen",
 }
 
-function prefixedKey(userId: string | null, key: string): string {
+function prefixedKey(tenantId: string | null, userId: string | null, key: string): string {
+  const canonical = LEGACY_KEYS[key] ?? key
+  const tid = tenantId || "t-default"
+  const uid = userId || "_anonymous"
+  return `omnisight:${tid}:${uid}:${canonical.replace(/^omnisight:/, "")}`
+}
+
+function _oldPrefixedKey(userId: string | null, key: string): string {
   const canonical = LEGACY_KEYS[key] ?? key
   const uid = userId || "_anonymous"
   return `omnisight:${uid}:${canonical.replace(/^omnisight:/, "")}`
 }
 
-function migrateLegacyKey(userId: string, legacyKey: string): void {
+function migrateLegacyKey(tenantId: string, userId: string, legacyKey: string): void {
   try {
-    const val = localStorage.getItem(legacyKey)
-    if (val === null) return
-    const newKey = prefixedKey(userId, legacyKey)
-    if (localStorage.getItem(newKey) === null) {
-      localStorage.setItem(newKey, val)
+    const newKey = prefixedKey(tenantId, userId, legacyKey)
+    if (localStorage.getItem(newKey) !== null) return
+    const oldUserScoped = _oldPrefixedKey(userId, legacyKey)
+    const oldVal = localStorage.getItem(oldUserScoped)
+    if (oldVal !== null) {
+      localStorage.setItem(newKey, oldVal)
+      localStorage.removeItem(oldUserScoped)
+      return
     }
-    localStorage.removeItem(legacyKey)
+    const bareVal = localStorage.getItem(legacyKey)
+    if (bareVal !== null) {
+      localStorage.setItem(newKey, bareVal)
+      localStorage.removeItem(legacyKey)
+    }
   } catch { /* private mode or quota */ }
 }
 
-export function migrateAllLegacyKeys(userId: string): void {
+export function migrateAllLegacyKeys(tenantId: string, userId: string): void {
   for (const legacyKey of Object.keys(LEGACY_KEYS)) {
-    migrateLegacyKey(userId, legacyKey)
+    migrateLegacyKey(tenantId, userId, legacyKey)
   }
 }
 
-export function getUserStorage(userId: string | null) {
+export function getUserStorage(tenantId: string | null, userId: string | null) {
   return {
     getItem(key: string): string | null {
       try {
-        return localStorage.getItem(prefixedKey(userId, key))
+        return localStorage.getItem(prefixedKey(tenantId, userId, key))
       } catch { return null }
     },
     setItem(key: string, value: string): void {
       try {
-        localStorage.setItem(prefixedKey(userId, key), value)
+        localStorage.setItem(prefixedKey(tenantId, userId, key), value)
       } catch { /* quota or private mode */ }
     },
     removeItem(key: string): void {
       try {
-        localStorage.removeItem(prefixedKey(userId, key))
+        localStorage.removeItem(prefixedKey(tenantId, userId, key))
       } catch { /* ignore */ }
     },
     key(key: string): string {
-      return prefixedKey(userId, key)
+      return prefixedKey(tenantId, userId, key)
     },
   }
 }
@@ -76,8 +91,9 @@ export function onStorageChange(cb: StorageChangeCallback): () => void {
 
 export function useUserStorage(key: string): [string | null, (v: string | null) => void] {
   const { user } = useAuth()
+  const { currentTenantId } = useTenant()
   const userId = user?.id ?? null
-  const fullKey = prefixedKey(userId, key)
+  const fullKey = prefixedKey(currentTenantId, userId, key)
 
   const snapshotRef = useRef<string | null>(null)
   const keyRef = useRef(fullKey)
@@ -117,8 +133,9 @@ export function useUserStorage(key: string): [string | null, (v: string | null) 
 
 export function useStorageSync(key: string, onSync: (newValue: string | null) => void): void {
   const { user } = useAuth()
+  const { currentTenantId } = useTenant()
   const userId = user?.id ?? null
-  const fullKey = prefixedKey(userId, key)
+  const fullKey = prefixedKey(currentTenantId, userId, key)
   const onSyncRef = useRef(onSync)
   onSyncRef.current = onSync
 

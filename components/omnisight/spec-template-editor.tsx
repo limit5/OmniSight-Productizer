@@ -11,6 +11,7 @@ import {
   type IngestRepoResponse, type DocFileResult,
 } from "@/lib/api"
 import { useAuth } from "@/lib/auth-context"
+import { useTenant } from "@/lib/tenant-context"
 import { getUserStorage, onStorageChange } from "@/lib/storage"
 
 // ─── Starter prose templates ───────────────────────────────────
@@ -132,8 +133,9 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
   const [failure, setFailure] = useState<DagFailureContext | null>(null)
   const [hydrated, setHydrated] = useState(false)
   const { user } = useAuth()
+  const { currentTenantId } = useTenant()
   const userId = user?.id ?? null
-  const store = getUserStorage(userId)
+  const store = getUserStorage(currentTenantId, userId)
 
   useEffect(() => {
     if (typeof window === "undefined" || !spec) return

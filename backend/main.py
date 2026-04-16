@@ -229,6 +229,45 @@ async def _api_key_scope_gate(request, call_next):
 
 
 @app.middleware("http")
+async def _tenant_header_gate(request, call_next):
+    """I7: Validate X-Tenant-Id header against the authenticated user's tenant.
+
+    If the header is present, it must match the user's own tenant_id
+    (or the user must be an admin to switch tenants). Sets the
+    request-scoped db_context tenant_id so downstream RLS picks it up.
+    """
+    header_tid = request.headers.get("x-tenant-id")
+    if not header_tid:
+        return await call_next(request)
+
+    from backend import auth as _auth
+    from backend import db_context
+
+    if _auth.auth_mode() == "open":
+        db_context.set_tenant_id(header_tid)
+        return await call_next(request)
+
+    cookie = request.cookies.get(_auth.SESSION_COOKIE) or ""
+    if not cookie:
+        return await call_next(request)
+    sess = await _auth.get_session(cookie)
+    if not sess:
+        return await call_next(request)
+    user = await _auth.get_user(sess.user_id)
+    if not user:
+        return await call_next(request)
+
+    if header_tid != user.tenant_id and user.role != "admin":
+        from starlette.responses import JSONResponse as StarletteJSON
+        return StarletteJSON(
+            status_code=403,
+            content={"detail": f"Tenant {header_tid} not accessible"},
+        )
+    db_context.set_tenant_id(header_tid)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def _must_change_password_gate(request, call_next):
     from starlette.responses import JSONResponse as StarletteJSON
     path = request.url.path

@@ -2,6 +2,7 @@
 
 import { I18nProvider } from "@/lib/i18n/context"
 import { AuthProvider } from "@/lib/auth-context"
+import { TenantProvider } from "@/lib/tenant-context"
 import { StorageBridge } from "@/components/storage-bridge"
 
 interface ProvidersProps {
@@ -12,8 +13,10 @@ export function Providers({ children }: ProvidersProps) {
   return (
     <I18nProvider>
       <AuthProvider>
-        <StorageBridge />
-        {children}
+        <TenantProvider>
+          <StorageBridge />
+          {children}
+        </TenantProvider>
       </AuthProvider>
     </I18nProvider>
   )

@@ -278,6 +278,30 @@ async def whoami(request: Request,
     }
 
 
+@router.get("/auth/tenants")
+async def user_tenants(user: auth.User = Depends(auth.current_user)) -> list[dict]:
+    """I7: Return tenants accessible to the current user.
+
+    Admin users get all tenants; regular users get only their own.
+    """
+    from backend.db import _conn
+    conn = _conn()
+    if user.role == "admin":
+        async with conn.execute(
+            "SELECT id, name, plan, enabled FROM tenants ORDER BY name",
+        ) as cur:
+            rows = await cur.fetchall()
+            return [{"id": r[0], "name": r[1], "plan": r[2], "enabled": bool(r[3])} for r in rows]
+    async with conn.execute(
+        "SELECT id, name, plan, enabled FROM tenants WHERE id = ?",
+        (user.tenant_id,),
+    ) as cur:
+        r = await cur.fetchone()
+        if r:
+            return [{"id": r[0], "name": r[1], "plan": r[2], "enabled": bool(r[3])}]
+    return [{"id": user.tenant_id, "name": user.tenant_id, "plan": "free", "enabled": True}]
+
+
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=12)
