@@ -1,0 +1,79 @@
+# W6 #280 — SKILL-NEXTJS manifest.
+#
+# First web-vertical skill pack — pilot that validates the W0-W5
+# framework end-to-end. Matches the pilot pattern established by
+# D1 SKILL-UVC (C5) and D29 SKILL-HMI-WEBUI (C26).
+#
+# Exercise:
+#   * W0  target_kind=web schema                    (configs/platforms/schema.yaml)
+#   * W1  web-vercel / web-edge-cloudflare profiles (configs/platforms/web-*.yaml)
+#   * W2  Lighthouse / Bundle / a11y / SEO gates    (backend/web_simulator.py)
+#   * W3  frontend-react / a11y / seo / perf roles  (configs/roles/web/)
+#   * W4  Vercel + CloudflarePages deploy adapters  (backend/deploy/)
+#   * W5  WCAG / GDPR / SPDX compliance gates       (backend/web_compliance/)
+#
+# Scaffolds in `scaffolds/` provide Next.js 16 App Router boilerplate that
+# intentionally sets `turbopack.root` — the same knob OmniSight itself
+# had to fix in `next.config.mjs` after hitting the workspace-root panic
+# on Next 16 pre-releases. Shipping the fix in the scaffold means every
+# new web SKU inherits the workaround without re-discovering the bug.
+
+schema_version: 1
+name: skill-nextjs
+description: >
+  Next.js 16 App Router pilot skill pack. Generates a production-ready
+  web project with Server/Client Components, next-auth OR Clerk auth
+  templates, API Routes + optional tRPC, dual-target build for Vercel
+  and Cloudflare Pages, Playwright E2E and vitest unit skeletons, and
+  WCAG / GDPR / SPDX compliance gates enabled by default. Validates the
+  W0-W5 web framework (pilot skill, mirrors D1/D29 pattern).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills:
+  - enterprise_web
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+  - CORE-21  # enterprise web reference
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - nextjs
+  - next-16
+  - app-router
+  - react
+  - server-components
+  - client-components
+  - turbopack
+  - next-auth
+  - clerk
+  - trpc
+  - vercel
+  - cloudflare-pages
+  - playwright
+  - vitest
+  - wcag-aa
+  - gdpr
+  - spdx
+  - pilot
+  - w6

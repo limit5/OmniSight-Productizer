@@ -1,0 +1,154 @@
+# W6 #280 — SKILL-NEXTJS DAG tasks.
+#
+# Every task here maps 1:1 to a W0-W5 framework capability, so running
+# the full DAG is by design a smoke test of the entire web vertical.
+
+tasks:
+  - id: nx-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render Next.js 16 App Router project from scaffolds/: package.json,
+      next.config.mjs (with `turbopack.root` pinned to project root —
+      avoids the workspace-root panic OmniSight itself fixed), tsconfig,
+      eslint. Idempotent: re-renders without clobbering user edits.
+    depends_on: []
+    artifacts: [nx_skeleton]
+    estimated_hours: 2
+    framework_gate: w0-platform-schema
+
+  - id: nx-components
+    name: "Render Server / Client component template"
+    description: >
+      Emit `app/page.tsx` (Server Component data layer),
+      `components/Counter.tsx` (`"use client"` leaf), and showcase the
+      `"use server"` action pattern. Enforces W3 frontend-react role's
+      anti-patterns.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_components]
+    estimated_hours: 2
+    framework_gate: w3-role-frontend-react
+
+  - id: nx-auth-nextauth
+    name: "Wire next-auth v5 template"
+    description: >
+      Render the next-auth v5 (Auth.js) route handler + middleware guard.
+      Credentials provider wired to backend /api/v1 endpoint; SSO hooks
+      ready to uncomment. Default choice when AUTH=nextauth.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_auth_nextauth]
+    estimated_hours: 2
+    framework_gate: w3-role-frontend-react
+
+  - id: nx-auth-clerk
+    name: "Wire Clerk template"
+    description: >
+      Alternative auth path — render Clerk middleware + <ClerkProvider>
+      wrapper + signed-in / signed-out hook examples. Selected when
+      AUTH=clerk.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_auth_clerk]
+    estimated_hours: 1
+
+  - id: nx-api-routes
+    name: "API Route handlers"
+    description: >
+      Render `app/api/health/route.ts` and `app/api/v1/[...slug]/route.ts`
+      that proxy to the backend (same pattern used by OmniSight's own
+      next.config.mjs rewrite).
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_api_routes]
+    estimated_hours: 1
+
+  - id: nx-trpc
+    name: "tRPC optional integration"
+    description: >
+      When TRPC=on, render `server/trpc.ts` root router + `app/api/trpc`
+      handler + client provider. Composes with next-auth for typed
+      session context.
+    depends_on: [nx-api-routes]
+    artifacts: [nx_trpc]
+    estimated_hours: 2
+
+  - id: nx-build-vercel
+    name: "Vercel build preset"
+    description: >
+      Emit `vercel.json` + bind to `configs/platforms/web-vercel.yaml`.
+      Wires `@vercel/analytics` and Node 20 serverless runtime.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_build_vercel]
+    estimated_hours: 1
+    framework_gate: w1-web-vercel-profile
+
+  - id: nx-build-cloudflare
+    name: "Cloudflare Pages build preset"
+    description: >
+      Emit `wrangler.toml` + `@cloudflare/next-on-pages` adapter config.
+      Binds to `configs/platforms/web-edge-cloudflare.yaml`; enforces
+      1 MiB edge bundle ceiling.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_build_cloudflare]
+    estimated_hours: 1
+    framework_gate: w1-web-edge-cloudflare-profile
+
+  - id: nx-playwright
+    name: "Playwright E2E skeleton"
+    description: >
+      Render `e2e/smoke.spec.ts` + `playwright.config.ts`. Matches the
+      test harness W2 simulate-track invokes.
+    depends_on: [nx-components, nx-api-routes]
+    artifacts: [nx_playwright]
+    estimated_hours: 1
+    framework_gate: w2-simulate-e2e
+
+  - id: nx-vitest
+    name: "Vitest unit skeleton"
+    description: >
+      Render `vitest.config.ts` + `tests/unit/home.test.tsx` using
+      @testing-library/react. Ships jsdom preset.
+    depends_on: [nx-components]
+    artifacts: [nx_vitest]
+    estimated_hours: 1
+    framework_gate: w2-simulate-unit
+
+  - id: nx-compliance-wire
+    name: "Compliance gates wired"
+    description: >
+      Generate `docs/privacy/retention.md` stub, cookie consent banner
+      component, and SPDX allowlist override. All three W5 gates should
+      pass on the rendered project out of the box.
+    depends_on: [nx-scaffold-init]
+    artifacts: [nx_compliance]
+    estimated_hours: 1
+    framework_gate: w5-compliance
+
+  - id: nx-deploy-smoke
+    name: "W4 deploy adapter smoke"
+    description: >
+      Dry-run provision via `backend/deploy/vercel.py` and
+      `backend/deploy/cloudflare_pages.py` against sandbox fixtures;
+      validate BuildArtifact → DeployResult round-trip.
+    depends_on: [nx-build-vercel, nx-build-cloudflare, nx-compliance-wire]
+    artifacts: [nx_deploy_smoke]
+    estimated_hours: 1
+    framework_gate: w4-deploy-adapters
+
+  - id: nx-pilot-validation
+    name: "Pilot framework validation"
+    description: >
+      Full-stack smoke: scaffold → build → simulate (W2) → compliance
+      (W5) → deploy adapter dry-run (W4). If this green-lights, the
+      W0-W5 framework is validated end-to-end — same bar D1 set for C5
+      and D29 for C26.
+    depends_on:
+      - nx-components
+      - nx-auth-nextauth
+      - nx-api-routes
+      - nx-build-vercel
+      - nx-build-cloudflare
+      - nx-playwright
+      - nx-vitest
+      - nx-compliance-wire
+      - nx-deploy-smoke
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: w6-pilot

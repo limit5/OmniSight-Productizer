@@ -1,0 +1,74 @@
+# SKILL-NEXTJS test definitions — W6 #280
+#
+# Authoritative list consumed by `backend/tests/test_skill_nextjs.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-nextauth-vercel
+        name: "Render: nextauth + vercel target"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+      - id: scaffold-clerk-cloudflare
+        name: "Render: clerk + cloudflare target"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+      - id: scaffold-nextauth-trpc-both
+        name: "Render: nextauth + trpc on both targets"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+      - id: scaffold-turbopack-root-pin
+        name: "Rendered next.config.mjs pins turbopack.root"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by auth/trpc/target are skipped correctly"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+
+  - id: framework-binding
+    name: "W0-W5 framework binding tests"
+    tests:
+      - id: w0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.nextjs_scaffolder.render_project
+      - id: w1-profile-budget-propagation
+        name: "Bundle budget from profile propagates into scaffold context"
+        type: integration
+        target: backend.nextjs_scaffolder._render_context
+      - id: w3-role-react-alignment
+        name: "Scaffold honours frontend-react anti-patterns"
+        type: unit
+        target: backend.nextjs_scaffolder.render_project
+      - id: w4-vercel-adapter-constructs
+        name: "VercelAdapter constructs against rendered project"
+        type: integration
+        target: backend.nextjs_scaffolder.dry_run_deploy
+      - id: w4-cloudflare-adapter-constructs
+        name: "CloudflarePagesAdapter constructs against rendered project"
+        type: integration
+        target: backend.nextjs_scaffolder.dry_run_deploy
+      - id: w5-compliance-runs
+        name: "W5 compliance bundle runs against rendered project"
+        type: integration
+        target: backend.nextjs_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill_nextjs appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill_nextjs') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

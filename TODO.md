@@ -997,14 +997,14 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### W6. SKILL-NEXTJS (pilot, #280)
-- [ ] Next.js 16 App Router 專案骨架 generator（含 `turbopack.root` 預設正確——避免 OmniSight 自身踩過的 Turbopack workspace-root panic）
-- [ ] Server Components / Client Components 模式 template
-- [ ] 認證 template（next-auth / Clerk）
-- [ ] API routes + tRPC 選項
-- [ ] Vercel + Cloudflare Pages 雙 target build
-- [ ] Playwright E2E + vitest unit 骨架
-- [ ] **First web skill — validates W0-W5 framework**（比照 D1 驗證 C5、D29 驗證 C26 的 pattern）
-- [ ] 預估：**2 day**
+- [x] Next.js 16 App Router 專案骨架 generator（含 `turbopack.root` 預設正確——避免 OmniSight 自身踩過的 Turbopack workspace-root panic）
+- [x] Server Components / Client Components 模式 template
+- [x] 認證 template（next-auth / Clerk）
+- [x] API routes + tRPC 選項
+- [x] Vercel + Cloudflare Pages 雙 target build
+- [x] Playwright E2E + vitest unit 骨架
+- [x] **First web skill — validates W0-W5 framework**（比照 D1 驗證 C5、D29 驗證 C26 的 pattern）
+- [x] 預估：**2 day**
 
 ### W7. SKILL-NUXT (#281)
 - [ ] Nuxt 4 專案骨架 generator

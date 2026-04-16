@@ -1,9 +1,52 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：W5 — Compliance gates (#279) — `backend/web_compliance/` package 落地（`wcag.py` axe-core + 2.2 AA 手動清單 / `gdpr.py` cookie+DPA+retention+RTBF / `spdx.py` arborist+walk fallback / `bundle.py` orchestrator + C8 bridge），opt-in `simulate.sh --w5-compliance=on`，60 條 W5 單元 + 6 條 simulate wire + 440 條 adjacent regression 全綠
-> Tag：`v0.1.0` — 無 bump（W5 新增 compliance gate layer，無破壞性 API 變動）
-> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0–W5 landed；W6 SKILL-NEXTJS pilot 為下一站）。W5 新增 1 個 package / 4 模組 / 2 測試檔 / 66 條測試，adjacent suite（compliance_harness / deploy_* / platform_web / web_simulator / web_simulate / web_role_skills / enterprise_web_stack）506/506 零 regression
+> 最後 commit：W6 — SKILL-NEXTJS pilot (#280) — `configs/skills/skill-nextjs/` 首支 web-vertical skill pack 落地（Next.js 16 App Router scaffold + `turbopack.root` 預設正確 / next-auth + Clerk 雙認證 / API Routes + tRPC 選項 / Vercel + CF Pages 雙 target / Playwright E2E + vitest unit），`backend/nextjs_scaffolder.py` 實作 `render_project` / `dry_run_deploy` / `pilot_report` / `validate_pack`，45 條 W6 單元 + 520 條 W0-W5 + deploy adapter regression 全綠，W0-W5 framework 端到端被 pilot skill 驗證通過
+> Tag：`v0.1.0` — 無 bump（W6 為新 skill pack，不動 existing API）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0–W6 landed；W7 SKILL-NUXT 為下一站）。W6 新增 1 個 skill pack（5 artifact kind） / 1 個 backend module / 1 個測試檔 / 45 條測試，adjacent suite（skill_framework / skills_extractor / platform_web_profiles / web_role_skills / web_simulator / web_compliance / web_simulate_w5 / enterprise_web_stack / deploy_base / deploy_vercel / deploy_cloudflare_pages / task_skills / web_simulate）520/520 零 regression
+
+---
+
+## W6 (complete) SKILL-NEXTJS pilot（#280）（2026-04-17 完成）
+
+**背景**：W0（schema）→ W1（4 platform profile）→ W2（simulate-track）→ W3（6 role skill）→ W4（4 deploy adapter）→ W5（3 compliance gate）把 web vertical 的「宣告 / QA 量化閘 / prompt 生碼層 / 上雲 driver / 合規證據 bundle」全部鋪齊，但**五層框架是否真的扣得回去**，要一支真的 skill pack 在五層之上渲染出可部署專案才算驗證。W6 比照 **D1 SKILL-UVC 驗證 C5**、**D29 SKILL-HMI-WEBUI 驗證 C26** 的 pilot pattern，是第一支 web-vertical skill，用 Next.js 16 App Router 當載體 — 之所以選 Next.js 而不是 Nuxt/Astro，是因為 Next.js 16 自己已經在 OmniSight 的 `next.config.mjs` 踩過 **Turbopack workspace-root panic**，生碼 template 如果沒預先 pin `turbopack.root`，每個新生成的 web SKU 都會再踩一次這個坑，所以把「已知會炸的預設值」包進 scaffold 本身就是 pilot 必須解決的問題。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `configs/skills/skill-nextjs/skill.yaml` | C5 manifest（`schema_version: 1` / `name: skill-nextjs`），宣告 `depends_on_core: [CORE-05, CORE-21]`、`depends_on_skills: [enterprise_web]`、5 個 artifact kind 的檔/目錄路徑、20 條 keyword（`pilot` / `w6` / `turbopack` / `next-16` / `app-router` 等讓操作員在 debug 時 grep 得到）。|
+| `configs/skills/skill-nextjs/tasks.yaml` | 13-task DAG：`nx-scaffold-init`（含 turbopack 說明）→ `nx-components` / `nx-auth-{nextauth,clerk}` / `nx-api-routes` / `nx-trpc` / `nx-build-{vercel,cloudflare}` / `nx-playwright` / `nx-vitest` / `nx-compliance-wire` / `nx-deploy-smoke` → `nx-pilot-validation`。每個 task 帶 `framework_gate` 欄位直接點名對應的 W0-W5 capability。|
+| `configs/skills/skill-nextjs/SKILL.md` | 人讀介紹：為什麼存在、輸出樹、4 個 knob（`auth` / `trpc` / `target` / `compliance`）、渲染片段、W0-W5 gate 對應表。|
+| `configs/skills/skill-nextjs/scaffolds/` | Jinja + 靜態檔 scaffold 集：`package.json.j2` / `next.config.mjs.j2`（`root: __dirname` 明確 pin） / `tsconfig.json` / `.gitignore` / `.env.example` / `app/layout.tsx.j2` / `app/page.tsx`（Server Component） / `app/globals.css` / `app/actions.ts`（`"use server"` example） / `app/api/health/route.ts` / `app/api/v1/[...slug]/route.ts`（backend proxy） / `app/api/auth/[...nextauth]/route.ts` / `app/api/trpc/[trpc]/route.ts` / `app/privacy/erasure/route.ts`（GDPR Art.17） / `components/Counter.tsx`（`"use client"` leaf） / `components/consent/CookieBanner.tsx` / `auth/nextauth.config.ts` + `auth/middleware.nextauth.ts` / `auth/clerk.middleware.ts` + `auth/clerk.example.tsx` / `server/trpc.ts` + `server/trpc.client.tsx` / `vercel.json.j2`（memory 從 W1 profile 讀） / `wrangler.toml.j2`（CF Pages + `nodejs_compat`） / `playwright.config.ts` + `e2e/smoke.spec.ts` / `vitest.config.ts` + `tests/unit/counter.test.tsx` + `tests/unit/setup.ts` / `docs/privacy/retention.md.j2` + `docs/privacy/dpa.md.j2` / `spdx.allowlist.json`。|
+| `configs/skills/skill-nextjs/tests/test_definitions.yaml` | 16 條 test definition 分三組：scaffold-unit / framework-binding / registry-integration，每條點名 Python target。|
+| `configs/skills/skill-nextjs/hil/recipes.yaml` | 5 條 HIL recipe：Vercel SSR cold-start / CF edge P95 latency / 活 URL Lighthouse / 活 WCAG axe / rollback 60s smoke。|
+| `configs/skills/skill-nextjs/docs/integration_guide.md` | 實作者文件：輸出目錄樹、`turbopack.root` 為何 load-bearing、W0-W5 binding 表、pilot 驗證判準（`pilot_report().w5_compliance.passed` + `w4_deploy.*.artifact_valid`）。|
+| `backend/nextjs_scaffolder.py`（新檔，~11 KiB） | 生碼模組。`ScaffoldOptions(project_name, auth, trpc, target, compliance, backend_url)` + `.validate()` + `.resolved_profiles()`。`render_project(out_dir, options, overwrite=True)` 走 `_iter_scaffold_files → _should_skip → _render_context → _write_file`：`.j2` 檔走 Jinja StrictUndefined、其餘 byte-for-byte copy。`_should_skip` 依 `auth/trpc/target/compliance` 四個 knob 剔除不該輸出的檔。`_render_context` 從 W1 profile 讀 `memory_limit_mb` / `bundle_size_budget`，parse 成 bytes 後注入。`dry_run_deploy` 用 `VercelAdapter.from_plaintext_token` + `CloudflarePagesAdapter.from_plaintext_token`（含 `account_id` 佔位）建 adapter，跑 `BuildArtifact(path, framework="next").validate()`，token 只透過 `token_fp()` 曝光。`pilot_report` one-shot 呼 `run_compliance_all(out_dir)` 拿 W5 bundle，再疊 W0/W1 profiles + W4 adapter bindings。`validate_pack` 透過 `skill_registry.validate_skill("skill-nextjs")` 跑 manifest 驗證。|
+| `backend/tests/test_skill_nextjs.py`（新檔，45 tests） | 6 組：（1）TestSkillPackRegistry：list_skills 可見 / validate_skill 乾淨 / 5 artifact kind 齊備 / manifest 帶 CORE-05 + enterprise_web / keyword 含 `pilot`+`w6`+`turbopack`+`nextjs` / `_SKILL_DIR` 解析正確；（2）TestScaffoldRender：15 個 must-exist 檔、`turbopack.root = __dirname` pin 斷言、`package.json` 依 `auth` / `trpc` 條件分支、auth=nextauth 排除 clerk 檔（反向亦然）、target=vercel 只輸出 `vercel.json`（CF 反向亦然）、compliance=off 移除 privacy/cookie/spdx 檔、idempotent re-render、ValueError on invalid auth/target/empty name；（3）TestW0W1Bindings：resolved_profiles 對三個 target 正確、profile 透過 `backend.platform.load_raw_profile` 可讀且 `target_kind=web`、budget 從 profile 而非 hard-code（vercel=50MiB / cf=1MiB）、`vercel.json.functions.memory` == W1 profile 的 1024；（4）TestW3RoleAlignment：Server Component 無 `"use client"`、Client Component 有 `"use client"`、全專案無 `useEffect(() => { fetch...`、`role="main"` landmark 存在；（5）TestW4DeployAdapters：both 模式建兩個 adapter、`BuildArtifact.validate()` 過、token fingerprint 非明文、vercel-only/cf-only 分支；（6）TestW5Compliance：pilot_report shape + gate_ids 全齊、retention.md 渲染 project_name、erasure handler shipped、spdx allowlist 含 MIT+Apache 且 deny GPL；（pilot）TestPilotValidation.test_full_pilot_flow：`auth=nextauth + trpc=on + target=both + compliance=on` 渲出後 `w4_deploy.*.artifact_valid == True` 且 `w5_compliance.failed_count == 0` — 這是 D1/D29 那條 bar。|
+| `TODO.md` | W6 七個 `[ ]` → `[x]`。|
+
+**Pilot 驗證結果（key takeaway）：**
+
+- **W0**：生成專案透過 `backend.platform.load_raw_profile` 讀 `web-vercel.yaml` / `web-edge-cloudflare.yaml`，`target_kind=web` dispatch 路徑正確。
+- **W1**：`vercel.json.functions.memory` 直接取自 web-vercel.yaml 的 `memory_limit_mb: 1024`（不是 hard-code），`wrangler.toml` compat flags 對齊 CF edge 1 MiB ceiling。
+- **W2**：`playwright.config.ts` + `vitest.config.ts` + `.next/static` 輸出佈局讓 W2 simulate-track 六道閘（Lighthouse / Bundle / a11y / SEO / E2E / Visual）能直接跑。
+- **W3**：生成專案對齊 `frontend-react.skill.md` 的 anti-pattern — Server Component 資料層 / Client Component 互動層分離、`"use client"` 只在 leaf、無 `useEffect` 資料抓取、`role="main"` + focus-visible 對齊 a11y/seo/perf role。
+- **W4**：`VercelAdapter` + `CloudflarePagesAdapter` 都能對新 render 的 `BuildArtifact(path=out_dir, framework="next")` 跑 `validate()` 乾淨，`from_plaintext_token` 的 token 只透 `token_fp()` 曝光（生產 path 仍應走 `from_encrypted_token`）。
+- **W5**：`pilot_report().w5_compliance.gates` 三道齊（wcag / gdpr / spdx），sandbox 下 WCAG + SPDX `skipped`（無 axe CLI、無 `node_modules`），GDPR 四道全過（cookie-banner 簽名 hit / retention 有 horizon / DPA 模板 / RTBF route + sentinel）。`failed_count == 0`，bundle pass。
+
+**Turbopack workspace-root panic 的 pin：** `scaffolds/next.config.mjs.j2` 用 `fileURLToPath(import.meta.url)` 拿到 `__dirname`，再寫 `turbopack: { root: __dirname }`。Regression test `TestScaffoldRender.test_turbopack_root_is_pinned` 讀回渲染產物、斷言同時出現 `turbopack:` / `root: __dirname` / `fileURLToPath` — 刪掉這段 Next 16 預發佈版會在 monorepo 子目錄啟動時 panic `workspace root is ambiguous`。
+
+**測試結果（2026-04-17）：**
+- `backend/tests/test_skill_nextjs.py`：**45 pass / 0 fail**（0.51s）。
+- W0-W5 regression：`test_skill_framework` + `test_skills_extractor` + `test_platform_web_profiles` + `test_web_role_skills` + `test_web_simulator` + `test_web_compliance` + `test_web_simulate_w5` + `test_enterprise_web_stack`：**429 pass / 0 fail**（6.26s）。
+- Deploy + adjacent：`test_deploy_base` + `test_deploy_vercel` + `test_deploy_cloudflare_pages` + `test_task_skills` + `test_web_simulate`：**91 pass / 0 fail**（2.83s）。
+- **合計 565 pass / 0 fail**。
+
+**未來工作項目（W6 衍生）：**
+- `enterprise_web` manifest 的 `schema_version: "1"`（字串）會讓 Pydantic validator 退回 `manifest=None`（registry 仍列出但驗證失敗）— 不在 W6 scope，留給下次 enterprise_web 改動時順手改。
+- `ComplianceReport` 的 `protocol` enum 目前無 `web` member，bundle_to_compliance_report 暫用 `onvif` + metadata 註明原點；W7 落地前若有 Python 改動空間可加一個 enum value。
+- W7 SKILL-NUXT 可直接 clone skill-nextjs 骨架換 Nuxt 4 / Nitro，`nextjs_scaffolder.py` 的 5 層 knob 設計可直接延用成 `nuxt_scaffolder.py`。
 
 ---
 
