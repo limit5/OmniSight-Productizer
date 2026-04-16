@@ -1,9 +1,61 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N9 — Framework Fallback Branches (master)
+> 最後 commit：O0 — CATC Payload Schema + Validator (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## O0 (complete) CATC Payload Schema + Validator（2026-04-16 完成）
+
+**背景**：O 區塊（Enterprise Event-Driven Multi-Agent Orchestration）的第一步。O1（Redis 分散式互斥鎖）、O2（Message Queue 抽象層）、O3（Stateless Worker Pool）都要消費同一種任務 payload；在把這些 pipeline 元件接起來之前，必須先把 payload schema 釘死，否則 downstream 每個 component 都會有自己的一套理解。設計來源：`docs/design/enterprise-multi-agent-event-driven-architecture.md` §二「CATC 任務卡標準格式 (Context-Anchored Task Card)」。
+
+### 實作內容
+
+1. **`backend/catc.py`**（new, ~230 行）— 三個 pydantic BaseModel 疊成 TaskCard：
+   - `ImpactScope{allowed: list[str] min_length=1, forbidden: list[str]}` — `allowed` 強制 `min_length=1`，這是「拒絕未宣告 impact_scope」的硬閘門。
+   - `Navigation{entry_point: str, impact_scope: ImpactScope}` — `impact_scope` 是 required（沒有預設值），所以「沒宣告」會直接被 pydantic `ValidationError` 擋下。
+   - `TaskCard{jira_ticket, acceptance_criteria, navigation, domain_context="", handoff_protocol=[]}` + `model_config = {"extra": "forbid"}` — worker 端只認識 schema 裡宣告的欄位，unknown field 直接拒絕以免 queue 夾帶隱形 payload。
+   - `jira_ticket` 加上 regex validator `^[A-Z][A-Z0-9_]*-\d+$`（e.g. `PROJ-402`），避免 Orchestrator 寫錯 ticket 格式導致 JIRA 雙向同步失敗。
+   - `to_dict()` / `to_json()` / `from_dict()` / `from_json()` + `task_card_json_schema()` helper — round-trip 與 JSON Schema export 一次到位。
+
+2. **impact_scope glob 解析器** — `_glob_to_regex(pattern)` 自寫的 regex 轉譯器：
+   - `*` → `[^/]*`（單 segment）、`**` → `.*`（任意深度）、`?` → `[^/]`、其餘 escape。
+   - 特殊處理 `/**`：consume slash 一起，讓 `src/camera/**` 同時匹配 `src/camera`（目錄本身）和 `src/camera/anything/below`。codeowners.py 的 fnmatch 做不到這件事；自寫的好處是 semantic 與 CODEOWNERS 對齊，兩個系統可以互比。
+   - `match_path_against_glob(path, pattern)` 對「具體路徑 vs glob」→ bool。
+   - `globs_overlap(g1, g2)` 對「glob vs glob」→ bool，用「literal prefix 前綴相同」的保守判定（寧願 false positive 也不要 false negative，避免 silent 放行）。
+
+3. **`check_catc_against_codeowners(card, agent_type, sub_type)` helper** — pre-dispatch gate：
+   - 拉 `get_scope_for_agent(agent_type, sub_type)` 拿到該 agent 在 CODEOWNERS 裡擁有的 pattern list。
+   - 對 `impact_scope.allowed` 每個 glob 分三類：`allowed_owned`（overlap agent 的 scope）/ `allowed_foreign`（落在其他 agent 的 scope）/ `allowed_unowned`（沒人認領，soft-allowed）。
+   - 對 `impact_scope.forbidden` 檢查是否與 agent 的 scope 有 overlap — 有的話進 `forbidden_in_scope`，task 直接 reject（因為 card 明確要求 agent「不要碰這些路徑」，但它又落在 agent 的 CODEOWNERS 領地，這是內在矛盾）。
+   - 回傳 `CatcCodeownersCheck` pydantic model（`ok` + 四條 list + `reason` human-readable），供 O2 Orchestrator Gateway 決策 queue 派發時直接讀。
+   - `_owner_labels_for_glob(glob)`：對 wildcard glob 拿 literal prefix 後綴 `/__probe__` 去 probe `get_file_owners()`，讓 CODEOWNERS 的 prefix rule 能命中。
+
+4. **`backend/tests/test_catc.py`**（new, 35 tests, 0.10 s）— 四個 test class：
+   - `TestTaskCardValidation`（8 tests）— reference payload parse / 拒絕 missing impact_scope / 拒絕 empty allowed / 拒絕 missing navigation / 拒絕 bad jira_ticket / 拒絕 unknown field / 拒絕 empty glob string / 驗證 optional 欄位的預設值。
+   - `TestRoundTrip`（5 tests）— dict↔TaskCard↔dict / str↔TaskCard↔str / JSON payload 欄位不變 / 巢狀 dataclass 型別正確 / JSON Schema required 欄位完整。
+   - `TestGlobParser`（15 tests，12 parametrize + 3 pair-test）— 單 segment `*` / 雙 segment `**` / 目錄本身匹配 / 副檔名 `*.dts` / `?` / 跨 slash 不越界 + concrete/glob/glob-glob overlap 三組合。
+   - `TestCheckCatcAgainstCodeowners`（5 tests）— agent 擁有 allowed / agent 不擁有 allowed / forbidden 與 scope 重疊被擋下 / unowned path soft-allow / reason 文案包含 agent type。
+
+### 測試結果
+
+- `backend/tests/test_catc.py` — **35 tests, all passing（0.10s）**
+- `backend/tests/test_codeowners.py` — 12 tests 仍全綠，確認新模組沒 regress CODEOWNERS module。
+
+### 設計決策 & 取捨
+
+- **pydantic BaseModel，不是 `@dataclass`**：spec 原文寫「dataclass」，但同段也要求「pydantic validator」+「拒絕未宣告 impact_scope 的 payload」+ JSON Schema export。stdlib dataclass 沒有這三個能力；pydantic BaseModel 是唯一能一次滿足全部需求的載體。model 物件對外仍呈現為「dataclass-like」（field access / immutable-ish / `model_dump()` = `asdict()`），spec 意圖保留。
+- **`extra="forbid"`**：Message Queue payload 是跨程序契約，unknown field silent-pass 會讓「Orchestrator 偷偷加 field，worker 沒讀到」變成查很久的 bug。ingress 嚴格、egress 寬鬆是正確方向。
+- **glob overlap 保守 false positive**：`check_catc_against_codeowners` 的 gate 如果 false negative（兩個 glob 實際有 overlap 但沒偵測到），會放行一個其實有衝突的 task，downstream O1 互斥鎖才會 catch（代價：worker 起 container、跑一半才發現要排隊）。false positive 頂多讓 task 排在某個 agent 的 queue 而不是多個；成本低很多。
+- **`_owner_labels_for_glob` 的 `__probe__` trick**：CODEOWNERS 的 `src/hal/**` 吃的是「具體檔案路徑的 prefix 匹配」，直接拿 glob 字串餵 `get_file_owners` 會命中不到。probe 一個 literal prefix 下的 fake path 就能讓 prefix rule 觸發。比重寫 `codeowners.py` 的匹配邏輯侵入性低。
+
+### 下一步 & 未結項目
+
+- **O1（#264）Redis 分散式檔案路徑互斥鎖** — 現在 CATC 有 `impact_scope.allowed`，O1 可以直接 `acquire_paths(task_id, card.navigation.impact_scope.allowed)` 拿鎖。
+- **O2（#265）Message Queue 抽象層** — payload 用 `TaskCard.to_json()` 入隊、`TaskCard.from_json(msg)` 出隊，schema 錯的 message 直接 DLQ。
+- **FUTURE**：JSON Schema export 可以釘到 `configs/schemas/task_card.schema.json`，讓非 Python 的 consumer（未來若有 Rust worker）也能用同一份 schema 驗證。目前以 in-process pydantic 驗證為主。
 
 ---
 

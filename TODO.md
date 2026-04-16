@@ -793,12 +793,12 @@ Legend:
 > 相依（硬前置）：**G4 (Postgres + replica)**、**I10 (Redis shared state)**、**S0 + K-early (auth baseline)**、**M1-M2 (cgroup 硬隔離，已完成)**、**B12 + L (bootstrap 配 Redis/MQ endpoint)**。
 
 ### O0. CATC Payload Schema + Validator (#263)
-- [ ] `backend/catc.py`：`TaskCard` dataclass（jira_ticket / acceptance_criteria / navigation{entry_point, impact_scope{allowed,forbidden}} / domain_context / handoff_protocol）
-- [ ] JSON Schema + pydantic validator（拒絕未宣告 impact_scope 的 payload）
-- [ ] Round-trip 測試（dict ↔ dataclass ↔ JSON）
-- [ ] impact_scope glob 語法（`src/camera/*`）解析器 + 單元測試
-- [ ] 與 `backend/codeowners.py` 交集檢查 helper：`check_catc_against_codeowners(card, agent_type)`
-- [ ] 預估：**0.5 day**
+- [x] `backend/catc.py`：`TaskCard` dataclass（jira_ticket / acceptance_criteria / navigation{entry_point, impact_scope{allowed,forbidden}} / domain_context / handoff_protocol）
+- [x] JSON Schema + pydantic validator（拒絕未宣告 impact_scope 的 payload）
+- [x] Round-trip 測試（dict ↔ dataclass ↔ JSON）
+- [x] impact_scope glob 語法（`src/camera/*`）解析器 + 單元測試
+- [x] 與 `backend/codeowners.py` 交集檢查 helper：`check_catc_against_codeowners(card, agent_type)`
+- [x] 預估：**0.5 day**
 
 ### O1. Redis 分散式檔案路徑互斥鎖 (#264)
 - [ ] `backend/dist_lock.py`：`acquire_paths(task_id, paths, ttl_s)` / `release_paths(task_id)` / `extend_lease(task_id, ttl_s)`
