@@ -1,0 +1,75 @@
+{
+  "_comment": "SKILL-IOS (P7 #292) — Xcode StoreKit 2 test plan. Used by the local sandbox for purchase flow integration tests; never shipped to production.",
+  "identifier": "OMNISIGHT_SKILL_IOS_TESTPLAN",
+  "products": [
+    {
+      "displayPrice": "0.99",
+      "familyShareable": false,
+      "internalID": "OMNISIGHT_PROD_COINS_100",
+      "localizations": [
+        {
+          "description": "100 coins for in-game spending.",
+          "displayName": "100 Coins",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "com.example.test.consumable.coins_100",
+      "referenceName": "100 Coins",
+      "type": "Consumable"
+    },
+    {
+      "displayPrice": "2.99",
+      "familyShareable": false,
+      "internalID": "OMNISIGHT_PROD_REMOVEADS",
+      "localizations": [
+        {
+          "description": "Permanently removes all advertisements.",
+          "displayName": "Remove Ads",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "com.example.test.nonconsumable.removeads",
+      "referenceName": "Remove Ads",
+      "type": "NonConsumable"
+    }
+  ],
+  "settings": {
+    "_failTransactionsEnabled": false,
+    "_locale": "en_US",
+    "_storefront": "USA",
+    "_storeKitErrors": []
+  },
+  "subscriptionGroups": [
+    {
+      "id": "OMNISIGHT_SUB_GROUP",
+      "localizations": [],
+      "name": "Pro",
+      "subscriptions": [
+        {
+          "adHocOffers": [],
+          "displayPrice": "4.99",
+          "familyShareable": false,
+          "groupNumber": 1,
+          "internalID": "OMNISIGHT_SUB_MONTHLY",
+          "introductoryOffer": null,
+          "localizations": [
+            {
+              "description": "Monthly Pro subscription.",
+              "displayName": "Monthly Pro",
+              "locale": "en_US"
+            }
+          ],
+          "productID": "com.example.test.subscription.monthly_pro",
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Monthly Pro",
+          "subscriptionGroupID": "OMNISIGHT_SUB_GROUP",
+          "type": "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version": {
+    "major": 3,
+    "minor": 0
+  }
+}

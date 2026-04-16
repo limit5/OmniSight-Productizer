@@ -1,0 +1,66 @@
+# SKILL-IOS (P7 #292) — Fastfile.
+#
+# Honours `OMNISIGHT_MACOS_BUILDER` (P1 #286) — the lane refuses to
+# run on Linux unless explicitly delegating to a remote macOS builder.
+# Codesign material is sourced from `backend/codesign_store.py` (P3
+# #288); never bake .p12 / .mobileprovision into the repo.
+
+default_platform(:ios)
+
+PROJECT_NAME = "{{ project_name }}"
+SCHEME       = "{{ project_name }}"
+
+before_all do
+  builder = ENV["OMNISIGHT_MACOS_BUILDER"]
+  if builder.nil? || builder.empty?
+    UI.user_error!(
+      "OMNISIGHT_MACOS_BUILDER not set. Linux hosts must delegate iOS builds " +
+      "to one of: self-hosted | macstadium | cirrus-ci | github-macos-runner. " +
+      "See P1 (#286)."
+    ) unless RUBY_PLATFORM.include?("darwin")
+  end
+end
+
+platform :ios do
+  desc "Build a Release archive (.ipa) for App Store distribution."
+  lane :build do
+    gym(
+      scheme: SCHEME,
+      configuration: "Release",
+      export_method: "app-store",
+      clean: true,
+      output_directory: "build",
+      include_symbols: true,
+      include_bitcode: false,
+      xcargs: {
+        "CODE_SIGN_IDENTITY"             => ENV["OMNISIGHT_CODE_SIGN_IDENTITY"],
+        "PROVISIONING_PROFILE_SPECIFIER" => ENV["OMNISIGHT_PROVISIONING_PROFILE_SPECIFIER"],
+        "DEVELOPMENT_TEAM"               => ENV["OMNISIGHT_DEVELOPMENT_TEAM"],
+      }
+    )
+  end
+
+  desc "Upload the latest build to TestFlight (internal testers track)."
+  lane :beta do
+    build
+    pilot(
+      ipa: "build/#{PROJECT_NAME}.ipa",
+      skip_waiting_for_build_processing: true,
+      changelog: "Internal build via OmniSight P7 SKILL-IOS / P5 store_submission."
+    )
+  end
+
+  desc "Submit a Release archive to App Store Connect (production track)."
+  lane :release do
+    build
+    deliver(
+      ipa: "build/#{PROJECT_NAME}.ipa",
+      submit_for_review: false,  # P5 dual-sign +2 must clear before submit
+      automatic_release: false,
+      skip_screenshots: true,
+      skip_metadata: false,
+      precheck_include_in_app_purchases: true,
+      force: true
+    )
+  end
+end

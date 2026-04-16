@@ -1,0 +1,36 @@
+# SKILL-IOS (P7 #292) — generated project gitignore.
+#
+# Build output, derived data, signing material, fastlane secrets.
+
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/test_output
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+*.xcodeproj
+*.xcworkspace
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Codesign material — NEVER commit
+*.p12
+*.cer
+*.mobileprovision
+AuthKey_*.p8
+
+# IDE
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,7 @@
+# SKILL-IOS (P7 #292) — Appfile.
+
+app_identifier("{{ bundle_id }}")
+# apple_id and team_id are NOT baked here. They come from
+# backend/codesign_store.py (P3) at materialise time:
+#   ENV["FASTLANE_USER"]   = secret_store.get("apple/asc/email")
+#   ENV["FASTLANE_TEAM_ID"]= secret_store.get("apple/asc/team_id")

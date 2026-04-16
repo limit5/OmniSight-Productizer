@@ -1,0 +1,23 @@
+// SKILL-IOS (P7 #292) — `@main` SwiftUI entry point.
+//
+// AppDelegate adapter is wired via `@UIApplicationDelegateAdaptor` so
+// the legacy `application(_:didRegisterForRemoteNotificationsWithDeviceToken:)`
+// callback can route the APNs token without dropping out of SwiftUI.
+
+import SwiftUI
+
+@main
+struct {{ project_name }}App: App {
+{% if push %}
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+{% endif %}
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+{% if storekit %}
+                .environment(StoreKitManager())
+{% endif %}
+        }
+    }
+}

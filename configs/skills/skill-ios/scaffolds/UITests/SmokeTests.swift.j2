@@ -1,0 +1,42 @@
+// SKILL-IOS (P7 #292) — XCUITest smoke flow.
+//
+// Matches the test harness P2 mobile_simulator (#287) auto-detects
+// when it sees a UITests/ directory with `XCUITest` import.
+//
+// The flow: launch → main view → increment → open store → dismiss.
+
+import XCTest
+
+final class SmokeTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+    }
+
+    func testLaunchAndIncrement() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let root = app.otherElements["ContentView.root"]
+        XCTAssertTrue(root.waitForExistence(timeout: 5))
+
+        let incrementButton = app.buttons["Increment counter"]
+        XCTAssertTrue(incrementButton.exists)
+        incrementButton.tap()
+
+        XCTAssertTrue(app.staticTexts["Tapped 1 time"].exists)
+    }
+
+{% if storekit %}
+    func testOpenStoreSheet() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let openStore = app.buttons["Open in-app purchase store"]
+        XCTAssertTrue(openStore.waitForExistence(timeout: 5))
+        openStore.tap()
+
+        XCTAssertTrue(app.otherElements["StoreView.list"].waitForExistence(timeout: 3))
+    }
+{% endif %}
+}

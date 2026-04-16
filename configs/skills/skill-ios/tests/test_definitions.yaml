@@ -1,0 +1,78 @@
+# SKILL-IOS test definitions — P7 #292
+#
+# Authoritative list consumed by `backend/tests/test_skill_ios.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-spm-default
+        name: "Render: SPM + push + storekit (defaults)"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: scaffold-cocoapods
+        name: "Render: CocoaPods package_manager"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: scaffold-push-off
+        name: "Render: push=off omits APNs files"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: scaffold-storekit-off
+        name: "Render: storekit=off omits StoreKit files"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: scaffold-bundle-id-flows
+        name: "Bundle id propagates to Info.plist + xcconfig + Fastfile"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: scaffold-deployment-target-pinned
+        name: "IPHONEOS_DEPLOYMENT_TARGET equals platform min_os_version"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: scaffold-no-secrets-baked
+        name: "Codesign xcconfig contains placeholders, never real hashes"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+
+  - id: framework-binding
+    name: "P0-P6 framework binding tests"
+    tests:
+      - id: p0-platform-profile-resolves
+        name: "Resolved platform profile loads via backend.platform"
+        type: integration
+        target: backend.ios_scaffolder._render_context
+      - id: p2-simulate-autodetect
+        name: "Rendered project autodetects as xcuitest framework"
+        type: integration
+        target: backend.mobile_simulator.resolve_ui_framework
+      - id: p4-role-ios-swift-anti-patterns
+        name: "Scaffold honours ios-swift role anti-patterns"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: p5-asc-metadata-shape
+        name: "AppStoreMetadata.json conforms to ASC schema"
+        type: unit
+        target: backend.ios_scaffolder.render_project
+      - id: p6-compliance-runs-clean
+        name: "P6 mobile_compliance.run_all passes against rendered project"
+        type: integration
+        target: backend.ios_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-ios appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-ios') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

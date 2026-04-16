@@ -1,0 +1,21 @@
+// SKILL-IOS (P7 #292) — XCTest unit suite for ContentView state.
+//
+// SwiftUI views aren't directly unit-testable for layout (that's
+// XCUITest's job in UITests/), but their `@State` /
+// `@Observable` model objects ARE — exercise them here.
+
+import XCTest
+@testable import {{ project_name }}
+
+final class ContentViewTests: XCTestCase {
+    func testDefaultCounterIsZero() {
+        let counter = FeatureCounter()
+        XCTAssertEqual(counter.value, 0)
+    }
+
+    func testIncrementMutatesObservable() {
+        let counter = FeatureCounter()
+        counter.increment()
+        XCTAssertEqual(counter.value, 1)
+    }
+}

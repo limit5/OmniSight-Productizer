@@ -1,0 +1,58 @@
+// SKILL-IOS (P7 #292) — root view.
+//
+// Shows the P4 ios-swift role anti-pattern guard rails:
+//   - `.task { ... }` for async work, NOT body-side fetchData()
+//   - `@State` for view-local mutation; `@Environment` for shared
+//   - `accessibilityLabel` on every interactive element
+
+import SwiftUI
+
+struct ContentView: View {
+    @State private var counter = 0
+{% if storekit %}
+    @Environment(StoreKitManager.self) private var storeKit
+{% endif %}
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Text("Hello from {{ project_name }}")
+                    .font(.title)
+                    .accessibilityAddTraits(.isHeader)
+
+                Text("Tapped \(counter) time\(counter == 1 ? "" : "s")")
+                    .font(.body)
+
+                Button("Increment") {
+                    counter &+= 1
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityLabel("Increment counter")
+                .accessibilityHint("Increases the counter by one")
+
+{% if storekit %}
+                NavigationLink("In-App Purchases") {
+                    StoreView()
+                }
+                .accessibilityLabel("Open in-app purchase store")
+{% endif %}
+            }
+            .padding()
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("ContentView.root")
+{% if storekit %}
+            .task {
+                // Drive product fetch on appear, not in the body.
+                await storeKit.loadProducts()
+            }
+{% endif %}
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+{% if storekit %}
+        .environment(StoreKitManager())
+{% endif %}
+}

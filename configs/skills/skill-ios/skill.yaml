@@ -1,0 +1,85 @@
+# P7 #292 — SKILL-IOS manifest.
+#
+# First mobile-vertical skill pack — pilot that validates the P0-P6
+# framework end-to-end. Matches the pilot pattern established by
+# D1 SKILL-UVC (C5), D29 SKILL-HMI-WEBUI (C26), and W6 SKILL-NEXTJS (#280).
+#
+# Exercise:
+#   * P0  target_kind=mobile profile schema       (configs/platforms/ios-arm64.yaml)
+#   * P1  mobile toolchain / macOS builder dispatch (backend/mobile_toolchain.py)
+#   * P2  mobile simulate-track + XCUITest         (backend/mobile_simulator.py)
+#   * P3  Apple cert / provisioning chain          (backend/codesign_store.py)
+#   * P4  ios-swift role anti-patterns             (configs/roles/mobile/ios-swift.skill.md)
+#   * P5  App Store Connect submission adapter     (backend/app_store_connect.py)
+#   * P6  ASC review guidelines + privacy labels   (backend/mobile_compliance/)
+#
+# Scaffolds in `scaffolds/` provide a SwiftUI 6 + Swift 5.9 strict
+# concurrency project that intentionally pins `IPHONEOS_DEPLOYMENT_TARGET`
+# to the P0 platform's `min_os_version` — the same coupling SKILL-NEXTJS
+# enforces between scaffolds and W1 web profiles. Shipping the pin in
+# the scaffold means every new iOS SKU inherits the P0 floor without
+# re-discovering StoreKit 2's iOS 16+ baseline.
+
+schema_version: 1
+name: skill-ios
+description: >
+  iOS Swift 5.9 + SwiftUI 6 pilot skill pack. Generates a production-ready
+  iOS app with App.swift entry point, SwiftUI views, Swift Package Manager
+  module structure with optional CocoaPods Podfile, APNs push notification
+  template (UNUserNotificationCenter + APNsHandler), StoreKit 2 in-app
+  purchase template (Product / Transaction / verifyResult flow), Privacy
+  Manifest (`PrivacyInfo.xcprivacy`) auto-populated from declared SDKs,
+  XCTest unit + XCUITest UI test skeletons matching the P2 simulate-track
+  contract, and ASC + Privacy gates green out-of-the-box. Validates the
+  P0-P6 mobile framework (pilot skill, mirrors D1/D29/W6 pattern).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - ios
+  - swift
+  - swift-5
+  - swiftui
+  - swiftui-6
+  - xcode
+  - xcode-16
+  - swift-package-manager
+  - spm
+  - cocoapods
+  - apns
+  - push-notifications
+  - storekit
+  - storekit-2
+  - in-app-purchase
+  - privacy-manifest
+  - xcuitest
+  - xctest
+  - app-store-connect
+  - testflight
+  - pilot
+  - p7

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SKILL-IOS (P7 #292) — Info.plist template.
+
+  Notes for reviewers:
+    * IPHONEOS_DEPLOYMENT_TARGET ({{ min_os_version }}) is set in
+      Configs/Common.xcconfig, NOT here.
+    * NSAppTransportSecurity intentionally omitted — defaults to ATS
+      enforcement, which is the App Store baseline.
+    * Permission usage strings (NSCameraUsageDescription etc.) are
+      added per-feature; this template only wires push (when push=on)
+      because ASC will reject a build that registers for
+      remote-notifications without an explicit aps-environment
+      entitlement.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>{{ project_name }}</string>
+    <key>CFBundleExecutable</key>
+    <string>{{ project_name }}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{{ bundle_id }}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>{{ project_name }}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+{% if push %}
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>remote-notification</string>
+    </array>
+{% endif %}
+    <key>NSUserTrackingUsageDescription</key>
+    <string>Used only to deliver relevant content. You can decline.</string>
+</dict>
+</plist>

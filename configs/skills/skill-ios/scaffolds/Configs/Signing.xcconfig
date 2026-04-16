@@ -1,0 +1,24 @@
+// SKILL-IOS (P7 #292) — codesign placeholders.
+//
+// !!! CRITICAL: NEVER bake real cert hashes or provisioning profile
+// UUIDs into this file. The values below are PLACEHOLDERS that the
+// `backend/codesign_store.py` (P3 #288) HSM layer rewrites at build
+// time, so the signed binary's identity matches the certificate
+// currently registered in the secret store.
+//
+// At build time the Fastlane lane resolves these via:
+//   bundle exec fastlane gym
+//     --xcargs "CODE_SIGN_IDENTITY='$CODE_SIGN_IDENTITY'
+//               PROVISIONING_PROFILE_SPECIFIER='$PROVISIONING_PROFILE_SPECIFIER'"
+// (gym sources both env vars from `backend/codesign_store.materialize_env()`.)
+
+// MUST be overridden at build time. A failing `xcodebuild` here is
+// the correct behaviour — fail-closed beats silently shipping
+// adhoc-signed binary into TestFlight.
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = $(OMNISIGHT_CODE_SIGN_IDENTITY)
+PROVISIONING_PROFILE_SPECIFIER = $(OMNISIGHT_PROVISIONING_PROFILE_SPECIFIER)
+DEVELOPMENT_TEAM = $(OMNISIGHT_DEVELOPMENT_TEAM)
+
+// Entitlements file; signed binary embeds these.
+CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/App/Resources/App.entitlements

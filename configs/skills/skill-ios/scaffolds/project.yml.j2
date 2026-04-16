@@ -1,0 +1,96 @@
+# SKILL-IOS (P7 #292) — XcodeGen spec.
+#
+# We ship project.yml (XcodeGen) instead of a hand-rolled .xcodeproj
+# because the .pbxproj format is fragile under merge conflicts and
+# scaffolders that emit it tend to drift. XcodeGen materialises a
+# fresh, deterministic .xcodeproj on every `xcodegen generate`.
+
+name: {{ project_name }}
+options:
+  bundleIdPrefix: {{ bundle_prefix }}
+  deploymentTarget:
+    iOS: "{{ min_os_version }}"
+  developmentLanguage: en
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: 5.9
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: -Onone
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: -O
+
+targets:
+  {{ project_name }}:
+    type: application
+    platform: iOS
+    deploymentTarget: "{{ min_os_version }}"
+    sources:
+      - App/Sources
+    resources:
+      - App/Resources
+{% if storekit %}
+      - App/Sources/StoreKit/Configuration.storekit
+{% endif %}
+    info:
+      path: App/Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: {{ bundle_id }}
+        INFOPLIST_FILE: App/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Resources/App.entitlements
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Manual
+    configFiles:
+      Debug: Configs/Common.xcconfig
+      Release: Configs/Common.xcconfig
+    dependencies: []
+
+  {{ project_name }}Tests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: {{ project_name }}
+
+  {{ project_name }}UITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: {{ project_name }}
+
+schemes:
+  {{ project_name }}:
+    build:
+      targets:
+        {{ project_name }}: all
+        {{ project_name }}Tests: [test]
+        {{ project_name }}UITests: [test]
+    test:
+      targets:
+        - {{ project_name }}Tests
+        - {{ project_name }}UITests
+{% if storekit %}
+      config: Debug
+      storeKitConfiguration: App/Sources/StoreKit/Configuration.storekit
+{% endif %}
+    run:
+      config: Debug
+    archive:
+      config: Release

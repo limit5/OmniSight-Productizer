@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SKILL-IOS (P7 #292) — entitlements.
+
+  aps-environment is conditional on push=on; in production switch to
+  "production" via fastlane / build script before App Store submission.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+{% if push %}
+    <key>aps-environment</key>
+    <string>development</string>
+{% endif %}
+{% if storekit %}
+    <key>com.apple.developer.in-app-payments</key>
+    <array/>
+{% endif %}
+</dict>
+</plist>

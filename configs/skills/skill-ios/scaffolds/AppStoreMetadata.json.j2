@@ -1,0 +1,45 @@
+{
+  "_comment": "SKILL-IOS (P7 #292) — App Store Connect submission summary. Consumed by backend/app_store_connect.py::create_version + submit_for_review.",
+  "schema_version": 1,
+  "bundle_id": "{{ bundle_id }}",
+  "app_name": "{{ project_name }}",
+  "primary_locale": "en-US",
+  "version": {
+    "version_string": "1.0.0",
+    "build_number": "1",
+    "release_type": "MANUAL",
+    "release_notes": {
+      "en-US": "Initial release."
+    }
+  },
+  "categories": {
+    "primary": "PRODUCTIVITY",
+    "secondary": "UTILITIES"
+  },
+  "age_rating": {
+    "violence_cartoon": "NONE",
+    "violence_realistic": "NONE",
+    "sexual_content_or_nudity": "NONE",
+    "profanity_or_crude_humor": "NONE",
+    "alcohol_tobacco_or_drug_use": "NONE",
+    "mature_or_suggestive_themes": "NONE",
+    "horror_or_fear_themes": "NONE",
+    "gambling_simulated": "NONE",
+    "gambling_and_contests": "NONE",
+    "unrestricted_web_access": false
+  },
+  "subscriptions": {{ '[]' if not storekit else '[
+    {"product_id": "com.example.test.subscription.monthly_pro", "group": "Pro"}
+  ]' }},
+  "in_app_purchases": {{ '[]' if not storekit else '[
+    {"product_id": "com.example.test.consumable.coins_100"},
+    {"product_id": "com.example.test.nonconsumable.removeads"}
+  ]' }},
+  "uses_idfa": false,
+  "exports_encryption": false,
+  "compliance_provenance": {
+    "p6_bundle_required": true,
+    "asc_gate_id": "app_store_guidelines",
+    "privacy_label_gate_id": "privacy_labels"
+  }
+}

@@ -1,0 +1,29 @@
+# SKILL-IOS (P7 #292) — CocoaPods Podfile (rendered when
+# package_manager == cocoapods or both).
+#
+# Default package manager is SPM (Apple's strategic direction). Use
+# CocoaPods only when migrating an existing project.
+
+platform :ios, '{{ min_os_version }}'
+
+# Inhibit warnings from third-party pods so SWIFT_TREAT_WARNINGS_AS_ERRORS
+# doesn't blow up on transitive dependencies.
+inhibit_all_warnings!
+
+target '{{ project_name }}' do
+  use_frameworks! :linkage => :static
+
+  # Add pods here. Example:
+  # pod 'Alamofire', '~> 5.9'
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '{{ min_os_version }}'
+      # Match the app's strict concurrency baseline so the binary
+      # links against pods built with consistent semantics.
+      config.build_settings['SWIFT_VERSION'] = '5.9'
+    end
+  end
+end

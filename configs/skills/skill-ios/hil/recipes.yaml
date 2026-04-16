@@ -1,0 +1,73 @@
+# SKILL-IOS HIL (hardware-in-the-loop) recipes — P7 #292
+#
+# "Hardware" here is real iOS device verification (Firebase Test Lab /
+# BrowserStack via P2 cloud delegation, plus on-device sandbox sign-in
+# for StoreKit 2). Each recipe describes a physical-side probe that can
+# only run after a real archive (not a dry-run) — used by the
+# operator-run Step 7 smoke, not by CI.
+
+recipes:
+  - id: device-launch-smoke
+    name: "Real iPhone launch smoke"
+    description: >
+      Boot the .ipa on three iPhone tiers (iPhone SE 3rd gen, iPhone 15,
+      iPhone 15 Pro Max) via Firebase Test Lab. Assert cold-launch
+      completes ≤ 1.5s p95 (matches `ios-swift.skill.md` quality gate).
+    targets: [ios-arm64]
+    probe:
+      kind: cloud_device_launch
+      farm: firebase
+      devices:
+        - {model: iphone_se_3rd, runtime: ios_17_5}
+        - {model: iphone_15, runtime: ios_17_5}
+        - {model: iphone_15_pro_max, runtime: ios_17_5}
+      p95_launch_ms_ceiling: 1500
+
+  - id: apns-sandbox-delivery
+    name: "APNs sandbox delivery"
+    description: >
+      Push a test notification via apns-sandbox.push.apple.com to the
+      installed build; assert UNUserNotificationCenter delegate is hit
+      within 5s. Validates the P7 push template wiring + provisioning
+      profile aps-environment entitlement.
+    targets: [ios-arm64]
+    probe:
+      kind: apns_sandbox_push
+      timeout_s: 5
+
+  - id: storekit-2-sandbox-purchase
+    name: "StoreKit 2 sandbox purchase"
+    description: >
+      Drive the StoreKit 2 buy flow against an Apple Sandbox account;
+      assert Transaction.updates yields a verified Transaction within
+      30s. Validates `verifyResult` path and Configuration.storekit test
+      plan binding.
+    targets: [ios-arm64]
+    probe:
+      kind: storekit_sandbox_purchase
+      product_id: "com.example.test.consumable.coins_100"
+      timeout_s: 30
+
+  - id: testflight-distribution
+    name: "TestFlight beta distribution smoke"
+    description: >
+      Upload the .ipa to TestFlight via P5 `app_store_connect.upload_build`,
+      wait for processing, assert the build appears in the internal
+      testers track. Same path P5 #290 ships.
+    targets: [ios-arm64]
+    probe:
+      kind: testflight_upload
+      track: internal_testers
+      processing_timeout_s: 900
+
+  - id: privacy-manifest-asc-validate
+    name: "PrivacyInfo.xcprivacy ASC validation"
+    description: >
+      Submit the build to App Store Connect and let Apple's automated
+      privacy manifest validator inspect it; assert no "missing
+      required reason API" warning surfaces. Catches gaps the offline
+      P6 generator can't see (Apple updates the required-reason API
+      list out-of-band).
+    targets: [ios-arm64]
+    probe:
+      kind: asc_privacy_validate

@@ -1,0 +1,162 @@
+# P7 #292 — SKILL-IOS DAG tasks.
+#
+# Every task here maps 1:1 to a P0-P6 framework capability, so running
+# the full DAG is by design a smoke test of the entire mobile vertical.
+
+tasks:
+  - id: ios-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render the SwiftUI app project from scaffolds/: Package.swift (SPM),
+      project.pbxproj-equivalent xcconfig matrix, Info.plist with
+      IPHONEOS_DEPLOYMENT_TARGET pinned to ios-arm64.yaml min_os_version
+      (16.0). Idempotent: re-renders without clobbering user-added files
+      outside the scaffold surface.
+    depends_on: []
+    artifacts: [ios_skeleton]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile
+
+  - id: ios-swiftui-views
+    name: "Render SwiftUI 6 view layer"
+    description: >
+      Emit `App.swift` (`@main` entry), `ContentView.swift` showcasing
+      `@Observable` macro, and a feature view that exercises the
+      `.task { ... }` pattern instead of body-side effects. Enforces P4
+      ios-swift role anti-patterns.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_views]
+    estimated_hours: 2
+    framework_gate: p4-role-ios-swift
+
+  - id: ios-spm
+    name: "Swift Package Manager module"
+    description: >
+      Render `Package.swift` declaring the app target plus a feature
+      module library, demonstrating dependency surface for downstream
+      teams. Default package manager.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_spm]
+    estimated_hours: 1
+
+  - id: ios-cocoapods
+    name: "CocoaPods Podfile (legacy)"
+    description: >
+      Emit `Podfile` + `Podfile.lock` template when PACKAGE_MANAGER=
+      cocoapods or both. Targets legacy projects migrating in.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_cocoapods]
+    estimated_hours: 1
+
+  - id: ios-apns-push
+    name: "APNs push notification template"
+    description: >
+      Render `PushNotificationManager.swift` (UNUserNotificationCenter
+      delegate), `AppDelegate+Push.swift` (didRegisterForRemoteNotifications
+      with token forwarding to backend), and the `aps-environment` /
+      `UIBackgroundModes` Info.plist additions. Documents the APNs
+      auth-key (.p8) flow — never bakes secrets.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_apns]
+    estimated_hours: 2
+
+  - id: ios-storekit-2
+    name: "StoreKit 2 in-app purchase template"
+    description: >
+      Render `StoreKitManager.swift` (Product.products / purchase /
+      Transaction.updates listener), example consumable + non-consumable
+      Product IDs, and `Configuration.storekit` test plan for sandbox.
+      Requires iOS 16+ — locked by the platform profile floor.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_storekit]
+    estimated_hours: 2
+
+  - id: ios-xctest
+    name: "XCTest unit skeleton"
+    description: >
+      Render `MyAppTests/StoreKitManagerTests.swift` +
+      `MyAppTests/ContentViewTests.swift` exercising `@Observable` state
+      transitions and Product mock. Coverage ≥ 70% gate-ready.
+    depends_on: [ios-swiftui-views, ios-storekit-2]
+    artifacts: [ios_xctest]
+    estimated_hours: 1
+    framework_gate: p2-simulate-unit
+
+  - id: ios-xcuitest
+    name: "XCUITest UI smoke skeleton"
+    description: >
+      Render `MyAppUITests/SmokeTests.swift` covering launch → main flow
+      → purchase sheet → dismiss. Matches the test harness P2
+      simulate-track invokes via `mobile_simulator.resolve_ui_framework`.
+    depends_on: [ios-swiftui-views, ios-storekit-2]
+    artifacts: [ios_xcuitest]
+    estimated_hours: 1
+    framework_gate: p2-simulate-ui
+
+  - id: ios-fastlane
+    name: "Fastlane build + deploy lane"
+    description: >
+      Render `fastlane/Fastfile` with `build` (gym -- archive), `beta`
+      (TestFlight upload), and `release` (App Store submit) lanes.
+      Honours OMNISIGHT_MACOS_BUILDER per P1 (#286).
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_fastlane]
+    estimated_hours: 1
+    framework_gate: p1-mobile-toolchain
+
+  - id: ios-codesign-stub
+    name: "Codesign placeholders for P3"
+    description: >
+      Emit `Configs/Signing.xcconfig` with `CODE_SIGN_IDENTITY` and
+      `PROVISIONING_PROFILE_SPECIFIER` declared as build-time variables —
+      values are injected by `backend/codesign_store.py` from the HSM.
+      Scaffold MUST NOT bake real cert hashes.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_codesign]
+    estimated_hours: 1
+    framework_gate: p3-codesign-chain
+
+  - id: ios-asc-metadata
+    name: "App Store Connect metadata stub"
+    description: >
+      Emit `fastlane/metadata/<locale>/{name,description,keywords,
+      privacy_url}.txt` and an `AppStoreMetadata.json` summary
+      consumable by `backend/app_store_connect.py::create_version`.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_asc_metadata]
+    estimated_hours: 1
+    framework_gate: p5-store-submission
+
+  - id: ios-compliance-wire
+    name: "P6 ASC + Privacy compliance wired"
+    description: >
+      Generate `PrivacyInfo.xcprivacy` (Apple required-reason API
+      declarations), `Info.plist` permission strings, and the SDK
+      catalogue stub used by the privacy-label generator. All P6 gates
+      should pass on the rendered project out of the box.
+    depends_on: [ios-scaffold-init]
+    artifacts: [ios_compliance]
+    estimated_hours: 1
+    framework_gate: p6-compliance
+
+  - id: ios-pilot-validation
+    name: "Pilot framework validation"
+    description: >
+      Full-stack smoke: scaffold → simulate (P2) → compliance (P6) →
+      ASC metadata sanity check (P5). If this green-lights, the P0-P6
+      framework is validated end-to-end — same bar D1 set for C5,
+      D29 for C26, and W6 for the web vertical.
+    depends_on:
+      - ios-swiftui-views
+      - ios-spm
+      - ios-apns-push
+      - ios-storekit-2
+      - ios-xctest
+      - ios-xcuitest
+      - ios-fastlane
+      - ios-codesign-stub
+      - ios-asc-metadata
+      - ios-compliance-wire
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: p7-pilot
