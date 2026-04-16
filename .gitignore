@@ -84,3 +84,9 @@ next-env.d.ts
 # Auto-runner orchestration (local only, not part of the product)
 /auto-runner.py
 /auto_runner.py
+
+# W2 #276 — Lighthouse CI / web simulator transient output
+.lighthouseci/
+.lighthouse-report.json
+# Playwright runtime cache (spec fixtures under configs/web/ are tracked)
+test-results/

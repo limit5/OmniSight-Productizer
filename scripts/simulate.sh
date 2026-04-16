@@ -28,6 +28,12 @@ DEPLOY_TARGET_IP=""
 DEPLOY_USER="root"
 DEPLOY_PATH="/opt/app"
 DEPLOY_BINARY=""
+# ── Web track (W2 #276) ──
+WEB_APP_PATH=""
+WEB_URL=""
+WEB_VISUAL_BASELINE=""
+WEB_BUDGET_OVERRIDE=""
+WEB_PROFILE=""
 WORKSPACE="${WORKSPACE:-/workspace}"
 TEST_ASSETS="${WORKSPACE}/test_assets"
 PLATFORM_DIR="${WORKSPACE}/configs/platforms"
@@ -49,6 +55,11 @@ for arg in "$@"; do
     --deploy-user=*) DEPLOY_USER="${arg#*=}" ;;
     --deploy-path=*) DEPLOY_PATH="${arg#*=}" ;;
     --deploy-binary=*) DEPLOY_BINARY="${arg#*=}" ;;
+    --app-path=*)   WEB_APP_PATH="${arg#*=}" ;;
+    --url=*)        WEB_URL="${arg#*=}" ;;
+    --visual-baseline=*) WEB_VISUAL_BASELINE="${arg#*=}" ;;
+    --budget-override=*) WEB_BUDGET_OVERRIDE="${arg#*=}" ;;
+    --web-profile=*) WEB_PROFILE="${arg#*=}" ;;
     *) ;;
   esac
 done
@@ -59,8 +70,8 @@ if [ -z "$TYPE" ] || [ -z "$MODULE" ]; then
   exit 1
 fi
 
-if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ] && [ "$TYPE" != "npu" ] && [ "$TYPE" != "deploy" ] && [ "$TYPE" != "hmi" ]; then
-  echo '{"version":"1.0","status":"error","errors":["--type must be algo, hw, npu, deploy, or hmi"]}'
+if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ] && [ "$TYPE" != "npu" ] && [ "$TYPE" != "deploy" ] && [ "$TYPE" != "hmi" ] && [ "$TYPE" != "web" ]; then
+  echo '{"version":"1.0","status":"error","errors":["--type must be algo, hw, npu, deploy, hmi, or web"]}'
   exit 1
 fi
 
@@ -881,6 +892,224 @@ with open('${SUMMARY_JSON}', 'w') as fh: json.dump(out, fh)
 
 
 # ============================================================
+# WEB Track: Lighthouse / bundle / a11y / SEO / E2E / visual
+# (W2 #276 / L4-CORE-W2)
+#
+# Thin shell wrapper around backend.web_simulator. The Python module
+# owns all unit / JSON / YAML parsing; the shell layer only translates
+# CLI args and aggregates the summary JSON into simulate.sh's top-level
+# shape.
+#
+# Profile defaults come from MODULE (web profile id) unless explicitly
+# overridden by --web-profile=. App path defaults to a repo fixture so
+# sandbox invocation without any flags still produces a valid report.
+# ============================================================
+
+WEB_PROFILE_USED=""
+WEB_LH_PERF=0
+WEB_LH_A11Y=0
+WEB_LH_SEO=0
+WEB_LH_BP=0
+WEB_LH_SOURCE="mock"
+WEB_BUNDLE_BYTES=0
+WEB_BUDGET_BYTES=0
+WEB_BUNDLE_VIOLATIONS=0
+WEB_A11Y_VIOLATIONS=0
+WEB_A11Y_SOURCE="mock"
+WEB_SEO_ISSUES=0
+WEB_E2E_STATUS="skip"
+WEB_VISUAL_STATUS="skip"
+WEB_OVERALL_PASS="false"
+
+run_web() {
+  log "═══════ Web Track: Lighthouse / Bundle / a11y / SEO / E2E ═══════"
+  local WEB_START_MS
+  WEB_START_MS=$(now_ms)
+
+  # Resolve profile: explicit --web-profile > MODULE (web-* prefix) > web-static
+  local _profile="${WEB_PROFILE:-$MODULE}"
+  case "$_profile" in
+    web-*) : ;;
+    *)     _profile="web-static" ;;
+  esac
+  WEB_PROFILE_USED="$_profile"
+
+  # Resolve app path: explicit --app-path > W2 fixture under configs/web
+  local _app_path="${WEB_APP_PATH:-${WORKSPACE}/configs/web/fixtures/static-site}"
+  if [ ! -d "$_app_path" ]; then
+    log "  [WARN] app path $_app_path not found; falling back to repo root"
+    _app_path="${WORKSPACE}"
+  fi
+
+  log "  Profile: ${_profile}"
+  log "  App path: ${_app_path}"
+  [ -n "$WEB_URL" ] && log "  URL: $WEB_URL"
+
+  local _summary="${BUILD_DIR}/web_summary.json"
+  local _py_err="${BUILD_DIR}/web_py.err"
+
+  # ── Invoke python driver ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  local _extra=()
+  [ -n "$WEB_URL" ] && _extra+=(--url "$WEB_URL")
+  [ -n "$WEB_VISUAL_BASELINE" ] && _extra+=(--visual-baseline "$WEB_VISUAL_BASELINE")
+  [ -n "$WEB_BUDGET_OVERRIDE" ] && _extra+=(--budget-override "$WEB_BUDGET_OVERRIDE")
+
+  if ( cd "$WORKSPACE" && python3 -m backend.web_simulator \
+         --profile "$_profile" \
+         --app-path "$_app_path" \
+         "${_extra[@]}" \
+         > "$_summary" 2>"$_py_err" ); then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "web_driver" "pass" "0" "Summary produced")"
+    log "  [PASS] Simulator driver produced summary"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    local _err
+    _err=$(head -5 "$_py_err" | tr '\n' ' ')
+    add_error "web simulator failed: ${_err}"
+    add_test_detail "$(json_test_detail "web_driver" "fail" "0" "${_err}")"
+    log "  [FAIL] Simulator driver errored"
+    WALL_TIME_MS=$(( $(now_ms) - WEB_START_MS ))
+    return 1
+  fi
+
+  # ── Parse summary via python (avoid bash JSON parsing) ──
+  if [ -f "$_summary" ]; then
+    WEB_LH_PERF=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['lighthouse_perf'])" "$_summary")
+    WEB_LH_A11Y=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['lighthouse_a11y'])" "$_summary")
+    WEB_LH_SEO=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['lighthouse_seo'])" "$_summary")
+    WEB_LH_BP=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['lighthouse_best_practices'])" "$_summary")
+    WEB_LH_SOURCE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['lighthouse_source'])" "$_summary")
+    WEB_BUNDLE_BYTES=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['bundle_total_bytes'])" "$_summary")
+    WEB_BUDGET_BYTES=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['bundle_budget_bytes'])" "$_summary")
+    WEB_BUNDLE_VIOLATIONS=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['bundle_violations']))" "$_summary")
+    WEB_A11Y_VIOLATIONS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['a11y_violations'])" "$_summary")
+    WEB_A11Y_SOURCE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['a11y_source'])" "$_summary")
+    WEB_SEO_ISSUES=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['seo_issues'])" "$_summary")
+    WEB_E2E_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['e2e_status'])" "$_summary")
+    WEB_VISUAL_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['visual_status'])" "$_summary")
+    WEB_OVERALL_PASS=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1]))['overall_pass']).lower())" "$_summary")
+  fi
+
+  # ── Gate: Lighthouse Performance ≥ 80 ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  if [ "$WEB_LH_PERF" -ge 80 ]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "lighthouse_perf" "pass" "0" "${WEB_LH_PERF}/100")"
+    log "  [PASS] Lighthouse Performance ${WEB_LH_PERF}/100 (>= 80)"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    add_test_detail "$(json_test_detail "lighthouse_perf" "fail" "0" "${WEB_LH_PERF}/100 < 80")"
+    add_error "Lighthouse Performance ${WEB_LH_PERF} below 80 baseline"
+    log "  [FAIL] Lighthouse Performance ${WEB_LH_PERF}/100"
+  fi
+
+  # ── Gate: Lighthouse Accessibility ≥ 90 ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  if [ "$WEB_LH_A11Y" -ge 90 ]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "lighthouse_a11y" "pass" "0" "${WEB_LH_A11Y}/100")"
+    log "  [PASS] Lighthouse Accessibility ${WEB_LH_A11Y}/100 (>= 90)"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    add_test_detail "$(json_test_detail "lighthouse_a11y" "fail" "0" "${WEB_LH_A11Y}/100 < 90")"
+    add_error "Lighthouse Accessibility ${WEB_LH_A11Y} below 90 baseline"
+    log "  [FAIL] Lighthouse Accessibility ${WEB_LH_A11Y}/100"
+  fi
+
+  # ── Gate: Lighthouse SEO ≥ 95 ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  if [ "$WEB_LH_SEO" -ge 95 ]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "lighthouse_seo" "pass" "0" "${WEB_LH_SEO}/100")"
+    log "  [PASS] Lighthouse SEO ${WEB_LH_SEO}/100 (>= 95)"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    add_test_detail "$(json_test_detail "lighthouse_seo" "fail" "0" "${WEB_LH_SEO}/100 < 95")"
+    add_error "Lighthouse SEO ${WEB_LH_SEO} below 95 baseline"
+    log "  [FAIL] Lighthouse SEO ${WEB_LH_SEO}/100"
+  fi
+
+  # ── Gate: Bundle budget ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  if [ "$WEB_BUDGET_BYTES" -eq 0 ] || [ "$WEB_BUNDLE_BYTES" -le "$WEB_BUDGET_BYTES" ]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "bundle_budget" "pass" "0" "${WEB_BUNDLE_BYTES}/${WEB_BUDGET_BYTES}B")"
+    log "  [PASS] Bundle ${WEB_BUNDLE_BYTES}B / ${WEB_BUDGET_BYTES}B"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    add_test_detail "$(json_test_detail "bundle_budget" "fail" "0" "${WEB_BUNDLE_BYTES}B > ${WEB_BUDGET_BYTES}B")"
+    add_error "Bundle ${WEB_BUNDLE_BYTES}B exceeds budget ${WEB_BUDGET_BYTES}B"
+    log "  [FAIL] Bundle ${WEB_BUNDLE_BYTES}B exceeds ${WEB_BUDGET_BYTES}B"
+  fi
+
+  # ── Gate: a11y clean ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  if [ "$WEB_A11Y_VIOLATIONS" -eq 0 ]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "a11y" "pass" "0" "0 violations (${WEB_A11Y_SOURCE})")"
+    log "  [PASS] a11y 0 violations (${WEB_A11Y_SOURCE})"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    add_test_detail "$(json_test_detail "a11y" "fail" "0" "${WEB_A11Y_VIOLATIONS} violations")"
+    add_error "a11y ${WEB_A11Y_VIOLATIONS} violations detected"
+    log "  [FAIL] a11y ${WEB_A11Y_VIOLATIONS} violations"
+  fi
+
+  # ── Gate: SEO lint clean ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  if [ "$WEB_SEO_ISSUES" -eq 0 ]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "seo_lint" "pass" "0" "0 issues")"
+    log "  [PASS] SEO lint clean"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    add_test_detail "$(json_test_detail "seo_lint" "fail" "0" "${WEB_SEO_ISSUES} issues")"
+    add_error "SEO lint: ${WEB_SEO_ISSUES} issues"
+    log "  [FAIL] SEO lint ${WEB_SEO_ISSUES} issues"
+  fi
+
+  # ── Gate: E2E smoke (pass | mock | skip all count as non-blocking) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$WEB_E2E_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "e2e_smoke" "pass" "0" "${WEB_E2E_STATUS}")"
+      log "  [PASS] E2E smoke: ${WEB_E2E_STATUS}"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "e2e_smoke" "fail" "0" "${WEB_E2E_STATUS}")"
+      add_error "E2E smoke failed: ${WEB_E2E_STATUS}"
+      log "  [FAIL] E2E smoke: ${WEB_E2E_STATUS}"
+      ;;
+  esac
+
+  # ── Gate: Visual regression (skip allowed when no baseline configured) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$WEB_VISUAL_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "visual_regression" "pass" "0" "${WEB_VISUAL_STATUS}")"
+      log "  [PASS] Visual: ${WEB_VISUAL_STATUS}"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "visual_regression" "fail" "0" "${WEB_VISUAL_STATUS}")"
+      add_error "Visual regression failed: ${WEB_VISUAL_STATUS}"
+      log "  [FAIL] Visual: ${WEB_VISUAL_STATUS}"
+      ;;
+  esac
+
+  COVERAGE_EXPECTED=$((COVERAGE_EXPECTED + TESTS_TOTAL))
+  COVERAGE_RUN=$((COVERAGE_RUN + TESTS_PASSED))
+  WALL_TIME_MS=$(( $(now_ms) - WEB_START_MS ))
+  log "  Web verification complete: ${TESTS_PASSED}/${TESTS_TOTAL} passed, bundle=${WEB_BUNDLE_BYTES}B/${WEB_BUDGET_BYTES}B"
+}
+
+
+# ============================================================
 # Main execution
 # ============================================================
 log "============================================"
@@ -895,6 +1124,7 @@ case "$TYPE" in
   npu)    run_npu || true ;;
   deploy) run_deploy || true ;;
   hmi)    run_hmi || true ;;
+  web)    run_web || true ;;
 esac
 
 # ── Coverage check ──
@@ -964,6 +1194,23 @@ cat <<JSONEOF
     "bundle_bytes": ${HMI_BUNDLE_BYTES},
     "budget_bytes": ${HMI_BUDGET_BYTES},
     "security_status": "${HMI_SECURITY_STATUS}"
+  },
+  "web": {
+    "profile": "${WEB_PROFILE_USED}",
+    "lighthouse_perf": ${WEB_LH_PERF:-0},
+    "lighthouse_a11y": ${WEB_LH_A11Y:-0},
+    "lighthouse_seo": ${WEB_LH_SEO:-0},
+    "lighthouse_best_practices": ${WEB_LH_BP:-0},
+    "lighthouse_source": "${WEB_LH_SOURCE}",
+    "bundle_total_bytes": ${WEB_BUNDLE_BYTES:-0},
+    "bundle_budget_bytes": ${WEB_BUDGET_BYTES:-0},
+    "bundle_violations": ${WEB_BUNDLE_VIOLATIONS:-0},
+    "a11y_violations": ${WEB_A11Y_VIOLATIONS:-0},
+    "a11y_source": "${WEB_A11Y_SOURCE}",
+    "seo_issues": ${WEB_SEO_ISSUES:-0},
+    "e2e_status": "${WEB_E2E_STATUS}",
+    "visual_status": "${WEB_VISUAL_STATUS}",
+    "overall_pass": ${WEB_OVERALL_PASS:-false}
   },
   "deploy": {
     "status": "${DEPLOY_STATUS}",

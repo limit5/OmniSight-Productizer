@@ -1,0 +1,24 @@
+{
+  "$comment": "W2 #276 — Lighthouse CI thresholds. Assertions mirror the W2 spec (Perf>=80, A11y>=90, SEO>=95). Best-practices is informational only, matching backend/web_simulator.py::LIGHTHOUSE_MIN_BEST_PRACTICES=0.",
+  "ci": {
+    "collect": {
+      "numberOfRuns": 1,
+      "settings": {
+        "chromeFlags": "--headless --no-sandbox --disable-gpu",
+        "preset": "desktop"
+      }
+    },
+    "assert": {
+      "assertions": {
+        "categories:performance": ["error", { "minScore": 0.80 }],
+        "categories:accessibility": ["error", { "minScore": 0.90 }],
+        "categories:seo": ["error", { "minScore": 0.95 }],
+        "categories:best-practices": ["warn", { "minScore": 0.0 }]
+      }
+    },
+    "upload": {
+      "target": "filesystem",
+      "outputDir": ".lighthouseci"
+    }
+  }
+}

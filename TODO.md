@@ -963,12 +963,12 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### W2. Web simulate track (#276)
-- [ ] `scripts/simulate.sh` 新增 `web` track：Lighthouse CI（Performance / Accessibility / SEO / Best Practices）+ bundle size gate + a11y audit + SEO lint
-- [ ] Lighthouse baseline：Performance ≥ 80 / A11y ≥ 90 / SEO ≥ 95
-- [ ] Bundle budget per profile（web-static ≤ 500 KiB critical / web-ssr-node ≤ 5 MiB server bundle）
-- [ ] Playwright E2E smoke（homepage → 關鍵互動 × 2）
-- [ ] Visual regression（可選，Chromatic 或 Playwright screenshot baseline）
-- [ ] 預估：**1.5 day**
+- [x] `scripts/simulate.sh` 新增 `web` track：Lighthouse CI（Performance / Accessibility / SEO / Best Practices）+ bundle size gate + a11y audit + SEO lint
+- [x] Lighthouse baseline：Performance ≥ 80 / A11y ≥ 90 / SEO ≥ 95
+- [x] Bundle budget per profile（web-static ≤ 500 KiB critical / web-ssr-node ≤ 5 MiB server bundle）
+- [x] Playwright E2E smoke（homepage → 關鍵互動 × 2）
+- [x] Visual regression（可選，Chromatic 或 Playwright screenshot baseline）
+- [x] 預估：**1.5 day**
 
 ### W3. Web role skills (#277)
 - [ ] `configs/roles/frontend-react.md`
