@@ -284,6 +284,7 @@ def list_providers() -> list[dict]:
             "name": "Anthropic",
             "default_model": "claude-sonnet-4-20250514",
             "models": [
+                "claude-opus-4-7",
                 "claude-opus-4-20250514",
                 "claude-sonnet-4-20250514",
                 "claude-haiku-4-20250506",

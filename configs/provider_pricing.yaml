@@ -9,7 +9,7 @@
 #   budget   — cheap (Claude Haiku, GPT-4o-mini, Gemini Flash)
 
 anthropic:
-  premium: 22.50          # Opus 4 / 4.5
+  premium: 15.00          # Opus 4.7 — $5/1M in + $25/1M out, blended ~$15/1M (released 2026-04-15)
   default: 4.50           # Sonnet 4 / 4.5
   budget:  1.20           # Haiku 4.5
 openai:

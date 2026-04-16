@@ -82,7 +82,7 @@ logger = logging.getLogger(__name__)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 DEFAULT_MODEL = os.environ.get(
-    "OMNISIGHT_MERGER_MODEL", "anthropic/claude-opus-4-6"
+    "OMNISIGHT_MERGER_MODEL", "anthropic/claude-opus-4-7"
 )
 
 # Gate thresholds.  Tweak via env for A/B'ing in production.

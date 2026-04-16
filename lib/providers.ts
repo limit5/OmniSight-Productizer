@@ -39,6 +39,7 @@ export const PROVIDERS: ProviderInfo[] = [
     name: "Anthropic",
     defaultModel: "claude-sonnet-4-20250514",
     models: [
+      "claude-opus-4-7",
       "claude-opus-4-20250514",
       "claude-sonnet-4-20250514",
       "claude-haiku-4-20250506",

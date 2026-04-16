@@ -1,9 +1,9 @@
 ---
-model_id: claude-opus-4
+model_id: claude-opus-4-7
 provider: anthropic
 family: claude
 context_window: 200000
-strengths: [deep-reasoning, architecture-design, complex-refactoring, code-review]
+strengths: [deep-reasoning, architecture-design, complex-refactoring, code-review, advanced-software-engineering]
 ---
 
 # Claude Opus — Agent Behavior Rules

@@ -110,7 +110,7 @@ def _try_anthropic(prompt: str, endpoint: Any) -> str | None:
         return None
     try:
         client = anthropic.Anthropic()
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
         system = (
             "You are a senior embedded engineer writing HMI binding docs. "
             "Respond with ONE concise sentence describing the endpoint intent."
