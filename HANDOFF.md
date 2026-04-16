@@ -1,9 +1,120 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：O1 — Redis 分散式檔案路徑互斥鎖 (master)
+> 最後 commit：O2 — Message Queue 抽象層 (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## O2 (complete) Message Queue 抽象層（2026-04-16 完成）
+
+**背景**：O 區塊第三步。O0 把 CATC payload schema 釘死、O1 做出 Redis 分散式檔案互斥鎖之後，下一塊基礎建設是把這些 task 變成「跨 worker pool 可消費的 message stream」。沒有這層，Orchestrator (O4) 沒地方丟 task、Worker pool (O3) 沒地方拉 task；兩邊既不能水平擴展也不能解耦上線。O2 就是這條中介管道，並且把「3 次失敗自動進 DLQ + 完整 root cause 保留」「P0 故障 task 永遠先排到 P3 backlog 之前」「worker 拉了但沒 ack 就在 visibility timeout 後重新入隊」這些跑 production 必備的語意一次釘死。
+
+### 實作內容
+
+1. **`backend/queue_backend.py`**（new, ~720 行）— 單檔 module 把 API、enum、Protocol、兩個 backend、adapter stubs、metrics wiring、background sweep 全塞進去：
+   - **Public API**：`push(card, priority=P2)` 入隊回傳 `message_id`；`pull(consumer, count, visibility_timeout_s)` claim 一批；`ack(message_id)` 永久移除；`nack(message_id, reason, stack=None)` 失敗計數 +1，第 3 次直接進 DLQ；`set_state(message_id, new_state)` 走 spec 狀態機；`get` / `depth(priority?, state?)` 查詢；`sweep_visibility()` 把過期 claim 重新入隊或進 DLQ；`dlq_list / dlq_purge / dlq_redrive` operator 介面；`format_exc(exc)` 把 traceback 轉字串方便 nack 時帶；`start_visibility_sweep / stop_visibility_sweep` daemon thread。
+   - **`PriorityLevel` enum**：`P0`（incident）/ `P1`（hotfix）/ `P2`（sprint，default）/ `P3`（backlog），`rank` property + `ordered()` classmethod 提供「P0 永遠第一個被 drain」的權威序。
+   - **`TaskState` enum**：spec 七個狀態 `Queued / Blocked_by_Mutex / Ready / Claimed / Running / Done / Failed`，搭配 `_ALLOWED_TRANSITIONS` 表 + `_check_transition(old, new)` 強制 state machine 合法 edge，違法直接 raise `InvalidStateTransition`。Done / Failed 是 terminal — 任何離開 transition 都拒絕。
+   - **`QueueMessage` dataclass**：`message_id` / `priority` / `state` / `payload`（CATC `to_dict`）/ `enqueued_at` / `delivery_count` / `claim_owner` / `claim_deadline` / `last_error` / `last_error_stack` / `history`（每次狀態變更的 (ts, state) tuple）。`task_card()` helper 反序列化回 `TaskCard`，`to_dict()` / `from_dict()` 做 Redis ↔ in-memory backend 一致表示。
+   - **`DlqEntry` dataclass**：DLQ 專屬條目 — `message_id` / `priority` / `payload`（**完整原 CATC**）/ `failure_count` / `root_cause` / `stack` / `moved_to_dlq_at` / `enqueued_at`，operator 拿到一條就能 reproduce。
+   - **`SweepResult`**：每次 visibility sweep 的 audit 結果（哪些被 requeue、哪些進 DLQ、花了多久）。
+
+2. **雙 backend（同 dist_lock / shared_state pattern）**：
+   - **`InMemoryQueueBackend`**：thread-safe，4 個 priority bucket（list of message_id, FIFO within priority），總表 `_messages` 存 `QueueMessage`，claimed set 做 visibility sweep 索引，DLQ 用 dict。`pull` 從 P0 bucket 開始 drain，達 count 才停。`_record_state_locked` 在每個 transition 都跑 `_check_transition` + append history。`ack` 直接 del — Done 是 terminal，留著沒意義反而吃記憶體。
+   - **`RedisStreamsQueueBackend`**：Redis Streams + ancillary hashes：
+     - 4 條 `omnisight:queue:stream:<priority>` XSTREAM 對應 P0..P3，consumer group `omnisight-workers` `mkstream=True` 在 init 時建立（BUSYGROUP 直接吞）。
+     - 每個 message 的權威狀態存 `omnisight:queue:msg:<id>` HASH（priority / state / payload / enqueued_at / delivery_count / claim_owner / claim_deadline / last_error / last_error_stack / history + 補一對 `_stream_key` / `_entry_id` 讓 ack 能 XACK + XDEL 對應 stream entry）。
+     - claimed messages 額外記在 `omnisight:queue:claimed` ZSET，score=deadline，sweep 直接 ZRANGEBYSCORE -inf, now 拿過期 claim list。
+     - DLQ 用 `omnisight:queue:dlq:entries` HASH + `omnisight:queue:dlq:order` ZSET（score=ts），dlq_list 走 ZREVRANGE。
+   - **為什麼 Streams 而不是 LIST + BRPOP**：Streams 提供 per-message ack（XACK）+ pending 追蹤（XPENDING / XCLAIM）+ consumer group 自動 share load。LIST 要自己寫 dispatch + claim tracking，工作量翻倍且難對齊 in-memory 的語意。
+   - **Selection**：`_select_backend()` 看 `OMNISIGHT_QUEUE_BACKEND` env（`auto`（default）/ `redis` / `memory` / `rabbitmq` / `sqs`）+ `OMNISIGHT_REDIS_URL` 是否設定。auto 模式：URL 設了試 Redis Streams（連不上 fallback in-memory + warn），沒設用 in-memory。`memory` 強制 in-memory。Adapter stub 名稱直接 raise NotImplementedError。`set_backend_for_tests(backend)` test-only。
+
+3. **Adapter 接口（RabbitMQ / SQS — 宣告，未實作）**：
+   - `_UnimplementedAdapter` base 把 12 個 protocol method 宣告 + `__init__` raise NotImplementedError 並印「設 OMNISIGHT_QUEUE_BACKEND=redis (default) 或實作 adapter」。
+   - `RabbitMQQueueBackend` / `SQSQueueBackend` 繼承之；存在的目的是讓 Protocol 有第三、四個 concrete 實作確認 contract 形狀，未來實作時 grep 找得到 entry point。**spec 明示「先宣告接口，不實作」**，所以 raise 是 correct 行為而非 TODO。
+
+4. **Visibility timeout（Worker crash recovery）**：
+   - `pull` 寫入 `claim_deadline = now + visibility_timeout_s`，每次 pull 把 message 從 ready bucket 移到 claimed set + state Queued → Claimed + delivery_count += 1。
+   - `sweep_visibility()` 找 `claim_deadline <= now` 的 claim：
+     - delivery_count 已達 `MAX_DELIVERIES` (3)：直接進 DLQ，root_cause = `visibility_timeout_exhausted`，原 CATC 完整保留。
+     - 還沒到上限：state 走 Claimed → Queued，重新 push 進 priority bucket（FIFO 內 dedupe），`claim_owner = None / claim_deadline = 0`，下個 worker 拉得到。
+   - `start_visibility_sweep(interval_s=30)` 開 daemon thread 跑 sweep；idempotent。
+
+5. **DLQ 政策**：
+   - `MAX_DELIVERIES = 3`（spec 指定）。
+   - 第 N 次 nack（N == 3）：state Queued/Claimed → Failed → DLQ entry 寫入並 del 原 message。dlq_list / dlq_purge / dlq_redrive 是 operator surface。
+   - Visibility timeout 同樣的 3-strike 規則：sweep 看到第 3 次 claim 過期且沒 ack，直接 DLQ。
+   - `dlq_redrive(message_id, new_priority?)` 把 DLQ entry 重新入隊（可改 priority，譬如 P3 -> P0 升級）；原 DLQ entry 移除。
+
+6. **Priority queue（P0..P3）**：
+   - `PriorityLevel.ordered()` 永遠回傳 `[P0, P1, P2, P3]`。
+   - in-memory 的 `pull` 跑 for 迴圈遍歷這條 list 並從 bucket 0 個 pop；Redis 的 `pull` 對每個 priority stream 跑一次 `xreadgroup`（block=0 不阻塞，沒就跳下一條）。
+   - 所以 **任何時候有 P0 在隊列，P0 永遠先被 drain**（spec：「P0 故障 / P1 hotfix / P2 sprint / P3 backlog」）。
+   - FIFO within same priority：bucket 是 list，append 在尾、pop 在頭；Redis Streams 本質就 FIFO。
+
+7. **Metrics**（wire 進 `backend/metrics.py` + `reset_for_tests()` + NoOp stubs）：
+   - `omnisight_queue_depth{priority,state}` Gauge — 4 priority × 7 state = 28 個 series，`_bump_depth_metric()` 在每個 mutating call 後 refresh。
+   - `omnisight_queue_claim_duration_seconds{outcome}` Histogram，outcome=hit|empty，`pull` 用 wall-clock 量。
+   - 兩個 metric 都有 No-op stub 在 `prometheus_client` 不可用時不炸。
+
+8. **`backend/tests/test_queue_backend.py`**（new, **49 tests, 0.39s，全綠**）— 12 個 test class：
+   - `TestEnumsAndStateMachine`（6 tests）— PriorityLevel rank / ordered / TaskState 包含 spec 7 個值 / 合法 edge OK / Done 是 terminal raise / 自迴圈 no-op
+   - `TestPushPullAck`（10 tests）— push 回 msg_id / pull 推進 Claimed + claim_owner + delivery_count / ack 永久移除 / ack 未知回 False / count=0 / 空 queue / push reject 非 TaskCard / push reject 非 PriorityLevel / pull 拒絕空 consumer / payload round-trip via TaskCard
+   - `TestPriorityOrdering`（4 tests）— P0 在 P3 之前 drain / 同 priority FIFO / P3 不會 starve 後到的 P0 / count cap
+   - `TestVisibilityTimeout`（4 tests）— claim 沒 ack → sweep requeue + 第 2 個 worker 拿到（delivery_count=2）/ 未過期不動 / 空 queue 回 0 / 第 3 次 visibility 過期直接 DLQ
+   - `TestNackAndDlq`（8 tests）— nack 在 limit 下 requeue / 第 3 次 nack 進 DLQ + 保留 reason+stack / DLQ 完整保留原 CATC（含 priority + impact_scope.allowed）/ nack 未知 raise / dlq_purge idempotent / dlq_redrive 創新 message + 改 priority / dlq_redrive 未知 raise / format_exc 渲染 traceback
+   - `TestSetState`（4 tests）— Queued → Blocked → Ready / 走完整 7 狀態鏈到 Done 後拒絕轉換 / 未知 raise / history 記錄完整
+   - `TestDepth`（2 tests）— total + by priority + by state filter
+   - `TestConcurrency`（2 tests）— **5 thread × 4 batch pull 20 message 不重複交付** / 4 thread × 10 push 計數正確
+   - `TestIntegration`（3 tests）— 兩 worker push/pull/ack 交錯 / visibility timeout 完整 recovery 流程 / 混合 priority load 下 strict P0→P1→P2→P3 drain
+   - `TestAdapterStubs`（3 tests）— RabbitMQ raise NotImplementedError / SQS 同 / `OMNISIGHT_QUEUE_BACKEND=rabbitmq` env 觸發 stub
+   - `TestMetricsWired`（2 tests）— `metrics.queue_depth` / `metrics.queue_claim_duration_seconds` 物件存在 + push/pull 不炸
+   - `TestQueueMessageRoundTrip`（1 test）— `to_dict / from_dict` 保留所有 field（含 history）
+
+### 測試結果
+
+- `backend/tests/test_queue_backend.py` — **49 tests, all passing (0.39s)**
+- Regression sweep：`test_queue_backend.py + test_dist_lock.py + test_catc.py + test_codeowners.py + test_metrics.py + test_shared_state.py + test_audit.py + test_dependency_governance.py + test_circuit_breaker.py` — **361 passed, 2 skipped**。沒有 regress。
+- Ruff lint：無錯誤（`queue_backend.py` / `test_queue_backend.py` / `metrics.py`）。
+
+### 設計決策 & 取捨
+
+- **Streams + consumer group, not LIST + BRPOP**：spec 原文寫「Redis Streams」就直接走這條。Streams 帶 native ack 語意（XACK / XPENDING / XCLAIM）+ multi-consumer fair share，把 visibility timeout 變成 Redis 原生概念而不是我們自己 Lua 腳本去模擬。LIST + BRPOP 拉得快但 ack/visibility/重新入隊都得自寫，code 量翻倍且難對齊 in-memory 的 observable semantics。
+- **Per-priority stream，不是單 stream + 排序欄位**：4 條 stream 讓 priority drain 變成「對 PriorityLevel.ordered() 跑 for 迴圈」這麼簡單，沒有「排序欄位」需要在 push 時計算 + pull 時比較的開銷。代價是 4 條 stream 占 4 個 redis key，但 Redis 對 stream 的記憶體開銷是 lazy/per-entry 的，4 條空 stream ≈ 0 cost。
+- **All-or-nothing nack/DLQ 邊界（>= MAX_DELIVERIES，不是 > MAX_DELIVERIES）**：`delivery_count` 在 pull 時 +1，nack 時讀。`>= 3` 表示「第 3 次 pull 後 nack 進 DLQ」。spec「3 次失敗進 DLQ」直譯就是這條。
+- **Done 後直接 del message hash / in-memory 物件**：Done 是 terminal state，留著沒任何後續操作會讀，徒增記憶體 / Redis key 數。要 audit 應該走 `backend/audit.py` 的 hash-chain，不是把 queue 當資料庫。
+- **DLQ entry 完整保留原 CATC payload**：spec「附 root cause + stack + 原 CATC」。DlqEntry.payload = msg.payload 整 dict 存。dlq_redrive 直接 `TaskCard.from_dict(payload)` 就能 round-trip 創新 message（pydantic validator 自動跑一次，corrupt entry 不會默默重新入隊污染 queue）。
+- **Visibility sweep 用 background thread，不是 cron / async task**：跟 dist_lock.start_deadlock_sweep 同 pattern。daemon thread + idempotent start/stop = 一個 process 啟用一次就好。Production 同時啟動兩個 sweep（dist_lock + queue）時各自一條 thread，互不干擾。
+- **In-memory backend 跟 Redis backend 完全 observable equivalent**：tests 全跑 in-memory，但 production 可以無痛切 Redis（同樣 Protocol、同樣 method signature、同樣 raise / return contract）。這是 dist_lock / shared_state / rate_limit 三個 module 已經建立的 codebase 慣例，O2 直接遵守。
+- **Adapter stub raise NotImplementedError 而不是 silent NoOp**：spec 明寫「先宣告接口，不實作」。raise 是 fail-fast；如果有人誤設 `OMNISIGHT_QUEUE_BACKEND=rabbitmq`，啟動時就炸給 ops，不會跑半天才發現 message 全沒入隊。
+- **`_bump_depth_metric()` lazy refresh**：每個 mutating API call 後跑一次 28-cell refresh，是 O(n) over messages 的 scan。production message 量大時可以改成「per-state delta counter」減少開銷，但目前 single-process 量級下這個 refresh < 0.1ms，先簡單對。FUTURE 標記在 module docstring。
+- **`_make_card` test fixture 用 `PROJ-{int}`**：CATC `jira_ticket` regex 是 `^[A-Z][A-Z0-9_]*-\d+$` — 後綴必須純數字。第一版用 `PROJ-{tag}_{i}` 違反 regex，concurrency test failed；改用 `tag * 100 + i` 確保唯一純數字。
+
+### 與前序 Phase 的互動
+
+- **O0（CATC）**：`push(card, priority)` 強制 `card` 必須是 `TaskCard` instance；payload 用 `card.to_dict()` 序列化、`message.task_card()` 反序列化都跑 pydantic validator，corrupt CATC 在 push 時就被拒絕，不會進 queue。
+- **O1（dist_lock）**：worker pull 出 message 後做 `acquire_paths(card.navigation.impact_scope.allowed)`；衝突時 worker 走 `set_state(message_id, TaskState.Blocked_by_Mutex)` 標示等鎖，等到後 set_state 進 Ready / Running，最後 ack。queue 層不直接知道 dist_lock 存在 — 兩者透過 state 機協作，責任邊界乾淨。
+- **O3（worker）— 下一步**：`worker_loop` 會是 `while True: msgs = pull(self.id, count=self.capacity, visibility_timeout_s=300); for m in msgs: try { acquire_paths(m); execute; ack(m) } except: nack(m, format_exc(exc))`。heartbeat 每 60s 呼 `extend_lease`（dist_lock）+ 看自己的 claim 是否還在 visibility window 內。
+- **O4（Orchestrator Gateway）— 下一步**：DAG 拆出 N 張 CATC 後，依 incident severity 決 priority，呼 `push(card, PriorityLevel.P0/P1/P2/P3)`，並把 DAG 對 message_id list 持久化以便 `GET /orchestrator/status/{ticket}` 能 join `get(message_id)` 回傳每張 CATC 的當前 state。
+- **CLAUDE.md L1**：本 phase 沒動 L1 immutable rules。新增的 module 不繞 Gerrit、不存 secret、不 force-push、不接觸 test_assets/。
+
+### 下一步 & 未結項目
+
+- **O3（#266）Stateless Agent Worker Pool** — worker.py 主迴圈 + heartbeat + Gerrit push + sandbox 隔離（拿 M1 cgroup）。message_id ↔ task_id ↔ Gerrit Change-Id 三向綁定要寫進 worker commit message trailer。
+- **O4（#267）Orchestrator Gateway** — Jira webhook → LLM 拆 DAG → N × `push()` → 回 message_id list 給 Jira sub-task。
+- **FUTURE — Redis 真正 integration test**：跟 dist_lock 同 status，目前 test 走 in-memory。CI 加 `pytest -m redis` 跑真 Redis container 覆蓋 XREADGROUP / XACK / XCLAIM 的實際行為。
+- **FUTURE — RabbitMQ / SQS adapter 實作**：當企業客戶要求自己帶 MQ 時補齊。Stub class 已預留 entry point，實作只需要把 `_UnimplementedAdapter` 換成真 adapter 同時保持 12 個 method signature 不動。
+- **FUTURE — `_bump_depth_metric()` 改成 per-state delta counter**：O(n) scan 在 message 量到 1e5 才會被注意到，目前先簡單對；改成 delta counter 之前要先在 backend 內部維護 4 priority × 7 state 的計數器表。
+
+### 新增 / 修改檔案
+
+- `backend/queue_backend.py` — **新增**（~720 行）
+- `backend/tests/test_queue_backend.py` — **新增**（49 tests）
+- `backend/metrics.py` — **修改**（兩個 metric 同步加進 init / `reset_for_tests` / NoOp stubs）
+- `TODO.md` — O2 全部 10 條 `[ ]` → `[x]`
+- `HANDOFF.md` — 本節新增
 
 ---
 

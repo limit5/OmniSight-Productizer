@@ -380,6 +380,21 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # O2 (#265): Message Queue abstraction layer ────────────────
+    queue_depth = Gauge(
+        "omnisight_queue_depth",
+        "Number of messages in the queue, partitioned by priority + state",
+        labelnames=("priority", "state"),  # P0..P3 × Queued/Ready/Claimed/...
+        registry=REGISTRY,
+    )
+    queue_claim_duration_seconds = Histogram(
+        "omnisight_queue_claim_duration_seconds",
+        "Wall-clock seconds for a worker pull() call to return",
+        labelnames=("outcome",),  # hit | empty
+        buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10),
+        registry=REGISTRY,
+    )
+
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
         "omnisight_memory_decay_total",
@@ -448,6 +463,8 @@ else:
     dist_lock_wait_seconds = _NoOp()  # type: ignore
     dist_lock_held_total = _NoOp()  # type: ignore
     dist_lock_deadlock_kills_total = _NoOp()  # type: ignore
+    queue_depth = _NoOp()  # type: ignore
+    queue_claim_duration_seconds = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -485,6 +502,7 @@ def reset_for_tests() -> None:
     global memory_decay_total
     global t3_runner_dispatch_total
     global dist_lock_wait_seconds, dist_lock_held_total, dist_lock_deadlock_kills_total
+    global queue_depth, queue_claim_duration_seconds
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -695,6 +713,16 @@ def reset_for_tests() -> None:
     dist_lock_deadlock_kills_total = Counter(
         "omnisight_dist_lock_deadlock_kills_total", "Deadlock-sweep kills",
         labelnames=("reason",), registry=REGISTRY,
+    )
+    queue_depth = Gauge(
+        "omnisight_queue_depth", "Queue depth by priority/state",
+        labelnames=("priority", "state"), registry=REGISTRY,
+    )
+    queue_claim_duration_seconds = Histogram(
+        "omnisight_queue_claim_duration_seconds", "Pull duration",
+        labelnames=("outcome",),
+        buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10),
+        registry=REGISTRY,
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",

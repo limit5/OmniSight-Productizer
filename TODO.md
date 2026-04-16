@@ -812,16 +812,16 @@ Legend:
 - [x] 預估：**2 day**
 
 ### O2. Message Queue 抽象層 (#265)
-- [ ] `backend/queue_backend.py`：`QueueBackend` interface（push / pull / ack / nack / dlq）
-- [ ] 預設 backend：Redis Streams（與 I10 Redis 共用連線）
-- [ ] 可插拔 adapter 介面：RabbitMQ / AWS SQS（先宣告接口，不實作）
-- [ ] 任務狀態機：`Queued` → `Blocked_by_Mutex` → `Ready` → `Claimed` → `Running` → `Done / Failed`
-- [ ] Visibility timeout：claim 後 N 分鐘沒 ack → 重新入隊（worker crash 恢復）
-- [ ] 優先權佇列：P0（故障）/ P1（hotfix）/ P2（sprint）/ P3（backlog）
-- [ ] DLQ：3 次失敗進 DLQ，附 root cause + stack + 原 CATC
-- [ ] Metrics：`queue_depth{priority,state}` / `queue_claim_duration_seconds`
-- [ ] 整合測試：push/pull/ack、visibility timeout、DLQ、priority 排序
-- [ ] 預估：**2 day**
+- [x] `backend/queue_backend.py`：`QueueBackend` interface（push / pull / ack / nack / dlq）
+- [x] 預設 backend：Redis Streams（與 I10 Redis 共用連線）
+- [x] 可插拔 adapter 介面：RabbitMQ / AWS SQS（先宣告接口，不實作）
+- [x] 任務狀態機：`Queued` → `Blocked_by_Mutex` → `Ready` → `Claimed` → `Running` → `Done / Failed`
+- [x] Visibility timeout：claim 後 N 分鐘沒 ack → 重新入隊（worker crash 恢復）
+- [x] 優先權佇列：P0（故障）/ P1（hotfix）/ P2（sprint）/ P3（backlog）
+- [x] DLQ：3 次失敗進 DLQ，附 root cause + stack + 原 CATC
+- [x] Metrics：`queue_depth{priority,state}` / `queue_claim_duration_seconds`
+- [x] 整合測試：push/pull/ack、visibility timeout、DLQ、priority 排序
+- [x] 預估：**2 day**
 
 ### O3. Stateless Agent Worker Pool (#266)
 - [ ] `backend/worker.py`：`Worker` 進程入口——pull from queue → 拿 lock（O1）→ 起 sandbox container（已有 M1 cgroup）→ 執行 agent node → commit code → push to Gerrit → push result event → release lock
