@@ -1,0 +1,299 @@
+# P6 #291 — SDK → data-collection mapping for mobile privacy labels
+# (iOS App Privacy / Play Data Safety Form).
+#
+# Derivation source: each SDK's public privacy / data collection
+# documentation. The categories are the union of Apple's iOS
+# "Privacy Details" taxonomy and Google Play's Data Safety
+# taxonomy — the two overlap in intent even when the wording differs.
+#
+# Schema:
+#   sdks:
+#     <SDK identifier>:
+#       # Human-readable name shown in generated labels.
+#       display_name: str
+#       # One or more identifiers for the same SDK across ecosystems.
+#       # The matcher checks these as substring/prefix against pod names
+#       # (iOS) and Maven coordinates (Android).
+#       identifiers:
+#         - "FirebaseAnalytics"           # iOS pod name
+#         - "com.google.firebase:firebase-analytics"  # Android Maven coord
+#       # Data categories the SDK collects by default. Values are from
+#       # the APPLE_CATEGORY_TAXONOMY list in privacy_labels.py.
+#       apple_categories:
+#         - Identifiers
+#         - Usage Data
+#       # Play categories (may partially overlap).
+#       play_categories:
+#         - Device or other IDs
+#         - App activity
+#       # Purpose codes — Apple's list of declared purposes. Rotated
+#       # once per SDK: the most common purpose.
+#       purposes:
+#         - Analytics
+#       # Whether the data is linked to user identity ("tracking" bit).
+#       linked_to_user: true
+#       # Whether the SDK tracks across other apps / websites ("used
+#       # for tracking"). Drives AppTrackingTransparency requirement.
+#       tracking: false
+
+sdks:
+  firebase_analytics:
+    display_name: Firebase Analytics
+    identifiers:
+      - FirebaseAnalytics
+      - com.google.firebase:firebase-analytics
+      - com.google.firebase:firebase-analytics-ktx
+    apple_categories:
+      - Identifiers
+      - Usage Data
+      - Diagnostics
+    play_categories:
+      - Device or other IDs
+      - App activity
+      - App info and performance
+    purposes:
+      - Analytics
+    linked_to_user: true
+    tracking: false
+
+  firebase_crashlytics:
+    display_name: Firebase Crashlytics
+    identifiers:
+      - FirebaseCrashlytics
+      - com.google.firebase:firebase-crashlytics
+      - com.google.firebase:firebase-crashlytics-ktx
+    apple_categories:
+      - Diagnostics
+      - Identifiers
+    play_categories:
+      - App info and performance
+      - Device or other IDs
+    purposes:
+      - App Functionality
+    linked_to_user: false
+    tracking: false
+
+  firebase_messaging:
+    display_name: Firebase Cloud Messaging
+    identifiers:
+      - FirebaseMessaging
+      - com.google.firebase:firebase-messaging
+    apple_categories:
+      - Identifiers
+    play_categories:
+      - Device or other IDs
+    purposes:
+      - App Functionality
+    linked_to_user: true
+    tracking: false
+
+  google_signin:
+    display_name: Google Sign-In
+    identifiers:
+      - GoogleSignIn
+      - com.google.android.gms:play-services-auth
+    apple_categories:
+      - Contact Info
+      - Identifiers
+    play_categories:
+      - Personal info
+      - Device or other IDs
+    purposes:
+      - App Functionality
+    linked_to_user: true
+    tracking: false
+
+  facebook_sdk:
+    display_name: Facebook SDK
+    identifiers:
+      - FBSDKCoreKit
+      - FacebookCore
+      - com.facebook.android:facebook-android-sdk
+    apple_categories:
+      - Contact Info
+      - Identifiers
+      - Usage Data
+      - Location
+    play_categories:
+      - Personal info
+      - Device or other IDs
+      - App activity
+      - Location
+    purposes:
+      - Analytics
+      - Third-Party Advertising
+    linked_to_user: true
+    tracking: true
+
+  admob:
+    display_name: Google AdMob
+    identifiers:
+      - Google-Mobile-Ads-SDK
+      - com.google.android.gms:play-services-ads
+    apple_categories:
+      - Identifiers
+      - Usage Data
+      - Location
+    play_categories:
+      - Device or other IDs
+      - App activity
+      - Location
+    purposes:
+      - Third-Party Advertising
+    linked_to_user: false
+    tracking: true
+
+  stripe_ios:
+    display_name: Stripe
+    identifiers:
+      - StripePayments
+      - StripePaymentSheet
+      - StripeCore
+      - com.stripe:stripe-android
+    apple_categories:
+      - Financial Info
+      - Contact Info
+      - Identifiers
+    play_categories:
+      - Financial info
+      - Personal info
+      - Device or other IDs
+    purposes:
+      - App Functionality
+    linked_to_user: true
+    tracking: false
+
+  sentry:
+    display_name: Sentry
+    identifiers:
+      - Sentry
+      - io.sentry:sentry-android
+    apple_categories:
+      - Diagnostics
+      - Identifiers
+    play_categories:
+      - App info and performance
+      - Device or other IDs
+    purposes:
+      - Analytics
+    linked_to_user: false
+    tracking: false
+
+  mixpanel:
+    display_name: Mixpanel
+    identifiers:
+      - Mixpanel
+      - com.mixpanel.android:mixpanel-android
+    apple_categories:
+      - Identifiers
+      - Usage Data
+    play_categories:
+      - Device or other IDs
+      - App activity
+    purposes:
+      - Analytics
+    linked_to_user: true
+    tracking: false
+
+  amplitude:
+    display_name: Amplitude
+    identifiers:
+      - Amplitude
+      - com.amplitude:analytics-android
+    apple_categories:
+      - Identifiers
+      - Usage Data
+    play_categories:
+      - Device or other IDs
+      - App activity
+    purposes:
+      - Analytics
+    linked_to_user: true
+    tracking: false
+
+  branch:
+    display_name: Branch
+    identifiers:
+      - Branch-SDK
+      - io.branch.sdk.android:library
+    apple_categories:
+      - Identifiers
+      - Usage Data
+      - Location
+    play_categories:
+      - Device or other IDs
+      - App activity
+      - Location
+    purposes:
+      - Analytics
+      - Product Personalization
+    linked_to_user: true
+    tracking: true
+
+  onesignal:
+    display_name: OneSignal
+    identifiers:
+      - OneSignal
+      - com.onesignal:OneSignal
+    apple_categories:
+      - Identifiers
+      - Usage Data
+    play_categories:
+      - Device or other IDs
+      - App activity
+    purposes:
+      - App Functionality
+      - Analytics
+    linked_to_user: true
+    tracking: false
+
+  segment:
+    display_name: Segment
+    identifiers:
+      - Analytics-Swift
+      - com.segment.analytics.kotlin:android
+    apple_categories:
+      - Identifiers
+      - Usage Data
+    play_categories:
+      - Device or other IDs
+      - App activity
+    purposes:
+      - Analytics
+    linked_to_user: true
+    tracking: false
+
+  applovin:
+    display_name: AppLovin MAX
+    identifiers:
+      - AppLovinSDK
+      - com.applovin:applovin-sdk
+    apple_categories:
+      - Identifiers
+      - Usage Data
+      - Location
+    play_categories:
+      - Device or other IDs
+      - App activity
+      - Location
+    purposes:
+      - Third-Party Advertising
+    linked_to_user: false
+    tracking: true
+
+  revenuecat:
+    display_name: RevenueCat
+    identifiers:
+      - RevenueCat
+      - com.revenuecat.purchases:purchases
+    apple_categories:
+      - Purchases
+      - Identifiers
+    play_categories:
+      - Financial info
+      - Device or other IDs
+    purposes:
+      - App Functionality
+      - Analytics
+    linked_to_user: true
+    tracking: false

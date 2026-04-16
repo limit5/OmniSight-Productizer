@@ -519,6 +519,8 @@ from backend.routers import hil as _hil_router  # C7/HIL-PLUGIN-API
 app.include_router(_hil_router.router, prefix=settings.api_prefix)
 from backend.routers import compliance as _compliance_router  # C8/COMPLIANCE-HARNESS
 app.include_router(_compliance_router.router, prefix=settings.api_prefix)
+from backend.routers import mobile_compliance as _mobile_compliance_router  # P6/MOBILE-STORE-GATES
+app.include_router(_mobile_compliance_router.router, prefix=settings.api_prefix)
 from backend.routers import safety as _safety_router  # C9/SAFETY-COMPLIANCE
 app.include_router(_safety_router.router, prefix=settings.api_prefix)
 from backend.routers import radio as _radio_router  # C10/RADIO-COMPLIANCE
