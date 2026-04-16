@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 
 import { NewProjectWizard } from "@/components/omnisight/new-project-wizard"
 import { AuthProvider } from "@/lib/auth-context"
+import { TenantProvider } from "@/lib/tenant-context"
 import { I18nProvider } from "@/lib/i18n/context"
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -10,10 +11,11 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     whoami: vi.fn().mockResolvedValue({
-      user: { id: "test-user-1", email: "test@test.com", name: "Test", role: "admin", enabled: true },
+      user: { id: "test-user-1", email: "test@test.com", name: "Test", role: "admin", enabled: true, tenant_id: "t-default" },
       auth_mode: "open",
       session_id: null,
     }),
+    listUserTenants: vi.fn().mockResolvedValue([{ id: "t-default", name: "Default", plan: "free", enabled: true }]),
     getUserPreference: vi.fn().mockResolvedValue(null),
     setUserPreference: vi.fn().mockResolvedValue(undefined),
   }
@@ -22,7 +24,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
 function Wrapper({ children }: { children: React.ReactNode }) {
   return (
     <I18nProvider>
-      <AuthProvider>{children}</AuthProvider>
+      <AuthProvider>
+        <TenantProvider>{children}</TenantProvider>
+      </AuthProvider>
     </I18nProvider>
   )
 }
@@ -51,7 +55,7 @@ describe("NewProjectWizard", () => {
   })
 
   it("does not show modal when user has a prior spec (user-scoped key)", async () => {
-    localStorage.setItem("omnisight:test-user-1:intent:last_spec", JSON.stringify({ raw_text: "test" }))
+    localStorage.setItem("omnisight:t-default:test-user-1:intent:last_spec", JSON.stringify({ raw_text: "test" }))
     render(<NewProjectWizard />, { wrapper: Wrapper })
     await waitFor(() => {
       expect(screen.queryByTestId("new-project-wizard")).not.toBeInTheDocument()
@@ -59,7 +63,7 @@ describe("NewProjectWizard", () => {
   })
 
   it("does not show modal on second mount (wizard already seen, user-scoped)", async () => {
-    localStorage.setItem("omnisight:test-user-1:wizard:seen", "1")
+    localStorage.setItem("omnisight:t-default:test-user-1:wizard:seen", "1")
     render(<NewProjectWizard />, { wrapper: Wrapper })
     await waitFor(() => {
       expect(screen.queryByTestId("new-project-wizard")).not.toBeInTheDocument()
@@ -79,7 +83,7 @@ describe("NewProjectWizard", () => {
     expect(navSpy).toHaveBeenCalledTimes(1)
     const detail = (navSpy.mock.calls[0][0] as CustomEvent).detail
     expect(detail.panel).toBe("spec")
-    expect(localStorage.getItem("omnisight:test-user-1:wizard:seen")).toBe("1")
+    expect(localStorage.getItem("omnisight:t-default:test-user-1:wizard:seen")).toBe("1")
 
     expect(screen.queryByTestId("new-project-wizard")).not.toBeInTheDocument()
     window.removeEventListener("omnisight:navigate", navSpy as EventListener)
@@ -110,6 +114,6 @@ describe("NewProjectWizard", () => {
     const closeButton = screen.getByRole("button", { name: /close/i })
     fireEvent.click(closeButton)
 
-    expect(localStorage.getItem("omnisight:test-user-1:wizard:seen")).toBe("1")
+    expect(localStorage.getItem("omnisight:t-default:test-user-1:wizard:seen")).toBe("1")
   })
 })

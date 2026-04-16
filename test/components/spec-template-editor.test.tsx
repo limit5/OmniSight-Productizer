@@ -20,17 +20,21 @@ vi.mock("@/lib/api", () => ({
   ingestRepo: vi.fn(),
   uploadDocs: vi.fn(),
   whoami: vi.fn().mockResolvedValue({
-    user: { id: "test-user-1", email: "test@test.com", name: "Test", role: "admin", enabled: true },
+    user: { id: "test-user-1", email: "test@test.com", name: "Test", role: "admin", enabled: true, tenant_id: "t-default" },
     auth_mode: "open",
     session_id: null,
   }),
+  listUserTenants: vi.fn().mockResolvedValue([{ id: "t-default", name: "Default", plan: "free", enabled: true }]),
   getUserPreference: vi.fn().mockResolvedValue(null),
   setUserPreference: vi.fn().mockResolvedValue(undefined),
   setCurrentSessionId: vi.fn(),
+  setCurrentTenantId: vi.fn(),
+  getCurrentTenantId: vi.fn().mockReturnValue("t-default"),
 }))
 
 import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
 import { AuthProvider } from "@/lib/auth-context"
+import { TenantProvider } from "@/lib/tenant-context"
 import { I18nProvider } from "@/lib/i18n/context"
 import * as api from "@/lib/api"
 import type { ParsedSpec } from "@/lib/api"
@@ -38,7 +42,9 @@ import type { ParsedSpec } from "@/lib/api"
 function Wrapper({ children }: { children: React.ReactNode }) {
   return (
     <I18nProvider>
-      <AuthProvider>{children}</AuthProvider>
+      <AuthProvider>
+        <TenantProvider>{children}</TenantProvider>
+      </AuthProvider>
     </I18nProvider>
   )
 }
@@ -186,7 +192,7 @@ describe("SpecTemplateEditor", () => {
     const btn = await screen.findByRole("button", { name: /continue/i })
     await waitFor(() => expect(btn).not.toBeDisabled())
     await user.click(btn)
-    const stored = window.localStorage.getItem("omnisight:test-user-1:intent:last_spec")
+    const stored = window.localStorage.getItem("omnisight:t-default:test-user-1:intent:last_spec")
     expect(stored).not.toBeNull()
     const cached = JSON.parse(stored!)
     expect(cached.framework.value).toBe("nextjs")
@@ -227,7 +233,7 @@ describe("SpecTemplateEditor", () => {
 
   it("restores the cached spec on next mount (back-from-DAG path)", async () => {
     window.localStorage.setItem(
-      "omnisight:test-user-1:intent:last_spec",
+      "omnisight:t-default:test-user-1:intent:last_spec",
       JSON.stringify({
         ...okSpec,
         raw_text: "previously typed prompt",
