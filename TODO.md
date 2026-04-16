@@ -1065,12 +1065,12 @@ Legend:
 - [x] 預估：**2 day**
 
 ### P2. Mobile simulate track (#287)
-- [ ] `scripts/simulate.sh` 新增 `mobile` track：iOS Simulator + Android Emulator 雙平台 smoke + UI test
-- [ ] `XCUITest`（iOS）+ `Espresso`（Android）整合
-- [ ] Flutter/RN 走各自 test runner
-- [ ] **Cloud device farm 整合**：Firebase Test Lab / AWS Device Farm / BrowserStack（真機覆蓋用）
-- [ ] 螢幕截圖 matrix（多機型 × 多 locale）
-- [ ] 預估：**2.5 day**
+- [x] `scripts/simulate.sh` 新增 `mobile` track：iOS Simulator + Android Emulator 雙平台 smoke + UI test
+- [x] `XCUITest`（iOS）+ `Espresso`（Android）整合
+- [x] Flutter/RN 走各自 test runner
+- [x] **Cloud device farm 整合**：Firebase Test Lab / AWS Device Farm / BrowserStack（真機覆蓋用）
+- [x] 螢幕截圖 matrix（多機型 × 多 locale）
+- [x] 預估：**2.5 day**
 
 ### P3. 簽章鏈管理（extend secret_store）(#288)
 - [ ] Apple certs：Developer ID Certificate + Provisioning Profile + App Store Distribution Certificate

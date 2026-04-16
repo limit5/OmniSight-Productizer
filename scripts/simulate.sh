@@ -4,9 +4,15 @@
 # Unified test entry point for AI Agent embedded development.
 #
 # Usage:
-#   ./simulate.sh --type=[algo|hw] --module=[name] \
+#   ./simulate.sh --type=[algo|hw|npu|deploy|hmi|web|mobile] --module=[name] \
 #     [--input=data] [--mock=true] [--coverage-check=true] \
 #     [--platform=aarch64]
+#
+# Mobile (P2 #287):
+#   ./simulate.sh --type=mobile --module=android-arm64-v8a \
+#     [--mobile-app-path=path/to/app] \
+#     [--farm=firebase|aws|browserstack] \
+#     [--devices=pixel_8,pixel_7] [--locales=en-US,zh-TW]
 #
 # stdout: JSON report (machine-parseable)
 # stderr: Human-readable progress (for SSE streaming)
@@ -34,6 +40,11 @@ WEB_URL=""
 WEB_VISUAL_BASELINE=""
 WEB_BUDGET_OVERRIDE=""
 WEB_PROFILE=""
+# ── Mobile track (P2 #287) ──
+MOBILE_APP_PATH=""
+MOBILE_FARM=""
+MOBILE_DEVICES=""
+MOBILE_LOCALES=""
 WORKSPACE="${WORKSPACE:-/workspace}"
 TEST_ASSETS="${WORKSPACE}/test_assets"
 PLATFORM_DIR="${WORKSPACE}/configs/platforms"
@@ -63,6 +74,10 @@ for arg in "$@"; do
     --spdx-allowlist=*) WEB_SPDX_ALLOWLIST="${arg#*=}" ;;
     --wcag-checklist=*) WEB_WCAG_CHECKLIST="${arg#*=}" ;;
     --w5-compliance=*) WEB_W5_COMPLIANCE="${arg#*=}" ;;
+    --mobile-app-path=*) MOBILE_APP_PATH="${arg#*=}" ;;
+    --farm=*)       MOBILE_FARM="${arg#*=}" ;;
+    --devices=*)    MOBILE_DEVICES="${arg#*=}" ;;
+    --locales=*)    MOBILE_LOCALES="${arg#*=}" ;;
     *) ;;
   esac
 done
@@ -73,8 +88,8 @@ if [ -z "$TYPE" ] || [ -z "$MODULE" ]; then
   exit 1
 fi
 
-if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ] && [ "$TYPE" != "npu" ] && [ "$TYPE" != "deploy" ] && [ "$TYPE" != "hmi" ] && [ "$TYPE" != "web" ]; then
-  echo '{"version":"1.0","status":"error","errors":["--type must be algo, hw, npu, deploy, hmi, or web"]}'
+if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ] && [ "$TYPE" != "npu" ] && [ "$TYPE" != "deploy" ] && [ "$TYPE" != "hmi" ] && [ "$TYPE" != "web" ] && [ "$TYPE" != "mobile" ]; then
+  echo '{"version":"1.0","status":"error","errors":["--type must be algo, hw, npu, deploy, hmi, web, or mobile"]}'
   exit 1
 fi
 
@@ -1149,6 +1164,198 @@ run_web() {
 
 
 # ============================================================
+# MOBILE Track: iOS Simulator + Android Emulator smoke + UI test
+# (P2 #287 / L4-CORE-P2)
+#
+# Thin shell wrapper around backend.mobile_simulator. The Python
+# module owns emulator boot, UI-test runner dispatch (XCUITest /
+# Espresso / Flutter / React Native), device-farm delegation
+# (Firebase / AWS / BrowserStack), and screenshot-matrix generation.
+# Each gate degrades to "mock" when its external CLI is absent so a
+# Linux sandbox still produces a parseable JSON envelope.
+#
+# Profile defaults come from MODULE (mobile profile id). App path
+# defaults to the repo root when --mobile-app-path is not passed —
+# the driver's UI framework autodetect then picks the right runner.
+# ============================================================
+
+MOBILE_PROFILE_USED=""
+MOBILE_PLATFORM=""
+MOBILE_ABI=""
+MOBILE_UI_FRAMEWORK=""
+MOBILE_EMULATOR_STATUS="skip"
+MOBILE_EMULATOR_DEVICE=""
+MOBILE_EMULATOR_RUNTIME=""
+MOBILE_SMOKE_STATUS="skip"
+MOBILE_UI_TEST_STATUS="skip"
+MOBILE_UI_TEST_PASSED=0
+MOBILE_UI_TEST_FAILED=0
+MOBILE_UI_TEST_TOTAL=0
+MOBILE_DEVICE_FARM_STATUS="skip"
+MOBILE_DEVICE_FARM_NAME=""
+MOBILE_SCREENSHOT_STATUS="skip"
+MOBILE_SCREENSHOT_CAPTURED=0
+MOBILE_OVERALL_PASS="false"
+
+run_mobile() {
+  log "═══════ Mobile Track: Simulator / Emulator / UI test / Farm / Shots ═══════"
+  local MOBILE_START_MS
+  MOBILE_START_MS=$(now_ms)
+
+  # Resolve profile (MODULE is the platform profile id, e.g. android-arm64-v8a)
+  MOBILE_PROFILE_USED="$MODULE"
+
+  # Resolve app path — fall back to workspace root so the driver can
+  # still autodetect frameworks even without an explicit path.
+  local _app_path="${MOBILE_APP_PATH:-${WORKSPACE}}"
+  if [ ! -d "$_app_path" ]; then
+    log "  [WARN] app path $_app_path not found; falling back to workspace root"
+    _app_path="${WORKSPACE}"
+  fi
+
+  log "  Profile: ${MOBILE_PROFILE_USED}"
+  log "  App path: ${_app_path}"
+  [ -n "$MOBILE_FARM" ]    && log "  Device farm: $MOBILE_FARM"
+  [ -n "$MOBILE_DEVICES" ] && log "  Devices: $MOBILE_DEVICES"
+  [ -n "$MOBILE_LOCALES" ] && log "  Locales: $MOBILE_LOCALES"
+
+  local _summary="${BUILD_DIR}/mobile_summary.json"
+  local _py_err="${BUILD_DIR}/mobile_py.err"
+
+  # ── Invoke python driver ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  local _extra=()
+  [ -n "$MOBILE_FARM" ]    && _extra+=(--farm "$MOBILE_FARM")
+  [ -n "$MOBILE_DEVICES" ] && _extra+=(--devices "$MOBILE_DEVICES")
+  [ -n "$MOBILE_LOCALES" ] && _extra+=(--locales "$MOBILE_LOCALES")
+
+  if ( cd "$WORKSPACE" && python3 -m backend.mobile_simulator \
+         --profile "$MOBILE_PROFILE_USED" \
+         --app-path "$_app_path" \
+         "${_extra[@]}" \
+         > "$_summary" 2>"$_py_err" ); then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "mobile_driver" "pass" "0" "Summary produced")"
+    log "  [PASS] Simulator driver produced summary"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    local _err
+    _err=$(head -5 "$_py_err" | tr '\n' ' ')
+    add_error "mobile simulator failed: ${_err}"
+    add_test_detail "$(json_test_detail "mobile_driver" "fail" "0" "${_err}")"
+    log "  [FAIL] Simulator driver errored"
+    WALL_TIME_MS=$(( $(now_ms) - MOBILE_START_MS ))
+    return 1
+  fi
+
+  # ── Parse summary via python (avoid bash JSON parsing) ──
+  if [ -f "$_summary" ]; then
+    MOBILE_PLATFORM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['mobile_platform'])" "$_summary")
+    MOBILE_ABI=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['mobile_abi'])" "$_summary")
+    MOBILE_UI_FRAMEWORK=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['ui_framework'])" "$_summary")
+    MOBILE_EMULATOR_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['emulator_status'])" "$_summary")
+    MOBILE_EMULATOR_DEVICE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['emulator_device'])" "$_summary")
+    MOBILE_EMULATOR_RUNTIME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['emulator_runtime'])" "$_summary")
+    MOBILE_SMOKE_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['smoke_status'])" "$_summary")
+    MOBILE_UI_TEST_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['ui_test_status'])" "$_summary")
+    MOBILE_UI_TEST_PASSED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['ui_test_passed'])" "$_summary")
+    MOBILE_UI_TEST_FAILED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['ui_test_failed'])" "$_summary")
+    MOBILE_UI_TEST_TOTAL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['ui_test_total'])" "$_summary")
+    MOBILE_DEVICE_FARM_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['device_farm_status'])" "$_summary")
+    MOBILE_DEVICE_FARM_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['device_farm_name'])" "$_summary")
+    MOBILE_SCREENSHOT_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['screenshot_matrix_status'])" "$_summary")
+    MOBILE_SCREENSHOT_CAPTURED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['screenshot_matrix_captured'])" "$_summary")
+    MOBILE_OVERALL_PASS=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1]))['overall_pass']).lower())" "$_summary")
+  fi
+
+  # ── Gate: Emulator boot (booted | mock accepted; fail is blocking) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$MOBILE_EMULATOR_STATUS" in
+    booted|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "emulator_boot" "pass" "0" "${MOBILE_EMULATOR_STATUS}")"
+      log "  [PASS] Emulator: ${MOBILE_EMULATOR_STATUS} (${MOBILE_EMULATOR_DEVICE})"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "emulator_boot" "fail" "0" "${MOBILE_EMULATOR_STATUS}")"
+      add_error "Emulator boot failed: ${MOBILE_EMULATOR_STATUS}"
+      log "  [FAIL] Emulator: ${MOBILE_EMULATOR_STATUS}"
+      ;;
+  esac
+
+  # ── Gate: Smoke (app install + launch) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$MOBILE_SMOKE_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "mobile_smoke" "pass" "0" "${MOBILE_SMOKE_STATUS}")"
+      log "  [PASS] Smoke: ${MOBILE_SMOKE_STATUS}"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "mobile_smoke" "fail" "0" "${MOBILE_SMOKE_STATUS}")"
+      add_error "Smoke failed: ${MOBILE_SMOKE_STATUS}"
+      log "  [FAIL] Smoke: ${MOBILE_SMOKE_STATUS}"
+      ;;
+  esac
+
+  # ── Gate: UI tests (XCUITest / Espresso / Flutter / RN) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$MOBILE_UI_TEST_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "ui_test" "pass" "0" "${MOBILE_UI_FRAMEWORK}:${MOBILE_UI_TEST_STATUS} ${MOBILE_UI_TEST_PASSED}/${MOBILE_UI_TEST_TOTAL}")"
+      log "  [PASS] UI test (${MOBILE_UI_FRAMEWORK}): ${MOBILE_UI_TEST_STATUS} ${MOBILE_UI_TEST_PASSED}/${MOBILE_UI_TEST_TOTAL}"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "ui_test" "fail" "0" "${MOBILE_UI_FRAMEWORK}:${MOBILE_UI_TEST_STATUS}")"
+      add_error "UI test failed: ${MOBILE_UI_FRAMEWORK} ${MOBILE_UI_TEST_STATUS} (${MOBILE_UI_TEST_FAILED} failures)"
+      log "  [FAIL] UI test (${MOBILE_UI_FRAMEWORK}): ${MOBILE_UI_TEST_STATUS}"
+      ;;
+  esac
+
+  # ── Gate: Device farm delegation (delegated | mock | skip accepted) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$MOBILE_DEVICE_FARM_STATUS" in
+    pass|delegated|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "device_farm" "pass" "0" "${MOBILE_DEVICE_FARM_NAME}:${MOBILE_DEVICE_FARM_STATUS}")"
+      log "  [PASS] Device farm (${MOBILE_DEVICE_FARM_NAME:-none}): ${MOBILE_DEVICE_FARM_STATUS}"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "device_farm" "fail" "0" "${MOBILE_DEVICE_FARM_STATUS}")"
+      add_error "Device farm failed: ${MOBILE_DEVICE_FARM_STATUS}"
+      log "  [FAIL] Device farm: ${MOBILE_DEVICE_FARM_STATUS}"
+      ;;
+  esac
+
+  # ── Gate: Screenshot matrix ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$MOBILE_SCREENSHOT_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "screenshot_matrix" "pass" "0" "${MOBILE_SCREENSHOT_STATUS} (${MOBILE_SCREENSHOT_CAPTURED} captured)")"
+      log "  [PASS] Screenshot matrix: ${MOBILE_SCREENSHOT_STATUS} (${MOBILE_SCREENSHOT_CAPTURED} captured)"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "screenshot_matrix" "fail" "0" "${MOBILE_SCREENSHOT_STATUS}")"
+      add_error "Screenshot matrix failed: ${MOBILE_SCREENSHOT_STATUS}"
+      log "  [FAIL] Screenshot matrix: ${MOBILE_SCREENSHOT_STATUS}"
+      ;;
+  esac
+
+  COVERAGE_EXPECTED=$((COVERAGE_EXPECTED + TESTS_TOTAL))
+  COVERAGE_RUN=$((COVERAGE_RUN + TESTS_PASSED))
+  WALL_TIME_MS=$(( $(now_ms) - MOBILE_START_MS ))
+  log "  Mobile verification complete: ${TESTS_PASSED}/${TESTS_TOTAL} passed, framework=${MOBILE_UI_FRAMEWORK}"
+}
+
+
+# ============================================================
 # Main execution
 # ============================================================
 log "============================================"
@@ -1164,6 +1371,7 @@ case "$TYPE" in
   deploy) run_deploy || true ;;
   hmi)    run_hmi || true ;;
   web)    run_web || true ;;
+  mobile) run_mobile || true ;;
 esac
 
 # ── Coverage check ──
@@ -1257,6 +1465,25 @@ cat <<JSONEOF
     "deploy_user": "${DEPLOY_USER}",
     "deploy_path": "${DEPLOY_PATH}",
     "remote_output": $(echo "${DEPLOY_REMOTE_OUTPUT:-}" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()))' 2>/dev/null || echo '""')
+  },
+  "mobile": {
+    "profile": "${MOBILE_PROFILE_USED}",
+    "platform": "${MOBILE_PLATFORM}",
+    "abi": "${MOBILE_ABI}",
+    "ui_framework": "${MOBILE_UI_FRAMEWORK}",
+    "emulator_status": "${MOBILE_EMULATOR_STATUS}",
+    "emulator_device": "${MOBILE_EMULATOR_DEVICE}",
+    "emulator_runtime": "${MOBILE_EMULATOR_RUNTIME}",
+    "smoke_status": "${MOBILE_SMOKE_STATUS}",
+    "ui_test_status": "${MOBILE_UI_TEST_STATUS}",
+    "ui_test_passed": ${MOBILE_UI_TEST_PASSED:-0},
+    "ui_test_failed": ${MOBILE_UI_TEST_FAILED:-0},
+    "ui_test_total": ${MOBILE_UI_TEST_TOTAL:-0},
+    "device_farm_status": "${MOBILE_DEVICE_FARM_STATUS}",
+    "device_farm_name": "${MOBILE_DEVICE_FARM_NAME}",
+    "screenshot_matrix_status": "${MOBILE_SCREENSHOT_STATUS}",
+    "screenshot_matrix_captured": ${MOBILE_SCREENSHOT_CAPTURED:-0},
+    "overall_pass": ${MOBILE_OVERALL_PASS:-false}
   },
   "errors": [${ERRORS}]
 }

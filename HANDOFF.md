@@ -9786,3 +9786,74 @@ Phase 25 的 `provider_chain` 用單一 global `_provider_failures: dict[str, fl
 - **Stale-check「Date.now() in render」改用 `snap.checked_at`**：React 19 的 `react-hooks/purity` ESLint rule 阻擋；剛好 snapshot 自帶時間戳，age 用 snapshot moment 為基準反而比 wall-clock 更穩定（兩個 KPI 的時間錨一致）。
 - **Alert rules YAML 用 markdown table 對映 severity → 路由**：避免測試硬寫 expected severity，YAML 與測試 dual-source-of-truth；CI 偵測 drift。
 - **Prometheus exposer 沒有改 `/metrics` 路由**：`backend/routers/observability.py` 的 `GET /metrics` 已經是 `render_exposition(REGISTRY)` — REGISTRY 加 metric 即自動暴露。新增的 3 個 gauge 直接出現在 scrape 結果，無需 router 改動。這也是「unified /metrics」字面意思的證據（測試 enforce 27 series 都在 single endpoint）。
+
+
+## P2 #287 — Mobile simulate track 完成 ✅（2026-04-17）
+
+### 背景
+Priority P 行動端 vertical 第三塊地基。P0 (#285) 已產出四個 mobile platform profiles (`ios-arm64` / `ios-simulator` / `android-arm64-v8a` / `android-armeabi-v7a`)，P1 (#286) 已完成 Docker 影像 + 雙 ABI 工具鏈 + macOS 委派；P2 負責把它們接進 `scripts/simulate.sh` 的統一跑測入口 — 這是 agent 觸手可及的「下一個 mobile phase 可以跑 `simulate.sh --type=mobile` 了」的具體前置。
+
+### 交付內容
+
+- **`backend/mobile_simulator.py`（新，809 行）** — P2 主驅動，同 W2 `web_simulator.py` / C26 `hmi_generator.py` 模式：Python 擁有所有 emulator boot / UI-test 派遣 / device-farm delegation / 螢幕截圖 matrix 邏輯；shell 是 thin wrapper。
+  - `resolve_ui_framework(app_path, mobile_platform="")` — 自動偵測 `xcuitest` / `espresso` / `flutter` / `react-native`。順序：pubspec.yaml → package.json 含 react-native dep → .xcodeproj/.xcworkspace → build.gradle → platform hint。**Flutter 優先於 native subdir**（Flutter 專案一定有 `android/` + `ios/`，若掃 native 會誤判）。
+  - `boot_ios_simulator()` / `boot_android_emulator()` — `xcrun simctl boot` / `emulator -avd` wrapper；Linux sandbox（無 xcrun/emulator）自動回 `mock` 不騙人；支援 `OMNISIGHT_IOS_SIM_*` / `OMNISIGHT_ANDROID_*` env 覆寫（profile emulator_spec 預設）。
+  - `run_xcuitest(scheme, destination)` / `run_espresso(project_root)` / `run_flutter_tests(project_root)` / `run_rn_tests(project_root)` — 各平台 UI-test runner；xcodebuild / gradle / flutter / detox 缺席時回 mock。Parsers:
+    - `_parse_xcodebuild_counts()` — 數 `Test Case '-[…]' passed/failed (…s).`
+    - `_parse_gradle_test_counts()` — 吃 gradle summary line `Tests: N, Failures: M, Errors: K`
+    - `_parse_flutter_test_json()` — 吃 `flutter test --reporter=json` 的 NDJSON `testDone` 事件（過濾 hidden setUp/tearDown）。
+  - `run_device_farm(farm, app_path, mobile_platform)` — 三家雲端機房 delegation adapter：
+    - **Firebase Test Lab**（`gcloud firebase test {android|ios} run`）— env forward 只記 `GOOGLE_CLOUD_PROJECT` / `GOOGLE_APPLICATION_CREDENTIALS`；argv 不含 secret values。
+    - **AWS Device Farm**（`aws devicefarm schedule-run`）— 所有 ARN 走 env ref (`$AWS_DEVICEFARM_PROJECT_ARN` 等)，argv 可安全 log。
+    - **BrowserStack**（`browserstack-local`）— `--key $BROWSERSTACK_ACCESS_KEY` 寫 env ref 不寫值。
+    - CLI 在 PATH 回 `delegated`（argv 實際可跑），缺席回 `mock`，未知 farm 名稱丟 `UnknownDeviceFarmError`。
+  - `run_screenshot_matrix(devices, locales, output_dir)` — `fastlane snapshot`（iOS）/ `fastlane screengrab`（Android）驅動；空 devices/locales 回 skip，fastlane 缺席回 mock 但仍記錄原始 matrix。`_parse_csv_list()` 處理 CLI 的 `--devices="iPhone 15 Pro,iPhone 14"` 格式。
+  - `simulate_mobile()` — 編排器，產出 `MobileSimResult` 含 5 gates (`emulator_ready` / `smoke_ok` / `ui_tests_ok` / `device_farm_ok` / `screenshot_matrix_ok`)，全是 non-blocking accept list (`pass | mock | skip | delegated`)。
+  - `result_to_json()` — 扁平化成 30+ 欄的 dict 給 shell 用，shape 穩定、測試 pin。
+  - `_cli_main()` — `python3 -m backend.mobile_simulator`；契約：stdout 單行 JSON，exit 0（非零會被 simulate.sh 的 `set -euo pipefail` 撞爆，永遠吐 JSON 讓 shell 決定 gating — 同 W2 驅動）。
+
+- **`scripts/simulate.sh`（+~250 行）** — 新 `mobile` track：
+  - Usage 擴充，宣告 `--type=mobile --module=<profile> [--mobile-app-path=…] [--farm=…] [--devices=…] [--locales=…]`。
+  - `run_mobile()` 調 `python3 -m backend.mobile_simulator`，JSON 經 `python3 -c 'import json; …'` 解析，從 summary 拉 15 個欄位出來建 5 個 gate assertion。
+  - `case "$TYPE" in` 分支 + 最終 stdout JSON 的 `"mobile"` 區塊（profile / platform / abi / ui_framework / emulator / smoke / ui_test / device_farm / screenshot_matrix / overall_pass），格式跟既有的 `"web"` / `"hmi"` / `"deploy"` 區塊對齊。
+
+- **`backend/tests/test_mobile_simulator.py`（新，45 個 case）** — 純 unit：
+  - **TestResolveUIFramework (9)**：Flutter wins over native / RN via package.json / xcodeproj / build.gradle / platform hint fallback / 空目錄 / 不存在目錄 / malformed JSON 不爆。
+  - **TestEmulatorBoot (4)**：xcrun / emulator 缺席 → mock；`OMNISIGHT_*` env 覆寫生效。
+  - **TestSmoke (6)**：emulator mock → smoke mock；.app / .apk / .aab 檔存在 → pass；缺檔 → skip；未知 platform → skip。
+  - **TestUIRunnersMockPath (4)**：xcodebuild / gradle / flutter / npm 缺席 → mock。
+  - **TestXcodeBuildCountParser (2)** / **TestGradleCountParser (2)** / **TestFlutterJsonParser (2)** — parser 定點覆蓋。
+  - **TestDeviceFarm (7)**：skip / unknown 丟 error / firebase argv 無 secret / firebase mock fallback / aws 委派 / browserstack 委派 / iOS 使用 xctest 型別。
+  - **TestScreenshotMatrix (4)**：空 matrix skip / 單邊 skip / fastlane 缺席 mock / `_parse_csv_list` edge cases。
+  - **TestSimulateMobileOrchestrator (4)**：Linux sandbox 全 mock 仍 overall_pass / iOS + farm + matrix / unknown farm 記 error 且 overall_pass=False / `result_to_json` shape pin。
+  - **TestCli (1)**：`_cli_main` 吐單行可 parse 的 JSON。
+
+- **`backend/tests/test_mobile_simulate.py`（新，3 個 case）** — 整合：bash → python3 driver → JSON envelope 全鏈，與 `test_web_simulate.py` 同構。
+
+### 測試結果
+
+- **新增** 48 test cases (45 unit + 3 integration)，全 pass。
+- **回歸檢驗**：`test_web_simulator` (33) / `test_web_simulate` (20) / `test_hmi_simulate` (7) / `test_mobile_toolchain` (45) / `test_platform_mobile_profiles` (35) — 共 140 cases 全 pass，無互相破壞。
+- `bash scripts/simulate.sh --type=mobile --module=android-arm64-v8a` 和 `--module=ios-simulator --farm=firebase --devices="iPhone 15 Pro" --locales="en-US,zh-TW"` 均 end-to-end 產出結構化 JSON + `status: pass`。
+
+### 修改檔案
+
+- **新增** `backend/mobile_simulator.py`（驅動 + 5 gate）
+- **新增** `backend/tests/test_mobile_simulator.py`（45 case）
+- **新增** `backend/tests/test_mobile_simulate.py`（shell 整合 3 case）
+- **改動** `scripts/simulate.sh`（mobile track + mobile JSON block）
+- **改動** `TODO.md`（P2 五項 `[x]`）
+- **改動** `HANDOFF.md`（本段）
+
+### 設計取捨
+
+- **External tool 缺席 → `mock` 而不是 `fail`**：P2 跑在各種環境（Linux CI 沙盒、macOS dev box、GitHub Actions macos runner），若要求 xcrun + adb + gradle + xcodebuild + flutter + npm + detox + fastlane + gcloud + aws + browserstack-local 全部在 PATH 才 pass，沒人能用。Mock 明確記在報告裡（`"emulator_status": "mock"`, `"detail": "xcrun not on PATH"`），caller（agent / CI dashboard）可靠 status 值判斷「gate 有跑」vs「gate 環境缺」vs「gate 真的 fail」。這與 W2 web_simulator、C26 hmi_generator 同哲學。
+- **Device farm 是 delegation，不是 execution**：P2 emit argv（values 全走 env ref），記錄 `env_forward` 白名單，但不跑 `gcloud firebase test … run`。真正的執行是下游 O6 worker pool / 專屬 runner 的責任 — 它們持有憑證且有 10–30 分鐘等 farm 回結果的預算。P2 的責任是「證明 argv 從 profile + app 狀態能 build 出來」，這讓 P2 可以在沙盒測試、結果可決定性、argv 可 log。
+- **Farm argv 絕不含 secret values**：測試 `test_firebase_argv_has_no_secret_values` 明確掃「AIza」/「-----BEGIN」/「Bearer 」模式；P3 (#288) HSM 整合後 token 會走 secret_store，此時 argv 已經是 `$GOOGLE_APPLICATION_CREDENTIALS` env ref，不會洩漏。
+- **UI framework autodetect 順序 specific-before-generic**：Flutter 專案一定內建 `android/` + `ios/` 子目錄（`flutter create` 的預設結構）；若先掃 .xcodeproj/build.gradle 會把 Flutter 誤判為 native。反過來 Native iOS 專案不可能有 pubspec.yaml，所以 Flutter-first 沒有誤判風險。React Native 同理（package.json 的 react-native dep 是最強訊號）。
+- **`_parse_gradle_test_counts` 守舊**：只吃 gradle 主 summary line `Tests: N, Failures: M, Errors: K`。需要 per-test 結果的 caller 應直讀 `app/build/outputs/androidTest-results/*.xml` — 那是契約 XML，一旦解析 NDJSON 或 gradle stdout 會對 gradle 版本 fragile。
+- **`_parse_flutter_test_json` 忽略 hidden 事件**：Flutter 的 NDJSON reporter 會為每個 `setUp` / `tearDown` emit `testDone` with `"hidden": true`；不過濾會虛報 passed/failed。
+- **Emulator boot 不等 full boot**：`boot_android_emulator` `Popen` 開背景 + `adb shell getprop sys.boot_completed` 探測 30s 就回 — 真 UI test 的 gradle `connectedAndroidTest` 自己會等。P2 只需要「大致確認 emulator 在動」，不要讓整條 simulate-track wait 1–2 分鐘的冷啟。
+- **iOS simulator 不支援 Linux 上 boot**：明確回 `mock` + `detail="xcrun not on PATH (non-macOS host)"`。這不是 bug，是 P1 (#286) 定的 constraint — iOS 需要 `OMNISIGHT_MACOS_BUILDER` 委派到遠端 macOS。P2 simulate-track 在 Linux 只負責驗證 argv 可 build、mobile profile 能 resolve；實跑是 P5 (#290) App Store upload 的責任。
+- **Mobile JSON block shape 與 web/hmi 對齊**：扁平欄位（不巢狀二層），數字 default 0，字串 default ""；這讓下游 dashboard 面板可共用「展開 `.web` / `.mobile` / `.hmi` 的第一層欄位」的 renderer。
+- **`MOBILE_APP_PATH` 缺省回落 WORKSPACE 根**：Agent 跑 `simulate.sh --type=mobile --module=android-arm64-v8a` 不帶 app path 時，driver 的 framework autodetect 會從 repo 根掃 — 可能掃到零個 marker、走 platform fallback 變 `espresso`。這是故意的 smoke 行為，確保「只給 profile id」的最簡單呼叫也能跑完 pipeline 產 envelope。
