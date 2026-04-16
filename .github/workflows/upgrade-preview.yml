@@ -1,0 +1,224 @@
+name: Nightly Upgrade Preview
+
+# N5 — forecast what the upcoming weekend Renovate batch will break.
+#
+# Every night the workflow:
+#   1. installs the COMMITTED lockfiles (baseline) so `pip list --outdated`
+#      and `pnpm outdated` report the gap from production
+#   2. trial-upgrades the lockfiles in a scratch dir via
+#      `pip-compile --upgrade` and `pnpm update --no-frozen-lockfile`,
+#      capturing the exact diff that Renovate would propose
+#   3. installs the upgraded deps in the same fresh runner image
+#      (each GitHub runner is itself an isolated container — N5 spec
+#      requires "isolated container" and the runner satisfies it)
+#   4. runs the full backend pytest suite + the chromium Playwright suite
+#      against those upgraded deps, capturing logs as artifacts
+#   5. closes any prior open `dependency-preview` issue and opens a
+#      fresh one carrying outdated lists, diffs, suspected-breaking
+#      callouts, and tail logs so that on Saturday morning the operator
+#      sees "this is what's about to land" before merging Renovate PRs
+#
+# This workflow does NOT mutate any committed file. It does NOT auto-merge
+# anything. The only side effect is one open issue at a time.
+
+on:
+  schedule:
+    # 17:00 UTC = 01:00 Asia/Taipei (next day). Renovate is scheduled
+    # `every weekend` (N2), so a Friday-night run lands the issue
+    # ~24h before the bot opens its weekend PRs.
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+    # Manual trigger for ad-hoc previews when triaging a planned bump.
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  # Only one preview job at a time — no value in stacking.
+  group: upgrade-preview
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OMNISIGHT_DEBUG: "true"
+      WORK_DIR: ${{ github.workspace }}/_upgrade_preview
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+
+      - name: prepare work dir
+        run: mkdir -p "$WORK_DIR"
+
+      - name: install pip-tools (locked version)
+        run: pip install "pip-tools==7.5.3"
+
+      # ── Baseline install (matches production lockfiles) ─────────────
+      - name: install committed python deps (baseline)
+        run: pip install --require-hashes -r backend/requirements.txt
+
+      - name: install committed js deps (baseline)
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      # ── Outdated reports against the baseline ───────────────────────
+      - name: collect pip outdated
+        # `pip list --outdated` exits 0 even with outdated packages —
+        # the `|| true` is a safety net for future pip behaviour drift.
+        run: pip list --outdated --format=json > "$WORK_DIR/pip-outdated.json" || true
+
+      - name: collect pnpm outdated
+        # `pnpm outdated` exits 1 when anything is outdated, which is
+        # the normal state of the world — swallow that exit code.
+        run: pnpm outdated --json --long > "$WORK_DIR/pnpm-outdated.json" || true
+
+      # ── Trial pip-compile --upgrade ────────────────────────────────
+      - name: trial pip-compile --upgrade
+        id: pip-trial
+        continue-on-error: true
+        run: |
+          set -eu
+          cp backend/requirements.txt "$WORK_DIR/req.committed.txt"
+          # Use the SAME flags as `lockfile-drift` (N1) so the diff is
+          # apples-to-apples with the file Renovate would commit.
+          pip-compile --quiet --upgrade --generate-hashes \
+              --output-file="$WORK_DIR/req.upgraded.txt" \
+              backend/requirements.in
+          # diff exits 1 when there are differences; that's expected.
+          diff -u "$WORK_DIR/req.committed.txt" "$WORK_DIR/req.upgraded.txt" \
+              > "$WORK_DIR/pip.diff" || true
+
+      # ── Trial pnpm update ──────────────────────────────────────────
+      - name: trial pnpm update
+        id: pnpm-trial
+        continue-on-error: true
+        run: |
+          set -eu
+          cp pnpm-lock.yaml "$WORK_DIR/pnpm-lock.committed.yaml"
+          pnpm update --no-frozen-lockfile --prefer-offline || true
+          diff -u "$WORK_DIR/pnpm-lock.committed.yaml" pnpm-lock.yaml \
+              > "$WORK_DIR/pnpm.diff" || true
+
+      # ── Install the upgraded deps and run the full suite ───────────
+      - name: install upgraded python deps
+        id: install-py
+        continue-on-error: true
+        run: |
+          set -eu
+          # The upgraded file is hash-locked because pip-compile was
+          # called with --generate-hashes; --require-hashes verifies it.
+          pip install --require-hashes -r "$WORK_DIR/req.upgraded.txt"
+
+      - name: install upgraded js deps
+        id: install-js
+        continue-on-error: true
+        run: |
+          set -eu
+          # Lockfile was already mutated by the trial step above; just
+          # let pnpm reconcile node_modules to it.
+          pnpm install --no-frozen-lockfile --prefer-offline
+
+      - name: pytest backend (upgraded deps)
+        id: pytest
+        continue-on-error: true
+        if: steps.install-py.outcome == 'success'
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/upgrade-preview.db
+        run: |
+          set -o pipefail
+          rm -f /tmp/upgrade-preview.db
+          cd backend
+          # No coverage thresholds in preview mode — we only care about
+          # pass/fail. The CI `backend-tests` matrix is the gate.
+          pytest tests/ -q --tb=line --no-header \
+              2>&1 | tee "$WORK_DIR/pytest.log"
+
+      - name: install playwright chromium (upgraded deps)
+        id: pw-install
+        continue-on-error: true
+        if: steps.install-js.outcome == 'success'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: playwright chromium (upgraded deps)
+        id: playwright
+        continue-on-error: true
+        if: steps.pw-install.outcome == 'success'
+        run: |
+          set -o pipefail
+          pnpm exec playwright test --project=chromium --reporter=line \
+              2>&1 | tee "$WORK_DIR/playwright.log"
+
+      # ── Restore mutated files so the artifact upload doesn't include
+      #    a "we changed your lockfile" surprise. The runner is ephemeral
+      #    so this is belt-and-suspenders, but checkout state is what the
+      #    artifact code uses for relative paths in the diffs.
+      - name: restore committed lockfiles
+        if: always()
+        run: |
+          set -eu
+          cp "$WORK_DIR/pnpm-lock.committed.yaml" pnpm-lock.yaml || true
+
+      # ── Render the issue body ──────────────────────────────────────
+      - name: render issue body
+        if: always()
+        id: render
+        run: |
+          python scripts/upgrade_preview.py \
+              --pip-outdated "$WORK_DIR/pip-outdated.json" \
+              --pnpm-outdated "$WORK_DIR/pnpm-outdated.json" \
+              --pip-diff "$WORK_DIR/pip.diff" \
+              --pnpm-diff "$WORK_DIR/pnpm.diff" \
+              --pytest-log "$WORK_DIR/pytest.log" \
+              --playwright-log "$WORK_DIR/playwright.log" \
+              --pytest-status "${{ steps.pytest.outcome }}" \
+              --playwright-status "${{ steps.playwright.outcome }}" \
+              --pip-install-status "${{ steps.install-py.outcome }}" \
+              --pnpm-install-status "${{ steps.install-js.outcome }}" \
+              --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --out "$WORK_DIR/issue-body.md"
+
+      # ── Upload everything as a workflow artifact (full fidelity) ───
+      - name: upload preview artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-preview-${{ github.run_id }}
+          path: ${{ env.WORK_DIR }}
+          retention-days: 14
+
+      # ── Close the prior preview (single open issue at a time) ──────
+      - name: close prior preview issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          numbers="$(gh issue list --label dependency-preview --state open \
+              --json number -q '.[].number' || true)"
+          for n in $numbers; do
+            gh issue close "$n" --reason "not planned" \
+                --comment "Superseded by run #${{ github.run_id }}." || true
+          done
+
+      # ── Open the new preview issue ─────────────────────────────────
+      - name: open preview issue
+        if: always() && steps.render.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          DATE="$(date -u +%Y-%m-%d)"
+          gh issue create \
+              --title "Nightly Dependency Upgrade Preview — $DATE" \
+              --label dependency-preview \
+              --body-file "$WORK_DIR/issue-body.md"

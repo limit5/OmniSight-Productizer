@@ -322,3 +322,126 @@ def test_renovate_policy_doc_exists() -> None:
     # policy doesn't silently lose its teeth via doc rot.
     for phrase in ("auto-merge", "blue-green", "every weekend", "vulnerability"):
         assert phrase.lower() in body.lower(), f"renovate_policy.md missing key term: {phrase!r}"
+
+
+# ---------------------------------------------------------------------------
+# N5 — Nightly Upgrade Preview guards
+# ---------------------------------------------------------------------------
+#
+# These guards lock in the *shape* of the N5 wiring (workflow file,
+# script, doc) so a careless edit can't quietly disarm the early-warning
+# system. The behaviour of the script itself is covered in
+# `test_upgrade_preview.py`; this section only checks file presence,
+# trigger, label, and policy-doc invariants.
+
+N5_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "upgrade-preview.yml"
+N5_SCRIPT = REPO_ROOT / "scripts" / "upgrade_preview.py"
+N5_DOC = REPO_ROOT / "docs" / "ops" / "upgrade_preview.md"
+
+
+@pytest.fixture(scope="module")
+def upgrade_preview_workflow() -> str:
+    return N5_WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_n5_workflow_file_exists(upgrade_preview_workflow: str) -> None:
+    assert N5_WORKFLOW.is_file(), (
+        "N5 requires .github/workflows/upgrade-preview.yml to be checked in"
+    )
+    assert "Nightly Upgrade Preview" in upgrade_preview_workflow, (
+        "Workflow `name:` must read 'Nightly Upgrade Preview' so the "
+        "GH Actions UI surfaces it under that label"
+    )
+
+
+def test_n5_workflow_runs_on_cron(upgrade_preview_workflow: str) -> None:
+    # Must be cron-driven — the whole point is unattended nightly runs.
+    assert "schedule:" in upgrade_preview_workflow, (
+        "N5 workflow must declare a schedule trigger"
+    )
+    assert "cron:" in upgrade_preview_workflow, "N5 workflow must use a cron schedule"
+    # Manual trigger as well, for ad-hoc previews.
+    assert "workflow_dispatch:" in upgrade_preview_workflow, (
+        "N5 workflow must also expose workflow_dispatch for ad-hoc runs"
+    )
+
+
+def test_n5_workflow_has_issues_write_permission(upgrade_preview_workflow: str) -> None:
+    # Without `issues: write` the gh issue create call will 403 silently.
+    assert "issues: write" in upgrade_preview_workflow, (
+        "N5 workflow must request issues: write so it can post the "
+        "preview issue under the dependency-preview label"
+    )
+
+
+def test_n5_workflow_uses_dependency_preview_label(upgrade_preview_workflow: str) -> None:
+    assert "dependency-preview" in upgrade_preview_workflow, (
+        "N5 workflow must label the issue dependency-preview (the "
+        "label the operator triages off of every Monday)"
+    )
+
+
+def test_n5_workflow_calls_render_script(upgrade_preview_workflow: str) -> None:
+    assert "scripts/upgrade_preview.py" in upgrade_preview_workflow, (
+        "N5 workflow must invoke scripts/upgrade_preview.py to render "
+        "the issue body — it's the single source of truth for layout "
+        "and the breaking-bump heuristic"
+    )
+
+
+def test_n5_workflow_runs_pytest_and_playwright(upgrade_preview_workflow: str) -> None:
+    # The whole point of the preview is to test against UPGRADED deps.
+    assert "pytest" in upgrade_preview_workflow, (
+        "N5 workflow must run pytest against the upgraded backend deps"
+    )
+    assert "playwright" in upgrade_preview_workflow, (
+        "N5 workflow must run Playwright against the upgraded JS deps"
+    )
+
+
+def test_n5_workflow_does_not_force_push_or_commit(upgrade_preview_workflow: str) -> None:
+    # Preview is read-only on master. Catch a careless edit that turns
+    # the preview into a writer.
+    forbidden = ("git push", "git commit", "contents: write")
+    for needle in forbidden:
+        assert needle not in upgrade_preview_workflow, (
+            f"N5 workflow must not contain `{needle}` — preview is read-only"
+        )
+
+
+def test_n5_script_is_stdlib_only() -> None:
+    # If the script grows third-party imports we lose the "no extra
+    # pip install in the workflow" property. This is a coarse check —
+    # it just verifies none of the obvious offenders sneak in.
+    assert N5_SCRIPT.is_file(), "N5 requires scripts/upgrade_preview.py"
+    src = N5_SCRIPT.read_text(encoding="utf-8")
+    forbidden_imports = (
+        "import requests",
+        "import yaml",
+        "import httpx",
+        "from pydantic",
+        "import pytest",  # pytest is a runtime dep of the suite, not the script
+    )
+    for needle in forbidden_imports:
+        assert needle not in src, (
+            f"scripts/upgrade_preview.py must stay stdlib-only "
+            f"(found `{needle}`) — adding deps means the workflow has to "
+            "install them, which defeats the 'preview survives broken deps' "
+            "design"
+        )
+
+
+def test_n5_doc_exists() -> None:
+    assert N5_DOC.is_file(), "N5 requires docs/ops/upgrade_preview.md"
+    body = N5_DOC.read_text(encoding="utf-8")
+    # Doc rot guard — these terms encode the contract operators rely on.
+    for phrase in (
+        "dependency-preview",
+        "Renovate",
+        "Suspected breaking",
+        "workflow_dispatch",
+        "every weekend",
+    ):
+        assert phrase.lower() in body.lower(), (
+            f"docs/ops/upgrade_preview.md missing key term: {phrase!r}"
+        )

@@ -305,6 +305,12 @@ A CI gate (`llm-adapter-firewall` job, runs in parallel with `lint`) enforces th
 3. Run `pytest backend/tests/test_llm_adapter.py` — 50 tests cover all public symbols.
 4. If any test fails, the fix is isolated to `backend/llm_adapter.py`; no other file needs changes.
 
+### Nightly upgrade preview (N5)
+
+Every night at 01:00 Asia/Taipei a separate workflow ([`.github/workflows/upgrade-preview.yml`](.github/workflows/upgrade-preview.yml)) trial-upgrades the lockfiles in a fresh GitHub runner, installs the upgraded deps, runs the full backend pytest suite + Chromium Playwright suite against them, and posts a single open issue tagged `dependency-preview` with: outdated tables, suspected-breaking callouts, lockfile diffs (truncated), and the tail logs. Operators read the issue on Monday morning to decide whether to let the weekend Renovate batch land, pin a package, or coordinate a blue-green deploy. The preview never auto-merges and never mutates committed files — full SOP in [`docs/ops/upgrade_preview.md`](docs/ops/upgrade_preview.md).
+
+The "suspected breaking" classifier in [`scripts/upgrade_preview.py`](scripts/upgrade_preview.py) flags major bumps, 0.x minor bumps (pre-1.0 SemVer convention), and any change to a hand-curated watchlist of strategic packages (`langchain*`, `pydantic`, `next`, `react`, `@radix-ui/*`, `@ai-sdk/*`, `playwright`, `vitest`, …). The renderer is stdlib-only so it survives the very dep break it is trying to forecast.
+
 ## Theme
 
 The UI is deliberately **dark-only** — the "FUI" (fictional user interface)

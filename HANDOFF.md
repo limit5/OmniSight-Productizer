@@ -1,9 +1,61 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N4 — LangChain/LangGraph Adapter 防火牆層 (master)
+> 最後 commit：N5 — Nightly Upgrade-Preview CI (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N5 (complete) Nightly Upgrade-Preview CI（2026-04-16 完成）
+
+**背景**：N1 把 lockfile 鎖死、N2 把週末升級交給 Renovate 之後，留下一個觀測缺口：每次 CI 跑的是 *committed* 的 lockfile，所以 Renovate 週末 PR 開出來那一刻是專案第一次接觸新版本 dep；patch 直接 auto-merge 的 tier 更只會在合進 master 才被使用者測到。N5 在每天凌晨（01:00 Asia/Taipei）跑一個夜間 preview job：先收集 `pip list --outdated` + `pnpm outdated`、再 trial `pip-compile --upgrade` + `pnpm update`、把升級後的 lockfile 裝進同一個 fresh runner、跑完整 backend pytest + chromium Playwright；最後把 outdated 表、diff、log 尾、suspected-breaking 列表 POST 成一個 `dependency-preview` label 的 GitHub issue。週六早上 operator 看 issue 就知道「下一批 Renovate PR 會壞什麼」，有 24 小時的 buffer 可以 pin / hold / 安排 blue-green。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `.github/workflows/upgrade-preview.yml` | 新增 ~190 行 nightly workflow：`schedule: 0 17 * * *`（UTC = 01:00 Asia/Taipei）+ `workflow_dispatch`；`permissions: { contents: read, issues: write }`；`concurrency: upgrade-preview`（避免疊跑）；90 min 硬上限；GitHub runner 本身就是 isolated container（每次 fresh ubuntu-latest，符合 N5 spec 的「隔離 container」要求） | ✅ |
+| Workflow 內容 | (1) checkout (2) setup-python 3.12 + pnpm 9 + setup-node `.nvmrc` (3) 安裝 committed `requirements.txt` + `pnpm install --frozen-lockfile` 為 baseline (4) `pip list --outdated --format=json` + `pnpm outdated --json --long` 收 outdated (5) `pip-compile --quiet --upgrade --generate-hashes` 寫到 `_upgrade_preview/req.upgraded.txt` 並 diff (6) `pnpm update --no-frozen-lockfile` 後 diff `pnpm-lock.yaml` (7) `pip install --require-hashes -r req.upgraded.txt` (8) `pnpm install --no-frozen-lockfile` (9) `pytest tests/ -q --tb=line` 全跑 (10) `playwright install --with-deps chromium` + `playwright test --project=chromium` (11) `python scripts/upgrade_preview.py ...` 渲染 issue body (12) upload artifact `upgrade-preview-${run_id}` 14 天保留 (13) `gh issue list --label dependency-preview --state open` → 全部 close (14) `gh issue create --title "Nightly Dependency Upgrade Preview — $DATE" --label dependency-preview --body-file ...` | ✅ |
+| `continue-on-error` 策略 | trial pip-compile / trial pnpm / install-py / install-js / pytest / pw-install / playwright 七個 step 都標 `continue-on-error: true`，下游 step 用 `if: steps.<id>.outcome == 'success'` 串接 — 任何一段失敗 issue 仍會生成（`render` step 標 `if: always()`），summary 表用 `${{ steps.X.outcome }}` 直接餵進 `--*-status` 旗標 | ✅ |
+| 副作用防護 | preview 結束前 `cp _upgrade_preview/pnpm-lock.committed.yaml pnpm-lock.yaml` 還原（trial step mutate 過）；不寫任何 git commit / push；test gate `test_n5_workflow_does_not_force_push_or_commit` 用文字檢查 forbidden tokens (`git push` / `git commit` / `contents: write`) — 任何一次 PR 把 preview 改成 writer 立刻被擋 | ✅ |
+| `scripts/upgrade_preview.py` | 新增 ~330 行 stdlib-only 渲染腳本：parse `pip list --outdated --format=json` + `pnpm outdated --json` 兩個 JSON；分類 bump (`major` / `minor` / `patch` / `unknown`)；watchlist-aware「suspected breaking」判定（langchain*/langgraph/fastapi/pydantic/sqlalchemy/alembic + next/react/@radix-ui/@ai-sdk/ai/playwright/vitest/msw/openapi-typescript）；render markdown body（Summary / Suspected breaking / pip outdated / pnpm outdated / pip diff / pnpm diff / pytest tail / playwright tail）；issue body > 60 KiB 時自動拋棄 diff 段（artifact 仍含完整版） | ✅ |
+| Breaking 判斷規則 | (a) leading int 變了 (1.x → 2.x) → major + breaking；(b) 0.x 系列 minor 變了 (0.5.1 → 0.6.0) → SemVer pre-1.0 慣例視為 breaking；(c) 在 watchlist 上的套件，**任何**版本變動都標 breaking（強制人工掃過）；(d) 版本字串無法 parse → unknown + breaking（safer default） | ✅ |
+| Issue dedup | 每次 run 開始 `gh issue list --label dependency-preview --state open` 把先前所有 open issue close（reason=not planned + comment "Superseded by run #...") → 永遠只會有 1 個 open issue。避免 365 issues/year 噪音 | ✅ |
+| `docs/ops/upgrade_preview.md` | 新增 ~145 行 SOP：TL;DR / 每段 issue 內容說明 / breaking 規則 / Monday 三段式 triage workflow（看 Summary → 看 Suspected breaking → 三選一決策 safe/hold/coordinate）/ 為什麼存在（rationale，明說 N1+N2 的觀測缺口）/ N5 不做的事 / 取消方法（含 `gh workflow disable`）/ 與 N1/N2/N3/N4/N6 互動表 / artifact retention / bootstrap operator step | ✅ |
+| `backend/tests/test_upgrade_preview.py` | 新增 35 tests 分 5 個 TestClass：<br>• `TestClassifyBump` (13 parametrize) — major/minor/patch/0.x SemVer/leading 'v'/unparsable 都 round-trip 對<br>• `TestParsePipOutdated` (6) — empty/malformed/basic/缺欄位 drop/watchlist 升級 breaking/sort breaking 在前<br>• `TestParsePnpmOutdated` (5) — empty/top-level dict/`{packages:...}` envelope/用 latest 而非 wanted/bad 行 skip<br>• `TestRenderIssueBody` (7) — 空 report 結構、summary 表 emoji、breaking 列表、200 行 diff 截斷、80 行 log tail、run URL link、>60 KiB body 自動 drop diff<br>• `TestCli` (2) — subprocess 跑 script 寫入 tmp_path / 全 optional input 缺亦能渲染 | ✅ |
+| `backend/tests/test_dependency_governance.py` 擴充 | 新增 9 N5 guards：workflow 檔存在 / `Nightly Upgrade Preview` 為 name / `schedule:` + `cron:` + `workflow_dispatch:` / `issues: write` / `dependency-preview` label / 呼叫 `scripts/upgrade_preview.py` / 跑 `pytest` + `playwright` / 不含 `git push`/`git commit`/`contents: write` / 腳本 stdlib-only（拒絕 `requests`/`yaml`/`httpx`/`pydantic` import）/ doc 含 5 個關鍵詞（dependency-preview / Renovate / Suspected breaking / workflow_dispatch / every weekend） | ✅ |
+| 驗證 | `python3 -m pytest backend/tests/test_upgrade_preview.py backend/tests/test_dependency_governance.py backend/tests/test_llm_adapter.py backend/tests/test_openapi_contract.py -q` → **124/124 pass**（35 N5 + 35 governance N5+N4+N3+N2+N1 / 50 N4 / 4 N3）；`ruff check scripts/upgrade_preview.py backend/tests/test_upgrade_preview.py` → all checks passed；`python3 scripts/check_llm_adapter_firewall.py` → OK；`python3 scripts/dump_openapi.py --check` → up to date | ✅ |
+
+**設計決策**：
+1. **為什麼 cron 用 17:00 UTC**：換算 = 01:00 Asia/Taipei 隔天。Renovate 在 N2 設 `every weekend`（即 Sat-Sun），所以「週五夜間」preview 落在 Renovate 週六上午開 PR 的 ~24 小時前；operator 週一上班看 issue 不需要被夜間 push 通知打擾，但又有充分時間在週末 PR 真的合進來前 pin 或 hold。
+2. **為什麼 stdlib-only render script**：preview 的核心承諾是「即使 deps 升爆也要能 report」。如果 render script 自己 `import requests`，就會發生「Renovate 想升 `requests`，preview 安裝壞掉，render 同時掛掉，issue 不開」的 catch-22。stdlib-only 是 self-defense — `test_n5_script_is_stdlib_only` 用文字 grep 強制這條規則。
+3. **為什麼 watchlist 額外把「safe」bump 標 breaking**：純 SemVer 規則只會抓到 major + 0.x minor；但專案的 load-bearing 套件（next、react、@radix-ui、langchain）即使是 patch 也常常因為 peer-dep 鏈或內部 internal API 變動爆掉。Watchlist 是「即使規則說沒事，這些套件也要人眼掃過」的 escape hatch。要新增 strategic 套件直接編輯 `WATCHLIST_PIP` / `WATCHLIST_NPM` tuple。
+4. **為什麼用 `gh issue close` + `gh issue create` 而非 `edit`**：保留歷史 — 想看 3 週前的 preview 結果可以 `gh issue list --label dependency-preview --state closed`，而不是 issue 變成單一 thread comment 互蓋。一個 open issue 是當前 forecast，已關 issue 是歷史紀錄。
+5. **為什麼 issue body 有 60 KiB cap + 自動 drop diff**：GitHub issue body 硬上限 65 536 bytes。pip + pnpm 的 diff 可以輕易超過。設計上「prose + summary + breaking 列表 + 表格 + log tail」是 must-have，diff 是 nice-to-have（artifact 內有完整版），所以 over-budget 時優先犧牲 diff。
+6. **為什麼 trial step 之間互相獨立 `continue-on-error`**：如果 `pip-compile --upgrade` 失敗（譬如 `requirements.in` 有衝突 spec），preview 仍應該 report「pnpm 那邊的試升 + 結果」。每個 step 自己 outcome 直接餵進 summary 表的 emoji，operator 一眼看出哪一段壞了。
+7. **為什麼 Playwright 只跑 chromium**：CI 主流程的 `frontend-e2e` 已經是 firefox+webkit advisory + chromium hard gate；preview 不需要把那 25 分鐘 ×3 都重跑。chromium 是 dev/prod traffic 大宗，足夠 forecast 「絕大多數使用者會不會壞」。
+8. **為什麼 issue 不自動 ping 任何人**：preview 是 informational，不該成為 pager。operator 自主在週一進 GitHub issue 看 `label:dependency-preview`，零打擾。要 ping 的時候手動 `@mention`。
+9. **為什麼 90 min hard timeout**：memory 提示完整 pytest + Playwright 可達 60-180 min。90 min 是「絕大多數情況跑得完，極端情況超時但 issue 仍開（artifact 標 timeout 狀態）」的折衷。如果 superset 真的常常超時，下一輪可降 cron 頻率（隔日）或拆 backend / frontend 兩個 job 平行跑。
+
+**新增/修改檔案**：
+- `.github/workflows/upgrade-preview.yml` — 新增（~190 行）
+- `scripts/upgrade_preview.py` — 新增（~330 行 stdlib-only）
+- `backend/tests/test_upgrade_preview.py` — 新增（~245 行 / 35 tests）
+- `docs/ops/upgrade_preview.md` — 新增（~145 行 SOP）
+- `backend/tests/test_dependency_governance.py` — +9 guards（N5 sections at end）
+- `TODO.md` — N5 3 個 checkbox 標 `[x]`
+- `HANDOFF.md` — 本段
+
+**與前序 Phase 的互動**：
+- **N1（lockfile）**：preview 只在 `_upgrade_preview/` scratch dir 寫 trial lockfile，工作樹結束前 `cp` 還原 `pnpm-lock.yaml`；committed `requirements.txt` 從不被 preview 動到。`lockfile-drift` CI gate 對 preview 完全無感（preview workflow 是獨立的，不 trigger PR/push event）。
+- **N2（Renovate）**：preview 是 Renovate 的「上游觀測」，不取代 Renovate；issue body 直接連 `docs/ops/renovate_policy.md` 提醒 operator 用哪一條 tier rule 處理進來的 PR。
+- **N3（OpenAPI contract）**：preview 不重新跑 `dump_openapi.py` — backend dep 升級可能影響 schema，但那是 `openapi-contract` job 在每個 PR 上會抓的事，preview 不重複。
+- **N4（LangChain firewall）**：watchlist 包含 `langchain*` + `langgraph` — 即使 patch bump 也標 breaking 強制看一眼。adapter firewall 不影響 preview workflow（preview 不 import langchain）。
+
+**Risk 評估**：
+- ✅ **Low risk**：preview 是純讀工作流（mutate `pnpm-lock.yaml` 已還原），唯一持久 side effect 是一個 GitHub issue。`test_n5_workflow_does_not_force_push_or_commit` 是 regression guard。
+- ⚠️ **Known gotcha**：`gh issue create --label dependency-preview` 第一次跑會自動建 label 但無顏色／描述；operator 想要視覺辨識度可手動到 GitHub Issues → Labels 補。已在 `docs/ops/upgrade_preview.md` Bootstrap 章節明示。
+- ⚠️ **Known gotcha**：org 層級若關掉 "Allow GitHub Actions to create and approve PRs / issues"，`gh issue create` step 會 403 但 workflow 不會 fail（因為 `if: always()`）。Operator 需確認該 setting 開啟，已在 doc 列為 bootstrap step。
+- ✅ **Reversibility**：要關掉只需 `gh workflow disable "Nightly Upgrade Preview"`，無 data migration、無 lockfile mutation。
 
 ---
 
@@ -1360,7 +1412,11 @@
 
 **背景**：`docs/design/enterprise-multi-agent-event-driven-architecture.md`（2026-04-16 新增）提出把 OmniSight 從「單程序 LangGraph + SQLite」升級為「Orchestrator Gateway + 分散式 Message Queue + Stateless Worker Pool + Merger Agent」的企業級事件驅動架構。審計結果顯示 **~60% 的設計目標已由既有模組覆蓋**（EventBus / SSE / DLQ / event_log / LangGraph orchestrator / DAG router / WorkspaceManager git worktree / CODEOWNERS pre-merge / Jira+GitHub+GitLab webhook 雙向同步 / I10 Redis shared state），**剩下 40% 為真正新增能力**：CATC payload 形式化、Redis 分散式檔案路徑互斥鎖、LLM 專職 Merger Agent、Stateless worker pool、JIRA 作為唯一 Intent Store。
 
-**審核政策更新（2026-04-16 用戶裁示）**：AI agent 允許**直接 commit** 並推送到 Gerrit code review server。最終合併進 main repo 採**雙簽 +2** 政策——Merger Agent 於「衝突解析 patchset」上可給 Code-Review: +2（scope 限「衝突解析正確性」，不涵蓋新邏輯審核），人工也必須給 +2，**兩者同時存在才放行 submit**。此政策藉由 Gerrit `project.config` 的 submit-rule 強制實現（O7），違反時 Gerrit 本身拒絕 submit。⚠️ **CLAUDE.md Safety Rule「AI reviewer max score is +1」需同步更新**，補一條例外條款：「Merger Agent 於衝突解析 patchset 上可給 +2；最終 submit 仍需人工 +2 雙簽」——否則實作即違反 L1 immutable rule，詳見 O6。
+**審核政策更新（2026-04-16 用戶裁示）**：AI agent 允許**直接 commit** 並推送到 Gerrit code review server。最終合併進 main repo 採**雙簽 +2** 政策——Merger Agent 於「衝突解析 patchset」上可給 Code-Review: +2（scope 限「衝突解析正確性」，不涵蓋新邏輯審核），人工也必須給 +2，**兩者同時存在才放行 submit**。此政策藉由 Gerrit `project.config` 的 submit-rule 強制實現（O7），違反時 Gerrit 本身拒絕 submit。
+
+🔒 **人工 +2 強制最終放行（2026-04-16 用戶裁示補強）**：**不論有多少個 AI agent（Merger Agent、lint-bot、security-bot、未來新增的任何 AI reviewer）投 Code-Review: +2，最終一律必須有人工 +2 才能放行 submit 到最終 git repo。任何 AI agent 組合（Nx AI +2 with zero human +2）都不得自行 submit**。實作上 Gerrit 建 `non-ai-reviewer`（人類專屬）與 `ai-reviewer-bots`（所有 bot）兩個 group，submit-rule 以 group membership 判斷而非個別帳號——未來新增 AI reviewer 不需改 rule，人工 +2 永遠是 hard gate。此規則為 immutable baseline。
+
+⚠️ **CLAUDE.md Safety Rule「AI reviewer max score is +1」需同步更新**，補一條例外條款：「Merger Agent 於衝突解析 patchset 上可給 +2；最終 submit 仍需人工 +2 雙簽，任何 AI 組合無人工皆不得放行」——否則實作即違反 L1 immutable rule，詳見 O6。
 
 **評估摘要**：
 
