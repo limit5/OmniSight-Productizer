@@ -1,9 +1,51 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：C26 — HMI embedded web UI framework + 129 tests + simulate.sh `hmi` track (master)
+> 最後 commit：M5 — Prewarm Pool 多租戶安全 — per-tenant bucketing + /tmp cleanup (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## M5 (complete) Prewarm Pool 多租戶安全（2026-04-16 完成）
+
+**背景**：M1-M4 已把資源硬隔離（cgroup CPU/mem、disk quota、LLM circuit、per-tenant metrics）做到 SaaS 級邊界，但 Phase 67-C 的 speculative 容器 pre-warm 池還是 **single global dict**（`_prewarmed: dict[str, PrewarmSlot]`）——任一 tenant 預熱的容器，其 `/tmp` 有前一個 workspace mount 殘留風險，且理論上別 tenant consume 也拿得到（雖然現行 opt-in 旗標預設關）。M5 在資源消耗預估只有 0.25 day 的範圍內補齊這個隔離層——三檔 policy（`disabled` / `shared` / `per_tenant`，預設 `per_tenant`）加 per-tenant bucket 加 consume-time `/tmp` 強制清空。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| Config `prewarm_policy` | `backend/config.py` `Settings.prewarm_policy: str = "per_tenant"`；env `OMNISIGHT_PREWARM_POLICY`；白名單 `disabled` / `shared` / `per_tenant`；`validate_startup_config` strict 模式下拒絕未知值（退回 per_tenant 並警告）、`shared` 模式發 warning（非 SaaS-safe）| ✅ 完成 |
+| Registry refactor | `_prewarmed: dict[str, PrewarmSlot]` → `_prewarmed_by_tenant: dict[str, dict[str, PrewarmSlot]]`；`_bucket_key()` 根據 policy 映射：`shared`→`_shared`、`per_tenant`→tenant_id（None 退 `t-default`）| ✅ 完成 |
+| `per_tenant` 分桶 + 隔離 | `prewarm_for(dag, ws, *, tenant_id=...)` 落到該 tenant bucket；`consume(task_id, *, tenant_id=...)` 只從對應 bucket pop，A 永遠拿不到 B 的 slot；agent_id 掺入 `hash(dag_id+tenant)` 避免 `_containers` dict key 衝突 | ✅ 完成 |
+| `disabled` 模式 | `prewarm_for` / `consume` / `_prewarm_enabled()` 均 short-circuit；`OMNISIGHT_PREWARM_ENABLED=true` 且 `policy=disabled` 時——後者 wins（policy 是更強的 intent 宣告）| ✅ 完成 |
+| Launch 前 `/tmp` 強制清空 | `consume()` 無論 hit/miss/shared/per_tenant 都呼叫 `tenant_quota.cleanup_tenant_tmp(slot.tenant_id or requested_tid)`；cleanup 失敗吞掉 exception、仍回傳 slot（不讓 cleanup blip 把有效 pre-warm 作廢）| ✅ 完成 |
+| Router 整合 | `backend/routers/dag.py` `_prewarm_in_background` / `_cancel_prewarm` 現在 resolve `db_context.current_tenant_id()` → 傳 `tenant_id=` kw；`cancel_all(tenant_id=...)` scope 到該 tenant bucket（跨 tenant mutation 不會誤殺別人）| ✅ 完成 |
+| Starter signature shim | `_call_starter()` 用 `inspect.signature` 偵測 starter 是否接 `tenant_id` kw；新 production `start_container` 有、舊測試 2-arg starter 沒有——shim 自動回退 positional call，保留 Phase 67-C 既有測試 (22 項) 全綠 | ✅ 完成 |
+| Slot metadata | `PrewarmSlot.tenant_id` 新 field；`snapshot_by_tenant()` 回傳 `{tenant_id: {task_id: agent_id}}` 供 admin debug；`snapshot()` flat view 保留相容 | ✅ 完成 |
+| 測試（23 項）| `test_prewarm_multi_tenant.py`：default/whitelist/invalid/case-insensitive policy、validate_startup_config 警告、per_tenant 分桶、A ≠ B consume（核心 acceptance）、cancel_all scoped、shared 單桶 + 跨 tenant consume、disabled short-circuit、/tmp cleanup on hit/miss/shared、cleanup 失敗仍回 slot、starter 2-arg fallback、starter kw passthrough、slot carries tenant | ✅ 23/23 pass |
+
+**新增/修改檔案**：
+- `backend/sandbox_prewarm.py` — **重寫 registry**：module-level dict → per-tenant nested dict；新增 `get_policy` / `_bucket_key` / `_call_starter` helper + `snapshot_by_tenant`；`PrewarmSlot` 加 `tenant_id` field；所有三個入口（prewarm_for / consume / cancel_all）加 `tenant_id=` kw + policy-aware 行為
+- `backend/config.py` — `Settings.prewarm_policy` field + `validate_startup_config` whitelist 檢查 + shared-mode warning
+- `backend/routers/dag.py` — `_prewarm_in_background` / `_cancel_prewarm` 從 request context 取 tenant；`_prewarm_enabled()` 加 `policy=="disabled"` short-circuit
+- `backend/tests/test_dag_prewarm_wire.py` — `fake_cancel` signature 擴 `tenant_id=None` kw（router 現在傳）
+- `backend/tests/test_prewarm_multi_tenant.py` — 新增 23 項
+
+**設計決策**：
+- **Policy 預設 `per_tenant` 而非 `shared`**：新部署一律 SaaS-safe；legacy single-tenant 自覺須改 `OMNISIGHT_PREWARM_POLICY=shared`——配上 startup warning 逼 operator 確認是否真的接受 cross-tenant risk。
+- **Agent_id 掺入 tenant hash**：兩個 tenant prewarm 同一 DAG（極端但合理情境——比如兩 tenant 測同一個 upstream reference DAG）不會撞 `backend/container._containers[agent_id]` 這個單 dict。寧可多花一次 `blake2b(4 bytes)` 也不要 silent data race。
+- **`/tmp` 清空 on consume 而非 on launch**：如果放在 `prewarm_for` 啟動時，速度優勢就沒了（本來就該被清），但 attack 面在 `consume` 這個從「speculative 無人」到「real workspace 掛入」的轉換點——那一刻是 residue 最可能被下一任拿到的窗口。清在 consume 最關鍵。
+- **Cleanup 失敗不 void hit**：/tmp 清空失敗（例如 FS 暫時 EROFS）相比於「錯過這次 300ms 加速」是小事；cleanup miss 頂多多一次 race risk（下次 stop_container 的 cleanup 還會跑），而 void hit 會惡化 p99 latency。兩害取輕。
+- **Cancel scope 到 tenant**：`_cancel_prewarm` 從 request context 拿 tenant 然後 `cancel_all(tenant_id=tid)`——否則 A 的 DAG mutate 會殺掉 B 正在用的 prewarm，既錯又變成 covert DoS 向量。`cancel_all(tenant_id=None)` 只保留給全域 shutdown / maintenance 使用。
+- **Starter signature shim 而非 breaking change**：直接把 `start_container` 的 `tenant_id` kw 加到 prewarm 的「starter」抽象會 break 既有 22 項測試的 fake starter。`inspect.signature` 偵測 param 存在才塞 kw——production 路徑全過、測試 0 改動。
+- **Shared mode 仍清 /tmp**：TODO 明文要求「即使 shared 模式亦然」——這是 defence-in-depth，確保 policy 被誤改也不會同時失去 bucketing 又失去 residue 清理。
+- **`disabled` 的「高安全客戶」定位**：把 300 ms 啟動延遲當成 audit 可接受的成本賣點——某些金融/政府類客戶會要「不可能有任何 speculative state」當 onboarding 條款。
+- **`_SHARED_BUCKET = "_shared"` 前綴 underscore**：真實 tenant id 從 `tenant_insert_value()` 流出來不會是底線開頭，避免碰撞。
+
+**驗收**：
+- 23/23 new + 22/22 legacy prewarm tests + 13/13 config tests + full M-track suite (173 pass) — regression-free
+- Validate_startup_config 在 `prewarm_policy=bogus` 下 emit `OMNISIGHT_PREWARM_POLICY=... invalid` warning；在 `shared` 下 emit `tenant-bucketed` warning
+- `consume` cross-tenant（A 預熱、B 試圖拿）→ 回 None；B 自己預熱 → 拿得到；兩者 `/tmp` 清空呼叫各自的 tenant id
+- `cancel_all(tenant_id="t-alpha")` 只殺 alpha bucket；beta bucket 原封不動
 
 ---
 
@@ -972,7 +1014,7 @@
 
 **背景**：C22 Barcode / C24 Machine Vision / D2 IPCam / D8 Router / D9 5G-GW / D17 Industrial-PC / D24 POS / D25 Kiosk 等工控與相機類設備，幾乎都會在 rootfs 裡內嵌整套 web admin UI（組態 / OTA / logs / 診斷）。現有 D4 SKILL-DISPLAY 只涵蓋 LVGL / Qt 的 native GUI，沒有 web stack 路線。2026-04 Anthropic Opus 4.7 伴隨發布的 AI Design Tool（NL → website / landing page / presentation）能力領域重疊但約束不符——其預期產出為 10-100 MB React bundle + CDN 依賴 + analytics，完全無法直接塞進 embedded flash partition（常見預算 1-5 MB、離線、凍結版 embedded Chromium/WebKit，版本常滯後 2-3 年）。C26 的定位：把「NL → web UI」的生成能力收斂到可進 rootfs 的約束下。
 
-**定位**：Layer A 基礎框架，與 C5 CORE-05 skill framework 平行；現已可供未來一支 D-pilot skill（例如對 D2 SKILL-IPCAM admin UI 或新建的 SKILL-HMI-WEBUI pilot）驗證完整性，比照 D1 SKILL-UVC 驗證 C5 的 pattern。
+**定位**：Layer A 基礎框架，與 C5 CORE-05 skill framework 平行；由 **D29 SKILL-HMI-WEBUI (pilot, #262)** 作為首支 HMI skill 驗證其完整性，比照 D1 SKILL-UVC 驗證 C5 的 pattern。D29 以 D2 SKILL-IPCAM 的 admin UI 為參考對象（ONVIF 設定 / stream preview / user 管理 / OTA），產出 rootfs-ready 的 `/www` partition image（目標 ≤ 3 MiB total），QEMU + Playwright 走完 cold-boot → login → ONVIF probe → stream preview 整條 E2E。
 
 | 項目 | 說明 | 狀態 |
 |---|---|---|

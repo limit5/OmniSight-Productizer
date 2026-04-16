@@ -205,6 +205,20 @@ OmniSight-Productizer/
 
 See [HANDOFF.md](HANDOFF.md) for detailed phase history and future roadmap.
 
+## Prewarm Pool Multi-Tenant Safety (M5)
+
+Speculative Tier-1 container pre-warm (Phase 67-C) is now tenant-scoped. The policy is controlled by `OMNISIGHT_PREWARM_POLICY`:
+
+| Policy | Behavior | When to pick |
+|---|---|---|
+| `per_tenant` (default) | Each tenant gets its own pre-warm bucket (depth 1-2 per bucket). Tenant A's pre-warmed container can never be consumed by tenant B. | SaaS / multi-tenant — always. |
+| `shared` | Single global bucket (legacy Phase 67-C behavior). Faster fan-out but cross-tenant filesystem residue risk. Emits a startup warning. | Single-tenant or fully-trusted deployments. |
+| `disabled` | Pre-warm entirely off. Trade 300 ms cold-start for zero speculative-container state. | High-security customers (compliance / audit). |
+
+Regardless of policy, every `consume()` force-clears the tenant's `/tmp/omnisight_ingest/<tid>/` namespace before handing the container to the real task — so no speculative scratch-file residue ever leaks into a real workspace. Cleanup failures are logged but never void a valid pre-warm hit.
+
+Pre-warm itself remains opt-in via `OMNISIGHT_PREWARM_ENABLED=true`; `policy=disabled` takes precedence when both are set.
+
 ## Theme
 
 The UI is deliberately **dark-only** — the "FUI" (fictional user interface)

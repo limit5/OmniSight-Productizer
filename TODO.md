@@ -630,12 +630,12 @@ Legend:
 - [x] 預估：**1 day**
 
 ### M5. Prewarm Pool 多租戶安全
-- [ ] Config `prewarm_policy`：`shared` / `per_tenant` / `disabled`；多租戶模式預設 `per_tenant`
-- [ ] `per_tenant` 模式：prewarm pool 按 tenant 分桶（每桶深度 1-2），空間換隔離
-- [ ] `disabled` 模式：徹底關 prewarm，犧牲 300ms 啟動延遲換乾淨（高安全需求客戶）
-- [ ] Launch 前強制 `/tmp` 清空（即使 shared 模式亦然）
-- [ ] 測試：A prewarm container 無法被 B 拿去用（per_tenant 模式）
-- [ ] 預估：**0.25 day**
+- [x] Config `prewarm_policy`：`shared` / `per_tenant` / `disabled`；多租戶模式預設 `per_tenant`（`backend/config.py` `Settings.prewarm_policy` + `validate_startup_config` whitelist / shared-mode warning）
+- [x] `per_tenant` 模式：prewarm pool 按 tenant 分桶（每桶深度 1-2），空間換隔離（`_prewarmed_by_tenant: dict[str, dict[str, PrewarmSlot]]`；`agent_id` 摻入 tenant hash 避免 `_containers` 撞 key）
+- [x] `disabled` 模式：徹底關 prewarm，犧牲 300ms 啟動延遲換乾淨（高安全需求客戶）（`prewarm_for` / `consume` / `_prewarm_enabled` 均 short-circuit）
+- [x] Launch 前強制 `/tmp` 清空（即使 shared 模式亦然）（`consume()` 每次 hit/miss 都呼叫 `tenant_quota.cleanup_tenant_tmp`；cleanup 失敗仍回傳 slot）
+- [x] 測試：A prewarm container 無法被 B 拿去用（per_tenant 模式）（23 cases in `test_prewarm_multi_tenant.py`：policy validation / isolation / cross-tenant consume rejection / cancel_all scope / starter signature shim / slot metadata）
+- [x] 預估：**0.25 day**
 
 ### M6. Per-tenant Egress Allowlist
 - [ ] `tenant_egress_policies` 表：`tenant_id, allowed_hosts[], allowed_cidrs[], default_action`
@@ -1029,6 +1029,18 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] PLC integration
 - [ ] Lighting control (strobe + polarizer)
 
+### D29. SKILL-HMI-WEBUI (pilot, #262)
+- [ ] Reference embedded web admin UI（參考對象：D2 SKILL-IPCAM 的 ONVIF 設定 / stream preview / user 管理 / OTA）
+- [ ] 沿用 C26 generator + backend binding + size budget + IEC 62443 gate — validate CORE-26 framework
+- [ ] rootfs packaging：`/www` partition + fastcgi/civetweb handler binary + inline JS/CSS assets 產出完整 image
+- [ ] QEMU boot + Playwright E2E：cold boot → login → ONVIF probe → stream preview 整條路徑
+- [ ] Flash partition size budget 驗收（目標 ≤ 3 MiB total for admin UI + handlers）
+- [ ] Embedded browser 相容性：aarch64 Chromium 90 / armv7 WebKit 2.36 雙平台 smoke
+- [ ] i18n：en / zh-TW 雙語 smoke test（驗證 C26 i18n 框架）
+- [ ] IEC 62443 baseline 驗證（CSP、CSRF token、session cookie flags、帳密 rate limit）
+- [ ] Datasheet + deployment runbook templates
+- [ ] **First HMI skill — validates CORE-26 framework**（比照 D1 SKILL-UVC 驗證 C5 的 pattern）
+
 ---
 
 ## 🅔 Priority E — L4 Layer C (software tracks)
@@ -1305,10 +1317,10 @@ C6..C17 sequential (safety / radio / power / RT / connectivity / sensor-fusion /
 C18..C26 as demanded by prioritized skill packs (C26 preconditions any D skill shipping an embedded web admin UI)
 
 ### Phase 4 — Skill pack parallel sprint (6-10 weeks, 3-person team)
-D2..D28 parallelized, prioritized by demand:
+D2..D29 parallelized, prioritized by demand:
 - Team α: imaging family (D2 IPCam, D5 doorbell, D6 dashcam, D19/20/21 scanner/printer/MFP)
 - Team β: audio + display family (D3, D4, D10, D11, D13, D14)
-- Team γ: industrial + safety-critical (D15 medical, D16 drone, D17 industrial-PC, D22 barcode, D23-D25 payment family, D26-D28 3D/MV)
+- Team γ: industrial + safety-critical (D15 medical, D16 drone, D17 industrial-PC, D22 barcode, D23-D25 payment family, D26-D28 3D/MV, D29 HMI web UI pilot)
 - D18 smartphone deferred / outsourced
 
 ### Phase 5 — Software tracks (4-6 weeks, 2-person team)
