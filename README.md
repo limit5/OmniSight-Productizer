@@ -305,6 +305,12 @@ A CI gate (`llm-adapter-firewall` job, runs in parallel with `lint`) enforces th
 3. Run `pytest backend/tests/test_llm_adapter.py` — 50 tests cover all public symbols.
 4. If any test fails, the fix is isolated to `backend/llm_adapter.py`; no other file needs changes.
 
+### Multi-version CI matrix (N7)
+
+A nightly workflow ([`.github/workflows/multi-version-matrix.yml`](.github/workflows/multi-version-matrix.yml)) exercises the test suite against the **next** versions of every interpreter and the FastAPI minor stream — Python 3.12 (gate) + 3.13 (advisory), Node 20.x (gate) + 22.x (advisory), FastAPI pinned (gate) + latest minor (advisory). PRs continue to run only the gate cells via [`ci.yml`](.github/workflows/ci.yml), so PR latency is unchanged; advisory cells use `continue-on-error: true` so a deprecation in Python 3.13 cannot red-X a green run. The matrix's job is to surface what the next upgrade will require *before* it lands.
+
+Every advisory cell pipes its captured pytest / vitest / tsc log through [`scripts/surface_deprecations.py`](scripts/surface_deprecations.py), which (a) emits one `::warning ...` GitHub Actions annotation per unique deprecation message — capped at 30 so a runaway log can't flood the run sidebar — and (b) appends a deduplicated count-by-message table to the per-job `GITHUB_STEP_SUMMARY`. The script is stdlib-only for the same self-defense reason `upgrade_preview.py` (N5) and `check_eol.py` (N6) are: it cannot itself be broken by the dep upgrade it summarises. Full SOP — when to act on a red advisory cell, how each install command differs from PR — lives in [`docs/ops/ci_matrix.md`](docs/ops/ci_matrix.md).
+
 ### Nightly upgrade preview (N5)
 
 Every night at 01:00 Asia/Taipei a separate workflow ([`.github/workflows/upgrade-preview.yml`](.github/workflows/upgrade-preview.yml)) trial-upgrades the lockfiles in a fresh GitHub runner, installs the upgraded deps, runs the full backend pytest suite + Chromium Playwright suite against them, and posts a single open issue tagged `dependency-preview` with: outdated tables, suspected-breaking callouts, lockfile diffs (truncated), and the tail logs. Operators read the issue on Monday morning to decide whether to let the weekend Renovate batch land, pin a package, or coordinate a blue-green deploy. The preview never auto-merges and never mutates committed files — full SOP in [`docs/ops/upgrade_preview.md`](docs/ops/upgrade_preview.md).

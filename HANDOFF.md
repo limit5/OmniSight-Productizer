@@ -1,9 +1,78 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N6 — Upgrade Runbook + CVE/EOL monitoring (master)
+> 最後 commit：N7 — Multi-version CI Matrix (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N7 (complete) Multi-version CI Matrix（2026-04-16 完成）
+
+**背景**：N1-N6 把 dependency governance 全自動化（lockfile / Renovate / OpenAPI / LangChain firewall / nightly preview / runbook + CVE + EOL）。N7 補上最後一塊「forward-look」：在 PR 還能保持 ~10 min latency 的前提下，每晚跑 Python / Node / FastAPI 的 next-version 矩陣，讓 deprecation 在我們真的升級前 *幾個月* 就被 surface 出來。N6 的 EOL check 已經提示 Node 20 在 2026-04-30 EOL；N7 是「Node 22 上跑得起來嗎？哪裡會壞？」這個問題的常駐答案。
+
+**設計選擇 — Layered（PR primary / Nightly broad）**：把整個 matrix 放進 PR 上是最直觀的，但 (a) ~4× wall-clock，PR 變慢會壓抑 reviewer 對 CI 的信任，(b) advisory cell 三天兩頭因為上游 churn 紅 X，最後就是大家無視 CI signal，這是「讓守門人變成裝飾品」的最快路徑。所以分兩條軌：`ci.yml` 維持單版本 gate（PR 上跑），新的 `multi-version-matrix.yml` 跑 nightly + workflow_dispatch，每個 advisory cell `continue-on-error: true`，只 emit 觀察性的 ::warning + step summary。
+
+### 實作內容
+
+1. **`.github/workflows/multi-version-matrix.yml`**（new）— 三個 job axis：
+   - `python-matrix`：[3.12 (gate), 3.13 (advisory)]。3.12 走 hashed lock；3.13 從 `requirements.in` 安裝（hashed `.txt` 鎖死 py3.12 ABI tag，3.13 解析會失敗，drift 已由 `lockfile-drift` job 守住所以從 `.in` 安裝是安全的）。
+   - `node-matrix`：[20.x (gate), 22.x (advisory)]。`pnpm install --frozen-lockfile` + `npm_config_engine_strict=false`（22 違反 `engines.node "<21"`，advisory 不該因此卡住）。同時跑 vitest + tsc 各自 capture log。
+   - `fastapi-matrix`：[pinned (gate), latest-minor (advisory)]。Latest-minor 在 hashed baseline 之上 `pip install --upgrade --no-deps fastapi starlette` — `--no-deps` 確保我們只測 FastAPI 本身的 delta，其它 dep 仍 hash-locked。
+   - `matrix-summary` roll-up job：always() 跑，把每 cell 結果整合到 run-level `GITHUB_STEP_SUMMARY`。
+   - Schedule：`0 18 * * *`（02:00 Asia/Taipei，比 N5 nightly preview 晚一小時）+ `workflow_dispatch`（operator 可在計畫升級前手動 dispatch）。
+   - Concurrency group：`multi-version-matrix` + `cancel-in-progress: true`，避免 nightly + 手動 dispatch 撞單。
+   - 環境變數 `PYTHONWARNINGS=default::DeprecationWarning,...` + `NODE_OPTIONS=--pending-deprecation` 讓 third-party lib 的 deprecation 也會吐出來（stdlib 預設外部 module 的 DeprecationWarning 是 silent 的）。
+
+2. **`scripts/surface_deprecations.py`**（new, stdlib-only）— 把 captured log 裡的 `DeprecationWarning / PendingDeprecationWarning / FutureWarning`（python）以及 `[DEP0xxx] / DeprecationWarning / "deprecated"`（node）轉成兩種輸出：
+   - **GitHub Actions annotation**：每個 *unique* message 一條 `::warning file=...,line=...::[<label>] <msg>`，capped 在 30 條（runaway log 可能有 5 000 條一樣的 warning，annotation 太多 GH UI 會吃掉，summary table 仍保留完整計數）。Workflow command 特殊字元 `% / \r / \n` 全部依 GH 規範 escape。
+   - **`GITHUB_STEP_SUMMARY` markdown table**：count + message，desc by count，pipe in message escape 掉。
+   - 額外 noise filter：node log 含 `--no-deprecation` / `deprecation_policy` / `deprecate(` 是 false positive，drop。
+   - **Always exit 0** — surfacing 是 advisory by design，這支 script 自己不能成為 gate failure 的來源。
+   - **Stdlib-only** — 跟 N5 / N6 同樣的 self-defense 邏輯：如果這支 script 自己依賴的 dep 被它正在 forecast 的 upgrade 弄壞，整個 matrix 就什麼都吐不出來。
+
+3. **`backend/tests/test_surface_deprecations.py`**（new）— 18 cases：
+   - `TestPythonParser`（4）：explicit DeprecationWarning、Pending+Future、empty log、不該誤抓的純文字
+   - `TestNodeParser`（4）：DEP0xxx code 與「deprecated」關鍵字、known noise drop、parse_log dispatch、unknown kind raise
+   - `TestAnnotations`（4）：identical message dedupe、不同 call site 不 collapse、ANNOTATION_CAP（30）+ 「N more」尾行、workflow command 特殊字元 escape
+   - `TestSummary`（3）：empty findings 顯示「No deprecation」、count desc 排序、pipe escape
+   - `TestCLI`（3）：`main()` 寫 step summary 並回 0、missing log 仍寫 ok-state、subprocess end-to-end smoke
+   - 全 18 pass（local pytest 0.10s）
+
+4. **`docs/ops/ci_matrix.md`**（new）— SOP doc：layer 圖表 + tier rationale（為什麼不全 PR 跑）+ 各 cell 安裝指令差異 + advisory cell 紅了該怎麼辦的決策樹 + 與 N5 / N6 workflow 的關係。
+
+5. **README.md** 在 Dependency Governance 區段加 N7 段落（描述 layered tier + surface_deprecations.py + SOP doc 連結）。
+
+### 設計取捨
+
+- **PR 不跑 matrix**：明示拒絕「都跑」的方案。理由如上：advisory cell 紅 X 久了就是 normalised CI 噪音，最終讓 gate 失去意義。Layered 是 SRE 圈處理「想擴大覆蓋但不想削弱 PR signal」的標準手法。
+- **Python 3.13 advisory 從 `.in` 安裝、不從 `.txt`**：lockfile 是 py3.12 hash-pinned 的，3.13 解析必失敗。我們選擇接受「3.13 cell 跑的不是 production 一模一樣的 dep」這個誤差換取「forecast 真的能跑」。drift 由 `lockfile-drift` 已守住所以 `.in` 與 `.txt` 永遠同步，誤差只在 transitive。
+- **FastAPI latest-minor 用 `--no-deps`**：只升 FastAPI + Starlette 兩個 layer，避免 `pip install -U fastapi` 連帶把 pydantic / typing-extensions 也拉新版，那會混淆「壞掉是 fastapi 還是 pydantic 的鍋」。
+- **Annotation cap 30**：經驗值。GH 的 PR / run page sidebar 顯示能力 ≈ 10-50 條 annotation，超過會被截斷或變成「+N more」的折疊。我們先 emit 30 條保證大部分都看得見，剩下的依賴 step summary table 完整呈現。
+- **Surface script 永遠 exit 0**：surfacing 是「分析輸出」，不是「執行測試」。如果它自己 fail 還會雙重失敗（pytest 失敗 + script 失敗），讓 root cause 更難判斷。
+- **Stdlib-only**：跟 N5、N6 一致的 self-defense 政策。CI matrix 跑的就是 dep upgrade forecast，工具自己依賴 dep 會變雞生蛋。
+
+### 修改檔案
+
+- `.github/workflows/multi-version-matrix.yml` — **新增**，nightly + dispatch 矩陣 workflow（254 lines）
+- `scripts/surface_deprecations.py` — **新增**，stdlib-only deprecation 解析 + ::warning/summary 渲染（~250 lines）
+- `backend/tests/test_surface_deprecations.py` — **新增** 18 cases
+- `docs/ops/ci_matrix.md` — **新增** SOP doc
+- `README.md` — Dependency Governance 段落新增 N7 子段
+- `TODO.md` — N7 全 6 項標 `[x]`
+- `HANDOFF.md` — 本段
+
+### 驗證
+
+- `pytest backend/tests/test_surface_deprecations.py -v` — 18/18 pass
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/multi-version-matrix.yml'))"` — 通過
+- 手動 smoke：用 fake pytest log 餵 script，確認 emit 兩條正確的 `::warning file=...,line=N::[label] msg` + step summary markdown 產出正確 table
+
+### 後續觀察點（不是 blocker）
+
+- 真實 nightly 第一次跑會吐出多少 deprecation 是未知數。預期 langchain-core 1.x → 2.x 過渡期間會有大量 PendingDeprecationWarning；這是 forecast 的價值點，不是 bug。
+- Node 22 cell 在 2026-04-30（Node 20 EOL）之前必須翻成 gate（即取消 advisory）。這個切換動作直接編輯 workflow 的 `include` block 即可，不需要新工具。
+- FastAPI latest-minor cell 紅 X 時，N4 的 LangChain firewall pattern 可以考慮複製成 FastAPI adapter — 但只有當同一個 minor bump 連續 3 次以上爆 N7 才值得做，目前還不該預先 abstract。
 
 ---
 

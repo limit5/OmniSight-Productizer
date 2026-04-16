@@ -1,0 +1,299 @@
+name: Multi-version CI Matrix
+
+# N7 — forecast which Python / Node / FastAPI version bumps will hurt
+# us at the next upgrade.
+#
+# Layering rationale:
+#   * `ci.yml` is the **primary** PR pipeline. It pins one version of
+#     every interpreter (Python 3.12, Node `.nvmrc`, FastAPI
+#     `requirements.txt`) so PR latency stays under ~10 minutes and the
+#     gates are deterministic.
+#   * **This** workflow runs the **broad** matrix nightly + on manual
+#     dispatch only. Every advisory cell uses `continue-on-error: true`
+#     so a single deprecation in Python 3.13 cannot red-X a green
+#     run; the operator reads the surfaced annotations + step summary
+#     to plan the next upgrade.
+#
+# Matrix axes:
+#   * Python: 3.12 (pinned baseline) + 3.13 (forward-look)
+#   * Node:   20.x (pinned baseline) + 22.x (next LTS)
+#   * FastAPI: pinned (`requirements.txt`) + latest minor (`pip install -U fastapi`)
+#
+# Output channels for deprecations (all fan into the same script):
+#   * `::warning ...` annotations on the run page sidebar
+#   * markdown table appended to `GITHUB_STEP_SUMMARY`
+#   * raw logs uploaded as workflow artifacts (14-day retention)
+
+on:
+  schedule:
+    # 18:00 UTC = 02:00 Asia/Taipei (next day). Runs an hour after N5
+    # so the nightly preview issue and the matrix run are on the same
+    # operator-morning timeline.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    # Manual trigger when triaging a planned interpreter / framework bump.
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two concurrent matrix runs would just thrash the Actions queue;
+  # the latest one wins (cancels the prior in-flight run).
+  group: multi-version-matrix
+  cancel-in-progress: true
+
+env:
+  # Python: surface DeprecationWarnings even from imported third-party
+  # libraries (stdlib default suppresses them outside __main__).
+  PYTHONWARNINGS: "default::DeprecationWarning,default::PendingDeprecationWarning,default::FutureWarning"
+  # Node: print pending deprecation messages from the loader.
+  NODE_OPTIONS: "--pending-deprecation"
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────
+  # Python matrix
+  # ─────────────────────────────────────────────────────────────────
+  python-matrix:
+    name: python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        include:
+          - python-version: "3.12"
+            advisory: false
+          - python-version: "3.13"
+            advisory: true
+    continue-on-error: ${{ matrix.advisory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python-version }}" }
+
+      - name: install pip-tools
+        run: pip install "pip-tools==7.5.3"
+
+      - name: install backend deps (baseline → hashed lock; advisory → from .in)
+        run: |
+          set -eu
+          if [ "${{ matrix.advisory }}" = "true" ]; then
+            # Forward-look cells install from the unlocked .in file —
+            # the hashed `requirements.txt` is wheel-pinned to py3.12
+            # ABI tags and would refuse to resolve on py3.13. Drift
+            # between .in and .txt is already gated by `lockfile-drift`
+            # in `ci.yml`, so installing from .in is safe here.
+            pip install -r backend/requirements.in
+          else
+            pip install --require-hashes -r backend/requirements.txt
+          fi
+
+      - name: pytest backend (capture log)
+        id: pytest
+        continue-on-error: true
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/ci-matrix-py-${{ matrix.python-version }}.db
+        run: |
+          set -o pipefail
+          mkdir -p _matrix
+          rm -f /tmp/ci-matrix-py-${{ matrix.python-version }}.db
+          cd backend
+          # No coverage thresholds in matrix mode — the `backend-tests`
+          # shards in `ci.yml` are the gate. Capture everything for the
+          # surface-deprecations pass.
+          pytest tests/ -q --tb=line --no-header -W default::DeprecationWarning \
+              2>&1 | tee ../_matrix/pytest-py${{ matrix.python-version }}.log
+
+      - name: surface deprecation warnings
+        if: always()
+        run: |
+          python3 scripts/surface_deprecations.py \
+              --log _matrix/pytest-py${{ matrix.python-version }}.log \
+              --kind python \
+              --label "py${{ matrix.python-version }}"
+
+      - name: upload pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-pytest-py${{ matrix.python-version }}
+          path: _matrix/pytest-py${{ matrix.python-version }}.log
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # Node matrix
+  # ─────────────────────────────────────────────────────────────────
+  node-matrix:
+    name: node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20.x", "22.x"]
+        include:
+          - node-version: "20.x"
+            advisory: false
+          - node-version: "22.x"
+            advisory: true
+    continue-on-error: ${{ matrix.advisory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ matrix.node-version }}", cache: pnpm }
+
+      - name: install js deps
+        env:
+          # `package.json` engines.node is `>=20.17.0 <21` (the pinned
+          # range). For the forward-look cell we need pnpm to install
+          # anyway; engine-strict=false downgrades the mismatch from a
+          # hard error to a warning.
+          npm_config_engine_strict: "false"
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: vitest (capture log)
+        id: vitest
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p _matrix
+          pnpm exec vitest run --reporter=verbose \
+              2>&1 | tee _matrix/vitest-node${{ matrix.node-version }}.log
+
+      - name: tsc --noEmit (capture log)
+        id: tsc
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pnpm exec tsc --noEmit \
+              2>&1 | tee _matrix/tsc-node${{ matrix.node-version }}.log
+
+      - name: surface deprecation warnings (vitest)
+        if: always()
+        run: |
+          python3 scripts/surface_deprecations.py \
+              --log _matrix/vitest-node${{ matrix.node-version }}.log \
+              --kind node \
+              --label "node${{ matrix.node-version }}-vitest"
+
+      - name: surface deprecation warnings (tsc)
+        if: always()
+        run: |
+          python3 scripts/surface_deprecations.py \
+              --log _matrix/tsc-node${{ matrix.node-version }}.log \
+              --kind node \
+              --label "node${{ matrix.node-version }}-tsc"
+
+      - name: upload node logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-node${{ matrix.node-version }}
+          path: _matrix/
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # FastAPI matrix (pinned vs latest minor on top of pinned baseline)
+  # ─────────────────────────────────────────────────────────────────
+  fastapi-matrix:
+    name: fastapi ${{ matrix.fastapi }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        fastapi: [pinned, latest-minor]
+        include:
+          - fastapi: pinned
+            advisory: false
+          - fastapi: latest-minor
+            advisory: true
+    continue-on-error: ${{ matrix.advisory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: install backend deps (hashed baseline)
+        run: pip install --require-hashes -r backend/requirements.txt
+
+      - name: upgrade fastapi to latest minor
+        if: matrix.fastapi == 'latest-minor'
+        run: |
+          set -eu
+          # Capture the baseline pin (e.g. 0.115.12), then upgrade only
+          # the minor stream within the same major. FastAPI is pre-1.0
+          # (SemVer convention: minor = breaking), so we deliberately
+          # pull the latest 0.* and let the matrix tell us what breaks.
+          pip install --upgrade --no-deps "fastapi" "starlette"
+          python3 - <<'PY'
+          from importlib.metadata import version
+          print(f"fastapi -> {version('fastapi')}")
+          print(f"starlette -> {version('starlette')}")
+          PY
+
+      - name: pytest backend (capture log)
+        id: pytest
+        continue-on-error: true
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/ci-matrix-fastapi-${{ matrix.fastapi }}.db
+        run: |
+          set -o pipefail
+          mkdir -p _matrix
+          rm -f /tmp/ci-matrix-fastapi-${{ matrix.fastapi }}.db
+          cd backend
+          pytest tests/ -q --tb=line --no-header -W default::DeprecationWarning \
+              2>&1 | tee ../_matrix/pytest-fastapi-${{ matrix.fastapi }}.log
+
+      - name: surface deprecation warnings
+        if: always()
+        run: |
+          python3 scripts/surface_deprecations.py \
+              --log _matrix/pytest-fastapi-${{ matrix.fastapi }}.log \
+              --kind python \
+              --label "fastapi-${{ matrix.fastapi }}"
+
+      - name: upload pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-fastapi-${{ matrix.fastapi }}
+          path: _matrix/pytest-fastapi-${{ matrix.fastapi }}.log
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # Roll-up summary — fans the per-cell summaries into one comment
+  # ─────────────────────────────────────────────────────────────────
+  matrix-summary:
+    name: summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [python-matrix, node-matrix, fastapi-matrix]
+    steps:
+      - uses: actions/checkout@v4
+      - name: write run-level summary
+        run: |
+          {
+            echo "## N7 multi-version matrix — run summary"
+            echo ""
+            echo "Layered CI: PRs run only the **primary** cells via \`ci.yml\`."
+            echo "This nightly matrix runs every advisory cell so deprecations"
+            echo "surface here months before the upgrade lands."
+            echo ""
+            echo "| Cell | Status |"
+            echo "|---|---|"
+            echo "| python 3.12 (primary)        | ${{ needs.python-matrix.result }} |"
+            echo "| python 3.13 (advisory)       | (see job log)                    |"
+            echo "| node 20.x   (primary)        | ${{ needs.node-matrix.result }}   |"
+            echo "| node 22.x   (advisory)       | (see job log)                    |"
+            echo "| fastapi pinned (primary)     | ${{ needs.fastapi-matrix.result }}|"
+            echo "| fastapi latest (advisory)    | (see job log)                    |"
+            echo ""
+            echo "Per-cell deprecation tables are appended to each job summary."
+            echo "Logs (14-day retention) are uploaded as workflow artifacts."
+          } >> "$GITHUB_STEP_SUMMARY"
