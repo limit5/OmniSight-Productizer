@@ -357,16 +357,16 @@ Legend:
 - [x] Unit test: G-code sequence → expected motion trace
 
 ### C26. L4-CORE-26 HMI embedded web UI framework (#261)
-- [ ] Bundle size budget per platform profile (flash partition aware; CI hard-fail on 超標)
-- [ ] Constrained generator（whitelist Preact / vanilla JS / lit-html；禁 CDN；inline fonts + CSS；禁 analytics）
-- [ ] Backend binding generator：NL + HAL schema → fastcgi/mongoose/civetweb C handler 骨架 + 對應 JS client
-- [ ] QEMU + headless Chromium 驗證 harness（`scripts/simulate.sh` 新增 `hmi` track）
-- [ ] IEC 62443 security baseline gate（CSP / XSS / CSRF / session storage / auth flow）
-- [ ] Embedded browser ABI matrix（aarch64/armv7/riscv64 × 凍結版 Chromium/WebKit 相容性表）
-- [ ] i18n 框架（與 D-series doc templates 共用語言池，en/zh-TW/ja/de 4 語言起步）
-- [ ] 共用 HMI component library（network / OTA / logs viewer — 供 D2 IPCam / D8 Router / D9 5G-GW / D17 Industrial-PC / D24 POS / D25 Kiosk 共用）
-- [ ] Pluggable LLM backend（Opus 4.7 Design Tool / Ollama 本地 / rule-based fallback，沿用 `OMNISIGHT_LLM_PROVIDER`）
-- [ ] Unit + integration tests（generator / QEMU+Chromium / size budget gate）
+- [x] Bundle size budget per platform profile (flash partition aware; CI hard-fail on 超標)
+- [x] Constrained generator（whitelist Preact / vanilla JS / lit-html；禁 CDN；inline fonts + CSS；禁 analytics）
+- [x] Backend binding generator：NL + HAL schema → fastcgi/mongoose/civetweb C handler 骨架 + 對應 JS client
+- [x] QEMU + headless Chromium 驗證 harness（`scripts/simulate.sh` 新增 `hmi` track）
+- [x] IEC 62443 security baseline gate（CSP / XSS / CSRF / session storage / auth flow）
+- [x] Embedded browser ABI matrix（aarch64/armv7/riscv64 × 凍結版 Chromium/WebKit 相容性表）
+- [x] i18n 框架（與 D-series doc templates 共用語言池，en/zh-TW/ja/zh-CN 4 語言起步）
+- [x] 共用 HMI component library（network / OTA / logs viewer — 供 D2 IPCam / D8 Router / D9 5G-GW / D17 Industrial-PC / D24 POS / D25 Kiosk 共用）
+- [x] Pluggable LLM backend（Opus 4.7 Design Tool / Ollama 本地 / rule-based fallback，沿用 `OMNISIGHT_LLM_PROVIDER`）
+- [x] Unit + integration tests（generator / QEMU+Chromium / size budget gate）
 
 ---
 

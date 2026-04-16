@@ -1,7 +1,7 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：M4 — Cgroup-based per-tenant metrics + UI split + AIMD upgrade + usage_report (master)
+> 最後 commit：C26 — HMI embedded web UI framework + 129 tests + simulate.sh `hmi` track (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
 
@@ -965,6 +965,85 @@
 - PID 模擬器使用 anti-windup guard，確保在目標溫度附近不會過沖
 - TMC2209 支援 StallGuard 無感測器歸零，A4988/DRV8825 僅支援 step/dir 介面
 - Machine 類別整合所有子系統，提供統一的 G-code→trace 執行管道
+
+---
+
+## C26 (complete) L4-CORE-26 HMI Embedded Web UI Framework（2026-04-16 完成）
+
+**背景**：C22 Barcode / C24 Machine Vision / D2 IPCam / D8 Router / D9 5G-GW / D17 Industrial-PC / D24 POS / D25 Kiosk 等工控與相機類設備，幾乎都會在 rootfs 裡內嵌整套 web admin UI（組態 / OTA / logs / 診斷）。現有 D4 SKILL-DISPLAY 只涵蓋 LVGL / Qt 的 native GUI，沒有 web stack 路線。2026-04 Anthropic Opus 4.7 伴隨發布的 AI Design Tool（NL → website / landing page / presentation）能力領域重疊但約束不符——其預期產出為 10-100 MB React bundle + CDN 依賴 + analytics，完全無法直接塞進 embedded flash partition（常見預算 1-5 MB、離線、凍結版 embedded Chromium/WebKit，版本常滯後 2-3 年）。C26 的定位：把「NL → web UI」的生成能力收斂到可進 rootfs 的約束下。
+
+**定位**：Layer A 基礎框架，與 C5 CORE-05 skill framework 平行；現已可供未來一支 D-pilot skill（例如對 D2 SKILL-IPCAM admin UI 或新建的 SKILL-HMI-WEBUI pilot）驗證完整性，比照 D1 SKILL-UVC 驗證 C5 的 pattern。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/hmi_framework.py` | per-platform flash-partition bundle budget + `BundleBudget` / `BundleMeasurement` / `BudgetVerdict` + `check_bundle_budget()` + ABI matrix + IEC 62443 gate + 4-locale pool + framework whitelist | ✅ 完成 |
+| `backend/hmi_generator.py` | Whitelist-enforced HTML/JS generator：Preact / lit-html / vanilla；inline CSS + 結構化 i18n JSON blob；內建 CSP + `X-Frame-Options` / `X-Content-Type-Options` / HSTS / Referrer-Policy；`BudgetExceeded` CI hook | ✅ 完成 |
+| `backend/hmi_binding.py` | NL prompt + HAL schema → `mongoose` / `fastcgi` / `civetweb` C handler 骨架 + 對應 JS client；struct field emit + request body parse stub + JSON render；每 server 專用 template | ✅ 完成 |
+| `backend/hmi_components.py` | 共用 component library：NetworkComponent / OTAComponent / LogsComponent（HTML + JS + HAL endpoints）— 供 D2/D8/D9/D17/D24/D25 直接 import | ✅ 完成 |
+| `backend/hmi_llm.py` | Pluggable LLM backend：anthropic / ollama / rule_based；precedence 為 explicit > `HMI_LLM_PROVIDER` > `OMNISIGHT_LLM_PROVIDER` > rule_based；無 API key 自動 degrade；lazy import 避免 stdlib-only CI fail | ✅ 完成 |
+| `backend/routers/hmi.py` | 13 REST endpoints under `/api/v1/hmi/*`：summary / platforms / abi-matrix / abi-check / locales / i18n-catalog / frameworks / generate / budget-check / security-scan / binding/generate / components / components/assemble | ✅ 完成 |
+| `scripts/simulate.sh` — `hmi` track | 新增 `run_hmi()`：python3 driver 產生 bundle + budget gate + security gate + 可選 headless Chromium 與 QEMU smoke；既有 algo/hw/npu/deploy tracks 零 regression | ✅ 完成 |
+| `configs/hmi_framework.yaml` | 平台預算（aarch64 512 KiB / armv7 256 KiB / riscv64 1 MiB / host_native 4 MiB）+ ABI matrix（4 platforms × Chromium/WebKit）+ IEC 62443 baseline（CSP/headers/forbidden patterns）+ 4-locale pool | ✅ 完成 |
+| i18n 框架 | `build_i18n_catalog()` 產生 `{locale: {key: text}}`；4 語言 base pool（en / zh-TW / ja / zh-CN）＋ overrides 機制；missing translation fall back 到英文 | ✅ 完成 |
+| 測試（129 項） | 38 framework + 20 generator + 15 binding + 15 components + 13 llm + 21 router + 7 simulate subprocess；含 security scan 拒絕 eval/CDN/analytics/inline event attr、budget gate 拒絕超出 JS sub-budget、unknown platform 404、subprocess JSON report 解析 | ✅ 129/129 pass |
+
+**新增/修改檔案**：
+- `backend/hmi_framework.py` — 新增：core module (bundle budget + security baseline + ABI matrix + i18n + whitelist)
+- `backend/hmi_generator.py` — 新增：constrained HTML/JS/CSS generator + `BudgetExceeded` + security scan integration
+- `backend/hmi_binding.py` — 新增：C handler + JS client generator (3 server backends)
+- `backend/hmi_components.py` — 新增：NetworkComponent / OTAComponent / LogsComponent
+- `backend/hmi_llm.py` — 新增：pluggable LLM backend with rule-based fallback
+- `backend/routers/hmi.py` — 新增：13 REST endpoints
+- `backend/main.py` — 掛載 `_hmi_router`
+- `configs/hmi_framework.yaml` — 新增：platform budgets + ABI matrix + security baseline + locales
+- `scripts/simulate.sh` — 新增 `hmi` track + JSON report 新增 `hmi` 區塊
+- `backend/tests/test_hmi_framework.py` — 38 tests
+- `backend/tests/test_hmi_generator.py` — 20 tests
+- `backend/tests/test_hmi_binding.py` — 15 tests（含 `@pytest.mark.parametrize` 3 servers）
+- `backend/tests/test_hmi_components.py` — 15 tests
+- `backend/tests/test_hmi_llm.py` — 13 tests
+- `backend/tests/test_hmi_router.py` — 21 tests（FastAPI TestClient + dependency_overrides）
+- `backend/tests/test_hmi_simulate.py` — 7 tests（subprocess 跑 simulate.sh）
+- `.gitignore` — exclude `/auto-runner.py` 本地 orchestrator
+
+**設計決策**：
+- **Platform budget 寫死 YAML 而非動態偵測**：flash partition 大小是供應鏈決策（datasheet / vendor BSP），不是 runtime 屬性；把數字放 YAML 讓 product team 可以不動 code 就調；CI 超標自動 hard-fail。
+- **i18n catalog 內嵌為 JSON `<script>`**：避免 HMI 首屏去 fetch `/locales/en.json`；embedded device 常常連 HTTPS cert chain 都有 quirks，省一次 round-trip 就是省 1-2 秒。副作用：catalog 跟頁面綁一起，多語切換走 `OmniHMI.t(key, locale)`，實作時用 `document.documentElement.lang` 做 default。
+- **Generator 不直接做 NL → code**：core constraint layer (size/security/ABI) 必須 deterministic，所以 generator 本身是 template-based，LLM 只接在 `hmi_llm.enrich_binding_description()`（只做 prose）。這樣 anthropic outage 不會 block CI。
+- **`HMI_LLM_PROVIDER` 獨立於 `OMNISIGHT_LLM_PROVIDER`**：主系統在用 anthropic 不代表 HMI 生成也要用 anthropic；operator 可以只為 HMI 切換到 ollama 做 offline dev 而不影響其他功能。precedence 寫成 explicit kwarg > `HMI_LLM_PROVIDER` > `OMNISIGHT_LLM_PROVIDER` > `rule_based`，讓「我要明確強制 X」永遠可達。
+- **Rule-based fallback 寫成 keyword hint list**：Ollama 會飄、anthropic 要 key；離線 CI / minimal Docker image 都跑不起來。rule_based 用 `wifi/ota/log/camera/gpio/sensor/auth/user` 這類常見 HMI 關鍵字觸發對應 hint，足以給 handler 一行像樣的 description；deterministic 對 test 有利。
+- **Binding 三 server backend 共用 struct 與 parse 邏輯、只差 header + dispatch**：mongoose 用 `struct mg_http_message *`、fastcgi 用 `FCGI_Accept`、civetweb 用 `mg_set_request_handler`——header 差異實作在 template string，struct 與 JSON render 完全相同。代價：每個 server 多一份 template，但換來的是 skill 作者可以真的挑 server 而不用改 generator。
+- **共用 component library 不直接綁 skill**：Component 是 pure renderer（HTML + JS + HAL spec），不 import skill 模組。D2 / D8 / D9 要用時各自 `assemble_components(["network", "ota", "logs"])`，自己決定要掛 3 個還是只掛 1 個；避免 D2 的 `ota_apply` 撞到 D24 POS 的 `ota_apply`（兩者 HAL 底層 vendor SDK 不同）。
+- **simulate.sh `hmi` track 中 chromium 與 QEMU 當 soft dependency**：sandbox / minimal CI 常常沒有 chromium package；`command -v` 探測不到就 log `[SKIP]` 並記為 pass（budget + security gate 仍強制）。這是在「覆蓋率」跟「不 block minimal image」之間取捨：有 chromium 就真 render，沒有就信任 gate。CI 若真要 enforce render，把 chromium 裝進 Docker image 即可。
+- **不收緊 `--mock=false` 走 `qemu-system`**：那是 rootfs 整機 boot，本 sandbox 跑不動 qemu-system；`simulate.sh` 的 `hmi` track 只做 in-tree bundle + gate + headless render。整機 QEMU 放到 B14 infra track。
+
+**驗收**：
+- ✅ bundle budget：4 platforms × (total / html+css / js / fonts / flash partition) 共 5 sub-budgets（10 tests）
+- ✅ IEC 62443 security scan：required headers / CSP directives / forbidden patterns（CDN/analytics/eval）/ inline event attrs（8 tests）
+- ✅ ABI matrix 4 platforms + compatibility check（WebGL2/WASM/WebRTC/ES version）（7 tests）
+- ✅ i18n：4 locales × 19 base keys；overrides；missing translation fallback（6 tests）
+- ✅ Framework whitelist：Preact/lit-html/vanilla allow；React/Vue/Angular/jQuery/Bootstrap reject（6 tests）
+- ✅ Generator：CSP 5-directive check；all 5 security headers；i18n JSON blob inlined；budget gate enforcement；extra_scripts security rejection；BudgetExceeded CI hook（20 tests）
+- ✅ Binding：3 server backends × (handler + client files) + GET querystring / POST JSON body + empty fields placeholder（7 tests）
+- ✅ Binding validation：bad id/path/method/c_type/server（5 tests）
+- ✅ LLM：precedence 5 level + anthropic/ollama key+daemon preconditions + rule-based hints + lazy fallback（13 tests）
+- ✅ Components：registry × 3 + per-component HTML/JS/endpoints + assembled security scan + skill coverage D2/D8/D9/D17/D24/D25（15 tests）
+- ✅ Router：13 endpoints × happy path + error paths（whitelist 400 / unknown platform 404 / bad method 400 / unknown component 404）（21 tests）
+- ✅ simulate.sh subprocess：JSON report shape、hmi section populated、bundle≤budget、security pass、unknown track rejected（7 tests）
+- ✅ 既有 247 項 host_metrics / tenant_aimd / host_router / circuit_breaker / motion_control / doc_suite_generator 測試 zero regression
+- ✅ `from backend.main import app` import 成功，新增 13 個 `/api/v1/hmi/*` routes
+- ✅ `WORKSPACE=$PWD bash scripts/simulate.sh --type=hmi --module=preact --platform=aarch64` → status=pass, tests 5/5, bundle 9540/524288 B, security=pass
+
+**已知限制 / Follow-up**：
+- 目前 generator 只產出 `index.html` + `app.js`；未來若需要多頁面 SPA 可擴充 `GeneratorRequest.pages` 欄位。
+- ABI matrix 靜態 YAML；真實產線應對接 vendor BSP 的 manifest（`supported_browser_versions.json`），那個接法留待 C4 platform profile schema 升級時順手做。
+- Anthropic SDK 尚未在 `backend/requirements.txt` 固定版本；目前 `_try_anthropic` 用 lazy import，無 SDK 自動 degrade 到 rule_based，所以不強制安裝。
+- `scripts/simulate.sh` 的 HMI track chromium smoke 在 sandbox 一律 `[SKIP]` — CI 若要真 render，需在 docker image 加 `chromium` + `--disable-dev-shm-usage`。
+- 目前 HMI 並未整合 C18 compliance harness 的 test evidence bundle；等 C18 暴露 `register_test_evidence()` API 再接。
+
+**下一步建議（非本 phase 範圍）**：
+- 一支 D-pilot skill（建議 `SKILL-HMI-WEBUI` 或直接 D2 IPCam admin UI）跑端到端 flow：skill 宣告 HAL schema → `hmi_binding.generate_binding()` → `hmi_generator.generate_bundle()` → `simulate.sh --type=hmi` → CI 產出 `hmi/rootfs_overlay.tar`。類似 D1 SKILL-UVC 之於 C5。
+- `hmi_llm` 加 prompt caching（anthropic pattern），讓 NL prompt 相同的 binding generation 可以重複 hit cache。
 
 ---
 

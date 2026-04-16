@@ -36,7 +36,7 @@ FastAPI (WSL2:8000)               Backend — Multi-agent engine (14 routers, ~8
     +-- EventBus → SSE            Real-time push + event persistence + replay API
     +-- WorkspaceManager          git worktree per agent (CODEOWNERS enforcement)
     +-- ContainerManager          Docker cross-compilation (aarch64/armv7/riscv64 + vendor SDK mount)
-    +-- Dual-Track Simulation     algo (x86 + Valgrind) / hw (mock sysfs + QEMU)
+    +-- Multi-Track Simulation    algo / hw / npu / deploy / hmi (constrained HMI bundle)
     +-- 4-Tier Notifications      L1 log → L2 Slack → L3 Jira → L4 PagerDuty (DLQ + retry)
     +-- NPI Lifecycle             8 phases × 3 tracks × 4 business models (Timeline + Gantt)
     +-- Slash Commands            22 commands with autocomplete (/status, /build, /simulate, ...)
@@ -96,9 +96,21 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Verification loop**: simulation [FAIL] → auto-fix code → re-verify (2x max)
 
 ### Simulation & Verification
-- **Dual-track**: algo (data-driven replay + Valgrind) / hw (mock sysfs + QEMU cross-run)
+- **Multi-track**: algo (data-driven replay + Valgrind) / hw (mock sysfs + QEMU cross-run) / npu / deploy / **hmi** (C26 — constrained HMI bundle + IEC 62443 gate + budget gate)
 - **simulate.sh**: unified test runner with JSON report, coverage enforcement, cmake toolchain support
 - **4 platform profiles**: aarch64, armv7, riscv64, vendor-example (extensible for any SoC)
+
+### HMI Embedded Web UI Framework (C26 / L4-CORE-26)
+- **Constrained generator**: whitelist Preact / lit-html / vanilla JS; inlines CSS + i18n JSON; rejects CDN / analytics / `eval` / inline event attrs
+- **Bundle size budget**: per-platform flash-partition-aware (aarch64 512 KiB / armv7 256 KiB / riscv64 1 MiB / host_native 4 MiB) — CI hard-fail via `BudgetExceeded`
+- **IEC 62443-4-2 SL2 gate**: CSP directives + required headers + forbidden patterns + inline event attr scan
+- **Binding generator**: NL prompt + HAL schema → `fastcgi` / `mongoose` / `civetweb` C handler skeleton + matching JS client
+- **Shared components**: network / OTA / logs viewer — reused by D2 IPCam / D8 Router / D9 5G-GW / D17 Industrial-PC / D24 POS / D25 Kiosk
+- **i18n pool**: en / zh-TW / ja / zh-CN (extensible via overrides), shared with D-series doc templates
+- **ABI matrix**: frozen Chromium/WebKit compatibility table per platform (aarch64 / armv7 / riscv64 / host_native)
+- **Pluggable LLM backend**: anthropic (Opus 4.7 Design Tool) / ollama / rule-based — override via `HMI_LLM_PROVIDER` env (falls back to `OMNISIGHT_LLM_PROVIDER`, then rule-based)
+- **Endpoints**: 13 REST routes under `/api/v1/hmi/*` (summary, platforms, abi-check, generate, budget-check, security-scan, binding/generate, components/assemble, ...)
+- **Simulation**: `scripts/simulate.sh --type=hmi` — generates bundle + runs budget + security gates + optional headless Chromium + QEMU smoke
 
 ### DevOps Integration
 - **Gerrit**: AI reviewer (patchset-created → auto-review), Code-Review -1 → auto-fix task
