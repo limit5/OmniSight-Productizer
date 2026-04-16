@@ -790,8 +790,7 @@ out = {
 with open('${OUTDIR}/index.html', 'w') as fh: fh.write(bundle.files['index.html'])
 with open('${OUTDIR}/app.js', 'w') as fh: fh.write(bundle.files['app.js'])
 with open('${SUMMARY_JSON}', 'w') as fh: json.dump(out, fh)
-print('OK')
-" 2>"${BUILD_DIR}/hmi_gen.err"; then
+" >"${BUILD_DIR}/hmi_gen.out" 2>"${BUILD_DIR}/hmi_gen.err"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     log "  [PASS] Bundle generated (${FRAMEWORK} / ${PLATFORM})"
   else
