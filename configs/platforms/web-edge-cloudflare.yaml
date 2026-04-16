@@ -1,0 +1,51 @@
+# OmniSight Platform Profile: Cloudflare Workers / Pages Functions — W1 #275
+#
+# Edge-runtime apps deployed to Cloudflare's V8-isolate platform:
+#   * pure Workers (`wrangler.toml` + `src/index.ts`)
+#   * Pages Functions (`functions/` directory in a Pages project)
+#   * Next.js on Cloudflare Pages via @cloudflare/next-on-pages
+#   * Hono / Astro / SvelteKit (`adapter-cloudflare`)
+#
+# The Cloudflare runtime is V8 isolates, NOT Node — Node built-ins are
+# unavailable unless `nodejs_compat` is opted in. The profile reflects
+# that explicitly via `runtime: cloudflare-workers`.
+#
+# Hard platform limits (load-bearing for bundle/memory budgets):
+#   * 1 MiB compressed worker bundle (Free / paid tier base; Workers
+#     Unbound / Pages Functions raise this to ~10 MiB compressed —
+#     budget here is the strict default, projects opt up explicitly).
+#   * 128 MiB memory ceiling per isolate (cannot be raised — it is a
+#     property of the platform, not a tunable). We surface it in the
+#     profile so build-time gates can warn before hitting CF's limit.
+#   * 50 ms CPU on Free, 30 s on Unbound — not a profile field, but
+#     worth recording in docs.
+#
+# This profile is consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=web
+#   * scripts/simulate.sh web track (1 MiB worker gate)        [W2]
+#   * backend/deploy/cloudflare.py (wrangler deploy adapter)   [W4]
+
+platform: web-edge-cloudflare
+label: "Web — Cloudflare Workers / Pages Functions (Edge)"
+target_kind: web
+
+runtime: cloudflare-workers
+# Track the V8 baseline Cloudflare ships; bump in lockstep with the
+# wrangler version pinned in package.json. Empty when project pins it
+# via wrangler.toml `compatibility_date` instead.
+runtime_version: ""
+
+# `wrangler deploy` is the canonical CF Workers build+deploy command;
+# Pages Functions projects should override to `wrangler pages deploy`.
+build_cmd: "wrangler deploy"
+
+# Cloudflare's hard limit for Free / Bundled is 1 MiB compressed. We
+# encode that as the budget so simulate-track gates fail before
+# `wrangler deploy` does. Workers Unbound / Pages Functions projects
+# may override up to ~10 MiB.
+bundle_size_budget: "1MiB"
+
+# 128 MiB is a CF platform invariant per isolate — not a tunable.
+memory_limit_mb: 128
+
+deploy_provider: cloudflare-pages

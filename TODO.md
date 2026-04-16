@@ -955,12 +955,12 @@ Legend:
 - [x] 預估：**1 day**
 
 ### W1. Web platform profiles (#275)
-- [ ] `configs/platforms/web-static.yaml` — 純靜態站（SSG）
-- [ ] `configs/platforms/web-ssr-node.yaml` — Next.js/Nuxt.js SSR on Node 20
-- [ ] `configs/platforms/web-edge-cloudflare.yaml` — Cloudflare Workers / Pages Functions
-- [ ] `configs/platforms/web-vercel.yaml` — Vercel Serverless / Edge Runtime
-- [ ] 每個 profile 宣告：runtime version / bundle size budget / memory limit / build cmd
-- [ ] 預估：**0.5 day**
+- [x] `configs/platforms/web-static.yaml` — 純靜態站（SSG）
+- [x] `configs/platforms/web-ssr-node.yaml` — Next.js/Nuxt.js SSR on Node 20
+- [x] `configs/platforms/web-edge-cloudflare.yaml` — Cloudflare Workers / Pages Functions
+- [x] `configs/platforms/web-vercel.yaml` — Vercel Serverless / Edge Runtime
+- [x] 每個 profile 宣告：runtime version / bundle size budget / memory limit / build cmd
+- [x] 預估：**0.5 day**
 
 ### W2. Web simulate track (#276)
 - [ ] `scripts/simulate.sh` 新增 `web` track：Lighthouse CI（Performance / Accessibility / SEO / Best Practices）+ bundle size gate + a11y audit + SEO lint

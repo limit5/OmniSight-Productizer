@@ -1,0 +1,55 @@
+# OmniSight Platform Profile: Vercel Serverless / Edge Runtime — W1 #275
+#
+# Vercel-hosted apps using either of Vercel's two compute kinds:
+#   * Serverless Functions → AWS Lambda under the hood (Node.js or
+#     Python runtime), regional, cold-start measured in 100s of ms.
+#   * Edge Functions / Edge Middleware → V8 isolates on Vercel's
+#     edge network, geographically distributed, cold-start ~ms.
+#
+# Both are addressable through the same `vercel build` / `vercel
+# deploy` toolchain, so we keep them in one profile and let project
+# config (Next.js `runtime: 'edge'` per route, `vercel.json`
+# `functions[].runtime`) decide which compute kind serves which path.
+#
+# Limits that drive the budgets here (load-bearing):
+#   * Serverless Function bundle: 50 MB unzipped (Hobby/Pro), 250 MB
+#     unzipped (Enterprise) — we set 50 MiB as the safe default.
+#   * Edge Function bundle: 1 MiB compressed (same V8-isolate ceiling
+#     as Cloudflare) — projects that ship edge functions should
+#     override per-route, not at the profile level.
+#   * Memory: defaults to 1024 MB on Vercel Serverless; tunable per
+#     function up to 3008 MB. Edge Functions cap at 128 MB.
+#   * Execution time: 10 s (Hobby) / 60 s (Pro) / 900 s (Enterprise).
+#
+# This profile is consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=web
+#   * scripts/simulate.sh web track                            [W2]
+#   * backend/deploy/vercel.py (Vercel REST API adapter)       [W4]
+
+platform: web-vercel
+label: "Web — Vercel (Serverless + Edge Runtime)"
+target_kind: web
+
+runtime: vercel-serverless
+# Vercel pins Node 20.x as the default Serverless runtime as of the
+# 2025 platform refresh; Edge Functions use the latest V8 (no
+# user-pinnable version, hence the field reflects only the serverless
+# side).
+runtime_version: "20.x"
+
+# `vercel build` produces the .vercel/output/ deploy artifact locally;
+# CI/CD pipelines that don't use the Vercel CLI may override to
+# `next build` (or framework equivalent) and let `vercel deploy
+# --prebuilt=false` handle the build.
+build_cmd: "vercel build"
+
+# 50 MiB matches the Hobby/Pro Serverless unzipped bundle ceiling.
+# Edge-function-heavy projects should override per-route in
+# vercel.json — that's a route-level concern, not a profile-level one.
+bundle_size_budget: "50MiB"
+
+# 1024 MB is Vercel's default Serverless Function memory; Edge
+# Functions are 128 MB but configured per-route, not via this profile.
+memory_limit_mb: 1024
+
+deploy_provider: vercel

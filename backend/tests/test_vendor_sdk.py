@@ -30,13 +30,19 @@ class TestPlatformProfiles:
         platforms_dir = Path(__file__).resolve().parent.parent.parent / "configs" / "platforms"
         # W0 #274: schema.yaml is a schema declaration, not a target
         # profile — the loader skips it and so must this enumerator.
-        from backend.platform import _NON_PROFILE_FILES
+        # W1 #275: `toolchain` is `required_when_embedded` only — web /
+        # mobile / software profiles legitimately omit it. Gate the
+        # toolchain assertion on the dispatched target_kind so adding a
+        # non-embedded profile doesn't trip this contract test.
+        from backend.platform import _NON_PROFILE_FILES, DEFAULT_TARGET_KIND
         for f in platforms_dir.glob("*.yaml"):
             if f.name in _NON_PROFILE_FILES:
                 continue
             data = yaml.safe_load(f.read_text())
             assert "platform" in data, f"{f.name} missing 'platform'"
-            assert "toolchain" in data, f"{f.name} missing 'toolchain'"
+            kind = data.get("target_kind") or DEFAULT_TARGET_KIND
+            if kind == "embedded":
+                assert "toolchain" in data, f"{f.name} missing 'toolchain'"
 
 
 class TestHardwareManifestVendor:
@@ -109,6 +115,24 @@ class TestVendorSDKEndpoint:
         aarch64 = next((s for s in resp.json() if s["platform"] == "aarch64"), None)
         assert aarch64 is not None
         assert aarch64["status"] == "ready"
+
+    @pytest.mark.asyncio
+    async def test_vendor_sdks_excludes_non_embedded_profiles(self, client):
+        """W1 #275: web / mobile / software profiles must not surface
+        in the vendor-SDK listing — they have no vendor_id / sysroot
+        and would otherwise show as "ready" with empty data, polluting
+        the operator UI."""
+        resp = await client.get("/api/v1/system/vendor/sdks")
+        ids = {s["platform"] for s in resp.json()}
+        for web_profile in (
+            "web-static",
+            "web-ssr-node",
+            "web-edge-cloudflare",
+            "web-vercel",
+        ):
+            assert web_profile not in ids, (
+                f"{web_profile} (target_kind=web) leaked into /vendor/sdks"
+            )
 
 
 class TestBSPSkillParameterized:

@@ -838,13 +838,20 @@ async def list_vendor_sdks():
     if not platforms_dir.is_dir():
         return []
     # W0 #274: skip schema.yaml — it's a schema declaration, not a profile.
-    from backend.platform import _NON_PROFILE_FILES
+    # W1 #275: only embedded profiles carry vendor SDK data; web /
+    # mobile / software profiles must not pollute this endpoint or the
+    # UI lists them with empty vendor fields and a misleading "ready"
+    # status. We dispatch on target_kind (defaulting to embedded for
+    # pre-W0 profiles per the W0 backward-compat rule).
+    from backend.platform import _NON_PROFILE_FILES, DEFAULT_TARGET_KIND
     results = []
     for f in sorted(platforms_dir.glob("*.yaml")):
         if f.name in _NON_PROFILE_FILES:
             continue
         try:
             data = yaml.safe_load(f.read_text()) or {}
+            if (data.get("target_kind") or DEFAULT_TARGET_KIND) != "embedded":
+                continue
             vendor_id = data.get("vendor_id", "")
             sysroot = data.get("sysroot_path", "")
             cmake_tc = data.get("cmake_toolchain_file", "")

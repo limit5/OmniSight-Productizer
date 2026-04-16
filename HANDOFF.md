@@ -1,9 +1,55 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：W0 — Platform profile schema 泛化 (#274) — 前置 refactor，unblocks Priority W/P/X vertical
-> Tag：`v0.1.0` — 首個正式 release（W0 是 schema refactor，不 bump tag）
-> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 開跑（W0 landed）。W0 新增 29 條 test_platform_schema + 全 suite zero regression
+> 最後 commit：W1 — Web platform profiles (#275) — 4 個 web profile 落地（static / SSR-Node20 / Cloudflare Edge / Vercel）
+> Tag：`v0.1.0` — 首個正式 release（W1 是 declarative profile + tests，不 bump tag）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0 + W1 landed，W2 simulate-track 為下一站）。W1 新增 24 條 test_platform_web_profiles + W0 既有 29 條全綠
+
+---
+
+## W1 (complete) Web platform profiles (#275)（2026-04-17 完成）
+
+**背景**：W0 把 `backend/platform.py` 的 dispatcher 與 schema 鋪好，新增 `target_kind: web` 走 `_resolve_web()` 路徑，但實際 web profile 一個都還沒落地——下游 W2（simulate-track web type）/ W4（Vercel + CF deploy adapters）/ W3（前端 role skills）都需要先有具名 profile 才能消費。W1 是 **0.5-day 落 4 個 declarative YAML + tests** 的小步驟，核心是把「web 端會遇到的四種 runtime 形態」一次抽乾淨——靜態、長住 Node SSR、Edge V8 isolate、Vercel 平台託管——讓後續 vertical 不再 hard-code runtime 假設。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `configs/platforms/web-static.yaml` | 純靜態站 SSG（Astro / Next.js export / Vite static / Hugo / 11ty）。`runtime: static` / `runtime_version: ""` / `build_cmd: npm run build` / `bundle_size_budget: 500KiB`（W2 critical-path 規格）/ `memory_limit_mb: 0`（無 server runtime）/ `deploy_provider: any-static`（operator 自行挑 S3+CDN / Pages / Netlify / nginx）。 |
+| `configs/platforms/web-ssr-node.yaml` | 長住 Node 20 SSR（Next.js standalone / Nuxt 3 Nitro node-server / Remix Express / SvelteKit adapter-node）。`runtime: node20` / `runtime_version: 20.11.1`（active LTS pinned in profile）/ `build_cmd: npm run build` / `bundle_size_budget: 5MiB`（W2 server bundle 規格）/ `memory_limit_mb: 512`（單 SSR worker 合理預設，含 PaaS free tier）/ `deploy_provider: docker`（最小公約數）。 |
+| `configs/platforms/web-edge-cloudflare.yaml` | Cloudflare Workers / Pages Functions（V8 isolate）。`runtime: cloudflare-workers` / `build_cmd: wrangler deploy` / `bundle_size_budget: 1MiB`（CF Free/Bundled compressed worker hard limit—W2 gate 比 `wrangler deploy` 早爆）/ `memory_limit_mb: 128`（V8 isolate 平台不變量）/ `deploy_provider: cloudflare-pages`。 |
+| `configs/platforms/web-vercel.yaml` | Vercel Serverless + Edge（兩種 compute kind 共用 toolchain，per-route 在 `vercel.json` 切換）。`runtime: vercel-serverless` / `runtime_version: 20.x` / `build_cmd: vercel build` / `bundle_size_budget: 50MiB`（Hobby/Pro Serverless unzipped ceiling）/ `memory_limit_mb: 1024`（Vercel Serverless 預設）/ `deploy_provider: vercel`。 |
+| `backend/tests/test_platform_web_profiles.py`（24 條，新檔） | 五組 parametrize（4 profiles × 5 contract assertions = 20 條）：enumerated / declares target_kind=web / declares 4 W1 必要欄位（runtime/build_cmd/bundle_size_budget/memory_limit_mb）/ validate_profile 無錯（W0 → W1 invariant：web 不被強逼宣告 kernel_arch）/ 解析後 `build_toolchain.kind == web` 且不漏 cross_prefix/arch。再加 4 條 per-profile budget 鎖定（static 無 server / SSR Node20.x / CF 1MiB+128MB platform invariants / Vercel 50MiB+1024MB defaults）——這些是「living spec」，誰把 CF bundle 改成 50MiB 會立刻紅燈。 |
+| `TODO.md` | W1 六個 `[ ]` → `[x]`。 |
+
+**驗證結果：**
+
+* `backend/tests/test_platform_web_profiles.py`：**24/24 綠**（<0.1s）。
+* W0 既有 schema suite 零 regression：`test_platform_schema.py` 29/29 綠（含 `test_dispatch_web` 仍正常）。
+* 合併執行：`python3 -m pytest backend/tests/test_platform_web_profiles.py backend/tests/test_platform_schema.py -v` → **53 passed in 0.20s**。
+* `list_profile_ids()` 隱式驗證：4 個 web profile 全部被枚舉、不誤把 `schema.yaml` 當 profile。
+
+**設計決策備忘：**
+
+1. **四個 profile 而不是兩個**：早期草稿想把 `web-edge-cloudflare` 和 `web-vercel` 合成 `web-edge`，但兩家平台的 hard limit 完全不同（CF: 1 MiB + 128 MB；Vercel Serverless: 50 MiB + 1024 MB），共用一個 profile 會把預設值設在哪一邊都錯。Vercel 內部「Edge vs Serverless」反而是 per-route 設定，留在 `vercel.json` 處理——所以 profile 維度切在「平台」而不是「runtime 形態」。
+2. **`runtime_version` 對 CF 留空**：Cloudflare V8 沒有 user-pinnable version，跟著 `wrangler` + `compatibility_date` 走；硬填一個 `v8-12.x` 對 operator 沒意義。對應 `web-static` 同理留空（純 build artifact，無 runtime 概念）。Node 與 Vercel 則明確 pin LTS / 平台預設。
+3. **`bundle_size_budget` 用 `KiB/MiB` 字串而非數字**：和 W0 schema.yaml 註解保持一致（`"500KiB" or "5MiB"`），W2 的 simulate-track parser 統一處理單位。如果用 raw bytes（`524288`）operator 看不出意圖。
+4. **`memory_limit_mb: 0` 對 static 表示「無 server runtime」**：而不是 `null`。理由：YAML null 在 Python 變 `None` 會強迫每個下游 consumer 寫 `if mem is None`；用 `0` 配合 `int` 型別讓 `if profile.memory_limit_mb:` 自動 falsy 判斷成立，符合 `_resolve_web` 預設值（`data.get("memory_limit_mb", 0)`）的語意。
+5. **`deploy_provider` 對 web-static 用 `any-static`**：避免硬綁某家託管。W4 deploy adapter 落地時，static profile 透過 project-level config 指定實際 provider；profile 本身只表態「這是個 static artifact，任何 static host 都能吃」。
+6. **per-profile budget assertion 寫成 living spec**：`test_web_edge_cloudflare_respects_platform_limits` 不只測「有這欄位」，連 1 MiB / 128 MB 兩個具體數字都鎖死。理由：CF 的 bundle / memory 是平台不變量，誰改它八成是搞錯了，紅燈 + 註解能在 PR 階段就攔下來；測試裡寫的 docstring 也成了 reviewer 的 just-in-time 文件。
+7. **沒順手實作 W2 的 budget gate**：W2 是獨立 ticket（simulate-track web 類型），W1 只負責 declarative profile + 把欄位裝進去——遵守 SOP「Step 6 重新評估、新工作項目放未來」。下一站直接接 W2 / W3 的 parametrize fixture 用 `_WEB_PROFILES` 跑。
+
+**後續建議（unblocks 的下游）：**
+
+* **W2 simulate.sh web track**：可以 `from backend.platform import get_platform_config` 拿 `build_toolchain.{build_cmd, bundle_size_budget, memory_limit_mb}` 跑 Lighthouse + bundle gate。bundle budget 已經 per-profile 落地。
+* **W4 deploy adapters**：`backend/deploy/{vercel,cloudflare}.py` 直接讀 `web-vercel` / `web-edge-cloudflare` profile 的 `runtime_version` / `deploy_provider` 欄位，不用再 hard-code。
+* **W7 Nuxt / W8 Astro 補齊**：兩者都吃 `web-ssr-node`（Nuxt Nitro node-server）或 `web-static`（Astro static export），W1 已覆蓋——除非 Nitro 加新 adapter 才需要新 profile。
+* **W3 role skills**：frontend-react / frontend-vue 等 role 的 prompt 可以引用 `_WEB_PROFILES` 當 context 給 LLM「這四種部署形態」。
+* **schema.yaml lint**：W0 設想的「validate_profile 對所有 yaml 跑、assert 無 error」現在已被 W1 的 `test_web_profile_validates_clean` parametrize 涵蓋；下一輪當 P/X 落地時，把 parametrize 列表擴成 union 即可。
+
+**Operator TODO（`[O]` 項目）：**
+
+* 無——W1 純 repo 內部 declarative profile + tests，無人工操作。實際對 Vercel / Cloudflare 開帳號 / 設 token 屬於 W4 deploy adapter 階段。
 
 ---
 

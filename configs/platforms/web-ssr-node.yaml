@@ -1,0 +1,50 @@
+# OmniSight Platform Profile: Web SSR on Node 20 — W1 #275
+#
+# Long-running Node.js server-side-rendered apps: Next.js (`output:
+# standalone`), Nuxt 3 (Nitro `node-server`), Remix (Express adapter),
+# SvelteKit (`adapter-node`). The artifact is a Node 20 process that
+# listens on a port; deployment targets are containers / VMs / PaaS
+# (Render / Fly / ECS / k8s).
+#
+# Why a dedicated profile (vs. web-static):
+#   * Has a server runtime — needs runtime_version, memory_limit, and
+#     a server-bundle budget that's an order of magnitude larger than
+#     a static critical-path budget.
+#   * Bundle budget here = server bundle (5 MiB matches W2 spec). The
+#     client critical-path budget is enforced separately by the
+#     framework's build (Next.js page budgets, Nuxt's analyzer).
+#   * `runtime: node20` is the dispatch signal for build adapters that
+#     need to install the right Node version into the container.
+#
+# This profile is consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=web
+#   * scripts/simulate.sh web track (Lighthouse + 5 MiB server gate) [W2]
+#   * backend/deploy/* docker / PaaS adapters                        [W4]
+
+platform: web-ssr-node
+label: "Web — SSR on Node 20 (Next.js / Nuxt / Remix / SvelteKit)"
+target_kind: web
+
+runtime: node20
+# Pin to the active LTS at time of W1 landing. Bumping this is a
+# breaking change for downstream container builds, so it lives in the
+# profile, not in env.
+runtime_version: "20.11.1"
+
+# Generic build cmd; framework-specific projects override in
+# package.json scripts. Both Next.js (`next build`) and Nuxt
+# (`nuxt build`) honour `npm run build`.
+build_cmd: "npm run build"
+
+# 5 MiB server-bundle ceiling per W2 spec. Bigger than that and we
+# probably picked the wrong runtime — should be edge or static instead.
+bundle_size_budget: "5MiB"
+
+# Reasonable default for a single SSR worker; tune per project. 512 MB
+# fits within free tiers of common PaaS (Render, Fly small VM) and is
+# the de-facto Next.js standalone reference footprint.
+memory_limit_mb: 512
+
+# Container is the lowest-common-denominator target — Render / Fly /
+# ECS / k8s all consume it. PaaS adapters override via project config.
+deploy_provider: docker

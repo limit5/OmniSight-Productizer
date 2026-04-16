@@ -1,0 +1,41 @@
+# OmniSight Platform Profile: Web Static (SSG) — W1 #275
+#
+# Pure-static sites: no server runtime, output is HTML/CSS/JS files only.
+# Targets the Astro / Next.js `output: export` / Vite-static / Hugo /
+# 11ty / docusaurus-style build pipelines. The artifact is a static
+# directory that any object store + CDN can serve (S3+CloudFront,
+# Cloudflare Pages static, GitHub Pages, Netlify static, nginx).
+#
+# Why a dedicated profile:
+#   * No memory_limit (no server process at runtime — only build-time).
+#   * Bundle budget is tight by design (≤ 500 KiB critical path) to
+#     enforce LCP / FCP discipline expected of a static site.
+#   * `deploy_provider: any-static` signals downstream adapters that
+#     they may pick the operator-configured static host.
+#
+# This profile is consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=web
+#   * scripts/simulate.sh web track (Lighthouse / bundle gate)  [W2]
+#   * backend/deploy/* static-host adapters                     [W4]
+
+platform: web-static
+label: "Web — Static Site (SSG)"
+target_kind: web
+
+runtime: static
+runtime_version: ""
+
+# Build command kept generic so any SSG framework can override via
+# project-level config; default matches the most common Next.js export
+# / Vite / Astro layout.
+build_cmd: "npm run build"
+
+# 500 KiB matches the W2 spec critical-path budget for static sites.
+bundle_size_budget: "500KiB"
+
+# Static = no long-lived server process; build-time RSS is the only
+# concern, and that's bounded by the build runner, not this profile.
+memory_limit_mb: 0
+
+# Operator picks the actual static host (S3, Pages, Netlify, nginx).
+deploy_provider: any-static
