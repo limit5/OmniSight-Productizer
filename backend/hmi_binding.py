@@ -16,7 +16,6 @@ skeleton (minus prose).
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -434,7 +433,3 @@ def summary() -> dict[str, Any]:
         "binding_version": BINDING_VERSION,
         "supported_servers": list(SUPPORTED_SERVERS),
     }
-
-
-# Ensure the module keeps `json` import used for future round-trip helpers
-_ = json

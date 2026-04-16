@@ -127,7 +127,7 @@ def _assert_framework_allowed(name: str) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _render_html(req: GeneratorRequest, i18n_blob: str, app_js: str, css: str) -> str:
+def _render_html(req: GeneratorRequest, i18n_blob: str, css: str) -> str:
     escape = html.escape
     title = escape(req.product_name)
     locale = escape(req.locale)
@@ -270,7 +270,7 @@ def generate_bundle(req: GeneratorRequest) -> GeneratedBundle:
     i18n_blob = _render_i18n_blob(req)
     css = _render_css(req.extra_styles)
     js = _render_js(req)
-    page_html = _render_html(req, i18n_blob, js, css)
+    page_html = _render_html(req, i18n_blob, css)
 
     files = {"index.html": page_html, "app.js": js}
     # Policy: security headers set by server, but also baked-in as <meta> and checked here
