@@ -555,6 +555,8 @@ from backend.routers import api_keys as _api_keys_router  # K6/BEARER-PER-KEY
 app.include_router(_api_keys_router.router, prefix=settings.api_prefix)
 from backend.routers import storage as _storage_router  # M2/DISK-QUOTA-LRU
 app.include_router(_storage_router.router, prefix=settings.api_prefix)
+from backend.routers import hmi as _hmi_router  # C26/L4-CORE-26 HMI
+app.include_router(_hmi_router.router, prefix=settings.api_prefix)
 
 
 @app.get("/")

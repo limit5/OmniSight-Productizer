@@ -1,0 +1,210 @@
+# C26 / L4-CORE-26 HMI embedded web UI framework (#261)
+# Bundle size budgets per platform profile (flash-partition aware),
+# embedded browser ABI matrix, IEC 62443 security baseline, i18n pool.
+
+version: "1.0.0"
+
+# ── Bundle Size Budgets (bytes) ──
+# Derived from typical IPCam / Router / Kiosk flash partition layouts:
+#   - IPCam (HiSilicon 3516/3519):  8 MiB /app partition → 512 KiB HMI
+#   - Router (MediaTek MT7622):    16 MiB overall        → 384 KiB HMI
+#   - 5G-GW (Qualcomm IPQ8074):    32 MiB overall        →   1 MiB HMI
+#   - Industrial-PC (host_native): unlimited              →   4 MiB HMI
+#   - POS/Kiosk (aarch64 eMMC):     4 GiB eMMC           →   4 MiB HMI
+#   - armv7 legacy cameras:         4 MiB /app partition →  256 KiB HMI
+#   - riscv64 dev boards:          16 MiB                →   1 MiB HMI
+#
+# Rationale: the HMI must fit in the "web-root" partition alongside
+# inline fonts/CSS/JS. Overhead budget split 60% HTML+CSS, 30% JS, 10% fonts.
+bundle_budgets:
+  host_native:
+    flash_partition_bytes: 0           # 0 = unlimited
+    hmi_budget_bytes: 4194304          # 4 MiB
+    html_css_max_bytes: 2621440        # 2.5 MiB
+    js_max_bytes: 1258291              # 1.2 MiB
+    fonts_max_bytes: 314572            # 300 KiB
+  aarch64:
+    flash_partition_bytes: 8388608     # 8 MiB
+    hmi_budget_bytes: 524288           # 512 KiB
+    html_css_max_bytes: 314572         # 307 KiB
+    js_max_bytes: 157286               # 153 KiB
+    fonts_max_bytes: 52428             # 51 KiB
+  armv7:
+    flash_partition_bytes: 4194304     # 4 MiB
+    hmi_budget_bytes: 262144           # 256 KiB
+    html_css_max_bytes: 157286         # 153 KiB
+    js_max_bytes: 78643                # 76 KiB
+    fonts_max_bytes: 26214             # 25 KiB
+  riscv64:
+    flash_partition_bytes: 16777216    # 16 MiB
+    hmi_budget_bytes: 1048576          # 1 MiB
+    html_css_max_bytes: 629145         # 614 KiB
+    js_max_bytes: 314572               # 307 KiB
+    fonts_max_bytes: 104857            # 102 KiB
+
+# ── Embedded Browser ABI Matrix ──
+# Frozen Chromium/WebKit builds shipped on device for each SoC family.
+# New HMI bundles must pass ABI compatibility check against the listed
+# engine version before deploy.
+abi_matrix:
+  aarch64:
+    - engine: chromium
+      version: "109.0.5414.120"
+      min_es_version: "ES2022"
+      supports_webgl2: true
+      supports_wasm: true
+      supports_webrtc: true
+      notes: "LTS on HiSilicon 3519 SDK 2023.4"
+    - engine: webkit
+      version: "617.1.17"
+      min_es_version: "ES2022"
+      supports_webgl2: true
+      supports_wasm: true
+      supports_webrtc: false
+      notes: "Default browser on MediaTek MT8395"
+  armv7:
+    - engine: chromium
+      version: "96.0.4664.175"
+      min_es_version: "ES2020"
+      supports_webgl2: false
+      supports_wasm: true
+      supports_webrtc: false
+      notes: "Last Cortex-A7 compatible build"
+    - engine: webkit
+      version: "614.3.5"
+      min_es_version: "ES2019"
+      supports_webgl2: false
+      supports_wasm: false
+      supports_webrtc: false
+      notes: "BusyBox legacy camera SDK"
+  riscv64:
+    - engine: chromium
+      version: "124.0.6367.243"
+      min_es_version: "ES2023"
+      supports_webgl2: true
+      supports_wasm: true
+      supports_webrtc: true
+      notes: "Experimental RISC-V port, TH1520 SoC"
+  host_native:
+    - engine: chromium
+      version: "126.0.6478.126"
+      min_es_version: "ES2024"
+      supports_webgl2: true
+      supports_wasm: true
+      supports_webrtc: true
+      notes: "Host browser — most permissive"
+
+# ── IEC 62443 Security Baseline ──
+# Industrial cyber-security standard for HMI panels. Minimum gate rules.
+security_baseline:
+  name: "IEC 62443-4-2 SL2"
+  required_headers:
+    - "Content-Security-Policy"
+    - "X-Content-Type-Options"
+    - "X-Frame-Options"
+    - "Referrer-Policy"
+    - "Strict-Transport-Security"
+  forbidden_patterns:
+    # URL sources
+    - "https://cdn."
+    - "https://cdnjs."
+    - "https://unpkg."
+    - "https://jsdelivr."
+    - "//cdn."
+    # Analytics
+    - "google-analytics"
+    - "googletagmanager"
+    - "segment.io"
+    - "mixpanel"
+    - "datadog-rum"
+    # Dangerous patterns
+    - "eval("
+    - "Function("
+    - "document.write"
+    - "innerHTML ="
+    - "dangerouslySetInnerHTML"
+  forbidden_attributes:
+    - "onclick"
+    - "onload"
+    - "onerror"
+    - "onmouseover"
+  required_csp_directives:
+    - "default-src 'self'"
+    - "script-src 'self'"
+    - "object-src 'none'"
+    - "base-uri 'none'"
+    - "frame-ancestors 'none'"
+  session_rules:
+    session_storage_only: false    # must NOT use localStorage for auth tokens
+    require_same_site_strict: true
+    require_httponly: true
+    require_secure: true
+    csrf_token_required: true
+  auth_flow_rules:
+    min_password_length: 12
+    max_login_attempts: 5
+    lockout_minutes: 15
+    require_mfa: false             # recommended but not mandatory for SL2
+
+# ── i18n language pool ──
+# Shared language pool with D-series doc templates.
+# 4 languages at launch; extensible via per-device overlay.
+i18n:
+  default_locale: "en"
+  supported_locales:
+    - code: "en"
+      name: "English"
+      rtl: false
+    - code: "zh-TW"
+      name: "繁體中文"
+      rtl: false
+    - code: "ja"
+      name: "日本語"
+      rtl: false
+    - code: "zh-CN"
+      name: "简体中文"
+      rtl: false
+  base_keys:
+    # Common HMI strings
+    - nav.home
+    - nav.network
+    - nav.ota
+    - nav.logs
+    - nav.settings
+    - nav.logout
+    - action.save
+    - action.cancel
+    - action.reboot
+    - action.factory_reset
+    - status.online
+    - status.offline
+    - status.updating
+    - status.error
+    - form.username
+    - form.password
+    - form.required
+    - error.unauthorized
+    - error.server
+
+# ── Generator Whitelist ──
+# Only these frameworks are allowed in HMI bundles.
+generator_whitelist:
+  frameworks:
+    - name: "preact"
+      version: "10.22.0"
+      size_bytes: 4096           # 4 KiB minified
+      license: "MIT"
+    - name: "lit-html"
+      version: "3.1.4"
+      size_bytes: 6144           # 6 KiB minified
+      license: "BSD-3-Clause"
+    - name: "vanilla"
+      version: "0"
+      size_bytes: 0
+      license: "N/A"
+  forbidden_frameworks:
+    - react                      # too large (~140 KiB) + CDN footguns
+    - vue
+    - angular
+    - jquery
+    - bootstrap
