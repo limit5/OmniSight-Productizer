@@ -1073,12 +1073,12 @@ Legend:
 - [x] 預估：**2.5 day**
 
 ### P3. 簽章鏈管理（extend secret_store）(#288)
-- [ ] Apple certs：Developer ID Certificate + Provisioning Profile + App Store Distribution Certificate
-- [ ] Android keystore：per-app keystore + alias + password
-- [ ] HSM 整合（選配）：AWS KMS / GCP KMS / YubiHSM — 私鑰不出 HSM
-- [ ] 簽章 audit：每次 sign 寫 hash-chain audit_log（who / when / what artifact / what cert）
-- [ ] Cert 到期 alert（30d / 7d / 1d pre-expiry SSE 告警）
-- [ ] 預估：**2 day**
+- [x] Apple certs：Developer ID Certificate + Provisioning Profile + App Store Distribution Certificate
+- [x] Android keystore：per-app keystore + alias + password
+- [x] HSM 整合（選配）：AWS KMS / GCP KMS / YubiHSM — 私鑰不出 HSM
+- [x] 簽章 audit：每次 sign 寫 hash-chain audit_log（who / when / what artifact / what cert）
+- [x] Cert 到期 alert（30d / 7d / 1d pre-expiry SSE 告警）
+- [x] 預估：**2 day**
 
 ### P4. Mobile role skills (#289)
 - [ ] `configs/roles/ios-swift.md`（SwiftUI / UIKit / Combine）
