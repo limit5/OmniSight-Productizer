@@ -1,3 +1,8 @@
+import { fileURLToPath } from "node:url"
+import { dirname } from "node:path"
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
 /** @type {import('next').NextConfig} */
 const backendUrl = process.env.BACKEND_URL || "http://localhost:8000"
 
@@ -8,6 +13,9 @@ const nextConfig = {
   },
   images: {
     unoptimized: true,
+  },
+  turbopack: {
+    root: __dirname,
   },
   async rewrites() {
     return [
