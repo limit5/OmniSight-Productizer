@@ -289,6 +289,12 @@ async def _oom_watchdog(agent_id: str, container_name: str,
                 await asyncio.sleep(OOM_POLL_INTERVAL_S)
             except asyncio.CancelledError:
                 return  # caller stopped us → done
+            # If the registry no longer tracks this agent (test reset,
+            # crash recovery wipe, etc.) the watchdog has nothing to
+            # attribute to — exit instead of spinning.
+            current = _containers.get(agent_id)
+            if current is None or current.container_name != container_name:
+                return
             rc, out, _ = await _run(
                 f"docker inspect --format "
                 f"'{{{{.State.Status}}}}|{{{{.State.OOMKilled}}}}|"

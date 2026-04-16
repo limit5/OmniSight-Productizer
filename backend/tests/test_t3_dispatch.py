@@ -51,10 +51,11 @@ def fake_info():
 async def test_local_dispatch_calls_local_starter(monkeypatch, fake_info):
     called = {"n": 0}
 
-    async def fake_starter(agent_id, workspace_path):
+    async def fake_starter(agent_id, workspace_path, **kwargs):
         called["n"] += 1
         called["agent_id"] = agent_id
         called["workspace_path"] = workspace_path
+        called["kwargs"] = kwargs
         return fake_info
 
     monkeypatch.setattr(_ct, "start_t3_local_container", fake_starter)
@@ -73,7 +74,7 @@ async def test_bundle_dispatch_returns_none(monkeypatch, fake_info):
     """aarch64 target on an x86_64 host → BUNDLE, no container start."""
     called = {"n": 0}
 
-    async def never(agent_id, workspace_path):
+    async def never(agent_id, workspace_path, **kwargs):
         called["n"] += 1
         return fake_info
 
@@ -93,7 +94,7 @@ async def test_empty_target_bundles_instead_of_local(monkeypatch, fake_info):
     because nobody said otherwise."""
     called = {"n": 0}
 
-    async def never(agent_id, workspace_path):
+    async def never(agent_id, workspace_path, **kwargs):
         called["n"] += 1
         return fake_info
 
@@ -111,7 +112,7 @@ async def test_kill_switch_forces_bundle(monkeypatch, fake_info):
     monkeypatch.setenv("OMNISIGHT_T3_LOCAL_ENABLED", "false")
     called = {"n": 0}
 
-    async def never(agent_id, workspace_path):
+    async def never(agent_id, workspace_path, **kwargs):
         called["n"] += 1
         return fake_info
 
@@ -135,7 +136,7 @@ async def test_dispatch_bumps_metric(monkeypatch, fake_info):
 
     monkeypatch.setattr(_r, "record_dispatch", fake_record)
 
-    async def fake_starter(agent_id, workspace_path):
+    async def fake_starter(agent_id, workspace_path, **kwargs):
         return fake_info
     monkeypatch.setattr(_ct, "start_t3_local_container", fake_starter)
 
