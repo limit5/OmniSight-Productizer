@@ -60,6 +60,9 @@ for arg in "$@"; do
     --visual-baseline=*) WEB_VISUAL_BASELINE="${arg#*=}" ;;
     --budget-override=*) WEB_BUDGET_OVERRIDE="${arg#*=}" ;;
     --web-profile=*) WEB_PROFILE="${arg#*=}" ;;
+    --spdx-allowlist=*) WEB_SPDX_ALLOWLIST="${arg#*=}" ;;
+    --wcag-checklist=*) WEB_WCAG_CHECKLIST="${arg#*=}" ;;
+    --w5-compliance=*) WEB_W5_COMPLIANCE="${arg#*=}" ;;
     *) ;;
   esac
 done
@@ -1101,6 +1104,42 @@ run_web() {
       log "  [FAIL] Visual: ${WEB_VISUAL_STATUS}"
       ;;
   esac
+
+  # ── W5 #279 Compliance gates (WCAG 2.2 AA / GDPR / SPDX) ──
+  # Opt-in: pass --w5-compliance=on. Default off so pre-W5 fixtures /
+  # callers keep their existing semantics; W5-aware callers enable it
+  # explicitly once they've added the GDPR artefacts the gate checks for.
+  if [ "${WEB_W5_COMPLIANCE:-off}" = "on" ]; then
+    local _w5_summary="${BUILD_DIR}/web_w5_compliance.json"
+    local _w5_err="${BUILD_DIR}/web_w5.err"
+    local _w5_args=(--app-path "$_app_path" --json-out "$_w5_summary")
+    [ -n "${WEB_URL:-}" ] && _w5_args+=(--url "$WEB_URL")
+    [ -n "${WEB_SPDX_ALLOWLIST:-}" ] && _w5_args+=(--allowlist "$WEB_SPDX_ALLOWLIST")
+    [ -n "${WEB_WCAG_CHECKLIST:-}" ] && _w5_args+=(--checklist "$WEB_WCAG_CHECKLIST")
+
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    if ( cd "$WORKSPACE" && python3 -m backend.web_compliance "${_w5_args[@]}" 2>"$_w5_err" ); then
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "w5_compliance" "pass" "0" "WCAG/GDPR/SPDX bundle passed")"
+      log "  [PASS] W5 compliance bundle (WCAG / GDPR / SPDX)"
+    else
+      # Exit 1 means a gate returned FAIL; non-zero > 1 means driver error.
+      local _w5_code=$?
+      if [ "$_w5_code" -eq 1 ]; then
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        add_test_detail "$(json_test_detail "w5_compliance" "fail" "0" "compliance bundle blocked by a failing gate")"
+        add_error "W5 compliance bundle blocked by a failing gate"
+        log "  [FAIL] W5 compliance bundle (see ${_w5_summary})"
+      else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        local _w5_msg
+        _w5_msg=$(head -3 "$_w5_err" | tr '\n' ' ')
+        add_test_detail "$(json_test_detail "w5_compliance" "fail" "0" "driver error: ${_w5_msg}")"
+        add_error "W5 compliance driver error: ${_w5_msg}"
+        log "  [FAIL] W5 compliance driver: ${_w5_msg}"
+      fi
+    fi
+  fi
 
   COVERAGE_EXPECTED=$((COVERAGE_EXPECTED + TESTS_TOTAL))
   COVERAGE_RUN=$((COVERAGE_RUN + TESTS_PASSED))

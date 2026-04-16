@@ -1,9 +1,60 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：W4 — Deploy adapters (#278) — `backend/deploy/` 五檔落地（`base.py` + 4 adapter），統一 `WebDeployAdapter` 介面（provision / deploy / rollback / get_url），token 全走 `secret_store.Fernet`，82 條 adapter 測試 + 210 條 adjacent regression 全綠
-> Tag：`v0.1.0` — 無 bump（W4 為 backend 驅動層新增，無破壞性 API 變動；v0.2.0 預計在 W6 Next.js pilot 拉首支可售 SKU 時打）
-> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0 + W1 + W2 + W3 + W4 landed，W5 compliance gates 為下一站）。W4 新增 5 個 deploy 模組 + 82 條測試，adjacent suite（cloudflare_tunnel / web_simulator / web_simulate / web_role_skills / platform_* / prompt_loader）292/292 零 regression
+> 最後 commit：W5 — Compliance gates (#279) — `backend/web_compliance/` package 落地（`wcag.py` axe-core + 2.2 AA 手動清單 / `gdpr.py` cookie+DPA+retention+RTBF / `spdx.py` arborist+walk fallback / `bundle.py` orchestrator + C8 bridge），opt-in `simulate.sh --w5-compliance=on`，60 條 W5 單元 + 6 條 simulate wire + 440 條 adjacent regression 全綠
+> Tag：`v0.1.0` — 無 bump（W5 新增 compliance gate layer，無破壞性 API 變動）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成 + Priority W 進行中（W0–W5 landed；W6 SKILL-NEXTJS pilot 為下一站）。W5 新增 1 個 package / 4 模組 / 2 測試檔 / 66 條測試，adjacent suite（compliance_harness / deploy_* / platform_web / web_simulator / web_simulate / web_role_skills / enterprise_web_stack）506/506 零 regression
+
+---
+
+## W5 (complete) Compliance gates（WCAG / GDPR / SPDX）(#279)（2026-04-17 完成）
+
+**背景**：W0（schema）→ W1（4 個 platform profile）→ W2（simulate-track）→ W3（6 個 role skill）→ W4（4 個 deploy adapter）把「宣告 + QA 量化閘 + prompt 生碼層 + 上雲 driver」鋪齊，但還漏了 **把上線前的合規檢查也一併證據化** 這一環。W5 是 **1.5-day 在 `backend/web_compliance/` 落 4 個模組**，把 WCAG 2.2 AA a11y 掃描（axe-core + 不可自動化的 AA 手動清單）/ GDPR posture 靜態掃描（cookie banner / retention / DPA / RTBF endpoint）/ SPDX license 樹（`@npmcli/arborist` + walk fallback，deny GPL/AGPL/SSPL，支援 allowlist override）封進同一個 `ComplianceBundle`，並透過 `bundle_to_compliance_report()` 把結果接到 C8 `compliance_harness` 的 audit-log hash-chain 做為 evidence bundle — 直接在既有的 HMI「compliance tools」列表旁多一行 `w5_web_compliance` row，Gerrit reviewer + HMI operator 不用學新 UI 就能看到 W/G/S 三道閘的通過狀況。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `backend/web_compliance/__init__.py`（新檔） | Public facade：re-export `run_all` / `bundle_to_compliance_report` / `scan_gdpr` / `scan_licenses` / `run_wcag_scan` / `WCAG_AA_MANUAL_CHECKLIST` / `DEFAULT_DENY_LICENSES`，讓下游一行 `from backend.web_compliance import run_all`。 |
+| `backend/web_compliance/wcag.py`（新檔，~6.8 KiB） | WCAG 2.2 AA 掃描：`run_wcag_scan(url, checklist_overrides=...)` 呼叫 axe CLI 拿 JSON、`_parse_axe_output()` 處理 list-of-entries / dict-with-violations 兩種 shape，抽出 `id / impact / description / helpUrl / nodes`。閘門條件：`critical + serious == 0` 且沒有 manual item 是 `fail`（unreviewed 不阻擋但 evidence bundle 會計數）。手動清單 12 條，每條帶 **WCAG 成功準則號**（1.3.1 / 1.4.3 / 2.1.1 / 2.4.3 / 2.4.7 / 2.4.11 / 2.5.7 / 2.5.8 / 3.3.7 / 3.3.8 / 4.1.2 / 4.1.3），對齊 W3 `a11y.skill.md` 的 WCAG 2.2 新增條款。axe CLI 缺席時 `source="mock"`，不阻擋 pipeline。 |
+| `backend/web_compliance/gdpr.py`（新檔，~7.0 KiB） | GDPR 四道靜態掃描：（1）cookie banner — 比對 13 組 consent-manager 簽名（OneTrust / Cookiebot / Klaro / usercentrics / Iubenda / tarteaucitron / cookie-banner / consent-manager 等），walk `.html/.js/.jsx/.ts/.tsx/.vue/.svelte`，排除 `node_modules / .git / dist / build / .next / .output / .vercel / coverage / .cache`；（2）retention policy — 10 組候選路徑（`docs/privacy/retention.md` / `PRIVACY.md` 等），檔存在 **且** 內容 match `\d+\s*(day\|month\|year\|週\|月\|年)` 才算過；（3）DPA template — 8 組 `docs/privacy/dpa*.md` / `docs/legal/dpa*.pdf` 候選；（4）RTBF endpoint — 6 條 route regex（`/gdpr/delete`、`/privacy/erase`、`/user/forget`、`/v*/users/:id/delete` 等）+ 7 條 sentinel（`gdpr:rtbf` / `@rtbf` / `rightToBeForgotten` / `data_subject_deletion` 等），source-grep 跨 Python/TS/Go/Rust/Java/Ruby/PHP。每一道獨立 pass/fail，四道全過才算 bundle pass。 |
+| `backend/web_compliance/spdx.py`（新檔，~8.2 KiB） | SPDX license 掃：優先用 `@npmcli/arborist`（node one-liner 跑 `loadActual()` 列出 inventory），缺 `node` / 缺 arborist 時 fallback 到 `_walk_node_modules()` 直接讀每個 `package.json`。`_normalise_license()` 處理三種 shape（str / dict with `type` field / list for OR expression），`_expand_atoms()` 把 `GPL-3.0-or-later` / `LGPL-2.1-only` / `(MIT OR GPL-3.0+)` 拆回 atomic SPDX id 再 match `DEFAULT_DENY_LICENSES`（17 條：GPL-1/2/3、LGPL-2.0/2.1/3.0、AGPL-1/3、SSPL-1.0、CC-BY-NC-*、OSL-3.0、EUPL-1.2、CPAL-1.0）。`allowlist` 參數接受 `"name"` 或 `"name@license"` — denied 若命中 allowlist 就降到 allowed。`source` 欄位 `arborist / walk / mock` 讓 reviewer 知道資料哪裡來。unknown license 不自動 fail（這是 review 決策），但 report.unknown 會 surface 數量。 |
+| `backend/web_compliance/bundle.py`（新檔，~7.5 KiB） | Orchestrator + C8 bridge：`run_all(app_path, url=, checklist_overrides=, spdx_deny=, spdx_allowlist=)` 跑三道閘回 `ComplianceBundle(gates=[GateReport×3])`；`passed` 只有 FAIL / ERROR 才擋（SKIPPED 不擋，對齊 C8 `TestVerdict.skipped` 語義）。`bundle_to_compliance_report(bundle)` 把 bundle 翻譯成 C8 `ComplianceReport`（`tool_name="w5_web_compliance"` / `protocol=onvif`（enum 暫無 web 成員，用 metadata 註明原點）/ `results=[W5-WCAG, W5-GDPR, W5-SPDX]` / `metadata.bundle={...}`），供既有 `log_compliance_report()` audit-log hash-chain 寫入。 |
+| `backend/web_compliance/__main__.py`（新檔） | CLI：`python3 -m backend.web_compliance --app-path=... [--url=] [--allowlist=a,b] [--checklist=path.json] [--json-out=out.json]`。exit 0 = bundle pass，exit 1 = bundle fail。供 `simulate.sh` 與 CI 使用。 |
+| `scripts/simulate.sh` | 新增 `--spdx-allowlist=` / `--wcag-checklist=` / `--w5-compliance=on\|off` 三個 CLI flag；W5 gate 為 **opt-in** 後處理（`WEB_W5_COMPLIANCE=on` 才跑），在既有六道 W2 gate 之後呼 `python3 -m backend.web_compliance`，exit-1 = gate FAIL、exit-N = driver 錯誤，分別 add_error 對齊的訊息。預設 off 以避免 W2 fixture（沒有 GDPR artefacts）被新閘擋到。 |
+| `configs/web/fixtures/compliance-site/`（新檔三個） | W5 驗證用 fixture：`index.html`（含 `cookie-banner` class）+ `docs/privacy/retention.md`（含 `30 days` horizon）+ `docs/privacy/dpa.md`（DPA 模板）+ `server.py`（含 `# gdpr:rtbf` sentinel + `/gdpr/delete` 路徑 + `erase_user_data()` 函式名）— 四道 GDPR check 全過。 |
+| `backend/tests/test_web_compliance.py`（新檔，60 條） | 單元測試：（1）manual checklist 固定 12 條 + 2.2 新增準則齊備（2.4.11 / 2.5.7 / 2.5.8 / 3.3.8）；（2）axe output JSON 解析單/雙 shape、non-JSON 容錯；（3）WCAG 閘門在 mock / critical / moderate 三種情境的 pass/fail；（4）cookie banner 13 簽名 parametrize、node_modules 排除、無簽名 fail；（5）retention file 有/無 horizon、檔不在；（6）DPA 在 docs/legal vs. 缺席；（7）RTBF sentinel vs. route pattern vs. 缺席；（8）GDPR end-to-end 四道 + 目錄不存在；（9）license 正規化四種 shape；（10）deny match：atoms 拆後綴 / OR expression 任一 atom 命中 / UNKNOWN 不誤判 / MIT 乾淨 / AGPL 命中；（11）walk fallback 的 5 種情境（MIT-only pass / GPL fail / allowlist override / UNKNOWN 不 fail / 跳過 test/ 巢狀子樹）；（12）bundle：三個 gate id 齊 / skipped 不擋 bundle / 空目錄 GDPR fail 擋 bundle / to_dict round-trip；（13）C8 bridge：tool_name/test_ids/metadata；（14）CLI exit 0 vs. 1。 |
+| `backend/tests/test_web_simulate_w5.py`（新檔，6 條） | 端到端 shell→python wire：開 flag → `w5_compliance` detail 出現且 status=pass / 關 flag（default）→ 無 `w5_compliance` detail / fixture 檔存在 / overall status 仍 pass。 |
+| `TODO.md` | W5 五個 `[ ]` → `[x]`。 |
+
+**驗證結果：**
+
+* 新測試：`test_web_compliance.py`(60) + `test_web_simulate_w5.py`(6) = **66/66 綠**（<1.5s）。
+* Adjacent regression 聚合跑：`test_compliance_harness` + `test_web_simulate` + `test_web_simulator` + `test_web_role_skills` + `test_deploy_base` + `test_deploy_vercel` + `test_deploy_netlify` + `test_deploy_cloudflare_pages` + `test_deploy_docker_nginx` + `test_platform_web_profiles` + `test_enterprise_web_stack` = **506/506 綠**（<10s，含 W5 新增 66 條）— 零 regression。
+
+**設計決策備忘：**
+
+1. **W5 gate 在 `simulate.sh` 是 opt-in 而非 on-by-default**：原始 W5 ticket 並沒明確要求「加進 W2 default pipeline」。W2 既有的 `configs/web/fixtures/static-site` 從來沒有 `docs/privacy/*` 或 `DPA.md`，所以若 on-by-default，所有既有 W2 測試會在 GDPR gate 紅燈（符合預期但**不該由 W5 改）。折衷：`--w5-compliance=on` flag 明確 opt-in；既有 fixture 與 pipeline 行為不變，W5-aware 專案（會有 privacy docs 的）才打開。文件裡有 ergonomics note：W6 / W7 pilot 啟動時預設帶上這個 flag 才是使用 W5 的正確姿勢。
+2. **wcag manual checklist 12 條而非全 50+ AA 成功準則**：axe-core 已自動覆蓋 ~40% 的 AA criteria；手動清單只列**不可自動化**且 W3 `a11y.skill.md` 明確 enumerate 的 12 條（含 2.2 的全部新增 AA：2.4.11 / 2.5.7 / 2.5.8 / 3.3.8）。把清單弄長只會讓 reviewer 疲勞地打 `n/a`，反而看不到該看的。清單每條 carry `sc` 欄位（WCAG 標準編號），evidence bundle 讀起來稽核員能直接對應到官方 spec。
+3. **GDPR 掃描只是**靜態 source analyzer**，不打 live service**：這個模組不替代 OneTrust / 真正的 runtime 合規平台，它只確認「evidence exists」— 開發者有裝 consent manager / 寫了 retention policy / 有 DPA template / 有 RTBF endpoint。runtime 合規（使用者真的能點 banner、刪除請求真的能跑完）是 integration test / E2E 的事。這樣的分層讓 W5 gate 不會因為 staging env 沒連上 OneTrust SaaS 而誤擋 PR。
+4. **SPDX 掃描 arborist 優先、walk fallback**：arborist 對 hoisting / workspaces / peer dep 的解析比 naive walk 精確，但它需要 `node` + `@npmcli/arborist` 兩個依賴同時在。walk fallback 讓本機開發 / 第一次 CI 跑（尚未 npm install）時仍能出一份 **近似正確** 的 verdict，`source="walk"` 明確告訴 reviewer 這是 fallback 結果而非 authoritative。`source="mock"` 是兩者都不行時（沒有 node_modules）— 閘降級為 SKIPPED 而非 FAIL，不阻擋無 node 依賴的純 html/css 專案。
+5. **deny list 走保守預設（17 條），allowlist 走 override**：GPL/AGPL/SSPL/CC-NC 等在 OmniSight 的 licensing policy 都是預設拒絕；但真實世界常有例外（例如 readline 的 GPL-3.0 在某些情境 legal 已簽 dual-license 豁免）。`allowlist` 接受 `"readline"`（對任何 license 豁免該 package）或 `"readline@GPL-3.0"`（僅對特定 license 豁免），讓 team 用 YAML/JSON config 簽下例外清單而不必 fork deny list。
+6. **`ComplianceBundle` 的 `passed` semantics：SKIPPED 不擋、FAIL/ERROR 擋**：對齊 C8 `TestVerdict` 的四值 enum（pass / fail / error / skipped），skipped 代表「該跑但工具缺席」— 沒測到不等於不合規，但也不該當作通過。evidence bundle 會 carry `skipped_count` 數值，reviewer 能一眼看到 sandbox CI 跳過了幾道、決定是否需要等 full CI 再簽。
+7. **C8 bridge 用現有 `ComplianceProtocol.onvif` 而非新增 `web`**：C8 的 `ComplianceProtocol` enum 只有 `onvif / usb / uac` 三值，要加 `web` 會改 C8 schema + audit-log 既有資料、是不相關的 refactor。折衷：bundle 翻譯時 `protocol=onvif` + `metadata.origin="web_compliance"` — audit-log 消費者只用 hash-chain 功能，不會因 protocol 名稱歧異報錯；未來若要分離，單獨開一張 ticket 改 enum。
+8. **fixture 檔在 `configs/web/fixtures/compliance-site/` 而非 `tests/fixtures/`**：`simulate.sh` 的 W2 fixture 已經放在 `configs/web/fixtures/static-site/`，W5 fixture 放同一路徑讓 shell script 的 `--app-path=` 參數能直接引用（`$WORKSPACE/configs/web/fixtures/compliance-site`），而且它本身也是「一個符合 W5 的最小專案範例」— reviewer 拿這個目錄直接當教學範本。跨 `configs/` 與 `tests/fixtures/` 的前例已經在 W2 立下。
+9. **gdpr 掃描排除 `node_modules / dist / build / .next`**：掃 cookie banner 時若沒排除 node_modules，某個裝了 `@iubenda/cookie-manager` 卻沒在 app 碼裡真正使用的 monorepo 會誤報「通過」。測試 `test_node_modules_excluded_from_scan` pin 這行為：只看 source tree 的直接 usage，不看 vendored 依賴。同理 dist / build 排除避免被 production bundle 裡的壓縮字串誤 match。
+
+**後續建議（unblocks 的下游）：**
+
+* **W6 Next.js pilot (#280)**：pilot 上線前把 `--w5-compliance=on` 設為 W6 profile 的預設，然後在 pilot 專案的 `docs/privacy/` 放真實的（法務簽過的）retention / DPA / RTBF handler — 第一次 deploy 就帶齊 W5 evidence bundle，不用事後補。
+* **Provider metadata 注入**：W4 的 adapter（Vercel / Netlify / CF Pages）都接受 deployment meta，可以把 `bundle_to_compliance_report(bundle).metadata["bundle"]` 序列化後塞進 deployment 的 `context` / `meta` 欄位，讓 provider UI 顯示「通過 W5 三道閘」的標記；GDPR 審計員看 Vercel dashboard 就能找到 evidence。
+* **HMI `/compliance/tools` 列出 `w5_web_compliance`**：C8 的 `list_tools()` registry 目前只列 ODTT / USBCV / UAC 三支。W5 可以跑 `register_tool("w5_web_compliance", ...)` 包一支 thin wrapper 把 bundle 翻成 `ComplianceReport`，這樣 HMI 既有的 compliance-tools 頁面不用改 UI 就會多一行「Web Compliance — WCAG/GDPR/SPDX」。（留給未來小 PR，不在本 patch 範圍。）
+* **C8 `ComplianceProtocol` enum 加 `web` 值**：長期應該把 protocol enum 加一個 web 成員，讓 audit-log 的 metadata filter 能直接 `protocol=web` 查詢而不用走 metadata JSON path。需要同時改 audit-log 既有 query、HMI filter UI 與 dashboard — 單獨 ticket。
+* **axe-core CLI 升級到 axe-cli@4.9+**：當前 parser 抓 `impact / nodes[]` 欄位，axe 的輸出 schema 在 4.x 內向前相容；但若升到 5.x 要重跑 parser 回歸。
+
+**Operator TODO（`[O]` 項目）：**
+
+* 無 — W5 純 Python backend 模組 + fixture + 測試。真正需要 operator 介入的是 **W6 pilot 啟動時**（1）開 `--w5-compliance=on`；（2）把 legal 簽過的 `retention.md` / `dpa.md` 放進 pilot 專案；（3）HMI 後台貼 axe-core + arborist 的 CI runner 讓 gate 從 SKIPPED 升到真實掃描結果。這屬於 pilot 啟動流程而非 W5 的基建。
 
 ---
 

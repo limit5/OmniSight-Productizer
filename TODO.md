@@ -990,11 +990,11 @@ Legend:
 - [x] 預估：**2 day**
 
 ### W5. Compliance gates（WCAG / GDPR / SPDX license scan）(#279)
-- [ ] WCAG 2.2 AA：axe-core 自動掃 + manual checklist（focus order / contrast / screen reader labels）
-- [ ] GDPR：cookie banner / data retention policy / DPA template / right-to-be-forgotten endpoint 掃描
-- [ ] SPDX license scan：`@npmcli/arborist` 列依賴樹 + 禁用 GPL/AGPL（可覆寫 allowlist）
-- [ ] 整合 C18 compliance harness 作為 evidence bundle
-- [ ] 預估：**1.5 day**
+- [x] WCAG 2.2 AA：axe-core 自動掃 + manual checklist（focus order / contrast / screen reader labels）
+- [x] GDPR：cookie banner / data retention policy / DPA template / right-to-be-forgotten endpoint 掃描
+- [x] SPDX license scan：`@npmcli/arborist` 列依賴樹 + 禁用 GPL/AGPL（可覆寫 allowlist）
+- [x] 整合 C18 compliance harness 作為 evidence bundle
+- [x] 預估：**1.5 day**
 
 ### W6. SKILL-NEXTJS (pilot, #280)
 - [ ] Next.js 16 App Router 專案骨架 generator（含 `turbopack.root` 預設正確——避免 OmniSight 自身踩過的 Turbopack workspace-root panic）
