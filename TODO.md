@@ -917,14 +917,14 @@ Legend:
 - [x] 預估：**1 day**
 
 ### O10. 安全加固（queue / lock / JIRA token / Gerrit bot）(#273)
-- [ ] Queue 傳輸 TLS + payload HMAC（防 worker 被偽造任務）
-- [ ] JIRA API token 沿用 `backend/secret_store.py` Fernet at-rest + fingerprint 顯示
-- [ ] Redis auth：ACL 分 role（orchestrator write lock、worker read+extend、observer read-only）
-- [ ] Worker attestation：啟動時 TLS 憑證 + tenant claim，orchestrator 驗證後才發任務
-- [ ] **Merger Agent Gerrit 帳號權限最小化**：`merger-agent-bot` 僅能 push to `refs/for/*` + Code-Review ±2；**不得**有 `Submit` / `Push Force` / `Delete Change` / 任何 project admin 權限
-- [ ] Merger Agent 投票 audit：每次 +2 / abstain / refuse 都寫入 hash-chain audit_log，附 change-id / patchset revision / confidence / rationale
-- [ ] 滲透測試案例：偽造 CATC、竊取鎖、注入 merger prompt、worker 偽裝、偽冒 `merger-agent-bot` 投票
-- [ ] 預估：**1.5 day**
+- [x] Queue 傳輸 TLS + payload HMAC（防 worker 被偽造任務） — `backend/security_hardening.py::sign_envelope/verify_envelope/assert_production_queue_tls`；`backend/queue_backend.py::_sign_queue_message/verify_pulled_message` 在 push/pull 兩側自動掛；env `OMNISIGHT_QUEUE_HMAC_KEY` + `OMNISIGHT_QUEUE_HMAC_KEY_ID`
+- [x] JIRA API token 沿用 `backend/secret_store.py` Fernet at-rest + fingerprint 顯示 — `backend/jira_adapter.py::_resolve_jira_token/describe_jira_token`；env `OMNISIGHT_JIRA_TOKEN_CIPHERTEXT` 優先 > plaintext fallback + warning
+- [x] Redis auth：ACL 分 role（orchestrator write lock、worker read+extend、observer read-only） — `backend/security_hardening.py::RedisAclRole/default_redis_acl_roles/render_acl_file`；CLI `python -m backend.security_hardening render-acl > users.acl`
+- [x] Worker attestation：啟動時 TLS 憑證 + tenant claim，orchestrator 驗證後才發任務 — `backend/security_hardening.py::WorkerIdentity/issue_attestation/AttestationVerifier`；worker `_info_snapshot` 暴露 `tls_cert_fingerprint` (env `OMNISIGHT_WORKER_TLS_FP`)
+- [x] **Merger Agent Gerrit 帳號權限最小化**：`merger-agent-bot` 僅能 push to `refs/for/*` + Code-Review ±2；**不得**有 `Submit` / `Push Force` / `Delete Change` / 任何 project admin 權限 — `.gerrit/project.config.example` 加了 9 行 `deny` 規則；`backend/security_hardening.py::verify_merger_least_privilege` + CLI `verify-gerrit-config` 鎖 CI
+- [x] Merger Agent 投票 audit：每次 +2 / abstain / refuse 都寫入 hash-chain audit_log，附 change-id / patchset revision / confidence / rationale — `backend/security_hardening.py::MergerVoteAuditChain`；`backend/merger_agent.py::_default_audit` 雙 sink (backend.audit + O10 chain)
+- [x] 滲透測試案例：偽造 CATC、竊取鎖、注入 merger prompt、worker 偽裝、偽冒 `merger-agent-bot` 投票 — `backend/tests/test_o10_pentests.py`（5 TestScenario 類，23 條測試全綠）+ `backend/tests/test_security_hardening.py`（51 條單元測試）
+- [x] 預估：**1.5 day** — 完成於 2026-04-17（單次 session）
 
 **Priority O 總預估**：**20 day**（原 19d + Merger Agent Gerrit 整合與 submit-rule 配置 +1d）（solo ~4 週，2-person team ~2-3 週）。
 

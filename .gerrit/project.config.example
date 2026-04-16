@@ -44,12 +44,39 @@
     label-Code-Review = -2..+2 group ai-reviewer-bots
     label-Code-Review = -2..+2 group non-ai-reviewer
     submit = group non-ai-reviewer
+    # O10 (#273): Least-privilege for AI reviewer bots.  Explicitly
+    # DENY every dangerous verb so even if Gerrit default policy
+    # changes upstream, the bots stay trapped in Code-Review land.
+    # DENY takes precedence over any later ALLOW on the same ref.
+    deny submit = group ai-reviewer-bots
+    deny abandon = group ai-reviewer-bots
+    deny delete = group ai-reviewer-bots
+    deny deleteChanges = group ai-reviewer-bots
+    deny owner = group ai-reviewer-bots
+    deny rebase = group ai-reviewer-bots
+    deny editTopicName = group ai-reviewer-bots
+    deny forgeAuthor = group ai-reviewer-bots
+    deny forgeCommitter = group ai-reviewer-bots
 
 [access "refs/for/refs/heads/*"]
     # AI reviewer bots push new patchsets; humans push via gerrit push
     # or gh/GitHub review.
     push = group ai-reviewer-bots
     push = group non-ai-reviewer
+    # O10: AI reviewer bots must not add patchsets to other humans'
+    # open changes.  They may only push *new* changes (which land via
+    # refs/for/*, above).  The addPatchSet override would otherwise
+    # allow a compromised bot to tag-team a reviewer.
+    deny addPatchSet = group ai-reviewer-bots
+
+[access "refs/*"]
+    # O10: the master-level lockdown — force-push, delete-ref,
+    # create-ref and anything destructive is reserved for humans.
+    deny push force = group ai-reviewer-bots
+    deny pushMerge = group ai-reviewer-bots
+    deny createTag = group ai-reviewer-bots
+    deny create = group ai-reviewer-bots
+    deny delete = group ai-reviewer-bots
 
 [label "Code-Review"]
     function = NoBlock

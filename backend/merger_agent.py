@@ -470,6 +470,13 @@ async def _default_test_runner(_req: ConflictRequest) -> TestRunResult:
 async def _default_audit(
     action: str, entity_id: str, payload: dict[str, Any]
 ) -> None:
+    """Dual-sink audit: (1) standard tenant hash-chain via ``backend.audit``
+    — durable, per-tenant, verifiable via ``audit verify`` CLI, and
+    (2) the O10 process-local merger vote chain which stores the
+    specific (vote, confidence, rationale, patchset_revision) tuple
+    the O10 spec asks for, tamper-detectable without hitting the DB.
+    Both are best-effort so a hot-path regression in either sink
+    doesn't block the merger decision."""
     try:
         from backend import audit
         await audit.log(
@@ -481,6 +488,23 @@ async def _default_audit(
         )
     except Exception as exc:                           # pragma: no cover
         logger.debug("merger_agent: audit failed: %s", exc)
+    try:
+        from backend import security_hardening
+        chain = security_hardening.get_global_merger_chain()
+        chain.append(
+            change_id=entity_id,
+            patchset_revision=str(payload.get("push_sha", "")),
+            vote=int(payload.get("voted_score", 0)),
+            confidence=float(payload.get("confidence", 0.0)),
+            rationale=str(payload.get("rationale", "")),
+            reason_code=str(payload.get("reason", action)),
+            extra={
+                "file_path": payload.get("file_path", ""),
+                "review_url": payload.get("review_url", ""),
+            },
+        )
+    except Exception as exc:                           # pragma: no cover
+        logger.debug("merger_agent: O10 chain append failed: %s", exc)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

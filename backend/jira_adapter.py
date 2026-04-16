@@ -522,11 +522,24 @@ def _render_description(p: SubtaskPayload) -> str:
 
 
 def build_default_jira_adapter() -> JiraAdapter:
-    """Build a JiraAdapter from ``backend.config.settings`` + env."""
+    """Build a JiraAdapter from ``backend.config.settings`` + env.
+
+    O10 (#273): JIRA tokens are preferentially resolved via the
+    Fernet-encrypted ``backend.secret_store`` so they never live in
+    plaintext on disk / in the settings dump.  Resolution order:
+
+      1. ``OMNISIGHT_JIRA_TOKEN_CIPHERTEXT`` env (ciphertext straight
+         from ``secret_store.encrypt``) — preferred.
+      2. ``notification_jira_token`` from settings (plaintext) —
+         legacy fallback; logs a warning so operators migrate.
+      3. Empty string — adapter returned but unauthenticated; calls
+         will return 401.
+    """
     from backend.config import settings
+    token = _resolve_jira_token(settings)
     return JiraAdapter(
         base_url=getattr(settings, "notification_jira_url", "") or "",
-        token=getattr(settings, "notification_jira_token", "") or "",
+        token=token,
         auth_mode=os.environ.get("OMNISIGHT_JIRA_AUTH_MODE", "bearer"),
         project_key=getattr(settings, "notification_jira_project", "") or "",
         webhook_secret=getattr(settings, "jira_webhook_secret", "") or "",
@@ -534,9 +547,84 @@ def build_default_jira_adapter() -> JiraAdapter:
     )
 
 
+def _resolve_jira_token(settings) -> str:
+    """Prefer the encrypted source; fall back to plaintext with a warn."""
+    ciphertext = (os.environ.get("OMNISIGHT_JIRA_TOKEN_CIPHERTEXT") or "").strip()
+    if ciphertext:
+        try:
+            from backend import secret_store
+            return secret_store.decrypt(ciphertext)
+        except Exception as exc:
+            logger.error(
+                "O10: OMNISIGHT_JIRA_TOKEN_CIPHERTEXT failed to decrypt: %s; "
+                "falling back to plaintext settings.notification_jira_token",
+                exc,
+            )
+    plaintext = getattr(settings, "notification_jira_token", "") or ""
+    if plaintext:
+        logger.warning(
+            "O10: notification_jira_token is set in plaintext; migrate to "
+            "OMNISIGHT_JIRA_TOKEN_CIPHERTEXT (Fernet via backend.secret_store) "
+            "before GA.  Token fingerprint: %s",
+            _jira_token_fingerprint(plaintext),
+        )
+    return plaintext
+
+
+def _jira_token_fingerprint(token: str) -> str:
+    """Safe-to-log fingerprint — last 4 chars only, never the head.
+
+    Delegates to ``secret_store.fingerprint`` when available so the
+    fingerprint style is consistent across the app; falls back to a
+    local impl so the adapter stays importable even if secret_store
+    hasn't initialised (e.g. during config validation)."""
+    try:
+        from backend import secret_store
+        return secret_store.fingerprint(token)
+    except Exception:
+        if len(token) <= 8:
+            return "****"
+        return f"…{token[-4:]}"
+
+
+def describe_jira_token(settings=None) -> dict[str, Any]:
+    """Operator-facing summary for the integration-status endpoint.
+
+    Returns ``{"configured": bool, "source": "encrypted"|"plaintext"|"none",
+    "fingerprint": "…abcd"}``.  No plaintext tokens leak."""
+    from backend.config import settings as default_settings
+    settings = settings or default_settings
+    ct = (os.environ.get("OMNISIGHT_JIRA_TOKEN_CIPHERTEXT") or "").strip()
+    if ct:
+        try:
+            from backend import secret_store
+            plain = secret_store.decrypt(ct)
+            return {
+                "configured": True,
+                "source": "encrypted",
+                "fingerprint": _jira_token_fingerprint(plain),
+            }
+        except Exception as exc:
+            return {
+                "configured": True,
+                "source": "encrypted",
+                "fingerprint": "****",
+                "error": f"decrypt_failed: {exc}",
+            }
+    plain = getattr(settings, "notification_jira_token", "") or ""
+    if plain:
+        return {
+            "configured": True,
+            "source": "plaintext",
+            "fingerprint": _jira_token_fingerprint(plain),
+        }
+    return {"configured": False, "source": "none", "fingerprint": ""}
+
+
 __all__ = [
     "DEFAULT_JIRA_STATUS_MAP",
     "JiraAdapter",
     "JiraFieldMap",
     "build_default_jira_adapter",
+    "describe_jira_token",
 ]

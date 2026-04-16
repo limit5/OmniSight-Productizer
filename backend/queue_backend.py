@@ -1062,14 +1062,95 @@ def _bump_depth_metric() -> None:
 
 def push(card: TaskCard,
          priority: PriorityLevel = PriorityLevel.P2) -> str:
-    """Enqueue a CATC payload.  Returns the new ``message_id``."""
+    """Enqueue a CATC payload.  Returns the new ``message_id``.
+
+    O10 (#273): if ``OMNISIGHT_QUEUE_HMAC_KEY`` is set, we ALSO stash a
+    detached HMAC envelope on the per-message hash under ``_o10_sig``
+    fields so pullers can verify the payload came from an authorised
+    orchestrator (defends "worker pulls a forged task").  The worker-
+    side verification happens in ``verify_pulled_message`` below.
+    """
     if not isinstance(card, TaskCard):
         raise TypeError("push() requires a TaskCard instance")
     if not isinstance(priority, PriorityLevel):
         raise TypeError("priority must be a PriorityLevel")
     msg_id = _get_backend().push(card, priority)
+    # Sign-in-place: fetch the just-pushed message, overlay the HMAC
+    # envelope fields onto its payload, write it back.  Backend-agnostic
+    # because we go through ``get`` / ``set_state`` glue.
+    _sign_queue_message(msg_id, card)
     _bump_depth_metric()
     return msg_id
+
+
+def _sign_queue_message(msg_id: str, card: TaskCard) -> None:
+    """If a queue-HMAC key is configured, stash a signature envelope on
+    the message payload so pullers can verify authenticity.  Best-
+    effort — a missing key degrades to "no signature", and the
+    corresponding ``verify_pulled_message`` call will reject when
+    signatures are mandatory."""
+    try:
+        from backend import security_hardening
+    except Exception:
+        return
+    key = security_hardening.QueueHmacKey.from_env()
+    if key is None:
+        return
+    msg = _get_backend().get(msg_id)
+    if msg is None:
+        return
+    signed = security_hardening.sign_envelope(msg.payload, key)
+    msg.payload = signed
+    # Write-back path differs per backend — InMemory owns the dict, Redis
+    # needs a re-serialise.  The cleanest cross-backend seam is to just
+    # mutate the in-memory instance (InMemory) or re-write via the
+    # backend-specific ``_write_msg`` for Redis.
+    backend = _get_backend()
+    if isinstance(backend, InMemoryQueueBackend):
+        with backend._lock:                        # type: ignore[attr-defined]
+            stored = backend._messages.get(msg_id)  # type: ignore[attr-defined]
+            if stored is not None:
+                stored.payload = signed
+    else:  # pragma: no cover — redis path
+        write = getattr(backend, "_write_msg", None)
+        if write is not None:
+            write(msg)
+
+
+def verify_pulled_message(msg: "QueueMessage", *, required: bool | None = None) -> None:
+    """Worker-side check that a pulled ``QueueMessage`` carries a valid
+    HMAC envelope.  Raises ``security_hardening.HmacVerifyError`` on
+    tamper / replay / missing-when-required.
+
+    When ``required`` is ``None`` (default), requirement is auto-
+    detected: if the orchestrator side has an HMAC key configured,
+    workers MUST verify.  Callers can force-enable via
+    ``required=True`` or force-disable (tests) via ``required=False``.
+    Also strips the envelope fields from ``msg.payload`` so downstream
+    CATC parsing doesn't choke on the ``_o10_*`` keys.
+    """
+    try:
+        from backend import security_hardening
+    except Exception:
+        return
+    key = security_hardening.QueueHmacKey.from_env()
+    has_envelope = (
+        security_hardening.HMAC_HEADER_FIELD in (msg.payload or {})
+    )
+    must_verify = required if required is not None else (key is not None)
+    if not must_verify and not has_envelope:
+        return
+    if must_verify and key is None:
+        raise security_hardening.HmacVerifyError(
+            "queue HMAC verification required but no key configured"
+        )
+    if must_verify and not has_envelope:
+        raise security_hardening.HmacVerifyError(
+            "queue message missing HMAC envelope but verification required"
+        )
+    assert key is not None
+    stripped = security_hardening.verify_envelope(msg.payload, key)
+    msg.payload = stripped
 
 
 def pull(consumer: str, count: int = 1,
@@ -1235,6 +1316,7 @@ __all__ = [
     "format_exc",
     "start_visibility_sweep",
     "stop_visibility_sweep",
+    "verify_pulled_message",
 ]
 
 

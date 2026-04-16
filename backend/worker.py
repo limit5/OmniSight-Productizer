@@ -924,6 +924,31 @@ class Worker:
             jira_ticket=_safe_ticket(msg),
             status="acked",
         )
+        # O10 (#273): reject forged / tampered queue payloads *before*
+        # touching the sandbox.  When no HMAC key is configured the call
+        # is a no-op and we fall back to pre-O10 behaviour.
+        try:
+            queue_backend.verify_pulled_message(msg)
+        except Exception as exc:
+            outcome.status = "nacked"
+            outcome.error = f"O10 HMAC verify failed: {exc}"
+            # Immediate DLQ — a bad signature is not a transient fault and
+            # re-queueing it would just poison the next puller.  We NACK
+            # MAX_DELIVERIES times to trigger DLQ in one call.
+            try:
+                for _ in range(queue_backend.MAX_DELIVERIES):
+                    queue_backend.nack(
+                        msg.message_id, outcome.error,
+                        queue_backend.format_exc(exc),
+                    )
+            except Exception:
+                pass
+            outcome.elapsed_s = time.time() - started
+            try:
+                metrics.worker_task_total.labels(outcome="hmac_rejected").inc()
+            except Exception:
+                pass
+            return outcome
         try:
             card = msg.task_card()
         except Exception as exc:
@@ -1157,7 +1182,7 @@ class Worker:
                 )
 
     def _info_snapshot(self, *, status: str) -> dict[str, Any]:
-        return {
+        snap = {
             "worker_id": self.config.worker_id,
             "host": socket.gethostname(),
             "pid": os.getpid(),
@@ -1169,6 +1194,13 @@ class Worker:
             "inflight": self._inflight_count(),
             "processed": len(self._processed),
         }
+        # O10 (#273): advertise the TLS certificate fingerprint so the
+        # orchestrator / dashboard can pin it — if the cert rotates
+        # without an ops approval, the next attestation will fail.
+        fp = os.environ.get("OMNISIGHT_WORKER_TLS_FP", "").strip()
+        if fp:
+            snap["tls_cert_fingerprint"] = fp
+        return snap
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

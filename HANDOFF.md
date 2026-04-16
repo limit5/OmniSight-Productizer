@@ -1,9 +1,77 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-17
-> 最後 commit：O8 — monolith↔distributed feature flag + dual-mode parity (#271)
-> Tag：`v0.1.0` — 首個正式 release（O8 為 migration infra，不 bump tag）
-> 工作目錄狀態：O8 實作完成，測試全綠（O8 新增 26 條 + 既有 queue/worker/merger/orchestrator/arbiter 190 條 + graph/catc/lock 85 條全通過）
+> 最後 commit：O10 — security hardening (queue HMAC / Redis ACL / worker attestation / merger audit chain / pentest suite) (#273)
+> Tag：`v0.1.0` — 首個正式 release（O10 為 security gate，不 bump tag）
+> 工作目錄狀態：Priority O 板塊 (O0–O10) 全部完成。O10 新增 74 條測試 (51 security_hardening + 23 pentest) + O9/O8 既有 275+ 條全綠
+
+---
+
+## O10 (complete) 安全加固：queue HMAC / Redis ACL / worker attestation / merger audit / pentests（2026-04-17 完成）
+
+**背景**：O0–O9 把分散式 orchestration plane 全搭起來了，但五條信任邊界沒有 hard-gate：
+(1) Redis/queue 有 TLS 但沒 payload authentication → worker 可能被餵偽造 CATC；
+(2) JIRA API token 在 settings 裡是 plaintext；
+(3) Redis ACL 只有單一 default user，LLM runaway 或 worker compromise 就能 FLUSHALL；
+(4) Worker 註冊沒有 mutual-auth，任何人連得到 orchestrator 就能宣稱自己是 tenant X 的 worker；
+(5) `merger-agent-bot` 帳號如果在 Gerrit 端被誤加上 `Submit` / `Push Force` 權限，就能單邊越過 O7 的雙簽閘。
+O10 把五個洞補齊，全部集中在一個 `backend/security_hardening.py` 模組裡，policy + implementation + audit 在一個檔案內可讀。
+
+**交付清單：**
+
+| 檔案 | 角色 |
+| --- | --- |
+| `backend/security_hardening.py`（~600 行，新檔） | 核心模組：`QueueHmacKey` / `sign_envelope` / `verify_envelope`（HMAC-SHA256 payload envelope with TTL + kid + replay defence）+ `queue_url_uses_tls` / `assert_production_queue_tls`（boot-time guard）+ `RedisAclRole` / `default_redis_acl_roles` / `render_acl_file`（三個 role：orchestrator / worker / observer；每個都 `-@all` 為底 + 明確 `+@read` / `+xack` 等白名單 + 明確 `-flushdb` / `-cluster` / `-acl` 黑名單）+ `WorkerIdentity` / `issue_attestation` / `AttestationVerifier`（TLS fp + tenant claim + nonce + TTL + PSK 簽章，全部 tamper 都 raise `AttestationError`）+ `MergerVoteAuditChain`（SHA-256 hash-chain，每筆 `+2/abstain/refuse` append 時鏈到前一筆，`verify()` 走一遍 O(n) 鎖定 tamper 點）+ `verify_merger_least_privilege`（掃 `project.config` flag `submit` / `push force` / `delete` 等 forbidden 授權給 ai-reviewer-bots 的 line；`deny <perm>` 不算授權）+ CLI `render-acl` / `verify-gerrit-config`（後者 exit 1 on violation → 直接接 CI gate） |
+| `backend/queue_backend.py` | `push()` 新增 `_sign_queue_message()` 自動 overlay HMAC envelope 欄位（僅在 env `OMNISIGHT_QUEUE_HMAC_KEY` 有值時觸發，保持 pre-O10 deployment 相容）；新增 module-level `verify_pulled_message(msg, required=None)`，required=None 自動偵測（若 orchestrator 配了 key，worker 就 MUST verify）。InMemory backend 直接寫 `_messages[id].payload`；Redis 路徑走 `_write_msg`。`__all__` 加入 `verify_pulled_message` |
+| `backend/worker.py` | `Worker.handle()` 第一件事改為呼叫 `queue_backend.verify_pulled_message(msg)`，失敗時 nack `MAX_DELIVERIES` 次一次送 DLQ（不給 retry 機會，bad sig 是 permanent condition），並 bump `worker_task_total{outcome=hmac_rejected}`；`_info_snapshot` 加 `tls_cert_fingerprint` 欄（從 env `OMNISIGHT_WORKER_TLS_FP` 讀），orchestrator 側 AttestationVerifier 可 pin |
+| `backend/jira_adapter.py` | `build_default_jira_adapter` 先查 env `OMNISIGHT_JIRA_TOKEN_CIPHERTEXT`（走 `secret_store.decrypt`），再 fallback 到 `settings.notification_jira_token`；plaintext fallback 時 WARN + 列 fingerprint (`…abcd`)。新增 `describe_jira_token()` 給 integration-status 用（只回傳 source/fingerprint/configured，不洩漏 plaintext）。`__all__` 加入 `describe_jira_token` |
+| `backend/merger_agent.py` | `_default_audit` 變成 dual sink：(a) 既有的 `backend.audit` tenant hash-chain（DB）+ (b) O10 的 `MergerVoteAuditChain` process-local 鏈（在 `security_hardening.get_global_merger_chain()`），塞 change_id / patchset_revision / vote / confidence / rationale / reason_code 五欄位；兩 sink 都 best-effort（失敗只 log.debug） |
+| `.gerrit/project.config.example` | `[access "refs/heads/*"]` 補 9 條 `deny submit/abandon/delete/deleteChanges/owner/rebase/editTopicName/forgeAuthor/forgeCommitter = group ai-reviewer-bots`；`[access "refs/for/refs/heads/*"]` 補 `deny addPatchSet`；新增 `[access "refs/*"]` 五條全域 `deny push force / pushMerge / createTag / create / delete`——全都 deny-takes-precedence over any later allow |
+| `docs/ops/o10_security_hardening.md`（~200 行，新檔） | Runbook：§1 Queue HMAC + TLS deploy/rotate 指令；§2 Redis ACL 三 role 表 + `render-acl` 流程；§3 Worker attestation allowlist YAML 範例；§4 JIRA token migrate 步驟（從 plaintext → ciphertext）；§5 Merger bot 雙防線（Gerrit deny + hash-chain）；§6 Penetration test 對照表；§7 Incident playbook（HMAC key 外洩 / PSK 外洩 / JIRA 輪換 / 鏈 tamper / config drift 五個 runbook） |
+| `backend/tests/test_security_hardening.py`（51 條，新檔） | 五個 TestClass 對應五個子功能：HMAC (12) / Redis ACL (6) / Attestation (9) / Merger chain (6) / Gerrit verifier (7) + CLI (5) + boundary cases (6)。pure-Python，<0.15s |
+| `backend/tests/test_o10_pentests.py`（23 條，新檔） | 五個 `TestScenario` class 對應 TODO 的五個攻擊情境：ForgedCatc (4) / LockTheft (4) / MergerPromptInjection (3 async) / WorkerSpoofing (6) / ForgedMergerVote (5)。每個 assert 都鎖「defence 必須在 side-effect 發生前 fire」：prompt injection 測試用 `_UnreachablePusher` / `_UnreachableReviewer`，真的被 call 就 AssertionError |
+| `TODO.md` | O10 全部 `[ ]` → `[x]`，每條標註對應檔案 / 函式 |
+
+**驗證結果：**
+
+* `backend/tests/test_security_hardening.py`：**51/51 綠**。
+* `backend/tests/test_o10_pentests.py`：**23/23 綠**。
+* Regression（sweep adjacent modules）：`test_queue_backend.py`（49）+ `test_worker.py`（32）+ `test_merger_agent.py`（37）+ `test_submit_rule_matrix.py`（16）+ `test_jira_adapter.py`（7）+ `test_merge_arbiter.py`（12）+ `test_merge_arbiter_http.py`（5）+ `test_catc.py`（35）+ `test_dist_lock.py`（41）+ `test_orchestrator_gateway.py`（26）+ `test_orchestration_mode.py`（26）+ `test_config.py`（13）+ `test_audit.py`（13）合計 **312 條全綠**。
+* Import 乾淨：`python3 -c "from backend import security_hardening as sh; print(sh.HMAC_VERSION, sh.ATTESTATION_VERSION)"` → `v1 v1`。
+* CLI 煙霧：`python -m backend.security_hardening verify-gerrit-config .gerrit/project.config.example` → `OK`；`python -m backend.security_hardening render-acl` → 三 role 輸出完整。
+
+**設計決策備忘：**
+
+1. **一個模組封五面**：HMAC / ACL / attestation / audit chain / Gerrit verifier 全塞進 `security_hardening.py` 而不是拆五個檔。理由：auditor 讀「我們的 security posture」時，一個 600 行檔案可以一次讀完；分散到五個檔就失去「一眼看完整防線」的審計友善度。代價是檔案有 5 個邏輯 section，但都用 ━━━ 分界線切清楚，`__all__` 裡按功能分組 export。
+2. **HMAC 驗證強制性 auto-detect**：`verify_pulled_message(required=None)` 預設「若 orchestrator 這一側有 key，worker 就 MUST verify」。理由：避免「部分 worker 驗部分不驗」的 split-brain；key 存在代表 admin 已經決定了 policy。tests 需要 disable 時傳 `required=False` 顯式。
+3. **HMAC TTL 預設 15 分鐘**：比 queue 的 5 分鐘 visibility_timeout 長 3 倍。理由：worker claim → 執行 → ack 的整個 window 不能超過 TTL，不然 ack 前 envelope 就失效會把成功的 task 判成 forge。15min 給 network hiccup + sweep re-claim 一個緩衝，又不會久到讓攻擊者可以 replay 幾小時前攔截的 envelope。
+4. **HMAC tamper 直接 DLQ，不重試**：`worker.py::handle()` 裡碰到 `HmacVerifyError` 連 nack `MAX_DELIVERIES` 次強制送 DLQ。理由：bad signature 不是 transient fault，重試結果一樣。DLQ 留給 operator 人工檢視「這條 forged message 是誰塞的」。
+5. **Attestation PSK 對稱 vs 非對稱**：選對稱 HMAC 而非 RSA/EdDSA 簽章。理由：worker pool 可能動輒 100+ pods，每個都用一對 RSA key + cert revocation 太重。PSK 放 Vault，per-worker 獨立，rotate via Vault 版本化即可。TLS mutual-auth 仍用真 cert（那是 transport 層）；PSK 只保 application-layer 的 nonce/tenant/capabilities 簽章。
+6. **Replay cache is process-local**：`AttestationVerifier._replay_cache` 是 dict，不共享給 cluster。理由：單一 orchestrator pod 驗一次就行，worker 不會跨 orchestrator 換連線（一個 worker 連一個 orchestrator）。若未來做 orchestrator HA，改成 Redis `SET NX EX` 即可，現在不做是因為 overkill。
+7. **Merger chain dual-sink**：既 append 到 process-local chain（即時 tamper 檢測、dashboard 用），又 fire-and-forget 寫 `backend.audit` 的 DB（durable + per-tenant verify）。兩條鏈不保證同步——DB 如果 down，process 還是繼續跑（不 block merger 決策）。trade-off：rare case 下 in-memory chain 有紀錄但 DB 沒有，反之亦然；這接受是因為 merger 決策的實體證據是 Gerrit 上的 vote log（hard truth），O10 的鏈只是輔助 tamper 偵測。
+8. **Gerrit verifier 走 string-level**：沒寫 Prolog parser 也沒用 libconfig。理由：`project.config` 語法隨 Gerrit 版本演進、access section 可以多層繼承 + 群組 JOIN 很難 parse 得嚴謹。我們用 "line 起始 + 關鍵字 whitelist/blacklist + deny 是好 prefix" 三層 filter，false positive 比 false negative 安全得多——operator 看到「哎 CI 擋了我的合法改動」比「攻擊者默默加了 Submit 權限 CI 沒攔到」好處理。
+9. **Gerrit config test 靠自己的 example 檔**：`test_real_project_config_example_passes` 直接吃 `.gerrit/project.config.example` 跑驗證器，所以哪天有人改這個 example 檔加了危險權限，CI 會立刻紅燈。這是「policy 檔 + 驗證器互為回歸」的設計。
+10. **JIRA token 不強制 encrypted**：plaintext fallback + warning 而不是 hard-fail。理由：大量既有部署是 env var plaintext，O10 版升級不能直接 brick 他們；warning + fingerprint 讓 operator 知道「該遷了」。未來 GA 之前會翻成 hard-fail（目前不翻是因為 pre-GA migration SOP 還沒跑完）。
+11. **pentest 測試斷「sidebar 不會被呼叫」**：`TestScenarioMergerPromptInjection` 用 `_UnreachablePusher` 的 `async def push` raise `AssertionError`。若哪天 merger_agent 重構改變了 gate 順序導致安全路徑先 push 再 refuse，這個 assertion 會立刻 fire——比單純 assert `outcome.reason == refused_security_file` 更嚴格（因為後者可能 pass but still push 了）。
+
+**後續建議（未動到的相鄰工作項）：**
+
+* **worker_id → orchestrator 的 attestation handshake**：目前 `AttestationVerifier` 有了，但 orchestrator_gateway 側還沒正式呼叫它（worker 目前只跑 heartbeat 登記）。下個 PR 在 `orchestrator_gateway.register_worker()` 加一個 API endpoint 收 attestation JSON，驗證後才把 worker_id 放進 dispatch 候選池。~30 行 glue。
+* **Redis ACL 自動 apply**：現在 `render-acl` 只輸出檔案，operator 要自己 `ACL LOAD`。下個 iteration 可以在 `backend/main.py` boot 時 SSH 進 Redis 自動 apply（或用 Redis 7 的 `CONFIG SET aclfile`）——但 production 安全考量下這個應該是 operator 明確批准才跑，不 auto。
+* **JIRA token hard-fail**：GA 前把 `_resolve_jira_token` 的 plaintext fallback 改為 raise，強制所有部署走 ciphertext 路徑。
+* **HMAC key 多版本共存**：目前 kid 換了就立刻 reject 舊 kid 的 envelope。支援 `(k1, k2)` 雙 key verify window 可以做 zero-downtime rotate——列在 follow-up。
+* **Attestation nonce 跨 pod 防重播**：若 orchestrator HA，把 `_replay_cache` 改為 Redis `SET NX EX`。~15 行改動。
+* **Gerrit verifier for live server**：目前只能 scan 本地 `project.config` 檔；`GET /access` API call 直接查 live Gerrit 的 effective ACL 是下一步（不吃 refs/meta/config clone）。
+* **Penetration test CI step**：把 `pytest backend/tests/test_o10_pentests.py` 加進 Gerrit pre-submit workflow，任一 scenario 紅燈就 block merge——這是 GA 前的 gate。
+
+**Operator TODO（`[O]` 項目，TODO.md 目前未增加）：**
+
+* 生 HMAC key、設 `OMNISIGHT_QUEUE_HMAC_KEY` 到所有 orchestrator+worker pod（production only）
+* 生 per-worker PSK，填 `AttestationVerifier.known_workers` 的 `pre_shared_key_ref` 指向 Vault 路徑
+* Encrypt 既有 JIRA token：`python -c "from backend import secret_store; print(secret_store.encrypt('<plaintext>'))"`，然後設 `OMNISIGHT_JIRA_TOKEN_CIPHERTEXT` + unset `OMNISIGHT_NOTIFICATION_JIRA_TOKEN`
+* Redis production cluster：執行 `python -m backend.security_hardening render-acl > /etc/redis/users.acl` + `redis-cli ACL LOAD`
+* 把 `.gerrit/project.config.example` push 到 target Gerrit 的 `refs/meta/config`（runbook §5）
+* CI pipeline 加 pre-submit step 跑 `python -m backend.security_hardening verify-gerrit-config` + `pytest backend/tests/test_o10_pentests.py`
 
 ---
 
