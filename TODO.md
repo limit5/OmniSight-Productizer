@@ -1007,11 +1007,12 @@ Legend:
 - [x] 預估：**2 day**
 
 ### W7. SKILL-NUXT (#281)
-- [ ] Nuxt 4 專案骨架 generator
-- [ ] Nitro engine 多 target（Node / Edge / Cloudflare Workers / Bun）
-- [ ] Pinia state + Vue Router
-- [ ] Vitest + Playwright
-- [ ] 預估：**1.5 day**
+- [x] Nuxt 4 專案骨架 generator
+- [x] Nitro engine 多 target（Node / Edge / Cloudflare Workers / Bun）
+- [x] Pinia state + Vue Router
+- [x] Vitest + Playwright
+- [x] **Cross-stack framework validation**（SKILL-NEXTJS 是 n=1 pilot，SKILL-NUXT 是 n=2 — 兩者共用同一套 ScaffoldOptions/render_project/pilot_report API，證明 W0-W5 是 framework 而非 pilot-plus-copy）
+- [x] 預估：**1.5 day**
 
 ### W8. SKILL-ASTRO（選配, #282）
 - [ ] Astro 5 content-heavy 站骨架

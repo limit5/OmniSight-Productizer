@@ -108,6 +108,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **simulate.sh**: unified test runner with JSON report, coverage enforcement, cmake toolchain support
 - **4 platform profiles**: aarch64, armv7, riscv64, vendor-example (extensible for any SoC)
 - **Generalized profile schema (W0 #274)**: `target_kind: embedded | web | mobile | software` + `configs/platforms/schema.yaml` + `backend/platform.py::get_platform_config()` dispatcher — unblocks Priority W (Next.js / Nuxt.js) / P (iOS / Android) / X (software-only) verticals without touching the embedded fast path
+- **Web vertical skill packs (W6 #280 / W7 #281)**: `configs/skills/skill-nextjs/` pilot (Next.js 16 App Router + Turbopack root pin) and `configs/skills/skill-nuxt/` cross-stack confirmation (Nuxt 4 + Nitro 4-preset: `node-server` / `vercel` / `cloudflare-pages` / `bun` via `NITRO_PRESET` env var) — both expose the same `ScaffoldOptions` / `render_project` / `dry_run_deploy` / `pilot_report` public API through `backend/nextjs_scaffolder.py` + `backend/nuxt_scaffolder.py`, validating the W0-W5 framework at n=2 consumers (React + Vue) without framework-level changes
 
 ### HMI Embedded Web UI Framework (C26 / L4-CORE-26)
 - **Constrained generator**: whitelist Preact / lit-html / vanilla JS; inlines CSS + i18n JSON; rejects CDN / analytics / `eval` / inline event attrs

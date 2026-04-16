@@ -1,0 +1,92 @@
+# W7 #281 — SKILL-NUXT manifest.
+#
+# Second web-vertical skill pack — follows the W6 SKILL-NEXTJS pilot
+# (#280) that validated the W0-W5 framework. Where SKILL-NEXTJS
+# exercises the Vercel Serverless + Cloudflare Pages targets via
+# next-on-pages, SKILL-NUXT exercises the much broader Nitro preset
+# matrix: node-server, vercel, cloudflare-pages, bun. Same framework
+# gates (W0-W5), different render tree.
+#
+# Exercise:
+#   * W0  target_kind=web schema                    (configs/platforms/schema.yaml)
+#   * W1  web-ssr-node / web-vercel /               (configs/platforms/web-*.yaml)
+#         web-edge-cloudflare profiles
+#   * W2  Lighthouse / Bundle / a11y / SEO gates    (backend/web_simulator.py)
+#   * W3  frontend-vue / a11y / seo / perf roles    (configs/roles/web/)
+#   * W4  Vercel + CloudflarePages + Docker-nginx   (backend/deploy/)
+#         deploy adapters
+#   * W5  WCAG / GDPR / SPDX compliance gates       (backend/web_compliance/)
+#
+# Scaffolds in `scaffolds/` provide a Nuxt 4 skeleton with Pinia store,
+# auto-imported composables, pages-based Vue Router, Nitro route
+# handlers, Vitest + Playwright suites, and a single `nuxt.config.ts`
+# whose `nitro.preset` is resolved at generate time from the requested
+# target. All four presets share one source tree — the value-add of
+# the W framework is that we validate bundle budget + adapter wire-up
+# for every selected preset before shipping.
+
+schema_version: 1
+name: skill-nuxt
+description: >
+  Nuxt 4 skill pack. Generates a production-ready Vue 3 / Nitro app
+  with Pinia state, Vue Router via pages directory, auto-imported
+  composables, Nitro server routes, multi-target deploy (node-server /
+  vercel / cloudflare-pages / bun) via Nitro preset selection, Vitest
+  unit + Playwright E2E harness, and WCAG / GDPR / SPDX compliance
+  gates enabled by default. Second web skill; re-exercises the W0-W5
+  framework on a non-React stack to prove the framework is not
+  React-specific (the pilot pattern established by W6 #280 only
+  validates if a second skill in the same vertical lands cleanly
+  without touching the framework — otherwise we have a framework of
+  one).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills:
+  - enterprise_web
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+  - CORE-21  # enterprise web reference
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - nuxt
+  - nuxt-4
+  - nitro
+  - vue
+  - vue3
+  - composition-api
+  - pinia
+  - vue-router
+  - auto-imports
+  - server-routes
+  - node-server
+  - vercel
+  - cloudflare-pages
+  - bun
+  - playwright
+  - vitest
+  - wcag-aa
+  - gdpr
+  - spdx
+  - w7

@@ -1,0 +1,84 @@
+# SKILL-NUXT test definitions — W7 #281
+#
+# Authoritative list consumed by `backend/tests/test_skill_nuxt.py`.
+# Each entry maps a cross-stack gate to the Python target that
+# exercises it. Mirrors the W6 SKILL-NEXTJS test plan where gates
+# overlap so regressions in the shared framework surface on both
+# skill packs simultaneously.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-sidebase-node
+        name: "Render: sidebase + node target"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+      - id: scaffold-clerk-cloudflare
+        name: "Render: clerk + cloudflare target"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+      - id: scaffold-sidebase-pinia-all
+        name: "Render: sidebase + pinia on all presets"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+      - id: scaffold-nitro-preset-pins
+        name: "Rendered nuxt.config.ts pins nitro.preset"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+      - id: scaffold-pinia-off-skip
+        name: "pinia=off strips store scaffolds + @pinia/nuxt module"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by auth/target/pinia skipped correctly"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+
+  - id: framework-binding
+    name: "W0-W5 framework binding tests"
+    tests:
+      - id: w0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.nuxt_scaffolder.render_project
+      - id: w1-profile-budget-propagation
+        name: "Bundle budget from profile propagates into scaffold context"
+        type: integration
+        target: backend.nuxt_scaffolder._render_context
+      - id: w3-role-vue-alignment
+        name: "Scaffold honours frontend-vue anti-patterns"
+        type: unit
+        target: backend.nuxt_scaffolder.render_project
+      - id: w4-vercel-adapter-constructs
+        name: "VercelAdapter constructs against rendered project"
+        type: integration
+        target: backend.nuxt_scaffolder.dry_run_deploy
+      - id: w4-cloudflare-adapter-constructs
+        name: "CloudflarePagesAdapter constructs against rendered project"
+        type: integration
+        target: backend.nuxt_scaffolder.dry_run_deploy
+      - id: w4-docker-adapter-constructs
+        name: "DockerNginxAdapter constructs for node/bun targets"
+        type: integration
+        target: backend.nuxt_scaffolder.dry_run_deploy
+      - id: w5-compliance-runs
+        name: "W5 compliance bundle runs against rendered project"
+        type: integration
+        target: backend.nuxt_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-nuxt appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-nuxt') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

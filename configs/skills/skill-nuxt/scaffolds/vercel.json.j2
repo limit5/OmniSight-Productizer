@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "framework": "nuxtjs",
+  "buildCommand": "NITRO_PRESET=vercel nuxt build",
+  "outputDirectory": ".vercel/output",
+  "regions": ["iad1"],
+  "functions": {
+    ".vercel/output/functions/__nitro.func/index.mjs": {
+      "runtime": "nodejs20.x",
+      "memory": {{ vercel_memory_limit_mb or 1024 }}
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" }
+      ]
+    }
+  ]
+}

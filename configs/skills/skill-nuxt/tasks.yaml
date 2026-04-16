@@ -1,0 +1,203 @@
+# W7 #281 — SKILL-NUXT DAG tasks.
+#
+# Mirrors the W6 SKILL-NEXTJS DAG shape so the two skill packs can be
+# audited side-by-side. Task IDs use an ``nx-`` prefix in W6 and an
+# ``nu-`` prefix here to keep the namespace clean when both packs run
+# in the same orchestrator queue.
+
+tasks:
+  - id: nu-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render Nuxt 4 project from scaffolds/: package.json (Nuxt 4 deps,
+      Pinia, Vue Test Utils, Playwright), nuxt.config.ts (nitro.preset
+      resolved from target), tsconfig, eslint. Idempotent.
+    depends_on: []
+    artifacts: [nu_skeleton]
+    estimated_hours: 2
+    framework_gate: w0-platform-schema
+
+  - id: nu-pages-router
+    name: "Pages-based Vue Router + layouts"
+    description: >
+      Emit pages/ directory (`index.vue`, `about.vue`), a default
+      layout, and a `<NuxtPage>` shell — Nuxt auto-registers these as
+      Vue Router routes. No manual router config needed; this is the
+      Nuxt idiom and is what the frontend-vue role prescribes.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_pages]
+    estimated_hours: 2
+    framework_gate: w3-role-frontend-vue
+
+  - id: nu-pinia-store
+    name: "Pinia store skeleton"
+    description: >
+      Emit `stores/counter.ts` with a defineStore example, wire
+      `@pinia/nuxt` module in nuxt.config.ts. Auto-imports make the
+      store usable as `useCounterStore()` without explicit import.
+      Gated by `pinia=on` option.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_pinia]
+    estimated_hours: 1
+    framework_gate: w3-role-frontend-vue
+
+  - id: nu-server-routes
+    name: "Nitro server routes"
+    description: >
+      Render `server/api/health.get.ts` + `server/api/v1/[...slug].ts`
+      that proxy to the backend — the Nitro analogue of Next.js API
+      Routes, and the same proxy pattern OmniSight's own backend uses.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_server_routes]
+    estimated_hours: 1
+
+  - id: nu-composables
+    name: "Auto-imported composables"
+    description: >
+      Emit `composables/useBackend.ts` — the canonical pattern for
+      Nuxt data fetching that honours SSR hydration (wraps `$fetch` /
+      `useFetch` with typed backend URL). Part of frontend-vue role's
+      anti-patterns (do NOT use raw `fetch()` inside `setup()`).
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_composables]
+    estimated_hours: 1
+    framework_gate: w3-role-frontend-vue
+
+  - id: nu-auth-sidebase
+    name: "Wire sidebase/nuxt-auth template"
+    description: >
+      Render `@sidebase/nuxt-auth` module config + middleware guard.
+      Credentials provider wired to backend `/api/v1/auth/login`;
+      OAuth hooks ready to uncomment. Default when AUTH=sidebase.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_auth_sidebase]
+    estimated_hours: 2
+
+  - id: nu-auth-clerk
+    name: "Wire Clerk (@clerk/nuxt) template"
+    description: >
+      Alternative auth path — `@clerk/nuxt` module + `useAuth()` /
+      `useUser()` composables example. Selected when AUTH=clerk.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_auth_clerk]
+    estimated_hours: 1
+
+  - id: nu-build-node
+    name: "Nitro node-server preset"
+    description: >
+      Emit Dockerfile + bind to `configs/platforms/web-ssr-node.yaml`.
+      Enforces the 5 MiB server-bundle budget; output mode is
+      `nitro.preset = 'node-server'`.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_build_node]
+    estimated_hours: 1
+    framework_gate: w1-web-ssr-node-profile
+
+  - id: nu-build-vercel
+    name: "Nitro vercel preset"
+    description: >
+      Emit `vercel.json` + bind to `configs/platforms/web-vercel.yaml`;
+      `nitro.preset = 'vercel'` routes build output through Vercel's
+      Build Output API.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_build_vercel]
+    estimated_hours: 1
+    framework_gate: w1-web-vercel-profile
+
+  - id: nu-build-cloudflare
+    name: "Nitro cloudflare-pages preset"
+    description: >
+      Emit `wrangler.toml` + bind to
+      `configs/platforms/web-edge-cloudflare.yaml`;
+      `nitro.preset = 'cloudflare-pages'` compiles to a V8-isolate
+      bundle under the 1 MiB ceiling.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_build_cloudflare]
+    estimated_hours: 1
+    framework_gate: w1-web-edge-cloudflare-profile
+
+  - id: nu-build-bun
+    name: "Nitro bun preset"
+    description: >
+      Emit `bun.lockb` placeholder + bunfig.toml + bind to
+      `configs/platforms/web-ssr-node.yaml` (Bun shares server bundle
+      budget w/ Node 20). `nitro.preset = 'bun'` produces a Bun
+      runtime bundle.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_build_bun]
+    estimated_hours: 1
+    framework_gate: w1-web-ssr-node-profile
+
+  - id: nu-playwright
+    name: "Playwright E2E skeleton"
+    description: >
+      Render `e2e/smoke.spec.ts` + `playwright.config.ts`. Harness
+      lines up with the W2 simulate-track.
+    depends_on: [nu-pages-router, nu-server-routes]
+    artifacts: [nu_playwright]
+    estimated_hours: 1
+    framework_gate: w2-simulate-e2e
+
+  - id: nu-vitest
+    name: "Vitest unit skeleton"
+    description: >
+      Render `vitest.config.ts` + `tests/unit/counter.test.ts` using
+      @vue/test-utils + happy-dom. Exercises Pinia store resets too.
+    depends_on: [nu-pages-router, nu-pinia-store]
+    artifacts: [nu_vitest]
+    estimated_hours: 1
+    framework_gate: w2-simulate-unit
+
+  - id: nu-compliance-wire
+    name: "Compliance gates wired"
+    description: >
+      Generate `docs/privacy/retention.md` stub, cookie consent
+      component, erasure Nitro handler, and SPDX allowlist override.
+      All three W5 gates pass on the rendered project out of the box.
+    depends_on: [nu-scaffold-init]
+    artifacts: [nu_compliance]
+    estimated_hours: 1
+    framework_gate: w5-compliance
+
+  - id: nu-deploy-smoke
+    name: "W4 deploy adapter smoke"
+    description: >
+      Dry-run provision via every adapter selected by the target
+      option (VercelAdapter / CloudflarePagesAdapter /
+      DockerNginxAdapter) against sandbox fixtures; validate
+      BuildArtifact → DeployResult round-trip.
+    depends_on:
+      - nu-build-node
+      - nu-build-vercel
+      - nu-build-cloudflare
+      - nu-build-bun
+      - nu-compliance-wire
+    artifacts: [nu_deploy_smoke]
+    estimated_hours: 1
+    framework_gate: w4-deploy-adapters
+
+  - id: nu-cross-stack-validation
+    name: "Cross-stack framework validation"
+    description: >
+      Full-stack smoke: scaffold → build → simulate (W2) → compliance
+      (W5) → deploy adapter dry-run (W4). Green-lighting this means
+      the W0-W5 framework survived a second consumer without
+      framework-level changes — the bar for calling W6+W7 "a
+      framework" vs "a pilot + copies".
+    depends_on:
+      - nu-pages-router
+      - nu-pinia-store
+      - nu-server-routes
+      - nu-composables
+      - nu-auth-sidebase
+      - nu-build-node
+      - nu-build-vercel
+      - nu-build-cloudflare
+      - nu-build-bun
+      - nu-playwright
+      - nu-vitest
+      - nu-compliance-wire
+      - nu-deploy-smoke
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: w7-cross-stack

@@ -1,0 +1,99 @@
+# SKILL-NUXT HIL (hardware-in-the-loop) recipes — W7 #281
+#
+# "Hardware" here is the deploy target (Node container / Vercel
+# Serverless POP / Cloudflare Edge / Bun runtime). Each recipe
+# describes a physical-side probe that can only run after a real
+# deploy (not a dry-run) — used by the operator-run Step 7 smoke,
+# not by CI.
+
+recipes:
+  - id: node-container-smoke
+    name: "Node SSR container cold-start smoke"
+    description: >
+      Launch the built Node container, hit the deployed URL five
+      times from a cold process, assert P95 TTFB ≤ 800ms. Validates
+      the `nitro.preset='node-server'` bundle boots and the Nuxt
+      runtime config is picked up from the container env.
+    targets: [web-ssr-node]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}"
+      iterations: 5
+      p95_ms_ceiling: 800
+
+  - id: vercel-smoke-ssr
+    name: "Vercel SSR cold-start smoke"
+    description: >
+      Hit the newly deployed URL five times from a cold region,
+      assert P95 TTFB ≤ 600ms. Validates Nitro's vercel preset
+      produces a functions/ artifact the Vercel runtime can invoke
+      (Node 20 serverless, 1024 MB memory per web-vercel.yaml).
+    targets: [web-vercel]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}"
+      iterations: 5
+      p95_ms_ceiling: 600
+
+  - id: cloudflare-edge-latency
+    name: "Cloudflare Pages edge latency"
+    description: >
+      Hit the health endpoint from three PoPs (SJC / FRA / SIN); P95
+      latency ≤ 200ms. Confirms the Nitro cloudflare-pages preset
+      stayed under the 1 MiB V8-isolate cap end-to-end.
+    targets: [web-edge-cloudflare]
+    probe:
+      kind: http_ttfb
+      url: "${DEPLOY_URL}/api/health"
+      pops: [sjc, fra, sin]
+      p95_ms_ceiling: 200
+
+  - id: bun-runtime-smoke
+    name: "Bun runtime smoke"
+    description: >
+      Start the built bundle with `bun run .output/server/index.mjs`,
+      assert startup under 200ms + health probe green. Bun is
+      dramatically faster to cold-start than Node; if this regresses
+      toward Node's ~600ms we've likely reverted to a Node-flavoured
+      preset by accident.
+    targets: [web-ssr-node]
+    probe:
+      kind: cold_start
+      command: "bun run .output/server/index.mjs"
+      timeout_ms: 500
+
+  - id: lighthouse-production
+    name: "Lighthouse against production URL"
+    description: >
+      Run the W2 simulate-track Lighthouse gate against the live
+      deploy — not the dev server. Catches regressions from CDN
+      settings (minify, Brotli) that only manifest post-deploy.
+    targets: [web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: lighthouse
+      url: "${DEPLOY_URL}"
+      thresholds:
+        performance: 80
+        accessibility: 90
+        seo: 95
+
+  - id: wcag-live
+    name: "Live WCAG AA axe-core run"
+    description: >
+      Run axe-core against the deployed URL; 0 critical + 0 serious
+      expected. Matches the W5 WCAG gate threshold.
+    targets: [web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: wcag
+      url: "${DEPLOY_URL}"
+
+  - id: rollback-smoke
+    name: "W4 rollback path smoke"
+    description: >
+      Push an intentionally broken Nuxt build, invoke
+      ``adapter.rollback()``, assert production URL serves the
+      previous good deployment within 60s.
+    targets: [web-ssr-node, web-vercel, web-edge-cloudflare]
+    probe:
+      kind: rollback
+      timeout_s: 60

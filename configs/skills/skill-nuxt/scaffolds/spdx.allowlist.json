@@ -1,0 +1,21 @@
+{
+  "_comment": "SKILL-NUXT (W7 #281) — licenses allowed on top of backend.web_compliance.spdx defaults. GPL/AGPL are still denied.",
+  "allow": [
+    "MIT",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Apache-2.0",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "BlueOak-1.0.0"
+  ],
+  "deny": [
+    "GPL-2.0",
+    "GPL-3.0",
+    "AGPL-3.0",
+    "LGPL-3.0",
+    "SSPL-1.0"
+  ]
+}
