@@ -2,13 +2,19 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
+import { useAuth } from "@/lib/auth-context"
+import {
+  getAllHostMetrics,
+  getMyHostMetrics,
+  type TenantUsage,
+} from "@/lib/api"
 import {
   Cpu,
-  HardDrive, 
-  MemoryStick, 
-  Wifi, 
-  Usb, 
-  Camera, 
+  HardDrive,
+  MemoryStick,
+  Wifi,
+  Usb,
+  Camera,
   Monitor,
   RefreshCw,
   Plus,
@@ -16,7 +22,8 @@ import {
   AlertCircle,
   CheckCircle2,
   Loader2,
-  Unplug
+  Unplug,
+  Users,
 } from "lucide-react"
 
 export type DeviceStatus = "connected" | "disconnected" | "detecting" | "error"
@@ -260,6 +267,148 @@ function HostInfoSection({ info }: { info: HostInfo }) {
   )
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  M4 — Per-tenant resource bars (cgroup-derived)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Max cap that normalises a tenant bar to 100% width. Chosen so a full
+// 16-core saturating tenant (1600% across all cores) just fills the bar.
+const TENANT_CPU_BAR_FULL = 1600
+const TENANT_MEM_BAR_FULL_GB = 16
+
+function TenantRow({ row, highlight = false }: { row: TenantUsage; highlight?: boolean }) {
+  const cpuWidth = Math.min(100, (row.cpu_percent / TENANT_CPU_BAR_FULL) * 100)
+  const memWidth = Math.min(100, (row.mem_used_gb / TENANT_MEM_BAR_FULL_GB) * 100)
+  return (
+    <div
+      className={`p-2 rounded ${highlight
+        ? "bg-[var(--neural-blue-dim)] border border-[var(--neural-blue)]/30"
+        : "bg-[var(--secondary)]"}`}
+    >
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="font-mono text-xs font-medium text-[var(--foreground)] truncate" title={row.tenant_id}>
+          {row.tenant_id}
+        </span>
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          {row.sandbox_count} sbx
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <span className="font-mono text-[10px] w-8 text-[var(--hardware-orange)]">CPU</span>
+        <div className="flex-1 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+          <div
+            className="h-full rounded-full bg-[var(--hardware-orange)] transition-all duration-500"
+            style={{ width: `${cpuWidth}%` }}
+          />
+        </div>
+        <span className="font-mono text-[10px] text-[var(--hardware-orange)] tabular-nums" style={{ minWidth: 52 }}>
+          {row.cpu_percent.toFixed(1)}%
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <span className="font-mono text-[10px] w-8 text-[var(--artifact-purple)]">MEM</span>
+        <div className="flex-1 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+          <div
+            className="h-full rounded-full bg-[var(--artifact-purple)] transition-all duration-500"
+            style={{ width: `${memWidth}%` }}
+          />
+        </div>
+        <span className="font-mono text-[10px] text-[var(--artifact-purple)] tabular-nums" style={{ minWidth: 52 }}>
+          {row.mem_used_gb.toFixed(2)}G
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="font-mono text-[10px] w-8 text-[var(--validation-emerald)]">DSK</span>
+        <span className="flex-1 font-mono text-[10px] text-[var(--validation-emerald)] tabular-nums">
+          {row.disk_used_gb.toFixed(2)} GiB on disk
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function TenantUsageSection() {
+  const { user } = useAuth()
+  const [rows, setRows] = useState<TenantUsage[]>([])
+  const [self, setSelf] = useState<TenantUsage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const isAdmin = user?.role === "admin"
+
+  const load = useCallback(async () => {
+    if (!user) return
+    setLoading(true)
+    try {
+      if (isAdmin) {
+        const data = await getAllHostMetrics()
+        setRows(data.tenants ?? [])
+      } else {
+        const data = await getMyHostMetrics()
+        setSelf(data.tenant)
+      }
+      setError(null)
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      setLoading(false)
+    }
+  }, [isAdmin, user])
+
+  useEffect(() => {
+    void load()
+    const t = setInterval(() => void load(), 5000)
+    return () => clearInterval(t)
+  }, [load])
+
+  if (!user) return null
+
+  return (
+    <div className="holo-glass-simple rounded p-3">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-1.5">
+          <Users size={12} className="text-[var(--neural-blue)] shrink-0" />
+          <span className="font-mono text-xs text-[var(--neural-blue)]">
+            {isAdmin ? "TENANT USAGE (ALL)" : "MY TENANT USAGE"}
+          </span>
+        </div>
+        <button
+          onClick={() => void load()}
+          disabled={loading}
+          className="p-1 rounded hover:bg-[var(--neural-blue-dim)] transition-colors"
+          title="Refresh"
+        >
+          <RefreshCw size={10} className={loading ? "animate-spin text-[var(--neural-blue)]" : "text-[var(--neural-blue)]"} />
+        </button>
+      </div>
+      {error && (
+        <div className="mb-2 font-mono text-[10px] text-[var(--critical-red)]">{error}</div>
+      )}
+      {isAdmin ? (
+        rows.length === 0 ? (
+          <div className="py-4 text-center">
+            <p className="font-mono text-xs text-[var(--muted-foreground)]">No running tenants</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {rows.map(row => (
+              <TenantRow key={row.tenant_id} row={row} highlight={row.tenant_id === user.tenant_id} />
+            ))}
+          </div>
+        )
+      ) : (
+        self ? (
+          <TenantRow row={self} highlight />
+        ) : (
+          <div className="py-4 text-center">
+            <p className="font-mono text-xs text-[var(--muted-foreground)]">Loading&hellip;</p>
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
+
 interface HostDevicePanelProps {
   hostInfo?: HostInfo
   devices?: Device[]
@@ -365,7 +514,10 @@ export function HostDevicePanel({
           </div>
           <HostInfoSection info={hostData} />
         </div>
-        
+
+        {/* M4: Per-tenant usage bars (admin → all tenants; user → self) */}
+        <TenantUsageSection />
+
         {/* Devices */}
         <div className="holo-glass-simple rounded p-3">
           <div className="flex items-center justify-between mb-3">

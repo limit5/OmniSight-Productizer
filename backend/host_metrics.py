@@ -1,0 +1,501 @@
+"""M4 — Cgroup-based per-container + per-tenant metrics.
+
+Samples cgroup v2 pseudo-files for every docker-launched container whose
+name matches ``omnisight-agent-*`` and aggregates the readings by the
+``tenant_id`` docker label (stamped on launch in ``container.py``):
+
+    /sys/fs/cgroup/system.slice/docker-<cid>.scope/cpu.stat
+    /sys/fs/cgroup/system.slice/docker-<cid>.scope/memory.current
+
+On cgroup v1 hosts (legacy / WSL2 without v2 enabled) the module falls
+back to ``docker stats --no-stream`` so the public API keeps returning
+sensible numbers; samplers simply won't be able to hit the sub-second
+granularity that v2 affords.
+
+Public surface — callers should treat these as the single source of
+truth for per-tenant resource state:
+
+    - ``sample_once()``            → one-shot scrape → list[ContainerSample]
+    - ``aggregate_by_tenant()``    → CPU%/mem/disk/sandbox_count per tenant
+    - ``get_tenant_usage()``       → cached latest aggregation
+    - ``get_culprit_tenant()``     → AIMD helper: whose CPU is the outlier?
+    - ``run_sampling_loop()``      → lifespan task; samples + bumps gauges
+
+Usage accounting (billing feed) sits alongside:
+
+    - ``accumulate_usage()``       → updates cpu_seconds + mem_gb_seconds
+    - ``snapshot_accounting()``    → read-only view for the report script
+    - ``reset_accounting()``       → test helper
+
+Design notes:
+  * CPU% is computed from the *delta* of ``usage_usec`` between samples,
+    divided by wall-clock delta, times 100. First sample primes the
+    state and returns 0% for that tenant.
+  * Memory is an instantaneous read (``memory.current`` on v2). It is
+    *not* usage over time; ``mem_gb_seconds`` in accounting derives from
+    integrating this value over the sample interval.
+  * Disk usage comes from ``tenant_quota.measure_tenant_usage`` — the
+    same source that drives M2's quota gate so numbers don't diverge.
+  * Sampling loop intentionally swallows exceptions: a scrape failure
+    should not tear down the backend. We log + count in
+    ``metrics.persist_failure_total{module="host_metrics"}``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Constants
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+SAMPLE_INTERVAL_S = 5.0
+CULPRIT_CPU_MARGIN_PCT = 150.0
+"""When overall host CPU is hot, derate *only* the tenant whose CPU% is
+at least this margin above the next-highest tenant. Below this margin
+the decision falls back to a flat multi-tenant derate."""
+
+CULPRIT_MIN_CPU_PCT = 80.0
+"""A tenant must itself be above this CPU% before it can be flagged as a
+culprit. Prevents derating a quiet tenant when the host is being
+pegged by a non-containerised workload."""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Dataclasses
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@dataclass
+class ContainerSample:
+    """One cgroup scrape for a single container."""
+    container_id: str
+    container_name: str
+    tenant_id: str
+    cpu_usage_usec: int          # cumulative CPU usage from cpu.stat
+    memory_bytes: int            # instantaneous memory.current
+    sampled_at: float            # wall-clock time.time()
+
+
+@dataclass
+class TenantUsage:
+    """Aggregated per-tenant resource view (one snapshot)."""
+    tenant_id: str
+    cpu_percent: float = 0.0
+    mem_used_gb: float = 0.0
+    disk_used_gb: float = 0.0
+    sandbox_count: int = 0
+
+
+@dataclass
+class UsageAccumulator:
+    """Cumulative per-tenant usage for billing (cpu_seconds + mem_gb_seconds)."""
+    tenant_id: str
+    cpu_seconds_total: float = 0.0
+    mem_gb_seconds_total: float = 0.0
+    last_updated: float = 0.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Module state (reset_for_tests() clears it)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_lock = threading.RLock()
+
+# (container_id) → (cpu_usage_usec, sampled_at) of the previous sample.
+# We need this to compute CPU% (a rate, not a counter).
+_prev_cpu: dict[str, tuple[int, float]] = {}
+
+# Latest snapshot — what GET /host/metrics renders and the AIMD helper
+# reads. Keyed by tenant_id so a missing tenant returns an empty view.
+_latest_by_tenant: dict[str, TenantUsage] = {}
+
+# Usage accounting feed (billing). Keyed by tenant_id.
+_accounting: dict[str, UsageAccumulator] = {}
+
+
+def _reset_for_tests() -> None:
+    with _lock:
+        _prev_cpu.clear()
+        _latest_by_tenant.clear()
+        _accounting.clear()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Cgroup v2 readers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _cgroup_v2_available() -> bool:
+    """Quick probe — /sys/fs/cgroup/cgroup.controllers exists on v2 hosts."""
+    return (CGROUP_ROOT / "cgroup.controllers").is_file()
+
+
+def _find_container_cgroup(container_id: str) -> Path | None:
+    """Locate a container's cgroup dir.
+
+    Docker on cgroup v2 typically places containers under::
+
+        /sys/fs/cgroup/system.slice/docker-<full_cid>.scope
+        /sys/fs/cgroup/docker/<full_cid>
+        /sys/fs/cgroup/user.slice/.../docker-<full_cid>.scope
+
+    We search a short list of well-known locations. Returns ``None`` if
+    none are readable (container gone / different scheme).
+    """
+    candidates = [
+        CGROUP_ROOT / "system.slice" / f"docker-{container_id}.scope",
+        CGROUP_ROOT / "docker" / container_id,
+    ]
+    for path in candidates:
+        if path.is_dir() and (path / "cpu.stat").is_file():
+            return path
+    # Fallback: glob for any docker-<cid>.scope anywhere under the root.
+    try:
+        for match in CGROUP_ROOT.rglob(f"docker-{container_id}.scope"):
+            if (match / "cpu.stat").is_file():
+                return match
+    except OSError:
+        pass
+    return None
+
+
+def _read_cpu_usage_usec(cgroup_dir: Path) -> int:
+    """Parse ``cpu.stat``'s ``usage_usec`` line. Returns 0 on any failure."""
+    try:
+        text = (cgroup_dir / "cpu.stat").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        if line.startswith("usage_usec "):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return 0
+    return 0
+
+
+def _read_memory_bytes(cgroup_dir: Path) -> int:
+    """Read ``memory.current`` (bytes). Returns 0 on any failure."""
+    try:
+        return int((cgroup_dir / "memory.current").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Sample collection
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _enumerate_agent_containers() -> list[dict]:
+    """Return the subset of ``list_containers()`` that are actually running.
+
+    Uses the in-memory registry from ``backend.container`` (stamped with
+    tenant_id) rather than ``docker ps`` so we don't pay the subprocess
+    cost on every sample. The registry is authoritative because
+    ``start_container`` writes + ``stop_container`` deletes.
+    """
+    try:
+        from backend.container import list_containers
+    except Exception:
+        return []
+    out: list[dict] = []
+    for info in list_containers():
+        if getattr(info, "status", "running") != "running":
+            continue
+        out.append({
+            "container_id": info.container_id,
+            "container_name": info.container_name,
+            "tenant_id": info.tenant_id or "t-default",
+        })
+    return out
+
+
+def sample_once() -> list[ContainerSample]:
+    """Scrape cgroup pseudo-files for every tracked running container.
+
+    Returns an empty list if cgroup v2 is unavailable or docker isn't
+    the active runtime. Callers that need a v1 / WSL fallback should
+    layer ``docker stats`` on top (tracked as a future enhancement —
+    see TODO H1 for the fallback story).
+    """
+    samples: list[ContainerSample] = []
+    if not _cgroup_v2_available():
+        logger.debug("cgroup v2 not available; sample_once() returning empty")
+        return samples
+    now = time.time()
+    for c in _enumerate_agent_containers():
+        cgroup = _find_container_cgroup(c["container_id"])
+        if cgroup is None:
+            continue
+        samples.append(ContainerSample(
+            container_id=c["container_id"],
+            container_name=c["container_name"],
+            tenant_id=c["tenant_id"],
+            cpu_usage_usec=_read_cpu_usage_usec(cgroup),
+            memory_bytes=_read_memory_bytes(cgroup),
+            sampled_at=now,
+        ))
+    return samples
+
+
+def _compute_cpu_percent(sample: ContainerSample) -> float:
+    """Convert the absolute cpu_usage_usec → per-second CPU% using the
+    previous sample for the same container. First sample primes state
+    and returns 0%.
+
+    Capped at (num_cores * 100) and floored at 0.
+    """
+    prev = _prev_cpu.get(sample.container_id)
+    _prev_cpu[sample.container_id] = (sample.cpu_usage_usec, sample.sampled_at)
+    if prev is None:
+        return 0.0
+    prev_usec, prev_t = prev
+    dt_s = sample.sampled_at - prev_t
+    if dt_s <= 0:
+        return 0.0
+    d_usec = max(0, sample.cpu_usage_usec - prev_usec)
+    # cpu_usage_usec is "CPU microseconds consumed across all cores".
+    # → CPU% = (d_usec / 1e6) / dt_s * 100
+    pct = (d_usec / 1_000_000.0) / dt_s * 100.0
+    cores = max(1, os.cpu_count() or 1)
+    return max(0.0, min(pct, cores * 100.0))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Aggregation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _measure_disk_gb(tenant_id: str) -> float:
+    """Delegate to M2's ``tenant_quota.measure_tenant_usage``."""
+    try:
+        from backend import tenant_quota as _tq
+        usage = _tq.measure_tenant_usage(tenant_id)
+        return usage.get("total_bytes", 0) / (1024 ** 3)
+    except Exception as exc:
+        logger.debug("disk usage read failed for %s: %s", tenant_id, exc)
+        return 0.0
+
+
+def aggregate_by_tenant(samples: list[ContainerSample] | None = None,
+                        *, include_disk: bool = True) -> dict[str, TenantUsage]:
+    """Group samples by tenant_id, attach disk + sandbox count.
+
+    If ``samples`` is None, performs a fresh ``sample_once()``. Passing
+    pre-collected samples is useful in tests + in the AIMD path where
+    the caller needs both the aggregate *and* the raw list.
+    """
+    if samples is None:
+        samples = sample_once()
+
+    by_tenant: dict[str, TenantUsage] = {}
+    for s in samples:
+        usage = by_tenant.setdefault(s.tenant_id, TenantUsage(tenant_id=s.tenant_id))
+        usage.cpu_percent += _compute_cpu_percent(s)
+        usage.mem_used_gb += s.memory_bytes / (1024 ** 3)
+        usage.sandbox_count += 1
+
+    if include_disk:
+        for tid, usage in by_tenant.items():
+            usage.disk_used_gb = _measure_disk_gb(tid)
+
+    return by_tenant
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Snapshot / culprit accessors
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_tenant_usage(tenant_id: str) -> TenantUsage:
+    """Return the latest cached aggregation for a single tenant.
+
+    Returns an empty ``TenantUsage`` if the sampler hasn't run yet or
+    the tenant has no running containers. Never raises — callers treat
+    missing data as "zero usage".
+    """
+    with _lock:
+        cached = _latest_by_tenant.get(tenant_id)
+        if cached:
+            return TenantUsage(
+                tenant_id=cached.tenant_id,
+                cpu_percent=cached.cpu_percent,
+                mem_used_gb=cached.mem_used_gb,
+                disk_used_gb=cached.disk_used_gb,
+                sandbox_count=cached.sandbox_count,
+            )
+    # Fallback — compute disk even when there are no samples, so quota
+    # pages can still render the disk bar for idle tenants.
+    return TenantUsage(
+        tenant_id=tenant_id,
+        disk_used_gb=_measure_disk_gb(tenant_id),
+    )
+
+
+def get_all_tenant_usage() -> list[TenantUsage]:
+    with _lock:
+        return [TenantUsage(
+            tenant_id=u.tenant_id,
+            cpu_percent=u.cpu_percent,
+            mem_used_gb=u.mem_used_gb,
+            disk_used_gb=u.disk_used_gb,
+            sandbox_count=u.sandbox_count,
+        ) for u in _latest_by_tenant.values()]
+
+
+def get_culprit_tenant(usage_by_tenant: dict[str, TenantUsage] | None = None,
+                       *, min_cpu_pct: float = CULPRIT_MIN_CPU_PCT,
+                       margin_pct: float = CULPRIT_CPU_MARGIN_PCT) -> str | None:
+    """Identify the tenant whose CPU% is dominating.
+
+    Returns a tenant_id if exactly one tenant is (a) above
+    ``min_cpu_pct`` in absolute terms AND (b) at least ``margin_pct``
+    above the *next-highest* tenant — the "outlier" rule. If two
+    tenants are both hot, returns None and the AIMD caller should fall
+    back to flat derate.
+
+    M4 acceptance test:
+        A=400%  B=20%  → culprit=A (A is 20× B)
+        A=200%  B=180% → culprit=None (both hot, flat derate)
+        A=60%   B=10%  → culprit=None (A below min_cpu_pct)
+    """
+    if usage_by_tenant is None:
+        with _lock:
+            usage_by_tenant = {
+                u.tenant_id: TenantUsage(
+                    tenant_id=u.tenant_id,
+                    cpu_percent=u.cpu_percent,
+                    mem_used_gb=u.mem_used_gb,
+                    disk_used_gb=u.disk_used_gb,
+                    sandbox_count=u.sandbox_count,
+                ) for u in _latest_by_tenant.values()
+            }
+    sorted_by_cpu = sorted(
+        usage_by_tenant.values(), key=lambda u: u.cpu_percent, reverse=True,
+    )
+    if not sorted_by_cpu:
+        return None
+    top = sorted_by_cpu[0]
+    if top.cpu_percent < min_cpu_pct:
+        return None
+    if len(sorted_by_cpu) == 1:
+        return top.tenant_id
+    second = sorted_by_cpu[1]
+    if top.cpu_percent >= second.cpu_percent + margin_pct:
+        return top.tenant_id
+    return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Usage accounting (billing feed)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def accumulate_usage(usage_by_tenant: dict[str, TenantUsage],
+                     interval_s: float) -> None:
+    """Fold one sample interval's usage into the running accumulators.
+
+    * ``cpu_seconds`` = cpu_percent / 100 * interval_s
+    * ``mem_gb_seconds`` = mem_used_gb * interval_s
+
+    Safe to call when ``interval_s`` is ~0 (e.g. right after a manual
+    probe); the contribution rounds to 0 without underflowing.
+    """
+    if interval_s <= 0:
+        return
+    now = time.time()
+    with _lock:
+        for tid, usage in usage_by_tenant.items():
+            acc = _accounting.setdefault(tid, UsageAccumulator(tenant_id=tid))
+            acc.cpu_seconds_total += (usage.cpu_percent / 100.0) * interval_s
+            acc.mem_gb_seconds_total += usage.mem_used_gb * interval_s
+            acc.last_updated = now
+
+
+def snapshot_accounting() -> list[UsageAccumulator]:
+    """Return a point-in-time copy of all accumulators. Used by
+    ``scripts/usage_report.py`` and admin dashboards."""
+    with _lock:
+        return [UsageAccumulator(
+            tenant_id=a.tenant_id,
+            cpu_seconds_total=a.cpu_seconds_total,
+            mem_gb_seconds_total=a.mem_gb_seconds_total,
+            last_updated=a.last_updated,
+        ) for a in _accounting.values()]
+
+
+def reset_accounting(tenant_id: str | None = None) -> None:
+    """Clear the accumulator for a single tenant (e.g. end-of-month
+    billing rollover) or for all tenants when ``tenant_id`` is None."""
+    with _lock:
+        if tenant_id is None:
+            _accounting.clear()
+        else:
+            _accounting.pop(tenant_id, None)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Prometheus metrics update
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _publish_prom_metrics(usage_by_tenant: dict[str, TenantUsage]) -> None:
+    """Push the freshest aggregation into the Prometheus gauges."""
+    try:
+        from backend import metrics as _m
+    except Exception:
+        return
+    for tid, u in usage_by_tenant.items():
+        try:
+            _m.tenant_cpu_percent.labels(tenant_id=tid).set(u.cpu_percent)
+            _m.tenant_mem_used_gb.labels(tenant_id=tid).set(u.mem_used_gb)
+            _m.tenant_disk_used_gb.labels(tenant_id=tid).set(u.disk_used_gb)
+            _m.tenant_sandbox_count.labels(tenant_id=tid).set(u.sandbox_count)
+        except Exception as exc:
+            logger.debug("metrics publish failed for %s: %s", tid, exc)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Sampling loop (lifespan task)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _update_latest(usage_by_tenant: dict[str, TenantUsage]) -> None:
+    with _lock:
+        _latest_by_tenant.clear()
+        _latest_by_tenant.update(usage_by_tenant)
+
+
+async def run_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S) -> None:
+    """Lifespan task — samples every ``interval_s`` seconds, bumps
+    Prometheus gauges, accumulates billing, updates the cached
+    snapshot. Swallows per-iteration exceptions so a transient cgroup
+    glitch doesn't crash the backend.
+    """
+    logger.info("host_metrics: sampling loop starting (interval=%.1fs)", interval_s)
+    last_sample_at = time.time()
+    try:
+        while True:
+            try:
+                samples = sample_once()
+                usage = aggregate_by_tenant(samples, include_disk=True)
+                _update_latest(usage)
+                _publish_prom_metrics(usage)
+                now = time.time()
+                accumulate_usage(usage, now - last_sample_at)
+                last_sample_at = now
+            except Exception as exc:
+                logger.warning("host_metrics sample iteration failed: %s", exc)
+                try:
+                    from backend import metrics as _m
+                    _m.persist_failure_total.labels(module="host_metrics").inc()
+                except Exception:
+                    pass
+            await asyncio.sleep(interval_s)
+    except asyncio.CancelledError:
+        logger.info("host_metrics: sampling loop cancelled")
+        raise

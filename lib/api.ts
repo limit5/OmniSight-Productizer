@@ -576,6 +576,41 @@ export async function resetCircuitBreaker(opts: { provider?: string; fingerprint
   })
 }
 
+// M4 — Per-tenant host metrics
+export interface TenantUsage {
+  tenant_id: string
+  cpu_percent: number
+  mem_used_gb: number
+  disk_used_gb: number
+  sandbox_count: number
+}
+
+export interface HostMetricsListResponse { tenants: TenantUsage[] }
+export interface HostMetricsSingleResponse { tenant: TenantUsage }
+
+export async function getHostMetricsForTenant(tenantId: string): Promise<HostMetricsSingleResponse> {
+  return request<HostMetricsSingleResponse>(`/host/metrics?tenant_id=${encodeURIComponent(tenantId)}`)
+}
+
+export async function getMyHostMetrics(): Promise<HostMetricsSingleResponse> {
+  return request<HostMetricsSingleResponse>("/host/metrics/me")
+}
+
+export async function getAllHostMetrics(): Promise<HostMetricsListResponse> {
+  return request<HostMetricsListResponse>("/host/metrics")
+}
+
+export interface TenantAccountingRow {
+  tenant_id: string
+  cpu_seconds_total: number
+  mem_gb_seconds_total: number
+  last_updated: number
+}
+
+export async function getHostAccounting(): Promise<{ tenants: TenantAccountingRow[] }> {
+  return request<{ tenants: TenantAccountingRow[] }>("/host/accounting")
+}
+
 export async function switchProvider(provider: string, model?: string) {
   return request<{ status: string; provider: string; model: string }>(
     "/providers/switch",

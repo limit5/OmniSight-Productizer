@@ -173,6 +173,52 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # M4: per-tenant cgroup-derived resource gauges. Scraped every
+    # SAMPLE_INTERVAL_S by host_metrics.run_sampling_loop; source of
+    # truth for the admin UI per-tenant bar chart + per-tenant AIMD.
+    tenant_cpu_percent = Gauge(
+        "omnisight_tenant_cpu_percent",
+        "Per-tenant CPU usage summed across all running sandbox containers",
+        labelnames=("tenant_id",),
+        registry=REGISTRY,
+    )
+    tenant_mem_used_gb = Gauge(
+        "omnisight_tenant_mem_used_gb",
+        "Per-tenant memory usage (GiB) — sum of cgroup memory.current",
+        labelnames=("tenant_id",),
+        registry=REGISTRY,
+    )
+    tenant_disk_used_gb = Gauge(
+        "omnisight_tenant_disk_used_gb",
+        "Per-tenant on-disk usage (GiB) from tenant_quota.measure_tenant_usage",
+        labelnames=("tenant_id",),
+        registry=REGISTRY,
+    )
+    tenant_sandbox_count = Gauge(
+        "omnisight_tenant_sandbox_count",
+        "Number of currently running sandbox containers per tenant",
+        labelnames=("tenant_id",),
+        registry=REGISTRY,
+    )
+    tenant_cpu_seconds_total = Counter(
+        "omnisight_tenant_cpu_seconds_total",
+        "Per-tenant cumulative CPU-seconds (billing basis)",
+        labelnames=("tenant_id",),
+        registry=REGISTRY,
+    )
+    tenant_mem_gb_seconds_total = Counter(
+        "omnisight_tenant_mem_gb_seconds_total",
+        "Per-tenant cumulative GiB-seconds of memory (billing basis)",
+        labelnames=("tenant_id",),
+        registry=REGISTRY,
+    )
+    tenant_derate_total = Counter(
+        "omnisight_tenant_derate_total",
+        "Per-tenant AIMD derate events by reason",
+        labelnames=("tenant_id", "reason"),  # reason: culprit | flat | recover
+        registry=REGISTRY,
+    )
+
     # Phase 62: skills extraction (Knowledge Generation L1) ─────
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total",
@@ -351,6 +397,13 @@ else:
     sandbox_launch_total = _NoOp()  # type: ignore
     sandbox_output_truncated_total = _NoOp()  # type: ignore
     sandbox_oom_total = _NoOp()  # type: ignore
+    tenant_cpu_percent = _NoOp()  # type: ignore
+    tenant_mem_used_gb = _NoOp()  # type: ignore
+    tenant_disk_used_gb = _NoOp()  # type: ignore
+    tenant_sandbox_count = _NoOp()  # type: ignore
+    tenant_cpu_seconds_total = _NoOp()  # type: ignore
+    tenant_mem_gb_seconds_total = _NoOp()  # type: ignore
+    tenant_derate_total = _NoOp()  # type: ignore
     skill_extracted_total = _NoOp()  # type: ignore
     skill_promoted_total = _NoOp()  # type: ignore
     intelligence_score = _NoOp()  # type: ignore
@@ -393,6 +446,9 @@ def reset_for_tests() -> None:
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
     global sandbox_launch_total, sandbox_output_truncated_total
     global sandbox_oom_total
+    global tenant_cpu_percent, tenant_mem_used_gb, tenant_disk_used_gb
+    global tenant_sandbox_count, tenant_cpu_seconds_total
+    global tenant_mem_gb_seconds_total, tenant_derate_total
     global skill_extracted_total, skill_promoted_total
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
@@ -478,6 +534,41 @@ def reset_for_tests() -> None:
         "omnisight_sandbox_oom_total",
         "Sandbox containers killed by the cgroup OOM-killer",
         labelnames=("tenant_id", "tier"), registry=REGISTRY,
+    )
+    tenant_cpu_percent = Gauge(
+        "omnisight_tenant_cpu_percent",
+        "Per-tenant CPU usage summed across all running sandbox containers",
+        labelnames=("tenant_id",), registry=REGISTRY,
+    )
+    tenant_mem_used_gb = Gauge(
+        "omnisight_tenant_mem_used_gb",
+        "Per-tenant memory usage (GiB)",
+        labelnames=("tenant_id",), registry=REGISTRY,
+    )
+    tenant_disk_used_gb = Gauge(
+        "omnisight_tenant_disk_used_gb",
+        "Per-tenant on-disk usage (GiB)",
+        labelnames=("tenant_id",), registry=REGISTRY,
+    )
+    tenant_sandbox_count = Gauge(
+        "omnisight_tenant_sandbox_count",
+        "Running sandbox containers per tenant",
+        labelnames=("tenant_id",), registry=REGISTRY,
+    )
+    tenant_cpu_seconds_total = Counter(
+        "omnisight_tenant_cpu_seconds_total",
+        "Cumulative CPU-seconds per tenant (billing)",
+        labelnames=("tenant_id",), registry=REGISTRY,
+    )
+    tenant_mem_gb_seconds_total = Counter(
+        "omnisight_tenant_mem_gb_seconds_total",
+        "Cumulative GiB-seconds per tenant (billing)",
+        labelnames=("tenant_id",), registry=REGISTRY,
+    )
+    tenant_derate_total = Counter(
+        "omnisight_tenant_derate_total",
+        "Per-tenant AIMD derate events",
+        labelnames=("tenant_id", "reason"), registry=REGISTRY,
     )
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total", "Skill extraction events",

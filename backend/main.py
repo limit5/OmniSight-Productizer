@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.routers import agents, artifacts, chat, events, health, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
+from backend.routers import agents, artifacts, chat, events, health, host as _host_router, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
 from backend import db
 
 async def _startup_cleanup(log):
@@ -155,8 +155,13 @@ async def lifespan(app: FastAPI):
     # and triggers LRU cleanup when over soft threshold.
     from backend import tenant_quota as _tq
     quota_task = asyncio.create_task(_tq.run_quota_sweep_loop())
+    # M4: cgroup per-container sampler → per-tenant Prometheus gauges +
+    # billing accumulator. Lifespan-scoped so it starts with the app
+    # and stops cleanly at shutdown.
+    from backend import host_metrics as _hm
+    host_metrics_task = asyncio.create_task(_hm.run_sampling_loop())
     yield
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task, host_metrics_task):
         t.cancel()
         try:
             await t
@@ -495,6 +500,7 @@ app.include_router(integration.router, prefix=settings.api_prefix)
 from backend.routers import secrets as _secrets_router  # I4/TENANT-SECRETS
 app.include_router(_secrets_router.router, prefix=settings.api_prefix)
 app.include_router(system.router, prefix=settings.api_prefix)
+app.include_router(_host_router.router, prefix=settings.api_prefix)
 from backend.routers import decisions as _decisions_router  # Phase 47A
 app.include_router(_decisions_router.router, prefix=settings.api_prefix)
 from backend.routers import memory as _memory_router  # Phase 63-E
