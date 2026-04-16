@@ -1,0 +1,110 @@
+name: Blue-Green Gate
+
+# N10 — couples major dependency upgrades to the G3 blue-green deploy
+# ceremony. Two jobs:
+#
+#   auto-label  → scans the PR diff + title + labels. If the PR bumps
+#                 the major component of a tracked framework (next,
+#                 pydantic, fastapi, react, langchain, node, python,
+#                 …) OR already carries Renovate's tier/major label,
+#                 applies the `requires-blue-green` label. Human PRs
+#                 that manually bump `package.json` / `requirements.in`
+#                 / `.nvmrc` / `.node-version` get caught here.
+#
+#   pr-check    → required status check. Red unless the PR carries
+#                 `requires-blue-green` AND the PR body includes the
+#                 G3 ceremony checklist markers (standby upgrade,
+#                 smoke test, 24h hot-hold). Waived via the
+#                 `deploy/bluegreen-waived` label (audit-logged in
+#                 the step summary and surfaced to the rollback
+#                 ledger during quarterly review).
+#
+# Pairs with:
+#   - major-upgrade-gate.yml (N9 — freshness of fallback branches)
+#   - scripts/check_bluegreen_gate.py (deploy-time counterpart)
+#   - docs/ops/dependency_upgrade_policy.md (authoritative policy)
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: blue-green-gate-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+
+  auto-label:
+    name: auto-label requires-blue-green
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      decision: ${{ steps.decide.outputs.decision }}
+      reason:   ${{ steps.decide.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need both sides of the diff to detect semver major bumps
+          # that a human authored by hand.
+          fetch-depth: 0
+
+      - id: decide
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+          BASE_SHA:  ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA:  ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/bluegreen_label_decider.py \
+              --labels "$PR_LABELS" \
+              --title  "$PR_TITLE" \
+              --base   "$BASE_SHA" \
+              --head   "$HEAD_SHA" \
+              >> "$GITHUB_OUTPUT"
+
+      - name: apply / remove label
+        if: steps.decide.outputs.decision != 'noop'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM:   ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          case "${{ steps.decide.outputs.decision }}" in
+            add)
+              gh pr edit "$PR_NUM" --add-label requires-blue-green
+              ;;
+            # We deliberately do NOT auto-remove the label — once a PR is
+            # blue-green-required, only a human waiver
+            # (deploy/bluegreen-waived) should relax the gate. This
+            # keeps the gate monotonic: label sticks through rebase,
+            # title edits, and label-toggle attempts.
+            *)
+              echo "decision=${{ steps.decide.outputs.decision }} — no label change"
+              ;;
+          esac
+
+  pr-check:
+    name: N10 / blue-green-label
+    needs: auto-label
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - id: gate
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          PR_BODY:   ${{ github.event.pull_request.body }}
+          DECISION:  ${{ needs.auto-label.outputs.decision }}
+          REASON:    ${{ needs.auto-label.outputs.reason }}
+        run: |
+          python3 scripts/bluegreen_pr_gate.py \
+              --labels "$PR_LABELS" \
+              --decision "$DECISION" \
+              --reason "$REASON" \
+              --body-file <(printf '%s' "$PR_BODY") \
+              >> "$GITHUB_STEP_SUMMARY"

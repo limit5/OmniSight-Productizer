@@ -750,14 +750,14 @@ Legend:
 - [O] 首兩條目標：`compat/nextjs-15`（現處 Next 16，15 是最近 fallback）、`compat/pydantic-v2`（未雨綢繆）<!-- 2026-04-16 N9: 宣告/工作流程/腳本/SOP 全部就緒並 commit；本機分支由 `bash scripts/fallback_setup.sh` 一條指令建立（dry-run 已通過）。實際 `git push -u origin compat/{nextjs-15,pydantic-v2}` 需要 push credentials → Operator-blocked，所以這項標 [O]。Push 完成後 fallback-branches.yml 會自動接手 weekly cron。 -->
 
 ### N10. 升級流程強制走 G3 Blue-Green + 升級節奏政策
-- [ ] 政策寫入 `docs/ops/dependency_upgrade_policy.md`：
+- [x] 政策寫入 `docs/ops/dependency_upgrade_policy.md`：
   - Patch：週批次，CI 綠自動合
   - Minor：雙週批次，1 人審 + staging 24h 觀察
   - Major：季度，2 人審 + **必走 G3 blue-green**（standby 先升、smoke 通過才切流、舊版保留 24h rollback）
   - 一個 PR 一個套件（或一組強相依），不混合；便於 single revert
-- [ ] CI gate：major 版本號升級的 PR 自動加 `requires-blue-green` label，deploy workflow 檢查該 label 存在才允許上 prod
-- [ ] 記錄每次 major 升級的 rollback 次數，季度 review
-- [ ] 預估：**0.25 day**（純文件 + CI label gate）
+- [x] CI gate：major 版本號升級的 PR 自動加 `requires-blue-green` label，deploy workflow 檢查該 label 存在才允許上 prod<!-- 2026-04-16 N10: `.github/workflows/blue-green-gate.yml` + `scripts/bluegreen_label_decider.py` auto-label；`scripts/check_bluegreen_gate.py` 接到 `scripts/deploy.sh` prod-only；required status check 名稱 `N10 / blue-green-label`。 -->
+- [x] 記錄每次 major 升級的 rollback 次數，季度 review<!-- 2026-04-16 N10: `docs/ops/upgrade_rollback_ledger.md`（append-only，三表：Upgrades / Rollbacks / Quarterly Summaries；trigger vocabulary 已列出）。 -->
+- [x] 預估：**0.25 day**（純文件 + CI label gate）
 
 **相依**：N8 與 G4 綁、N10 與 G3 綁；其餘可獨立推進。
 

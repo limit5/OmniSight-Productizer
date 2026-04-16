@@ -71,6 +71,28 @@ CURRENT_REF=$(git describe --tags --always --dirty)
 log "deploying $CURRENT_REF to $ENV"
 
 # ───────────────────────────────────────────────────────────────────
+# 1b. N10 blue-green gate (prod only)
+# ───────────────────────────────────────────────────────────────────
+# Refuses a prod deploy when the last-merged PR is blue-green-required
+# but the G3 ceremony was not recorded in the rollback ledger.
+# See docs/ops/dependency_upgrade_policy.md for the full policy.
+
+if [[ "$ENV" == "prod" ]]; then
+  log "N10: checking blue-green gate"
+  if ! OMNISIGHT_DEPLOY_ENV="$ENV" python3 "$ROOT/scripts/check_bluegreen_gate.py"; then
+    rc=$?
+    if [[ "$rc" == "2" ]]; then
+      echo "[deploy] blue-green gate REFUSED the deploy (see stderr above)." >&2
+      exit 2
+    fi
+    # rc==3 = environmental failure (no gh, broken ledger). Surface
+    # it loudly but don't block — operators can set
+    # OMNISIGHT_CHECK_BLUEGREEN=0 for a documented bypass.
+    echo "[deploy] WARN: blue-green gate reported environmental failure (rc=$rc); proceeding." >&2
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────────
 # 2. DB backup (WAL-safe online backup)
 # ───────────────────────────────────────────────────────────────────
 

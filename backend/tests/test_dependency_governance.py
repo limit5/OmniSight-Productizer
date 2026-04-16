@@ -1278,3 +1278,447 @@ def test_n9_renovate_excludes_pinned_packages_on_compat_branches() -> None:
     ]
     assert nextjs, "renovate.json missing carve-out: next on compat/nextjs-15"
     assert pyd, "renovate.json missing carve-out: pydantic on compat/pydantic-v2"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# N10 — Upgrade cadence policy + blue-green deploy gate
+# ─────────────────────────────────────────────────────────────────────
+#
+# Pins the *shape* of:
+#   - docs/ops/dependency_upgrade_policy.md  (the cadence contract)
+#   - docs/ops/upgrade_rollback_ledger.md    (the quarterly input)
+#   - .github/workflows/blue-green-gate.yml  (PR-side auto-label + gate)
+#   - scripts/bluegreen_label_decider.py     (decision logic)
+#   - scripts/bluegreen_pr_gate.py           (PR body check)
+#   - scripts/check_bluegreen_gate.py        (deploy-time gate)
+#   - scripts/deploy.sh                       (wiring + prod-only scope)
+#
+# Behaviour of the decider/gate/deploy-gate is exercised by small
+# in-process unit tests further down (imported as modules; no gh/git
+# side effects).
+
+N10_POLICY         = REPO_ROOT / "docs" / "ops" / "dependency_upgrade_policy.md"
+N10_LEDGER         = REPO_ROOT / "docs" / "ops" / "upgrade_rollback_ledger.md"
+N10_GATE_WORKFLOW  = REPO_ROOT / ".github" / "workflows" / "blue-green-gate.yml"
+N10_DECIDER_SCRIPT = REPO_ROOT / "scripts" / "bluegreen_label_decider.py"
+N10_PR_GATE_SCRIPT = REPO_ROOT / "scripts" / "bluegreen_pr_gate.py"
+N10_DEPLOY_GATE    = REPO_ROOT / "scripts" / "check_bluegreen_gate.py"
+N10_DEPLOY_SH      = REPO_ROOT / "scripts" / "deploy.sh"
+
+
+# ----- Policy doc ---------------------------------------------------------
+
+def test_n10_policy_doc_exists() -> None:
+    assert N10_POLICY.is_file(), (
+        "N10 requires docs/ops/dependency_upgrade_policy.md"
+    )
+
+
+def test_n10_policy_doc_covers_cadence_matrix() -> None:
+    body = N10_POLICY.read_text(encoding="utf-8").lower()
+    required = [
+        # cadence terms
+        "patch", "minor", "major",
+        "weekly", "bi-weekly", "quarterly",
+        # ceremony terms
+        "blue-green",
+        "standby",
+        "smoke",
+        "cut-over",
+        "24h",
+        "rollback",
+        # policy terms
+        "one package per pr",
+        "single-revert",
+        # cross-links
+        "renovate_policy.md",
+        "dependency_upgrade_runbook.md",
+        "upgrade_rollback_ledger.md",
+        # escape hatch names
+        "deploy/bluegreen-waived",
+        "omnisight_bluegreen_override",
+    ]
+    missing = [p for p in required if p not in body]
+    assert not missing, (
+        f"dependency_upgrade_policy.md missing key phrases: {missing}"
+    )
+
+
+def test_n10_policy_doc_binds_major_to_bluegreen() -> None:
+    body = N10_POLICY.read_text(encoding="utf-8")
+    # The major-row must explicitly mention G3 blue-green — this is
+    # the load-bearing coupling between N10 and G3.
+    assert "G3 blue-green" in body, (
+        "policy must explicitly name the G3 blue-green deploy path for majors"
+    )
+    assert "requires-blue-green" in body, (
+        "policy must document the requires-blue-green sticky label"
+    )
+
+
+# ----- Ledger -------------------------------------------------------------
+
+def test_n10_ledger_exists() -> None:
+    assert N10_LEDGER.is_file(), (
+        "N10 requires docs/ops/upgrade_rollback_ledger.md"
+    )
+
+
+def test_n10_ledger_has_three_tables() -> None:
+    body = N10_LEDGER.read_text(encoding="utf-8")
+    # Three tables the quarterly review reads. Drift here breaks the
+    # policy's scheduled summary step.
+    for heading in ("## Upgrades", "## Rollbacks", "## Quarterly Summaries"):
+        assert heading in body, f"ledger missing heading: {heading!r}"
+
+
+def test_n10_ledger_has_trigger_vocabulary() -> None:
+    body = N10_LEDGER.read_text(encoding="utf-8").lower()
+    # Quarterly review tallies by these trigger strings.
+    for trig in (
+        "slo/error-rate", "slo/latency-p99", "slo/memory",
+        "slo/domain", "operator/manual", "ceremony/smoke-fail",
+    ):
+        assert trig in body, f"ledger missing trigger vocabulary: {trig!r}"
+
+
+# ----- Workflow -----------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def n10_workflow_text() -> str:
+    return N10_GATE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_n10_workflow_exists(n10_workflow_text: str) -> None:
+    assert N10_GATE_WORKFLOW.is_file(), (
+        "N10 requires .github/workflows/blue-green-gate.yml"
+    )
+    assert "Blue-Green Gate" in n10_workflow_text
+
+
+def test_n10_workflow_triggers_on_pr_events(n10_workflow_text: str) -> None:
+    # Label events matter — Renovate adds tier/major *after* PR open,
+    # so without `labeled` the auto-labeller would never see the
+    # signal. `edited` is needed so the PR body check re-runs when
+    # the operator updates the ceremony checklist.
+    assert "pull_request:" in n10_workflow_text
+    for evt in ("opened", "edited", "synchronize", "reopened", "labeled", "unlabeled"):
+        assert evt in n10_workflow_text, f"gate must trigger on {evt}"
+
+
+def test_n10_workflow_requests_pr_write(n10_workflow_text: str) -> None:
+    # Needed by `gh pr edit --add-label`; absence silently disarms the
+    # auto-labeller (the label add 403s in CI).
+    assert "pull-requests: write" in n10_workflow_text, (
+        "blue-green-gate must request pull-requests:write to add labels"
+    )
+
+
+def test_n10_workflow_auto_label_job_calls_decider(n10_workflow_text: str) -> None:
+    assert "auto-label:" in n10_workflow_text
+    assert "scripts/bluegreen_label_decider.py" in n10_workflow_text
+
+
+def test_n10_workflow_pr_check_is_required_status(n10_workflow_text: str) -> None:
+    # The job `name:` becomes the GitHub status check title. Changing
+    # it would silently bypass branch protection that's pinned to the
+    # old name. Keep the name stable; evolve the job body freely.
+    assert "N10 / blue-green-label" in n10_workflow_text, (
+        "pr-check job name must be 'N10 / blue-green-label' (branch "
+        "protection references this string)"
+    )
+    assert "scripts/bluegreen_pr_gate.py" in n10_workflow_text
+
+
+def test_n10_workflow_has_per_pr_concurrency(n10_workflow_text: str) -> None:
+    # Rapid label-toggle or push events must cancel in-flight gate
+    # runs so the latest decision wins.
+    assert "concurrency:" in n10_workflow_text
+    assert re.search(r"group:\s*blue-green-gate-pr-\$\{\{", n10_workflow_text), (
+        "concurrency group must scope to PR number"
+    )
+
+
+# ----- Decider script ----------------------------------------------------
+
+def test_n10_decider_script_exists() -> None:
+    assert N10_DECIDER_SCRIPT.is_file()
+
+
+def test_n10_decider_script_is_stdlib_only() -> None:
+    src = N10_DECIDER_SCRIPT.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests", "import httpx", "import yaml",
+        "from pydantic", "import aiohttp", "from github ",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"bluegreen_label_decider.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+def _load_decider():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "n10_decider", N10_DECIDER_SCRIPT,
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_n10_decider_sticks_on_existing_label() -> None:
+    mod = _load_decider()
+    decision, reason = mod.decide(
+        labels=["requires-blue-green"],
+        title="some random title",
+        base=None, head=None,
+    )
+    assert decision == "keep", reason
+
+
+def test_n10_decider_adds_on_renovate_tier_major() -> None:
+    mod = _load_decider()
+    decision, reason = mod.decide(
+        labels=["tier/major"],
+        title="Update dependency next to v17",
+        base=None, head=None,
+    )
+    assert decision == "add"
+    assert "tier/major" in reason
+
+
+def test_n10_decider_adds_on_deploy_bluegreen_required() -> None:
+    mod = _load_decider()
+    # Renovate's major rule in renovate.json adds this as an alias.
+    decision, _ = mod.decide(
+        labels=["deploy/blue-green-required"],
+        title="Update fastapi to v1",
+        base=None, head=None,
+    )
+    assert decision == "add"
+
+
+def test_n10_decider_adds_on_title_major_bump_of_tracked_framework() -> None:
+    mod = _load_decider()
+    for title in (
+        "Update pydantic to v3",
+        "Update dependency next to v17",
+        "update fastapi to v1",
+    ):
+        decision, reason = mod.decide(
+            labels=[], title=title, base=None, head=None,
+        )
+        assert decision == "add", (title, reason)
+
+
+def test_n10_decider_noop_on_non_tracked_title() -> None:
+    mod = _load_decider()
+    decision, _ = mod.decide(
+        labels=[],
+        title="Update some-unknown-helper to v3",
+        base=None, head=None,
+    )
+    assert decision == "noop"
+
+
+def test_n10_decider_noop_on_minor_bump_title() -> None:
+    mod = _load_decider()
+    # "Update X to 2.1" → minor bump (baseline 2.0-something). The
+    # title regex only fires on "to vN" where N looks like a major.
+    # But note: Renovate's convention is "to v<new-major>" for major
+    # bumps specifically, and "to v<exact-version>" for minors (which
+    # our regex also catches). The policy-level safety net is the
+    # *tier/major* label; the title heuristic is a best-effort early
+    # signal. So we assert the less-risky case: a non-tracked package
+    # never trips.
+    decision, _ = mod.decide(
+        labels=[], title="Update random-lib to v5", base=None, head=None,
+    )
+    assert decision == "noop"
+
+
+def test_n10_decider_noop_on_empty_input() -> None:
+    mod = _load_decider()
+    decision, _ = mod.decide(
+        labels=[], title="", base=None, head=None,
+    )
+    assert decision == "noop"
+
+
+def test_n10_decider_parse_labels_handles_json_and_csv() -> None:
+    mod = _load_decider()
+    assert mod.parse_labels("[]") == []
+    assert mod.parse_labels('["a","b"]') == ["a", "b"]
+    assert mod.parse_labels("a, b, c") == ["a", "b", "c"]
+    assert mod.parse_labels("") == []
+
+
+def test_n10_decider_major_of_handles_common_specs() -> None:
+    mod = _load_decider()
+    assert mod._major_of("1.2.3") == 1
+    assert mod._major_of("^2.0.0") == 2
+    assert mod._major_of("~0.1") == 0
+    assert mod._major_of(">=3,<4") == 3
+    assert mod._major_of("v7") == 7
+    assert mod._major_of("") is None
+    assert mod._major_of("not-a-version") is None
+
+
+# ----- PR-side gate script -----------------------------------------------
+
+def test_n10_pr_gate_script_exists() -> None:
+    assert N10_PR_GATE_SCRIPT.is_file()
+
+
+def _load_pr_gate():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("n10_prgate", N10_PR_GATE_SCRIPT)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_n10_pr_gate_passes_on_noop() -> None:
+    mod = _load_pr_gate()
+    ok, _ = mod.evaluate(labels=[], body="", decision="noop")
+    assert ok is True
+
+
+def test_n10_pr_gate_fails_without_ceremony_markers() -> None:
+    mod = _load_pr_gate()
+    ok, reasons = mod.evaluate(
+        labels=["requires-blue-green"],
+        body="nothing useful here",
+        decision="add",
+    )
+    assert ok is False
+    assert any("missing" in r.lower() for r in reasons)
+
+
+def test_n10_pr_gate_passes_with_full_ceremony_body() -> None:
+    mod = _load_pr_gate()
+    body = (
+        "Standby upgrade complete, smoke test green, cut-over at 10:00. "
+        "Old version hot for 24h."
+    )
+    ok, reasons = mod.evaluate(
+        labels=["requires-blue-green"],
+        body=body,
+        decision="add",
+    )
+    assert ok is True, reasons
+
+
+def test_n10_pr_gate_honours_waiver() -> None:
+    mod = _load_pr_gate()
+    ok, reasons = mod.evaluate(
+        labels=["requires-blue-green", "deploy/bluegreen-waived"],
+        body="",  # body doesn't matter when waived
+        decision="add",
+    )
+    assert ok is True
+    assert any("waived" in r.lower() for r in reasons)
+
+
+# ----- Deploy-time gate script -------------------------------------------
+
+def test_n10_deploy_gate_script_exists() -> None:
+    assert N10_DEPLOY_GATE.is_file()
+
+
+def test_n10_deploy_gate_script_is_stdlib_only() -> None:
+    src = N10_DEPLOY_GATE.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests", "import httpx", "import yaml",
+        "from pydantic", "import aiohttp",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"check_bluegreen_gate.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+def test_n10_deploy_gate_skips_non_prod() -> None:
+    # Behavioural smoke: non-prod env exits 0 without needing gh or
+    # the ledger to exist.
+    import subprocess
+    proc = subprocess.run(
+        ["python3", str(N10_DEPLOY_GATE), "--env", "staging"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 0
+    assert "gate skipped" in proc.stderr.lower()
+
+
+def test_n10_deploy_gate_respects_skip_env() -> None:
+    import os, subprocess
+    env = os.environ.copy()
+    env["OMNISIGHT_CHECK_BLUEGREEN"] = "0"
+    proc = subprocess.run(
+        ["python3", str(N10_DEPLOY_GATE), "--env", "prod"],
+        capture_output=True, text=True, timeout=15, env=env,
+    )
+    assert proc.returncode == 0
+    assert "gate skipped" in proc.stderr.lower()
+
+
+def _load_deploy_gate():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("n10_deploygate", N10_DEPLOY_GATE)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_n10_deploy_gate_scan_ledger_reads_matching_row(tmp_path) -> None:
+    # Build a minimal ledger and check scan_ledger finds the row.
+    mod = _load_deploy_gate()
+    ledger = tmp_path / "ledger.md"
+    ledger.write_text(
+        "# header\n\n"
+        "## Upgrades\n\n"
+        "| Cut-over (UTC) | Package | From → To | PR | Operator | Disposition | Notes |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| 2026-04-20 | pydantic | 2.9 → 3.0 | #123 | alice | shipped | ref:abc1234 |\n",
+        encoding="utf-8",
+    )
+    assert mod.scan_ledger(ledger, "abc1234") == "shipped"
+    assert mod.scan_ledger(ledger, "deadbeef") is None
+
+
+def test_n10_deploy_gate_terminal_ok_set_is_tight() -> None:
+    mod = _load_deploy_gate()
+    # Only these three disposition strings should pass the gate on
+    # their own. Adding more later is a policy change, not a test fix.
+    assert mod.TERMINAL_OK == frozenset({"shipped", "rolled-back", "waived"})
+
+
+# ----- deploy.sh integration ---------------------------------------------
+
+def test_n10_deploy_sh_invokes_gate_on_prod_only() -> None:
+    src = N10_DEPLOY_SH.read_text(encoding="utf-8")
+    # The gate call must be guarded by ENV=prod — running it on
+    # staging would fail because staging often has no merged PR yet.
+    assert 'if [[ "$ENV" == "prod" ]]; then' in src, (
+        "deploy.sh must guard the blue-green gate with `if ENV==prod`"
+    )
+    assert "scripts/check_bluegreen_gate.py" in src
+    # Exit code 2 (gate refused) must fail the deploy, not warn.
+    assert 'exit 2' in src, (
+        "deploy.sh must exit 2 when the blue-green gate refuses"
+    )
+
+
+def test_n10_renovate_policy_cross_links_n10() -> None:
+    # Keep the two docs in lockstep. If the renovate doc stops linking
+    # to this policy, operators won't find the cadence matrix.
+    body = (REPO_ROOT / "docs" / "ops" / "renovate_policy.md").read_text(encoding="utf-8")
+    # Either as an inline link or a bare filename — both count.
+    assert (
+        "dependency_upgrade_policy.md" in body
+        or "N10" in body
+    ), "renovate_policy.md should reference N10 / the policy doc"

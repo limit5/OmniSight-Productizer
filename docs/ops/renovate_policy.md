@@ -187,6 +187,19 @@ validator catches typos in field names, deprecated patterns, and
 schema-incompatible combinations — fast feedback before the bot tries
 to interpret a broken config in production.
 
+## Cross-reference
+
+* **Cadence + deploy gate (N10)**:
+  [`dependency_upgrade_policy.md`](dependency_upgrade_policy.md) is
+  the authoritative doc for **how often** majors ship and the
+  **blue-green ceremony** a major PR must complete before it can hit
+  prod. This file (`renovate_policy.md`, N2) describes how Renovate
+  *opens* the PRs; the policy doc describes how they *land*.
+* **Runbook**: [`dependency_upgrade_runbook.md`](dependency_upgrade_runbook.md)
+  — the four-phase upgrade + rollback SOP.
+* **Ledger**: [`upgrade_rollback_ledger.md`](upgrade_rollback_ledger.md)
+  — append-only ledger read by the quarterly policy review.
+
 ## Change log
 
 * **2026-04-16** — N2 initial policy. Group rules for `@radix-ui/*`,

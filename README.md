@@ -331,6 +331,14 @@ Every night at 01:00 Asia/Taipei a separate workflow ([`.github/workflows/upgrad
 
 The "suspected breaking" classifier in [`scripts/upgrade_preview.py`](scripts/upgrade_preview.py) flags major bumps, 0.x minor bumps (pre-1.0 SemVer convention), and any change to a hand-curated watchlist of strategic packages (`langchain*`, `pydantic`, `next`, `react`, `@radix-ui/*`, `@ai-sdk/*`, `playwright`, `vitest`, …). The renderer is stdlib-only so it survives the very dep break it is trying to forecast.
 
+### Upgrade cadence + blue-green gate (N10)
+
+The authoritative cadence contract lives in [`docs/ops/dependency_upgrade_policy.md`](docs/ops/dependency_upgrade_policy.md): **patch** ships weekly (CI-green auto-merge), **minor** ships bi-weekly (1 reviewer, 5-day soak), **major** ships **quarterly** (2 reviewers, 14-day soak) and is physically gated to the G3 blue-green deploy path — standby upgrade → smoke test → traffic cut-over → old version held hot for 24 h. One package per PR (or one N2 peer-coupled group) so a failing major is always `git revert`-able in one shot.
+
+Two gates couple the policy to the repo:
+* [`.github/workflows/blue-green-gate.yml`](.github/workflows/blue-green-gate.yml) runs on every PR and (a) auto-applies a sticky `requires-blue-green` label when [`scripts/bluegreen_label_decider.py`](scripts/bluegreen_label_decider.py) detects a Renovate major label, a `Update <pkg> to v<N>` title, or a hand-authored major bump in `package.json` / `backend/requirements.in` / `.nvmrc` / `.node-version`; and (b) exposes `N10 / blue-green-label` as a required status check that stays red until the PR body carries the full ceremony checklist (standby / smoke / cut-over / 24h), checked by [`scripts/bluegreen_pr_gate.py`](scripts/bluegreen_pr_gate.py). A manual waiver via `deploy/bluegreen-waived` is honoured but audit-logged.
+* [`scripts/check_bluegreen_gate.py`](scripts/check_bluegreen_gate.py) is called from `scripts/deploy.sh` on every **prod** deploy. It looks up the PR that introduced the target ref, checks for the sticky label, and refuses the deploy (exit 2) unless [`docs/ops/upgrade_rollback_ledger.md`](docs/ops/upgrade_rollback_ledger.md) has a matching `shipped` / `rolled-back` / `waived` entry. The ledger is append-only and powers the quarterly policy review (opens a `policy-review` issue if rollback rate exceeds 25 % or mean soak falls below 24 h).
+
 ## Theme
 
 The UI is deliberately **dark-only** — the "FUI" (fictional user interface)

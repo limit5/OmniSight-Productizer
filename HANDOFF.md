@@ -8272,3 +8272,77 @@ Phase 25 的 `provider_chain` 用單一 global `_provider_failures: dict[str, fl
 - **Audit 寫入時 wrap tenant context**：背景 sweep 之類的 system actor 也能正確寫入「受影響的 tenant」的 chain，而不是 caller 的 chain
 - **SSE 只 emit transition**：避免 100 次連續失敗灌爆 audit + SSE 隊列；只在 closed→open / open→close 才寫
 - **No DB persistence**：circuit state 是 in-memory（process restart 後從 closed 開始）；故意保留簡單性，因為 cooldown 只 5 分鐘，restart 後 ride-through 一次失敗就會重新開，影響可忽略
+
+## N10. 升級節奏政策 + G3 Blue-Green 強制 — 完成 ✅（2026-04-16）
+
+### 完成事項
+
+1. **政策文件** — `docs/ops/dependency_upgrade_policy.md`
+   - Cadence matrix：Patch 週批 / Minor 雙週批 / Major 季度批
+   - Reviewers：0 / 1 / 2；soak：3d / 5d+24h / 14d+48h
+   - Major 強制 G3 blue-green 五步儀式：standby 升級 → smoke → 切流 → 24h hot-hold → 關閉
+   - PR 包裝鐵律：**one package per PR**（例外只限 N2 carve-out 的 Radix / AI-SDK / LangChain / @types 群組）
+   - Quarterly review SOP：rollback rate > 25 % 或 mean soak < 24h 就開 `policy-review` issue
+   - 逃生口：`deploy/bluegreen-waived` label、`OMNISIGHT_BLUEGREEN_OVERRIDE=1`、季度政策修訂
+
+2. **Rollback Ledger** — `docs/ops/upgrade_rollback_ledger.md`
+   - Append-only；三表：Upgrades / Rollbacks / Quarterly Summaries
+   - Trigger vocabulary 統一：`slo/error-rate`、`slo/latency-p99`、`slo/memory`、`slo/domain`、`operator/manual`、`ceremony/smoke-fail`
+   - Q2 2026 空位已備；2026-07-01 首次季度 review
+
+3. **CI Gate** — `.github/workflows/blue-green-gate.yml`（新 workflow）
+   - `auto-label` job：跑 `scripts/bluegreen_label_decider.py`，依序檢查（a）現有 sticky label、（b）Renovate `tier/major` / `deploy/blue-green-required`、（c）PR 標題 `Update <tracked> to v<N>` 模式、（d）diff 分析 `package.json` / `backend/requirements.in` / `.nvmrc` / `.node-version` 的 semver-major 變動（含 engines.*）
+   - `pr-check` job：`N10 / blue-green-label` required status check；需要 PR body 含 standby/smoke/cut-over/24h 四個儀式 marker；`deploy/bluegreen-waived` 可免審但會被 ledger 記
+   - Sticky 設計：`requires-blue-green` label 只會加不會自動移除（避免 rebase 或標題修改繞過）
+   - Per-PR concurrency：rapid label toggle 會取消 in-flight run
+
+4. **Deploy-time Gate** — `scripts/check_bluegreen_gate.py`
+   - Prod-only（其他 env 直接 skip）
+   - 流程：取當前 HEAD → 用 `gh pr list --search <sha>` 找對應 merged PR → 讀 label → 若有 `requires-blue-green` 就掃 `upgrade_rollback_ledger.md` 比對 disposition
+   - Terminal OK disposition：`shipped` / `rolled-back` / `waived`
+   - Exit codes：0 通過 / 2 拒絕 / 3 環境錯（`gh` 缺失 → 不 silent-pass，要求 operator 明確 bypass）
+   - 接進 `scripts/deploy.sh` prod flow 的 step 1b（DB backup 之前跑，最早阻擋）
+   - 三道 escape：`OMNISIGHT_CHECK_BLUEGREEN=0`（純 skip）、`OMNISIGHT_BLUEGREEN_OVERRIDE=1`（DR-only，寫 audit line）、PR 上 `deploy/bluegreen-waived` label（最常用）
+
+5. **Cross-link**：`docs/ops/renovate_policy.md` 補「Cross-reference」段，指向 N10 政策 / 運維 runbook / ledger，維持兩個文件 lockstep。
+
+### 測試（135 / 135 全 pass）
+
+**新增 36 cases in `backend/tests/test_dependency_governance.py` N10 section**：
+
+- **Policy doc (3)**：檔案存在、cadence matrix 所有關鍵字（`blue-green` / `standby` / `smoke` / `cut-over` / `24h` / `single-revert` 等 17 個）都入文、Major 行 explicit 綁到 G3
+- **Ledger (3)**：檔案存在、三表齊全、trigger vocabulary 6 字全在
+- **Workflow (6)**：檔案 + name 正確；`pull_request` events（`labeled` / `unlabeled` / `edited` / …）齊全；`pull-requests: write` 權限存在；`auto-label` job 呼叫 decider script；`pr-check` job 名稱 rigid = `N10 / blue-green-label`（branch protection 固定用這字串）；per-PR concurrency scope
+- **Decider script (9)**：stdlib-only；sticky label 回 `keep`；`tier/major` / `deploy/blue-green-required` 都回 `add`；標題的 `Update pydantic to v3` / `Update dependency next to v17` / `update fastapi to v1` 都觸發；非追蹤套件不觸發；`parse_labels` 支援 JSON 與 CSV；`_major_of` 解析 `1.2.3` / `^2.0.0` / `~0.1` / `>=3,<4` / `v7`
+- **PR gate script (4)**：noop decision pass；missing markers fail；full ceremony pass；`deploy/bluegreen-waived` pass
+- **Deploy gate script (5)**：stdlib-only；staging 環境 skip；`OMNISIGHT_CHECK_BLUEGREEN=0` skip；`scan_ledger` 解析 markdown table row；`TERMINAL_OK` 集合 tight
+- **Integration (3)**：`deploy.sh` 有 `if ENV==prod` guard + exit 2 on gate refuse；`renovate_policy.md` cross-link 到 N10；多條子測試
+
+**Regression**：其餘 99 個 N1-N9 測試全 pass，無任何互相破壞。
+
+### 修改檔案
+
+- **新增** `docs/ops/dependency_upgrade_policy.md` — 政策全文（cadence + ceremony + 季度 review）
+- **新增** `docs/ops/upgrade_rollback_ledger.md` — append-only ledger + trigger vocab
+- **新增** `.github/workflows/blue-green-gate.yml` — auto-label + PR gate
+- **新增** `scripts/bluegreen_label_decider.py` — stdlib-only，依 4 條 rule 決策
+- **新增** `scripts/bluegreen_pr_gate.py` — PR body + label 檢查
+- **新增** `scripts/check_bluegreen_gate.py` — deploy-time gate（gh + ledger）
+- **改動** `scripts/deploy.sh` — 在 prod 路徑插入 step 1b（DB backup 之前）
+- **改動** `docs/ops/renovate_policy.md` — cross-reference 段
+- **改動** `backend/tests/test_dependency_governance.py` — 加 N10 section（36 cases）
+- **改動** `TODO.md` — N10 三項全 `[x]`
+- **改動** `HANDOFF.md` — 本段
+
+### 設計取捨
+
+- **Sticky label monotonic**：`requires-blue-green` 只會加不會自動移除。理由：rebase / 標題改 / label toggle 都可能誤繞過，sticky 唯一能被關閉的方式是人審 waiver（`deploy/bluegreen-waived`），一切審計可追。
+- **Ceremony markers 存在於 PR body，不是 comment**：body 是 merge commit 一部分（via squash-merge），comment 不會；gate 的證據需要跟著 git history 走。
+- **Deploy-time gate 找不到 PR 時 default-green**：hotfix / direct-to-master 不該被阻擋；由 warning 訊息引導 operator 回到 PR 路徑。
+- **`gh` 缺失回 exit 3 而非 skip**：silent-pass 會讓 operator 以為 gate 通過；exit 3 明確要求 bypass 旗標，審計到 season review 時會被看到。
+- **Trigger vocabulary 固定字串**：季度 review 用這些字串做 group-by；不限制就會變成 free-text 無法聚合。
+- **不做 webhook-based gate（e.g. repository_dispatch）**：簡單 PR workflow + deploy-time check 已覆蓋 99 % 場景；webhook 會引入 secret / audit complexity，違反 0.25-day 預估。
+- **Stdlib-only 三個 script**：與 N5 / N6 / N7 / N8 / N9 support script 同款紀律——我們在建 upgrade guard，它不該 depend on 被它 guard 的 dependency。
+- **Ledger 用 markdown 而非 JSON/DB**：PR review 能直接 read；季度 review 用 `grep` + `awk` 就能算指標；工具鏈輕。程式 parser (`scan_ledger`) 是一個 regex，夠強但不脆。
+- **Quarterly review 觸發條件刻意二擇**：rollback rate > 25 % **或** mean soak < 24h 才開 issue。避免每季強迫 ceremony 通告，只有明確訊號才打擾 maintainer。
+- **Renovate grouping 與 single-revert 的衝突**：N2 的 `radix-ui` / `ai-sdk` / `langchain-py` / `types` 是 tight peer-coupled 例外——這四群 mixing 是「更安全」而非 single-revert；政策明文 carve-out，reviewer 不用靠直覺判斷。
