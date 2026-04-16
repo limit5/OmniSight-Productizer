@@ -1,9 +1,71 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：M1 Cgroup CPU/Memory 硬隔離（對映 DRF token） (master)
+> 最後 commit：M2 (S6) tenant_quota tests — 28 cases, plan→quota, LRU/keep, /storage (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## M2 (complete) Per-tenant Disk Quota + LRU Cleanup（2026-04-16 完成）
+
+**背景**：M1 把 CPU/Memory 從「公平排隊」升到「硬邊界」（cgroup `--cpus` / `--memory`），但磁碟仍然是公共資源——一個 tenant 的 build artifacts/workflow_runs 失控就把 host 整顆塞滿，連無辜 tenant 的下次 sandbox 啟動都失敗。M2 補上 disk plane：plan-driven `quota.yaml`（free 5/10 GiB → enterprise 500/1000 GiB），背景 5 min sweep 量測，超 soft 發 SSE 警告 + 自動 LRU，超 hard 直接拒絕 sandbox 創建（HTTP 507）。
+
+| 項目 | 說明 | 狀態 |
+|---|---|---|
+| `backend/tenant_quota.py` | Plan→DiskQuota 表（free/starter/pro/enterprise）、`quota.yaml` 載入/寫入、`measure_tenant_usage` 聚合 artifacts/workflow_runs/backups/ingest_tmp、`check_hard_quota` raise `QuotaExceeded` | ✅ 完成 |
+| LRU cleanup (`lru_cleanup`) | Sort workflow_runs by mtime asc，遇 `.keep` 標記跳過，`keep_recent_runs` 最新 N 筆永遠保留，`.in_progress` sentinel 永不刪 | ✅ 完成 |
+| `/tmp` namespace + 強制清理 (`cleanup_tenant_tmp`) | `start_container` 已沿用 I5 `tenant_ingest_root` 命名空間；`stop_container` 加上 `cleanup_tenant_tmp(info.tenant_id)` 確保每次 sandbox 結束 scratch 空間清空 | ✅ 完成 |
+| Background sweep (`run_quota_sweep_loop`) | 5 min cadence（`OMNISIGHT_QUOTA_SWEEP_S`），啟動延遲 30 s 避免和 DRF/IQ/decision sweep 撞；首次 sweep 一個 tenant 時自動 materialise `quota.yaml` | ✅ 完成 |
+| SSE warning (`tenant_storage_warning`) | 超 soft → level=`soft`，30 min cooldown 防 spam（`OMNISIGHT_QUOTA_WARN_COOLDOWN_S`）；超 hard → level=`hard`，每次 sweep 都發；audit row `tenant_storage_warning` 同步寫入 | ✅ 完成 |
+| 507 enforcement | `start_container` 在 `docker run` 前先 `check_hard_quota`；超量時 raise `QuotaExceeded` + 寫 `sandbox_quota_exceeded` audit + bump `sandbox_launch_total{result=quota_exceeded}` 計數；`/workspaces/container/start/{agent_id}` 翻譯成 HTTP 507 + structured detail | ✅ 完成 |
+| REST API (`backend/routers/storage.py`) | `GET /storage/usage`（viewer，admin 可 `?tenant_id=` overrride）、`POST /storage/cleanup`（operator）、`POST /storage/sweep`（operator） | ✅ 完成 |
+| UI (`StorageQuotaSection`) | Settings 模態新增 storage 區塊：current usage、soft/hard 雙 bar、子目錄 breakdown、健康狀態 badge（healthy/over soft/hard breach）、手動 LRU 按鈕、上一次 cleanup 摘要 | ✅ 完成 |
+| API client (`lib/api.ts`) | `TenantStorageUsage` / `TenantStorageCleanupSummary` types + `getStorageUsage` / `triggerStorageCleanup` helpers | ✅ 完成 |
+| main.py lifespan | 註冊 `quota_task = asyncio.create_task(_tq.run_quota_sweep_loop())`，shutdown 時 cancel | ✅ 完成 |
+| 測試（28 項） | 4 plan mapping + 4 quota.yaml + 3 measure + 3 check_hard + 5 LRU + 2 cleanup_tmp + 3 sweep + 1 start_container gate + 3 REST | ✅ 28/28 pass |
+
+**新增/修改檔案**：
+- `backend/tenant_quota.py` — 新增：完整 quota 模組（DiskQuota / load_quota / write_quota / measure_tenant_usage / check_hard_quota + QuotaExceeded / lru_cleanup / cleanup_tenant_tmp / sweep_tenant / run_quota_sweep_loop）
+- `backend/routers/storage.py` — 新增：3 個 REST endpoints（usage/cleanup/sweep）
+- `backend/container.py` — `start_container` 加上 hard-quota gate（含 audit + metric）；`stop_container` 加上 `cleanup_tenant_tmp` 清理
+- `backend/main.py` — lifespan 註冊 quota_task，掛載 storage router
+- `backend/routers/workspaces.py` — `start_agent_container` 把 `QuotaExceeded` 翻成 HTTP 507 + structured detail
+- `lib/api.ts` — `TenantStorageUsage`/`TenantStorageCleanupSummary` types + 2 個 helpers
+- `components/omnisight/integration-settings.tsx` — 新增 `StorageQuotaSection` + `formatBytes` helper，掛在 Settings modal body 末尾
+- `backend/tests/test_tenant_quota.py` — 新增 28 項測試（含 `_make_run` helper + `isolated_tenants` fixture rebase TENANTS_ROOT/INGEST_BASE 進 tmp_path）
+
+**設計決策**：
+- **Plan→quota 表用 dataclass + frozen dict**：和 I9 `quota.py`（rate-limit）相同 pattern，Free 5/10 GiB → Enterprise 500/1000 GiB。`hard > soft` 是 plan 表 invariant（測試 `test_all_plans_have_hard_above_soft` 強制）。
+- **`quota.yaml` 自動 materialise + 允許 hand-edit**：sweep 第一次見到 tenant 時把 plan default 寫進 `data/tenants/<tid>/quota.yaml`，operator 可後續 hand-edit override（測試 `test_yaml_hand_edit_override_takes_effect` 強制）。corrupt YAML 自動 fallback plan default 避免 deploy-time 啞死。
+- **不用 `du -sh` 而用 `os.walk` + lstat**：純 Python 實作避免 shell quoting / TOCTOU；明確 skip symlinks（`stat.S_ISLNK`）防止跨租戶 escape；測試 `test_measure_skips_symlinks` 證明。
+- **LRU 三層保護**：(1) `.in_progress` sentinel 永不入 candidate list（避免刪正在寫的 run），(2) `keep_recent_runs` 最新 N 筆 reservation，(3) `.keep` 標記 sidecar file —— 三條路徑互不依賴，任一條開即保命。`.keep` 用 sidecar 而非 DB column 因為 LRU 邏輯不該依賴 DB（filesystem self-contained, recovery friendly）。
+- **超 hard 還是執行 LRU**：超 hard 不只是 reject 寫入，sweep 也會立即跑一次 LRU 嘗試自救。但 `start_container` 仍 raise——這是「cleanup 是 best-effort，gate 是 hard」設計。
+- **507 翻譯放 router 而非 module**：`start_container` raise 純 `QuotaExceeded`，因為它有非 HTTP 的 caller（prewarm pool、dispatch_t3）；workspaces router 才把它翻成 HTTP 507 + structured detail（client 可從 `error: tenant_disk_quota_exceeded` field 程式化判斷）。
+- **SSE warning cooldown**：30 min 預設（`OMNISIGHT_QUOTA_WARN_COOLDOWN_S`），避免每 5 min 一次 sweep 把 UI 紅色 banner 不停 flash。超 hard 不 cooldown（每次 sweep 都發，因為 it's actively rejecting writes）。
+- **背景 sweep stagger 啟動 30 s**：避免和 DRF grace sweep / IQ nightly / decision timeout sweep 同時上線。
+- **`/tmp` 強制清理放 `stop_container`**：寧可重複清也不要漏清；測試 `test_clears_files_and_dirs` 證明 dirs + files 都清掉。即使 cleanup 失敗也不阻擋 container teardown（debug log + continue）。
+- **Sweep 串行 not 並行**：所有 tenant sweep 都打同一塊 block device，並行只會搶 IOPS；串行也避免 slow tenant 餓死其他人——sweep 內部已是 best-effort（單個 tenant 失敗 log + skip）。
+
+**驗收**：
+- ✅ Plan→quota 4 級 mapping + invariant hard>soft（4 tests）
+- ✅ `quota.yaml` round-trip + hand-edit override + corrupt fallback（4 tests）
+- ✅ `measure_tenant_usage` 聚合 artifacts/runs/backups/ingest_tmp + skip symlinks（3 tests）
+- ✅ `check_hard_quota` raise + 接受 precomputed usage（3 tests）
+- ✅ LRU 刪最舊優先 + `.keep` 保命 + `.in_progress` 永不刪 + `keep_recent_runs` reservation（5 tests）
+- ✅ `cleanup_tenant_tmp` 清空 dirs + files + tolerate missing（2 tests）
+- ✅ Sweep under threshold no-op；over soft 發 SSE + 跑 LRU；首次 sweep materialise `quota.yaml`（3 tests）
+- ✅ `start_container` 超 hard 時 raise `QuotaExceeded` + 寫 `sandbox_quota_exceeded` audit（1 test）
+- ✅ `/storage/usage` 回 breakdown；`/storage/cleanup` 回 summary；admin 可 `?tenant_id=` 跨租戶查（3 tests）
+- ✅ 既有 26 項 container/audit/rate_limit/sandbox 測試 zero regression
+- ✅ TypeScript 新增檔案 0 type errors（pre-existing 無關 errors 不變）
+
+**已知限制 / Follow-up**：
+- LRU 只刪 `workflow_runs/` 下的完成 run；artifacts/ 由 `delete_artifact` API 個別管理（artifact 通常綁 task_id，autoclean 風險高）。如要更激進可後續加 `artifacts/` LRU。
+- Sweep 是純 Python `os.walk` 實作；對 100+ GB tenant 可能需要 5–10 s。可後續改用 `du -sh` 或 cached size column。
+- SSE `tenant_storage_warning` 用 `broadcast_scope="tenant"`，依賴 EventBus 的 tenant routing；如 tenant routing 設定未啟用會降級成 global broadcast。
+- `start_container` 的 hard-quota gate 對 prewarm pool / dispatch_t3 等非 HTTP callsite 同樣生效（raise `QuotaExceeded`），caller 需自行 try/except——已在 docstring 標註。
+- UI 顯示「current tenant」usage；admin 視角的「all tenants overview」表格留待 M4 host_metrics 整合（M4 會做 per-tenant CPU/mem/disk 統一的 dashboard）。
 
 ---
 

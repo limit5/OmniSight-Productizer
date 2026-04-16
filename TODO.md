@@ -590,13 +590,13 @@ Legend:
 - [x] 預估：**1 day**
 
 ### M2. Per-tenant Disk Quota + LRU Cleanup
-- [ ] `data/tenants/<tid>/` 加 `quota.yaml`：`soft=5GB / hard=10GB`（plan 驅動）
-- [ ] Background sweep（每 5 min）：`du -sh` per-tenant → 超 soft 發 warning SSE；超 hard 拒新寫入（sandbox create 回 507 Insufficient Storage）
-- [ ] LRU cleanup：超 soft 時自動刪 `artifacts/` 下最舊的完成 workflow_run（保留最近 N 筆 + 所有 `keep=true` 標記）
-- [ ] `/tmp` 也按 tenant namespace + 每 sandbox 結束強制清理
-- [ ] UI：Settings → Storage 頁顯示用量 + 手動清理按鈕
-- [ ] 測試：quota 強制生效、LRU 不誤刪 keep 標記
-- [ ] 預估：**0.5 day**
+- [x] `data/tenants/<tid>/` 加 `quota.yaml`：`soft=5GB / hard=10GB`（plan 驅動，`backend/tenant_quota.PLAN_DISK_QUOTAS` free/starter/pro/enterprise 四級）
+- [x] Background sweep（每 5 min）：`backend/tenant_quota.run_quota_sweep_loop()` per-tenant → 超 soft 發 `tenant_storage_warning` SSE（30 min cooldown）；超 hard `start_container` 預先 raise `QuotaExceeded` → workspaces router 回 507 Insufficient Storage
+- [x] LRU cleanup：超 soft 時自動刪 `workflow_runs/` 下最舊的完成 run（保留最近 `keep_recent_runs` 筆 + 所有 `.keep` 標記 + `.in_progress` sentinel 永不刪）
+- [x] `/tmp` 按 tenant namespace（沿用 I5 `tenant_ingest_root`）+ 每 sandbox 結束 `stop_container` 強制清理（`cleanup_tenant_tmp`）
+- [x] UI：Settings → Storage Quota 區塊（`integration-settings.tsx StorageQuotaSection`），雙 bar (soft/hard) + 子目錄 breakdown + 手動 LRU 按鈕
+- [x] 測試：28 項 — plan/quota.yaml/measure/check_hard/lru/cleanup_tmp/sweep/start_container gate/`/storage/*` REST
+- [x] 預估：**0.5 day**
 
 ### M3. Per-tenant-per-provider Circuit Breaker
 - [ ] 現行 `provider_chain` 5min cooldown 改 key：`(tenant_id, provider, api_key_fingerprint)` → 獨立 circuit state
