@@ -1,9 +1,158 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：O2 — Message Queue 抽象層 (master)
+> 最後 commit：O3 — Stateless Agent Worker Pool (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## O3 (complete) Stateless Agent Worker Pool（2026-04-16 完成）
+
+**背景**：O 區塊第四步。O0 釘死 CATC payload schema、O1 做出 Redis 分散式檔案互斥鎖、O2 把 task 變成可消費的 message queue 之後，下一塊基礎建設就是把這些 message 真的「拉出來、執行、推回 Gerrit 走人工 review」。O3 是第一個能把整條 path 跑通的進程：pull → lock → sandbox → execute → commit → push → ack → release。設計刻意把 sandbox / agent / Gerrit 三條外接介面留成 Protocol，所以單元測試不需要 docker / LLM / SSH key，但 production 直接換實作就能上線。
+
+### 實作內容
+
+1. **`backend/worker.py`**（new, ~870 行）— 單檔 module 包含全部 Worker 機能，依 dist_lock / queue_backend / shared_state 同 pattern 寫：
+   - **公開 API**：`Worker(config, sandbox_runtime, agent_executor, gerrit_pusher, heartbeat_store)`，`start()` / `run()` / `stop()` / `install_signal_handlers()`，`handle(msg)` 處理單一 `QueueMessage`（never raises — 所有錯誤路徑都 catch + nack）。
+   - **`WorkerConfig` dataclass**：worker_id / capacity / tenant_filter / capability_filter / heartbeat_interval_s / heartbeat_ttl_s / visibility_timeout_s / loop_idle_s / lock_wait_s / lock_ttl_s / max_messages（tests 用） / pull_count / project_root。
+   - **資料類**：`AgentResult`（agent 回傳）、`GerritPushResult`（push 結果含 attempts + reason）、`WorkerTaskOutcome`（每個 message 的審計列）、`SandboxHandle`（sandbox 回傳的 opaque handle）。
+   - **Helper**：`new_worker_id()` 產生 `wkr-<host>-<8hex>`、`_new_change_id()` 產生 `I` + 40 hex Gerrit Change-Id、`_build_commit_message()` 把 agent commit message 加上 `Change-Id:` / `CATC-Ticket:` / `Worker-Id:` 三條 trailer。
+
+2. **Pluggable runtime — 4 個 Protocol + 預設實作**：
+   - **`SandboxRuntime` Protocol**：`start(worker_id, task_id, card, project_root) → SandboxHandle` / `commit(handle, commit_message) → sha` / `stop(handle)`。
+   - **`LocalSandboxRuntime`**（預設）：filesystem-based sandbox。`start` 開新 workspace → **只**把 CATC `impact_scope.allowed` 命中的檔案拷進去（`_resolve_glob` 拒絕 `..` / 路徑跳出 root），`git init` baseline commit；`commit` 跑 `git add -A && git commit && rev-parse HEAD`；`stop` 拆掉 workspace。「bind-mount 只掛 `impact_scope.allowed`」用拷貝 + git 模擬 — production 換 `DockerSandboxRuntime` 接 `container.py` 走真 docker bind-mount 同樣形狀。
+   - **`AgentExecutor` Protocol**：`run(handle, card, worker_id) → AgentResult`。預設 `_StubAgentExecutor` 寫一個 marker file 進 workspace，回 `ok=True` — 讓 worker 在沒有 LLM key 的環境也跑得起來（CI / dev / `--dry-run`）。
+   - **`GerritPusher` Protocol**：`push(handle, card, commit_sha, change_id, worker_id) → GerritPushResult`。預設 `StubGerritPusher` 純記錄；production `GerritCommandPusher` 跑 `git push origin HEAD:refs/for/main`，失敗 retry 最多 `GERRIT_PUSH_MAX_RETRIES=3` 次（backoff `(1, 4, 15)` s），全失敗回 `ok=False, reason=...`，由 worker 走 nack（messages 進 queue 3-strike → DLQ）。
+   - **`HeartbeatStore` Protocol**：`register / heartbeat / deregister / list_active / get_info`。`_MemoryHeartbeatStore`（dev / tests）+ `RedisHeartbeatStore`（production，rely on `shared_state.get_sync_redis()`）。Redis 版用 key `omnisight:worker:<id>:alive` SETEX 90s + `omnisight:worker:active` SET 雙寫；`list_active()` 跨檢 alive key 是否還活，TTL 過期的 ghost 自動 SREM。
+
+3. **Worker run loop（`Worker.run()`）**：
+   ```
+   while not stop:
+     若 max_messages 已達 → break
+     free = capacity - max(inflight, pending)
+     若 free <= 0 → sleep(loop_idle_s) 繼續
+     msgs = queue_backend.pull(worker_id, count=min(capacity, free), visibility_timeout_s)
+     若空 → sleep 繼續
+     for msg in msgs:
+       若 stop → return_to_queue(msg) + 記 outcome
+       若 filter mismatch → return_to_queue(msg) + 記 outcome
+       若 capacity == 1 → handle(msg) inline
+       否則 → executor_pool.submit(_handle_and_record, msg) — pool max_workers=capacity
+   wait pending → 0  # 確保 outs 完整
+   return list(processed)
+   ```
+
+4. **`Worker.handle(msg)`（單 task 完整流程）**：
+   1. 反序列化 `task_card()`（pydantic validator 跑一次，corrupt CATC 直接 nack + format_exc(stack)）
+   2. `dist_lock.acquire_paths(task_id, card.navigation.impact_scope.allowed, ttl_s=lock_ttl_s, wait_timeout_s=lock_wait_s)` — all-or-nothing。衝突 → `set_state(Blocked_by_Mutex)` + `nack(reason=conflict)` 讓 message 重新進隊（visibility timeout 會處理沒設 set_state 的 race）
+   3. `set_state(Running)`
+   4. `sandbox.start(...)` → `executor.run(...)` → `sandbox.commit(...)` → `gerrit.push(...)`
+   5. 任一步出錯 raise `WorkerTaskFailed(reason, stack)` → `nack`，否則 `ack`
+   6. **finally**：`sandbox.stop(handle)` + `dist_lock.release_paths(task_id)`，每個 outcome 都記 `WorkerTaskOutcome`
+
+5. **Heartbeat thread（背景 thread）**：daemon thread，每 `heartbeat_interval_s` 秒呼 `store.heartbeat(worker_id, info_snapshot, ttl_s)`。snapshot 含 status / capacity / tenant_filter / capability_filter / pid / host / inflight / processed。Redis store 同時把 alive key TTL 重置成 90s — Redis 自動逐出長時間沒 heartbeat 的 worker。
+
+6. **Capacity > 1 並行**（spec：`--capacity N` 單 worker 並行領 N 個任務）：用 `concurrent.futures.ThreadPoolExecutor(max_workers=capacity)`。`_pending` counter 在 submit 時 ++、`_handle_and_record` finally 區塊 --，所以 main loop 用 `pending` + `inflight` 雙重檢查 free slot；`run()` 結束前 wait `pending == 0` 確保所有 outcome 都 append 完才返回（不然測試 `len(outs) == N` 會失敗）。
+
+7. **Filters（spec：`--tenant-filter` / `--capability-filter`）**：
+   - tenant：取 `card.payload["domain_context"]`（CATC 還沒 first-class tenant 欄位之前的暫時 anchor）
+   - capability：掃 `handoff_protocol` + `domain_context` 找 `cap:foo` token（O5 加 first-class capabilities 之後再升級）
+   - 兩者皆空 = 全收。任一沒 match → `nack(reason=filter mismatch)` 讓 message 進回 queue 給其他 worker 拉（**會吃 1 次 delivery_count，operator 不該設出永遠 reject 的 filter，否則 3-strike 進 DLQ**）
+
+8. **Graceful shutdown（spec：SIGTERM → stop claiming + 等現有任務完成 + release lock）**：
+   - `install_signal_handlers()` 把 SIGTERM / SIGINT 接到 `_stop_event.set()`（必須在 main thread 呼）
+   - `stop(timeout_s=60)`：set stop_event → 等 `inflight == 0 and pending == 0`（有 timeout） → shutdown thread pool（wait=True） → join heartbeat thread → `store.deregister(worker_id)` → bump `worker_active` gauge
+   - timeout 過了還有 in-flight → 走 `_abandon` 路徑：`nack` + `release_paths`，盡力釋放 visibility window + lock 給下一個 worker
+
+9. **Sandbox path enforcement（spec：「bind-mount 只掛 `impact_scope.allowed` 路徑 — 超出範圍物理不可達」）**：
+   - `_resolve_glob(root, glob)`：先檢查 `..` segment（直接 raise）；用 `pathlib.Path.glob` 展開後 `relative_to(root)` 檢查 — 任何 resolve 結果跳出 project root 直接 raise `ValueError`
+   - `LocalSandboxRuntime.start` 收到 ValueError 不 catch — worker.handle 收到 → `WorkerTaskFailed → nack` → 進 queue 3-strike → DLQ；惡意 CATC 不會污染 workspace
+   - production `DockerSandboxRuntime`（接 `backend/container.py`）會把 same `allowed` list 翻成 `-v <abs>:<abs>:ro` 多條 bind-mount，superset path 物理上 docker 沒給 mount → 真的不可達
+
+10. **Gerrit push trailer 規範**：每個 commit 都附三條 trailer：
+    ```
+    Change-Id: I<40 hex>     # Gerrit 用來把 patchset 串成同一 change
+    CATC-Ticket: PROJ-123    # 對應 JIRA ticket — 三方追溯（queue / Gerrit / JIRA）
+    Worker-Id: wkr-host-xxx  # 哪個 worker 推的 — debug + audit
+    ```
+    `GerritCommandPusher` 從 `git push` stdout 抓 `remote: https://...` 行回填 `review_url`，方便 SSE 推給人 reviewer。
+
+11. **CLI 入口**：`python -m backend.worker run --capacity N --tenant-filter t1,t2 --capability-filter cap1,cap2 [--max-messages N] [--worker-id ...] [--heartbeat-*] [--visibility-timeout-s ...]`，另外有 `python -m backend.worker list` dump active workers JSON。signal handlers 自動 install。
+
+12. **systemd unit template**：`deploy/systemd/omnisight-worker@.service`（`@N` template）— 操作員跑 `systemctl enable --now omnisight-worker@1 omnisight-worker@2 ...` 就有 N 個獨立 worker 進程拉同一條 queue。EnvironmentFile 讀 `.env` 拿 `OMNISIGHT_WORKER_CAPACITY` / `_TENANT_FILTER` / `_CAPABILITY_FILTER`。`KillSignal=SIGTERM` + `TimeoutStopSec=60` 對齊 `Worker.stop(timeout_s=60)` 的 graceful drain budget。`ProtectSystem=strict` + `ReadWritePaths=...data ...artifacts` 把 worker 自身鎖在最小 fs scope（與 backend service 一致）。
+
+13. **docker-compose profile**：`docker-compose.yml` 新增 `worker` service（`profiles: ["workers"]`）— 平常 `docker compose up` 不啟，`docker compose --profile workers up -d` 才啟，`--scale worker=N` 任意拉。`stop_signal: SIGTERM` + `stop_grace_period: 60s` 同 systemd unit 對齊。
+
+14. **Metrics（wire 進 `backend/metrics.py` + `reset_for_tests()` + NoOp stubs）**：
+    - `omnisight_worker_active` Gauge — 註冊在 active set 的 worker 數
+    - `omnisight_worker_inflight` Gauge — 本 process 當下 in-flight 任務數
+    - `omnisight_worker_heartbeat_total` Counter — heartbeat tick 數
+    - `omnisight_worker_lifecycle_total{event=start|stop}` Counter
+    - `omnisight_worker_task_total{outcome=acked|nacked|error|locked}` Counter
+    - `omnisight_worker_task_seconds` Histogram（buckets 0.05..1800s）
+    - 所有 metric 都有 No-op stub，`prometheus_client` 沒裝也不炸
+
+15. **`backend/tests/test_worker.py`**（new, **32 tests, 1.11s，全綠**）— 12 個 test class：
+    - `TestHelpers`（6）— worker_id 唯一、change_id 格式、commit_message trailer、capability extraction、glob escape reject、commit message fallback
+    - `TestSandboxBindMount`（4）— 只 allowed paths visible、glob dir 抓 subtree、`..` escape rejected、commit 回 SHA
+    - `TestSingleTaskHappyPath`（2）— full E2E ack + push、ack 後 lock release
+    - `TestFilters`（4）— tenant match / mismatch / capability match / mismatch
+    - `TestHeartbeatRegistration`（3）— register on start / deregister on stop、heartbeat 重新整理 TTL、heartbeat loss → list_active drop
+    - `TestCapacity`（1）— capacity=3 + 5 task → peak_inflight ≥ 2 + 全 ack
+    - `TestGracefulShutdown`（2）— stop 釋放 locks + deregister、signal handler install idempotent
+    - `TestLockConflict`（1）— 預先 acquire lock → worker pull 後拿不到 → return_to_queue
+    - `TestGerritRetry`（3）— retry then succeed、max_retries 後放棄、push fail 觸發 nack
+    - `TestMultiWorkerFanout`（2）— 兩 worker 共享 queue 不重複交付、crash 後 visibility recovery
+    - `TestCli`（2）— argparse `run` / `list` 兩 subcommand、CSV parser handle blanks
+    - `TestE2E`（2）— metrics 物件存在 + 不炸、P0 永遠先 drain（worker layer 對應 O2 priority）
+
+### 測試結果
+
+- `backend/tests/test_worker.py` — **32 passed (1.11s)**
+- Regression sweep：`test_worker.py + test_queue_backend.py + test_dist_lock.py + test_catc.py + test_codeowners.py + test_metrics.py` — **183 passed, 2 skipped**。沒有 regress。
+- Ruff lint：`worker.py` / `test_worker.py` / `metrics.py` 全綠
+- CLI smoke：`python -m backend.worker run --capacity 1 --max-messages 0` 正常 start/stop；`python -m backend.worker list` 列出 active workers
+
+### 設計決策 & 取捨
+
+- **Protocol-first runtime（SandboxRuntime / AgentExecutor / GerritPusher / HeartbeatStore）**：spec 指定 worker 接 docker / git review / Redis，但這些都是 heavy external dep。把它們抽成 Protocol + 預設 in-memory/local 實作意味著 (a) unit test 不需要 docker / SSH key / Redis 也能跑全流程；(b) production 換成接 `container.py` / 真 git push / Redis 一行注入；(c) 未來要支援 podman / k8s job / SQS 也只是新加一個 implementation class。整個 worker module 沒有任何 `from backend import container` — 環境隔離乾淨。
+- **`LocalSandboxRuntime` 用 copy + git，不用 docker**：unit test 跑 32 個案例 1.11s，全部不 require docker daemon。production 換 `DockerSandboxRuntime` 走真 bind-mount。但 ｢ bind-mount only allowed」這個 invariant 在兩條實作裡都成立 — local 透過「沒拷進去就沒」、docker 透過「沒 mount 就沒」，**兩者形狀相同所以 contract test 不用改**。
+- **`_pending` counter 跟 `_inflight` 分開**：thread pool 的 `submit()` 不立即把工作交給 worker thread；submit 完到 thread 真的進入 `handle()` 之間有微秒級 race。如果只看 `_inflight`（在 handle 內 ++），main loop 有可能在這個 race 視窗內以為 free slot 還很多，oversubscribe 到 pool 內部 queue。`_pending` 在 submit 時 ++，所以 main loop 的 `free = capacity - max(inflight, pending)` 永遠正確。`run()` 收尾也用 `pending == 0` 等所有 outcome 落到 `_processed` 才 return — 不然測試 `len(outs) == N` 會偶發失敗。
+- **filter mismatch 用 `nack` 而不是「假裝沒拉」**：queue 沒 unclaim API（O2 spec 沒這個 op，要加會破壞 visibility timeout 純粹性）。`nack` 雖然會吃 1 次 delivery_count，但 (a) 操作員不該設永遠 reject 的 filter；(b) 真出 3-strike → DLQ 反而是好事（operator 看到 DLQ 知道「這 worker 設的 filter 沒人領」）；(c) 跟 graceful shutdown 路徑用同一條 code path，少一條歧路。
+- **`Worker.handle` never raises**：所有 exception 在 `handle()` 裡面被 catch + 翻譯成 `WorkerTaskOutcome(status='nacked', error=...)`。理由：worker run loop 會丟給 thread pool，pool 的 `submit()` 把 exception 吞進 future — 如果不在 handle 裡 catch，pool 會默默吃掉錯誤而 message 永遠不 ack/nack（卡在 visibility timeout 直到 Re-pull）。讓 handle 自己當 last-mile error wrapper，所有 outcome 都明確記到 audit。
+- **Heartbeat = daemon thread + Event.wait**：跟 `dist_lock.start_deadlock_sweep` 同 pattern。daemon=True 確保 worker 主進程退出時 thread 不卡死系統。`Event.wait(interval)` 比 `time.sleep(interval)` 好 — `stop()` 一 set event 就立刻喚醒，不用等 interval 過。
+- **Gerrit push 用 `git` CLI 不用 SSH 直連 Gerrit**：local git 已經 know how to talk to Gerrit (透過 SSH key)，`git push origin HEAD:refs/for/main` 就是 Gerrit 的 magic ref。直接呼 `gerrit review` SSH 反而要 worker 自己掛 ssh subprocess + parse 回應 — 多一個 brittle integration point。`backend/gerrit.py` 既有的 `GerritClient` 是 review/query 走 SSH — push 我們刻意走 git 標準路徑，cleaner。
+- **commit-message trailer 三條（Change-Id / CATC-Ticket / Worker-Id）**：spec 要 `Change-Id` + `CATC-Ticket`。多塞一條 `Worker-Id` 的代價是零 — debug 「哪個 worker 推這 commit」直接看 trailer 就好，不用 cross-ref audit log。Gerrit submit-rule 不會看 unknown trailer，安全。
+- **`max_messages=0` 必須能 start/stop 不卡**：`run()` 的最開頭就檢查 `n >= max_messages` 直接 break，所以 0 就是「啟動但不拉任何 message」。test fixture 大量用這個 mode 測 start/stop / heartbeat / register / deregister，不會被任何 pull 的 race condition 干擾。
+- **systemd template 用 `@N` instance**：`omnisight-worker@1.service` / `omnisight-worker@2.service` 是同一個 unit file 多個 instance — 比寫 N 個獨立 unit 乾淨，也讓 operator 可以 `systemctl status omnisight-worker@*` 一次看全部。`hostname -s` + `%i` 組成 `wkr-<host>-<N>`，跨 host 也不撞 worker_id。
+
+### 與前序 Phase 的互動
+
+- **O0（CATC）**：worker 對 message 第一件事是 `task_card()` — pydantic validator 跑一次。corrupt CATC 在 worker 邊界就 nack，不會跑到 sandbox/agent/gerrit。`impact_scope.allowed` 是 `LocalSandboxRuntime` bind-mount 唯一輸入。
+- **O1（dist_lock）**：worker `acquire_paths(task_id, card.allowed)` 是 hard prerequisite。衝突 → `set_state(Blocked_by_Mutex)` + nack 讓 visibility timeout 重新分配。`release_paths` 在 finally 區塊保證 lock 一定回收。
+- **O2（queue_backend）**：worker 唯一接觸 queue 的 path 是 `pull/ack/nack/set_state`。queue 的 visibility timeout（5min default）是 worker crash 的 safety net — 工人死了 5min 內 message 會被另一個 worker 拉走。queue 的 3-strike → DLQ 是 worker 連續失敗的安全網 — worker 不需要自己決定「放棄」。
+- **O4（Orchestrator Gateway）— 下一步**：把 Jira webhook 拆成 N 張 CATC + push queue，worker 就會自動拉。worker 的 `WorkerTaskOutcome.gerrit.review_url` 可以反向回填 Jira sub-task comment（O4 + O5 的責任）。
+- **O6 / O7（Merger Agent + Submit-rule）**：worker push 出去的 patchset 等的就是 Merger Agent 解 conflict + 雙人 +2。worker 的 `Change-Id` 是這條 cross-system trace 的 anchor。
+- **CLAUDE.md L1**：本 phase 沒動 L1 immutable rules。worker 不繞 Gerrit、不存 secret、不 force-push、不接觸 test_assets/。worker push 出去的 patchset **強制走 Gerrit review** — 沒繞過 +2 政策。
+
+### 下一步 & 未結項目
+
+- **O4（#267）Orchestrator Gateway** — Jira webhook → LLM 拆 DAG → N × `push()` → 回 message_id list 給 Jira sub-task。worker 已就緒，O4 就是「produce side」。
+- **FUTURE — `DockerSandboxRuntime`**：把 `backend/container.py` 包成 `SandboxRuntime` Protocol 實作。bind-mount 只掛 `impact_scope.allowed` 那組路徑，其它 fs subset 不掛。此時 `LocalSandboxRuntime` 變成 dev/CI 用，production 用 docker。
+- **FUTURE — Gerrit REST 整合**：目前 `GerritCommandPusher` 用 `git push` CLI。要 review_url 直接查、要 patchset state 同步，可以加 `GerritRestPusher` 用 `backend/gerrit.py` 的 SSH client，或實作 HTTP REST client。
+- **FUTURE — capability 升級成 first-class CATC field**：目前 worker capability filter 看 `handoff_protocol` 裡的 `cap:` 前綴。O5 (#268) 加正式 `capabilities` field 後 worker 直接讀 — `_msg_capabilities` 已在 docstring 標 FUTURE 註記。
+- **FUTURE — Real Redis integration test**：跟 dist_lock / queue 同 status，目前 test 走 in-memory `_MemoryHeartbeatStore`。CI 加 `pytest -m redis` 跑真 Redis container 覆蓋 `RedisHeartbeatStore` 的 SETEX / SADD / SREM 行為。
+
+### 新增 / 修改檔案
+
+- `backend/worker.py` — **新增**（~870 行）
+- `backend/tests/test_worker.py` — **新增**（32 tests）
+- `backend/metrics.py` — **修改**（6 個 worker metric 同步加進 init / `reset_for_tests` / NoOp stubs）
+- `deploy/systemd/omnisight-worker@.service` — **新增**（systemd template）
+- `docker-compose.yml` — **修改**（新 `worker` service profile `workers`）
+- `TODO.md` — O3 全部 10 條 `[ ]` → `[x]`
+- `HANDOFF.md` — 本節新增
 
 ---
 

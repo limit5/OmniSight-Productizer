@@ -36,3 +36,35 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # O3 (#266): stateless agent worker pool.
+  # Bring up with:  docker compose --profile workers up -d
+  # Scale with:     docker compose --profile workers up -d --scale worker=3
+  # ──────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    profiles: ["workers"]
+    command: >
+      python3 -m backend.worker run
+      --capacity ${OMNISIGHT_WORKER_CAPACITY:-1}
+      --tenant-filter ${OMNISIGHT_WORKER_TENANT_FILTER:-}
+      --capability-filter ${OMNISIGHT_WORKER_CAPABILITY_FILTER:-}
+    volumes:
+      - ./backend:/app/backend
+      - ./configs:/app/configs
+      - ./scripts:/app/scripts
+      - ./data:/app/data
+      - ./.artifacts:/app/.artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    stop_signal: SIGTERM
+    stop_grace_period: 60s
+    restart: unless-stopped

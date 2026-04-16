@@ -395,6 +395,41 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # O3 (#266): Stateless Agent Worker Pool ────────────────────
+    worker_active = Gauge(
+        "omnisight_worker_active",
+        "Number of workers currently registered in workers:active",
+        registry=REGISTRY,
+    )
+    worker_inflight = Gauge(
+        "omnisight_worker_inflight",
+        "Number of in-flight tasks across this worker process",
+        registry=REGISTRY,
+    )
+    worker_heartbeat_total = Counter(
+        "omnisight_worker_heartbeat_total",
+        "Heartbeat refresh ticks emitted",
+        registry=REGISTRY,
+    )
+    worker_lifecycle_total = Counter(
+        "omnisight_worker_lifecycle_total",
+        "Worker lifecycle events (start | stop)",
+        labelnames=("event",),
+        registry=REGISTRY,
+    )
+    worker_task_total = Counter(
+        "omnisight_worker_task_total",
+        "Tasks processed by outcome",
+        labelnames=("outcome",),  # acked | nacked | error | locked
+        registry=REGISTRY,
+    )
+    worker_task_seconds = Histogram(
+        "omnisight_worker_task_seconds",
+        "End-to-end seconds spent per acked task",
+        buckets=(0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800),
+        registry=REGISTRY,
+    )
+
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
         "omnisight_memory_decay_total",
@@ -465,6 +500,12 @@ else:
     dist_lock_deadlock_kills_total = _NoOp()  # type: ignore
     queue_depth = _NoOp()  # type: ignore
     queue_claim_duration_seconds = _NoOp()  # type: ignore
+    worker_active = _NoOp()  # type: ignore
+    worker_inflight = _NoOp()  # type: ignore
+    worker_heartbeat_total = _NoOp()  # type: ignore
+    worker_lifecycle_total = _NoOp()  # type: ignore
+    worker_task_total = _NoOp()  # type: ignore
+    worker_task_seconds = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
@@ -503,6 +544,8 @@ def reset_for_tests() -> None:
     global t3_runner_dispatch_total
     global dist_lock_wait_seconds, dist_lock_held_total, dist_lock_deadlock_kills_total
     global queue_depth, queue_claim_duration_seconds
+    global worker_active, worker_inflight, worker_heartbeat_total
+    global worker_lifecycle_total, worker_task_total, worker_task_seconds
     global process_start_time
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
@@ -722,6 +765,31 @@ def reset_for_tests() -> None:
         "omnisight_queue_claim_duration_seconds", "Pull duration",
         labelnames=("outcome",),
         buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10),
+        registry=REGISTRY,
+    )
+    worker_active = Gauge(
+        "omnisight_worker_active", "Active worker count",
+        registry=REGISTRY,
+    )
+    worker_inflight = Gauge(
+        "omnisight_worker_inflight", "Per-process in-flight tasks",
+        registry=REGISTRY,
+    )
+    worker_heartbeat_total = Counter(
+        "omnisight_worker_heartbeat_total", "Heartbeat ticks",
+        registry=REGISTRY,
+    )
+    worker_lifecycle_total = Counter(
+        "omnisight_worker_lifecycle_total", "Worker lifecycle events",
+        labelnames=("event",), registry=REGISTRY,
+    )
+    worker_task_total = Counter(
+        "omnisight_worker_task_total", "Worker task outcomes",
+        labelnames=("outcome",), registry=REGISTRY,
+    )
+    worker_task_seconds = Histogram(
+        "omnisight_worker_task_seconds", "End-to-end task seconds",
+        buckets=(0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800),
         registry=REGISTRY,
     )
     process_start_time = Gauge(

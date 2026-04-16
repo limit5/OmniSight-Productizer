@@ -1,0 +1,65 @@
+; systemd unit template for the OmniSight stateless agent worker (O3).
+;
+; Install:
+;   sudo cp deploy/systemd/omnisight-worker@.service /etc/systemd/system/
+;   # Edit USER_HOME / USERNAME placeholders below for your install.
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-worker@1
+;   sudo systemctl enable --now omnisight-worker@2
+;   ...
+;
+; The "@N" template lets the operator scale workers horizontally:
+; ``omnisight-worker@1`` and ``omnisight-worker@2`` are independent
+; processes drained from the same shared queue (O2).  Each one
+; registers itself in the Redis ``workers:active`` set with TTL 90s
+; and writes a heartbeat every 30s — see backend/worker.py.
+;
+; Tunables via the EnvironmentFile (.env at the project root):
+;   * OMNISIGHT_REDIS_URL          — required for shared queue + locks.
+;   * OMNISIGHT_WORKER_CAPACITY    — concurrent in-flight per worker.
+;   * OMNISIGHT_WORKER_TENANT_FILTER     — comma-list of tenant_ids.
+;   * OMNISIGHT_WORKER_CAPABILITY_FILTER — comma-list of agent caps.
+;
+; Graceful shutdown: systemd sends SIGTERM, the worker stops claiming
+; new work, finishes in-flight tasks, releases its dist-locks, and
+; deregisters from the active set.  TimeoutStopSec gives it 60s to
+; finish before SIGKILL.
+
+[Unit]
+Description=OmniSight stateless agent worker (instance %i)
+Documentation=https://github.com/your-org/OmniSight-Productizer
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=exec
+User=USERNAME
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+EnvironmentFile=/home/USER_HOME/work/sora/OmniSight-Productizer/.env
+Environment=OMNISIGHT_WORKER_INSTANCE=%i
+ExecStart=/bin/sh -c '\
+    CAP=$${OMNISIGHT_WORKER_CAPACITY:-1}; \
+    TENANTS=$${OMNISIGHT_WORKER_TENANT_FILTER:-}; \
+    CAPS=$${OMNISIGHT_WORKER_CAPABILITY_FILTER:-}; \
+    exec python3 -m backend.worker run \
+        --worker-id "wkr-$$(hostname -s)-%i" \
+        --capacity $$CAP \
+        --tenant-filter "$$TENANTS" \
+        --capability-filter "$$CAPS"'
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+; Sandboxing: the worker spawns docker containers, so it needs
+; /var/run/docker.sock + /home access; lock down the rest.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/data
+ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/.artifacts
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

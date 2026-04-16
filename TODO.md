@@ -824,17 +824,17 @@ Legend:
 - [x] 預估：**2 day**
 
 ### O3. Stateless Agent Worker Pool (#266)
-- [ ] `backend/worker.py`：`Worker` 進程入口——pull from queue → 拿 lock（O1）→ 起 sandbox container（已有 M1 cgroup）→ 執行 agent node → commit code → push to Gerrit → push result event → release lock
-- [ ] Worker heartbeat 寫 Redis（`worker:<id>:alive` with TTL 90 s）
-- [ ] 支援 `--capacity N` 單 worker 並行領幾個任務
-- [ ] 支援 `--tenant-filter` / `--capability-filter`（只領 particular agent_type）
-- [ ] Graceful shutdown：SIGTERM → stop claiming new + 等現有任務完成 + release lock
-- [ ] Worker registration：啟動時註冊到 Redis `workers:active` set
-- [ ] Worker orchestration：systemd unit template + docker-compose profile `workers-N`
-- [ ] Sandbox runtime enforcement：bind-mount 只掛 `impact_scope.allowed` 路徑（延伸 I5 tenant namespace）— 超出範圍物理不可達
-- [ ] Gerrit push：worker 完成任務後自動 `git review`（或等價 HTTP API）推 patchset；commit 訊息含 `Change-Id` + `CATC-Ticket:` trailer
-- [ ] 整合測試：N workers pull 同一 queue、crash recovery、heartbeat loss、graceful shutdown、Gerrit push 失敗重試
-- [ ] 預估：**3 day**
+- [x] `backend/worker.py`：`Worker` 進程入口——pull from queue → 拿 lock（O1）→ 起 sandbox container（已有 M1 cgroup）→ 執行 agent node → commit code → push to Gerrit → push result event → release lock
+- [x] Worker heartbeat 寫 Redis（`worker:<id>:alive` with TTL 90 s）
+- [x] 支援 `--capacity N` 單 worker 並行領幾個任務
+- [x] 支援 `--tenant-filter` / `--capability-filter`（只領 particular agent_type）
+- [x] Graceful shutdown：SIGTERM → stop claiming new + 等現有任務完成 + release lock
+- [x] Worker registration：啟動時註冊到 Redis `workers:active` set
+- [x] Worker orchestration：systemd unit template + docker-compose profile `workers-N`
+- [x] Sandbox runtime enforcement：bind-mount 只掛 `impact_scope.allowed` 路徑（延伸 I5 tenant namespace）— 超出範圍物理不可達
+- [x] Gerrit push：worker 完成任務後自動 `git review`（或等價 HTTP API）推 patchset；commit 訊息含 `Change-Id` + `CATC-Ticket:` trailer
+- [x] 整合測試：N workers pull 同一 queue、crash recovery、heartbeat loss、graceful shutdown、Gerrit push 失敗重試
+- [x] 預估：**3 day**
 
 ### O4. Orchestrator Gateway Service (#267)
 - [ ] `backend/orchestrator_gateway.py`：獨立 FastAPI app（或現有 backend 內的 router）
