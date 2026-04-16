@@ -1,0 +1,267 @@
+name: Fallback Branches
+
+# N9 — keep `compat/nextjs-15` and `compat/pydantic-v2` evergreen.
+#
+# Triggers (three layers, intentional):
+#   * push    → any commit landing on a compat/** branch (manual rebase
+#               or automated cherry-pick) re-runs build + core tests
+#               immediately. We want the operator to know within ~10
+#               minutes whether their rebase broke the fallback, not
+#               next Sunday at 04:00.
+#   * cron    → weekly Sunday 18:00 UTC = 02:00 Mon Asia/Taipei. Catches
+#               ambient drift (transitive deps moving under us, GitHub
+#               runner image rolling) even when no one touched the
+#               branch all week. Same time slot as N5 + N7 — operator
+#               sees one consolidated nightly digest.
+#   * dispatch → on demand, when the major-upgrade-gate workflow
+#                requests a fresh "is the fallback green?" verdict
+#                before a tier/major PR merges.
+#
+# This workflow is the **gate** the major-upgrade-gate.yml polls for.
+# Its `required_check_name` is recorded in each manifest under
+# [gate].required_check_name — if you rename a job here, update the
+# manifest in the same PR.
+
+on:
+  push:
+    branches:
+      - "compat/**"
+  schedule:
+    # 18:00 UTC Sunday. One hour after multi-version-matrix's daily slot
+    # so log archives don't collide on the runner cache.
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "compat/** branch to certify (defaults to all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # actions: read needed so major-upgrade-gate can query latest run
+  # status via the workflow_run API.
+  actions: read
+
+concurrency:
+  # Per-branch concurrency: a push to compat/nextjs-15 should not
+  # cancel an in-flight run on compat/pydantic-v2.
+  group: fallback-${{ github.ref || github.event.inputs.target_branch }}
+  cancel-in-progress: true
+
+jobs:
+
+  discover:
+    # Read .fallback/manifests/*.toml from master and emit a JSON list
+    # of {branch, framework, pin_version, manifest_paths}. The build job
+    # below fans out from this matrix.
+    name: discover fallback branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      branches: ${{ steps.list.outputs.branches }}
+    steps:
+      - name: checkout master (manifests live here)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: list manifests
+        id: list
+        env:
+          DISPATCH_TARGET: ${{ github.event.inputs.target_branch }}
+          PUSH_REF:        ${{ github.ref }}
+          EVENT_NAME:      ${{ github.event_name }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re
+          from pathlib import Path
+
+          # Tiny TOML reader — only handles the flat key=value lines we
+          # actually use in manifests/*.toml. Avoids adding a tomllib
+          # dep just for discover; the shape-guard test verifies the
+          # subset we read.
+          def read_branch_name(text: str) -> str | None:
+              section = None
+              for raw in text.splitlines():
+                  s = raw.strip()
+                  if s.startswith("[") and s.endswith("]"):
+                      section = s[1:-1]
+                      continue
+                  if section == "branch" and s.startswith("name"):
+                      m = re.search(r'"([^"]+)"', s)
+                      if m:
+                          return m.group(1)
+              return None
+
+          all_branches: list[str] = []
+          for p in sorted(Path(".fallback/manifests").glob("*.toml")):
+              name = read_branch_name(p.read_text(encoding="utf-8"))
+              if name:
+                  all_branches.append(name)
+
+          # Filter for trigger context:
+          #   * push to compat/<x>   → just that one
+          #   * dispatch with input  → just that one
+          #   * dispatch w/o input   → all
+          #   * cron                 → all
+          dispatch = (os.environ.get("DISPATCH_TARGET") or "").strip()
+          push_ref = os.environ.get("PUSH_REF") or ""
+          event    = os.environ.get("EVENT_NAME") or ""
+
+          if event == "push" and push_ref.startswith("refs/heads/compat/"):
+              selected = [push_ref.removeprefix("refs/heads/")]
+          elif event == "workflow_dispatch" and dispatch:
+              selected = [dispatch]
+          else:
+              selected = all_branches
+
+          # Defensive: never include a branch not in the manifest set.
+          selected = [b for b in selected if b in all_branches]
+          print(f"branches={json.dumps(selected)}")
+          PY
+
+  build-and-test:
+    name: build-and-test (${{ matrix.branch }})
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ needs.discover.outputs.branches != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.discover.outputs.branches) }}
+    steps:
+      - name: checkout fallback branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          # Need the manifest from master in case this branch's tree
+          # somehow drifted — second checkout below.
+          fetch-depth: 0
+
+      - name: pull manifest from master
+        # Fallback branches MAY shed `.fallback/` (e.g. if an early
+        # rebase squashed it). The manifest is canonical on master, so
+        # we re-fetch the file from master into a temp path. The
+        # workflow uses the manifest only to log the pin/scope and to
+        # decide which jobs to skip — never to mutate the branch tree.
+        run: |
+          set -eu
+          mkdir -p _manifest
+          # branch `compat/nextjs-15` → manifest `nextjs-15.toml`
+          MANIFEST_NAME="${BRANCH#compat/}.toml"
+          # `.fallback/` may exist on the branch already; copy it in.
+          if [ -d ".fallback" ]; then cp -r .fallback _manifest/; fi
+          # Always also pull master's copy (authoritative).
+          git fetch --depth 1 origin master
+          git show "origin/master:.fallback/manifests/${MANIFEST_NAME}" \
+              > "_manifest/${MANIFEST_NAME}" 2>/dev/null \
+              || echo "::warning::manifest ${MANIFEST_NAME} not found on master"
+          ls -la _manifest/ || true
+        env:
+          BRANCH: ${{ matrix.branch }}
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: setup node
+        uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          # `engines.node` may sit on the branch's pinned major (which
+          # could differ from master). Use `.nvmrc` from the branch.
+          node-version-file: ".nvmrc"
+          cache: pnpm
+
+      # ── backend build + core tests (always run) ─────────────────────
+      - name: pip install (hashed)
+        # Backend lockfile sits in `backend/requirements.txt`. If the
+        # fallback branch is `compat/pydantic-v2`, the lockfile must
+        # still resolve cleanly with pydantic 2.x — that's the entire
+        # point of the gate. If it doesn't, this step red-Xs and the
+        # operator gets a notification.
+        run: pip install --require-hashes -r backend/requirements.txt
+
+      - name: pytest core (governance + adapter + smoke)
+        # "Core tests" = the small, fast set that catches structural
+        # regressions without needing the full ~60 min suite. Three
+        # marker tests pulled forward as proxies for the three concerns
+        # most likely to break on a framework downgrade:
+        #   * test_dependency_governance.py    → lockfile + workflow shape
+        #   * test_llm_adapter.py              → langchain firewall (N4)
+        #   * test_openapi_contract.py         → schema drift
+        # Full suite stays nightly via ci.yml on master.
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/n9-fallback-${{ matrix.branch }}.db
+        run: |
+          set -eu
+          rm -f "/tmp/n9-fallback-${{ matrix.branch }}.db"
+          cd backend
+          pytest -q --tb=line --no-header \
+              tests/test_dependency_governance.py \
+              tests/test_llm_adapter.py \
+              tests/test_openapi_contract.py
+
+      # ── frontend build + core tests ─────────────────────────────────
+      - name: pnpm install
+        env:
+          # If the branch's `engines.node` pin happens to be tighter
+          # than the runner's default, downgrade to a warning rather
+          # than fail — fallback branches deliberately straddle node
+          # majors during the LTS overlap (Apr 2026 = node 20→22).
+          npm_config_engine_strict: "false"
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: pnpm build (next build)
+        # `next build` is the cheapest "does the framework still load
+        # and compile our routes" probe. We deliberately skip
+        # `next start` + e2e — that's the nightly job's territory.
+        run: pnpm run build
+
+      - name: vitest core
+        run: pnpm exec vitest run --reporter=dot
+
+      # ── certify run on success ──────────────────────────────────────
+      - name: emit certification marker
+        # Step summary record that major-upgrade-gate.yml polls for
+        # via the GH API. Format kept dead-simple so the gate's parser
+        # is one regex.
+        if: success()
+        run: |
+          {
+            echo "## N9 fallback certified"
+            echo ""
+            echo "* branch: \`${{ matrix.branch }}\`"
+            echo "* sha:    \`$(git rev-parse HEAD)\`"
+            echo "* run:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "* utc:    $(date -u +%FT%TZ)"
+            echo ""
+            echo "fallback-status: GREEN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  summary:
+    # Always-run roll-up so a partial cron failure is visible at a
+    # glance. Mirrors the pattern N7 / N8 use.
+    name: summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [discover, build-and-test]
+    steps:
+      - name: write run summary
+        run: |
+          {
+            echo "## N9 fallback-branches — run summary"
+            echo ""
+            echo "Selected branches: \`${{ needs.discover.outputs.branches }}\`"
+            echo ""
+            echo "| Job | Result |"
+            echo "|---|---|"
+            echo "| discover       | ${{ needs.discover.result }} |"
+            echo "| build-and-test | ${{ needs.build-and-test.result }} |"
+            echo ""
+            echo "Per-branch step-summary blocks above carry the certification marker"
+            echo "polled by major-upgrade-gate.yml."
+          } >> "$GITHUB_STEP_SUMMARY"

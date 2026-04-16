@@ -1,0 +1,51 @@
+# Fallback manifest for compat/nextjs-15
+#
+# Schema is intentionally tiny — every field is consumed by at least one
+# of: fallback-branches.yml, major-upgrade-gate.yml, fallback_rebase.py,
+# or test_dependency_governance.py. Don't add a key without updating
+# all four readers; the shape-guard test enforces this.
+
+[branch]
+name              = "compat/nextjs-15"
+framework         = "next"
+framework_track   = "15"           # we hold this major; relinquish if master ever returns to 15
+created_for       = "Next 17 breaking-major hedge"
+
+[pin]
+# Last stable Next 15 (per https://github.com/vercel/next.js/releases).
+# When Vercel publishes a new 15.x patch we bump this and run the
+# fallback workflow on the branch to certify the patch.
+package           = "next"
+version           = "15.5.4"
+ecosystem         = "npm"
+manifest_paths    = ["package.json", "pnpm-lock.yaml"]
+
+[gate]
+# Major-upgrade-gate fails if a master PR bumps `next` past this and
+# the fallback hasn't shown a green CI run within `freshness_days`.
+trigger_on_master_bump_past = "16"
+freshness_days              = 14
+required_check_name         = "fallback-branches / build-and-test (compat/nextjs-15)"
+
+[rebase]
+# Paths the weekly rebase tool MUST NOT cherry-pick from master into
+# this fallback. Anything here pulls in Next 16+ APIs; we'd rather skip
+# the commit than fight a merge conflict.
+skip_globs = [
+    "next.config.*",
+    "middleware.ts",
+    "middleware.js",
+    "app/**/route.ts",
+    "app/**/route.js",
+    "app/**/page.tsx",
+    "app/**/layout.tsx",
+    "lib/generated/api-types.ts",  # regenerated per branch
+]
+# When a master commit touches BOTH a skip path and a safe path, the
+# rebase tool reports it as `partial-skip` so the operator can split it
+# manually. Auto-splitting silently is too risky.
+
+[retire]
+# Conditions under which the operator should `git branch -D` this branch.
+when_master_returns_to_track = "15"   # if master ever pins next 15 again
+when_track_eol_announced     = true   # Vercel announces 15.x EOL → start the wind-down clock

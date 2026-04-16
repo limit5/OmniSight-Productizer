@@ -336,7 +336,51 @@ For Postgres (future G4):
 pg_restore --clean --if-exists --dbname=omnisight omnisight-${ROLLBACK_SHA}.pgdump
 ```
 
-### 4.5 Post-rollback hygiene
+### 4.5 Path C — Fallback-branch rollback (framework major explosions)
+
+If the failed upgrade was a framework major (`next`, `pydantic`) and a
+declared fallback branch exists for the previous major
+(`compat/<framework>-<N-1>`), prefer this path over Path A/B — it
+ships the *previous* framework version that has live CI proving it
+still builds with our codebase, instead of relying on the rollback
+image tag (which may have been built before any of the master commits
+that landed since the fallback was last rebased).
+
+```bash
+# 1. On the deploy host, fetch the latest fallback ref.
+git fetch origin
+git switch --detach origin/compat/nextjs-15      # or compat/pydantic-v2
+LATEST_GREEN_SHA="$(git rev-parse HEAD)"
+
+# 2. Rebuild and redeploy from the fallback ref.
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d
+
+# 3. Tag the fallback ref so forensics has an anchor.
+git tag "rollback-to-fallback-$(date +%Y%m%d)" "${LATEST_GREEN_SHA}"
+git push origin "rollback-to-fallback-$(date +%Y%m%d)"
+
+# 4. Revert the failed major-bump merge commit on master so the next
+#    deploy does not re-attempt it.
+git switch master
+git revert --no-edit <merge-commit-sha>
+git push origin master
+```
+
+Decision rule:
+
+* Fallback exists and `fallback-branches.yml` shows GREEN within
+  freshness window → **Path C** (preferred).
+* No fallback (e.g. brand-new framework adoption) → Path A or B.
+* Fallback exists but is stale → Path A or B; do *not* deploy a stale
+  fallback to prod (the whole point of N9's freshness gate is to keep
+  this from being the rollback target).
+
+See [`docs/ops/fallback_branches.md`](fallback_branches.md) for the
+fallback branches' lifecycle, weekly maintenance SOP, and the
+freshness window definition.
+
+### 4.6 Post-rollback hygiene
 
 - File an incident report in the PR body (what failed, what got
   rolled back, next steps) — even if the fix is "reopen the PR with a
@@ -359,9 +403,13 @@ pg_restore --clean --if-exists --dbname=omnisight omnisight-${ROLLBACK_SHA}.pgdu
 | §2.3 smoke | `scripts/prod_smoke_test.py` | N/A — standalone script |
 | §3.x metrics | CVE daily scan | `.github/workflows/cve-scan.yml` (N6) |
 | §1.x planning | EOL monthly check | `.github/workflows/eol-check.yml` (N6) |
+| §2.x major-bump gate | Major Upgrade Gate | `.github/workflows/major-upgrade-gate.yml` (N9) |
+| §4.5 framework rollback | Fallback branches | `.github/workflows/fallback-branches.yml` + `docs/ops/fallback_branches.md` (N9) |
 
 ## Change log
 
 - **2026-04-16** — N6 initial runbook. Four phases (pre / during /
   post / rollback), 24h staging soak, 72h production monitoring,
   blue-green-aware rollback paths, DB snapshot-and-restore procedure.
+- **2026-04-16** — N9 added Phase 4.5 (Path C — fallback-branch
+  rollback) and the major-upgrade gate row in the automation table.

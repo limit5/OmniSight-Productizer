@@ -894,3 +894,387 @@ def test_n8_alembic_env_supports_postgres_url() -> None:
     assert 'url.startswith("sqlite:///")' in env_py, (
         "env.py must gate the mkdir-parent step on the sqlite dialect"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# N9 — Framework Fallback Branches
+# ─────────────────────────────────────────────────────────────────────
+
+N9_FALLBACK_DIR     = REPO_ROOT / ".fallback"
+N9_MANIFESTS_DIR    = N9_FALLBACK_DIR / "manifests"
+N9_FALLBACK_README  = N9_FALLBACK_DIR / "README.md"
+N9_WORKFLOW         = REPO_ROOT / ".github" / "workflows" / "fallback-branches.yml"
+N9_GATE_WORKFLOW    = REPO_ROOT / ".github" / "workflows" / "major-upgrade-gate.yml"
+N9_REBASE_SCRIPT    = REPO_ROOT / "scripts" / "fallback_rebase.py"
+N9_FRESHNESS_SCRIPT = REPO_ROOT / "scripts" / "check_fallback_freshness.py"
+N9_SETUP_SCRIPT     = REPO_ROOT / "scripts" / "fallback_setup.sh"
+N9_SOP_DOC          = REPO_ROOT / "docs" / "ops" / "fallback_branches.md"
+N9_REQUIRED_BRANCHES = ("compat/nextjs-15", "compat/pydantic-v2")
+
+
+@pytest.fixture(scope="module")
+def n9_workflow_text() -> str:
+    return N9_WORKFLOW.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def n9_gate_workflow_text() -> str:
+    return N9_GATE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _read_manifest(branch: str) -> dict:
+    """Tiny TOML reader sufficient for the schema we use in fallback manifests.
+
+    We deliberately avoid `tomllib` here so the test runs on the same
+    Python that ships in CI (3.12 — fine for tomllib, but consistency
+    with the workflow's awk-based reader matters: if this test passes
+    but the workflow's parser misses a key, the test is useless).
+    """
+    leaf = branch.split("/", 1)[-1] if "/" in branch else branch
+    path = N9_MANIFESTS_DIR / f"{leaf}.toml"
+    text = path.read_text(encoding="utf-8")
+    out: dict[str, dict[str, str]] = {}
+    section = None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1]; out.setdefault(section, {})
+            continue
+        if "=" not in s or section is None:
+            continue
+        k, _, v = s.partition("=")
+        v = v.strip()
+        if v.startswith('"') and '"' in v[1:]:
+            v = v[1:].split('"', 1)[0]
+        out[section][k.strip()] = v
+    return out
+
+
+def test_n9_fallback_dir_exists() -> None:
+    assert N9_FALLBACK_DIR.is_dir(), "N9 requires .fallback/ as the manifest home"
+    assert N9_FALLBACK_README.is_file(), "N9 requires .fallback/README.md"
+    assert N9_MANIFESTS_DIR.is_dir(), "N9 requires .fallback/manifests/"
+
+
+def test_n9_required_manifests_present() -> None:
+    # The TODO names two specific first targets; both manifests must
+    # ship in this commit. Adding more later is fine — the workflow's
+    # discover step is dynamic.
+    expected = {"nextjs-15.toml", "pydantic-v2.toml"}
+    actual = {p.name for p in N9_MANIFESTS_DIR.glob("*.toml")}
+    missing = expected - actual
+    assert not missing, f"N9 manifests missing: {missing}"
+
+
+def test_n9_manifest_nextjs_pins_next_15() -> None:
+    m = _read_manifest("compat/nextjs-15")
+    assert m["branch"]["framework"] == "next"
+    assert m["branch"]["framework_track"] == "15"
+    assert m["pin"]["package"] == "next"
+    # Pin must be 15.x — exact patch may bump in maintenance, but the
+    # major MUST stay 15 (otherwise the branch's identity broke).
+    assert m["pin"]["version"].startswith("15."), m["pin"]["version"]
+    assert m["pin"]["ecosystem"] == "npm"
+
+
+def test_n9_manifest_pydantic_pins_v2() -> None:
+    m = _read_manifest("compat/pydantic-v2")
+    assert m["branch"]["framework"] == "pydantic"
+    assert m["branch"]["framework_track"] == "2"
+    assert m["pin"]["package"] == "pydantic"
+    assert m["pin"]["version"].startswith("2."), m["pin"]["version"]
+    assert m["pin"]["ecosystem"] == "pypi"
+
+
+def test_n9_manifests_carry_gate_and_rebase_metadata() -> None:
+    # All four sections the tooling reads must exist on every manifest.
+    for branch in N9_REQUIRED_BRANCHES:
+        m = _read_manifest(branch)
+        for section in ("branch", "pin", "gate", "retire"):
+            assert section in m, f"{branch}: manifest missing [{section}]"
+        # gate.freshness_days must parse as int and be small enough that
+        # a single missed weekly cron flips the gate red.
+        days = int(m["gate"]["freshness_days"])
+        assert 1 <= days <= 30, f"{branch}: freshness_days {days} out of band"
+        # required_check_name must reference the workflow's job name so
+        # the gate's polling matches what fallback-branches.yml emits.
+        check = m["gate"]["required_check_name"]
+        assert "fallback-branches" in check, check
+        assert branch in check, check
+
+
+def test_n9_workflow_exists(n9_workflow_text: str) -> None:
+    assert N9_WORKFLOW.is_file()
+    assert "Fallback Branches" in n9_workflow_text
+
+
+def test_n9_workflow_triggers_on_compat_push_cron_dispatch(n9_workflow_text: str) -> None:
+    # Three triggers, in this order: push (immediate feedback after
+    # rebase), cron (catches drift), workflow_dispatch (gate's probe).
+    assert re.search(r'branches:\s*\n\s*-\s*"compat/\*\*"', n9_workflow_text), (
+        "fallback-branches.yml must trigger on push to compat/**"
+    )
+    assert "schedule:" in n9_workflow_text
+    assert re.search(r'cron:\s*"0\s+18\s+\*\s+\*\s+0"', n9_workflow_text), (
+        "weekly cron must be Sunday 18:00 UTC (per docs/ops/fallback_branches.md)"
+    )
+    assert "workflow_dispatch:" in n9_workflow_text
+
+
+def test_n9_workflow_discovers_manifests_dynamically(n9_workflow_text: str) -> None:
+    # The discover job MUST read .fallback/manifests/*.toml — adding a
+    # new fallback should not require editing the workflow.
+    assert ".fallback/manifests" in n9_workflow_text
+    assert "discover" in n9_workflow_text
+    assert "build-and-test" in n9_workflow_text
+
+
+def test_n9_workflow_runs_core_tests_only(n9_workflow_text: str) -> None:
+    # Per docs/ops/fallback_branches.md, fallback CI runs the small
+    # "core tests" set, not the full suite (60-180min). The three
+    # forwarded files are the proxies for the three concerns most
+    # likely to break on a framework downgrade.
+    for proxy in (
+        "tests/test_dependency_governance.py",
+        "tests/test_llm_adapter.py",
+        "tests/test_openapi_contract.py",
+    ):
+        assert proxy in n9_workflow_text, (
+            f"fallback-branches.yml must invoke {proxy} as part of core tests"
+        )
+    # And it must build the frontend (next build is the cheapest
+    # framework-level smoke).
+    assert "pnpm run build" in n9_workflow_text
+    assert "vitest" in n9_workflow_text
+
+
+def test_n9_workflow_uses_per_branch_concurrency(n9_workflow_text: str) -> None:
+    # A push to compat/nextjs-15 must NOT cancel an in-flight cron
+    # run on compat/pydantic-v2. The concurrency key must therefore
+    # embed the ref / input.
+    assert "concurrency:" in n9_workflow_text
+    assert re.search(r"group:\s*fallback-\$\{\{", n9_workflow_text), (
+        "concurrency group must scope to ref/input, not be a global lock"
+    )
+
+
+def test_n9_gate_workflow_exists(n9_gate_workflow_text: str) -> None:
+    assert N9_GATE_WORKFLOW.is_file()
+    assert "Major Upgrade Gate" in n9_gate_workflow_text
+
+
+def test_n9_gate_workflow_listens_for_label_events(n9_gate_workflow_text: str) -> None:
+    # The gate must re-evaluate when labels change (Renovate adds
+    # tier/major after the PR opens). Without `labeled`, the gate
+    # would silently miss every Renovate-tier PR.
+    assert "pull_request:" in n9_gate_workflow_text
+    for evt in ("labeled", "unlabeled", "opened", "synchronize", "reopened"):
+        assert evt in n9_gate_workflow_text, f"gate must trigger on {evt}"
+
+
+def test_n9_gate_workflow_calls_freshness_probe(n9_gate_workflow_text: str) -> None:
+    assert "scripts/check_fallback_freshness.py" in n9_gate_workflow_text
+    # The decide job must inspect labels (tier/major / blue-green) and
+    # match framework names from the PR title.
+    assert "tier/major" in n9_gate_workflow_text
+    assert "deploy/blue-green-required" in n9_gate_workflow_text
+
+
+def test_n9_setup_script_exists_and_executable() -> None:
+    assert N9_SETUP_SCRIPT.is_file(), "N9 requires scripts/fallback_setup.sh"
+    # bash script — first line must be a shebang, and stat must show +x.
+    first = N9_SETUP_SCRIPT.read_text(encoding="utf-8").splitlines()[0]
+    assert first.startswith("#!"), f"setup script missing shebang: {first!r}"
+    import os, stat
+    mode = N9_SETUP_SCRIPT.stat().st_mode
+    assert mode & stat.S_IXUSR, "scripts/fallback_setup.sh must be executable"
+
+
+def test_n9_setup_script_reads_manifests_dynamically() -> None:
+    src = N9_SETUP_SCRIPT.read_text(encoding="utf-8")
+    assert ".fallback/manifests" in src, (
+        "setup script must list manifests dynamically (no hard-coded branch list)"
+    )
+    # Must NOT push by itself — push is operator-blocked.
+    assert "git push" not in src or "# git push" in src or 'push -u origin' in src, (
+        "setup script should not auto-push; it should only print operator commands"
+    )
+
+
+def test_n9_rebase_script_exists() -> None:
+    assert N9_REBASE_SCRIPT.is_file(), "N9 requires scripts/fallback_rebase.py"
+
+
+def test_n9_rebase_script_is_stdlib_only() -> None:
+    src = N9_REBASE_SCRIPT.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "import yaml",
+        "from pydantic",
+        "import aiohttp",
+        "from git ",
+        "import git\n",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"fallback_rebase.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+def test_n9_rebase_script_classifies_three_buckets() -> None:
+    src = N9_REBASE_SCRIPT.read_text(encoding="utf-8")
+    for bucket in ('"pickable"', '"full-skip"', '"partial-skip"'):
+        assert bucket in src, f"rebase script must classify into {bucket}"
+
+
+def test_n9_rebase_script_refuses_wrong_head() -> None:
+    # Critical safety property: --apply must refuse to run on master.
+    src = N9_REBASE_SCRIPT.read_text(encoding="utf-8")
+    assert "symbolic-ref" in src, (
+        "rebase script must check current HEAD before --apply"
+    )
+    assert "manifest.branch" in src, "rebase script must compare HEAD to manifest"
+
+
+def test_n9_rebase_script_smoke_run() -> None:
+    # Smoke: --plan on a known range emits valid JSON with the four
+    # top-level keys downstream consumers (gate, summary) read.
+    import subprocess
+    proc = subprocess.run(
+        ["python3", str(N9_REBASE_SCRIPT),
+         "--branch", "compat/nextjs-15",
+         "--range", "HEAD~3..HEAD",
+         "--plan", "--json"],
+        capture_output=True, text=True, timeout=30, cwd=REPO_ROOT,
+    )
+    assert proc.returncode == 0, (
+        f"fallback_rebase.py exited {proc.returncode}: {proc.stderr[-300:]}"
+    )
+    payload = json.loads(proc.stdout)
+    for key in ("branch", "range", "total", "counts", "commits"):
+        assert key in payload, f"--json missing {key!r}"
+    for bucket in ("pickable", "full-skip", "partial-skip"):
+        assert bucket in payload["counts"]
+
+
+def test_n9_freshness_script_exists() -> None:
+    assert N9_FRESHNESS_SCRIPT.is_file()
+
+
+def test_n9_freshness_script_is_stdlib_only() -> None:
+    src = N9_FRESHNESS_SCRIPT.read_text(encoding="utf-8")
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "import yaml",
+        "from pydantic",
+        "import aiohttp",
+        "from github ",
+        "import github\n",
+    )
+    for needle in forbidden:
+        assert needle not in src, (
+            f"check_fallback_freshness.py must stay stdlib-only, found {needle!r}"
+        )
+
+
+def test_n9_freshness_script_evaluates_three_verdicts() -> None:
+    # The gate's downstream summary depends on these three exact verdict
+    # strings; renaming any breaks the gate's UI message.
+    src = N9_FRESHNESS_SCRIPT.read_text(encoding="utf-8")
+    for verdict in ('"green"', '"stale"', '"never-green"'):
+        assert verdict in src, f"freshness probe must produce verdict {verdict}"
+
+
+def test_n9_freshness_script_logic_unit_test() -> None:
+    # Re-import the module and run the pure evaluator directly. This
+    # avoids any GitHub API call and verifies the freshness math.
+    import importlib.util
+    from datetime import datetime, timezone
+    spec = importlib.util.spec_from_file_location(
+        "n9_freshness", N9_FRESHNESS_SCRIPT,
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    now = datetime(2026, 4, 16, tzinfo=timezone.utc)
+
+    # Case 1: 2-hour-old run → green
+    runs_green = [{
+        "id": 1, "html_url": "x", "head_sha": "abc1234567",
+        "updated_at": "2026-04-16T08:00:00Z",
+    }]
+    assert mod.evaluate(runs_green, freshness_days=14, now=now)["verdict"] == "green"
+
+    # Case 2: 20-day-old run → stale
+    runs_stale = [{
+        "id": 1, "html_url": "x", "head_sha": "abc1234567",
+        "updated_at": "2026-03-27T10:00:00Z",
+    }]
+    assert mod.evaluate(runs_stale, freshness_days=14, now=now)["verdict"] == "stale"
+
+    # Case 3: empty → never-green
+    assert mod.evaluate([], freshness_days=14, now=now)["verdict"] == "never-green"
+
+
+def test_n9_sop_doc_exists() -> None:
+    assert N9_SOP_DOC.is_file(), "N9 requires docs/ops/fallback_branches.md"
+
+
+def test_n9_sop_doc_covers_key_phrases() -> None:
+    body = N9_SOP_DOC.read_text(encoding="utf-8")
+    required = [
+        "compat/nextjs-15",
+        "compat/pydantic-v2",
+        "fallback_setup.sh",
+        "fallback_rebase.py",
+        "check_fallback_freshness.py",
+        "fallback-branches.yml",
+        "major-upgrade-gate.yml",
+        ".fallback/manifests",
+        "freshness_days",
+        "skip_globs",
+        "Path C",
+        "Retirement",
+    ]
+    missing = [p for p in required if p not in body]
+    assert not missing, f"fallback_branches.md missing key phrases: {missing}"
+
+
+def test_n9_runbook_phase_4_5_added() -> None:
+    body = (REPO_ROOT / "docs" / "ops" / "dependency_upgrade_runbook.md").read_text(
+        encoding="utf-8"
+    )
+    # Phase 4.5 (Path C) must reference the fallback path; Phase 4.6
+    # (post-rollback hygiene) is the renumbered original 4.5.
+    assert "### 4.5 Path C" in body, "runbook must add Phase 4.5 (Path C)"
+    assert "fallback_branches.md" in body
+    assert "rollback-to-fallback-" in body, (
+        "Phase 4.5 must show the date-stamped rollback tag command"
+    )
+
+
+def test_n9_renovate_excludes_pinned_packages_on_compat_branches() -> None:
+    raw = (REPO_ROOT / "renovate.json").read_text(encoding="utf-8")
+    cfg = json.loads(raw)
+    rules = cfg.get("packageRules", [])
+    # We expect at least two carve-outs: one for `next` on
+    # compat/nextjs-15 and one for `pydantic*` on compat/pydantic-v2.
+    nextjs = [
+        r for r in rules
+        if "compat/nextjs-15" in (r.get("matchBaseBranches") or [])
+        and "next" in (r.get("matchPackageNames") or [])
+        and r.get("enabled") is False
+    ]
+    pyd = [
+        r for r in rules
+        if "compat/pydantic-v2" in (r.get("matchBaseBranches") or [])
+        and "pydantic" in (r.get("matchPackageNames") or [])
+        and r.get("enabled") is False
+    ]
+    assert nextjs, "renovate.json missing carve-out: next on compat/nextjs-15"
+    assert pyd, "renovate.json missing carve-out: pydantic on compat/pydantic-v2"

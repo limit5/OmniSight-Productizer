@@ -80,8 +80,21 @@
         ":warning: **Major version bump.** Per N2 policy this PR must:",
         "1. receive **2 human approvals** (auto-merge is disabled regardless of CI),",
         "2. run the **G3 blue-green deploy** path (see `docs/ops/renovate_policy.md` and TODO N10),",
-        "3. include manual smoke-test results in the PR description before merge."
+        "3. include manual smoke-test results in the PR description before merge.",
+        "4. **N9 fallback gate**: if the package is `next` or `pydantic`, the `Major Upgrade Gate` workflow will block merge until the corresponding `compat/**` fallback branch shows a green CI run within its freshness window. See `docs/ops/fallback_branches.md`."
       ]
+    },
+    {
+      "description": "N9 fallback branches — Renovate must NOT bump the pinned framework on its own fallback. See docs/ops/fallback_branches.md and renovate_policy.md.",
+      "matchBaseBranches": ["compat/nextjs-15"],
+      "matchPackageNames": ["next"],
+      "enabled": false
+    },
+    {
+      "description": "N9 fallback branches — Renovate must NOT bump pydantic on the pydantic-v2 fallback.",
+      "matchBaseBranches": ["compat/pydantic-v2"],
+      "matchPackageNames": ["pydantic", "pydantic-core", "pydantic-settings"],
+      "enabled": false
     },
     {
       "description": "Group: @radix-ui/* — peer-coupled UI primitives, always one PR.",

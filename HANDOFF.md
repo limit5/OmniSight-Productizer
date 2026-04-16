@@ -1,9 +1,161 @@
 # HANDOFF.md — OmniSight Productizer 開發交接文件
 
 > 撰寫時間：2026-04-16
-> 最後 commit：N8 — DB Engine Compatibility Matrix (master)
+> 最後 commit：N9 — Framework Fallback Branches (master)
 > Tag：`v0.1.0` — 首個正式 release
 > 工作目錄狀態：clean
+
+---
+
+## N9 (complete) Framework Fallback Branches（2026-04-16 完成）
+
+**背景**：N1-N8 把 dependency governance 完全自動化，但「升級炸了之後怎麼回退」這條路目前只有 N6 runbook 的 image rollback tag。Image tag 解決得了 patch / minor，**解決不了「framework 整包跨 major 翻車」**——譬如 Next 16 → 17 升完發現 App Router 的 streaming 行為崩了；要把鏡像回滾到 Next 16 是可以，但**那個鏡像是兩週前 build 的，期間我們合了 50 個 backend commit**，回滾鏡像等於連帶丟掉這 50 個 commit 的 backend fix。N9 的任務是讓這條路改走「framework rollback to last green fallback **branch**」——branch 持續 rebase master 的非 framework commit，所以回滾的時候只丟掉 framework 那個 major bump，其它工作都保留。Pydantic v2 → v3 同理（v3 還沒 ship，但 v1→v2 的全業界痛苦讓「v3 發布當天就有 v2 fallback 在 CI green」變成不該等到出事才做的事）。
+
+### 實作內容
+
+1. **`.fallback/` declarative source-of-truth（new dir）** — 三檔：
+   - `.fallback/README.md` — 人類可讀的政策摘要 + lifecycle 圖（master @ vN → fallback 建立 → weekly rebase → 入口 gate → rollback）。
+   - `.fallback/manifests/nextjs-15.toml` — `[branch]/[pin]/[gate]/[rebase]/[retire]` 五段：framework=`next` / track=`15` / pin=`15.5.4` / freshness_days=`14` / skip_globs（next.config.* / middleware.* / app/**/route.* / app/**/page.tsx / app/**/layout.tsx / lib/generated/api-types.ts）/ retire-when-master-returns-to-15-or-EOL-announced。
+   - `.fallback/manifests/pydantic-v2.toml` — 同 schema：framework=`pydantic` / track=`2` / pin=`2.11.3` / skip_globs（backend/agents/**/schema.py、backend/finding_types.py、backend/event_models.py、backend/api_models.py、backend/agents/**/*_models.py）。
+   - **Schema rationale**：每個 key 至少一個 consumer 在讀（workflow / rebase script / gate / shape-guard test）。把這些 metadata 集中在 manifest 裡，比散在三個不同檔案省下「政策一改就要同步 3 個檔」的 drift 機會。
+
+2. **`.github/workflows/fallback-branches.yml`**（new, ~210 行）— 三 trigger × 三 job：
+   - **trigger**：`push`（compat/** branch 收到 commit 立刻跑，~10 min 內知道 rebase 有沒有打壞）+ `schedule` 週日 18:00 UTC（同時段集中跟 N5/N7 nightly digest）+ `workflow_dispatch`（major-upgrade-gate 主動 dispatch 拉 fresh verdict）。
+   - **`discover` job**：checkout master 讀 `.fallback/manifests/*.toml`，根據 trigger context 過濾出要跑的 branch 列表（push 只跑被 push 的那個 / dispatch 帶 input 跑指定的 / 其餘跑全部）。dynamic discovery 的 payoff 是「以後新增 fallback 只要丟 `.toml` 進 manifests/，workflow 不用動」。
+   - **`build-and-test` job**：matrix fan-out，每個 branch 一個 cell。`pip install --require-hashes` + `pnpm install --frozen-lockfile` + 跑 **core tests 三件**（test_dependency_governance / test_llm_adapter / test_openapi_contract）+ `pnpm run build` + `pnpm exec vitest run`。**刻意不跑 full suite** — full suite 60-180 min 在 fallback 的 weekly cron 裡是純浪費；core tests 抓「lockfile / firewall / schema drift」三類最會壞 framework downgrade 的 signal 就夠。
+   - **certification marker**：成功時 emit `fallback-status: GREEN` 進 `GITHUB_STEP_SUMMARY`，給下游 major-upgrade-gate 用 GH Actions API 查 latest run 時可讀。
+   - **per-branch concurrency**：`group: fallback-${{ github.ref || inputs.target_branch }}` + `cancel-in-progress: true` — push 到 nextjs-15 不會掐 pydantic-v2 的 cron run。
+   - **`summary` always() job**：roll-up，跟 N7 / N8 同一語彙。
+
+3. **`.github/workflows/major-upgrade-gate.yml`**（new, ~115 行）— 入口 gate：
+   - **trigger**：`pull_request: [labeled, unlabeled, opened, synchronize, reopened]` — `labeled` 必要，因為 Renovate 開 PR 之後才補 `tier/major` label，沒有 `labeled` event 整個 gate 會 silently miss 每個 Renovate-tier major PR。
+   - **`decide` job**：純 Python inline script 讀 PR labels + title。**Gate 觸發條件**：label 有 `tier/major` 或 `deploy/blue-green-required`（N10 hand-off 用同樣 label）AND title 含 manifest 裡 `[branch].framework` 名稱。匹配的 manifest list emit 進 `GITHUB_OUTPUT`。
+   - **`freshness` matrix job**：fan-out 每個匹配的 fallback，跑 `scripts/check_fallback_freshness.py` — 不 green 就 exit 1，job 紅 X，PR 被 block 住。
+   - **`gate-summary` always() job**：roll-up + 把 recovery 指令拼進 step summary（reviewer 直接看到「跑這條指令救分支」）。
+
+4. **`scripts/fallback_setup.sh`**（new, ~60 行 bash, executable）— 一次性 bootstrap：
+   - 讀 `.fallback/manifests/*.toml`（純 awk + grep，不引 jq / Python），對每個 manifest extract `[branch].name`，`git branch <name> <master HEAD>` 建立本地分支。Idempotent — 已存在就 no-op。`--dry-run` 模式只列要做什麼。
+   - **刻意不 push** — `git push -u origin compat/...` 寫在 epilogue 裡當 operator 指引，不在 script 裡 auto-run。Push credentials / branch-protection setup 是 operator 領域，不該 silent。
+   - 實機 dry-run 已通過（`bash scripts/fallback_setup.sh --dry-run` 印出 nextjs-15 + pydantic-v2 兩條建立計畫）。
+
+5. **`scripts/fallback_rebase.py`**（new, ~280 行, **stdlib + tomllib only**）— 週週 rebase planner / applier：
+   - 三 bucket 分類：**pickable**（commit 完全沒踩 skip_globs）→ 進 cherry-pick 列表；**full-skip**（每個 changed path 都踩 skip_globs）→ 整 commit 跳過；**partial-skip**（同一 commit 部分踩部分沒踩）→ **拒絕 auto-split**，需 operator 手動 `git checkout -p` 拆。Auto-split 會破 commit 原子性 + 後面 `git bisect` 失準，比 fail loud 更糟。
+   - `_glob_match()` 自寫的「fnmatch + `**` recursive」實作 — fnmatch 不認 `**`，但 manifest 的 `app/**/route.ts` 這類 glob 是常見需求，自寫一個最小遞迴 matcher 比拉 globmatch / pathspec 等第三方依賴划算。Smoke 測過 6 個 case 全綠（包含跨 segment 的 `backend/agents/**/schema.py` 對 `backend/agents/coordinator/sub/schema.py` 命中）。
+   - `--apply` 安全鎖：`git symbolic-ref --short HEAD` 必須等於 manifest 裡的 branch name；不等就 exit 2 + 印「先 git switch」。Guard 是「**不要在 master 上 cherry-pick 50 個 commit 然後不知不覺把 fallback policy 應用到 master 上**」這種災難。
+   - 第一次 conflict 就停 + 印 resume 指令（`git cherry-pick --continue` + 重跑 fallback_rebase.py）。
+   - **Stdlib-only**：跟 N5/N6/N7/N8 同一 self-defense — fallback rebase 工具的存在意義就是「framework 升級爆了的時候要還能跑」，引第三方 dep 違反這個承諾。
+
+6. **`scripts/check_fallback_freshness.py`**（new, ~190 行, stdlib + tomllib + urllib.request only）— gate freshness probe：
+   - 從 `.fallback/manifests/<leaf>.toml` 讀 `[gate].freshness_days`，呼叫 GH Actions API（`/repos/{repo}/actions/workflows/fallback-branches.yml/runs?branch=...&status=success`）拿最新 30 個 successful run。
+   - `evaluate()` pure function — 三 verdict：`green`（latest run age ≤ freshness_days）/ `stale`（>）/ `never-green`（沒 run 過）。`stale` 跟 `never-green` 都 exit 1（gate 紅 X）。
+   - `render_summary()` 在 `stale` verdict 直接印 recovery 指令塊（`git switch ... && python3 scripts/fallback_rebase.py --apply && git push ...`）— reviewer 看 step summary 可直接 copy-paste。
+   - 完整 unit test：3 個 verdict 路徑各 1 case，shape-guard 直接 importlib 載入 module 跑 `evaluate()` 而不打網路（test_n9_freshness_script_logic_unit_test）。
+
+7. **`docs/ops/fallback_branches.md`**（new, ~210 行）— SOP：
+   - TL;DR table（concern → where）
+   - Why-two-branches-why-these-two（next 15 = 16+1=17 hedge / pydantic v2 = pre-emptive v3 hedge）
+   - Lifecycle 狀態機 ASCII 圖（master vN → fallback 建立 → weekly rebase → gate → rollback）
+   - Operator playbooks（one-shot bootstrap / weekly maintenance / gate-failed recovery / production rollback）
+   - 7 條 design decisions（為什麼 manifest / 為什麼 per-branch concurrency / 為什麼 partial-skip refuse / 為什麼 14 days / 為什麼 Renovate carve-out / 為什麼 stdlib-only / 為什麼 bootstrap 不 retroactive pin）
+   - Retirement criteria — manifest `[retire].when_master_returns_to_track` + `when_track_eol_announced` + 56 day wind-down clock。
+
+8. **`docs/ops/dependency_upgrade_runbook.md`** patch — 新增 **Phase 4.5「Path C — Fallback-branch rollback」**（~50 行）：
+   - 觸發條件：framework major 升級爆 AND fallback 存在 AND CI 是 freshness 內 green。
+   - 4 步指令：`git switch --detach origin/compat/...` → docker compose build/up → `git tag rollback-to-fallback-YYYYMMDD` → revert master 上的 merge commit。
+   - Decision rule：fallback 不存在或 stale 都退回 Path A/B；**不可以 deploy stale fallback** — 不然 N9 freshness gate 等於白做。
+   - 原 4.5「Post-rollback hygiene」renumber 成 4.6。
+   - Related automation table 加兩列（major-upgrade-gate / fallback-branches）。
+   - Change log 加一條 N9 patch entry。
+
+9. **`docs/ops/renovate_policy.md`** patch — 新增 **「Fallback branches (`compat/**`) — N9 carve-out」**段落，解釋為什麼 Renovate 不該在 compat/nextjs-15 上 bump next（會打死整個 fallback 的 raison d'être），但其它套件仍流（不然 fallback 會自己 rot）。
+
+10. **`renovate.json`** patch — 新增兩條 `packageRules`（共 13 條 → 15 條）：
+    - `matchBaseBranches: ["compat/nextjs-15"]` + `matchPackageNames: ["next"]` + `enabled: false`
+    - `matchBaseBranches: ["compat/pydantic-v2"]` + `matchPackageNames: ["pydantic", "pydantic-core", "pydantic-settings"]` + `enabled: false`
+    - 同時在現有 MAJOR tier 的 `prBodyNotes` 加一條第 4 點：「N9 fallback gate — 如果 package 是 next 或 pydantic，Major Upgrade Gate workflow 會 block 直到 fallback 分支 freshness 內 green」。
+
+11. **`backend/tests/test_dependency_governance.py`** 擴充 28 條 N9 shape guards：
+    - manifest (5) — `.fallback/` dir 在 / 兩 manifest 在 / nextjs pin next 15.x npm / pydantic pin pydantic 2.x pypi / 四 section 都在且 freshness_days 在 1-30 + required_check_name 含 branch
+    - workflow (5) — fallback-branches.yml 在 / push compat/** + cron 0 18 * * 0 + workflow_dispatch / 動態讀 manifests / 跑 core tests + pnpm build + vitest / per-branch concurrency
+    - gate workflow (3) — 在 / 五個 PR event 都 listen / 呼叫 freshness probe + 兩 label 識別
+    - setup script (2) — 在 + executable + shebang / 動態讀 manifest 不寫死 branch 名
+    - rebase script (4) — 在 / stdlib-only（禁 requests/httpx/yaml/pydantic/aiohttp/git）/ 三 bucket 名稱 / `symbolic-ref` HEAD 安全鎖 / `--plan --json` smoke run 回 valid JSON 含 5 keys
+    - freshness script (4) — 在 / stdlib-only / 三 verdict / `evaluate()` 三 case importlib 跑通
+    - SOP doc (2) — 在 / 12 個 key phrase（compat/nextjs-15 / compat/pydantic-v2 / fallback_setup.sh / fallback_rebase.py / check_fallback_freshness.py / fallback-branches.yml / major-upgrade-gate.yml / .fallback/manifests / freshness_days / skip_globs / Path C / Retirement）
+    - runbook (1) — Phase 4.5 「Path C」在 + 含 `rollback-to-fallback-` 指令模板 + 連結 fallback_branches.md
+    - renovate (1) — `packageRules` 含「next disabled on compat/nextjs-15」+「pydantic disabled on compat/pydantic-v2」兩條 carve-out
+
+### 驗證
+
+- `python3 -m pytest backend/tests/test_dependency_governance.py -k n9 -v` → **28/28 pass (0.10s)**
+- `python3 -m pytest backend/tests/test_dependency_governance.py backend/tests/test_llm_adapter.py backend/tests/test_openapi_contract.py backend/tests/test_upgrade_preview.py backend/tests/test_check_eol.py backend/tests/test_cve_triage.py backend/tests/test_surface_deprecations.py -q` → **264/264 pass (12s)**（N1-N9 governance 全綠 + 鄰近 N3-N7 各自的 unit suite 無回歸）
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/fallback-branches.yml'))"` + `major-upgrade-gate.yml` → 通過
+- `python3 -c "import json; json.load(open('renovate.json'))"` → 通過 + 15 packageRules
+- `bash scripts/fallback_setup.sh --dry-run` → 列 compat/nextjs-15 + compat/pydantic-v2 兩條建立計畫
+- `python3 scripts/fallback_rebase.py --branch compat/nextjs-15 --range HEAD~3..HEAD --plan --json` → 回 valid JSON, total=3 / pickable=3
+- `ruff check scripts/fallback_rebase.py scripts/check_fallback_freshness.py` → All checks passed
+
+### 設計取捨
+
+- **Manifest 用 TOML 而不是 YAML / JSON**：3.11+ stdlib 有 `tomllib` 但沒有 yaml；JSON 不支援 comment（manifest 裡每條 skip_glob 為什麼存在的 inline 注釋是 reviewer onboarding 的關鍵）。TOML 三贏：comment + stdlib parser + 比 YAML 嚴格的 type system。
+- **Workflow 的 discover job 自己寫 mini-TOML reader 而不用 tomllib**：`actions/setup-python` 本身要 ~10 秒，只為了讀一個 `[branch].name` 不值。awk-based reader + shape-guard test 同步守住「我們只讀的這個子集」是平衡點。
+- **Per-branch concurrency 而不是 global**：N7 的 multi-version-matrix concurrency 是 global（`multi-version-matrix`），那是因為它只跑 nightly，撞單就讓新的贏。N9 不一樣 — push 是隨時觸發的，cron 也是 weekly schedule，兩個 branch 各自的 push 會頻繁撞單，必須 per-branch 否則互相吃掉 CI signal。
+- **Major-upgrade-gate 的 `decide` job 用 inline Python 而不是抽 script**：邏輯是「讀 labels + title + grep manifests 找 framework name」，~30 行 Python；抽成 `scripts/decide_major_gate.py` 等於多一個檔 + 多一條 shape-guard test 換零實際維護收益。Inline Python 在 workflow yaml 裡是 GH Actions community 最佳實踐之一。
+- **`scripts/fallback_setup.sh` 用 bash + awk 而不是 Python**：60 行的工作；要操作 git CLI；Python 等價會多一個 import 區 + subprocess wrapper。Bash 更短更直接，且不需要 `actions/setup-python`（減少 boot time）。
+- **`fallback_rebase.py` 拒絕 auto-split partial-skip**：N9 design 的最關鍵安全 default。Auto-split 一個 commit 的副作用是「未來 git bisect 找回歸 commit 找錯」+「commit message 跟實際 diff 不一致」。`--allow-partial-skip` 留 escape hatch 給「framework delta dominates，safe paths 是噪音」的少數情境，預設拒絕。
+- **Freshness window 14 days 而不是 7 days**：weekly cron + push trigger 雙 source，要兩週 stale 等於「兩個 cron 都 fail AND 沒人 push 修」— 這時候 fallback **不該被當 rollback 候選**，N9 主動拒絕 deploy stale fallback 才是真正的安全。
+- **Renovate carve-out 不擋全部，只擋 pinned package**：擋全部 = fallback 緩慢老化（lockfile drift / 無關 minor bump 的功能 regression 累積）；只擋 pinned = fallback 跟 master 一起鮮活，唯獨 framework 該 package 永遠 hold 在 [pin].version。
+- **Bootstrap 不做 retroactive 1516 downgrade commit**：codebase 從來沒有過 Next 15 — 寫 retroactive downgrade commit 是盲飛。Setup script 把 fallback 建在 master HEAD（= Next 16 today），第一次真實的 16→17 升級事件來臨時，operator 在那條 PR 開的同時 push fallback 更新（並用 rebase tool 把 next 釘回 15.x）。這個延後讓 fallback 是 deployable from day-one（因為 = master），policy artefact 永遠存在，pin 在實戰時 materialize。
+- **Stdlib-only 三條 script（setup / rebase / freshness）**：跟 N5/N6/N7/N8 同一論證 — 這些是「framework 升級爆掉時的逃生工具」。引第三方 dep 違反「逃生工具不該被同一場火燒到」的 invariant。`tomllib` 在 3.11+ 是 stdlib，恰好解 manifest parsing 需求。
+
+### 與前序 Phase 的互動
+
+- **N1（lockfile）**：fallback CI 用 hashed `--require-hashes` 安裝，跟 master 同 lock-discipline；fallback rebase 不會 silently drift 到 master 不認的 transitive。
+- **N2（Renovate）**：renovate.json 兩條新 carve-out 把 next/pydantic 從 compat/** 排除，但其它 PR 仍流。MAJOR tier 的 prBodyNotes 加第 4 點「N9 fallback gate」讓 reviewer 在 PR 描述裡就看到 gate 規則。
+- **N5（preview）**：Sunday-night fallback cron 跟 N5 nightly 同時段 cluster；operator 一次看完。`docs/ops/upgrade_preview.md` 後續可加一行「preview 顯示有 framework major candidate 時，順手 dispatch fallback-branches.yml 確認 fallback 仍 green」（不在本 commit scope）。
+- **N6（runbook）**：Phase 4.5 新增 Path C 跟 Path A / Path B 並列；Decision rule 寫清楚「fallback 不存在或 stale → fallback 不可選」。Related automation table 加兩列。Change log 加 entry。
+- **N7（multi-version matrix）**：N7 的 concurrency / continue-on-error / step-summary 設計語彙完全一致。reviewer 對 N7 的閱讀直覺直接套用到 N9。
+- **N8（DB engine matrix）**：fallback 上跑的 core tests 包含 test_dependency_governance（裡面有 N8 shape guards），所以 fallback 也順手把 N8 invariant 守住。
+- **N10（blue-green policy）**：N10 還沒實作；N9 的 gate 已經把 `deploy/blue-green-required` label 跟 `tier/major` label 並列當 trigger，所以 N10 上線時 N9 gate 自動接住所有 blue-green-required PR，不用改 workflow。
+- **CLAUDE.md L1**：本 phase 沒動 L1 immutable rules。新增的兩條 workflow 都不 force-push、不繞 Gerrit code review、不存 secret in source；fallback 設定 script 明示「push 是 operator 動作」也避開 unattended push 的風險。
+
+### 新增/修改檔案
+
+- `.fallback/README.md` — **新增**（~95 行 policy summary）
+- `.fallback/manifests/nextjs-15.toml` — **新增**（~45 行 declarative manifest）
+- `.fallback/manifests/pydantic-v2.toml` — **新增**（~40 行）
+- `.github/workflows/fallback-branches.yml` — **新增**（~210 行）
+- `.github/workflows/major-upgrade-gate.yml` — **新增**（~115 行）
+- `scripts/fallback_setup.sh` — **新增**（~60 行 bash, +x）
+- `scripts/fallback_rebase.py` — **新增**（~280 行 stdlib+tomllib）
+- `scripts/check_fallback_freshness.py` — **新增**（~190 行 stdlib+tomllib+urllib）
+- `docs/ops/fallback_branches.md` — **新增**（~210 行 SOP）
+- `docs/ops/dependency_upgrade_runbook.md` — Phase 4.5 (Path C) 新增、4.5→4.6 renumber、related automation table +2 列、change log +1 條
+- `docs/ops/renovate_policy.md` — Fallback branches carve-out 段落新增
+- `renovate.json` — packageRules +2 條 + MAJOR tier prBodyNotes +1 點
+- `backend/tests/test_dependency_governance.py` — +28 N9 shape guards
+- `README.md` — Dependency Governance 段落新增 N9 子段
+- `TODO.md` — N9 6 個 [x] + 1 個 [O]（push 動作交由 Operator）
+- `HANDOFF.md` — 本段
+
+### Operator-blocked 後續（[O] item）
+
+僅一條動作需要人類執行：
+
+```bash
+bash scripts/fallback_setup.sh                  # 創 local 兩條分支（idempotent）
+git push -u origin compat/nextjs-15
+git push -u origin compat/pydantic-v2
+```
+
+Push 後 `fallback-branches.yml` 會在 push event 自動跑首次 build/test，10 min 內知道 fallback bootstrap 是不是真的 deployable。Operator 同時可順手在 GitHub branch protection 把這兩條 branch 設「require linear history + Restricts who can push」（防止 Renovate 不小心 PR base 跑錯）。
+
+### 後續觀察點（不是 blocker）
+
+- 第一次 push 後若 `fallback-branches.yml` 紅 X：99% 機率是 lockfile 在 fallback 上跟 master 一致但 transitive dep 對 fallback 來說有 issue（例如 react-19 + next-15 的 peer-dep 警告）— 進 docs/ops/fallback_branches.md 的 weekly maintenance 章節照 SOP 修。
+- Pydantic v3 ship 之前，compat/pydantic-v2 等於 master 副本（沒事可做但 freshness 不會掉）。Pydantic v3 ship 當天，operator 把 [pin].version 凍在最後 v2 + 開始把 master 上的 v3-shaped commit 加進 skip_globs。
+- Next 17 ship 時同理。届時 manifest 的 `trigger_on_master_bump_past = "16"` 會讓 major-upgrade-gate 真正開始攔截 PR — 那是 N9 政策第一次「擋下實彈」的時刻，operator 應該把 fallback workflow 設為 GitHub PR required check（branch protection）給最後一道保險。
+- 14 days freshness window 是初值 — 第一個季度跑下來如果 false-positive 多（gate 卡到不該卡的 PR），可以調到 21 days；不夠用（fallback 早於 14 天就 stale 了）就調到 7 days。改 manifest 的 `[gate].freshness_days` 一個值就生效，不需要動 script / workflow。
 
 ---
 

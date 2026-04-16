@@ -1,0 +1,153 @@
+name: Major Upgrade Gate
+
+# N9 — block tier/major PRs that bump a framework with a declared
+# fallback unless that fallback's CI is green within its freshness window.
+#
+# How a PR triggers the gate:
+#   1. Renovate (or a human) opens a PR with label `tier/major`.
+#   2. The PR title contains the framework name (`next` or `pydantic`).
+#      Renovate's title format is "Update <package> to v<X>" so the
+#      package name is reliably present.
+#   3. This workflow:
+#       a. Reads `.fallback/manifests/*.toml` to find which manifests
+#          declare framework matching the PR.
+#       b. For each match, calls `scripts/check_fallback_freshness.py`
+#          which queries the GH Actions API for the latest successful
+#          `fallback-branches.yml` run on that manifest's branch.
+#       c. If freshness > [gate].freshness_days → job red-X.
+#
+# This is the **last gate** before a major framework upgrade ships.
+# Pairs with N10 (blue-green policy) — N10 forces the deploy strategy,
+# N9 forces the rollback insurance to be live.
+
+on:
+  pull_request:
+    types: [labeled, unlabeled, opened, synchronize, reopened]
+    branches: [main, master]
+
+permissions:
+  contents:      read
+  pull-requests: read
+  actions:       read
+  # Status writes are inherited from the default checks suite — no
+  # extra permission needed.
+
+concurrency:
+  # Newer event on the same PR cancels in-flight gate runs.
+  group: major-upgrade-gate-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+
+  decide:
+    name: decide which fallbacks apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      branches: ${{ steps.match.outputs.branches }}
+      reason:   ${{ steps.match.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: match
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re
+          from pathlib import Path
+
+          labels = json.loads(os.environ["PR_LABELS"] or "[]")
+          title  = (os.environ.get("PR_TITLE") or "").lower()
+
+          # Gate trigger: PR labelled tier/major (N2 convention) OR the
+          # explicit deploy/blue-green-required label (N10 hand-off).
+          gating_labels = {"tier/major", "deploy/blue-green-required"}
+          if not (gating_labels & set(labels)):
+              print("branches=[]")
+              print(f"reason=PR not labelled {' / '.join(sorted(gating_labels))}; gate skipped.")
+              raise SystemExit(0)
+
+          # Find manifests whose [branch].framework appears in the PR title.
+          # PR titles from Renovate look like:
+          #   "Update dependency next to v17"
+          #   "Update pydantic to v3"
+          matched: list[tuple[str, str]] = []
+          for m in sorted(Path(".fallback/manifests").glob("*.toml")):
+              text = m.read_text(encoding="utf-8")
+              # Tiny TOML reader for [branch] section.
+              section = None
+              fields: dict[str, str] = {}
+              for line in text.splitlines():
+                  s = line.strip()
+                  if s.startswith("[") and s.endswith("]"):
+                      section = s[1:-1]; continue
+                  if section == "branch":
+                      mm = re.match(r'(\w+)\s*=\s*"([^"]+)"', s)
+                      if mm:
+                          fields[mm.group(1)] = mm.group(2)
+              fw = fields.get("framework", "").lower()
+              br = fields.get("name", "")
+              if not fw or not br:
+                  continue
+              # Match framework name as a whole word in the title.
+              if re.search(rf'\b{re.escape(fw)}\b', title):
+                  matched.append((br, fw))
+
+          if not matched:
+              print("branches=[]")
+              print(f"reason=PR title `{title}` matches no fallback framework; gate skipped.")
+              raise SystemExit(0)
+
+          print(f"branches={json.dumps([b for b, _ in matched])}")
+          print(f"reason=PR triggers fallback freshness check for: "
+                f"{', '.join(b for b, _ in matched)}")
+          PY
+
+  freshness:
+    name: freshness (${{ matrix.branch }})
+    needs: decide
+    if: ${{ needs.decide.outputs.branches != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.decide.outputs.branches) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: probe latest fallback CI run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check_fallback_freshness.py \
+              --branch "${{ matrix.branch }}" \
+              --repo   "${{ github.repository }}"
+
+  gate-summary:
+    name: summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [decide, freshness]
+    steps:
+      - name: write summary
+        run: |
+          {
+            echo "## N9 major-upgrade gate — PR #${{ github.event.pull_request.number }}"
+            echo ""
+            echo "**Reason**: ${{ needs.decide.outputs.reason }}"
+            echo ""
+            echo "**Selected branches**: \`${{ needs.decide.outputs.branches }}\`"
+            echo ""
+            echo "| job | result |"
+            echo "|---|---|"
+            echo "| decide     | ${{ needs.decide.result }}     |"
+            echo "| freshness  | ${{ needs.freshness.result }}  |"
+            echo ""
+            echo "If \`freshness\` is red, run \`scripts/fallback_rebase.py\`"
+            echo "for the affected branch (recovery commands are in this run's"
+            echo "step-summary blocks above), push, then re-trigger this PR."
+          } >> "$GITHUB_STEP_SUMMARY"

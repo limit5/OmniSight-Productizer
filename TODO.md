@@ -741,13 +741,13 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### N9. Framework Fallback Branches
-- [ ] 長青分支 `compat/nextjs-15`：固定在 Next 15 最後穩定版、weekly rebase master（只取非 Next 相關 commit）
-- [ ] 長青分支 `compat/pydantic-v2`：固定在 Pydantic 2.x 最後版（Pydantic v3 出現時用）
-- [ ] CI 每週對 fallback 分支跑 build + 核心測試，確保隨時可切
-- [ ] 重大 major 升級（Next 17 / Pydantic v3）PR 合入前，fallback 分支必須 green
-- [ ] Rollback 流程：若 production 升級爆炸 → 切 fallback 分支 tag → 重部
-- [ ] 預估：**0.5 day** 建置 + 持續維護
-- [ ] 首兩條目標：`compat/nextjs-15`（現處 Next 16，15 是最近 fallback）、`compat/pydantic-v2`（未雨綢繆）
+- [x] 長青分支 `compat/nextjs-15`：固定在 Next 15 最後穩定版、weekly rebase master（只取非 Next 相關 commit）
+- [x] 長青分支 `compat/pydantic-v2`：固定在 Pydantic 2.x 最後版（Pydantic v3 出現時用）
+- [x] CI 每週對 fallback 分支跑 build + 核心測試，確保隨時可切
+- [x] 重大 major 升級（Next 17 / Pydantic v3）PR 合入前，fallback 分支必須 green
+- [x] Rollback 流程：若 production 升級爆炸 → 切 fallback 分支 tag → 重部
+- [x] 預估：**0.5 day** 建置 + 持續維護
+- [O] 首兩條目標：`compat/nextjs-15`（現處 Next 16，15 是最近 fallback）、`compat/pydantic-v2`（未雨綢繆）<!-- 2026-04-16 N9: 宣告/工作流程/腳本/SOP 全部就緒並 commit；本機分支由 `bash scripts/fallback_setup.sh` 一條指令建立（dry-run 已通過）。實際 `git push -u origin compat/{nextjs-15,pydantic-v2}` 需要 push credentials → Operator-blocked，所以這項標 [O]。Push 完成後 fallback-branches.yml 會自動接手 weekly cron。 -->
 
 ### N10. 升級流程強制走 G3 Blue-Green + 升級節奏政策
 - [ ] 政策寫入 `docs/ops/dependency_upgrade_policy.md`：

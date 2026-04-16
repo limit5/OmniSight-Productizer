@@ -84,6 +84,27 @@ into a single PR so the lockfile stays internally consistent.
 * When bumping Node, remember to also update `.nvmrc`,
   `.node-version`, and the CI matrix (see N7 in TODO once it lands).
 
+### Fallback branches (`compat/**`) — N9 carve-out
+
+The N9 fallback branches exist precisely to **hold a previous major**
+of a framework. Renovate's default behaviour would happily bump
+`next` on `compat/nextjs-15`, defeating the entire point. The
+`packageRules` block in `renovate.json` therefore:
+
+* On any branch matching `compat/**`, the package whose name appears
+  in the branch (`next` for `compat/nextjs-15`, `pydantic` for
+  `compat/pydantic-v2`) is **excluded** from any update PR.
+* All *other* packages on those branches stay in scope so the fallback
+  doesn't rot — security patches and unrelated minor bumps still flow.
+* The fallback's `[pin].version` in `.fallback/manifests/<branch>.toml`
+  is the source of truth for what version is held; reviewers reading
+  Renovate's PR list should never see a `next` bump targeting
+  `compat/nextjs-15`.
+
+If you do see one, the `packageRules` carve-out has drifted — fix it
+in `renovate.json` and the shape-guard test in
+`backend/tests/test_dependency_governance.py` will start passing again.
+
 ## Vulnerability handling
 
 `vulnerabilityAlerts` short-circuits the schedule and the patch wait:

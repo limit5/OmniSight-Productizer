@@ -1,0 +1,47 @@
+# Fallback manifest for compat/pydantic-v2
+#
+# See .fallback/README.md for schema rationale. Same shape as
+# nextjs-15.toml — keep the keys in lockstep.
+
+[branch]
+name              = "compat/pydantic-v2"
+framework         = "pydantic"
+framework_track   = "2"
+created_for       = "Pydantic v3 breaking-major hedge (pre-emptive — v3 not yet released)"
+
+[pin]
+# Last Pydantic 2.x in `backend/requirements.txt` at the time the
+# fallback was created. Bump in lockstep with master while master is
+# still on 2.x; freeze the moment master moves to v3 so this branch
+# becomes the "last green v2" reference.
+package           = "pydantic"
+version           = "2.11.3"
+ecosystem         = "pypi"
+manifest_paths    = ["backend/requirements.in", "backend/requirements.txt"]
+
+[gate]
+trigger_on_master_bump_past = "2"
+freshness_days              = 14
+required_check_name         = "fallback-branches / build-and-test (compat/pydantic-v2)"
+
+[rebase]
+# Pydantic v3 will likely break:
+#   * BaseModel.model_config dict shape
+#   * Validator decorator semantics
+#   * JSON schema generation
+# Anything that touches our pydantic-shaped contract files gets skipped
+# on the v2 fallback so we don't accidentally pull v3-only kwargs back.
+skip_globs = [
+    "backend/agents/**/schema.py",
+    "backend/finding_types.py",
+    "backend/event_models.py",
+    "backend/api_models.py",
+    "backend/agents/**/*_models.py",
+    # When master adds new pydantic-shaped models, extend this list in
+    # the same PR — the rebase tool's `partial-skip` report makes
+    # additions discoverable.
+]
+
+[retire]
+when_master_returns_to_track = "2"    # if master ever pins pydantic 2 again
+when_track_eol_announced     = true   # Pydantic team announces 2.x EOL
