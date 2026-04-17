@@ -1,0 +1,707 @@
+#!/usr/bin/env bash
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# OmniSight Productizer — 一鍵佈署腳本
+# 適用：WSL2 本地主機 + Cloudflare Tunnel + GoDaddy 域名
+#
+# 使用方式：
+#   chmod +x scripts/quick-start.sh
+#   ./scripts/quick-start.sh
+#   ./scripts/quick-start.sh --dry-run     # 只檢查，不執行
+#   ./scripts/quick-start.sh --uninstall   # 清除容器+volumes
+#
+# 本腳本處理：
+#   1. 前置條件檢查（Docker / Docker Compose / WSL2 systemd）
+#   2. .env 自動生成（互動式問答）
+#   3. Docker 容器啟動（prod 模式）
+#   4. 等待 backend/frontend 健康檢查
+#   5. Cloudflare Tunnel 自動建立（API token → tunnel → DNS CNAME）
+#   6. cloudflared connector 安裝 + 啟動
+#   7. GoDaddy NS 遷移指引（一次性手動步驟）
+#   8. Bootstrap wizard 開啟
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+set -euo pipefail
+# pipefail: makes `cmd | tee | tail` reflect cmd's exit code — critical so
+# a failing `docker compose up` isn't masked by the trailing pager commands.
+
+# ── 可設定參數 ──
+DOMAIN="${OMNISIGHT_DOMAIN:-sora-dev.app}"
+API_SUBDOMAIN="api"
+TUNNEL_NAME="omnisight-prod"
+COMPOSE_FILE="docker-compose.prod.yml"
+BACKEND_PORT=8000
+FRONTEND_PORT=3000
+HEALTH_RETRIES=45
+HEALTH_INTERVAL=4
+MIN_DISK_GB=5
+LOG_FILE="/tmp/omnisight-quick-start-$(date +%Y%m%d-%H%M%S).log"
+DRY_RUN=false
+UNINSTALL=false
+NON_INTERACTIVE=false
+# detect non-TTY (CI, piped stdin) so interactive `read` doesn't silently
+# consume empty lines and leave .env misconfigured.
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+    NON_INTERACTIVE=true
+fi
+
+# ── 顏色 ──
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+log()  { echo -e "${GREEN}✅${NC} $*" | tee -a "$LOG_FILE"; }
+warn() { echo -e "${YELLOW}⚠️${NC}  $*" | tee -a "$LOG_FILE"; }
+err()  { echo -e "${RED}❌${NC} $*" | tee -a "$LOG_FILE"; }
+step() { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n" | tee -a "$LOG_FILE"; }
+
+# Prompt for a secret without echoing to screen. Falls back to plain read
+# when stdin isn't a TTY (e.g. CI) — there the caller feeds the value in
+# pre-redacted anyway.
+read_secret() {
+    local prompt="$1" __var="$2" __tmp=""
+    if [ -t 0 ]; then
+        read -rsp "$prompt" __tmp
+        echo ""  # newline after silent read
+    else
+        read -r __tmp
+    fi
+    printf -v "$__var" '%s' "$__tmp"
+}
+
+# ── CLI 參數 ──
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)  DRY_RUN=true ;;
+        --uninstall) UNINSTALL=true ;;
+        --help|-h)
+            echo "用法: $0 [--dry-run] [--uninstall]"
+            echo "  --dry-run    只檢查前置條件，不實際執行"
+            echo "  --uninstall  清除所有 OmniSight 容器、volumes、cloudflared"
+            exit 0
+            ;;
+    esac
+done
+
+# ── 持久化 log ──
+mkdir -p "$(dirname "$LOG_FILE")"
+echo "OmniSight quick-start log — $(date)" > "$LOG_FILE"
+log "日誌輸出至：$LOG_FILE"
+
+# ── Ctrl+C 清理 ──
+_cleanup_on_exit() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo "" | tee -a "$LOG_FILE"
+        err "腳本在 Step 執行中被中斷或發生錯誤 (exit code: $exit_code)"
+        echo "" | tee -a "$LOG_FILE"
+        echo -e "${BOLD}診斷建議：${NC}" | tee -a "$LOG_FILE"
+        echo "  1. 查看日誌：cat $LOG_FILE" | tee -a "$LOG_FILE"
+        echo "  2. 查看容器狀態：docker compose -f $COMPOSE_FILE ps" | tee -a "$LOG_FILE"
+        echo "  3. 查看容器日誌：docker compose -f $COMPOSE_FILE logs --tail 50" | tee -a "$LOG_FILE"
+        echo "  4. 重新執行此腳本：問題修復後重跑即可（腳本支援冪等）" | tee -a "$LOG_FILE"
+    fi
+}
+trap _cleanup_on_exit EXIT
+
+# ── Uninstall 模式 ──
+if [ "$UNINSTALL" = true ]; then
+    step "解除安裝 OmniSight"
+    echo "⚠️  即將刪除所有 OmniSight 容器、volumes 和 cloudflared 設定。"
+    read -rp "確定要繼續嗎？[y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        echo "取消。"; exit 0
+    fi
+    docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+    sudo systemctl stop cloudflared 2>/dev/null || true
+    sudo systemctl disable cloudflared 2>/dev/null || true
+    sudo cloudflared service uninstall 2>/dev/null || true
+    log "已清除容器 + volumes + cloudflared"
+    exit 0
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 0: 前置條件檢查
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "Step 0: 前置條件檢查"
+
+PREFLIGHT_PASS=true
+
+# Docker 安裝
+if ! command -v docker &>/dev/null; then
+    err "Docker 未安裝。"
+    echo "   安裝指南：https://docs.docker.com/engine/install/"
+    PREFLIGHT_PASS=false
+else
+    log "Docker $(docker --version | grep -oP '\d+\.\d+\.\d+' || echo 'unknown')"
+fi
+
+# Docker daemon 是否在運行
+if command -v docker &>/dev/null; then
+    if ! docker info &>/dev/null; then
+        err "Docker daemon 未啟動。"
+        echo "   請執行：sudo systemctl start docker  或啟動 Docker Desktop"
+        PREFLIGHT_PASS=false
+    else
+        log "Docker daemon 運行中"
+    fi
+fi
+
+# Docker Compose V2
+if ! docker compose version &>/dev/null; then
+    err "Docker Compose V2 未安裝。"
+    echo "   請升級 Docker Desktop 或：sudo apt-get install docker-compose-plugin"
+    PREFLIGHT_PASS=false
+else
+    log "Docker Compose $(docker compose version --short 2>/dev/null || echo 'unknown')"
+fi
+
+# curl
+if ! command -v curl &>/dev/null; then
+    err "curl 未安裝。請執行：sudo apt-get install curl"
+    PREFLIGHT_PASS=false
+else
+    log "curl OK"
+fi
+
+# openssl（用於 tunnel secret 生成）
+if ! command -v openssl &>/dev/null; then
+    warn "openssl 未安裝，Cloudflare Tunnel 設定可能失敗。"
+    echo "   請執行：sudo apt-get install openssl"
+else
+    log "openssl OK"
+fi
+
+# jq（CF API JSON 解析用）
+if ! command -v jq &>/dev/null; then
+    warn "jq 未安裝，嘗試自動安裝..."
+    if sudo apt-get update -qq && sudo apt-get install -y -qq jq >/dev/null 2>&1; then
+        log "jq 安裝成功"
+    else
+        err "jq 安裝失敗。Cloudflare 自動設定需要 jq。"
+        echo "   請手動執行：sudo apt-get install jq"
+        PREFLIGHT_PASS=false
+    fi
+else
+    log "jq OK"
+fi
+
+# Port 檢查
+for PORT in $BACKEND_PORT $FRONTEND_PORT; do
+    if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+       lsof -i ":${PORT}" &>/dev/null; then
+        err "Port ${PORT} 已被佔用。"
+        echo "   請釋放 port 或修改 COMPOSE_FILE 中的 port mapping"
+        echo "   查看佔用者：lsof -i :${PORT} 或 ss -tlnp | grep ${PORT}"
+        PREFLIGHT_PASS=false
+    else
+        log "Port ${PORT} 可用"
+    fi
+done
+
+# 磁碟空間
+AVAIL_GB=$(df -BG . 2>/dev/null | awk 'NR==2 {gsub("G",""); print $4}' || echo "0")
+if [ "${AVAIL_GB:-0}" -lt "$MIN_DISK_GB" ]; then
+    err "磁碟空間不足：剩餘 ${AVAIL_GB}G，需要至少 ${MIN_DISK_GB}G。"
+    echo "   Docker build + images 需要約 3-5 GB 空間"
+    PREFLIGHT_PASS=false
+else
+    log "磁碟空間：${AVAIL_GB}G 可用（需求 ≥${MIN_DISK_GB}G）"
+fi
+
+# 確認專案根目錄
+if [ ! -f "$COMPOSE_FILE" ]; then
+    err "找不到 $COMPOSE_FILE。請在 OmniSight-Productizer 根目錄執行此腳本。"
+    PREFLIGHT_PASS=false
+else
+    log "專案目錄：$(pwd)"
+fi
+
+# .env.example 存在
+if [ ! -f ".env.example" ]; then
+    err "找不到 .env.example。專案檔案可能不完整，請重新 git clone。"
+    PREFLIGHT_PASS=false
+else
+    log ".env.example 存在"
+fi
+
+# WSL2 systemd check — probe PID 1 being systemd, not just the `systemctl`
+# binary. On WSL2 without [boot] systemd=true the binary still exists.
+WSL_SYSTEMD=true
+IS_WSL=false
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    IS_WSL=true
+    if [ -d /run/systemd/system ] && [ "$(ps -p 1 -o comm= 2>/dev/null || echo unknown)" = "systemd" ]; then
+        log "WSL2 + systemd 已啟用"
+    else
+        warn "WSL2 偵測到但 systemd 未啟用。Cloudflared 將以背景程序模式運行。"
+        warn "啟用方法：在 /etc/wsl.conf 加入 [boot] systemd=true 後重啟 WSL"
+        WSL_SYSTEMD=false
+    fi
+elif [ ! -d /run/systemd/system ] || [ "$(ps -p 1 -o comm= 2>/dev/null || echo unknown)" != "systemd" ]; then
+    WSL_SYSTEMD=false
+    warn "偵測到非 systemd init。Cloudflared 將以背景程序模式運行。"
+fi
+
+# 網路連線
+if ! curl -sf --max-time 5 "https://api.cloudflare.com/client/v4/" >/dev/null 2>&1; then
+    warn "無法連線到 Cloudflare API。Cloudflare Tunnel 設定可能失敗。"
+    echo "   請確認網路連線正常。"
+else
+    log "網路連線正常"
+fi
+
+# 前置檢查結果
+echo ""
+if [ "$PREFLIGHT_PASS" = false ]; then
+    err "前置條件檢查未通過。請修復上述問題後重新執行。"
+    exit 1
+fi
+log "所有前置條件通過 ✓"
+
+if [ "$DRY_RUN" = true ]; then
+    echo ""
+    log "[Dry-run] 前置條件檢查完成。加入 --dry-run 模式不會執行後續步驟。"
+    exit 0
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 1: .env 生成
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "Step 1: 環境設定 (.env)"
+
+# sed-safe 替換函式（處理 API key 中的特殊字元 / & \）
+_sed_safe_replace() {
+    local file="$1" key="$2" value="$3"
+    # 用 awk 做替換，避免 sed 的特殊字元問題
+    awk -v k="$key" -v v="$value" '
+        BEGIN { found=0 }
+        $0 ~ "^"k"=" { print k"="v; found=1; next }
+        { print }
+    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+if [ -f ".env" ]; then
+    log ".env 已存在，跳過生成。"
+    echo "   如需重新設定，請刪除 .env 後重新執行。"
+elif [ "$NON_INTERACTIVE" = true ]; then
+    cp .env.example .env
+    warn "非互動模式：已複製 .env.example → .env（未填 API key）。"
+    warn "請在執行完畢後編輯 .env 填入 API key，或重新以互動 TTY 執行腳本。"
+else
+    cp .env.example .env
+    log "已從 .env.example 複製 .env"
+
+    echo ""
+    echo -e "${BOLD}選擇 LLM Provider：${NC}"
+    echo "  1) Anthropic (Claude Opus 4.7) — 推薦"
+    echo "  2) OpenAI (GPT)"
+    echo "  3) Google (Gemini)"
+    echo "  4) Ollama (本地，免 API key)"
+    echo ""
+    read -rp "請輸入 1-4 [預設 1]: " llm_choice
+    llm_choice=${llm_choice:-1}
+
+    case "$llm_choice" in
+        1)
+            _sed_safe_replace .env "OMNISIGHT_LLM_PROVIDER" "anthropic"
+            read_secret "Anthropic API Key (sk-ant-..., 輸入不顯示): " api_key
+            # 格式驗證
+            if [ -n "$api_key" ] && [[ ! "$api_key" =~ ^sk-ant- ]]; then
+                warn "API Key 格式異常（預期以 sk-ant- 開頭）。仍將寫入，但可能無法連線。"
+            fi
+            if [ -z "$api_key" ]; then
+                warn "未輸入 API Key。系統將以 rule-based fallback 模式運行（無 AI 推理）。"
+                warn "稍後可在 Bootstrap wizard 或 .env 中補填。"
+            else
+                _sed_safe_replace .env "OMNISIGHT_ANTHROPIC_API_KEY" "$api_key"
+                _sed_safe_replace .env "ANTHROPIC_API_KEY" "$api_key"
+                log "API Key 已寫入（末四碼：...${api_key: -4}）"
+            fi
+            ;;
+        2)
+            _sed_safe_replace .env "OMNISIGHT_LLM_PROVIDER" "openai"
+            read_secret "OpenAI API Key (sk-..., 輸入不顯示): " api_key
+            if [ -n "$api_key" ] && [[ ! "$api_key" =~ ^sk- ]]; then
+                warn "API Key 格式異常（預期以 sk- 開頭）。"
+            fi
+            [ -n "$api_key" ] && _sed_safe_replace .env "OMNISIGHT_OPENAI_API_KEY" "$api_key"
+            ;;
+        3)
+            _sed_safe_replace .env "OMNISIGHT_LLM_PROVIDER" "google"
+            read_secret "Google API Key (輸入不顯示): " api_key
+            [ -n "$api_key" ] && _sed_safe_replace .env "OMNISIGHT_GOOGLE_API_KEY" "$api_key"
+            ;;
+        4)
+            _sed_safe_replace .env "OMNISIGHT_LLM_PROVIDER" "ollama"
+            log "Ollama 模式，不需 API key。請確保 ollama serve 在運行。"
+            ;;
+        *)
+            warn "無效選項，使用預設 Anthropic（無 key，rule-based fallback）。"
+            ;;
+    esac
+
+    log ".env 設定完成"
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 2: Docker 容器啟動
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "Step 2: 啟動 Docker 容器"
+
+echo "📦 Building + starting containers (首次可能需要 5-10 分鐘)..."
+if ! docker compose -f "$COMPOSE_FILE" up -d --build 2>&1 | tee -a "$LOG_FILE" | tail -10; then
+    err "Docker 容器啟動失敗。"
+    echo ""
+    echo -e "${BOLD}排查步驟：${NC}"
+    echo "  1. 查看完整日誌：docker compose -f $COMPOSE_FILE logs"
+    echo "  2. 常見原因："
+    echo "     - Dockerfile build 失敗（npm install / pip install 問題）"
+    echo "     - Port 衝突（其他程序佔用 $BACKEND_PORT 或 $FRONTEND_PORT）"
+    echo "     - 磁碟空間不足"
+    echo "  3. 修復後重新執行此腳本即可（支援冪等）"
+    exit 1
+fi
+
+log "容器已啟動"
+
+# 等 2 秒讓容器初始化
+sleep 2
+
+# 快速確認容器狀態。使用 --services --status=running 取代 grep/jq 組合，
+# 避免 `grep -c pattern || echo "0"` 在 0 筆時印出 "0\n0" 導致整數比較爆炸。
+RUNNING_SVCS=$(docker compose -f "$COMPOSE_FILE" ps --services --status=running 2>/dev/null | grep -c . || true)
+RUNNING_SVCS=${RUNNING_SVCS//[^0-9]/}
+RUNNING_SVCS=${RUNNING_SVCS:-0}
+if [ "$RUNNING_SVCS" -lt 2 ]; then
+    warn "部分容器可能未成功啟動（running 服務數：${RUNNING_SVCS}）。"
+    docker compose -f "$COMPOSE_FILE" ps 2>/dev/null | tee -a "$LOG_FILE"
+    echo ""
+    echo "  如果看到 'Exited' 狀態的容器，請執行："
+    echo "  docker compose -f $COMPOSE_FILE logs <service-name>"
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 3: 健康檢查
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "Step 3: 等待服務就緒"
+
+_wait_for_health() {
+    local name="$1" url="$2" retries="$3" interval="$4"
+    echo -n "⏳ ${name} "
+    for i in $(seq 1 "$retries"); do
+        if curl -sf --max-time 3 "$url" >/dev/null 2>&1; then
+            echo ""
+            log "${name} 就緒（第 ${i}/${retries} 次檢查）"
+            return 0
+        fi
+        echo -n "."
+        sleep "$interval"
+    done
+    echo ""
+    err "${name} 啟動超時（${retries} × ${interval}s = $((retries * interval))s）。"
+    echo "   排查：docker compose -f $COMPOSE_FILE logs $(echo "$name" | tr '[:upper:]' '[:lower:]')"
+    return 1
+}
+
+_wait_for_health "Backend" "http://localhost:${BACKEND_PORT}/api/v1/health" "$HEALTH_RETRIES" "$HEALTH_INTERVAL" || exit 1
+_wait_for_health "Frontend" "http://localhost:${FRONTEND_PORT}/" "$HEALTH_RETRIES" "$HEALTH_INTERVAL" || exit 1
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 4: Cloudflare Tunnel 自動建立
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "Step 4: Cloudflare Tunnel 設定（公網 HTTPS）"
+
+CF_READY=false
+
+echo -e "${BOLD}你的域名：${DOMAIN}${NC}"
+echo ""
+echo "Cloudflare Tunnel 讓你的 WSL2 主機不需開 port、不需固定 IP，"
+echo "就能透過 https://${DOMAIN} 對外服務。"
+echo ""
+if [ "$NON_INTERACTIVE" = true ]; then
+    cf_setup="N"
+    warn "非互動模式：跳過 Cloudflare Tunnel 設定。請之後在 Bootstrap wizard 中完成。"
+else
+    read -rp "是否現在設定 Cloudflare Tunnel？[Y/n]: " cf_setup
+    cf_setup=${cf_setup:-Y}
+fi
+
+if [[ "$cf_setup" =~ ^[Yy] ]]; then
+    echo ""
+    echo -e "${BOLD}請提供 Cloudflare API Token${NC}"
+    echo "  建立方式：https://dash.cloudflare.com/profile/api-tokens → Create Token"
+    echo "  所需權限：Account:Cloudflare Tunnel:Edit + Zone:DNS:Edit + Account:Account Settings:Read"
+    echo ""
+    read_secret "Cloudflare API Token (輸入不顯示): " CF_TOKEN
+
+    if [ -z "$CF_TOKEN" ]; then
+        warn "未提供 Token，跳過 Cloudflare 設定。"
+        warn "你稍後可在 Bootstrap wizard → Step 3 中設定。"
+    else
+        echo "" | tee -a "$LOG_FILE"
+        echo "🔍 驗證 Token..." | tee -a "$LOG_FILE"
+
+        # ── 驗證 Token ──
+        CF_VERIFY=$(curl -sf --max-time 10 -H "Authorization: Bearer ${CF_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/user/tokens/verify" 2>/dev/null || echo '{"success":false}')
+
+        if ! echo "$CF_VERIFY" | jq -e '.success' >/dev/null 2>&1; then
+            err "Token 驗證失敗。"
+            echo "   可能原因：Token 過期、權限不足、或格式錯誤" | tee -a "$LOG_FILE"
+            echo "   驗證回應：$(echo "$CF_VERIFY" | jq -r '.errors[0].message // "unknown"' 2>/dev/null)" | tee -a "$LOG_FILE"
+            warn "跳過 Cloudflare 設定。你可在 Bootstrap wizard 中重試。"
+        else
+            log "Token 驗證通過"
+
+            # ── 取得 Account ID ──
+            CF_ACCOUNTS=$(curl -sf --max-time 10 -H "Authorization: Bearer ${CF_TOKEN}" \
+                "https://api.cloudflare.com/client/v4/accounts?page=1&per_page=5" 2>/dev/null || echo '{"result":[]}')
+            CF_ACCOUNT_ID=$(echo "$CF_ACCOUNTS" | jq -r '.result[0].id // empty')
+            CF_ACCOUNT_NAME=$(echo "$CF_ACCOUNTS" | jq -r '.result[0].name // "unknown"')
+
+            if [ -z "$CF_ACCOUNT_ID" ]; then
+                err "無法取得 Cloudflare Account ID。Token 可能缺少 Account Settings:Read 權限。"
+                warn "跳過 Cloudflare 設定。"
+            else
+                log "Account: ${CF_ACCOUNT_NAME} (${CF_ACCOUNT_ID})"
+
+                # ── 取得 Zone ID ──
+                CF_ZONES=$(curl -sf --max-time 10 -H "Authorization: Bearer ${CF_TOKEN}" \
+                    "https://api.cloudflare.com/client/v4/zones?name=${DOMAIN}" 2>/dev/null || echo '{"result":[]}')
+                CF_ZONE_ID=$(echo "$CF_ZONES" | jq -r '.result[0].id // empty')
+                CF_ZONE_STATUS=$(echo "$CF_ZONES" | jq -r '.result[0].status // "not_found"')
+
+                if [ -z "$CF_ZONE_ID" ]; then
+                    warn "域名 ${DOMAIN} 尚未加入 Cloudflare。"
+                    echo ""
+                    echo "  請先到 Cloudflare Dashboard 加入域名："
+                    echo "    https://dash.cloudflare.com → Add a site → ${DOMAIN}"
+                    echo ""
+                    echo "  加入後會取得 Nameserver，再到 GoDaddy 更改（見 Step 5）。"
+                    echo "  完成後重新執行此腳本即可。"
+                else
+                    log "Zone: ${DOMAIN} (${CF_ZONE_ID}) — status: ${CF_ZONE_STATUS}"
+
+                    if [ "$CF_ZONE_STATUS" = "pending" ]; then
+                        warn "Zone 狀態為 'pending'——Nameserver 尚未遷移或正在傳播中。"
+                        warn "Tunnel 仍可建立，但 HTTPS 需等 NS 傳播完成後才能用。"
+                    fi
+
+                    # ── 建立或複用 Tunnel ──
+                    echo "🔧 建立 Cloudflare Tunnel: ${TUNNEL_NAME}..." | tee -a "$LOG_FILE"
+
+                    # 先查是否已存在
+                    EXISTING=$(curl -sf --max-time 10 -H "Authorization: Bearer ${CF_TOKEN}" \
+                        "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/tunnels?name=${TUNNEL_NAME}&is_deleted=false" 2>/dev/null || echo '{"result":[]}')
+                    CF_TUNNEL_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+
+                    if [ -n "$CF_TUNNEL_ID" ]; then
+                        log "Tunnel 已存在: ${CF_TUNNEL_ID}，複用。"
+                        CF_TOKEN_RESP=$(curl -sf --max-time 10 -H "Authorization: Bearer ${CF_TOKEN}" \
+                            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/tunnels/${CF_TUNNEL_ID}/token" 2>/dev/null || echo '{"result":""}')
+                        CF_TUNNEL_TOKEN=$(echo "$CF_TOKEN_RESP" | jq -r '.result // empty')
+                    else
+                        TUNNEL_SECRET=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
+                        CF_TUNNEL_RESP=$(curl -sf --max-time 15 -X POST \
+                            -H "Authorization: Bearer ${CF_TOKEN}" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"name\":\"${TUNNEL_NAME}\",\"tunnel_secret\":\"${TUNNEL_SECRET}\"}" \
+                            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/tunnels" 2>/dev/null || echo '{"success":false}')
+
+                        if echo "$CF_TUNNEL_RESP" | jq -e '.success' >/dev/null 2>&1; then
+                            CF_TUNNEL_ID=$(echo "$CF_TUNNEL_RESP" | jq -r '.result.id')
+                            CF_TUNNEL_TOKEN=$(echo "$CF_TUNNEL_RESP" | jq -r '.result.token')
+                            log "Tunnel 建立成功: ${CF_TUNNEL_ID}"
+                        else
+                            CF_ERR_MSG=$(echo "$CF_TUNNEL_RESP" | jq -r '.errors[0].message // "unknown error"' 2>/dev/null)
+                            err "Tunnel 建立失敗: ${CF_ERR_MSG}"
+                            CF_TUNNEL_ID=""
+                        fi
+                    fi
+
+                    if [ -n "${CF_TUNNEL_ID:-}" ] && [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
+                        # ── 設定 ingress ──
+                        echo "🔧 設定 Tunnel ingress..." | tee -a "$LOG_FILE"
+                        INGRESS_RESP=$(curl -sf --max-time 10 -X PUT \
+                            -H "Authorization: Bearer ${CF_TOKEN}" \
+                            -H "Content-Type: application/json" \
+                            -d "{
+                                \"config\": {
+                                    \"ingress\": [
+                                        {\"hostname\": \"${DOMAIN}\", \"service\": \"http://localhost:${FRONTEND_PORT}\"},
+                                        {\"hostname\": \"${API_SUBDOMAIN}.${DOMAIN}\", \"service\": \"http://localhost:${BACKEND_PORT}\"},
+                                        {\"service\": \"http_status:404\"}
+                                    ]
+                                }
+                            }" \
+                            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/tunnels/${CF_TUNNEL_ID}/configurations" 2>/dev/null || echo '{"success":false}')
+
+                        if echo "$INGRESS_RESP" | jq -e '.success' >/dev/null 2>&1; then
+                            log "Ingress 設定完成"
+                        else
+                            err "Ingress 設定失敗：$(echo "$INGRESS_RESP" | jq -r '.errors[0].message // "unknown"' 2>/dev/null)"
+                            warn "Tunnel 已建立但 ingress 未配。請在 Cloudflare Dashboard 手動設定。"
+                        fi
+
+                        # ── DNS CNAME ──
+                        TUNNEL_CNAME="${CF_TUNNEL_ID}.cfargotunnel.com"
+                        for HOSTNAME in "$DOMAIN" "${API_SUBDOMAIN}.${DOMAIN}"; do
+                            echo "🔧 DNS CNAME: ${HOSTNAME} → ${TUNNEL_CNAME}" | tee -a "$LOG_FILE"
+                            DNS_RESP=$(curl -sf --max-time 10 -X POST \
+                                -H "Authorization: Bearer ${CF_TOKEN}" \
+                                -H "Content-Type: application/json" \
+                                -d "{\"type\":\"CNAME\",\"name\":\"${HOSTNAME}\",\"content\":\"${TUNNEL_CNAME}\",\"proxied\":true}" \
+                                "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" 2>/dev/null || echo '{"success":false}')
+                            if echo "$DNS_RESP" | jq -e '.success' >/dev/null 2>&1; then
+                                log "  ${HOSTNAME} CNAME 已建立"
+                            else
+                                DNS_ERR=$(echo "$DNS_RESP" | jq -r '.errors[0].message // "unknown"' 2>/dev/null)
+                                if echo "$DNS_ERR" | grep -qi "already exists"; then
+                                    log "  ${HOSTNAME} CNAME 已存在，跳過"
+                                else
+                                    warn "  ${HOSTNAME} CNAME 建立失敗: ${DNS_ERR}"
+                                fi
+                            fi
+                        done
+
+                        # ── 安裝 cloudflared ──
+                        echo "🔧 安裝 cloudflared connector..." | tee -a "$LOG_FILE"
+                        if ! command -v cloudflared &>/dev/null; then
+                            # arch-aware download (amd64 / arm64). Cloudflare
+                            # doesn't ship .deb for other arches.
+                            CF_ARCH="$(uname -m)"
+                            case "$CF_ARCH" in
+                                x86_64|amd64) CF_DEB="cloudflared-linux-amd64.deb" ;;
+                                aarch64|arm64) CF_DEB="cloudflared-linux-arm64.deb" ;;
+                                *)
+                                    err "不支援的 CPU 架構：${CF_ARCH}。請手動安裝 cloudflared。"
+                                    CF_DEB=""
+                                    CF_TUNNEL_TOKEN=""
+                                    ;;
+                            esac
+                            echo "   下載 cloudflared (${CF_ARCH})..." | tee -a "$LOG_FILE"
+                            if [ -n "$CF_DEB" ] && curl -fsSL --max-time 60 \
+                                "https://github.com/cloudflare/cloudflared/releases/latest/download/${CF_DEB}" \
+                                -o /tmp/cloudflared.deb; then
+                                if sudo dpkg -i /tmp/cloudflared.deb >/dev/null 2>&1; then
+                                    log "cloudflared 安裝成功"
+                                else
+                                    err "cloudflared .deb 安裝失敗。"
+                                    echo "   請手動安裝：sudo dpkg -i /tmp/cloudflared.deb"
+                                    warn "跳過 cloudflared 啟動。"
+                                    CF_TUNNEL_TOKEN=""
+                                fi
+                                rm -f /tmp/cloudflared.deb
+                            else
+                                err "cloudflared 下載失敗。請檢查網路連線。"
+                                CF_TUNNEL_TOKEN=""
+                            fi
+                        else
+                            log "cloudflared 已安裝：$(cloudflared --version 2>&1 | head -1)"
+                        fi
+
+                        # ── 啟動 cloudflared ──
+                        if [ -n "${CF_TUNNEL_TOKEN:-}" ]; then
+                            if [ "$WSL_SYSTEMD" = true ]; then
+                                echo "🔧 設定 cloudflared systemd service..." | tee -a "$LOG_FILE"
+                                sudo cloudflared service install "$CF_TUNNEL_TOKEN" 2>/dev/null || true
+                                sudo systemctl enable cloudflared 2>/dev/null || true
+                                if sudo systemctl restart cloudflared 2>/dev/null; then
+                                    log "cloudflared service 已啟動（systemd）"
+                                else
+                                    err "cloudflared service 啟動失敗。"
+                                    echo "   排查：sudo systemctl status cloudflared"
+                                    echo "   日誌：sudo journalctl -u cloudflared -n 20"
+                                fi
+                            else
+                                echo "🔧 以背景程序啟動 cloudflared..." | tee -a "$LOG_FILE"
+                                nohup cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" \
+                                    >> /tmp/cloudflared.log 2>&1 &
+                                CFLARED_PID=$!
+                                sleep 3
+                                if kill -0 "$CFLARED_PID" 2>/dev/null; then
+                                    log "cloudflared 已啟動（PID: ${CFLARED_PID}）"
+                                    warn "WSL 無 systemd：cloudflared 以背景程序運行。重啟 WSL 後需重新執行腳本。"
+                                else
+                                    err "cloudflared 啟動後立即退出。"
+                                    echo "   查看日誌：cat /tmp/cloudflared.log"
+                                fi
+                            fi
+
+                            sleep 3
+                            CF_READY=true
+                            log "Cloudflare Tunnel 設定完成 ✓"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+else
+    warn "跳過 Cloudflare Tunnel。你可稍後在 Bootstrap wizard 的 Step 3 設定。"
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 5: GoDaddy NS 遷移指引
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "Step 5: GoDaddy Nameserver 遷移（一次性手動步驟）"
+
+echo -e "${BOLD}如果你還沒有將 ${DOMAIN} 的 Nameserver 指向 Cloudflare：${NC}"
+echo ""
+echo "  1. 登入 GoDaddy：https://dcc.godaddy.com/manage/${DOMAIN}/dns"
+echo "  2.「Nameservers」→「Change」→「I'll use my own nameservers」"
+echo "  3. 填入 Cloudflare Dashboard → ${DOMAIN} → DNS 頁面提供的兩個 NS"
+echo "  4. 儲存 → 等待 DNS 傳播（5 分鐘 ~ 24 小時）"
+echo ""
+
+if [ "$CF_READY" = true ]; then
+    log "Cloudflare Tunnel 已就緒。NS 傳播完成後 https://${DOMAIN} 即可使用。"
+else
+    warn "Cloudflare Tunnel 未設定。首次使用請在 Bootstrap wizard → Step 3 完成。"
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Step 6: 完成
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+step "🎉 OmniSight Productizer 部署完成！"
+
+echo -e "${BOLD}本地存取：${NC}"
+echo "  Dashboard:  http://localhost:${FRONTEND_PORT}"
+echo "  API Docs:   http://localhost:${BACKEND_PORT}/docs"
+echo ""
+
+if [ "$CF_READY" = true ]; then
+    echo -e "${BOLD}公網存取（NS 傳播完成後）：${NC}"
+    echo "  Dashboard:  https://${DOMAIN}"
+    echo "  API:        https://${API_SUBDOMAIN}.${DOMAIN}"
+    echo ""
+fi
+
+echo -e "${BOLD}下一步：${NC}"
+echo "  1. 打開瀏覽器 → http://localhost:${FRONTEND_PORT}"
+echo "  2. Bootstrap wizard 將引導你完成首次設定"
+echo "  3. 預設管理員：admin@omnisight.local（首次登入會強制改密碼）"
+echo ""
+echo -e "${BOLD}常用指令：${NC}"
+echo "  查看日誌：   docker compose -f ${COMPOSE_FILE} logs -f"
+echo "  停止服務：   docker compose -f ${COMPOSE_FILE} down"
+echo "  重啟服務：   docker compose -f ${COMPOSE_FILE} restart"
+echo "  升級部署：   git pull && docker compose -f ${COMPOSE_FILE} up -d --build"
+echo "  清除重裝：   $0 --uninstall"
+echo ""
+echo -e "${BOLD}部署日誌：${NC} $LOG_FILE"
+echo ""
+
+# 嘗試打開瀏覽器
+if [ "$CF_READY" = true ]; then
+    URL="https://${DOMAIN}"
+else
+    URL="http://localhost:${FRONTEND_PORT}"
+fi
+
+if command -v explorer.exe &>/dev/null; then
+    explorer.exe "$URL" 2>/dev/null &
+elif command -v xdg-open &>/dev/null; then
+    xdg-open "$URL" 2>/dev/null &
+fi
+
+echo -e "${GREEN}${BOLD}✅ 部署完成！請在瀏覽器開啟 ${URL}${NC}"
