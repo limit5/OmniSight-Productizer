@@ -1125,10 +1125,10 @@ Legend:
 - [x] 預估：**2 day**
 
 ### P10. Mobile observability (#295)
-- [ ] Firebase Crashlytics / Sentry Mobile adapter
-- [ ] ANR detection（Android）/ watchdog termination（iOS）
-- [ ] 線上 UI metric（render time / frame drop）
-- [ ] 預估：**0.5 day**
+- [x] Firebase Crashlytics / Sentry Mobile adapter
+- [x] ANR detection（Android）/ watchdog termination（iOS）
+- [x] 線上 UI metric（render time / frame drop）
+- [x] 預估：**0.5 day**
 
 **Priority P 總預估**：**20 day**（含簽章鏈 + store 合規的繁複度）
 
