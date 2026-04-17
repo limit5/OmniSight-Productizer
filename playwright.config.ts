@@ -71,6 +71,12 @@ export default defineConfig({
         // cross-origin EventSource (used by the SSE round-trip test)
         // isn't blocked by CORS.
         OMNISIGHT_EXTRA_CORS_ORIGINS: `http://127.0.0.1:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT}`,
+        // L8 #2: forward OMNISIGHT_DATABASE_PATH so individual specs can
+        // point the backend at an isolated temp DB without clobbering the
+        // caller's dev data. Unset by default — preserves prior behavior.
+        ...(process.env.OMNISIGHT_DATABASE_PATH
+          ? { OMNISIGHT_DATABASE_PATH: process.env.OMNISIGHT_DATABASE_PATH }
+          : {}),
       },
       port: BACKEND_PORT,
       reuseExistingServer: !process.env.CI,
