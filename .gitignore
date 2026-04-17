@@ -98,5 +98,12 @@ test-results/
 deploy/blue-green/previous_color
 deploy/blue-green/cutover_timestamp
 deploy/blue-green/previous_retention_until
+
+# G4 #5 — db-engine-matrix.yml / pg-live-integration transient output
+# (written to the repo root by CI steps; not part of the product).
+_dualtrack-*.json
+_engine-syntax-scan.json
+_pg-live-junit.xml
+_migrate-dryrun.json
 deploy/blue-green/rollback_timestamp
 deploy/blue-green/*.tmp.*

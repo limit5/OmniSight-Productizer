@@ -1,12 +1,12 @@
-# DB Engine Compatibility Matrix (N8)
+# DB Engine Compatibility Matrix (N8 + G4 #5)
 
-> **Status:** live since 2026-04-16. Hard gate on SQLite 3.40 + 3.45; advisory on Postgres 15 + 16. Retires SQLite after **G4** ports the storage layer to Postgres.
+> **Status (2026-04-18):** hard gate on SQLite 3.40 + 3.45, **hard gate** on Postgres 15 + 16, advisory on Postgres 17 (forward-look) and the engine-syntax-scan. The Postgres cells flipped to hard after **G4 #1** landed the runtime SQLite→Postgres compat shim (`backend/alembic_pg_compat.py`) and **G4 #4** landed the data-migration script — the shim makes every existing SQLite-idiom migration run green on Postgres, and the migration script is guarded end-to-end by a live-PG integration job. SQLite retires only after the operator runbook (**G4 #6** / `docs/ops/db_failover.md`) declares the cutover complete.
 
 ## Why this matrix exists
 
-OmniSight's storage is SQLite today and Postgres tomorrow. The **G4** milestone cuts the runtime over to Postgres; multi-tenancy (**I**) hard-depends on it (RLS, `statement_timeout`, role-scoped grants). Migration code written today accretes SQLite-only idioms — `AUTOINCREMENT`, `datetime('now')`, `INSERT OR IGNORE`, `CREATE VIRTUAL TABLE … USING fts5` — and every one of them is a landmine that surfaces on the G4 cut-over night, far too late.
+OmniSight's storage is SQLite today and Postgres tomorrow. The **G4** milestone cuts the runtime over to Postgres; multi-tenancy (**I**) hard-depends on it (RLS, `statement_timeout`, role-scoped grants). Migration code written today accretes SQLite-only idioms — `AUTOINCREMENT`, `datetime('now')`, `INSERT OR IGNORE`, `CREATE VIRTUAL TABLE … USING fts5` — and every one of them would be a landmine on the G4 cut-over night, far too late.
 
-N8 is the CI layer that **refuses to let that landmine pass merge today** and **exercises the Postgres target continuously** so G4 is a graph-coloring problem, not a safari.
+Before G4 #1 the Postgres cells were **advisory** because the migrations genuinely did not run on PG. Now that the runtime shim translates those idioms on the fly (`AUTOINCREMENT` → `IDENTITY`, `datetime('now')` → `NOW()`, `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING`, …), every committed revision upgrades/downgrades green on PG 15 + 16 and the cells are **hard gates**. N8 is now the CI layer that **pins the shim contract on every PR** and **exercises the real Postgres target continuously** so the G4 cutover is a graph-coloring problem, not a safari.
 
 ## Layer architecture
 
@@ -18,18 +18,27 @@ N8 is the CI layer that **refuses to let that landmine pass merge today** and **
 │     ├ sqlite 3.40.1 — LD_PRELOAD'd libsqlite3.so + dual-track      │
 │     └ sqlite 3.45.3 — LD_PRELOAD'd libsqlite3.so + dual-track      │
 │                                                                    │
-│   postgres-matrix      (advisory until G4)                         │
-│     ├ postgres:15 service container + dual-track                   │
-│     └ postgres:16 service container + dual-track                   │
+│   postgres-matrix      (hard gate since G4 #1 shim landed)         │
+│     ├ postgres:15 service container + dual-track  (hard)           │
+│     ├ postgres:16 service container + dual-track  (hard)           │
+│     └ postgres:17 service container + dual-track  (advisory*)      │
+│                                                                    │
+│   pg-live-integration  (hard gate — G4 #5)                         │
+│     ├ postgres:16 service container                                │
+│     ├ pytest test_alembic_pg_live_upgrade.py   (G4 #1 contract)    │
+│     └ migrate_sqlite_to_pg.py --dry-run smoke  (G4 #4 contract)    │
 │                                                                    │
 │   engine-syntax-scan   (advisory linter)                           │
 │     └ scripts/check_migration_syntax.py → ::warning annotations    │
 │                                                                    │
 │   matrix-summary       (roll-up table on run page)                 │
 └────────────────────────────────────────────────────────────────────┘
+
+* postgres:17 = N7-style forward-look cell, graduates to hard once a
+  full quarter is green.
 ```
 
-Triggers: PRs touching `backend/alembic/**`, `backend/db.py`, `backend/db_context.py`, or the N8 scripts themselves; plus push to `master` and manual `workflow_dispatch`.
+Triggers: PRs touching the Alembic tree, `backend/alembic_pg_compat.py`, `backend/db.py`, `backend/db_context.py`, `backend/db_url.py`, `backend/db_connection.py`, or any of the N8/G4 scripts (`alembic_dual_track.py`, `check_migration_syntax.py`, `migrate_sqlite_to_pg.py`, `scan_sqlite_isms.py`); plus push to `master` and manual `workflow_dispatch`.
 
 ## Dual-track validator
 
@@ -60,18 +69,22 @@ GitHub Actions' `ubuntu-latest` has one system SQLite and Python's `setup-python
 
 ## Postgres wiring
 
-Service container approach: `services.postgres.image: postgres:<ver>` starts a container on `localhost:5432`. The validator connects through `postgresql+psycopg://omnisight:omnisight@127.0.0.1:5432/omnitest`. `psycopg[binary]==3.2.3` is installed only in this cell — it is **not** added to `requirements.txt` until G4 lands, because pulling the 11MB psycopg binary wheel into every other CI job (backend-tests, openapi-contract, renovate-config) would cost minutes for no benefit.
+Service container approach: `services.postgres.image: postgres:<ver>` starts a container on `localhost:5432`.
 
-## Known pre-G4 findings
+* **`postgres-matrix` (dual-track)** — connects through `postgresql+psycopg://omnisight:omnisight@127.0.0.1:5432/omnitest` (psycopg v3, SQLAlchemy's modern dialect). `psycopg[binary]==3.2.3` is installed only in this cell.
+* **`pg-live-integration`** — runs `pytest backend/tests/test_alembic_pg_live_upgrade.py` under `OMNI_TEST_PG_URL=postgresql+psycopg2://…` (sync, Alembic) and smoke-runs `scripts/migrate_sqlite_to_pg.py --dry-run` which pulls asyncpg lazily (G4 #2 dispatcher). The cell installs `psycopg2-binary==2.9.10` + `asyncpg==0.30.0` to cover both wire paths.
 
-The engine-syntax-scan today reports ~30 findings across the 15 committed revisions. They are not fixed before G4 because:
+Neither driver is pinned in `backend/requirements.txt` — they're CI-only. The production runtime reaches PG via `backend/db_connection.py` → asyncpg; Alembic runs through psycopg2 at cutover time because Alembic has no async driver. Adding the PG drivers to every other CI job (backend-tests, openapi-contract, renovate-config) would cost minutes for no benefit pre-cutover.
 
-* The runtime (`backend/db.py`) speaks SQLite natively; rewriting the migrations to be dialect-agnostic without changing the runtime introduces churn with zero payoff.
-* Most findings are `datetime('now')` defaults. The G4 port replaces them with `CURRENT_TIMESTAMP` in a single sweep.
-* `INSERT OR IGNORE` sites in `0015_tenant_egress_policies.py` need `ON CONFLICT (tenant_id) DO NOTHING / UPDATE` — mechanical.
-* `CREATE VIRTUAL TABLE … USING fts5` in the runtime schema is SQLite-exclusive; G4 will gate it by dialect (`if bind.dialect.name == 'sqlite'`) or replace with `tsvector` + GIN.
+## Engine-syntax-scan scope
 
-The advisory scan exists today so **new** migrations (post-N8) are authored with Postgres in mind. If the pre-G4 finding count grows on a PR, reviewers ask "why are we adding a new SQLite-only idiom when we're about to migrate?"
+The engine-syntax-scan today reports ~30 findings across the committed revisions. They are **intentionally not fixed in the migration files themselves** because:
+
+* The G4 #1 runtime shim (`backend/alembic_pg_compat.py`) translates every SQLite-only idiom to its Postgres equivalent at `before_cursor_execute` time. Rewriting the migrations to be dialect-native is a one-way churn with no runtime payoff.
+* The shim's self-tests (`backend/tests/test_alembic_pg_compat.py`, 226 assertions) pin every translation rule so a rule drift would fail the unit suite before the scan ever fires.
+* The live-PG cell (`pg-live-integration`) proves shim + migrations are end-to-end green; the scan is a belt-and-braces advisory layer.
+
+The advisory scan stays so **new** migrations are authored with Postgres in mind. If the finding count grows on a PR, reviewers ask "why add a new SQLite-only idiom when the shim already handles it — can the migration use a dialect-native form?"
 
 ## Engine-specific SQL — the rules
 
@@ -88,19 +101,21 @@ The advisory scan exists today so **new** migrations (post-N8) are authored with
 | `begin_immediate` | `BEGIN IMMEDIATE` | default transaction + `SELECT … FOR UPDATE` |
 | `text_pk_as_integer` | `INTEGER PRIMARY KEY` (SQLite rowid alias) | `BIGSERIAL PRIMARY KEY` or `GENERATED BY DEFAULT AS IDENTITY` |
 
-## G4 handoff plan
+## G4 handoff status
 
-When the G4 branch is ready to merge:
+**Delivered (2026-04-18):**
 
-1. **Port the migrations** — sweep every engine-syntax-scan finding, use `bind.dialect.name` to fork where unavoidable (FTS5).
-2. **Run the Postgres matrix green** — confirm both `postgres:15` and `postgres:16` cells pass.
-3. **Flip postgres-matrix to hard gate** — remove `continue-on-error: true` on the `postgres-matrix` job.
-4. **Retire sqlite-matrix** — delete the `sqlite-matrix` job block from `db-engine-matrix.yml`.
-5. **Add postgres:17 as advisory** — mirror N7's "forward-look" pattern; one cell advisory, two cells hard.
-6. **Flip engine-syntax-scan to `--strict`** — the linter now rejects PRs that re-introduce SQLite-only SQL.
-7. **Delete the pre-G4 workaround** — `OMNISIGHT_SKIP_FS_MIGRATIONS` env var in `0014_tenant_filesystem_namespace.py` can go; the filesystem move is a one-shot upgrade-time action and the matrix doesn't need to re-run it.
+1. ✅ **Runtime SQLite→Postgres shim** — `backend/alembic_pg_compat.py` (G4 #1). Every committed Alembic revision runs green on Postgres 15/16 via the shim without per-migration edits.
+2. ✅ **Postgres matrix is hard gate** — `continue-on-error: true` removed from the `postgres-matrix` job; PG 15 + 16 must pass for merge.
+3. ✅ **Postgres 17 advisory cell added** — `continue-on-error: ${{ matrix.postgres == '17' }}` for the forward-look cell (N7 pattern).
+4. ✅ **Live-PG integration job** — `pg-live-integration` runs `test_alembic_pg_live_upgrade.py` + `migrate_sqlite_to_pg.py --dry-run` smoke against a real PG 16 service container on every matrix-relevant PR.
 
-That's the whole N8 handoff. The SOP lives here; the code scaffolding is already in place.
+**Deferred to the cutover sweep** (once `docs/ops/db_failover.md` / G4 #6 declares cutover complete):
+
+1. **Retire sqlite-matrix** — delete the `sqlite-matrix` job block from `db-engine-matrix.yml`.
+2. **Promote postgres:17 to hard gate** — after one quarter green.
+3. **Flip engine-syntax-scan to `--strict`** — once migrations are rewritten in dialect-native SQL (or the reviewers accept the shim as the permanent translation layer).
+4. **Delete `OMNISIGHT_SKIP_FS_MIGRATIONS`** — the filesystem move in `0014_tenant_filesystem_namespace.py` is a one-shot upgrade-time action and the matrix doesn't need to re-run it.
 
 ## Cross-references
 

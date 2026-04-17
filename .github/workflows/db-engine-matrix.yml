@@ -1,58 +1,81 @@
 name: DB Engine Compatibility Matrix
 
-# N8 — catch engine-specific SQL landmines before the G4 Postgres
-# cutover. Three layers:
+# N8 + G4 #5 — catch engine-specific SQL landmines on every PR so the
+# SQLite → Postgres cutover never surprises production. Four layers:
 #
 #   sqlite-matrix        hard gate — exercises every committed Alembic
 #                        revision on SQLite 3.40 and 3.45 (upgrade head
 #                        → step-down to baseline → re-upgrade head,
-#                        fingerprints compared). Today's production
-#                        engine; regression here blocks merge.
+#                        fingerprints compared). Still the production
+#                        engine through the G4 window; regression blocks
+#                        merge. Retires only after the operator runbook
+#                        (docs/ops/db_failover.md / G4 #6) declares the
+#                        cutover complete.
 #
-#   postgres-matrix      advisory — same dual-track script pointed at
-#                        Postgres 15 and 16 service containers. Today
-#                        the baseline migrations use SQLite-only idioms
-#                        (AUTOINCREMENT, datetime('now'), INSERT OR
-#                        IGNORE, CREATE VIRTUAL TABLE fts5, …) so the
-#                        cells red-X by design. Their purpose is to
-#                        catch a NEW migration that works on Postgres
-#                        but quietly regresses — the pre-G4 floor is
-#                        "don't make things worse".
+#   postgres-matrix      HARD GATE since G4 #1 landed the runtime
+#                        SQLite→Postgres shim (`backend/alembic_pg_compat.py`)
+#                        — every committed revision now upgrades head /
+#                        downgrades / re-upgrades green on Postgres
+#                        15, 16. Postgres 17 stays `continue-on-error`
+#                        as the forward-look cell (N7 pattern) until it
+#                        has a full green quarter.
+#
+#   pg-live-integration  hard gate — spins up a Postgres 16 service
+#                        container and runs the `OMNI_TEST_PG_URL`-gated
+#                        tests that the unit suite skips (namely
+#                        `test_alembic_pg_live_upgrade.py`, G4 #1's
+#                        live-shim contract) plus a dry-run of the
+#                        SQLite→Postgres data migration script (G4 #4).
+#                        Together these prove the shim + migration
+#                        path continue to work on a real PG instance.
 #
 #   engine-syntax-scan   advisory — static regex scan over every
 #                        migration file (scripts/check_migration_syntax.py)
 #                        emits `::warning ...` annotations per finding
 #                        and a rule/file aggregate on the run summary.
-#                        Flipped to --strict once G4 is live.
+#                        Stays advisory while the runtime shim is the
+#                        translation layer; flips to `--strict` when
+#                        migrations themselves switch to dialect-native
+#                        SQL (post-G4 cutover sweep).
 #
-# When G4 lands:
-#   * Drop `sqlite-matrix` entirely (SQLite retires).
-#   * Move `postgres-matrix` to hard gate and expand to 15/16/17.
-#   * Change `engine-syntax-scan` to `--strict`.
-# The SOP doc `docs/ops/db_matrix.md` tracks the G4 handoff.
+# Future handoff (once `docs/ops/db_failover.md` declares cutover done):
+#   * Drop `sqlite-matrix` entirely.
+#   * Promote `postgres: 17` from advisory to hard gate.
+#   * Flip `engine-syntax-scan` to `--strict`.
+# The SOP doc `docs/ops/db_matrix.md` tracks this handoff.
 
 on:
   push:
     branches: [main, master]
     paths:
       - 'backend/alembic/**'
+      - 'backend/alembic_pg_compat.py'
       - 'backend/db.py'
       - 'backend/db_context.py'
+      - 'backend/db_url.py'
+      - 'backend/db_connection.py'
       - 'scripts/alembic_dual_track.py'
       - 'scripts/check_migration_syntax.py'
+      - 'scripts/migrate_sqlite_to_pg.py'
+      - 'scripts/scan_sqlite_isms.py'
       - '.github/workflows/db-engine-matrix.yml'
   pull_request:
     branches: [main, master]
     paths:
       - 'backend/alembic/**'
+      - 'backend/alembic_pg_compat.py'
       - 'backend/db.py'
       - 'backend/db_context.py'
+      - 'backend/db_url.py'
+      - 'backend/db_connection.py'
       - 'scripts/alembic_dual_track.py'
       - 'scripts/check_migration_syntax.py'
+      - 'scripts/migrate_sqlite_to_pg.py'
+      - 'scripts/scan_sqlite_isms.py'
       - '.github/workflows/db-engine-matrix.yml'
   workflow_dispatch:
-    # Manual trigger when planning a Postgres migration or when the
-    # G4 branch needs a full sweep ahead of merge.
+    # Manual trigger when planning a Postgres migration or when a
+    # release branch needs a full sweep ahead of tag.
 
 permissions:
   contents: read
@@ -148,17 +171,19 @@ jobs:
           retention-days: 14
 
   # ─────────────────────────────────────────────────────────────────
-  # Postgres dual-track — advisory until G4
+  # Postgres dual-track — hard gate (G4 #1 shim landed 2026-04-18)
   # ─────────────────────────────────────────────────────────────────
   postgres-matrix:
     name: postgres ${{ matrix.postgres }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true   # advisory — see workflow header comment
+    # PG 15 + 16 = hard gate (OmniSight runtime floor + ceiling).
+    # PG 17 = advisory forward-look (N7 pattern) until quarterly green.
+    continue-on-error: ${{ matrix.postgres == '17' }}
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["15", "16"]
+        postgres: ["15", "16", "17"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -180,9 +205,12 @@ jobs:
         with: { python-version: "3.12", cache: pip }
 
       - name: install backend deps + psycopg driver
-        # psycopg (v3) is the modern Postgres driver SQLAlchemy 2.x
-        # prefers; it is NOT in requirements.txt today because G4
-        # hasn't landed. We install it only in this advisory cell.
+        # psycopg (v3) is SQLAlchemy 2.x's modern Postgres dialect. We
+        # install it *only* in this cell — requirements.txt intentionally
+        # ships without it so the ~11MB wheel doesn't land in unrelated
+        # CI jobs (backend-tests, openapi-contract, renovate-config).
+        # The runtime hits PG through asyncpg (G4 #2); Alembic uses the
+        # sync psycopg path here because Alembic has no async driver.
         run: |
           set -eu
           pip install --require-hashes -r backend/requirements.txt
@@ -198,23 +226,13 @@ jobs:
           echo "::error::postgres never became ready"; exit 1
 
       - name: dual-track upgrade/downgrade sweep
-        id: dualtrack
-        continue-on-error: true
         run: |
           set -eu
           URL="postgresql+psycopg://omnisight:omnisight@127.0.0.1:5432/omnitest"
           python3 scripts/alembic_dual_track.py \
               --engine postgres --url "$URL" \
               | tee _dualtrack-postgres-${{ matrix.postgres }}.json
-
-      - name: annotate expected failure reason
-        if: steps.dualtrack.outcome == 'failure'
-        run: |
-          echo "::warning::Postgres cell failed as expected pre-G4 — "\
-               "the baseline Alembic revisions use SQLite-only SQL "\
-               "(AUTOINCREMENT, datetime('now'), INSERT OR IGNORE, …). "\
-               "This cell turns into a hard gate once G4 ports the "\
-               "migrations; see docs/ops/db_matrix.md."
+          # Script exits 1 on any validation failure; CI respects it.
 
       - name: upload dual-track report
         if: always()
@@ -223,6 +241,115 @@ jobs:
           name: dualtrack-postgres-${{ matrix.postgres }}
           path: _dualtrack-postgres-${{ matrix.postgres }}.json
           retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # PG live integration — hard gate (G4 #5)
+  #
+  # Runs the tests that the main pytest sharded jobs skip because
+  # they require a real Postgres service container (gated by the
+  # `OMNI_TEST_PG_URL` env var). Today that's:
+  #
+  #   * backend/tests/test_alembic_pg_live_upgrade.py   (G4 #1) —
+  #     live Alembic upgrade-head → downgrade-0001 → upgrade-head
+  #     cycle against a real PG; proves the pg-compat shim stays
+  #     intact end-to-end, not just at unit-test level.
+  #
+  #   * scripts/migrate_sqlite_to_pg.py --dry-run        (G4 #4) —
+  #     hash-chain pre-flight over a freshly-migrated SQLite fixture
+  #     so the data-migration entry point is always callable (exit
+  #     codes 0 / 1 / 2 / 3 / 4 / 5 / 6 all reachable on a release
+  #     branch, not just a developer's laptop).
+  # ─────────────────────────────────────────────────────────────────
+  pg-live-integration:
+    name: pg live integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: omnisight
+          POSTGRES_PASSWORD: omnisight
+          POSTGRES_DB: omnitest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: install backend deps + live PG drivers
+        # Three drivers, by design:
+        #   psycopg2-binary : Alembic (sync) — same driver the live
+        #                     upgrade test uses through SQLAlchemy.
+        #   asyncpg         : runtime (async) — what
+        #                     `backend/db_connection.py` opens against
+        #                     the PG target during the migrate script
+        #                     dry-run + the G4 #2 dispatcher contract.
+        #   aiosqlite       : already in requirements.txt (the SQLite
+        #                     source-of-truth side of the migrate).
+        # None of these are pinned via pip-compile — they're CI-only.
+        run: |
+          set -eu
+          pip install --require-hashes -r backend/requirements.txt
+          pip install "psycopg2-binary==2.9.10" "asyncpg==0.30.0"
+
+      - name: wait for postgres
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5432 -U omnisight; then exit 0; fi
+            sleep 2
+          done
+          echo "::error::postgres never became ready"; exit 1
+
+      - name: pytest live PG integration
+        env:
+          # Sync URL — psycopg2 SQLAlchemy dialect, matches
+          # test_alembic_pg_live_upgrade.py's `_alembic()` subprocess.
+          OMNI_TEST_PG_URL: postgresql+psycopg2://omnisight:omnisight@127.0.0.1:5432/omnitest
+        run: |
+          set -eu
+          cd backend
+          pytest tests/test_alembic_pg_live_upgrade.py \
+              -v --tb=short -q \
+              --junitxml=../_pg-live-junit.xml
+
+      - name: migrate script dry-run smoke
+        # Stage SQLite fixture → alembic upgrade head → run the
+        # migrate script in --dry-run mode. --dry-run only exercises
+        # the source chain verifier (no target writes), so PG is not
+        # strictly required — but we've already paid for the service
+        # container, and a live target smoke would also catch any
+        # asyncpg wire-level regression in G4 #2's dispatcher.
+        env:
+          OMNISIGHT_DATABASE_PATH: /tmp/_ci_pg_smoke.db
+        run: |
+          set -eu
+          rm -f /tmp/_ci_pg_smoke.db
+          cd backend && alembic upgrade head && cd ..
+          python3 scripts/migrate_sqlite_to_pg.py \
+              --source /tmp/_ci_pg_smoke.db \
+              --dry-run --json \
+              | tee _migrate-dryrun.json
+          python3 -c "import json,sys; r=json.load(open('_migrate-dryrun.json')); sys.exit(0 if r.get('source_chain_ok') else 1)"
+
+      - name: upload live integration artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-live-integration
+          path: |
+            _pg-live-junit.xml
+            _migrate-dryrun.json
+          retention-days: 14
+          if-no-files-found: ignore
 
   # ─────────────────────────────────────────────────────────────────
   # Engine-specific SQL scan — advisory linter
@@ -263,20 +390,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     if: always()
-    needs: [sqlite-matrix, postgres-matrix, engine-syntax-scan]
+    needs: [sqlite-matrix, postgres-matrix, pg-live-integration, engine-syntax-scan]
     steps:
       - name: write run-level summary
         run: |
           {
-            echo "## N8 DB engine compatibility matrix"
+            echo "## N8 + G4 #5 DB engine compatibility matrix"
             echo ""
             echo "| Layer | Status | Gate |"
             echo "|---|---|---|"
-            echo "| sqlite 3.40.1          | ${{ needs.sqlite-matrix.result }}      | hard        |"
-            echo "| sqlite 3.45.3          | ${{ needs.sqlite-matrix.result }}      | hard        |"
-            echo "| postgres 15            | ${{ needs.postgres-matrix.result }}    | advisory*   |"
-            echo "| postgres 16            | ${{ needs.postgres-matrix.result }}    | advisory*   |"
-            echo "| engine-syntax-scan     | ${{ needs.engine-syntax-scan.result }} | advisory*   |"
+            echo "| sqlite 3.40.1          | ${{ needs.sqlite-matrix.result }}        | hard        |"
+            echo "| sqlite 3.45.3          | ${{ needs.sqlite-matrix.result }}        | hard        |"
+            echo "| postgres 15            | ${{ needs.postgres-matrix.result }}      | hard        |"
+            echo "| postgres 16            | ${{ needs.postgres-matrix.result }}      | hard        |"
+            echo "| postgres 17            | ${{ needs.postgres-matrix.result }}      | advisory*   |"
+            echo "| pg live integration    | ${{ needs.pg-live-integration.result }}  | hard        |"
+            echo "| engine-syntax-scan     | ${{ needs.engine-syntax-scan.result }}   | advisory*   |"
             echo ""
-            echo "\`*\` Advisory cells turn into hard gates after G4. See \`docs/ops/db_matrix.md\`."
+            echo "\`*\` PG 17 = forward-look (N7 pattern); engine-syntax-scan stays advisory while the runtime shim is the translation layer. See \`docs/ops/db_matrix.md\`."
           } >> "$GITHUB_STEP_SUMMARY"
