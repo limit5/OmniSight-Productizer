@@ -1,0 +1,137 @@
+version: "3.9"
+
+# G4 #3 — OmniSight PostgreSQL HA pair (primary + hot standby).
+#
+# Topology:
+#   pg-primary :5432  ──► ──► ──►  pg-standby :5433
+#          (synchronous_commit=on,      (hot_standby=on,
+#           synchronous_standby_names     primary_conninfo=...,
+#           optional)                     read-only queries ok)
+#
+# Streaming replication is established at standby first-boot via
+# `init-standby.sh` (pg_basebackup + standby.signal + primary_conninfo).
+# A named physical replication slot `omnisight_standby_slot` guarantees
+# the primary retains WAL until the standby has consumed it.
+#
+# Synchronous mode (operator opt-in):
+#   Flip `synchronous_standby_names` in postgresql.primary.conf from the
+#   empty default to `'FIRST 1 (omnisight_standby)'` and reload the primary:
+#     docker compose -f deploy/postgres-ha/docker-compose.yml \
+#         exec pg-primary pg_ctl reload
+#   The standby advertises `application_name=omnisight_standby` in its
+#   primary_conninfo — no change needed on the standby side.
+#
+# Usage:
+#   cp deploy/postgres-ha/.env.example deploy/postgres-ha/.env
+#   # edit .env → set strong POSTGRES_PASSWORD + REPLICATION_PASSWORD
+#   docker compose -f deploy/postgres-ha/docker-compose.yml --env-file deploy/postgres-ha/.env up -d
+#
+# Runbook:    docs/ops/db_failover.md (G4 #5)
+# Verifier:   scripts/pg_ha_verify.py
+# Contracts:  backend/tests/test_pg_ha_deployment.py
+
+services:
+  # --- Primary ---------------------------------------------------------
+  # The `postgres:16-alpine` image matches the version used by the Alembic
+  # live-migration tests (G4 #1) so migration behaviour is identical
+  # between CI and HA deploy.
+  pg-primary:
+    image: postgres:16-alpine
+    container_name: omnisight-pg-primary
+    restart: always
+    ports:
+      - "${PG_PRIMARY_HOST_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-omnisight}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-omnisight}"
+      REPLICATION_USER: "${REPLICATION_USER:-replicator}"
+      REPLICATION_PASSWORD: "${REPLICATION_PASSWORD:?REPLICATION_PASSWORD must be set in .env}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      # Named volume for durable data. Survives `docker compose down`
+      # but NOT `docker compose down -v` — operator must be explicit.
+      - omnisight-pg-primary:/var/lib/postgresql/data
+      # Read-only config bind-mounts. Postgres is started via `command:`
+      # below with explicit `-c config_file=/etc/postgresql/postgresql.conf`
+      # so the image's default config is fully overridden.
+      - ./postgresql.primary.conf:/etc/postgresql/postgresql.conf:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      # Init hook creates replicator role + replication slot on first
+      # boot only (idempotent across container restarts because PGDATA
+      # persistence short-circuits the /docker-entrypoint-initdb.d run).
+      - ./init-primary.sh:/docker-entrypoint-initdb.d/10-init-primary.sh:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "config_file=/etc/postgresql/postgresql.conf"
+      - "-c"
+      - "hba_file=/etc/postgresql/pg_hba.conf"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-omnisight} -d $${POSTGRES_DB:-omnisight}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks:
+      - pg-ha
+
+  # --- Hot standby -----------------------------------------------------
+  # Standby does NOT run the docker-entrypoint-initdb.d flow — it clones
+  # the primary via `pg_basebackup` inside init-standby.sh. `depends_on`
+  # with `service_healthy` makes the standby wait for the primary's
+  # pg_isready to go green before booting.
+  pg-standby:
+    image: postgres:16-alpine
+    container_name: omnisight-pg-standby
+    restart: always
+    ports:
+      - "${PG_STANDBY_HOST_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-omnisight}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-omnisight}"
+      REPLICATION_USER: "${REPLICATION_USER:-replicator}"
+      REPLICATION_PASSWORD: "${REPLICATION_PASSWORD:?REPLICATION_PASSWORD must be set in .env}"
+      PRIMARY_HOST: "${PRIMARY_HOST:-pg-primary}"
+      PRIMARY_PORT: "${PRIMARY_PORT:-5432}"
+      REPLICATION_SLOT_NAME: "${REPLICATION_SLOT_NAME:-omnisight_standby_slot}"
+      REPLICATION_APPLICATION_NAME: "${REPLICATION_APPLICATION_NAME:-omnisight_standby}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+      STANDBY_BASEBACKUP_TIMEOUT: "${STANDBY_BASEBACKUP_TIMEOUT:-300}"
+    volumes:
+      - omnisight-pg-standby:/var/lib/postgresql/data
+      - ./postgresql.standby.conf:/etc/postgresql/postgresql.conf:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./init-standby.sh:/usr/local/bin/init-standby.sh:ro
+    # Override the default entrypoint so init-standby.sh runs instead of
+    # the docker-entrypoint-initdb.d flow (which would try to initdb an
+    # empty PGDATA — we want pg_basebackup instead).
+    entrypoint:
+      - "/bin/bash"
+      - "/usr/local/bin/init-standby.sh"
+    healthcheck:
+      # `pg_isready` returns 0 when the standby is accepting read-only
+      # connections in hot-standby mode. That's a sufficient liveness
+      # signal for the HA pair — if the standby cannot accept reads it
+      # is effectively down regardless of replication state.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-omnisight} -d $${POSTGRES_DB:-omnisight}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    networks:
+      - pg-ha
+
+networks:
+  pg-ha:
+    driver: bridge
+
+volumes:
+  omnisight-pg-primary:
+    driver: local
+  omnisight-pg-standby:
+    driver: local
