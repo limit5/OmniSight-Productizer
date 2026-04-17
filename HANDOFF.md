@@ -3422,6 +3422,40 @@ Push 後 `fallback-branches.yml` 會在 push event 自動跑首次 build/test，
 
 ---
 
+## R (pending) Enterprise Watchdog & Disaster Recovery（2026-04-17 登錄）
+
+**背景**：`docs/design/enterprise_watchdog_and_disaster_recovery_architecture.md`（2026-04-17 新增）提出 PEP Gateway（工具執行網關）、冪等性重試、語意監控、自動續寫、ChatOps 遠端介入、階梯式部署六大防護機制。審計結果 ~55% 與既有模組重疊（sandboxed tools / L1-L4 notifications / M1 cgroups / worktree isolation / startup cleanup），5 項 net-new：PEP middleware、ChatOps interactive、semantic entropy、scratchpad 持久化 + 斷點續傳、Serverless PaaS。
+
+**設計覆寫**：
+- 白皮書 §三.2 `git clean -fd` → **拒絕**：改用 discard + recreate worktree（R8），保持 WorkspaceManager 安全隔離
+- 白皮書 §四 `<system_override>` 標籤 → **拒絕**：改走 agent state machine `human_hint` slot（R1），防止 prompt injection 權限溢出
+- 白皮書 P1/P2/P3 分級 → **不取代 L1-L4**：改掛 `severity` tag 在既有 L1-L4 notification tier 上（R9）
+
+**評估摘要**：
+
+| 向度 | 判斷 | 說明 |
+|---|---|---|
+| 效益 | 高 | PEP 攔截 agent 幻覺毀滅性命令（-70% incident）；ChatOps interactive 把 on-call response 從 ~5min 降到 ~10s；semantic entropy 提前 2-3 輪抓到 deadlock；scratchpad 省 30-50% 重試成本 |
+| 影響 | 中 | PEP 成為所有 tool call 的 chokepoint（需 circuit breaker）；ChatOps bridge 需 3 平台 adapter 維護成本；semantic entropy embedding 計算每 3 輪 ~5ms（MiniLM 本地，成本可控） |
+| 副作用 | 中 | PEP SPOF（R0 circuit breaker 緩解）；ChatOps inject prompt injection 風險（R1 sanitize + rate limit + audit 緩解）；Keepalived VRRP 需 L2 鄰接（R5 Consul 替代方案） |
+
+**UI 工作量**：8d / 25.5d total（~31%）。新增 2 元件（`pep-live-feed.tsx`、`chatops-mirror.tsx`）+ 擴充 5 既有元件（agent-matrix-wall / run-history-panel / decision-dashboard / audit-panel / toast-center / notification-center / ops-summary-panel / integration-settings）。
+
+**切段交付（5 段）**：
+1. R0 + R8 + R9（6.5d）— PEP Gateway + 安全重試 + 統一通報。最高優先
+2. R1（4d）— ChatOps Interactive + Mirror Panel
+3. R2 + R3（5.5d）— Semantic entropy + scratchpad + Agent Health Card
+4. R4（2.5d）— 斷點續傳 + Checkpoint Timeline
+5. R5 + R6 + R7（7d）— HA 部署 + Serverless + Deployment Topology View
+
+**總預估**：25.5 day（backend 17.5d + UI 8d）。
+
+**硬相依**：O0-O3（CATC + Worker pool + Redis + MQ）、G2（reverse proxy）、G5（K8s manifests）、I10（Redis HA）、L（Bootstrap wizard）。
+
+**下一步**：O 系列落地後啟動 R0。R0 + R8 + R9 可先行（只需 O0 CATC schema + 既有 tool_executor）；R1-R4 需 O3 Worker pool；R5-R7 需 G2 + G5。
+
+---
+
 ## B12 (complete) UX-CF-TUNNEL-WIZARD — Cloudflare Tunnel 一鍵自動配置（2026-04-16 完成）
 
 **背景**：現行流程 100% 手動 — `cloudflared tunnel login` 瀏覽器 OAuth → `tunnel create` 抄 UUID → `route dns` → 編輯 `deploy/cloudflared/config.yml` → `sed` 填 systemd unit → `systemctl enable`。UI / 後端 API 皆無 CF 輸入介面。這是 onboarding 最大摩擦點之一。

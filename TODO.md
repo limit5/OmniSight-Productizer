@@ -1229,6 +1229,183 @@ Legend:
 
 ---
 
+## 🅡 Priority R — Enterprise Watchdog & Disaster Recovery（全維度守護 + 災難復原 + UI 強化）
+
+> 背景：`docs/design/enterprise_watchdog_and_disaster_recovery_architecture.md`（2026-04-17 新增）提出五層防護：PEP Gateway（工具執行網關）、冪等性重試、語意監控、自動續寫、階梯式部署。審計結果顯示 ~55% 與既有模組重疊（sandboxed tools / L1-L4 notifications / M1 cgroups / worktree isolation / startup cleanup），但有 5 項真正新增能力填補 critical gap：PEP 攔截 middleware、ChatOps interactive approve/inject、semantic entropy 偵測、scratchpad 持久化 + 斷點續傳、Serverless PaaS adapter。
+>
+> **設計覆寫**：白皮書 §三.2 建議重試前 `git clean -fd` + `git checkout .`——**本路線拒絕此設計**，改用「discard worktree + create fresh worktree」維持既有 WorkspaceManager 的安全隔離（R8 詳述）。白皮書 §四 的 `<system_override>` 標籤——**不採用**，改走 agent state machine 的 `human_hint` slot，避免 prompt injection 權限溢出（R1 詳述）。
+>
+> **UI 策略**：既有 47 個 FUI 元件中，toast-center（approve/reject 按鈕）、decision-dashboard（審批佇列）、audit-panel（審計追蹤）、orchestration-panel（O9 觀測性）可直接延伸。新增 2 個全新元件（`pep-live-feed.tsx`、`chatops-mirror.tsx`）+ 擴充 3 個既有元件（agent-matrix-wall / run-history-panel / integration-settings 或 ops-summary-panel 加 deployment topology tab）。
+>
+> 相依（硬前置）：**O0-O3**（CATC + Worker pool + Redis + MQ）、**G2**（reverse proxy）、**G5**（K8s manifests）、**I10**（Redis HA）、**L**（Bootstrap wizard）。建議排在 O 之後。
+
+### R0. PEP Gateway Middleware（工具執行網關）(#306)
+- [ ] `backend/pep_gateway.py`：PEP (Policy Enforcement Point) middleware，intercept 所有 tool_executor node 的 tool call
+- [ ] 毀滅性命令 pattern 表（`rm -rf /`、`chown`、`chmod 777`、`dd if=/dev/zero`、`mkfs`、`:(){:|:&};:`…）→ 自動 DENY + audit
+- [ ] 生產部署攔截：`deploy.sh prod`、`kubectl apply --context production`、`terraform apply` 等 prod-scope 命令 → 自動 HOLD，等人工 approve
+- [ ] T1/T2/T3 sandbox tier 整合：PEP 在 tool call 前查 sandbox tier policy，T1 只放行白名單工具，T3 允許 sudo 但仍攔截 prod-deploy
+- [ ] Circuit breaker：PEP down 時 fallback 到 sandbox-tier 本機 rule（degraded but alive）；恢復後自動切回
+- [ ] SSE event：`pep.decision`（action / agent / tool / command / decision: auto_allow | hold | deny）
+- [ ] Metrics：`pep_decisions_total{decision}` / `pep_hold_duration_seconds` / `pep_deny_total`
+- [ ] 整合測試：mock tool call → auto_allow、hold、deny 三條路徑 + PEP down fallback
+- [ ] **UI — PEP Live Feed 面板（新元件 `pep-live-feed.tsx` 或 orchestration-panel 新 tab）**：
+  - [ ] 即時顯示所有 tool call decisions（SSE `pep.decision` 驅動）
+  - [ ] 每行：timestamp / agent name / tool name / command（truncated） / decision badge（✅ auto / 🟡 HELD / 🔴 DENY）
+  - [ ] HELD 的行展開後顯示完整 command + impact_scope + 「Approve」/「Reject」按鈕（複用 toast-center 的 approve/reject 機制）
+  - [ ] Filter bar：by agent / by decision / by tool name
+  - [ ] Header 統計：auto_allowed count / held count / denied count（自動刷新）
+- [ ] **UI — decision-dashboard 延伸**：新增 `category: "pep_tool_intercept"` 類別，PEP HELD 項目也出現在 decision queue
+- [ ] **UI — audit-panel 延伸**：新增 PEP filter tab（`action: pep.intercept | pep.approve | pep.reject | pep.auto_allow`）
+- [ ] **UI — toast-center 延伸**：PEP HOLD 事件走 toast（`source: "pep"`），approve 後 toast 自動消失
+- [ ] 預估：**3.5 day**（backend 2d + UI 1.5d）
+
+### R1. ChatOps Interactive Integration（Discord / Teams / Line 雙向互動）(#307)
+- [ ] `backend/chatops_bridge.py`：統一 ChatOps interface（`send_interactive(channel, message, buttons)` / `on_button_click(callback)` / `on_command(cmd, handler)`）
+- [ ] Discord adapter：Webhook + Interaction endpoint（Button / Select Menu）
+- [ ] Teams adapter：Adaptive Card + Bot Framework webhook
+- [ ] Line adapter：Flex Message + Postback action
+- [ ] PEP approve/reject 按鈕回路：ChatOps button click → `POST /api/v1/pep/decision/{id}` → PEP gateway 放行/拒絕
+- [ ] `/omnisight inspect [ID]` — 回傳 agent 最後 3 輪 ReAct 日誌（markdown 格式）
+- [ ] `/omnisight inject [ID] "hint"` — 將 human hint 寫入 agent state machine 的 `human_hint` slot（**不用 `<system_override>` 標籤**，改走 debug blackboard 機制）；hint 內容強制 sanitize（strip XML/HTML tags + 長度上限 2000 chars）+ rate limit（每 agent 每 5 min 最多 3 次）+ audit log
+- [ ] `/omnisight rollback [ID]` — 觸發 worktree discard + recreate（R8 機制）
+- [ ] `/omnisight status` — 回傳系統 KPI snapshot（active agents / queue depth / PEP held / entropy alerts）
+- [ ] Hot Resume 機制：inject hint 後不重啟 sandbox，agent state machine 從 `suspended` → `running`，hint 注入 context 的 `human_hint` slot（非 system prompt 尾端）
+- [ ] 安全：ChatOps inject 只接受 Gerrit `non-ai-reviewer` group 對應的 ChatOps user（防止非授權人員注入指令）；所有 inject 進 hash-chain audit_log
+- [ ] **UI — ChatOps Mirror Panel（新元件 `chatops-mirror.tsx`）**：
+  - [ ] 即時雙向鏡像：ChatOps 頻道的對話（bot 發出 + human 回覆）顯示在 dashboard
+  - [ ] SSE event `chatops.message`（direction: outbound | inbound, channel, author, body, buttons_state）
+  - [ ] Dashboard 側也能 inject hint / approve PEP（不一定要開 Discord）——form input + submit 按鈕
+  - [ ] Channel selector（multiple channels 支援：#omnisight-alerts / #omnisight-dev / custom）
+  - [ ] Connection status indicator（● Connected / ○ Disconnected per channel）
+  - [ ] 歷史捲動 + 搜尋（最近 100 條 ChatOps 訊息快取在前端 state）
+- [ ] **UI — notification-center 延伸**：P2 severity 通知裡加 inline text input 讓 operator 直接 inject hint 而不用切到 ChatOps Mirror
+- [ ] 整合測試：mock Discord webhook → button click → PEP approve → agent resume；inject hint → agent picks up hint → audit recorded
+- [ ] 預估：**4 day**（backend 2.5d + UI 1.5d）
+
+### R2. Semantic Entropy Monitor（語意熵值偵測）(#308)
+- [ ] `backend/semantic_entropy.py`：每 N 輪（預設 3）對 agent 最近 output 做 embedding similarity 計算
+- [ ] Embedding backend：sentence-transformers（本地 MiniLM）或 Anthropic embedding API（可插拔）
+- [ ] Entropy 指標：rolling window 5 輪的 pairwise cosine similarity 平均值；threshold 0.7 → `cognitive_deadlock` event
+- [ ] 整合 debug blackboard：entropy 超標寫入 `debug_findings` 表
+- [ ] 與既有 loop detection 協作：entropy check 在 loop detection 之前觸發，可更早抓到「措辭不同但語意空轉」
+- [ ] SSE event：`agent.entropy`（agent_id / entropy_score / threshold / verdict: ok | warning | deadlock）
+- [ ] Metrics：`semantic_entropy_score{agent_id}` gauge / `cognitive_deadlock_total` counter
+- [ ] 成本控制：MiniLM 本地推理 ~5ms / 輪；不用 LLM 評估 LLM（避免成本翻倍）
+- [ ] **UI — Agent Cognitive Health Card（擴充 `agent-matrix-wall.tsx`）**：
+  - [ ] 每個 agent 卡片新增「Cognitive Health」區塊
+  - [ ] Semantic entropy sparkline（最近 20 輪的 entropy 趨勢，微型折線圖）
+  - [ ] Entropy 當前值 + 閾值 badge（✅ < 0.5 / ⚠️ 0.5-0.7 / 🔴 > 0.7）
+  - [ ] ReAct loop counter（loop N / max M，auto-escalate at max）
+  - [ ] 當 entropy > threshold 時卡片邊框變紅 + 脈衝動畫（FUI scan-line 風格）
+  - [ ] 點擊 entropy sparkline 展開「最近 5 輪 output 摘要」popover（方便人工判斷是否真的卡住）
+- [ ] **UI — ops-summary-panel 延伸**：加「Highest Entropy Agent」badge（即時顯示 entropy 最高的 agent 名 + 分數）
+- [ ] 整合測試：mock 5 輪相似 output → entropy > threshold → deadlock event 發出 + UI sparkline 變紅
+- [ ] 預估：**2.5 day**（backend 1.5d + UI 1d）
+
+### R3. Scratchpad Memory Offload + Auto-Continuation（心智卸載 + 自動續寫）(#309)
+- [ ] `backend/scratchpad.py`：per-agent persistent scratchpad file（`data/agents/<agent_id>/scratchpad.md`）
+- [ ] 自動寫入觸發：每 10 輪 ReAct 循環、每次 tool call 結束後、agent 切換子任務時
+- [ ] Scratchpad 格式：structured markdown（`## Current Task` / `## Progress` / `## Blockers` / `## Next Steps` / `## Context Summary`）
+- [ ] 加密 at-rest：沿用 `backend/secret_store.py` Fernet（scratchpad 可能含 code snippet + 設計決策）
+- [ ] Auto-continuation：`stop_reason=max_tokens` 偵測 → 自動發送「請從上次截斷處繼續輸出」→ 拼接結果 → 記 `token_continuation_total` metric
+- [ ] Scratchpad reload on resume：agent restart / crash recovery 時自動載入最新 scratchpad.md 到 context head
+- [ ] 清理策略：任務成功完成 → archive scratchpad（move to `data/agents/<agent_id>/archive/`）；失敗 → 保留供 debug
+- [ ] SSE event：`agent.scratchpad.saved`（agent_id / turn / size_bytes / sections_count）
+- [ ] Metrics：`scratchpad_saves_total` / `scratchpad_size_bytes` / `token_continuation_total`
+- [ ] **UI — Scratchpad Progress Indicator（擴充 `agent-matrix-wall.tsx` Health Card）**：
+  - [ ] Progress bar：scratchpad 持久化佔比（已寫入的 turn 數 / 總 turn 數）
+  - [ ] 最後寫入時間（relative，如「2 min ago」）
+  - [ ] 點擊展開 scratchpad 內容 preview（read-only，markdown rendered）
+  - [ ] 若 agent crash 且有 scratchpad → 卡片顯示「Recoverable ●」badge
+- [ ] **UI — Auto-Continuation Indicator**：在 agent message stream 中，auto-continued 的訊息標注「↩ auto-continued」小 tag
+- [ ] 整合測試：10 輪循環 → scratchpad 自動寫入；mock crash → reload scratchpad → agent 接續；max_tokens truncation → auto-continue → 拼接正確
+- [ ] 預估：**3 day**（backend 2d + UI 1d）
+
+### R4. CATC State Snapshot 斷點續傳 (#310)
+- [ ] O0 `TaskCard` dataclass 擴充：新增 `state_snapshot: Optional[str]`（BASE64 encoded JSON，含 scratchpad + tool_call_history + partial_output + turn_counter）
+- [ ] Worker claim 任務時：若 `state_snapshot` 存在 → hot-resume from checkpoint（跳過已完成的 tool calls），否則 cold-start
+- [ ] Snapshot 生成時機：scratchpad save 時同步生成 snapshot → 寫入 CATC payload → 存入 queue backend
+- [ ] Snapshot 大小限制：≤ 512 KiB（超過則只保留最新 scratchpad + turn_counter，drop tool_call_history）
+- [ ] 安全：snapshot 加密 at-rest + 簽名防竄改（HMAC-SHA256 with CATC-specific key）
+- [ ] **UI — Checkpoint Timeline（擴充 `run-history-panel.tsx`）**：
+  - [ ] 任務詳情頁新增水平時間軸，顯示所有 checkpoint 點（● = scratchpad save / ✕ = crash / ▶ = resume）
+  - [ ] 每個 checkpoint 可點擊查看當時的 scratchpad 內容
+  - [ ] crash → resume 之間用虛線連接，標註「resumed from checkpoint #N」
+  - [ ] Checkpoint 間距顏色編碼：綠色 = 正常進展、黃色 = entropy 升高中、紅色 = 接近 deadlock
+  - [ ] Timeline 末尾顯示「total recovered time」（= 從 checkpoint resume 省下的時間 vs. cold-restart 的預估時間）
+- [ ] 整合測試：task running → 3 checkpoints → crash → worker re-claim → hot-resume from checkpoint#3 → task continues → done；checkpoint timeline UI 正確顯示 5 個點
+- [ ] 預估：**2.5 day**（backend 1.5d + UI 1d）
+
+### R5. Active-Standby HA 具體方案（Keepalived + Redis M-S）(#311)
+- [ ] `deploy/ha/keepalived.conf.example`：VRRP instance 配置範本（VIP / priority / auth / health check script）
+- [ ] `deploy/ha/redis-sentinel.conf.example`：Redis Sentinel 3-node 最小配置
+- [ ] Health check script `scripts/ha_health_check.sh`：檢查 FastAPI `/healthz` + Redis ping + queue depth；失敗 → Keepalived 降權 → failover
+- [ ] Consul leader election 替代方案（雲端 VPC 無 L2 multicast 時）：`backend/ha_leader.py` 用 Consul session + KV lock
+- [ ] Failover runbook `docs/ops/ha_failover_runbook.md`：手動 / 自動 failover 步驟、驗證清單、回切流程
+- [ ] Redis replication lag monitoring：SSE event `ha.redis_lag`（lag_bytes / lag_seconds）
+- [ ] 預估：**2 day**
+
+### R6. Serverless PaaS Adapter（Fargate / Cloud Run）(#312)
+- [ ] `backend/deploy/fargate.py`：AWS ECS + Fargate task definition 生成 + 佈署
+- [ ] `backend/deploy/cloud_run.py`：GCP Cloud Run service 生成 + 佈署
+- [ ] 統一 `PaaSAdapter` interface：`provision()` / `deploy(image_uri)` / `scale(min, max)` / `teardown()` / `get_url()`
+- [ ] Cold-start mitigation：pre-warm（Fargate 的 minimum task count / Cloud Run 的 min-instances）
+- [ ] Task-queue bridge：PaaS container 啟動後自動連接 O2 Message Queue，pull CATC 任務
+- [ ] Scale-to-zero 支援：idle timeout 後 PaaS 自動縮 → queue consumer 斷線 → 新任務入隊時自動 scale-up
+- [ ] 成本估算 helper：依 vCPU/hour + memory/hour 計算 burst 成本 vs. always-on 成本
+- [ ] 整合測試：mock Fargate API → provision + deploy + scale + teardown 四步流程
+- [ ] 預估：**2.5 day**
+
+### R7. Deployment Topology View UI + Bootstrap Wizard Extension (#313)
+- [ ] **UI — Deployment Topology View（新元件 `deployment-topology.tsx`）**：
+  - [ ] 偵測當前部署模式（Single Node / Active-Standby / K8s / PaaS）——呼叫 `GET /api/v1/system/deploy-topology`
+  - [ ] Single Node 模式：顯示單機 CPU / Mem / Disk 使用率 + Docker container list + cgroup 狀態
+  - [ ] Active-Standby 模式：雙節點拓撲圖（primary / standby）+ VIP 歸屬 + Redis replication lag + heartbeat latency
+  - [ ] K8s 模式：pod count / ReplicaSet status / node health / HPA current/target replicas
+  - [ ] PaaS 模式：service URL / active instances / cold-start p99 / scale-to-zero countdown
+  - [ ] 各模式共有底部列：queue depth / DLQ count / active workers / last failover event
+  - [ ] 模式切換建議：依當前 load 自動建議升級路徑（Single → HA / HA → K8s），呈現為 info banner
+- [ ] `backend/routers/system.py` 新增 `GET /api/v1/system/deploy-topology`：回傳 deploy mode + 各模式特定指標
+- [ ] **Bootstrap wizard（L 系列）extension**：L7 `detect_deploy_mode()` 延伸為可選 HA / K8s / PaaS 配置步驟
+- [ ] **UI — integration-settings 延伸**：Settings modal 新增 Deployment 區塊，內嵌 Topology View + 「Upgrade Plan」one-click trigger
+- [ ] Deployment runbook `docs/ops/deployment_hierarchy.md`：4 方案完整對比表 + 升級步驟 + 回切流程
+- [ ] 預估：**2.5 day**（backend 1d + UI 1.5d）
+
+### R8. Idempotent Retry 正規化（worktree-based，覆寫白皮書 §三.2 的 git clean 設計）(#314)
+- [ ] **設計決策（明確覆寫白皮書）**：不使用 `git clean -fd` + `git checkout .`；改用「discard current worktree + `git worktree add` create fresh worktree from anchor commit」
+- [ ] Anchor commit 機制：task 開始前記錄 `anchor_commit_sha`（寫入 CATC metadata）；retry 時 fresh worktree 從此 SHA 分支
+- [ ] WorkspaceManager 擴充：`discard_and_recreate(agent_id, anchor_sha)` → 刪除舊 worktree dir（安全刪除，先 `git worktree remove --force`）→ 新建 worktree → 回傳新 path
+- [ ] Audit trail：每次 retry 寫入 `audit_log`（`retry.worktree_recreated`，附 old_worktree_path / anchor_sha / reason）
+- [ ] 既有 startup cleanup 延伸：啟動時掃描 orphan worktree（`git worktree list` 中不屬於任何 active agent 的 worktree）→ 自動 remove + log
+- [ ] 整合測試：task fail → retry → old worktree 消失 + new worktree 乾淨 + anchor_sha 正確 + audit logged
+- [ ] 預估：**1 day**
+
+### R9. P1/P2/P3 ↔ L1-L4 通報統一 + E2E Watchdog Integration Tests (#315)
+- [ ] 不新起 P1/P2/P3 分級——改為 L1-L4 notification tier 上掛 `severity` tag：
+  - [ ] P1（系統崩潰）→ L4 PagerDuty + L3 Jira（severity: P1）+ L2 Slack/Discord @everyone + SMS
+  - [ ] P2（任務卡死）→ L3 Jira（severity: P2, label: blocked）+ L2 ChatOps interactive（R1）
+  - [ ] P3（自動修復中）→ L1 log + email 匯總報告
+- [ ] `backend/notifications.py` 擴充：`send_notification(tier, severity, payload, interactive=False)` — interactive=True 時走 R1 ChatOps bridge
+- [ ] 統一 event taxonomy：`watchdog.p1_system_down` / `watchdog.p2_cognitive_deadlock` / `watchdog.p3_auto_recovery` → 各自映射 L1-L4 + severity tag
+- [ ] E2E watchdog integration tests（headless，不需真 Discord）：
+  - [ ] Agent 語意空轉 → R2 entropy alert → R9 P2 mapping → L2 ChatOps notification（mock）→ R1 inject hint → agent resumes
+  - [ ] PEP 攔截 prod-deploy → R0 HOLD → R9 P2 mapping → L2 ChatOps → R1 approve → PEP release → tool executes
+  - [ ] Agent crash → R4 checkpoint → R8 worktree recreate → R3 scratchpad reload → agent hot-resumes
+  - [ ] System OOM → M1 cgroup kill → R9 P1 mapping → L4 PagerDuty（mock）+ L3 Jira ticket auto-create
+- [ ] **UI — notification-center 延伸**：每條通知卡片新增 `severity` badge（P1 紅 / P2 橙 / P3 灰）；filter bar 加 severity dropdown
+- [ ] 預估：**2 day**（backend 1.5d + UI 0.5d）
+
+**Priority R 總預估**：**25.5 day**（backend 17.5d + UI 8d）（solo ~5 週，2-person team ~3 週）
+
+**建議切段交付**：
+1. **R0 + R8 + R9**（6.5d）— PEP Gateway + 安全重試 + 統一通報 + E2E watchdog tests。**最高優先——填防護缺口**
+2. **R1**（4d）— ChatOps Interactive。on-call UX 飛躍（含 ChatOps Mirror Panel）
+3. **R2 + R3**（5.5d）— Semantic entropy + scratchpad。agent 智能 + 持久化（含 Agent Health Card + Progress Indicator）
+4. **R4**（2.5d）— 斷點續傳。配合 R3 形成完整 crash-recovery 鏈（含 Checkpoint Timeline）
+5. **R5 + R6 + R7**（7d）— HA 部署方案 + Serverless PaaS + Deployment Topology View。Scale-out 準備
+
+---
+
 ## 🅛 Priority L — Bootstrap Wizard（一鍵從新機器到公網可用）
 
 > 背景：目前**無 UI 觸發的 OmniSight 自佈署功能**。`scripts/deploy.sh` 是 CLI-only（A1 待辦卡在 operator 手動執行）；`POST /api/v1/deploy` 是佈產品 binary 到 EVK 開發板，非佈 OmniSight 自身。`ensure_default_admin` 用 env 設密碼、Cloudflare Tunnel 4 步驟手動、LLM provider key 寫 `.env`、systemd unit 要 `sed` 填 USERNAME。首次安裝摩擦極大。
@@ -1842,6 +2019,13 @@ X0+X1+X2+X3 (平台基礎 + 多語言 build/package) — 5d
 → X5 (FastAPI pilot，dogfood) — 1.5d
 → X6-X9 (Go / Rust / Tauri / Spring Boot，隨 demand ship) — 4.5d
 
+### Phase 18 — Enterprise Watchdog & Disaster Recovery（~5 week，需 O0-O3 + G2 + G5 + I10 + L 前置）
+R0 + R8 + R9 (PEP Gateway + 安全重試 + 統一通報 + E2E watchdog tests) — 最高優先，填防護缺口（6.5d）
+→ R1 (ChatOps Interactive + Mirror Panel) — on-call UX 飛躍（4d）
+→ R2 + R3 (Semantic entropy + scratchpad + Agent Health Card + Progress Indicator) — agent 智能提升（5.5d）
+→ R4 (斷點續傳 + Checkpoint Timeline) — 完整 crash-recovery 鏈（2.5d）
+→ R5 + R6 + R7 (Active-Standby HA + Serverless PaaS + Deployment Topology View) — scale-out 準備（7d）
+
 ---
 
 ## Totals
@@ -1855,7 +2039,8 @@ X0+X1+X2+X3 (平台基礎 + 多語言 build/package) — 5d
 | W (web vertical) | 13.5 day |
 | P (mobile vertical) | 20 day |
 | X (software vertical) | 12 day |
+| R (watchdog + DR + UI) | 25.5 day |
 | META | 4-8 day |
-| **Total** | **~463.5-634.5 day** |
+| **Total** | **~489-660 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.
