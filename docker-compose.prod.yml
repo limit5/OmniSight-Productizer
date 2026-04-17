@@ -1,8 +1,32 @@
 version: "3.9"
 
-# Production compose — optimized images, named volumes, restart policy
+# Production compose — image-first deployment.
+#
+# Pre-built images live on GHCR (published by .github/workflows/docker-publish.yml).
+# `docker compose -f docker-compose.prod.yml up -d` will:
+#   1. Use the local image if already cached.
+#   2. Otherwise try to pull from `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-{backend,frontend}:${OMNISIGHT_IMAGE_TAG}`.
+#   3. Fall back to a local `docker build` from the Dockerfiles below
+#      (native Compose behavior when both `image:` and `build:` are set).
+#
+# Knobs (override via env / .env):
+#   OMNISIGHT_GHCR_NAMESPACE  — lowercase GitHub org/user handle that
+#                               owns the GHCR packages. Default
+#                               `your-org` is a placeholder — the pull
+#                               will fail and Compose will transparently
+#                               fall back to a local build, so first-run
+#                               works out of the box.
+#   OMNISIGHT_IMAGE_TAG       — image tag to pull. Default `latest`.
+#                               Pin to a `v*` release tag for
+#                               reproducible deploys.
+#
+# To force a rebuild (e.g. after editing a Dockerfile locally):
+#   docker compose -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.prod.yml up -d --build
 services:
   backend:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -28,6 +52,8 @@ services:
       retries: 3
 
   frontend:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: .
       dockerfile: Dockerfile.frontend

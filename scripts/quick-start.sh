@@ -472,8 +472,15 @@ fi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 step "Step 2: 啟動 Docker 容器"
 
-echo "📦 Building + starting containers (首次可能需要 5-10 分鐘)..."
-if ! docker compose -f "$COMPOSE_FILE" up -d --build 2>&1 | tee -a "$LOG_FILE" | tail -10; then
+echo "📦 啟動容器 (image-first：先嘗試 pull GHCR，失敗則 local build，首次 build 需 5-10 分鐘)..."
+# Image-first deployment (L10 #337): docker-compose.prod.yml declares
+# both `image:` (GHCR) and `build:`. Without `--build`, Compose pulls
+# from registry when possible and transparently falls back to a local
+# build only when the image isn't available — saving 5-10 min for
+# operators who have OMNISIGHT_GHCR_NAMESPACE pointed at a published
+# package. To force a rebuild from local sources, run manually:
+#   docker compose -f $COMPOSE_FILE up -d --build
+if ! docker compose -f "$COMPOSE_FILE" up -d 2>&1 | tee -a "$LOG_FILE" | tail -10; then
     err "Docker 容器啟動失敗。"
     echo ""
     echo -e "${BOLD}排查步驟：${NC}"
@@ -482,6 +489,7 @@ if ! docker compose -f "$COMPOSE_FILE" up -d --build 2>&1 | tee -a "$LOG_FILE" |
     echo "     - Dockerfile build 失敗（npm install / pip install 問題）"
     echo "     - Port 衝突（其他程序佔用 $BACKEND_PORT 或 $FRONTEND_PORT）"
     echo "     - 磁碟空間不足"
+    echo "     - GHCR pull 失敗且本地 build 也失敗 (檢查 OMNISIGHT_GHCR_NAMESPACE)"
     echo "  3. 修復後重新執行此腳本即可（支援冪等）"
     exit 1
 fi
@@ -1049,7 +1057,8 @@ echo -e "${BOLD}常用指令：${NC}"
 echo "  查看日誌：   docker compose -f ${COMPOSE_FILE} logs -f"
 echo "  停止服務：   docker compose -f ${COMPOSE_FILE} down"
 echo "  重啟服務：   docker compose -f ${COMPOSE_FILE} restart"
-echo "  升級部署：   git pull && docker compose -f ${COMPOSE_FILE} up -d --build"
+echo "  升級部署：   git pull && docker compose -f ${COMPOSE_FILE} pull && docker compose -f ${COMPOSE_FILE} up -d"
+echo "  強制本地 build： docker compose -f ${COMPOSE_FILE} up -d --build"
 echo "  清除重裝：   $0 --uninstall"
 echo ""
 echo -e "${BOLD}部署日誌：${NC} $LOG_FILE"
