@@ -267,4 +267,21 @@ export function useWorkspaceType(): WorkspaceType {
   return useWorkspaceContext().type
 }
 
+/**
+ * Non-throwing variant of `useWorkspaceContext` for components that
+ * may render either inside or outside a workspace subtree (e.g. the
+ * V0 #7 chat panel, which can be embedded in storybook / host screens
+ * with an explicit `workspaceType` prop).  Returns `null` when no
+ * provider is mounted; callers are expected to fall back to explicit
+ * props in that case.
+ */
+export function useOptionalWorkspaceContext(): WorkspaceContextValue | null {
+  return React.useContext(WorkspaceCtx)
+}
+
+/** Non-throwing variant of `useWorkspaceType`; mirrors the optional context. */
+export function useOptionalWorkspaceType(): WorkspaceType | null {
+  return useOptionalWorkspaceContext()?.type ?? null
+}
+
 export default WorkspaceProvider
