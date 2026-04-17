@@ -1,0 +1,23 @@
+{{/*
+G5 #5 (TODO row 1373) — Backend Service template.
+
+Mirrors deploy/k8s/20-service-backend.yaml. targetPort references the
+named container port `http` so changing containerPort in values.yaml
+needs zero edits here.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "omnisight.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "omnisight.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "omnisight.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP

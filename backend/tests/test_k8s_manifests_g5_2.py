@@ -599,20 +599,15 @@ class TestCharterAlignment:
 
 
 # ---------------------------------------------------------------------------
-# TestScopeDisciplineSiblingRows — rows 1372/1373/1374 own separate
-# manifests; G5 #2 must NOT silently drag them in. Row 1371 (PDB) has
-# now landed under its own contract file (test_k8s_pdb_g5_3.py) and is
-# referenced from G5 #2's apply-order test instead.
+# TestScopeDisciplineSiblingRows — rows 1372/1374 own separate
+# artefacts; G5 #2 must NOT silently drag them in. Row 1371 (PDB) and
+# row 1373 (Helm chart) have now landed under their own contract files
+# (test_k8s_pdb_g5_3.py, test_helm_chart_g5_5.py) and are referenced
+# from G5 #2's apply-order / wire-shape tests instead. The
+# `test_no_helm_chart_dir_yet` guard previously here was removed in the
+# G5 #5 commit per the explicit-migration pattern.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
-    def test_no_helm_chart_dir_yet(self) -> None:
-        # G5 #5 (row 1373) is the Helm chart. If it exists when G5 #2
-        # lands, the scope line between the rows has blurred.
-        chart_yaml = PROJECT_ROOT / "deploy" / "helm" / "omnisight" / "Chart.yaml"
-        assert not chart_yaml.exists(), (
-            "Helm chart must not land here — G5 #5 row 1373 owns it"
-        )
-
     def test_no_nomad_or_swarm_manifests(self) -> None:
         # Charter §7.8 says Nomad / Swarm are out-of-scope. If a
         # sibling directory appears, re-open the decision.

@@ -1,0 +1,50 @@
+# G5 #5 (TODO row 1373) — Staging environment overrides.
+#
+# Charter §7.5: staging overrides live HERE, not as inline conditionals
+# in values.yaml. Keeps `helm diff upgrade` between environments
+# readable.
+#
+# Apply:
+#   helm upgrade --install omnisight deploy/helm/omnisight \
+#     -f deploy/helm/omnisight/values.yaml \
+#     -f deploy/helm/omnisight/values-staging.yaml \
+#     --set image.repository=ghcr.io/<ns>/omnisight-backend \
+#     --set image.tag=<staging-sha>
+
+# Smaller resource ask + lower autoscale ceiling for staging; we still
+# keep replicaCount=2 / minReplicas=2 because HA-02 is the contract
+# under test in staging, not just prod.
+
+image:
+  tag: staging
+
+ingress:
+  host: staging.omnisight.example.com
+  # Same ingress class as prod — staging only differs in scale, not
+  # traffic shape. If staging ever needs a different controller, that
+  # is a fresh decision (don't silently drift here).
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+# PDB on in staging too — we test the contract HERE first, not in prod.
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Pod annotations: scrape staging pods at a faster cadence so we catch
+# deploy-induced regressions before they ride the train into prod.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: /metrics

@@ -1,0 +1,215 @@
+# G5 #5 (TODO row 1373) — Default values for the omnisight chart.
+#
+# Defaults reproduce the deploy/k8s/*.yaml manifests byte-faithfully so
+# that `helm template . | kubectl diff -f deploy/k8s/` is a no-op for the
+# fields the chart owns. Environment-specific overrides live in
+# values-staging.yaml and values-prod.yaml — never inline conditionals
+# here (charter §7.5).
+
+# ---------------------------------------------------------------------------
+# Naming
+# ---------------------------------------------------------------------------
+# nameOverride / fullnameOverride map to the standard Helm naming pattern.
+# Empty string means "use chart name" (`omnisight`) — same as the plain
+# manifests' `omnisight-backend` once the component suffix is appended.
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+# By default the chart renders a Namespace doc so `helm install` against
+# a fresh cluster works. Operators that already manage the namespace
+# (e.g. via Argo CD `syncOptions: CreateNamespace=true`, or `kubectl
+# create ns`) can flip createNamespace=false to skip it without losing
+# the rest of the bundle.
+namespace: omnisight
+createNamespace: true
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+# `your-org` is an obvious placeholder — operators MUST override at
+# install time:
+#   helm install omnisight . \
+#     --set image.repository=ghcr.io/<your-namespace>/omnisight-backend \
+#     --set image.tag=<git-sha-or-tag>
+image:
+  repository: ghcr.io/your-org/omnisight-backend
+  tag: latest
+  pullPolicy: IfNotPresent
+  # Optional imagePullSecrets — list of objectRefs, e.g.
+  # pullSecrets: [{name: ghcr-pull}].
+  pullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Workload
+# ---------------------------------------------------------------------------
+# replicaCount is the static replica baseline (HA-02). When autoscaling
+# is enabled, HPA owns the live replica count; this value still controls
+# the initial Deployment.spec.replicas at install time and the
+# autoscaling.minReplicas floor.
+replicaCount: 2
+
+# Charter §7.4 — RollingUpdate maxUnavailable=0, maxSurge=1 is the only
+# configuration that delivers zero-downtime rollouts on a 2-replica
+# backend AND matches the G2 rolling-restart semantics already shipped
+# under deploy/blue-green/.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+revisionHistoryLimit: 5
+
+# Container resource requests/limits. CPU REQUEST is REQUIRED for
+# HPA CPU utilisation — without it HPA cannot compute a percentage and
+# silently stays at minReplicas.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+# Container port — named `http` so Service/Ingress/HPA/probe references
+# resolve via name (one source of truth) and operators can change the
+# numeric port without churning every manifest.
+containerPort: 8000
+
+# Optional extra env vars (list of {name, value} or full envvar objects).
+extraEnv: []
+
+# nodeSelector / tolerations / affinity / topologySpreadConstraints —
+# defaults are empty; operators tune per cluster.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# ---------------------------------------------------------------------------
+# Probes (charter §7.3 — wire to G1 /readyz and /livez via httpGet)
+# ---------------------------------------------------------------------------
+# Timing windows are calibrated against the G1 graceful-shutdown budget:
+#   * readiness drain window = failureThreshold * periodSeconds = 15s
+#     (< 30s G1 Retry-After, so LB can pull replicas before in-flight
+#     requests time out)
+#   * liveness restart window = failureThreshold * periodSeconds = 30s
+#     (>= 30s G1 shutdown budget, so K8s never restarts a healthy-but-
+#     draining pod)
+# DO NOT change these without re-reading test_k8s_probes_g5_4.py — the
+# contract test enforces both bounds.
+probes:
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+    successThreshold: 1
+  liveness:
+    path: /livez
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+    successThreshold: 1
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  # targetPort intentionally references the named container port `http`
+  # — see containerPort above for why.
+  targetPort: http
+
+# ---------------------------------------------------------------------------
+# Ingress (charter §7.6 — Gateway-API is an EXPLICIT toggle, not silent
+# auto-detect)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  host: omnisight.example.com
+  className: nginx
+  path: /
+  pathType: Prefix
+  annotations: {}
+  tls: []
+  # Gateway-API toggle. When enabled, the chart renders a
+  # gateway.networking.k8s.io/v1 HTTPRoute targeting the parentRef
+  # below INSTEAD of a networking.k8s.io/v1 Ingress. Choosing this is
+  # explicit so cluster-class drift never produces silent surprises.
+  gatewayApi:
+    enabled: false
+    parentRefs: []
+      # - name: omnisight-gateway
+      #   namespace: gateway-system
+      #   sectionName: https
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudget (charter §7.2)
+# ---------------------------------------------------------------------------
+# pdb.enabled is the one-template flip that the G5 #3 PDB historical
+# note prescribes. minAvailable=1 is the directly-readable HA-02 floor —
+# survives future replicas bumps without silently weakening the contract
+# (which `maxUnavailable` percentages do).
+pdb:
+  enabled: true
+  minAvailable: 1
+  # Mutually exclusive with minAvailable. If you set this, set
+  # minAvailable to null. The chart asserts only one is set.
+  maxUnavailable: null
+
+# ---------------------------------------------------------------------------
+# HorizontalPodAutoscaler (charter §7.4)
+# ---------------------------------------------------------------------------
+# autoscaling/v2 — v2beta2 was removed in K8s 1.26 and is not on the
+# wire in 1.29. targetCPUUtilizationPercentage is the literal the G5
+# TODO row asks for.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # Optional memory target. Off by default — G7 capacity planning will
+  # decide whether to enable it.
+  targetMemoryUtilizationPercentage: null
+
+# ---------------------------------------------------------------------------
+# Persistence (charter §8 open question — no default storageClassName)
+# ---------------------------------------------------------------------------
+# The backend is stateless today; persistence stays disabled by default
+# and stays orchestrator-agnostic. When G7 introduces stateful
+# components, operators set storageClassName per their cluster's
+# StorageClass without the chart pre-deciding.
+persistence:
+  enabled: false
+  storageClassName: ""
+  size: 10Gi
+  accessModes:
+    - ReadWriteOnce
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Pod-level security context (kept minimal here — O10 PodSecurity
+# admission baseline owns enforcement)
+# ---------------------------------------------------------------------------
+podSecurityContext: {}
+securityContext: {}
+
+# ---------------------------------------------------------------------------
+# Pod annotations / labels — for observability operators (e.g.
+# Prometheus annotations on pods scraped by the operator).
+# ---------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}

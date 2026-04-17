@@ -1,0 +1,43 @@
+{{/*
+G5 #5 (TODO row 1373) — HorizontalPodAutoscaler template.
+
+Charter §7.4 — apiVersion: autoscaling/v2 (NOT autoscaling/v2beta2,
+removed in K8s 1.26). Default targetCPUUtilizationPercentage: 70 is
+the literal the G5 TODO row asks for.
+
+minReplicas matches the Deployment baseline (HA-02 floor) — never
+scales below 2.
+*/}}
+{{- if .Values.autoscaling.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "omnisight.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "omnisight.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "omnisight.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end -}}

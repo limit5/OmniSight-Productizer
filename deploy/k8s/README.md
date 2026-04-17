@@ -68,12 +68,18 @@ this against each PR.
 
 ## Scope — what this bundle does NOT include
 
-- Helm chart templates + `values-staging.yaml` / `values-prod.yaml` → G5 #5 row 1373.
 - CI smoke workflow + kind harness → G5 #6 row 1374.
 - `deploy/nomad/` or `deploy/swarm/` — out of scope per charter §7.8.
 
 `PodDisruptionBudget` (G5 #3 row 1371) is part of the bundle —
 ships as `15-pdb-backend.yaml` with `policy/v1` and `minAvailable: 1`.
+
+The Helm chart (G5 #5 row 1373) ships under `deploy/helm/omnisight/`
+with split `values-staging.yaml` / `values-prod.yaml`. Charter §7.5 —
+two surfaces, one truth: the chart is intended to render byte-faithfully
+to the manifests above for the fields the chart owns, so
+`helm template … | kubectl diff -f - -f deploy/k8s/` is a no-op for
+those fields.
 
 Readiness / liveness probes (G5 #4 row 1372) are wired into the
 Deployment's backend container: `httpGet` against the G1 `/readyz`

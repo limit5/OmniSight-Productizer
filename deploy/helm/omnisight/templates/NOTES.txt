@@ -1,0 +1,30 @@
+G5 #5 (TODO row 1373) — OmniSight chart {{ .Chart.Version }} (app {{ .Chart.AppVersion }})
+Charter: docs/ops/orchestration_selection.md §7
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Values.namespace }}
+Image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+
+Replicas (Deployment baseline): {{ .Values.replicaCount }}
+Autoscaling: {{ if .Values.autoscaling.enabled }}min={{ .Values.autoscaling.minReplicas }} max={{ .Values.autoscaling.maxReplicas }} cpu={{ .Values.autoscaling.targetCPUUtilizationPercentage }}%{{ else }}disabled{{ end }}
+PodDisruptionBudget: {{ if .Values.pdb.enabled }}enabled (minAvailable={{ .Values.pdb.minAvailable }}){{ else }}disabled{{ end }}
+
+Ingress:
+{{- if not .Values.ingress.enabled }}
+  disabled (operators may run a separate Ingress manager)
+{{- else if .Values.ingress.gatewayApi.enabled }}
+  Gateway-API HTTPRoute on host {{ .Values.ingress.host }}
+{{- else }}
+  networking.k8s.io/v1 Ingress (class {{ .Values.ingress.className }}) on host {{ .Values.ingress.host }}
+{{- end }}
+
+Probes (G1 endpoints):
+  readiness: {{ .Values.probes.readiness.path }} (drain window {{ mul .Values.probes.readiness.failureThreshold .Values.probes.readiness.periodSeconds }}s — must stay < 30s G1 Retry-After)
+  liveness:  {{ .Values.probes.liveness.path }} (restart window {{ mul .Values.probes.liveness.failureThreshold .Values.probes.liveness.periodSeconds }}s — must stay >= 30s G1 shutdown budget)
+
+To verify the rollout:
+  kubectl -n {{ .Values.namespace }} rollout status deploy/{{ include "omnisight.fullname" . }} --timeout=120s
+  kubectl -n {{ .Values.namespace }} get pdb,hpa,svc,ingress -l app.kubernetes.io/name={{ include "omnisight.fullname" . }}
+
+If `image.tag` is `latest`, K8s cannot tell new builds from old at
+pull-time — pin a real tag for production releases.

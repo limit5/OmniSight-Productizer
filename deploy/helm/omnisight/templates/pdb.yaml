@@ -1,0 +1,33 @@
+{{/*
+G5 #5 (TODO row 1373) — PodDisruptionBudget template.
+
+Charter §7.2 — apiVersion: policy/v1 (NOT policy/v1beta1, removed in
+K8s 1.25). Toggle `pdb.enabled` is the one-template flip the G5 #3
+historical note prescribed.
+
+minAvailable / maxUnavailable are mutually exclusive in the K8s API.
+The chart enforces this at render time with a `fail` so operators
+notice the conflict immediately rather than at apply time.
+*/}}
+{{- if .Values.pdb.enabled -}}
+{{- if and (ne (toString .Values.pdb.minAvailable) "<nil>") (ne (toString .Values.pdb.maxUnavailable) "<nil>") -}}
+{{- fail "pdb.minAvailable and pdb.maxUnavailable are mutually exclusive — set one to null" -}}
+{{- end -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "omnisight.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "omnisight.labels" . | nindent 4 }}
+spec:
+  {{- if ne (toString .Values.pdb.minAvailable) "<nil>" }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  {{- if ne (toString .Values.pdb.maxUnavailable) "<nil>" }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "omnisight.selectorLabels" . | nindent 6 }}
+{{- end -}}

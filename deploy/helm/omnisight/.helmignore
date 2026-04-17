@@ -1,0 +1,19 @@
+# G5 #5 — Patterns to ignore when packaging the chart.
+# Standard helm-create defaults plus a few project-specific entries.
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.hg/
+.svn/
+.idea/
+.vscode/
+*.swp
+*.tmp
+*.bak
+*.orig
+*.rej
+*.tgz
+.helmignore
+OWNERS
+README.md.tmpl

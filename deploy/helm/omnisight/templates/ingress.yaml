@@ -1,0 +1,66 @@
+{{/*
+G5 #5 (TODO row 1373) — Ingress / HTTPRoute template.
+
+Charter §7.6: Gateway-API selection is an EXPLICIT toggle
+(`ingress.gatewayApi.enabled`) — the chart never silently auto-detects
+cluster capability. Operators flip the toggle, ingest the resulting
+diff, and ship it.
+
+When ingress.enabled=false the chart emits nothing (operators may run a
+separate Ingress manager). When enabled, exactly one of:
+  * Gateway-API HTTPRoute  (gatewayApi.enabled=true)
+  * networking.k8s.io/v1 Ingress (default)
+*/}}
+{{- if .Values.ingress.enabled -}}
+{{- if .Values.ingress.gatewayApi.enabled -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "omnisight.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "omnisight.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.ingress.gatewayApi.parentRefs | nindent 4 }}
+  hostnames:
+    - {{ .Values.ingress.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.ingress.path | quote }}
+      backendRefs:
+        - name: {{ include "omnisight.fullname" . }}
+          port: {{ .Values.service.port }}
+{{- else -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "omnisight.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "omnisight.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "omnisight.fullname" . }}
+                port:
+                  name: http
+{{- end -}}
+{{- end -}}

@@ -379,13 +379,9 @@ class TestTodoRowMarker:
 # silently dragging them in.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
-    def test_no_helm_chart_dir_yet(self) -> None:
-        # G5 #5 (row 1373) is the Helm chart. If it lands when G5 #3
-        # ships, the scope line between the rows has blurred.
-        chart_yaml = PROJECT_ROOT / "deploy" / "helm" / "omnisight" / "Chart.yaml"
-        assert not chart_yaml.exists(), (
-            "Helm chart must not land here — G5 #5 row 1373 owns it"
-        )
+    # `test_no_helm_chart_dir_yet` previously here was removed in the
+    # G5 #5 commit per the explicit-migration pattern (the Helm chart is
+    # now pinned by test_helm_chart_g5_5.py).
 
     def test_no_nomad_or_swarm_manifests(self) -> None:
         # Charter §7.8 — Nomad / Swarm are out-of-scope for G5.

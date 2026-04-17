@@ -1,0 +1,69 @@
+# G5 #5 (TODO row 1373) — Production environment overrides.
+#
+# Charter §7.5: prod overrides live HERE, not as inline conditionals
+# in values.yaml. Keeps `helm diff upgrade` between environments
+# readable.
+#
+# Apply:
+#   helm upgrade --install omnisight deploy/helm/omnisight \
+#     -f deploy/helm/omnisight/values.yaml \
+#     -f deploy/helm/omnisight/values-prod.yaml \
+#     --set image.repository=ghcr.io/<ns>/omnisight-backend \
+#     --set image.tag=<release-tag>
+
+# Production sizing — heavier resource ask, larger autoscale ceiling.
+
+image:
+  # Operators MUST pin a real tag at deploy time. `latest` is rejected
+  # by the chart's NOTES.txt warning when `--set image.tag=latest` lands
+  # against a -prod values file (operational discipline, not chart
+  # enforcement).
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+ingress:
+  host: omnisight.example.com
+  className: nginx
+  # TLS termination handled by the cluster's ingress controller +
+  # cert-manager; operators set this list from outside the chart so
+  # secrets don't end up in chart values.
+  tls: []
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 2Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# Topology spread: prefer pods on different nodes — survives single-node
+# loss without dropping below HA-02. This is staging's missing piece;
+# we accept the deploy-time complexity in prod for the resilience.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: omnisight-backend
+        app.kubernetes.io/component: backend
+
+# Prod scrape config — the staging pattern is fine here too; if a
+# Prometheus Operator ServiceMonitor lands later (G7), we drop these
+# annotations in favour of the operator-managed selector.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: /metrics

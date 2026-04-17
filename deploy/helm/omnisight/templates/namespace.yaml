@@ -1,0 +1,16 @@
+{{/*
+G5 #5 (TODO row 1373) — Namespace template.
+
+Mirrors deploy/k8s/00-namespace.yaml. Gated by .Values.createNamespace
+so operators that already manage the namespace externally (Argo CD
+sync option, GitOps tooling, plain `kubectl create ns`) can flip it
+off without losing the rest of the chart.
+*/}}
+{{- if .Values.createNamespace -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    {{- include "omnisight.labels" . | nindent 4 }}
+{{- end -}}

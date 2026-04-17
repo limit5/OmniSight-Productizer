@@ -1,0 +1,46 @@
+# G5 #5 (TODO row 1373) — Helm chart for OmniSight backend.
+#
+# Charter: docs/ops/orchestration_selection.md §7.1, §7.5.
+#   * Two surfaces, one truth — this chart MUST render to the same K8s
+#     resources that deploy/k8s/*.yaml ships, just templated for
+#     release-managed workflows.
+#   * Environment overrides split into values-staging.yaml /
+#     values-prod.yaml — no mega-file with conditionals.
+#
+# Bumped on every breaking change to a templated field that operators may
+# rely on. Keeps `helm diff upgrade` honest.
+apiVersion: v2
+name: omnisight
+description: OmniSight multi-agent dev command-center for embedded AI cameras (G5 HA-05 chart).
+type: application
+
+# Chart version (this chart's release versioning) — SemVer, bump on
+# template-shape changes. The image tag is set independently via
+# `image.tag` so chart bumps don't force image bumps and vice versa.
+version: 0.1.0
+
+# appVersion mirrors the OmniSight backend release. Operators can
+# override at deploy time via `--set image.tag=…` without touching the
+# chart.
+appVersion: "0.1.0"
+
+kubeVersion: ">= 1.29.0-0"
+
+home: https://github.com/your-org/omnisight
+sources:
+  - https://github.com/your-org/omnisight
+
+keywords:
+  - omnisight
+  - ha
+  - kubernetes
+  - g5
+
+maintainers:
+  - name: OmniSight Platform
+    email: platform@omnisight.example.com
+
+annotations:
+  # Cross-reference to the charter so `helm show chart` surfaces it.
+  ops.omnisight.io/charter: docs/ops/orchestration_selection.md
+  ops.omnisight.io/g5-row: "1373"
