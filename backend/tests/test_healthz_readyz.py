@@ -59,6 +59,18 @@ async def test_healthz_prefixed_delegates_to_same_handler():
     assert a == b
 
 
+@pytest.mark.asyncio
+async def test_livez_alias_matches_healthz_payload():
+    """``/livez`` is the K8s-charter spelling of liveness (G5 #4). It
+    must delegate to the same handler as ``/healthz`` so the two spellings
+    stay byte-identical — no drift between compose-era callers and K8s
+    probes."""
+    a = await health_mod.healthz()
+    b = await health_mod.livez()
+    c = await health_mod.livez_prefixed()
+    assert a == b == c
+
+
 # ──────────────────────────────────────────────────────────────
 #  Unit — individual readyz checks
 # ──────────────────────────────────────────────────────────────
@@ -151,6 +163,38 @@ async def test_healthz_prefixed_200(client):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_livez_root_200(client):
+    """``/livez`` (root) must answer 200 with the same liveness payload
+    as ``/healthz`` — K8s probes target the ``/livez`` spelling per the
+    G5 #4 charter commitment."""
+    r = await client.get("/livez", follow_redirects=False)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["live"] is True
+
+
+@pytest.mark.asyncio
+async def test_livez_prefixed_200(client):
+    """``/api/v1/livez`` mirrors the root-level K8s-probe path."""
+    r = await client.get("/api/v1/livez", follow_redirects=False)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["live"] is True
+
+
+@pytest.mark.asyncio
+async def test_livez_stays_200_while_draining(client):
+    """Liveness must keep answering 200 during graceful shutdown at the
+    K8s-probe spelling too — otherwise K8s would restart draining pods
+    instead of letting them finish in-flight work."""
+    lifecycle.coordinator.begin_draining()
+    r = await client.get("/livez", follow_redirects=False)
+    assert r.status_code == 200
 
 
 @pytest.mark.asyncio

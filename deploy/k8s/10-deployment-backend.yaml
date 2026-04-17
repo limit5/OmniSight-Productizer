@@ -8,9 +8,8 @@
 #     2-replica backend and matches the G2 rolling-restart semantics
 #     already in deploy/blue-green/.
 #
-# Probes are wired in G5 #4 (TODO row 1372) — intentionally not added
-# here so that row owns the /readyz + /livez httpGet contract as a
-# single focused change.
+# Probes wired in G5 #4 (TODO row 1372) — httpGet to the G1 endpoints
+# (`/livez` for liveness, `/readyz` for readiness) per charter §7.3.
 #
 # The PodDisruptionBudget (minAvailable=1) lands in G5 #3 (TODO row
 # 1371) as a separate manifest.
@@ -71,3 +70,47 @@ spec:
               memory: 512Mi
             limits:
               memory: 1Gi
+          # G5 #4 (TODO row 1372) — probes wire to the G1 endpoints per
+          # charter §7.3. httpGet is intentional: the G1 endpoint is
+          # HTTP (not exec, not tcpSocket).
+          #
+          # `/livez` is a byte-identical alias of `/healthz` that G1
+          # ships specifically so the K8s Deployment can follow the
+          # charter spelling without having to choose between two
+          # existing paths. Both go through `health_mod.healthz`, so
+          # this wiring hits the G1 handler with zero drift.
+          #
+          # `/readyz` evaluates DB + migrations + provider chain and
+          # starts returning 503 the moment the graceful-shutdown gate
+          # flips to draining — that's the mechanism the LB uses to
+          # take a replica out of rotation ahead of the 30s in-flight
+          # budget. K8s sees those 503s and marks the pod NotReady
+          # after `failureThreshold` consecutive failures at
+          # `periodSeconds` cadence (3 × 5s = 15s under the 30s budget).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          # Liveness is process-dead-detection, not ready-to-serve. We
+          # use a longer period + longer initial delay than readiness:
+          # restarting a cold-starting pod is the failure mode we want
+          # to avoid, and liveness has no I/O so false negatives only
+          # happen when the event loop is truly stuck. failureThreshold
+          # 3 × periodSeconds 10 = 30s before restart, which matches
+          # the G1 graceful-shutdown grace budget.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1

@@ -225,13 +225,13 @@ app.add_middleware(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _PASSWORD_CHANGE_EXEMPT = {
     "/auth/change-password", "/auth/login", "/auth/logout",
-    "/auth/whoami", "/health", "/healthz", "/readyz",
+    "/auth/whoami", "/health", "/healthz", "/livez", "/readyz",
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  I9 — Per-IP / per-user / per-tenant rate limiting
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_RATE_LIMIT_EXEMPT = {"/health", "/healthz", "/readyz", "/auth/login", "/auth/logout"}
+_RATE_LIMIT_EXEMPT = {"/health", "/healthz", "/livez", "/readyz", "/auth/login", "/auth/logout"}
 
 
 @app.middleware("http")
@@ -459,7 +459,7 @@ async def _must_change_password_gate(request, call_next):
 # system).
 _BOOTSTRAP_EXEMPT_REL = {
     "/auth/login", "/auth/logout", "/auth/change-password",
-    "/healthz", "/health", "/readyz",
+    "/healthz", "/health", "/livez", "/readyz",
 }
 # ``/cloudflare/*`` is exempt for L4 Step 3 — the wizard's Cloudflare
 # tunnel embed (B12 wizard) calls these endpoints before login. The
@@ -469,7 +469,7 @@ _BOOTSTRAP_EXEMPT_REL_PREFIXES = (
     "/cloudflare/",
 )
 _BOOTSTRAP_EXEMPT_RAW = {
-    "/", "/healthz", "/readyz", "/docs", "/openapi.json", "/redoc",
+    "/", "/healthz", "/livez", "/readyz", "/docs", "/openapi.json", "/redoc",
     "/favicon.ico", "/robots.txt",
 }
 _BOOTSTRAP_EXEMPT_RAW_PREFIXES = (
@@ -508,7 +508,7 @@ def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
 # (so it becomes the outermost layer) — we want to count even requests
 # that the bootstrap gate would otherwise redirect, AND we want 503s
 # to short-circuit before any other middleware does real work.
-_GRACEFUL_SHUTDOWN_EXEMPT_RAW = {"/healthz", "/health", "/readyz"}
+_GRACEFUL_SHUTDOWN_EXEMPT_RAW = {"/healthz", "/health", "/livez", "/readyz"}
 
 
 @app.middleware("http")

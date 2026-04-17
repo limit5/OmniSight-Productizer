@@ -26,7 +26,8 @@ that):
     * G5 #2 row 1370 — Deployment / Service / Ingress / HPA contracts
       live in ``test_k8s_manifests_g5_2.py``.
     * G5 #4 row 1372 — readiness / liveness probe wiring to G1
-      ``/readyz`` + ``/livez`` via httpGet.
+      ``/readyz`` + ``/livez`` via httpGet, now pinned in
+      ``test_k8s_probes_g5_4.py``.
     * G5 #5 row 1373 — Helm chart under ``deploy/helm/omnisight/``
       with ``pdb.enabled`` toggle.
     * G5 #6 row 1374 — delivery bundle + kind 1.29 CI smoke.
@@ -384,20 +385,6 @@ class TestScopeDisciplineSiblingRows:
         chart_yaml = PROJECT_ROOT / "deploy" / "helm" / "omnisight" / "Chart.yaml"
         assert not chart_yaml.exists(), (
             "Helm chart must not land here — G5 #5 row 1373 owns it"
-        )
-
-    def test_no_probes_in_deployment_yet(
-        self, deployment_doc: dict[str, Any]
-    ) -> None:
-        # G5 #4 (row 1372) owns readiness/liveness probes. If they show
-        # up in the Deployment when G5 #3 ships, that row has silently
-        # landed inside G5 #3 — visibility regression.
-        container = deployment_doc["spec"]["template"]["spec"]["containers"][0]
-        assert "readinessProbe" not in container, (
-            "readinessProbe belongs to G5 #4 row 1372, not G5 #3"
-        )
-        assert "livenessProbe" not in container, (
-            "livenessProbe belongs to G5 #4 row 1372, not G5 #3"
         )
 
     def test_no_nomad_or_swarm_manifests(self) -> None:

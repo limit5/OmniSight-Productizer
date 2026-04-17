@@ -5,7 +5,10 @@ Two distinct concerns, two distinct endpoints:
 * ``/healthz`` — **liveness**. Must return 200 fast whenever the Python
   process is alive enough to answer an HTTP request. No I/O. No DB.
   The orchestrator uses this to decide "is the process dead, should I
-  restart it?".
+  restart it?". ``/livez`` is a byte-identical alias — the charter
+  (``docs/ops/orchestration_selection.md`` §7.3) commits K8s probes to
+  the ``/livez`` spelling, so G5 #4 wires there; ``/healthz`` stays the
+  historical canonical path for compose / systemd / CF checks.
 
 * ``/readyz`` — **readiness**. Returns 200 only when the process is
   ready to serve traffic: DB is reachable, alembic migrations are at
@@ -79,6 +82,21 @@ async def healthz() -> dict:
 # only know about ``/api/v1/*`` still have a way to reach it.
 @router.get("/healthz")
 async def healthz_prefixed() -> dict:
+    return await healthz()
+
+
+# ``/livez`` is the K8s-charter spelling for the liveness probe
+# (``docs/ops/orchestration_selection.md`` §7.3 commits the Deployment
+# httpGet to ``/livez``). It delegates to the same handler so the two
+# paths return byte-identical payloads — the orchestrator sees one
+# contract regardless of which spelling it probes.
+@probe_router.get("/livez")
+async def livez() -> dict:
+    return await healthz()
+
+
+@router.get("/livez")
+async def livez_prefixed() -> dict:
     return await healthz()
 
 

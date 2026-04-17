@@ -68,10 +68,15 @@ this against each PR.
 
 ## Scope — what this bundle does NOT include
 
-- Readiness / liveness probes → G5 #4 row 1372.
 - Helm chart templates + `values-staging.yaml` / `values-prod.yaml` → G5 #5 row 1373.
 - CI smoke workflow + kind harness → G5 #6 row 1374.
 - `deploy/nomad/` or `deploy/swarm/` — out of scope per charter §7.8.
 
-`PodDisruptionBudget` (G5 #3 row 1371) is now part of the bundle —
+`PodDisruptionBudget` (G5 #3 row 1371) is part of the bundle —
 ships as `15-pdb-backend.yaml` with `policy/v1` and `minAvailable: 1`.
+
+Readiness / liveness probes (G5 #4 row 1372) are wired into the
+Deployment's backend container: `httpGet` against the G1 `/readyz`
+and `/livez` endpoints (both served on the named `http` port 8000).
+`/livez` is a byte-identical alias of `/healthz` added in G1 so the
+K8s probes can follow the charter spelling with zero payload drift.
