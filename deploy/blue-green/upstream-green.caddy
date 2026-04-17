@@ -1,0 +1,18 @@
+# G3 HA-03 blue-green — GREEN color upstream snippet (TODO row 1354).
+#
+# Symmetric twin of `upstream-blue.caddy` — routes to backend-b:8001
+# when active. See the sibling file for the full mechanism contract.
+#
+# IMPORTANT: the snippet name `active_upstream_rp` is identical across
+# both colors. The importer (main Caddyfile) always says
+# `import active_upstream_rp` and the active color is decided purely
+# by which file `active_upstream.caddy` symlinks to — no Caddyfile
+# edit is required when flipping colors.
+#
+# Env override:
+#   OMNISIGHT_UPSTREAM_B — override green's host:port
+#                          default: backend-b:8001
+
+(active_upstream_rp) {
+	reverse_proxy {$OMNISIGHT_UPSTREAM_B:backend-b:8001}
+}

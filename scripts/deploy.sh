@@ -284,25 +284,40 @@ rolling_restart_replica() {
 }
 
 if [[ "$STRATEGY" == "blue-green" ]]; then
-  # G3 HA-03 blue-green cutover landing pad (TODO row 1353).
+  # G3 HA-03 blue-green cutover landing pad (TODO rows 1353-1357).
   # The `--strategy blue-green` flag is accepted and validated here;
-  # the full ceremony (atomic active/standby upstream switch, pre-cut
-  # smoke on standby, 5-min observation window, 24 h rollback retention,
-  # `deploy.sh --rollback` companion, runbook) is tracked in the
-  # remaining G3 TODO rows (1354-1357) and will fill in this branch
-  # incrementally. Until those deliverables land we fail CLOSED with a
-  # distinct exit code (5) — *not* silently fall through to
-  # rolling/systemd — so an operator who types
-  # `scripts/deploy.sh --strategy blue-green prod v0.2.0` gets an
-  # explicit "not yet wired" signal instead of an accidental rolling
-  # restart dressed up as blue-green.
+  # row 1354 (atomic active/standby switch mechanism) ships the
+  # `scripts/bluegreen_switch.sh` primitive + `deploy/blue-green/`
+  # state dir, which we consult below to SHOW the operator the current
+  # state. The remaining ceremony (pre-cut smoke on standby, 5-min
+  # observation window, 24 h rollback retention, `deploy.sh --rollback`
+  # companion, runbook) is tracked in rows 1355-1357 and will fill in
+  # this branch incrementally. Until those deliverables land we fail
+  # CLOSED with a distinct exit code (5) — *not* silently fall through
+  # to rolling/systemd — so an operator who types `scripts/deploy.sh
+  # --strategy blue-green prod v0.2.0` gets an explicit "not yet fully
+  # wired" signal instead of an accidental rolling restart dressed up
+  # as blue-green. The atomic switch primitive is callable standalone
+  # (see status print below); deploy.sh itself does NOT invoke the
+  # cutover yet because there's no pre-cut smoke gate in front of it.
   log "blue-green mode: compose=$COMPOSE_FILE (active/standby cutover)"
   if [[ ! -f "$ROOT/$COMPOSE_FILE" ]]; then
     echo "[deploy] blue-green: compose file '$COMPOSE_FILE' missing — cannot select active/standby color" >&2
     exit 4
   fi
-  echo "[deploy] blue-green: --strategy flag accepted; ceremony wiring (standby smoke → atomic upstream switch → 5-min observe → 24 h rollback retention) is tracked in TODO rows 1354-1357 (G3 #2-#5). Aborting before any upstream switch so no half-applied cutover runs against $ENV." >&2
-  echo "[deploy] blue-green: next steps — implement the atomic symlink/upstream switch (row 1354), then wire pre-cut smoke via scripts/prod_smoke_test.py on the standby color (row 1355), then add deploy.sh --rollback (row 1356) and docs/ops/blue_green_runbook.md (row 1357)." >&2
+  # Row 1354: surface current blue-green state if the primitive is
+  # present. Missing state dir is NOT fatal (dev hosts that never
+  # initialized blue-green still get the fail-closed message) — we
+  # just skip the status print.
+  BLUEGREEN_SWITCH="$ROOT/scripts/bluegreen_switch.sh"
+  if [[ -x "$BLUEGREEN_SWITCH" && -d "$ROOT/deploy/blue-green" ]]; then
+    log "blue-green state (row 1354 primitive):"
+    if ! "$BLUEGREEN_SWITCH" status | sed 's/^/  /' >&2; then
+      echo "[deploy] WARN: bluegreen_switch.sh status failed — state may need reconciliation" >&2
+    fi
+  fi
+  echo "[deploy] blue-green: --strategy flag accepted; row 1354 atomic switch primitive is wired (scripts/bluegreen_switch.sh + deploy/blue-green/). Remaining ceremony (pre-cut smoke → atomic upstream switch → 5-min observe → 24 h rollback retention) is tracked in TODO rows 1355-1357. Aborting before any upstream switch so no half-applied cutover runs against $ENV." >&2
+  echo "[deploy] blue-green: next steps — wire pre-cut smoke via scripts/prod_smoke_test.py on the standby color (row 1355), then add deploy.sh --rollback (row 1356) and docs/ops/blue_green_runbook.md (row 1357). To switch colors manually TODAY: $BLUEGREEN_SWITCH switch" >&2
   exit 5
 elif [[ "$STRATEGY" == "rolling" ]]; then
   log "rolling mode: compose=$COMPOSE_FILE (backend-a:8000 → backend-b:8001)"

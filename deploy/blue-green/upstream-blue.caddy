@@ -1,0 +1,37 @@
+# G3 HA-03 blue-green — BLUE color upstream snippet (TODO row 1354).
+#
+# When `deploy/blue-green/active_upstream.caddy` symlinks to THIS file,
+# the running Caddyfile routes 100% of production traffic to the blue
+# replica (backend-a:8000). The green replica (backend-b:8001) remains
+# warm — still receiving `/readyz` probes — but takes zero client
+# traffic until an atomic cutover flips the symlink.
+#
+# Integration contract (wired in the row 1357 runbook):
+#   Caddyfile:  import deploy/blue-green/active_upstream.caddy
+#   Site block: reverse_proxy { import active_upstream_rp ... }
+# Or, more directly:
+#   Site block: import active_upstream_rp
+#
+# The snippet name `active_upstream_rp` is identical in the green
+# twin so the importer site block never needs to know which color is
+# active — that decision is delegated to the symlink.
+#
+# Atomic switch mechanism (row 1354 deliverable):
+#   scripts/bluegreen_switch.sh switch       # blue → green (or reverse)
+#   scripts/bluegreen_switch.sh set-active green
+#   scripts/bluegreen_switch.sh rollback     # flip back to the previous color
+#   scripts/bluegreen_switch.sh status       # print active/standby/symlink
+#
+# The switch uses a rename(2)-based atomic symlink swap: Caddy never
+# sees a half-written `active_upstream.caddy` — it's either fully blue
+# or fully green, no in-between. Pairs with `caddy reload` (zero-
+# downtime config reload) in the row 1357 runbook.
+#
+# Env override (mirrors the existing Caddyfile contract in
+# deploy/reverse-proxy/Caddyfile):
+#   OMNISIGHT_UPSTREAM_A — override blue's host:port
+#                          default: backend-a:8000
+
+(active_upstream_rp) {
+	reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000}
+}
