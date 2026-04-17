@@ -3,26 +3,30 @@
 Parallel to ``backend/web_compliance/spdx.py`` (which is npm-only) but
 covers every ecosystem an X-series software skill can ship:
 
-    ecosystem  │ preferred CLI                 │ fallback
-    ───────────┼───────────────────────────────┼────────────────────────
-    cargo      │ ``cargo-license`` (JSON)      │ walk ``Cargo.lock``
-    go         │ ``go-licenses report`` (CSV)  │ parse ``go.mod`` (*)
-    pip        │ ``pip-licenses`` (JSON)       │ walk site-packages
-    npm        │ ``license-checker`` (JSON)    │ walk ``node_modules``
+    ecosystem  │ preferred CLI                                 │ fallback
+    ───────────┼───────────────────────────────────────────────┼────────────────────────
+    cargo      │ ``cargo-license`` (JSON)                      │ walk ``Cargo.lock``
+    go         │ ``go-licenses report`` (CSV)                  │ parse ``go.mod`` (*)
+    pip        │ ``pip-licenses`` (JSON)                       │ walk site-packages
+    npm        │ ``license-checker`` (JSON)                    │ walk ``node_modules``
+    maven      │ ``mvn license:aggregate-download-licenses``   │ parse ``pom.xml`` (*)
 
 Each adapter is **optional** — missing tools make the adapter return
 ``source="mock"`` with no packages (caller treats as ``skip``).
 
 The public ``scan_licenses()`` auto-detects the ecosystem from marker
 files (``Cargo.toml`` / ``go.mod`` / ``requirements.txt`` / ``pyproject``
-/ ``package.json``) or takes an explicit ecosystem hint.
+/ ``package.json`` / ``pom.xml`` / ``build.gradle.kts``) or takes an
+explicit ecosystem hint.
 
 Denylist / allowlist semantics match W5 ``web_compliance/spdx.py`` so
 downstream audit consumers can compare bundle rows across verticals.
 
 (*) ``go.mod`` doesn't record licenses natively — the fallback only
-lists module ids with ``license="UNKNOWN"``. The gate still reports
-them under ``unknown`` rather than failing them blind.
+lists module ids with ``license="UNKNOWN"``. Same for ``pom.xml`` /
+``build.gradle.kts``: the fallback lists groupId/artifactId/version
+as ``UNKNOWN`` rows so the gate still reports them under ``unknown``
+rather than failing them blind.
 """
 
 from __future__ import annotations
@@ -65,7 +69,7 @@ DEFAULT_DENY_LICENSES: frozenset[str] = frozenset({
 })
 
 
-ECOSYSTEMS: tuple[str, ...] = ("cargo", "go", "pip", "npm")
+ECOSYSTEMS: tuple[str, ...] = ("cargo", "go", "pip", "npm", "maven")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -187,6 +191,7 @@ _MARKER_FILES: dict[str, tuple[str, ...]] = {
     "go": ("go.mod",),
     "pip": ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg"),
     "npm": ("package.json",),
+    "maven": ("pom.xml", "build.gradle.kts", "build.gradle"),
 }
 
 
@@ -578,6 +583,188 @@ def _parse_package_json_direct(path: Path) -> list[PackageLicense]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  maven ecosystem (X9 #305)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Regexes for the pom.xml / build.gradle.kts fallback. We only walk
+# direct `<dependency>` / `implementation("…")` entries — recursive
+# transitive resolution needs the real Maven / Gradle daemon, which
+# the preferred-CLI path covers (Mojohaus license plugin runs a full
+# resolve). The fallback exists so a CI without an operating `mvn`
+# still reports something rather than blind-passing.
+_POM_DEP_RE = re.compile(
+    r"<dependency>\s*"
+    r"(?:<groupId>(?P<group>[^<]+)</groupId>\s*)?"
+    r"(?:<artifactId>(?P<artifact>[^<]+)</artifactId>\s*)?"
+    r"(?:<version>(?P<version>[^<]+)</version>\s*)?"
+    r"(?:<scope>[^<]+</scope>\s*)?"
+    r"(?:<type>[^<]+</type>\s*)?"
+    r"(?:<optional>[^<]+</optional>\s*)?"
+    r"</dependency>",
+    re.DOTALL,
+)
+_GRADLE_DEP_RE = re.compile(
+    r"(?:implementation|api|runtimeOnly|compileOnly|testImplementation)"
+    r"\s*\(\s*\"(?P<coord>[^\"]+)\"\s*\)"
+)
+
+
+def _scan_maven(app_path: Path, timeout: int) -> tuple[list[PackageLicense], str]:
+    """Prefer ``mvn license:aggregate-download-licenses`` (Mojohaus plugin)
+    for a full dependency tree with license metadata; fall back to
+    parsing ``pom.xml`` / ``build.gradle.kts`` as ``UNKNOWN`` rows so
+    the gate still reports on CI hosts without ``mvn``.
+    """
+    if shutil.which("mvn") and (app_path / "pom.xml").exists():
+        rc, _out, err = _run_tool(
+            [
+                "mvn", "-B", "-q",
+                "org.codehaus.mojo:license-maven-plugin:2.4.0:aggregate-download-licenses",
+            ],
+            cwd=app_path,
+            timeout=timeout,
+        )
+        # The plugin writes its JSON/XML summary to
+        # target/generated-resources/licenses.xml. When the plugin ran
+        # clean we parse that file; otherwise we fall through to the
+        # pom.xml walker.
+        xml_report = app_path / "target" / "generated-resources" / "licenses.xml"
+        if rc == 0 and xml_report.is_file():
+            try:
+                return _parse_maven_licenses_xml(xml_report), "mvn-license-plugin"
+            except Exception as exc:  # noqa: BLE001 — fall through
+                logger.info("mvn license plugin XML parse failed: %s", exc)
+        else:
+            logger.info("mvn license plugin failed rc=%s err=%s", rc, err[:200])
+
+    pom = app_path / "pom.xml"
+    if pom.exists():
+        return _parse_pom_xml(pom), "walk"
+
+    for gradle_manifest in ("build.gradle.kts", "build.gradle"):
+        candidate = app_path / gradle_manifest
+        if candidate.exists():
+            return _parse_gradle_build(candidate), "walk"
+
+    return [], "mock"
+
+
+def _parse_pom_xml(pom_path: Path) -> list[PackageLicense]:
+    """Minimal pom.xml parser. Pulls direct `<dependency>` blocks
+    only — deep transitive resolution needs real Maven."""
+    try:
+        text = pom_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    out: list[PackageLicense] = []
+    seen: set[tuple[str, str]] = set()
+    for m in _POM_DEP_RE.finditer(text):
+        group = (m.group("group") or "").strip()
+        artifact = (m.group("artifact") or "").strip()
+        version = (m.group("version") or "").strip()
+        if not artifact:
+            continue
+        name = f"{group}:{artifact}" if group else artifact
+        key = (name, version)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            PackageLicense(
+                name=name,
+                version=version,
+                license="UNKNOWN",
+                ecosystem="maven",
+            )
+        )
+    return out
+
+
+def _parse_gradle_build(build_path: Path) -> list[PackageLicense]:
+    """Minimal build.gradle[.kts] parser. Pulls string-coordinate deps
+    (``implementation("group:artifact:version")``) — does NOT handle
+    BOMs, platforms, or Kotlin `libs.xxx` version catalogs. License
+    is always ``UNKNOWN`` — full resolution needs the Gradle daemon.
+    """
+    try:
+        text = build_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    out: list[PackageLicense] = []
+    seen: set[tuple[str, str]] = set()
+    for m in _GRADLE_DEP_RE.finditer(text):
+        coord = m.group("coord").strip()
+        parts = coord.split(":")
+        if len(parts) < 2:
+            continue
+        name = f"{parts[0]}:{parts[1]}"
+        version = parts[2] if len(parts) >= 3 else ""
+        key = (name, version)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            PackageLicense(
+                name=name,
+                version=version,
+                license="UNKNOWN",
+                ecosystem="maven",
+            )
+        )
+    return out
+
+
+def _parse_maven_licenses_xml(xml_path: Path) -> list[PackageLicense]:
+    """Parse the Mojohaus license-maven-plugin aggregated XML.
+
+    Shape (relevant subset)::
+
+        <licenseSummary>
+          <dependencies>
+            <dependency>
+              <groupId>…</groupId>
+              <artifactId>…</artifactId>
+              <version>…</version>
+              <licenses>
+                <license><name>Apache 2.0</name></license>
+              </licenses>
+            </dependency>
+          </dependencies>
+        </licenseSummary>
+    """
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(str(xml_path))
+    root = tree.getroot()
+    out: list[PackageLicense] = []
+    for dep in root.iter("dependency"):
+        group = (dep.findtext("groupId") or "").strip()
+        artifact = (dep.findtext("artifactId") or "").strip()
+        version = (dep.findtext("version") or "").strip()
+        if not artifact:
+            continue
+        licenses_el = dep.find("licenses")
+        raw: Any = "UNKNOWN"
+        if licenses_el is not None:
+            names = [
+                (lic.findtext("name") or "").strip()
+                for lic in licenses_el.iter("license")
+            ]
+            names = [n for n in names if n]
+            if names:
+                raw = names if len(names) > 1 else names[0]
+        out.append(
+            PackageLicense(
+                name=f"{group}:{artifact}" if group else artifact,
+                version=version,
+                license=_normalise_license(raw),
+                ecosystem="maven",
+            )
+        )
+    return out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -586,6 +773,7 @@ _SCANNERS = {
     "go": _scan_go,
     "pip": _scan_pip,
     "npm": _scan_npm,
+    "maven": _scan_maven,
 }
 
 

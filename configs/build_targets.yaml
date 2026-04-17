@@ -129,6 +129,24 @@ targets:
     supports_push: true
     artifact_kinds: [AppImage, dmg, nsis, msi, snap, deb, rpm]
 
+  - id: maven
+    kind: skill-hook
+    description: "JVM Spring Boot / JVM 21 fat-jar release (mvn package)"
+    tools: [mvn, mvnw]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}-{version}.jar"
+    supports_push: true
+    artifact_kinds: [jar, war]
+
+  - id: gradle
+    kind: skill-hook
+    description: "JVM Spring Boot fat-jar release (./gradlew bootJar)"
+    tools: [gradle, gradlew]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}-{version}.jar"
+    supports_push: true
+    artifact_kinds: [jar, war]
+
 # ── X2 role → preferred build targets ────────────────────────────
 # When a software role asks the orchestrator for "release artifacts"
 # without naming a target, the agent walks this list in order and runs
@@ -138,7 +156,7 @@ role_defaults:
   backend-go:     [docker, goreleaser]
   backend-rust:   [docker, cargo-dist]
   backend-node:   [docker]
-  backend-java:   [docker]
+  backend-java:   [docker, maven, gradle]
   cli-tooling:    [goreleaser, cargo-dist, pyinstaller]
   desktop-electron: [electron-builder]
   desktop-tauri:  [cargo-dist]

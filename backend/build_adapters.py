@@ -85,6 +85,7 @@ NATIVE_TARGETS: tuple[str, ...] = (
 # Skill-hook targets — wrap a language-native release toolchain.
 SKILL_HOOK_TARGETS: tuple[str, ...] = (
     "cargo-dist", "goreleaser", "pyinstaller", "electron-builder",
+    "maven", "gradle",
 )
 
 ALL_TARGETS: tuple[str, ...] = NATIVE_TARGETS + SKILL_HOOK_TARGETS
@@ -115,6 +116,8 @@ TARGET_HOST_REQUIREMENTS: Mapping[str, tuple[str, ...]] = {
     "goreleaser": ("linux", "darwin", "windows"),
     "pyinstaller": ("linux", "darwin", "windows"),
     "electron-builder": ("linux", "darwin", "windows"),
+    "maven": ("linux", "darwin", "windows"),
+    "gradle": ("linux", "darwin", "windows"),
 }
 
 # Tool binary names (resolved via shutil.which()).
@@ -131,6 +134,8 @@ TOOL_BINARIES: Mapping[str, tuple[str, ...]] = {
     "goreleaser": ("goreleaser",),
     "pyinstaller": ("pyinstaller",),
     "electron-builder": ("electron-builder", "npx"),
+    "maven": ("mvn", "mvnw"),
+    "gradle": ("gradle", "gradlew"),
 }
 
 # Output filename pattern per target. ``{name}`` and ``{version}`` are
@@ -148,6 +153,8 @@ OUTPUT_PATTERNS: Mapping[str, str] = {
     "goreleaser": "{name}_{version}_{arch}.tar.gz",
     "pyinstaller": "{name}-{version}",             # binary, no extension on Linux/macOS
     "electron-builder": "{name}-{version}.{ext}",  # ext varies per platform
+    "maven": "{name}-{version}.jar",
+    "gradle": "{name}-{version}.jar",
 }
 
 
@@ -959,6 +966,86 @@ class ElectronBuilderAdapter(_SkillHookAdapter):
         return [runner, "--publish", "never"]
 
 
+class MavenAdapter(_SkillHookAdapter):
+    """X9 #305 — Spring Boot / JVM 21 fat-jar release via ``mvn package``.
+
+    Added for SKILL-SPRING-BOOT (the fifth and final priority-X
+    software-vertical skill pack). The real build is delegated to the
+    Maven wrapper / system ``mvn``; the adapter's job is to assert the
+    scaffold ships a ``pom.xml`` at the given path and, on build, to
+    locate the fat jar under ``target/`` (Maven final-name pattern
+    ``<artifactId>-<version>.jar``).
+    """
+
+    target = "maven"
+    binaries = ("mvn", "mvnw")
+    skill_hook = "maven"
+
+    def _validate_source(self, source: BuildSource) -> None:
+        if not (source.path / "pom.xml").exists():
+            raise ArtifactSourceError(
+                f"maven needs pom.xml at {source.path / 'pom.xml'}"
+            )
+
+    def _compose_cmd(self, source: BuildSource, runner: str) -> list[str]:
+        # `mvn package -DskipTests` is the standard Spring Boot fat-jar
+        # build. Tests and coverage verification run via `mvn verify`
+        # from X1 software_simulator, not from X3 release path.
+        return [runner, "-B", "-DskipTests", "package"]
+
+    def _locate_artifact(self, source: BuildSource) -> Optional[Path]:
+        target_dir = source.path / "target"
+        if not target_dir.is_dir():
+            return None
+        # Prefer `<artifactId>-<version>.jar`, fall back to any *.jar
+        # the build emitted that isn't the `original-*.jar` layering
+        # artefact from spring-boot-maven-plugin repackage.
+        candidates = sorted(
+            p for p in target_dir.glob("*.jar")
+            if not p.name.startswith("original-")
+        )
+        return candidates[-1] if candidates else None
+
+
+class GradleAdapter(_SkillHookAdapter):
+    """X9 #305 — Spring Boot / JVM 21 fat-jar release via Gradle.
+
+    Mirrors ``MavenAdapter`` but for Gradle Kotlin-DSL projects. The
+    adapter accepts either a wrapper (``gradlew`` / ``gradlew.bat``)
+    or a system ``gradle`` binary; when the wrapper is present the
+    scaffold prefers it so builds are reproducible across hosts.
+    """
+
+    target = "gradle"
+    binaries = ("gradle", "gradlew")
+    skill_hook = "gradle"
+
+    def _validate_source(self, source: BuildSource) -> None:
+        has_kts = (source.path / "build.gradle.kts").exists()
+        has_groovy = (source.path / "build.gradle").exists()
+        if not (has_kts or has_groovy):
+            raise ArtifactSourceError(
+                f"gradle needs build.gradle[.kts] at {source.path}"
+            )
+
+    def _compose_cmd(self, source: BuildSource, runner: str) -> list[str]:
+        # `bootJar` is the Spring Boot plugin goal; for plain JVM
+        # projects it degrades to Gradle's `jar` task via the
+        # `io.spring.dependency-management` plugin. Using `bootJar`
+        # directly keeps the release path unambiguous.
+        return [runner, "--no-daemon", "bootJar"]
+
+    def _locate_artifact(self, source: BuildSource) -> Optional[Path]:
+        libs = source.path / "build" / "libs"
+        if not libs.is_dir():
+            return None
+        candidates = sorted(
+            p for p in libs.glob("*.jar")
+            if not p.name.endswith("-plain.jar")  # bootJar ships main + plain
+        )
+        return candidates[-1] if candidates else None
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Registry & dispatch
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -976,6 +1063,8 @@ _REGISTRY: dict[str, type[BuildAdapter]] = {
     "goreleaser": GoreleaserAdapter,
     "pyinstaller": PyInstallerAdapter,
     "electron-builder": ElectronBuilderAdapter,
+    "maven": MavenAdapter,
+    "gradle": GradleAdapter,
 }
 
 
@@ -1076,7 +1165,7 @@ ROLE_DEFAULT_TARGETS: Mapping[str, tuple[str, ...]] = {
     "backend-go": ("docker", "goreleaser"),
     "backend-rust": ("docker", "cargo-dist"),
     "backend-node": ("docker",),
-    "backend-java": ("docker",),
+    "backend-java": ("docker", "maven", "gradle"),
     "cli-tooling": ("goreleaser", "cargo-dist", "pyinstaller"),
     "desktop-electron": ("electron-builder",),
     "desktop-tauri": ("cargo-dist",),
@@ -1125,6 +1214,8 @@ __all__ = [
     "GoreleaserAdapter",
     "PyInstallerAdapter",
     "ElectronBuilderAdapter",
+    "MavenAdapter",
+    "GradleAdapter",
     # Dispatch
     "list_targets",
     "get_adapter",

@@ -1,0 +1,135 @@
+# X9 #305 — SKILL-SPRING-BOOT DAG tasks.
+#
+# Mirrors the X5 SKILL-FASTAPI / X6 SKILL-GO-SERVICE / X7 SKILL-RUST-CLI
+# / X8 SKILL-DESKTOP-TAURI DAG shape so the skill registry's
+# tests/validate path stays uniform across language-vertical packs.
+# Each task maps 1:1 to an X0-X4 capability; running the full DAG is
+# by design a smoke test of the software vertical on JVM 21.
+
+tasks:
+  - id: spring-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render Spring Boot project from scaffolds/: pom.xml or
+      build.gradle.kts per knob, src/main/java layout, Makefile,
+      .gitignore, .env.example. Idempotent re-render: overwrites
+      inside the scaffold surface, never touches files outside it
+      (e.g. operator-added `src/main/java/<pkg>/service/`).
+    depends_on: []
+    artifacts: [spring_skeleton]
+    estimated_hours: 1
+    framework_gate: x0-platform-schema
+
+  - id: spring-app-core
+    name: "Spring Boot app core"
+    description: >
+      Emit `Application.java` (@SpringBootApplication bootstrap),
+      `application.yaml` (Spring Profile + @ConfigurationProperties
+      binding, no manual System.getenv), JPA config when
+      database=postgres|h2, Actuator config exposing /health +
+      /metrics + /info endpoints, structured logging via Logback
+      JSON appender.
+    depends_on: [spring-scaffold-init]
+    artifacts: [spring_core]
+    estimated_hours: 1
+    framework_gate: x2-role-backend-java
+
+  - id: spring-api-v1
+    name: "REST API v1 + health + items CRUD"
+    description: >
+      Render `/api/v1/health` (delegates to Spring Actuator health
+      indicator) + `/api/v1/items` CRUD via @RestController +
+      constructor-injected service. Service layer backed by
+      Spring Data JPA repository when database!=none; in-memory
+      store when database=none.
+    depends_on: [spring-app-core]
+    artifacts: [spring_api_v1]
+    estimated_hours: 1
+
+  - id: spring-flyway
+    name: "Flyway migrations"
+    description: >
+      Emit `src/main/resources/db/migration/V1__create_items_table.sql`
+      as the baseline migration. Wire `spring.flyway.locations` and
+      `spring.jpa.hibernate.ddl-auto: validate` so Hibernate refuses
+      to start against an un-migrated schema. Skipped when
+      database=none.
+    depends_on: [spring-app-core]
+    artifacts: [spring_flyway]
+    estimated_hours: 0.5
+
+  - id: spring-tests
+    name: "JUnit 5 + JaCoCo coverage"
+    description: >
+      Render @WebMvcTest for HealthController + ItemsController and
+      @DataJpaTest for ItemsRepository. Maven wires
+      `jacoco-maven-plugin` with a `check` goal at `LINE=0.70` /
+      Gradle wires `jacocoTestCoverageVerification` at 0.70 — both
+      enforce the X1 Java threshold via
+      `COVERAGE_THRESHOLDS["java"] == 70.0`.
+    depends_on: [spring-api-v1, spring-flyway]
+    artifacts: [spring_tests]
+    estimated_hours: 1
+    framework_gate: x1-software-simulate
+
+  - id: spring-docker
+    name: "Dockerfile + compose"
+    description: >
+      Multi-stage Dockerfile — builder stage `eclipse-temurin:21-jdk`
+      runs `mvn package -DskipTests` or `./gradlew bootJar`, runtime
+      stage `gcr.io/distroless/java21-debian12:nonroot` (no shell,
+      uid 65532). docker-compose brings up the service + optional
+      postgres for local dev. Wires to
+      `backend.build_adapters.DockerImageAdapter`.
+    depends_on: [spring-app-core]
+    artifacts: [spring_docker]
+    estimated_hours: 0.5
+    framework_gate: x3-docker-adapter
+
+  - id: spring-helm
+    name: "Helm chart"
+    description: >
+      Emit `deploy/helm/` chart (Chart.yaml + values.yaml +
+      deployment/service/ingress templates). Lintable by `helm lint`,
+      packageable by `backend.build_adapters.HelmChartAdapter`.
+    depends_on: [spring-docker]
+    artifacts: [spring_helm]
+    estimated_hours: 0.5
+    framework_gate: x3-helm-adapter
+
+  - id: spring-build-adapter
+    name: "Maven / Gradle build adapter"
+    description: >
+      Wires to the new `backend.build_adapters.MavenAdapter` /
+      `GradleAdapter` skill-hook adapters. `_validate_source` is
+      offline — confirms the scaffold ships pom.xml (Maven) or
+      build.gradle.kts + gradlew (Gradle) without running
+      `mvn package` / `./gradlew bootJar` on CI.
+    depends_on: [spring-app-core]
+    artifacts: [spring_build_adapter]
+    estimated_hours: 0.5
+    framework_gate: x3-maven-adapter
+
+  - id: spring-compliance
+    name: "X4 compliance gates"
+    description: >
+      Emit `spdx.allowlist.json` (default-deny GPL/AGPL, allow
+      Apache-2.0 / MIT / BSD / MPL-2.0 / EPL-2.0). The compliance
+      harness detects the maven ecosystem via pom.xml and runs
+      `mvn license:aggregate-third-party-report` when available;
+      falls back to walking pom.xml `<dependencies>`.
+    depends_on: [spring-scaffold-init]
+    artifacts: [spring_compliance]
+    estimated_hours: 0.5
+    framework_gate: x4-software-compliance
+
+  - id: spring-pilot-report
+    name: "X0-X4 validation report"
+    description: >
+      End-to-end smoke: render project, run X3 docker dry-run, X3
+      helm dry-run, X3 maven/gradle adapter probe, X4 compliance
+      bundle — emit one JSON report. Any framework regression fails
+      this task first.
+    depends_on: [spring-tests, spring-docker, spring-helm, spring-build-adapter, spring-compliance]
+    artifacts: [spring_pilot_report]
+    estimated_hours: 0.5

@@ -1,0 +1,74 @@
+# SKILL-SPRING-BOOT HIL recipes — X9 #305
+#
+# "Hardware" here is the deploy target (container runtime, k8s cluster,
+# or the fat jar landing on an operator workstation). Each recipe is
+# a probe that can only run after a real build / deploy (not a dry-run)
+# — used by the operator-run Step 7 smoke, not by CI.
+
+recipes:
+  - id: docker-smoke-health
+    name: "Docker smoke — /api/v1/health"
+    description: >
+      After `docker run -d -p 8080:8080 <image>`, hit /api/v1/health
+      five times from a cold container, assert P95 ≤ 800ms and every
+      response carries `{"status":"UP"}`. Spring Boot cold start on
+      distroless is ≤ 5s per the backend-java role budget, but we
+      probe post-start, so 800ms P95 is a conservative ceiling.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: http_ttfb
+      url: "http://localhost:8080/api/v1/health"
+      iterations: 5
+      p95_ms_ceiling: 800
+
+  - id: helm-install-smoke
+    name: "Helm install smoke (kind cluster)"
+    description: >
+      `helm install spring-pilot ./deploy/helm` on a freshly-started
+      kind cluster; wait for rollout, port-forward, curl
+      /api/v1/health once. Validates chart manifest shape under real
+      kubectl. Timeout 180s because Spring Boot pods are slower to
+      reach ready than Go/Rust microservices (JVM warm-up).
+    targets: [linux-x86_64-native]
+    probe:
+      kind: kubectl_rollout
+      release: spring-pilot
+      timeout_s: 180
+
+  - id: maven-package
+    name: "Maven package — fat jar size"
+    description: >
+      `mvn package -DskipTests`. Must succeed and emit
+      `target/<artifact>-0.1.0.jar`. Size must be ≤ 80 MiB
+      (backend-java role budget). Hard-fails in CI when the jar
+      bloats past that threshold.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "mvn package -DskipTests"
+      expected_rc: 0
+
+  - id: gradle-bootjar
+    name: "Gradle bootJar"
+    description: >
+      `./gradlew bootJar`. Must succeed and emit
+      `build/libs/<artifact>-0.1.0.jar`. Size must be ≤ 80 MiB.
+      Only valid when build_tool=gradle.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "./gradlew bootJar"
+      expected_rc: 0
+
+  - id: flyway-migrate
+    name: "Flyway migration apply + verify"
+    description: >
+      Start the service against an empty Postgres, assert Flyway
+      applies V1__create_items_table.sql and Hibernate's
+      `ddl-auto=validate` passes on the next boot against the
+      already-migrated schema.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "mvn spring-boot:run -Dspring-boot.run.profiles=it"
+      expected_rc: 0

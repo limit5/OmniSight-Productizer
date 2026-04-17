@@ -1,0 +1,91 @@
+# X9 #305 — SKILL-SPRING-BOOT manifest.
+#
+# Fifth (and final priority-X) software-vertical skill pack. Follows
+# the X5 SKILL-FASTAPI / X6 SKILL-GO-SERVICE / X7 SKILL-RUST-CLI /
+# X8 SKILL-DESKTOP-TAURI layout and re-exercises X0-X4 on the JVM —
+# a third language toolchain after Python and Go/Rust/TS. Primary
+# pilot for the `backend-java` role (X2) and the Maven/Gradle build
+# path into `backend.build_adapters` (X3). Validates that X4 SPDX
+# license scan + CVE + SBOM gates remain language-agnostic by adding
+# a `maven` ecosystem adapter to `backend.software_compliance.licenses`.
+#
+# Exercise:
+#   * X0  target_kind=software profile                (configs/platforms/linux-x86_64-native.yaml)
+#   * X1  mvn test / gradle test + JaCoCo 70% floor   (backend/software_simulator.py, java threshold 70%)
+#   * X2  backend-java role default                   (configs/roles/software/backend-java.skill.md)
+#   * X3  docker + helm + maven (+ gradle) adapters   (backend/build_adapters.py — DockerImageAdapter / HelmChartAdapter / MavenAdapter / GradleAdapter)
+#   * X4  SPDX license scan / CVE / SBOM              (backend/software_compliance/ — new `maven` ecosystem detector)
+#
+# Scaffolds under `scaffolds/` render a Spring Boot 3.2+ microservice:
+# either Maven (`pom.xml`) or Gradle Kotlin-DSL (`build.gradle.kts`)
+# build, Flyway 9 migrations under `src/main/resources/db/migration/`,
+# JUnit 5 + Mockito 5 + MockMvc test doubles, JaCoCo coverage report
+# wired to the X1 70% floor, `/api/v1/health` (delegates to Spring
+# Actuator) + `/api/v1/items` CRUD surface, multi-stage Dockerfile
+# (eclipse-temurin:21-jdk builder → distroless/java21 runtime),
+# docker-compose for local dev (+ optional Postgres service), and a
+# Helm chart skeleton.
+
+schema_version: 1
+name: skill-spring-boot
+description: >
+  Spring Boot 3.2+ microservice skill pack on JVM 21 LTS. Generates a
+  production-ready REST service with Maven or Gradle (Kotlin DSL)
+  build, Spring Data JPA persistence, Flyway 9 SQL migrations, JUnit
+  5 + Mockito 5 + MockMvc tests, JaCoCo coverage wired to the X1 Java
+  threshold (70%), `/api/v1/health` + `/api/v1/items` CRUD, multi-stage
+  Dockerfile (eclipse-temurin builder → distroless runtime, uid 65532),
+  docker-compose with optional Postgres, Helm chart, and SPDX/CVE/SBOM
+  compliance gates via a new `maven` ecosystem detector in
+  `software_compliance`. Dogfoods the backend-java role and is the
+  last priority-X pilot to close the X0-X4 framework evidence surface.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - java
+  - jvm
+  - jvm-21
+  - spring
+  - spring-boot
+  - spring-boot-3
+  - maven
+  - gradle
+  - kotlin-dsl
+  - flyway
+  - junit-5
+  - mockito
+  - jpa
+  - hibernate
+  - jacoco
+  - actuator
+  - docker
+  - docker-compose
+  - helm
+  - spdx
+  - x9

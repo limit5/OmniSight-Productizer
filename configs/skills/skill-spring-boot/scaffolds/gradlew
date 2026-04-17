@@ -1,0 +1,6 @@
+#!/bin/sh
+# Gradle wrapper placeholder — replace with `gradle wrapper --gradle-version 8.7`
+# output on first bootstrap. Scaffold ships a stub so MavenAdapter /
+# GradleAdapter `_validate_source` can assert the file exists without
+# pulling a 200KB binary shell script through version control.
+exec gradle "$@"

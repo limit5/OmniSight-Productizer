@@ -1,0 +1,82 @@
+# SKILL-SPRING-BOOT test definitions — X9 #305
+#
+# Authoritative list consumed by `backend/tests/test_skill_spring_boot.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-maven-postgres-both
+        name: "Render: maven + postgres + both deploy targets"
+        type: unit
+        target: backend.spring_boot_scaffolder.render_project
+      - id: scaffold-gradle-h2-docker
+        name: "Render: gradle + h2 + docker-only"
+        type: unit
+        target: backend.spring_boot_scaffolder.render_project
+      - id: scaffold-maven-none-helm
+        name: "Render: maven + no database + helm-only"
+        type: unit
+        target: backend.spring_boot_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by build_tool/database/deploy/compliance skipped correctly"
+        type: unit
+        target: backend.spring_boot_scaffolder.render_project
+      - id: scaffold-artifact-id-default
+        name: "artifact_id defaults to slug of project_name"
+        type: unit
+        target: backend.spring_boot_scaffolder.ScaffoldOptions
+
+  - id: framework-binding
+    name: "X0-X4 framework binding tests"
+    tests:
+      - id: x0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.spring_boot_scaffolder.render_project
+      - id: x1-coverage-threshold-in-pom
+        name: "pom.xml JaCoCo check goal enforces 0.70 line coverage"
+        type: unit
+        target: backend.spring_boot_scaffolder.render_project
+      - id: x2-role-java-alignment
+        name: "Scaffold honours backend-java role anti-patterns (constructor injection, @ConfigurationProperties, no field @Autowired)"
+        type: unit
+        target: backend.spring_boot_scaffolder.render_project
+      - id: x3-docker-adapter-resolves
+        name: "DockerImageAdapter resolves against rendered Dockerfile"
+        type: integration
+        target: backend.spring_boot_scaffolder.dry_run_build
+      - id: x3-helm-adapter-resolves
+        name: "HelmChartAdapter resolves against rendered chart"
+        type: integration
+        target: backend.spring_boot_scaffolder.dry_run_build
+      - id: x3-maven-adapter-resolves
+        name: "MavenAdapter resolves against rendered pom.xml"
+        type: integration
+        target: backend.spring_boot_scaffolder.dry_run_build
+      - id: x3-gradle-adapter-resolves
+        name: "GradleAdapter resolves against rendered build.gradle.kts + gradlew"
+        type: integration
+        target: backend.spring_boot_scaffolder.dry_run_build
+      - id: x4-compliance-runs
+        name: "X4 compliance bundle runs against rendered project (ecosystem=maven)"
+        type: integration
+        target: backend.spring_boot_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-spring-boot appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-spring-boot') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill
