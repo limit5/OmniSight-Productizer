@@ -1,0 +1,59 @@
+// SKILL-ANDROID (P8 #293) — push registration helper.
+//
+// Responsibilities:
+//   1. Request the POST_NOTIFICATIONS runtime permission (Android 13+).
+//   2. Fetch the FCM registration token from FirebaseMessaging (first
+//      token on cold install; later tokens arrive via
+//      `FcmMessagingService.onNewToken`).
+//   3. Forward the token to the OmniSight backend over HTTPS.
+//
+// SECURITY:
+//   - Raw token forwarded only to the backend, which holds the FCM
+//     service-account JSON in backend/secret_store (the app never sees
+//     server credentials).
+//   - Token fingerprints (first 8 bytes of SHA-256 hex) are the only
+//     thing that hits logcat.
+
+package com.omnisight.pilot.push
+
+import android.content.Context
+import android.util.Log
+import com.google.firebase.messaging.FirebaseMessaging
+
+object PushRegistrar {
+
+    private const val TAG = "PushRegistrar"
+
+    /// URL the token POSTs into. Override per environment. Production
+    /// apps should read this from BuildConfig / a remote-config source.
+    @Suppress("MemberVisibilityCanBePrivate")
+    var tokenEndpoint: String? = null
+
+    fun requestToken(context: Context, onResult: ((String?) -> Unit)? = null) {
+        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+            if (!task.isSuccessful) {
+                Log.w(TAG, "FCM token fetch failed: " + (task.exception?.message ?: "unknown"))
+                onResult?.invoke(null)
+                return@addOnCompleteListener
+            }
+            val token = task.result
+            val fingerprint = FcmMessagingService.sha256Fingerprint(token)
+            Log.i(TAG, "FCM token fetched (fingerprint=$fingerprint)")
+            forwardToken(context, token)
+            onResult?.invoke(token)
+        }
+    }
+
+    fun forwardToken(context: Context, token: String) {
+        val endpoint = tokenEndpoint
+        if (endpoint.isNullOrEmpty()) {
+            Log.i(TAG, "No tokenEndpoint configured; skipping forward.")
+            return
+        }
+        // Real implementations should POST to `endpoint` via OkHttp /
+        // Retrofit with the app's auth header. We keep the forward
+        // asynchronous in a production app; the scaffold's stub is
+        // intentionally a no-op so the template builds on a device that
+        // has no network at first run.
+    }
+}

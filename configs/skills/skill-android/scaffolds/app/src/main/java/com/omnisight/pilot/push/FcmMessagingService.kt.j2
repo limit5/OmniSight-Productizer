@@ -1,0 +1,50 @@
+// SKILL-ANDROID (P8 #293) — FirebaseMessagingService subclass.
+//
+// Responsibilities:
+//   1. Receive the rotated FCM registration token via `onNewToken`.
+//   2. Forward the token (raw, over HTTPS) to the OmniSight backend,
+//      which stores it and drives FCM send from server-side.
+//   3. Receive incoming data / notification payloads via
+//      `onMessageReceived` and hand them off to a router.
+//
+// SECURITY:
+//   - The FCM server key / service-account JSON lives ONLY server-side.
+//     This service never touches it.
+//   - The raw token is logged ONLY via a short SHA-256 fingerprint.
+//     Logcat captures from support tools must never reveal the full
+//     token, which is a credential Google treats as equivalent to a
+//     weak bearer token.
+
+package com.omnisight.pilot.push
+
+import android.util.Log
+import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
+import java.security.MessageDigest
+
+class FcmMessagingService : FirebaseMessagingService() {
+
+    override fun onNewToken(token: String) {
+        super.onNewToken(token)
+        val fingerprint = sha256Fingerprint(token)
+        Log.i(TAG, "FCM token rotated (fingerprint=$fingerprint)")
+        PushRegistrar.forwardToken(applicationContext, token)
+    }
+
+    override fun onMessageReceived(message: RemoteMessage) {
+        super.onMessageReceived(message)
+        Log.i(TAG, "FCM payload received (data-size=${message.data.size})")
+        // Route to a dedicated handler in production code; keep the
+        // template surface minimal and predictable.
+    }
+
+    companion object {
+        private const val TAG = "FcmMessagingService"
+
+        fun sha256Fingerprint(token: String): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val bytes = digest.digest(token.toByteArray(Charsets.UTF_8))
+            return bytes.take(8).joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
+        }
+    }
+}

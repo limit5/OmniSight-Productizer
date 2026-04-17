@@ -1,0 +1,84 @@
+# P8 #293 — SKILL-ANDROID authoritative test list.
+#
+# This file is the source-of-truth for what backend/tests/test_skill_android.py
+# covers. If a suite entry drifts from an actual test target, CI flags the
+# mismatch via the skill_registry validator.
+
+schema_version: 1
+
+suites:
+  - id: registry
+    description: Skill pack registry / manifest invariants
+    tests:
+      - id: pack_discoverable
+        target: backend.skill_registry.list_skills
+      - id: pack_validates_clean
+        target: backend.skill_registry.validate_skill
+      - id: all_five_artifact_kinds_declared
+        target: backend.skill_registry.SkillInfo.artifact_kinds
+      - id: manifest_declares_core_dependencies
+        target: backend.skill_registry.SkillManifest.depends_on_core
+      - id: manifest_keywords_include_pilot_marker
+        target: backend.skill_registry.SkillManifest.keywords
+      - id: validate_pack_helper
+        target: backend.android_scaffolder.validate_pack
+
+  - id: scaffold
+    description: Jinja render + knob gating
+    tests:
+      - id: render_writes_core_files
+        target: backend.android_scaffolder.render_project
+      - id: render_returns_render_outcome
+        target: backend.android_scaffolder.RenderOutcome
+      - id: push_off_skips_fcm_files
+        target: backend.android_scaffolder._should_skip
+      - id: push_off_drops_manifest_entries
+        target: backend.android_scaffolder.render_project
+      - id: push_on_emits_fcm_files
+        target: backend.android_scaffolder.render_project
+      - id: billing_off_skips_billing_files
+        target: backend.android_scaffolder._should_skip
+      - id: billing_on_emits_billing_files
+        target: backend.android_scaffolder.render_project
+      - id: compliance_off_skips_data_safety
+        target: backend.android_scaffolder._should_skip
+      - id: compliance_on_ships_data_safety
+        target: backend.android_scaffolder.render_project
+      - id: idempotent_rerender
+        target: backend.android_scaffolder.render_project
+      - id: invalid_package_id_rejected
+        target: backend.android_scaffolder.ScaffoldOptions.validate
+      - id: empty_project_name_rejected
+        target: backend.android_scaffolder.ScaffoldOptions.validate
+
+  - id: framework_gates
+    description: P0-P6 framework-gate cover on rendered output
+    tests:
+      - id: p0_min_sdk_pinned_in_gradle
+        target: app/build.gradle.kts
+      - id: p0_target_sdk_pinned_in_gradle
+        target: app/build.gradle.kts
+      - id: p2_espresso_autodetect
+        target: backend.mobile_simulator.resolve_ui_framework
+      - id: p3_keystore_uses_env_placeholders
+        target: keystore.properties.example
+      - id: p3_gradle_reads_keystore_env
+        target: app/build.gradle.kts
+      - id: p4_no_system_out_in_kotlin
+        target: app/src/main/java/**/*.kt
+      - id: p4_no_log_d_in_kotlin
+        target: app/src/main/java/**/*.kt
+      - id: p4_compose_uses_viewmodel_statflow
+        target: app/src/main/java/.../ui/HomeScreen.kt
+      - id: p5_play_metadata_json_valid
+        target: PlayStoreMetadata.json
+      - id: p5_play_metadata_reverse_dns
+        target: PlayStoreMetadata.json
+      - id: p6_mobile_compliance_passes
+        target: backend.mobile_compliance.run_all
+      - id: p6_asc_gate_skipped_for_android
+        target: backend.mobile_compliance.run_all
+      - id: p6_data_safety_form_yaml_parses
+        target: docs/play/data_safety.yaml
+      - id: pilot_report_aggregates_all_gates
+        target: backend.android_scaffolder.pilot_report

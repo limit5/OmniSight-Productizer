@@ -1,0 +1,25 @@
+// SKILL-ANDROID (P8 #293) — settings.gradle.kts.
+//
+// Pinned to Gradle 8.7 + AGP 8.3.2 + Kotlin 2.0.0 to match the P1 Docker
+// image (ghcr.io/omnisight/mobile-build). Bumping these independently
+// of the Docker image will break CI with "Unsupported class file
+// major version" or "Android Gradle Plugin not found" errors.
+
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "{{ project_name }}"
+include(":app")

@@ -1,0 +1,38 @@
+# SKILL-ANDROID (P8 #293) — generated project gitignore.
+#
+# Build output, derived data, keystore material, Fastlane secrets,
+# Firebase runtime credentials.
+
+# Gradle
+.gradle/
+build/
+app/build/
+captures/
+
+# Android Studio / IDE
+.idea/
+.vscode/
+*.iml
+local.properties
+
+# Kotlin
+*.class
+*.jar
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/test_output
+
+# Keystore material — NEVER commit
+keystore.properties
+*.jks
+*.keystore
+*.p12
+
+# Firebase / Google Services runtime JSON — NEVER commit
+google-services.json
+*-play-service-account.json
+
+# Temp / OS
+.DS_Store

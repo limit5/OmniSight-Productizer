@@ -1,0 +1,62 @@
+# SKILL-ANDROID (P8 #293) — Play Data Safety form source.
+#
+# This YAML is the single source-of-truth that the Play Console Data
+# Safety section MUST agree with. The P6 compliance gate (`play_policy`)
+# cross-checks declared_sdks against the gradle dependencies and blocks
+# submission when Play will see a dependency that isn't declared here.
+#
+# Edit as the app's actual data collection changes; keep in sync with
+# the rendered AndroidManifest.xml permission list.
+
+schema_version: 1
+package_name: "{{ package_id }}"
+last_updated: "2026-04-17"
+
+# Every third-party SDK that transmits data MUST be listed. The
+# scaffold's default dependency set is listed below; extend when you
+# add analytics / auth / ads / payment SDKs.
+declared_sdks:
+  - androidx.activity:activity-compose
+  - androidx.core:core-ktx
+  - androidx.lifecycle:lifecycle-runtime-ktx
+  - androidx.lifecycle:lifecycle-viewmodel-compose
+  - androidx.compose.ui
+  - androidx.compose.material3
+{% if push %}
+  - com.google.firebase:firebase-messaging-ktx
+{% endif %}
+{% if billing %}
+  - com.android.billingclient:billing-ktx
+{% endif %}
+
+# Whether the app ever collects data of any kind. Default: false until
+# you add analytics / crash reporting / user accounts.
+collects_any_data: {{ 'true' if push else 'false' }}
+
+data_collected:
+  # Populate per Play taxonomy: Personal info / Financial info / Location
+  # / Device or other IDs / Messages / Photos or videos / Files and docs
+  # / Audio files / App activity / Web browsing / App info and performance
+{% if push %}
+  - type: "Device or other IDs"
+    purpose: "App functionality"
+    shared_with_third_parties: false
+    optional: false
+    ephemeral: false
+    collected_from: "FCM registration token"
+{% endif %}
+{% if billing %}
+  - type: "Financial info"
+    purpose: "App functionality (in-app purchases)"
+    shared_with_third_parties: true
+    optional: true
+    ephemeral: false
+    collected_from: "Play Billing purchase tokens (server-verified)"
+{% endif %}
+
+data_shared: []
+
+security_practices:
+  encrypted_in_transit: true
+  users_can_request_deletion: true
+  reviewed_against_guidelines: true

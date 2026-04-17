@@ -1,0 +1,9 @@
+# SKILL-ANDROID (P8 #293) — Fastlane Appfile.
+# `package_name` is the Google Play applicationId / listing identifier.
+
+package_name("{{ package_id }}")
+
+# json_key is sourced from backend/secret_store at CI time — never
+# checked into the repo. Override with the path to a local
+# service-account.json file for dry-run testing.
+json_key_file(ENV["OMNISIGHT_PLAY_SERVICE_ACCOUNT_JSON"] || "")

@@ -1,0 +1,75 @@
+# SKILL-ANDROID (P8 #293) — Fastfile.
+#
+# Android builds on Linux — no `OMNISIGHT_MACOS_BUILDER` gate required
+# (unlike SKILL-IOS). The P1 Docker image (ghcr.io/omnisight/mobile-build)
+# bakes in every build tool these lanes call, so operators running
+# Fastlane from the OmniSight CI runner get a stable environment.
+#
+# Codesign material is sourced from `backend/codesign_store.py` (P3 #288)
+# via the OMNISIGHT_KEYSTORE_* env, which `app/build.gradle.kts` reads
+# when executing the `signingConfigs.release` block.
+
+default_platform(:android)
+
+PROJECT_NAME = "{{ project_name }}"
+PACKAGE_NAME = "{{ package_id }}"
+
+before_all do
+  # Hard-fail when running release lanes without a keystore path in the
+  # env. Fail-closed here beats silently shipping an unsigned AAB to
+  # Play Console.
+  if Actions.lane_context[:LANE_NAME].to_s =~ /internal|production/
+    if ENV["OMNISIGHT_KEYSTORE_PATH"].to_s.empty?
+      UI.user_error!(
+        "OMNISIGHT_KEYSTORE_PATH not set. Inject via backend/codesign_store.materialize_env() " +
+        "before running the internal / production lane. See P3 (#288)."
+      )
+    end
+  end
+end
+
+platform :android do
+  desc "Build a Release AAB for Play Store distribution."
+  lane :build do
+    gradle(
+      task: "clean bundleRelease",
+      properties: {
+        # gradle resolves the signing credentials from the process env;
+        # we re-forward them explicitly for clarity.
+        "OMNISIGHT_KEYSTORE_PATH" => ENV["OMNISIGHT_KEYSTORE_PATH"],
+        "OMNISIGHT_KEYSTORE_PASSWORD" => ENV["OMNISIGHT_KEYSTORE_PASSWORD"],
+        "OMNISIGHT_KEY_ALIAS" => ENV["OMNISIGHT_KEY_ALIAS"],
+        "OMNISIGHT_KEY_PASSWORD" => ENV["OMNISIGHT_KEY_PASSWORD"],
+      }
+    )
+  end
+
+  desc "Upload the latest AAB to Play Internal testing track."
+  lane :internal do
+    build
+    supply(
+      package_name: PACKAGE_NAME,
+      track: "internal",
+      aab: "app/build/outputs/bundle/release/app-release.aab",
+      skip_upload_metadata: false,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+      release_status: "draft"
+    )
+  end
+
+  desc "Stage a production rollout on Play Console (NOT submit)."
+  lane :production do
+    build
+    supply(
+      package_name: PACKAGE_NAME,
+      track: "production",
+      aab: "app/build/outputs/bundle/release/app-release.aab",
+      release_status: "draft",  # P5 dual-sign +2 must clear before promote
+      rollout: "0.10",          # staged rollout at 10% — matches Play policy
+      skip_upload_metadata: false,
+      skip_upload_images: true,
+      skip_upload_screenshots: true
+    )
+  end
+end

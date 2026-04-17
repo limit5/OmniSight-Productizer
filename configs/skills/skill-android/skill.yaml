@@ -1,0 +1,86 @@
+# P8 #293 — SKILL-ANDROID manifest.
+#
+# Second mobile-vertical skill pack — n=2 consumer of the P0-P6 framework.
+# P7 SKILL-IOS was the pilot; this pack exercises the same contract on a
+# disjoint toolchain (Gradle 8 + Kotlin 2.0 + Jetpack Compose + FCM + Play
+# Billing) to prove the framework is not just "one path happens to work".
+#
+# Exercise:
+#   * P0  target_kind=mobile profile schema       (configs/platforms/android-arm64-v8a.yaml)
+#   * P1  mobile toolchain / Docker dispatch       (backend/mobile_toolchain.py)
+#   * P2  mobile simulate-track + Espresso         (backend/mobile_simulator.py)
+#   * P3  Android keystore chain                   (backend/codesign_store.py)
+#   * P4  android-kotlin role anti-patterns        (configs/roles/mobile/android-kotlin.skill.md)
+#   * P5  Google Play Developer submission adapter (backend/google_play_developer.py)
+#   * P6  Play policy + data-safety / privacy gate (backend/mobile_compliance/)
+#
+# Scaffolds in `scaffolds/` render a Jetpack Compose app that pins
+# `targetSdk` and `minSdk` to the P0 platform's `sdk_version` and
+# `min_os_version` via a single Jinja render — matches the way SKILL-IOS
+# pins `IPHONEOS_DEPLOYMENT_TARGET` to the iOS profile. Shipping the pin
+# in the scaffold means every new Android SKU inherits the P0 floor
+# without re-deriving the Play Store 2026 target-SDK requirement.
+
+schema_version: 1
+name: skill-android
+description: >
+  Android Kotlin 2.0 + Jetpack Compose pilot skill pack. Generates a
+  production-ready Android app with Compose entry Activity, ViewModel +
+  StateFlow state pattern, Hilt-ready Application subclass, FCM push
+  integration (FirebaseMessagingService + token fingerprint logging —
+  never log raw token), Play Billing Library 7 in-app purchase template
+  (BillingClient + purchasesUpdatedListener + verifyPurchase flow),
+  Data Safety form stub pre-filled from declared SDKs, Espresso UI test
+  skeleton matching the P2 simulate-track contract, and Play policy +
+  privacy gates green out-of-the-box. Validates the P0-P6 mobile
+  framework on its second consumer (n=2 signal — P7 pilot was the first).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - android
+  - kotlin
+  - kotlin-2
+  - jetpack-compose
+  - compose
+  - gradle
+  - gradle-8
+  - agp
+  - fcm
+  - firebase-messaging
+  - push-notifications
+  - play-billing
+  - billing-library
+  - in-app-purchase
+  - data-safety
+  - espresso
+  - junit4
+  - play-developer
+  - play-console
+  - pilot
+  - p8

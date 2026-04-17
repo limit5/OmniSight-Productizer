@@ -1,0 +1,52 @@
+{
+  "_comment": "SKILL-ANDROID (P8 #293) — Play Developer submission summary. Consumed by backend/google_play_developer.py::upload_bundle + update_track.",
+  "schema_version": 1,
+  "package_name": "{{ package_id }}",
+  "app_name": "{{ project_name }}",
+  "primary_locale": "en-US",
+  "version": {
+    "version_name": "1.0.0",
+    "version_code": 1,
+    "release_status": "draft",
+    "release_notes": {
+      "en-US": "Initial release."
+    }
+  },
+  "listing": {
+    "title": "{{ project_name }}",
+    "short_description": "{{ project_name }} — an OmniSight pilot Android app.",
+    "full_description_path": "fastlane/metadata/android/en-US/full_description.txt"
+  },
+  "categories": {
+    "primary": "PRODUCTIVITY",
+    "secondary": "TOOLS"
+  },
+  "content_rating": {
+    "questionnaire_id": "default_pegi_3",
+    "violence": "NONE",
+    "sexual_content": "NONE",
+    "drug_use": "NONE",
+    "gambling": "NONE"
+  },
+  "target_audience": {
+    "age_groups": [ "18+" ],
+    "appeals_to_children": false
+  },
+  "data_safety_form_path": "docs/play/data_safety.yaml",
+  "subscriptions": {{ '[]' if not billing else '[
+    {"product_id": "com.example.test.subscription.monthly_pro", "base_plan": "monthly-pro"}
+  ]' }},
+  "in_app_purchases": {{ '[]' if not billing else '[
+    {"product_id": "com.example.test.consumable.coins_100"},
+    {"product_id": "com.example.test.nonconsumable.removeads"}
+  ]' }},
+  "tracks": {
+    "internal": {"user_fraction": 1.0},
+    "production": {"user_fraction": 0.10, "status": "draft"}
+  },
+  "compliance_provenance": {
+    "p6_bundle_required": true,
+    "play_policy_gate_id": "play_policy",
+    "privacy_label_gate_id": "privacy_labels"
+  }
+}

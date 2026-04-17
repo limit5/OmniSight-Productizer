@@ -1,0 +1,85 @@
+# P8 #293 — SKILL-ANDROID hardware-in-the-loop recipes.
+#
+# These probes hit real hardware / real external services. They are
+# operator-run, NOT CI-run. A probe that requires a real device or a
+# real Play Console API key must never be invoked as part of
+# `scripts/simulate.sh mobile` — it would burn credentials and violate
+# the "CI runs offline" invariant.
+#
+# Each recipe declares:
+#   id              — short stable identifier for the HANDOFF log
+#   title           — human-readable label
+#   requires        — prerequisites (binary / credential / device)
+#   procedure       — steps the operator follows
+#   expected_signal — what a pass looks like
+#   blocking        — true if a pilot release must not proceed without this
+
+recipes:
+  - id: device-launch-smoke
+    title: "Install + launch on a physical Android 7.0+ device"
+    requires:
+      - adb in PATH
+      - Android 7.0+ device in developer mode
+      - Cable / USB debugging authorised
+    procedure:
+      - "./gradlew installRelease"
+      - "adb shell am start -n <package_id>/.MainActivity"
+      - "Verify splash → Compose HomeScreen renders within 5s"
+      - "Tap the 'Increment' button; counter advances"
+    expected_signal: App launches and button tap is responsive on the device.
+    blocking: true
+
+  - id: fcm-sandbox-delivery
+    title: "FCM sandbox push delivery"
+    requires:
+      - Firebase project console access
+      - Scaffold rendered with push=true
+      - Real Android device (emulator push delivery is flaky)
+    procedure:
+      - "Launch app on device — `PushRegistrar` logs a token fingerprint"
+      - "Copy raw token from `adb logcat` (the app does NOT log it; get it from the Firebase Console test endpoint)"
+      - "In Firebase Console → Messaging → Send test message → paste token → Send"
+      - "Observe notification banner in 30s"
+    expected_signal: Notification banner appears on device; FCM console shows delivery=1.
+    blocking: false
+
+  - id: play-billing-sandbox-purchase
+    title: "Play Billing sandbox purchase"
+    requires:
+      - Google account on a Play Internal testing track
+      - App uploaded to Play Console with test products configured
+      - Scaffold rendered with billing=true
+    procedure:
+      - "./gradlew bundleRelease && upload AAB to Play Console internal track"
+      - "On a tester device, sign in with the test-track Google account"
+      - "Install via Play Internal link; launch app"
+      - "Navigate to Billing screen; tap one of the test products"
+      - "Complete the Google Play purchase sheet (will not actually charge)"
+    expected_signal: Purchase sheet completes; `BillingClientManager.onPurchasesUpdated` logs a verified purchase.
+    blocking: true
+
+  - id: play-internal-distribution
+    title: "Play Internal Sharing → Internal testing → Production"
+    requires:
+      - Play Console service-account (service-account JSON in secret_store)
+      - P5 store_submission approval (dual-sign +2)
+    procedure:
+      - "Render with scaffold_options.compliance=true"
+      - "fastlane android internal"
+      - "Install via Play Internal share link; smoke-test main flow"
+      - "Promote to Internal testing → Closed testing → Production via Play Console"
+    expected_signal: App passes Play pre-launch report; staged rollout at 10% shows 0 crashes per 1k installs.
+    blocking: true
+
+  - id: data-safety-form-cross-check
+    title: "Play Console Data Safety form cross-check"
+    requires:
+      - Scaffold rendered with compliance=true
+      - Play Console access to the app's listing
+    procedure:
+      - "Open docs/play/data_safety.yaml; note every declared_sdks entry"
+      - "Navigate to Play Console → App content → Data safety"
+      - "For each form section, verify the answer matches the YAML's data_collected block"
+      - "Re-run `python3 -m backend.mobile_compliance --app-path . --platform android`"
+    expected_signal: "`mobile_compliance` reports zero blocker findings for the play_policy gate."
+    blocking: true

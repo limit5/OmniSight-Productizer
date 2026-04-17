@@ -1,0 +1,81 @@
+// SKILL-ANDROID (P8 #293) — root Compose screen.
+//
+// P4 anti-pattern rule cover:
+//   * State lives in a `ViewModel` surfaced as `StateFlow`, never in
+//     the composable directly (side effects on recomposition are the
+//     #1 bug source we've seen).
+//   * UI reads state via `collectAsStateWithLifecycle()` — never
+//     `observeAsState()` (deprecated) or raw `collectAsState()`
+//     (doesn't respect lifecycle).
+//   * Content descriptions on every interactive control — accessibility
+//     is not optional.
+
+package com.omnisight.pilot.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+
+class HomeViewModel : ViewModel() {
+    private val _counter = MutableStateFlow(0)
+    val counter: StateFlow<Int> = _counter.asStateFlow()
+
+    fun increment() {
+        _counter.update { it + 1 }
+    }
+}
+
+@Composable
+fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
+    val counter by viewModel.counter.collectAsStateWithLifecycle()
+    Scaffold(
+        modifier = Modifier.testTag("HomeScreen.root"),
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = "Hello from {{ project_name }}",
+                style = MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.semantics { contentDescription = "App greeting" },
+            )
+            Text(
+                text = "Tapped " + counter + " time" + (if (counter == 1) "" else "s"),
+                modifier = Modifier.testTag("HomeScreen.counter"),
+            )
+            Button(
+                onClick = { viewModel.increment() },
+                modifier = Modifier
+                    .testTag("HomeScreen.increment")
+                    .semantics { contentDescription = "Increment counter" },
+            ) {
+                Text("Increment")
+            }
+        }
+    }
+}

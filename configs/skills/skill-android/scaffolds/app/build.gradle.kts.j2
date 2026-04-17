@@ -1,0 +1,143 @@
+// SKILL-ANDROID (P8 #293) — app module build.gradle.kts.
+//
+// Compile / min / target SDK come straight from configs/platforms/
+// android-arm64-v8a.yaml at render time — `{{ min_os_version }}` is the
+// P0 floor (Android 7.0 / API 24) and `{{ sdk_version }}` is Play's
+// 2026 target compile SDK (API 35). Drifting either value from the P0
+// profile will trip the scaffolder's P0 binding test.
+
+import java.util.Properties
+import java.io.FileInputStream
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// -- Keystore material -------------------------------------------------
+//
+// Production signing credentials are injected by the P3 codesign store
+// at build time via the OMNISIGHT_KEYSTORE_* env. Local dev can
+// override via a gitignored `keystore.properties` at the repo root; we
+// fall back to an empty Properties() when neither source is present so
+// `gradle assembleDebug` still builds without credentials.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        load(FileInputStream(keystorePropertiesFile))
+    }
+}
+
+fun keystoreProp(name: String): String =
+    System.getenv(name) ?: keystoreProperties.getProperty(name, "")
+
+android {
+    // The kotlin namespace is fixed at render time (source tree lives
+    // under com/omnisight/pilot/). `applicationId` below is the ID
+    // Google Play sees — it can (and usually does) differ from the
+    // namespace on white-label / flavored builds.
+    namespace = "com.omnisight.pilot"
+    compileSdk = {{ sdk_version }}
+
+    defaultConfig {
+        applicationId = "{{ package_id }}"
+        minSdk = {{ min_os_version }}
+        targetSdk = {{ sdk_version }}
+        versionCode = 1
+        versionName = "1.0.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        create("release") {
+            // Empty strings here are intentional: gradle resolves them
+            // at the time the task runs, so missing credentials surface
+            // as "keystore file not found" rather than silently shipping
+            // an unsigned or adhoc-signed AAB.
+            storeFile = keystoreProp("OMNISIGHT_KEYSTORE_PATH").takeIf { it.isNotEmpty() }?.let { file(it) }
+            storePassword = keystoreProp("OMNISIGHT_KEYSTORE_PASSWORD")
+            keyAlias = keystoreProp("OMNISIGHT_KEY_ALIAS")
+            keyPassword = keystoreProp("OMNISIGHT_KEY_PASSWORD")
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            isMinifyEnabled = false
+        }
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+        freeCompilerArgs += listOf(
+            "-opt-in=kotlin.RequiresOptIn",
+        )
+        // Treat all compiler warnings as errors — matches the P4
+        // android-kotlin role anti-pattern rule.
+        allWarningsAsErrors = true
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+}
+
+dependencies {
+    // AndroidX + Compose BOM keeps the Compose artifact matrix aligned.
+    implementation(platform("androidx.compose:compose-bom:2024.04.01"))
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.core:core-ktx:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+{% if push %}
+
+    // FCM — push notification support.
+    implementation(platform("com.google.firebase:firebase-bom:33.0.0"))
+    implementation("com.google.firebase:firebase-messaging-ktx")
+{% endif %}
+{% if billing %}
+
+    // Play Billing Library 7 — in-app purchase support.
+    implementation("com.android.billingclient:billing-ktx:7.0.0")
+{% endif %}
+
+    // Test deps
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.04.01"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+}

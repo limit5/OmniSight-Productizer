@@ -1,0 +1,23 @@
+// SKILL-ANDROID (P8 #293) — Application subclass.
+//
+// Keeps the Application-scoped init surface small and predictable:
+//   * No Hilt / Koin wiring here — add it in your app after the
+//     scaffold renders so the DI choice isn't forced by the template.
+//   * FCM-specific init is triggered from `PushRegistrar` the first
+//     time MainActivity runs; we do NOT eagerly touch
+//     `FirebaseMessaging.getInstance()` here because that forces
+//     google-services.json at cold-start even for debug builds that
+//     don't have one.
+
+package com.omnisight.pilot
+
+import android.app.Application
+
+class {{ project_name }}App : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        // P4 anti-pattern rule: no `Log.d` / `println` / `System.out` in
+        // production code. Wire a dedicated logger wrapper (Timber /
+        // Logcat facade) in your app and route through that instead.
+    }
+}

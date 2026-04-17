@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SKILL-ANDROID (P8 #293) — auto-backup rules.
+  Excludes sensitive SharedPreferences from auto-backup by default.
+  Android 12+ uses `data_extraction_rules.xml` instead; this file is
+  retained for backward compat with Android 10-11.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="auth.xml" />
+    <exclude domain="sharedpref" path="secrets.xml" />
+</full-backup-content>

@@ -1,0 +1,66 @@
+# {{ project_name }}
+
+Android app scaffolded by SKILL-ANDROID (P8 #293) — second mobile-vertical
+skill pack in the OmniSight Productizer P0-P6 framework (the first was
+SKILL-IOS / P7 #292).
+
+## Build
+
+```bash
+# Build a debug APK for local install.
+./gradlew assembleDebug
+
+# Build a Release AAB for Play Store submission.
+./gradlew bundleRelease
+```
+
+## Lanes
+
+```bash
+# Upload to Play Internal testing (draft status).
+fastlane android internal
+
+# Stage a Play Production rollout at 10% (draft — P5 dual-sign +2
+# must approve promotion to `completed`).
+fastlane android production
+```
+
+## Signing
+
+Production signing credentials live in the OmniSight HSM (P3 codesign
+store). `backend/codesign_store.materialize_env()` injects the following
+env vars into the gradle process at build time:
+
+- `OMNISIGHT_KEYSTORE_PATH`
+- `OMNISIGHT_KEYSTORE_PASSWORD`
+- `OMNISIGHT_KEY_ALIAS`
+- `OMNISIGHT_KEY_PASSWORD`
+
+Local-dev / HIL testing can copy `keystore.properties.example` →
+`keystore.properties` (gitignored) with real values.
+
+## FCM push
+
+The scaffold ships `FcmMessagingService` + `PushRegistrar`. **You must
+drop a real `google-services.json` into `app/` before building** — the
+scaffold intentionally does NOT ship one (it's a runtime config that
+varies by environment).
+
+## Play Billing
+
+`BillingClientManager` drives the purchase sheet. **`verifyPurchase(_:)`
+is a stub** — replace it with a server-side call to your backend, which
+in turn asks the Play Developer API (`purchases.products.get`) to
+validate the purchase token. Never grant entitlements on a raw client
+response.
+
+## Tests
+
+```bash
+# JUnit4 unit tests (fast, runs in JVM).
+./gradlew test
+
+# Espresso / Compose UI tests (needs a booted emulator or Firebase Test
+# Lab device).
+./gradlew connectedDebugAndroidTest
+```

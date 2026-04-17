@@ -1,0 +1,27 @@
+// SKILL-ANDROID (P8 #293) — `ComponentActivity` entry point.
+//
+// Compose-first: the activity has a single `setContent` call and
+// delegates everything else to `HomeScreen`. This is the P4 role
+// anti-pattern baseline — `findViewById` / XML layouts / fragments
+// never appear in the primary surface area.
+
+package com.omnisight.pilot
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import com.omnisight.pilot.ui.HomeScreen
+import com.omnisight.pilot.ui.theme.{{ project_name }}Theme
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            {{ project_name }}Theme {
+                HomeScreen()
+            }
+        }
+    }
+}

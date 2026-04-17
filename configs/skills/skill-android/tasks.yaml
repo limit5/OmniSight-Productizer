@@ -1,0 +1,169 @@
+# P8 #293 — SKILL-ANDROID DAG tasks.
+#
+# Every task maps 1:1 to a P0-P6 framework capability. Running the full
+# DAG is by design a smoke test of the entire mobile vertical — same
+# bar D1 SKILL-UVC set for C5, D29 SKILL-HMI-WEBUI for C26, W6 SKILL-
+# NEXTJS for the web vertical, and P7 SKILL-IOS for the mobile vertical's
+# pilot. This pack is the n=2 consumer.
+
+tasks:
+  - id: android-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render the Jetpack Compose app project from scaffolds/: settings.gradle.kts
+      (Gradle 8 + AGP 8.3 plugin management), root build.gradle.kts (version
+      catalog), app/build.gradle.kts with minSdk pinned to android-arm64-v8a.yaml
+      min_os_version (24) and targetSdk pinned to sdk_version (35). Idempotent:
+      re-renders without clobbering user-added files outside the scaffold surface.
+    depends_on: []
+    artifacts: [android_skeleton]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile
+
+  - id: android-compose-ui
+    name: "Render Jetpack Compose UI layer"
+    description: >
+      Emit `MainActivity.kt` (`ComponentActivity` + `setContent { … }`),
+      `HomeScreen.kt` showcasing `ViewModel` + `StateFlow` state, and a
+      `Theme.kt` file wired to Material 3. Enforces P4 android-kotlin role
+      anti-patterns (no `System.out.println`, no `android.util.Log.d`,
+      `Log.tag` + `Timber`-style logger wrapper only).
+    depends_on: [android-scaffold-init]
+    artifacts: [android_compose]
+    estimated_hours: 2
+    framework_gate: p4-role-android-kotlin
+
+  - id: android-gradle-kts
+    name: "Gradle 8 + Kotlin DSL pinning"
+    description: >
+      Render `settings.gradle.kts` / `build.gradle.kts` / `gradle/wrapper/
+      gradle-wrapper.properties` with a pinned Gradle 8.7 wrapper distribution
+      URL and Kotlin 2.0.0 plugin version. Matches the P1 Docker image
+      (`ghcr.io/omnisight/mobile-build`) which bakes Gradle 8.7 + JDK 17.
+    depends_on: [android-scaffold-init]
+    artifacts: [android_gradle]
+    estimated_hours: 1
+    framework_gate: p1-mobile-toolchain
+
+  - id: android-fcm-push
+    name: "FCM push notification template"
+    description: >
+      Render `FcmMessagingService.kt` (`FirebaseMessagingService` subclass
+      with `onNewToken` + `onMessageReceived`), `PushRegistrar.kt`
+      (authorization + token fingerprint logger — raw token never hits
+      logs), and the `<service>` + `<meta-data>` manifest entries. The
+      `google-services.json` lives outside the scaffold (runtime secret)
+      and the lane refuses to build without it.
+    depends_on: [android-scaffold-init]
+    artifacts: [android_fcm]
+    estimated_hours: 2
+
+  - id: android-play-billing
+    name: "Play Billing Library template"
+    description: >
+      Render `BillingClientManager.kt` (`BillingClient` setup + `queryProductDetails`
+      + `launchBillingFlow` + `PurchasesUpdatedListener`), `BillingScreen.kt`
+      (Compose sheet), and a `billing_products.json` test plan with
+      consumable / non-consumable / subscription entries. Verifies purchase
+      tokens against the Play Developer API server-side (we never grant
+      entitlements on the raw client-side result).
+    depends_on: [android-scaffold-init]
+    artifacts: [android_billing]
+    estimated_hours: 2
+
+  - id: android-unit-tests
+    name: "JUnit4 unit skeleton"
+    description: >
+      Render `app/src/test/java/.../ExampleUnitTest.kt` + a
+      `BillingClientManagerTest.kt` exercising state transitions and a
+      mock BillingClient. Coverage ≥ 70% gate-ready.
+    depends_on: [android-compose-ui, android-play-billing]
+    artifacts: [android_junit]
+    estimated_hours: 1
+    framework_gate: p2-simulate-unit
+
+  - id: android-espresso-ui
+    name: "Espresso UI smoke skeleton"
+    description: >
+      Render `app/src/androidTest/java/.../MainActivityTest.kt` covering
+      launch → main flow → billing sheet → dismiss. Matches the test
+      harness P2 simulate-track invokes via
+      `mobile_simulator.resolve_ui_framework` (`espresso`).
+    depends_on: [android-compose-ui, android-play-billing]
+    artifacts: [android_espresso]
+    estimated_hours: 1
+    framework_gate: p2-simulate-ui
+
+  - id: android-fastlane
+    name: "Fastlane build + deploy lane"
+    description: >
+      Render `fastlane/Fastfile` with `build` (gradle bundleRelease — produces
+      .aab), `internal` (supply to Play Internal track), and `production`
+      (supply to Play Production with staged rollout) lanes. Honours
+      `OMNISIGHT_MOBILE_IMAGE_TAG` per P1 (#286) — lanes run in the shared
+      mobile-build Docker image on Linux CI.
+    depends_on: [android-scaffold-init]
+    artifacts: [android_fastlane]
+    estimated_hours: 1
+    framework_gate: p1-mobile-toolchain
+
+  - id: android-keystore-stub
+    name: "Keystore placeholders for P3"
+    description: >
+      Emit `keystore.properties.example` with `OMNISIGHT_KEYSTORE_PATH`,
+      `OMNISIGHT_KEYSTORE_PASSWORD`, `OMNISIGHT_KEY_ALIAS`, and
+      `OMNISIGHT_KEY_PASSWORD` placeholder declarations. Real values are
+      injected by `backend/codesign_store.py` from the HSM at build time.
+      Scaffold MUST NOT bake a real keystore (binary) or password.
+    depends_on: [android-scaffold-init]
+    artifacts: [android_keystore]
+    estimated_hours: 1
+    framework_gate: p3-codesign-chain
+
+  - id: android-play-metadata
+    name: "Play Developer metadata stub"
+    description: >
+      Emit `fastlane/metadata/android/<locale>/{title,short_description,
+      full_description,video}.txt` and a `PlayStoreMetadata.json` summary
+      consumable by `backend/google_play_developer.py::upload_bundle` +
+      `update_track`.
+    depends_on: [android-scaffold-init]
+    artifacts: [android_play_metadata]
+    estimated_hours: 1
+    framework_gate: p5-store-submission
+
+  - id: android-compliance-wire
+    name: "P6 Play policy + Data Safety wired"
+    description: >
+      Generate `docs/play/data_safety.yaml` (pre-populated with declared
+      SDKs from the scaffold's gradle dependencies), the `AndroidManifest.xml`
+      permission block (ACCESS_NETWORK_STATE + POST_NOTIFICATIONS when push=on),
+      and the Data Safety form cross-check hook. All P6 gates should pass
+      on the rendered project out of the box.
+    depends_on: [android-scaffold-init]
+    artifacts: [android_compliance]
+    estimated_hours: 1
+    framework_gate: p6-compliance
+
+  - id: android-pilot-validation
+    name: "Pilot framework validation (n=2)"
+    description: >
+      Full-stack smoke: scaffold → simulate (P2) → compliance (P6) →
+      Play metadata sanity check (P5). n=2 consumer of the P0-P6 mobile
+      framework — collapsing P7 pilot into "framework happens to work
+      for iOS" vs. "framework handles arbitrary mobile SKUs". If this
+      green-lights alongside P7, the framework is validated.
+    depends_on:
+      - android-compose-ui
+      - android-gradle-kts
+      - android-fcm-push
+      - android-play-billing
+      - android-unit-tests
+      - android-espresso-ui
+      - android-fastlane
+      - android-keystore-stub
+      - android-play-metadata
+      - android-compliance-wire
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: p8-pilot
