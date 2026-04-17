@@ -15,14 +15,17 @@ finalized — otherwise finalize itself would be redirected to the wizard.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
+import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
 from backend import auth as _au
 from backend import audit
@@ -748,6 +751,302 @@ async def bootstrap_start_services(
         stdout_tail=stdout_tail,
         stderr_tail=stderr_tail,
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L5 — Step 4 (SSE stream — tail systemd / docker logs into the UI)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# How long the SSE stream will tail logs before closing cleanly. The
+# wizard UI only needs to watch services start (G1 /readyz polling caps
+# at 180s), so a little headroom keeps idle connections from piling up
+# without cutting off the operator mid-boot.
+_TICK_STREAM_MAX_SECS = 300
+# Heartbeat sent when there is no log activity so the EventSource
+# connection stays alive behind any intermediary proxies.
+_TICK_HEARTBEAT_SECS = 10.0
+
+
+def _tick_command(mode: DeployMode, compose_file: str, tail: int) -> list[str]:
+    """Build the argv used to tail service logs for the wizard.
+
+    ``systemd``      → ``journalctl -u <unit>... --follow --lines <tail>
+                         --output short-iso --no-pager``
+    ``docker-compose`` → ``docker compose -f <file> logs --follow --tail <tail>``
+    ``dev``          → empty list (the endpoint does not exec anything;
+                         dev already runs under uvicorn / next dev and has
+                         no managed units to tail).
+    """
+    lines = max(int(tail or 0), 0)
+    if mode == "systemd":
+        cmd = ["journalctl"]
+        for unit in _SYSTEMD_UNITS:
+            cmd.extend(["-u", unit])
+        cmd.extend([
+            "--follow",
+            "--lines", str(lines),
+            "--output", "short-iso",
+            "--no-pager",
+        ])
+        return cmd
+    if mode == "docker-compose":
+        cf = (compose_file or "").strip() or _DEFAULT_COMPOSE_FILE
+        return [
+            "docker", "compose", "-f", cf, "logs",
+            "--follow", "--tail", str(lines), "--no-color",
+        ]
+    return []
+
+
+def _pack_tick(line: str, stream: str, seq: int) -> dict:
+    """Shape a single log line as an SSE ``bootstrap.service.tick`` event."""
+    return {
+        "event": "bootstrap.service.tick",
+        "data": json.dumps({
+            "line": line,
+            "stream": stream,
+            "seq": seq,
+            "ts": time.time(),
+        }),
+    }
+
+
+async def _drain_stream(
+    stream,
+    kind: str,
+    queue: "asyncio.Queue[tuple[str, str]]",
+) -> None:
+    """Copy each decoded line from *stream* into *queue* as ``(kind, line)``.
+
+    Exits cleanly on EOF (process closed its pipe) so the generator
+    downstream can distinguish "no more output" from "heartbeat timeout".
+    """
+    if stream is None:
+        return
+    try:
+        while True:
+            raw = await stream.readline()
+            if not raw:
+                return
+            await queue.put((kind, raw.decode(errors="replace").rstrip("\n")))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover — defensive, readline rarely raises
+        logger.debug("bootstrap: tick drain(%s) failed: %s", kind, exc)
+
+
+@router.get("/service-tick")
+async def bootstrap_service_tick(
+    request: Request,
+    mode: str = "",
+    compose_file: str = "",
+    tail: int = 50,
+    max_seconds: int = _TICK_STREAM_MAX_SECS,
+):
+    """SSE stream: pipe live service logs into the wizard's Step 4 UI.
+
+    Counterpart to ``POST /bootstrap/start-services``. Once the launcher
+    returns, the UI opens this EventSource to watch the services come
+    up in real time. Each decoded log line becomes a
+    ``bootstrap.service.tick`` event carrying ``{line, stream, seq, ts}``.
+
+    Mode dispatch mirrors ``_detect_deploy_mode`` (systemd / docker-compose
+    / dev). ``dev`` emits a single informational tick and closes so the
+    UI doesn't hang waiting for output on a dev box with no managed
+    units.
+
+    Lifecycle events:
+      * ``start`` — mode + command + pid (once, at the top)
+      * ``bootstrap.service.tick`` — one per log line (stdout + stderr
+        are interleaved in source order with a monotonically increasing
+        ``seq`` so the UI can render a stable transcript)
+      * ``heartbeat`` — every ~10s of silence to keep the connection
+        alive through proxies
+      * ``done`` — when the tailer exits OR ``max_seconds`` elapses OR
+        the client disconnects
+
+    Query parameters:
+      * ``mode`` — systemd / docker-compose / dev (empty → auto-detect)
+      * ``compose_file`` — override for docker compose mode
+      * ``tail`` — historical lines to replay before following (default 50)
+      * ``max_seconds`` — upper bound on stream duration (default 300s)
+
+    Kept unauthenticated like the rest of ``/bootstrap/*`` so the wizard
+    can stream without an admin session. The bootstrap-gate middleware
+    still blocks access after finalize.
+    """
+    override_mode = (mode or "").strip().lower()
+    if override_mode:
+        if override_mode not in ("systemd", "docker-compose", "dev"):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": (
+                        "mode must be one of: systemd, docker-compose, dev — "
+                        f"got {override_mode!r}"
+                    ),
+                },
+            )
+        active_mode: DeployMode = override_mode  # type: ignore[assignment]
+    else:
+        active_mode = _detect_deploy_mode()
+
+    command = _tick_command(active_mode, compose_file, tail)
+    deadline = time.monotonic() + max(int(max_seconds or 0), 1)
+
+    async def event_generator():
+        seq = 0
+        # ── dev mode: surface one informational tick and close ──────
+        if active_mode == "dev":
+            yield {
+                "event": "start",
+                "data": json.dumps({
+                    "mode": active_mode,
+                    "command": [],
+                    "pid": None,
+                    "tail": int(tail or 0),
+                }),
+            }
+            yield _pack_tick(
+                "dev mode — services run under uvicorn / next dev, "
+                "no managed units to tail",
+                "info",
+                0,
+            )
+            yield {
+                "event": "done",
+                "data": json.dumps({
+                    "mode": active_mode,
+                    "reason": "dev_noop",
+                    "returncode": 0,
+                }),
+            }
+            return
+
+        # ── systemd / docker-compose: exec the tailer and stream ───
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            logger.error("bootstrap: service-tick launcher missing: %s", exc)
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "detail": (
+                        f"tailer binary not found: {exc} — expected "
+                        f"{command[0]!r} on PATH for mode={active_mode}"
+                    ),
+                    "mode": active_mode,
+                    "command": command,
+                }),
+            }
+            yield {
+                "event": "done",
+                "data": json.dumps({
+                    "mode": active_mode,
+                    "reason": "launcher_missing",
+                    "returncode": None,
+                }),
+            }
+            return
+
+        yield {
+            "event": "start",
+            "data": json.dumps({
+                "mode": active_mode,
+                "command": command,
+                "pid": proc.pid,
+                "tail": int(tail or 0),
+            }),
+        }
+        logger.info(
+            "bootstrap: service-tick streaming mode=%s pid=%s cmd=%s",
+            active_mode, proc.pid, command,
+        )
+
+        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=512)
+        drain_out = asyncio.create_task(
+            _drain_stream(proc.stdout, "stdout", queue)
+        )
+        drain_err = asyncio.create_task(
+            _drain_stream(proc.stderr, "stderr", queue)
+        )
+        drains = {drain_out, drain_err}
+
+        reason = "eof"
+        returncode: int | None = None
+        try:
+            while True:
+                if await request.is_disconnected():
+                    reason = "client_disconnect"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = "max_seconds"
+                    break
+                timeout = min(_TICK_HEARTBEAT_SECS, remaining)
+                try:
+                    kind, line = await asyncio.wait_for(
+                        queue.get(), timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    # No output — if both drains ended AND queue is empty
+                    # the process is done, so break; otherwise heartbeat.
+                    if all(d.done() for d in drains) and queue.empty():
+                        reason = "eof"
+                        break
+                    yield {
+                        "event": "heartbeat",
+                        "data": json.dumps({"ts": time.time()}),
+                    }
+                    continue
+                seq += 1
+                yield _pack_tick(line, kind, seq)
+        finally:
+            for d in drains:
+                d.cancel()
+            for d in drains:
+                try:
+                    await d
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    returncode = await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        returncode = await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        returncode = None
+            else:
+                returncode = proc.returncode
+
+        logger.info(
+            "bootstrap: service-tick closed mode=%s reason=%s rc=%s seq=%d",
+            active_mode, reason, returncode, seq,
+        )
+        yield {
+            "event": "done",
+            "data": json.dumps({
+                "mode": active_mode,
+                "reason": reason,
+                "returncode": returncode,
+                "lines": seq,
+            }),
+        }
+
+    return EventSourceResponse(event_generator())
 
 
 class FinalizeRequest(BaseModel):
