@@ -159,6 +159,8 @@ class TestSSESchemaExport:
             # Phase 47 Autonomous Decision Engine
             "mode_changed", "decision_pending", "decision_auto_executed",
             "decision_resolved", "decision_undone", "budget_strategy_changed",
+            # R0 (#306) PEP Gateway
+            "pep.decision",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 

@@ -30,6 +30,7 @@ import {
 export type PanelId =
   | "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
   | "decisions" | "budget" | "timeline" | "rules" | "forecast" | "dag" | "intent" | "history" | "audit"
+  | "pep"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -54,6 +55,7 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "intent", label: "Spec Editor", shortLabel: "Spec", icon: Sparkles, color: "var(--artifact-purple)" },
   { id: "history", label: "Run History", shortLabel: "History", icon: History, color: "var(--neural-cyan, #67e8f9)" },
   { id: "audit", label: "Audit Log", shortLabel: "Audit", icon: Shield, color: "var(--neural-cyan, #67e8f9)" },
+  { id: "pep", label: "PEP Live Feed", shortLabel: "PEP", icon: Shield, color: "var(--neural-cyan, #67e8f9)" },
 ]
 
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {

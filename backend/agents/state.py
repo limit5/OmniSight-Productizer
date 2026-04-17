@@ -59,6 +59,11 @@ class GraphState(BaseModel):
     # Isolated workspace path (set when agent has a provisioned workspace)
     workspace_path: str | None = None
 
+    # R0 (#306): sandbox tier controlling PEP whitelist (t1 / t2 / t3).
+    # Defaults to t1 — the most restrictive — when the workflow layer
+    # hasn't set it explicitly. Unknown values collapse to t1.
+    sandbox_tier: str = "t1"
+
     # Per-agent model and role context
     model_name: str = ""
     agent_sub_type: str = ""

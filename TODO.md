@@ -1240,24 +1240,24 @@ Legend:
 > 相依（硬前置）：**O0-O3**（CATC + Worker pool + Redis + MQ）、**G2**（reverse proxy）、**G5**（K8s manifests）、**I10**（Redis HA）、**L**（Bootstrap wizard）。建議排在 O 之後。
 
 ### R0. PEP Gateway Middleware（工具執行網關）(#306)
-- [ ] `backend/pep_gateway.py`：PEP (Policy Enforcement Point) middleware，intercept 所有 tool_executor node 的 tool call
-- [ ] 毀滅性命令 pattern 表（`rm -rf /`、`chown`、`chmod 777`、`dd if=/dev/zero`、`mkfs`、`:(){:|:&};:`…）→ 自動 DENY + audit
-- [ ] 生產部署攔截：`deploy.sh prod`、`kubectl apply --context production`、`terraform apply` 等 prod-scope 命令 → 自動 HOLD，等人工 approve
-- [ ] T1/T2/T3 sandbox tier 整合：PEP 在 tool call 前查 sandbox tier policy，T1 只放行白名單工具，T3 允許 sudo 但仍攔截 prod-deploy
-- [ ] Circuit breaker：PEP down 時 fallback 到 sandbox-tier 本機 rule（degraded but alive）；恢復後自動切回
-- [ ] SSE event：`pep.decision`（action / agent / tool / command / decision: auto_allow | hold | deny）
-- [ ] Metrics：`pep_decisions_total{decision}` / `pep_hold_duration_seconds` / `pep_deny_total`
-- [ ] 整合測試：mock tool call → auto_allow、hold、deny 三條路徑 + PEP down fallback
-- [ ] **UI — PEP Live Feed 面板（新元件 `pep-live-feed.tsx` 或 orchestration-panel 新 tab）**：
-  - [ ] 即時顯示所有 tool call decisions（SSE `pep.decision` 驅動）
-  - [ ] 每行：timestamp / agent name / tool name / command（truncated） / decision badge（✅ auto / 🟡 HELD / 🔴 DENY）
-  - [ ] HELD 的行展開後顯示完整 command + impact_scope + 「Approve」/「Reject」按鈕（複用 toast-center 的 approve/reject 機制）
-  - [ ] Filter bar：by agent / by decision / by tool name
-  - [ ] Header 統計：auto_allowed count / held count / denied count（自動刷新）
-- [ ] **UI — decision-dashboard 延伸**：新增 `category: "pep_tool_intercept"` 類別，PEP HELD 項目也出現在 decision queue
-- [ ] **UI — audit-panel 延伸**：新增 PEP filter tab（`action: pep.intercept | pep.approve | pep.reject | pep.auto_allow`）
-- [ ] **UI — toast-center 延伸**：PEP HOLD 事件走 toast（`source: "pep"`），approve 後 toast 自動消失
-- [ ] 預估：**3.5 day**（backend 2d + UI 1.5d）
+- [x] `backend/pep_gateway.py`：PEP (Policy Enforcement Point) middleware，intercept 所有 tool_executor node 的 tool call
+- [x] 毀滅性命令 pattern 表（`rm -rf /`、`chown`、`chmod 777`、`dd if=/dev/zero`、`mkfs`、`:(){:|:&};:`…）→ 自動 DENY + audit
+- [x] 生產部署攔截：`deploy.sh prod`、`kubectl apply --context production`、`terraform apply` 等 prod-scope 命令 → 自動 HOLD，等人工 approve
+- [x] T1/T2/T3 sandbox tier 整合：PEP 在 tool call 前查 sandbox tier policy，T1 只放行白名單工具，T3 允許 sudo 但仍攔截 prod-deploy
+- [x] Circuit breaker：PEP down 時 fallback 到 sandbox-tier 本機 rule（degraded but alive）；恢復後自動切回
+- [x] SSE event：`pep.decision`（action / agent / tool / command / decision: auto_allow | hold | deny）
+- [x] Metrics：`pep_decisions_total{decision}` / `pep_hold_duration_seconds` / `pep_deny_total`
+- [x] 整合測試：mock tool call → auto_allow、hold、deny 三條路徑 + PEP down fallback
+- [x] **UI — PEP Live Feed 面板（新元件 `pep-live-feed.tsx`，獨立 panel 掛進 mobile-nav/page.tsx）**：
+  - [x] 即時顯示所有 tool call decisions（SSE `pep.decision` 驅動）
+  - [x] 每行：timestamp / agent name / tool name / command（truncated） / decision badge（✅ auto / 🟡 HELD / 🔴 DENY）
+  - [x] HELD 的行展開後顯示完整 command + impact_scope + 「Approve」/「Reject」按鈕（複用 toast-center 的 approve/reject 機制，經 `/decisions/{id}/approve|reject`）
+  - [x] Filter bar：by agent / by decision / by tool name
+  - [x] Header 統計：auto_allowed count / held count / denied count（自動刷新）
+- [x] **UI — decision-dashboard 延伸**：PEP HELD 項目自動出現在 decision queue（kind=`pep_tool_intercept`，列掛 PEP chip）
+- [x] **UI — audit-panel 延伸**：新增 kind filter tabs（`All Actions | PEP | Decisions | Auth`），PEP 篩選過濾 `action.startsWith("pep.")`
+- [x] **UI — toast-center 延伸**：PEP HOLD 事件透過 DE 的 `decision_pending` 自動上浮（severity=risky/destructive），並顯示 PEP chip；approve 後 toast 自動消失
+- [x] 預估：**3.5 day**（backend 2d + UI 1.5d）**✅ AI completed 2026-04-17**
 
 ### R1. ChatOps Interactive Integration（Discord / Teams / Line 雙向互動）(#307)
 - [ ] `backend/chatops_bridge.py`：統一 ChatOps interface（`send_interactive(channel, message, buttons)` / `on_button_click(callback)` / `on_command(cmd, handler)`）

@@ -567,6 +567,8 @@ from backend.routers import hmi as _hmi_router  # C26/L4-CORE-26 HMI
 app.include_router(_hmi_router.router, prefix=settings.api_prefix)
 from backend.routers import orchestrator as _orchestrator_router  # O4/ORCHESTRATOR-GATEWAY
 app.include_router(_orchestrator_router.router, prefix=settings.api_prefix)
+from backend.routers import pep as _pep_router  # R0 (#306) PEP Gateway
+app.include_router(_pep_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

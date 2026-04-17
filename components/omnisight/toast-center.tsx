@@ -212,6 +212,20 @@ export function ToastCenter() {
                   >
                     {s.label}
                   </span>
+                  {/* R0 (#306): mark PEP-originating toasts so operators can
+                      tell at a glance this is a tool-call intercept. */}
+                  {t.decision.kind === "pep_tool_intercept" && (
+                    <span
+                      className="font-mono text-[9px] tracking-wider px-1 py-[1px] rounded-sm border"
+                      style={{
+                        color: "var(--neural-cyan,#67e8f9)",
+                        borderColor: "var(--neural-cyan,#67e8f9)",
+                      }}
+                      aria-label="policy enforcement point"
+                    >
+                      PEP
+                    </span>
+                  )}
                   <span className="font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)] truncate">
                     {t.decision.kind}
                   </span>

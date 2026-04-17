@@ -389,6 +389,20 @@ function DecisionRow(props: {
             >
               {meta.label}
             </span>
+            {/* R0 (#306): PEP-originating decisions wear a distinct chip so
+                operators can filter them visually when the queue backs up. */}
+            {d.kind === "pep_tool_intercept" && (
+              <span
+                className="font-mono text-[9px] px-1 rounded-sm border"
+                style={{
+                  color: "var(--neural-cyan,#67e8f9)",
+                  borderColor: "var(--neural-cyan,#67e8f9)",
+                }}
+                data-testid="decision-pep-chip"
+              >
+                PEP
+              </span>
+            )}
             <span className="font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)]">
               {d.kind}
             </span>

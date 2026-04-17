@@ -165,6 +165,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 ### Reliability & Recovery
 - **Token budget**: 3-tier (80% warn → 90% downgrade → 100% freeze) + daily auto-reset
 - **Provider failover**: per-tenant per-key circuit breaker (M3) — `(tenant_id, provider, api_key_fingerprint)` triple, 5min cooldown, audit on open/close, `/providers/circuits` REST + Settings UI panel; tenant A's bad key cannot derail tenant B
+- **PEP Gateway** (R0 #306): Policy Enforcement Point in front of every `tool_executor` node — 18 destructive-command regex (rm -rf /, mkfs, fork-bomb, DROP DATABASE…) auto-DENY, 10 production-scope patterns (deploy.sh prod, kubectl --context production, terraform apply…) auto-HOLD for human approval; T1/T2/T3 sandbox tier whitelists; circuit breaker fails closed on propose outage; SSE `pep.decision` + Prometheus metrics + hash-chain audit; `pep-live-feed.tsx` panel + `/pep/live` + `/pep/policy` endpoints
 - **Watchdog**: 30min task timeout, 2hr stuck detection, dynamic reallocation
 - **Startup cleanup**: reset stuck agents/simulations, orphan containers, git locks
 - **Event persistence**: DLQ with retry (3x exponential backoff), event_log table, replay API

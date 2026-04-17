@@ -161,6 +161,25 @@ class SSEBudgetStrategyChanged(BaseModel):
     timestamp: str = ""
 
 
+# ─── R0 (#306): PEP Gateway event ───
+
+class SSEPepDecision(BaseModel):
+    """pep.decision — Policy Enforcement Point tool-call classification."""
+    id: str
+    ts: float
+    agent_id: str = ""
+    tool: str
+    command: str = ""
+    tier: str = "t1"
+    action: str  # "auto_allow" | "hold" | "deny"
+    rule: str = ""
+    reason: str = ""
+    impact_scope: str = ""  # "local" | "prod" | "destructive"
+    decision_id: Optional[str] = None
+    degraded: bool = False
+    timestamp: str = ""
+
+
 class SSEDecisionOption(BaseModel):
     """One decision option. Strongly typed to catch drift (R2-#17)."""
     id: str
@@ -210,6 +229,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "decision_resolved": SSEDecision,
     "decision_undone": SSEDecision,
     "budget_strategy_changed": SSEBudgetStrategyChanged,
+    # R0 (#306): PEP Gateway
+    "pep.decision": SSEPepDecision,
 }
 
 

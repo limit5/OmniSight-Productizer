@@ -64,6 +64,16 @@ function actionColor(action: string): string {
 }
 
 type SessionFilter = "all" | string
+type KindFilter = "all" | "pep" | "decision" | "auth"
+
+// R0 (#306): predicate for action-kind tabs.
+function matchesKindFilter(action: string, kind: KindFilter): boolean {
+  if (kind === "all") return true
+  if (kind === "pep") return action.startsWith("pep.")
+  if (kind === "decision") return action.startsWith("decision.") || action === "set_mode"
+  if (kind === "auth") return action.startsWith("auth.") || action.startsWith("login")
+  return true
+}
 
 export function AuditPanel() {
   const { sessionId } = useAuth()
@@ -71,6 +81,7 @@ export function AuditPanel() {
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [loading, setLoading] = useState(true)
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all")
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all")
   const [expanded, setExpanded] = useState<number | null>(null)
 
   const fetchData = useCallback(async () => {
@@ -131,6 +142,31 @@ export function AuditPanel() {
         </button>
       </div>
 
+      {/* Kind filter (R0 #306): lets operators isolate PEP interceptions. */}
+      <div className="flex items-center gap-2 flex-wrap" data-testid="audit-kind-tabs">
+        <Filter size={14} className="text-[var(--muted-foreground)]" />
+        {([
+          { id: "all", label: "All Actions" },
+          { id: "pep", label: "PEP" },
+          { id: "decision", label: "Decisions" },
+          { id: "auth", label: "Auth" },
+        ] as { id: KindFilter; label: string }[]).map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setKindFilter(f.id)}
+            data-testid={`audit-kind-${f.id}`}
+            className="px-2 py-1 text-xs rounded-md border transition-colors"
+            style={{
+              borderColor: kindFilter === f.id ? "var(--neural-cyan, #67e8f9)" : "var(--border)",
+              color: kindFilter === f.id ? "var(--neural-cyan, #67e8f9)" : "var(--muted-foreground)",
+              background: kindFilter === f.id ? "rgba(103,232,249,0.1)" : "transparent",
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
       {/* Session filter bar */}
       <div className="flex items-center gap-2 flex-wrap">
         <Filter size={14} className="text-[var(--muted-foreground)]" />
@@ -183,7 +219,7 @@ export function AuditPanel() {
         {!loading && entries.length === 0 && (
           <p className="text-xs text-[var(--muted-foreground)] text-center py-8">No audit entries found.</p>
         )}
-        {entries.map((e) => (
+        {entries.filter((e) => matchesKindFilter(e.action, kindFilter)).map((e) => (
           <button
             key={e.id}
             onClick={() => setExpanded(expanded === e.id ? null : e.id)}

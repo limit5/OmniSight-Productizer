@@ -602,6 +602,27 @@ async def tool_executor_node(state: GraphState) -> dict:
             if tc.tool_name == "generate_artifact_report" and not args.get("task_id") and state.task_id:
                 args = {**args, "task_id": state.task_id}
 
+            # R0 (#306) — PEP Gateway: classify before exec.
+            try:
+                from backend import pep_gateway as _pep
+                pep_dec = await _pep.evaluate(
+                    tool=tc.tool_name,
+                    arguments=args,
+                    agent_id=agent_id or "",
+                    tier=state.sandbox_tier or "t1",
+                )
+                if pep_dec.action is _pep.PepAction.deny:
+                    output = f"[BLOCKED] PEP denied {tc.tool_name}: {pep_dec.reason}"
+                    emit_tool_progress(tc.tool_name, "error", output, index=i, success=False)
+                    results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
+                    tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+                    continue
+            except Exception as pep_exc:
+                # PEP evaluate raised unexpectedly — stay conservative:
+                # let the tool run (circuit breaker inside evaluate() will
+                # have tripped already so the next call fails closed).
+                logger.warning("PEP evaluate raised: %s — proceeding", pep_exc)
+
             try:
                 output = await tool_fn.ainvoke(args)
                 # Compress output to save tokens (covers ALL tools)

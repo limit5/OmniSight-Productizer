@@ -24,6 +24,64 @@
 
 ---
 
+## R0 (complete) PEP Gateway Middleware（#306）（2026-04-17 完成）
+
+**背景**：Priority R（Enterprise Watchdog & Disaster Recovery）design doc `docs/design/enterprise_watchdog_and_disaster_recovery_architecture.md` 把 R0 列為「最高優先 — 填防護缺口」的第一階段 — 為 tool_executor node 加一道 Policy Enforcement Point，在 agent 執行毀滅性命令 / 生產部署前就把工具呼叫攔截下來。R0 完成後，R1 ChatOps 的 approve 按鈕有去處、R8 安全重試的 blast radius 有界、R9 統一通報有 PEP HELD→ChatOps→audit 這一條 canonical 事件流。
+
+### 交付
+
+- **`backend/pep_gateway.py`** — 615 行 Policy Enforcement Point：
+  - 3-tier 分類函式 `classify(tool, arguments, tier)` → `(auto_allow | hold | deny, rule_id, reason, impact_scope)`，純函式可測。
+  - 18 條毀滅性 regex（`rm -rf /`、`mkfs`、`dd if=/dev/{zero,urandom,sda}`、fork-bomb、`chmod -R 777`、`curl … | bash`、`shutdown`、`DROP DATABASE`、`terraform destroy`、`git push --force`…）命中即 DENY（`impact_scope="destructive"`）。
+  - 10 條生產部署 regex（`deploy.sh prod(uction)`、`kubectl --context prod`、`kubectl -n prod`、`terraform apply`、`helm upgrade --namespace prod`、`ansible-playbook prod`、`aws --profile prod`、`gcloud --project …prod…`、`psql -h …prod…`、`docker push …:prod`）命中即 HOLD。
+  - T1/T2/T3 sandbox tier 白名單（`TIER_T1_WHITELIST` / `TIER_T2_EXTRA` / `TIER_T3_EXTRA`），cumulative（T3 ⊃ T2 ⊃ T1），未白名單的工具走 HOLD 不是 DENY（operator 可 approve）。
+  - Circuit breaker：連續 3 次 `propose` 失敗 → 開路 60 s；開路時所有 HOLD 改為 degraded DENY 失敗閉合。自動 half-open。
+  - HELD round-trip：raise Decision Engine proposal（`kind="pep_tool_intercept"`、severity=`destructive` if prod else `risky`、options `[approve | reject]`、`default_option_id="reject"` 作 timeout safe-default）、poll 到 resolve。Approved → `auto_allow`；rejected / timeout → `deny`。
+  - 自帶 recent-ring（200）+ HELD queue（512）供 router 初始化。
+- **`backend/routers/pep.py`** — 5 個 GET + 1 個 POST：`/pep/live`（recent + held + stats + breaker 一次抓）、`/pep/decisions`、`/pep/held`、`/pep/policy`（tier 白名單 + rule 名稱列表）、`/pep/status`、`POST /pep/breaker/reset`（需 operator role）。Approve / Reject 沿用 `decisions.router` 的 `/decisions/{id}/approve|reject` 端點 — PEP HELD 的 `decision_id` 欄位就是 DE id。
+- **`backend/metrics.py`** 擴充 — 新增 3 個 Prometheus counters/histogram：`omnisight_pep_decisions_total{decision,tier,rule}`、`omnisight_pep_deny_total{rule}`、`omnisight_pep_hold_duration_seconds{outcome}`（buckets 1s-1h）。`reset_for_tests()` 同步包含。
+- **`backend/sse_schemas.py`** — 新增 `SSEPepDecision` pydantic model + `SSE_EVENT_SCHEMAS["pep.decision"]` 註冊。
+- **`backend/agents/state.py`** — `GraphState.sandbox_tier: str = "t1"` 新欄位，workflow 層設定後 PEP 根據 tier 選擇白名單。
+- **`backend/agents/nodes.py`** — `tool_executor_node` 在 `tool_fn.ainvoke(args)` 之前插入 PEP `evaluate()`；DENY → `[BLOCKED] PEP denied …`；PEP 本身 raise 時記 warning 但不阻斷（breaker 會在內部 trip）。
+- **Frontend**：
+  - `components/omnisight/pep-live-feed.tsx`（新） — 整個 PEP Live Feed 面板：header 三色 stats（auto/held/deny）+ breaker warning chip + 整排 filter（decision chips / agent select / tool select）+ 可展開的 row（每行 timestamp/agent/tool/command + 徽章；展開顯示 tier/impact/rule/reason + HELD 時顯示 Approve/Reject 按鈕 → 走 `/decisions/{id}/approve|reject`）。每 10 s 刷新 breaker snapshot。
+  - `components/omnisight/toast-center.tsx` — `kind === "pep_tool_intercept"` 的 toast 多掛 `PEP` chip 讓 operator 一眼辨識。
+  - `components/omnisight/decision-dashboard.tsx` — `DecisionRow` 在 kind 旁多掛 `PEP` chip（`data-testid="decision-pep-chip"`）。
+  - `components/omnisight/audit-panel.tsx` — 頂部新增 `All Actions | PEP | Decisions | Auth` kind filter tab（`action.startsWith("pep.")`）。
+  - `components/omnisight/mobile-nav.tsx` + `app/page.tsx` — 新增 `pep` panel id，`PepLiveFeed` 掛進 panel switch。
+  - `lib/api.ts` — `SSE_EVENT_TYPES` 新增 `pep.decision`、`SSEEvent` union 新增 PepDecisionEvent variant、新增 `getPepLive / listPepDecisions / getPepHeld / getPepPolicy / getPepStatus / resetPepBreaker`。
+- **`backend/tests/test_pep_gateway.py`（37 tests）+ `test_pep_router.py`（5 tests）**：
+  - 分類：tier_whitelist auto_allow / tier_unlisted hold / 11 條毀滅性 pattern / 7 條 production hold pattern / destructive > production 優先序 / unknown tier → t1 fallback。
+  - E2E evaluate()：auto_allow 返回、destructive 直接 deny、prod-deploy HOLD→approve 翻 auto_allow、HOLD→reject 翻 deny、HOLD→timeout 失敗閉合、t1 未白名單工具走 HOLD→approve。
+  - Circuit breaker：3 次 propose 失敗開路 + 後續 HOLD 被短路不再 propose、auto_allow 繞過 breaker、deny（classify 層）不被 breaker 影響、reset_breaker。
+  - Ring/stats 排序 + to_dict enum flatten。
+  - Router smoke：`/pep/live` / `/pep/policy` / `/pep/status` / `/pep/held` / `/pep/decisions?limit=…` 五個端點的 contract。
+  - `test_schema.py` SSE 事件集合斷言更新加入 `pep.decision`。
+  - 全部 42 新測試 + 19 regression test_schema 都 pass（`python3 -m pytest backend/tests/test_pep_gateway.py backend/tests/test_pep_router.py backend/tests/test_schema.py` → 61 passed）。
+
+### 設計取捨
+
+- **HOLD 走 Decision Engine 而非獨立佇列**：pep_gateway 把 HOLD 轉成 `kind="pep_tool_intercept"` 的 DE proposal，沿用現成 toast-center / decision-dashboard 的 approve/reject 路徑。好處：zero 新 HTTP endpoint 給 UI，toast 自動上浮（severity=risky/destructive 本來就觸發 toast）、operator 不用學第二套 UX。代價：approve 與 reject 要透過 DE 的 `/decisions/{id}/approve|reject` 而非 `/pep/decisions/{id}/approve` — 但 pep_live_feed.tsx 已經包好這層，對 operator 透明。
+- **default_option_id="reject"**：HELD 到 deadline 會自動 resolve 成預設選項。R0 把預設設為 reject（fail-closed）— 30 min 沒人 approve 就當作拒絕，避免 operator 不在值班時 prod-deploy 因為 timeout 自動放行。
+- **Tier 不在 policy YAML 裡**：直接寫在 pep_gateway.py 的三個 frozenset 常數。好處：版本控制 + code review 自動附帶審查改動、無需配置熱載。如果以後 tier 策略頻繁變動再提煉成 YAML。
+- **Regex 不是 AST**：destructive / prod patterns 用 regex，不是真正的 shell parser。意圖是「低誤攔 + 低漏攔」— `rm -rf /tmp/foo` 不會被 `rm_rf_root`（pattern 有 `/` 之後要 `\s|$`）誤打，但 shell quoting 作怪的混淆（如 `rm '-rf' /`）可能漏。對 AI agent 自動化來說，漏打仍經過 tier unlisted → HOLD；對 human 直接執行的 shell 安全防護不是這層的責任（cgroup / bwrap / sudo policy 才是）。
+- **Regex 失敗的 fail-closed 方向**：classify 永遠走完三個規則後回傳 tuple — 不 raise、不吞例外。evaluate() 若 propose/wait 出例外就把 outcome 改為 deny + 記 degraded=True。
+
+### 整合 point
+
+- R1 ChatOps Interactive（#307）會把 `/pep/held` + ChatOps button click → `POST /decisions/{id}/approve` wire 上去，加上 Gerrit `non-ai-reviewer` group 授權檢查。
+- R8 安全重試（#313）會讀 PEP HOLD 的 `decision_id` 作為 retry boundary；prod-deploy reject 後 worktree 直接 discard。
+- R9 統一通報（#314）會把 PEP P0（pep.deny 累計 >N/5m）路由到 L1 PagerDuty、P2（pep.intercept prod-scope）路由到 L2 ChatOps。
+
+### 後續可擴點（非 R0 scope）
+
+- PEP policy DSL / YAML 化（只有 tier 規模擴大才需要）。
+- per-tenant rule override（目前所有 tenant 共用同一份 pattern list）。
+- PEP 決策的「為什麼 deny」semantic diff（幫 operator 判斷 regex 是否過嚴）。
+- T2→T3 自動升級（operator approve 後就升到 T3 session，避免每次都 hold）。
+
+---
+
 ## P8 (complete) SKILL-ANDROID pilot（#293）（2026-04-17 完成）
 
 **背景**：P7 SKILL-IOS 證明 P0-P6 mobile framework 在 iOS 這條 path 上走得通 — 但「pilot 成功」跟「framework 普遍成立」是兩碼事。D1 對 C5、D29 對 C26、W6 對 W0-W5 都只驗 n=1；每次都留下疑問：會不會只是 iOS / Next.js 剛好湊對？P8 SKILL-ANDROID 是 framework 的 n=2 consumer — 換一條完全 disjoint 的 toolchain（Gradle 8 / Kotlin 2.0 / Jetpack Compose / FCM / Play Billing vs iOS 的 Xcode / Swift 5.9 / SwiftUI / APNs / StoreKit 2）、換一條完全 disjoint 的 host 模型（Linux Docker Android vs macOS runner iOS）、換一條完全 disjoint 的 compliance 主線（Play Policy + Data Safety vs ASC Guidelines + Privacy Manifest），還能用同一個 Python layout 撐住。這是 framework 收斂訊號。

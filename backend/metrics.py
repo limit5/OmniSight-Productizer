@@ -487,6 +487,27 @@ if _AVAILABLE:
     )
     process_start_time.set(time.time())
 
+    # R0 (#306): PEP Gateway — tool-call intercept decisions ───
+    pep_decisions_total = Counter(
+        "omnisight_pep_decisions_total",
+        "PEP Gateway decisions partitioned by outcome / tier / rule",
+        labelnames=("decision", "tier", "rule"),  # decision: auto_allow|hold|deny
+        registry=REGISTRY,
+    )
+    pep_deny_total = Counter(
+        "omnisight_pep_deny_total",
+        "PEP Gateway hard-deny events (destructive pattern matches)",
+        labelnames=("rule",),
+        registry=REGISTRY,
+    )
+    pep_hold_duration_seconds = Histogram(
+        "omnisight_pep_hold_duration_seconds",
+        "Wall-clock seconds a HELD tool call spent waiting for operator",
+        labelnames=("outcome",),  # approved | rejected | timeout
+        buckets=(1, 5, 15, 60, 300, 900, 1800, 3600),
+        registry=REGISTRY,
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -555,6 +576,9 @@ else:
     awaiting_human_age_seconds = _NoOp()  # type: ignore
     worker_pool_capacity = _NoOp()  # type: ignore
     process_start_time = _NoOp()  # type: ignore
+    pep_decisions_total = _NoOp()  # type: ignore
+    pep_deny_total = _NoOp()  # type: ignore
+    pep_hold_duration_seconds = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -883,3 +907,18 @@ def reset_for_tests() -> None:
         registry=REGISTRY,
     )
     process_start_time.set(time.time())
+    global pep_decisions_total, pep_deny_total, pep_hold_duration_seconds
+    pep_decisions_total = Counter(
+        "omnisight_pep_decisions_total", "PEP decisions",
+        labelnames=("decision", "tier", "rule"), registry=REGISTRY,
+    )
+    pep_deny_total = Counter(
+        "omnisight_pep_deny_total", "PEP hard-deny events",
+        labelnames=("rule",), registry=REGISTRY,
+    )
+    pep_hold_duration_seconds = Histogram(
+        "omnisight_pep_hold_duration_seconds", "PEP hold duration",
+        labelnames=("outcome",),
+        buckets=(1, 5, 15, 60, 300, 900, 1800, 3600),
+        registry=REGISTRY,
+    )

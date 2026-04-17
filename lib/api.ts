@@ -102,6 +102,7 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  | { event: "pep.decision"; data: PepDecisionEvent }
 
 // ─── Global SSE manager ───
 // 48A-Fix P0: a single EventSource per origin, shared across every caller.
@@ -140,6 +141,8 @@ const SSE_EVENT_TYPES = [
   "orchestration.lock.released",
   "orchestration.merger.voted",
   "orchestration.change.awaiting_human_plus_two",
+  // ─── R0 (#306) PEP Gateway ───
+  "pep.decision",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
@@ -2073,6 +2076,90 @@ export interface BudgetStrategyInfo {
 
 export async function getBudgetStrategy() {
   return request<BudgetStrategyInfo>("/budget-strategy")
+}
+
+// ─── R0 (#306) PEP Gateway ───────────────────────────────────
+
+export type PepAction = "auto_allow" | "hold" | "deny"
+export type PepImpactScope = "local" | "prod" | "destructive" | ""
+
+export interface PepDecisionEvent {
+  id: string
+  ts: number
+  agent_id: string
+  tool: string
+  command: string
+  tier: string
+  action: PepAction
+  rule: string
+  reason: string
+  impact_scope: PepImpactScope
+  decision_id: string | null
+  degraded: boolean
+  timestamp?: string
+  _broadcast_scope?: string
+  _session_id?: string
+  _tenant_id?: string
+}
+
+export interface PepStats {
+  auto_allowed: number
+  held: number
+  denied: number
+  total: number
+}
+
+export interface PepBreakerStatus {
+  open: boolean
+  consecutive_failures: number
+  opened_at: number
+  last_failure: number
+  last_reason: string
+  cooldown_remaining: number
+}
+
+export interface PepLiveSnapshot {
+  recent: PepDecisionEvent[]
+  held: PepDecisionEvent[]
+  stats: PepStats
+  breaker: PepBreakerStatus
+}
+
+export async function getPepLive(limit = 100): Promise<PepLiveSnapshot> {
+  return request<PepLiveSnapshot>(`/pep/live?limit=${limit}`)
+}
+
+export async function listPepDecisions(limit = 100) {
+  return request<{ items: PepDecisionEvent[]; count: number }>(
+    `/pep/decisions?limit=${limit}`,
+  )
+}
+
+export async function getPepHeld() {
+  return request<{ items: PepDecisionEvent[]; count: number }>(`/pep/held`)
+}
+
+export async function getPepPolicy() {
+  return request<{
+    tiers: { t1: string[]; t2: string[]; t3: string[] }
+    destructive_rule_count: number
+    prod_hold_rule_count: number
+    destructive_rules: string[]
+    prod_hold_rules: string[]
+  }>("/pep/policy")
+}
+
+export async function getPepStatus() {
+  return request<{ breaker: PepBreakerStatus; stats: PepStats; held_count: number }>(
+    "/pep/status",
+  )
+}
+
+export async function resetPepBreaker() {
+  return request<{ ok: boolean; breaker: PepBreakerStatus }>(
+    "/pep/breaker/reset",
+    { method: "POST" },
+  )
 }
 
 export async function setBudgetStrategy(strategy: BudgetStrategyId) {
