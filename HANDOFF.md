@@ -11709,3 +11709,76 @@ backend/tests/test_reverse_proxy_caddyfile.py ........................... 24 pas
 ### 下一步（G3 收官，下一波是 G4）
 - G3 (HA-03 Blue-Green) 五顆 checkbox 全數完成：row 1353 (`--strategy` flag) / 1354 (atomic primitive) / 1355 (ceremony) / 1356 (`--rollback`) / 1357 (runbook + 腳本) — 從 flag 到文件 closed-loop。
 - 接下來是 G4 (HA-04 SQLite → PostgreSQL 遷移 + streaming replica)，TODO 從 row 1359 起。G3 的 blue-green 機制將是 G4 schema migration 的安全網：non-backward-compat schema change 必走 G3 ceremony。
+
+## 2026-04-18 — V4 #3 · `backend/web_block_exporter.py` Block exporter for shadcn-CLI compatible blocks（TODO row 1535）
+
+### Phase summary
+單一 deliverable：把 V4 工作區裡 agent 生成的 React/Tailwind 元件**包成 shadcn 官方 registry-item.json**，操作員直接拿 `npx shadcn add <url>` 就能裝。這是「分享元件原始碼」的對偶 — V4 #2 的 Instant Preview URL 分享「跑起來的網站」，本顆分享「可一鍵安裝的 source bundle」。
+
+### 交付清單
+- **新檔** `backend/web_block_exporter.py` (~620 行)
+- **新檔** `backend/tests/test_web_block_exporter.py` (~700 行 / 128 顆契約測試 / 0.23 s)
+- **零改動** `backend/deploy/*` / `backend/__init__.py` / `components/` / `app/` / `package.json` / `requirements.txt`
+
+### 設計重點
+1. **Wire 契約對齊 shadcn v2 schema** — 產出的 JSON 含 `$schema` (`https://ui.shadcn.com/schema/registry-item.json`) / `name` / `type` (`registry:block` 預設) / `title` / `description` / `author` / `dependencies` (npm) / `devDependencies` / `registryDependencies` (shadcn ui primitives) / `files: [{path, content, type, target?}]` / `tailwind: {config: {...}}` / `cssVars: {light, dark}` / `categories` / `docs` / `meta`。空 optional 不寫進 payload，CLI 端體積最小。
+2. **依賴自動推導** — `extract_imports(content)` regex 抓所有 `import` / `export ... from` 來源；`detect_npm_dependencies()` 把 bare specifier 收進 `dependencies`（react/react-dom 自動排除）；`detect_shadcn_dependencies()` 對 `@/components/ui/<name>` import 比對 `KNOWN_SHADCN_UI_COMPONENTS` (55 顆 = 與 `components/ui/` 實檔同步) → 命中即進 `registryDependencies`。操作員可手動傳 `dependencies=` / `registry_dependencies=` 加碼，會 sorted-dedupe 與推導結果合併。
+3. **每檔 type 用路徑啟發式推導** — `infer_file_type(path)`：`components/ui/*`→`registry:ui`、`hooks/*`→`registry:hook`、`lib/*`→`registry:lib`、`app/**/page.tsx`→`registry:page`、`*.css/.scss`→`registry:style`、`*.tsx/.jsx/.ts/.js/.mjs/.cjs`→`registry:component`、其餘→`registry:file`。`autoinfer=False` 時跳過。
+4. **Path-traversal / shell-injection 雙層防護** — 所有檔案路徑經 `assert_safe_relative_path()` 拒絕 `..` / 絕對路徑 / Windows 磁碟代號 / 空字串、normalise `\` → `/`；block name 強制 `^[a-z][a-z0-9-]{0,63}$` 不 coerce（操作員看清楚 error）；CLI URL 含 `&?# *;` 等特殊字元自動 `"…"` quote。零 subprocess、零 network、零 eval。
+5. **Test seam `writer=`** — `export_block(..., writer=lambda p, body: captured.append((p, body)))` 不碰 disk，方便 router 在 dry-run 模式下回 preview。預設 `writer=None` 時走真實檔案 write_bytes。
+6. **Multi-block index 自我修復** — `update_registry_index=True` 時會讀 `<output>/registry.json`，append 新 block + 舊 entries (skip 同名 entry 完成 replace 語意)；既存檔解析失敗時 logger.warning + 重建（避免 corrupted manifest 卡 publish flow）。
+7. **Round-trip + forward-compat** — `load_block_from_json()` 反向解析既存 JSON；未知 schema 欄位保留進 `meta._unknown_fields`，未來 shadcn 加新欄不掉資料。
+
+### Public 公開介面
+| 類別 | 符號 |
+|---|---|
+| Schema 常量 | `REGISTRY_ITEM_SCHEMA`、`REGISTRY_INDEX_SCHEMA`、9 顆 `BLOCK_TYPE_*`、`REGISTRY_ITEM_TYPES`、`REGISTRY_FILE_TYPES`、`BLOCK_NAME_RE`、`DEFAULT_REGISTRY_DIR`、`MAX_BLOCK_FILE_BYTES`、3 alias prefix、`KNOWN_SHADCN_UI_COMPONENTS`、`KNOWN_NPM_PACKAGES` |
+| Errors | `BlockExportError`、`InvalidBlockNameError`、`UnsafeBlockPathError`、`EmptyBlockError`、`BlockValidationError` |
+| Dataclass | `BlockFile`、`BlockExport`、`ExportResult` |
+| Pure helper | `slugify_block_name`、`validate_block_name`、`assert_safe_relative_path`、`infer_file_type`、`extract_imports`、`detect_shadcn_dependencies`、`detect_npm_dependencies`、`merge_unique`、`block_export_filename`、`compute_block_url`、`compute_install_command` |
+| Builder | `build_block`、`build_block_from_directory` |
+| Serialiser | `to_registry_item_dict`、`serialize_registry_item`、`compute_registry_index_entry`、`build_registry_index` |
+| Exporter | `export_block` |
+| Round-trip | `load_block_from_json` |
+
+### 測試總結（128 passed in 0.23 s）
+- 模組 invariants 9（exports / schema URL / item-types 完整 / known sets / regex / size cap / dir / error 階層）
+- `slugify_block_name` 7（trim/collapse/leading-non-letter strip/cap 64/non-str/empty-after-clean/unicode）
+- `validate_block_name` 8（parametrize 4 good + 6 bad + non-str）
+- `assert_safe_relative_path` 7（happy/`\`→`/`/abs/drive-letter/`..`/empty/non-str）
+- `infer_file_type` 14（parametrize 13 路徑 + non-str + backslash）
+- `extract_imports` 4（named/default/namespace/side-effect + export-from + dedupe + empty）
+- `detect_shadcn_dependencies` 5
+- `detect_npm_dependencies` 5（含 react/react-dom drop + drop_builtins=False 開關）
+- `merge_unique` 3
+- URL/install-cmd/filename 7
+- `BlockFile` dataclass 3（minimal/with target/frozen）
+- `build_block` happy 9 + error 8
+- `build_block_from_directory` 5（happy/prefix/missing/no match/non-utf8）
+- `to_registry_item_dict` 4 + `serialize_registry_item` 4（含 indent=None compact、sort_keys、unicode 保留）
+- Index 3（entry/build/duplicate）
+- `export_block` 11（json artefact + base_url install cmd + alt runner + write_individual_files + index create + index append + index replace-same-name + sha256 + writer seam + invalid-name fail-fast + corrupt-index recovery）
+- `load_block_from_json` 5（round-trip + 未知欄保留 + non-object/missing name/missing files reject）
+- 全棧 e2e 1（含 tailwind + cssVars + categories + 兩 type 檔案 + install command 字面對齊）
+- JSON-safe 1
+
+### 零回歸驗證
+- `backend/tests/test_deploy_{base,vercel,docker_nginx,netlify,cloudflare_pages,instant_preview}.py` 共 **299 tests 全綠** in 1.89 s
+- `backend/tests/test_skill_{nextjs,astro,nuxt}.py` 共 **168 tests 全綠** in 2.33 s
+
+### 為什麼這樣設計（Q&A）
+1. **為什麼不是 `WebDeployAdapter` 介面的第 5 個方法？** Block exporter 跟 deploy adapter 解耦：deploy 是「把網站推上去」（vercel/docker/netlify/cf-pages），block exporter 是「把元件包成可分享 JSON」（產出物可以再被任一 adapter serve / 或丟 GitHub raw / S3 / docker-nginx 內部 registry）。把它塞進 adapter 抽象會違反 single responsibility 還會逼每個 adapter 都實作這顆。
+2. **為什麼 `dependencies` 自動排除 `react`/`react-dom`？** 任何 shadcn 消費者都已經有，重複 declare 會在 `npm install` 時拉舊版頂掉新版（典型 footgun）。`drop_builtins=False` 開關保留給少數 monorepo 場景。
+3. **為什麼 `KNOWN_SHADCN_UI_COMPONENTS` 是 frozen set 不是動態掃描？** 動態掃描 `components/ui/*.tsx` 在 prod 環境會增加 IO + 跨平台路徑差異風險，而 shadcn 的官方 primitives 名單是相對穩定的（一年一次大更新）。手動同步比 IO 風險小。
+4. **為什麼 `MAX_BLOCK_FILE_BYTES = 1 MiB`？** 超過 1 MiB 的單檔 .tsx/.ts 已經是 bundled asset 而非源碼（生成式 agent 產出 4 KB 以下是常態，500 KB 已經是極端）。1 MiB 軟限提早把 OOM/payload bloat 抓出來。
+5. **為什麼 `build_block` 接 dict 也接 `BlockFile`？** REST router 收到 JSON body 解析後是 dict，內部 caller 用 dataclass — 接兩種免去外層強行 coerce 的樣板碼。
+
+### 刻意**不**做的事
+- **不**動 `backend/deploy/__init__.py` 的 `__all__`：block exporter 不是 deploy adapter，分裝在 `backend/web_block_exporter.py` 自成模組免得 deploy 包語意污染。
+- **不**寫 `npx shadcn build` 包裝：那是 operator 端的事，本模組只負責產生 build 後的 JSON artefact（與 shadcn 官方 build 等價的單檔）。
+- **不**做 HTTP serving：URL 是 operator 提供的；docker-nginx adapter 已經能 serve 任何靜態目錄，要服務 `<output>/r/*.json` 就把 output_dir 餵給它。
+- **不**做 component 改寫 / codemod：保留 agent 產出的源碼原樣（任何改寫都是 V4 #4 brand consistency validator 的 scope）。
+- **不**註冊 FastAPI router：route wiring（POST /api/v1/blocks/export）屬後續 workspace HMI integration，本回合只交付 library。
+
+### 下一步
+- V4 #4 Brand consistency validator（TODO row 1537）：post-deploy 掃描所有 color/font 是否在 design system 允許範圍，違規列 warning。會跟 V4 #3 互補 — 一個是「打包要散播的元件」，一個是「驗證已散播的元件還守規矩」。
