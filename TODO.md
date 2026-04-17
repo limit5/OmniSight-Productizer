@@ -1112,11 +1112,11 @@ Legend:
 - [x] 預估：**2.5 day**
 
 ### P8. SKILL-ANDROID (pilot, #293)
-- [ ] Jetpack Compose app 骨架
-- [ ] Gradle 8 + Kotlin 2.0
-- [ ] FCM push integration
-- [ ] Play Billing template
-- [ ] 預估：**2.5 day**
+- [x] Jetpack Compose app 骨架
+- [x] Gradle 8 + Kotlin 2.0
+- [x] FCM push integration
+- [x] Play Billing template
+- [x] 預估：**2.5 day**
 
 ### P9. SKILL-FLUTTER / SKILL-RN（跨平台, #294）
 - [ ] Flutter 3.x app 骨架 + 共用 iOS/Android config
