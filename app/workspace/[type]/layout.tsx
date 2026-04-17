@@ -1,18 +1,18 @@
 /**
- * V0 #1 — Workspace router.
+ * V0 #1 — Workspace router. V0 #3 — wraps children in the per-workspace
+ * `WorkspaceProvider` so every page under `/workspace/[type]` gets its own
+ * (type-scoped) project / agent-session / preview state, cleanly isolated
+ * from the command-center global state.
  *
  * Dynamic segment `[type]` gates the three product-line workspaces
  * (`/workspace/web`, `/workspace/mobile`, `/workspace/software`).
  * An unknown type 404s immediately instead of rendering an empty shell,
  * which keeps typos and stale links from leaking the dev UX.
- *
- * This file is intentionally the *router only* — V0's shell / context
- * provider / chat / bridge card / SSE filter are separate checkboxes
- * under #316 and plug in as children (the shell will wrap `{children}`
- * once it lands in `components/omnisight/workspace-shell.tsx`).
  */
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
+
+import { WorkspaceProvider } from "@/components/omnisight/workspace-context"
 
 export const WORKSPACE_TYPES = ["web", "mobile", "software"] as const
 export type WorkspaceType = (typeof WORKSPACE_TYPES)[number]
@@ -70,7 +70,7 @@ export default async function WorkspaceLayout(
       data-testid="workspace-root"
       className="min-h-screen bg-background text-foreground"
     >
-      {children}
+      <WorkspaceProvider type={type}>{children}</WorkspaceProvider>
     </section>
   )
 }
