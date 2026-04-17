@@ -17,14 +17,19 @@ daily drill workflow (G6 #1) and the RTO/RPO objective doc (G6 #2).
 
 Sibling rows NOT covered by this test (explicit scope fence):
 
-    * row 1382 (G6 #4) — annual DR drill operator checklist.
     * row 1383 (G6 #5) — ``scripts/dr_drill.sh`` +
       ``docs/ops/dr_runbook.md`` bundle-closure deliverables.
+
+Previously row 1382 (G6 #4, annual DR drill checklist) was also
+guarded here via ``test_no_annual_dr_checklist_doc``. G6 #4 landed
+as ``docs/ops/dr_annual_drill_checklist.md`` with contract
+``backend/tests/test_dr_annual_drill_checklist_g6_4.py`` — the
+guard was removed in that commit per the explicit-migration pattern.
 
 The sibling-row guards below RED-flag any of the above landing in
 this same commit (silent scope creep). The explicit-migration pattern
 (remove the guard in the commit that lands the next row) is carried
-forward from G5 → G6 #1 → G6 #2 → this row.
+forward from G5 → G6 #1 → G6 #2 → this row → G6 #4.
 
 Explicit migration accepted from G6 #2:
 
@@ -452,19 +457,11 @@ class TestScopeDisciplineSiblingRows:
             "land it in this commit"
         )
 
-    def test_no_annual_dr_checklist_doc(self) -> None:
-        # G6 #4 (row 1382) owns the annual DR drill checklist. A
-        # separate checklist file landing here would be scope creep.
-        candidates = (
-            PROJECT_ROOT / "docs" / "ops" / "dr_annual_checklist.md",
-            PROJECT_ROOT / "docs" / "ops" / "annual_dr_checklist.md",
-            PROJECT_ROOT / "docs" / "ops" / "dr_drill_checklist.md",
-        )
-        for cand in candidates:
-            assert not cand.exists(), (
-                f"row 1382 (G6 #4) owns the annual DR checklist; "
-                f"saw unexpected {cand.relative_to(PROJECT_ROOT)}"
-            )
+    # NOTE: `test_no_annual_dr_checklist_doc` was removed when G6 #4
+    # (row 1382) landed as `docs/ops/dr_annual_drill_checklist.md`
+    # (contract: `backend/tests/test_dr_annual_drill_checklist_g6_4.py`).
+    # Explicit-migration pattern carried forward from
+    # G5 #3→#4→#5→#6 → G6 #1 → G6 #2 → G6 #3 → G6 #4 (step 8).
 
     def test_no_g7_grafana_dashboard(self) -> None:
         # G7 ships the Grafana dashboard; must not appear with G6 #3.
