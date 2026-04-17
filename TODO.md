@@ -1484,7 +1484,7 @@ Legend:
 
 ### V0. Workspace Foundation 共用基建 (#316)
 - [x] `app/workspace/[type]/layout.tsx`：workspace router（`/workspace/web` / `/workspace/mobile` / `/workspace/software`） *(done: V0 #1 — dynamic route with `WORKSPACE_TYPES = ["web","mobile","software"]`, `isWorkspaceType` guard, `generateStaticParams`, per-type `generateMetadata`, `notFound()` on unknown segments + 13 contract tests)*
-- [ ] `components/omnisight/workspace-shell.tsx`：共用 workspace layout 殼（三欄：sidebar / preview / code+chat）
+- [x] `components/omnisight/workspace-shell.tsx`：共用 workspace layout 殼（三欄：sidebar / preview / code+chat） *(done: V0 #2 — 3-column CSS grid shell with per-type defaults (`web`→Components/Preview, `mobile`→Platforms/Device Preview, `software`→Languages/Runtime Output), sidebar collapse toggle (ARIA + `data-sidebar-collapsed`), slot props API (`sidebar`/`preview`/`codeChat`), title overrides + 16 contract tests)*
 - [ ] Workspace context provider：per-workspace 獨立 project state（當前專案 / agent session / preview state）；跟指揮中心 global state 分離
 - [ ] Workspace session persistence：切換工作區不丟失 state（localStorage + backend session sync）
 - [ ] `components/omnisight/workspace-bridge-card.tsx`：指揮中心的 summary card——顯示「3 個工作區正在運作」+ 每個工作區的 agent 狀態 + 點擊跳轉
