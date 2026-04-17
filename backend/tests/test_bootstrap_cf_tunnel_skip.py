@@ -23,13 +23,25 @@ from backend import bootstrap as _boot
 
 @pytest.fixture()
 def _marker_tmp():
-    """Isolate the bootstrap marker so the real one is not touched."""
+    """Isolate the bootstrap marker + CF router state so neither leaks.
+
+    The provision test exercises ``POST /cloudflare/provision`` end-to-end,
+    which writes ``tunnel_id`` into the module-level ``_stored_state`` of
+    :mod:`backend.routers.cloudflare_tunnel`. Without an explicit reset
+    that value survives into later tests (e.g. ``test_bootstrap.py``'s
+    marker-roundtrip assertions), where ``_cf_tunnel_is_configured`` then
+    trips the in-memory branch instead of the marker branch under test.
+    """
+    from backend.routers import cloudflare_tunnel as _cft
+
     tmp = tempfile.mkdtemp(prefix="omnisight_cf_skip_")
     _boot._reset_for_tests(Path(tmp) / "marker.json")
+    _cft._reset_for_tests()
     try:
         yield
     finally:
         _boot._reset_for_tests()
+        _cft._reset_for_tests()
 
 
 @pytest.mark.asyncio

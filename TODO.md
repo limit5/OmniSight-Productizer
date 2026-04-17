@@ -1260,7 +1260,7 @@ Legend:
 
 ### L4. Step 3 — Cloudflare Tunnel（複用 B12 wizard）
 - [x] 直接 embed B12 的 `cloudflare-tunnel-setup.tsx` 到 bootstrap step 3
-- [ ] 完成 provision 後寫 `bootstrap_state.cf_tunnel_configured=true`
+- [x] 完成 provision 後寫 `bootstrap_state.cf_tunnel_configured=true`
 - [ ] 提供「跳過（內網部署）」選項，記 audit warning
 - 預估：**0.25 day**（主要靠 B12，此處只做 embed + state 寫入）
 
