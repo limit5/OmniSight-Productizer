@@ -22,7 +22,8 @@ chart enforces:
   `values-prod.yaml`, NOT inline conditionals in `values.yaml`.
 - §7.6 — Gateway-API selection is an EXPLICIT toggle
   (`ingress.gatewayApi.enabled`) — the chart never auto-detects.
-- §7.7 — CI smoke against `kind` 1.29 (lands in G5 #6, row 1374).
+- §7.7 — CI smoke against `kind` 1.29 (landed in G5 #6, row 1374, at
+  `.github/workflows/k8s-helm-smoke.yml`).
 
 ## Files
 
@@ -69,8 +70,11 @@ obvious placeholder — operators MUST override.
 
 ## Diff against the plain manifests
 
-Until the G5 #6 CI job lands a smoke check, run this locally to confirm
-the chart hasn't drifted from the plain manifests:
+The G5 #6 CI smoke (`.github/workflows/k8s-helm-smoke.yml`, row 1374)
+runs `helm template … | kubectl apply --dry-run=server -f -` against
+both default and overlay values on every PR that touches the chart or
+the plain manifests. To reproduce locally — or to surface a textual
+diff before pushing — run:
 
 ```bash
 helm template omnisight deploy/helm/omnisight \
@@ -99,8 +103,6 @@ The four toggles operators reach for most:
 ## Scope — what this chart does NOT include
 
 - `deploy/nomad/` or `deploy/swarm/` — out of scope per charter §7.8.
-- CI smoke workflow (kind 1.29 + `helm template | kubectl diff`) lands
-  in G5 #6 row 1374.
 - Optional sub-charts (Postgres-HA, Prometheus Operator) — those ship
   as their own deploy bundles under `deploy/postgres-ha/` and
   `deploy/prometheus/` and stay first-class. The OmniSight chart is

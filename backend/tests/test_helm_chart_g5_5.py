@@ -13,8 +13,10 @@ probe paths, HPA target, PDB API version, etc.).
 Helm CLI is intentionally NOT a test prerequisite — most of the contract
 holds on the chart files themselves (templates as text + values as YAML)
 which keeps these tests fast and runnable in CI without Helm install.
-The G5 #6 row 1374 CI smoke job will add a `helm template` + `kubectl
-apply` round-trip.
+The G5 #6 row 1374 CI smoke job adds the `helm template` + `kubectl
+apply --dry-run=server` round-trip against kind 1.29; that workflow
+lives at `.github/workflows/k8s-helm-smoke.yml` and is contract-pinned
+in `test_ci_k8s_helm_smoke_g5_6.py`.
 
 Sibling contracts (not asserted here):
     * G5 #2 row 1370 — plain Deployment / Service / Ingress / HPA
@@ -710,29 +712,17 @@ class TestTodoRowMarker:
 
 # ---------------------------------------------------------------------------
 # TestScopeDisciplineSiblingRows — G5 #5 must not silently drag in
-# G5 #6 (CI smoke + delivery bundle). If those land, it's a separate
-# commit and this guard flips.
+# extra charts. The G5 #6 CI smoke guard previously lived here and was
+# REMOVED in the commit that landed G5 #6 row 1374 — explicit-migration
+# pattern carried forward from G5 #3 → #4 → #5 → #6. The CI workflow
+# that closes the bundle now ships at .github/workflows/k8s-helm-smoke.yml
+# and is contract-pinned in test_ci_k8s_helm_smoke_g5_6.py.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
     def test_no_nomad_or_swarm_manifests(self) -> None:
         # Charter §7.8 — Nomad / Swarm are out-of-scope for G5.
         assert not (PROJECT_ROOT / "deploy" / "nomad").exists()
         assert not (PROJECT_ROOT / "deploy" / "swarm").exists()
-
-    def test_no_ci_smoke_workflow_yet(self) -> None:
-        # G5 #6 (row 1374) owns the CI smoke. If a workflow file with
-        # the kind 1.29 + helm template gating lands here, the scope
-        # line between rows has blurred.
-        workflows_dir = PROJECT_ROOT / ".github" / "workflows"
-        if not workflows_dir.is_dir():
-            return  # nothing to check
-        for wf in workflows_dir.glob("*.y*ml"):
-            text = _read(wf)
-            if "deploy/helm/omnisight" in text and "kind" in text.lower():
-                pytest.fail(
-                    f"G5 #6 (row 1374) owns the kind/helm CI smoke — "
-                    f"saw it in {wf.name}; flip row 1374 in the same commit"
-                )
 
     def test_no_extra_chart_under_deploy_helm(self) -> None:
         # If a sibling chart lands (e.g. deploy/helm/omnisight-frontend/)

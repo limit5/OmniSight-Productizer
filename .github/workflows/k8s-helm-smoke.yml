@@ -1,0 +1,274 @@
+name: K8s + Helm smoke
+
+# G5 #6 (TODO row 1374) — delivery-bundle CI smoke for the G5 K8s
+# manifests (`deploy/k8s/`) and Helm chart (`deploy/helm/omnisight/`).
+# Charter `docs/ops/orchestration_selection.md` §7.7 commits:
+#
+#   "CI smoke uses kind (Kubernetes IN Docker) for parity: every G5
+#    manifest must render + apply cleanly against a vanilla kind 1.29
+#    cluster — this pins the minimum version claim."
+#
+# Three jobs, ordered cheap → expensive so a fast failure short-circuits
+# the slower ones in practice (matrix is independent so all run on PR):
+#
+#   helm-render        Hard gate. No cluster needed — runs `helm lint`
+#                      then `helm template` against defaults, staging,
+#                      and prod values. Catches Go-template syntax
+#                      errors, missing required values, and chart
+#                      structure regressions on every PR in <30 s.
+#
+#   kubectl-validate   Hard gate. Schema-validates `deploy/k8s/*.yaml`
+#                      against bundled OpenAPI specs via
+#                      `kubectl --dry-run=client`. Same ~30 s budget;
+#                      complementary to helm-render (catches plain-YAML
+#                      regressions independently of the chart).
+#
+#   kind-smoke         Hard gate. Boots a kind 1.29 cluster and runs
+#                      `kubectl apply --dry-run=server` against the
+#                      *live* API server for both `deploy/k8s/*.yaml`
+#                      and the chart rendered with each values overlay.
+#                      Catches admission warnings, deprecated apiVersions,
+#                      and field drift that client-side validation misses.
+#                      `--dry-run=server` is deliberate — the placeholder
+#                      `ghcr.io/your-org/omnisight-backend` image cannot
+#                      pull, so we validate the *manifests* not the app.
+#
+# Why kind 1.29 specifically: charter §1 names 1.29 as the minimum
+# target. The chart's `kubeVersion: ">= 1.29.0-0"` enforces this on
+# `helm install`; this workflow is the symmetric round-trip that ensures
+# our manifests are still 1.29-compatible as the chart evolves.
+#
+# Sibling commitments:
+#   - charter §7.1   two surfaces (deploy/k8s + chart), one truth.
+#   - charter §7.4   Deployment RollingUpdate maxUnavailable: 0 / maxSurge: 1.
+#   - charter §7.5   values-staging.yaml + values-prod.yaml split.
+#   - charter §7.6   ingress.gatewayApi.enabled is an explicit toggle —
+#                    the kind-smoke job exercises both render branches.
+#   - charter §7.8   nomad/swarm bundles are out of scope; no job here.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'deploy/k8s/**'
+      - 'deploy/helm/omnisight/**'
+      - '.github/workflows/k8s-helm-smoke.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'deploy/k8s/**'
+      - 'deploy/helm/omnisight/**'
+      - '.github/workflows/k8s-helm-smoke.yml'
+  workflow_dispatch:
+    # Manual trigger when bumping kind / helm / kubectl pins to confirm
+    # nothing else in the bundle has rotted in the meantime.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-helm-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned tool versions. Bump in sync with charter §1's minimum-version
+  # claim; downgrading kind below 1.29 is a charter violation.
+  KIND_NODE_IMAGE: kindest/node:v1.29.0
+  HELM_VERSION: v3.14.4
+  KUBECTL_VERSION: v1.29.3
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────
+  # helm-render — Hard gate. Pure file-level validation; no cluster.
+  # ─────────────────────────────────────────────────────────────────
+  helm-render:
+    name: helm lint + template (defaults / staging / prod)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm version
+        run: helm version --short
+
+      - name: helm lint
+        run: |
+          set -eu
+          helm lint deploy/helm/omnisight \
+            -f deploy/helm/omnisight/values.yaml
+
+      - name: helm template — defaults
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            > /tmp/render-defaults.yaml
+          test -s /tmp/render-defaults.yaml
+          echo "rendered $(wc -l < /tmp/render-defaults.yaml) lines"
+
+      - name: helm template — staging overlay
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            -f deploy/helm/omnisight/values.yaml \
+            -f deploy/helm/omnisight/values-staging.yaml \
+            > /tmp/render-staging.yaml
+          test -s /tmp/render-staging.yaml
+
+      - name: helm template — prod overlay
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            -f deploy/helm/omnisight/values.yaml \
+            -f deploy/helm/omnisight/values-prod.yaml \
+            > /tmp/render-prod.yaml
+          test -s /tmp/render-prod.yaml
+
+      - name: helm template — Gateway-API toggle (charter §7.6)
+        # Flip the explicit toggle to confirm both Ingress branches
+        # render. Charter §7.6 forbids silent auto-detect, so the
+        # if/else in templates/ingress.yaml is load-bearing.
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            --set ingress.gatewayApi.enabled=true \
+            > /tmp/render-gatewayapi.yaml
+          grep -q '^kind: HTTPRoute$' /tmp/render-gatewayapi.yaml \
+            || { echo "::error::Gateway-API render missing HTTPRoute"; exit 1; }
+
+      - name: upload rendered manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-rendered-manifests
+          path: |
+            /tmp/render-defaults.yaml
+            /tmp/render-staging.yaml
+            /tmp/render-prod.yaml
+            /tmp/render-gatewayapi.yaml
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────
+  # kubectl-validate — Hard gate. Client-side schema validation of
+  # the plain-YAML manifests. Independent of the chart so a chart
+  # regression cannot mask a manifest regression (or vice-versa).
+  # ─────────────────────────────────────────────────────────────────
+  kubectl-validate:
+    name: kubectl --dry-run=client (deploy/k8s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: kubectl version
+        run: kubectl version --client=true
+
+      - name: client-side validate every manifest
+        run: |
+          set -eu
+          # --dry-run=client validates against the bundled OpenAPI
+          # schema for the kubectl version (pinned to 1.29.x). It
+          # catches typos, wrong apiVersion, missing required fields
+          # — without needing a live API server.
+          kubectl apply --dry-run=client -f deploy/k8s/
+
+  # ─────────────────────────────────────────────────────────────────
+  # kind-smoke — Hard gate. Live API server validation against
+  # kind 1.29 (charter §1 minimum target). Catches admission warnings,
+  # deprecated apiVersions, server-side field drift.
+  # ─────────────────────────────────────────────────────────────────
+  kind-smoke:
+    name: kind 1.29 round-trip (manifests + chart)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [helm-render, kubectl-validate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: spin up kind 1.29 cluster
+        # helm/kind-action pins the kind binary version and exposes the
+        # kubeconfig automatically. node_image holds the K8s control-plane
+        # version; v1.29.0 is charter §1's minimum-target floor.
+        uses: helm/kind-action@v1
+        with:
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+          cluster_name: omnisight-g5-smoke
+          wait: 120s
+
+      - name: kubectl cluster-info (sanity)
+        run: |
+          set -eu
+          kubectl cluster-info
+          kubectl get nodes -o wide
+          kubectl version --short || kubectl version
+
+      - name: server-side validate plain manifests
+        # The placeholder image (ghcr.io/your-org/omnisight-backend)
+        # cannot pull from the kind cluster, so we use --dry-run=server
+        # to validate the *manifests* against the live 1.29 API server
+        # without ever scheduling pods. This is the strict version of
+        # client-side validation: admission webhooks, defaulting, and
+        # deprecation warnings all run.
+        run: |
+          set -eu
+          kubectl apply --dry-run=server -f deploy/k8s/
+
+      - name: server-side validate chart — defaults
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            | kubectl apply --dry-run=server -f -
+
+      - name: server-side validate chart — staging overlay
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            -f deploy/helm/omnisight/values.yaml \
+            -f deploy/helm/omnisight/values-staging.yaml \
+            | kubectl apply --dry-run=server -f -
+
+      - name: server-side validate chart — prod overlay
+        run: |
+          set -eu
+          helm template omnisight deploy/helm/omnisight \
+            --namespace omnisight \
+            -f deploy/helm/omnisight/values.yaml \
+            -f deploy/helm/omnisight/values-prod.yaml \
+            | kubectl apply --dry-run=server -f -
+
+      - name: collect kind logs on failure
+        if: failure()
+        run: |
+          set +e
+          kind export logs /tmp/kind-logs --name omnisight-g5-smoke
+          ls -la /tmp/kind-logs || true
+
+      - name: upload kind logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-smoke-logs
+          path: /tmp/kind-logs
+          retention-days: 7

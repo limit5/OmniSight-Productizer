@@ -63,13 +63,20 @@ kubectl apply -f deploy/k8s/
 kubectl -n omnisight wait deploy/omnisight-backend --for=condition=available --timeout=120s
 ```
 
-The G5 #6 delivery bundle (row 1374) will land the CI job that runs
-this against each PR.
+The G5 #6 delivery bundle (row 1374) shipped this as
+`.github/workflows/k8s-helm-smoke.yml` — every PR that touches
+`deploy/k8s/**` or `deploy/helm/omnisight/**` gates on three jobs:
+`helm-render` (helm lint + `helm template` for defaults / staging /
+prod / Gateway-API toggle), `kubectl-validate` (client-side schema
+check against bundled OpenAPI), and `kind-smoke` (live `kubectl apply
+--dry-run=server` against a fresh kind 1.29 cluster). Contract pinned
+in `backend/tests/test_ci_k8s_helm_smoke_g5_6.py`.
 
 ## Scope — what this bundle does NOT include
 
-- CI smoke workflow + kind harness → G5 #6 row 1374.
 - `deploy/nomad/` or `deploy/swarm/` — out of scope per charter §7.8.
+- DR-drill / restore / backup-selftest CI → G6 (HA-06) bucket.
+- Grafana dashboard + alert rules → G7 (HA-07) bucket.
 
 `PodDisruptionBudget` (G5 #3 row 1371) is part of the bundle —
 ships as `15-pdb-backend.yaml` with `policy/v1` and `minAvailable: 1`.
