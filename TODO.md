@@ -1185,11 +1185,11 @@ Legend:
 - [x] 預估：**2 day**
 
 ### X4. License / dependency 合規 (#300)
-- [ ] SPDX license scan（依語言 ecosystem：`cargo-license` / `go-licenses` / `pip-licenses` / `npm-license-checker`）
-- [ ] 禁用 licenses allowlist（預設禁 GPL/AGPL，allowlist 可覆寫）
-- [ ] CVE scan（`trivy` / `grype` / `osv-scanner`）
-- [ ] 依賴圖 SBOM 輸出（CycloneDX / SPDX）
-- [ ] 預估：**1 day**
+- [x] SPDX license scan（依語言 ecosystem：`cargo-license` / `go-licenses` / `pip-licenses` / `npm-license-checker`）
+- [x] 禁用 licenses allowlist（預設禁 GPL/AGPL，allowlist 可覆寫）
+- [x] CVE scan（`trivy` / `grype` / `osv-scanner`）
+- [x] 依賴圖 SBOM 輸出（CycloneDX / SPDX）
+- [x] 預估：**1 day**
 
 ### X5. SKILL-FASTAPI (pilot, #301)
 - [ ] FastAPI service 骨架 + Alembic + Pydantic
