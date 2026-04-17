@@ -83,7 +83,7 @@ async def test_start_services_dev_mode_is_noop(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_start_services_systemd_success(client, monkeypatch):
-    """``systemd`` mode exec's ``systemctl start`` with both unit files."""
+    """``systemd`` mode exec's ``sudo -n systemctl start`` for both units."""
     captured: list = []
     _patch_exec(monkeypatch, captured, returncode=0,
                 stdout=b"Started omnisight-backend.service\n",
@@ -99,7 +99,7 @@ async def test_start_services_systemd_success(client, monkeypatch):
     assert body["status"] == "started"
     assert body["mode"] == "systemd"
     assert body["command"] == [
-        "systemctl", "start",
+        "sudo", "-n", "systemctl", "start",
         "omnisight-backend.service", "omnisight-frontend.service",
     ]
     assert body["returncode"] == 0
@@ -107,7 +107,7 @@ async def test_start_services_systemd_success(client, monkeypatch):
 
     # Fake exec saw exactly the command in the response.
     assert captured == [[
-        "systemctl", "start",
+        "sudo", "-n", "systemctl", "start",
         "omnisight-backend.service", "omnisight-frontend.service",
     ]]
 
@@ -287,3 +287,90 @@ async def test_detect_deploy_mode_falls_back_to_dev(monkeypatch, tmp_path):
     monkeypatch.setattr(_dm, "_SYSTEMD_RUN_DIR", tmp_path / "nope-systemd")
     monkeypatch.setattr(_dm, "_DOCKER_SOCKET", tmp_path / "nope-docker.sock")
     assert _br._detect_deploy_mode() == "dev"
+
+
+# ── per-mode argv shape (unit-level, no subprocess) ───────────────────
+
+
+def test_start_command_systemd_is_sudo_wrapped():
+    """systemd branch prefixes ``sudo -n`` so the K1 sudoers NOPASSWD grant
+    keeps the launcher non-interactive — no TTY prompt if the rule is missing.
+    """
+    from backend.routers import bootstrap as _br
+
+    cmd = _br._start_command("systemd", "")
+    assert cmd[:4] == ["sudo", "-n", "systemctl", "start"]
+    # Every declared unit is present, in order.
+    assert cmd[4:] == list(_br._SYSTEMD_UNITS)
+
+
+def test_start_command_docker_compose_defaults_prod_compose():
+    """docker-compose branch defaults to ``docker-compose.prod.yml``."""
+    from backend.routers import bootstrap as _br
+
+    assert _br._start_command("docker-compose", "") == [
+        "docker", "compose", "-f", "docker-compose.prod.yml", "up", "-d",
+    ]
+
+
+def test_start_command_docker_compose_honours_override():
+    """Operator-supplied ``compose_file`` overrides the default."""
+    from backend.routers import bootstrap as _br
+
+    cmd = _br._start_command("docker-compose", "docker-compose.edge.yml")
+    assert cmd == [
+        "docker", "compose", "-f", "docker-compose.edge.yml", "up", "-d",
+    ]
+
+
+def test_start_command_dev_is_empty_noop():
+    """dev branch returns ``[]`` so the HTTP handler short-circuits cleanly."""
+    from backend.routers import bootstrap as _br
+
+    assert _br._start_command("dev", "") == []
+    # compose_file is ignored in dev mode — still empty argv.
+    assert _br._start_command("dev", "docker-compose.edge.yml") == []
+
+
+# ── K1 sudoers snippet generator ──────────────────────────────────────
+
+
+def test_generate_sudoers_snippet_covers_every_unit():
+    """Snippet names every unit in ``_SYSTEMD_UNITS`` with absolute path.
+
+    sudo refuses a rule where the command is a bare name, so the snippet
+    *must* use ``/usr/bin/systemctl``. The ``omnisight ALL=(root)``
+    prefix mirrors the cloudflared sudoers pattern operators already
+    ship in ``/etc/sudoers.d/omnisight-cloudflared``.
+    """
+    from backend.routers import bootstrap as _br
+
+    snippet = _br.generate_sudoers_snippet()
+
+    # Header comment so a future reader can grep from the sudoers.d file
+    # back to this generator.
+    assert snippet.startswith("# /etc/sudoers.d/omnisight-bootstrap")
+    # Principal + NOPASSWD grant with absolute systemctl path.
+    assert "omnisight ALL=(root) NOPASSWD:" in snippet
+    for unit in _br._SYSTEMD_UNITS:
+        assert f"/usr/bin/systemctl start {unit}" in snippet
+    # Only "start" is granted — the wizard never stops or restarts, so
+    # the sudoers grant must stay equally narrow (K1 least-privilege).
+    assert " stop " not in snippet
+    assert " restart " not in snippet
+
+
+def test_generate_sudoers_snippet_uses_shared_sudoers_line():
+    """The snippet body should be exactly ``SUDOERS_LINE`` + newline wrap.
+
+    Keeping the two in lockstep lets operators import ``SUDOERS_LINE``
+    from the module for programmatic checks (e.g. the setup wizard
+    verifying the on-disk rule matches) without parsing the comment
+    header out of :func:`generate_sudoers_snippet`.
+    """
+    from backend.routers import bootstrap as _br
+
+    snippet = _br.generate_sudoers_snippet()
+    assert _br.SUDOERS_LINE in snippet
+    # Trailing newline is required or ``visudo`` chokes on EOF-without-newline.
+    assert snippet.endswith("\n")

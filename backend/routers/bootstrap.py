@@ -491,6 +491,36 @@ _SYSTEMD_UNITS: tuple[str, ...] = (
 _DEFAULT_COMPOSE_FILE = "docker-compose.prod.yml"
 _START_TIMEOUT_SECS = 120
 
+# Absolute path systemctl lives at on every Debian/Ubuntu + RHEL/CentOS
+# host we ship for. Pinned so the sudoers rule below can name the exact
+# binary — sudo refuses a rule with a bare command name.
+_SYSTEMCTL_ABSPATH = "/usr/bin/systemctl"
+
+# K1 scoped sudoers snippet for the Step 4 launcher. Mirrors the
+# cloudflared service's sudoers shape (``omnisight ALL=(root) NOPASSWD:
+# /usr/bin/systemctl start <unit>, …``) so operators who already dropped
+# `omnisight-cloudflared` into `/etc/sudoers.d/` can extend the pattern
+# without learning a second convention. Start-only on purpose: the
+# wizard never stops or restarts services, so the sudoers grant stays
+# as narrow as the K1 principle-of-least-privilege requires.
+SUDOERS_LINE = (
+    "omnisight ALL=(root) NOPASSWD: "
+    + ", ".join(
+        f"{_SYSTEMCTL_ABSPATH} start {unit}" for unit in _SYSTEMD_UNITS
+    )
+)
+
+
+def generate_sudoers_snippet() -> str:
+    """Return the ``/etc/sudoers.d/omnisight-bootstrap`` snippet body.
+
+    Rendered as a standalone helper (rather than inlined into the doc)
+    so operators can diff the *actual* grant the wizard expects against
+    whatever is on disk — units can and will drift as new services join
+    the bootstrap set, and a single generator keeps one source of truth.
+    """
+    return f"# /etc/sudoers.d/omnisight-bootstrap\n{SUDOERS_LINE}\n"
+
 
 def _detect_deploy_mode() -> DeployMode:
     """Pick the launch strategy based on what's available on the host.
@@ -551,12 +581,23 @@ def _tail(text: str, limit: int = 4000) -> str:
 def _start_command(mode: DeployMode, compose_file: str) -> list[str]:
     """Build the argv for the chosen deploy mode.
 
-    Kept separate so tests can assert command shape without having to
-    actually exec the subprocess. ``dev`` returns an empty list — the
-    endpoint short-circuits and never exec's anything.
+    Per-mode dispatch:
+      * ``systemd`` → ``sudo -n systemctl start <unit>...`` — the ``-n``
+        keeps the launcher non-interactive: if the K1 sudoers grant is
+        missing, sudo exits immediately rather than blocking on a TTY
+        prompt (``NOPASSWD:`` rule → see :data:`SUDOERS_LINE`).
+      * ``docker-compose`` → ``docker compose -f <file> up -d`` — no
+        privilege escalation; the daemon socket's unix-group membership
+        is the gate.
+      * ``dev`` → empty list — the endpoint short-circuits and never
+        exec's anything because ``uvicorn`` / ``next dev`` are already
+        running in-process.
+
+    Kept separate from the HTTP handler so tests can assert argv shape
+    without having to actually exec the subprocess.
     """
     if mode == "systemd":
-        return ["systemctl", "start", *_SYSTEMD_UNITS]
+        return ["sudo", "-n", "systemctl", "start", *_SYSTEMD_UNITS]
     if mode == "docker-compose":
         cf = (compose_file or "").strip() or _DEFAULT_COMPOSE_FILE
         return ["docker", "compose", "-f", cf, "up", "-d"]
