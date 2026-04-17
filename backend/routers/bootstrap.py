@@ -2336,3 +2336,143 @@ async def bootstrap_finalize(
         status=status.to_dict(),
         actor_user_id=admin.id,
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L8 #1 — Reset (admin + dev-mode only, QA escape hatch)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class BootstrapResetRequest(BaseModel):
+    """Body for ``POST /bootstrap/reset``.
+
+    ``reason`` is captured into the audit row so QA runs can be traced
+    back (e.g. "running E2E suite", "manual reset for screenshot").
+    """
+
+    reason: str = Field(
+        default="",
+        max_length=500,
+        description="Optional free-text note recorded with the audit row.",
+    )
+
+
+class BootstrapResetResponse(BaseModel):
+    status: str
+    deploy_mode: DeployMode
+    bootstrap_state_rows_deleted: int
+    admins_reflagged: int
+    marker_cleared: bool
+    actor_user_id: str
+
+
+@router.post("/reset", response_model=BootstrapResetResponse)
+async def bootstrap_reset(
+    req: BootstrapResetRequest | None = None,
+    admin: _au.User = Depends(_au.require_admin),
+):
+    """Wipe wizard state so the next page-load lands back in ``/bootstrap``.
+
+    Strictly a **QA escape hatch**: refused unless the deploy mode is
+    ``dev`` so no production install can accidentally drop its bootstrap
+    record. Side-effects on success:
+
+      1. ``DELETE FROM bootstrap_state`` — every recorded step is gone,
+         so :func:`missing_required_steps` reports a fresh install.
+      2. ``clear_marker()`` — wipes ``data/.bootstrap_state.json``
+         (smoke_passed, cf_tunnel_*, ``bootstrap_finalized``).
+      3. ``flag_all_admins_must_change_password()`` — every enabled
+         admin row is re-flagged so the L2 Step 1 password-rotation
+         gate fires again. We don't restore the original ``omnisight-
+         admin`` plaintext (we never stored it) — re-flagging is enough
+         to drive the wizard.
+      4. Resets the in-process gate cache so the very next request hits
+         the redirect middleware instead of the sticky ``True`` cache.
+      5. Emits ``bootstrap.reset`` audit row with the actor + reason +
+         ``severity=warning`` so the trail shows who blew the wizard
+         away and why.
+
+    Error contract:
+      * 401/403 — caller is not an admin (``require_admin``)
+      * 403 — deploy mode is anything other than ``dev`` (the body
+        names the detected mode so QA can see why)
+      * 500 — db or marker IO failed mid-flight (response still reports
+        partial counts so the operator can re-attempt)
+    """
+    body = req or BootstrapResetRequest()
+    reason = (body.reason or "").strip()
+
+    from backend.deploy_mode import detect_deploy_mode
+
+    detection = detect_deploy_mode()
+    if detection.mode != "dev":
+        logger.warning(
+            "bootstrap: reset refused for admin=%s — deploy_mode=%s "
+            "(reason=%s)",
+            admin.email, detection.mode, detection.reason,
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "bootstrap reset is restricted to dev mode "
+                    f"(detected: {detection.mode!r}). Set "
+                    "OMNISIGHT_DEPLOY_MODE=dev only on QA hosts."
+                ),
+                "deploy_mode": detection.mode,
+                "deploy_mode_reason": detection.reason,
+            },
+        )
+
+    rows_deleted = await _boot.reset_bootstrap_state_table()
+
+    marker_cleared = True
+    try:
+        _boot.clear_marker()
+    except Exception as exc:
+        logger.warning("bootstrap: reset clear_marker failed: %s", exc)
+        marker_cleared = False
+
+    try:
+        flagged = await _au.flag_all_admins_must_change_password()
+    except Exception as exc:
+        logger.warning("bootstrap: reset flag_all_admins failed: %s", exc)
+        flagged = []
+
+    _boot._gate_cache_reset()
+
+    try:
+        await audit.log(
+            action="bootstrap.reset",
+            entity_kind="bootstrap",
+            entity_id="reset",
+            before=None,
+            after={
+                "deploy_mode": detection.mode,
+                "deploy_mode_reason": detection.reason,
+                "bootstrap_state_rows_deleted": rows_deleted,
+                "admins_reflagged": [a["email"] for a in flagged],
+                "marker_cleared": marker_cleared,
+                "reason": reason,
+                "severity": "warning",
+            },
+            actor=admin.email,
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.reset audit emit failed: %s", exc)
+
+    logger.warning(
+        "bootstrap: RESET by admin=%s deploy_mode=%s rows_deleted=%d "
+        "admins_reflagged=%d marker_cleared=%s reason=%r",
+        admin.email, detection.mode, rows_deleted, len(flagged),
+        marker_cleared, reason or "<none>",
+    )
+
+    return BootstrapResetResponse(
+        status="reset",
+        deploy_mode=detection.mode,
+        bootstrap_state_rows_deleted=rows_deleted,
+        admins_reflagged=len(flagged),
+        marker_cleared=marker_cleared,
+        actor_user_id=admin.id,
+    )

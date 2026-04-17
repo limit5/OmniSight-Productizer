@@ -212,6 +212,50 @@ def mark_cf_tunnel(*, configured: bool = False, skipped: bool = False) -> None:
     _write_marker(data)
 
 
+def clear_marker() -> None:
+    """Wipe the bootstrap marker file so every gate goes back to red.
+
+    Drives L8 ``POST /bootstrap/reset``: removes ``smoke_passed``,
+    ``cf_tunnel_configured``/``cf_tunnel_skipped``, and the sticky
+    ``bootstrap_finalized`` flag in one shot. Missing-file is treated
+    as already-clean.
+    """
+    path = _BOOTSTRAP_MARKER
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError as exc:
+        logger.warning("bootstrap: clear_marker(%s) failed: %s", path, exc)
+
+
+async def reset_bootstrap_state_table() -> int:
+    """``DELETE FROM bootstrap_state`` — return the row count removed.
+
+    Used by L8 ``POST /bootstrap/reset`` to put every wizard step back
+    into the "missing" bucket so :func:`missing_required_steps` reports
+    a fresh install. The ``bootstrap_state`` table itself stays so the
+    next wizard run can upsert new rows without re-running the schema.
+    """
+    from backend import db
+
+    try:
+        conn = db._conn()
+    except Exception as exc:
+        logger.warning("bootstrap: reset_bootstrap_state_table — db not ready (%s)", exc)
+        return 0
+
+    try:
+        async with conn.execute("SELECT COUNT(*) AS n FROM bootstrap_state") as cur:
+            row = await cur.fetchone()
+        before = int(row["n"] or 0) if row else 0
+        await conn.execute("DELETE FROM bootstrap_state")
+        await conn.commit()
+        return before
+    except Exception as exc:
+        logger.warning("bootstrap: reset_bootstrap_state_table failed: %s", exc)
+        return 0
+
+
 def _reset_for_tests(marker_path: Optional[Path] = None) -> None:
     """Point the marker at a fresh path (or wipe the default one)."""
     global _BOOTSTRAP_MARKER

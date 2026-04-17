@@ -328,6 +328,37 @@ async def change_password(user_id: str, new_password: str) -> None:
     await conn.commit()
 
 
+async def flag_all_admins_must_change_password() -> list[dict]:
+    """Re-flag every enabled admin row with ``must_change_password=1``.
+
+    Used by L8 ``POST /bootstrap/reset`` to put the install back into
+    its first-boot state for QA. We don't try to restore the original
+    ``omnisight-admin`` plaintext (we never stored it) — flipping the
+    flag is enough to drive ``find_admin_requiring_password_change()``
+    + the K1 428 gate, which is what the L2 wizard step probes.
+
+    Returns the list of ``{id, email}`` dicts that were re-flagged so
+    the caller can include them in the audit row. Disabled admins are
+    skipped — re-flagging a disabled row would force a password change
+    on an account no one can log into.
+    """
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT id, email FROM users WHERE role='admin' AND enabled=1",
+    ) as cur:
+        rows = await cur.fetchall()
+    flagged: list[dict] = []
+    for r in rows:
+        await conn.execute(
+            "UPDATE users SET must_change_password=1 WHERE id=?",
+            (r["id"],),
+        )
+        flagged.append({"id": r["id"], "email": r["email"]})
+    if flagged:
+        await conn.commit()
+    return flagged
+
+
 LOCKOUT_BASE_S = 15 * 60
 LOCKOUT_MAX_S = 24 * 60 * 60
 LOCKOUT_THRESHOLD = 10
