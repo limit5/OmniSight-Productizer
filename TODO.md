@@ -1483,7 +1483,7 @@ Legend:
 > 相依：**O3 Worker Pool**（✅ done）、**W0-W10 / P0-P10 / X0-X9**（✅ done）、**R0-R3 PEP + ChatOps + Entropy + Scratchpad**（✅ done）。無硬前置阻塞——L 做完後可立即開工。
 
 ### V0. Workspace Foundation 共用基建 (#316)
-- [ ] `app/workspace/[type]/layout.tsx`：workspace router（`/workspace/web` / `/workspace/mobile` / `/workspace/software`）
+- [x] `app/workspace/[type]/layout.tsx`：workspace router（`/workspace/web` / `/workspace/mobile` / `/workspace/software`） *(done: V0 #1 — dynamic route with `WORKSPACE_TYPES = ["web","mobile","software"]`, `isWorkspaceType` guard, `generateStaticParams`, per-type `generateMetadata`, `notFound()` on unknown segments + 13 contract tests)*
 - [ ] `components/omnisight/workspace-shell.tsx`：共用 workspace layout 殼（三欄：sidebar / preview / code+chat）
 - [ ] Workspace context provider：per-workspace 獨立 project state（當前專案 / agent session / preview state）；跟指揮中心 global state 分離
 - [ ] Workspace session persistence：切換工作區不丟失 state（localStorage + backend session sync）
