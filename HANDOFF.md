@@ -11328,3 +11328,35 @@ G1 #1 在 `backend/lifecycle.py` 實作的 SIGTERM drain coordinator 是「proce
 - **沒做的 follow-up（G1 剩餘項目）**：
   - [ ] G1 #4 — `docker-compose healthcheck` 改用 `/readyz`（drain 期間 `/readyz` 應回 503，讓 reverse proxy 主動移除 instance）。
   - [ ] G1 #5 — 整合測試：用 docker compose up 起 backend → kill -TERM → 觀察 in-flight request 是否完成、新連線是否被拒。這需要 docker network 隔離環境，不能在單元測試做。
+
+---
+
+## G1 #6 — 交付確認：`backend/lifecycle.py` + systemd unit + 測試三項齊備（2026-04-18）
+
+### 結論
+G1 (HA-01 Graceful shutdown + readiness/liveness) 全部 6 個子項目已完成；本項為「交付清單」最終確認，不新增程式邏輯，僅驗證三大產出物已存在、互相一致並全部通過自動化測試。
+
+### 交付清單核對
+1. **`backend/lifecycle.py`**（223 行）— ShutdownCoordinator 單例 + `flush_sse_subscribers()` + `graceful_shutdown()` 完整 drain orchestrator；SIGTERM/SIGINT signal handler；in-flight 計數器；30s drain budget（`DEFAULT_DRAIN_TIMEOUT_SECONDS = 30.0`）。
+2. **`deploy/systemd/*.service`** — 共 4 支 unit，HA-01 相關產線 backend unit 已加上 `KillSignal=SIGTERM` + `TimeoutStopSec=40`：
+   - `omnisight-backend.service`（KillSignal=SIGTERM ✅、TimeoutStopSec=40 ✅，註解明確指向 `backend/lifecycle.py` G1 #1 drain coordinator）
+   - `omnisight-worker@.service`（KillSignal=SIGTERM ✅、TimeoutStopSec=60 — worker drain 預算較寬，因為單一 task 可能需要更久 finalize）
+   - `omnisight-frontend.service`（前端不需 drain coordinator，TimeoutStopSec=15 即可）
+   - `cloudflared.service`（純 tunnel daemon，不涉及 G1 範圍）
+3. **測試** — 共 42 顆：
+   - `backend/tests/test_lifecycle.py` — 19 顆（coordinator unit + middleware ASGI integration + signal handler wiring）
+   - `backend/tests/test_healthz_readyz.py` — 17 顆（liveness 不阻塞、readiness 在 drain 時回 503 + Retry-After、provider chain / DB / migration 三 check 獨立可斷言）
+   - `backend/tests/test_sigterm_integration.py` — 6 顆（真 `os.kill(os.getpid(), SIGTERM)` 端到端契約測試，含「in-flight 完成 + 新連線被拒」同時段對齊驗證）
+
+### 驗證
+- `python3 -m pytest backend/tests/test_lifecycle.py backend/tests/test_healthz_readyz.py backend/tests/test_sigterm_integration.py -q` → **42/42 pass，6.38s**。
+- `docker-compose.yml:25-26` healthcheck 已使用 `curl -sf http://localhost:8000/readyz` — 與 G1 #4 一致。
+- systemd unit 註解明確交叉引用 `backend/lifecycle.py`（"KillSignal=SIGTERM triggers backend/lifecycle.py drain coordinator (G1 #1)"），契約來源與實作對齊。
+
+### 風險 / 副作用
+- 本項純為文件 / TODO 狀態同步，零程式碼變更，零功能風險。
+- G1 已關閉，但 G1 整體效益仍依賴 G2（reverse proxy + dual instance rolling restart）才能讓 readyz 回 503 真正觸發 LB 把該 instance 從 pool 移除。**G2 仍在 backlog，需排程處理。**
+
+### 下一步
+- 進入 G2（HA-02 Reverse proxy + dual backend instance rolling restart），開始 Caddy/nginx 前置 + dual backend instance 設定。
+

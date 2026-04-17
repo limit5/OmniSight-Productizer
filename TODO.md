@@ -1339,7 +1339,7 @@ Legend:
 - [x] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
 - [x] docker-compose healthcheck 改用 `/readyz`
 - [x] 單元 + 整合測試：送 SIGTERM 時 in-flight request 仍完成、新連線被拒
-- [ ] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
+- [x] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
 
 ### G2. HA-02 Reverse proxy + dual backend instance rolling restart
 - [ ] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
