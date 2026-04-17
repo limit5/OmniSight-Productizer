@@ -19,6 +19,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     bootstrapDetectOllama: vi.fn(),
     bootstrapCfTunnelSkip: vi.fn(),
     bootstrapParallelHealthCheck: vi.fn(),
+    bootstrapSmokeSubset: vi.fn(),
   }
 })
 
@@ -48,6 +49,7 @@ const mockedProvisionLlm = api.bootstrapLlmProvision as unknown as ReturnType<ty
 const mockedDetectOllama = api.bootstrapDetectOllama as unknown as ReturnType<typeof vi.fn>
 const mockedCfSkip = api.bootstrapCfTunnelSkip as unknown as ReturnType<typeof vi.fn>
 const mockedParallelHealth = api.bootstrapParallelHealthCheck as unknown as ReturnType<typeof vi.fn>
+const mockedSmokeSubset = api.bootstrapSmokeSubset as unknown as ReturnType<typeof vi.fn>
 
 const redStatus = {
   status: {
@@ -87,6 +89,7 @@ describe("BootstrapPage", () => {
     mockedProvisionLlm.mockReset()
     mockedDetectOllama.mockReset()
     mockedCfSkip.mockReset()
+    mockedSmokeSubset.mockReset()
     mockedDetectOllama.mockResolvedValue({
       reachable: false,
       base_url: "http://localhost:11434",
@@ -905,5 +908,222 @@ describe("BootstrapPage", () => {
     expect(
       screen.queryByTestId("bootstrap-admin-password-complete"),
     ).toBeNull()
+  })
+
+  it("Step 5 surfaces a jump-back panel with the audit-chain culprit highlighted when smoke fails", async () => {
+    // Three preceding gates are green so the operator is parked on Step 5;
+    // smoke is the only red gate.
+    mockedGetStatus.mockResolvedValue({
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    })
+    // Smoke result returns a clean DAG run but a broken audit chain — the
+    // diagnose heuristic should peg admin_password as the likely culprit.
+    mockedSmokeSubset.mockResolvedValue({
+      smoke_passed: false,
+      subset: "both",
+      elapsed_ms: 432,
+      runs: [
+        {
+          key: "dag1",
+          label: "DAG_1 — compile-flash host_native",
+          dag_id: "dag1-id",
+          ok: true,
+          validation_errors: [],
+          run_id: "run-1",
+          plan_id: 11,
+          plan_status: "validated",
+          task_count: 4,
+          t3_runner: "t3-runner-host",
+          target_platform: "host_native",
+        },
+        {
+          key: "dag2",
+          label: "DAG_2 — cross-compile aarch64",
+          dag_id: "dag2-id",
+          ok: true,
+          validation_errors: [],
+          run_id: "run-2",
+          plan_id: 12,
+          plan_status: "validated",
+          task_count: 3,
+          t3_runner: "t3-runner-aarch64",
+          target_platform: "aarch64",
+        },
+      ],
+      audit_chain: {
+        ok: false,
+        first_bad_id: 42,
+        detail: "hash mismatch at row 42",
+        tenant_count: 3,
+        bad_tenants: ["tenant-a"],
+      },
+    })
+
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-smoke"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-run-button"),
+      ).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-smoke-run-button"))
+
+    // Failure pane appears with all four jump-back buttons + admin_password
+    // flagged as the likely culprit (audit chain broke).
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-jump-back"),
+      ).toHaveAttribute("data-culprit", "admin_password")
+    })
+    for (const id of [
+      "admin_password",
+      "llm_provider",
+      "cf_tunnel",
+      "services_ready",
+    ]) {
+      expect(
+        screen.getByTestId(`bootstrap-smoke-jump-back-${id}`),
+      ).toBeInTheDocument()
+    }
+    expect(
+      screen
+        .getByTestId("bootstrap-smoke-jump-back-admin_password")
+        .getAttribute("data-culprit"),
+    ).toBe("true")
+    expect(
+      screen
+        .getByTestId("bootstrap-smoke-jump-back-services_ready")
+        .getAttribute("data-culprit"),
+    ).toBe("false")
+
+    // Clicking a jump-back button pins the wizard to the chosen step. We
+    // pick llm_provider here to confirm the callback isn't hard-wired to
+    // the culprit suggestion.
+    fireEvent.click(
+      screen.getByTestId("bootstrap-smoke-jump-back-llm_provider"),
+    )
+    await waitFor(() => {
+      expect(screen.getByText("STEP 2 / 6")).toBeInTheDocument()
+    })
+  })
+
+  it("Step 5 jump-back panel appears when the smoke endpoint itself errors", async () => {
+    mockedGetStatus.mockResolvedValue({
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    })
+    mockedSmokeSubset.mockRejectedValue(
+      new Error("API 503: smoke runner unreachable"),
+    )
+
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-smoke"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-run-button"),
+      ).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-smoke-run-button"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-smoke-error")).toHaveTextContent(
+        /smoke runner unreachable/,
+      )
+    })
+    // Network error → diagnose returns services_ready as the culprit.
+    expect(
+      screen.getByTestId("bootstrap-smoke-jump-back"),
+    ).toHaveAttribute("data-culprit", "services_ready")
+
+    fireEvent.click(
+      screen.getByTestId("bootstrap-smoke-jump-back-services_ready"),
+    )
+    await waitFor(() => {
+      expect(screen.getByText("STEP 4 / 6")).toBeInTheDocument()
+    })
+  })
+
+  it("Step 5 hides the jump-back panel when smoke passes", async () => {
+    mockedGetStatus.mockResolvedValue({
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    })
+    mockedSmokeSubset.mockResolvedValue({
+      smoke_passed: true,
+      subset: "both",
+      elapsed_ms: 412,
+      runs: [
+        {
+          key: "dag1",
+          label: "DAG_1",
+          dag_id: "dag1-id",
+          ok: true,
+          validation_errors: [],
+          run_id: "run-1",
+          plan_id: 1,
+          plan_status: "validated",
+          task_count: 1,
+          t3_runner: "t3",
+          target_platform: "host_native",
+        },
+      ],
+      audit_chain: {
+        ok: true,
+        first_bad_id: null,
+        detail: "all chains verified",
+        tenant_count: 2,
+        bad_tenants: [],
+      },
+    })
+
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-smoke"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-run-button"),
+      ).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-smoke-run-button"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-result"),
+      ).toHaveAttribute("data-passed", "true")
+    })
+    expect(screen.queryByTestId("bootstrap-smoke-jump-back")).toBeNull()
   })
 })

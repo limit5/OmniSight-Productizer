@@ -1410,13 +1410,83 @@ function ServiceHealthStep({
 
 // ─── L6 — Step 5 (smoke test subset: compile-flash + cross-compile DAGs) ──
 
+/**
+ * Steps the smoke pane offers as jump-back targets when the run fails.
+ * Order matches the wizard sidebar; ``services_ready`` sits last because
+ * it's the most common culprit for a host_native compile-flash failure.
+ */
+const SMOKE_JUMP_BACK_STEPS: Array<{
+  id: StepId
+  label: string
+  hint: string
+}> = [
+  {
+    id: "admin_password",
+    label: "Step 1 — Admin Password",
+    hint: "Audit chain failures usually trace back to a tenant/admin row",
+  },
+  {
+    id: "llm_provider",
+    label: "Step 2 — LLM Provider",
+    hint: "Re-validate provider key if planner / validator errors mention LLM",
+  },
+  {
+    id: "cf_tunnel",
+    label: "Step 3 — Cloudflare Tunnel",
+    hint: "Re-provision (or skip) the tunnel if connector probes failed",
+  },
+  {
+    id: "services_ready",
+    label: "Step 4 — Service Health",
+    hint: "Re-run the parallel-health-check probes before retrying smoke",
+  },
+]
+
+/**
+ * Heuristic: pick the most likely culprit step based on the smoke
+ * failure shape. Returns ``null`` when nothing obvious stands out so
+ * the operator picks freely from the four jump-back buttons.
+ */
+function _diagnoseSmokeFailure(
+  result: BootstrapSmokeSubsetResponse | null,
+  networkError: string | null,
+): StepId | null {
+  if (networkError) return "services_ready"
+  if (!result) return null
+  if (!result.audit_chain.ok) return "admin_password"
+  for (const run of result.runs) {
+    if (run.ok) continue
+    for (const err of run.validation_errors) {
+      const blob = `${err.rule} ${err.message}`.toLowerCase()
+      if (blob.includes("llm") || blob.includes("provider")) {
+        return "llm_provider"
+      }
+      if (blob.includes("tunnel") || blob.includes("cloudflare")) {
+        return "cf_tunnel"
+      }
+      if (
+        blob.includes("platform") ||
+        blob.includes("compile") ||
+        blob.includes("target") ||
+        blob.includes("runner") ||
+        blob.includes("ready")
+      ) {
+        return "services_ready"
+      }
+    }
+  }
+  return "services_ready"
+}
+
 function SmokeSubsetStep({
   alreadyGreen,
   onPassed,
+  onJumpToStep,
   finalize,
 }: {
   alreadyGreen: boolean
   onPassed: () => Promise<unknown>
+  onJumpToStep?: (id: StepId) => void
   finalize?: {
     allGatesGreen: boolean
     busy: boolean
@@ -1453,6 +1523,12 @@ function SmokeSubsetStep({
   const auditOk = result?.audit_chain?.ok === true
   const passed = result?.smoke_passed === true
   const smokeGreen = alreadyGreen || passed
+  // Failure surface: either the call itself errored (no result) or the
+  // backend returned a not-passed result. ``alreadyGreen`` suppresses
+  // the jump-back panel because the gate is independently green.
+  const hasFailure =
+    !smokeGreen && (error !== null || (result !== null && !passed))
+  const culpritStepId = _diagnoseSmokeFailure(result, error)
 
   return (
     <div
@@ -1653,6 +1729,54 @@ function SmokeSubsetStep({
         >
           {error}
         </p>
+      )}
+
+      {hasFailure && onJumpToStep && (
+        <div
+          data-testid="bootstrap-smoke-jump-back"
+          data-culprit={culpritStepId ?? ""}
+          className="flex flex-col gap-2 p-3 rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/5"
+        >
+          <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--destructive)]">
+            <AlertCircle size={12} />
+            <span>Jump back to fix a previous step</span>
+          </div>
+          <p className="font-mono text-[11px] text-[var(--muted-foreground)]">
+            Re-open the gate that owns the failure, fix it there, then
+            return to Step 5 and re-run the smoke subset.
+          </p>
+          <div
+            data-testid="bootstrap-smoke-jump-back-buttons"
+            className="flex flex-wrap gap-2"
+          >
+            {SMOKE_JUMP_BACK_STEPS.map((s) => {
+              const isCulprit = culpritStepId === s.id
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  data-testid={`bootstrap-smoke-jump-back-${s.id}`}
+                  data-culprit={isCulprit ? "true" : "false"}
+                  onClick={() => onJumpToStep(s.id)}
+                  title={s.hint}
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded border font-mono text-[11px] transition ${
+                    isCulprit
+                      ? "border-[var(--destructive)] bg-[var(--destructive)]/15 text-[var(--destructive)] font-semibold"
+                      : "border-[var(--border)] bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--muted)]/40"
+                  }`}
+                >
+                  <ChevronLeft size={11} />
+                  <span>{s.label}</span>
+                  {isCulprit && (
+                    <span className="ml-1 px-1 rounded bg-[var(--destructive)]/20 text-[9px] uppercase tracking-wider">
+                      likely
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
       )}
 
       {finalize && smokeGreen && (
@@ -1981,6 +2105,10 @@ export default function BootstrapPage() {
                 <SmokeSubsetStep
                   alreadyGreen={status.status.smoke_passed}
                   onPassed={reloadStatus}
+                  onJumpToStep={(id) => {
+                    setUserPinned(true)
+                    setActiveId(id)
+                  }}
                   finalize={{
                     allGatesGreen,
                     busy: finalizing,
