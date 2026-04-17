@@ -151,6 +151,17 @@ const SSE_EVENT_TYPES = [
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
 export type SSEFilterMode = "this_session" | "all_sessions"
 
+// V0 #6 — workspace-scoped SSE routing.  The three product-line
+// workspaces (`web` / `mobile` / `software`) each mount their own
+// SSE subscribers; the command-center dashboard mounts one too.
+// An event that carries `_workspace_type` belongs to exactly that
+// workspace and must not reach any other surface — including the
+// command center, whose `_currentWorkspaceType === null` is the
+// "no workspace attached" sentinel that rejects these events by
+// design (so agent chatter from `/workspace/web` doesn't pollute
+// the Agent Matrix Wall).
+export type WorkspaceType = "web" | "mobile" | "software"
+
 type SSEListener = (ev: SSEEvent) => void
 type ErrorListener = (err: Event) => void
 
@@ -160,6 +171,7 @@ const _sseErrorListeners = new Set<ErrorListener>()
 
 let _currentSessionId: string | null = null
 let _currentTenantId: string | null = null
+let _currentWorkspaceType: WorkspaceType | null = null
 let _sseFilterMode: SSEFilterMode = "this_session"
 const _filterModeListeners = new Set<(mode: SSEFilterMode) => void>()
 
@@ -174,6 +186,12 @@ export function setCurrentTenantId(tid: string | null): void {
 }
 export function getCurrentTenantId(): string | null {
   return _currentTenantId
+}
+export function setCurrentWorkspaceType(type: WorkspaceType | null): void {
+  _currentWorkspaceType = type
+}
+export function getCurrentWorkspaceType(): WorkspaceType | null {
+  return _currentWorkspaceType
 }
 export function setSSEFilterMode(mode: SSEFilterMode): void {
   _sseFilterMode = mode
@@ -193,6 +211,19 @@ function _shouldDeliverEvent(data: Record<string, unknown>): boolean {
   const scope = (data._broadcast_scope as BroadcastScope) || "global"
   const eventSessionId = (data._session_id as string) || ""
   const eventTenantId = (data._tenant_id as string) || ""
+  const eventWorkspaceType = (data._workspace_type as string) || ""
+
+  // V0 #6 — workspace gate runs before scope-based filters.  A
+  // non-empty `_workspace_type` binds the event to exactly that
+  // workspace subtree.  The command center (no workspace attached)
+  // is isolated by design; cross-workspace bleed is rejected too.
+  // Events without `_workspace_type` fall through unchanged — that
+  // is the backward-compat contract with the J1/I3 filters.
+  if (eventWorkspaceType) {
+    if (_currentWorkspaceType === null) return false
+    if (_currentWorkspaceType !== eventWorkspaceType) return false
+  }
+
   if (scope === "global") return true
   if (scope === "tenant") {
     if (!_currentTenantId || !eventTenantId) return true

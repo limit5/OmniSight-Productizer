@@ -463,3 +463,85 @@ describe("PersistentWorkspaceProvider — reset semantics", () => {
     })
   })
 })
+
+describe("PersistentWorkspaceProvider — V0 #6 SSE workspace-type registration", () => {
+  it("registers the workspace type on mount and clears it on unmount", async () => {
+    const { getCurrentWorkspaceType, setCurrentWorkspaceType } = await import(
+      "@/lib/api"
+    )
+    setCurrentWorkspaceType(null)
+    mockFetchWithResponses([noSnapshotResp()])
+
+    expect(getCurrentWorkspaceType()).toBeNull()
+
+    const { unmount } = render(
+      <PersistentWorkspaceProvider type="web" backendDebounceMs={0}>
+        <Probe />
+      </PersistentWorkspaceProvider>,
+    )
+
+    await waitFor(() => {
+      expect(getCurrentWorkspaceType()).toBe("web")
+    })
+
+    unmount()
+    expect(getCurrentWorkspaceType()).toBeNull()
+  })
+
+  it("cleanup does not overwrite a different workspace that took the slot", async () => {
+    const { getCurrentWorkspaceType, setCurrentWorkspaceType } = await import(
+      "@/lib/api"
+    )
+    setCurrentWorkspaceType(null)
+    mockFetchWithResponses([noSnapshotResp()])
+
+    const { unmount } = render(
+      <PersistentWorkspaceProvider type="web" backendDebounceMs={0}>
+        <Probe />
+      </PersistentWorkspaceProvider>,
+    )
+    await waitFor(() => {
+      expect(getCurrentWorkspaceType()).toBe("web")
+    })
+
+    // A route transition races in: the next layout's effect runs
+    // before the outgoing layout's cleanup.  Simulate the new
+    // registration.
+    setCurrentWorkspaceType("mobile")
+
+    // Now the outgoing provider unmounts.  Its cleanup must not
+    // wipe the newly-mounted "mobile" registration.
+    unmount()
+    expect(getCurrentWorkspaceType()).toBe("mobile")
+
+    setCurrentWorkspaceType(null)
+  })
+
+  it("switching workspace type re-registers with lib/api", async () => {
+    const { getCurrentWorkspaceType, setCurrentWorkspaceType } = await import(
+      "@/lib/api"
+    )
+    setCurrentWorkspaceType(null)
+    mockFetchWithResponses([noSnapshotResp(), noSnapshotResp()])
+
+    const { rerender } = render(
+      <PersistentWorkspaceProvider type="web" backendDebounceMs={0}>
+        <Probe />
+      </PersistentWorkspaceProvider>,
+    )
+    await waitFor(() => {
+      expect(getCurrentWorkspaceType()).toBe("web")
+    })
+
+    rerender(
+      <PersistentWorkspaceProvider type="software" backendDebounceMs={0}>
+        <Probe />
+      </PersistentWorkspaceProvider>,
+    )
+    await waitFor(() => {
+      expect(getCurrentWorkspaceType()).toBe("software")
+    })
+
+    setCurrentWorkspaceType(null)
+  })
+})

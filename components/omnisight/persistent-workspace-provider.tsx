@@ -54,6 +54,10 @@ import {
   type WorkspaceSnapshotEnvelope,
   type WorkspaceSnapshotState,
 } from "@/hooks/use-workspace-persistence"
+import {
+  getCurrentWorkspaceType,
+  setCurrentWorkspaceType,
+} from "@/lib/api"
 
 // Backend sync is debounced — mashing setters in quick succession
 // shouldn't translate into a PUT per keystroke.  localStorage writes
@@ -102,6 +106,22 @@ function WorkspacePersistenceBridge({
 
   const hasHydratedRef = React.useRef(false)
   const suppressSaveRef = React.useRef(false)
+
+  // ── 0. Register this workspace with the shared SSE manager ────────────
+  // V0 #6 — tells `lib/api.ts` which workspace the current surface owns
+  // so its `_shouldDeliverEvent` can accept only events carrying a
+  // matching `_workspace_type`.  Cleanup guards against clobbering a
+  // sibling's registration during React 18 strict-mode remounts and
+  // during Next.js route transitions where the new layout mounts
+  // before the old one has finished unmounting.
+  React.useEffect(() => {
+    setCurrentWorkspaceType(type)
+    return () => {
+      if (getCurrentWorkspaceType() === type) {
+        setCurrentWorkspaceType(null)
+      }
+    }
+  }, [type])
 
   // ── 1. Hydrate from localStorage + backend on first mount ─────────────
   React.useEffect(() => {
