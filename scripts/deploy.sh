@@ -4,8 +4,9 @@
 #
 # Usage:
 #   scripts/deploy.sh staging
-#   scripts/deploy.sh prod v0.2.0           # check out the tag first
-#   scripts/deploy.sh prod v0.2.0 rolling   # G2 #3 HA-02 rolling restart
+#   scripts/deploy.sh prod v0.2.0                      # check out the tag first
+#   scripts/deploy.sh prod v0.2.0 rolling              # G2 #3 HA-02 rolling restart
+#   scripts/deploy.sh --strategy blue-green prod v0.2.0 # G3 HA-03 blue-green cutover
 #
 # Legacy (systemd) steps, kept for single-replica hosts:
 #   1. Optionally check out the requested git ref.
@@ -13,6 +14,15 @@
 #   3. Install backend deps + build the frontend.
 #   4. systemctl restart with health-check polling.
 #   5. Hit /health on the new pid.
+#
+# Strategy flag (G3 HA-03 TODO row 1353):
+#   `--strategy <rolling|systemd|blue-green>` is the GNU-style form.
+#   Accepts the same three values the positional arg accepts; when both
+#   are supplied the flag wins. Added so the blue-green ceremony (TODO
+#   row 1354-1357: atomic upstream switch, pre-cut smoke, observe window,
+#   --rollback) has a stable selector operators can script against —
+#   without breaking the positional-arg contract tests the G2 rolling
+#   suite relies on.
 #
 # Rolling mode (G2 / HA-02 TODO row 1347):
 #   Used when the host runs the dual-replica docker-compose topology
@@ -51,12 +61,58 @@
 
 set -euo pipefail
 
+# ── Flag parsing (G3 #1 / TODO row 1353) ──────────────────────────────
+# GNU-style flags are stripped first so the downstream positional
+# contract (ENV / GIT_REF / STRATEGY_ARG = $1 / $2 / $3) is unchanged.
+# Only `--strategy <value>` and `--strategy=<value>` are parsed here;
+# everything else bubbles back up as a positional so future flags can
+# slot in next to it without a rewrite.
+STRATEGY_FLAG=""
+_positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strategy)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --strategy requires a value (rolling|systemd|blue-green)" >&2
+        exit 1
+      fi
+      STRATEGY_FLAG="$2"
+      shift 2
+      ;;
+    --strategy=*)
+      STRATEGY_FLAG="${1#--strategy=}"
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        _positional+=("$1")
+        shift
+      done
+      break
+      ;;
+    --*)
+      echo "error: unknown flag: $1" >&2
+      echo "usage: scripts/deploy.sh [--strategy rolling|systemd|blue-green] <env> [git-ref] [rolling|systemd|blue-green]" >&2
+      exit 1
+      ;;
+    *)
+      _positional+=("$1")
+      shift
+      ;;
+  esac
+done
+# Repopulate $@ so the rest of the script uses the familiar positional
+# reads. `${_positional[@]+"${_positional[@]}"}` is the set-u-safe way
+# to expand an array that might be empty.
+set -- "${_positional[@]+"${_positional[@]}"}"
+
 ENV=${1:-}
 GIT_REF=${2:-}
 STRATEGY_ARG=${3:-}
 
 if [[ -z "$ENV" ]]; then
-  echo "usage: scripts/deploy.sh <env> [git-ref] [rolling|systemd]" >&2
+  echo "usage: scripts/deploy.sh [--strategy rolling|systemd|blue-green] <env> [git-ref] [rolling|systemd|blue-green]" >&2
   exit 1
 fi
 if [[ "$ENV" != "prod" && "$ENV" != "staging" ]]; then
@@ -66,8 +122,16 @@ fi
 
 # Strategy resolution — positional arg wins over env var; default systemd.
 STRATEGY="${STRATEGY_ARG:-${OMNISIGHT_DEPLOY_STRATEGY:-systemd}}"
-if [[ "$STRATEGY" != "rolling" && "$STRATEGY" != "systemd" ]]; then
-  echo "error: strategy must be 'rolling' or 'systemd' (got '$STRATEGY')" >&2
+# The `--strategy` flag (parsed above) overrides the positional/env
+# chain so operators can write `scripts/deploy.sh --strategy blue-green
+# prod v0.2.0` without remembering that the legacy positional slot is
+# the third arg. If both are supplied, the flag wins — this matches
+# GNU-coreutils conventions and is documented in the usage string.
+if [[ -n "$STRATEGY_FLAG" ]]; then
+  STRATEGY="$STRATEGY_FLAG"
+fi
+if [[ "$STRATEGY" != "rolling" && "$STRATEGY" != "systemd" && "$STRATEGY" != "blue-green" ]]; then
+  echo "error: strategy must be 'rolling', 'systemd', or 'blue-green' (got '$STRATEGY')" >&2
   exit 1
 fi
 
@@ -219,7 +283,28 @@ rolling_restart_replica() {
   log "rolling[$svc]: /readyz pass → back in Caddy upstream pool"
 }
 
-if [[ "$STRATEGY" == "rolling" ]]; then
+if [[ "$STRATEGY" == "blue-green" ]]; then
+  # G3 HA-03 blue-green cutover landing pad (TODO row 1353).
+  # The `--strategy blue-green` flag is accepted and validated here;
+  # the full ceremony (atomic active/standby upstream switch, pre-cut
+  # smoke on standby, 5-min observation window, 24 h rollback retention,
+  # `deploy.sh --rollback` companion, runbook) is tracked in the
+  # remaining G3 TODO rows (1354-1357) and will fill in this branch
+  # incrementally. Until those deliverables land we fail CLOSED with a
+  # distinct exit code (5) — *not* silently fall through to
+  # rolling/systemd — so an operator who types
+  # `scripts/deploy.sh --strategy blue-green prod v0.2.0` gets an
+  # explicit "not yet wired" signal instead of an accidental rolling
+  # restart dressed up as blue-green.
+  log "blue-green mode: compose=$COMPOSE_FILE (active/standby cutover)"
+  if [[ ! -f "$ROOT/$COMPOSE_FILE" ]]; then
+    echo "[deploy] blue-green: compose file '$COMPOSE_FILE' missing — cannot select active/standby color" >&2
+    exit 4
+  fi
+  echo "[deploy] blue-green: --strategy flag accepted; ceremony wiring (standby smoke → atomic upstream switch → 5-min observe → 24 h rollback retention) is tracked in TODO rows 1354-1357 (G3 #2-#5). Aborting before any upstream switch so no half-applied cutover runs against $ENV." >&2
+  echo "[deploy] blue-green: next steps — implement the atomic symlink/upstream switch (row 1354), then wire pre-cut smoke via scripts/prod_smoke_test.py on the standby color (row 1355), then add deploy.sh --rollback (row 1356) and docs/ops/blue_green_runbook.md (row 1357)." >&2
+  exit 5
+elif [[ "$STRATEGY" == "rolling" ]]; then
   log "rolling mode: compose=$COMPOSE_FILE (backend-a:8000 → backend-b:8001)"
   if [[ ! -f "$ROOT/$COMPOSE_FILE" ]]; then
     echo "[deploy] rolling: compose file '$COMPOSE_FILE' missing — cannot run dual-replica rolling restart" >&2
