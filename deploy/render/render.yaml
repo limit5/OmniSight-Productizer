@@ -1,0 +1,155 @@
+# OmniSight Productizer — Render Blueprint (L11 #338 #3)
+#
+# One-click deploy: https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer
+#
+# Render picks this file up automatically when you click the Deploy button or
+# when you connect the repo via Dashboard → New → Blueprint. Once applied, the
+# live Blueprint in Render's control plane becomes the SSOT; this file is a
+# seed template.
+#
+# Topology (mirrors docker-compose.prod.yml + deploy/digitalocean/app.yaml):
+#   omnisight-backend  — FastAPI on :8000, type: pserv (Render's "private
+#                        service" — only reachable from sibling services via
+#                        the internal hostname `omnisight-backend:8000`)
+#   omnisight-frontend — Next.js on $PORT, type: web (public at /; Render
+#                        injects PORT which Next.js standalone reads via
+#                        process.env.PORT, so Dockerfile.frontend's CMD
+#                        works unmodified).
+#
+# Render-specific footguns this spec defends:
+#
+#   1. Blueprint env vars don't support string templating. `fromService`
+#      exposes a sibling service's `host` / `port` / `hostport` but cannot
+#      build a full `http://host:port` URL. Hard-pin BACKEND_URL instead —
+#      pserv hostnames are deterministic (== the service `name`) inside
+#      the Blueprint, so `http://omnisight-backend:8000` is stable.
+#
+#   2. Render does NOT inject $PORT into pservs (only into web services).
+#      Backend's Dockerfile CMD already binds :8000 so leaving it alone
+#      would work, but we override `dockerCommand` anyway to keep
+#      OMNISIGHT_WORKERS tunable from the spec and to make the port
+#      explicit. (Matches the approach the Railway spec takes for the
+#      same Dockerfile.)
+#
+#   3. Secrets use `sync: false` — Render will prompt the operator for
+#      each value on first Blueprint apply, and rotate them via dashboard
+#      instead of committing them to git. NEVER set a real API key in
+#      this file; the contract test `test_no_plaintext_api_keys_in_spec`
+#      will fail the build if you paste one accidentally.
+#
+#   4. OMNISIGHT_FRONTEND_ORIGIN + NEXT_PUBLIC_API_URL need the PUBLIC
+#      https URL of the frontend. Render exposes RENDER_EXTERNAL_URL at
+#      runtime only, and NEXT_PUBLIC_* is baked into the client bundle
+#      at BUILD time — so these are `sync: false` and the runbook walks
+#      the operator through a 2-stage post-deploy (first deploy → note
+#      the onrender.com URL → set both envs → trigger redeploy).
+#
+# Data persistence — Render's Blueprint `disk:` block attaches a 1 GB
+# SSD to the backend at /var/data so the default SQLite DB survives
+# redeploys (unlike App Platform + Railway's default ephemeral FS).
+# Disks require a paid plan (`starter` $7/mo minimum per service).
+# Bump `sizeGB` if event_log + artifacts grow past 1 GB.
+#
+# Cost: 2× starter ($7/mo each) + 1 GB disk ($0.25/GB/mo) ≈ $14/mo.
+# The free tier (`plan: free`) works for the frontend but spins the
+# service down after 15 min of inactivity; not recommended for demos
+# you want to share with live users.
+
+services:
+  # ── Backend (FastAPI) ───────────────────────────────────────────────
+  # Private service — not reachable from the public internet. The
+  # frontend calls it by internal hostname `omnisight-backend:8000`
+  # (see BACKEND_URL on the frontend service below).
+  - type: pserv
+    name: omnisight-backend
+    runtime: docker
+    region: oregon
+    plan: starter
+    repo: https://github.com/limit5/OmniSight-Productizer
+    branch: master
+    dockerfilePath: ./Dockerfile.backend
+    dockerContext: .
+    # Override the Dockerfile CMD so OMNISIGHT_WORKERS comes from the
+    # spec (Dockerfile defaults to CPU/2 which varies per Render tier).
+    # Port stays :8000 because pserv doesn't get $PORT injected and the
+    # frontend hard-pins BACKEND_URL=http://omnisight-backend:8000.
+    dockerCommand: "sh -c 'exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers ${OMNISIGHT_WORKERS:-2}'"
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    disk:
+      name: omnisight-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # ── Production safety pins (.env.example Internet-exposure block) ──
+      - key: OMNISIGHT_DEBUG
+        value: "false"
+      - key: OMNISIGHT_AUTH_MODE
+        value: strict
+      - key: OMNISIGHT_COOKIE_SECURE
+        value: "true"
+      - key: OMNISIGHT_ENV
+        value: production
+      # SQLite path lives on the persistent disk mounted at /var/data so
+      # redeploys don't wipe event_log / users / debug_findings.
+      - key: OMNISIGHT_DATABASE_PATH
+        value: /var/data/omnisight.db
+      - key: OMNISIGHT_WORKERS
+        value: "2"
+      # CORS — must be the public frontend URL. Render can't template a
+      # full `https://<host>` URL from fromService (property is hostname
+      # only, no scheme), so operator sets this via dashboard after the
+      # first deploy assigns the frontend its *.onrender.com URL.
+      - key: OMNISIGHT_FRONTEND_ORIGIN
+        sync: false
+
+      # ── LLM provider (pick one + fill the matching key in dashboard) ──
+      - key: OMNISIGHT_LLM_PROVIDER
+        value: anthropic
+      - key: OMNISIGHT_ANTHROPIC_API_KEY
+        sync: false
+      - key: OMNISIGHT_OPENAI_API_KEY
+        sync: false
+      - key: OMNISIGHT_GOOGLE_API_KEY
+        sync: false
+
+      # ── Bootstrap admin (K1 — must_change_password on first login) ──
+      - key: OMNISIGHT_ADMIN_EMAIL
+        value: admin@example.com
+      - key: OMNISIGHT_ADMIN_PASSWORD
+        sync: false
+
+  # ── Frontend (Next.js standalone) ───────────────────────────────────
+  # Public service — Render routes `$PORT` to the internet and serves
+  # the root route. Dockerfile.frontend's CMD (`node server.js`) reads
+  # process.env.PORT automatically (Next.js standalone convention).
+  - type: web
+    name: omnisight-frontend
+    runtime: docker
+    region: oregon
+    plan: starter
+    repo: https://github.com/limit5/OmniSight-Productizer
+    branch: master
+    dockerfilePath: ./Dockerfile.frontend
+    dockerContext: .
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Hard-pinned because Blueprint env vars don't support string
+      # templating. Sibling pservs are reachable at `<service-name>:<port>`
+      # within the same Blueprint (Render's service-discovery contract).
+      # RUN_AND_BUILD_TIME equivalent: Render makes envVars available at
+      # both phases by default for Docker runtime.
+      - key: BACKEND_URL
+        value: http://omnisight-backend:8000
+      # NEXT_PUBLIC_* vars are inlined into the client JS bundle at BUILD
+      # time. Render's RENDER_EXTERNAL_URL is runtime-only → operator
+      # must set this manually via dashboard after noting the assigned
+      # onrender.com URL, then trigger a redeploy so the value is baked in.
+      # (Alternative: client fetches relative `/api/v1/*` paths and relies
+      # on Next.js rewrites via BACKEND_URL above — this env is optional
+      # if the client only uses same-origin calls.)
+      - key: NEXT_PUBLIC_API_URL
+        sync: false

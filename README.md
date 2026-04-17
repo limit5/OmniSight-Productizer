@@ -97,10 +97,11 @@ Point a cloud provider at this repo and get a public URL in ~3 minutes:
 
 [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master)
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Flimit5%2FOmniSight-Productizer)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer)
 
 - DigitalOcean — Spec: [`deploy/digitalocean/app.yaml`](deploy/digitalocean/app.yaml) · Runbook: [`deploy/digitalocean/README.md`](deploy/digitalocean/README.md)
 - Railway — Spec: [`deploy/railway/railway.json`](deploy/railway/railway.json) · Runbook: [`deploy/railway/README.md`](deploy/railway/README.md)
-- Render button follows in subsequent L11 steps.
+- Render — Spec: [`deploy/render/render.yaml`](deploy/render/render.yaml) · Runbook: [`deploy/render/README.md`](deploy/render/README.md)
 
 ### Environment Variables
 
