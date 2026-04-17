@@ -17,7 +17,10 @@ G7.
 Sibling rows NOT covered by this test (explicit scope fence):
 
     * row 1381 (G6 #3) — primary-DB / reverse-proxy manual failover
-      runbook.
+      runbook. Landed as G6 #3 at ``docs/ops/dr_manual_failover.md``;
+      now pinned in ``backend/tests/test_dr_manual_failover_g6_3.py``
+      (the ``test_no_manual_failover_runbook`` guard was migrated out
+      in that commit).
     * row 1382 (G6 #4) — annual DR drill operator checklist.
     * row 1383 (G6 #5) — ``scripts/dr_drill.sh`` +
       ``docs/ops/dr_runbook.md`` bundle-closure deliverables.
@@ -434,20 +437,14 @@ class TestScopeDisciplineSiblingRows:
                 f"saw unexpected {cand.relative_to(PROJECT_ROOT)}"
             )
 
-    def test_no_manual_failover_runbook(self) -> None:
-        # G6 #3 (row 1381) owns the primary-DB / reverse-proxy
-        # manual failover runbook. A separate file landing here
-        # would be scope creep.
-        candidates = (
-            PROJECT_ROOT / "docs" / "ops" / "dr_manual_failover.md",
-            PROJECT_ROOT / "docs" / "ops" / "manual_failover.md",
-            PROJECT_ROOT / "docs" / "ops" / "dr_failover_runbook.md",
-        )
-        for cand in candidates:
-            assert not cand.exists(), (
-                f"row 1381 (G6 #3) owns the manual failover runbook; "
-                f"saw unexpected {cand.relative_to(PROJECT_ROOT)}"
-            )
+    # NOTE: `test_no_manual_failover_runbook` was removed in the commit
+    # that landed G6 #3 (TODO row 1381) — `docs/ops/dr_manual_failover.md`
+    # now owns the primary-DB / reverse-proxy manual failover runbook,
+    # which is the exact literal this guard used to forbid. The G6 #3-
+    # side contract pinning lives in
+    # `backend/tests/test_dr_manual_failover_g6_3.py` —
+    # explicit-migration pattern, carried forward from
+    # G5 → G6 #1 → G6 #2 → G6 #3.
 
     def test_no_g7_grafana_dashboard(self) -> None:
         # G7 ships the Grafana dashboard; must not appear with G6 #2.
