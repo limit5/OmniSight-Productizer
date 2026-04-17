@@ -4,7 +4,8 @@
 # Unified test entry point for AI Agent embedded development.
 #
 # Usage:
-#   ./simulate.sh --type=[algo|hw|npu|deploy|hmi|web|mobile] --module=[name] \
+#   ./simulate.sh --type=[algo|hw|npu|deploy|hmi|web|mobile|software] \
+#     --module=[name] \
 #     [--input=data] [--mock=true] [--coverage-check=true] \
 #     [--platform=aarch64]
 #
@@ -13,6 +14,13 @@
 #     [--mobile-app-path=path/to/app] \
 #     [--farm=firebase|aws|browserstack] \
 #     [--devices=pixel_8,pixel_7] [--locales=en-US,zh-TW]
+#
+# Software (X1 #297):
+#   ./simulate.sh --type=software --module=linux-x86_64-native \
+#     [--app-path=path/to/project] \
+#     [--language=python|go|rust|java|node|csharp] \
+#     [--coverage-override=<pct>] \
+#     [--benchmark=on] [--benchmark-current-ms=<float>]
 #
 # stdout: JSON report (machine-parseable)
 # stderr: Human-readable progress (for SSE streaming)
@@ -45,6 +53,12 @@ MOBILE_APP_PATH=""
 MOBILE_FARM=""
 MOBILE_DEVICES=""
 MOBILE_LOCALES=""
+# ── Software track (X1 #297) ──
+SOFTWARE_APP_PATH=""
+SOFTWARE_LANGUAGE=""
+SOFTWARE_COVERAGE_OVERRIDE=""
+SOFTWARE_BENCHMARK="off"
+SOFTWARE_BENCHMARK_CURRENT_MS=""
 WORKSPACE="${WORKSPACE:-/workspace}"
 TEST_ASSETS="${WORKSPACE}/test_assets"
 PLATFORM_DIR="${WORKSPACE}/configs/platforms"
@@ -78,6 +92,11 @@ for arg in "$@"; do
     --farm=*)       MOBILE_FARM="${arg#*=}" ;;
     --devices=*)    MOBILE_DEVICES="${arg#*=}" ;;
     --locales=*)    MOBILE_LOCALES="${arg#*=}" ;;
+    --software-app-path=*) SOFTWARE_APP_PATH="${arg#*=}" ;;
+    --language=*)   SOFTWARE_LANGUAGE="${arg#*=}" ;;
+    --coverage-override=*) SOFTWARE_COVERAGE_OVERRIDE="${arg#*=}" ;;
+    --benchmark=*)  SOFTWARE_BENCHMARK="${arg#*=}" ;;
+    --benchmark-current-ms=*) SOFTWARE_BENCHMARK_CURRENT_MS="${arg#*=}" ;;
     *) ;;
   esac
 done
@@ -88,8 +107,8 @@ if [ -z "$TYPE" ] || [ -z "$MODULE" ]; then
   exit 1
 fi
 
-if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ] && [ "$TYPE" != "npu" ] && [ "$TYPE" != "deploy" ] && [ "$TYPE" != "hmi" ] && [ "$TYPE" != "web" ] && [ "$TYPE" != "mobile" ]; then
-  echo '{"version":"1.0","status":"error","errors":["--type must be algo, hw, npu, deploy, hmi, web, or mobile"]}'
+if [ "$TYPE" != "algo" ] && [ "$TYPE" != "hw" ] && [ "$TYPE" != "npu" ] && [ "$TYPE" != "deploy" ] && [ "$TYPE" != "hmi" ] && [ "$TYPE" != "web" ] && [ "$TYPE" != "mobile" ] && [ "$TYPE" != "software" ]; then
+  echo '{"version":"1.0","status":"error","errors":["--type must be algo, hw, npu, deploy, hmi, web, mobile, or software"]}'
   exit 1
 fi
 
@@ -1356,6 +1375,162 @@ run_mobile() {
 
 
 # ============================================================
+# SOFTWARE Track: Language-native test runners (X1 #297)
+#
+# Thin shell wrapper around backend.software_simulator. The Python
+# driver owns language autodetect, per-runner argv, coverage-report
+# parsing, and benchmark regression; the shell layer aggregates the
+# summary JSON into simulate.sh's top-level shape.
+#
+# MODULE is reused as the platform profile id (e.g.
+# linux-x86_64-native). App path defaults to the repo root so a
+# sandbox invocation without any flags still produces a valid report.
+# ============================================================
+
+SOFTWARE_LANGUAGE_USED=""
+SOFTWARE_PACKAGING_USED=""
+SOFTWARE_TEST_RUNNER=""
+SOFTWARE_TEST_STATUS="skip"
+SOFTWARE_TEST_TOTAL=0
+SOFTWARE_TEST_PASSED=0
+SOFTWARE_TEST_FAILED=0
+SOFTWARE_COV_STATUS="skip"
+SOFTWARE_COV_PCT=0
+SOFTWARE_COV_THRESHOLD=0
+SOFTWARE_COV_SOURCE=""
+SOFTWARE_BENCH_STATUS="skip"
+SOFTWARE_BENCH_CURRENT_MS=0
+SOFTWARE_BENCH_BASELINE_MS=0
+SOFTWARE_BENCH_REGRESSION_PCT=0
+SOFTWARE_BENCH_THRESHOLD_PCT=0
+SOFTWARE_OVERALL_PASS="false"
+
+run_software() {
+  log "═══════ Software Track: Language-native test runners ═══════"
+  local SW_START_MS
+  SW_START_MS=$(now_ms)
+
+  # Resolve app path: explicit --software-app-path > WORKSPACE root.
+  local _app_path="${SOFTWARE_APP_PATH:-${WORKSPACE}}"
+  if [ ! -d "$_app_path" ]; then
+    log "  [WARN] app path ${_app_path} not found; falling back to ${WORKSPACE}"
+    _app_path="${WORKSPACE}"
+  fi
+
+  log "  Profile: ${MODULE}"
+  log "  App path: ${_app_path}"
+  [ -n "$SOFTWARE_LANGUAGE" ] && log "  Language override: ${SOFTWARE_LANGUAGE}"
+  [ "$SOFTWARE_BENCHMARK" = "on" ] && log "  Benchmark regression: enabled"
+
+  local _summary="${BUILD_DIR}/software_summary.json"
+  local _py_err="${BUILD_DIR}/software_py.err"
+
+  # ── Invoke python driver ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  local _extra=()
+  [ -n "$SOFTWARE_LANGUAGE" ] && _extra+=(--language "$SOFTWARE_LANGUAGE")
+  [ -n "$SOFTWARE_COVERAGE_OVERRIDE" ] && _extra+=(--coverage-override "$SOFTWARE_COVERAGE_OVERRIDE")
+  [ "$SOFTWARE_BENCHMARK" = "on" ] && _extra+=(--benchmark)
+  [ -n "$SOFTWARE_BENCHMARK_CURRENT_MS" ] && _extra+=(--benchmark-current-ms "$SOFTWARE_BENCHMARK_CURRENT_MS")
+
+  if ( cd "$WORKSPACE" && python3 -m backend.software_simulator \
+         --profile "$MODULE" \
+         --app-path "$_app_path" \
+         --module "$MODULE" \
+         --workspace "$WORKSPACE" \
+         "${_extra[@]}" \
+         > "$_summary" 2>"$_py_err" ); then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    add_test_detail "$(json_test_detail "software_driver" "pass" "0" "Summary produced")"
+    log "  [PASS] Simulator driver produced summary"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    local _err
+    _err=$(head -5 "$_py_err" | tr '\n' ' ')
+    add_error "software simulator failed: ${_err}"
+    add_test_detail "$(json_test_detail "software_driver" "fail" "0" "${_err}")"
+    log "  [FAIL] Simulator driver errored"
+    WALL_TIME_MS=$(( $(now_ms) - SW_START_MS ))
+    return 1
+  fi
+
+  # ── Parse summary via python (avoid bash JSON parsing) ──
+  if [ -f "$_summary" ]; then
+    SOFTWARE_LANGUAGE_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['language'])" "$_summary")
+    SOFTWARE_PACKAGING_USED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['packaging'])" "$_summary")
+    SOFTWARE_TEST_RUNNER=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['test_runner'])" "$_summary")
+    SOFTWARE_TEST_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['test_status'])" "$_summary")
+    SOFTWARE_TEST_TOTAL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['test_total'])" "$_summary")
+    SOFTWARE_TEST_PASSED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['test_passed'])" "$_summary")
+    SOFTWARE_TEST_FAILED=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['test_failed'])" "$_summary")
+    SOFTWARE_COV_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['coverage_status'])" "$_summary")
+    SOFTWARE_COV_PCT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['coverage_pct'])" "$_summary")
+    SOFTWARE_COV_THRESHOLD=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['coverage_threshold'])" "$_summary")
+    SOFTWARE_COV_SOURCE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['coverage_source'])" "$_summary")
+    SOFTWARE_BENCH_STATUS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['benchmark_status'])" "$_summary")
+    SOFTWARE_BENCH_CURRENT_MS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['benchmark_current_ms'])" "$_summary")
+    SOFTWARE_BENCH_BASELINE_MS=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['benchmark_baseline_ms'])" "$_summary")
+    SOFTWARE_BENCH_REGRESSION_PCT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['benchmark_regression_pct'])" "$_summary")
+    SOFTWARE_BENCH_THRESHOLD_PCT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['benchmark_threshold_pct'])" "$_summary")
+    SOFTWARE_OVERALL_PASS=$(python3 -c "import json,sys; print(str(json.load(open(sys.argv[1]))['overall_pass']).lower())" "$_summary")
+  fi
+
+  # ── Gate: test runner (pass | mock | skip all non-blocking) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$SOFTWARE_TEST_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "software_test" "pass" "0" "${SOFTWARE_TEST_RUNNER}:${SOFTWARE_TEST_STATUS} ${SOFTWARE_TEST_PASSED}/${SOFTWARE_TEST_TOTAL}")"
+      log "  [PASS] Test runner (${SOFTWARE_TEST_RUNNER}): ${SOFTWARE_TEST_STATUS} ${SOFTWARE_TEST_PASSED}/${SOFTWARE_TEST_TOTAL}"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "software_test" "fail" "0" "${SOFTWARE_TEST_RUNNER}:${SOFTWARE_TEST_STATUS}")"
+      add_error "Test runner failed: ${SOFTWARE_TEST_RUNNER} ${SOFTWARE_TEST_STATUS} (${SOFTWARE_TEST_FAILED} failures)"
+      log "  [FAIL] Test runner (${SOFTWARE_TEST_RUNNER}): ${SOFTWARE_TEST_STATUS}"
+      ;;
+  esac
+
+  # ── Gate: coverage (pass | mock | skip non-blocking) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$SOFTWARE_COV_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "software_coverage" "pass" "0" "${SOFTWARE_COV_SOURCE}:${SOFTWARE_COV_STATUS} ${SOFTWARE_COV_PCT}%/${SOFTWARE_COV_THRESHOLD}%")"
+      log "  [PASS] Coverage (${SOFTWARE_COV_SOURCE}): ${SOFTWARE_COV_PCT}% (threshold ${SOFTWARE_COV_THRESHOLD}%)"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "software_coverage" "fail" "0" "${SOFTWARE_COV_PCT}%<${SOFTWARE_COV_THRESHOLD}%")"
+      add_error "Coverage ${SOFTWARE_COV_PCT}% below threshold ${SOFTWARE_COV_THRESHOLD}%"
+      log "  [FAIL] Coverage ${SOFTWARE_COV_PCT}% below ${SOFTWARE_COV_THRESHOLD}%"
+      ;;
+  esac
+
+  # ── Gate: benchmark regression (opt-in; pass | mock | skip non-blocking) ──
+  TESTS_TOTAL=$((TESTS_TOTAL + 1))
+  case "$SOFTWARE_BENCH_STATUS" in
+    pass|mock|skip)
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      add_test_detail "$(json_test_detail "software_benchmark" "pass" "0" "${SOFTWARE_BENCH_STATUS}:${SOFTWARE_BENCH_REGRESSION_PCT}%/${SOFTWARE_BENCH_THRESHOLD_PCT}%")"
+      log "  [PASS] Benchmark: ${SOFTWARE_BENCH_STATUS} (regression ${SOFTWARE_BENCH_REGRESSION_PCT}%)"
+      ;;
+    *)
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      add_test_detail "$(json_test_detail "software_benchmark" "fail" "0" "regression ${SOFTWARE_BENCH_REGRESSION_PCT}%>${SOFTWARE_BENCH_THRESHOLD_PCT}%")"
+      add_error "Benchmark regression ${SOFTWARE_BENCH_REGRESSION_PCT}% exceeds ${SOFTWARE_BENCH_THRESHOLD_PCT}%"
+      log "  [FAIL] Benchmark regression: ${SOFTWARE_BENCH_REGRESSION_PCT}% > ${SOFTWARE_BENCH_THRESHOLD_PCT}%"
+      ;;
+  esac
+
+  COVERAGE_EXPECTED=$((COVERAGE_EXPECTED + TESTS_TOTAL))
+  COVERAGE_RUN=$((COVERAGE_RUN + TESTS_PASSED))
+  WALL_TIME_MS=$(( $(now_ms) - SW_START_MS ))
+  log "  Software verification complete: ${TESTS_PASSED}/${TESTS_TOTAL} passed, language=${SOFTWARE_LANGUAGE_USED}"
+}
+
+
+# ============================================================
 # Main execution
 # ============================================================
 log "============================================"
@@ -1372,6 +1547,7 @@ case "$TYPE" in
   hmi)    run_hmi || true ;;
   web)    run_web || true ;;
   mobile) run_mobile || true ;;
+  software) run_software || true ;;
 esac
 
 # ── Coverage check ──
@@ -1484,6 +1660,25 @@ cat <<JSONEOF
     "screenshot_matrix_status": "${MOBILE_SCREENSHOT_STATUS}",
     "screenshot_matrix_captured": ${MOBILE_SCREENSHOT_CAPTURED:-0},
     "overall_pass": ${MOBILE_OVERALL_PASS:-false}
+  },
+  "software": {
+    "language": "${SOFTWARE_LANGUAGE_USED}",
+    "packaging": "${SOFTWARE_PACKAGING_USED}",
+    "test_runner": "${SOFTWARE_TEST_RUNNER}",
+    "test_status": "${SOFTWARE_TEST_STATUS}",
+    "test_total": ${SOFTWARE_TEST_TOTAL:-0},
+    "test_passed": ${SOFTWARE_TEST_PASSED:-0},
+    "test_failed": ${SOFTWARE_TEST_FAILED:-0},
+    "coverage_status": "${SOFTWARE_COV_STATUS}",
+    "coverage_pct": ${SOFTWARE_COV_PCT:-0},
+    "coverage_threshold": ${SOFTWARE_COV_THRESHOLD:-0},
+    "coverage_source": "${SOFTWARE_COV_SOURCE}",
+    "benchmark_status": "${SOFTWARE_BENCH_STATUS}",
+    "benchmark_current_ms": ${SOFTWARE_BENCH_CURRENT_MS:-0},
+    "benchmark_baseline_ms": ${SOFTWARE_BENCH_BASELINE_MS:-0},
+    "benchmark_regression_pct": ${SOFTWARE_BENCH_REGRESSION_PCT:-0},
+    "benchmark_threshold_pct": ${SOFTWARE_BENCH_THRESHOLD_PCT:-0},
+    "overall_pass": ${SOFTWARE_OVERALL_PASS:-false}
   },
   "errors": [${ERRORS}]
 }

@@ -1159,11 +1159,11 @@ Legend:
 - [x] 預估：**0.5 day**
 
 ### X1. Software simulate track (#297)
-- [ ] `scripts/simulate.sh` 新增 `software` track：語言-native test runner
-- [ ] 多語言 dispatcher：`pytest` / `go test` / `cargo test` / `mvn test` / `npm test` / `xUnit`
-- [ ] Coverage gate：依 language 各自門檻（Python 80% / Go 70% / Rust 75% ...）
-- [ ] Benchmark 回歸（可選）
-- [ ] 預估：**1 day**
+- [x] `scripts/simulate.sh` 新增 `software` track：語言-native test runner
+- [x] 多語言 dispatcher：`pytest` / `go test` / `cargo test` / `mvn test`（或 `gradle test`）/ `npm test` / `pnpm test` / `yarn test` / `dotnet test`
+- [x] Coverage gate：依 language 各自門檻（Python 80% / Go 70% / Rust 75% / Java 70% / Node 80% / C# 70%）
+- [x] Benchmark 回歸（可選，`--benchmark=on` opt-in + `test_assets/benchmarks/<module>.json` 基準）
+- [x] 預估：**1 day**
 
 ### X2. Software role skills (#298)
 - [ ] `configs/roles/backend-python.md`（FastAPI / Django / Flask）
