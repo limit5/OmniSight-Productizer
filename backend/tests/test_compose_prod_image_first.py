@@ -55,7 +55,7 @@ def compose_text() -> str:
 # (1) Both app services declare image: referencing GHCR
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("service", ["backend", "frontend"])
+@pytest.mark.parametrize("service", ["backend-a", "backend-b", "frontend"])
 def test_service_has_image_referencing_ghcr(compose: dict, service: str) -> None:
     svc = compose["services"][service]
     image = svc.get("image")
@@ -68,7 +68,10 @@ def test_service_has_image_referencing_ghcr(compose: dict, service: str) -> None
     )
 
 
-@pytest.mark.parametrize("service,role", [("backend", "backend"), ("frontend", "frontend")])
+@pytest.mark.parametrize(
+    "service,role",
+    [("backend-a", "backend"), ("backend-b", "backend"), ("frontend", "frontend")],
+)
 def test_image_uses_namespace_and_tag_env_overrides(
     compose: dict, service: str, role: str
 ) -> None:
@@ -97,7 +100,11 @@ def test_image_uses_namespace_and_tag_env_overrides(
 
 @pytest.mark.parametrize(
     "service,dockerfile",
-    [("backend", "Dockerfile.backend"), ("frontend", "Dockerfile.frontend")],
+    [
+        ("backend-a", "Dockerfile.backend"),
+        ("backend-b", "Dockerfile.backend"),
+        ("frontend", "Dockerfile.frontend"),
+    ],
 )
 def test_service_keeps_build_for_fallback(
     compose: dict, service: str, dockerfile: str
@@ -126,15 +133,18 @@ def test_frontend_build_preserves_backend_url_arg(compose: dict) -> None:
     # Frontend's Next.js build needs BACKEND_URL baked in for the
     # rewrite proxy. Regressing this would silently break the prod
     # frontend → backend wiring on the local-build fallback path.
+    # G2 #2 (HA-02) — after the dual-replica split, the frontend SSR
+    # points at backend-a (the default upstream); Caddy fronts external
+    # traffic and G2 #3 will move this to the proxy DNS name.
     args = compose["services"]["frontend"]["build"].get("args") or {}
-    assert args.get("BACKEND_URL") == "http://backend:8000"
+    assert args.get("BACKEND_URL") == "http://backend-a:8000"
 
 
 # ---------------------------------------------------------------------------
 # (5) pull_policy: missing — explicit so drift to `always`/`build` fails CI
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("service", ["backend", "frontend"])
+@pytest.mark.parametrize("service", ["backend-a", "backend-b", "frontend"])
 def test_pull_policy_is_missing(compose: dict, service: str) -> None:
     svc = compose["services"][service]
     # `missing` IS Compose's default but pinning it explicitly:
@@ -177,7 +187,9 @@ def test_compose_image_names_match_publishing_workflow() -> None:
     published = {entry["image"] for entry in matrix["include"]}
     compose = yaml.safe_load(COMPOSE_PATH.read_text())
     consumed = set()
-    for service in ("backend", "frontend"):
+    # G2 #2: backend-a + backend-b both pull the same `omnisight-backend`
+    # image; de-duplicating via set() keeps the set equality check clean.
+    for service in ("backend-a", "backend-b", "frontend"):
         image = compose["services"][service]["image"]
         # Strip the `ghcr.io/<ns>/` prefix and `:<tag>` suffix to get
         # the bare image name.
@@ -189,7 +201,7 @@ def test_compose_image_names_match_publishing_workflow() -> None:
     )
     # Both must use ghcr.io as the registry.
     assert workflow["env"]["REGISTRY"] == "ghcr.io"
-    for service in ("backend", "frontend"):
+    for service in ("backend-a", "backend-b", "frontend"):
         assert compose["services"][service]["image"].startswith("ghcr.io/")
 
 

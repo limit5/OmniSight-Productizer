@@ -24,7 +24,32 @@ version: "3.9"
 #   docker compose -f docker-compose.prod.yml build
 #   docker compose -f docker-compose.prod.yml up -d --build
 services:
-  backend:
+  # G2 #2 — HA-02 dual backend replicas for rolling-restart + reverse-proxy HA.
+  #
+  # Topology (see deploy/reverse-proxy/Caddyfile G2 #1):
+  #   caddy :443 ──► { backend-a:8000, backend-b:8001 }  (round-robin, /readyz eject)
+  #
+  # Both replicas run the same image and mount the same three named volumes
+  # (`omnisight-data`, `omnisight-artifacts`, `omnisight-sdks`) so any request
+  # may land on either replica. The upstream pool is truly symmetric — a
+  # prerequisite for the rolling-restart flow in scripts/deploy.sh (G2 #3)
+  # where one replica is drained while the other serves 100 % of traffic.
+  #
+  # SQLite caveat (closed-loop note): the shared `omnisight-data` volume means
+  # both replicas talk to the same `omnisight.db`. SQLite in WAL mode supports
+  # many readers + one writer, so concurrent write contention *will* surface
+  # `database is locked` errors under load. G4 (HA-04) migrates to PostgreSQL
+  # and removes the constraint; for G2 this plumbing-level dual-replica is
+  # acceptable because rolling restart only leaves one replica live at a time
+  # during the cutover window.
+  #
+  # Port convention (contract with Caddyfile upstream block):
+  #   backend-a → listens on container port 8000 (uvicorn --port 8000, default CMD).
+  #   backend-b → listens on container port 8001 (uvicorn --port 8001, command-override).
+  # Keeping distinct internal ports lets the Caddy upstream stanza address
+  # them unambiguously by service name + port, and host-port exposure (8000/8001)
+  # remains operator-friendly for direct `curl` smoke of each replica.
+  backend-a:
     image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: missing
     build:
@@ -42,11 +67,61 @@ services:
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=production
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      - OMNISIGHT_INSTANCE_ID=backend-a
+    env_file:
+      - .env
+    # Legacy `backend` DNS alias — preserves the single-replica scrape target
+    # in configs/prometheus.yml (`backend:8000`) without touching files outside
+    # this compose diff. A follow-up commit can teach prometheus.yml to scrape
+    # both replicas (backend-a + backend-b) and drop this alias.
+    networks:
+      default:
+        aliases:
+          - backend
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  backend-b:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    # Override the baked-in CMD (port 8000) so backend-b listens on 8001 and
+    # matches the Caddyfile upstream contract. Worker-count formula mirrors
+    # the Dockerfile default so `OMNISIGHT_WORKERS` override works the same.
+    # Note on `$$` escapes: docker-compose does its own variable interpolation
+    # *before* passing the string to the container's shell, so every `$` that
+    # must survive to the in-container `sh -c` is doubled. Single `$` would
+    # be consumed at compose-config time and break the OMNISIGHT_WORKERS
+    # override + the `$(python3 ...)` worker-count fallback.
+    command:
+      - "sh"
+      - "-c"
+      - "WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS"
+    ports:
+      - "8001:8001"
+    volumes:
+      - omnisight-data:/app/data
+      - omnisight-artifacts:/app/.artifacts
+      - omnisight-sdks:/app/.sdks
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OMNISIGHT_DEBUG=false
+      - OMNISIGHT_AUTH_MODE=strict
+      - OMNISIGHT_ENV=production
+      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      - OMNISIGHT_INSTANCE_ID=backend-b
     env_file:
       - .env
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/readyz"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/readyz"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -59,14 +134,19 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
       args:
-        BACKEND_URL: http://backend:8000
+        # Frontend SSR hits backend-a directly (default upstream). Once the
+        # Caddy service lands in G2 #3 this will move to the proxy address
+        # so SSR survives backend-a rolling restart as well.
+        BACKEND_URL: http://backend-a:8000
     ports:
       - "3000:3000"
     environment:
-      - BACKEND_URL=http://backend:8000
+      - BACKEND_URL=http://backend-a:8000
       - NODE_ENV=production
     depends_on:
-      backend:
+      backend-a:
+        condition: service_healthy
+      backend-b:
         condition: service_healthy
     restart: always
     healthcheck:
@@ -89,7 +169,8 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=15d"
     depends_on:
-      - backend
+      - backend-a
+      - backend-b
     restart: always
 
   grafana:
