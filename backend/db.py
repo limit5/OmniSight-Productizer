@@ -708,6 +708,21 @@ CREATE INDEX IF NOT EXISTS idx_debug_findings_tenant ON debug_findings(tenant_id
 CREATE INDEX IF NOT EXISTS idx_decision_rules_tenant ON decision_rules(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant ON workflow_runs(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
+
+-- L1: bootstrap wizard step audit + finalize anchor
+-- Each row is one wizard step recorded as completed. `step` is the
+-- stable logical name (admin_password_set / llm_provider_configured /
+-- cf_tunnel_configured / smoke_passed / finalized); `actor_user_id`
+-- is the admin who advanced the wizard; `metadata` carries per-step
+-- context (e.g. selected provider, tunnel id). Upsert-by-step keeps
+-- the table idempotent so replaying a step refreshes its timestamp
+-- rather than piling up duplicate rows.
+CREATE TABLE IF NOT EXISTS bootstrap_state (
+    step            TEXT PRIMARY KEY,
+    completed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    actor_user_id   TEXT,
+    metadata        TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 

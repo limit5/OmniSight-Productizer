@@ -134,6 +134,20 @@ async def client_with_default_admin(tmp_path, monkeypatch):
 
     from backend.main import app
     from httpx import ASGITransport, AsyncClient
+    from backend import bootstrap as _boot
+
+    # L1 #2: pin bootstrap gate green so this test isolates the K1 428
+    # mechanism. The admin's individual `must_change_password` flag is a
+    # per-user gate that persists after bootstrap finalization.
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
 
     await db.init()
     from backend import auth
@@ -144,6 +158,7 @@ async def client_with_default_admin(tmp_path, monkeypatch):
             yield ac
     finally:
         await db.close()
+        _boot._gate_cache_reset()
 
 
 @pytest.mark.asyncio

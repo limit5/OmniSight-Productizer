@@ -1238,31 +1238,31 @@ Legend:
 > 相依：**B12 (CF Tunnel wizard)** 是 Step 3 基礎；**G1 (readyz)** 讓 Step 4 能精確判斷「起來了沒」；**K1 (must_change_password)** 讓 Step 1 密碼關卡有後端支援。
 
 ### L1. Bootstrap 狀態偵測 + `/bootstrap` 路由
-- [ ] `backend/bootstrap.py`：`get_bootstrap_status()` 回傳 `{admin_password_default: bool, llm_provider_configured: bool, cf_tunnel_configured: bool, smoke_passed: bool}`
-- [ ] 全局 middleware：若 bootstrap 未完成 → 除 `/bootstrap/*`、`/auth/login`、`/healthz`、靜態資源外一律導向 `/bootstrap`
-- [ ] `bootstrap_state` 表：`step`, `completed_at`, `actor_user_id`, `metadata`；完成全部步驟後寫 `bootstrap_finalized=true` 進 app 設定
-- [ ] `POST /api/v1/bootstrap/finalize` — 全 step 綠才讓過（admin 才能呼叫）
-- [ ] 前端 `app/bootstrap/page.tsx` 多步 wizard 殼
-- [ ] 預估：**0.5 day**
+- [x] `backend/bootstrap.py`：`get_bootstrap_status()` 回傳 `{admin_password_default: bool, llm_provider_configured: bool, cf_tunnel_configured: bool, smoke_passed: bool}`
+- [x] 全局 middleware：若 bootstrap 未完成 → 除 `/bootstrap/*`、`/auth/login`、`/healthz`、靜態資源外一律導向 `/bootstrap`
+- [x] `bootstrap_state` 表：`step`, `completed_at`, `actor_user_id`, `metadata`；完成全部步驟後寫 `bootstrap_finalized=true` 進 app 設定
+- [x] `POST /api/v1/bootstrap/finalize` — 全 step 綠才讓過（admin 才能呼叫）
+- [x] 前端 `app/bootstrap/page.tsx` 多步 wizard 殼
+- [x] 預估：**0.5 day**
 
 ### L2. Step 1 — 首次 admin 密碼設定
-- [ ] 整合 K1 的 `must_change_password` 旗標；wizard Step 1 強制改預設 `omnisight-admin`
+- [x] 整合 K1 的 `must_change_password` 旗標；wizard Step 1 強制改預設 `omnisight-admin`
 - [ ] 密碼強度檢查（最短 12 字 + zxcvbn ≥ 3，與 K7 統一）；若 K7 未做則先用簡版
 - [ ] 寫入 audit_log（`bootstrap.admin_password_set`）；清除 `must_change_password`
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### L3. Step 2 — LLM Provider 選擇 + API Key 輸入
 - [ ] UI 選單：Anthropic / OpenAI / Ollama（本機）/ Azure
 - [ ] API Key 輸入 → `POST /api/v1/bootstrap/llm-provision`：驗 key（`provider.ping()`）→ 寫入 `backend/secrets.py`（at-rest 加密）→ 更新 `settings.llm_provider`
 - [ ] Ollama 選項偵測本機 `localhost:11434` 可達性 + 列可用 model
 - [ ] 錯誤處理：key 無效 / quota 用盡 / 網路不通 → 明確訊息
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### L4. Step 3 — Cloudflare Tunnel（複用 B12 wizard）
 - [ ] 直接 embed B12 的 `cloudflare-tunnel-setup.tsx` 到 bootstrap step 3
 - [ ] 完成 provision 後寫 `bootstrap_state.cf_tunnel_configured=true`
 - [ ] 提供「跳過（內網部署）」選項，記 audit warning
-- [ ] 預估：**0.25 day**（主要靠 B12，此處只做 embed + state 寫入）
+- 預估：**0.25 day**（主要靠 B12，此處只做 embed + state 寫入）
 
 ### L5. Step 4 — 服務啟動 / 健康驗證（SSE 即時 log）
 - [ ] `POST /api/v1/bootstrap/start-services`：呼叫 `systemctl start` 或 `docker compose up -d`（依部署模式）
@@ -1270,14 +1270,14 @@ Legend:
 - [ ] 輪詢 G1 的 `/readyz` 直到通過 or timeout 180s
 - [ ] 並行檢查：backend ready / frontend ready / DB migration up-to-date / CF tunnel connector online（若 step 3 有做）
 - [ ] UI 顯示 4 個勾勾即時變綠
-- [ ] 預估：**1 day**
+- 預估：**1 day**
 
 ### L6. Step 5 — Smoke Test + 完成
 - [ ] 跑 `scripts/prod_smoke_test.py` 子集（選 compile-flash host_native DAG，~60s）
 - [ ] 顯示 audit_log hash chain 驗證結果、兩個 DAG 的 run summary
 - [ ] 全綠 → `POST /api/v1/bootstrap/finalize` → 寫 `bootstrap_finalized=true` → 導向 dashboard
 - [ ] 失敗 → 顯示錯誤 + 允許回到前面 step 修正
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### L7. 部署模式偵測 + docker-compose 路徑
 - [ ] `detect_deploy_mode()`：偵測是否在 docker 內 / 是否有 systemd / 是否有 docker socket
@@ -1286,13 +1286,13 @@ Legend:
   - `docker-compose` 模式：`docker compose -f docker-compose.prod.yml up -d`
   - `dev` 模式：跳過 start-services step（已在 uvicorn + next dev）
 - [ ] 文件 `docs/ops/bootstrap_modes.md`
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### L8. 重置 + 測試
 - [ ] `POST /api/v1/bootstrap/reset`（admin 限定、dev 模式限定）— 清 bootstrap_state、重設 must_change_password；用於 QA
 - [ ] E2E Playwright：完整 5-step wizard 走完（mock CF API、mock LLM provider ping）
 - [ ] 錯誤路徑：密碼太弱 / LLM key 無效 / systemctl 失敗各自 UX
-- [ ] 預估：**0.75 day**
+- 預估：**0.75 day**
 
 **總預估**：L1 (0.5) + L2 (0.5) + L3 (0.5) + L4 (0.25) + L5 (1) + L6 (0.5) + L7 (0.5) + L8 (0.75) = **~4.5 day**
 
@@ -1323,7 +1323,7 @@ Legend:
 - [ ] SSE event routing：`workspace.type` filter 確保 agent event 只推送到對應工作區（不汙染指揮中心）
 - [ ] `components/omnisight/workspace-chat.tsx`：共用對話式迭代 chat panel（文字 + 圖片上傳 + annotation reference + NL → 任務），三個工作區共用此元件
 - [ ] Workspace navigation sidebar：per-type sidebar template（web = component palette；mobile = platform selector；software = language selector）
-- [ ] 預估：**6 day**
+- 預估：**6 day**
 
 ### V1. Web — AI 自主 UI 生成引擎 (#317)
 - [ ] `configs/roles/ui-designer.md`：UI Designer specialist agent role skill——精通 shadcn/ui 全套 API（Button/Card/Dialog/Sheet/Table/Form/...）+ Tailwind utility classes + responsive breakpoints + WAI-ARIA patterns + color contrast
@@ -1335,7 +1335,7 @@ Legend:
 - [ ] URL → reference：`WebFetch(url)` + Playwright 截圖 → 注入 agent visual context 作為參考（「做一個像這個 URL 的頁面」）
 - [ ] Edit complexity auto-router：分析 user prompt 複雜度——小改（文字/色彩/spacing）→ Haiku 快改（< 3s）；大改（layout 重構/新頁面）→ Opus 深想
 - [ ] 整合測試：NL「做一個定價頁面，三個方案，年月切換」→ agent 輸出完整 React + shadcn Tabs/Card/Switch 元件 + Tailwind → render 正確 + consistency lint pass
-- [ ] 預估：**7 day**
+- 預估：**7 day**
 
 ### V2. Web — Live Preview + Sandbox 渲染 (#318)
 - [ ] `backend/ui_sandbox.py`：per-session Next.js dev server 管理器——Docker container 內跑 `npm run dev`，agent 透過 volume mount 寫 code → HMR 自動更新
@@ -1346,7 +1346,7 @@ Legend:
 - [ ] Agent visual context injection：每輪 ReAct 前自動截圖 → base64 附加到 Opus 4.7 multimodal message → agent 真正「看到」畫面長什麼樣
 - [ ] SSE event：`ui_sandbox.screenshot`（session_id / viewport / image_url / timestamp）+ `ui_sandbox.error`（error_type / message / file / line）
 - [ ] 整合測試：agent 寫 code → sandbox HMR → 截圖 → error 偵測 → auto-fix → 重截圖 → 最終 screenshot 無 error
-- [ ] 預估：**6 day**
+- 預估：**6 day**
 
 ### V3. Web — 視覺迭代 + 標註回饋 (#319)
 - [ ] `components/omnisight/visual-annotator.tsx`：在 preview 截圖上的 annotation overlay——使用者可畫矩形框 / 點選元素 / 加文字 comment
@@ -1354,7 +1354,7 @@ Legend:
 - [ ] Element inspector integration：sandbox React tree 注入 `data-omnisight-component` attribute → hover 時前端顯示元件名 + 當前 props + computed styles（輕量版 React DevTools）
 - [ ] UI iteration timeline（`components/omnisight/ui-iteration-timeline.tsx`）：每次 agent 修改 → 存截圖 + code diff → 水平時間軸可視化；點任何版本可回溯（preview + code 都回到該版本）
 - [ ] Version rollback：在 iteration timeline 點「回到此版本」→ sandbox git checkout 該 commit → preview 刷新
-- [ ] 預估：**5 day**
+- 預估：**5 day**
 
 ### V4. Web Workspace UI + 輸出 (#320)
 - [ ] `app/workspace/web/page.tsx`：Web 工作區主頁面——三欄佈局
@@ -1364,14 +1364,14 @@ Legend:
 - [ ] Instant preview URL：W4 deploy adapter 的快速模式——`vercel deploy --preview` 或 `docker run` 出暫時 URL 供分享（不走 full CI/CD）
 - [ ] Block exporter：agent 生成的元件包成 shadcn CLI 相容 block（`npx shadcn add <block-url>`）
 - [ ] Brand consistency validator：post-deploy 掃描 → 所有 color/font 是否在 design system 允許範圍 → 違規項列為 warning
-- [ ] 預估：**5 day**
+- 預估：**5 day**
 
 ### V5. Mobile — AI 自主 App 生成引擎 (#321)
 - [ ] `configs/roles/mobile-ui-designer.md`：Mobile UI Designer specialist agent——精通 SwiftUI views / Jetpack Compose components / Flutter widgets + 平台 HIG (Human Interface Guidelines / Material Design)
 - [ ] `backend/mobile_component_registry.py`：SwiftUI views 清單（NavigationStack/List/Form/TabView/...）+ Compose components（Scaffold/LazyColumn/Card/...）+ Flutter widgets（Scaffold/ListView/...）注入 agent context
 - [ ] Figma → mobile code：MCP `get_design_context` → 提取 spacing/color/component 結構 → agent 輸出 Swift / Kotlin / Dart code
 - [ ] Screenshot → mobile code：上傳 app 截圖或手繪稿 → Opus 4.7 vision → 對應 SwiftUI/Compose/Flutter layout code
-- [ ] 預估：**4 day**
+- 預估：**4 day**
 
 ### V6. Mobile — Device Preview + Sandbox 渲染 (#322)
 - [ ] `backend/mobile_sandbox.py`：per-session build server——Android: Docker + Gradle build → .apk → Android emulator 截圖；iOS: macOS remote delegate + xcodebuild → .app → Simulator 截圖
@@ -1380,7 +1380,7 @@ Legend:
 - [ ] Multi-device grid view（`components/omnisight/device-grid.tsx`）：6+ 機型同時預覽（同一頁面在不同機型上的截圖 grid）
 - [ ] Agent visual context injection（mobile）：每輪 ReAct 截圖 emulator → 注入 Opus 4.7 multimodal context
 - [ ] Build error → agent auto-fix：Xcode / Gradle build error 攔截 → 注入 agent → 修 → 重 build → 重截圖
-- [ ] 預估：**6 day**
+- 預估：**6 day**
 
 ### V7. Mobile — 視覺迭代 + Workspace UI + 輸出 (#323)
 - [ ] Mobile visual annotation：在 device frame 截圖上畫框/點選 → agent 修改對應 SwiftUI/Compose/Flutter 元件
@@ -1391,7 +1391,7 @@ Legend:
   - [ ] 右 pane：code viewer + workspace chat
 - [ ] Build status panel：即時 Xcode/Gradle build 進度 + error list + artifact link (.ipa/.apk download)
 - [ ] Store submission dashboard：工作區內看 App Store / Play Console 審核狀態 + 截圖管理 + TestFlight/Firebase 一鍵派發
-- [ ] 預估：**5 day**
+- 預估：**5 day**
 
 ### V8. Software Workspace UI (#324)
 - [ ] `app/workspace/software/page.tsx`：Software 工作區主頁面
@@ -1400,7 +1400,7 @@ Legend:
   - [ ] 右 pane：code viewer + workspace chat
 - [ ] Multi-platform release dashboard：各平台 build 狀態 grid（Docker ✅ / Helm ✅ / .deb ⏳ / .msi ❌ / .dmg ✅）+ 每個 artifact 的 download link
 - [ ] Test coverage viewer：coverage report 渲染（per-file coverage bar + uncovered line highlight）
-- [ ] 預估：**4 day**
+- 預估：**4 day**
 
 ### V9. Cross-workspace Integration + Polish (#325)
 - [ ] Image generation tool：`backend/agents/tools.py` 新增 `image_generate` tool（呼叫 OpenAI Image API 或 Anthropic image gen）→ agent 可在 coding 流程中生成 icon/banner/asset → preview pane 直接顯示
@@ -1410,7 +1410,7 @@ Legend:
   - [ ] Web：NL「做一個 SaaS landing page」→ agent 自主寫完 → preview 渲染正確 → 標註「把 hero 背景改深藍」→ agent 修改 → 重渲染 → deploy → Lighthouse ≥ 80
   - [ ] Mobile：NL「做一個 todo app」→ agent 寫 SwiftUI → emulator 截圖 → 標註「加個 dark mode toggle」→ agent 修改 → rebuild → 截圖正確
   - [ ] Software：NL「做一個 REST API with user CRUD」→ agent 寫 FastAPI → pytest pass → OpenAPI spec 渲染 → Docker build → deploy
-- [ ] 預估：**5 day**
+- 預估：**5 day**
 
 **Priority V 總預估**：**48 day**（4 stage 切段交付：基建 6d → Web 23d → Mobile 15d → Software+CLI 9d）
 
@@ -1527,7 +1527,7 @@ Legend:
   - [ ] Checkpoint 間距顏色編碼：綠色 = 正常進展、黃色 = entropy 升高中、紅色 = 接近 deadlock
   - [ ] Timeline 末尾顯示「total recovered time」（= 從 checkpoint resume 省下的時間 vs. cold-restart 的預估時間）
 - [ ] 整合測試：task running → 3 checkpoints → crash → worker re-claim → hot-resume from checkpoint#3 → task continues → done；checkpoint timeline UI 正確顯示 5 個點
-- [ ] 預估：**2.5 day**（backend 1.5d + UI 1d）
+- 預估：**2.5 day**（backend 1.5d + UI 1d）
 
 ### R5. Active-Standby HA 具體方案（Keepalived + Redis M-S）(#311)
 - [ ] `deploy/ha/keepalived.conf.example`：VRRP instance 配置範本（VIP / priority / auth / health check script）
@@ -1536,7 +1536,7 @@ Legend:
 - [ ] Consul leader election 替代方案（雲端 VPC 無 L2 multicast 時）：`backend/ha_leader.py` 用 Consul session + KV lock
 - [ ] Failover runbook `docs/ops/ha_failover_runbook.md`：手動 / 自動 failover 步驟、驗證清單、回切流程
 - [ ] Redis replication lag monitoring：SSE event `ha.redis_lag`（lag_bytes / lag_seconds）
-- [ ] 預估：**2 day**
+- 預估：**2 day**
 
 ### R6. Serverless PaaS Adapter（Fargate / Cloud Run）(#312)
 - [ ] `backend/deploy/fargate.py`：AWS ECS + Fargate task definition 生成 + 佈署
@@ -1547,7 +1547,7 @@ Legend:
 - [ ] Scale-to-zero 支援：idle timeout 後 PaaS 自動縮 → queue consumer 斷線 → 新任務入隊時自動 scale-up
 - [ ] 成本估算 helper：依 vCPU/hour + memory/hour 計算 burst 成本 vs. always-on 成本
 - [ ] 整合測試：mock Fargate API → provision + deploy + scale + teardown 四步流程
-- [ ] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### R7. Deployment Topology View UI + Bootstrap Wizard Extension (#313)
 - [ ] **UI — Deployment Topology View（新元件 `deployment-topology.tsx`）**：
@@ -1562,7 +1562,7 @@ Legend:
 - [ ] **Bootstrap wizard（L 系列）extension**：L7 `detect_deploy_mode()` 延伸為可選 HA / K8s / PaaS 配置步驟
 - [ ] **UI — integration-settings 延伸**：Settings modal 新增 Deployment 區塊，內嵌 Topology View + 「Upgrade Plan」one-click trigger
 - [ ] Deployment runbook `docs/ops/deployment_hierarchy.md`：4 方案完整對比表 + 升級步驟 + 回切流程
-- [ ] 預估：**2.5 day**（backend 1d + UI 1.5d）
+- 預估：**2.5 day**（backend 1d + UI 1.5d）
 
 ### R8. Idempotent Retry 正規化（worktree-based，覆寫白皮書 §三.2 的 git clean 設計）(#314)
 - [ ] **設計決策（明確覆寫白皮書）**：不使用 `git clean -fd` + `git checkout .`；改用「discard current worktree + `git worktree add` create fresh worktree from anchor commit」
@@ -1571,7 +1571,7 @@ Legend:
 - [ ] Audit trail：每次 retry 寫入 `audit_log`（`retry.worktree_recreated`，附 old_worktree_path / anchor_sha / reason）
 - [ ] 既有 startup cleanup 延伸：啟動時掃描 orphan worktree（`git worktree list` 中不屬於任何 active agent 的 worktree）→ 自動 remove + log
 - [ ] 整合測試：task fail → retry → old worktree 消失 + new worktree 乾淨 + anchor_sha 正確 + audit logged
-- [ ] 預估：**1 day**
+- 預估：**1 day**
 
 ### R9. P1/P2/P3 ↔ L1-L4 通報統一 + E2E Watchdog Integration Tests (#315)
 - [ ] 不新起 P1/P2/P3 分級——改為 L1-L4 notification tier 上掛 `severity` tag：
@@ -1586,7 +1586,7 @@ Legend:
   - [ ] Agent crash → R4 checkpoint → R8 worktree recreate → R3 scratchpad reload → agent hot-resumes
   - [ ] System OOM → M1 cgroup kill → R9 P1 mapping → L4 PagerDuty（mock）+ L3 Jira ticket auto-create
 - [ ] **UI — notification-center 延伸**：每條通知卡片新增 `severity` badge（P1 紅 / P2 橙 / P3 灰）；filter bar 加 severity dropdown
-- [ ] 預估：**2 day**（backend 1.5d + UI 0.5d）
+- 預估：**2 day**（backend 1.5d + UI 0.5d）
 
 **Priority R 總預估**：**25.5 day**（backend 17.5d + UI 8d）（solo ~5 週，2-person team ~3 週）
 
@@ -1970,7 +1970,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Endpoint：`GET /api/v1/host/metrics`（current + history）
 - [ ] SSE event：`host.metrics.tick`（5s 推送）
 - [ ] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### H2. Coordinator 負載感知調度（precondition + backoff）
 - [ ] `_ModeSlot.acquire()` 新增 precondition：`cpu_pct < 85 AND mem_pct < 85 AND container_count < K`
@@ -1980,7 +1980,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
 - [ ] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
 - [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
-- [ ] 預估：**2 day**
+- 預估：**2 day**
 
 ### H3. UI Host Load Panel + Coordinator 決策透明化
 - [ ] 把 `components/omnisight/host-device-panel.tsx` placeholder 換成真 SSE 驅動（listen `host.metrics.tick`）
@@ -1991,7 +1991,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 手動 override 按鈕：`Force turbo`（confirm dialog 警告可能 OOM，audit 記錄）
 - [ ] 高壓閾值視覺標記（CPU >85% 變紅、70-85% 變黃）
 - [ ] Component + Playwright E2E 測試
-- [ ] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### H4a. Weighted Token Bucket + AIMD 自適應 concurrency
 - [ ] 定義 `SandboxCostWeight` 表（初期估值）：
@@ -2011,7 +2011,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Last-known-good budget 持久化（DB），冷啟動時載入替代 `init=6`
 - [ ] UI 顯示當前 AIMD budget + 最近 5min trace（上升/下降歷史）
 - [ ] 測試：模擬 CPU spike → 驗證 MD halve、冷卻後 AI 回升、floor/cap 邊界
-- [ ] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### H4b. Sandbox cost calibration（H1 上線 1 週後）
 - [ ] `scripts/calibrate_sandbox_cost.py`：讀取過去 N 天 sandbox 執行紀錄（start/end timestamp + 同期 host_metrics ring）
@@ -2019,7 +2019,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 輸出 diff report（舊權重 vs 新權重）供人工審核
 - [ ] 支援 `--apply` 旗標寫回 `configs/sandbox_cost_weights.yaml`（改 H4a hardcode 為 config 驅動）
 - [ ] Audit：權重變更寫入 hash-chain
-- [ ] 預估：**1 day**
+- 預估：**1 day**
 
 **相依性**：H1 → H2 → H3（metrics → 調度 → UI）；H4a 可與 H3 並行；H4b 需 H1 資料累積 1 週。
 

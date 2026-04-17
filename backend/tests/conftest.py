@@ -58,6 +58,12 @@ async def client(tmp_path, monkeypatch):
     across tests. Previously every test hit the real `data/omnisight.db`
     and rows accumulated forever — the audit flagged this as the root
     cause of `test_list_plan_chain` seeing 8+ plans when it expected 2.
+
+    L1 #2 note: the bootstrap gate middleware would normally 307 every
+    non-exempt request on a fresh install (nothing configured). For the
+    shared client fixture we pin the gate to "finalized" so existing
+    tests don't suddenly have to care about bootstrap state. Tests that
+    explicitly exercise the gate reset the cache themselves.
     """
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
@@ -70,6 +76,18 @@ async def client(tmp_path, monkeypatch):
 
     from backend.main import app
     from httpx import ASGITransport, AsyncClient
+    from backend import bootstrap as _boot
+
+    # Pin bootstrap to finalized so non-gate tests see a normal app.
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
 
     await db.init()
     try:
@@ -78,3 +96,4 @@ async def client(tmp_path, monkeypatch):
             yield ac
     finally:
         await db.close()
+        _boot._gate_cache_reset()

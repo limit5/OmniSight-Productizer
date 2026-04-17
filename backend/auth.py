@@ -229,6 +229,31 @@ async def get_user_by_email(email: str) -> Optional[User]:
                 tenant_id=r["tenant_id"])
 
 
+async def find_admin_requiring_password_change() -> Optional[User]:
+    """Return the single enabled admin still flagged must_change_password.
+
+    Drives L2 Step 1 of the bootstrap wizard: the operator hasn't logged
+    in yet (no session), so the wizard endpoint needs to identify which
+    admin row still carries the shipping credential without trusting
+    client-supplied identity. If multiple admins share the flag we pick
+    the oldest (first created) — practically only one exists during
+    bootstrap since ``ensure_default_admin`` only runs on an empty table.
+    """
+    conn = await _conn()
+    async with conn.execute(
+        "SELECT id, email, name, role, enabled, must_change_password, tenant_id "
+        "FROM users WHERE role='admin' AND enabled=1 AND must_change_password=1 "
+        "ORDER BY rowid ASC LIMIT 1",
+    ) as cur:
+        r = await cur.fetchone()
+    if not r:
+        return None
+    return User(id=r["id"], email=r["email"], name=r["name"],
+                role=r["role"], enabled=bool(r["enabled"]),
+                must_change_password=bool(r["must_change_password"]),
+                tenant_id=r["tenant_id"])
+
+
 async def create_user(email: str, name: str, role: str = "viewer",
                       password: str | None = None,
                       oidc_provider: str = "", oidc_subject: str = "",

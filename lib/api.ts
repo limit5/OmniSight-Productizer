@@ -2467,6 +2467,60 @@ export async function updateApiKeyScopes(keyId: string, scopes: string[]): Promi
   })
 }
 
+// ─── L1 — Bootstrap wizard ─────────────────────────────────────────────────
+
+export interface BootstrapGates {
+  admin_password_default: boolean
+  llm_provider_configured: boolean
+  cf_tunnel_configured: boolean
+  smoke_passed: boolean
+}
+
+export interface BootstrapStatusResponse {
+  status: BootstrapGates
+  all_green: boolean
+  finalized: boolean
+  missing_steps: string[]
+}
+
+export interface BootstrapFinalizeResponse {
+  finalized: boolean
+  status: BootstrapGates
+  actor_user_id: string
+}
+
+export async function getBootstrapStatus(): Promise<BootstrapStatusResponse> {
+  return request<BootstrapStatusResponse>("/bootstrap/status")
+}
+
+export async function finalizeBootstrap(reason?: string): Promise<BootstrapFinalizeResponse> {
+  return request<BootstrapFinalizeResponse>("/bootstrap/finalize", {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {}),
+  })
+}
+
+// ─── L2 — Step 1 (force admin password rotation) ───────────────────
+
+export interface BootstrapAdminPasswordResponse {
+  status: string
+  admin_password_default: boolean
+  user_id: string
+}
+
+export async function bootstrapSetAdminPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<BootstrapAdminPasswordResponse> {
+  return request<BootstrapAdminPasswordResponse>("/bootstrap/admin-password", {
+    method: "POST",
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced

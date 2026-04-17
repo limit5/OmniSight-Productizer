@@ -421,6 +421,78 @@ async def _must_change_password_gate(request, call_next):
     return await call_next(request)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L1 #2 — Bootstrap wizard gate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Until `backend.bootstrap.is_bootstrap_finalized()` flips to True,
+# every non-exempt request gets 307-redirected to the wizard at
+# ``/bootstrap``. Exempt paths:
+#   * ``/bootstrap/*``  — wizard UI + wizard API (with or without api_prefix)
+#   * ``/auth/login``   — operator must log in to drive the wizard
+#   * ``/healthz``      — k8s/probe liveness (backend ``/health`` too)
+#   * static resources  — ``/_next/*``, ``/static/*``, ``/assets/*``,
+#                         ``/favicon.ico`` and friends
+#   * doc routes        — ``/``, ``/docs``, ``/openapi.json``, ``/redoc``
+#
+# The gate is registered LAST on purpose — Starlette wraps middleware
+# in reverse registration order, so `@app.middleware` declared last
+# becomes the outermost layer. That lets it short-circuit before the
+# rate-limit / api-key / tenant / password-change gates do any work
+# during a fresh install (when they'd otherwise 401/429 on an unconfigured
+# system).
+_BOOTSTRAP_EXEMPT_REL = {
+    "/auth/login", "/auth/logout", "/auth/change-password",
+    "/healthz", "/health",
+}
+_BOOTSTRAP_EXEMPT_RAW = {
+    "/", "/healthz", "/docs", "/openapi.json", "/redoc",
+    "/favicon.ico", "/robots.txt",
+}
+_BOOTSTRAP_EXEMPT_RAW_PREFIXES = (
+    "/_next/", "/static/", "/assets/", "/public/",
+)
+_BOOTSTRAP_STATIC_SUFFIXES = (
+    ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg",
+    ".gif", ".svg", ".webp", ".woff", ".woff2", ".ttf", ".eot",
+)
+
+
+def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
+    """Return True if *path* bypasses the bootstrap wizard gate."""
+    if path == "/bootstrap" or path.startswith("/bootstrap/"):
+        return True
+    if rel == "/bootstrap" or rel.startswith("/bootstrap/"):
+        return True
+    if rel in _BOOTSTRAP_EXEMPT_REL or path in _BOOTSTRAP_EXEMPT_RAW:
+        return True
+    if any(path.startswith(p) for p in _BOOTSTRAP_EXEMPT_RAW_PREFIXES):
+        return True
+    if path.endswith(_BOOTSTRAP_STATIC_SUFFIXES):
+        return True
+    return False
+
+
+@app.middleware("http")
+async def _bootstrap_gate(request, call_next):
+    """L1 #2 — redirect to ``/bootstrap`` until the wizard is finalized."""
+    from starlette.responses import RedirectResponse
+
+    path = request.url.path
+    rel = path.removeprefix(settings.api_prefix)
+    if _bootstrap_path_is_exempt(path, rel):
+        return await call_next(request)
+
+    from backend import bootstrap as _boot
+    if await _boot.is_bootstrap_finalized():
+        return await call_next(request)
+
+    # Use 307 to preserve method + body (so a fetch/POST doesn't get
+    # silently downgraded to GET on redirect — the client decides
+    # whether to follow).
+    return RedirectResponse(url="/bootstrap", status_code=307)
+
+
 @app.middleware("http")
 async def _security_headers(request, call_next):
     response = await call_next(request)
@@ -575,6 +647,8 @@ from backend.routers import entropy as _entropy_router  # R2 (#308) Semantic Ent
 app.include_router(_entropy_router.router, prefix=settings.api_prefix)
 from backend.routers import scratchpad as _scratchpad_router  # R3 (#309) Scratchpad Offload + Auto-Continuation
 app.include_router(_scratchpad_router.router, prefix=settings.api_prefix)
+from backend.routers import bootstrap as _bootstrap_router  # L1 Bootstrap wizard REST
+app.include_router(_bootstrap_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
