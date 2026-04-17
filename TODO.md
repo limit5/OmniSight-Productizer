@@ -1329,6 +1329,147 @@ Legend:
 
 ---
 
+## 🅖 Priority G — Ops / Reliability（HA 補強）
+
+> 背景：目前為單機 systemd 原型，`scripts/deploy.sh` 以 `systemctl restart` 原地重啟，會有短暫中斷；SQLite 無複製；無負載均衡 / 多副本 / 藍綠 / rolling。Canary、備份、DLQ、watchdog 已具備，但欠缺真正 HA 與零停機。以下 Phase 為補強工作。
+
+### G1. HA-01 Graceful shutdown + readiness/liveness 拆分
+- [ ] Backend 攔截 `SIGTERM`：停收新流量、flush SSE、關閉 DB、等待 in-flight task（timeout 30s）
+- [ ] `/api/v1/health` 拆為 `/healthz`（liveness，永遠快速回 200 if process alive）與 `/readyz`（readiness，檢 DB + migration + 關鍵 provider chain）
+- [ ] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
+- [ ] docker-compose healthcheck 改用 `/readyz`
+- [ ] 單元 + 整合測試：送 SIGTERM 時 in-flight request 仍完成、新連線被拒
+- [ ] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
+
+### G2. HA-02 Reverse proxy + dual backend instance rolling restart
+- [ ] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
+- [ ] `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 volume）
+- [ ] `scripts/deploy.sh` 改為 rolling：取下 A → 重啟 → `/readyz` pass → 取下 B → 重啟
+- [ ] Upstream health check + automatic eject（fail_timeout）
+- [ ] 整合測試：部署中對 `/api/v1/*` 持續打流量，0 個 5xx
+- [ ] 交付：`deploy/reverse-proxy/Caddyfile`、`docker-compose.prod.yml` diff、`scripts/deploy.sh` rolling 模式
+
+### G3. HA-03 Blue-Green 部署策略
+- [ ] `scripts/deploy.sh` 新增 `--strategy blue-green` 旗標
+- [ ] 維護 active/standby symlink 或 proxy upstream 切換（atomic）
+- [ ] Pre-cut smoke（`scripts/prod_smoke_test.py` on standby）→ 切流 → 觀察 5 分鐘 → 保留舊版 24h 供 rollback
+- [ ] Rollback 腳本：`deploy.sh --rollback`（秒級切回 previous color）
+- [ ] 交付：runbook `docs/ops/blue_green_runbook.md`、腳本
+
+### G4. HA-04 SQLite → PostgreSQL 遷移 + streaming replica
+- [ ] Alembic 驗證所有 migration 在 Postgres 上綠（sqlite-isms 掃描：`AUTOINCREMENT`、`WITHOUT ROWID`、dynamic type）
+- [ ] Connection 抽象：`DATABASE_URL` 支援 `postgresql+asyncpg://`
+- [ ] 部署 primary + hot standby（`streaming replication`、`synchronous_commit=on` 可設）
+- [ ] 資料搬移腳本 `scripts/migrate_sqlite_to_pg.py`（含 audit_log hash chain 連續性驗證）
+- [ ] CI 新增 Postgres service matrix（sqlite + pg 兩軌）
+- [ ] 交付：`docs/ops/db_failover.md`、遷移腳本、CI 更新
+
+### G5. HA-05 Multi-node orchestration（K8s manifests 或 Nomad job）
+- [ ] 選型決策文件（K8s vs Nomad vs docker swarm — 比較運維負擔）
+- [ ] Manifests：Deployment（replicas=2, maxUnavailable=0）、Service、Ingress、HPA（CPU 70%）
+- [ ] PDB（PodDisruptionBudget minAvailable=1）
+- [ ] readiness/liveness probe 對接 G1 endpoint
+- [ ] Helm chart `deploy/helm/omnisight/`（values.yaml for staging/prod）
+- [ ] 交付：`deploy/k8s/` 或 `deploy/nomad/`、決策文件
+
+### G6. HA-06 DR runbook + 自動化 restore drill
+- [ ] 每日排程：備份 → 另一主機執行 `restore` → 跑 `backup_selftest.py` + smoke 子集 → 報告
+- [ ] RTO / RPO 目標明文化（建議 RTO ≤ 15min, RPO ≤ 5min）
+- [ ] Runbook：資料庫 primary 掛掉的手動切換步驟、反向代理故障的 fallback
+- [ ] 年度 DR 演練 checklist
+- [ ] 交付：`scripts/dr_drill.sh`、`docs/ops/dr_runbook.md`
+
+### G7. HA-07 Observability for HA signals
+- [ ] Prometheus 指標：`omnisight_backend_instance_up`、`rolling_deploy_5xx_rate`、`replica_lag_seconds`、`readyz_latency`
+- [ ] Grafana dashboard `deploy/observability/grafana/ha.json`
+- [ ] Alert rules：replica lag > 10s / 5xx rate > 1% for 2min / instance down
+- [ ] 交付：dashboard + alert rules
+
+**相依性**：G1 → G2 → G3（rolling → blue-green）；G4 獨立可並行；G5 建議待 G1–G4 穩定後；G6、G7 橫向支援。
+
+**預估**：G1 (2d) + G2 (3d) + G3 (2d) + G4 (5-7d) + G5 (4-5d) + G6 (2d) + G7 (2d) ≈ **20-23 day**。
+
+---
+
+## 🅗 Priority H — Host-aware Coordinator（主機負載感知 + 自適應調度）
+
+> 背景：現行 `_ModeSlot`（`backend/decision_engine.py` L52-189）只以 Operation Mode 給靜態 budget（manual=1/supervised=2/full_auto=4/turbo=8），coordinator 不讀 CPU/mem/disk，prewarm 純猜測。風險：turbo 在高壓時仍硬塞 → OOM / watchdog 誤判 stuck → 重試放大壓力。UI `host-device-panel.tsx` L40-51 `HostInfo` 是 placeholder 未實作。
+>
+> 基準硬體（hardcode baseline）：AMD Ryzen 9 9950X、WSL2 分配 **16 cores + 64 GB RAM + 512 GB disk**。
+
+### H1. 主機 metrics 採集（baseline hardcode 版）
+- [ ] `backend/host_metrics.py`：定義 `HOST_BASELINE = HostBaseline(cpu_cores=16, mem_total_gb=64, disk_total_gb=512, cpu_model="AMD Ryzen 9 9950X")`
+- [ ] `psutil` 採樣：`cpu_percent(interval=1)` / `virtual_memory()` (用 `available` 反推) / `disk_usage('/')` / `os.getloadavg()`
+- [ ] Docker SDK 抓 running container 數 + 總 mem reservation；Docker Desktop 情境 fallback `docker stats --no-stream`
+- [ ] 採樣 5s 週期、ring buffer 60 點（5 分鐘歷史）
+- [ ] WSL2 輔助訊號：`loadavg_1m / 16 > 0.9` 也標記為 high pressure（host 其他進程）
+- [ ] Prometheus gauges：`host_cpu_percent` / `host_mem_percent` / `host_disk_percent` / `host_loadavg_1m` / `host_container_count`
+- [ ] Endpoint：`GET /api/v1/host/metrics`（current + history）
+- [ ] SSE event：`host.metrics.tick`（5s 推送）
+- [ ] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
+- 預估：**0.5 day**
+
+### H2. Coordinator 負載感知調度（precondition + backoff）
+- [ ] `_ModeSlot.acquire()` 新增 precondition：`cpu_pct < 85 AND mem_pct < 85 AND container_count < K`
+- [ ] 超標時指數 backoff（cap 30s），不佔槽位；emit `sandbox.deferred` audit 事件（reason: `host_cpu_high` / `host_mem_high` / `container_cap`）
+- [ ] Turbo 自動降級：`cpu_pct > 80` 持續 30s → 降到 supervised budget；恢復後可自動回升（需冷卻 2 min）
+- [ ] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
+- [ ] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
+- [ ] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
+- [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
+- 預估：**2 day**
+
+### H3. UI Host Load Panel + Coordinator 決策透明化
+- [ ] 把 `components/omnisight/host-device-panel.tsx` placeholder 換成真 SSE 驅動（listen `host.metrics.tick`）
+- [ ] 顯示：CPU% / mem%（含 available）/ disk% / loadavg 1m / running container 數 + 各項 60-pt sparkline
+- [ ] Baseline 顯示「16c / 64GB / 512GB」於 header（hardcode）
+- [ ] `ops-summary-panel.tsx` 加欄位：**queue depth**（等槽位任務數）/ **deferred count**（近 5min）/ **effective concurrency budget**（因 derate 可能 < 設定）
+- [ ] 過載 Badge：`Coordinator auto-derated to supervised`，hover tooltip 顯示原因（"CPU 87% > threshold"）
+- [ ] 手動 override 按鈕：`Force turbo`（confirm dialog 警告可能 OOM，audit 記錄）
+- [ ] 高壓閾值視覺標記（CPU >85% 變紅、70-85% 變黃）
+- [ ] Component + Playwright E2E 測試
+- 預估：**1.5 day**
+
+### H4a. Weighted Token Bucket + AIMD 自適應 concurrency
+- [ ] 定義 `SandboxCostWeight` 表（初期估值）：
+  - `gvisor_lightweight = 1` (unit test / lint, ~512MB / 1 core burst)
+  - `docker_t2_networked = 2` (integration, ~1.5GB / 2 core)
+  - `phase64c_local_compile = 4` (`make -j4`, ~2GB / 4 core sustained)
+  - `phase64c_qemu_aarch64 = 3` (cross-compile, ~2GB / 2 core)
+  - `phase64c_ssh_remote = 0.5` (成本在對端)
+- [ ] `CAPACITY_MAX = min(cpu_cores * 0.8, mem_gb / 2) = 12 tokens`（16c/64GB → 12）
+- [ ] AIMD 控制器（`backend/adaptive_budget.py`）：
+  - Init `budget = 6`（≈ CAPACITY_MAX / 2 安全啟動）
+  - Additive: 每 30s 若 `cpu<70` & `mem<70` & `deferred=0` → `budget += 1`
+  - Multiplicative: `cpu>85` 或 `mem>85` 持續 10s → `budget = max(floor=2, budget//2)`
+  - Hard cap：`budget ≤ CAPACITY_MAX`
+- [ ] Mode 變 multiplier：`turbo=1.0 / full_auto=0.7 / supervised=0.4 / manual=0.15`；effective = `min(mode_cap × CAPACITY_MAX, aimd_budget)`
+- [ ] `_ModeSlot.acquire(cost: int)` 改為 token-based，排隊時 emit `sandbox.deferred`
+- [ ] Last-known-good budget 持久化（DB），冷啟動時載入替代 `init=6`
+- [ ] UI 顯示當前 AIMD budget + 最近 5min trace（上升/下降歷史）
+- [ ] 測試：模擬 CPU spike → 驗證 MD halve、冷卻後 AI 回升、floor/cap 邊界
+- 預估：**1.5 day**
+
+### H4b. Sandbox cost calibration（H1 上線 1 週後）
+- [ ] `scripts/calibrate_sandbox_cost.py`：讀取過去 N 天 sandbox 執行紀錄（start/end timestamp + 同期 host_metrics ring）
+- [ ] 計算每類 sandbox 的平均 CPU×time / Δmem_peak → 產新權重表
+- [ ] 輸出 diff report（舊權重 vs 新權重）供人工審核
+- [ ] 支援 `--apply` 旗標寫回 `configs/sandbox_cost_weights.yaml`（改 H4a hardcode 為 config 驅動）
+- [ ] Audit：權重變更寫入 hash-chain
+- 預估：**1 day**
+
+**相依性**：H1 → H2 → H3（metrics → 調度 → UI）；H4a 可與 H3 並行；H4b 需 H1 資料累積 1 週。
+
+**總預估**：H1 (0.5d) + H2 (2d) + H3 (1.5d) + H4a (1.5d) + H4b (1d) = **6.5 day**
+
+**驗收**：
+- turbo mode 在 CPU>85% 時 30s 內自動降級，UI Badge 顯示原因
+- 同時跑 8 個 Phase 64-C-LOCAL compile 不會 OOM（AIMD 會先擋）
+- 新使用者看 host-device-panel 可一眼知道系統壓力與 queue 狀況
+- WSL2 host-load 輔助訊號（loadavg_1m/16）能反映 Windows host 其他進程壓力
+
+---
+
 ## 🅥 Priority V — Visual Design Loop + Workspace Architecture（v0.dev / Codex 體驗層 + 獨立工作區）
 
 > 背景：W/P/X 三系列（scaffold + compliance + deploy）已全部完成，但體驗層（AI 自主寫完整 app + 即時視覺回饋 + 對話迭代修改 + 獨立工作區 UI）= 0。v0.dev 和 Codex 的核心差異化不在後端引擎（OmniSight O 系列已平手），而在「使用者看到什麼、怎麼互動」——這正是 V 系列要補的。
@@ -1916,147 +2057,6 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Rule engine (threshold + geometric checks)
 - [ ] MES reporting via CORE-13
 - [ ] Historical dashboard with trend
-
----
-
-## 🅖 Priority G — Ops / Reliability（HA 補強）
-
-> 背景：目前為單機 systemd 原型，`scripts/deploy.sh` 以 `systemctl restart` 原地重啟，會有短暫中斷；SQLite 無複製；無負載均衡 / 多副本 / 藍綠 / rolling。Canary、備份、DLQ、watchdog 已具備，但欠缺真正 HA 與零停機。以下 Phase 為補強工作。
-
-### G1. HA-01 Graceful shutdown + readiness/liveness 拆分
-- [ ] Backend 攔截 `SIGTERM`：停收新流量、flush SSE、關閉 DB、等待 in-flight task（timeout 30s）
-- [ ] `/api/v1/health` 拆為 `/healthz`（liveness，永遠快速回 200 if process alive）與 `/readyz`（readiness，檢 DB + migration + 關鍵 provider chain）
-- [ ] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
-- [ ] docker-compose healthcheck 改用 `/readyz`
-- [ ] 單元 + 整合測試：送 SIGTERM 時 in-flight request 仍完成、新連線被拒
-- [ ] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
-
-### G2. HA-02 Reverse proxy + dual backend instance rolling restart
-- [ ] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
-- [ ] `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 volume）
-- [ ] `scripts/deploy.sh` 改為 rolling：取下 A → 重啟 → `/readyz` pass → 取下 B → 重啟
-- [ ] Upstream health check + automatic eject（fail_timeout）
-- [ ] 整合測試：部署中對 `/api/v1/*` 持續打流量，0 個 5xx
-- [ ] 交付：`deploy/reverse-proxy/Caddyfile`、`docker-compose.prod.yml` diff、`scripts/deploy.sh` rolling 模式
-
-### G3. HA-03 Blue-Green 部署策略
-- [ ] `scripts/deploy.sh` 新增 `--strategy blue-green` 旗標
-- [ ] 維護 active/standby symlink 或 proxy upstream 切換（atomic）
-- [ ] Pre-cut smoke（`scripts/prod_smoke_test.py` on standby）→ 切流 → 觀察 5 分鐘 → 保留舊版 24h 供 rollback
-- [ ] Rollback 腳本：`deploy.sh --rollback`（秒級切回 previous color）
-- [ ] 交付：runbook `docs/ops/blue_green_runbook.md`、腳本
-
-### G4. HA-04 SQLite → PostgreSQL 遷移 + streaming replica
-- [ ] Alembic 驗證所有 migration 在 Postgres 上綠（sqlite-isms 掃描：`AUTOINCREMENT`、`WITHOUT ROWID`、dynamic type）
-- [ ] Connection 抽象：`DATABASE_URL` 支援 `postgresql+asyncpg://`
-- [ ] 部署 primary + hot standby（`streaming replication`、`synchronous_commit=on` 可設）
-- [ ] 資料搬移腳本 `scripts/migrate_sqlite_to_pg.py`（含 audit_log hash chain 連續性驗證）
-- [ ] CI 新增 Postgres service matrix（sqlite + pg 兩軌）
-- [ ] 交付：`docs/ops/db_failover.md`、遷移腳本、CI 更新
-
-### G5. HA-05 Multi-node orchestration（K8s manifests 或 Nomad job）
-- [ ] 選型決策文件（K8s vs Nomad vs docker swarm — 比較運維負擔）
-- [ ] Manifests：Deployment（replicas=2, maxUnavailable=0）、Service、Ingress、HPA（CPU 70%）
-- [ ] PDB（PodDisruptionBudget minAvailable=1）
-- [ ] readiness/liveness probe 對接 G1 endpoint
-- [ ] Helm chart `deploy/helm/omnisight/`（values.yaml for staging/prod）
-- [ ] 交付：`deploy/k8s/` 或 `deploy/nomad/`、決策文件
-
-### G6. HA-06 DR runbook + 自動化 restore drill
-- [ ] 每日排程：備份 → 另一主機執行 `restore` → 跑 `backup_selftest.py` + smoke 子集 → 報告
-- [ ] RTO / RPO 目標明文化（建議 RTO ≤ 15min, RPO ≤ 5min）
-- [ ] Runbook：資料庫 primary 掛掉的手動切換步驟、反向代理故障的 fallback
-- [ ] 年度 DR 演練 checklist
-- [ ] 交付：`scripts/dr_drill.sh`、`docs/ops/dr_runbook.md`
-
-### G7. HA-07 Observability for HA signals
-- [ ] Prometheus 指標：`omnisight_backend_instance_up`、`rolling_deploy_5xx_rate`、`replica_lag_seconds`、`readyz_latency`
-- [ ] Grafana dashboard `deploy/observability/grafana/ha.json`
-- [ ] Alert rules：replica lag > 10s / 5xx rate > 1% for 2min / instance down
-- [ ] 交付：dashboard + alert rules
-
-**相依性**：G1 → G2 → G3（rolling → blue-green）；G4 獨立可並行；G5 建議待 G1–G4 穩定後；G6、G7 橫向支援。
-
-**預估**：G1 (2d) + G2 (3d) + G3 (2d) + G4 (5-7d) + G5 (4-5d) + G6 (2d) + G7 (2d) ≈ **20-23 day**。
-
----
-
-## 🅗 Priority H — Host-aware Coordinator（主機負載感知 + 自適應調度）
-
-> 背景：現行 `_ModeSlot`（`backend/decision_engine.py` L52-189）只以 Operation Mode 給靜態 budget（manual=1/supervised=2/full_auto=4/turbo=8），coordinator 不讀 CPU/mem/disk，prewarm 純猜測。風險：turbo 在高壓時仍硬塞 → OOM / watchdog 誤判 stuck → 重試放大壓力。UI `host-device-panel.tsx` L40-51 `HostInfo` 是 placeholder 未實作。
->
-> 基準硬體（hardcode baseline）：AMD Ryzen 9 9950X、WSL2 分配 **16 cores + 64 GB RAM + 512 GB disk**。
-
-### H1. 主機 metrics 採集（baseline hardcode 版）
-- [ ] `backend/host_metrics.py`：定義 `HOST_BASELINE = HostBaseline(cpu_cores=16, mem_total_gb=64, disk_total_gb=512, cpu_model="AMD Ryzen 9 9950X")`
-- [ ] `psutil` 採樣：`cpu_percent(interval=1)` / `virtual_memory()` (用 `available` 反推) / `disk_usage('/')` / `os.getloadavg()`
-- [ ] Docker SDK 抓 running container 數 + 總 mem reservation；Docker Desktop 情境 fallback `docker stats --no-stream`
-- [ ] 採樣 5s 週期、ring buffer 60 點（5 分鐘歷史）
-- [ ] WSL2 輔助訊號：`loadavg_1m / 16 > 0.9` 也標記為 high pressure（host 其他進程）
-- [ ] Prometheus gauges：`host_cpu_percent` / `host_mem_percent` / `host_disk_percent` / `host_loadavg_1m` / `host_container_count`
-- [ ] Endpoint：`GET /api/v1/host/metrics`（current + history）
-- [ ] SSE event：`host.metrics.tick`（5s 推送）
-- [ ] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
-- 預估：**0.5 day**
-
-### H2. Coordinator 負載感知調度（precondition + backoff）
-- [ ] `_ModeSlot.acquire()` 新增 precondition：`cpu_pct < 85 AND mem_pct < 85 AND container_count < K`
-- [ ] 超標時指數 backoff（cap 30s），不佔槽位；emit `sandbox.deferred` audit 事件（reason: `host_cpu_high` / `host_mem_high` / `container_cap`）
-- [ ] Turbo 自動降級：`cpu_pct > 80` 持續 30s → 降到 supervised budget；恢復後可自動回升（需冷卻 2 min）
-- [ ] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
-- [ ] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
-- [ ] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
-- [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
-- 預估：**2 day**
-
-### H3. UI Host Load Panel + Coordinator 決策透明化
-- [ ] 把 `components/omnisight/host-device-panel.tsx` placeholder 換成真 SSE 驅動（listen `host.metrics.tick`）
-- [ ] 顯示：CPU% / mem%（含 available）/ disk% / loadavg 1m / running container 數 + 各項 60-pt sparkline
-- [ ] Baseline 顯示「16c / 64GB / 512GB」於 header（hardcode）
-- [ ] `ops-summary-panel.tsx` 加欄位：**queue depth**（等槽位任務數）/ **deferred count**（近 5min）/ **effective concurrency budget**（因 derate 可能 < 設定）
-- [ ] 過載 Badge：`Coordinator auto-derated to supervised`，hover tooltip 顯示原因（"CPU 87% > threshold"）
-- [ ] 手動 override 按鈕：`Force turbo`（confirm dialog 警告可能 OOM，audit 記錄）
-- [ ] 高壓閾值視覺標記（CPU >85% 變紅、70-85% 變黃）
-- [ ] Component + Playwright E2E 測試
-- 預估：**1.5 day**
-
-### H4a. Weighted Token Bucket + AIMD 自適應 concurrency
-- [ ] 定義 `SandboxCostWeight` 表（初期估值）：
-  - `gvisor_lightweight = 1` (unit test / lint, ~512MB / 1 core burst)
-  - `docker_t2_networked = 2` (integration, ~1.5GB / 2 core)
-  - `phase64c_local_compile = 4` (`make -j4`, ~2GB / 4 core sustained)
-  - `phase64c_qemu_aarch64 = 3` (cross-compile, ~2GB / 2 core)
-  - `phase64c_ssh_remote = 0.5` (成本在對端)
-- [ ] `CAPACITY_MAX = min(cpu_cores * 0.8, mem_gb / 2) = 12 tokens`（16c/64GB → 12）
-- [ ] AIMD 控制器（`backend/adaptive_budget.py`）：
-  - Init `budget = 6`（≈ CAPACITY_MAX / 2 安全啟動）
-  - Additive: 每 30s 若 `cpu<70` & `mem<70` & `deferred=0` → `budget += 1`
-  - Multiplicative: `cpu>85` 或 `mem>85` 持續 10s → `budget = max(floor=2, budget//2)`
-  - Hard cap：`budget ≤ CAPACITY_MAX`
-- [ ] Mode 變 multiplier：`turbo=1.0 / full_auto=0.7 / supervised=0.4 / manual=0.15`；effective = `min(mode_cap × CAPACITY_MAX, aimd_budget)`
-- [ ] `_ModeSlot.acquire(cost: int)` 改為 token-based，排隊時 emit `sandbox.deferred`
-- [ ] Last-known-good budget 持久化（DB），冷啟動時載入替代 `init=6`
-- [ ] UI 顯示當前 AIMD budget + 最近 5min trace（上升/下降歷史）
-- [ ] 測試：模擬 CPU spike → 驗證 MD halve、冷卻後 AI 回升、floor/cap 邊界
-- 預估：**1.5 day**
-
-### H4b. Sandbox cost calibration（H1 上線 1 週後）
-- [ ] `scripts/calibrate_sandbox_cost.py`：讀取過去 N 天 sandbox 執行紀錄（start/end timestamp + 同期 host_metrics ring）
-- [ ] 計算每類 sandbox 的平均 CPU×time / Δmem_peak → 產新權重表
-- [ ] 輸出 diff report（舊權重 vs 新權重）供人工審核
-- [ ] 支援 `--apply` 旗標寫回 `configs/sandbox_cost_weights.yaml`（改 H4a hardcode 為 config 驅動）
-- [ ] Audit：權重變更寫入 hash-chain
-- 預估：**1 day**
-
-**相依性**：H1 → H2 → H3（metrics → 調度 → UI）；H4a 可與 H3 並行；H4b 需 H1 資料累積 1 週。
-
-**總預估**：H1 (0.5d) + H2 (2d) + H3 (1.5d) + H4a (1.5d) + H4b (1d) = **6.5 day**
-
-**驗收**：
-- turbo mode 在 CPU>85% 時 30s 內自動降級，UI Badge 顯示原因
-- 同時跑 8 個 Phase 64-C-LOCAL compile 不會 OOM（AIMD 會先擋）
-- 新使用者看 host-device-panel 可一眼知道系統壓力與 queue 狀況
-- WSL2 host-load 輔助訊號（loadavg_1m/16）能反映 Windows host 其他進程壓力
 
 ---
 
