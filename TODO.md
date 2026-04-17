@@ -1215,9 +1215,9 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### X9. SKILL-SPRING-BOOT（企業 Java, #305）
-- [ ] Spring Boot 3 + Maven/Gradle
-- [ ] Flyway migration + JUnit 5
-- [ ] 預估：**1 day**
+- [x] Spring Boot 3 + Maven/Gradle
+- [x] Flyway migration + JUnit 5
+- [x] 預估：**1 day**
 
 **Priority X 總預估**：**12 day**（最輕量，工具鏈多但每條路徑成本低）
 
