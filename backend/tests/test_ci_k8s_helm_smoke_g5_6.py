@@ -513,17 +513,14 @@ class TestScopeDisciplineSiblingRows:
         assert not (PROJECT_ROOT / "deploy" / "nomad").exists()
         assert not (PROJECT_ROOT / "deploy" / "swarm").exists()
 
-    def test_no_g6_dr_drill_workflow(self) -> None:
-        # G6 (HA-06 DR runbook) is the next bucket. Its CI workflow
-        # would mention `dr_drill` or `backup_selftest`. If one lands
-        # in this commit, scope crept.
-        for wf in WORKFLOWS_DIR.glob("*.y*ml"):
-            text = _read(wf)
-            if "dr_drill" in text or "backup_selftest" in text:
-                pytest.fail(
-                    f"G6 owns dr_drill/backup_selftest CI — saw it in "
-                    f"{wf.name}; G5 #6 must not pre-commit it"
-                )
+    # NOTE: `test_no_g6_dr_drill_workflow` was removed in the commit
+    # that landed G6 #1 (TODO row 1379) —
+    # `.github/workflows/dr-drill-daily.yml` now owns the daily DR
+    # drill CI surface and references `scripts/backup_selftest.py` by
+    # name, which is the exact literal this guard used to forbid. The
+    # G6-side contract pinning lives in
+    # `backend/tests/test_dr_drill_daily_g6_1.py` — explicit-migration
+    # pattern, carried forward from G5 #3 → #4 → #5 → #6 → G6 #1.
 
     def test_no_g7_grafana_dashboard(self) -> None:
         # G7 (HA-07 observability) ships the Grafana dashboard. If

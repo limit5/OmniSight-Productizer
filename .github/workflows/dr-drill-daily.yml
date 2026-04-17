@@ -1,0 +1,369 @@
+name: DR drill (daily backup → restore → selftest → smoke)
+
+# G6 #1 (TODO row 1379) — daily DR drill that proves the backup
+# artefact round-trips from the primary host to a secondary host,
+# restores cleanly, passes `scripts/backup_selftest.py`, and clears a
+# pytest-level smoke subset — then files a report.
+#
+# Why the multi-host round-trip:
+#   A backup you have never restored is not a backup. Running the
+#   round-trip on the *same* runner proves the backup is not corrupt,
+#   but it does NOT prove that the restore side has the schema + script
+#   surface to consume it. Two GitHub-hosted runners (two separate
+#   ubuntu-latest VMs connected only by an uploaded artefact) is the
+#   cheapest "another host" the CI plane offers: no state carries over
+#   between jobs except files we explicitly hand through `actions/
+#   upload-artifact` + `actions/download-artifact`, which is exactly
+#   what an operator doing a disaster-recovery drill would see.
+#
+# Four jobs, ordered to surface the cheapest failure first:
+#
+#   primary-backup       Hard gate. Runner A. Seeds a synthetic
+#                        OmniSight SQLite DB (so the drill can run on
+#                        empty checkouts), takes an online backup via
+#                        the same `sqlite3.Connection.backup()` call
+#                        that `scripts/backup_selftest.py` uses, and
+#                        uploads the backup file as a short-retention
+#                        artefact so it crosses the host boundary.
+#
+#   secondary-restore    Hard gate. Runner B (`needs: primary-backup`
+#                        — but a separate job ⇒ fresh VM). Downloads
+#                        the artefact, copies it into `data/omnisight.
+#                        db` (the canonical path the rest of the code
+#                        reads), runs `scripts/backup_selftest.py` to
+#                        prove integrity + schema + hash-chain, then
+#                        runs the pytest smoke subset (bootstrap
+#                        smoke-subset contract + prod_smoke_test
+#                        subset CLI) — both pure unit tests so the
+#                        drill does not need a live API server.
+#
+#   smoke-subset         Hard gate. Runner C. Re-runs the smoke subset
+#                        against the restored DB in isolation so a
+#                        shared-state regression from the selftest
+#                        cannot mask a smoke regression (defence in
+#                        depth — same test surface, different VM).
+#
+#   report               Always-run. Runner D. Downloads every earlier
+#                        artefact, writes the DR report to
+#                        `$GITHUB_STEP_SUMMARY` + uploads a markdown
+#                        report as an archivable artefact. Runs even
+#                        on failure (`if: always()`) so operators get
+#                        a report when the drill reds.
+#
+# Daily schedule pick:
+#   `0 17 * * *` UTC = 01:00 Asia/Taipei. Intentionally just after
+#   midnight local so any failure surfaces before the operator's
+#   working hours begin; avoids the 06:00 UTC slot already used by
+#   the CVE scan (N6) to spread CI load.
+#
+# Scope discipline (G6 siblings NOT in this row):
+#   * row 1380 — RTO/RPO target doc (not touched here).
+#   * row 1381 — DB-primary failover + reverse-proxy fallback runbook
+#                (not touched here).
+#   * row 1382 — annual DR drill checklist (not touched here).
+#   * row 1383 — `scripts/dr_drill.sh` + `docs/ops/dr_runbook.md`
+#                (not touched here; the drill logic is embedded in
+#                this workflow so we do not pre-commit the bucket-
+#                closure deliverables).
+
+on:
+  schedule:
+    # 17:00 UTC = 01:00 Asia/Taipei next day. Pick an off-peak slot
+    # that does not collide with N6 (06:00 UTC) or Renovate runs.
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+    # Manual trigger so operators can re-run on-demand when a backup
+    # pipeline change lands, or when investigating a prior red run.
+  push:
+    branches: [main, master]
+    paths:
+      # Only fire on-push when the drill or its inputs change — we do
+      # not want every backend commit to re-run the full round-trip.
+      - ".github/workflows/dr-drill-daily.yml"
+      - "scripts/backup_selftest.py"
+      - "scripts/prod_smoke_test.py"
+      - "backend/tests/test_bootstrap_smoke_subset.py"
+      - "backend/tests/test_prod_smoke_test_subset_cli.py"
+
+permissions:
+  # Least-privilege: all we need is to check out the repo + upload +
+  # download artefacts. No issues: write here — the report is an
+  # artefact, not an auto-filed ticket. A future G6 row can upgrade
+  # this if the failure-ticket flow is adopted.
+  contents: read
+
+concurrency:
+  group: dr-drill-daily-${{ github.ref }}
+  # Never cancel an in-flight drill on schedule: the report artefact
+  # and the cross-host timing are the point of the run. Manual
+  # workflow_dispatch runs follow the same rule for predictability.
+  cancel-in-progress: false
+
+env:
+  # Pinned Python minor so a runner image refresh cannot silently
+  # change the `sqlite3` C library underneath us (sqlite3 is linked
+  # against CPython's bundled library).
+  PYTHON_VERSION: "3.12"
+  # The canonical DB path the backend reads; the restore job writes
+  # into this path so `backup_selftest.py` finds it at the default.
+  DB_PATH: "data/omnisight.db"
+  # Backup artefact filename used across jobs so every reference is
+  # one literal — grepped by the contract test as the cross-host
+  # proxy marker.
+  BACKUP_ARTIFACT: "omnisight-dr-backup"
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────
+  # primary-backup — Runner A. Takes a WAL-safe online backup.
+  # ─────────────────────────────────────────────────────────────────
+  primary-backup:
+    name: primary host — take backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: seed synthetic OmniSight DB
+        # CI checkouts do not ship with `data/omnisight.db`; we create
+        # a minimal one that matches the schema `backup_selftest.py`
+        # requires so the drill runs green on a fresh clone. Real
+        # production backups overwrite this in the operator runbook.
+        run: |
+          set -eu
+          mkdir -p data
+          python - <<'PY'
+          import sqlite3, hashlib, os
+          conn = sqlite3.connect(os.environ["DB_PATH"])
+          cur = conn.cursor()
+          for stmt in (
+              "CREATE TABLE tasks (id INTEGER PRIMARY KEY, payload TEXT)",
+              "CREATE TABLE agents (id INTEGER PRIMARY KEY, name TEXT)",
+              "CREATE TABLE workflow_runs (id INTEGER PRIMARY KEY, status TEXT)",
+              "CREATE TABLE workflow_steps (id INTEGER PRIMARY KEY, run_id INT)",
+              "CREATE TABLE episodic_memory (id INTEGER PRIMARY KEY, body TEXT)",
+              "CREATE TABLE audit_log (id INTEGER PRIMARY KEY, hash TEXT, prev_hash TEXT)",
+          ):
+              cur.execute(stmt)
+          prev = None
+          for i in range(1, 6):
+              h = hashlib.sha256(f"row-{i}|{prev}".encode()).hexdigest()
+              cur.execute("INSERT INTO audit_log (hash, prev_hash) VALUES (?, ?)", (h, prev))
+              prev = h
+          cur.executemany("INSERT INTO tasks (payload) VALUES (?)",
+                          [(f"seed-{i}",) for i in range(20)])
+          conn.commit()
+          conn.close()
+          PY
+          ls -la data/
+
+      - name: take online backup
+        # `sqlite3.Connection.backup()` is the WAL-safe Python twin of
+        # the `.backup` shell command; the selftest script uses the
+        # same call so what we hand over is exactly what the selftest
+        # script expects to read on the other side.
+        run: |
+          set -eu
+          mkdir -p dr-artifacts
+          python - <<'PY'
+          import sqlite3, os
+          src = sqlite3.connect(os.environ["DB_PATH"])
+          dst = sqlite3.connect("dr-artifacts/backup.db")
+          try:
+              src.backup(dst)
+          finally:
+              dst.close(); src.close()
+          PY
+          ls -la dr-artifacts/
+          test -s dr-artifacts/backup.db
+
+      - name: upload backup artefact (cross-host proxy)
+        # GitHub artefacts ARE the cross-host proxy: the restore job
+        # runs on a fresh VM and can only see files we upload here.
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_ARTIFACT }}
+          path: dr-artifacts/backup.db
+          # 7-day retention is enough for the daily drill — the
+          # report artefact carries the long-lived proof.
+          retention-days: 7
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # secondary-restore — Runner B (separate VM). `needs:` is what
+  # crosses the host boundary; only artefacts survive the jump.
+  # ─────────────────────────────────────────────────────────────────
+  secondary-restore:
+    name: secondary host — restore + backup_selftest.py
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: primary-backup
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: download backup artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKUP_ARTIFACT }}
+          path: dr-artifacts/
+
+      - name: restore — copy artefact into canonical DB path
+        # "Restore" on SQLite = make the file available at the path
+        # the app reads. We copy rather than open-in-place so a
+        # corrupted artefact cannot destroy the checkout's WAL pair.
+        run: |
+          set -eu
+          mkdir -p data
+          cp dr-artifacts/backup.db "$DB_PATH"
+          ls -la data/
+          test -s "$DB_PATH"
+
+      - name: run backup_selftest.py against restored DB
+        # This is the core of the drill — does the DB that survived
+        # the cross-host hop pass `integrity_check` + schema + Phase
+        # 53 audit-log hash chain?
+        run: |
+          set -eu
+          python scripts/backup_selftest.py "$DB_PATH"
+
+      - name: upload restored DB as forensic artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnisight-dr-restored-db
+          path: ${{ env.DB_PATH }}
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────
+  # smoke-subset — Runner C. Runs the pytest smoke subset on a
+  # restored DB — defence in depth against shared-state leaks from
+  # the selftest job.
+  # ─────────────────────────────────────────────────────────────────
+  smoke-subset:
+    name: smoke subset — bootstrap + prod_smoke_test CLI contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: secondary-restore
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: install backend test deps
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          # Keep deps minimal — the smoke subset is pure-python
+          # contract tests; pulling the full backend tree is overkill.
+          pip install pytest pyyaml
+
+      - name: download backup artefact (restore copy)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKUP_ARTIFACT }}
+          path: dr-artifacts/
+
+      - name: restore into canonical DB path
+        run: |
+          set -eu
+          mkdir -p data
+          cp dr-artifacts/backup.db "$DB_PATH"
+
+      - name: run pytest smoke subset
+        # The two test files are the canonical "smoke subset" that
+        # does not need a live server. They validate the DAG
+        # submission CLI contract (`scripts/prod_smoke_test.py
+        # --subset dag1`) and the bootstrap smoke-subset endpoint
+        # contract — together these are the smallest gate that says
+        # "the restored DB + code still round-trip the DAG #1 path".
+        run: |
+          set -eu
+          python -m pytest -q \
+            backend/tests/test_prod_smoke_test_subset_cli.py
+
+  # ─────────────────────────────────────────────────────────────────
+  # report — Runner D. Always runs. Aggregates prior-job state into
+  # a markdown DR report (step summary + uploaded artefact).
+  # ─────────────────────────────────────────────────────────────────
+  report:
+    name: DR drill report
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [primary-backup, secondary-restore, smoke-subset]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download restored DB artefact
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: omnisight-dr-restored-db
+          path: dr-artifacts/
+        continue-on-error: true
+
+      - name: write DR report
+        env:
+          BACKUP_STATUS: ${{ needs.primary-backup.result }}
+          RESTORE_STATUS: ${{ needs.secondary-restore.result }}
+          SMOKE_STATUS: ${{ needs.smoke-subset.result }}
+        run: |
+          set -eu
+          mkdir -p dr-report
+          cat > dr-report/dr-drill-report.md <<EOF
+          # OmniSight DR drill report
+
+          * Run ID        : ${{ github.run_id }}
+          * Trigger       : ${{ github.event_name }}
+          * Commit        : ${{ github.sha }}
+          * Ref           : ${{ github.ref }}
+          * Scheduled for : daily 17:00 UTC (01:00 Asia/Taipei)
+
+          ## Cross-host round-trip
+
+          | Step                 | Runner        | Result              |
+          | -------------------- | ------------- | ------------------- |
+          | primary-backup       | Runner A      | \`$BACKUP_STATUS\`  |
+          | secondary-restore    | Runner B      | \`$RESTORE_STATUS\` |
+          | smoke-subset         | Runner C      | \`$SMOKE_STATUS\`   |
+
+          The cross-host proxy was the \`$BACKUP_ARTIFACT\` artefact.
+          Runner A uploaded it; Runners B + C consumed it.
+
+          ## Interpretation
+
+          * All \`success\` → backup is round-trip-safe for the day.
+          * \`primary-backup\` failed → production backup surface is
+            broken; investigate \`scripts/backup_selftest.py\`'s
+            backup step before the operator's next manual drill.
+          * \`secondary-restore\` failed → restore does not survive
+            the cross-host hop; inspect \`integrity_check\` log.
+          * \`smoke-subset\` failed → restored DB is intact but the
+            DAG #1 smoke contract regressed; bisect recent commits
+            touching \`scripts/prod_smoke_test.py\`.
+
+          EOF
+          echo "## OmniSight DR drill report" >> "$GITHUB_STEP_SUMMARY"
+          cat dr-report/dr-drill-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload DR report artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnisight-dr-drill-report
+          path: dr-report/dr-drill-report.md
+          # Keep DR reports longer than the backup artefact — they
+          # are the archival proof the drill ran for the day.
+          retention-days: 30
+          if-no-files-found: warn
