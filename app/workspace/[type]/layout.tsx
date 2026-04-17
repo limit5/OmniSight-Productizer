@@ -2,7 +2,10 @@
  * V0 #1 — Workspace router. V0 #3 — wraps children in the per-workspace
  * `WorkspaceProvider` so every page under `/workspace/[type]` gets its own
  * (type-scoped) project / agent-session / preview state, cleanly isolated
- * from the command-center global state.
+ * from the command-center global state.  V0 #4 — upgrades the wrapper to
+ * `PersistentWorkspaceProvider`, which seeds the provider from
+ * `localStorage` + the backend session-sync endpoint so switching away
+ * and back to a workspace no longer discards in-flight state.
  *
  * Dynamic segment `[type]` gates the three product-line workspaces
  * (`/workspace/web`, `/workspace/mobile`, `/workspace/software`).
@@ -12,7 +15,7 @@
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
-import { WorkspaceProvider } from "@/components/omnisight/workspace-context"
+import { PersistentWorkspaceProvider } from "@/components/omnisight/persistent-workspace-provider"
 
 export const WORKSPACE_TYPES = ["web", "mobile", "software"] as const
 export type WorkspaceType = (typeof WORKSPACE_TYPES)[number]
@@ -70,7 +73,7 @@ export default async function WorkspaceLayout(
       data-testid="workspace-root"
       className="min-h-screen bg-background text-foreground"
     >
-      <WorkspaceProvider type={type}>{children}</WorkspaceProvider>
+      <PersistentWorkspaceProvider type={type}>{children}</PersistentWorkspaceProvider>
     </section>
   )
 }
