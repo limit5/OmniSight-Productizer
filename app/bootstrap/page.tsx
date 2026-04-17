@@ -35,6 +35,11 @@ import {
   type BootstrapGates,
   type BootstrapStatusResponse,
 } from "@/lib/api"
+import {
+  estimatePasswordStrength,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_MIN_SCORE,
+} from "@/lib/password_strength"
 
 // ─── Step definitions ────────────────────────────────────────────────
 
@@ -163,13 +168,20 @@ function AdminPasswordStep({
   const [localError, setLocalError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
 
+  const strength = useMemo(
+    () => estimatePasswordStrength(newPassword),
+    [newPassword],
+  )
   const mismatch =
     confirmPassword.length > 0 && newPassword !== confirmPassword
-  const tooShort = newPassword.length > 0 && newPassword.length < 12
+  const tooShort =
+    newPassword.length > 0 && newPassword.length < PASSWORD_MIN_LENGTH
+  const tooWeak =
+    newPassword.length >= PASSWORD_MIN_LENGTH && !strength.passes
   const canSubmit =
     !busy &&
     currentPassword.length > 0 &&
-    newPassword.length >= 12 &&
+    strength.passes &&
     confirmPassword === newPassword
 
   const handleSubmit = useCallback(
@@ -278,9 +290,55 @@ function AdminPasswordStep({
         />
       </label>
 
+      {newPassword.length > 0 && (
+        <div
+          data-testid="bootstrap-admin-password-strength"
+          data-score={strength.score}
+          data-passes={strength.passes ? "true" : "false"}
+          className="flex flex-col gap-1"
+        >
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1 flex-1" aria-hidden>
+              {[0, 1, 2, 3, 4].map((i) => (
+                <span
+                  key={i}
+                  className={`h-1.5 flex-1 rounded ${
+                    i < strength.score
+                      ? strength.passes
+                        ? "bg-[var(--status-green)]"
+                        : "bg-[var(--status-yellow,#d97706)]"
+                      : "bg-[var(--muted)]"
+                  }`}
+                />
+              ))}
+            </div>
+            <span
+              className={`font-mono text-[10px] uppercase tracking-wider ${
+                strength.passes
+                  ? "text-[var(--status-green)]"
+                  : "text-[var(--muted-foreground)]"
+              }`}
+            >
+              {strength.label} · {strength.score}/4
+            </span>
+          </div>
+          <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+            {strength.hint} (server re-checks with K7 zxcvbn ≥{" "}
+            {PASSWORD_MIN_SCORE}.)
+          </p>
+        </div>
+      )}
       {tooShort && (
         <p className="font-mono text-[11px] text-[var(--destructive)]">
-          New password must be at least 12 characters.
+          New password must be at least {PASSWORD_MIN_LENGTH} characters.
+        </p>
+      )}
+      {tooWeak && !tooShort && (
+        <p
+          data-testid="bootstrap-admin-password-weak"
+          className="font-mono text-[11px] text-[var(--destructive)]"
+        >
+          New password is too guessable — score ≥ {PASSWORD_MIN_SCORE} required.
         </p>
       )}
       {mismatch && (

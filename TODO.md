@@ -1247,7 +1247,7 @@ Legend:
 
 ### L2. Step 1 — 首次 admin 密碼設定
 - [x] 整合 K1 的 `must_change_password` 旗標；wizard Step 1 強制改預設 `omnisight-admin`
-- [ ] 密碼強度檢查（最短 12 字 + zxcvbn ≥ 3，與 K7 統一）；若 K7 未做則先用簡版
+- [x] 密碼強度檢查（最短 12 字 + zxcvbn ≥ 3，與 K7 統一）；若 K7 未做則先用簡版
 - [ ] 寫入 audit_log（`bootstrap.admin_password_set`）；清除 `must_change_password`
 - 預估：**0.5 day**
 
