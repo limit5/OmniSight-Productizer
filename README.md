@@ -91,6 +91,16 @@ open http://localhost:3000
 Interactive API docs live at `http://localhost:8000/docs` (FastAPI
 auto-generated Swagger) once the backend is up.
 
+### One-click cloud deploy (L11 #338)
+
+Point a cloud provider at this repo and get a public URL in ~3 minutes:
+
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master)
+
+Spec: [`deploy/digitalocean/app.yaml`](deploy/digitalocean/app.yaml) ·
+Caveats + post-deploy steps: [`deploy/digitalocean/README.md`](deploy/digitalocean/README.md).
+Railway + Render buttons follow in subsequent L11 steps.
+
 ### Environment Variables
 
 Copy `.env.example` to `.env` and set your LLM API key:
