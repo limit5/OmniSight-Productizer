@@ -94,16 +94,50 @@
 
 		# Active probes — tight interval so a downed replica is pulled from the
 		# pool within ~3 probes (≈6 s), matching the rolling-restart SLO.
+		#
+		# G2 #4 contract (TODO row 1348):
+		#   - `health_method GET` is explicit so the probe never inherits the
+		#     verb of a failed in-flight request (would skew /readyz observation).
+		#   - `health_follow_redirects false` — /readyz returns 200 or 503 flat,
+		#     a 3xx chain is a bug and should eject the upstream, not mask it.
+		#   - `health_passes 1` / `health_fails 3` pins the state-flip threshold:
+		#     one good probe re-inserts a drained replica (fast recovery after
+		#     rolling restart), three consecutive bad probes eject it (~6 s at
+		#     2 s interval — tight enough that Caddy pulls a dying replica before
+		#     `deploy.sh` reaches it, loose enough that a single dropped probe
+		#     on a GC pause doesn't flap the pool).
 		health_uri /readyz
 		health_port 0
+		health_method GET
 		health_interval 2s
 		health_timeout 2s
 		health_status 2xx
+		health_passes 1
+		health_fails 3
+		health_follow_redirects false
 
 		# Passive eject — independent safety net for the case where a replica
-		# returns 5xx *without* failing the /readyz probe (e.g. DB blip).
+		# returns 5xx *without* failing the /readyz probe (e.g. DB blip mid
+		# request). This is the Caddy equivalent of nginx's
+		# `fail_timeout` / `max_fails` pair: `fail_duration` is BOTH the
+		# observation window AND the eject duration (nginx semantics exactly).
+		#
+		# Tuning rationale (TODO row 1348 — "fail_timeout"):
+		#   - `fail_duration 30s` — one tenant's burst of 5xx won't eject for
+		#     longer than it takes the operator to notice; short enough that
+		#     an ejected replica re-enters the pool quickly once healthy.
+		#   - `max_fails 3` — single DB blip (one 5xx) shouldn't eject; three
+		#     within 30 s is a signal, not noise.
+		#   - `unhealthy_request_count 50` — a flood of clients hitting one
+		#     replica during a partial outage gets that replica ejected even
+		#     if individual requests don't cross `max_fails` in the window.
+		#   - `unhealthy_status 5xx` — 4xx is client error, never counts.
+		#   - `unhealthy_latency 10s` — a replica that answers 200 but takes
+		#     >10 s is worse than ejected; `backend/lifecycle.py` p99 is
+		#     sub-second under nominal load.
 		fail_duration 30s
 		max_fails 3
+		unhealthy_request_count 50
 		unhealthy_status 5xx
 		unhealthy_latency 10s
 
