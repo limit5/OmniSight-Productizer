@@ -1,0 +1,106 @@
+# {{ app_name }}
+
+Tauri 2.x desktop app scaffolded by **SKILL-DESKTOP-TAURI** (X8 #304).
+Rust backend (`src-tauri/`) + {% if frontend == 'react' %}React 18{% else %}Vue 3{% endif %} frontend (`src/`)
+shipped as platform-native installers — `.msi` (Windows), `.dmg` +
+`.app` (macOS), `.deb` + `.AppImage` + `.rpm` (Linux).
+
+## Quick start
+
+```bash
+pnpm install                  # install frontend deps
+pnpm tauri dev                # hot-reload native window
+pnpm test                     # vitest --coverage (frontend track, 80% floor)
+make test-rust                # cargo test + llvm-cov 75% floor (Rust track)
+pnpm tauri build              # release build for the current OS
+```
+
+## Project layout
+
+```
+.
+├── src/                       (frontend — Vite SPA)
+├── src-tauri/                 (Rust backend — Tauri 2.x)
+│   ├── Cargo.toml
+│   ├── tauri.conf.json        (bundle metadata + 3-OS config + updater)
+│   ├── capabilities/
+│   │   └── default.json       (Tauri 2 capability grants)
+│   └── src/
+│       ├── main.rs
+│       ├── lib.rs             (Builder + plugin registration)
+│       └── commands.rs        (#[tauri::command] handlers)
+├── .github/workflows/
+│   └── release.yml            (tauri-action 3-OS release matrix)
+└── Makefile
+```
+
+## Cross-platform release
+
+The `.github/workflows/release.yml` workflow drives a tauri-action
+3-OS matrix:
+
+| Job runner       | Outputs                                |
+|------------------|----------------------------------------|
+| `windows-latest` | `{{ slug_name }}_<version>_x64_en-US.msi`, `.exe` |
+| `macos-14`       | `{{ slug_name }}.app`, `{{ slug_name }}_<version>_aarch64.dmg` |
+| `ubuntu-22.04`   | `{{ slug_name }}_<version>_amd64.deb`, `.AppImage`, `.rpm` |
+
+Cut a release locally:
+
+```bash
+git tag app-v0.1.0
+git push origin app-v0.1.0
+# release.yml triggers; it uploads artifacts to a draft GitHub Release.
+```
+
+{% if updater -%}
+## Auto-update channel
+
+The scaffold wires `tauri-plugin-updater` and ships a placeholder
+public-key envelope in `src-tauri/tauri.conf.json`. **Operator
+workflow:**
+
+```bash
+# 1. Generate a minisign key pair (one-shot, save the private key
+#    to your secret store — NOT the repo)
+pnpm tauri signer generate -w ~/.tauri/{{ slug_name }}.key
+
+# 2. Paste the printed PUBLIC key into src-tauri/tauri.conf.json
+#    -> bundle.updater.pubkey
+
+# 3. Set the manifest endpoint to your CDN
+#    -> bundle.updater.endpoints
+#       (e.g. "https://releases.example.com/{{ '{{target}}' }}/{{ '{{current_version}}' }}")
+
+# 4. After each `tauri build`, sign the produced binary with your
+#    private key and publish a `latest.json` manifest pointing to
+#    the signed asset. Tauri's plugin verifies the minisign signature
+#    on the client BEFORE applying any update.
+```
+
+The signing private key + password live in CI secrets
+(`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`)
+and never appear in the repo.
+{%- endif %}
+
+## CLI / IPC contract (desktop-tauri role)
+
+| Rule | Implementation |
+| --- | --- |
+| `bundle.identifier` reverse-DNS unique | `{{ identifier }}` |
+| Strict CSP, no `unsafe-eval` | `app.security.csp` in `tauri.conf.json` |
+| Capability grants per command | `src-tauri/capabilities/default.json` |
+| All IPC via `#[tauri::command]` | `src-tauri/src/commands.rs` |
+| Logs → stderr, data → IPC return | `tracing-subscriber` on stderr |
+| Updater pubkey embedded | `bundle.updater.pubkey` in `tauri.conf.json` |
+| Two-ecosystem license scan | `make audit && make deny` (cargo) + `pnpm audit` (npm) |
+
+## Framework gates validated
+
+| X-series | What this scaffold exercises |
+| --- | --- |
+| X0 | `linux-x86_64-native` default + 4 sibling profiles via cargo-dist matrix |
+| X1 | `cargo llvm-cov` 75% (Rust) AND `vitest --coverage` 80% (frontend) |
+| X2 | desktop-tauri role: capability system, strict CSP, no Tauri 1.x patterns |
+| X3 | `CargoDistAdapter` accepts `src-tauri/Cargo.toml` |
+| X4 | `software_compliance` over both ecosystems (npm @ root, cargo @ src-tauri) |

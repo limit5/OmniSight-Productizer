@@ -1,0 +1,114 @@
+# X8 #304 — SKILL-DESKTOP-TAURI DAG tasks.
+#
+# Mirrors the X5/X6/X7 DAG shape so the skill-registry tests/validate
+# path stays uniform across language-vertical packs. Each task maps
+# 1:1 to an X0-X4 capability so running the full DAG smoke-tests the
+# software vertical on a Tauri 2.x hybrid (Rust backend + webview
+# frontend).
+
+tasks:
+  - id: tauri-scaffold-init
+    name: "Scaffold Tauri 2.x project skeleton"
+    description: >
+      Render the Tauri project tree from scaffolds/: src-tauri/Cargo.toml
+      (Tauri 2.x deps + cargo-dist metadata), src-tauri/tauri.conf.json
+      (bundle metadata, three-OS targets, strict CSP), package.json
+      (frontend deps + Vitest), vite.config.ts, tsconfig.json,
+      .gitignore, .env.example. Idempotent re-render: overwrites
+      scaffold-owned paths, never touches operator-added modules
+      (e.g. src-tauri/src/operators/*.rs, src/components/custom/*.tsx).
+    depends_on: []
+    artifacts: [tauri_skeleton]
+    estimated_hours: 1.5
+    framework_gate: x0-platform-schema
+
+  - id: tauri-rust-backend
+    name: "Rust backend (capability system + #[tauri::command] IPC)"
+    description: >
+      Emit src-tauri/src/main.rs (Tauri 2 setup hook), src-tauri/src/lib.rs
+      (run() entry point + plugin registration), src-tauri/src/commands.rs
+      (typed IPC handlers), src-tauri/build.rs (tauri_build::build()),
+      src-tauri/capabilities/default.json (per-command grants — NO `**`
+      wildcard). Honours desktop-tauri role: strict CSP, reverse-DNS
+      bundle.identifier, no Tauri 1.x allowlist patterns.
+    depends_on: [tauri-scaffold-init]
+    artifacts: [tauri_rust_core]
+    estimated_hours: 2
+    framework_gate: x2-role-desktop-tauri
+
+  - id: tauri-frontend
+    name: "Frontend (React 18 default | Vue 3 opt-in) + Vite 5"
+    description: >
+      Render the chosen frontend tree under src/. React variant: main.tsx,
+      App.tsx, App.css, plus a `useTauri.ts` hook wrapping
+      `@tauri-apps/api/core::invoke`. Vue variant: main.ts, App.vue,
+      App.css, plus a `useTauri.ts` composable. Both wire Vitest +
+      Testing-Library and a strict TypeScript config (strict: true,
+      noUncheckedIndexedAccess: true).
+    depends_on: [tauri-scaffold-init]
+    artifacts: [tauri_frontend]
+    estimated_hours: 1.5
+
+  - id: tauri-updater
+    name: "tauri-plugin-updater wiring (auto-update channel)"
+    description: >
+      When the `updater` knob is on (default): add tauri-plugin-updater
+      to src-tauri/Cargo.toml, register the plugin in
+      src-tauri/src/lib.rs, emit `[bundle.updater]` in tauri.conf.json
+      with HTTPS endpoint + minisign pubkey envelope. Document the
+      operator-side key generation + manifest workflow in README.
+      `updater=false` strips all three.
+    depends_on: [tauri-rust-backend]
+    artifacts: [tauri_updater]
+    estimated_hours: 0.75
+
+  - id: tauri-build-matrix
+    name: "Three-platform release (Windows / macOS / Linux)"
+    description: >
+      Render .github/workflows/release.yml driving a tauri-action job
+      across windows-latest / macos-14 (arm64) / ubuntu-22.04. The
+      X3 CargoDistAdapter validates src-tauri/Cargo.toml + the
+      `[workspace.metadata.dist]` block offline. The real release
+      pipeline is `tauri build` per-platform — cargo-dist is the
+      offline "config-shape" gate, tauri-action is the runtime path.
+    depends_on: [tauri-rust-backend]
+    artifacts: [tauri_build_matrix]
+    estimated_hours: 1
+    framework_gate: x3-cargo-dist-adapter
+
+  - id: tauri-tests
+    name: "cargo test + llvm-cov 75% (Rust) + Vitest 80% (frontend)"
+    description: >
+      Render scripts/check_cov.sh for the Rust track (matches the X1
+      Rust 75% threshold from COVERAGE_THRESHOLDS["rust"]); package.json
+      `test` script wires `vitest --run --coverage` for the frontend
+      track. Makefile wraps both behind `make test`. The two tracks
+      run independently — a failure on either fails the build.
+    depends_on: [tauri-rust-backend, tauri-frontend]
+    artifacts: [tauri_tests]
+    estimated_hours: 1
+    framework_gate: x1-software-simulate
+
+  - id: tauri-compliance
+    name: "X4 compliance gates — cargo + npm two-ecosystem"
+    description: >
+      Emit spdx.allowlist.json (default-deny GPL/AGPL, allow
+      permissive + MPL-2.0), src-tauri/deny.toml for cargo-deny, and
+      package.json `audit` script. The X4 compliance harness detects
+      npm at the project root and cargo under src-tauri/ — both pass
+      the same allowlist. Skipped when `compliance=false`.
+    depends_on: [tauri-scaffold-init]
+    artifacts: [tauri_compliance]
+    estimated_hours: 0.5
+    framework_gate: x4-software-compliance
+
+  - id: tauri-pilot-report
+    name: "X0-X4 validation report"
+    description: >
+      End-to-end smoke: render project, run X3 cargo-dist dry-run
+      against src-tauri/, X4 two-ecosystem compliance bundle — emit a
+      single JSON report. Any framework regression fails this task
+      first.
+    depends_on: [tauri-updater, tauri-build-matrix, tauri-tests, tauri-compliance]
+    artifacts: [tauri_pilot_report]
+    estimated_hours: 0.5

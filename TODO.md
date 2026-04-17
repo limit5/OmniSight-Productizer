@@ -1210,9 +1210,9 @@ Legend:
 - [x] 預估：**1 day**
 
 ### X8. SKILL-DESKTOP-TAURI (#304)
-- [ ] Tauri 2.x 骨架 + 前端整合（React/Vue 可選）
-- [ ] 三平台 build（Windows/macOS/Linux）+ auto-update
-- [ ] 預估：**1.5 day**
+- [x] Tauri 2.x 骨架 + 前端整合（React/Vue 可選）
+- [x] 三平台 build（Windows/macOS/Linux）+ auto-update
+- [x] 預估：**1.5 day**
 
 ### X9. SKILL-SPRING-BOOT（企業 Java, #305）
 - [ ] Spring Boot 3 + Maven/Gradle

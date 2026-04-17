@@ -1,0 +1,99 @@
+# X8 #304 — SKILL-DESKTOP-TAURI manifest.
+#
+# Fourth software-vertical skill pack. X5 SKILL-FASTAPI (#301) proved
+# the X0-X4 framework on Python; X6 SKILL-GO-SERVICE (#302) on Go;
+# X7 SKILL-RUST-CLI (#303) on Rust as a single-binary CLI. X8 stresses
+# the framework on a *hybrid* deliverable: Tauri 2.x (Rust backend +
+# system-webview frontend) producing platform-specific installers
+# (.msi / .dmg+ .app / .deb + .AppImage + .rpm) for the three desktop
+# OSes — Windows, macOS, Linux — with `tauri-plugin-updater` wired
+# for auto-update via minisign-signed manifests over HTTPS.
+#
+# Exercise:
+#   * X0  target_kind=software profiles                (configs/platforms/{linux-x86_64-native,linux-arm64-native,windows-msvc-x64,macos-arm64-native,macos-x64-native}.yaml)
+#   * X1  cargo test + llvm-cov 75% floor (Rust)       (backend/software_simulator.py — COVERAGE_THRESHOLDS["rust"]=75)
+#         + Vitest --coverage 80% floor (frontend)     (Node track via package.json)
+#   * X2  desktop-tauri role default                   (configs/roles/software/desktop-tauri.skill.md)
+#   * X3  cargo-dist adapter against src-tauri/        (backend/build_adapters.py — CargoDistAdapter on Cargo.toml)
+#         + tauri-action GitHub workflow for the real
+#         3-platform `tauri build` matrix
+#   * X4  SPDX license scan / CVE / SBOM               (backend/software_compliance — cargo @ src-tauri/, npm @ root)
+#
+# Scaffolds under `scaffolds/` emit a Tauri 2.x project tree:
+#   * src-tauri/ — Rust backend (clap-free; Tauri 2 capability system,
+#     #[tauri::command] IPC handlers, tauri-plugin-updater, strict CSP,
+#     reverse-DNS bundle.identifier).
+#   * src/ — frontend (React 18 + Vite 5 by default; Vue 3 + Vite 5
+#     opt-in via the `frontend` knob). Vitest + Testing-Library for
+#     unit tests; Playwright optional via tauri-driver.
+#   * tauri.conf.json — bundle metadata + 3-OS installer config (msi,
+#     dmg, deb, AppImage, rpm) + updater endpoints + minisign pubkey.
+#   * .github/workflows/release.yml — tauri-action 3-platform release
+#     matrix (windows-latest / macos-14 (arm64) / ubuntu-22.04).
+
+schema_version: 1
+name: skill-desktop-tauri
+description: >
+  Tauri 2.x desktop skill pack — Rust backend + system-webview frontend
+  (React 18 default, Vue 3 opt-in) producing platform-native installers
+  for Windows (.msi), macOS (.dmg + .app), and Linux (.deb / .AppImage
+  / .rpm) via `tauri build`. Wires tauri-plugin-updater + minisign for
+  auto-update, the Tauri 2 Capability System for IPC permission grants,
+  strict CSP defaults, cargo-dist adapter against src-tauri/Cargo.toml
+  for X3 release validation, and a tauri-action GitHub workflow for the
+  real 3-platform build matrix. cargo test + llvm-cov 75% (Rust track)
+  and Vitest 80% (frontend track) honour the X1 software simulate-track
+  thresholds. Dogfoods the desktop-tauri role and consumes every X0-X4
+  framework layer end-to-end.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - tauri
+  - tauri-2
+  - desktop
+  - cross-platform
+  - rust
+  - webview
+  - vite
+  - react
+  - vue
+  - typescript
+  - capability
+  - ipc
+  - tauri-plugin-updater
+  - minisign
+  - msi
+  - dmg
+  - appimage
+  - deb
+  - rpm
+  - tauri-action
+  - cargo-dist
+  - spdx
+  - x8

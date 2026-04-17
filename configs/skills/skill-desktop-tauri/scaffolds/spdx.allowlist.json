@@ -1,0 +1,31 @@
+{
+  "_comment": "SKILL-DESKTOP-TAURI X8 #304 SPDX allowlist. Shared across both ecosystems — cargo (src-tauri/) and npm (root). Default-deny GPL/AGPL; allow permissive + MPL-2.0. src-tauri/deny.toml mirrors these for the cargo-deny path; the npm side is enforced via license-checker through backend/software_compliance/licenses.py.",
+  "allowed_licenses": [
+    "Apache-2.0",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unlicense",
+    "CC0-1.0",
+    "0BSD",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0"
+  ],
+  "denied_licenses": [
+    "GPL-2.0",
+    "GPL-2.0-only",
+    "GPL-2.0-or-later",
+    "GPL-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "AGPL-3.0",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "SSPL-1.0"
+  ],
+  "waivers": []
+}

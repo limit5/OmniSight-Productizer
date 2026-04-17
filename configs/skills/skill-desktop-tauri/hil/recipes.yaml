@@ -1,0 +1,98 @@
+# SKILL-DESKTOP-TAURI HIL recipes — X8 #304
+#
+# "Hardware" here is the installer landing on an end-user workstation.
+# Each recipe is an operator-run probe — Step 7 of the SOP — that
+# must hit a real tauri-action-built artifact, not a mock. The CI
+# matrix in .github/workflows/release.yml is the authoritative driver.
+
+recipes:
+  - id: tauri-dev-boot
+    name: "pnpm tauri dev boots"
+    description: >
+      Run `pnpm install && pnpm tauri dev` against the rendered tree
+      and assert the native window opens within 30s. Sanity check that
+      the frontend dev server, the Vite middleware, and the Rust
+      webview glue all handshake.
+    targets: [linux-x86_64-native, macos-arm64-native, windows-msvc-x64]
+    probe:
+      kind: cli_exit_code
+      cmd: "timeout 30 pnpm tauri dev --no-watch"
+      expected_rc: 0
+
+  - id: tauri-build-installer-size
+    name: "Installer bundle under role size budget"
+    description: >
+      Run `pnpm tauri build` and assert installer size against the
+      desktop-tauri role budget (MSI ≤ 15 MiB, DMG ≤ 12 MiB, AppImage
+      ≤ 18 MiB — roughly 8-10× smaller than an Electron equivalent).
+      A regression usually means a heavy frontend dep (moment-timezone,
+      full-fat chart lib) or a Rust dep with openssl=system leaked in.
+    targets: [linux-x86_64-native, macos-arm64-native, windows-msvc-x64]
+    probe:
+      kind: file_size_ceiling_per_platform
+      path:
+        linux-x86_64-native: "src-tauri/target/release/bundle/appimage/*.AppImage"
+        macos-arm64-native: "src-tauri/target/release/bundle/dmg/*.dmg"
+        windows-msvc-x64: "src-tauri/target/release/bundle/msi/*.msi"
+      ceiling_bytes:
+        linux-x86_64-native: 18874368   # 18 MiB
+        macos-arm64-native: 12582912    # 12 MiB
+        windows-msvc-x64: 15728640      # 15 MiB
+
+  - id: tauri-cold-start
+    name: "Cold-start ≤ 800ms"
+    description: >
+      Launch the installed app 5× with page-cache drop between runs
+      (when the operator has root) and assert P95 cold-start wall
+      time ≤ 800ms — the role target for "no Chromium startup cost".
+      Measured from process spawn to the first `app://` webview load
+      event.
+    targets: [linux-x86_64-native, macos-arm64-native, windows-msvc-x64]
+    probe:
+      kind: cli_wall_time
+      cmd_per_platform:
+        linux-x86_64-native: "src-tauri/target/release/bundle/appimage/*.AppImage --version"
+        macos-arm64-native: "src-tauri/target/release/*.app/Contents/MacOS/* --version"
+        windows-msvc-x64: "src-tauri/target/release/*.exe --version"
+      iterations: 5
+      p95_ms_ceiling: 800
+
+  - id: cargo-dist-plan
+    name: "cargo dist plan succeeds against src-tauri/"
+    description: >
+      `cd src-tauri && cargo dist plan` must exit zero offline,
+      validating the Cargo.toml `[workspace.metadata.dist]` block and
+      the dist-workspace.toml anchor. This is the X3 CargoDistAdapter's
+      offline hook — the real release goes through tauri-action.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "cd src-tauri && cargo dist plan"
+      expected_rc: 0
+
+  - id: updater-manifest-signature
+    name: "Updater manifest signature validates"
+    description: >
+      Generate a minisign key pair, sign a stub `latest.json`, and
+      assert that the embedded public key in the rendered
+      tauri.conf.json verifies it. Catches the "operator forgot to
+      paste the pubkey" class of bug before shipping a release that
+      will silently reject updates.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: minisign_verify
+      cmd: "minisign -Vm latest.json -P $(jq -r .bundle.updater.pubkey src-tauri/tauri.conf.json)"
+      expected_rc: 0
+
+  - id: capability-deny-wildcard
+    name: "No `**` wildcard in capability files"
+    description: >
+      Grep the rendered src-tauri/capabilities/*.json files and fail
+      if any permission entry contains the `**` wildcard. The
+      desktop-tauri role treats wildcard grants as equivalent to
+      disabling the capability system.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: grep_absent
+      path: "src-tauri/capabilities"
+      pattern: '"\\*\\*"'

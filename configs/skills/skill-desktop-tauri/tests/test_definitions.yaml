@@ -1,0 +1,74 @@
+# SKILL-DESKTOP-TAURI test definitions — X8 #304
+#
+# Authoritative list consumed by `backend/tests/test_skill_desktop_tauri.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-react-default
+        name: "Render: React + updater + compliance (full default)"
+        type: unit
+        target: backend.tauri_scaffolder.render_project
+      - id: scaffold-vue-variant
+        name: "Render: Vue 3 frontend variant"
+        type: unit
+        target: backend.tauri_scaffolder.render_project
+      - id: scaffold-no-updater
+        name: "updater=off strips plugin + bundle.updater + docs"
+        type: unit
+        target: backend.tauri_scaffolder.render_project
+      - id: scaffold-no-compliance
+        name: "compliance=off skips spdx.allowlist + deny.toml"
+        type: unit
+        target: backend.tauri_scaffolder.render_project
+      - id: scaffold-app-name-default
+        name: "app_name defaults to humanised project_name"
+        type: unit
+        target: backend.tauri_scaffolder.ScaffoldOptions
+      - id: scaffold-identifier-validation
+        name: "identifier rejects non-reverse-DNS values"
+        type: unit
+        target: backend.tauri_scaffolder.ScaffoldOptions
+
+  - id: framework-binding
+    name: "X0-X4 framework binding tests"
+    tests:
+      - id: x0-platform-profile-exists
+        name: "Default + 4 sibling profiles all load via backend.platform"
+        type: integration
+        target: backend.tauri_scaffolder.render_project
+      - id: x1-coverage-thresholds-honoured
+        name: "Rust 75% + frontend 80% coverage gates wired"
+        type: unit
+        target: backend.tauri_scaffolder.render_project
+      - id: x2-desktop-tauri-role-alignment
+        name: "Strict CSP, capability-system grants, no Tauri 1.x allowlist"
+        type: unit
+        target: backend.tauri_scaffolder.render_project
+      - id: x3-cargo-dist-adapter-resolves
+        name: "CargoDistAdapter resolves against rendered src-tauri/Cargo.toml"
+        type: integration
+        target: backend.tauri_scaffolder.dry_run_build
+      - id: x4-compliance-two-ecosystems
+        name: "Compliance bundle handles both npm (root) and cargo (src-tauri/)"
+        type: integration
+        target: backend.tauri_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-desktop-tauri appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-desktop-tauri') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill
