@@ -6,9 +6,13 @@ name: Docker Publish
 #   - :latest            — floating tag, moves with each release
 #   - :<git-tag>          — immutable snapshot (e.g. v0.3.1)
 #
-# Multi-arch (linux/amd64 + linux/arm64) and docker-compose
-# registry-first consumption live on separate TODO lines (L10 #337
-# items 2–4) and are not scoped into this workflow yet.
+# Multi-arch (linux/amd64 + linux/arm64): we publish an OCI image
+# index so a single pulled tag resolves to the correct architecture
+# on both cloud x86 VMs and ARM SBC / Apple-silicon hosts. The
+# arm64 layer is built on amd64 runners via QEMU emulation
+# (docker/setup-qemu-action). Emulated builds roughly double wall
+# time — timeout-minutes bumped to 90 to cover the frontend
+# (pnpm install + Next.js build) on emulated arm64.
 
 on:
   push:
@@ -35,7 +39,10 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # QEMU-emulated arm64 build roughly doubles wall time vs native
+    # amd64 — 90 min leaves headroom for the frontend (pnpm install
+    # + Next.js build) without blanket-canceling long but healthy runs.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +72,14 @@ jobs:
             echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # QEMU registers binfmt_misc handlers so the amd64 runner can
+      # execute arm64 binaries during the build. Scoped to arm64 —
+      # linux/amd64 runs natively on the runner and needs no emulation.
+      - name: set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
       - name: set up buildx
         uses: docker/setup-buildx-action@v3
 
@@ -80,6 +95,12 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          # Publish a multi-arch OCI image index. A single `docker
+          # pull ghcr.io/<owner>/<image>:<tag>` from an arm64 host
+          # (Raspberry Pi / Ampere / Apple silicon CI) resolves to
+          # the arm64 layer; x86_64 hosts resolve to amd64. Keeps
+          # one pullable tag regardless of host architecture.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}:latest

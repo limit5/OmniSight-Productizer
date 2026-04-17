@@ -186,3 +186,88 @@ def test_owner_is_lowercased(workflow: dict) -> None:
         "workflow must lowercase github.repository_owner before using "
         "it as a GHCR namespace"
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-arch (L10 #337 item 3) — linux/amd64 + linux/arm64 via buildx
+# ---------------------------------------------------------------------------
+
+def _build_push_step(workflow: dict) -> dict:
+    return next(
+        s for s in _steps(workflow)
+        if isinstance(s.get("uses"), str)
+        and s["uses"].startswith("docker/build-push-action@")
+    )
+
+
+def test_qemu_action_present_for_arm64_emulation(workflow: dict) -> None:
+    # GitHub-hosted runners are amd64; arm64 layers must be built
+    # under binfmt_misc emulation via docker/setup-qemu-action.
+    # Without this step, `platforms: linux/arm64` would fail with
+    # "exec format error" on the first arm64 RUN.
+    steps = _steps(workflow)
+    qemu = next(
+        (s for s in steps if isinstance(s.get("uses"), str)
+         and s["uses"].startswith("docker/setup-qemu-action@")),
+        None,
+    )
+    assert qemu is not None, (
+        "multi-arch build requires docker/setup-qemu-action to "
+        "register arm64 binfmt_misc handlers on amd64 runners"
+    )
+    with_block = qemu.get("with") or {}
+    # Accept either an explicit linux/arm64 scope or the "all" default
+    # (action v3 without a `with` block registers every handler).
+    platforms = str(with_block.get("platforms", "")) or "all"
+    assert "arm64" in platforms or platforms == "all", (
+        f"QEMU must cover arm64 (got platforms={platforms!r})"
+    )
+
+
+def test_qemu_runs_before_buildx(workflow: dict) -> None:
+    # Ordering matters: buildx needs binfmt_misc registered before
+    # it initializes its builder, otherwise the builder caches
+    # amd64-only capabilities and arm64 builds fail at runtime.
+    steps = _steps(workflow)
+
+    def _index(prefix: str) -> int:
+        for i, s in enumerate(steps):
+            if isinstance(s.get("uses"), str) and s["uses"].startswith(prefix):
+                return i
+        return -1
+
+    qemu_idx = _index("docker/setup-qemu-action@")
+    buildx_idx = _index("docker/setup-buildx-action@")
+    assert qemu_idx >= 0 and buildx_idx >= 0, "both steps must exist"
+    assert qemu_idx < buildx_idx, (
+        "docker/setup-qemu-action must run before docker/setup-buildx-action"
+    )
+
+
+def test_build_push_publishes_amd64_and_arm64(workflow: dict) -> None:
+    # The concrete L10 #337 checkbox promise: one pulled tag must
+    # resolve to the right layer on both x86_64 cloud VMs and ARM
+    # SBC / Apple-silicon hosts. Pin the two-platform list so that
+    # a regression (e.g. dropping to amd64-only for speed) fails CI.
+    with_block = _build_push_step(workflow).get("with") or {}
+    platforms = str(with_block.get("platforms", ""))
+    assert "linux/amd64" in platforms, (
+        "multi-arch build must include linux/amd64 for cloud VMs"
+    )
+    assert "linux/arm64" in platforms, (
+        "multi-arch build must include linux/arm64 for ARM SBC / "
+        "Apple-silicon hosts — dropping this defeats the L10 #337 "
+        "multi-arch contract"
+    )
+
+
+def test_timeout_accommodates_emulated_arm64_build(workflow: dict) -> None:
+    # QEMU-emulated arm64 build roughly doubles wall time versus
+    # native amd64. The default 45 min won't cover the frontend
+    # (pnpm install + Next.js build) reliably — bumped to 90 min.
+    timeout = _publish_job(workflow).get("timeout-minutes")
+    assert isinstance(timeout, int), "timeout-minutes must be declared"
+    assert timeout >= 60, (
+        f"timeout-minutes={timeout} is too tight for QEMU-emulated "
+        "arm64 frontend build — expect 60+ min"
+    )
