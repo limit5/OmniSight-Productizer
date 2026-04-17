@@ -3650,7 +3650,27 @@ Push 後 `fallback-branches.yml` 會在 push event 自動跑首次 build/test，
 
 ---
 
-## R (pending) Enterprise Watchdog & Disaster Recovery（2026-04-17 登錄）
+## V (pending) Visual Design Loop + Workspace Architecture（2026-04-17 登錄）
+
+**背景**：W/P/X 三系列 scaffold + compliance + deploy 全部完成，但「AI 自主寫完整 app + 即時視覺回饋 + 對話迭代 + 獨立工作區」體驗層 = 0。V 系列把 W/P/X 從 scaffold generator 升級為 end-to-end autonomous builder，對標 v0.dev（Web）+ Codex for Almost Everything（Mobile + Software）。
+
+**產品定位**：W/P/X 是嵌入式主線的隱藏殺手鐧。主 dashboard（neural-grid 指揮中心）保留給嵌入式；三個 vertical 各有獨立工作區（`/workspace/web`、`/workspace/mobile`、`/workspace/software`），專屬 preview + 迭代 chat + 部署面板。
+
+**10 子項**：V0 Workspace 共用基建 / V1 Web AI 生成引擎 / V2 Web Live Preview / V3 Web 視覺迭代 / V4 Web 工作區 UI / V5 Mobile AI 生成引擎 / V6 Mobile Device Preview / V7 Mobile 工作區 / V8 Software 工作區 / V9 CLI + Image gen + E2E
+
+**總預估**：48 day（Workspace 6d → Web 23d → Mobile 15d → Software+CLI 9d）
+
+**切段交付**：
+1. V0（6d）— 基建：三個工作區 route + layout + chat + bridge card
+2. V1-V4（23d）— Web 完整體驗，v0.dev parity
+3. V5-V7（15d）— Mobile 完整體驗，Codex parity
+4. V8-V9（9d）— Software + CLI + E2E
+
+**硬相依**：O3 Worker Pool（✅ done）、W/P/X（✅ done）、R0-R3 PEP+ChatOps+Entropy+Scratchpad（✅ done）。L（Bootstrap）完成後可立即開工。
+
+---
+
+## R (partial — R0-R3 complete, R4-R9 pending) Enterprise Watchdog & Disaster Recovery（2026-04-17 登錄）
 
 **背景**：`docs/design/enterprise_watchdog_and_disaster_recovery_architecture.md`（2026-04-17 新增）提出 PEP Gateway（工具執行網關）、冪等性重試、語意監控、自動續寫、ChatOps 遠端介入、階梯式部署六大防護機制。審計結果 ~55% 與既有模組重疊（sandboxed tools / L1-L4 notifications / M1 cgroups / worktree isolation / startup cleanup），5 項 net-new：PEP middleware、ChatOps interactive、semantic entropy、scratchpad 持久化 + 斷點續傳、Serverless PaaS。
 
