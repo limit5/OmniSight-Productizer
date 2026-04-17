@@ -440,28 +440,24 @@ class TestG6_2SiblingGuardMigration:
 # into the rest of G6 + G7. Explicit-migration pattern continued.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
-    def test_no_dr_runbook_doc(self) -> None:
-        # docs/ops/dr_runbook.md is row 1383's deliverable (G6 #5
-        # bundle closure) — must not land here.
-        assert not (
-            PROJECT_ROOT / "docs" / "ops" / "dr_runbook.md"
-        ).exists(), (
-            "row 1383 (G6 #5) owns docs/ops/dr_runbook.md — do not "
-            "land it in this commit"
-        )
-
-    def test_no_dr_drill_shell_script(self) -> None:
-        # scripts/dr_drill.sh is row 1383's shell-script deliverable.
-        assert not (PROJECT_ROOT / "scripts" / "dr_drill.sh").exists(), (
-            "row 1383 (G6 #5) owns scripts/dr_drill.sh — do not "
-            "land it in this commit"
-        )
-
+    # NOTE (G6 #5 / row 1383 migration):
+    #   `test_no_dr_runbook_doc` and `test_no_dr_drill_shell_script`
+    #   previously lived here and RED-flagged the two G6 #5 bundle-
+    #   closure paths `docs/ops/dr_runbook.md` and
+    #   `scripts/dr_drill.sh`. G6 #5 landed both paths
+    #   (contract: `backend/tests/test_dr_bundle_closure_g6_5.py`);
+    #   both guards were REMOVED in the same commit per the
+    #   explicit-migration pattern (G5 → G6 #1 → #2 → #3 → #4 →
+    #   G6 #5, 9th continuation).
+    #
     # NOTE: `test_no_annual_dr_checklist_doc` was removed when G6 #4
     # (row 1382) landed as `docs/ops/dr_annual_drill_checklist.md`
     # (contract: `backend/tests/test_dr_annual_drill_checklist_g6_4.py`).
     # Explicit-migration pattern carried forward from
     # G5 #3→#4→#5→#6 → G6 #1 → G6 #2 → G6 #3 → G6 #4 (step 8).
+    #
+    # G6 bucket is CLOSED with G6 #5; all five rows landed +
+    # contract-pinned. Next bucket: G7 (rows 1385–1388).
 
     def test_no_g7_grafana_dashboard(self) -> None:
         # G7 ships the Grafana dashboard; must not appear with G6 #3.

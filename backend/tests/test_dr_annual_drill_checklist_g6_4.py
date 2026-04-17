@@ -13,15 +13,21 @@ The checklist is the fourth deliverable of the G6 HA-06 bucket after
 the daily drill workflow (G6 #1), the RTO/RPO objective doc (G6 #2),
 and the manual failover runbook (G6 #3).
 
-Sibling rows NOT covered by this test (explicit scope fence):
+Sibling rows status — G6 #5 migration note:
 
     * row 1383 (G6 #5) — ``scripts/dr_drill.sh`` +
       ``docs/ops/dr_runbook.md`` bundle-closure deliverables.
+      Landed at the named paths. The two guards that previously
+      RED-flagged those paths (``test_no_dr_runbook_doc`` and
+      ``test_no_dr_drill_shell_script``) were REMOVED in the same
+      commit that lands G6 #5, per the explicit-migration pattern
+      carried forward from G5 → G6 #1 → #2 → #3 → #4 → this row
+      (9th continuation). The ownership of those paths moved to
+      ``backend/tests/test_dr_bundle_closure_g6_5.py``, which
+      contract-pins the shape of both artefacts.
 
-The sibling-row guards below RED-flag the above landing in this
-same commit (silent scope creep). The explicit-migration pattern
-(remove the guard in the commit that lands the next row) is carried
-forward from G5 → G6 #1 → G6 #2 → G6 #3 → this row.
+G6 bucket status at the time of the migration: **closed** — all
+five rows (1379–1383) landed + contract-pinned.
 
 Explicit migration accepted from G6 #3:
 
@@ -461,22 +467,19 @@ class TestG6_3SiblingGuardMigration:
 # into the remaining G6 row + G7. Explicit-migration pattern continued.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
-    def test_no_dr_runbook_doc(self) -> None:
-        # docs/ops/dr_runbook.md is row 1383's deliverable (G6 #5
-        # bundle closure) — must not land here.
-        assert not (
-            PROJECT_ROOT / "docs" / "ops" / "dr_runbook.md"
-        ).exists(), (
-            "row 1383 (G6 #5) owns docs/ops/dr_runbook.md — do not "
-            "land it in this commit"
-        )
-
-    def test_no_dr_drill_shell_script(self) -> None:
-        # scripts/dr_drill.sh is row 1383's shell-script deliverable.
-        assert not (PROJECT_ROOT / "scripts" / "dr_drill.sh").exists(), (
-            "row 1383 (G6 #5) owns scripts/dr_drill.sh — do not "
-            "land it in this commit"
-        )
+    # NOTE (G6 #5 / row 1383 migration):
+    #   `test_no_dr_runbook_doc` and `test_no_dr_drill_shell_script`
+    #   previously lived here and RED-flagged the two G6 #5 bundle-
+    #   closure paths `docs/ops/dr_runbook.md` and
+    #   `scripts/dr_drill.sh`. G6 #5 landed both paths; both guards
+    #   were REMOVED in the same commit per the explicit-migration
+    #   pattern (G5 → G6 #1 → #2 → #3 → #4 → G6 #5). Ownership of
+    #   the two paths' shape now lives in
+    #   `backend/tests/test_dr_bundle_closure_g6_5.py`.
+    #
+    #   G6 bucket is CLOSED with G6 #5; all five rows landed +
+    #   contract-pinned. Next bucket to open: G7 (rows 1385–1388 —
+    #   Prometheus + Grafana + alert rules).
 
     def test_no_g7_grafana_dashboard(self) -> None:
         # G7 ships the Grafana dashboard; must not appear with G6 #4.

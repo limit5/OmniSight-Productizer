@@ -532,20 +532,19 @@ class TestHandoffAlignment:
 # into the rest of G6 + G7. Explicit-migration pattern continued.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
-    def test_no_dr_drill_shell_script(self) -> None:
-        # `scripts/dr_drill.sh` is row 1383's deliverable (G6 bundle
-        # closure). Landing it here would pre-commit a later row.
-        assert not (PROJECT_ROOT / "scripts" / "dr_drill.sh").exists(), (
-            "row 1383 (G6 #5) owns scripts/dr_drill.sh — do not land "
-            "it in this commit"
-        )
-
-    def test_no_dr_runbook_doc(self) -> None:
-        # `docs/ops/dr_runbook.md` is row 1383's companion doc.
-        assert not (PROJECT_ROOT / "docs" / "ops" / "dr_runbook.md").exists(), (
-            "row 1383 (G6 #5) owns docs/ops/dr_runbook.md — do not "
-            "land it in this commit"
-        )
+    # NOTE (G6 #5 / row 1383 migration):
+    #   `test_no_dr_drill_shell_script` and `test_no_dr_runbook_doc`
+    #   previously lived here and RED-flagged the two G6 #5 bundle-
+    #   closure paths `scripts/dr_drill.sh` + `docs/ops/dr_runbook.md`.
+    #   G6 #5 landed both paths; both guards were REMOVED in the
+    #   same commit per the explicit-migration pattern (G5 → G6 #1
+    #   → #2 → #3 → #4 → G6 #5, 9th continuation). Ownership of the
+    #   two paths' shape now lives in
+    #   `backend/tests/test_dr_bundle_closure_g6_5.py`.
+    #
+    #   G6 bucket is CLOSED with G6 #5; all five rows landed +
+    #   contract-pinned. Next bucket: G7 (rows 1385–1388 —
+    #   Prometheus + Grafana + alert rules).
 
     def test_no_g7_grafana_dashboard(self) -> None:
         # G7 ships the Grafana dashboard; must not appear with G6 #1.
