@@ -1,0 +1,157 @@
+# OmniSight Productizer — DigitalOcean App Platform spec (L11 #338 #1)
+#
+# One-click deploy: https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master
+# The DO wizard picks this file up automatically on first deploy; on subsequent
+# deploys the App's live spec is the SSOT and this file becomes a seed template.
+#
+# Topology (mirrors docker-compose.prod.yml):
+#   backend  — FastAPI on :8000, private (only reachable via ${backend.PRIVATE_URL})
+#   frontend — Next.js on :3000, public at /
+#     └─ proxies /api/* to backend via next.config.mjs rewrite using BACKEND_URL
+#
+# Secrets — values marked `type: SECRET` must be filled in via the DO UI after
+# the first deploy (or via `doctl apps update --spec ...` with real values).
+# Placeholder strings here are safe dummies; changing them in this file does
+# not take effect until the App owner triggers a new deployment.
+#
+# Cost sizing — basic-xxs is the cheapest paid tier ($5/mo/service). Downsize
+# with instance_size_slug=apps-d-1vcpu-1gb for dev; upsize to professional-xs
+# for prod. Two services × basic-xxs ≈ $10/mo; add a managed Postgres for
+# durable storage (see `databases:` block, commented out).
+#
+# Data persistence caveat — App Platform service filesystems are EPHEMERAL.
+# The default SQLite at /app/data/omnisight.db is wiped on every redeploy.
+# For anything beyond a demo: uncomment the `databases:` block + switch
+# OMNISIGHT_DATABASE_URL to `${omnisight-db.DATABASE_URL}` (requires code
+# path for Postgres; SQLite-only deployments should use Railway/Render
+# persistent volumes instead — see deploy/railway + deploy/render).
+
+name: omnisight-productizer
+region: nyc
+
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+
+services:
+  # ── Backend (FastAPI) ───────────────────────────────────────────────
+  # Private service — not exposed on the public URL. Frontend reaches it
+  # via ${backend.PRIVATE_URL} injected at runtime by App Platform.
+  - name: backend
+    dockerfile_path: Dockerfile.backend
+    source_dir: /
+    github:
+      repo: limit5/OmniSight-Productizer
+      branch: master
+      deploy_on_push: true
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    internal_ports:
+      - 8000
+    health_check:
+      http_path: /api/v1/health
+      initial_delay_seconds: 20
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+      success_threshold: 1
+    envs:
+      - key: OMNISIGHT_DEBUG
+        scope: RUN_TIME
+        value: "false"
+      - key: OMNISIGHT_AUTH_MODE
+        scope: RUN_TIME
+        value: "strict"
+      - key: OMNISIGHT_COOKIE_SECURE
+        scope: RUN_TIME
+        value: "true"
+      - key: OMNISIGHT_ENV
+        scope: RUN_TIME
+        value: "production"
+      - key: OMNISIGHT_DATABASE_PATH
+        scope: RUN_TIME
+        value: "/app/data/omnisight.db"
+      - key: OMNISIGHT_WORKERS
+        scope: RUN_TIME
+        value: "2"
+      # Public origin — DO injects ${APP_URL} with the https URL of the
+      # app after first deploy. CORS will refuse the browser without it.
+      - key: OMNISIGHT_FRONTEND_ORIGIN
+        scope: RUN_TIME
+        value: ${APP_URL}
+
+      # ── LLM provider (pick one + fill the matching key in the UI) ──
+      - key: OMNISIGHT_LLM_PROVIDER
+        scope: RUN_TIME
+        value: "anthropic"
+      - key: OMNISIGHT_ANTHROPIC_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: "EV[1:PLACEHOLDER:REPLACE_AFTER_DEPLOY]"
+      - key: OMNISIGHT_OPENAI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: "EV[1:PLACEHOLDER:REPLACE_AFTER_DEPLOY]"
+      - key: OMNISIGHT_GOOGLE_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+        value: "EV[1:PLACEHOLDER:REPLACE_AFTER_DEPLOY]"
+
+      # ── Bootstrap admin (K1 — must_change_password on first login) ──
+      - key: OMNISIGHT_ADMIN_EMAIL
+        scope: RUN_TIME
+        value: "admin@example.com"
+      - key: OMNISIGHT_ADMIN_PASSWORD
+        scope: RUN_TIME
+        type: SECRET
+        value: "EV[1:PLACEHOLDER:REPLACE_AFTER_DEPLOY]"
+
+  # ── Frontend (Next.js standalone) ───────────────────────────────────
+  # Public service — serves the root route. `BACKEND_URL` is the
+  # server-side URL Next.js uses for /api/* rewrites (see next.config.mjs).
+  - name: frontend
+    dockerfile_path: Dockerfile.frontend
+    source_dir: /
+    github:
+      repo: limit5/OmniSight-Productizer
+      branch: master
+      deploy_on_push: true
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    http_port: 3000
+    routes:
+      - path: /
+    health_check:
+      http_path: /
+      initial_delay_seconds: 30
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+      success_threshold: 1
+    envs:
+      - key: NODE_ENV
+        scope: RUN_AND_BUILD_TIME
+        value: "production"
+      # Build-time: next.config.mjs bakes BACKEND_URL into the proxy
+      # rewrite. At runtime we also pass it so server-side fetch uses
+      # the DO-injected private URL (the <service>.PRIVATE_URL token
+      # resolves to http://backend:<internal_port> inside the VPC).
+      - key: BACKEND_URL
+        scope: RUN_AND_BUILD_TIME
+        value: ${backend.PRIVATE_URL}
+      - key: NEXT_PUBLIC_API_URL
+        scope: RUN_AND_BUILD_TIME
+        value: ${APP_URL}
+
+# ── Optional: managed Postgres for durable storage ─────────────────────
+# Uncomment if you need persistence across deploys. Requires the backend
+# to read OMNISIGHT_DATABASE_URL (SQLAlchemy URL) instead of the default
+# SQLite path. $5/mo dev-db tier shown; bump to production-xs for real use.
+#
+# databases:
+#   - name: omnisight-db
+#     engine: PG
+#     version: "16"
+#     size: db-s-dev-database
+#     num_nodes: 1
+#     production: false
