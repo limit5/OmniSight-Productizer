@@ -215,13 +215,17 @@ class TestBlueGreenDispatchBranch:
             "`docker compose stop backend-a` runs"
         )
 
-    def test_blue_green_fails_closed_until_ceremony_wired(
+    def test_blue_green_ceremony_wires_exits_6_and_7(
         self, deploy_sh_text: str
     ) -> None:
-        # Pull the blue-green branch body and assert the deliberate
-        # `exit 5`. The remainder of G3 (rows 1354-1357) will replace
-        # this fail-closed stub with the real ceremony; until then, the
-        # contract is: flag accepted, but NO upstream touch.
+        # Row 1355 replaces the fail-closed stub with the real ceremony.
+        # The contract now is: pre-cut smoke fail → exit 6 (NO cutover),
+        # observation window degradation → exit 7 (cutover DID happen,
+        # operator should rollback). Exit 5 is retained for the narrow
+        # case where the blue-green primitive itself is missing (state
+        # dir / switch script not shipped). Pinning all three codes
+        # here so a future refactor that collapses them into `exit 1`
+        # or drops the ceremony entirely trips this test.
         match = re.search(
             r'if\s+\[\[\s+"\$STRATEGY"\s*==\s*"blue-green"\s*\]\];\s*then(.+?)elif\s+\[\[\s+"\$STRATEGY"\s*==\s*"rolling"',
             deploy_sh_text,
@@ -229,10 +233,17 @@ class TestBlueGreenDispatchBranch:
         )
         assert match, "could not locate blue-green dispatch body"
         body = match.group(1)
+        assert re.search(r"\bexit\s+6\b", body), (
+            "blue-green branch must `exit 6` on pre-cut smoke failure "
+            "(ceremony row 1355 — no cutover occurred, active color unchanged)"
+        )
+        assert re.search(r"\bexit\s+7\b", body), (
+            "blue-green branch must `exit 7` on observation-window degradation "
+            "(ceremony row 1355 — cutover DID happen, operator should rollback)"
+        )
         assert re.search(r"\bexit\s+5\b", body), (
-            "blue-green branch must `exit 5` (ENOSYS-like) until the "
-            "remaining G3 ceremony deliverables land — never silently "
-            "fall through to rolling/systemd"
+            "blue-green branch must retain `exit 5` for missing primitive / "
+            "state dir (fail-closed when deploy/blue-green/ isn't initialised)"
         )
 
     def test_blue_green_checks_compose_file_exists(

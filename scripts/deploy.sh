@@ -18,11 +18,23 @@
 # Strategy flag (G3 HA-03 TODO row 1353):
 #   `--strategy <rolling|systemd|blue-green>` is the GNU-style form.
 #   Accepts the same three values the positional arg accepts; when both
-#   are supplied the flag wins. Added so the blue-green ceremony (TODO
-#   row 1354-1357: atomic upstream switch, pre-cut smoke, observe window,
-#   --rollback) has a stable selector operators can script against —
-#   without breaking the positional-arg contract tests the G2 rolling
-#   suite relies on.
+#   are supplied the flag wins.
+#
+# Blue-green ceremony (G3 HA-03 TODO row 1355):
+#   `--strategy blue-green` runs the full cutover ceremony:
+#     1. Recreate STANDBY container with new image; wait for /readyz.
+#     2. Pre-cut smoke (`scripts/prod_smoke_test.py` on standby host port)
+#        — smoke fail = exit 6, NO symlink flip, active color unchanged.
+#     3. Atomic cutover via `scripts/bluegreen_switch.sh set-active`
+#        (rename(2) over the `deploy/blue-green/active_upstream.caddy` symlink).
+#     4. Caddy reload (via `OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD`).
+#     5. Record retention breadcrumbs (cutover_timestamp + previous_retention_until).
+#     6. 5-minute `/readyz` observation window; consecutive failures =
+#        exit 7 (operator runs `scripts/deploy.sh --rollback` — row 1356).
+#     7. OLD color's container stays warm for 24 h so rollback is instant.
+#   Tunables: OMNISIGHT_BLUEGREEN_{SMOKE_TIMEOUT,OBSERVE_SECONDS,
+#     OBSERVE_INTERVAL,OBSERVE_MAX_FAILURES,RETENTION_HOURS}
+#   Escape hatches: OMNISIGHT_BLUEGREEN_DRY_RUN=1 / OMNISIGHT_BLUEGREEN_SKIP_SMOKE=1
 #
 # Rolling mode (G2 / HA-02 TODO row 1347):
 #   Used when the host runs the dual-replica docker-compose topology
@@ -284,41 +296,234 @@ rolling_restart_replica() {
 }
 
 if [[ "$STRATEGY" == "blue-green" ]]; then
-  # G3 HA-03 blue-green cutover landing pad (TODO rows 1353-1357).
-  # The `--strategy blue-green` flag is accepted and validated here;
-  # row 1354 (atomic active/standby switch mechanism) ships the
-  # `scripts/bluegreen_switch.sh` primitive + `deploy/blue-green/`
-  # state dir, which we consult below to SHOW the operator the current
-  # state. The remaining ceremony (pre-cut smoke on standby, 5-min
-  # observation window, 24 h rollback retention, `deploy.sh --rollback`
-  # companion, runbook) is tracked in rows 1355-1357 and will fill in
-  # this branch incrementally. Until those deliverables land we fail
-  # CLOSED with a distinct exit code (5) — *not* silently fall through
-  # to rolling/systemd — so an operator who types `scripts/deploy.sh
-  # --strategy blue-green prod v0.2.0` gets an explicit "not yet fully
-  # wired" signal instead of an accidental rolling restart dressed up
-  # as blue-green. The atomic switch primitive is callable standalone
-  # (see status print below); deploy.sh itself does NOT invoke the
-  # cutover yet because there's no pre-cut smoke gate in front of it.
+  # G3 HA-03 blue-green cutover ceremony (TODO rows 1353-1357).
+  #
+  # Ceremony flow (row 1355):
+  #   (1) Resolve active/standby colors from `bluegreen_switch.sh status`.
+  #   (2) Re-create the standby container with the new image
+  #       (`docker compose up -d --no-deps --force-recreate backend-<standby>`)
+  #       and wait for `/readyz` on the standby host port.
+  #   (3) Pre-cut smoke: run `scripts/prod_smoke_test.py` against the
+  #       STANDBY replica (not the proxy) — every DAG runs through the
+  #       fresh code *before* any client traffic touches it. Smoke fail
+  #       → exit 6, NO cutover occurs, standby container left running
+  #       so the operator can triage with `docker compose logs backend-<standby>`.
+  #   (4) Atomic cutover via `bluegreen_switch.sh set-active <standby>` —
+  #       rename(2)-based symlink flip, Caddy sees the new upstream on
+  #       its next config reload. Optional reload via
+  #       `OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD` (operators running Caddy
+  #       outside compose skip this and reload by hand).
+  #   (5) Record retention breadcrumbs: `deploy/blue-green/cutover_timestamp`
+  #       (Unix seconds of cutover) + `deploy/blue-green/previous_retention_until`
+  #       (cutover + 24 h) so row 1356 rollback can verify it's still
+  #       within the retention window and row 1357 runbook can surface
+  #       when the old color becomes eligible for pruning.
+  #   (6) 5-min observation: poll `/readyz` on the new active's host port
+  #       every 15 s. More than `OMNISIGHT_BLUEGREEN_OBSERVE_MAX_FAILURES`
+  #       consecutive failures → exit 7 (operator should run
+  #       `deploy.sh --rollback`).
+  #   (7) The OLD color's container is NEVER stopped — it stays warm,
+  #       still passing `/readyz` probes, ready for instant rollback
+  #       during the 24 h retention window.
+  #
+  # Exit codes (blue-green):
+  #   0 — ceremony passed (smoke + cutover + 5-min observe all green)
+  #   3 — standby failed to come up (before cutover — NO symlink flip)
+  #   4 — compose file missing
+  #   5 — blue-green primitive / state dir missing (can't resolve colors)
+  #   6 — pre-cut smoke failed (before cutover — NO symlink flip)
+  #   7 — 5-min observation window detected degradation (cutover DID
+  #       happen, operator should run `deploy.sh --rollback`)
+  #
+  # Escape hatches:
+  #   OMNISIGHT_BLUEGREEN_DRY_RUN=1   — print the plan, exit 0 before any
+  #                                     docker / symlink mutation (used by
+  #                                     contract tests + operator sanity check).
+  #   OMNISIGHT_BLUEGREEN_SKIP_SMOKE=1 — SKIP the pre-cut smoke (DANGEROUS
+  #                                     — only for local dev against fixtures
+  #                                     without the full DAG runner).
   log "blue-green mode: compose=$COMPOSE_FILE (active/standby cutover)"
   if [[ ! -f "$ROOT/$COMPOSE_FILE" ]]; then
     echo "[deploy] blue-green: compose file '$COMPOSE_FILE' missing — cannot select active/standby color" >&2
     exit 4
   fi
-  # Row 1354: surface current blue-green state if the primitive is
-  # present. Missing state dir is NOT fatal (dev hosts that never
-  # initialized blue-green still get the fail-closed message) — we
-  # just skip the status print.
+
   BLUEGREEN_SWITCH="$ROOT/scripts/bluegreen_switch.sh"
-  if [[ -x "$BLUEGREEN_SWITCH" && -d "$ROOT/deploy/blue-green" ]]; then
-    log "blue-green state (row 1354 primitive):"
-    if ! "$BLUEGREEN_SWITCH" status | sed 's/^/  /' >&2; then
-      echo "[deploy] WARN: bluegreen_switch.sh status failed — state may need reconciliation" >&2
-    fi
+  BLUEGREEN_STATE_DIR="$ROOT/deploy/blue-green"
+  if [[ ! -x "$BLUEGREEN_SWITCH" || ! -d "$BLUEGREEN_STATE_DIR" ]]; then
+    echo "[deploy] blue-green: atomic switch primitive missing (expected $BLUEGREEN_SWITCH + $BLUEGREEN_STATE_DIR). Ship TODO row 1354 first." >&2
+    exit 5
   fi
-  echo "[deploy] blue-green: --strategy flag accepted; row 1354 atomic switch primitive is wired (scripts/bluegreen_switch.sh + deploy/blue-green/). Remaining ceremony (pre-cut smoke → atomic upstream switch → 5-min observe → 24 h rollback retention) is tracked in TODO rows 1355-1357. Aborting before any upstream switch so no half-applied cutover runs against $ENV." >&2
-  echo "[deploy] blue-green: next steps — wire pre-cut smoke via scripts/prod_smoke_test.py on the standby color (row 1355), then add deploy.sh --rollback (row 1356) and docs/ops/blue_green_runbook.md (row 1357). To switch colors manually TODAY: $BLUEGREEN_SWITCH switch" >&2
-  exit 5
+
+  # Tunables — all env-overridable so contract tests and operators can
+  # shorten the observe window / skip smoke without editing this file.
+  BLUEGREEN_SMOKE_TIMEOUT="${OMNISIGHT_BLUEGREEN_SMOKE_TIMEOUT:-300}"
+  BLUEGREEN_OBSERVE_SECONDS="${OMNISIGHT_BLUEGREEN_OBSERVE_SECONDS:-300}"
+  BLUEGREEN_OBSERVE_INTERVAL="${OMNISIGHT_BLUEGREEN_OBSERVE_INTERVAL:-15}"
+  BLUEGREEN_OBSERVE_MAX_FAILURES="${OMNISIGHT_BLUEGREEN_OBSERVE_MAX_FAILURES:-3}"
+  BLUEGREEN_RETENTION_HOURS="${OMNISIGHT_BLUEGREEN_RETENTION_HOURS:-24}"
+  BLUEGREEN_STANDBY_READY_TIMEOUT="${OMNISIGHT_BLUEGREEN_STANDBY_READY_TIMEOUT:-${ROLL_READY_TIMEOUT}}"
+  BLUEGREEN_CADDY_RELOAD_CMD="${OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD:-}"
+
+  # Map color → compose service + host port (matches docker-compose.prod.yml
+  # dual-replica topology G2 #2 / TODO row 1346).
+  bluegreen_service_for_color() {
+    case "$1" in
+      blue)  echo "backend-a" ;;
+      green) echo "backend-b" ;;
+      *)     echo "" ;;
+    esac
+  }
+  bluegreen_port_for_color() {
+    case "$1" in
+      blue)  echo 8000 ;;
+      green) echo 8001 ;;
+      *)     echo "" ;;
+    esac
+  }
+
+  log "blue-green state (row 1354 primitive):"
+  if ! "$BLUEGREEN_SWITCH" status | sed 's/^/  /' >&2; then
+    echo "[deploy] blue-green: bluegreen_switch.sh status failed — state may need reconciliation" >&2
+    exit 5
+  fi
+
+  # (1) Resolve colors. `bluegreen_switch.sh status` prints `active=<color>`
+  # on stdout; we parse it so the ceremony knows which replica is the
+  # pre-cut smoke target.
+  status_out=$("$BLUEGREEN_SWITCH" status)
+  BG_ACTIVE=$(printf '%s\n' "$status_out" | sed -n 's/^active=//p')
+  BG_STANDBY=$(printf '%s\n' "$status_out" | sed -n 's/^standby=//p')
+  if [[ -z "$BG_ACTIVE" || -z "$BG_STANDBY" ]]; then
+    echo "[deploy] blue-green: could not parse active/standby from switch status output:" >&2
+    echo "$status_out" | sed 's/^/  /' >&2
+    exit 5
+  fi
+  BG_STANDBY_SVC=$(bluegreen_service_for_color "$BG_STANDBY")
+  BG_STANDBY_PORT=$(bluegreen_port_for_color "$BG_STANDBY")
+  BG_ACTIVE_PORT=$(bluegreen_port_for_color "$BG_ACTIVE")
+  if [[ -z "$BG_STANDBY_SVC" || -z "$BG_STANDBY_PORT" || -z "$BG_ACTIVE_PORT" ]]; then
+    echo "[deploy] blue-green: unknown color mapping (active=$BG_ACTIVE standby=$BG_STANDBY)" >&2
+    exit 5
+  fi
+
+  log "blue-green plan: cutover $BG_ACTIVE (:$BG_ACTIVE_PORT, keep warm 24 h) → $BG_STANDBY (:$BG_STANDBY_PORT, $BG_STANDBY_SVC) via pre-cut smoke → atomic switch → ${BLUEGREEN_OBSERVE_SECONDS}s observe"
+
+  if [[ "${OMNISIGHT_BLUEGREEN_DRY_RUN:-0}" == "1" ]]; then
+    log "blue-green: OMNISIGHT_BLUEGREEN_DRY_RUN=1 — plan printed, no docker / symlink changes"
+    log "blue-green: dry-run complete (standby=$BG_STANDBY would be recreated + smoked, then symlink flipped)"
+    exit 0
+  fi
+
+  # (2) Re-create standby container with the new image. `--no-deps`
+  # avoids touching the frontend / active replica; `--force-recreate`
+  # ensures the new image + env take effect even if the tag is the
+  # same as before.
+  log "blue-green[$BG_STANDBY_SVC]: recreating standby container"
+  docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$BG_STANDBY_SVC"
+
+  log "blue-green[$BG_STANDBY_SVC]: waiting for /readyz on :$BG_STANDBY_PORT (timeout: ${BLUEGREEN_STANDBY_READY_TIMEOUT}s)"
+  standby_ready_url="http://localhost:${BG_STANDBY_PORT}/readyz"
+  standby_ready=0
+  standby_waited=0
+  while (( standby_waited < BLUEGREEN_STANDBY_READY_TIMEOUT )); do
+    if curl -sf -m 2 "$standby_ready_url" >/dev/null 2>&1; then
+      standby_ready=1
+      break
+    fi
+    sleep "$ROLL_POLL_INTERVAL"
+    standby_waited=$((standby_waited + ROLL_POLL_INTERVAL))
+  done
+  if [[ "$standby_ready" != "1" ]]; then
+    echo "[deploy] blue-green[$BG_STANDBY_SVC]: /readyz never returned 200 within ${BLUEGREEN_STANDBY_READY_TIMEOUT}s — aborting BEFORE cutover (active color unchanged)" >&2
+    echo "[deploy]    triage: docker compose -f $COMPOSE_FILE logs --tail=200 $BG_STANDBY_SVC" >&2
+    exit 3
+  fi
+  log "blue-green[$BG_STANDBY_SVC]: /readyz pass — standby is up on :$BG_STANDBY_PORT"
+
+  # (3) Pre-cut smoke on standby. We point prod_smoke_test.py DIRECTLY
+  # at the standby host port so the DAGs run through the fresh code
+  # before Caddy routes any real user there. Bypassing the proxy is
+  # deliberate: we want "does the new image work end-to-end?", not
+  # "does the load balancer work?".
+  if [[ "${OMNISIGHT_BLUEGREEN_SKIP_SMOKE:-0}" == "1" ]]; then
+    echo "[deploy] blue-green: OMNISIGHT_BLUEGREEN_SKIP_SMOKE=1 — skipping pre-cut smoke (DANGEROUS — dev-only)" >&2
+  else
+    log "blue-green: pre-cut smoke on standby (scripts/prod_smoke_test.py → http://localhost:$BG_STANDBY_PORT, timeout ${BLUEGREEN_SMOKE_TIMEOUT}s)"
+    if ! timeout "$BLUEGREEN_SMOKE_TIMEOUT" python3 "$ROOT/scripts/prod_smoke_test.py" "http://localhost:$BG_STANDBY_PORT"; then
+      echo "[deploy] blue-green: PRE-CUT SMOKE FAILED — aborting BEFORE cutover (active color unchanged, standby left warm for triage)" >&2
+      echo "[deploy]    triage: docker compose -f $COMPOSE_FILE logs --tail=200 $BG_STANDBY_SVC" >&2
+      echo "[deploy]    triage: curl http://localhost:$BG_STANDBY_PORT/readyz" >&2
+      exit 6
+    fi
+    log "blue-green: pre-cut smoke PASS — safe to cut over"
+  fi
+
+  # (4) Atomic cutover — the one-line rename(2) flip. Everything before
+  # this point is reversible by just redeploying the same image; this
+  # line is the actual traffic flip.
+  log "blue-green: ATOMIC CUTOVER → $BG_STANDBY (was: $BG_ACTIVE)"
+  "$BLUEGREEN_SWITCH" set-active "$BG_STANDBY"
+
+  # Reload Caddy so the new symlink target takes effect. The command
+  # varies by topology (docker compose service vs. host-installed
+  # systemd unit vs. external LB), so we delegate to an operator-
+  # supplied env override. If empty, emit a hint — the symlink is
+  # already swapped, so a manual `caddy reload` is all that's left.
+  if [[ -n "$BLUEGREEN_CADDY_RELOAD_CMD" ]]; then
+    log "blue-green: reloading Caddy ($BLUEGREEN_CADDY_RELOAD_CMD)"
+    if ! bash -c "$BLUEGREEN_CADDY_RELOAD_CMD"; then
+      echo "[deploy] WARN: Caddy reload command failed — symlink is already on $BG_STANDBY, but the running Caddy may still see the old upstream. Run the reload command by hand." >&2
+    fi
+  else
+    log "blue-green: OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD not set — reload Caddy manually (e.g. docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile)"
+  fi
+
+  # (5) Retention breadcrumbs — row 1356 rollback reads these to verify
+  # the old color is still within the 24 h rollback window; row 1357
+  # runbook surfaces them to the operator.
+  cutover_ts=$(date +%s)
+  retention_until=$((cutover_ts + BLUEGREEN_RETENTION_HOURS * 3600))
+  retention_until_iso=$(date -u -d "@$retention_until" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || python3 -c "import datetime,sys; print(datetime.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$retention_until")
+  printf '%s\n' "$cutover_ts" > "$BLUEGREEN_STATE_DIR/cutover_timestamp.tmp.$$"
+  mv -f "$BLUEGREEN_STATE_DIR/cutover_timestamp.tmp.$$" "$BLUEGREEN_STATE_DIR/cutover_timestamp"
+  printf '%s\n' "$retention_until" > "$BLUEGREEN_STATE_DIR/previous_retention_until.tmp.$$"
+  mv -f "$BLUEGREEN_STATE_DIR/previous_retention_until.tmp.$$" "$BLUEGREEN_STATE_DIR/previous_retention_until"
+  log "blue-green: retention window — old color ($BG_ACTIVE) kept warm until $retention_until_iso (+${BLUEGREEN_RETENTION_HOURS}h). Do NOT prune $BG_ACTIVE's container before that."
+
+  # (6) 5-minute observation window. Poll new active's /readyz; if we
+  # hit OBSERVE_MAX_FAILURES consecutive failures we exit 7 so the
+  # operator knows to run `deploy.sh --rollback` (row 1356).
+  new_active_url="http://localhost:${BG_STANDBY_PORT}/readyz"
+  log "blue-green: observation window — polling $new_active_url every ${BLUEGREEN_OBSERVE_INTERVAL}s for ${BLUEGREEN_OBSERVE_SECONDS}s"
+  observe_elapsed=0
+  observe_failures=0
+  observe_checks=0
+  while (( observe_elapsed < BLUEGREEN_OBSERVE_SECONDS )); do
+    observe_checks=$((observe_checks + 1))
+    if curl -sf -m 5 "$new_active_url" >/dev/null 2>&1; then
+      observe_failures=0
+    else
+      observe_failures=$((observe_failures + 1))
+      echo "[deploy] blue-green: observation probe #$observe_checks FAIL (consecutive=$observe_failures/$BLUEGREEN_OBSERVE_MAX_FAILURES)" >&2
+      if (( observe_failures >= BLUEGREEN_OBSERVE_MAX_FAILURES )); then
+        echo "[deploy] blue-green: observation window DETECTED DEGRADATION ($observe_failures consecutive /readyz failures) — run: scripts/deploy.sh --rollback" >&2
+        exit 7
+      fi
+    fi
+    sleep "$BLUEGREEN_OBSERVE_INTERVAL"
+    observe_elapsed=$((observe_elapsed + BLUEGREEN_OBSERVE_INTERVAL))
+  done
+  log "blue-green: observation window PASS ($observe_checks probes over ${BLUEGREEN_OBSERVE_SECONDS}s, no sustained failure)"
+
+  # (7) Old color container is intentionally left running — warm for
+  # the 24 h retention window so row 1356 `deploy.sh --rollback` can
+  # flip the symlink back in seconds without needing to recreate the
+  # container. Operators running a disk-tight host can manually
+  # `docker compose stop backend-<old>` after the retention_until
+  # timestamp, or let row 1357 cron prune it.
+  log "blue-green: deploy complete — new active is $BG_STANDBY (:$BG_STANDBY_PORT), old $BG_ACTIVE (:$BG_ACTIVE_PORT) kept warm for ${BLUEGREEN_RETENTION_HOURS}h rollback retention"
 elif [[ "$STRATEGY" == "rolling" ]]; then
   log "rolling mode: compose=$COMPOSE_FILE (backend-a:8000 → backend-b:8001)"
   if [[ ! -f "$ROOT/$COMPOSE_FILE" ]]; then

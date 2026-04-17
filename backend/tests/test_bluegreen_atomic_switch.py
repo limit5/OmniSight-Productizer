@@ -28,10 +28,11 @@ Deliverables pinned by this file:
     * Caddy snippets use a shared name ``(active_upstream_rp)`` so
       the consumer Caddyfile never needs to know which color is
       live — the symlink abstracts that decision.
-    * ``scripts/deploy.sh --strategy blue-green`` shows current
-      state (via ``bluegreen_switch.sh status``) but STILL fails
-      closed (``exit 5``) because the full ceremony (rows 1355-
-      1357) isn't wired.
+    * ``scripts/deploy.sh --strategy blue-green`` integrates with
+      the primitive: parses ``active``/``standby`` from
+      ``bluegreen_switch.sh status`` and invokes ``set-active``
+      during cutover (row 1355 ceremony). ``exit 5`` is retained
+      only for the narrow "primitive / state dir missing" path.
 
 Siblings:
     * test_deploy_sh_blue_green_flag.py  — G3 #1 flag contract (24)
@@ -468,12 +469,12 @@ class TestDeployShIntegration:
             "so row 1354's primitive is discoverable to operators"
         )
 
-    def test_deploy_sh_still_exits_5_on_blue_green(self, deploy_sh_text: str) -> None:
-        # Row 1354 delivers the switch mechanism but NOT the full
-        # ceremony. Deploy.sh must still fail closed (exit 5) until
-        # rows 1355-1357 land — regression lock against a well-meaning
-        # refactor that wires the switch call prematurely without the
-        # pre-cut smoke gate.
+    def test_deploy_sh_blue_green_invokes_set_active(self, deploy_sh_text: str) -> None:
+        # Row 1355 lands the ceremony — deploy.sh now actually invokes
+        # the row-1354 primitive. The regression lock flips: we pin
+        # that `bluegreen_switch.sh set-active` IS called from the
+        # blue-green arm. If a future refactor drops this call the
+        # ceremony becomes a no-op flip dressed up as a cutover.
         match = re.search(
             r'if\s+\[\[\s+"\$STRATEGY"\s*==\s*"blue-green"\s*\]\];\s*then(.+?)elif\s+\[\[\s+"\$STRATEGY"\s*==\s*"rolling"',
             deploy_sh_text,
@@ -481,9 +482,13 @@ class TestDeployShIntegration:
         )
         assert match, "could not locate blue-green dispatch body"
         body = match.group(1)
-        assert re.search(r"\bexit\s+5\b", body), (
-            "deploy.sh blue-green arm must still `exit 5` — full "
-            "ceremony (pre-cut smoke → switch → observe) is rows 1355-1357"
+        assert re.search(
+            r'"\$BLUEGREEN_SWITCH"\s+set-active\s+"\$BG_STANDBY"', body
+        ), (
+            "deploy.sh blue-green arm must invoke "
+            "`bluegreen_switch.sh set-active $BG_STANDBY` for the atomic "
+            "cutover — that's the one-line rename(2) flip that actually "
+            "moves traffic"
         )
 
     def test_deploy_sh_blue_green_body_references_state_dir(
