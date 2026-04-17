@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import logging
 
-from pythonjsonlogger import jsonlogger
+# python-json-logger 4.x renamed `jsonlogger` → `json`. Keep compatibility
+# with both layouts so users who ran `pip install` before the rename
+# don't get broken; new installs hit the renamed module directly.
+try:
+    from pythonjsonlogger.json import JsonFormatter
+except ImportError:
+    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[assignment]
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -18,7 +24,7 @@ def configure_logging(level: str = "INFO") -> None:
         return
 
     handler = logging.StreamHandler()
-    formatter = jsonlogger.JsonFormatter(
+    formatter = JsonFormatter(
         "%(asctime)s %(name)s %(levelname)s %(message)s",
         rename_fields={"asctime": "ts", "levelname": "level"},
     )
