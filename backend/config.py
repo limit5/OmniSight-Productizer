@@ -18,6 +18,12 @@ class Settings(BaseSettings):
 
     # Database
     database_path: str = ""  # SQLite path (empty = default data/omnisight.db)
+    # G4 #2 (HA-04): full DATABASE_URL overrides database_path. Accepts both
+    # `sqlite:///path/to.db` and `postgresql+asyncpg://user:pw@host:5432/db`.
+    # When set, the abstraction in backend/db_url.py dispatches to the right
+    # async driver (aiosqlite / asyncpg). Legacy callers that only read
+    # `database_path` continue to work for SQLite deployments.
+    database_url: str = ""
 
     # I9/I10: Redis (rate limiting, multi-worker shared state)
     redis_url: str = ""  # e.g. redis://localhost:6379/0

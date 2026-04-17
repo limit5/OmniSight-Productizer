@@ -28,12 +28,32 @@ if config.config_file_name is not None:
 
 def _resolve_db_url() -> str:
     # N8: SQLALCHEMY_URL wins so the dual-track validator can point
-    # Alembic at a Postgres service container. Falls back to the
-    # legacy OMNISIGHT_DATABASE_PATH → sqlite:// path so SQLite-only
-    # callers (dev, existing CI jobs) are untouched.
+    # Alembic at a Postgres service container.
+    # G4 #2 (HA-04): OMNISIGHT_DATABASE_URL / DATABASE_URL are next —
+    # this is the new connection-abstraction env that the runtime also
+    # reads. Alembic itself cannot drive asyncpg (sync engine only), so
+    # we coerce `postgresql+asyncpg://` → `postgresql+psycopg2://` here.
+    # Falls back to the legacy OMNISIGHT_DATABASE_PATH → sqlite:// path
+    # so SQLite-only callers (dev, existing CI jobs) are untouched.
     full = os.environ.get("SQLALCHEMY_URL", "").strip()
     if full:
         return full
+    for key in ("OMNISIGHT_DATABASE_URL", "DATABASE_URL"):
+        url = os.environ.get(key, "").strip()
+        if url:
+            try:
+                # Lazy import — keeps env.py usable even if the backend
+                # package is not on sys.path (e.g. a minimal alembic tool
+                # invocation).
+                import sys
+                root = Path(__file__).resolve().parents[2]
+                if str(root) not in sys.path:
+                    sys.path.insert(0, str(root))
+                from backend.db_url import parse  # type: ignore
+            except Exception:  # pragma: no cover — defensive
+                return url
+            parsed = parse(url)
+            return parsed.sqlalchemy_url(sync=True)
     env = os.environ.get("OMNISIGHT_DATABASE_PATH", "").strip()
     if env:
         return f"sqlite:///{env}"
