@@ -1,0 +1,67 @@
+# Keep build context slim + prevent host artifacts from clobbering
+# the freshly-installed /app/node_modules inside the frontend image.
+#
+# ── Why each entry ──
+# node_modules/.next/.pnpm-store : COPY . . in Dockerfile.frontend line 14
+#   overwrites /app/node_modules just installed at line 11 → "cannot copy
+#   to non-directory" on buildkit cachemounts. Discovered live during L9
+#   quick-start.sh end-to-end testing on 2026-04-17.
+# __pycache__/.pytest_cache : Python bytecode + test caches bloat context.
+# .git : ~GB of pack files not needed at build time.
+# data/*.db : local dev SQLite files shouldn't leak into image.
+# test-results/playwright-report : test run output, not shipped.
+# .venv : backend tests sometimes create a local venv.
+# .agent_workspaces : dev workspace clones can be huge.
+
+# Frontend
+node_modules
+.next
+.pnpm-store
+.turbo
+.eslintcache
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+.venv
+
+# Local data / runtime state
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/.bootstrap_state.json
+.artifacts
+.sdks
+.agent_workspaces
+
+# Tests / CI artifacts
+test-results
+playwright-report
+coverage
+htmlcov
+.tox
+.nyc_output
+
+# VCS / editor
+.git
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Env secrets (the real .env is mounted via env_file in compose, not COPYed)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Dockerignore itself
+.dockerignore

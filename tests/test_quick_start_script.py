@@ -1163,3 +1163,396 @@ def test_validators_accept_common_valid_domains():
         assert "ALL_ACCEPT_OK" in r.stdout
     finally:
         os.unlink(path)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# L9 final — end-to-end script-flow contract.
+#
+# Verified live on a real WSL2 + systemd + Docker 29.4 host on 2026-04-17:
+# Step 0 preflight → all green; Step 1 .env skip (pre-existing) → green;
+# Step 2 `docker compose up --build` → containers start; Step 3 health
+# polling → backend `/api/v1/health` + frontend `/` both 200; Step 4 CF
+# tunnel → cleanly auto-skipped in non-interactive mode (no TTY) with the
+# documented warn→exit path; Step 6 browser-open → xdg-open absent,
+# explorer.exe absent on this sandbox → silent fall-through (no crash).
+# Residuals that genuinely require an operator: (a) real CF API token +
+# real domain → "CF tunnel active" gate, (b) Windows-side browser →
+# "browser opens" gate. These are verified by hand during the L1-01 prod
+# deploy runbook (HANDOFF.md Step 1-3).
+#
+# The tests below pin the non-interactive control-flow contract so a
+# future regression that e.g. makes the script hang on a read prompt in
+# CI / a piped shell would fail loudly. They do NOT boot Docker — the
+# real boot was exercised once, live, during this task.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_non_interactive_mode_auto_detected_from_non_tty():
+    """If stdin/stdout aren't a TTY (CI, piped shell, subprocess), the script
+    must set NON_INTERACTIVE=true automatically so `read -rp` doesn't hang.
+
+    Regression guard: a previous draft used `[ -t 0 ]` only → when stdout
+    was redirected but stdin was a TTY, the CF prompt would still fire
+    and silently consume a newline from the TTY-terminated stdin → CF
+    setup skipped without a warning message, confusing the user.
+    """
+    content = SCRIPT.read_text()
+    # Must check BOTH fds so piped-stdout-only + piped-stdin-only both trip.
+    assert "[ ! -t 0 ] || [ ! -t 1 ]" in content, (
+        "NON_INTERACTIVE must auto-detect when EITHER stdin or stdout is "
+        "not a TTY — regression: old code used stdin only"
+    )
+
+
+def test_non_interactive_skips_cf_tunnel_setup_cleanly():
+    """When NON_INTERACTIVE=true the CF tunnel step must auto-answer N
+    and emit an explicit warning — not silently do nothing.
+
+    Pin: the exact branch that fires on CI, in piped shells, or when
+    stdin is captured by a test harness. Must leave CF_READY=false so
+    Step 5 (NS migration) + Step 6 (browser URL) fall back to the
+    localhost flow rather than pointing at a dead HTTPS URL.
+    """
+    content = SCRIPT.read_text()
+    # The exact branch — keep as a single literal so a refactor that
+    # restructures the if/else can't silently break this contract.
+    assert 'if [ "$NON_INTERACTIVE" = true ]; then' in content
+    assert 'cf_setup="N"' in content, (
+        "non-interactive branch must set cf_setup=N"
+    )
+    # User must be told why CF was skipped — silent skip is a footgun.
+    assert "非互動模式：跳過 Cloudflare Tunnel 設定" in content
+
+
+def test_wait_for_health_is_resilient_to_transient_failures():
+    """`_wait_for_health` must retry on curl failure, not bail on first.
+    Extract the function, stub curl to fail twice then succeed, and
+    verify it returns success on the 3rd attempt.
+
+    This pins the Step 3 health-polling contract — the one gate that
+    translates "containers are up" into "containers are actually ready".
+    """
+    import tempfile
+
+    src = SCRIPT.read_text()
+    start = src.index("_wait_for_health() {")
+    end = src.index("\n}\n", start) + 2
+    func = src[start:end]
+
+    harness = textwrap.dedent(
+        r"""
+        #!/usr/bin/env bash
+        set -uo pipefail
+        # Stub log/err so the extracted function doesn't complain about missing
+        # helpers. tee -a "$LOG_FILE" is not used inside _wait_for_health but
+        # its callers use log() so stub for safety if the extraction creeps.
+        LOG_FILE=/dev/null
+        log()  { echo "LOG $*"; }
+        err()  { echo "ERR $*"; }
+        warn() { echo "WARN $*"; }
+
+        # Stub `curl` — fail the first 2 calls, succeed from the 3rd onward.
+        # Writes attempt count to a sidecar so the test can assert the retry
+        # loop actually ran rather than short-circuiting.
+        COUNTER_FILE="$1"
+        echo 0 > "$COUNTER_FILE"
+        curl() {
+            local n
+            n=$(cat "$COUNTER_FILE")
+            n=$((n + 1))
+            echo "$n" > "$COUNTER_FILE"
+            if [ "$n" -ge 3 ]; then
+                return 0
+            fi
+            return 7  # curl: couldn't connect
+        }
+        export -f curl
+
+        __FN__
+
+        # interval=0 so the test doesn't burn 12s of real wall time
+        _wait_for_health "Backend" "http://localhost:8000/api/v1/health" 10 0
+        echo "EXIT_CODE=$?"
+        """
+    ).replace("__FN__", func)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        f.write(harness)
+        path = f.name
+    counter = path + ".count"
+
+    try:
+        r = subprocess.run(
+            ["bash", path, counter],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0, (
+            f"_wait_for_health harness failed:\n"
+            f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+        )
+        assert "EXIT_CODE=0" in r.stdout, (
+            "function must return 0 after retrying past the transient "
+            f"failures.\nSTDOUT:\n{r.stdout}"
+        )
+        assert "Backend 就緒（第 3/10 次檢查）" in r.stdout, (
+            "must log which retry succeeded — critical debugging aid "
+            f"when users report 'slow startup'.\nSTDOUT:\n{r.stdout}"
+        )
+        attempts = int(Path(counter).read_text().strip())
+        assert attempts == 3, (
+            f"stubbed curl should have been called 3 times, got {attempts}"
+        )
+    finally:
+        os.unlink(path)
+        if Path(counter).exists():
+            os.unlink(counter)
+
+
+def test_wait_for_health_times_out_with_actionable_error():
+    """Flip side of the retry test: if the service NEVER comes up, the
+    function must return non-zero with the exact "啟動超時" message AND
+    a copy-pasteable `docker compose logs` hint — not just die silently.
+    """
+    import tempfile
+
+    src = SCRIPT.read_text()
+    start = src.index("_wait_for_health() {")
+    end = src.index("\n}\n", start) + 2
+    func = src[start:end]
+
+    harness = textwrap.dedent(
+        r"""
+        #!/usr/bin/env bash
+        set -uo pipefail
+        LOG_FILE=/dev/null
+        COMPOSE_FILE="docker-compose.prod.yml"
+        log()  { echo "LOG $*"; }
+        err()  { echo "ERR $*"; }
+        curl() { return 7; }     # always fail
+        export -f curl
+
+        __FN__
+
+        # retries=3, interval=0 — function must give up after 3 attempts.
+        _wait_for_health "Backend" "http://localhost:8000/api/v1/health" 3 0
+        echo "EXIT_CODE=$?"
+        """
+    ).replace("__FN__", func)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        f.write(harness)
+        path = f.name
+
+    try:
+        r = subprocess.run(
+            ["bash", path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert "EXIT_CODE=1" in r.stdout, (
+            f"must return 1 after exhausting retries.\nSTDOUT:\n{r.stdout}"
+        )
+        assert "啟動超時" in r.stdout, (
+            f"must emit 啟動超時 error copy.\nSTDOUT:\n{r.stdout}"
+        )
+        assert "3 × 0s" in r.stdout, (
+            f"error must state retries × interval math for debugging.\n"
+            f"STDOUT:\n{r.stdout}"
+        )
+        assert "docker compose -f" in r.stdout and "logs backend" in r.stdout, (
+            f"error must include copy-pasteable `docker compose logs` "
+            f"hint — the #1 ask from users when startup fails.\n"
+            f"STDOUT:\n{r.stdout}"
+        )
+    finally:
+        os.unlink(path)
+
+
+def test_browser_open_falls_back_gracefully_on_no_desktop():
+    """Step 6 (last 10 lines of script) tries `explorer.exe` then
+    `xdg-open`. On headless Linux / CI / certain WSL1 setups neither
+    exists. The `if/elif` chain must fall through WITHOUT a fatal `command
+    not found` under `set -e` — otherwise the script would report failure
+    at the very last line after everything actually succeeded.
+
+    Pin: the specific `command -v foo &>/dev/null` guard on both branches.
+    Regression guard against a refactor that e.g. drops the `&>/dev/null`
+    and pipes stderr to console.
+    """
+    content = SCRIPT.read_text()
+    # Both commands must be guarded
+    assert "command -v explorer.exe &>/dev/null" in content, (
+        "explorer.exe call must be guarded with command -v"
+    )
+    assert "command -v xdg-open &>/dev/null" in content, (
+        "xdg-open call must be guarded with command -v"
+    )
+    # Neither branch should `exit` / `|| exit 1` — silent fall-through only.
+    browser_block_start = content.index("# 嘗試打開瀏覽器")
+    browser_block_end = content.index("✅ 部署完成！", browser_block_start)
+    browser_block = content[browser_block_start:browser_block_end]
+    assert "exit 1" not in browser_block, (
+        "browser-open block must never abort the script — a headless host "
+        "should still see the '✅ 部署完成' banner"
+    )
+    # Final success banner is unconditional — must sit OUTSIDE any branch.
+    # Using a line-prefix match so a refactor that indents it into the
+    # elif block would fail the test.
+    assert "\necho -e \"${GREEN}${BOLD}✅ 部署完成" in content, (
+        "final success banner must be unconditional, printed even when no "
+        "desktop/browser opener is available"
+    )
+
+
+def test_end_to_end_non_interactive_reaches_success_banner():
+    """Full-script smoke: sandbox the script with stubbed docker + curl +
+    cloudflared, run in non-interactive mode with no CF token, and assert
+    the script reaches the final '✅ 部署完成！' banner.
+
+    This is THE contract for L9's final checkbox — "containers start,
+    health pass, CF tunnel skipped cleanly, browser-open fall-through".
+    Real containers / real CF are exercised by hand during operator
+    deployment; the automated version pins the script's control flow so
+    a refactor can't silently break the non-interactive path.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        stubs = tdp / "stubs"
+        stubs.mkdir()
+
+        # ── stub docker: accept any subcommand, emit plausible output ──
+        (stubs / "docker").write_text(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            # capture invocations for post-hoc assertions
+            echo "$@" >> "$DOCKER_LOG"
+            case "$1" in
+                --version) echo "Docker version 29.4.0-stub" ;;
+                info) echo "Server Version: 29.4.0-stub" ;;
+                compose)
+                    shift
+                    # Some args like `-f file` arrive before the subcommand.
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            -f) shift 2 ;;
+                            version) echo "Docker Compose version v5.1.2-stub"; exit 0 ;;
+                            up) exit 0 ;;
+                            ps)
+                                # --services --status=running used by RUNNING count
+                                if [[ " $* " == *" --services "* && " $* " == *" --status=running "* ]]; then
+                                    echo "backend"
+                                    echo "frontend"
+                                fi
+                                exit 0
+                                ;;
+                            logs) exit 0 ;;
+                            *) shift ;;
+                        esac
+                    done
+                    exit 0
+                    ;;
+                *) exit 0 ;;
+            esac
+        """))
+        (stubs / "docker").chmod(0o755)
+
+        # ── stub curl: localhost/api/v1/health + frontend / → 200 ──
+        # Cloudflare API + everything else → fail (network unreachable).
+        (stubs / "curl").write_text(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            # Scan args for localhost URL — health-poll success path.
+            for arg in "$@"; do
+                case "$arg" in
+                    http://localhost:8000/api/v1/health|http://localhost:3000/|http://localhost:3000)
+                        exit 0 ;;
+                esac
+            done
+            # All other URLs (including api.cloudflare.com/client/v4/) fail,
+            # which is fine: the CF preflight probe already warns + the CF
+            # setup block is gated behind NON_INTERACTIVE=false anyway.
+            exit 7
+        """))
+        (stubs / "curl").chmod(0o755)
+
+        # ── stub xdg-open + explorer.exe absent by default — testing
+        # the no-desktop fall-through. We intentionally DON'T provide them.
+
+        # ── minimal project scaffold the script expects ──
+        (tdp / ".env.example").write_text(
+            "OMNISIGHT_LLM_PROVIDER=anthropic\nOMNISIGHT_ANTHROPIC_API_KEY=\n"
+        )
+        (tdp / "docker-compose.prod.yml").write_text(
+            "services:\n  backend: {image: stub}\n  frontend: {image: stub}\n"
+        )
+        # Pre-existing .env makes the script skip Step 1 interactive prompts.
+        (tdp / ".env").write_text("OMNISIGHT_LLM_PROVIDER=anthropic\n")
+
+        # Copy the real script into the sandbox
+        sandbox_script = tdp / "quick-start.sh"
+        sandbox_script.write_text(SCRIPT.read_text())
+        sandbox_script.chmod(0o755)
+
+        docker_log = tdp / "docker.log"
+        docker_log.touch()
+
+        env = os.environ.copy()
+        env["PATH"] = f"{stubs}:{env['PATH']}"
+        env["DOCKER_LOG"] = str(docker_log)
+        # Speed up health poll: 3 retries × 0s = instant
+        # (We can't override these without editing the script, so we
+        # rely on the stub curl returning 0 on first try.)
+
+        # Run non-interactively: subprocess.run with stdin=PIPE gives us
+        # a non-TTY fd0, which auto-trips NON_INTERACTIVE=true.
+        r = subprocess.run(
+            ["bash", str(sandbox_script)],
+            capture_output=True,
+            text=True,
+            cwd=str(tdp),
+            env=env,
+            timeout=120,
+            stdin=subprocess.DEVNULL,
+        )
+
+        # Script must reach the final success banner, even though:
+        #  - CF API was unreachable (curl stub returns 7 for it)
+        #  - CF setup auto-skipped (non-interactive mode)
+        #  - neither explorer.exe nor xdg-open is installed
+        combined = r.stdout + r.stderr
+        assert r.returncode == 0, (
+            f"script must exit 0 in non-interactive sandbox.\n"
+            f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        )
+        assert "所有前置條件通過" in combined, (
+            f"Step 0 preflight must pass.\nstdout:\n{r.stdout}"
+        )
+        assert ".env 已存在" in combined, (
+            f"Step 1 must detect pre-existing .env.\nstdout:\n{r.stdout}"
+        )
+        assert "容器已啟動" in combined, (
+            f"Step 2 must log container-start success.\nstdout:\n{r.stdout}"
+        )
+        assert "Backend 就緒" in combined, (
+            f"Step 3 must see backend health pass.\nstdout:\n{r.stdout}"
+        )
+        assert "Frontend 就緒" in combined, (
+            f"Step 3 must see frontend health pass.\nstdout:\n{r.stdout}"
+        )
+        assert "非互動模式：跳過 Cloudflare Tunnel 設定" in combined, (
+            f"Step 4 must cleanly skip CF in non-interactive mode.\n"
+            f"stdout:\n{r.stdout}"
+        )
+        assert "部署完成" in combined, (
+            f"final success banner must fire even without a browser "
+            f"opener.\nstdout:\n{r.stdout}"
+        )
+        # docker compose up was invoked (the critical side-effecting call)
+        log_text = docker_log.read_text()
+        assert "compose" in log_text and "up" in log_text, (
+            f"docker compose up must have been called.\n"
+            f"docker.log:\n{log_text}"
+        )
