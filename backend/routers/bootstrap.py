@@ -14,7 +14,11 @@ finalized — otherwise finalize itself would be redirected to the wizard.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import shutil
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -465,6 +469,285 @@ async def bootstrap_cf_tunnel_skip(req: CfTunnelSkipRequest) -> CfTunnelSkipResp
         reason or "<none>",
     )
     return CfTunnelSkipResponse(status="skipped", cf_tunnel_configured=True)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L5 — Step 4 (service start — systemd / docker compose / dev)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+DeployMode = Literal["systemd", "docker-compose", "dev"]
+
+_SYSTEMD_UNITS: tuple[str, ...] = (
+    "omnisight-backend.service",
+    "omnisight-frontend.service",
+)
+
+# Compose file the docker-compose mode starts. Overridable via env so
+# deployments that ship a different filename don't have to patch source.
+_DEFAULT_COMPOSE_FILE = "docker-compose.prod.yml"
+_START_TIMEOUT_SECS = 120
+
+
+def _detect_deploy_mode() -> DeployMode:
+    """Pick the launch strategy based on what's available on the host.
+
+    Order of precedence:
+      1. ``OMNISIGHT_DEPLOY_MODE`` env var (explicit operator override).
+      2. Running under ``systemctl`` with the units installed → ``systemd``.
+      3. Docker compose binary available → ``docker-compose``.
+      4. Fallback → ``dev`` (no-op; dev already runs uvicorn / next dev).
+
+    Lives inside this module (rather than the L7 skeleton) so the Step 4
+    endpoint is self-contained — L7's richer implementation can replace
+    this when it lands without breaking the call site.
+    """
+    override = (os.environ.get("OMNISIGHT_DEPLOY_MODE") or "").strip().lower()
+    if override in ("systemd", "docker-compose", "dev"):
+        return override  # type: ignore[return-value]
+
+    if shutil.which("systemctl") is not None:
+        return "systemd"
+    if shutil.which("docker") is not None:
+        return "docker-compose"
+    return "dev"
+
+
+class StartServicesRequest(BaseModel):
+    """Body for ``POST /bootstrap/start-services``.
+
+    ``mode`` overrides the auto-detection when the operator needs to pin
+    a specific launch strategy (e.g. CI forcing ``dev``). ``compose_file``
+    is passed through to ``docker compose -f`` in docker-compose mode.
+    """
+
+    mode: str = Field(
+        default="",
+        max_length=32,
+        description="Deploy mode override: systemd / docker-compose / dev. "
+                    "Empty → auto-detect.",
+    )
+    compose_file: str = Field(
+        default="",
+        max_length=256,
+        description="Override path for docker compose file "
+                    "(defaults to docker-compose.prod.yml).",
+    )
+
+
+class StartServicesResponse(BaseModel):
+    status: str
+    mode: DeployMode
+    command: list[str]
+    returncode: int
+    stdout_tail: str
+    stderr_tail: str
+
+
+def _tail(text: str, limit: int = 4000) -> str:
+    """Return the last ``limit`` chars of *text* (for the HTTP response)."""
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _start_command(mode: DeployMode, compose_file: str) -> list[str]:
+    """Build the argv for the chosen deploy mode.
+
+    Kept separate so tests can assert command shape without having to
+    actually exec the subprocess. ``dev`` returns an empty list — the
+    endpoint short-circuits and never exec's anything.
+    """
+    if mode == "systemd":
+        return ["systemctl", "start", *_SYSTEMD_UNITS]
+    if mode == "docker-compose":
+        cf = (compose_file or "").strip() or _DEFAULT_COMPOSE_FILE
+        return ["docker", "compose", "-f", cf, "up", "-d"]
+    return []
+
+
+@router.post("/start-services", response_model=StartServicesResponse)
+async def bootstrap_start_services(
+    req: StartServicesRequest | None = None,
+) -> StartServicesResponse:
+    """Launch the OmniSight services for the wizard's Step 4.
+
+    Dispatches by deploy mode:
+      * ``systemd`` → ``systemctl start omnisight-backend omnisight-frontend``
+      * ``docker-compose`` → ``docker compose -f <file> up -d``
+      * ``dev`` → no-op (processes are already running under uvicorn /
+        next-dev); the endpoint returns ``status="already_running"``.
+
+    Unauthenticated like the other wizard endpoints — during the wizard
+    there is no admin session yet and the bootstrap-gate middleware
+    limits who can reach ``/bootstrap/*`` before finalize.
+
+    Side-effects:
+      * ``logger.info`` with the full argv
+      * audit row ``bootstrap.start_services`` capturing mode + return
+        code so a failed start has a traceable fingerprint.
+
+    HTTP contract:
+      * 200 on success (returncode==0, or dev no-op)
+      * 502 when the launcher exited non-zero — stdout/stderr tails are
+        echoed back in the body so the SSE-log follow-up (next checkbox)
+        has a first point of reference.
+      * 504 on timeout after ``_START_TIMEOUT_SECS``.
+    """
+    body = req or StartServicesRequest()
+    override_mode = body.mode.strip().lower()
+    if override_mode:
+        if override_mode not in ("systemd", "docker-compose", "dev"):
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=422,
+                content={
+                    "detail": (
+                        "mode must be one of: systemd, docker-compose, dev — "
+                        f"got {override_mode!r}"
+                    ),
+                },
+            )
+        mode: DeployMode = override_mode  # type: ignore[assignment]
+    else:
+        mode = _detect_deploy_mode()
+
+    command = _start_command(mode, body.compose_file)
+
+    if mode == "dev":
+        logger.info(
+            "bootstrap: start-services skipped — mode=dev "
+            "(uvicorn / next dev already running)"
+        )
+        try:
+            await audit.log(
+                action="bootstrap.start_services",
+                entity_kind="bootstrap",
+                entity_id="start_services",
+                before=None,
+                after={"mode": mode, "command": [], "returncode": 0,
+                       "status": "already_running"},
+                actor="wizard",
+            )
+        except Exception as exc:
+            logger.debug("bootstrap.start_services audit emit failed: %s", exc)
+        return StartServicesResponse(
+            status="already_running",
+            mode=mode,
+            command=[],
+            returncode=0,
+            stdout_tail="",
+            stderr_tail="",
+        )
+
+    logger.info("bootstrap: start-services mode=%s cmd=%s", mode, command)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=_START_TIMEOUT_SECS,
+        )
+        returncode = proc.returncode or 0
+    except asyncio.TimeoutError:
+        logger.error(
+            "bootstrap: start-services TIMEOUT mode=%s after %ds",
+            mode, _START_TIMEOUT_SECS,
+        )
+        try:
+            await audit.log(
+                action="bootstrap.start_services",
+                entity_kind="bootstrap",
+                entity_id="start_services",
+                before=None,
+                after={"mode": mode, "command": command,
+                       "status": "timeout",
+                       "timeout_secs": _START_TIMEOUT_SECS},
+                actor="wizard",
+            )
+        except Exception as exc:
+            logger.debug("bootstrap.start_services audit emit failed: %s", exc)
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=504,
+            content={
+                "detail": (
+                    f"launcher did not finish within {_START_TIMEOUT_SECS}s — "
+                    "check host for stuck systemctl / docker-compose"
+                ),
+                "mode": mode,
+                "command": command,
+            },
+        )
+    except FileNotFoundError as exc:
+        logger.error("bootstrap: start-services binary missing: %s", exc)
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=502,
+            content={
+                "detail": (
+                    f"launcher binary not found: {exc} — expected {command[0]!r} "
+                    f"on PATH for mode={mode}"
+                ),
+                "mode": mode,
+                "command": command,
+            },
+        )
+
+    stdout_tail = _tail(stdout_b.decode(errors="replace"))
+    stderr_tail = _tail(stderr_b.decode(errors="replace"))
+
+    try:
+        await audit.log(
+            action="bootstrap.start_services",
+            entity_kind="bootstrap",
+            entity_id="start_services",
+            before=None,
+            after={
+                "mode": mode,
+                "command": command,
+                "returncode": returncode,
+                "status": "started" if returncode == 0 else "failed",
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.start_services audit emit failed: %s", exc)
+
+    if returncode != 0:
+        logger.error(
+            "bootstrap: start-services FAILED mode=%s rc=%d stderr=%r",
+            mode, returncode, stderr_tail[-400:],
+        )
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=502,
+            content={
+                "detail": (
+                    f"launcher exited with code {returncode} — "
+                    "see stderr_tail for the failure reason"
+                ),
+                "mode": mode,
+                "command": command,
+                "returncode": returncode,
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+            },
+        )
+
+    logger.info(
+        "bootstrap: start-services OK mode=%s rc=%d",
+        mode, returncode,
+    )
+    return StartServicesResponse(
+        status="started",
+        mode=mode,
+        command=command,
+        returncode=returncode,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+    )
 
 
 class FinalizeRequest(BaseModel):
