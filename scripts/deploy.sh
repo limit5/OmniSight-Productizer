@@ -7,6 +7,7 @@
 #   scripts/deploy.sh prod v0.2.0                      # check out the tag first
 #   scripts/deploy.sh prod v0.2.0 rolling              # G2 #3 HA-02 rolling restart
 #   scripts/deploy.sh --strategy blue-green prod v0.2.0 # G3 HA-03 blue-green cutover
+#   scripts/deploy.sh --rollback                        # G3 HA-03 row 1356 秒級切回 previous color
 #
 # Legacy (systemd) steps, kept for single-replica hosts:
 #   1. Optionally check out the requested git ref.
@@ -19,6 +20,37 @@
 #   `--strategy <rolling|systemd|blue-green>` is the GNU-style form.
 #   Accepts the same three values the positional arg accepts; when both
 #   are supplied the flag wins.
+#
+# Rollback flag (G3 HA-03 TODO row 1356):
+#   `--rollback` is the "秒級切回 previous color" instant-fallback path.
+#   It does NOT run git fetch / pip install / pnpm build / systemctl
+#   restart / docker compose up — the old color's container has been
+#   kept warm by the row-1355 ceremony for exactly this purpose, so all
+#   we do is flip the symlink back and (optionally) reload Caddy. This
+#   is why rollback is measured in seconds, not minutes. The rollback
+#   block runs before any positional-env validation so it works even
+#   without supplying a trailing `prod`/`staging` arg — the operator's
+#   muscle memory at 3am shouldn't be "which env was I deploying?".
+#
+#   Pre-flight gates (rollback refuses and exits non-zero unless each
+#   passes, so we never point Caddy at a dead upstream):
+#     (a) blue-green primitive present (exit 5)
+#     (b) `previous_color` breadcrumb exists (exit 2)
+#     (c) retention window still open — now <= previous_retention_until
+#         (exit 8; bypass with OMNISIGHT_ROLLBACK_FORCE=1 — DANGEROUS)
+#     (d) previous color's host-port /readyz returns 200 (exit 3;
+#         bypass with OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT=1 — DANGEROUS,
+#         only if you're about to recreate the container manually)
+#
+#   Exit codes (--rollback):
+#     0 — symlink flipped back, previous color is now active
+#     2 — no previous_color recorded (never had a cutover)
+#     3 — previous color's /readyz dead (container pruned?)
+#     5 — blue-green primitive / state dir missing
+#     8 — retention window expired (24 h default)
+#
+#   Dry-run: OMNISIGHT_BLUEGREEN_DRY_RUN=1 prints the plan and exits 0
+#   without any symlink mutation.
 #
 # Blue-green ceremony (G3 HA-03 TODO row 1355):
 #   `--strategy blue-green` runs the full cutover ceremony:
@@ -73,13 +105,14 @@
 
 set -euo pipefail
 
-# ── Flag parsing (G3 #1 / TODO row 1353) ──────────────────────────────
+# ── Flag parsing (G3 #1 / TODO row 1353, #4 / row 1356) ────────────────
 # GNU-style flags are stripped first so the downstream positional
 # contract (ENV / GIT_REF / STRATEGY_ARG = $1 / $2 / $3) is unchanged.
-# Only `--strategy <value>` and `--strategy=<value>` are parsed here;
-# everything else bubbles back up as a positional so future flags can
-# slot in next to it without a rewrite.
+# `--strategy <value>` / `--strategy=<value>` and `--rollback` are
+# parsed here; everything else bubbles back up as a positional so
+# future flags can slot in next to them without a rewrite.
 STRATEGY_FLAG=""
+ROLLBACK_FLAG=0
 _positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -95,6 +128,10 @@ while [[ $# -gt 0 ]]; do
       STRATEGY_FLAG="${1#--strategy=}"
       shift
       ;;
+    --rollback)
+      ROLLBACK_FLAG=1
+      shift
+      ;;
     --)
       shift
       while [[ $# -gt 0 ]]; do
@@ -105,7 +142,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --*)
       echo "error: unknown flag: $1" >&2
-      echo "usage: scripts/deploy.sh [--strategy rolling|systemd|blue-green] <env> [git-ref] [rolling|systemd|blue-green]" >&2
+      echo "usage: scripts/deploy.sh [--strategy rolling|systemd|blue-green] [--rollback] <env> [git-ref] [rolling|systemd|blue-green]" >&2
       exit 1
       ;;
     *)
@@ -118,6 +155,148 @@ done
 # reads. `${_positional[@]+"${_positional[@]}"}` is the set-u-safe way
 # to expand an array that might be empty.
 set -- "${_positional[@]+"${_positional[@]}"}"
+
+# ── Rollback fast-path (G3 #4 / TODO row 1356) ────────────────────────
+# `--rollback` deliberately short-circuits the ENV requirement, the git
+# checkout, the db backup, the pip/pnpm build, and the strategy
+# dispatch. The previous color's container was kept warm by row 1355's
+# ceremony precisely so rollback is a single-rename(2) symlink flip —
+# measured in seconds, not minutes. Putting this block BEFORE the
+# `ENV` check is what lets operators type `scripts/deploy.sh --rollback`
+# with no other args at 3am.
+if [[ "$ROLLBACK_FLAG" == "1" ]]; then
+  ROOT=$(cd "$(dirname "$0")/.." && pwd)
+  cd "$ROOT"
+
+  rblog() { printf '\033[35m[rollback]\033[0m %s\n' "$*"; }
+
+  # Honour OMNISIGHT_BLUEGREEN_DIR the same way bluegreen_switch.sh does
+  # so contract tests can sandbox the state dir without mutating the
+  # committed repo. Default is $ROOT/deploy/blue-green (production).
+  BLUEGREEN_STATE_DIR="${OMNISIGHT_BLUEGREEN_DIR:-$ROOT/deploy/blue-green}"
+  BLUEGREEN_SWITCH="$ROOT/scripts/bluegreen_switch.sh"
+
+  # (a) Primitive present?
+  if [[ ! -x "$BLUEGREEN_SWITCH" || ! -d "$BLUEGREEN_STATE_DIR" ]]; then
+    echo "[rollback] blue-green primitive missing (expected $BLUEGREEN_SWITCH + $BLUEGREEN_STATE_DIR) — nothing to roll back (has the G3 ceremony ever run on this host?)" >&2
+    exit 5
+  fi
+
+  RB_ACTIVE_FILE="$BLUEGREEN_STATE_DIR/active_color"
+  RB_PREV_FILE="$BLUEGREEN_STATE_DIR/previous_color"
+  RB_RETENTION_FILE="$BLUEGREEN_STATE_DIR/previous_retention_until"
+
+  # (b) previous_color breadcrumb?
+  if [[ ! -f "$RB_PREV_FILE" ]]; then
+    echo "[rollback] no previous_color recorded at $RB_PREV_FILE — there is no prior color to roll back to (has a cutover happened on this host?)" >&2
+    exit 2
+  fi
+  RB_PREV_COLOR=$(tr -d '[:space:]' < "$RB_PREV_FILE")
+  if [[ "$RB_PREV_COLOR" != "blue" && "$RB_PREV_COLOR" != "green" ]]; then
+    echo "[rollback] invalid previous_color '$RB_PREV_COLOR' in $RB_PREV_FILE (expected blue|green)" >&2
+    exit 2
+  fi
+
+  if [[ ! -f "$RB_ACTIVE_FILE" ]]; then
+    echo "[rollback] no active_color state at $RB_ACTIVE_FILE — state dir looks uninitialised" >&2
+    exit 5
+  fi
+  RB_CURR_COLOR=$(tr -d '[:space:]' < "$RB_ACTIVE_FILE")
+
+  # No-op guard: if active already equals previous (e.g. two rollbacks
+  # in quick succession without an intervening cutover), we're already
+  # where we'd flip to. Bail cleanly rather than ping-pong.
+  if [[ "$RB_CURR_COLOR" == "$RB_PREV_COLOR" ]]; then
+    rblog "already on $RB_CURR_COLOR (previous_color=$RB_PREV_COLOR) — nothing to roll back (no-op)"
+    exit 0
+  fi
+
+  # Map color → host port (mirrors blue-green arm + G2 compose topology).
+  case "$RB_PREV_COLOR" in
+    blue)  RB_PREV_PORT=8000 ;;
+    green) RB_PREV_PORT=8001 ;;
+    *)     echo "[rollback] unknown color '$RB_PREV_COLOR'" >&2; exit 2 ;;
+  esac
+
+  rblog "plan: $RB_CURR_COLOR → $RB_PREV_COLOR (previous host port :$RB_PREV_PORT)"
+
+  # (c) Retention window. 24 h default (row 1355 breadcrumb). Bypass
+  # via OMNISIGHT_ROLLBACK_FORCE=1 for the rare case where an operator
+  # wants to try anyway (e.g. after manually recreating the old color).
+  if [[ -f "$RB_RETENTION_FILE" ]]; then
+    RB_RETENTION_UNTIL=$(tr -d '[:space:]' < "$RB_RETENTION_FILE")
+    RB_NOW=$(date +%s)
+    if [[ "$RB_RETENTION_UNTIL" =~ ^[0-9]+$ ]] && (( RB_NOW > RB_RETENTION_UNTIL )); then
+      if [[ "${OMNISIGHT_ROLLBACK_FORCE:-0}" != "1" ]]; then
+        RB_RETENTION_ISO=$(date -u -d "@$RB_RETENTION_UNTIL" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+          || python3 -c "import datetime,sys; print(datetime.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$RB_RETENTION_UNTIL")
+        echo "[rollback] retention window EXPIRED (ended $RB_RETENTION_ISO, now=$RB_NOW) — previous color ($RB_PREV_COLOR) may have been pruned. Rolling back blind would point Caddy at a dead upstream." >&2
+        echo "[rollback]   bypass: OMNISIGHT_ROLLBACK_FORCE=1 (DANGEROUS — only if you verified $RB_PREV_COLOR is still live)" >&2
+        exit 8
+      fi
+      echo "[rollback] WARN: retention window expired but OMNISIGHT_ROLLBACK_FORCE=1 is set — proceeding at operator's risk" >&2
+    fi
+  else
+    echo "[rollback] WARN: no previous_retention_until breadcrumb at $RB_RETENTION_FILE — proceeding without retention gate (pre-row-1355 state dir?)" >&2
+  fi
+
+  # Dry-run exit point — everything above is read-only state inspection;
+  # from here on we'd actually flip the symlink + write breadcrumbs.
+  if [[ "${OMNISIGHT_BLUEGREEN_DRY_RUN:-0}" == "1" ]]; then
+    rblog "OMNISIGHT_BLUEGREEN_DRY_RUN=1 — plan printed, no symlink / Caddy changes"
+    exit 0
+  fi
+
+  # (d) /readyz pre-flight — we refuse to flip to a dead upstream.
+  # The whole point of the 24 h warm-standby is instant rollback; if
+  # the container isn't responding, flipping the symlink would just
+  # shift the outage to the "rolled back" pretense. Bypass is for the
+  # rare case where the operator is about to `docker compose up
+  # backend-<prev>` right after this runs.
+  if [[ "${OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT:-0}" != "1" ]]; then
+    rb_ready_url="http://localhost:${RB_PREV_PORT}/readyz"
+    if ! curl -sf -m 5 "$rb_ready_url" >/dev/null 2>&1; then
+      rb_prev_svc="backend-a"; [[ "$RB_PREV_COLOR" == "green" ]] && rb_prev_svc="backend-b"
+      echo "[rollback] previous color ($RB_PREV_COLOR :$RB_PREV_PORT) /readyz NOT responding — rolling back would point Caddy at a dead upstream." >&2
+      echo "[rollback]   triage: docker compose -f docker-compose.prod.yml logs --tail=200 $rb_prev_svc" >&2
+      echo "[rollback]   bypass: OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT=1 (DANGEROUS — only if you're about to recreate $rb_prev_svc manually)" >&2
+      exit 3
+    fi
+    rblog "pre-flight: previous color ($RB_PREV_COLOR :$RB_PREV_PORT) /readyz OK"
+  else
+    echo "[rollback] WARN: OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT=1 — skipping /readyz pre-flight (DANGEROUS)" >&2
+  fi
+
+  # ── ATOMIC SYMLINK FLIP ───────────────────────────────────────────
+  # Delegate to the G3 #2 primitive — rename(2) over the symlink. This
+  # is THE cutover (everything above is read-only; everything below is
+  # post-flip audit). Passing OMNISIGHT_BLUEGREEN_DIR through so the
+  # primitive targets the same sandbox we just validated.
+  rblog "ATOMIC ROLLBACK → $RB_PREV_COLOR (was: $RB_CURR_COLOR)"
+  OMNISIGHT_BLUEGREEN_DIR="$BLUEGREEN_STATE_DIR" "$BLUEGREEN_SWITCH" rollback
+
+  # Optional Caddy reload — same delegation pattern as the row-1355 arm.
+  BLUEGREEN_CADDY_RELOAD_CMD="${OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD:-}"
+  if [[ -n "$BLUEGREEN_CADDY_RELOAD_CMD" ]]; then
+    rblog "reloading Caddy ($BLUEGREEN_CADDY_RELOAD_CMD)"
+    if ! bash -c "$BLUEGREEN_CADDY_RELOAD_CMD"; then
+      echo "[rollback] WARN: Caddy reload command failed — symlink is already on $RB_PREV_COLOR, but the running Caddy may still see the old upstream. Run the reload command by hand." >&2
+    fi
+  else
+    rblog "OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD not set — reload Caddy manually (e.g. docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile)"
+  fi
+
+  # Audit breadcrumb — row 1357 runbook + any future timeline reconstructor
+  # reads this to know when the rollback happened. Same atomic tmp-then-mv
+  # pattern as the row-1355 ceremony so a concurrent reader never sees a
+  # half-written file.
+  rb_ts=$(date +%s)
+  printf '%s\n' "$rb_ts" > "$BLUEGREEN_STATE_DIR/rollback_timestamp.tmp.$$"
+  mv -f "$BLUEGREEN_STATE_DIR/rollback_timestamp.tmp.$$" "$BLUEGREEN_STATE_DIR/rollback_timestamp"
+
+  rblog "rollback complete: now active=$RB_PREV_COLOR (:$RB_PREV_PORT). Old color ($RB_CURR_COLOR) still running as new standby — investigate logs before next cutover."
+  exit 0
+fi
 
 ENV=${1:-}
 GIT_REF=${2:-}

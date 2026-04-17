@@ -11465,3 +11465,79 @@ backend/tests/test_reverse_proxy_caddyfile.py ............... 24 passed in 0.08s
 - G2 row 1346 — `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 `omnisight-data` / `omnisight-artifacts` / `omnisight-sdks` volumes），並把 Caddy service 加進同一 compose。
 - G2 row 1347 — 改 `scripts/deploy.sh` 為 rolling：drain A → restart → `/readyz` pass → drain B → restart。
 - G2 row 1349 — soak test（部署中持續打 `/api/v1/*` 流量，assert 0 個 5xx）。
+
+
+---
+
+## 2026-04-18 — G3 #4 · `scripts/deploy.sh --rollback`（HA-03 TODO row 1356 秒級切回）
+
+### 本回合做了什麼
+TODO row 1356「Rollback 腳本：`deploy.sh --rollback`（秒級切回 previous color）」完成，並附 40 顆契約測試全綠。這是 G3（HA-03 Blue-Green）五顆 checkbox 的**第 4 顆**；前三顆（row 1353 `--strategy blue-green` flag / row 1354 `bluegreen_switch.sh` atomic primitive / row 1355 ceremony with pre-cut smoke + 5-min observe + 24h retention）已到位，row 1356 把 **operator-facing 秒級 rollback 命令**包在這些 primitive 之上。
+
+### 交付物
+- `scripts/deploy.sh`（+~160 行、修改 flag parser + 新增 rollback fast-path block）
+  - **Flag parser 新增 `--rollback` case**：設定 `ROLLBACK_FLAG=1`，不消耗後續位置參數；usage 字串同步更新為 `[--strategy …] [--rollback] <env> [git-ref] [strategy-positional]`。
+  - **Rollback fast-path block 位置關鍵**：在 `set -- "${_positional[@]+"${_positional[@]}"}"` 之後、**ENV validator / git fetch / pip install / pnpm build / strategy dispatch 之前**。這保證：
+    - `scripts/deploy.sh --rollback` 單獨執行就能 run（3am operator 不用背 env 名）。
+    - **絕不** `git fetch` / `git checkout` / `pip install` / `pnpm install` / `pnpm run build` / `docker compose up` / `docker compose stop` / `systemctl restart` — 所有耗時操作都被跳過，rollback 就是純粹的 rename(2) symlink flip，真正「秒級」。
+  - **5 道 fail-closed gate**（順序敏感，每道都有 distinct exit code 讓 row 1357 runbook 能精準 triage）：
+    1. `bluegreen_switch.sh` + `$OMNISIGHT_BLUEGREEN_DIR`（預設 `deploy/blue-green/`）同時存在 → 否則 `exit 5`（G3 ceremony 從未在此 host 跑過）。
+    2. `previous_color` breadcrumb 存在 + 值為 `blue`/`green` → 否則 `exit 2`（從未 cutover 過）。
+    3. `active_color` 存在 → 否則 `exit 5`（state dir uninitialised）。
+    4. active == previous → `exit 0` no-op（防 double-rollback ping-pong）。
+    5. `previous_retention_until` 存在且 `now() ≤ retention_until` → 否則 `exit 8`（row 1355 breadcrumb 24h 預算已過，old color 可能被 prune）。Bypass via `OMNISIGHT_ROLLBACK_FORCE=1`（印 DANGEROUS warning）。
+    6. `curl -sf http://localhost:<prev_port>/readyz` OK → 否則 `exit 3`（container 可能被停了，flip symlink 會指向死 upstream）。Bypass via `OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT=1`（印 DANGEROUS warning）。
+    缺 retention breadcrumb 時打 WARN 但繼續（用於 pre-row-1355 state dir compatibility）。
+  - **Atomic cutover 走 G3 #2 primitive**：`OMNISIGHT_BLUEGREEN_DIR="$BLUEGREEN_STATE_DIR" "$BLUEGREEN_SWITCH" rollback`。絕不 inline `ln -sfn`（會引入兩-syscall 原子間隔）、絕不自寫 state file（primitive 已經按 step 1 `previous_color` → step 2 symlink → step 3 `active_color` 的 crash-consistent order 處理）。把 `OMNISIGHT_BLUEGREEN_DIR` 傳進子腳本讓測試能 sandbox 整個 state dir 而不污染 committed 的 `deploy/blue-green/`。
+  - **Optional Caddy reload** via `OMNISIGHT_BLUEGREEN_CADDY_RELOAD_CMD`（同 row 1355 ceremony 的委託模式：topology 變動大，不硬編碼 command；未設時印 operator hint）。
+  - **Audit breadcrumb** `deploy/blue-green/rollback_timestamp`（Unix seconds）用 `.tmp.$$` + `mv -f` 原子寫入，row 1357 runbook 或 timeline reconstructor 可以安全 concurrent read。
+  - **Dry-run** via `OMNISIGHT_BLUEGREEN_DRY_RUN=1` 在 gate (e)→(d) 之後、symlink flip 之前退出（契約測試強制驗 dry-run 絕不 mutate 符號連結）。
+  - **Header comment** 新增 `Rollback flag (G3 HA-03 TODO row 1356)` 區塊：文件化 5 道 gate、exit codes、tunables、escape hatches，讓操作員從 `head -80 scripts/deploy.sh` 就能看懂整個 contract。
+- `backend/tests/test_deploy_sh_rollback.py`（新檔、40 顆、0.17 s 全綠）
+  - 11 class × 40 test：flag parsing / block structure / no-build contract / fail-closed gates / atomic cutover delegation / audit breadcrumb / escape hatches / color mapping / Caddy reload / runtime behaviour / structural。
+  - **關鍵契約**：
+    - `test_rollback_honored_without_env_positional` — `scripts/deploy.sh --rollback` 單獨跑絕不 fail ENV validator。
+    - `test_block_runs_before_{env_validation,git_checkout,pip_install,pnpm_build}` — pin 位置順序，refactor 時誤把 rollback block 塞到 build steps 後面會被這 4 顆抓。
+    - `test_no_{docker_compose_up,docker_compose_stop,pip_install,pnpm_build,systemctl_restart,git_fetch_or_checkout}` — 「秒級」契約的負面斷言（`_strip_bash_comments()` helper 過濾掉 operator-facing hint comment 以免誤判）。
+    - `test_primitive_missing_exits_5` / `test_no_previous_color_exits_2` / `test_retention_expired_exits_8` / `test_readyz_dead_exits_3` — 四個 fail-closed gate 的 distinct exit codes 釘死，讓 row 1357 runbook triage tree 可以穩定對照。
+    - `test_invokes_bluegreen_switch_rollback` — 強制走 G3 #2 primitive，禁 inline `ln -sfn`。
+    - `test_rollback_timestamp_written_atomically` — tmp-then-mv pattern 必須一致，truncate-in-place 會被抓。
+    - `test_cutover_runs_after_gates` — exit 5 / exit 2 必須在 `$BLUEGREEN_SWITCH rollback` 之前（否則 gate 變 vanity check）。
+    - `test_dry_run_exits_before_symlink_flip` — dry-run 必須在 symlink flip 前退出。
+    - Runtime class (7 顆) sandbox 出真的 state dir 跑 `--rollback`：exit 2 / 8 / 5 / 0（dry-run）/ 0（force+dry-run）/ 0（no-op）/ 0（skip-preflight + full flip，驗 symlink 最終指向 blue 且 `rollback_timestamp` 有效）。
+
+### 設計決策 & trade-off
+1. **為什麼 rollback fast-path 放在 flag 解析後、ENV 檢查前？** 我想強制 operator 在凌晨 3am 也能打 `scripts/deploy.sh --rollback` 不想（加上 `env` 參數。把 rollback 當成「模式」而非「策略」就能 bypass 所有 env-dependent 的檢查與 build。代價：rollback 不會 run N10 blue-green gate；但 N10 gate 是 cut-FORWARD 的守門員，rollback 是 cut-BACK，不適用。
+2. **為什麼用 exit 8 而非 exit 5 給 retention expired？** Row 1357 runbook 要能區分「state dir 從來沒 init 過」（exit 5，operator 去 init）vs「state dir 有但 24h 已過」（exit 8，operator 要先確認 old color 還活著或手動 recreate）。兩種情境的 triage tree 不同。
+3. **為什麼用 exit 3 給 /readyz dead（與 rolling/row-1355 standby readyz 失敗同號）？** 相同 failure mode（「upstream /readyz 不通」）走相同 exit code，減少 runbook 分支。operator 看到 exit 3 就知道是 `/readyz` 問題，不管發生在哪個 phase。
+4. **為什麼 audit breadcrumb 叫 `rollback_timestamp` 而非加到 `previous_color` 的 history？** History 是另一個 feature（需要 append-only log、rotation、解析工具）；row 1356 只做「記一個時戳」。Row 1357 runbook 可以 grep `rollback_timestamp` 的檔案 mtime + 內容查最近一次 rollback。如果未來要 history 再做一顆 N+1 TODO。
+5. **為什麼 preflight 是 `http://localhost:<port>/readyz` 而非走 Caddy？** Rollback 前 symlink 還指向新 active（待被換下），Caddy 看到的是 new active 的 `/readyz`；要驗的是**待切回的 old color 還活著**，必須 bypass Caddy 直打 previous color 的 host-exposed port（與 row 1355 pre-cut smoke 對稱）。
+6. **為什麼不重跑 `scripts/prod_smoke_test.py` 在 rollback 時？** Rollback 是切回「剛剛還活著」的 previous color（24h 前 cutover 時剛做過 pre-cut smoke 的版本），預期它 still works。DAG 級 smoke 太慢（預設 300s timeout）會背叛「秒級」契約。`/readyz` 已足夠確認容器還在回應。如果 operator 擔心，可以手動跑 `python3 scripts/prod_smoke_test.py http://localhost:<prev_port>` 自行驗證。
+
+### 刻意**不**做的事
+- **不**寫 row 1357 runbook：那是下一顆 checkbox 的交付。
+- **不**啟動/重啟 previous color 容器：`--rollback` 假設它還在（這就是 row 1355 24h 保留的目的）；若沒在，`OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT=1` + 手動 `docker compose up backend-<prev>` 是 escape hatch。
+- **不**做 rollback 之後的 observation window：row 1355 的 5-min observation 是**升版後**才需要（新碼可能有 bug），rollback 是**切回舊碼**（之前已在線穩定 > 300s 才被換掉），不需要重複 observe。
+- 維持「一次只完成一個 TODO checkbox」的全自動化契約。
+
+### 測試總結
+```
+backend/tests/test_deploy_sh_rollback.py ................................ 40 passed in 0.17s
+backend/tests/test_deploy_sh_blue_green_flag.py ........................ 24 passed
+backend/tests/test_bluegreen_atomic_switch.py ............................ 32 passed
+backend/tests/test_bluegreen_precut_ceremony.py ........................... 29 passed
+backend/tests/test_deploy_sh_rolling.py ................................... 31 passed
+backend/tests/test_g2_delivery_bundle.py ................................. 28 passed
+backend/tests/test_reverse_proxy_caddyfile.py ........................... 24 passed
+-------- 208 passed in 0.82s, 零回歸 --------
+```
+bash 語法：`bash -n scripts/deploy.sh` → 乾淨。
+實機 smoke：5 個 case（primitive missing / no previous / dry-run / retention expired / full flip with skip-preflight）手動跑過，exit codes 與 state-dir mutation 全部對齊契約。
+
+### 風險 / 副作用
+- Rollback 只會切**一層**（到最近一次 `previous_color`）。兩次 cutover 之後做 `--rollback` 只會切回第二新，**不會**切回更早的版本——但這是 blue-green 的本質（只有兩個 slot）。操作員如果需要「回到更早版本」必須走完整 `--strategy blue-green prod <old-tag>` 流程。
+- 若 operator 不小心在 retention window 外強行 `OMNISIGHT_ROLLBACK_FORCE=1`，且同時 `OMNISIGHT_ROLLBACK_SKIP_PREFLIGHT=1`，腳本會切 symlink 到可能已被停止的 container → Caddy 看到 dead upstream → 5xx 風暴。**兩道 bypass 各自都有 DANGEROUS warning**，但同時觸發時系統不會再 double-gate；這是刻意的「operator knows what they're doing」留空間。Row 1357 runbook 會在 triage tree 明確標註「兩個 bypass 同開前必須手動確認 previous color container 狀態」。
+- 新增的 `rollback_timestamp` 檔案未加入 `.gitignore` 管理：`deploy/blue-green/` 的所有狀態檔都是 commited（`active_color` / `upstream-*.caddy` / `active_upstream.caddy` 初始 symlink），`rollback_timestamp` 不提交是 runtime artefact，建議之後加入 `.gitignore`。**目前影響**：若在 dev 手動跑過 `--rollback`（sandbox 外）就會產生這個檔，但 contract 不要求它持久化。
+
+### 下一步
+- G3 row 1357 — `docs/ops/blue_green_runbook.md` runbook + 腳本彙整交付清單。這會是 G3 最後一顆 checkbox。

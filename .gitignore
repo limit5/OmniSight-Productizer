@@ -90,3 +90,13 @@ next-env.d.ts
 .lighthouse-report.json
 # Playwright runtime cache (spec fixtures under configs/web/ are tracked)
 test-results/
+
+# G3 HA-03 blue-green runtime breadcrumbs (state files written by the
+# row 1355 ceremony + row 1356 rollback at deploy-time; the symlink
+# target + upstream-*.caddy snippets + initial active_color ARE
+# tracked so a fresh checkout has a consistent initial state).
+deploy/blue-green/previous_color
+deploy/blue-green/cutover_timestamp
+deploy/blue-green/previous_retention_until
+deploy/blue-green/rollback_timestamp
+deploy/blue-green/*.tmp.*
