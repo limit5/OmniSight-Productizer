@@ -1,0 +1,91 @@
+// HomeScreen — Zustand store + function component with hooks.
+// P4 anti-patterns blocked: no setState-in-FlatList, no inline style,
+// StyleSheet.create only, useCallback for any handler passed into a
+// memoized child.
+
+import React, {useCallback} from 'react';
+import {StyleSheet, Text, View, Pressable} from 'react-native';
+import {create} from 'zustand';
+
+type CounterStore = {
+  count: number;
+  lastAction: string;
+  increment: () => void;
+  reset: () => void;
+};
+
+export const useCounter = create<CounterStore>(set => ({
+  count: 0,
+  lastAction: 'init',
+  increment: () =>
+    set(state => ({count: state.count + 1, lastAction: 'increment'})),
+  reset: () => set({count: 0, lastAction: 'reset'}),
+}));
+
+const HomeScreen = (): JSX.Element => {
+  const count = useCounter(state => state.count);
+  const lastAction = useCounter(state => state.lastAction);
+  const increment = useCounter(state => state.increment);
+  const reset = useCounter(state => state.reset);
+
+  const onIncrement = useCallback(() => increment(), [increment]);
+  const onReset = useCallback(() => reset(), [reset]);
+
+  return (
+    <View style={styles.container}>
+      <Text
+        accessibilityLabel="counter value"
+        testID="counter-value"
+        style={styles.count}>
+        {count}
+      </Text>
+      <Text style={styles.subtitle}>last: {lastAction}</Text>
+      <Pressable
+        testID="increment-counter"
+        accessibilityRole="button"
+        onPress={onIncrement}
+        style={styles.button}>
+        <Text style={styles.buttonText}>Increment</Text>
+      </Pressable>
+      <Pressable
+        testID="reset-counter"
+        accessibilityRole="button"
+        onPress={onReset}
+        style={[styles.button, styles.secondaryButton]}>
+        <Text style={styles.buttonText}>Reset</Text>
+      </Pressable>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+  },
+  count: {
+    fontSize: 48,
+    fontWeight: '700',
+  },
+  subtitle: {
+    fontSize: 14,
+    opacity: 0.7,
+  },
+  button: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#007aff',
+  },
+  secondaryButton: {
+    backgroundColor: '#6c757d',
+  },
+  buttonText: {
+    color: 'white',
+    fontWeight: '600',
+  },
+});
+
+export default HomeScreen;

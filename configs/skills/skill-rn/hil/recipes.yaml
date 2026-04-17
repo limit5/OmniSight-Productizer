@@ -1,0 +1,75 @@
+# SKILL-RN HIL (hardware-in-the-loop) recipes — P9 #294
+#
+# Contrast-pack HIL recipes. Same probes as SKILL-FLUTTER with the
+# runner swapped for Detox where applicable.
+
+recipes:
+  - id: ios-device-launch-smoke
+    name: "Real iPhone cold-launch smoke (iOS rail)"
+    description: >
+      Firebase Test Lab iOS launch on 3 iPhone tiers. Hermes bytecode
+      + New Architecture should keep cold-launch ≤ 2.5s p95 on mid-tier.
+    targets: [ios-arm64]
+    probe:
+      kind: cloud_device_launch
+      farm: firebase
+      devices:
+        - {model: iphone_se_3rd, runtime: ios_17_5}
+        - {model: iphone_15, runtime: ios_17_5}
+        - {model: iphone_15_pro_max, runtime: ios_17_5}
+      p95_launch_ms_ceiling: 2500
+
+  - id: android-device-launch-smoke
+    name: "Real Pixel cold-launch smoke (Android rail)"
+    description: >
+      Firebase Test Lab Android launch on 3 Pixel tiers.
+      Hermes + New Architecture, TTI ≤ 2.5s on mid-tier.
+    targets: [android-arm64-v8a]
+    probe:
+      kind: cloud_device_launch
+      farm: firebase
+      devices:
+        - {model: pixel_5, runtime: android_14}
+        - {model: pixel_7, runtime: android_14}
+        - {model: pixel_8, runtime: android_14}
+      p95_launch_ms_ceiling: 2500
+
+  - id: detox-matrix
+    name: "Detox test matrix on both rails"
+    description: >
+      `detox test` against iOS Simulator + Android AVD back-to-back.
+      Gate: both rails pass the same scenario, and the New Architecture
+      flag is observable at runtime (`global.__turboModuleProxy !==
+      undefined` asserted within the test).
+    targets: [ios-arm64, android-arm64-v8a]
+    probe:
+      kind: detox_matrix
+      timeout_s: 900
+
+  - id: fcm-apns-dual-delivery
+    name: "FCM + APNs sandbox delivery (both rails)"
+    description: >
+      Verify messaging().onMessage fires within 5s on both platforms.
+    targets: [ios-arm64, android-arm64-v8a]
+    probe:
+      kind: firebase_messaging_sandbox
+      timeout_s: 5
+
+  - id: iap-sandbox
+    name: "react-native-iap sandbox buy on both stores"
+    description: >
+      Sandbox buy + server-verify round-trip on both rails using
+      `requestPurchase` / `getPurchaseHistory`.
+    targets: [ios-arm64, android-arm64-v8a]
+    probe:
+      kind: rn_iap_sandbox
+      product_id: "com.example.test.consumable.coins_100"
+      timeout_s: 30
+
+  - id: asc-privacy-validate
+    name: "ASC privacy manifest validation"
+    description: >
+      ASC submit + automated privacy manifest validator inspection.
+    targets: [ios-arm64]
+    probe:
+      kind: asc_privacy_validate

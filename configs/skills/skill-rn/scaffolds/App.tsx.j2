@@ -1,0 +1,53 @@
+// P9 #294 — SKILL-RN root component. React Navigation 7 + Zustand.
+// P4 react-native role anti-pattern lock-in: no console.log (ESLint
+// blocks it), StyleSheet.create rather than inline styles, function
+// component only (no class components in fresh scaffolds).
+
+import React, {useEffect} from 'react';
+import {GestureHandlerRootView} from 'react-native-gesture-handler';
+import {SafeAreaProvider} from 'react-native-safe-area-context';
+import {NavigationContainer} from '@react-navigation/native';
+import {createNativeStackNavigator} from '@react-navigation/native-stack';
+import {StyleSheet} from 'react-native';
+
+import HomeScreen from './src/features/home/HomeScreen';
+{% if push %}
+import {bootstrapPush} from './src/features/push/push';
+{% endif %}
+
+export type RootStackParamList = {
+  Home: undefined;
+};
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+const screenOptions = {title: '{{ project_name }}'};
+const rootStyles = StyleSheet.create({root: {flex: 1}});
+
+const App = (): JSX.Element => {
+  useEffect(() => {
+{% if push %}
+    bootstrapPush().catch(() => {
+      // silent: permission rejected is a user choice, not an error.
+    });
+{% endif %}
+  }, []);
+
+  return (
+    <GestureHandlerRootView style={rootStyles.root}>
+      <SafeAreaProvider>
+        <NavigationContainer>
+          <Stack.Navigator>
+            <Stack.Screen
+              name="Home"
+              component={HomeScreen}
+              options={screenOptions}
+            />
+          </Stack.Navigator>
+        </NavigationContainer>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
+  );
+};
+
+export default App;

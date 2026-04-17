@@ -1,0 +1,32 @@
+# P6 #291 — RN Play Data Safety form source for {{ project_name }}.
+schema_version: 1
+package_name: "{{ package_id }}"
+app_name: "{{ project_name }}"
+
+declared_sdks:
+  - com.facebook.react:react-android
+  - com.facebook.react:hermes-android
+{% if push %}
+  - com.google.firebase:firebase-messaging
+  - com.google.firebase:firebase-core
+{% endif %}
+{% if payments %}
+  - react-native-iap
+{% endif %}
+
+data_collection:
+{% if push %}
+  - type: device_id
+    purpose: app_functionality
+    linked_to_user: true
+    shared: false
+    required: true
+{% endif %}
+  - type: crash_logs
+    purpose: analytics
+    linked_to_user: false
+    shared: false
+    required: false
+
+encryption_in_transit: true
+deletion_flow_url: "https://example.com/{{ project_name | lower }}/delete-account"

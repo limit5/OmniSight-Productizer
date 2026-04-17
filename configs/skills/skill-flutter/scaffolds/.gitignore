@@ -1,0 +1,46 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+*.iml
+.idea/
+.vscode/
+
+# iOS native
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Runner/GoogleService-Info.plist
+ios/ExportOptions.plist
+# P3: iOS signing — never commit
+*.p12
+*.mobileprovision
+*.cer
+*.certSigningRequest
+
+# Android native
+android/.gradle/
+android/captures/
+android/app/release/
+android/local.properties
+android/**/GeneratedPluginRegistrant.java
+# P3: Android keystore — never commit
+key.properties
+android/key.properties
+*.jks
+*.keystore
+# P5: Play service account — server-side only
+google-services.json
+*-play-service-account.json
+
+# macOS
+.DS_Store
+
+# Test coverage output
+coverage/
+lcov.info

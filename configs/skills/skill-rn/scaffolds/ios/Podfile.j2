@@ -1,0 +1,41 @@
+# P9 #294 — RN iOS Podfile. New Architecture + Hermes on by default.
+# Platform version pinned to the P0 ios-arm64 profile.
+
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+ENV['RCT_NEW_ARCH_ENABLED'] = '1'
+
+require_relative '../node_modules/react-native/scripts/react_native_pods'
+
+platform :ios, '{{ min_os_version_ios }}'
+prepare_react_native_project!
+
+target '{{ project_name }}' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    :hermes_enabled => true,
+    :fabric_enabled => true,
+    :new_arch_enabled => true,
+    :app_path => "#{Pod::Config.instance.installation_root}/..",
+  )
+
+{% if push %}
+  # P6 privacy catalogue matcher fingerprints this pod ↦ firebase_messaging.
+  pod 'FirebaseMessaging', '~> 10.25'
+  pod 'FirebaseCore', '~> 10.25'
+{% endif %}
+
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+    )
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |bc|
+        bc.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '{{ min_os_version_ios }}'
+      end
+    end
+  end
+end

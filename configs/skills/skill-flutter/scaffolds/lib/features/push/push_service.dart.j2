@@ -1,0 +1,66 @@
+// P9 #294 — FCM push wrapper (firebase_messaging). Rendered when
+// `push=on`.
+//
+// Contract:
+//   * Raw token NEVER enters a log line — logs emit a SHA-256
+//     fingerprint only. Log-capture leaks are the #1 way APNs tokens
+//     get into the wild.
+//   * `.p8` APNs auth key stays server-side — never bundle it in the
+//     .ipa. The server endpoint this Dart code posts the device token
+//     to does the APNs signing through `backend/secret_store`.
+//   * FCM service-account JSON stays server-side — never bundle
+//     `google-services.json` with production key material. Gradle's
+//     FCM plugin reads sender-id only; the rest sits with the API.
+
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
+
+class PushService {
+  PushService._();
+
+  /// Idempotent bootstrap: initializes Firebase, asks for notification
+  /// permission, wires onMessage / onMessageOpenedApp handlers. Safe to
+  /// call from main().
+  static Future<void> bootstrap() async {
+    await Firebase.initializeApp();
+    final FirebaseMessaging messaging = FirebaseMessaging.instance;
+    final NotificationSettings settings = await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+      provisional: false,
+    );
+    if (settings.authorizationStatus != AuthorizationStatus.authorized &&
+        settings.authorizationStatus != AuthorizationStatus.provisional) {
+      debugPrint('push permission denied');
+      return;
+    }
+    // Pull the current token, forward the fingerprint to the server.
+    final String? token = await messaging.getToken();
+    if (token != null) {
+      _forwardToServer(token);
+    }
+    messaging.onTokenRefresh.listen(_forwardToServer);
+  }
+
+  static void _forwardToServer(String token) {
+    final String fingerprint = _fingerprint(token);
+    // Never log `token` — only the fingerprint.
+    debugPrint('push token refreshed fp=$fingerprint');
+    // Real implementation: HTTPS POST the token to the backend
+    // `/api/v1/push/register` endpoint. The backend owns the APNs
+    // .p8 + FCM service-account; the client never sees them.
+  }
+
+  static String _fingerprint(String token) {
+    final List<int> digest = sha256.convert(utf8.encode(token)).bytes;
+    return digest
+        .sublist(0, 4)
+        .map((int b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+  }
+}

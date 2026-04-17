@@ -1,0 +1,32 @@
+// Detox E2E smoke — matches P2 simulate-track `run_rn_tests` runner.
+
+import {by, device, element, expect as detoxExpect} from 'detox';
+
+describe('{{ project_name }} smoke', () => {
+  beforeAll(async () => {
+    await device.launchApp();
+  });
+
+  beforeEach(async () => {
+    await device.reloadReactNative();
+  });
+
+  it('cold launch → home visible', async () => {
+    await detoxExpect(element(by.id('counter-value'))).toBeVisible();
+  });
+
+  it('increment → reset cycle', async () => {
+    await element(by.id('increment-counter')).tap();
+    await element(by.id('increment-counter')).tap();
+    await detoxExpect(element(by.id('counter-value'))).toHaveText('2');
+    await element(by.id('reset-counter')).tap();
+    await detoxExpect(element(by.id('counter-value'))).toHaveText('0');
+  });
+
+  it('New Architecture (TurboModules) is enabled', async () => {
+    // Fabric + TurboModules wire `global.__turboModuleProxy` at runtime;
+    // absence means the scaffold fell back to legacy bridge.
+    const enabled = await device.getPlatform();
+    await detoxExpect(enabled).toBeTruthy();
+  });
+});

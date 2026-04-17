@@ -1,0 +1,78 @@
+// P9 #294 — RN Android :app module. Hermes + New Architecture on;
+// applicationId + SDK versions come from the P0 profile via scaffolder.
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+{% if push %}
+apply plugin: "com.google.gms.google-services"
+{% endif %}
+
+def keystorePropertiesFile = rootProject.file("key.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+react {
+    autolinkLibrariesWithApp()
+    hermesEnabled = true
+}
+
+android {
+    namespace "{{ package_id }}"
+    compileSdk rootProject.ext.compileSdkVersion
+    ndkVersion rootProject.ext.ndkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+        allWarningsAsErrors = true
+    }
+
+    defaultConfig {
+        applicationId "{{ package_id }}"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            // P3: prefer env, fall back to gitignored key.properties.
+            keyAlias System.getenv("OMNISIGHT_KEY_ALIAS")
+                ?: keystoreProperties['keyAlias']
+            keyPassword System.getenv("OMNISIGHT_KEY_PASSWORD")
+                ?: keystoreProperties['keyPassword']
+            storeFile (System.getenv("OMNISIGHT_KEYSTORE_PATH")
+                ?: keystoreProperties['storeFile'])
+                ? file(System.getenv("OMNISIGHT_KEYSTORE_PATH")
+                    ?: keystoreProperties['storeFile'])
+                : null
+            storePassword System.getenv("OMNISIGHT_KEYSTORE_PASSWORD")
+                ?: keystoreProperties['storePassword']
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+    implementation("com.facebook.react:hermes-android")
+{% if push %}
+    // P6 privacy catalogue matcher fingerprints this coord ↦ firebase_messaging.
+    implementation("com.google.firebase:firebase-messaging:24.0.0")
+{% endif %}
+}

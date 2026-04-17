@@ -1,0 +1,183 @@
+# P9 #294 — SKILL-FLUTTER DAG tasks.
+#
+# Every task here maps 1:1 to a P0-P6 framework capability. Unlike P7
+# (iOS-only) and P8 (Android-only), several tasks here fan-out to both
+# platform rails — the cross-platform contract requires every P0-P6
+# invariant to hold on BOTH rails simultaneously before the pilot-
+# validation stage will green.
+
+tasks:
+  - id: flutter-scaffold-init
+    name: "Scaffold Dart + Flutter skeleton"
+    description: >
+      Render pubspec.yaml with Dart 3.4+ / Flutter 3.22+ pin,
+      analysis_options.yaml with flutter_lints + very_good_analysis,
+      lib/main.dart entry point, lib/app.dart with Riverpod
+      ProviderScope. Idempotent: re-renders without clobbering user-
+      added files outside the scaffold surface.
+    depends_on: []
+    artifacts: [flutter_skeleton]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile
+
+  - id: flutter-lib-layer
+    name: "Render lib/ feature layer"
+    description: >
+      Emit lib/features/home/home_screen.dart (Material 3 scaffold +
+      Riverpod StateNotifier + go_router navigation), lib/app.dart
+      (ProviderScope + MaterialApp.router). Enforces P4 flutter-dart
+      role anti-patterns — no `print()`, uses `debugPrint`; Riverpod
+      over `setState` for cross-widget state; `mounted` guard across
+      every `async` gap.
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_features]
+    estimated_hours: 2
+    framework_gate: p4-role-flutter-dart
+
+  - id: flutter-fcm-push
+    name: "firebase_messaging push integration"
+    description: >
+      Render lib/features/push/push_service.dart (FirebaseMessaging
+      wrapper covering APNs + FCM under one Dart API), condition pod
+      entries and android dependency on the push knob. Token never
+      logs raw — SHA-256 fingerprint only. Documents the .p8 APNs
+      auth-key + FCM service-account JSON flow as server-side only.
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_fcm]
+    estimated_hours: 2
+
+  - id: flutter-iap
+    name: "in_app_purchase payments bridge"
+    description: >
+      Render lib/features/billing/iap_service.dart using pub.dev
+      `in_app_purchase` (the official Flutter plugin that multiplexes
+      StoreKit 2 + Play Billing). purchaseStream listener verifies via
+      a server-side adapter; raw receipts never grant entitlement.
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_iap]
+    estimated_hours: 2
+
+  - id: flutter-widget-tests
+    name: "Widget + unit test skeleton"
+    description: >
+      Render test/widget_test.dart exercising HomeScreen state
+      transitions. Coverage ≥ 70% gate-ready via `flutter test
+      --coverage`.
+    depends_on: [flutter-lib-layer]
+    artifacts: [flutter_widget_tests]
+    estimated_hours: 1
+    framework_gate: p2-simulate-unit
+
+  - id: flutter-integration-tests
+    name: "integration_test/ UI smoke skeleton"
+    description: >
+      Render integration_test/app_test.dart driving cold-launch → main
+      flow → purchase sheet → dismiss. Matches the P2 simulate-track
+      `run_flutter_tests` runner contract (`flutter test integration_test
+      --reporter=json`).
+    depends_on: [flutter-lib-layer, flutter-iap]
+    artifacts: [flutter_integration_tests]
+    estimated_hours: 1
+    framework_gate: p2-simulate-ui
+
+  - id: flutter-ios-native
+    name: "iOS native side (Podfile + Info.plist + entitlements)"
+    description: >
+      Emit ios/Runner/Info.plist pinning deployment target to P0
+      ios-arm64 profile min_os_version (16.0), ios/Podfile with
+      platform :ios and optional firebase_messaging / in_app_purchase
+      pods, ios/Runner/Runner.entitlements with aps-environment when
+      push=on. Scaffold is `flutter create`-compatible: running
+      `flutter pub get` + `pod install` completes the native plumbing
+      without conflict.
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_ios_native]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile-ios
+
+  - id: flutter-android-native
+    name: "Android native side (Gradle + manifest + signing)"
+    description: >
+      Emit android/settings.gradle.kts, android/build.gradle.kts root,
+      android/app/build.gradle.kts with applicationId from knob +
+      minSdk/targetSdk from P0 android-arm64-v8a profile (24 / 35).
+      AndroidManifest.xml + backup/extraction rules. Gradle wrapper
+      pinned to the P1 Docker image baseline (gradle-8.7).
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_android_native]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile-android
+
+  - id: flutter-signing-placeholders
+    name: "P3 signing placeholders for iOS + Android"
+    description: >
+      Android: key.properties.example with `$OMNISIGHT_KEYSTORE_*` env
+      refs. iOS: ExportOptions.plist references signing identity env
+      vars. Scaffold MUST NOT bake real cert hashes or keystore
+      binaries; `.gitignore` bans *.jks / *.keystore / *.p12 /
+      key.properties / google-services.json.
+    depends_on: [flutter-ios-native, flutter-android-native]
+    artifacts: [flutter_signing]
+    estimated_hours: 1
+    framework_gate: p3-codesign-chain
+
+  - id: flutter-fastlane
+    name: "Fastlane dual-lane (ios + android)"
+    description: >
+      Fastfile with `ios_beta` (gym → TestFlight) and `android_internal`
+      (supply → Play internal track). Honours OMNISIGHT_MACOS_BUILDER
+      for the iOS lane per P1 (#286) and fails fast if required env
+      vars are missing.
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_fastlane]
+    estimated_hours: 1
+    framework_gate: p1-mobile-toolchain
+
+  - id: flutter-store-metadata
+    name: "ASC + Play submission metadata"
+    description: >
+      Emit BOTH AppStoreMetadata.json (ASC create_version shape) AND
+      PlayStoreMetadata.json (Play upload_bundle shape), plus
+      fastlane/metadata/{ios,android}/<locale>/ directory structure
+      expected by `deliver` / `supply`.
+    depends_on: [flutter-scaffold-init]
+    artifacts: [flutter_store_metadata]
+    estimated_hours: 1
+    framework_gate: p5-store-submission
+
+  - id: flutter-compliance-wire
+    name: "P6 ASC + Play + Privacy compliance wired"
+    description: >
+      Generate PrivacyInfo.xcprivacy (iOS), data_safety.yaml (Android),
+      Info.plist + AndroidManifest.xml declared permission strings.
+      mobile_compliance.run_all(platform="both") should pass on the
+      rendered project with the default knobs.
+    depends_on:
+      - flutter-ios-native
+      - flutter-android-native
+      - flutter-fcm-push
+    artifacts: [flutter_compliance]
+    estimated_hours: 1
+    framework_gate: p6-compliance
+
+  - id: flutter-pilot-validation
+    name: "Cross-platform pilot framework validation"
+    description: >
+      Full-stack smoke: scaffold → simulate-track autodetect=flutter
+      → P6 compliance(platform=both) → ASC + Play metadata round-trip
+      sanity. Green light here is the n=3 consumer signal — the P0-P6
+      framework holds for cross-platform toolchains, not only native
+      iOS and native Android in isolation.
+    depends_on:
+      - flutter-lib-layer
+      - flutter-widget-tests
+      - flutter-integration-tests
+      - flutter-ios-native
+      - flutter-android-native
+      - flutter-signing-placeholders
+      - flutter-fastlane
+      - flutter-store-metadata
+      - flutter-compliance-wire
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: p9-pilot-cross-platform

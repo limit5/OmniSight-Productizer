@@ -1,0 +1,38 @@
+{
+    "schema_version": 1,
+    "platform": "ios",
+    "bundle_id": "{{ package_id }}",
+    "package_name": "{{ package_id }}",
+    "app_name": "{{ project_name }}",
+    "primary_category": "productivity",
+    "age_rating": {
+        "kind": "apple_4plus",
+        "reason": "no objectionable content"
+    },
+    "uses_idfa": false,
+    "privacy_policy_url": "https://example.com/{{ project_name | lower }}/privacy",
+    "privacy_info_path": "ios/Runner/PrivacyInfo.xcprivacy",
+    "app_review_information": {
+        "contact_email": "$OMNISIGHT_ASC_CONTACT_EMAIL",
+        "notes": "Flutter cross-platform app rendered from OmniSight SKILL-FLUTTER (P9 #294)."
+    },
+    "in_app_purchases": {% if payments %}[
+        {
+            "product_id": "com.example.test.consumable.coins_100",
+            "kind": "consumable",
+            "reference_name": "Coins 100",
+            "price_tier": 1
+        },
+        {
+            "product_id": "com.example.test.subscription.monthly",
+            "kind": "auto_renewable_subscription",
+            "reference_name": "Monthly pro",
+            "price_tier": 5,
+            "subscription_group": "pro"
+        }
+    ]{% else %}[]{% endif %},
+    "release": {
+        "phased_release": true,
+        "auto_release": false
+    }
+}

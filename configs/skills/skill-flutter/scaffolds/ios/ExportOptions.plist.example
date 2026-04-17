@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- P3 iOS signing template — populate from OMNISIGHT_* env at build time.
+     NEVER commit a version of this file with real signing identity or
+     provisioning profile specifier values. Fastlane `ios_beta` lane
+     reads OMNISIGHT_IOS_SIGN_IDENTITY / OMNISIGHT_IOS_PROVISIONING_PROFILE
+     + the API key id for ASC at runtime, never from this file.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>teamID</key>
+    <string>$OMNISIGHT_IOS_TEAM_ID</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>$PACKAGE_ID</key>
+        <string>$OMNISIGHT_IOS_PROVISIONING_PROFILE</string>
+    </dict>
+    <key>signingCertificate</key>
+    <string>$OMNISIGHT_IOS_SIGN_IDENTITY</string>
+    <key>uploadBitcode</key>
+    <false/>
+    <key>uploadSymbols</key>
+    <true/>
+</dict>
+</plist>

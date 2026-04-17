@@ -1,0 +1,90 @@
+# SKILL-FLUTTER test definitions — P9 #294
+#
+# Authoritative list consumed by `backend/tests/test_skill_flutter.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-defaults
+        name: "Render: push + payments + compliance (defaults)"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-push-off
+        name: "Render: push=off omits firebase_messaging pod + gradle dep"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-payments-off
+        name: "Render: payments=off omits in_app_purchase files"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-compliance-off
+        name: "Render: compliance=off drops PrivacyInfo + data_safety"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-package-id-flows
+        name: "package_id propagates to iOS Info.plist + Android applicationId"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-ios-deploy-target-pinned
+        name: "iOS Podfile platform version equals ios-arm64 min_os_version"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-android-min-sdk-pinned
+        name: "android build.gradle minSdk equals android-arm64-v8a min_os_version"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: scaffold-no-secrets-baked
+        name: "key.properties.example + ios signing both env-ref only"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+
+  - id: framework-binding
+    name: "P0-P6 framework binding tests"
+    tests:
+      - id: p0-ios-profile-resolves
+        name: "ios-arm64 profile loads via backend.platform"
+        type: integration
+        target: backend.flutter_scaffolder._render_context
+      - id: p0-android-profile-resolves
+        name: "android-arm64-v8a profile loads via backend.platform"
+        type: integration
+        target: backend.flutter_scaffolder._render_context
+      - id: p2-simulate-autodetect
+        name: "Rendered project autodetects as flutter (wins over native subdirs)"
+        type: integration
+        target: backend.mobile_simulator.resolve_ui_framework
+      - id: p4-role-flutter-anti-patterns
+        name: "Scaffold honours flutter-dart role anti-patterns (no print, mounted guards)"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: p5-asc-metadata-shape
+        name: "AppStoreMetadata.json conforms to ASC schema"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: p5-play-metadata-shape
+        name: "PlayStoreMetadata.json conforms to Play schema"
+        type: unit
+        target: backend.flutter_scaffolder.render_project
+      - id: p6-compliance-both-platforms-clean
+        name: "P6 mobile_compliance.run_all(platform=both) passes"
+        type: integration
+        target: backend.flutter_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-flutter appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-flutter') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

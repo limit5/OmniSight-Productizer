@@ -1,0 +1,46 @@
+# {{ project_name }}
+
+React Native 0.76+ cross-platform app rendered from OmniSight SKILL-RN
+(P9 #294). React 18 + TypeScript 5 + Hermes + New Architecture
+(Fabric + TurboModules). Contrast-pack next to SKILL-FLUTTER.
+
+## Platform targets
+
+| Store         | Profile                                      | Build command                                     |
+|---------------|----------------------------------------------|---------------------------------------------------|
+| App Store     | `configs/platforms/ios-arm64.yaml`           | `npx react-native build-ios --mode=Release`       |
+| Google Play   | `configs/platforms/android-arm64-v8a.yaml`   | `npx react-native build-android --mode=Release`   |
+
+- iOS: `Podfile platform :ios, '{{ min_os_version_ios }}'` (StoreKit 2 baseline).
+- Android: `minSdk = {{ min_os_version_android }}`, `targetSdk = {{ sdk_version_android }}`, `compileSdk = {{ sdk_version_android }}`.
+
+## Running locally
+
+```sh
+npm install
+cd ios && pod install && cd ..
+npx react-native start         # Metro bundler
+npx react-native run-ios       # or run-android
+```
+
+## Testing
+
+```sh
+npm test                       # Jest unit + @testing-library/react-native
+detox test --configuration ios.sim.release       # Detox E2E (iOS)
+detox test --configuration android.emu.release   # Detox E2E (Android)
+```
+
+The P2 simulate-track `run_rn_tests` runner invokes `detox test`.
+
+## Signing
+
+Never commit keystores, provisioning profiles, or
+`google-services.json`. Everything goes through `OMNISIGHT_*` env vars
+from `backend/secret_store` (P3 chain).
+
+## Package id
+
+`{{ package_id }}` is shared between iOS `CFBundleIdentifier` and
+Android `applicationId` — single knob, both stores. Change via
+`render_project(... package_id=...)`.

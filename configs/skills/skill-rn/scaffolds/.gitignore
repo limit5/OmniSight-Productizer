@@ -1,0 +1,46 @@
+# Node / RN
+node_modules/
+.metro-health-check*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.expo/
+
+# iOS native
+ios/Pods/
+ios/DerivedData/
+ios/build/
+ios/Podfile.lock
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+ios/ExportOptions.plist
+# P3 iOS signing — never commit
+*.p12
+*.mobileprovision
+*.cer
+*.certSigningRequest
+
+# Android native
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/local.properties
+android/app/src/main/assets/index.android.bundle
+# P3 Android keystore — never commit
+key.properties
+android/key.properties
+*.jks
+*.keystore
+# P5 Play service account — server-side only
+google-services.json
+*-play-service-account.json
+
+# macOS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Test / coverage
+coverage/
+e2e/artifacts/

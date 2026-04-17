@@ -1,0 +1,46 @@
+// Root application widget — Material 3 + go_router declarative routes.
+// Enforces P4 flutter-dart role anti-patterns: no bare `setState` for
+// cross-widget state (Riverpod owns that), no `print()` (debugPrint via
+// the analyzer lint).
+
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+import 'features/home/home_screen.dart';
+
+final GoRouter _router = GoRouter(
+  initialLocation: '/',
+  routes: <RouteBase>[
+    GoRoute(
+      path: '/',
+      name: 'home',
+      builder: (BuildContext context, GoRouterState state) {
+        return const HomeScreen();
+      },
+    ),
+  ],
+);
+
+class {{ project_name }}App extends StatelessWidget {
+  const {{ project_name }}App({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(
+      title: '{{ project_name }}',
+      debugShowCheckedModeBanner: false,
+      routerConfig: _router,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blue,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+    );
+  }
+}

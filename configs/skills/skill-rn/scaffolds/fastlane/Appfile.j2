@@ -1,0 +1,10 @@
+for_platform :ios do
+  app_identifier "{{ package_id }}"
+  apple_id ENV["OMNISIGHT_ASC_APPLE_ID"]
+  team_id ENV["OMNISIGHT_IOS_TEAM_ID"]
+end
+
+for_platform :android do
+  package_name "{{ package_id }}"
+  json_key_file ENV["OMNISIGHT_PLAY_SERVICE_ACCOUNT_PATH"]
+end

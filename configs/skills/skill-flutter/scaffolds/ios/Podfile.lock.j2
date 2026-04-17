@@ -1,0 +1,29 @@
+PODS:
+  - Flutter (1.0.0)
+{% if push %}
+  - FirebaseCore (10.25.0)
+  - FirebaseMessaging (10.25.0):
+    - FirebaseCore (~> 10.25)
+{% endif %}
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+{% if push %}
+  - FirebaseMessaging (~> 10.25)
+  - FirebaseCore (~> 10.25)
+{% endif %}
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+
+SPEC CHECKSUMS:
+  Flutter: e0871f40cf51350855a761d2e70bf5af5b9b5de7
+{% if push %}
+  FirebaseCore: 0000000000000000000000000000000000000000
+  FirebaseMessaging: 0000000000000000000000000000000000000000
+{% endif %}
+
+PODFILE CHECKSUM: 0000000000000000000000000000000000000000
+
+COCOAPODS: 1.15.2

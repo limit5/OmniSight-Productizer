@@ -1,0 +1,38 @@
+# P6 #291 — Google Play Data Safety form source for {{ project_name }}
+# (Flutter cross-platform). Feed this into the Play Console "Data
+# safety" section during submission; contents are derived from the
+# `configs/privacy_label_sdks.yaml` catalogue that mobile_compliance
+# reads during the Privacy gate.
+
+schema_version: 1
+package_name: "{{ package_id }}"
+app_name: "{{ project_name }}"
+
+declared_sdks:
+  - androidx
+  - androidx.compose
+{% if push %}
+  - com.google.firebase:firebase-messaging
+  - com.google.firebase:firebase-core
+{% endif %}
+{% if payments %}
+  - in_app_purchase
+  - play-billing
+{% endif %}
+
+data_collection:
+{% if push %}
+  - type: device_id
+    purpose: app_functionality
+    linked_to_user: true
+    shared: false
+    required: true
+{% endif %}
+  - type: crash_logs
+    purpose: analytics
+    linked_to_user: false
+    shared: false
+    required: false
+
+encryption_in_transit: true
+deletion_flow_url: "https://example.com/{{ project_name | lower }}/delete-account"

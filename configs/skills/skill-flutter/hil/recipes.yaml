@@ -1,0 +1,105 @@
+# SKILL-FLUTTER HIL (hardware-in-the-loop) recipes — P9 #294
+#
+# Cross-platform pack HIL recipes have to cover BOTH rails — an iOS
+# probe on the rendered .ipa and an Android probe on the .aab — because
+# the whole point of the pack is one render covering both stores. Each
+# recipe is operator-run (Step 7), not CI; the probes require real
+# cloud device farms + sandbox accounts P2's mock-fallback intentionally
+# avoids.
+
+recipes:
+  - id: ios-device-launch-smoke
+    name: "Real iPhone cold-launch smoke (iOS rail)"
+    description: >
+      Boot the rendered .ipa on 3 iPhone tiers via Firebase Test Lab
+      iOS. Cold-launch time ≤ 2s p95 (Flutter role quality gate —
+      Impeller renderer + tree-shaken AOT should meet this on a 15 Pro).
+    targets: [ios-arm64]
+    probe:
+      kind: cloud_device_launch
+      farm: firebase
+      devices:
+        - {model: iphone_se_3rd, runtime: ios_17_5}
+        - {model: iphone_15, runtime: ios_17_5}
+        - {model: iphone_15_pro_max, runtime: ios_17_5}
+      p95_launch_ms_ceiling: 2000
+
+  - id: android-device-launch-smoke
+    name: "Real Pixel cold-launch smoke (Android rail)"
+    description: >
+      Boot the rendered .aab on 3 Pixel tiers via Firebase Test Lab
+      Android. Cold-launch ≤ 2s p95 on mid-tier (Pixel 5 equivalent).
+    targets: [android-arm64-v8a]
+    probe:
+      kind: cloud_device_launch
+      farm: firebase
+      devices:
+        - {model: pixel_5, runtime: android_14}
+        - {model: pixel_7, runtime: android_14}
+        - {model: pixel_8, runtime: android_14}
+      p95_launch_ms_ceiling: 2000
+
+  - id: fcm-apns-dual-delivery
+    name: "FCM + APNs sandbox delivery (both rails)"
+    description: >
+      On iOS — push through apns-sandbox.push.apple.com to the
+      installed .ipa; verify `FirebaseMessaging.onMessage` fires within
+      5s. On Android — push through FCM console to the installed .aab;
+      verify `FirebaseMessaging.onMessage` fires within 5s. The Dart
+      callback is the SAME stream in both cases — that's the
+      cross-platform-correctness bit to verify.
+    targets: [ios-arm64, android-arm64-v8a]
+    probe:
+      kind: firebase_messaging_sandbox
+      timeout_s: 5
+
+  - id: in-app-purchase-sandbox
+    name: "in_app_purchase sandbox buy on both stores"
+    description: >
+      iOS: drive `InAppPurchase.instance.buyConsumable` against an
+      Apple Sandbox account; assert `purchaseStream` yields a
+      verified PurchaseDetails within 30s. Android: same flow against
+      a Play license-test account. Dart-side code path is identical in
+      both — the backing StoreKit 2 / Play Billing bridges are the
+      moving parts.
+    targets: [ios-arm64, android-arm64-v8a]
+    probe:
+      kind: in_app_purchase_sandbox
+      product_id: "com.example.test.consumable.coins_100"
+      timeout_s: 30
+
+  - id: asc-privacy-validate
+    name: "App Store Connect privacy manifest validation"
+    description: >
+      Submit the .ipa to ASC and let Apple's automated validator
+      inspect the merged PrivacyInfo.xcprivacy (Flutter rolls up
+      Dart-side + plugin-side privacy files at build time). Assert no
+      "missing required reason API" warning.
+    targets: [ios-arm64]
+    probe:
+      kind: asc_privacy_validate
+
+  - id: play-data-safety-submit
+    name: "Play Data Safety form round-trip"
+    description: >
+      Upload the rendered `docs/play/data_safety.yaml` through the
+      Play Developer API; assert the Play console shows every
+      `declared_sdks` entry was accepted with no manual-follow-up
+      warning (the "we detected SDK X but your form doesn't mention it"
+      case).
+    targets: [android-arm64-v8a]
+    probe:
+      kind: play_data_safety_submit
+
+  - id: cross-platform-e2e-smoke
+    name: "Cross-platform E2E smoke via flutter drive"
+    description: >
+      `flutter drive --target=integration_test/app_test.dart` runs the
+      SAME integration test against both an iOS Simulator and an
+      Android AVD back-to-back. Gate: both rails pass, with the same
+      scenario — assures the widget tree actually behaves identically
+      on both platforms, which is the whole reason to be on Flutter.
+    targets: [ios-arm64, android-arm64-v8a]
+    probe:
+      kind: flutter_drive_matrix
+      timeout_s: 900

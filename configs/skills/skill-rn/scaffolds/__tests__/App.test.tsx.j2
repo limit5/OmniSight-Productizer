@@ -1,0 +1,28 @@
+// Jest + @testing-library/react-native unit tests.
+
+import React from 'react';
+import {render, fireEvent} from '@testing-library/react-native';
+
+import HomeScreen, {useCounter} from '../src/features/home/HomeScreen';
+
+describe('HomeScreen', () => {
+  beforeEach(() => {
+    useCounter.setState({count: 0, lastAction: 'init'});
+  });
+
+  it('starts at zero and increments', () => {
+    const {getByTestId} = render(<HomeScreen />);
+    expect(getByTestId('counter-value').props.children).toBe(0);
+    fireEvent.press(getByTestId('increment-counter'));
+    expect(getByTestId('counter-value').props.children).toBe(1);
+  });
+
+  it('reset returns to zero', () => {
+    const {getByTestId} = render(<HomeScreen />);
+    fireEvent.press(getByTestId('increment-counter'));
+    fireEvent.press(getByTestId('increment-counter'));
+    expect(getByTestId('counter-value').props.children).toBe(2);
+    fireEvent.press(getByTestId('reset-counter'));
+    expect(getByTestId('counter-value').props.children).toBe(0);
+  });
+});

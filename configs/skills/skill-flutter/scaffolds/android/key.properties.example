@@ -1,0 +1,12 @@
+# P3 #288 signing chain — env-ref only. NEVER commit a version of this
+# file with real values; the real key.properties is gitignored.
+#
+# At CI / build time the OmniSight orchestrator materialises a
+# key.properties beside this file, populating values from
+# backend/secret_store (HSM-backed). Locally, developers source their
+# own $OMNISIGHT_KEYSTORE_* env and `gradle` will use those directly.
+
+storeFile=$OMNISIGHT_KEYSTORE_PATH
+storePassword=$OMNISIGHT_KEYSTORE_PASSWORD
+keyAlias=$OMNISIGHT_KEY_ALIAS
+keyPassword=$OMNISIGHT_KEY_PASSWORD

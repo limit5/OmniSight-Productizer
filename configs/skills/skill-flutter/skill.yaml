@@ -1,0 +1,97 @@
+# P9 #294 — SKILL-FLUTTER manifest.
+#
+# Cross-platform skill pack — third consumer of the P0-P6 mobile framework
+# after P7 SKILL-IOS (pilot) and P8 SKILL-ANDROID (n=2). This one renders a
+# single Dart codebase that targets BOTH iOS (ios-arm64 profile) and Android
+# (android-arm64-v8a profile) — the first skill pack whose pilot_report has
+# to hold against `mobile_compliance.run_all(platform="both")`, not just one
+# platform.
+#
+# Exercise (same P0-P6 surface as P7/P8 but on both rails simultaneously):
+#   * P0  target_kind=mobile profile schema       (ios-arm64.yaml + android-arm64-v8a.yaml)
+#   * P1  mobile toolchain / macOS + Docker       (backend/mobile_toolchain.py — both rails)
+#   * P2  mobile simulate-track + flutter runner  (backend/mobile_simulator.py autodetect="flutter")
+#   * P3  Apple + Android signing chains          (backend/codesign_store.py)
+#   * P4  flutter-dart role anti-patterns         (configs/roles/mobile/flutter-dart.skill.md)
+#   * P5  ASC + Play dual-submission adapters     (backend/app_store_connect.py + backend/google_play_developer.py)
+#   * P6  mobile_compliance bundle (ASC + Play +  (backend/mobile_compliance/ platform="both")
+#         Privacy)
+#
+# Knob surface is a superset of P7+P8: `package_id` (shared across iOS
+# bundleIdentifier and Android applicationId — the whole point of
+# cross-platform), `push` (FCM via firebase_messaging pod on iOS +
+# com.google.firebase:firebase-messaging on Android), `payments` (pub.dev
+# `in_app_purchase` bridges Apple IAP + Play Billing under one Dart API),
+# and `compliance` (toggles both ASC metadata and Play metadata + Data
+# Safety form).
+
+schema_version: 1
+name: skill-flutter
+description: >
+  Flutter 3.22+ / Dart 3.4+ cross-platform skill pack — single codebase
+  targeting both iOS (ios-arm64) and Android (android-arm64-v8a).
+  Generates a production-ready app with main.dart entry, Riverpod 2
+  StateNotifier state management, go_router 7 navigation, Material 3
+  SwitchableTheme, FCM push via `firebase_messaging` (iOS APNs +
+  Android FCM under one Dart API), `in_app_purchase` unified StoreKit 2
+  + Play Billing bridge, platform-specific signing templates (.p8 APNs
+  auth key + Play keystore, both env-ref only), `analysis_options.yaml`
+  with `flutter_lints` + `very_good_analysis` strict, widget tests
+  (`flutter test`) + integration tests (`flutter test integration_test`)
+  matching the P2 simulate-track `run_flutter_tests` contract, and both
+  ASC + Play submission metadata + Data Safety form green out-of-the-box.
+  Third consumer of the P0-P6 mobile framework — validates framework
+  holds for cross-platform toolchains that straddle both iOS and Android
+  (n=3 after P7 SKILL-IOS pilot + P8 SKILL-ANDROID n=2).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - flutter
+  - flutter-3
+  - dart
+  - dart-3
+  - riverpod
+  - riverpod-2
+  - go-router
+  - material-3
+  - cupertino
+  - firebase-messaging
+  - fcm
+  - apns
+  - in-app-purchase
+  - storekit
+  - play-billing
+  - cross-platform
+  - ios
+  - android
+  - integration-test
+  - flutter-test
+  - widget-test
+  - p9
+  - pilot

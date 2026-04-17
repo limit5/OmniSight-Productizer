@@ -1,0 +1,26 @@
+// P9 #294 — SKILL-FLUTTER main entry. Renders `ProviderScope` wrapping
+// the root app widget. Dart 3.4+ / Flutter 3.22+.
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'app.dart';
+{% if push %}
+import 'features/push/push_service.dart';
+{% endif %}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+{% if push %}
+  // P6 / firebase: initialize messaging + request notification
+  // permission on first launch. FCM + APNs run through the same
+  // FirebaseMessaging API on both rails — that's Flutter's whole
+  // cross-platform value proposition.
+  await PushService.bootstrap();
+{% endif %}
+  if (kDebugMode) {
+    debugPrint('{{ project_name }} starting');
+  }
+  runApp(const ProviderScope(child: {{ project_name }}App()));
+}

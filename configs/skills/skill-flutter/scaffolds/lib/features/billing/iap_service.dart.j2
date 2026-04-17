@@ -1,0 +1,90 @@
+// P9 #294 — in_app_purchase wrapper. One Dart API, two stores.
+// Rendered when `payments=on`.
+//
+// Contract:
+//   * Raw receipt / purchase token NEVER grants entitlement client-side.
+//     `verifyPurchase` below ALWAYS delegates to the backend which talks
+//     to Apple `verifyReceipt` (or App Store Server API v2) and Play
+//     Developer API `purchases.products.get`. This is the most-exploited
+//     IAP bypass — the scaffold locks it down by default.
+//   * Pending/restored purchases are completed with `completePurchase`
+//     ONLY after server-side verification returns verified.
+
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:in_app_purchase/in_app_purchase.dart';
+
+class IapService {
+  IapService._();
+
+  static const List<String> productIds = <String>[
+    'com.example.test.consumable.coins_100',
+    'com.example.test.subscription.monthly',
+  ];
+
+  static StreamSubscription<List<PurchaseDetails>>? _subscription;
+
+  /// Start listening to purchaseStream; call once after app boot.
+  static Future<void> start() async {
+    final bool available = await InAppPurchase.instance.isAvailable();
+    if (!available) {
+      debugPrint('iap unavailable on this device');
+      return;
+    }
+    _subscription = InAppPurchase.instance.purchaseStream.listen(
+      _handlePurchases,
+      onError: (Object err) => debugPrint('iap stream error: $err'),
+    );
+  }
+
+  static Future<void> stop() async {
+    await _subscription?.cancel();
+    _subscription = null;
+  }
+
+  /// Fetch product metadata from the active store (StoreKit 2 on iOS,
+  /// Play Billing on Android). Backing native calls are wrapped by the
+  /// plugin into one Dart signature.
+  static Future<ProductDetailsResponse> loadProducts() {
+    return InAppPurchase.instance.queryProductDetails(productIds.toSet());
+  }
+
+  static Future<bool> buy(ProductDetails product) async {
+    final PurchaseParam param = PurchaseParam(productDetails: product);
+    return InAppPurchase.instance.buyConsumable(purchaseParam: param);
+  }
+
+  static Future<void> _handlePurchases(List<PurchaseDetails> purchases) async {
+    for (final PurchaseDetails purchase in purchases) {
+      if (purchase.status == PurchaseStatus.error) {
+        debugPrint('iap error: ${purchase.error}');
+        continue;
+      }
+      if (purchase.status == PurchaseStatus.purchased ||
+          purchase.status == PurchaseStatus.restored) {
+        final bool verified = await _verifyPurchase(purchase);
+        if (!verified) {
+          debugPrint('iap rejected by server verification');
+          continue;
+        }
+        // ONLY complete after server verified.
+        if (purchase.pendingCompletePurchase) {
+          await InAppPurchase.instance.completePurchase(purchase);
+        }
+      }
+    }
+  }
+
+  /// Server-side verification — REPLACE with an actual HTTPS POST to
+  /// your backend's `/api/v1/iap/verify` endpoint before shipping.
+  /// The scaffold returns `false` so no client-side grant is possible
+  /// until the operator wires this.
+  static Future<bool> _verifyPurchase(PurchaseDetails purchase) async {
+    debugPrint(
+      'iap verify stub — replace with server call before shipping '
+      'sku=${purchase.productID}',
+    );
+    return false;
+  }
+}

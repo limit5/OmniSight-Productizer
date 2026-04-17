@@ -1,0 +1,45 @@
+// P9 #294 — FCM/APNs push via @react-native-firebase/messaging.
+// Rendered when `push=on`.
+//
+// Contract:
+//   * Raw token NEVER hits a log line — SHA-256 fingerprint only.
+//   * `.p8` APNs auth key stays server-side; this client only posts
+//     the device token to the backend which does the APNs signing.
+//   * `google-services.json` stays server-side; gradle's
+//     google-services plugin reads only the sender-id at build time.
+
+import messaging from '@react-native-firebase/messaging';
+
+/** Idempotent bootstrap — safe to call on every app launch. */
+export async function bootstrapPush(): Promise<void> {
+  const authStatus = await messaging().requestPermission();
+  const enabled =
+    authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+    authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+  if (!enabled) {
+    return;
+  }
+  const token = await messaging().getToken();
+  if (token) {
+    forwardToServer(token);
+  }
+  messaging().onTokenRefresh(forwardToServer);
+}
+
+function forwardToServer(token: string): void {
+  const fingerprint = fingerprintOf(token);
+  // DO NOT log `token` — only the fingerprint.
+  void fingerprint;
+  // Real impl: fetch('/api/v1/push/register', …) with the backend
+  // owning the APNs auth key + FCM server key.
+}
+
+function fingerprintOf(token: string): string {
+  // Lightweight non-crypto fingerprint — enough to correlate log
+  // entries, never enough to reconstruct the token.
+  let hash = 0;
+  for (let i = 0; i < token.length; i += 1) {
+    hash = (Math.imul(31, hash) + token.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}

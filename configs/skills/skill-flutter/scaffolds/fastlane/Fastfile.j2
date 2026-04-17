@@ -1,0 +1,52 @@
+# P9 #294 — Flutter dual-lane Fastfile. One file, both stores.
+#
+# iOS lane (`ios_beta`) goes through OMNISIGHT_MACOS_BUILDER; fails fast
+# on Linux without the env set (per P1 #286 delegation matrix).
+# Android lane (`android_internal`) runs on Linux via the P1 Docker
+# image — needs OMNISIGHT_KEYSTORE_* populated at build time.
+
+default_platform(:ios)
+
+platform :ios do
+  before_all do
+    unless ENV["OMNISIGHT_MACOS_BUILDER"]
+      UI.user_error!(
+        "OMNISIGHT_MACOS_BUILDER must be set — iOS builds require a " \
+        "macOS host. See P1 (#286) delegation matrix.",
+      )
+    end
+  end
+
+  desc "Build & upload iOS build to TestFlight"
+  lane :beta do
+    sh("flutter build ipa --release --export-options-plist ../ios/ExportOptions.plist")
+    pilot(
+      api_key_path: ENV["OMNISIGHT_ASC_API_KEY_PATH"],
+      ipa: "../build/ios/ipa/{{ project_name }}.ipa",
+      skip_waiting_for_build_processing: true,
+    )
+  end
+end
+
+platform :android do
+  before_all do
+    unless ENV["OMNISIGHT_KEYSTORE_PATH"]
+      UI.user_error!(
+        "OMNISIGHT_KEYSTORE_PATH must be set — Android signing chain " \
+        "requires a keystore path. See P3 (#288).",
+      )
+    end
+  end
+
+  desc "Build & upload Android bundle to Play internal track"
+  lane :internal do
+    sh("flutter build appbundle --release")
+    supply(
+      package_name: "{{ package_id }}",
+      aab: "../build/app/outputs/bundle/release/app-release.aab",
+      track: "internal",
+      json_key_data: ENV["OMNISIGHT_PLAY_SERVICE_ACCOUNT_JSON"],
+      release_status: "draft",
+    )
+  end
+end

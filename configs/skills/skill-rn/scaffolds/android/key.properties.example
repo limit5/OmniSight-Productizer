@@ -1,0 +1,7 @@
+# P3 #288 signing chain — env refs only. Never commit a version with
+# real values; `key.properties` itself is gitignored.
+
+storeFile=$OMNISIGHT_KEYSTORE_PATH
+storePassword=$OMNISIGHT_KEYSTORE_PASSWORD
+keyAlias=$OMNISIGHT_KEY_ALIAS
+keyPassword=$OMNISIGHT_KEY_PASSWORD

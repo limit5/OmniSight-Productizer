@@ -1,0 +1,26 @@
+// P9 #294 — RN Android root build.gradle. All Android Gradle + Kotlin
+// + RN plugin declarations `apply false`; the :app module opts in.
+buildscript {
+    ext {
+        buildToolsVersion = "35.0.0"
+        minSdkVersion = {{ min_os_version_android }}
+        compileSdkVersion = {{ sdk_version_android }}
+        targetSdkVersion = {{ sdk_version_android }}
+        ndkVersion = "27.0.12077973"
+        kotlinVersion = "2.0.0"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.3.2")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlinVersion}")
+{% if push %}
+        classpath("com.google.gms:google-services:4.4.2")
+{% endif %}
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"

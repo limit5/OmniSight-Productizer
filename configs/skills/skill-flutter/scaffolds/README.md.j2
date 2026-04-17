@@ -1,0 +1,48 @@
+# {{ project_name }}
+
+Flutter {{ "3.22+" }} cross-platform app rendered from OmniSight
+SKILL-FLUTTER (P9 #294). One Dart codebase, both stores.
+
+## Platform targets
+
+| Store         | Profile                                      | Build command                          |
+|---------------|----------------------------------------------|----------------------------------------|
+| App Store     | `configs/platforms/ios-arm64.yaml`           | `flutter build ipa --release`          |
+| Google Play   | `configs/platforms/android-arm64-v8a.yaml`   | `flutter build appbundle --release`    |
+
+Deployment floors (pinned from P0 profiles, not copied):
+
+- iOS: `min_os_version = {{ min_os_version_ios }}` (StoreKit 2 baseline).
+- Android: `minSdk = {{ min_os_version_android }}`, `targetSdk = {{ sdk_version_android }}`.
+
+## Running locally
+
+```sh
+flutter pub get
+cd ios && pod install && cd ..
+flutter run -d <device-id>        # picks an iOS sim or Android AVD
+```
+
+## Testing
+
+```sh
+flutter test --coverage           # unit + widget tests
+flutter test integration_test/    # integration test via P2 simulate-track
+```
+
+The P2 simulate-track `run_flutter_tests` runner invokes
+`flutter test integration_test --reporter=json` — the scaffold is
+compatible out-of-the-box.
+
+## Signing
+
+NEVER commit keystores or provisioning profiles. Everything goes
+through `OMNISIGHT_*` env vars sourced from `backend/secret_store` at
+build time (P3 chain). See `android/key.properties.example` for the
+expected env-ref shape.
+
+## Package id
+
+`{{ package_id }}` is shared between iOS `CFBundleIdentifier` and
+Android `applicationId` — the whole point of cross-platform is one id
+per product. Change the id via `render_project(... package_id=...)`.

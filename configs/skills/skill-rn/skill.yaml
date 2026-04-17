@@ -1,0 +1,92 @@
+# P9 #294 — SKILL-RN manifest.
+#
+# Cross-platform skill pack (contrast pick). SKILL-FLUTTER is P9's
+# primary cross-platform pack; SKILL-RN is the React-ecosystem
+# alternative — same P0-P6 contract, different toolchain (React 18 +
+# TypeScript 5 + Hermes + Fabric/TurboModules + Metro bundler).
+#
+# Exercise (same surface as P7/P8/SKILL-FLUTTER, different rails):
+#   * P0  target_kind=mobile profile schema       (ios-arm64.yaml + android-arm64-v8a.yaml)
+#   * P1  mobile toolchain / macOS + Docker       (backend/mobile_toolchain.py — both rails)
+#   * P2  mobile simulate-track + detox runner    (backend/mobile_simulator.py autodetect="react-native")
+#   * P3  Apple + Android signing chains          (backend/codesign_store.py)
+#   * P4  react-native role anti-patterns         (configs/roles/mobile/react-native.skill.md)
+#   * P5  ASC + Play dual-submission adapters     (backend/app_store_connect.py + backend/google_play_developer.py)
+#   * P6  mobile_compliance bundle                (backend/mobile_compliance/ platform="both")
+#
+# The contrast-vs-primary split is deliberate: picking Flutter as
+# primary lets the organisation standardise on one toolchain per
+# product vertical while keeping the React / TypeScript muscle
+# available when the product group's existing stack is React + Next.js
+# (dogfood alignment with W6 SKILL-NEXTJS).
+
+schema_version: 1
+name: skill-rn
+description: >
+  React Native 0.76+ / TypeScript 5 / Hermes cross-platform skill pack —
+  contrast pick next to SKILL-FLUTTER. Generates a production-ready app
+  with App.tsx entry, function-component + hooks pattern, Zustand for
+  local state, React Navigation 7 for routing, New Architecture
+  (Fabric renderer + TurboModules) enabled by default on both rails,
+  FCM push via `@react-native-firebase/messaging` (iOS APNs + Android
+  FCM under one TypeScript API), `react-native-iap` payments bridge,
+  Jest + @testing-library/react-native for unit + Detox for E2E
+  matching the P2 simulate-track `run_rn_tests` contract, and both
+  ASC + Play submission metadata + Data Safety form green
+  out-of-the-box. Fourth consumer of the P0-P6 mobile framework
+  (second cross-platform; after P7 SKILL-IOS + P8 SKILL-ANDROID +
+  SKILL-FLUTTER).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - react-native
+  - react-native-0-76
+  - rn
+  - typescript
+  - typescript-5
+  - hermes
+  - new-architecture
+  - fabric
+  - turbo-modules
+  - metro
+  - react-navigation
+  - zustand
+  - react-native-firebase
+  - fcm
+  - apns
+  - react-native-iap
+  - storekit
+  - play-billing
+  - jest
+  - detox
+  - cross-platform
+  - ios
+  - android
+  - contrast
+  - p9

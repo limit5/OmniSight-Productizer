@@ -1,0 +1,43 @@
+// Widget tests — exercise HomeScreen state transitions via Riverpod.
+// Matches the P2 simulate-track `run_flutter_tests` runner contract.
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:{{ project_name | lower }}/features/home/home_screen.dart';
+
+void main() {
+  testWidgets('HomeScreen starts at zero and increments', (tester) async {
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(home: HomeScreen()),
+      ),
+    );
+
+    expect(find.byKey(const Key('counter-value')), findsOneWidget);
+    expect(find.text('0'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('increment-counter')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1'), findsOneWidget);
+  });
+
+  testWidgets('HomeScreen reset returns to zero', (tester) async {
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(home: HomeScreen()),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('increment-counter')));
+    await tester.tap(find.byKey(const Key('increment-counter')));
+    await tester.pumpAndSettle();
+    expect(find.text('2'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('reset-counter')));
+    await tester.pumpAndSettle();
+    expect(find.text('0'), findsOneWidget);
+  });
+}

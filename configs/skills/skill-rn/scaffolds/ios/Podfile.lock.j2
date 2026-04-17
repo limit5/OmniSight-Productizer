@@ -1,0 +1,32 @@
+PODS:
+  - React (0.76.0)
+  - hermes-engine (0.76.0)
+{% if push %}
+  - FirebaseCore (10.25.0)
+  - FirebaseMessaging (10.25.0):
+    - FirebaseCore (~> 10.25)
+{% endif %}
+
+DEPENDENCIES:
+  - React (from `../node_modules/react-native/`)
+  - hermes-engine
+{% if push %}
+  - FirebaseMessaging (~> 10.25)
+  - FirebaseCore (~> 10.25)
+{% endif %}
+
+EXTERNAL SOURCES:
+  React:
+    :path: ../node_modules/react-native/
+
+SPEC CHECKSUMS:
+  React: 0000000000000000000000000000000000000000
+  hermes-engine: 0000000000000000000000000000000000000000
+{% if push %}
+  FirebaseCore: 0000000000000000000000000000000000000000
+  FirebaseMessaging: 0000000000000000000000000000000000000000
+{% endif %}
+
+PODFILE CHECKSUM: 0000000000000000000000000000000000000000
+
+COCOAPODS: 1.15.2

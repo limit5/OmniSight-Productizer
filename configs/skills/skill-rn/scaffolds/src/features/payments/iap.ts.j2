@@ -1,0 +1,65 @@
+// P9 #294 — react-native-iap bridge. One TypeScript API, two stores.
+// Rendered when `payments=on`.
+//
+// Contract:
+//   * `finishTransaction` ONLY after server verification returns
+//     `verified = true`. The scaffold's `verifyPurchase` stub returns
+//     false, so raw client-side response CANNOT grant entitlement —
+//     operators must wire the real server call before shipping.
+
+import {
+  type Purchase,
+  type Subscription,
+  type Product,
+  finishTransaction,
+  getProducts,
+  getSubscriptions,
+  purchaseUpdatedListener,
+  requestPurchase,
+  initConnection,
+  endConnection,
+} from 'react-native-iap';
+
+export const PRODUCT_IDS = ['com.example.test.consumable.coins_100'];
+export const SUBSCRIPTION_IDS = ['com.example.test.subscription.monthly'];
+
+let subscription: {remove: () => void} | null = null;
+
+export async function startIap(): Promise<void> {
+  await initConnection();
+  subscription = purchaseUpdatedListener(async (purchase: Purchase) => {
+    const verified = await verifyPurchase(purchase);
+    if (!verified) {
+      return;
+    }
+    // Only finish after verification — this is the IAP-bypass fix
+    // Apple + Google explicitly warn about.
+    await finishTransaction({purchase, isConsumable: true});
+  });
+}
+
+export async function stopIap(): Promise<void> {
+  subscription?.remove();
+  subscription = null;
+  await endConnection();
+}
+
+export async function loadProducts(): Promise<Product[]> {
+  return getProducts({skus: PRODUCT_IDS});
+}
+
+export async function loadSubscriptions(): Promise<Subscription[]> {
+  return getSubscriptions({skus: SUBSCRIPTION_IDS});
+}
+
+export async function buy(sku: string): Promise<void> {
+  await requestPurchase({sku});
+}
+
+/** Server-side verification stub — REPLACE with a real HTTPS POST to
+ *  the backend `/api/v1/iap/verify` endpoint before shipping. Returns
+ *  `false` so no client-side grant can happen until the operator
+ *  wires this up. */
+async function verifyPurchase(_purchase: Purchase): Promise<boolean> {
+  return false;
+}

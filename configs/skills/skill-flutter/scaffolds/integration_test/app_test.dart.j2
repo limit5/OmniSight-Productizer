@@ -1,0 +1,35 @@
+// P2 simulate-track integration test entry. The runner invokes
+//   flutter test integration_test --reporter=json
+// on iOS Simulator + Android AVD during the mobile simulate-track gate.
+
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:integration_test/integration_test.dart';
+import 'package:{{ project_name | lower }}/app.dart';
+import 'package:{{ project_name | lower }}/features/home/home_screen.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+void main() {
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('cold launch → home → increment → reset smoke', (tester) async {
+    await tester.pumpWidget(const ProviderScope(child: {{ project_name }}App()));
+    await tester.pumpAndSettle();
+
+    // Home visible.
+    expect(find.byType(HomeScreen), findsOneWidget);
+    expect(find.text('0'), findsOneWidget);
+
+    // Increment twice.
+    await tester.tap(find.byKey(const Key('increment-counter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('increment-counter')));
+    await tester.pumpAndSettle();
+    expect(find.text('2'), findsOneWidget);
+
+    // Reset.
+    await tester.tap(find.byKey(const Key('reset-counter')));
+    await tester.pumpAndSettle();
+    expect(find.text('0'), findsOneWidget);
+  });
+}

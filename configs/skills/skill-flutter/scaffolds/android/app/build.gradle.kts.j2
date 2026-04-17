@@ -1,0 +1,90 @@
+// P9 #294 — Flutter Android app module build.gradle.kts.
+//
+// Reads minSdk / targetSdk / compileSdk from the P0
+// `android-arm64-v8a` profile — same pattern P8 SKILL-ANDROID locks
+// down. `applicationId` comes from the scaffolder's `package_id`
+// knob and is shared with iOS `CFBundleIdentifier` — the whole point
+// of one codebase targeting two stores.
+//
+// Signing: `signingConfigs.release` reads `key.properties` which is
+// itself gitignored and seeded from `$OMNISIGHT_KEYSTORE_*` env at
+// build time (P3 chain). This file NEVER bakes a keystore path or
+// password — only reads env refs.
+
+plugins {
+    id("com.android.application")
+    id("kotlin-android")
+    id("dev.flutter.flutter-gradle-plugin")
+{% if push %}
+    id("com.google.gms.google-services")
+{% endif %}
+}
+
+val keystoreProperties = java.util.Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace = "{{ package_id }}"
+    compileSdk = {{ sdk_version_android }}
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+        allWarningsAsErrors = true
+    }
+
+    defaultConfig {
+        applicationId = "{{ package_id }}"
+        minSdk = {{ min_os_version_android }}
+        targetSdk = {{ sdk_version_android }}
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    signingConfigs {
+        create("release") {
+            // P3: prefer env, fall back to gitignored key.properties,
+            // fail fast if neither is present.
+            keyAlias = System.getenv("OMNISIGHT_KEY_ALIAS")
+                ?: keystoreProperties.getProperty("keyAlias")
+            keyPassword = System.getenv("OMNISIGHT_KEY_PASSWORD")
+                ?: keystoreProperties.getProperty("keyPassword")
+            storeFile = (System.getenv("OMNISIGHT_KEYSTORE_PATH")
+                ?: keystoreProperties.getProperty("storeFile"))
+                ?.let { file(it) }
+            storePassword = System.getenv("OMNISIGHT_KEYSTORE_PASSWORD")
+                ?: keystoreProperties.getProperty("storePassword")
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+{% if push %}
+    // P6 privacy catalogue matcher fingerprints this coord ↦ firebase_messaging.
+    implementation("com.google.firebase:firebase-messaging:24.0.0")
+{% endif %}
+}

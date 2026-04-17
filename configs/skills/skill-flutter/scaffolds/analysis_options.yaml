@@ -1,0 +1,25 @@
+include: package:very_good_analysis/analysis_options.yaml
+
+analyzer:
+  strong-mode:
+    implicit-casts: false
+    implicit-dynamic: false
+  errors:
+    # Flutter role (P4): print() is an anti-pattern in production code;
+    # every call goes through `debugPrint` or `package:logging`.
+    avoid_print: error
+    # Flutter role (P4): BuildContext across async gaps must guard
+    # `mounted` — upgrade the lint to error so the CI analyzer blocks it.
+    use_build_context_synchronously: error
+    # Keep diagnostics strict — project opts into very_good_analysis
+    # which already ships opinionated rules; we only tighten.
+    missing_return: error
+    dead_code: error
+
+linter:
+  rules:
+    avoid_print: true
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    prefer_final_locals: true
+    use_key_in_widget_constructors: true

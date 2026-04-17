@@ -1,0 +1,164 @@
+# P9 #294 — SKILL-RN DAG tasks.
+#
+# Task shape mirrors SKILL-FLUTTER (same P0-P6 surface, different
+# toolchain). RN-specific beats are New Architecture + Hermes +
+# TurboModules wiring, Detox (vs Flutter's integration_test) and
+# Metro bundler config.
+
+tasks:
+  - id: rn-scaffold-init
+    name: "Scaffold package.json + TypeScript skeleton"
+    description: >
+      Render package.json with React Native 0.76 + React 18 + TypeScript
+      5, tsconfig.json strict, .prettierrc, eslint config. Idempotent:
+      re-renders without clobbering user-added files outside the
+      scaffold surface.
+    depends_on: []
+    artifacts: [rn_skeleton]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile
+
+  - id: rn-src-layer
+    name: "Render src/ feature layer"
+    description: >
+      Emit src/features/home/HomeScreen.tsx (function component +
+      hooks + Zustand store), App.tsx with React Navigation 7 and
+      Gesture Handler root view. Enforces P4 react-native role
+      anti-patterns (no console.log in prod, StyleSheet.create, no
+      inline function in FlatList renderItem).
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_features]
+    estimated_hours: 2
+    framework_gate: p4-role-react-native
+
+  - id: rn-fcm-push
+    name: "@react-native-firebase/messaging push"
+    description: >
+      Render src/features/push/push.ts — initializes messaging, asks
+      permission, forwards the device token's SHA-256 fingerprint
+      (never the raw token) to the server. Conditioned on push=on.
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_fcm]
+    estimated_hours: 2
+
+  - id: rn-iap
+    name: "react-native-iap payments bridge"
+    description: >
+      Render src/features/payments/iap.ts using `react-native-iap` —
+      bridges StoreKit 2 + Play Billing under one TypeScript API.
+      `finishTransaction` is ONLY called after server-side receipt
+      verification returns verified.
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_iap]
+    estimated_hours: 2
+
+  - id: rn-jest-tests
+    name: "Jest + @testing-library/react-native skeleton"
+    description: >
+      Render __tests__/App.test.tsx exercising HomeScreen state
+      transitions. Coverage ≥ 70% via `jest --coverage`.
+    depends_on: [rn-src-layer]
+    artifacts: [rn_jest]
+    estimated_hours: 1
+    framework_gate: p2-simulate-unit
+
+  - id: rn-detox-tests
+    name: "Detox E2E skeleton"
+    description: >
+      Render e2e/app.test.ts driving cold launch → main flow →
+      purchase sheet → dismiss. Matches P2 simulate-track
+      `run_rn_tests` runner contract.
+    depends_on: [rn-src-layer, rn-iap]
+    artifacts: [rn_detox]
+    estimated_hours: 1
+    framework_gate: p2-simulate-ui
+
+  - id: rn-ios-native
+    name: "iOS native side (Podfile + Info.plist)"
+    description: >
+      Emit ios/Podfile pinning the platform version to the P0
+      ios-arm64 profile min_os_version; Podfile.lock stub so the P6
+      privacy gate has Firebase / IAP pods to fingerprint; Info.plist
+      with bundle id + UIBackgroundModes when push=on.
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_ios_native]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile-ios
+
+  - id: rn-android-native
+    name: "Android native side (Gradle + manifest)"
+    description: >
+      Emit android/settings.gradle + build.gradle root + app/build.gradle
+      with applicationId + minSdk/targetSdk/compileSdk from P0
+      android-arm64-v8a profile, android/gradle.properties enabling
+      Hermes + New Architecture, AndroidManifest.xml.
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_android_native]
+    estimated_hours: 2
+    framework_gate: p0-platform-profile-android
+
+  - id: rn-signing-placeholders
+    name: "P3 signing placeholders for iOS + Android"
+    description: >
+      Android: key.properties.example with $OMNISIGHT_KEYSTORE_* env
+      refs. iOS: ExportOptions.plist references signing identity env
+      vars. `.gitignore` bans keystores, provisioning profiles,
+      google-services.json.
+    depends_on: [rn-ios-native, rn-android-native]
+    artifacts: [rn_signing]
+    estimated_hours: 1
+    framework_gate: p3-codesign-chain
+
+  - id: rn-fastlane
+    name: "Fastlane dual-lane (ios + android)"
+    description: >
+      Fastfile with ios_beta (gym → TestFlight) + android_internal
+      (supply → Play internal track). OMNISIGHT_MACOS_BUILDER +
+      OMNISIGHT_KEYSTORE_* required, fails fast when missing.
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_fastlane]
+    estimated_hours: 1
+    framework_gate: p1-mobile-toolchain
+
+  - id: rn-store-metadata
+    name: "ASC + Play submission metadata"
+    description: >
+      Emit AppStoreMetadata.json + PlayStoreMetadata.json + Fastlane
+      metadata/ trees for both stores.
+    depends_on: [rn-scaffold-init]
+    artifacts: [rn_store_metadata]
+    estimated_hours: 1
+    framework_gate: p5-store-submission
+
+  - id: rn-compliance-wire
+    name: "P6 ASC + Play + Privacy compliance wired"
+    description: >
+      PrivacyInfo.xcprivacy (iOS) + docs/play/data_safety.yaml
+      (Android). run_all(platform="both") passes on a fresh render.
+    depends_on:
+      - rn-ios-native
+      - rn-android-native
+      - rn-fcm-push
+    artifacts: [rn_compliance]
+    estimated_hours: 1
+    framework_gate: p6-compliance
+
+  - id: rn-pilot-validation
+    name: "Cross-platform pilot framework validation"
+    description: >
+      Full-stack smoke, contrast to skill-flutter-pilot-validation.
+      Scaffold → autodetect=react-native → P6 compliance(platform=both)
+      → ASC + Play metadata round-trip.
+    depends_on:
+      - rn-src-layer
+      - rn-jest-tests
+      - rn-detox-tests
+      - rn-ios-native
+      - rn-android-native
+      - rn-signing-placeholders
+      - rn-fastlane
+      - rn-store-metadata
+      - rn-compliance-wire
+    artifacts: []
+    estimated_hours: 2
+    framework_gate: p9-pilot-cross-platform

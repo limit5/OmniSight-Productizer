@@ -1,0 +1,42 @@
+{
+    "schema_version": 1,
+    "platform": "android",
+    "package_name": "{{ package_id }}",
+    "app_name": "{{ project_name }}",
+    "primary_category": "PRODUCTIVITY",
+    "content_rating": {
+        "rating_scheme": "IARC_GENERIC",
+        "rating_label": "EVERYONE",
+        "descriptors": []
+    },
+    "target_audience": {
+        "age_group": "ADULTS",
+        "appeals_to_children": false
+    },
+    "data_safety_form_path": "docs/play/data_safety.yaml",
+    "privacy_policy_url": "https://example.com/{{ project_name | lower }}/privacy",
+    "in_app_purchases": {% if payments %}[
+        {
+            "sku": "com.example.test.consumable.coins_100",
+            "kind": "consumable",
+            "reference_name": "Coins 100"
+        }
+    ]{% else %}[]{% endif %},
+    "subscriptions": {% if payments %}[
+        {
+            "sku": "com.example.test.subscription.monthly",
+            "billing_period": "P1M",
+            "reference_name": "Monthly pro"
+        }
+    ]{% else %}[]{% endif %},
+    "tracks": {
+        "internal": {
+            "user_fraction": 1.0,
+            "release_status": "draft"
+        },
+        "production": {
+            "user_fraction": 0.1,
+            "release_status": "draft"
+        }
+    }
+}
