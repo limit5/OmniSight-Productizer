@@ -1344,7 +1344,7 @@ Legend:
 ### G2. HA-02 Reverse proxy + dual backend instance rolling restart
 - [x] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
 - [x] `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 volume）
-- [ ] `scripts/deploy.sh` 改為 rolling：取下 A → 重啟 → `/readyz` pass → 取下 B → 重啟
+- [x] `scripts/deploy.sh` 改為 rolling：取下 A → 重啟 → `/readyz` pass → 取下 B → 重啟
 - [ ] Upstream health check + automatic eject（fail_timeout）
 - [ ] 整合測試：部署中對 `/api/v1/*` 持續打流量，0 個 5xx
 - [ ] 交付：`deploy/reverse-proxy/Caddyfile`、`docker-compose.prod.yml` diff、`scripts/deploy.sh` rolling 模式
