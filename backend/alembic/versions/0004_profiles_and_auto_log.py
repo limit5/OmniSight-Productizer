@@ -16,6 +16,8 @@ Create Date: 2026-04-14
 """
 from __future__ import annotations
 
+import re
+
 from alembic import op
 
 revision = "0004"
@@ -63,15 +65,36 @@ def upgrade() -> None:
     bind = op.get_bind()
     for stmt in [s.strip() for s in _SQL.split(";") if s.strip()]:
         bind.exec_driver_sql(stmt)
-    # Idempotent column adds — ignore "duplicate column" errors when
-    # re-applying.
+    # Idempotent column adds — check existence first so a re-run on a
+    # DB where the column already exists is a no-op. Using a savepoint
+    # around a failing ALTER TABLE doesn't work on SQLite, and
+    # transactional-DDL engines (Postgres) abort the whole migration
+    # transaction on a DuplicateColumn error. Pre-check dodges both.
+    dialect = bind.dialect.name.lower()
     for stmt in _RULES_ADD_COLS:
-        try:
+        col_match = re.match(
+            r"ALTER TABLE (\w+) ADD COLUMN (\w+)\b", stmt
+        )
+        if not col_match:
             bind.exec_driver_sql(stmt)
-        except Exception as exc:
-            if "duplicate column" in str(exc).lower():
-                continue
-            raise
+            continue
+        table, column = col_match.group(1), col_match.group(2)
+        if dialect == "postgresql":
+            exists = bind.exec_driver_sql(
+                "SELECT 1 FROM information_schema.columns "
+                f"WHERE table_schema='public' AND table_name='{table}' "
+                f"AND column_name='{column}'"
+            ).fetchone()
+        else:
+            exists = any(
+                row[1] == column
+                for row in bind.exec_driver_sql(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            )
+        if exists:
+            continue
+        bind.exec_driver_sql(stmt)
 
 
 def downgrade() -> None:

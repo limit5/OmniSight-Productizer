@@ -64,6 +64,12 @@ def run_migrations_online() -> None:
         Path(url.replace("sqlite:///", "")).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url, poolclass=pool.NullPool)
     with engine.connect() as conn:
+        # G4 #1: install the SQLite→Postgres compatibility shim so
+        # existing migrations (written against SQLite) run cleanly on
+        # Postgres. No-op for SQLite binds.
+        from alembic_pg_compat import install_pg_compat  # type: ignore
+
+        install_pg_compat(conn)
         context.configure(
             connection=conn,
             target_metadata=target_metadata,
