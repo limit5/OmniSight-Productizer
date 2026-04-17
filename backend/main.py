@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.config import settings
 from backend.routers import agents, artifacts, chat, events, health, host as _host_router, integration, invoke, providers, simulations, system, tasks, tools, webhooks, workflow as wf_router, workspaces
 from backend import db
+from backend import lifecycle as _lifecycle
 
 async def _startup_cleanup(log):
     """Reset stuck states left over from a previous crash."""
@@ -131,6 +132,12 @@ async def lifespan(app: FastAPI):
     import asyncio
     from backend import shared_state as _ss
     pubsub_task = asyncio.create_task(_ss.start_pubsub_listener())
+    # G1: install SIGTERM/SIGINT handler so the process can drain in
+    # under 30 s. Idempotent — safe when lifespan runs twice (tests).
+    try:
+        _lifecycle.coordinator.install_signal_handlers(asyncio.get_running_loop())
+    except Exception as exc:
+        _log.debug("[lifecycle] install_signal_handlers failed: %s", exc)
     # Start watchdog for stuck agent detection
     watchdog_task = asyncio.create_task(invoke.run_watchdog())
     # Phase 47D: DecisionEngine timeout sweep (30 s cadence)
@@ -161,6 +168,15 @@ async def lifespan(app: FastAPI):
     from backend import host_metrics as _hm
     host_metrics_task = asyncio.create_task(_hm.run_sampling_loop())
     yield
+    # G1: graceful drain — flip gate, flush SSE, wait in-flight (30 s),
+    # close DB. Background tasks are cancelled AFTER the drain so any
+    # in-flight request that depends on them still has a chance to
+    # finish within the timeout.
+    try:
+        result = await _lifecycle.graceful_shutdown(close_db=False)
+        _log.info("[lifecycle] graceful_shutdown result: %s", result)
+    except Exception as exc:
+        _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
     for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task, host_metrics_task):
         t.cancel()
         try:
@@ -480,6 +496,48 @@ def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
     if path.endswith(_BOOTSTRAP_STATIC_SUFFIXES):
         return True
     return False
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  G1 — Graceful shutdown gate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Rejects new traffic with 503 once SIGTERM has flipped the drain flag,
+# and tracks in-flight request count so the lifespan shutdown can wait
+# for outstanding work to finish.  Registered AFTER the bootstrap gate
+# (so it becomes the outermost layer) — we want to count even requests
+# that the bootstrap gate would otherwise redirect, AND we want 503s
+# to short-circuit before any other middleware does real work.
+_GRACEFUL_SHUTDOWN_EXEMPT_RAW = {"/healthz", "/health"}
+
+
+@app.middleware("http")
+async def _graceful_shutdown_gate(request, call_next):
+    """G1 — refuse new traffic while draining + count in-flight."""
+    from starlette.responses import JSONResponse as StarletteJSON
+
+    path = request.url.path
+    rel = path.removeprefix(settings.api_prefix)
+    # Liveness probes must keep working while we drain so the
+    # orchestrator can still tell the process is alive (just not
+    # ready).  Readiness endpoints should start failing — that is
+    # G1 bullet #2, handled by the /readyz router itself.
+    exempt = (
+        path in _GRACEFUL_SHUTDOWN_EXEMPT_RAW
+        or rel in _GRACEFUL_SHUTDOWN_EXEMPT_RAW
+    )
+    if _lifecycle.coordinator.shutting_down and not exempt:
+        return StarletteJSON(
+            status_code=503,
+            content={"detail": "Server is shutting down"},
+            headers={"Retry-After": "30", "Connection": "close"},
+        )
+
+    _lifecycle.coordinator.request_started()
+    try:
+        return await call_next(request)
+    finally:
+        _lifecycle.coordinator.request_finished()
 
 
 @app.middleware("http")

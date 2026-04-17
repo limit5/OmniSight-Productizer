@@ -1334,7 +1334,7 @@ Legend:
 > 背景：目前為單機 systemd 原型，`scripts/deploy.sh` 以 `systemctl restart` 原地重啟，會有短暫中斷；SQLite 無複製；無負載均衡 / 多副本 / 藍綠 / rolling。Canary、備份、DLQ、watchdog 已具備，但欠缺真正 HA 與零停機。以下 Phase 為補強工作。
 
 ### G1. HA-01 Graceful shutdown + readiness/liveness 拆分
-- [ ] Backend 攔截 `SIGTERM`：停收新流量、flush SSE、關閉 DB、等待 in-flight task（timeout 30s）
+- [x] Backend 攔截 `SIGTERM`：停收新流量、flush SSE、關閉 DB、等待 in-flight task（timeout 30s）
 - [ ] `/api/v1/health` 拆為 `/healthz`（liveness，永遠快速回 200 if process alive）與 `/readyz`（readiness，檢 DB + migration + 關鍵 provider chain）
 - [ ] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
 - [ ] docker-compose healthcheck 改用 `/readyz`
