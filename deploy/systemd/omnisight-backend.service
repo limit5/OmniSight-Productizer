@@ -11,7 +11,10 @@
 ;
 ; Graceful shutdown: the FastAPI lifespan cancels background loops per worker
 ; (watchdog / decision sweep / DLQ retry / IQ nightly / finetune nightly /
-; memory decay / pubsub listener). uvicorn's default SIGTERM is honoured.
+; memory decay / pubsub listener). KillSignal=SIGTERM triggers backend/lifecycle.py
+; drain coordinator (G1 #1): stop accepting new requests, flush SSE, close DB,
+; wait up to 30s for in-flight tasks. TimeoutStopSec=40 = 30s drain + 10s buffer
+; before systemd escalates to SIGKILL.
 
 [Unit]
 Description=OmniSight backend (FastAPI / uvicorn)
@@ -34,7 +37,8 @@ ExecStart=/bin/sh -c '\
     --no-access-log'
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=40
 
 ; Sandboxing. OmniSight itself needs docker + /home access; keep the
 ; rest locked down so a compromise doesn't walk out.

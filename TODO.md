@@ -1336,7 +1336,7 @@ Legend:
 ### G1. HA-01 Graceful shutdown + readiness/liveness 拆分
 - [x] Backend 攔截 `SIGTERM`：停收新流量、flush SSE、關閉 DB、等待 in-flight task（timeout 30s）
 - [x] `/api/v1/health` 拆為 `/healthz`（liveness，永遠快速回 200 if process alive）與 `/readyz`（readiness，檢 DB + migration + 關鍵 provider chain）
-- [ ] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
+- [x] systemd unit 加 `TimeoutStopSec=40` 與 `KillSignal=SIGTERM`
 - [ ] docker-compose healthcheck 改用 `/readyz`
 - [ ] 單元 + 整合測試：送 SIGTERM 時 in-flight request 仍完成、新連線被拒
 - [ ] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
