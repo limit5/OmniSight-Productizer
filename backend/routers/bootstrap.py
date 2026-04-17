@@ -323,6 +323,69 @@ async def bootstrap_llm_provision(req: LlmProvisionRequest) -> LlmProvisionRespo
     )
 
 
+class OllamaDetectResponse(BaseModel):
+    """Response for read-only Ollama reachability probe.
+
+    ``reachable`` is true iff ``GET {base_url}/api/tags`` returned 200.
+    ``models`` carries the names Ollama reported (may be empty if the
+    host has no models pulled yet). ``kind`` is one of the
+    :class:`backend.llm_secrets.ProviderPingError` classifications on
+    failure, or empty string on success.
+    """
+
+    reachable: bool
+    base_url: str
+    latency_ms: int
+    models: list[str] = Field(default_factory=list)
+    kind: str = ""
+    detail: str = ""
+
+
+@router.get("/ollama-detect", response_model=OllamaDetectResponse)
+async def bootstrap_ollama_detect(base_url: str = "") -> OllamaDetectResponse:
+    """Probe a local Ollama daemon before the operator commits.
+
+    Read-only companion to :func:`bootstrap_llm_provision` — used by the
+    wizard's L3 Step 2 when the operator picks "Ollama (local)". Hits
+    ``GET {base_url}/api/tags`` (default ``http://localhost:11434``) and
+    reports reachability + available models so the UI can render a
+    model dropdown without writing any state.
+
+    This endpoint never persists credentials, never touches
+    ``bootstrap_state``, and never emits an audit row — it is a pure
+    probe. The ``provision`` call is still the single writer.
+
+    Response is always 200; the ``reachable`` boolean + ``kind`` field
+    carry the outcome so the UI does not have to parse HTTP status codes
+    for a UX affordance.
+    """
+    target = (base_url or "").strip() or "http://localhost:11434"
+    try:
+        info = await _secrets.ping_provider("ollama", base_url=target)
+    except _secrets.ProviderPingError as exc:
+        logger.info(
+            "bootstrap: ollama-detect probe failed base_url=%s kind=%s (%s)",
+            target, exc.kind, exc.message,
+        )
+        return OllamaDetectResponse(
+            reachable=False,
+            base_url=target,
+            latency_ms=0,
+            models=[],
+            kind=exc.kind,
+            detail=exc.message,
+        )
+
+    return OllamaDetectResponse(
+        reachable=True,
+        base_url=target,
+        latency_ms=int(info.get("latency_ms", 0)),
+        models=list(info.get("models", []) or []),
+        kind="",
+        detail="",
+    )
+
+
 class FinalizeRequest(BaseModel):
     reason: str | None = Field(
         default=None,

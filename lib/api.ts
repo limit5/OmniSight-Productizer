@@ -2521,6 +2521,24 @@ export async function bootstrapSetAdminPassword(
   })
 }
 
+// ─── L3 — Step 2 Ollama local reachability probe ───────────────────
+
+export interface BootstrapOllamaDetectResponse {
+  reachable: boolean
+  base_url: string
+  latency_ms: number
+  models: string[]
+  kind: string
+  detail: string
+}
+
+export async function bootstrapDetectOllama(
+  baseUrl?: string,
+): Promise<BootstrapOllamaDetectResponse> {
+  const qs = baseUrl ? `?base_url=${encodeURIComponent(baseUrl)}` : ""
+  return request<BootstrapOllamaDetectResponse>(`/bootstrap/ollama-detect${qs}`)
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced

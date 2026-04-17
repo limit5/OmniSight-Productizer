@@ -33,10 +33,12 @@ import {
   Cpu,
 } from "lucide-react"
 import {
+  bootstrapDetectOllama,
   bootstrapSetAdminPassword,
   finalizeBootstrap,
   getBootstrapStatus,
   type BootstrapGates,
+  type BootstrapOllamaDetectResponse,
   type BootstrapStatusResponse,
 } from "@/lib/api"
 import {
@@ -427,8 +429,187 @@ const LLM_PROVIDERS: LlmProviderOption[] = [
   },
 ]
 
+const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
+
+const OLLAMA_KIND_HINTS: Record<string, string> = {
+  network_unreachable:
+    "Ollama did not respond at that URL — is the daemon running?",
+  bad_request: "Ollama replied with an unexpected status.",
+  provider_error: "Ollama returned a server error.",
+  key_invalid: "Ollama rejected the probe — unusual for a local daemon.",
+  quota_exceeded: "Ollama reported a rate-limit response.",
+}
+
+function OllamaDetectPanel({
+  baseUrl,
+  onBaseUrlChange,
+  onModelSelected,
+  selectedModel,
+}: {
+  baseUrl: string
+  onBaseUrlChange: (v: string) => void
+  onModelSelected: (model: string) => void
+  selectedModel: string
+}) {
+  const [probe, setProbe] = useState<BootstrapOllamaDetectResponse | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const runProbe = useCallback(
+    async (targetUrl: string) => {
+      setBusy(true)
+      setErr(null)
+      try {
+        const result = await bootstrapDetectOllama(targetUrl || undefined)
+        setProbe(result)
+        // Auto-pick the first model if nothing is selected yet — lets the
+        // operator submit the wizard step without an extra click when the
+        // host already has a single pulled model.
+        if (result.reachable && result.models.length > 0 && !selectedModel) {
+          onModelSelected(result.models[0])
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setErr(msg)
+        setProbe(null)
+      } finally {
+        setBusy(false)
+      }
+    },
+    [onModelSelected, selectedModel],
+  )
+
+  // Auto-probe on mount using the default URL so the operator sees an
+  // immediate reachable/unreachable indicator without a manual click.
+  useEffect(() => {
+    void runProbe(baseUrl || OLLAMA_DEFAULT_BASE_URL)
+    // We intentionally run this once per mount — further probes go via
+    // the explicit "Re-detect" button so typing in the URL field does
+    // not spam the local daemon.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const state: "idle" | "probing" | "reachable" | "unreachable" = busy
+    ? "probing"
+    : probe == null
+      ? "idle"
+      : probe.reachable
+        ? "reachable"
+        : "unreachable"
+
+  return (
+    <div
+      data-testid="bootstrap-ollama-detect"
+      data-state={state}
+      className="flex flex-col gap-2 p-3 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>OLLAMA</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          GET {(baseUrl || OLLAMA_DEFAULT_BASE_URL).replace(/\/$/, "")}/api/tags
+        </code>
+      </div>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+          Base URL (leave blank for localhost:11434)
+        </span>
+        <input
+          type="text"
+          data-testid="bootstrap-ollama-base-url"
+          value={baseUrl}
+          onChange={(e) => onBaseUrlChange(e.target.value)}
+          placeholder={OLLAMA_DEFAULT_BASE_URL}
+          className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+        />
+      </label>
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-ollama-detect-button"
+          onClick={() => void runProbe(baseUrl || OLLAMA_DEFAULT_BASE_URL)}
+          disabled={busy}
+          className="flex items-center gap-1 font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)]/40 disabled:opacity-40"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Server size={12} />}
+          {probe == null ? "Detect" : "Re-detect"}
+        </button>
+        {state === "reachable" && (
+          <span
+            data-testid="bootstrap-ollama-reachable"
+            className="flex items-center gap-1 font-mono text-[11px] text-[var(--status-green)]"
+          >
+            <Check size={12} /> reachable · {probe?.latency_ms}ms
+          </span>
+        )}
+        {state === "unreachable" && (
+          <span
+            data-testid="bootstrap-ollama-unreachable"
+            className="flex items-center gap-1 font-mono text-[11px] text-[var(--destructive)]"
+          >
+            <AlertCircle size={12} />
+            {OLLAMA_KIND_HINTS[probe?.kind ?? ""] ?? "not reachable"}
+          </span>
+        )}
+      </div>
+
+      {err && (
+        <p
+          role="alert"
+          data-testid="bootstrap-ollama-error"
+          className="font-mono text-[11px] text-[var(--destructive)] break-words"
+        >
+          {err}
+        </p>
+      )}
+
+      {probe && probe.reachable && (
+        <div className="flex flex-col gap-1">
+          <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            Available models ({probe.models.length})
+          </span>
+          {probe.models.length === 0 ? (
+            <p
+              data-testid="bootstrap-ollama-no-models"
+              className="font-mono text-[11px] text-[var(--muted-foreground)] italic"
+            >
+              Host is reachable but no models are pulled. Run{" "}
+              <code>ollama pull &lt;model&gt;</code> and click Re-detect.
+            </p>
+          ) : (
+            <select
+              data-testid="bootstrap-ollama-model-select"
+              value={selectedModel}
+              onChange={(e) => onModelSelected(e.target.value)}
+              className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+            >
+              <option value="">— select a model —</option>
+              {probe.models.map((m) => (
+                <option key={m} value={m} data-testid={`bootstrap-ollama-model-option-${m}`}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      {probe && !probe.reachable && (
+        <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+          Install Ollama from{" "}
+          <code>https://ollama.com/download</code>, start{" "}
+          <code>ollama serve</code>, then click Re-detect.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
   const [selected, setSelected] = useState<LlmProviderId | null>(null)
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState<string>("")
+  const [ollamaModel, setOllamaModel] = useState<string>("")
 
   if (alreadyGreen) {
     return (
@@ -460,9 +641,9 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
       </div>
       <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
         Choose the LLM provider OmniSight should call for agent runs. The
-        API key form, live <code>provider.ping()</code> validation, and
-        Ollama localhost probe land in the next sub-task — picking a
-        provider here just stages the choice.
+        API key form and live <code>provider.ping()</code> validation land
+        in a follow-up sub-task; for Ollama the wizard already probes the
+        local daemon below so you can see whether it is reachable.
       </p>
 
       <fieldset
@@ -511,13 +692,27 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
         })}
       </fieldset>
 
+      {selected === "ollama" && (
+        <OllamaDetectPanel
+          baseUrl={ollamaBaseUrl}
+          onBaseUrlChange={setOllamaBaseUrl}
+          selectedModel={ollamaModel}
+          onModelSelected={setOllamaModel}
+        />
+      )}
+
       <p
         data-testid="bootstrap-llm-provider-selected"
         data-value={selected ?? ""}
+        data-ollama-model={selected === "ollama" ? ollamaModel : ""}
         className="font-mono text-[10px] text-[var(--muted-foreground)]"
       >
         {selected
-          ? `Selected: ${selected} — continue to the API key step (next sub-task).`
+          ? `Selected: ${selected}${
+              selected === "ollama" && ollamaModel
+                ? ` · model=${ollamaModel}`
+                : ""
+            } — continue to the API key step (next sub-task).`
           : "No provider selected yet."}
       </p>
     </div>
