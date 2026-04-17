@@ -1295,7 +1295,7 @@ Legend:
 - 預估：**0.75 day**
 
 ### L9. Quick-start 一鍵佈署腳本 (#336)
-- [ ] `scripts/quick-start.sh`（428 行，已撰寫）：6 步驟自動化——前置檢查 → .env 互動生成（LLM provider 選擇 + API key 輸入）→ `docker compose -f docker-compose.prod.yml up -d --build` → 健康檢查 polling → Cloudflare Tunnel 自動建立（CF API Token → tunnel → ingress → DNS CNAME → cloudflared connector）→ 開瀏覽器
+- [x] `scripts/quick-start.sh`（428 行，已撰寫）：6 步驟自動化——前置檢查 → .env 互動生成（LLM provider 選擇 + API key 輸入）→ `docker compose -f docker-compose.prod.yml up -d --build` → 健康檢查 polling → Cloudflare Tunnel 自動建立（CF API Token → tunnel → ingress → DNS CNAME → cloudflared connector）→ 開瀏覽器
 - [ ] WSL2 偵測：systemd 啟用則用 `systemd service`；未啟用則 `nohup` 背景模式 + 提示使用者啟用 systemd
 - [ ] GoDaddy NS 遷移指引：腳本內印出清楚步驟（GoDaddy Dashboard → Nameservers → 填 CF NS），這步無法自動化
 - [ ] 冪等：重複執行不壞（.env 已存在跳過 / tunnel 已存在複用 / DNS CNAME 已存在 skip）
@@ -2196,19 +2196,34 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 測試：mock payment_failed → 3 次重試 → 降級 → 停權 → 恢復付款 → 自動升回
 - [ ] 預估：**2 day**
 
-### T9. 金流安全 + PCI DSS + 審計 (#335)
+### T9. 金流安全 + PCI DSS + Secret Resolver + 審計 (#335)
+- [ ] **Secret Resolver 多 backend 統一介面**（`backend/secret_resolver.py`）：
+  - [ ] `SecretResolver` ABC：`get(key) -> str` / `set(key, value)` / `delete(key)` / `list_keys() -> list[str]` / `health_check() -> bool`
+  - [ ] `EnvFileResolver`（Level 1）：從 `.env` 檔讀取——現有行為的正式封裝，開發環境預設
+  - [ ] `FernetResolver`（Level 1.5）：沿用現有 `backend/secret_store.py` Fernet at-rest 加密——key 在磁碟但加密
+  - [ ] `DopplerResolver`（Level 3）：Doppler REST API（`https://api.doppler.com/v3/configs/config/secrets`）+ service token auth
+  - [ ] `AWSSecretsResolver`（Level 3）：AWS Secrets Manager（`boto3` `secretsmanager.get_secret_value`）+ IAM role auth
+  - [ ] `VaultResolver`（Level 3）：HashiCorp Vault（`hvac` client）+ AppRole / token auth
+  - [ ] `InfisicalResolver`（Level 3）：Infisical API（開源自建友好）+ service token auth
+  - [ ] Factory：`get_resolver() -> SecretResolver`，依 `OMNISIGHT_SECRET_BACKEND=env | fernet | doppler | aws | vault | infisical` env 決定（預設 `env`）
+  - [ ] Singleton + lazy init：整個 app 只建一次 resolver instance
+  - [ ] Caching layer：secret 值 in-memory cache（TTL 5 min），避免每次 LLM call 都打 remote API
+  - [ ] 測試：mock 每個 backend 的 get/set/delete + factory 切換 + cache TTL 過期 + health_check
+- [ ] **config.py 整合**：`settings` 初始化時透過 `SecretResolver` 取得所有 `*_API_KEY` / `*_SECRET` 欄位值，取代直接從 env var 讀取
+- [ ] **啟動時 secret 驗證**：`validate_startup_config()` 改走 resolver → 找不到必要 secret 時報清楚的錯誤訊息（含 backend 名稱 + 設定指引）
+- [ ] **Secret rotation hook**：`resolver.on_rotation(key, callback)` — Vault / AWS 支援 rotation event → callback 更新 in-memory cache + 寫 audit_log `secret.rotated`
 - [ ] PCI DSS SAQ-A 合規：OmniSight 不儲存 / 不處理 / 不傳輸卡號（全由 Stripe/ECPay/PayPal tokenize）
-- [ ] API key 安全：Stripe secret key / ECPay HashKey+HashIV / PayPal client secret 存 `backend/secret_store.py` Fernet at-rest
-- [ ] Webhook secret 安全：每家 webhook signing secret 同上 Fernet 加密
+- [ ] API key 安全：Stripe secret key / ECPay HashKey+HashIV / PayPal client secret 統一走 `SecretResolver`（不再直接讀 env var）
+- [ ] Webhook secret 安全：每家 webhook signing secret 統一走 `SecretResolver`
 - [ ] 金額篡改防護：前端不傳金額，後端從 plan 定義計算 → 建 checkout session 時由後端設金額
 - [ ] Refund 權限控制：只有 admin role 可觸發退款 → audit_log 記錄
 - [ ] Rate limit：`/billing/subscribe` 和 `/billing/webhook` 加獨立 rate limit（防 brute force checkout）
 - [ ] 金流切換 audit：切換 gateway 時寫 `audit_log`（`billing.gateway_switched`，含 from/to/operator）
-- [ ] 金流健康檢查：`GET /api/v1/billing/health` — 驗 gateway API 可達 + webhook endpoint 可達 + 最近一次 webhook 時間
-- [ ] 滲透測試案例：重放 webhook / 偽造簽名 / 金額篡改 / 跨租戶訂閱操作 / Stripe key 洩漏偵測
-- [ ] 預估：**1.5 day**
+- [ ] 金流健康檢查：`GET /api/v1/billing/health` — 驗 gateway API 可達 + webhook endpoint 可達 + resolver health + 最近一次 webhook 時間
+- [ ] 滲透測試案例：重放 webhook / 偽造簽名 / 金額篡改 / 跨租戶訂閱操作 / resolver backend 偽造 / secret cache poisoning
+- [ ] 預估：**3 day**（原 1.5d + Secret Resolver 1.5d）
 
-**Priority T 總預估**：**23.5 day**（solo ~5 週，2-person team ~3 週）
+**Priority T 總預估**：**25 day**（原 23.5d + Secret Resolver 1.5d）（solo ~5 週，2-person team ~3 週）
 
 **建議切段交付**：
 1. **T0 + T4 + T5**（6.5d）— 統一介面 + 用量追蹤 + 方案管理。billing 骨架可運行
@@ -2351,8 +2366,8 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 | X (software vertical) | 12 day |
 | R (watchdog + DR + UI) | 25.5 day |
 | V (visual design loop + workspace) | 48 day |
-| T (billing + payment gateway) | 23.5 day |
+| T (billing + payment gateway) | 25 day |
 | META | 4-8 day |
-| **Total** | **~560.5-731.5 day** |
+| **Total** | **~562-732.5 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.
