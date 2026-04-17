@@ -161,6 +161,35 @@ class SSEBudgetStrategyChanged(BaseModel):
     timestamp: str = ""
 
 
+# ─── R1 (#307): ChatOps Mirror event ───
+
+
+class SSEChatOpsMessage(BaseModel):
+    """chatops.message — Outbound/inbound ChatOps traffic mirror.
+
+    Emitted by :mod:`backend.chatops_bridge` whenever a message is sent
+    via any adapter or a webhook callback is dispatched. Enables the
+    ChatOps Mirror Panel (``chatops-mirror.tsx``) to show real-time
+    bi-directional chat traffic inside the dashboard.
+    """
+    id: str
+    direction: str                  # "outbound" | "inbound"
+    channel: str                    # "discord" | "teams" | "line" | "dashboard"
+    ts: float = 0.0
+    title: str = ""
+    body: str = ""
+    author: str = ""
+    user_id: str = ""
+    kind: str = ""                  # for inbound: "button" | "command" | "message"
+    button_id: str = ""
+    command: str = ""
+    command_args: str = ""
+    buttons: list[dict] = Field(default_factory=list)
+    meta: dict = Field(default_factory=dict)
+    errors: list[str] = Field(default_factory=list)
+    timestamp: str = ""
+
+
 # ─── R0 (#306): PEP Gateway event ───
 
 class SSEPepDecision(BaseModel):
@@ -231,6 +260,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "budget_strategy_changed": SSEBudgetStrategyChanged,
     # R0 (#306): PEP Gateway
     "pep.decision": SSEPepDecision,
+    # R1 (#307): ChatOps Mirror
+    "chatops.message": SSEChatOpsMessage,
 }
 
 

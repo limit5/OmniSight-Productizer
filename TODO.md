@@ -1260,27 +1260,27 @@ Legend:
 - [x] 預估：**3.5 day**（backend 2d + UI 1.5d）**✅ AI completed 2026-04-17**
 
 ### R1. ChatOps Interactive Integration（Discord / Teams / Line 雙向互動）(#307)
-- [ ] `backend/chatops_bridge.py`：統一 ChatOps interface（`send_interactive(channel, message, buttons)` / `on_button_click(callback)` / `on_command(cmd, handler)`）
-- [ ] Discord adapter：Webhook + Interaction endpoint（Button / Select Menu）
-- [ ] Teams adapter：Adaptive Card + Bot Framework webhook
-- [ ] Line adapter：Flex Message + Postback action
-- [ ] PEP approve/reject 按鈕回路：ChatOps button click → `POST /api/v1/pep/decision/{id}` → PEP gateway 放行/拒絕
-- [ ] `/omnisight inspect [ID]` — 回傳 agent 最後 3 輪 ReAct 日誌（markdown 格式）
-- [ ] `/omnisight inject [ID] "hint"` — 將 human hint 寫入 agent state machine 的 `human_hint` slot（**不用 `<system_override>` 標籤**，改走 debug blackboard 機制）；hint 內容強制 sanitize（strip XML/HTML tags + 長度上限 2000 chars）+ rate limit（每 agent 每 5 min 最多 3 次）+ audit log
-- [ ] `/omnisight rollback [ID]` — 觸發 worktree discard + recreate（R8 機制）
-- [ ] `/omnisight status` — 回傳系統 KPI snapshot（active agents / queue depth / PEP held / entropy alerts）
-- [ ] Hot Resume 機制：inject hint 後不重啟 sandbox，agent state machine 從 `suspended` → `running`，hint 注入 context 的 `human_hint` slot（非 system prompt 尾端）
-- [ ] 安全：ChatOps inject 只接受 Gerrit `non-ai-reviewer` group 對應的 ChatOps user（防止非授權人員注入指令）；所有 inject 進 hash-chain audit_log
-- [ ] **UI — ChatOps Mirror Panel（新元件 `chatops-mirror.tsx`）**：
-  - [ ] 即時雙向鏡像：ChatOps 頻道的對話（bot 發出 + human 回覆）顯示在 dashboard
-  - [ ] SSE event `chatops.message`（direction: outbound | inbound, channel, author, body, buttons_state）
-  - [ ] Dashboard 側也能 inject hint / approve PEP（不一定要開 Discord）——form input + submit 按鈕
-  - [ ] Channel selector（multiple channels 支援：#omnisight-alerts / #omnisight-dev / custom）
-  - [ ] Connection status indicator（● Connected / ○ Disconnected per channel）
-  - [ ] 歷史捲動 + 搜尋（最近 100 條 ChatOps 訊息快取在前端 state）
-- [ ] **UI — notification-center 延伸**：P2 severity 通知裡加 inline text input 讓 operator 直接 inject hint 而不用切到 ChatOps Mirror
-- [ ] 整合測試：mock Discord webhook → button click → PEP approve → agent resume；inject hint → agent picks up hint → audit recorded
-- [ ] 預估：**4 day**（backend 2.5d + UI 1.5d）
+- [x] `backend/chatops_bridge.py`：統一 ChatOps interface（`send_interactive(channel, message, buttons)` / `on_button_click(callback)` / `on_command(cmd, handler)`）
+- [x] Discord adapter：Webhook + Interaction endpoint（Button / Select Menu）
+- [x] Teams adapter：Adaptive Card + Bot Framework webhook
+- [x] Line adapter：Flex Message + Postback action
+- [x] PEP approve/reject 按鈕回路：ChatOps button click → `POST /api/v1/pep/decision/{id}` → PEP gateway 放行/拒絕
+- [x] `/omnisight inspect [ID]` — 回傳 agent 最後 3 輪 ReAct 日誌（markdown 格式）
+- [x] `/omnisight inject [ID] "hint"` — 將 human hint 寫入 agent state machine 的 `human_hint` slot（**不用 `<system_override>` 標籤**，改走 debug blackboard 機制）；hint 內容強制 sanitize（strip XML/HTML tags + 長度上限 2000 chars）+ rate limit（每 agent 每 5 min 最多 3 次）+ audit log
+- [x] `/omnisight rollback [ID]` — 觸發 worktree discard + recreate（R8 機制）
+- [x] `/omnisight status` — 回傳系統 KPI snapshot（active agents / queue depth / PEP held / entropy alerts）
+- [x] Hot Resume 機制：inject hint 後不重啟 sandbox，agent state machine 從 `suspended` → `running`，hint 注入 context 的 `human_hint` slot（非 system prompt 尾端）
+- [x] 安全：ChatOps inject 只接受 Gerrit `non-ai-reviewer` group 對應的 ChatOps user（防止非授權人員注入指令）；所有 inject 進 hash-chain audit_log
+- [x] **UI — ChatOps Mirror Panel（新元件 `chatops-mirror.tsx`）**：
+  - [x] 即時雙向鏡像：ChatOps 頻道的對話（bot 發出 + human 回覆）顯示在 dashboard
+  - [x] SSE event `chatops.message`（direction: outbound | inbound, channel, author, body, buttons_state）
+  - [x] Dashboard 側也能 inject hint / approve PEP（不一定要開 Discord）——form input + submit 按鈕
+  - [x] Channel selector（multiple channels 支援：#omnisight-alerts / #omnisight-dev / custom）
+  - [x] Connection status indicator（● Connected / ○ Disconnected per channel）
+  - [x] 歷史捲動 + 搜尋（最近 100 條 ChatOps 訊息快取在前端 state）
+- [x] **UI — notification-center 延伸**：P2 severity 通知裡加 inline text input 讓 operator 直接 inject hint 而不用切到 ChatOps Mirror
+- [x] 整合測試：mock Discord webhook → button click → PEP approve → agent resume；inject hint → agent picks up hint → audit recorded
+- [x] 預估：**4 day**（backend 2.5d + UI 1.5d）**✅ AI completed 2026-04-17**
 
 ### R2. Semantic Entropy Monitor（語意熵值偵測）(#308)
 - [ ] `backend/semantic_entropy.py`：每 N 輪（預設 3）對 agent 最近 output 做 embedding similarity 計算

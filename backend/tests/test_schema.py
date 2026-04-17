@@ -161,6 +161,8 @@ class TestSSESchemaExport:
             "decision_resolved", "decision_undone", "budget_strategy_changed",
             # R0 (#306) PEP Gateway
             "pep.decision",
+            # R1 (#307) ChatOps Interactive
+            "chatops.message",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 

@@ -103,6 +103,7 @@ export type SSEEvent =
       }
     }
   | { event: "pep.decision"; data: PepDecisionEvent }
+  | { event: "chatops.message"; data: ChatOpsMessageEvent }
 
 // ─── Global SSE manager ───
 // 48A-Fix P0: a single EventSource per origin, shared across every caller.
@@ -143,6 +144,8 @@ const SSE_EVENT_TYPES = [
   "orchestration.change.awaiting_human_plus_two",
   // ─── R0 (#306) PEP Gateway ───
   "pep.decision",
+  // ─── R1 (#307) ChatOps Interactive ───
+  "chatops.message",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
@@ -2159,6 +2162,92 @@ export async function resetPepBreaker() {
   return request<{ ok: boolean; breaker: PepBreakerStatus }>(
     "/pep/breaker/reset",
     { method: "POST" },
+  )
+}
+
+// ─── R1 (#307) ChatOps Interactive ───────────────────────────────
+
+export type ChatOpsDirection = "outbound" | "inbound"
+export type ChatOpsChannel = "discord" | "teams" | "line" | "dashboard"
+
+export interface ChatOpsButton {
+  id: string
+  label: string
+  style?: "primary" | "secondary" | "danger" | "success"
+  value?: string
+}
+
+export interface ChatOpsMessageEvent {
+  id: string
+  ts: number
+  direction: ChatOpsDirection
+  channel: ChatOpsChannel | string
+  title?: string
+  body?: string
+  author?: string
+  user_id?: string
+  kind?: string
+  button_id?: string
+  command?: string
+  command_args?: string
+  buttons?: ChatOpsButton[]
+  meta?: Record<string, unknown>
+  errors?: string[]
+  timestamp?: string
+}
+
+export interface ChatOpsAdapterStatus {
+  configured: boolean
+  reason: string
+}
+
+export interface ChatOpsMirrorSnapshot {
+  items: ChatOpsMessageEvent[]
+  status: Record<string, ChatOpsAdapterStatus>
+}
+
+export async function getChatOpsMirror(limit = 100): Promise<ChatOpsMirrorSnapshot> {
+  return request<ChatOpsMirrorSnapshot>(`/chatops/mirror?limit=${limit}`)
+}
+
+export async function getChatOpsStatus() {
+  return request<{
+    adapters: Record<string, ChatOpsAdapterStatus>
+    buttons: string[]
+    commands: string[]
+    pending_hints: Array<{ agent_id: string; text: string; author: string; channel: string; ts: number }>
+  }>("/chatops/status")
+}
+
+export async function injectAgentHint(agent_id: string, text: string, author = "dashboard") {
+  return request<{ ok: boolean; hint: { agent_id: string; text: string; author: string; channel: string; ts: number } }>(
+    "/chatops/inject",
+    { method: "POST", body: JSON.stringify({ agent_id, text, author }) },
+  )
+}
+
+export async function sendChatOpsInteractive(
+  channel: string, body: string,
+  opts: { title?: string; buttons?: ChatOpsButton[]; meta?: Record<string, unknown> } = {},
+) {
+  return request<{ ok: boolean; message: ChatOpsMessageEvent }>(
+    "/chatops/send",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        channel, body,
+        title: opts.title ?? "OmniSight",
+        buttons: opts.buttons ?? [],
+        meta: opts.meta ?? {},
+      }),
+    },
+  )
+}
+
+export async function decidePepFromChatOps(pep_id: string, decision: "approve" | "reject") {
+  return request<{ ok: boolean; pep_id: string; decision: DecisionPayload }>(
+    `/pep/decision/${encodeURIComponent(pep_id)}`,
+    { method: "POST", body: JSON.stringify({ decision }) },
   )
 }
 

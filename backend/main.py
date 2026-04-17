@@ -569,6 +569,8 @@ from backend.routers import orchestrator as _orchestrator_router  # O4/ORCHESTRA
 app.include_router(_orchestrator_router.router, prefix=settings.api_prefix)
 from backend.routers import pep as _pep_router  # R0 (#306) PEP Gateway
 app.include_router(_pep_router.router, prefix=settings.api_prefix)
+from backend.routers import chatops as _chatops_router  # R1 (#307) ChatOps Interactive
+app.include_router(_chatops_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

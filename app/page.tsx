@@ -19,6 +19,7 @@ import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
 import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"
 import { AuditPanel } from "@/components/omnisight/audit-panel"
 import { PepLiveFeed } from "@/components/omnisight/pep-live-feed"
+import { ChatOpsMirror } from "@/components/omnisight/chatops-mirror"
 import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
@@ -52,7 +53,7 @@ const agentTemplates: Record<string, Partial<Agent>> = {
 const VALID_PANELS: ReadonlySet<PanelId> = new Set([
   "host", "spec", "agents", "orchestrator", "tasks", "source", "npi", "vitals",
   "decisions", "budget", "timeline", "rules", "forecast", "dag", "intent", "history", "audit",
-  "pep",
+  "pep", "chatops",
 ])
 
 function readPanelFromUrl(): PanelId | null {
@@ -515,6 +516,8 @@ export default function Home() {
         return <AuditPanel />
       case "pep":
         return <PepLiveFeed />
+      case "chatops":
+        return <ChatOpsMirror />
       case "intent":
         return (
           <SpecTemplateEditor

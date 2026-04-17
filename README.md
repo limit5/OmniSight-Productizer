@@ -14,7 +14,7 @@
 ![Google](https://img.shields.io/badge/Google-Gemini-4285F4?logo=google&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-Local-ffffff?logo=ollama&logoColor=black)
 
-![Tests](https://img.shields.io/badge/Tests-909-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-957-brightgreen)
 ![Tools](https://img.shields.io/badge/Tools-29_Sandboxed-green)
 ![Agents](https://img.shields.io/badge/Roles-19_Skills-blueviolet)
 ![API](https://img.shields.io/badge/API-~80_Endpoints-blue)
@@ -166,6 +166,7 @@ Without an API key the system runs in rule-based fallback mode — all features 
 - **Token budget**: 3-tier (80% warn → 90% downgrade → 100% freeze) + daily auto-reset
 - **Provider failover**: per-tenant per-key circuit breaker (M3) — `(tenant_id, provider, api_key_fingerprint)` triple, 5min cooldown, audit on open/close, `/providers/circuits` REST + Settings UI panel; tenant A's bad key cannot derail tenant B
 - **PEP Gateway** (R0 #306): Policy Enforcement Point in front of every `tool_executor` node — 18 destructive-command regex (rm -rf /, mkfs, fork-bomb, DROP DATABASE…) auto-DENY, 10 production-scope patterns (deploy.sh prod, kubectl --context production, terraform apply…) auto-HOLD for human approval; T1/T2/T3 sandbox tier whitelists; circuit breaker fails closed on propose outage; SSE `pep.decision` + Prometheus metrics + hash-chain audit; `pep-live-feed.tsx` panel + `/pep/live` + `/pep/policy` endpoints
+- **ChatOps Interactive** (R1 #307): Unified Discord / Teams / Line bridge — `chatops_bridge.py` (send_interactive / on_button_click / on_command / dispatch_inbound) + 3 adapters (Ed25519 Discord interactions, Adaptive Card 1.4 Teams HMAC, Flex Message Line postback); built-in handlers for `pep_approve` / `pep_reject` buttons (direct round-trip to decision-engine via `/pep/decision/{pep_id}` alias) and `/omnisight {inspect,inject,rollback,status,help}` commands; `agent_hints` blackboard with XML/HTML-tag-strip sanitize, 3/5-min sliding rate limit, hash-chain audit, asyncio.Event hot-resume (so suspended agents wake without sandbox restart); `chatops-mirror.tsx` bi-directional SSE (`chatops.message`) dashboard panel + inline inject in `notification-center.tsx` for P2+ severity notifications; `chatops_authorized_users` allow-list gate blocks non-approved inject attempts
 - **Watchdog**: 30min task timeout, 2hr stuck detection, dynamic reallocation
 - **Startup cleanup**: reset stuck agents/simulations, orphan containers, git locks
 - **Event persistence**: DLQ with retry (3x exponential backoff), event_log table, replay API

@@ -2,8 +2,8 @@
 
 import { useState } from "react"
 import { createPortal } from "react-dom"
-import { X, Bell, AlertTriangle, AlertOctagon, Info, ExternalLink } from "lucide-react"
-import type { NotificationItem } from "@/lib/api"
+import { X, Bell, AlertTriangle, AlertOctagon, Info, ExternalLink, Zap } from "lucide-react"
+import { injectAgentHint, type NotificationItem } from "@/lib/api"
 
 const LEVEL_CONFIG = {
   info:     { icon: Info,           color: "var(--muted-foreground)", bg: "var(--secondary)",          label: "INFO" },
@@ -17,6 +17,59 @@ interface NotificationCenterProps {
   onClose: () => void
   notifications: NotificationItem[]
   onMarkRead: (id: string) => void
+}
+
+/** R1 (#307): on P2-ish notifications (source="agent:<id>"), let the
+ * operator fire off an inject hint without hopping to the ChatOps panel. */
+function extractAgentId(source: string | undefined): string {
+  if (!source) return ""
+  const m = /^agent:([a-zA-Z0-9_\-:/.]+)/.exec(source)
+  return m ? m[1] : ""
+}
+
+function InlineInject({ agentId }: { agentId: string }) {
+  const [text, setText] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [flash, setFlash] = useState<string | null>(null)
+  const doInject = async () => {
+    const t = text.trim()
+    if (!t) return
+    setBusy(true)
+    setFlash(null)
+    try {
+      await injectAgentHint(agentId, t, "notification-center")
+      setFlash("✓ injected")
+      setText("")
+    } catch (exc) {
+      setFlash(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      setBusy(false)
+      setTimeout(() => setFlash(null), 3000)
+    }
+  }
+  return (
+    <div className="mt-1.5 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+      <Zap size={10} className="text-[var(--fui-orange, #f59e0b)]" />
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={`inject hint → ${agentId}`}
+        maxLength={2000}
+        className="flex-1 px-1.5 py-0.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[10px]"
+        onKeyDown={(e) => { if (e.key === "Enter") void doInject() }}
+      />
+      <button
+        onClick={() => void doInject()}
+        disabled={busy || !text.trim()}
+        className="px-1.5 py-0.5 rounded font-mono text-[9px] border border-[var(--fui-orange, #f59e0b)] text-[var(--fui-orange, #f59e0b)] hover:bg-[var(--fui-orange, #f59e0b)]/10 disabled:opacity-40"
+      >
+        {busy ? "…" : "Inject"}
+      </button>
+      {flash && (
+        <span className="font-mono text-[9px] text-[var(--muted-foreground)]">{flash}</span>
+      )}
+    </div>
+  )
 }
 
 export function NotificationCenter({ open, onClose, notifications, onMarkRead }: NotificationCenterProps) {
@@ -126,6 +179,10 @@ export function NotificationCenter({ open, onClose, notifications, onMarkRead }:
                             {n.action_label || "View"}
                           </a>
                         )}
+                        {(n.level === "action" || n.level === "critical") && (() => {
+                          const aid = extractAgentId(n.source)
+                          return aid ? <InlineInject agentId={aid} /> : null
+                        })()}
                       </div>
                     </div>
                   </div>

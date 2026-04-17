@@ -94,6 +94,18 @@ class Settings(BaseSettings):
     notification_max_retries: int = 3     # Max retry attempts for failed dispatches
     notification_retry_backoff: int = 30  # Seconds between retry attempts (exponential)
 
+    # ── R1 (#307) ChatOps Interactive Integration ──
+    chatops_discord_webhook: str = ""     # Discord Incoming Webhook URL (outbound)
+    chatops_discord_public_key: str = ""  # Discord application public key (interaction verify)
+    chatops_teams_webhook: str = ""       # Teams Incoming Webhook URL (outbound)
+    chatops_teams_secret: str = ""        # HMAC-SHA256 secret for Teams bot callback
+    chatops_line_channel_token: str = ""  # Line Messaging API channel access token
+    chatops_line_channel_secret: str = "" # Line channel secret (X-Line-Signature verify)
+    chatops_line_to: str = ""             # Line target user / group ID (push)
+    chatops_authorized_users: str = ""    # Comma-separated user IDs allowed to inject
+    chatops_hint_rate_per_5min: int = 3   # Max inject hints per agent per 5-minute window
+    chatops_hint_max_length: int = 2000   # Sanitized hint text max char length
+
     # ── Gerrit Code Review ──
     gerrit_enabled: bool = False  # Master switch for Gerrit integration
     gerrit_url: str = ""  # Web UI URL, e.g. "https://gerrit.sora.services"

@@ -10714,3 +10714,56 @@ X8 留下幾個 follow-up：
 - **Tauri-specific build adapter**：目前 X3 把 `desktop-tauri` role default 指向 `cargo-dist`（offline plan + tarball matrix）。Real release 是 `tauri build` 透過 tauri-action — 可考慮加 `TauriBuildAdapter`（binary `tauri`、validate Cargo.toml in src-tauri/、compose `tauri build` cmd）給 operator 直接 `build_artifact(target="tauri-build", ...)` 用，但要等真有人想 dogfood 再做。
 - **`tauri-driver` E2E 整合**：Tauri 2 主 process 沒有官方 E2E framework；`tauri-driver`（基於 WebDriver）能跑 cross-process spec，但要裝 chromedriver / msedgedriver / safaridriver host-side。先 skip，operator 自己想做 E2E 再加。
 - **`pnpm-lock.yaml` placeholder**：scaffold 不 ship lock file，依賴 operator 第一次 `pnpm install` 自動產；若後續發現 reproducibility issue（operator install 拿到不同 transitive deps）可考慮 ship lock file，但跟 X6 `go.sum` placeholder 同邏輯，先 trust upstream resolver。
+
+---
+
+## R1 #307 — ChatOps Interactive Integration（Discord / Teams / Line 雙向互動） ✅ 2026-04-17
+
+### 交付摘要
+把 R0 PEP Gateway 的 approve/reject 佇列延伸到 ChatOps 通路上：operator 用 Discord / Teams / Line 直接按按鈕放行 PEP HELD tool call、用 `/omnisight inject <agent-id> <hint>` 把 human hint 熱注入到 agent state machine 的 `human_hint` blackboard slot（**不走 system prompt 尾端**，避免 prompt injection 權限溢出），dashboard 有 Mirror Panel 看到雙向訊息流並可在前端不開 Discord 直接 inject。
+
+### 新增檔案
+- `backend/chatops_bridge.py` (~340 行) — 統一 interface：`send_interactive / on_button_click / on_command / dispatch_inbound / mirror_snapshot`。跨 adapter 抽象、SSE mirror publish、audit hook、authorize_inject（對 `chatops_authorized_users` allow-list 做雙鍵匹配：user_id OR author）。
+- `backend/chatops/` package：
+  - `discord.py` — Webhook POST + Embed + Action Row buttons（max 5）；Ed25519 interaction signature verify（走 PyNaCl）；parse_inbound 認 type=2 command / type=3 button。
+  - `teams.py` — Adaptive Card 1.4 + Action.Submit；HMAC-SHA256 verify（hex OR base64 都吃）；parse_inbound 從 `value.buttonId` 萃取按鈕 id + `/cmd` 前綴辨識 command。
+  - `line.py` — Flex Message bubble + postback 按鈕；X-Line-Signature base64-HMAC verify；parse_inbound 認 postback/message event + `buttonId=...&value=...` 解析。
+- `backend/agent_hints.py` (~210 行) — per-agent `human_hint` blackboard：sanitize (XML/HTML tag strip + control chars strip + 2000-char 上限 + `chatops_hint_max_length` 可調)、sliding-window rate limit（default 3/5min，`chatops_hint_rate_per_5min` 可調）、hot-resume asyncio.Event（inject 觸發 set，consume 清掉）、audit hash-chain `action="chatops.inject"`、SSE via `emit_debug_finding(finding_type="human_hint")`。
+- `backend/chatops_handlers.py` — built-in handlers (import-time auto-register + idempotent `register_defaults()`)：`pep_approve` / `pep_reject` button handlers（共用 `_resolve_pep` 從 held registry 查 decision_id 再走 decision_engine.resolve）、`omnisight` command 分發（inspect / inject / rollback / status / help），`_rollback` 會 best-effort 找 `backend.workspace` 上任一個 rollback primitive（`rollback_agent_worktree` / `discard_and_recreate` / `reset_agent_worktree`）。
+- `backend/routers/chatops.py` (~170 行) — FastAPI router：
+  - `POST /api/v1/chatops/webhook/{discord,teams,line}` — verify → parse_inbound → dispatch_inbound；Discord 回 `{"type":4,"data":{"content":reply}}`、Teams 回 `{"type":"message","text":reply}`、Line 回 `{"ok":true}`。
+  - `GET /api/v1/chatops/mirror?limit=` — 最近 ring + adapter 連線狀態。
+  - `GET /api/v1/chatops/status` — adapter 狀態 + registered buttons/commands + pending hints。
+  - `POST /api/v1/chatops/inject` — dashboard 側 inject（operator role 必要）。
+  - `POST /api/v1/chatops/send` — operator 手動廣播到 ChatOps。
+  - `POST /api/v1/pep/decision/{pep_id}` — **R1 spec line item** — PEP ChatOps button 按壓的 stable URL。從 held registry 查到 decision_engine id 再走 resolve。
+- `components/omnisight/chatops-mirror.tsx` — 新元件：雙向 SSE mirror（subscribe `chatops.message`, dedupe by id）+ adapter 連線 chip（●/○ + reason tooltip）+ inject form + compose form + channel/direction/search filter + PEP approve/reject button（meta.pep_id 檢出時顯示）。
+- `components/omnisight/chatops-mirror.tsx` 透過 `ChatOpsMirror` 匯入 `app/page.tsx`，panel id `"chatops"`，`mobile-nav.tsx` 新增 nav entry。
+- `components/omnisight/notification-center.tsx` 延伸：`extractAgentId()` 從 `n.source="agent:<id>"` 抽 agent id；P2/P3 severity (`action`/`critical`) + 來源含 agent id 時渲染 `<InlineInject>` 小元件（inline text input + Inject 按鈕，直接打 `injectAgentHint()`）。
+- `lib/api.ts` 新增 types（`ChatOpsMessageEvent`, `ChatOpsAdapterStatus`, `ChatOpsButton`, `ChatOpsMirrorSnapshot`）+ helpers（`getChatOpsMirror`, `getChatOpsStatus`, `injectAgentHint`, `sendChatOpsInteractive`, `decidePepFromChatOps`）+ SSE event union + `SSE_EVENT_TYPES` 加 `"chatops.message"`。
+- `backend/sse_schemas.py` 加 `SSEChatOpsMessage` + 登記 `"chatops.message"` schema。
+- `backend/config.py` 加 10 個 `chatops_*` 設定：3 對 webhook（Discord / Teams / Line）+ Discord public key + Teams secret + Line channel secret + Line push target + authorized users csv + rate/length knob。
+- `backend/main.py` 掛 `_chatops_router`。
+- `backend/notifications.py` 的 `notify()` 加 `interactive=False / interactive_buttons=[] / interactive_channel="*"` keyword-only args；走 ChatOps bridge 派送 Adaptive 卡（meta 帶 `notification_id`/`source`）。不會破壞既有 caller（都是 default 值）。
+
+### 測試套件（48 pass + 1 skip (PyNaCl optional), 新增 5 個 test 檔共 48 cases）
+- `test_agent_hints.py` — 14 case：sanitize 的 tag/control/length clamp、rate limit window + per-agent 隔離、inject/peek/consume 行為、hot-resume Event 觸發/清除、snapshot list。
+- `test_chatops_bridge.py` — 15 case：send fanout + unknown channel ValueError（先驗再派）+ unconfigured skip + mirror ring + SSE bus 發 event + button/command handler 路由 + unknown command not handled + handler exception 變 reply + authorize_inject allow-list 匹配 user_id OR author。
+- `test_chatops_adapters.py` — 10 case：Discord parse component/command + signature verify（正例+反例，反例包 missing headers）、Teams build card + parse button/command + HMAC verify（hex+base64 都吃）、Line flex build + parse postback/command + X-Line-Signature verify。
+- `test_chatops_router.py` — 9 case：mirror endpoint 初始空、inject rate limit（第 4 次拿 429）、inject sanitize tags、inject empty after sanitize→422、send 路徑走 mirror、`/pep/decision/{pep_id}` 404/200/422、status endpoint 有 built-in commands、discord webhook unverified→401、inject 觸發 resume_event。
+- `test_chatops_handlers.py` — 9 case：pep_approve/pep_reject button 觸發 decision_engine.resolve、missing held entry 有漂亮 error、/omnisight status/inject/help/inspect 命令路徑、inject 拿到 `<system_override>` tag 會先 sanitize 掉再寫 blackboard、非 authorize 使用者 inject 得到 `Forbidden` reply。
+- `test_schema.py` 更新：`expected_events` set 加 `"chatops.message"`（不然既有 contract test 會 fail）。
+
+### 架構決策
+- **`/omnisight <verb>` 走單一 command handler** — 不拆 4 個 Discord slash command，因 Discord 每 app register command 要 HTTP round-trip；用 `command_args` 分發 verb 更便宜、擴充 verb 不用 re-register。Teams/Line `/xxx` 文字消息也同一入口。
+- **Handler registry 是 process-global**。對比方案是 per-router instance，但 slash command 分發不適合：我們希望 `backend.chatops_handlers` import 一次就全員註冊。為了測試可變性把 `_reset_for_tests()` 公開 + `register_defaults()` idempotent。
+- **`POST /pep/decision/{pep_id}`** 走 HELD registry 查 decision_id 再 forward 到 decision_engine — 不複製 decision_engine 邏輯，也保留 R0 既有的 audit / SSE fire chain。operator 仍舊可走 `/decisions/{id}/approve`（既有 R0 UI 用的），ChatOps 走 `/pep/decision/{pep_id}`（stable URL），兩路入口同一個 engine。
+- **Hot-resume 用 asyncio.Event 而非 queue** — agent state machine 的 consume model 是 single-slot replace（新 hint 覆寫舊），queue 語意不對。Event 給一次性 "有新 hint 了，去讀 blackboard" 訊號就夠。
+- **notifications.py `interactive=True` 是可選 fan-out，不是替代** — 既有 Slack/Jira/PagerDuty 路徑不變；ChatOps 是額外一路，non-fatal 失敗。
+
+### Hot spots / follow-up
+- **`/omnisight rollback` 目前靠 best-effort 找 `backend.workspace` module 的 rollback primitive**（`rollback_agent_worktree` / `discard_and_recreate` / `reset_agent_worktree`）。R8 worktree discard+recreate 實作落地後，改 hardcode 到正確名稱；目前會 fallback 成 "operator invocation recorded to audit" warning。
+- **agent state machine 的 consume loop 尚未接 `agent_hints.consume()`**。接口已備妥（`peek`/`consume`/`resume_event`），等 agent runtime 下次 refactor 把 `await resume_event(aid).wait()` 塞進 supervised loop + `hint = consume(aid)` 後把 hint text 注入 context `human_hint` slot（**不要** append 到 system prompt）。這一跳由 agent 執行器合作是必要的，bridge 不自作主張。
+- **Discord 要跑 button round-trip 需要 `pip install pynacl`**（已做 optional import，未裝時 test 自動 skip 而非 hard fail）。Production 部署要加到 `requirements.in`；目前只有 `test_chatops_adapters.py::test_discord_verify_rejects_bad_signature` 會 skip。
+- **Line outbound 的 channel token 格式是 "Long-lived channel access token"**，不是 webhook URL；operator 設定時注意 `chatops_line_channel_token=<token>` + `chatops_line_to=<userId|groupId>`（push API target）。
+- **Teams 的 Incoming Webhook**（outbound）跟 Bot Framework callback（inbound）是兩件事：outbound 只要 `chatops_teams_webhook`；inbound buttons 需要 bot deploy + `chatops_teams_secret` 配 HMAC。只配 webhook 的 dev 環境會看到「connected (outbound only)」狀態。

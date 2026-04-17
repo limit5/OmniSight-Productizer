@@ -28,6 +28,9 @@ async def notify(
     source: str = "",
     action_url: str | None = None,
     action_label: str | None = None,
+    interactive: bool = False,
+    interactive_buttons: list[dict] | None = None,
+    interactive_channel: str = "*",
 ) -> Notification:
     """Create and route a notification through the tiered system.
 
@@ -68,6 +71,13 @@ async def notify(
     # 3. Route to external channels based on level
     if level_str in ("warning", "action", "critical"):
         asyncio.create_task(_dispatch_external(notif))
+
+    # R1 (#307): interactive mirror to ChatOps bridge. Non-fatal if
+    # bridge is unavailable — notification already persisted + SSE'd.
+    if interactive:
+        asyncio.create_task(_dispatch_chatops(
+            notif, interactive_channel, interactive_buttons or [],
+        ))
 
     # 4. Log
     from backend.routers.system import add_system_log
@@ -132,6 +142,39 @@ async def _dispatch_external(notif: Notification) -> None:
             await db.update_notification_dispatch(notif.id, "sent", attempts=1)
     except Exception as exc:
         logger.warning("Failed to update dispatch status for %s: %s", notif.id, exc)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  R1 (#307): ChatOps interactive mirror
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def _dispatch_chatops(
+    notif: Notification,
+    channel: str,
+    buttons: list[dict],
+) -> None:
+    """Forward a notification to the ChatOps bridge as an interactive card."""
+    try:
+        from backend import chatops_bridge as bridge
+        btns = [
+            bridge.Button(
+                id=str(b.get("id") or ""),
+                label=str(b.get("label") or b.get("id") or ""),
+                style=str(b.get("style") or "primary"),
+                value=str(b.get("value") or ""),
+            )
+            for b in (buttons or [])
+            if b.get("id")
+        ]
+        await bridge.send_interactive(
+            channel, notif.message or notif.title,
+            title=f"[{notif.level.upper()}] {notif.title}",
+            buttons=btns,
+            meta={"notification_id": notif.id, "source": notif.source},
+        )
+    except Exception as exc:
+        logger.warning("ChatOps mirror dispatch failed for %s: %s", notif.id, exc)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
