@@ -1,0 +1,46 @@
+# SKILL-GO-SERVICE HIL recipes — X6 #302
+#
+# "Hardware" here is the deploy target (container runtime, k8s cluster,
+# or the release tarball landing on a workstation). Each recipe is a
+# probe that can only run after a real build/deploy (not a dry-run) —
+# used by the operator-run Step 7 smoke, not by CI.
+
+recipes:
+  - id: docker-smoke-health
+    name: "Docker smoke — /api/v1/health"
+    description: >
+      After `docker run -d -p 8080:8080 <image>`, hit /api/v1/health
+      five times from a cold container, assert P95 ≤ 150ms and every
+      response carries `{"status":"ok"}`. Go cold start on distroless
+      is ≤ 200ms per the backend-go role budget, so 150ms is a
+      comfortable P95 ceiling.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: http_ttfb
+      url: "http://localhost:8080/api/v1/health"
+      iterations: 5
+      p95_ms_ceiling: 150
+
+  - id: helm-install-smoke
+    name: "Helm install smoke (kind cluster)"
+    description: >
+      `helm install go-pilot ./deploy/helm` on a freshly-started kind
+      cluster; wait for rollout, port-forward, curl /api/v1/health
+      once. Validates chart manifest shape under real kubectl.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: kubectl_rollout
+      release: go-pilot
+      timeout_s: 120
+
+  - id: goreleaser-snapshot
+    name: "goreleaser snapshot build"
+    description: >
+      `goreleaser release --snapshot --clean`. Must succeed and emit
+      dist/ archives for every target in the matrix (linux/darwin/windows
+      × amd64/arm64). Exit code 0 and ≥ 6 archives expected.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "goreleaser release --snapshot --clean"
+      expected_rc: 0

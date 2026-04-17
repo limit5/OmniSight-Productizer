@@ -1,0 +1,78 @@
+# SKILL-GO-SERVICE test definitions — X6 #302
+#
+# Authoritative list consumed by `backend/tests/test_skill_go_service.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-gin-postgres-both
+        name: "Render: gin + postgres + both deploy targets"
+        type: unit
+        target: backend.go_service_scaffolder.render_project
+      - id: scaffold-fiber-sqlite-docker
+        name: "Render: fiber + sqlite + docker-only"
+        type: unit
+        target: backend.go_service_scaffolder.render_project
+      - id: scaffold-gin-none-helm
+        name: "Render: gin + no database + helm-only"
+        type: unit
+        target: backend.go_service_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by database/deploy/compliance skipped correctly"
+        type: unit
+        target: backend.go_service_scaffolder.render_project
+      - id: scaffold-module-path-default
+        name: "module_path defaults to github.com/example/<slug>"
+        type: unit
+        target: backend.go_service_scaffolder.ScaffoldOptions
+
+  - id: framework-binding
+    name: "X0-X4 framework binding tests"
+    tests:
+      - id: x0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.go_service_scaffolder.render_project
+      - id: x1-coverage-threshold-in-makefile
+        name: "Makefile + check_cov.sh enforce Go 70% coverage floor"
+        type: unit
+        target: backend.go_service_scaffolder.render_project
+      - id: x2-role-go-alignment
+        name: "Scaffold honours backend-go role anti-patterns (log/slog, envconfig)"
+        type: unit
+        target: backend.go_service_scaffolder.render_project
+      - id: x3-docker-adapter-resolves
+        name: "DockerImageAdapter resolves against rendered Dockerfile"
+        type: integration
+        target: backend.go_service_scaffolder.dry_run_build
+      - id: x3-helm-adapter-resolves
+        name: "HelmChartAdapter resolves against rendered chart"
+        type: integration
+        target: backend.go_service_scaffolder.dry_run_build
+      - id: x3-goreleaser-adapter-resolves
+        name: "GoreleaserAdapter resolves against rendered .goreleaser.yaml + go.mod"
+        type: integration
+        target: backend.go_service_scaffolder.dry_run_build
+      - id: x4-compliance-runs
+        name: "X4 compliance bundle runs against rendered project"
+        type: integration
+        target: backend.go_service_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-go-service appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-go-service') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

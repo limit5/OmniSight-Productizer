@@ -1,0 +1,80 @@
+# X6 #302 — SKILL-GO-SERVICE manifest.
+#
+# Second software-vertical skill pack. Pattern is the same as X5
+# SKILL-FASTAPI (#301): consume every X0-X4 framework capability and
+# emit a production-ready Go microservice. X5 proved the framework on
+# Python; X6 proves it survives a second language runtime with a
+# different toolchain (go modules, go test, goreleaser) instead of
+# pip/pytest/pyinstaller.
+#
+# Exercise:
+#   * X0  target_kind=software profile                (configs/platforms/linux-x86_64-native.yaml)
+#   * X1  go test + coverage + benchmark gates        (backend/software_simulator.py, go threshold 70%)
+#   * X2  backend-go role default                     (configs/roles/software/backend-go.skill.md)
+#   * X3  docker + helm + goreleaser adapters         (backend/build_adapters.py — DockerImageAdapter / HelmChartAdapter / GoreleaserAdapter)
+#   * X4  SPDX license scan / CVE / SBOM              (backend/software_compliance/ — go ecosystem via go-licenses + go.mod fallback)
+#
+# Scaffolds under `scaffolds/` produce a Go 1.22+ microservice: chosen
+# HTTP framework (gin | fiber) with an `/api/v1/health` + `/api/v1/items`
+# surface, `log/slog` structured logging, `kelseyhightower/envconfig`
+# config (no scattered os.Getenv), multi-stage Dockerfile (scratch
+# runtime), `.goreleaser.yaml` for Linux/Darwin/Windows × amd64/arm64
+# release, docker-compose for local dev, and a Helm chart skeleton.
+
+schema_version: 1
+name: skill-go-service
+description: >
+  Go 1.22+ microservice skill pack. Generates a production-ready Gin
+  or Fiber HTTP service with log/slog structured logging, envconfig
+  settings, optional Postgres via pgx, `/api/v1/health` + `/api/v1/items`
+  routes, go test + coverage wired to the X1 simulate-track Go
+  threshold (70%), multi-stage scratch Dockerfile, docker-compose for
+  local dev, `.goreleaser.yaml` for multi-platform binary release
+  (Linux/Darwin/Windows × amd64/arm64 + archive), and Helm chart for
+  k8s deploy. Dogfoods the backend-go role skill and consumes every
+  X0-X4 framework layer end-to-end.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - go
+  - golang
+  - go-1.22
+  - gin
+  - fiber
+  - microservice
+  - pgx
+  - slog
+  - envconfig
+  - goreleaser
+  - docker
+  - docker-compose
+  - helm
+  - openapi
+  - spdx
+  - x6

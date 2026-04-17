@@ -1200,9 +1200,9 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### X6. SKILL-GO-SERVICE (#302)
-- [ ] Gin/Fiber 微服務骨架
-- [ ] goreleaser 多平台 binary build
-- [ ] 預估：**1 day**
+- [x] Gin/Fiber 微服務骨架
+- [x] goreleaser 多平台 binary build
+- [x] 預估：**1 day**
 
 ### X7. SKILL-RUST-CLI (#303)
 - [ ] Clap + anyhow + tokio 骨架

@@ -1,0 +1,3 @@
+// Populated on first `go mod tidy` — the scaffold ships an empty
+// go.sum so downstream mirror caches are not pinned to this repo's
+// build-time transitive tree.

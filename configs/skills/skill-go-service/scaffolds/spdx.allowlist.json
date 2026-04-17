@@ -1,0 +1,26 @@
+{
+  "_comment": "SKILL-GO-SERVICE X6 #302 SPDX allowlist. Consumed by backend/software_compliance/licenses.py (ecosystem=go via go.mod + go-licenses). Default-deny GPL/AGPL; allow permissive + MPL-2.0.",
+  "allowed_licenses": [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unlicense",
+    "CC0-1.0"
+  ],
+  "denied_licenses": [
+    "GPL-2.0",
+    "GPL-2.0-only",
+    "GPL-2.0-or-later",
+    "GPL-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "AGPL-3.0",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "SSPL-1.0"
+  ],
+  "waivers": []
+}

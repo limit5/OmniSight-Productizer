@@ -1,0 +1,117 @@
+# X6 #302 — SKILL-GO-SERVICE DAG tasks.
+#
+# Mirrors the X5 SKILL-FASTAPI DAG shape so the skill registry's
+# tests/validate path stays uniform across language-vertical packs.
+# Each task maps 1:1 to an X0-X4 capability, so running the full
+# DAG is by design a smoke test of the software vertical on Go.
+
+tasks:
+  - id: go-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render Go project from scaffolds/: go.mod with framework +
+      database pins, cmd/server/main.go entry, internal/ layout,
+      Makefile, .gitignore, .env.example. Idempotent re-render:
+      overwrites inside the scaffold surface, never touches files
+      outside it (e.g. operator-added `internal/domain/`).
+    depends_on: []
+    artifacts: [go_skeleton]
+    estimated_hours: 1.5
+    framework_gate: x0-platform-schema
+
+  - id: go-app-core
+    name: "HTTP app core"
+    description: >
+      Emit `cmd/server/main.go` (server bootstrap), `internal/config`
+      (envconfig settings + validation, no scattered os.Getenv),
+      `internal/logging` (log/slog JSON handler), `internal/db`
+      (pgx pool when database=postgres, modernc.org/sqlite when
+      database=sqlite, no-op when database=none).
+    depends_on: [go-scaffold-init]
+    artifacts: [go_core]
+    estimated_hours: 1.5
+    framework_gate: x2-role-backend-go
+
+  - id: go-api-v1
+    name: "API v1 router + health"
+    description: >
+      Render framework-specific `/api/v1/health` (liveness probe)
+      and a sample `/api/v1/items` CRUD router. Gin uses `gin.Engine`
+      + `gin.Context`; Fiber uses `fiber.App` + `fiber.Ctx`. Both
+      expose identical JSON contracts so the test suite does not
+      branch on framework choice.
+    depends_on: [go-app-core]
+    artifacts: [go_api_v1]
+    estimated_hours: 1.5
+
+  - id: go-tests
+    name: "go test + coverage"
+    description: >
+      Render `internal/api/health_test.go` + `internal/api/items_test.go`
+      using `net/http/httptest` for Gin or Fiber's `app.Test()`.
+      Makefile `make test` runs `go test -race -cover ./...` and
+      enforces the X1 70% threshold via `scripts/check_cov.sh`.
+    depends_on: [go-api-v1]
+    artifacts: [go_tests]
+    estimated_hours: 1
+    framework_gate: x1-software-simulate
+
+  - id: go-docker
+    name: "Dockerfile + compose"
+    description: >
+      Multi-stage Dockerfile — builder stage `golang:1.22-alpine`,
+      runtime stage `gcr.io/distroless/static-debian12:nonroot`
+      (scratch-class, no shell, runs as uid 65532). docker-compose
+      brings up the service + optional postgres for local dev. Wires
+      to `backend.build_adapters.DockerImageAdapter`.
+    depends_on: [go-app-core]
+    artifacts: [go_docker]
+    estimated_hours: 1
+    framework_gate: x3-docker-adapter
+
+  - id: go-helm
+    name: "Helm chart"
+    description: >
+      Emit `deploy/helm/` chart (Chart.yaml + values.yaml +
+      deployment/service/ingress templates). Lintable by `helm lint`,
+      packageable by `backend.build_adapters.HelmChartAdapter`.
+    depends_on: [go-docker]
+    artifacts: [go_helm]
+    estimated_hours: 0.75
+    framework_gate: x3-helm-adapter
+
+  - id: go-goreleaser
+    name: "goreleaser multi-platform release"
+    description: >
+      Emit `.goreleaser.yaml` with Linux/Darwin/Windows × amd64/arm64
+      matrix, CGO_ENABLED=0, `-ldflags "-s -w"`, archives + checksums
+      + SBOM hook. Consumed by `backend.build_adapters.GoreleaserAdapter`
+      for the release pipeline. `goreleaser check` validates the
+      config offline.
+    depends_on: [go-app-core]
+    artifacts: [go_goreleaser]
+    estimated_hours: 1
+    framework_gate: x3-goreleaser-adapter
+
+  - id: go-compliance
+    name: "X4 compliance gates"
+    description: >
+      Emit `spdx.allowlist.json` (default-deny GPL/AGPL, allowlist
+      Apache-2.0 / MIT / BSD / MPL-2.0). The compliance harness
+      (backend.software_compliance.licenses) detects the go ecosystem
+      via go.mod and runs go-licenses when available.
+    depends_on: [go-scaffold-init]
+    artifacts: [go_compliance]
+    estimated_hours: 0.5
+    framework_gate: x4-software-compliance
+
+  - id: go-pilot-report
+    name: "X0-X4 validation report"
+    description: >
+      End-to-end smoke: render project, run X3 docker dry-run, X3 helm
+      dry-run, X3 goreleaser probe (checks the config is shipped),
+      X4 compliance bundle — emit one JSON report. Any framework
+      regression fails this task first.
+    depends_on: [go-tests, go-docker, go-helm, go-goreleaser, go-compliance]
+    artifacts: [go_pilot_report]
+    estimated_hours: 0.75
