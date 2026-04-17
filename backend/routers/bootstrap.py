@@ -22,6 +22,7 @@ import shutil
 import time
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -1047,6 +1048,260 @@ async def bootstrap_service_tick(
         }
 
     return EventSourceResponse(event_generator())
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L5 — Step 4 (poll G1 /readyz until green or 180s elapsed)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# After ``/bootstrap/start-services`` exec's systemctl / docker-compose
+# and the SSE tick stream replays the log lines, the wizard needs a
+# deterministic "it's up" signal so Step 4 can flip green and move on
+# to the smoke-test step. The readiness probe is owned by G1
+# (``/healthz`` = liveness, ``/readyz`` = readiness — DB + migration +
+# provider chain). This endpoint is the UI-facing side of that wait:
+# it polls ``GET /readyz`` every ``interval_secs`` for up to
+# ``timeout_secs`` and reports a single structured outcome.
+#
+# While G1 is still rolling out the dedicated ``/readyz`` route, the
+# probe transparently falls back to the already-shipped ``/healthz``
+# endpoint on a 404 so wizards on older backends still converge.
+
+
+_WAIT_READY_DEFAULT_TIMEOUT_SECS = 180.0
+_WAIT_READY_DEFAULT_INTERVAL_SECS = 2.0
+_WAIT_READY_MAX_TIMEOUT_SECS = 600.0
+# Individual probe timeout — a hung /readyz shouldn't starve the
+# overall wait. Kept short so 180s still yields ~90 probe opportunities
+# even when every request hits the ceiling.
+_WAIT_READY_PROBE_TIMEOUT_SECS = 3.0
+
+
+def _default_readyz_url() -> str:
+    """Pick the URL the wizard should poll for readiness.
+
+    Resolution order:
+      1. ``OMNISIGHT_READYZ_URL`` env var (explicit operator override).
+      2. ``http://127.0.0.1:<OMNISIGHT_PORT or 8000>{api_prefix}/readyz``.
+
+    ``api_prefix`` comes from :mod:`backend.config` so the URL matches
+    whatever the backend is mounted at (``/api/v1`` by default).
+    """
+    explicit = (os.environ.get("OMNISIGHT_READYZ_URL") or "").strip()
+    if explicit:
+        return explicit
+    port = (os.environ.get("OMNISIGHT_PORT") or "").strip() or "8000"
+    prefix = (_settings.api_prefix or "").rstrip("/")
+    return f"http://127.0.0.1:{port}{prefix}/readyz"
+
+
+class WaitReadyRequest(BaseModel):
+    """Body for ``POST /bootstrap/wait-ready``.
+
+    ``timeout_secs`` caps the total wait; ``interval_secs`` is the gap
+    between probes. ``url`` overrides the default readyz target (useful
+    when the wizard runs behind a reverse proxy or on a non-standard
+    port). ``fallback_healthz`` keeps older backends (no ``/readyz`` yet)
+    working: on a 404 the probe swaps the suffix to ``/healthz`` once.
+    """
+
+    timeout_secs: float = Field(
+        default=_WAIT_READY_DEFAULT_TIMEOUT_SECS,
+        ge=0.05, le=_WAIT_READY_MAX_TIMEOUT_SECS,
+        description="Upper bound on total wait time (default 180s).",
+    )
+    interval_secs: float = Field(
+        default=_WAIT_READY_DEFAULT_INTERVAL_SECS,
+        ge=0.05, le=30.0,
+        description="Seconds to sleep between probes.",
+    )
+    url: str = Field(
+        default="", max_length=1024,
+        description="Optional override for the readyz URL.",
+    )
+    fallback_healthz: bool = Field(
+        default=True,
+        description=(
+            "If the readyz URL 404s, swap the suffix to /healthz and keep "
+            "polling. Lets wizards on pre-G1 backends still converge."
+        ),
+    )
+
+
+WaitReadyReason = Literal["ready", "timeout", "connection_error"]
+
+
+class WaitReadyResponse(BaseModel):
+    ready: bool
+    url: str
+    attempts: int
+    elapsed_ms: int
+    last_status_code: int | None = None
+    last_error: str | None = None
+    reason: WaitReadyReason
+    fallback_applied: bool = False
+
+
+async def _probe_ready_once(
+    url: str,
+    *,
+    timeout_secs: float = _WAIT_READY_PROBE_TIMEOUT_SECS,
+) -> tuple[int | None, str | None]:
+    """Single GET probe — returns ``(status_code, error)``.
+
+    On transport failure (connect refused, DNS, timeout) ``status_code``
+    is None and ``error`` carries a short ``<ExcName>: <msg>`` string.
+    Kept as a module-level coroutine so tests can monkeypatch it to
+    sequence probe outcomes without spinning up a real server.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout_secs) as client:
+            resp = await client.get(url)
+        return resp.status_code, None
+    except httpx.HTTPError as exc:
+        return None, f"{type(exc).__name__}: {exc}"[:200]
+    except Exception as exc:  # pragma: no cover — defensive
+        return None, f"{type(exc).__name__}: {exc}"[:200]
+
+
+@router.post("/wait-ready", response_model=WaitReadyResponse)
+async def bootstrap_wait_ready(
+    req: WaitReadyRequest | None = None,
+) -> WaitReadyResponse:
+    """Block until the backend's readyz probe goes green or 180s elapses.
+
+    The wizard's Step 4 kicks services via ``start-services``, streams
+    their logs via ``service-tick``, and finally calls this endpoint to
+    get one deterministic boolean: did the stack actually come up? We
+    poll ``GET {url}`` every ``interval_secs`` and return as soon as any
+    probe reports a 2xx. If no probe succeeds within ``timeout_secs`` we
+    return ``ready=false`` with ``reason=timeout`` (or
+    ``connection_error`` if every probe failed at the transport layer —
+    the distinction matters for UX: a misconfigured URL vs. services
+    that are still booting).
+
+    Lives under ``/bootstrap/*`` so the gate middleware lets it through
+    before finalize. Unauthenticated like every other wizard step.
+
+    Response is always HTTP 200 — the polling itself completed, the
+    ``ready`` boolean carries the outcome so the UI can render a
+    green/red check without parsing error bodies.
+    """
+    body = req or WaitReadyRequest()
+    url = (body.url or "").strip() or _default_readyz_url()
+    started = time.monotonic()
+    deadline = started + body.timeout_secs
+
+    attempts = 0
+    last_status: int | None = None
+    last_error: str | None = None
+    fallback_applied = False
+
+    while True:
+        attempts += 1
+        status, err = await _probe_ready_once(url)
+        last_status = status
+        last_error = err
+
+        if status is not None and 200 <= status < 300:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "bootstrap: wait-ready GREEN url=%s attempts=%d elapsed=%dms",
+                url, attempts, elapsed_ms,
+            )
+            try:
+                await audit.log(
+                    action="bootstrap.wait_ready",
+                    entity_kind="bootstrap",
+                    entity_id="wait_ready",
+                    before=None,
+                    after={
+                        "url": url,
+                        "attempts": attempts,
+                        "elapsed_ms": elapsed_ms,
+                        "reason": "ready",
+                        "last_status_code": status,
+                        "fallback_applied": fallback_applied,
+                    },
+                    actor="wizard",
+                )
+            except Exception as exc:
+                logger.debug("bootstrap.wait_ready audit emit failed: %s", exc)
+            return WaitReadyResponse(
+                ready=True,
+                url=url,
+                attempts=attempts,
+                elapsed_ms=elapsed_ms,
+                last_status_code=status,
+                last_error=None,
+                reason="ready",
+                fallback_applied=fallback_applied,
+            )
+
+        # G1 is still landing /readyz on some backends. If we get a 404
+        # on a /readyz suffix, retry on /healthz (same probe shape,
+        # already shipped) exactly once so older stacks still converge.
+        if (
+            status == 404
+            and body.fallback_healthz
+            and not fallback_applied
+            and url.endswith("/readyz")
+        ):
+            new_url = url[: -len("/readyz")] + "/healthz"
+            logger.info(
+                "bootstrap: wait-ready got 404 on %s — falling back to %s",
+                url, new_url,
+            )
+            url = new_url
+            fallback_applied = True
+            continue
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(body.interval_secs, remaining))
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    reason: WaitReadyReason = (
+        "connection_error"
+        if (last_status is None and last_error is not None)
+        else "timeout"
+    )
+    logger.warning(
+        "bootstrap: wait-ready NOT READY url=%s attempts=%d elapsed=%dms "
+        "reason=%s last_status=%s err=%s",
+        url, attempts, elapsed_ms, reason, last_status, last_error,
+    )
+    try:
+        await audit.log(
+            action="bootstrap.wait_ready",
+            entity_kind="bootstrap",
+            entity_id="wait_ready",
+            before=None,
+            after={
+                "url": url,
+                "attempts": attempts,
+                "elapsed_ms": elapsed_ms,
+                "reason": reason,
+                "last_status_code": last_status,
+                "last_error": last_error,
+                "fallback_applied": fallback_applied,
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.wait_ready audit emit failed: %s", exc)
+
+    return WaitReadyResponse(
+        ready=False,
+        url=url,
+        attempts=attempts,
+        elapsed_ms=elapsed_ms,
+        last_status_code=last_status,
+        last_error=last_error,
+        reason=reason,
+        fallback_applied=fallback_applied,
+    )
 
 
 class FinalizeRequest(BaseModel):
