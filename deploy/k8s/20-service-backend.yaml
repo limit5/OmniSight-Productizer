@@ -1,0 +1,27 @@
+# G5 #2 (TODO row 1370) — Backend Service.
+#
+# ClusterIP on port 80 → targetPort 8000 (container `http` named port).
+# Ingress (30-ingress.yaml) routes to this Service on port 80.
+#
+# Named port indirection (`targetPort: http` not `8000`) lets G5 #5
+# Helm chart flip container port without churning the Service manifest.
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnisight-backend
+  namespace: omnisight
+  labels:
+    app.kubernetes.io/name: omnisight-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: omnisight
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: omnisight-backend
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

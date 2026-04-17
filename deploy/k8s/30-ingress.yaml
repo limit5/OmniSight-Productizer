@@ -1,0 +1,34 @@
+# G5 #2 (TODO row 1370) — Ingress for OmniSight backend.
+#
+# Charter `docs/ops/orchestration_selection.md` §7.6: Gateway-API
+# Ingress class is picked only when the cluster has one; default here is
+# `ingressClassName: nginx`. The Helm chart (G5 #5 row 1373) exposes a
+# toggle `ingress.gatewayApi.enabled` so operators can flip to a
+# Gateway-API compatible controller without silent auto-detection.
+#
+# Host `omnisight.example.com` is a placeholder — override at deploy
+# time via `kubectl edit ingress` or the Helm chart's `ingress.host`
+# value.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: omnisight-backend
+  namespace: omnisight
+  labels:
+    app.kubernetes.io/name: omnisight-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: omnisight
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: omnisight.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: omnisight-backend
+                port:
+                  name: http

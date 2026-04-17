@@ -1,0 +1,13 @@
+# G5 #2 (TODO row 1370) — Namespace for OmniSight K8s manifests.
+#
+# Per `docs/ops/orchestration_selection.md` §3.2, the OmniSight workload
+# lives in a single namespace with two ingresses (web + api). Keeping the
+# blast radius of RBAC + NetworkPolicy changes bounded.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: omnisight
+  labels:
+    app.kubernetes.io/name: omnisight
+    app.kubernetes.io/part-of: omnisight
+    app.kubernetes.io/managed-by: kubectl

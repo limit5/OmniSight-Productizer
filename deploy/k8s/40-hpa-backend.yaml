@@ -1,0 +1,36 @@
+# G5 #2 (TODO row 1370) — HorizontalPodAutoscaler for the backend.
+#
+# Charter `docs/ops/orchestration_selection.md` §7.4:
+#   * API version `autoscaling/v2` (NOT v2beta2 — that was removed in
+#     Kubernetes 1.26; v2 is the only surviving wire form on K8s 1.29).
+#   * Target CPU utilisation: 70%. This is the literal the G5 TODO row
+#     asks for and what the Helm chart (G5 #5 row 1373) will expose as
+#     `autoscaling.targetCPUUtilizationPercentage`.
+#
+# minReplicas matches the Deployment baseline (2) — HPA never scales
+# below HA-02. maxReplicas=10 is a safe upper bound for the backend's
+# stateless request handlers; revisit when G7 capacity planning lands.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: omnisight-backend
+  namespace: omnisight
+  labels:
+    app.kubernetes.io/name: omnisight-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: omnisight
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: omnisight-backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

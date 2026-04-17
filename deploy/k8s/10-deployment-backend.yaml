@@ -1,0 +1,73 @@
+# G5 #2 (TODO row 1370) — Backend Deployment.
+#
+# Charter: `docs/ops/orchestration_selection.md` §7.4.
+#   * replicas: 2 (HA-02 baseline — matches the two compose replicas
+#     backend-a / backend-b we already ship in docker-compose.prod.yml).
+#   * strategy: RollingUpdate with maxUnavailable=0 and maxSurge=1.
+#     Only configuration that delivers zero-downtime rollouts on a
+#     2-replica backend and matches the G2 rolling-restart semantics
+#     already in deploy/blue-green/.
+#
+# Probes are wired in G5 #4 (TODO row 1372) — intentionally not added
+# here so that row owns the /readyz + /livez httpGet contract as a
+# single focused change.
+#
+# The PodDisruptionBudget (minAvailable=1) lands in G5 #3 (TODO row
+# 1371) as a separate manifest.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnisight-backend
+  namespace: omnisight
+  labels:
+    app.kubernetes.io/name: omnisight-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: omnisight
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omnisight-backend
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omnisight-backend
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: omnisight
+    spec:
+      # Per charter §3.2, runtime is containerd on CNCF-certified distros.
+      # No custom securityContext here — K8s defaults + O10 baseline
+      # (future PodSecurity admission) handle it.
+      containers:
+        - name: backend
+          image: ghcr.io/your-org/omnisight-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # OMNISIGHT_INSTANCE_ID is emitted as a Prometheus label by
+            # the backend; using the pod name keeps parity with the
+            # compose-level backend-a / backend-b naming convention.
+            - name: OMNISIGHT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Resources.requests.cpu is REQUIRED for HPA CPU utilisation
+          # (40-hpa-backend.yaml targets 70%). Without a request, HPA
+          # cannot compute a percentage and silently stays at minReplicas.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
