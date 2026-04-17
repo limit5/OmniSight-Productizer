@@ -31,7 +31,7 @@ _CLAUDE_MD = _PROJECT_ROOT / "CLAUDE.md"
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
 _MAX_CORE_RULES = 2000
 _MAX_MODEL_RULES = 3000
-_MAX_ROLE_SKILL = 6000
+_MAX_ROLE_SKILL = 8000
 _MAX_TASK_SKILL = 4000
 _MAX_HANDOFF = 4000
 

@@ -1166,14 +1166,14 @@ Legend:
 - [x] 預估：**1 day**
 
 ### X2. Software role skills (#298)
-- [ ] `configs/roles/backend-python.md`（FastAPI / Django / Flask）
-- [ ] `configs/roles/backend-go.md`（gin / fiber / net/http）
-- [ ] `configs/roles/backend-rust.md`（axum / actix / rocket）
-- [ ] `configs/roles/backend-node.md`（Express / NestJS / Fastify）
-- [ ] `configs/roles/backend-java.md`（Spring Boot / Quarkus）
-- [ ] `configs/roles/cli-tooling.md`（Cobra / Clap / Commander）
-- [ ] `configs/roles/desktop-electron.md` / `desktop-tauri.md` / `desktop-qt.md`
-- [ ] 預估：**1.5 day**
+- [x] `configs/roles/software/backend-python.skill.md`（FastAPI / Django / Flask）
+- [x] `configs/roles/software/backend-go.skill.md`（gin / fiber / net/http）
+- [x] `configs/roles/software/backend-rust.skill.md`（axum / actix / rocket）
+- [x] `configs/roles/software/backend-node.skill.md`（Express / NestJS / Fastify）
+- [x] `configs/roles/software/backend-java.skill.md`（Spring Boot / Quarkus）
+- [x] `configs/roles/software/cli-tooling.skill.md`（Cobra / Clap / Commander / Typer / Picocli）
+- [x] `configs/roles/software/desktop-electron.skill.md` / `desktop-tauri.skill.md` / `desktop-qt.skill.md`
+- [x] 預估：**1.5 day**
 
 ### X3. Build & package adapters (#299)
 - [ ] Docker image build + push（GHCR / Docker Hub / ECR）
