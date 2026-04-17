@@ -11010,3 +11010,44 @@ X8 留下幾個 follow-up：
 ### 風險 / 副作用
 - 純前端新增，無 schema / API / DB 變更。
 - 既有 `StepBodyPlaceholder` map 仍保留 `llm_provider` entry（Record exhaustiveness）；雖然渲染路徑已不再走它，但移掉會破 TS 型別，留著無副作用。
+
+## L3 Step 2 #2 — `POST /api/v1/bootstrap/llm-provision` 後端實作 (2026-04-17)
+
+### Scope
+TODO L3 Step 2 第二個 bullet：API Key 輸入 → 後端驗 key → at-rest 加密儲存 → flip `settings.llm_provider`。Ollama 本機偵測 + key 無效 / quota / 網路錯誤訊息一併落地（Ollama ping 走同一路徑，已滿足 L3 Step 2 bullet 3；bullet 4 的四種錯誤 kind 也已分類）。
+
+### 變更
+- **新增** `backend/llm_secrets.py`
+  - ⚠ **不是 `backend/secrets.py`** — stdlib 有 `secrets`（starlette `from secrets import token_hex` 等），pytest rootdir 把 `backend/` 加進 sys.path 時會整個 shadow 掉，112 個既有 test 會全部 collect 失敗。rename 為 `llm_secrets.py`。TODO entry 已同步更新。
+  - Fernet-encrypted JSON 存於 `data/.llm_secrets.enc`（key 來自 `OMNISIGHT_SECRET_KEY` env 或 `data/.secret_key`；沿用 `backend.secret_store` 的加密原語）。
+  - API：`set_provider_credentials(provider, api_key, model, base_url, azure_deployment)` / `get_provider_credentials(provider)` / `list_provider_fingerprints()`（UI 用，永遠只看到 `…xxxx` tail）/ `load_into_settings()`（把存檔解密後鏡射到 `config.settings`，cache-bust `backend.agents.llm._cache`；module import 時自動跑一次，讓 restart 後 credentials 不需環境變數）。
+  - `ping_provider()` — 統一走 httpx 直接打 provider REST 端點（不依賴 langchain init），四個 provider 各一條路徑：
+    - Anthropic: `GET https://api.anthropic.com/v1/models` + `x-api-key`
+    - OpenAI: `GET {base_url|https://api.openai.com/v1}/models` + `Authorization: Bearer`
+    - Azure: `GET {base_url}/openai/deployments?api-version=2023-05-15` + `api-key`
+    - Ollama: `GET {base_url|http://localhost:11434}/api/tags`
+  - 失敗會 raise `ProviderPingError(kind, message)`，kind ∈ {`key_invalid`, `quota_exceeded`, `network_unreachable`, `bad_request`, `provider_error`}。
+- **新增** `POST /api/v1/bootstrap/llm-provision`（`backend/routers/bootstrap.py`）
+  - Body: `{provider, api_key?, model?, base_url?, azure_deployment?}`。ollama 不需 key；azure 必填 `base_url`；其他 hosted provider 必填 `api_key`。
+  - Flow: ping → 成功才寫入加密 store → 更新 `settings.llm_provider` + `settings.llm_model` → `record_bootstrap_step(STEP_LLM_PROVIDER)` → `audit.log('bootstrap.llm_provisioned')`。
+  - Ping 失敗 → 不動任何 state，回傳對應 HTTP: 401 `key_invalid` / 429 `quota_exceeded` / 504 `network_unreachable` / 400 `bad_request` / 502 `provider_error`。
+  - 意圖 **無須 admin auth**（和 `/bootstrap/admin-password` 相同 pattern，因為 wizard 期間還沒登入）。globally gated route 只能從 `/bootstrap/*` prefix 進入；`is_bootstrap_finalized` 後 middleware 會攔下所有 wizard endpoint。
+- **新增** `backend/tests/test_bootstrap_llm_provision.py`（12 test）
+  - 整合：anthropic / openai happy path（setting flip + encrypted persistence + step row + audit row），ollama local probe 免 key，無效 key 401 + 不 persist，quota 429，`ConnectError` → 504，hosted 無 key / 未知 provider / azure 無 base_url → 422。
+  - Unit：`set_get_round_trip` + 雙 provider 共存，未知 provider ValueError，`fingerprint()` redact。
+  - 用 `httpx.MockTransport` 注入到 `backend.llm_secrets.httpx.AsyncClient`，整套 ping 不需實際網路。
+
+### 測試結果
+- 新 test：12/12 pass（`backend/tests/test_bootstrap_llm_provision.py`）。
+- Regression：`test_bootstrap*.py` 共 92/92 pass（含 admin_password / finalize / gate / state / 原 bootstrap 合約）。
+- 改名 `backend/secrets.py → backend/llm_secrets.py` 之前，backend 全部 test 都會 collect-error（starlette `from secrets import token_hex` 找不到）。
+
+### 風險 / 副作用
+- 檔名與 TODO 原文（`backend/secrets.py`）有差；僅做 1 層 rename，所有 call site 都走 `backend.llm_secrets`。後續 slot 要引用只需 `from backend import llm_secrets as _secrets`。
+- Fernet key 由 `backend.secret_store._get_key()` 管理，缺 `OMNISIGHT_SECRET_KEY` 時會自動在 `data/.secret_key` 產生一把本機 key（0600 chmod）— 與既有 B12 Cloudflare token 儲存共用同一把鑰匙，不變更 threat model。
+- `/api/v1/bootstrap/llm-provision` 無 auth：受 bootstrap gate middleware 保護（finalized 後無法到達），與 `/bootstrap/admin-password` 相同設計。
+- wizard 前端（`LlmProviderStep`）仍停在 L3 Step 2 #1 的 selection-only pattern；API form 綁定是 L3 Step 2 下一個 slot 的事。
+
+### 後續 hook（不在本次 scope）
+- 前端 `LlmProviderStep`：state lift + API key input + submit → `POST /api/v1/bootstrap/llm-provision`，依 response `kind` 顯示錯誤；Ollama option 在 `selected === "ollama"` 時主動 ping `localhost:11434` 列 model。
+- 若有 L7 CI key rotation，`set_provider_credentials()` 可以被重複呼叫，舊記錄會直接被新 Fernet payload 覆蓋（不留歷史 key）— 若需要歷史，另開 column。

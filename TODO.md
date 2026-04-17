@@ -1253,7 +1253,7 @@ Legend:
 
 ### L3. Step 2 — LLM Provider 選擇 + API Key 輸入
 - [x] UI 選單：Anthropic / OpenAI / Ollama（本機）/ Azure
-- [ ] API Key 輸入 → `POST /api/v1/bootstrap/llm-provision`：驗 key（`provider.ping()`）→ 寫入 `backend/secrets.py`（at-rest 加密）→ 更新 `settings.llm_provider`
+- [x] API Key 輸入 → `POST /api/v1/bootstrap/llm-provision`：驗 key（`provider.ping()`）→ 寫入 `backend/llm_secrets.py`（at-rest 加密；`backend/secrets.py` 會 shadow stdlib，故改名）→ 更新 `settings.llm_provider`
 - [ ] Ollama 選項偵測本機 `localhost:11434` 可達性 + 列可用 model
 - [ ] 錯誤處理：key 無效 / quota 用盡 / 網路不通 → 明確訊息
 - 預估：**0.5 day**

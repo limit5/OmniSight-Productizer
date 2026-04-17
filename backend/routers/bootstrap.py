@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 from backend import auth as _au
 from backend import audit
 from backend import bootstrap as _boot
+from backend import llm_secrets as _secrets
+from backend.config import settings as _settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bootstrap", tags=["bootstrap"])
@@ -130,6 +132,194 @@ async def bootstrap_admin_password(req: AdminPasswordRequest) -> AdminPasswordRe
         status="password_changed",
         admin_password_default=False,
         user_id=target.id,
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L3 — Step 2 (LLM provider + API key provisioning)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class LlmProvisionRequest(BaseModel):
+    """Request body for the wizard's L3 Step 2 provider provisioning.
+
+    ``api_key`` is required for every hosted provider (anthropic / openai
+    / azure); ``ollama`` is local and authenticates by reachability only.
+    ``base_url`` is mandatory for Azure (the resource endpoint) and
+    optional for Ollama (defaults to ``http://localhost:11434``). A
+    caller-supplied ``model`` is echoed back into
+    :attr:`settings.llm_model` so the agent factory picks it up.
+    """
+
+    provider: str = Field(min_length=1, max_length=32)
+    api_key: str = Field(default="", max_length=4096)
+    model: str = Field(default="", max_length=128)
+    base_url: str = Field(default="", max_length=512)
+    azure_deployment: str = Field(default="", max_length=128)
+
+
+class LlmProvisionResponse(BaseModel):
+    status: str
+    provider: str
+    model: str
+    fingerprint: str
+    latency_ms: int
+    models: list[str] = Field(default_factory=list)
+
+
+_PING_KIND_TO_STATUS: dict[str, int] = {
+    "key_invalid": 401,
+    "quota_exceeded": 429,
+    "network_unreachable": 504,
+    "bad_request": 400,
+    "provider_error": 502,
+}
+
+
+@router.post("/llm-provision", response_model=LlmProvisionResponse)
+async def bootstrap_llm_provision(req: LlmProvisionRequest) -> LlmProvisionResponse:
+    """Verify + persist an LLM provider credential during wizard Step L3.
+
+    Flow:
+      1. ``provider.ping()`` — a single REST probe against the hosted
+         provider that classifies the failure into ``key_invalid``,
+         ``quota_exceeded``, ``network_unreachable``, or ``bad_request``.
+         Ollama uses the local ``/api/tags`` probe so the same path also
+         satisfies the "Ollama reachability" bullet of L3 Step 2.
+      2. On success, persist the credential encrypted-at-rest via
+         :mod:`backend.llm_secrets` (Fernet; key from ``OMNISIGHT_SECRET_KEY``
+         or ``data/.secret_key``).
+      3. Mirror the active provider into ``settings.llm_provider`` and
+         clear the LLM factory cache so the next ``get_llm()`` call uses
+         the fresh credential without an env reload.
+      4. Record ``bootstrap_state.llm_provider_configured`` and emit an
+         audit row — mirrors the admin-password step's contract.
+
+    Intentionally unauthenticated: during the wizard the operator has
+    no admin session yet. The global bootstrap-gate middleware
+    (:mod:`backend.main`) only permits ``/bootstrap/*`` until the wizard
+    finalizes, so the endpoint cannot be reached after install.
+
+    Error codes mirror ``_PING_KIND_TO_STATUS``:
+      * 401 — key was rejected (invalid / expired)
+      * 429 — provider returned quota exhausted
+      * 504 — network unreachable / timeout
+      * 400 — bad request shape (e.g. Azure w/o base_url)
+      * 502 — provider 5xx
+    """
+    provider = req.provider.strip().lower()
+    if provider not in _secrets.SUPPORTED_PROVIDERS:
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={
+                "detail": (
+                    f"unsupported provider {req.provider!r}; "
+                    f"valid: {list(_secrets.SUPPORTED_PROVIDERS)}"
+                ),
+                "kind": "bad_request",
+            },
+        )
+
+    api_key = req.api_key.strip()
+    if provider != "ollama" and not api_key:
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={
+                "detail": f"{provider} requires a non-empty api_key",
+                "kind": "key_invalid",
+            },
+        )
+    if provider == "azure" and not req.base_url.strip():
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=422,
+            content={
+                "detail": (
+                    "azure requires a base_url (endpoint) "
+                    "— e.g. https://<resource>.openai.azure.com"
+                ),
+                "kind": "bad_request",
+            },
+        )
+
+    try:
+        ping = await _secrets.ping_provider(
+            provider,
+            api_key=api_key,
+            base_url=req.base_url,
+            azure_deployment=req.azure_deployment,
+        )
+    except _secrets.ProviderPingError as exc:
+        status_code = _PING_KIND_TO_STATUS.get(exc.kind, 502)
+        logger.info(
+            "bootstrap: llm-provision ping failed for provider=%s kind=%s (%s)",
+            provider, exc.kind, exc.message,
+        )
+        return JSONResponse(
+            status_code=status_code,
+            content={"detail": exc.message, "kind": exc.kind},
+        )
+
+    # Ping succeeded — persist the credential and flip settings.
+    record = _secrets.set_provider_credentials(
+        provider,
+        api_key=api_key,
+        model=req.model,
+        base_url=req.base_url,
+        azure_deployment=req.azure_deployment,
+    )
+    _settings.llm_provider = provider
+    if req.model.strip():
+        _settings.llm_model = req.model.strip()
+
+    # Mark the wizard step + emit an audit row. Actor is anonymous
+    # (wizard runs pre-login); the audit row still captures the event.
+    try:
+        await _boot.record_bootstrap_step(
+            _boot.STEP_LLM_PROVIDER,
+            actor_user_id=None,
+            metadata={
+                "provider": provider,
+                "model": record["model"] or _settings.get_model_name(),
+                "fingerprint": record["fingerprint"],
+                "base_url": record["base_url"],
+                "latency_ms": ping["latency_ms"],
+            },
+        )
+    except Exception as exc:
+        logger.warning("bootstrap: record_bootstrap_step(llm_provider) failed: %s", exc)
+
+    try:
+        await audit.log(
+            action="bootstrap.llm_provisioned",
+            entity_kind="bootstrap",
+            entity_id=_boot.STEP_LLM_PROVIDER,
+            before=None,
+            after={
+                "provider": provider,
+                "model": record["model"],
+                "fingerprint": record["fingerprint"],
+                "base_url": record["base_url"],
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.llm_provisioned audit emit failed: %s", exc)
+
+    logger.info(
+        "bootstrap: LLM provider provisioned — provider=%s model=%s fp=%s latency=%dms",
+        provider,
+        record["model"] or _settings.get_model_name(),
+        record["fingerprint"],
+        ping["latency_ms"],
+    )
+
+    return LlmProvisionResponse(
+        status="provisioned",
+        provider=provider,
+        model=record["model"] or _settings.get_model_name(),
+        fingerprint=record["fingerprint"],
+        latency_ms=ping["latency_ms"],
+        models=list(ping.get("models", []) or []),
     )
 
 
