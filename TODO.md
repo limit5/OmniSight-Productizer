@@ -1275,7 +1275,7 @@ Legend:
 ### L6. Step 5 — Smoke Test + 完成
 - [x] 跑 `scripts/prod_smoke_test.py` 子集（選 compile-flash host_native DAG，~60s） *(done: `--subset dag1` CLI flag on the smoke script + `POST /api/v1/bootstrap/smoke-subset` endpoint runs DAG_1 in-process, verifies audit hash chain, and flips `smoke_passed` + records `STEP_SMOKE` on green; wizard Step 5 UI wired via `SmokeSubsetStep`)*
 - [x] 顯示 audit_log hash chain 驗證結果、兩個 DAG 的 run summary *(done: wizard now POSTs `subset=both` so `/bootstrap/smoke-subset` runs DAG_1 + DAG_2 and returns per-DAG `SmokeRunSummary`s; Step 5 pane renders each DAG as its own pass/fail card (label, run_id, plan_id, plan_status, target, t3 runner, task count, validation errors) and a dedicated audit-chain panel shows PASS/FAIL + tenant_count + detail + first_bad_id + bad_tenants)*
-- [ ] 全綠 → `POST /api/v1/bootstrap/finalize` → 寫 `bootstrap_finalized=true` → 導向 dashboard
+- [x] 全綠 → `POST /api/v1/bootstrap/finalize` → 寫 `bootstrap_finalized=true` → 導向 dashboard *(done: backend `POST /bootstrap/finalize` already writes `bootstrap_finalized=true` in the marker + records `STEP_FINALIZED` via `mark_bootstrap_finalized`; wizard now exposes an inline "Finalize & go to dashboard" CTA inside the Step 5 Smoke pane (`bootstrap-smoke-finalize-button`) that is enabled only when `status.all_green` and `missing_steps` is empty — click posts `/bootstrap/finalize`, waits for `reloadStatus`, then `router.replace("/")`; Step 6 "Finalize" pane still carries the canonical button for operators who auto-advance past Smoke; two new vitest cases cover the inline-CTA green-path redirect and the disabled/missing-steps red-path)*
 - [ ] 失敗 → 顯示錯誤 + 允許回到前面 step 修正
 - 預估：**0.5 day**
 

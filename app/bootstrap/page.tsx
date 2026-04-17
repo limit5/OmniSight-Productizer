@@ -1413,9 +1413,16 @@ function ServiceHealthStep({
 function SmokeSubsetStep({
   alreadyGreen,
   onPassed,
+  finalize,
 }: {
   alreadyGreen: boolean
   onPassed: () => Promise<unknown>
+  finalize?: {
+    allGatesGreen: boolean
+    busy: boolean
+    missingSteps: string[]
+    onFinalize: () => void
+  }
 }) {
   const [result, setResult] = useState<BootstrapSmokeSubsetResponse | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1445,6 +1452,7 @@ function SmokeSubsetStep({
   const runs = result?.runs ?? []
   const auditOk = result?.audit_chain?.ok === true
   const passed = result?.smoke_passed === true
+  const smokeGreen = alreadyGreen || passed
 
   return (
     <div
@@ -1645,6 +1653,39 @@ function SmokeSubsetStep({
         >
           {error}
         </p>
+      )}
+
+      {finalize && smokeGreen && (
+        <div
+          data-testid="bootstrap-smoke-finalize-cta"
+          data-ready={finalize.allGatesGreen ? "true" : "false"}
+          className="flex flex-col gap-2 p-3 rounded border border-[var(--artifact-purple)]/40 bg-[var(--artifact-purple)]/5"
+        >
+          <p className="font-mono text-[11px] text-[var(--foreground)]">
+            All four gates green — closing the wizard writes{" "}
+            <code>bootstrap_finalized=true</code> and opens the dashboard.
+          </p>
+          {!finalize.allGatesGreen && finalize.missingSteps.length > 0 && (
+            <p className="font-mono text-[11px] text-[var(--destructive)]">
+              Missing steps:{" "}
+              <code>{finalize.missingSteps.join(", ")}</code>
+            </p>
+          )}
+          <button
+            type="button"
+            data-testid="bootstrap-smoke-finalize-button"
+            onClick={finalize.onFinalize}
+            disabled={!finalize.allGatesGreen || finalize.busy}
+            className="self-start flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {finalize.busy ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Rocket size={12} />
+            )}
+            Finalize &amp; go to dashboard
+          </button>
+        </div>
       )}
     </div>
   )
@@ -1940,6 +1981,12 @@ export default function BootstrapPage() {
                 <SmokeSubsetStep
                   alreadyGreen={status.status.smoke_passed}
                   onPassed={reloadStatus}
+                  finalize={{
+                    allGatesGreen,
+                    busy: finalizing,
+                    missingSteps: status.missing_steps,
+                    onFinalize: () => void handleFinalize(),
+                  }}
                 />
               ) : (
                 <StepBodyPlaceholder step={activeStep} />

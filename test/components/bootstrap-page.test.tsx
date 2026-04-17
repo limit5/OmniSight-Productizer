@@ -192,6 +192,70 @@ describe("BootstrapPage", () => {
     })
   })
 
+  it("Step 5 exposes an inline finalize CTA that posts /bootstrap/finalize and redirects to the dashboard", async () => {
+    // Auto-advance lands on the finalize pane when every gate is green, so
+    // pin the user to the smoke step to exercise the inline CTA path.
+    mockedGetStatus.mockResolvedValue(greenStatus)
+    mockedFinalize.mockResolvedValue({
+      finalized: true,
+      status: greenStatus.status,
+      actor_user_id: "admin-1",
+    })
+
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-smoke"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-finalize-cta"),
+      ).toHaveAttribute("data-ready", "true")
+    })
+    const inlineBtn = screen.getByTestId("bootstrap-smoke-finalize-button")
+    expect(inlineBtn).not.toBeDisabled()
+    fireEvent.click(inlineBtn)
+
+    await waitFor(() => {
+      expect(mockedFinalize).toHaveBeenCalledTimes(1)
+    })
+    await waitFor(() => {
+      expect(routerReplace).toHaveBeenCalledWith("/")
+    })
+  })
+
+  it("Step 5 inline finalize CTA stays disabled while any gate or required step is still red", async () => {
+    const smokeGreenButStepMissing = {
+      ...greenStatus,
+      missing_steps: ["llm_provider_configured"],
+      all_green: false,
+      status: { ...greenStatus.status, llm_provider_configured: false },
+    }
+    mockedGetStatus.mockResolvedValue(smokeGreenButStepMissing)
+
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-smoke"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-smoke-finalize-cta"),
+      ).toHaveAttribute("data-ready", "false")
+    })
+    expect(
+      screen.getByTestId("bootstrap-smoke-finalize-button"),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(/Missing steps:/),
+    ).toBeInTheDocument()
+    expect(mockedFinalize).not.toHaveBeenCalled()
+  })
+
   it("Step 1 form rotates the admin password and refreshes status", async () => {
     // First poll: default admin still flagged. After rotation: green.
     const postRotateStatus = {
