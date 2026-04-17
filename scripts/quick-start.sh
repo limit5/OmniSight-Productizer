@@ -230,15 +230,24 @@ IS_WSL=false
 if grep -qi microsoft /proc/version 2>/dev/null; then
     IS_WSL=true
     if [ -d /run/systemd/system ] && [ "$(ps -p 1 -o comm= 2>/dev/null || echo unknown)" = "systemd" ]; then
-        log "WSL2 + systemd 已啟用"
+        log "WSL2 + systemd 已啟用（cloudflared 將以 systemd service 常駐）"
     else
-        warn "WSL2 偵測到但 systemd 未啟用。Cloudflared 將以背景程序模式運行。"
-        warn "啟用方法：在 /etc/wsl.conf 加入 [boot] systemd=true 後重啟 WSL"
+        warn "偵測到 WSL2 但 systemd 未啟用 → cloudflared 將以 nohup 背景程序運行。"
+        echo ""  | tee -a "$LOG_FILE"
+        echo -e "${BOLD}建議啟用 WSL2 systemd（可選但推薦）：${NC}" | tee -a "$LOG_FILE"
+        echo "  1. 編輯 /etc/wsl.conf（若不存在則建立）：" | tee -a "$LOG_FILE"
+        echo "       sudo tee /etc/wsl.conf >/dev/null <<'EOF'" | tee -a "$LOG_FILE"
+        echo "       [boot]" | tee -a "$LOG_FILE"
+        echo "       systemd=true" | tee -a "$LOG_FILE"
+        echo "       EOF" | tee -a "$LOG_FILE"
+        echo "  2. 在 Windows PowerShell 執行：wsl --shutdown" | tee -a "$LOG_FILE"
+        echo "  3. 重新進入 WSL 後重跑本腳本 → cloudflared 會自動升級為 systemd service" | tee -a "$LOG_FILE"
+        echo "" | tee -a "$LOG_FILE"
         WSL_SYSTEMD=false
     fi
 elif [ ! -d /run/systemd/system ] || [ "$(ps -p 1 -o comm= 2>/dev/null || echo unknown)" != "systemd" ]; then
     WSL_SYSTEMD=false
-    warn "偵測到非 systemd init。Cloudflared 將以背景程序模式運行。"
+    warn "偵測到非 systemd init → cloudflared 將以 nohup 背景程序運行。"
 fi
 
 # 網路連線
@@ -613,17 +622,50 @@ if [[ "$cf_setup" =~ ^[Yy] ]]; then
                                     echo "   日誌：sudo journalctl -u cloudflared -n 20"
                                 fi
                             else
-                                echo "🔧 以背景程序啟動 cloudflared..." | tee -a "$LOG_FILE"
-                                nohup cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" \
-                                    >> /tmp/cloudflared.log 2>&1 &
-                                CFLARED_PID=$!
-                                sleep 3
+                                echo "🔧 以 nohup 背景程序啟動 cloudflared..." | tee -a "$LOG_FILE"
+                                # Idempotency: a stale PID file from a previous run may still point
+                                # at a live cloudflared. Reuse it if so — avoids spawning parallel
+                                # tunnel connectors which confuses Cloudflare's load balancer.
+                                CFLARED_PID_FILE="/tmp/omnisight-cloudflared.pid"
+                                CFLARED_LOG="/tmp/omnisight-cloudflared.log"
+                                CFLARED_PID=""
+                                if [ -f "$CFLARED_PID_FILE" ]; then
+                                    OLD_PID=$(cat "$CFLARED_PID_FILE" 2>/dev/null || echo "")
+                                    # PID recycling is real on WSL (short-lived shell tasks can take
+                                    # a previously-used PID), so verify the process is actually
+                                    # cloudflared before trusting it.
+                                    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null && \
+                                       ps -p "$OLD_PID" -o comm= 2>/dev/null | grep -q cloudflared; then
+                                        log "cloudflared 已在背景運行（PID: ${OLD_PID}），複用。"
+                                        CFLARED_PID="$OLD_PID"
+                                    else
+                                        rm -f "$CFLARED_PID_FILE"
+                                    fi
+                                fi
+
+                                if [ -z "$CFLARED_PID" ]; then
+                                    nohup cloudflared tunnel run --token "$CF_TUNNEL_TOKEN" \
+                                        >> "$CFLARED_LOG" 2>&1 &
+                                    CFLARED_PID=$!
+                                    # detach from the shell's job table so Ctrl-C on the script
+                                    # doesn't take the tunnel down; `|| true` because disown is
+                                    # a no-op (and would exit non-zero under -e) if job control
+                                    # is off, e.g. under `sh` or in some CI runners.
+                                    disown "$CFLARED_PID" 2>/dev/null || true
+                                    echo "$CFLARED_PID" > "$CFLARED_PID_FILE"
+                                    sleep 3
+                                fi
+
                                 if kill -0 "$CFLARED_PID" 2>/dev/null; then
                                     log "cloudflared 已啟動（PID: ${CFLARED_PID}）"
-                                    warn "WSL 無 systemd：cloudflared 以背景程序運行。重啟 WSL 後需重新執行腳本。"
+                                    echo "   PID file: $CFLARED_PID_FILE" | tee -a "$LOG_FILE"
+                                    echo "   日誌:    $CFLARED_LOG" | tee -a "$LOG_FILE"
+                                    warn "nohup 模式：cloudflared 會在 WSL 重啟後消失，屆時需重跑此腳本。"
+                                    warn "若要「開機自動啟動 + 崩潰自動重啟」，請依 Step 0 的提示啟用 systemd。"
                                 else
+                                    rm -f "$CFLARED_PID_FILE"
                                     err "cloudflared 啟動後立即退出。"
-                                    echo "   查看日誌：cat /tmp/cloudflared.log"
+                                    echo "   查看日誌：cat $CFLARED_LOG"
                                 fi
                             fi
 

@@ -227,3 +227,151 @@ def test_uninstall_prompt_safety(tmp_path):
     # Should exit cleanly with "取消" (cancelled) rather than proceed.
     assert r.returncode == 0
     assert "取消" in r.stdout or "cancel" in r.stdout.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# L9 — WSL2 detection + systemd/nohup branching guards
+# ──────────────────────────────────────────────────────────────────────
+# Scope: the quick-start must handle 2 WSL2 cases symmetrically —
+#   (a) systemd as PID 1 → `cloudflared service install` + systemctl
+#   (b) no systemd       → `nohup cloudflared tunnel run` + PID-file idempotency
+# + print copy-pasteable instructions for enabling systemd in case (b).
+# These tests are source-level guards: they don't require WSL at runtime.
+
+
+def test_wsl_systemd_branching_both_modes_present():
+    """Both branches (systemd service install / nohup tunnel run) must exist."""
+    content = SCRIPT.read_text()
+    # systemd branch
+    assert "cloudflared service install" in content, (
+        "systemd branch must call `cloudflared service install` to register the unit"
+    )
+    assert "systemctl enable cloudflared" in content
+    assert "systemctl restart cloudflared" in content
+    # nohup branch
+    assert "nohup cloudflared tunnel run" in content, (
+        "no-systemd branch must fall back to `nohup cloudflared tunnel run`"
+    )
+    # And the two branches must be gated by the same WSL_SYSTEMD variable
+    # (not duplicated with divergent detection, which was the L8 regression risk).
+    assert 'if [ "$WSL_SYSTEMD" = true ]' in content
+
+
+def test_nohup_branch_is_idempotent():
+    """Re-running the script must reuse a live cloudflared, not spawn a second one.
+
+    The fix is a PID file: on second run, if it points at a live `cloudflared`
+    process, reuse that PID; otherwise clear the stale file and spawn fresh.
+    """
+    content = SCRIPT.read_text()
+    # PID file persisted for idempotency
+    assert "CFLARED_PID_FILE=" in content, (
+        "nohup branch must persist the cloudflared PID to allow re-run idempotency"
+    )
+    # Re-use logic must verify the PID actually points at cloudflared
+    # (defense against PID recycling).
+    assert "ps -p \"$OLD_PID\" -o comm=" in content, (
+        "must verify reused PID actually runs `cloudflared` (PID recycling protection)"
+    )
+    # disown so the tunnel survives the parent shell exiting
+    assert "disown " in content, "nohup'd cloudflared must be disown'd from the job table"
+
+
+def test_systemd_enablement_guidance_is_copy_pasteable():
+    """When systemd is off, the script must emit actionable wsl.conf instructions."""
+    content = SCRIPT.read_text()
+    # Must show both the wsl.conf content and the `wsl --shutdown` step.
+    assert "/etc/wsl.conf" in content, "must name the config file to edit"
+    assert "systemd=true" in content, "must show the exact config line"
+    assert "wsl --shutdown" in content, (
+        "must instruct user to shut down WSL so the [boot] block takes effect"
+    )
+
+
+def test_nohup_log_path_is_namespaced():
+    """Log file lives under /tmp with an omnisight prefix — easier to find, won't collide."""
+    content = SCRIPT.read_text()
+    assert "/tmp/omnisight-cloudflared.log" in content, (
+        "cloudflared log must be namespaced, not the generic /tmp/cloudflared.log"
+    )
+
+
+def test_wsl_detection_simulation(tmp_path):
+    """Simulate both WSL + non-WSL init scenarios against the detection block.
+
+    We extract the detection logic from the script, stub `grep` on a fake
+    /proc/version, and assert WSL_SYSTEMD is set correctly. This catches
+    logic bugs in the `if` / `elif` chain without needing a real WSL host.
+    """
+    # Extract the WSL_SYSTEMD detection block (between the marker comments).
+    src = SCRIPT.read_text()
+    start = src.index("# WSL2 systemd check")
+    end = src.index("# 網路連線", start)
+    detection_block = src[start:end]
+
+    # Scenario 1: non-WSL Linux with systemd → WSL_SYSTEMD stays true.
+    #   We force grep to return false (not in WSL) and pretend PID 1 is systemd.
+    script1 = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        set -o pipefail
+        # The extracted block references these; stub to harmless values so the
+        # test doesn't have to co-evolve with color codes.
+        LOG_FILE=/tmp/quick-start-test-$$.log
+        BOLD=""; NC=""
+        WSL_SYSTEMD=true
+        warn() {{ echo "WARN $*"; }}
+        log()  {{ echo "LOG $*"; }}
+        # Stub: grep always fails (not WSL)
+        grep() {{ return 1; }}
+        ps()   {{ echo systemd; }}
+        mkdir -p /tmp/fake-systemd && touch /tmp/fake-systemd/sentinel
+        # Redirect /run/systemd/system check via shell builtin — replace the
+        # test expression in the block we extracted with something stable.
+        {block}
+        echo "RESULT WSL_SYSTEMD=$WSL_SYSTEMD IS_WSL=${{IS_WSL:-false}}"
+        """
+    ).format(block=detection_block.replace("/run/systemd/system", "/tmp/fake-systemd"))
+    (tmp_path / "s1.sh").write_text(script1)
+    r1 = subprocess.run(
+        ["bash", str(tmp_path / "s1.sh")],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert "WSL_SYSTEMD=true" in r1.stdout, (
+        f"non-WSL + systemd host should leave WSL_SYSTEMD=true, got:\n{r1.stdout}\n{r1.stderr}"
+    )
+    assert "IS_WSL=false" in r1.stdout
+
+    # Scenario 2: WSL2 without systemd → WSL_SYSTEMD=false, IS_WSL=true.
+    script2 = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        set -o pipefail
+        # The extracted block references these; stub to harmless values so the
+        # test doesn't have to co-evolve with color codes.
+        LOG_FILE=/tmp/quick-start-test-$$.log
+        BOLD=""; NC=""
+        WSL_SYSTEMD=true
+        warn() {{ echo "WARN $*"; }}
+        log()  {{ echo "LOG $*"; }}
+        # Stub: grep for microsoft succeeds (we ARE in WSL)
+        grep() {{ return 0; }}
+        ps()   {{ echo init; }}   # PID 1 is NOT systemd
+        {block}
+        echo "RESULT WSL_SYSTEMD=$WSL_SYSTEMD IS_WSL=${{IS_WSL:-false}}"
+        """
+    ).format(block=detection_block.replace("/run/systemd/system", "/tmp/definitely-not-here-xyz"))
+    (tmp_path / "s2.sh").write_text(script2)
+    r2 = subprocess.run(
+        ["bash", str(tmp_path / "s2.sh")],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert "WSL_SYSTEMD=false" in r2.stdout, (
+        f"WSL2 without systemd should set WSL_SYSTEMD=false, got:\n{r2.stdout}\n{r2.stderr}"
+    )
+    assert "IS_WSL=true" in r2.stdout, (
+        "WSL2 host should set IS_WSL=true even when systemd is off"
+    )
+    # And the user-facing systemd-enablement tips must fire.
+    assert "/etc/wsl.conf" in r2.stdout
+    assert "wsl --shutdown" in r2.stdout
