@@ -11362,3 +11362,54 @@ G1 (HA-01 Graceful shutdown + readiness/liveness) 全部 6 個子項目已完成
 ### 下一步
 - 進入 G2（HA-02 Reverse proxy + dual backend instance rolling restart），開始 Caddy/nginx 前置 + dual backend instance 設定。
 
+
+---
+
+## 2026-04-18 — G2 #1 · `deploy/reverse-proxy/Caddyfile`（HA-02 首顆 checkbox 綠）
+
+### 本回合做了什麼
+TODO row 1345「新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）」完成，並附 24 顆契約測試全綠。這是 G2（HA-02 Reverse proxy + dual backend instance rolling restart）五顆 checkbox 的**第 1 顆**，為後續 4 顆（docker-compose dual replica、rolling `deploy.sh`、`fail_timeout` 微調、soak test 0 個 5xx）立起錨點。
+
+### 交付物
+- `deploy/reverse-proxy/Caddyfile`（新檔，約 110 行含註解）
+  - `:80` → 301 `https://` redirect（host-agnostic，bare-IP / 指定 hostname 兩套部署都能跑）
+  - `{$OMNISIGHT_PUBLIC_HOSTNAME::443} { ... }` 主 HTTPS 站台：ACME issuer + internal CA fallback，first-boot 在 air-gapped / dev 環境不用 DNS 也能起。
+  - `reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000} {$OMNISIGHT_UPSTREAM_B:backend-b:8001}` 單一 directive 把兩 replica 放進同一個 upstream pool（**契約測試強制驗**：若拆成兩個 `reverse_proxy` 會讓 `lb_policy round_robin` 失效退化為 per-directive single-upstream）。
+  - LB 政策：`lb_policy round_robin` + `lb_try_duration 5s` + `lb_try_interval 250ms`，配合 G2 checkbox #3 rolling-restart 時 5s 內自動 retry 另一 replica。
+  - Active probe：`health_uri /readyz`（G1 lifecycle coordinator 的產出）、`health_interval 2s` / `health_timeout 2s` / `health_status 2xx` — ≈ 3 probes / 6s 內把 draining replica 踢出 pool，正好對齊 `backend/lifecycle.py` 的 drain 窗口。
+  - Passive eject：`fail_duration 30s` + `max_fails 3` + `unhealthy_status 5xx` + `unhealthy_latency 10s`（TODO row 1348 `fail_timeout` 語意的底層旋鈕）— 即使 `/readyz` 還是 200 但 request 爛掉的情境也有救。
+  - `flush_interval -1` 關閉 buffer（`backend/events.py` SSE / agent stream 需要）。
+  - Identity headers：`X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto` / `Host` 全部 `header_up`（rate-limiter、audit log、account-lockout 都吃這幾個 header）。
+  - Hardening：`-Server` strip、`X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy`、`admin off`、JSON access log（Phase 52 observability 能直接收）。
+- `backend/tests/test_reverse_proxy_caddyfile.py`（新檔，24 顆測試，0.08s 全綠）
+  - 8 class × 24 test：file layout / HTTPS listener / upstreams / LB policy / health checks / identity headers / hardening / brace balance
+  - **關鍵契約**：`test_both_upstreams_on_same_reverse_proxy_line`（防 refactor 時誤拆成兩個 directive）、`test_upstreams_are_env_overridable`（operator 能用 env var 換 host 不用 fork 檔）、`test_passive_eject_configured`（row 1348 預留契約）、`test_curly_braces_balanced`（stripped 掉 `{$VAR}` / `{http.*}` / `{remote_host}` 佔位符後的腦力平衡檢查）。
+
+### 為什麼選 Caddy 而不是 nginx
+TODO row 1345 寫「Caddy / nginx」二擇一，最終選 Caddy：
+1. **Auto-TLS + internal CA fallback** 讓 `tls internal` 在裸 VM / CI / air-gapped 安裝一鍵起來，nginx 得搭 certbot 另一個 component。
+2. **Native active health check**（`health_uri` / `health_interval`）與 G1 產出的 `/readyz` 原生吻合，nginx 的 `health_check` 是 commercial plus 專屬。
+3. **原生 HTTP/3 + HTTP/2** 零配置；nginx HTTP/3 仍在 experimental。
+4. Caddyfile DSL 短、在 IaC diff 可讀，rolling-restart 腳本 `deploy.sh`（row 1347）之後會 `caddy reload`，比 nginx `-s reload` 語義更乾淨（zero-downtime、configfile-only）。
+
+### 刻意**不**做的事
+- **不**動 `docker-compose.prod.yml`：那是 G2 row 1346 的交付物，本回合只做第 1 顆 checkbox。
+- **不**改 `scripts/deploy.sh` 為 rolling 模式：row 1347 的交付物。
+- **不**寫 soak-test 打流量驗 0 個 5xx：row 1349 的交付物，需要 docker-compose dual replica 先到位。
+- 維持「一次只完成一個 TODO checkbox」的全自動化契約。
+
+### 測試總結
+```
+backend/tests/test_reverse_proxy_caddyfile.py ............... 24 passed in 0.08s
+```
+包含的覆蓋面：檔案存在性 / UTF-8 乾淨度 / `:443` listener / `:80→:443` redirect / `tls` block / 兩個 upstream 存在且 env-overridable / round_robin LB / retry duration / health_uri = `/readyz` / 2–10s 探測間距 / passive eject / 三個 X-Forwarded-* headers / `-Server` strip / `nosniff` / `admin off` / JSON log / 大括號平衡。
+
+### 風險 / 副作用
+- 本回合純新增檔案，**零** runtime code 變更、**零** 既有測試受影響。
+- `caddy` 二進位目前 CI 環境未裝 → 無法跑 `caddy validate` 語法檢查。已用 24 顆 string-level 契約測試把語法結構鎖死（brace 平衡、directive keyword、port/host）；之後若 CI 要加 `caddy validate` 一步，Dockerfile 多 layer 一下 `caddyserver/caddy:2-alpine` 即可。
+- TLS cert 以 `tls internal` fallback 方式先跑，上線前 operator 需要設 `OMNISIGHT_PUBLIC_HOSTNAME` + `OMNISIGHT_ACME_EMAIL` 兩個 env var 才會走 ACME Let's Encrypt。這兩顆是 operator-configurable，不算 blocker。
+
+### 下一步
+- G2 row 1346 — `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 `omnisight-data` / `omnisight-artifacts` / `omnisight-sdks` volumes），並把 Caddy service 加進同一 compose。
+- G2 row 1347 — 改 `scripts/deploy.sh` 為 rolling：drain A → restart → `/readyz` pass → drain B → restart。
+- G2 row 1349 — soak test（部署中持續打 `/api/v1/*` 流量，assert 0 個 5xx）。

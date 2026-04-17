@@ -1,0 +1,121 @@
+# OmniSight Productizer — Reverse proxy (G2 / HA-02 #1)
+#
+# Frontside HTTPS :443 terminator that fronts two backend replicas
+# (backend-a:8000, backend-b:8001) sharing the same volumes.
+#
+# Why Caddy: auto-TLS (ACME / internal issuer), zero-config HTTP/2 + HTTP/3,
+# native active health checks + passive `fail_timeout` eject, and a concise
+# load-balancing stanza that maps 1:1 onto the rolling-restart flow we need
+# in TODO.md G2 checkbox #3 (取下 A → 重啟 → /readyz pass → 取下 B → 重啟).
+#
+# This file is the **deliverable for TODO row 1345 only**:
+#   - listen on :443
+#   - upstream = { backend-a:8000, backend-b:8001 }
+#
+# The companion items (docker-compose dual replica, rolling deploy.sh,
+# fail_timeout tuning, integration-soak test) land in subsequent G2 commits
+# and will extend this file in place — the load-balance block is the anchor.
+#
+# Operator knobs (env → Caddy globals):
+#   OMNISIGHT_PUBLIC_HOSTNAME  — ACME hostname. Default :443 (any SNI) so
+#                                first-boot with `tls internal` works on
+#                                a bare VM without DNS plumbing.
+#   OMNISIGHT_ACME_EMAIL       — ACME registration email. Empty ⇒ internal CA.
+#   OMNISIGHT_UPSTREAM_A       — override backend-a address. Default backend-a:8000.
+#   OMNISIGHT_UPSTREAM_B       — override backend-b address. Default backend-b:8001.
+#
+# Smoke: `caddy validate --config deploy/reverse-proxy/Caddyfile --adapter caddyfile`
+#        `caddy fmt --overwrite deploy/reverse-proxy/Caddyfile`
+
+{
+	# Global options — kept explicit so `caddy validate` is deterministic in CI.
+	admin off
+	auto_https disable_redirects
+	email {$OMNISIGHT_ACME_EMAIL:}
+	servers {
+		protocols h1 h2 h2c h3
+	}
+}
+
+# HTTP :80 → HTTPS :443 redirect (host-agnostic so it works both for a bare
+# IP deploy and the `OMNISIGHT_PUBLIC_HOSTNAME` deploy).
+:80 {
+	redir https://{host}{uri} permanent
+}
+
+# Main HTTPS listener. `{$OMNISIGHT_PUBLIC_HOSTNAME::443}` expands to the
+# configured hostname (ACME-issued cert) or falls back to `:443` (internal
+# cert via `tls internal` for dev/CI/air-gapped installs).
+{$OMNISIGHT_PUBLIC_HOSTNAME::443} {
+	# TLS — ACME if hostname is set, internal CA otherwise.
+	tls {
+		issuer acme {
+			email {$OMNISIGHT_ACME_EMAIL:}
+		}
+		issuer internal
+	}
+
+	# Standard hardening — HSTS only after a host is pinned; on bare `:443`
+	# the preload list would be a footgun, so keep it off by default.
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# Structured access log — JSON so the existing ELK / Loki stack (Phase 52
+	# observability sidecars in docker-compose.prod.yml) can ingest directly.
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+
+	# --- Reverse proxy to the dual backend replicas -------------------------
+	#
+	# Both replicas mount the same `omnisight-data` volume (see
+	# docker-compose.prod.yml extension in G2 checkbox #2), so any request can
+	# land on either one — the upstream pool is truly symmetric.
+	#
+	# `lb_policy round_robin` + `lb_try_duration 5s` gives even traffic under
+	# steady state and a 5 s retry budget when one replica is being pulled for
+	# rolling restart (scripts/deploy.sh G2 checkbox #3).
+	#
+	# Active health check hits the backend's `/readyz` (G1 deliverable) every
+	# 2 s; a replica needs `fail_duration 30s` of failures before being ejected
+	# from the pool — which matches TODO row 1348 "fail_timeout" semantics and
+	# gives `deploy.sh` a predictable quiet window to restart the taken-down
+	# instance.
+	reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000} {$OMNISIGHT_UPSTREAM_B:backend-b:8001} {
+		lb_policy round_robin
+		lb_try_duration 5s
+		lb_try_interval 250ms
+
+		# Active probes — tight interval so a downed replica is pulled from the
+		# pool within ~3 probes (≈6 s), matching the rolling-restart SLO.
+		health_uri /readyz
+		health_port 0
+		health_interval 2s
+		health_timeout 2s
+		health_status 2xx
+
+		# Passive eject — independent safety net for the case where a replica
+		# returns 5xx *without* failing the /readyz probe (e.g. DB blip).
+		fail_duration 30s
+		max_fails 3
+		unhealthy_status 5xx
+		unhealthy_latency 10s
+
+		# Forward the usual identity headers so the backend sees the real
+		# client (rate-limiter, audit log, account-lockout all key on these).
+		header_up Host {http.reverse_proxy.upstream.hostport}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		# Buffering off — the backend streams SSE for agent runs / debug
+		# findings (backend/events.py) and long-lived WS-ish transports.
+		flush_interval -1
+	}
+}

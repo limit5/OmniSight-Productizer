@@ -1342,7 +1342,7 @@ Legend:
 - [x] 交付：`backend/lifecycle.py`、`deploy/systemd/*.service` 更新、測試
 
 ### G2. HA-02 Reverse proxy + dual backend instance rolling restart
-- [ ] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
+- [x] 新增 Caddy / nginx 前置（listen :443 → upstream backend-a:8000, backend-b:8001）
 - [ ] `docker-compose.prod.yml` 擴充 `backend-a` / `backend-b` 兩副本（共用 volume）
 - [ ] `scripts/deploy.sh` 改為 rolling：取下 A → 重啟 → `/readyz` pass → 取下 B → 重啟
 - [ ] Upstream health check + automatic eject（fail_timeout）
