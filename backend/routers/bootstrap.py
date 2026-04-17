@@ -1304,6 +1304,449 @@ async def bootstrap_wait_ready(
     )
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L5 — Step 4 (parallel health check: 4 gates in a single response)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The wizard's Step 4 shows four checkboxes that must all flip green
+# before the operator can move on: backend ready / frontend ready /
+# DB migration up-to-date / CF tunnel connector online. ``wait-ready``
+# already answers the "is backend up" question, but Step 4 needs all
+# four signals in one deterministic call so the UI can light each tick
+# from the same server observation — separate endpoints would race each
+# other and produce split-brain states in the UI.
+#
+# The CF tunnel check is conditional: if the operator explicitly skipped
+# Step 3 (LAN-only deployment), ``cf_tunnel`` reports ``skipped`` rather
+# than red — skipped still counts as a green tick from the wizard's POV
+# because nothing is broken, the operator just doesn't want a tunnel.
+
+_PARALLEL_CHECK_DEFAULT_TIMEOUT_SECS = 5.0
+_PARALLEL_CHECK_MAX_TIMEOUT_SECS = 30.0
+_PARALLEL_CHECK_PROBE_TIMEOUT_SECS = 3.0
+
+
+def _default_healthz_url() -> str:
+    """Pick the URL for the backend /healthz probe.
+
+    Mirrors :func:`_default_readyz_url` but suffixes ``/healthz`` so
+    the backend-ready check doesn't depend on the newer ``/readyz``
+    route (which is still landing on some builds). ``/healthz`` is
+    already wired up in ``backend.routers.observability``.
+    """
+    explicit = (os.environ.get("OMNISIGHT_HEALTHZ_URL") or "").strip()
+    if explicit:
+        return explicit
+    port = (os.environ.get("OMNISIGHT_PORT") or "").strip() or "8000"
+    prefix = (_settings.api_prefix or "").rstrip("/")
+    return f"http://127.0.0.1:{port}{prefix}/healthz"
+
+
+def _default_frontend_url() -> str:
+    """Pick the URL for the frontend readiness probe.
+
+    Resolution order:
+      1. ``OMNISIGHT_FRONTEND_URL`` env var (explicit operator override).
+      2. ``settings.frontend_origin`` (the same origin CORS trusts).
+    Any trailing slash is stripped so the probe hits the bare root URL
+    — the Next.js server responds with 200 on ``/`` once it's ready.
+    """
+    explicit = (os.environ.get("OMNISIGHT_FRONTEND_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    origin = (getattr(_settings, "frontend_origin", "") or "").strip()
+    return (origin or "http://localhost:3000").rstrip("/")
+
+
+CheckStatus = Literal["green", "red", "skipped"]
+
+
+class CheckResult(BaseModel):
+    """One of the four parallel probes' outcome.
+
+    ``status`` is tri-state: ``skipped`` means the probe was not
+    applicable (e.g. CF tunnel when the operator chose LAN-only). The
+    wizard UI treats ``green`` and ``skipped`` both as a green check;
+    only ``red`` keeps the step gated.
+    """
+
+    ok: bool
+    status: CheckStatus
+    detail: str | None = None
+    latency_ms: int | None = None
+
+
+class ParallelHealthCheckRequest(BaseModel):
+    """Body for ``POST /bootstrap/parallel-health-check``.
+
+    Every field is optional so the wizard can fire a bare POST on
+    default installations — operator overrides are only needed when
+    running behind a reverse proxy or in docker-compose with non-default
+    service names.
+    """
+
+    timeout_secs: float = Field(
+        default=_PARALLEL_CHECK_DEFAULT_TIMEOUT_SECS,
+        ge=0.1, le=_PARALLEL_CHECK_MAX_TIMEOUT_SECS,
+        description="Per-probe hard timeout (default 5s).",
+    )
+    backend_url: str = Field(
+        default="", max_length=1024,
+        description="Optional override for the backend /healthz URL.",
+    )
+    frontend_url: str = Field(
+        default="", max_length=1024,
+        description="Optional override for the frontend readiness URL.",
+    )
+
+
+class ParallelHealthCheckResponse(BaseModel):
+    """Aggregated result of the four Step-4 probes.
+
+    ``all_green`` is True iff none of the four checks reports ``red``
+    (``skipped`` counts as green because nothing is actually broken).
+    ``elapsed_ms`` is the wall-clock cost of the slowest probe, not the
+    sum — the four checks fan out in parallel.
+    """
+
+    all_green: bool
+    elapsed_ms: int
+    backend: CheckResult
+    frontend: CheckResult
+    db_migration: CheckResult
+    cf_tunnel: CheckResult
+
+
+async def _check_backend_ready(url: str, timeout: float) -> CheckResult:
+    """HTTP GET the backend /healthz and grade the response.
+
+    Green on 2xx. Observability's /healthz already wraps DB ping +
+    watchdog + SSE + sandbox counters, so a 2xx here means the backend
+    process is fully wired up — not just listening.
+    """
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+        elapsed = int((time.monotonic() - started) * 1000)
+        if 200 <= resp.status_code < 300:
+            return CheckResult(ok=True, status="green", latency_ms=elapsed)
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"HTTP {resp.status_code}",
+            latency_ms=elapsed,
+        )
+    except httpx.HTTPError as exc:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+
+async def _check_frontend_ready(url: str, timeout: float) -> CheckResult:
+    """Probe the Next.js server root.
+
+    A Next.js dev/prod server answers ``GET /`` with 200 once compiled.
+    We accept anything <500 as "reachable" so redirect-based login gates
+    (e.g. 302 → /login) still count as ready — the test is "is the
+    frontend process serving responses", not "is the landing page
+    fully rendered".
+    """
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.get(url)
+        elapsed = int((time.monotonic() - started) * 1000)
+        if resp.status_code < 500:
+            return CheckResult(ok=True, status="green", latency_ms=elapsed)
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"HTTP {resp.status_code}",
+            latency_ms=elapsed,
+        )
+    except httpx.HTTPError as exc:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"{type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+
+# Columns backend/db.py:_migrate treats as load-bearing invariants
+# (see the ``REQUIRED`` set in db._migrate). If any of these is missing
+# the schema is out of date and the rest of the app will IntegrityError
+# on the first insert.
+_DB_MIGRATION_REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("tasks", "npi_phase_id"),
+    ("agents", "sub_type"),
+    ("users", "must_change_password"),
+    ("users", "tenant_id"),
+    ("bootstrap_state", "step"),
+)
+
+
+async def _check_db_migration() -> CheckResult:
+    """Verify the load-bearing migration invariants against PRAGMA.
+
+    We don't use Alembic for application schema (``backend.db._migrate``
+    runs at startup with ALTER/CREATE IF NOT EXISTS). The ready signal
+    is therefore "do the columns that the runtime hard-depends on
+    exist" — lifted from ``db._migrate``'s own ``REQUIRED`` set plus a
+    couple of columns every wizard step touches.
+    """
+    started = time.monotonic()
+    try:
+        from backend import db as _db
+
+        conn = _db._conn()
+    except Exception as exc:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"db not ready: {type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    missing: list[str] = []
+    for table, column in _DB_MIGRATION_REQUIRED_COLUMNS:
+        try:
+            cur = await conn.execute(f"PRAGMA table_info({table})")
+            cols = {row[1] for row in await cur.fetchall()}
+        except Exception as exc:
+            return CheckResult(
+                ok=False, status="red",
+                detail=f"PRAGMA {table} failed: {type(exc).__name__}: {exc}"[:200],
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
+        if column not in cols:
+            missing.append(f"{table}.{column}")
+
+    elapsed = int((time.monotonic() - started) * 1000)
+    if missing:
+        return CheckResult(
+            ok=False, status="red",
+            detail="missing columns: " + ", ".join(missing),
+            latency_ms=elapsed,
+        )
+    return CheckResult(
+        ok=True, status="green",
+        detail=f"{len(_DB_MIGRATION_REQUIRED_COLUMNS)} invariants present",
+        latency_ms=elapsed,
+    )
+
+
+async def _check_cf_tunnel(timeout: float) -> CheckResult:
+    """Check Cloudflare tunnel connector status — or report skipped.
+
+    Three outcomes:
+      * ``skipped`` — operator explicitly skipped Step 3 (LAN-only).
+        Counts as a green tick since nothing is broken.
+      * ``green`` — tunnel is provisioned AND at least one connector
+        reports ``is_pending_reconnect=False`` against the CF API.
+      * ``red`` — tunnel expected but connector offline / CF API error.
+
+    Also returns ``skipped`` if Step 3 has not run at all yet — the
+    parallel-health-check is a probe, not a gate, and missing-step
+    state is already surfaced by ``GET /bootstrap/status``.
+    """
+    started = time.monotonic()
+    marker = _boot._read_marker()
+    if marker.get("cf_tunnel_skipped") is True:
+        return CheckResult(
+            ok=True, status="skipped",
+            detail="operator skipped Step 3 (LAN-only)",
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    try:
+        from backend.routers import cloudflare_tunnel as _cft
+    except Exception as exc:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"cf-tunnel module unavailable: {type(exc).__name__}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    state = _cft._get_state()
+    tunnel_id = state.get("tunnel_id")
+    if not tunnel_id:
+        if marker.get("cf_tunnel_configured") is True:
+            return CheckResult(
+                ok=False, status="red",
+                detail="marker says configured but router has no tunnel_id",
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
+        return CheckResult(
+            ok=True, status="skipped",
+            detail="Step 3 not yet run",
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    account_id = state.get("account_id", "")
+    tunnel_name = state.get("tunnel_name")
+    try:
+        client = _cft._client_from_stored()
+    except Exception as exc:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"cf client init failed: {type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    try:
+        tunnels = await asyncio.wait_for(
+            client.list_tunnels(account_id, name=tunnel_name),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"cf list_tunnels timed out after {timeout}s",
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+    except Exception as exc:
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"cf list_tunnels failed: {type(exc).__name__}: {exc}"[:200],
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    if not tunnels:
+        return CheckResult(
+            ok=False, status="red",
+            detail="tunnel_id stored but not found on Cloudflare account",
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    tunnel = tunnels[0]
+    connections = getattr(tunnel, "connections", None) or []
+    connector_online = any(
+        (c.get("is_pending_reconnect") is False) for c in connections
+    ) if connections else False
+
+    elapsed = int((time.monotonic() - started) * 1000)
+    if connector_online:
+        return CheckResult(
+            ok=True, status="green",
+            detail=f"{len(connections)} connection(s), at least one online",
+            latency_ms=elapsed,
+        )
+    return CheckResult(
+        ok=False, status="red",
+        detail="no cloudflared connector online (is_pending_reconnect)",
+        latency_ms=elapsed,
+    )
+
+
+@router.post(
+    "/parallel-health-check",
+    response_model=ParallelHealthCheckResponse,
+)
+async def bootstrap_parallel_health_check(
+    req: ParallelHealthCheckRequest | None = None,
+) -> ParallelHealthCheckResponse:
+    """Run the four Step-4 readiness probes in parallel.
+
+    The wizard's Step 4 UI shows four checkboxes (backend / frontend /
+    DB migration / CF tunnel). A single call to this endpoint returns
+    the state of all four so the UI lights them from one server
+    observation — no racing between independent polls. ``cf_tunnel``
+    is tri-state: ``skipped`` when the operator chose LAN-only at
+    Step 3, otherwise ``green`` / ``red`` against the live CF API.
+
+    Like every other wizard endpoint this route is unauthenticated
+    (the admin hasn't logged in yet) and lives under ``/bootstrap/*``
+    so the gate middleware lets it through before finalize. Response
+    is always HTTP 200 — per-probe status lives in the body.
+    """
+    body = req or ParallelHealthCheckRequest()
+    timeout = min(body.timeout_secs, _PARALLEL_CHECK_PROBE_TIMEOUT_SECS * 2)
+    backend_url = (body.backend_url or "").strip() or _default_healthz_url()
+    frontend_url = (body.frontend_url or "").strip() or _default_frontend_url()
+
+    overall_started = time.monotonic()
+
+    results = await asyncio.gather(
+        _check_backend_ready(backend_url, timeout),
+        _check_frontend_ready(frontend_url, timeout),
+        _check_db_migration(),
+        _check_cf_tunnel(timeout),
+        return_exceptions=True,
+    )
+
+    def _coerce(result, label: str) -> CheckResult:
+        if isinstance(result, CheckResult):
+            return result
+        return CheckResult(
+            ok=False, status="red",
+            detail=f"{label} probe raised: {type(result).__name__}: {result}"[:200],
+            latency_ms=None,
+        )
+
+    backend_r = _coerce(results[0], "backend")
+    frontend_r = _coerce(results[1], "frontend")
+    db_r = _coerce(results[2], "db_migration")
+    cf_r = _coerce(results[3], "cf_tunnel")
+
+    elapsed_ms = int((time.monotonic() - overall_started) * 1000)
+
+    all_green = all(
+        r.status != "red" for r in (backend_r, frontend_r, db_r, cf_r)
+    )
+
+    logger.info(
+        "bootstrap: parallel-health-check all_green=%s backend=%s frontend=%s "
+        "db_migration=%s cf_tunnel=%s elapsed=%dms",
+        all_green, backend_r.status, frontend_r.status,
+        db_r.status, cf_r.status, elapsed_ms,
+    )
+
+    try:
+        await audit.log(
+            action="bootstrap.parallel_health_check",
+            entity_kind="bootstrap",
+            entity_id="parallel_health_check",
+            before=None,
+            after={
+                "all_green": all_green,
+                "elapsed_ms": elapsed_ms,
+                "backend_url": backend_url,
+                "frontend_url": frontend_url,
+                "backend": backend_r.model_dump(),
+                "frontend": frontend_r.model_dump(),
+                "db_migration": db_r.model_dump(),
+                "cf_tunnel": cf_r.model_dump(),
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.parallel_health_check audit emit failed: %s", exc)
+
+    return ParallelHealthCheckResponse(
+        all_green=all_green,
+        elapsed_ms=elapsed_ms,
+        backend=backend_r,
+        frontend=frontend_r,
+        db_migration=db_r,
+        cf_tunnel=cf_r,
+    )
+
+
 class FinalizeRequest(BaseModel):
     reason: str | None = Field(
         default=None,

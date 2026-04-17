@@ -1268,7 +1268,7 @@ Legend:
 - [x] `POST /api/v1/bootstrap/start-services`：呼叫 `systemctl start` 或 `docker compose up -d`（依部署模式）
 - [x] SSE event stream `bootstrap.service.tick`：每行 log 即時推送（tail systemd journal 或 docker logs）
 - [x] 輪詢 G1 的 `/readyz` 直到通過 or timeout 180s
-- [ ] 並行檢查：backend ready / frontend ready / DB migration up-to-date / CF tunnel connector online（若 step 3 有做）
+- [x] 並行檢查：backend ready / frontend ready / DB migration up-to-date / CF tunnel connector online（若 step 3 有做）
 - [ ] UI 顯示 4 個勾勾即時變綠
 - 預估：**1 day**
 
