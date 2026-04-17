@@ -1,0 +1,153 @@
+# X3 #299 — Build & package adapter declarative config
+#
+# Catalog of every distributable artifact format an OmniSight software
+# skill can produce. Loaded by `backend.build_adapters` and surfaced to
+# the orchestrator / HMI for target selection.
+#
+# Schema (per entry under `targets`):
+#   id            : string — adapter id (matches build_adapters._REGISTRY key)
+#   kind          : "native" | "skill-hook"
+#   description   : human-readable
+#   tools         : ordered list of binary candidates (first one on PATH wins)
+#   host_os       : list of compatible host OS (linux / darwin / windows)
+#   output_pattern: filename / image-ref pattern with {name} {version} {arch} {ext}
+#   supports_push : true if the adapter can publish to a registry
+#   registry      : optional list of supported registries
+#
+# `role_defaults` maps X2 software role IDs (configs/roles/software/*.skill.md)
+# to the ordered list of build targets they prefer when no explicit target
+# is named.
+
+schema_version: 1
+ticket: "X3 #299"
+
+targets:
+
+  # ── Native package targets ────────────────────────────────────
+
+  - id: docker
+    kind: native
+    description: "OCI image build + push (GHCR / Docker Hub / ECR / GCR / ACR / private)"
+    tools: [docker, podman]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}:{version}"
+    supports_push: true
+    registry: [ghcr, dockerhub, ecr, gcr, acr, private]
+
+  - id: helm
+    kind: native
+    description: "Helm chart package for k8s deployment"
+    tools: [helm]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}-{version}.tgz"
+    supports_push: true
+    registry: [oci, chartmuseum]
+
+  - id: deb
+    kind: native
+    description: "Debian / Ubuntu .deb package"
+    tools: [dpkg-deb, fpm]
+    host_os: [linux]
+    output_pattern: "{name}_{version}_{arch}.deb"
+    supports_push: false
+
+  - id: rpm
+    kind: native
+    description: "RHEL / Fedora .rpm package"
+    tools: [rpmbuild, fpm]
+    host_os: [linux]
+    output_pattern: "{name}-{version}.{arch}.rpm"
+    supports_push: false
+
+  - id: msi
+    kind: native
+    description: "Windows MSI (WiX candle + light)"
+    tools: [candle, light, wix]
+    host_os: [windows]
+    output_pattern: "{name}-{version}.msi"
+    supports_push: false
+
+  - id: nsis
+    kind: native
+    description: "Windows NSIS installer (makensis)"
+    tools: [makensis]
+    host_os: [windows, linux]
+    output_pattern: "{name}-{version}-setup.exe"
+    supports_push: false
+
+  - id: dmg
+    kind: native
+    description: "macOS DMG disk image (hdiutil / create-dmg)"
+    tools: [hdiutil, create-dmg]
+    host_os: [darwin]
+    output_pattern: "{name}-{version}.dmg"
+    supports_push: false
+
+  - id: pkg
+    kind: native
+    description: "macOS PKG installer (pkgbuild + productbuild)"
+    tools: [pkgbuild, productbuild]
+    host_os: [darwin]
+    output_pattern: "{name}-{version}.pkg"
+    supports_push: false
+
+  # ── Skill-hook adapters (language-native release tools) ───────
+
+  - id: cargo-dist
+    kind: skill-hook
+    description: "Rust multi-platform release pipeline (cargo-dist)"
+    tools: [cargo-dist, cargo]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}-{version}-{arch}.tar.xz"
+    supports_push: true
+    artifact_kinds: [tarball, msi, dmg, deb]
+
+  - id: goreleaser
+    kind: skill-hook
+    description: "Go multi-platform binary + archive + checksums + brew tap"
+    tools: [goreleaser]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}_{version}_{arch}.tar.gz"
+    supports_push: true
+    artifact_kinds: [tarball, deb, rpm, dmg, brew]
+
+  - id: pyinstaller
+    kind: skill-hook
+    description: "Python single-file executable (one-file mode)"
+    tools: [pyinstaller]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}-{version}"
+    supports_push: false
+    artifact_kinds: [binary]
+
+  - id: electron-builder
+    kind: skill-hook
+    description: "Electron multi-platform installer (AppImage / dmg / nsis / msi)"
+    tools: [electron-builder, npx]
+    host_os: [linux, darwin, windows]
+    output_pattern: "{name}-{version}.{ext}"
+    supports_push: true
+    artifact_kinds: [AppImage, dmg, nsis, msi, snap, deb, rpm]
+
+# ── X2 role → preferred build targets ────────────────────────────
+# When a software role asks the orchestrator for "release artifacts"
+# without naming a target, the agent walks this list in order and runs
+# every target the host supports. Keep the order: most portable first.
+role_defaults:
+  backend-python: [docker, pyinstaller]
+  backend-go:     [docker, goreleaser]
+  backend-rust:   [docker, cargo-dist]
+  backend-node:   [docker]
+  backend-java:   [docker]
+  cli-tooling:    [goreleaser, cargo-dist, pyinstaller]
+  desktop-electron: [electron-builder]
+  desktop-tauri:  [cargo-dist]
+  desktop-qt:     [deb, rpm, dmg, msi]
+
+# Coverage / lint gates the build adapter may consult before producing
+# a release artifact. Re-uses X1 simulate-track's COVERAGE_THRESHOLDS.
+release_gates:
+  require_simulate_pass: true        # latest software_simulator run must be green
+  require_lint_clean:    true        # checkpatch / ruff / clippy / golangci-lint
+  refuse_dirty_tree:     true        # git status --porcelain must be empty
+  require_signed_tag:    false       # gated behind ENABLE_RELEASE_SIGNING=1

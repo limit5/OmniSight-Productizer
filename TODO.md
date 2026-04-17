@@ -1176,13 +1176,13 @@ Legend:
 - [x] 預估：**1.5 day**
 
 ### X3. Build & package adapters (#299)
-- [ ] Docker image build + push（GHCR / Docker Hub / ECR）
-- [ ] Helm chart 生成（k8s 部署）
-- [ ] .deb / .rpm（Linux package）
-- [ ] .msi / NSIS installer（Windows）
-- [ ] .dmg / .pkg（macOS）
-- [ ] `cargo-dist` / `goreleaser` / `pyinstaller` / `electron-builder` 對應 skill hook
-- [ ] 預估：**2 day**
+- [x] Docker image build + push（GHCR / Docker Hub / ECR）
+- [x] Helm chart 生成（k8s 部署）
+- [x] .deb / .rpm（Linux package）
+- [x] .msi / NSIS installer（Windows）
+- [x] .dmg / .pkg（macOS）
+- [x] `cargo-dist` / `goreleaser` / `pyinstaller` / `electron-builder` 對應 skill hook
+- [x] 預估：**2 day**
 
 ### X4. License / dependency 合規 (#300)
 - [ ] SPDX license scan（依語言 ecosystem：`cargo-license` / `go-licenses` / `pip-licenses` / `npm-license-checker`）
