@@ -212,9 +212,10 @@ async def bootstrap_llm_provision(req: LlmProvisionRequest) -> LlmProvisionRespo
         return JSONResponse(  # type: ignore[return-value]
             status_code=422,
             content={
-                "detail": (
-                    f"unsupported provider {req.provider!r}; "
-                    f"valid: {list(_secrets.SUPPORTED_PROVIDERS)}"
+                "detail": _secrets.clear_message(
+                    "bad_request",
+                    req.provider or "<empty>",
+                    f"unsupported provider — valid: {list(_secrets.SUPPORTED_PROVIDERS)}",
                 ),
                 "kind": "bad_request",
             },
@@ -225,7 +226,11 @@ async def bootstrap_llm_provision(req: LlmProvisionRequest) -> LlmProvisionRespo
         return JSONResponse(  # type: ignore[return-value]
             status_code=422,
             content={
-                "detail": f"{provider} requires a non-empty api_key",
+                "detail": _secrets.clear_message(
+                    "key_invalid",
+                    provider,
+                    "no API key provided — paste the key from the provider dashboard",
+                ),
                 "kind": "key_invalid",
             },
         )
@@ -233,9 +238,11 @@ async def bootstrap_llm_provision(req: LlmProvisionRequest) -> LlmProvisionRespo
         return JSONResponse(  # type: ignore[return-value]
             status_code=422,
             content={
-                "detail": (
-                    "azure requires a base_url (endpoint) "
-                    "— e.g. https://<resource>.openai.azure.com"
+                "detail": _secrets.clear_message(
+                    "bad_request",
+                    "Azure OpenAI",
+                    "endpoint (base_url) is required — e.g. "
+                    "https://<resource>.openai.azure.com",
                 ),
                 "kind": "bad_request",
             },

@@ -15,15 +15,20 @@ vi.mock("@/lib/api", async (importOriginal) => {
     getBootstrapStatus: vi.fn(),
     finalizeBootstrap: vi.fn(),
     bootstrapSetAdminPassword: vi.fn(),
+    bootstrapLlmProvision: vi.fn(),
+    bootstrapDetectOllama: vi.fn(),
   }
 })
 
 import BootstrapPage from "@/app/bootstrap/page"
 import * as api from "@/lib/api"
+import { BootstrapLlmProvisionError } from "@/lib/api"
 
 const mockedGetStatus = api.getBootstrapStatus as unknown as ReturnType<typeof vi.fn>
 const mockedFinalize = api.finalizeBootstrap as unknown as ReturnType<typeof vi.fn>
 const mockedSetAdminPw = api.bootstrapSetAdminPassword as unknown as ReturnType<typeof vi.fn>
+const mockedProvisionLlm = api.bootstrapLlmProvision as unknown as ReturnType<typeof vi.fn>
+const mockedDetectOllama = api.bootstrapDetectOllama as unknown as ReturnType<typeof vi.fn>
 
 const redStatus = {
   status: {
@@ -60,6 +65,16 @@ describe("BootstrapPage", () => {
     mockedGetStatus.mockReset()
     mockedFinalize.mockReset()
     mockedSetAdminPw.mockReset()
+    mockedProvisionLlm.mockReset()
+    mockedDetectOllama.mockReset()
+    mockedDetectOllama.mockResolvedValue({
+      reachable: false,
+      base_url: "http://localhost:11434",
+      latency_ms: 0,
+      models: [],
+      kind: "network_unreachable",
+      detail: "probe not wired in tests",
+    })
   })
 
   it("renders all five wizard steps with the first red step auto-focused", async () => {
@@ -288,6 +303,142 @@ describe("BootstrapPage", () => {
       ).toBeInTheDocument()
     })
     expect(screen.queryByTestId("bootstrap-llm-provider-menu")).toBeNull()
+  })
+
+  // ─── L3 Step 2 #4 — provisioning error banner per kind ─────────────
+  //
+  // The backend returns `{detail, kind}` on failure. The wizard must
+  // pick a matching headline + hint from BOOTSTRAP_PROVISION_KIND_COPY
+  // so operators see a clear explanation (key invalid vs quota vs
+  // network vs bad request vs 5xx) without having to parse the raw
+  // `detail` string.
+
+  async function openProvisionFormAs(providerId: "anthropic" | "openai" | "azure") {
+    fireEvent.click(screen.getByTestId("bootstrap-step-llm_provider"))
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-llm-provider-menu"),
+      ).toBeInTheDocument()
+    })
+    const option = screen.getByTestId(`bootstrap-llm-provider-option-${providerId}`)
+    const radio = option.querySelector("input[type='radio']") as HTMLInputElement
+    fireEvent.click(radio)
+  }
+
+  const kindCases: Array<{
+    kind: "key_invalid" | "quota_exceeded" | "network_unreachable" | "bad_request" | "provider_error"
+    status: number
+    detail: string
+    expectedTitle: RegExp
+  }> = [
+    {
+      kind: "key_invalid",
+      status: 401,
+      detail: "Invalid API key — Anthropic: rejected (HTTP 401)",
+      expectedTitle: /API key rejected/i,
+    },
+    {
+      kind: "quota_exceeded",
+      status: 429,
+      detail: "Quota exceeded — OpenAI: rate limit (HTTP 429)",
+      expectedTitle: /Quota or rate limit exceeded/i,
+    },
+    {
+      kind: "network_unreachable",
+      status: 504,
+      detail: "Cannot reach provider — Anthropic: no response within 10s",
+      expectedTitle: /Cannot reach the provider/i,
+    },
+    {
+      kind: "bad_request",
+      status: 400,
+      detail: "Bad request — Azure OpenAI: endpoint (base_url) is required",
+      expectedTitle: /Request rejected/i,
+    },
+    {
+      kind: "provider_error",
+      status: 502,
+      detail: "Provider error — OpenAI: temporary overload (HTTP 503)",
+      expectedTitle: /Provider error/i,
+    },
+  ]
+
+  for (const c of kindCases) {
+    it(`Step 2 renders kind=${c.kind} banner with clear copy + backend detail`, async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      mockedProvisionLlm.mockRejectedValue(
+        new BootstrapLlmProvisionError(c.kind, c.detail, c.status),
+      )
+      render(<BootstrapPage />)
+      await waitFor(() => {
+        expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
+      })
+      await openProvisionFormAs(c.kind === "bad_request" ? "azure" : "anthropic")
+
+      // Fill enough input to enable submit. Azure needs endpoint too.
+      fireEvent.change(screen.getByTestId("bootstrap-llm-provider-api-key"), {
+        target: { value: "sk-whatever" },
+      })
+      if (c.kind === "bad_request") {
+        fireEvent.change(
+          screen.getByTestId("bootstrap-llm-provider-azure-endpoint"),
+          { target: { value: "https://stub.openai.azure.com" } },
+        )
+      }
+      fireEvent.click(screen.getByTestId("bootstrap-llm-provider-submit"))
+
+      await waitFor(() => {
+        const banner = screen.getByTestId("bootstrap-llm-provider-error")
+        expect(banner).toBeInTheDocument()
+        expect(banner.getAttribute("data-kind")).toBe(c.kind)
+        expect(banner).toHaveTextContent(c.expectedTitle)
+        // Backend's detail is shown verbatim so the operator sees the
+        // precise provider + HTTP status.
+        expect(banner).toHaveTextContent(c.detail)
+      })
+      expect(mockedProvisionLlm).toHaveBeenCalledTimes(1)
+    })
+  }
+
+  it("Step 2 happy path flips the gate to green and clears the error banner", async () => {
+    // 1st poll: red. 2nd poll (triggered by onProvisioned → reloadStatus):
+    // llm_provider_configured is now true, so the form swaps to the
+    // completion card. This is the real operator-visible success signal.
+    mockedGetStatus
+      .mockResolvedValueOnce(redStatus)
+      .mockResolvedValue({
+        ...redStatus,
+        status: { ...redStatus.status, llm_provider_configured: true },
+        missing_steps: redStatus.missing_steps.filter(
+          (s) => s !== "llm_provider_configured",
+        ),
+      })
+    mockedProvisionLlm.mockResolvedValue({
+      status: "provisioned",
+      provider: "anthropic",
+      model: "claude-opus-4-7",
+      fingerprint: "…alid",
+      latency_ms: 123,
+      models: ["claude-opus-4-7"],
+    })
+    render(<BootstrapPage />)
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
+    })
+    await openProvisionFormAs("anthropic")
+    fireEvent.change(screen.getByTestId("bootstrap-llm-provider-api-key"), {
+      target: { value: "sk-ant-valid" },
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-llm-provider-submit"))
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-llm-provider-complete"),
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("bootstrap-llm-provider-error")).toBeNull()
+    expect(mockedProvisionLlm).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "anthropic", api_key: "sk-ant-valid" }),
+    )
   })
 
   it("Step 1 form surfaces server error without marking success", async () => {

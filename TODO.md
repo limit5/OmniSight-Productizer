@@ -1255,7 +1255,7 @@ Legend:
 - [x] UI 選單：Anthropic / OpenAI / Ollama（本機）/ Azure
 - [x] API Key 輸入 → `POST /api/v1/bootstrap/llm-provision`：驗 key（`provider.ping()`）→ 寫入 `backend/llm_secrets.py`（at-rest 加密；`backend/secrets.py` 會 shadow stdlib，故改名）→ 更新 `settings.llm_provider`
 - [x] Ollama 選項偵測本機 `localhost:11434` 可達性 + 列可用 model
-- [ ] 錯誤處理：key 無效 / quota 用盡 / 網路不通 → 明確訊息
+- [x] 錯誤處理：key 無效 / quota 用盡 / 網路不通 → 明確訊息
 - 預估：**0.5 day**
 
 ### L4. Step 3 — Cloudflare Tunnel（複用 B12 wizard）

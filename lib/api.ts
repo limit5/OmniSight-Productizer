@@ -2539,6 +2539,147 @@ export async function bootstrapDetectOllama(
   return request<BootstrapOllamaDetectResponse>(`/bootstrap/ollama-detect${qs}`)
 }
 
+// ─── L3 — Step 2 LLM provider provisioning ─────────────────────────
+
+export type BootstrapLlmProvisionKind =
+  | "key_invalid"
+  | "quota_exceeded"
+  | "network_unreachable"
+  | "bad_request"
+  | "provider_error"
+
+export interface BootstrapLlmProvisionRequest {
+  provider: "anthropic" | "openai" | "ollama" | "azure"
+  api_key?: string
+  model?: string
+  base_url?: string
+  azure_deployment?: string
+}
+
+export interface BootstrapLlmProvisionResponse {
+  status: string
+  provider: string
+  model: string
+  fingerprint: string
+  latency_ms: number
+  models: string[]
+}
+
+/**
+ * Typed error raised by {@link bootstrapLlmProvision} when the backend's
+ * `provider.ping()` verdict is anything other than success. Carries the
+ * machine-readable ``kind`` so the UI can pick a matching banner copy +
+ * icon without parsing ``detail`` strings.
+ */
+export class BootstrapLlmProvisionError extends Error {
+  kind: BootstrapLlmProvisionKind
+  detail: string
+  status: number
+  constructor(kind: BootstrapLlmProvisionKind, detail: string, status: number) {
+    super(detail)
+    this.name = "BootstrapLlmProvisionError"
+    this.kind = kind
+    this.detail = detail
+    this.status = status
+  }
+}
+
+function _isProvisionKind(v: unknown): v is BootstrapLlmProvisionKind {
+  return (
+    v === "key_invalid" ||
+    v === "quota_exceeded" ||
+    v === "network_unreachable" ||
+    v === "bad_request" ||
+    v === "provider_error"
+  )
+}
+
+export async function bootstrapLlmProvision(
+  req: BootstrapLlmProvisionRequest,
+): Promise<BootstrapLlmProvisionResponse> {
+  const method = "POST"
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  }
+  if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
+  if (typeof document !== "undefined") {
+    const csrf = readCookie("omnisight_csrf")
+    if (csrf) baseHeaders["X-CSRF-Token"] = csrf
+  }
+  // Straight fetch — the shared ``request<T>`` helper retries 429/503 and
+  // buries the response body inside the Error message. For provisioning
+  // we want 1) no retry on quota_exceeded (429) so the operator gets an
+  // immediate actionable message, and 2) the structured ``{kind, detail}``
+  // payload the backend returns, not a flattened string.
+  let res: Response
+  try {
+    res = await fetch(`${API_V1}/bootstrap/llm-provision`, {
+      method,
+      credentials: "include",
+      headers: baseHeaders,
+      body: JSON.stringify(req),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new BootstrapLlmProvisionError(
+      "network_unreachable",
+      `Browser could not reach the OmniSight API — ${msg}`,
+      0,
+    )
+  }
+  if (!res.ok) {
+    let kind: BootstrapLlmProvisionKind = "provider_error"
+    let detail = `API ${res.status}`
+    try {
+      const body = await res.json()
+      if (_isProvisionKind(body?.kind)) kind = body.kind
+      if (typeof body?.detail === "string" && body.detail.trim()) detail = body.detail
+    } catch {
+      // Non-JSON body — fall back to raw text.
+      try {
+        const text = await res.text()
+        if (text.trim()) detail = text.trim()
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new BootstrapLlmProvisionError(kind, detail, res.status)
+  }
+  return (await res.json()) as BootstrapLlmProvisionResponse
+}
+
+/**
+ * User-facing copy for each {@link BootstrapLlmProvisionKind}. The wizard
+ * uses the kind to choose a banner headline; the backend's ``detail`` is
+ * shown beneath it for the precise reason (e.g. which provider, which
+ * HTTP status). Keep these short — they render in a ≤3-line banner.
+ */
+export const BOOTSTRAP_PROVISION_KIND_COPY: Record<
+  BootstrapLlmProvisionKind,
+  { title: string; hint: string }
+> = {
+  key_invalid: {
+    title: "API key rejected",
+    hint: "The provider returned 401/403 — copy a fresh key from the provider dashboard and try again.",
+  },
+  quota_exceeded: {
+    title: "Quota or rate limit exceeded",
+    hint: "The provider returned 429 — wait for the quota to reset, or upgrade the account tier.",
+  },
+  network_unreachable: {
+    title: "Cannot reach the provider",
+    hint: "The network did not respond within 10s — check DNS, firewall, VPN, or an upstream proxy.",
+  },
+  bad_request: {
+    title: "Request rejected",
+    hint: "The provider rejected the request shape — check endpoint, deployment name, or base URL.",
+  },
+  provider_error: {
+    title: "Provider error",
+    hint: "The provider returned 5xx — retry in a few minutes or pick another provider.",
+  },
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced

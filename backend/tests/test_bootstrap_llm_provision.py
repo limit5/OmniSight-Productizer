@@ -236,7 +236,11 @@ async def test_invalid_key_returns_401_and_no_persistence(
     client = _wizard_client["client"]
 
     def _unauth(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"error": "invalid_api_key"})
+        return httpx.Response(
+            401,
+            json={"error": {"type": "authentication_error",
+                            "message": "invalid x-api-key"}},
+        )
 
     _stub_httpx(monkeypatch, _unauth)
 
@@ -247,6 +251,13 @@ async def test_invalid_key_returns_401_and_no_persistence(
     assert r.status_code == 401, r.text
     body = r.json()
     assert body["kind"] == "key_invalid"
+    # Detail must carry the kind-specific prefix + the provider name so
+    # the wizard can show it verbatim without stringly parsing.
+    assert body["detail"].startswith("Invalid API key —"), body
+    assert "Anthropic" in body["detail"], body
+    # Provider-supplied error message is echoed so the operator sees the
+    # precise upstream reason.
+    assert "invalid x-api-key" in body["detail"], body
     # No credential written on failure
     assert _secrets.get_provider_credentials("anthropic") == {}
     # Step row NOT recorded
@@ -258,7 +269,11 @@ async def test_quota_exhausted_returns_429(_wizard_client, monkeypatch):
     client = _wizard_client["client"]
 
     def _quota(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, json={"error": "rate_limit_exceeded"})
+        return httpx.Response(
+            429,
+            json={"error": {"type": "rate_limit_exceeded",
+                            "message": "Requests per minute limit hit"}},
+        )
 
     _stub_httpx(monkeypatch, _quota)
 
@@ -267,7 +282,11 @@ async def test_quota_exhausted_returns_429(_wizard_client, monkeypatch):
         json={"provider": "openai", "api_key": "sk-proj-quota"},
     )
     assert r.status_code == 429, r.text
-    assert r.json()["kind"] == "quota_exceeded"
+    body = r.json()
+    assert body["kind"] == "quota_exceeded"
+    assert body["detail"].startswith("Quota exceeded —"), body
+    assert "OpenAI" in body["detail"], body
+    assert "Requests per minute limit hit" in body["detail"], body
 
 
 @pytest.mark.asyncio
@@ -284,7 +303,35 @@ async def test_network_unreachable_returns_504(_wizard_client, monkeypatch):
         json={"provider": "anthropic", "api_key": "sk-ant-xyz"},
     )
     assert r.status_code == 504, r.text
-    assert r.json()["kind"] == "network_unreachable"
+    body = r.json()
+    assert body["kind"] == "network_unreachable"
+    assert body["detail"].startswith("Cannot reach provider —"), body
+    # Operator-friendly message mentions the remediation hints.
+    assert "anthropic" in body["detail"].lower(), body
+    assert ("firewall" in body["detail"] or "DNS" in body["detail"]), body
+
+
+@pytest.mark.asyncio
+async def test_provider_error_5xx_returns_502_with_prefix(
+    _wizard_client, monkeypatch,
+):
+    """5xx from the provider → kind=provider_error with clear prefix."""
+    client = _wizard_client["client"]
+
+    def _boom(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="temporary overload, try later")
+
+    _stub_httpx(monkeypatch, _boom)
+
+    r = await client.post(
+        "/api/v1/bootstrap/llm-provision",
+        json={"provider": "anthropic", "api_key": "sk-ant-live"},
+    )
+    assert r.status_code == 502, r.text
+    body = r.json()
+    assert body["kind"] == "provider_error"
+    assert body["detail"].startswith("Provider error —"), body
+    assert "HTTP 503" in body["detail"], body
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -300,7 +347,9 @@ async def test_missing_key_for_hosted_provider_422(_wizard_client):
         json={"provider": "anthropic"},
     )
     assert r.status_code == 422, r.text
-    assert r.json()["kind"] == "key_invalid"
+    body = r.json()
+    assert body["kind"] == "key_invalid"
+    assert body["detail"].startswith("Invalid API key —"), body
 
 
 @pytest.mark.asyncio
@@ -311,7 +360,9 @@ async def test_unsupported_provider_422(_wizard_client):
         json={"provider": "mystery-llm", "api_key": "x"},
     )
     assert r.status_code == 422, r.text
-    assert r.json()["kind"] == "bad_request"
+    body = r.json()
+    assert body["kind"] == "bad_request"
+    assert body["detail"].startswith("Bad request —"), body
 
 
 @pytest.mark.asyncio
@@ -322,7 +373,29 @@ async def test_azure_requires_base_url(_wizard_client):
         json={"provider": "azure", "api_key": "key-azr"},
     )
     assert r.status_code == 422, r.text
-    assert r.json()["kind"] == "bad_request"
+    body = r.json()
+    assert body["kind"] == "bad_request"
+    assert body["detail"].startswith("Bad request —"), body
+    assert "endpoint" in body["detail"].lower(), body
+
+
+@pytest.mark.asyncio
+async def test_clear_message_prefix_covers_every_kind():
+    """Every kind the router maps to HTTP gets a human-readable prefix.
+
+    Keeps the ``BOOTSTRAP_PROVISION_KIND_COPY`` in ``lib/api.ts`` in lock
+    step with the backend: if a new kind is added here without UI copy,
+    the wizard banner would fall through to the generic "provider error"
+    label.
+    """
+    from backend.routers.bootstrap import _PING_KIND_TO_STATUS
+
+    for kind in _PING_KIND_TO_STATUS:
+        msg = _secrets.clear_message(kind, "anthropic", "probe failed")
+        assert kind in _secrets.KIND_PREFIX, f"missing prefix for {kind}"
+        assert msg.startswith(_secrets.KIND_PREFIX[kind] + " —"), (kind, msg)
+        assert "anthropic" in msg
+        assert "probe failed" in msg
 
 
 # ─────────────────────────────────────────────────────────────────

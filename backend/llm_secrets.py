@@ -54,11 +54,38 @@ _PING_TIMEOUT_S = 10.0
 # ─────────────────────────────────────────────────────────────────
 
 
+# Operator-friendly prefixes mapped per kind. The route passes these
+# straight through to the wizard so ``detail`` is actionable without
+# the UI having to classify the message on its own.
+KIND_PREFIX: dict[str, str] = {
+    "key_invalid": "Invalid API key",
+    "quota_exceeded": "Quota exceeded",
+    "network_unreachable": "Cannot reach provider",
+    "bad_request": "Bad request",
+    "provider_error": "Provider error",
+}
+
+
+def clear_message(kind: str, provider: str, reason: str, *, status: int | None = None) -> str:
+    """Compose an operator-friendly error message for ``kind``.
+
+    Output shape: ``"{Prefix} — {provider}: {reason} (HTTP {status})"``.
+    The prefix is stable per kind so the UI can string-match in tests
+    without duplicating the same mapping table.
+    """
+    prefix = KIND_PREFIX.get(kind, "Provider error")
+    tail = f" (HTTP {status})" if status is not None else ""
+    return f"{prefix} — {provider}: {reason}{tail}"
+
+
 class ProviderPingError(Exception):
     """Raised when :func:`ping_provider` cannot verify a provider.
 
     ``kind`` is one of the classified strings above — callers map it
-    to an HTTP status + user-facing message.
+    to an HTTP status + user-facing message. ``message`` is always
+    prefixed with :data:`KIND_PREFIX` so the wizard can show it to the
+    operator verbatim — the ``kind`` field still carries the machine
+    label for any UI-side branching (icon, hint, retry affordance).
     """
 
     def __init__(self, kind: str, message: str, *, status: int | None = None) -> None:
@@ -247,6 +274,45 @@ def _classify_http_status(status: int) -> str:
     return "provider_error"
 
 
+_KIND_DEFAULT_REASON: dict[str, str] = {
+    "key_invalid": "the API key was rejected — double-check for typos or an expired credential",
+    "quota_exceeded": "rate limit or monthly quota exhausted — try again later or upgrade the account",
+    "bad_request": "the provider rejected the request shape",
+    "provider_error": "the provider responded with an internal error",
+}
+
+
+def _extract_reason(resp: "httpx.Response", kind: str, *, default: str | None = None) -> str:
+    """Pull a short, user-meaningful reason out of a provider response.
+
+    Preference order: ``error.message`` → ``error.type`` → ``error`` (raw string)
+    → :data:`_KIND_DEFAULT_REASON` → truncated response body. Keeps the
+    result short so it renders in a wizard banner without scrolling.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            for key in ("message", "type", "code"):
+                v = err.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()[:200]
+        elif isinstance(err, str) and err.strip():
+            return err.strip()[:200]
+        for key in ("message", "detail"):
+            v = body.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()[:200]
+    fallback = default or _KIND_DEFAULT_REASON.get(kind) or "unexpected reply"
+    text = (resp.text or "").strip()
+    if text and kind in ("bad_request", "provider_error") and len(text) <= 200:
+        return text
+    return fallback
+
+
 async def _ping_anthropic(api_key: str) -> dict[str, Any]:
     headers = {
         "x-api-key": api_key,
@@ -255,9 +321,15 @@ async def _ping_anthropic(api_key: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=_PING_TIMEOUT_S) as client:
         resp = await client.get("https://api.anthropic.com/v1/models", headers=headers)
     if resp.status_code >= 400:
+        kind = _classify_http_status(resp.status_code)
         raise ProviderPingError(
-            _classify_http_status(resp.status_code),
-            f"Anthropic API returned HTTP {resp.status_code}: {resp.text[:200]}",
+            kind,
+            clear_message(
+                kind,
+                "Anthropic",
+                _extract_reason(resp, kind),
+                status=resp.status_code,
+            ),
             status=resp.status_code,
         )
     models: list[str] = []
@@ -278,9 +350,15 @@ async def _ping_openai(api_key: str, base_url: str = "") -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=_PING_TIMEOUT_S) as client:
         resp = await client.get(url, headers=headers)
     if resp.status_code >= 400:
+        kind = _classify_http_status(resp.status_code)
         raise ProviderPingError(
-            _classify_http_status(resp.status_code),
-            f"OpenAI API returned HTTP {resp.status_code}: {resp.text[:200]}",
+            kind,
+            clear_message(
+                kind,
+                "OpenAI",
+                _extract_reason(resp, kind),
+                status=resp.status_code,
+            ),
             status=resp.status_code,
         )
     models: list[str] = []
@@ -299,17 +377,27 @@ async def _ping_azure(api_key: str, base_url: str, deployment: str = "") -> dict
     if not base_url:
         raise ProviderPingError(
             "bad_request",
-            "Azure OpenAI requires a base_url (endpoint) — e.g. "
-            "https://<resource>.openai.azure.com",
+            clear_message(
+                "bad_request",
+                "Azure OpenAI",
+                "endpoint (base_url) is required — e.g. "
+                "https://<resource>.openai.azure.com",
+            ),
         )
     url = base_url.rstrip("/") + "/openai/deployments?api-version=2023-05-15"
     headers = {"api-key": api_key}
     async with httpx.AsyncClient(timeout=_PING_TIMEOUT_S) as client:
         resp = await client.get(url, headers=headers)
     if resp.status_code >= 400:
+        kind = _classify_http_status(resp.status_code)
         raise ProviderPingError(
-            _classify_http_status(resp.status_code),
-            f"Azure OpenAI returned HTTP {resp.status_code}: {resp.text[:200]}",
+            kind,
+            clear_message(
+                kind,
+                "Azure OpenAI",
+                _extract_reason(resp, kind),
+                status=resp.status_code,
+            ),
             status=resp.status_code,
         )
     deployments: list[str] = []
@@ -334,9 +422,15 @@ async def _ping_ollama(base_url: str = "") -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=_PING_TIMEOUT_S) as client:
         resp = await client.get(url)
     if resp.status_code >= 400:
+        kind = _classify_http_status(resp.status_code)
         raise ProviderPingError(
-            _classify_http_status(resp.status_code),
-            f"Ollama returned HTTP {resp.status_code} from {url}",
+            kind,
+            clear_message(
+                kind,
+                "Ollama",
+                _extract_reason(resp, kind, default=f"unexpected reply from {url}"),
+                status=resp.status_code,
+            ),
             status=resp.status_code,
         )
     models: list[str] = []
@@ -365,12 +459,23 @@ async def ping_provider(
     """
     p = (provider or "").strip().lower()
     if p not in SUPPORTED_PROVIDERS:
-        raise ProviderPingError("bad_request", f"unsupported provider: {provider!r}")
+        raise ProviderPingError(
+            "bad_request",
+            clear_message(
+                "bad_request",
+                provider or "<empty>",
+                f"unsupported provider — valid: {list(SUPPORTED_PROVIDERS)}",
+            ),
+        )
 
     if p != "ollama" and not (api_key or "").strip():
         raise ProviderPingError(
             "key_invalid",
-            f"{p} requires an API key — none provided.",
+            clear_message(
+                "key_invalid",
+                p,
+                "no API key provided — paste the key from the provider dashboard",
+            ),
         )
 
     started = time.monotonic()
@@ -388,18 +493,29 @@ async def ping_provider(
         elif p == "ollama":
             info = await _ping_ollama(base_url=base_url.strip())
         else:  # pragma: no cover — guarded above
-            raise ProviderPingError("bad_request", f"unsupported provider: {p!r}")
+            raise ProviderPingError(
+                "bad_request",
+                clear_message("bad_request", p, "unsupported provider"),
+            )
     except ProviderPingError:
         raise
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
         raise ProviderPingError(
             "network_unreachable",
-            f"cannot reach {p}: {exc}",
+            clear_message(
+                "network_unreachable",
+                p,
+                f"no response within {int(_PING_TIMEOUT_S)}s — check DNS, firewall, or proxy ({exc})",
+            ),
         ) from exc
     except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         raise ProviderPingError(
             "network_unreachable",
-            f"transport error contacting {p}: {exc}",
+            clear_message(
+                "network_unreachable",
+                p,
+                f"transport error — {exc}",
+            ),
         ) from exc
 
     latency_ms = int((time.monotonic() - started) * 1000)

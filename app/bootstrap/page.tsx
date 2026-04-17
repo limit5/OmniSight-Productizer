@@ -33,11 +33,17 @@ import {
   Cpu,
 } from "lucide-react"
 import {
+  BOOTSTRAP_PROVISION_KIND_COPY,
+  BootstrapLlmProvisionError,
   bootstrapDetectOllama,
+  bootstrapLlmProvision,
   bootstrapSetAdminPassword,
   finalizeBootstrap,
   getBootstrapStatus,
   type BootstrapGates,
+  type BootstrapLlmProvisionKind,
+  type BootstrapLlmProvisionRequest,
+  type BootstrapLlmProvisionResponse,
   type BootstrapOllamaDetectResponse,
   type BootstrapStatusResponse,
 } from "@/lib/api"
@@ -606,10 +612,114 @@ function OllamaDetectPanel({
   )
 }
 
-function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
+function ProvisionErrorBanner({
+  kind,
+  detail,
+}: {
+  kind: BootstrapLlmProvisionKind
+  detail: string
+}) {
+  const copy = BOOTSTRAP_PROVISION_KIND_COPY[kind]
+  return (
+    <div
+      role="alert"
+      data-testid="bootstrap-llm-provider-error"
+      data-kind={kind}
+      className="flex flex-col gap-1 p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10"
+    >
+      <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--destructive)]">
+        <AlertCircle size={12} /> {copy.title}
+      </div>
+      <p className="font-mono text-[11px] text-[var(--destructive)] break-words">
+        {detail}
+      </p>
+      <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+        {copy.hint}
+      </p>
+    </div>
+  )
+}
+
+function LlmProviderStep({
+  alreadyGreen,
+  onProvisioned,
+}: {
+  alreadyGreen: boolean
+  onProvisioned: () => Promise<unknown>
+}) {
   const [selected, setSelected] = useState<LlmProviderId | null>(null)
+  const [apiKey, setApiKey] = useState<string>("")
+  const [model, setModel] = useState<string>("")
+  const [azureEndpoint, setAzureEndpoint] = useState<string>("")
+  const [azureDeployment, setAzureDeployment] = useState<string>("")
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState<string>("")
   const [ollamaModel, setOllamaModel] = useState<string>("")
+  const [busy, setBusy] = useState(false)
+  const [errKind, setErrKind] = useState<BootstrapLlmProvisionKind | null>(null)
+  const [errDetail, setErrDetail] = useState<string>("")
+  const [okResult, setOkResult] = useState<BootstrapLlmProvisionResponse | null>(null)
+
+  const resetErrors = () => {
+    setErrKind(null)
+    setErrDetail("")
+    setOkResult(null)
+  }
+
+  const canSubmit =
+    !busy &&
+    selected !== null &&
+    (selected === "ollama"
+      ? true
+      : selected === "azure"
+        ? apiKey.trim().length > 0 && azureEndpoint.trim().length > 0
+        : apiKey.trim().length > 0)
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault()
+      if (!canSubmit || !selected) return
+      setBusy(true)
+      resetErrors()
+      const req: BootstrapLlmProvisionRequest = { provider: selected }
+      if (selected !== "ollama") req.api_key = apiKey.trim()
+      const effectiveModel =
+        selected === "ollama" ? ollamaModel.trim() : model.trim()
+      if (effectiveModel) req.model = effectiveModel
+      if (selected === "azure") {
+        req.base_url = azureEndpoint.trim()
+        if (azureDeployment.trim()) req.azure_deployment = azureDeployment.trim()
+      }
+      if (selected === "ollama" && ollamaBaseUrl.trim()) {
+        req.base_url = ollamaBaseUrl.trim()
+      }
+      try {
+        const result = await bootstrapLlmProvision(req)
+        setOkResult(result)
+        await onProvisioned()
+      } catch (err) {
+        if (err instanceof BootstrapLlmProvisionError) {
+          setErrKind(err.kind)
+          setErrDetail(err.detail || err.message)
+        } else {
+          setErrKind("provider_error")
+          setErrDetail(err instanceof Error ? err.message : String(err))
+        }
+      } finally {
+        setBusy(false)
+      }
+    },
+    [
+      canSubmit,
+      selected,
+      apiKey,
+      model,
+      ollamaModel,
+      ollamaBaseUrl,
+      azureEndpoint,
+      azureDeployment,
+      onProvisioned,
+    ],
+  )
 
   if (alreadyGreen) {
     return (
@@ -628,8 +738,16 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
     )
   }
 
+  const keyLabel =
+    selected === "azure"
+      ? "Azure OpenAI key"
+      : selected === "openai"
+        ? "OpenAI API key"
+        : "Anthropic API key"
+
   return (
-    <div
+    <form
+      onSubmit={handleSubmit}
       data-testid="bootstrap-llm-provider-step"
       className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
     >
@@ -641,9 +759,9 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
       </div>
       <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
         Choose the LLM provider OmniSight should call for agent runs. The
-        API key form and live <code>provider.ping()</code> validation land
-        in a follow-up sub-task; for Ollama the wizard already probes the
-        local daemon below so you can see whether it is reachable.
+        wizard runs a live <code>provider.ping()</code> before persisting
+        the credential — invalid keys, exhausted quotas, and unreachable
+        endpoints surface here rather than at first agent run.
       </p>
 
       <fieldset
@@ -670,7 +788,10 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
                 name="llm-provider"
                 value={p.id}
                 checked={active}
-                onChange={() => setSelected(p.id)}
+                onChange={() => {
+                  setSelected(p.id)
+                  resetErrors()
+                }}
                 className="mt-1 accent-[var(--artifact-purple)]"
               />
               <span className="flex items-center justify-center w-7 h-7 rounded border border-[var(--border)] bg-[var(--background)] shrink-0">
@@ -701,6 +822,97 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
         />
       )}
 
+      {selected && selected !== "ollama" && (
+        <div className="flex flex-col gap-2 p-3 rounded border border-[var(--border)] bg-[var(--background)]">
+          <label className="flex flex-col gap-1">
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+              {keyLabel}
+            </span>
+            <input
+              type="password"
+              data-testid="bootstrap-llm-provider-api-key"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              autoComplete="off"
+              placeholder={
+                selected === "openai"
+                  ? "sk-proj-…"
+                  : selected === "anthropic"
+                    ? "sk-ant-…"
+                    : "•••••••••"
+              }
+              className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+              Model (optional — defaults to project config)
+            </span>
+            <input
+              type="text"
+              data-testid="bootstrap-llm-provider-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={
+                selected === "openai"
+                  ? "gpt-4o"
+                  : selected === "anthropic"
+                    ? "claude-opus-4-7"
+                    : "gpt-4o"
+              }
+              className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+            />
+          </label>
+          {selected === "azure" && (
+            <>
+              <label className="flex flex-col gap-1">
+                <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                  Azure endpoint (base URL)
+                </span>
+                <input
+                  type="text"
+                  data-testid="bootstrap-llm-provider-azure-endpoint"
+                  value={azureEndpoint}
+                  onChange={(e) => setAzureEndpoint(e.target.value)}
+                  placeholder="https://<resource>.openai.azure.com"
+                  className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                  Deployment name (optional)
+                </span>
+                <input
+                  type="text"
+                  data-testid="bootstrap-llm-provider-azure-deployment"
+                  value={azureDeployment}
+                  onChange={(e) => setAzureDeployment(e.target.value)}
+                  placeholder="gpt-4o"
+                  className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+                />
+              </label>
+            </>
+          )}
+        </div>
+      )}
+
+      {errKind && <ProvisionErrorBanner kind={errKind} detail={errDetail} />}
+
+      {okResult && (
+        <div
+          data-testid="bootstrap-llm-provider-success"
+          className="flex flex-col gap-1 p-3 rounded border border-[var(--status-green)] bg-[var(--background)]"
+        >
+          <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--status-green)]">
+            <Check size={12} /> Credential accepted ({okResult.latency_ms}ms)
+          </div>
+          <p className="font-mono text-[10px] text-[var(--muted-foreground)]">
+            provider={okResult.provider} · model={okResult.model || "(default)"} ·
+            fingerprint={okResult.fingerprint}
+          </p>
+        </div>
+      )}
+
       <p
         data-testid="bootstrap-llm-provider-selected"
         data-value={selected ?? ""}
@@ -712,10 +924,20 @@ function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
               selected === "ollama" && ollamaModel
                 ? ` · model=${ollamaModel}`
                 : ""
-            } — continue to the API key step (next sub-task).`
+            }`
           : "No provider selected yet."}
       </p>
-    </div>
+
+      <button
+        type="submit"
+        data-testid="bootstrap-llm-provider-submit"
+        disabled={!canSubmit}
+        className="self-start flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <Shield size={12} />}
+        Verify & save credential
+      </button>
+    </form>
   )
 }
 
@@ -967,6 +1189,7 @@ export default function BootstrapPage() {
               ) : activeStep.id === "llm_provider" ? (
                 <LlmProviderStep
                   alreadyGreen={status.status.llm_provider_configured}
+                  onProvisioned={reloadStatus}
                 />
               ) : (
                 <StepBodyPlaceholder step={activeStep} />
