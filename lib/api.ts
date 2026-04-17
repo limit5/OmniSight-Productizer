@@ -2680,6 +2680,49 @@ export const BOOTSTRAP_PROVISION_KIND_COPY: Record<
   },
 }
 
+// ─── L5 — Step 4 (parallel health check / 4 live ticks) ───────────
+
+export type BootstrapHealthCheckStatus = "green" | "red" | "skipped"
+
+export interface BootstrapHealthCheckResult {
+  ok: boolean
+  status: BootstrapHealthCheckStatus
+  detail: string | null
+  latency_ms: number | null
+}
+
+export interface BootstrapParallelHealthCheckResponse {
+  all_green: boolean
+  elapsed_ms: number
+  backend: BootstrapHealthCheckResult
+  frontend: BootstrapHealthCheckResult
+  db_migration: BootstrapHealthCheckResult
+  cf_tunnel: BootstrapHealthCheckResult
+}
+
+export interface BootstrapParallelHealthCheckRequest {
+  timeout_secs?: number
+  backend_url?: string
+  frontend_url?: string
+}
+
+/**
+ * Run the four Step-4 readiness probes in parallel
+ * (backend / frontend / DB migration / CF tunnel connector).
+ * The body is optional — bare POST uses backend defaults.
+ */
+export async function bootstrapParallelHealthCheck(
+  req?: BootstrapParallelHealthCheckRequest,
+): Promise<BootstrapParallelHealthCheckResponse> {
+  return request<BootstrapParallelHealthCheckResponse>(
+    "/bootstrap/parallel-health-check",
+    {
+      method: "POST",
+      body: JSON.stringify(req ?? {}),
+    },
+  )
+}
+
 // ─── L4 — Step 3 (Cloudflare Tunnel skip / LAN-only) ──────────────
 
 export interface BootstrapCfTunnelSkipResponse {

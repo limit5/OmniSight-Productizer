@@ -18,6 +18,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     bootstrapLlmProvision: vi.fn(),
     bootstrapDetectOllama: vi.fn(),
     bootstrapCfTunnelSkip: vi.fn(),
+    bootstrapParallelHealthCheck: vi.fn(),
   }
 })
 
@@ -46,6 +47,7 @@ const mockedSetAdminPw = api.bootstrapSetAdminPassword as unknown as ReturnType<
 const mockedProvisionLlm = api.bootstrapLlmProvision as unknown as ReturnType<typeof vi.fn>
 const mockedDetectOllama = api.bootstrapDetectOllama as unknown as ReturnType<typeof vi.fn>
 const mockedCfSkip = api.bootstrapCfTunnelSkip as unknown as ReturnType<typeof vi.fn>
+const mockedParallelHealth = api.bootstrapParallelHealthCheck as unknown as ReturnType<typeof vi.fn>
 
 const redStatus = {
   status: {
@@ -93,9 +95,30 @@ describe("BootstrapPage", () => {
       kind: "network_unreachable",
       detail: "probe not wired in tests",
     })
+    mockedParallelHealth.mockReset()
+    // Default: probe is reachable, all four green. Tests that need a
+    // different shape override this before render().
+    mockedParallelHealth.mockResolvedValue({
+      all_green: true,
+      elapsed_ms: 12,
+      backend: { ok: true, status: "green", detail: null, latency_ms: 5 },
+      frontend: { ok: true, status: "green", detail: null, latency_ms: 7 },
+      db_migration: {
+        ok: true,
+        status: "green",
+        detail: "5 invariants present",
+        latency_ms: 1,
+      },
+      cf_tunnel: {
+        ok: true,
+        status: "skipped",
+        detail: "operator skipped Step 3 (LAN-only)",
+        latency_ms: 0,
+      },
+    })
   })
 
-  it("renders all five wizard steps with the first red step auto-focused", async () => {
+  it("renders all six wizard steps with the first red step auto-focused", async () => {
     mockedGetStatus.mockResolvedValue(redStatus)
     render(<BootstrapPage />)
 
@@ -104,11 +127,12 @@ describe("BootstrapPage", () => {
     })
     expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-cf_tunnel")).toBeInTheDocument()
+    expect(screen.getByTestId("bootstrap-step-services_ready")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-finalize")).toBeInTheDocument()
 
-    // First red step is auto-focused → STEP 1 / 5 header reflects admin_password.
-    expect(screen.getByText("STEP 1 / 5")).toBeInTheDocument()
+    // First red step is auto-focused → STEP 1 / 6 header reflects admin_password.
+    expect(screen.getByText("STEP 1 / 6")).toBeInTheDocument()
   })
 
   it("disables the Finalize button while gates are red + shows missing_steps", async () => {
@@ -145,7 +169,7 @@ describe("BootstrapPage", () => {
     render(<BootstrapPage />)
 
     await waitFor(() => {
-      expect(screen.getByText("STEP 5 / 5")).toBeInTheDocument()
+      expect(screen.getByText("STEP 6 / 6")).toBeInTheDocument()
     })
 
     const btn = screen.getByTestId("bootstrap-finalize-button")
@@ -559,6 +583,231 @@ describe("BootstrapPage", () => {
     })
     expect(screen.queryByTestId("bootstrap-cf-tunnel-step")).toBeNull()
     expect(screen.queryByTestId("bootstrap-cf-tunnel-launch")).toBeNull()
+  })
+
+  // ─── L5 Step 4 — Service Health (4 live ticks) ─────────────────────
+  //
+  // The wizard slot embeds ServiceHealthStep. It must (a) render four
+  // rows (backend / frontend / DB migration / CF tunnel), (b) flip each
+  // row's tick to green as soon as the parallel-health-check probe
+  // returns ``status !== "red"``, and (c) bubble the all_green signal
+  // up so the side-pill turns green.
+
+  it("Step 4 renders four service health rows with live tick state", async () => {
+    mockedGetStatus.mockResolvedValue({
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    })
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-step-services_ready"),
+      ).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-services_ready"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-service-health-step"),
+      ).toBeInTheDocument()
+    })
+
+    // All four named rows must be present — the operator sees one tick
+    // per probe, not a single rolled-up status.
+    for (const id of ["backend", "frontend", "db_migration", "cf_tunnel"]) {
+      expect(
+        screen.getByTestId(`bootstrap-service-health-row-${id}`),
+      ).toBeInTheDocument()
+    }
+
+    // After the first probe returns (default mock = all green), every
+    // row must report ``data-green=true``. ``cf_tunnel`` arrives as
+    // ``skipped`` and still counts as green — that's the LAN-only path.
+    await waitFor(() => {
+      for (const id of ["backend", "frontend", "db_migration", "cf_tunnel"]) {
+        expect(
+          screen
+            .getByTestId(`bootstrap-service-health-row-${id}`)
+            .getAttribute("data-green"),
+        ).toBe("true")
+      }
+    })
+
+    // The aggregated step container reports all_green=true.
+    await waitFor(() => {
+      expect(
+        screen
+          .getByTestId("bootstrap-service-health-step")
+          .getAttribute("data-all-green"),
+      ).toBe("true")
+    })
+    expect(
+      screen
+        .getByTestId("bootstrap-service-health-step")
+        .getAttribute("data-green-count"),
+    ).toBe("4")
+    expect(
+      screen.getByTestId("bootstrap-service-health-summary"),
+    ).toHaveTextContent(/4\/4 services green/)
+
+    // Side-pill flips to green via local-green plumbing once all_green=true.
+    await waitFor(() => {
+      expect(
+        screen
+          .getByTestId("bootstrap-step-services_ready")
+          .getAttribute("data-state"),
+      ).toBe("green")
+    })
+  })
+
+  it("Step 4 marks the failing row red and keeps polling for recovery", async () => {
+    mockedGetStatus.mockResolvedValue({
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    })
+    // First probe: backend hasn't booted yet. Subsequent probes: green.
+    mockedParallelHealth
+      .mockResolvedValueOnce({
+        all_green: false,
+        elapsed_ms: 9,
+        backend: {
+          ok: false,
+          status: "red",
+          detail: "ConnectError: connection refused",
+          latency_ms: 4,
+        },
+        frontend: { ok: true, status: "green", detail: null, latency_ms: 5 },
+        db_migration: {
+          ok: true,
+          status: "green",
+          detail: "5 invariants present",
+          latency_ms: 1,
+        },
+        cf_tunnel: {
+          ok: true,
+          status: "skipped",
+          detail: "operator skipped Step 3 (LAN-only)",
+          latency_ms: 0,
+        },
+      })
+      .mockResolvedValue({
+        all_green: true,
+        elapsed_ms: 8,
+        backend: { ok: true, status: "green", detail: null, latency_ms: 3 },
+        frontend: { ok: true, status: "green", detail: null, latency_ms: 5 },
+        db_migration: {
+          ok: true,
+          status: "green",
+          detail: "5 invariants present",
+          latency_ms: 1,
+        },
+        cf_tunnel: {
+          ok: true,
+          status: "skipped",
+          detail: "operator skipped Step 3 (LAN-only)",
+          latency_ms: 0,
+        },
+      })
+
+    render(<BootstrapPage />)
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-step-services_ready"),
+      ).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-services_ready"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-service-health-row-backend"),
+      ).toBeInTheDocument()
+    })
+
+    // After the first probe: backend is red, others green.
+    await waitFor(() => {
+      expect(
+        screen
+          .getByTestId("bootstrap-service-health-row-backend")
+          .getAttribute("data-status"),
+      ).toBe("red")
+    })
+    expect(
+      screen.getByTestId("bootstrap-service-health-row-backend"),
+    ).toHaveTextContent(/ConnectError: connection refused/)
+    expect(
+      screen
+        .getByTestId("bootstrap-service-health-step")
+        .getAttribute("data-all-green"),
+    ).toBe("false")
+
+    // Operator-driven re-check — the second mock fires and flips the
+    // row to green without waiting for the 3s interval.
+    fireEvent.click(screen.getByTestId("bootstrap-service-health-recheck"))
+    await waitFor(() => {
+      expect(
+        screen
+          .getByTestId("bootstrap-service-health-row-backend")
+          .getAttribute("data-green"),
+      ).toBe("true")
+    })
+    await waitFor(() => {
+      expect(
+        screen
+          .getByTestId("bootstrap-service-health-step")
+          .getAttribute("data-all-green"),
+      ).toBe("true")
+    })
+  })
+
+  it("Step 4 surfaces transport errors when the probe endpoint is unreachable", async () => {
+    mockedGetStatus.mockResolvedValue({
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    })
+    mockedParallelHealth.mockRejectedValue(
+      new Error("API 503: backend offline"),
+    )
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-step-services_ready"),
+      ).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-services_ready"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-service-health-error"),
+      ).toHaveTextContent(/API 503: backend offline/)
+    })
+    // No probe came back, so the rows stay in their pending state.
+    for (const id of ["backend", "frontend", "db_migration", "cf_tunnel"]) {
+      expect(
+        screen
+          .getByTestId(`bootstrap-service-health-row-${id}`)
+          .getAttribute("data-status"),
+      ).toBe("pending")
+    }
   })
 
   it("Step 1 form surfaces server error without marking success", async () => {

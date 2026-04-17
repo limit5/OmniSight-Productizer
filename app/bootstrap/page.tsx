@@ -13,15 +13,19 @@
  * step so the green/red markers reflect live backend signals.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
+  Activity,
   AlertCircle,
   Check,
   ChevronLeft,
   ChevronRight,
   CircleDashed,
+  Database,
+  Globe,
   Loader2,
+  RefreshCw,
   Rocket,
   Shield,
   KeyRound,
@@ -38,14 +42,17 @@ import {
   bootstrapCfTunnelSkip,
   bootstrapDetectOllama,
   bootstrapLlmProvision,
+  bootstrapParallelHealthCheck,
   bootstrapSetAdminPassword,
   finalizeBootstrap,
   getBootstrapStatus,
   type BootstrapGates,
+  type BootstrapHealthCheckResult,
   type BootstrapLlmProvisionKind,
   type BootstrapLlmProvisionRequest,
   type BootstrapLlmProvisionResponse,
   type BootstrapOllamaDetectResponse,
+  type BootstrapParallelHealthCheckResponse,
   type BootstrapStatusResponse,
 } from "@/lib/api"
 import {
@@ -61,6 +68,7 @@ type StepId =
   | "admin_password"
   | "llm_provider"
   | "cf_tunnel"
+  | "services_ready"
   | "smoke"
   | "finalize"
 
@@ -69,8 +77,20 @@ interface StepDef {
   title: string
   subtitle: string
   icon: React.ComponentType<{ size?: number; className?: string }>
-  /** Returns true if this step is satisfied by current backend signals. */
-  isGreen: (g: BootstrapGates, finalized: boolean) => boolean
+  /**
+   * Returns true if this step is satisfied by current backend signals.
+   *
+   * For ``services_ready`` the backend's ``BootstrapGates`` doesn't carry
+   * a dedicated boolean (the parallel-health-check is a probe, not a
+   * gate per backend.routers.bootstrap), so the step's tick is driven
+   * by the latest local probe result instead — passed through
+   * ``localGreen``.
+   */
+  isGreen: (
+    g: BootstrapGates,
+    finalized: boolean,
+    localGreen: Record<StepId, boolean>,
+  ) => boolean
 }
 
 const STEPS: StepDef[] = [
@@ -94,6 +114,13 @@ const STEPS: StepDef[] = [
     subtitle: "Provision remote access (or skip for LAN-only)",
     icon: Cloud,
     isGreen: (g) => g.cf_tunnel_configured,
+  },
+  {
+    id: "services_ready",
+    title: "Service Health",
+    subtitle: "Verify backend / frontend / DB / tunnel are all live",
+    icon: Activity,
+    isGreen: (_g, _finalized, localGreen) => localGreen.services_ready === true,
   },
   {
     id: "smoke",
@@ -1105,6 +1132,280 @@ function CfTunnelStep({
   )
 }
 
+// ─── L5 — Step 4 (parallel health check: 4 live ticks) ──────────────
+//
+// Polls ``POST /api/v1/bootstrap/parallel-health-check`` every 3s and
+// renders one row per probe (backend / frontend / DB migration / CF
+// tunnel). Each row's tick flips to green the moment the latest probe
+// reports ``status !== "red"`` — so the operator sees the four ticks
+// turn green in real time as services finish booting (rather than
+// waiting for a manual refresh).
+//
+// The endpoint is a probe, not a gate (per backend.routers.bootstrap):
+// the wizard's overall finalize gates aren't blocked by it. The step
+// is satisfied locally — every row green AND ``all_green=true`` — and
+// reported back to the page so the side-pill turns green.
+
+interface HealthRow {
+  id: "backend" | "frontend" | "db_migration" | "cf_tunnel"
+  label: string
+  hint: string
+  icon: React.ComponentType<{ size?: number; className?: string }>
+}
+
+const HEALTH_ROWS: HealthRow[] = [
+  {
+    id: "backend",
+    label: "Backend ready",
+    hint: "GET /healthz returns 2xx",
+    icon: Server,
+  },
+  {
+    id: "frontend",
+    label: "Frontend ready",
+    hint: "Next.js root responds <500",
+    icon: Globe,
+  },
+  {
+    id: "db_migration",
+    label: "DB migration up-to-date",
+    hint: "Required schema invariants present",
+    icon: Database,
+  },
+  {
+    id: "cf_tunnel",
+    label: "Cloudflare connector online",
+    hint: "Or LAN-only skip recorded at Step 3",
+    icon: Cloud,
+  },
+]
+
+const SERVICE_HEALTH_POLL_MS = 3000
+
+function HealthRowItem({
+  row,
+  result,
+}: {
+  row: HealthRow
+  result: BootstrapHealthCheckResult | undefined
+}) {
+  const Icon = row.icon
+  // Tri-state: undefined while we have no observation yet, then driven
+  // by the latest probe. ``skipped`` counts as green (LAN-only).
+  const status = result?.status ?? "pending"
+  const isGreen = status === "green" || status === "skipped"
+  const isRed = status === "red"
+
+  const glyph = isGreen ? (
+    <Check size={14} className="text-[var(--status-green)]" />
+  ) : isRed ? (
+    <AlertCircle size={14} className="text-[var(--destructive)]" />
+  ) : (
+    <Loader2 size={14} className="animate-spin text-[var(--muted-foreground)]" />
+  )
+  const borderClass = isGreen
+    ? "border-[var(--status-green)]"
+    : isRed
+      ? "border-[var(--destructive)]"
+      : "border-[var(--border)]"
+
+  // Latency rendered in ms; "skipped" rows show that label instead so
+  // the operator can tell green-because-skipped from green-because-live.
+  const latencyText =
+    status === "skipped"
+      ? "skipped (LAN-only)"
+      : result?.latency_ms != null
+        ? `${result.latency_ms}ms`
+        : status === "pending"
+          ? "probing…"
+          : ""
+
+  return (
+    <div
+      data-testid={`bootstrap-service-health-row-${row.id}`}
+      data-status={status}
+      data-green={isGreen ? "true" : "false"}
+      className={`flex items-center gap-3 p-3 rounded border ${borderClass} bg-[var(--background)]`}
+    >
+      <span className="flex items-center justify-center w-7 h-7 rounded-full border border-[var(--border)] bg-[var(--card)] shrink-0">
+        {glyph}
+      </span>
+      <Icon size={14} className="text-[var(--muted-foreground)] shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="font-mono text-xs text-[var(--foreground)]">
+          {row.label}
+        </div>
+        <div className="font-mono text-[10px] text-[var(--muted-foreground)] truncate">
+          {row.hint}
+        </div>
+        {result?.detail && (
+          <div
+            className="font-mono text-[10px] text-[var(--muted-foreground)] truncate"
+            title={result.detail}
+          >
+            {result.detail}
+          </div>
+        )}
+      </div>
+      <span
+        className={`font-mono text-[10px] tracking-wider shrink-0 ${
+          isGreen
+            ? "text-[var(--status-green)]"
+            : isRed
+              ? "text-[var(--destructive)]"
+              : "text-[var(--muted-foreground)]"
+        }`}
+      >
+        {latencyText}
+      </span>
+    </div>
+  )
+}
+
+function ServiceHealthStep({
+  onChanged,
+}: {
+  onChanged: (allGreen: boolean) => void
+}) {
+  const [snapshot, setSnapshot] = useState<BootstrapParallelHealthCheckResponse | null>(
+    null,
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Tracks how many probes have come back at least once, so the UI can
+  // show "probing…" on first paint instead of stale "all red".
+  const [probeCount, setProbeCount] = useState(0)
+
+  // Stable ref over ``onChanged`` so the polling effect doesn't get
+  // torn down + restarted every parent re-render (which would consume
+  // the next mocked response in tests and double-invoke the probe in
+  // production). The latest callback is always called via the ref.
+  const onChangedRef = useRef(onChanged)
+  useEffect(() => {
+    onChangedRef.current = onChanged
+  }, [onChanged])
+
+  const runProbe = useCallback(async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const next = await bootstrapParallelHealthCheck()
+      setSnapshot(next)
+      setProbeCount((n) => n + 1)
+      onChangedRef.current(next.all_green)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg)
+      onChangedRef.current(false)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  // Probe immediately + every 3s. We keep polling even after all-green
+  // so a service crash flips a tick back to red without a manual
+  // refresh. The interval is cheap — single POST that fans out four
+  // checks server-side.
+  useEffect(() => {
+    void runProbe()
+    const handle = setInterval(() => {
+      void runProbe()
+    }, SERVICE_HEALTH_POLL_MS)
+    return () => clearInterval(handle)
+  }, [runProbe])
+
+  const greenCount = snapshot
+    ? HEALTH_ROWS.reduce((acc, row) => {
+        const r = snapshot[row.id]
+        return acc + (r && (r.status === "green" || r.status === "skipped") ? 1 : 0)
+      }, 0)
+    : 0
+  const allGreen = snapshot?.all_green === true
+
+  return (
+    <div
+      data-testid="bootstrap-service-health-step"
+      data-all-green={allGreen ? "true" : "false"}
+      data-green-count={greenCount}
+      data-probe-count={probeCount}
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>PROBE</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          POST /bootstrap/parallel-health-check
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Live readiness of the four bootstrap services. Each tick turns
+        green the moment the matching probe comes back from the server —
+        re-polled every {SERVICE_HEALTH_POLL_MS / 1000}s so a service
+        crash flips its row back to red without a manual refresh.
+      </p>
+
+      <div
+        data-testid="bootstrap-service-health-rows"
+        className="flex flex-col gap-2"
+      >
+        {HEALTH_ROWS.map((row) => (
+          <HealthRowItem
+            key={row.id}
+            row={row}
+            result={snapshot ? snapshot[row.id] : undefined}
+          />
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between">
+        <span
+          data-testid="bootstrap-service-health-summary"
+          className={`font-mono text-[11px] ${
+            allGreen
+              ? "text-[var(--status-green)]"
+              : "text-[var(--muted-foreground)]"
+          }`}
+        >
+          {allGreen ? (
+            <span className="flex items-center gap-1">
+              <Check size={12} /> {greenCount}/4 services green · all systems
+              ready
+            </span>
+          ) : (
+            <span>
+              {greenCount}/4 services green
+              {snapshot ? ` · ${snapshot.elapsed_ms}ms last probe` : ""}
+            </span>
+          )}
+        </span>
+        <button
+          type="button"
+          data-testid="bootstrap-service-health-recheck"
+          onClick={() => void runProbe()}
+          disabled={busy}
+          className="flex items-center gap-1 font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)]/40 disabled:opacity-40"
+        >
+          {busy ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <RefreshCw size={12} />
+          )}
+          Re-check
+        </button>
+      </div>
+
+      {error && (
+        <p
+          role="alert"
+          data-testid="bootstrap-service-health-error"
+          className="font-mono text-[11px] text-[var(--destructive)] break-words"
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function StepBodyPlaceholder({ step }: { step: StepDef }) {
   // Each step's actual UI lands in its own TODO slot (L3–L5). Until then
   // the shell just surfaces what this step IS so the operator knows what's
@@ -1121,6 +1422,10 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
     cf_tunnel: {
       gate: "cf_tunnel_configured === true",
       todo: "L4 — create/link Cloudflare tunnel or explicit skip for LAN-only",
+    },
+    services_ready: {
+      gate: "parallel-health-check.all_green === true",
+      todo: "L5 — backend/frontend/DB/CF connector live ticks",
     },
     smoke: {
       gate: "smoke_passed === true",
@@ -1152,6 +1457,13 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
 
 // ─── Page component ─────────────────────────────────────────────────
 
+function _emptyLocalGreen(): Record<StepId, boolean> {
+  // Centralised so STEPS additions don't drift from the seed value.
+  const out = {} as Record<StepId, boolean>
+  for (const s of STEPS) out[s.id] = false
+  return out
+}
+
 export default function BootstrapPage() {
   const router = useRouter()
   const [status, setStatus] = useState<BootstrapStatusResponse | null>(null)
@@ -1159,6 +1471,18 @@ export default function BootstrapPage() {
   const [error, setError] = useState<string | null>(null)
   const [activeId, setActiveId] = useState<StepId>("admin_password")
   const [finalizing, setFinalizing] = useState(false)
+  // Locally-tracked greens for steps the backend doesn't gate (currently
+  // only ``services_ready`` — the parallel-health-check is a probe, not
+  // a finalize gate).
+  const [localGreen, setLocalGreen] = useState<Record<StepId, boolean>>(
+    () => _emptyLocalGreen(),
+  )
+
+  const setLocalGreenFor = useCallback((id: StepId, value: boolean) => {
+    setLocalGreen((prev) =>
+      prev[id] === value ? prev : { ...prev, [id]: value },
+    )
+  }, [])
 
   const reloadStatus = useCallback(async () => {
     try {
@@ -1188,9 +1512,11 @@ export default function BootstrapPage() {
   const [userPinned, setUserPinned] = useState(false)
   useEffect(() => {
     if (!status || userPinned) return
-    const firstRed = STEPS.find((s) => !s.isGreen(status.status, status.finalized))
+    const firstRed = STEPS.find(
+      (s) => !s.isGreen(status.status, status.finalized, localGreen),
+    )
     if (firstRed) setActiveId(firstRed.id)
-  }, [status, userPinned])
+  }, [status, userPinned, localGreen])
 
   const stepStates = useMemo(() => {
     if (!status) return {} as Record<StepId, "green" | "pending" | "active">
@@ -1199,11 +1525,11 @@ export default function BootstrapPage() {
       "green" | "pending" | "active"
     >
     for (const s of STEPS) {
-      const green = s.isGreen(status.status, status.finalized)
+      const green = s.isGreen(status.status, status.finalized, localGreen)
       out[s.id] = green ? "green" : s.id === activeId ? "active" : "pending"
     }
     return out
-  }, [status, activeId])
+  }, [status, activeId, localGreen])
 
   const activeStep = STEPS.find((s) => s.id === activeId) ?? STEPS[0]
   const activeIdx = STEPS.findIndex((s) => s.id === activeId)
@@ -1359,6 +1685,12 @@ export default function BootstrapPage() {
                 <CfTunnelStep
                   alreadyGreen={status.status.cf_tunnel_configured}
                   onChanged={reloadStatus}
+                />
+              ) : activeStep.id === "services_ready" ? (
+                <ServiceHealthStep
+                  onChanged={(allGreen) =>
+                    setLocalGreenFor("services_ready", allGreen)
+                  }
                 />
               ) : (
                 <StepBodyPlaceholder step={activeStep} />
