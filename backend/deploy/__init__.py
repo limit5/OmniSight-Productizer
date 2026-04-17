@@ -34,6 +34,17 @@ from backend.deploy.base import (
     WebDeployAdapter,
     token_fingerprint,
 )
+from backend.deploy.instant_preview import (
+    INSTANT_PREVIEW_MODES,
+    MODE_DOCKER_RUN,
+    MODE_VERCEL_PREVIEW,
+    InstantPreviewError,
+    InstantPreviewResult,
+    InstantPreviewUnavailable,
+    create_docker_run_preview,
+    create_instant_preview,
+    create_vercel_preview,
+)
 
 if TYPE_CHECKING:
     pass
@@ -76,11 +87,20 @@ __all__ = [
     "DeployError",
     "DeployRateLimitError",
     "DeployResult",
+    "INSTANT_PREVIEW_MODES",
     "InvalidDeployTokenError",
+    "InstantPreviewError",
+    "InstantPreviewResult",
+    "InstantPreviewUnavailable",
+    "MODE_DOCKER_RUN",
+    "MODE_VERCEL_PREVIEW",
     "MissingDeployScopeError",
     "ProvisionResult",
     "RollbackUnavailableError",
     "WebDeployAdapter",
+    "create_docker_run_preview",
+    "create_instant_preview",
+    "create_vercel_preview",
     "get_adapter",
     "list_providers",
     "token_fingerprint",
