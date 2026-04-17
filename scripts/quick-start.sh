@@ -570,6 +570,16 @@ if [[ "$cf_setup" =~ ^[Yy] ]]; then
                         fi
 
                         # ── DNS CNAME ──
+                        # Idempotent policy:
+                        #   1. POST the desired CNAME (happy path).
+                        #   2. On "already exists" → GET the record and compare .content.
+                        #      - If content matches current tunnel → skip (true no-op).
+                        #      - If content points at a DIFFERENT tunnel (e.g. stale
+                        #        from a prior tunnel that got deleted out-of-band),
+                        #        PATCH to update so re-runs self-heal silently.
+                        #      Without the drift-check, re-running the script after a
+                        #      tunnel delete+recreate would leave the CNAME pointed at
+                        #      a dead tunnel and the site would 1016 forever.
                         TUNNEL_CNAME="${CF_TUNNEL_ID}.cfargotunnel.com"
                         for HOSTNAME in "$DOMAIN" "${API_SUBDOMAIN}.${DOMAIN}"; do
                             echo "🔧 DNS CNAME: ${HOSTNAME} → ${TUNNEL_CNAME}" | tee -a "$LOG_FILE"
@@ -583,7 +593,32 @@ if [[ "$cf_setup" =~ ^[Yy] ]]; then
                             else
                                 DNS_ERR=$(echo "$DNS_RESP" | jq -r '.errors[0].message // "unknown"' 2>/dev/null)
                                 if echo "$DNS_ERR" | grep -qi "already exists"; then
-                                    log "  ${HOSTNAME} CNAME 已存在，跳過"
+                                    # Verify existing record points at current tunnel; PATCH if drifted.
+                                    EXISTING_REC=$(curl -sf --max-time 10 \
+                                        -H "Authorization: Bearer ${CF_TOKEN}" \
+                                        "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=CNAME&name=${HOSTNAME}" \
+                                        2>/dev/null || echo '{"result":[]}')
+                                    EXISTING_ID=$(echo "$EXISTING_REC" | jq -r '.result[0].id // empty')
+                                    EXISTING_CONTENT=$(echo "$EXISTING_REC" | jq -r '.result[0].content // empty')
+                                    if [ -z "$EXISTING_ID" ]; then
+                                        warn "  ${HOSTNAME} CNAME 已存在但無法查詢內容，保守跳過。"
+                                    elif [ "$EXISTING_CONTENT" = "$TUNNEL_CNAME" ]; then
+                                        log "  ${HOSTNAME} CNAME 已存在且指向當前 tunnel，跳過"
+                                    else
+                                        echo "   偵測到 CNAME 漂移：目前指向 ${EXISTING_CONTENT}，更新為 ${TUNNEL_CNAME}..." | tee -a "$LOG_FILE"
+                                        PATCH_RESP=$(curl -sf --max-time 10 -X PATCH \
+                                            -H "Authorization: Bearer ${CF_TOKEN}" \
+                                            -H "Content-Type: application/json" \
+                                            -d "{\"type\":\"CNAME\",\"name\":\"${HOSTNAME}\",\"content\":\"${TUNNEL_CNAME}\",\"proxied\":true}" \
+                                            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${EXISTING_ID}" \
+                                            2>/dev/null || echo '{"success":false}')
+                                        if echo "$PATCH_RESP" | jq -e '.success' >/dev/null 2>&1; then
+                                            log "  ${HOSTNAME} CNAME 已更新至當前 tunnel"
+                                        else
+                                            PATCH_ERR=$(echo "$PATCH_RESP" | jq -r '.errors[0].message // "unknown"' 2>/dev/null)
+                                            warn "  ${HOSTNAME} CNAME 更新失敗: ${PATCH_ERR}"
+                                        fi
+                                    fi
                                 else
                                     warn "  ${HOSTNAME} CNAME 建立失敗: ${DNS_ERR}"
                                 fi

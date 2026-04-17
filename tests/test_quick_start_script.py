@@ -546,3 +546,338 @@ def test_cf_nameservers_graceful_fallback_when_empty():
         assert "dash.cloudflare.com" in r.stdout
     finally:
         os.unlink(scratch)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# L9 — End-to-end idempotency contract
+# ──────────────────────────────────────────────────────────────────────
+# Contract the script guarantees across re-runs:
+#   (1) .env already present           → skip regeneration (no overwrite).
+#   (2) Tunnel by TUNNEL_NAME exists   → reuse its ID + token, never
+#       create a second tunnel sharing the name (CF load-balances across
+#       tunnels by ID, so a duplicate name with a new ID leaks tunnel
+#       slots + confuses the ingress config).
+#   (3) Ingress configured previously  → PUT with identical body is a
+#       replace-style no-op (by CF API design), so the script can re-run
+#       Step 4 after a Ctrl-C without producing drift.
+#   (4) DNS CNAME already present:
+#       (a) content matches current tunnel → skip quietly.
+#       (b) content points at a DIFFERENT tunnel (e.g. the previous tunnel
+#           was deleted out-of-band and a fresh one got a new ID) → PATCH
+#           in place so the script self-heals without operator intervention.
+#           Without this drift-repair the site would 1016 forever.
+#   (5) cloudflared already installed  → skip .deb download.
+#   (6) cloudflared already running (nohup) → skip relaunch (PID-file guard,
+#       covered by test_nohup_branch_is_idempotent above).
+# These tests pin all six invariants at the source level, plus one
+# behavioral test that drives the CNAME drift-repair path end-to-end
+# against a mock curl+jq shim.
+
+
+def test_idempotency_env_skip_source_guard():
+    """Re-running with an existing .env must skip regeneration, not overwrite."""
+    content = SCRIPT.read_text()
+    # The exact guard + message the script emits on re-run.
+    assert 'if [ -f ".env" ]; then' in content
+    assert ".env 已存在，跳過生成" in content
+    # Negative guard: the interactive regeneration branch must be gated inside
+    # an `else` under the `.env exists` check — i.e. the file is only created
+    # when missing. Catch regressions where someone moves `cp .env.example .env`
+    # above the guard.
+    idx_guard = content.index('if [ -f ".env" ]; then')
+    idx_cp_after_guard = content.index("cp .env.example .env", idx_guard)
+    # All cp-to-.env lines must live AFTER the guard (inside elif / else).
+    cp_count_total = content.count("cp .env.example .env")
+    cp_count_before_guard = content[:idx_guard].count("cp .env.example .env")
+    assert cp_count_before_guard == 0, (
+        ".env must not be copied before the existence guard — that would "
+        "clobber a user's customized .env on every re-run"
+    )
+    # Sanity: at least one cp happens (first-run path).
+    assert cp_count_total >= 1
+    assert idx_cp_after_guard > idx_guard
+
+
+def test_idempotency_tunnel_reuse_source_guard():
+    """Tunnel reuse must query by name + is_deleted=false and skip re-create."""
+    content = SCRIPT.read_text()
+    # The API query that powers reuse — if this regresses to
+    # /tunnels?name=X (without is_deleted) then a soft-deleted tunnel
+    # with the same name would be reused by mistake.
+    assert "tunnels?name=${TUNNEL_NAME}&is_deleted=false" in content, (
+        "tunnel-exists probe must include is_deleted=false so we don't "
+        "reuse a soft-deleted tunnel"
+    )
+    # Reuse path must (a) extract the existing id, (b) fetch token for it,
+    # (c) announce reuse to the user.
+    assert 'CF_TUNNEL_ID=$(echo "$EXISTING" | jq -r \'.result[0].id // empty\')' in content
+    assert "Tunnel 已存在" in content
+    # Reuse path must fetch token via .../tunnels/${CF_TUNNEL_ID}/token,
+    # not skip the token step (which would leave CF_TUNNEL_TOKEN empty
+    # and break the downstream ingress/connector).
+    assert "/tunnels/${CF_TUNNEL_ID}/token" in content
+    # And there must NOT be two separate `POST .../tunnels` calls — only one,
+    # inside the "not-found" branch. A regression adding a second POST would
+    # bypass the reuse check entirely.
+    tunnel_post_count = content.count("-X POST")
+    # We allow multiple POSTs total (CNAME, tunnel, etc) but the tunnel-create
+    # POST is specifically identified by its URL:
+    tunnel_create_posts = content.count(
+        'accounts/${CF_ACCOUNT_ID}/tunnels"'
+    )
+    # The one tunnel POST is the `curl ... -X POST ... "...accounts/${CF_ACCOUNT_ID}/tunnels"`.
+    # A regression duplicating this URL would reflect a tunnel being created twice.
+    assert tunnel_create_posts == 1, (
+        f"exactly one POST to .../accounts/{{id}}/tunnels expected (create-if-missing); "
+        f"found {tunnel_create_posts}"
+    )
+
+
+def test_idempotency_ingress_uses_put_not_post():
+    """Ingress must use PUT (replace-style) so a second run is a no-op on
+    unchanged config. POST would create duplicate config revisions.
+    """
+    content = SCRIPT.read_text()
+    # Locate the ingress API call and verify it's a PUT.
+    ingress_block_start = content.index("設定 Tunnel ingress")
+    ingress_block_end = content.index("DNS CNAME", ingress_block_start)
+    ingress_block = content[ingress_block_start:ingress_block_end]
+    assert "-X PUT" in ingress_block, (
+        "ingress config must be written with PUT so re-runs don't create "
+        "duplicate revisions"
+    )
+    assert "/tunnels/${CF_TUNNEL_ID}/configurations" in ingress_block
+
+
+def test_idempotency_cname_already_exists_branch_source_guard():
+    """CNAME 'already exists' branch must exist + verify content + PATCH on drift.
+
+    Three sub-behaviors guarded here:
+      a) Detect 'already exists' error from CF API.
+      b) GET existing record by (type=CNAME, name=HOSTNAME) to compare content.
+      c) PATCH if drift detected; log skip if content matches.
+
+    Without (b) + (c) the script silently succeeds on a stale CNAME that
+    points at a deleted tunnel → user sees 1016 forever + has to edit DNS
+    manually. That's the worst-case for a "just re-run it" escape hatch.
+    """
+    content = SCRIPT.read_text()
+    # Locate the CNAME loop body.
+    cname_start = content.index("DNS CNAME:")
+    cname_end = content.index("安裝 cloudflared", cname_start)
+    cname_block = content[cname_start:cname_end]
+
+    # (a) already-exists detection
+    assert 'grep -qi "already exists"' in cname_block, (
+        "must detect 'already exists' error message from CF API"
+    )
+    # (b) GET existing record to compare content
+    assert "dns_records?type=CNAME&name=${HOSTNAME}" in cname_block, (
+        "on 'already exists', must GET the existing record to verify "
+        "content (drift-repair)"
+    )
+    assert "EXISTING_CONTENT=" in cname_block, (
+        "must capture existing record's content for comparison"
+    )
+    # (c) PATCH on drift; skip if match
+    assert "-X PATCH" in cname_block, (
+        "must PATCH the existing record if content drifted from current tunnel"
+    )
+    assert "CNAME 已存在且指向當前 tunnel，跳過" in cname_block, (
+        "must log explicit skip when existing CNAME already points at current tunnel"
+    )
+    assert "偵測到 CNAME 漂移" in cname_block, (
+        "must log the drift detection before PATCH — diagnostic breadcrumb"
+    )
+
+
+def test_idempotency_cloudflared_install_skipped_if_present():
+    """cloudflared .deb install path must be gated by `! command -v cloudflared`."""
+    content = SCRIPT.read_text()
+    assert "if ! command -v cloudflared" in content, (
+        "cloudflared install must be gated — a second run with cloudflared "
+        "already on PATH must not re-download + re-dpkg"
+    )
+    assert "cloudflared 已安裝" in content, (
+        "must announce 'already installed' in the else branch of the install guard"
+    )
+
+
+def test_idempotency_cname_drift_repair_behavioral(tmp_path):
+    """End-to-end behavioral test of the CNAME drift-repair path.
+
+    We extract the CNAME loop and drive it with mocked `curl` + `jq` so we
+    can assert the exact API calls the script makes. Three scenarios:
+
+      1. First-run happy path: POST succeeds → log "CNAME 已建立".
+      2. Already-exists + content matches: POST fails with 'already exists',
+         GET returns matching content → log "已存在且指向當前 tunnel，跳過".
+         Must NOT issue a PATCH.
+      3. Drift: POST fails with 'already exists', GET returns DIFFERENT
+         content → PATCH is issued → log "CNAME 已更新".
+         The drift message "偵測到 CNAME 漂移" must fire.
+
+    This guards the sub-behavior that's hardest to catch by code reading:
+    the drift scenario is silent unless you mock the API and trace the
+    exact sequence of curl verbs.
+    """
+    src = SCRIPT.read_text()
+    # Extract just the inner `for HOSTNAME in ...; do ... done` block — we
+    # keep it intact so the test breaks if the block structure regresses.
+    start = src.index("TUNNEL_CNAME=\"${CF_TUNNEL_ID}.cfargotunnel.com\"")
+    end = src.index("# ── 安裝 cloudflared ──", start)
+    cname_block = src[start:end]
+
+    # Harness: stub curl so we can return canned responses for POST/GET/PATCH,
+    # and log every invocation so the test can assert call order.
+    def make_harness(scenario: str) -> str:
+        return textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -uo pipefail
+            # ---- stubs for log/warn/err + colors the block references ----
+            LOG_FILE=$(mktemp)
+            CYAN=""; BOLD=""; NC=""; YELLOW=""
+            log()  {{ echo "LOG $*"; }}
+            warn() {{ echo "WARN $*"; }}
+            err()  {{ echo "ERR $*"; }}
+
+            # ---- vars the block reads ----
+            CF_TUNNEL_ID="new-tunnel-id"
+            CF_ZONE_ID="zone123"
+            CF_TOKEN="fake-token"
+            DOMAIN="example.com"
+            API_SUBDOMAIN="api"
+
+            # ---- mock curl: behavior driven by SCENARIO env + URL/method ----
+            # Method detection: we look for -X PATCH / -X POST in argv; default GET.
+            # URL is always the last arg.
+            SCENARIO="{scenario}"
+            CURL_CALLS=/tmp/curl-calls-$$.log
+            : > "$CURL_CALLS"
+
+            curl() {{
+                local method="GET"
+                local url=""
+                local args=( "$@" )
+                local i=0
+                while [ $i -lt ${{#args[@]}} ]; do
+                    case "${{args[$i]}}" in
+                        -X)  i=$((i+1)); method="${{args[$i]}}" ;;
+                        http*) url="${{args[$i]}}" ;;
+                    esac
+                    i=$((i+1))
+                done
+                echo "${{method}} ${{url}}" >> "$CURL_CALLS"
+
+                case "$SCENARIO" in
+                    happy)
+                        # First-run: POST succeeds.
+                        if [ "$method" = "POST" ]; then
+                            echo '{{"success":true,"result":{{"id":"rec-new"}}}}'
+                        fi
+                        ;;
+                    already_match)
+                        if [ "$method" = "POST" ]; then
+                            echo '{{"success":false,"errors":[{{"message":"CNAME record with these exact values already exists"}}]}}'
+                        elif [ "$method" = "GET" ]; then
+                            # Matches current tunnel
+                            echo '{{"result":[{{"id":"rec-existing","content":"new-tunnel-id.cfargotunnel.com"}}]}}'
+                        fi
+                        ;;
+                    drift)
+                        if [ "$method" = "POST" ]; then
+                            echo '{{"success":false,"errors":[{{"message":"A record with that hostname already exists"}}]}}'
+                        elif [ "$method" = "GET" ]; then
+                            # Drifted: points at OLD tunnel
+                            echo '{{"result":[{{"id":"rec-existing","content":"old-tunnel-id.cfargotunnel.com"}}]}}'
+                        elif [ "$method" = "PATCH" ]; then
+                            echo '{{"success":true,"result":{{"id":"rec-existing"}}}}'
+                        fi
+                        ;;
+                esac
+                return 0
+            }}
+            export -f curl
+            # Expose call log path to the parent so we can grep it.
+            echo "CURL_CALLS=$CURL_CALLS"
+
+            # ---- the extracted block under test ----
+            {block}
+
+            echo "---END---"
+            """
+        ).format(scenario=scenario, block=cname_block)
+
+    def run(scenario: str):
+        script_path = tmp_path / f"run_{scenario}.sh"
+        script_path.write_text(make_harness(scenario))
+        r = subprocess.run(
+            ["bash", str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # Find the CURL_CALLS log path from stdout.
+        calls_line = next(
+            (ln for ln in r.stdout.splitlines() if ln.startswith("CURL_CALLS=")),
+            None,
+        )
+        assert calls_line, f"harness didn't emit CURL_CALLS path:\n{r.stdout}"
+        call_log = Path(calls_line.split("=", 1)[1]).read_text()
+        return r, call_log
+
+    # Scenario 1 — happy path
+    r1, calls1 = run("happy")
+    assert r1.returncode == 0, f"happy path failed: {r1.stderr}"
+    assert "CNAME 已建立" in r1.stdout, (
+        f"first-run must log 'CNAME 已建立', got:\n{r1.stdout}"
+    )
+    # Only POSTs (one per hostname), no GET / PATCH on happy path.
+    assert calls1.count("POST") == 2
+    assert calls1.count("GET") == 0
+    assert calls1.count("PATCH") == 0
+
+    # Scenario 2 — already exists + content matches current tunnel
+    r2, calls2 = run("already_match")
+    assert r2.returncode == 0, f"already_match failed: {r2.stderr}"
+    assert "已存在且指向當前 tunnel，跳過" in r2.stdout, (
+        f"matching-content path must log idempotent skip, got:\n{r2.stdout}"
+    )
+    # Critically: must NOT PATCH when content matches.
+    assert calls2.count("PATCH") == 0, (
+        f"PATCH must not fire when existing CNAME matches current tunnel; "
+        f"calls:\n{calls2}"
+    )
+    # POST (fails) + GET (verify) for each of 2 hostnames = 2 POSTs + 2 GETs.
+    assert calls2.count("POST") == 2
+    assert calls2.count("GET") == 2
+
+    # Scenario 3 — drift: existing content points at OLD tunnel
+    r3, calls3 = run("drift")
+    assert r3.returncode == 0, f"drift failed: {r3.stderr}"
+    assert "偵測到 CNAME 漂移" in r3.stdout, (
+        f"drift detection message must fire, got:\n{r3.stdout}"
+    )
+    assert "CNAME 已更新至當前 tunnel" in r3.stdout, (
+        f"drift path must confirm PATCH succeeded, got:\n{r3.stdout}"
+    )
+    # PATCH must fire once per drifted hostname (2 total).
+    assert calls3.count("PATCH") == 2, (
+        f"PATCH must fire on drift; calls:\n{calls3}"
+    )
+    # Sequence: POST (fails), GET (detects drift), PATCH (repairs) per host.
+    assert calls3.count("POST") == 2
+    assert calls3.count("GET") == 2
+
+
+def test_idempotency_full_rerun_announces_support_in_error_copy():
+    """The error-recovery copy must tell the user 'just re-run the script'
+    works — otherwise users assume a failed run has corrupted state and
+    manually rm things they shouldn't.
+    """
+    content = SCRIPT.read_text()
+    assert "支援冪等" in content, (
+        "the error-path cleanup banner must mention idempotency so users "
+        "know a clean re-run is safe (it doesn't corrupt state)"
+    )
