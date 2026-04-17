@@ -158,6 +158,16 @@ class TestDetectEcosystem:
         (tmp_path / "package.json").write_text('{"name":"x"}')
         assert detect_ecosystem(tmp_path) == "npm"
 
+    def test_maven_pom(self, tmp_path: Path):
+        (tmp_path / "pom.xml").write_text(
+            '<?xml version="1.0"?>\n<project/>\n'
+        )
+        assert detect_ecosystem(tmp_path) == "maven"
+
+    def test_maven_gradle_kts(self, tmp_path: Path):
+        (tmp_path / "build.gradle.kts").write_text('plugins { java }\n')
+        assert detect_ecosystem(tmp_path) == "maven"
+
     def test_nothing_returns_none(self, tmp_path: Path):
         assert detect_ecosystem(tmp_path) is None
 
@@ -165,6 +175,64 @@ class TestDetectEcosystem:
         (tmp_path / "Cargo.toml").write_text("[package]\nname=\"f\"\n")
         (tmp_path / "package.json").write_text('{"name":"x"}')
         assert detect_ecosystem(tmp_path) == "cargo"
+
+    def test_precedence_npm_over_maven(self, tmp_path: Path):
+        # Spring Boot project that also has a static frontend bundled
+        # under package.json — npm wins since it's listed first.
+        (tmp_path / "package.json").write_text('{"name":"x"}')
+        (tmp_path / "pom.xml").write_text('<?xml version="1.0"?><project/>')
+        assert detect_ecosystem(tmp_path) == "npm"
+
+
+class TestMavenParser:
+    def test_pom_xml_direct_deps(self, tmp_path: Path):
+        from backend.software_compliance.licenses import _parse_pom_xml
+        pom = tmp_path / "pom.xml"
+        pom.write_text(
+            '<?xml version="1.0"?>\n'
+            '<project>\n'
+            '  <dependencies>\n'
+            '    <dependency>\n'
+            '      <groupId>org.springframework.boot</groupId>\n'
+            '      <artifactId>spring-boot-starter-web</artifactId>\n'
+            '      <version>3.2.5</version>\n'
+            '    </dependency>\n'
+            '    <dependency>\n'
+            '      <groupId>org.junit.jupiter</groupId>\n'
+            '      <artifactId>junit-jupiter</artifactId>\n'
+            '      <version>5.10.2</version>\n'
+            '      <scope>test</scope>\n'
+            '    </dependency>\n'
+            '  </dependencies>\n'
+            '</project>\n'
+        )
+        pkgs = _parse_pom_xml(pom)
+        assert len(pkgs) == 2
+        coords = {(p.name, p.version) for p in pkgs}
+        assert ("org.springframework.boot:spring-boot-starter-web", "3.2.5") in coords
+        assert ("org.junit.jupiter:junit-jupiter", "5.10.2") in coords
+        assert all(p.license == "UNKNOWN" for p in pkgs)
+        assert all(p.ecosystem == "maven" for p in pkgs)
+
+    def test_build_gradle_kts_direct_deps(self, tmp_path: Path):
+        from backend.software_compliance.licenses import _parse_gradle_build
+        build = tmp_path / "build.gradle.kts"
+        build.write_text(
+            'plugins { java }\n'
+            'dependencies {\n'
+            '    implementation("org.springframework.boot:spring-boot-starter-web:3.2.5")\n'
+            '    runtimeOnly("org.postgresql:postgresql:42.7.3")\n'
+            '    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")\n'
+            '}\n'
+        )
+        pkgs = _parse_gradle_build(build)
+        assert len(pkgs) == 3
+        coords = {(p.name, p.version) for p in pkgs}
+        assert (
+            "org.springframework.boot:spring-boot-starter-web", "3.2.5"
+        ) in coords
+        assert ("org.postgresql:postgresql", "42.7.3") in coords
+        assert all(p.ecosystem == "maven" for p in pkgs)
 
 
 class TestCargoLockParser:

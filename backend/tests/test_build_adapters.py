@@ -127,9 +127,11 @@ def fake_which_absent():
 
 class TestRegistry:
 
-    def test_list_targets_returns_all_twelve(self):
+    def test_list_targets_returns_all_fourteen(self):
+        # X9 #305 bumped the skill-hook set from 4 to 6 by adding
+        # MavenAdapter + GradleAdapter for SKILL-SPRING-BOOT.
         targets = ba.list_targets()
-        assert len(targets) == 12, f"expected 12 targets, got {len(targets)}"
+        assert len(targets) == 14, f"expected 14 targets, got {len(targets)}"
         for t in ba.NATIVE_TARGETS + ba.SKILL_HOOK_TARGETS:
             assert t in targets, f"target {t!r} missing from registry"
 
@@ -137,7 +139,7 @@ class TestRegistry:
         assert len(ba.NATIVE_TARGETS) == 8
 
     def test_skill_hook_targets_count(self):
-        assert len(ba.SKILL_HOOK_TARGETS) == 4
+        assert len(ba.SKILL_HOOK_TARGETS) == 6
 
     def test_native_and_skill_hook_disjoint(self):
         assert not set(ba.NATIVE_TARGETS) & set(ba.SKILL_HOOK_TARGETS)
