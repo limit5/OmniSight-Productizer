@@ -1408,7 +1408,7 @@ function ServiceHealthStep({
   )
 }
 
-// ─── L6 — Step 5 (smoke test subset: compile-flash host_native DAG) ──
+// ─── L6 — Step 5 (smoke test subset: compile-flash + cross-compile DAGs) ──
 
 function SmokeSubsetStep({
   alreadyGreen,
@@ -1425,7 +1425,11 @@ function SmokeSubsetStep({
     setBusy(true)
     setError(null)
     try {
-      const next = await bootstrapSmokeSubset()
+      // Wizard asks for "both" so the Step-5 pane can render a run
+      // summary per DAG shipped in ``scripts/prod_smoke_test.py``. The
+      // backend still validates+persists only (no cross-compile), so
+      // including DAG #2 does not blow the wizard's fast path.
+      const next = await bootstrapSmokeSubset("both")
       setResult(next)
       if (next.smoke_passed) {
         await onPassed()
@@ -1438,7 +1442,7 @@ function SmokeSubsetStep({
     }
   }, [onPassed])
 
-  const runSummary = result?.runs?.[0] ?? null
+  const runs = result?.runs ?? []
   const auditOk = result?.audit_chain?.ok === true
   const passed = result?.smoke_passed === true
 
@@ -1455,11 +1459,13 @@ function SmokeSubsetStep({
         </code>
       </div>
       <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-        Runs the <code>compile-flash host_native</code> DAG from{" "}
-        <code>scripts/prod_smoke_test.py</code> (~60s) and verifies the
-        audit-log hash chain. On green the fifth gate flips and finalize
-        unlocks; on red the run summary + first-bad audit id are surfaced
-        so the operator can jump back to the offending step.
+        Runs both DAGs from{" "}
+        <code>scripts/prod_smoke_test.py</code> —{" "}
+        <code>compile-flash host_native</code> and{" "}
+        <code>cross-compile aarch64</code> — and verifies the audit-log
+        hash chain. On all green the fifth gate flips and finalize
+        unlocks; on red the per-DAG run summary + first-bad audit id are
+        surfaced so the operator can jump back to the offending step.
       </p>
 
       {alreadyGreen && !result && (
@@ -1492,7 +1498,8 @@ function SmokeSubsetStep({
             data-testid="bootstrap-smoke-elapsed"
             className="font-mono text-[10px] text-[var(--muted-foreground)]"
           >
-            last run: {result.elapsed_ms}ms · subset={result.subset}
+            last run: {result.elapsed_ms}ms · subset={result.subset} ·{" "}
+            {runs.length} DAG{runs.length === 1 ? "" : "s"}
           </span>
         )}
       </div>
@@ -1501,6 +1508,7 @@ function SmokeSubsetStep({
         <div
           data-testid="bootstrap-smoke-result"
           data-passed={passed ? "true" : "false"}
+          data-run-count={runs.length}
           className="flex flex-col gap-2 p-3 rounded border border-[var(--border)] bg-[var(--muted)]/20"
         >
           <div
@@ -1523,71 +1531,108 @@ function SmokeSubsetStep({
             )}
           </div>
 
-          {runSummary && (
+          {runs.length > 0 && (
             <div
-              data-testid="bootstrap-smoke-run-summary"
-              data-run-ok={runSummary.ok ? "true" : "false"}
-              className="flex flex-col gap-1 font-mono text-[11px]"
+              data-testid="bootstrap-smoke-runs"
+              className="flex flex-col gap-2"
             >
-              <div>
-                <span className="text-[var(--muted-foreground)]">dag:</span>{" "}
-                <span>{runSummary.label}</span>
-              </div>
-              <div>
-                <span className="text-[var(--muted-foreground)]">run:</span>{" "}
-                <code>{runSummary.run_id ?? "—"}</code>
-                {" · "}
-                <span className="text-[var(--muted-foreground)]">plan:</span>{" "}
-                <code>{runSummary.plan_id ?? "—"}</code>
-                {" · "}
-                <span className="text-[var(--muted-foreground)]">status:</span>{" "}
-                <code>{runSummary.plan_status ?? "—"}</code>
-              </div>
-              <div>
-                <span className="text-[var(--muted-foreground)]">target:</span>{" "}
-                <code>{runSummary.target_platform ?? "—"}</code>
-                {" · "}
-                <span className="text-[var(--muted-foreground)]">t3:</span>{" "}
-                <code>{runSummary.t3_runner ?? "—"}</code>
-                {" · "}
-                <span className="text-[var(--muted-foreground)]">tasks:</span>{" "}
-                {runSummary.task_count}
-              </div>
-              {runSummary.validation_errors.length > 0 && (
-                <ul
-                  data-testid="bootstrap-smoke-errors"
-                  className="mt-1 list-disc pl-4 text-[var(--destructive)]"
+              {runs.map((run, idx) => (
+                <div
+                  key={run.dag_id || `run-${idx}`}
+                  data-testid="bootstrap-smoke-run-summary"
+                  data-run-key={run.key || `run-${idx}`}
+                  data-run-ok={run.ok ? "true" : "false"}
+                  className={`flex flex-col gap-1 p-2 rounded border font-mono text-[11px] ${
+                    run.ok
+                      ? "border-[var(--status-green)]/30 bg-[var(--status-green)]/5"
+                      : "border-[var(--destructive)]/40 bg-[var(--destructive)]/5"
+                  }`}
                 >
-                  {runSummary.validation_errors.map((e, i) => (
-                    <li key={i}>
-                      <code>{e.rule}</code>
-                      {e.task_id ? ` (${e.task_id})` : ""}: {e.message}
-                    </li>
-                  ))}
-                </ul>
-              )}
+                  <div className="flex items-center gap-2 font-semibold">
+                    {run.ok ? (
+                      <Check
+                        size={12}
+                        className="text-[var(--status-green)]"
+                      />
+                    ) : (
+                      <AlertCircle
+                        size={12}
+                        className="text-[var(--destructive)]"
+                      />
+                    )}
+                    <span>{run.label}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--muted-foreground)]">run:</span>{" "}
+                    <code>{run.run_id ?? "—"}</code>
+                    {" · "}
+                    <span className="text-[var(--muted-foreground)]">plan:</span>{" "}
+                    <code>{run.plan_id ?? "—"}</code>
+                    {" · "}
+                    <span className="text-[var(--muted-foreground)]">
+                      status:
+                    </span>{" "}
+                    <code>{run.plan_status ?? "—"}</code>
+                  </div>
+                  <div>
+                    <span className="text-[var(--muted-foreground)]">
+                      target:
+                    </span>{" "}
+                    <code>{run.target_platform ?? "—"}</code>
+                    {" · "}
+                    <span className="text-[var(--muted-foreground)]">t3:</span>{" "}
+                    <code>{run.t3_runner ?? "—"}</code>
+                    {" · "}
+                    <span className="text-[var(--muted-foreground)]">
+                      tasks:
+                    </span>{" "}
+                    {run.task_count}
+                  </div>
+                  {run.validation_errors.length > 0 && (
+                    <ul
+                      data-testid="bootstrap-smoke-errors"
+                      className="mt-1 list-disc pl-4 text-[var(--destructive)]"
+                    >
+                      {run.validation_errors.map((e, i) => (
+                        <li key={i}>
+                          <code>{e.rule}</code>
+                          {e.task_id ? ` (${e.task_id})` : ""}: {e.message}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
           <div
             data-testid="bootstrap-smoke-audit-summary"
             data-audit-ok={auditOk ? "true" : "false"}
-            className={`flex items-center gap-2 font-mono text-[11px] ${
+            data-tenant-count={result.audit_chain.tenant_count}
+            className={`flex flex-col gap-0.5 p-2 rounded border font-mono text-[11px] ${
               auditOk
-                ? "text-[var(--status-green)]"
-                : "text-[var(--destructive)]"
+                ? "border-[var(--status-green)]/30 bg-[var(--status-green)]/5 text-[var(--status-green)]"
+                : "border-[var(--destructive)]/40 bg-[var(--destructive)]/5 text-[var(--destructive)]"
             }`}
           >
-            {auditOk ? <Check size={12} /> : <AlertCircle size={12} />}
-            <span>
-              audit hash chain: {auditOk ? "PASS" : "FAIL"}
-              {result.audit_chain.detail
-                ? ` · ${result.audit_chain.detail}`
-                : ""}
+            <div className="flex items-center gap-2 font-semibold">
+              {auditOk ? <Check size={12} /> : <AlertCircle size={12} />}
+              <span>
+                audit_log hash chain: {auditOk ? "PASS" : "FAIL"} ·{" "}
+                {result.audit_chain.tenant_count} tenant
+                {result.audit_chain.tenant_count === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="pl-5 text-[var(--muted-foreground)]">
+              {result.audit_chain.detail || "—"}
               {result.audit_chain.first_bad_id != null
                 ? ` · first_bad_id=${result.audit_chain.first_bad_id}`
                 : ""}
-            </span>
+              {result.audit_chain.bad_tenants.length > 0
+                ? ` · bad_tenants=${result.audit_chain.bad_tenants.join(",")}`
+                : ""}
+            </div>
           </div>
         </div>
       )}

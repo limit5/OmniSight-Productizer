@@ -1274,7 +1274,7 @@ Legend:
 
 ### L6. Step 5 — Smoke Test + 完成
 - [x] 跑 `scripts/prod_smoke_test.py` 子集（選 compile-flash host_native DAG，~60s） *(done: `--subset dag1` CLI flag on the smoke script + `POST /api/v1/bootstrap/smoke-subset` endpoint runs DAG_1 in-process, verifies audit hash chain, and flips `smoke_passed` + records `STEP_SMOKE` on green; wizard Step 5 UI wired via `SmokeSubsetStep`)*
-- [ ] 顯示 audit_log hash chain 驗證結果、兩個 DAG 的 run summary
+- [x] 顯示 audit_log hash chain 驗證結果、兩個 DAG 的 run summary *(done: wizard now POSTs `subset=both` so `/bootstrap/smoke-subset` runs DAG_1 + DAG_2 and returns per-DAG `SmokeRunSummary`s; Step 5 pane renders each DAG as its own pass/fail card (label, run_id, plan_id, plan_status, target, t3 runner, task count, validation errors) and a dedicated audit-chain panel shows PASS/FAIL + tenant_count + detail + first_bad_id + bad_tenants)*
 - [ ] 全綠 → `POST /api/v1/bootstrap/finalize` → 寫 `bootstrap_finalized=true` → 導向 dashboard
 - [ ] 失敗 → 顯示錯誤 + 允許回到前面 step 修正
 - 預估：**0.5 day**

@@ -168,12 +168,22 @@ def _check_cycles(dag: DAG, errors: list[ValidationError]) -> None:
 def _t3_resolves_local(target_profile: dict | None) -> bool:
     """Ask the T3 resolver whether this plan's target would land in
     the LOCAL runner. Import is local so dag_validator doesn't pull
-    the container / metrics module graph on pure-schema tests."""
+    the container / metrics module graph on pure-schema tests.
+
+    Resolution itself may lazy-import optional transport modules
+    (paramiko for SSH, etc.) that aren't shipped by every install —
+    if resolution raises for any reason, treat it as "not LOCAL" so
+    the tier-capability check falls back to the strict t3 rules
+    rather than bombing the whole validate() call.
+    """
     try:
         from backend.t3_resolver import resolve_from_profile, T3RunnerKind
     except Exception:
         return False
-    res = resolve_from_profile(target_profile)
+    try:
+        res = resolve_from_profile(target_profile)
+    except Exception:
+        return False
     return res.kind == T3RunnerKind.LOCAL
 
 

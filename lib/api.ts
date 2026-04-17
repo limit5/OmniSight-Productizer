@@ -2723,9 +2723,13 @@ export async function bootstrapParallelHealthCheck(
   )
 }
 
-// ─── L6 — Step 5 (smoke test subset — compile-flash host_native DAG) ──
+// ─── L6 — Step 5 (smoke test subset — compile-flash host_native + aarch64 DAGs) ──
+
+export type BootstrapSmokeSubsetKey = "dag1" | "dag2" | "both"
 
 export interface BootstrapSmokeSubsetRunSummary {
+  /** Catalogue key ("dag1" or "dag2") — empty string on legacy backends. */
+  key: string
   label: string
   dag_id: string
   ok: boolean
@@ -2746,6 +2750,10 @@ export interface BootstrapSmokeAuditSummary {
   ok: boolean
   first_bad_id: number | null
   detail: string
+  /** Total tenants whose audit chain was verified. */
+  tenant_count: number
+  /** Tenant ids whose chain verification failed (empty when ok=true). */
+  bad_tenants: string[]
 }
 
 export interface BootstrapSmokeSubsetResponse {
@@ -2757,15 +2765,19 @@ export interface BootstrapSmokeSubsetResponse {
 }
 
 /**
- * Run the wizard's L6 Step-5 smoke subset — the compile-flash host_native
- * DAG from ``scripts/prod_smoke_test.py`` (DAG #1) plus a full audit
- * hash-chain verification. Returns the combined pass/fail result so the
- * wizard can light the fifth gate without parsing error bodies.
+ * Run the wizard's L6 Step-5 smoke subset — runs the compile-flash
+ * host_native DAG and/or the aarch64 cross-compile DAG from
+ * ``scripts/prod_smoke_test.py`` plus a full audit hash-chain
+ * verification. ``subset`` defaults to ``both`` so the wizard can
+ * display run summaries for both DAGs; external callers can pin to
+ * ``dag1`` to keep the fast ~60s path.
  */
-export async function bootstrapSmokeSubset(): Promise<BootstrapSmokeSubsetResponse> {
+export async function bootstrapSmokeSubset(
+  subset: BootstrapSmokeSubsetKey = "both",
+): Promise<BootstrapSmokeSubsetResponse> {
   return request<BootstrapSmokeSubsetResponse>("/bootstrap/smoke-subset", {
     method: "POST",
-    body: JSON.stringify({ subset: "dag1" }),
+    body: JSON.stringify({ subset }),
   })
 }
 

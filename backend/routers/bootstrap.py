@@ -1779,26 +1779,38 @@ async def bootstrap_parallel_health_check(
 #     wizard-only.
 
 _SMOKE_DAG_ID = "smoke-compile-flash-host-native"
+_SMOKE_DAG_ID_AARCH64 = "smoke-cross-compile-aarch64"
 
 
 class SmokeSubsetRequest(BaseModel):
-    """Body for ``POST /bootstrap/smoke-subset`` — no tunables required.
+    """Body for ``POST /bootstrap/smoke-subset``.
 
-    ``subset`` is fixed to ``dag1`` today; the field is kept so the
-    wizard can in the future opt into ``both`` if the operator decides
-    to pay the ~3-minute aarch64 cost on first install.
+    ``subset`` selects which DAG(s) to invoke:
+      * ``dag1`` (default) — the compile-flash host_native DAG, ~60s;
+        matches what L6 Step 5 locked in for the fast-path wizard run.
+      * ``dag2`` — the aarch64 cross-compile DAG, validation + plan
+        persistence only (no physical cross-compile runs in-process).
+      * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5 UI
+        can render a run summary for each DAG shipped in
+        ``scripts/prod_smoke_test.py``.
+
+    The wizard drives ``subset="both"`` so the operator sees the
+    "兩個 DAG 的 run summary" (Step 5 TODO); external callers / CLI
+    users can still pin to ``dag1`` for the 60-second fast path.
     """
 
-    subset: Literal["dag1"] = Field(
+    subset: Literal["dag1", "dag2", "both"] = Field(
         default="dag1",
         description=(
-            "Which DAG subset to run — only ``dag1`` (compile-flash "
-            "host_native) is permitted during bootstrap."
+            "Which DAG subset to run — ``dag1`` (compile-flash "
+            "host_native, ~60s fast path), ``dag2`` (aarch64 "
+            "cross-compile), or ``both`` (wizard default on Step 5)."
         ),
     )
 
 
 class SmokeRunSummary(BaseModel):
+    key: str = ""
     label: str
     dag_id: str
     ok: bool
@@ -1815,6 +1827,8 @@ class AuditChainSummary(BaseModel):
     ok: bool
     first_bad_id: int | None = None
     detail: str = ""
+    tenant_count: int = 0
+    bad_tenants: list[str] = Field(default_factory=list)
 
 
 class SmokeSubsetResponse(BaseModel):
@@ -1872,17 +1886,85 @@ def _dag1_payload() -> dict:
     }
 
 
-async def _run_dag1_smoke() -> SmokeRunSummary:
-    """Validate + open a workflow run for the compile-flash host_native DAG.
+def _dag2_payload() -> dict:
+    """Return the cross-compile aarch64 DAG payload verbatim.
 
-    The DAG is validated against the same 7-rule semantic pass the
-    operator-UI uses, then a workflow_run is opened through
-    ``workflow.start`` so the invocation leaves the same artefact trail
-    (``dag_plans`` + ``workflow_runs``) as a prod smoke. We consider the
-    smoke ``ok`` when validation passes AND ``workflow.start`` returns a
-    plan in an executing/validated state — the downstream agent layer
-    still owns actually executing the tasks, but the wizard only needs
-    to prove the install can accept and validate a real plan.
+    Mirrors ``DAG_2_CROSS_COMPILE_AARCH64`` in ``scripts/prod_smoke_test.py``.
+    During bootstrap we validate + persist the plan only — the actual
+    aarch64 cross-compile toolchain is not invoked in-process, so the
+    DAG completes the ``workflow.start`` handshake almost instantly on
+    any host regardless of whether ``aarch64-linux-gnu-gcc`` is present.
+    """
+    return {
+        "dag": {
+            "schema_version": 1,
+            "dag_id": _SMOKE_DAG_ID_AARCH64,
+            "tasks": [
+                {
+                    "task_id": "cross-compile",
+                    "description": (
+                        "Cross-compile firmware for AArch64 target"
+                    ),
+                    "required_tier": "t1",
+                    "toolchain": "cmake",
+                    "inputs": [],
+                    "expected_output": "build/firmware-aarch64.bin",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "package",
+                    "description": (
+                        "Package cross-compiled artifact for deployment"
+                    ),
+                    "required_tier": "t1",
+                    "toolchain": "make",
+                    "inputs": ["build/firmware-aarch64.bin"],
+                    "expected_output": "dist/firmware-aarch64.tar.gz",
+                    "depends_on": ["cross-compile"],
+                },
+            ],
+        },
+        "target_platform": "aarch64",
+        "metadata": {"source": "bootstrap:smoke-subset", "test_run": True},
+    }
+
+
+# Single source of truth for the bootstrap smoke DAG catalogue. Matches
+# the (key, label, payload) tuple shape used by
+# ``scripts/prod_smoke_test.py`` so the two surfaces cannot drift.
+def _smoke_dag_catalogue() -> list[tuple[str, str, str, dict]]:
+    return [
+        (
+            "dag1",
+            "DAG #1: compile-flash (host_native)",
+            _SMOKE_DAG_ID,
+            _dag1_payload(),
+        ),
+        (
+            "dag2",
+            "DAG #2: cross-compile (aarch64)",
+            _SMOKE_DAG_ID_AARCH64,
+            _dag2_payload(),
+        ),
+    ]
+
+
+def _select_smoke_dags(subset: str) -> list[tuple[str, str, str, dict]]:
+    """Filter the catalogue by subset keyword (mirrors the CLI helper)."""
+    catalogue = _smoke_dag_catalogue()
+    if subset == "both":
+        return catalogue
+    return [entry for entry in catalogue if entry[0] == subset]
+
+
+async def _run_smoke_dag(
+    key: str, label: str, dag_id: str, payload: dict,
+) -> SmokeRunSummary:
+    """Validate + open a workflow run for one smoke DAG payload.
+
+    Generic replacement for the old ``_run_dag1_smoke`` helper — the
+    shape is identical so the wizard's Step-5 pane can iterate over
+    ``runs[]`` without special-casing any individual DAG.
     """
     from backend.dag_schema import DAG
     from backend import dag_storage as _ds
@@ -1890,16 +1972,15 @@ async def _run_dag1_smoke() -> SmokeRunSummary:
     from backend import workflow as wf
     from backend.routers import dag as _dag_router
 
-    payload = _dag1_payload()
-    label = "DAG #1: compile-flash (host_native)"
     target_name = payload.get("target_platform") or "host_native"
 
     try:
         dag = DAG.model_validate(payload["dag"])
     except Exception as exc:
         return SmokeRunSummary(
+            key=key,
             label=label,
-            dag_id=_SMOKE_DAG_ID,
+            dag_id=dag_id,
             ok=False,
             validation_errors=[{
                 "rule": "schema",
@@ -1922,8 +2003,9 @@ async def _run_dag1_smoke() -> SmokeRunSummary:
 
     if not result.ok:
         return SmokeRunSummary(
+            key=key,
             label=label,
-            dag_id=_SMOKE_DAG_ID,
+            dag_id=dag_id,
             ok=False,
             validation_errors=[e.to_dict() for e in result.errors],
             plan_status="failed",
@@ -1946,8 +2028,9 @@ async def _run_dag1_smoke() -> SmokeRunSummary:
     except Exception as exc:
         logger.exception("bootstrap: smoke workflow.start failed")
         return SmokeRunSummary(
+            key=key,
             label=label,
-            dag_id=_SMOKE_DAG_ID,
+            dag_id=dag_id,
             ok=False,
             validation_errors=[{
                 "rule": "workflow_start",
@@ -1965,8 +2048,9 @@ async def _run_dag1_smoke() -> SmokeRunSummary:
     smoke_ok = bool(plan and plan_status in ("validated", "executing"))
 
     return SmokeRunSummary(
+        key=key,
         label=label,
-        dag_id=_SMOKE_DAG_ID,
+        dag_id=dag_id,
         ok=smoke_ok,
         validation_errors=(plan.errors() if plan and not smoke_ok else []),
         run_id=run.id,
@@ -1995,6 +2079,8 @@ async def _verify_audit_chain() -> AuditChainSummary:
             ok=False,
             first_bad_id=None,
             detail=f"verify_all_chains raised: {type(exc).__name__}: {exc}"[:300],
+            tenant_count=0,
+            bad_tenants=[],
         )
 
     first_bad: int | None = None
@@ -2010,22 +2096,31 @@ async def _verify_audit_chain() -> AuditChainSummary:
         if all_ok
         else f"broken chain in tenant(s): {', '.join(bad_tenants)}"
     )
-    return AuditChainSummary(ok=all_ok, first_bad_id=first_bad, detail=detail)
+    return AuditChainSummary(
+        ok=all_ok,
+        first_bad_id=first_bad,
+        detail=detail,
+        tenant_count=len(results),
+        bad_tenants=bad_tenants,
+    )
 
 
 @router.post("/smoke-subset", response_model=SmokeSubsetResponse)
 async def bootstrap_smoke_subset(
     req: SmokeSubsetRequest | None = None,
 ) -> SmokeSubsetResponse:
-    """Run the wizard's Step-5 smoke subset (compile-flash host_native).
+    """Run the wizard's Step-5 smoke subset (compile-flash host_native and/or
+    cross-compile aarch64).
 
     Sequence:
-      1. Validate + submit the compile-flash host_native DAG via
-         ``workflow.start`` — same artefact shape the prod-UI smoke uses.
+      1. Validate + submit each selected DAG via ``workflow.start`` —
+         same artefact shape the prod-UI smoke uses. ``subset=both``
+         yields one run summary per DAG so Step 5 can render both.
       2. Verify the audit hash chain for every tenant (catches
          pre-finalize tampering).
-      3. On both green, flip the ``smoke_passed`` bootstrap marker +
-         record ``STEP_SMOKE`` so the finalize gate can pass.
+      3. On every selected DAG green AND audit chain intact, flip the
+         ``smoke_passed`` bootstrap marker + record ``STEP_SMOKE`` so
+         the finalize gate can pass.
 
     Unauthenticated like every other wizard endpoint — the bootstrap-
     gate middleware keeps ``/bootstrap/*`` wizard-scoped until finalize.
@@ -2036,11 +2131,16 @@ async def bootstrap_smoke_subset(
     body = req or SmokeSubsetRequest()
     started = time.monotonic()
 
-    run_summary = await _run_dag1_smoke()
+    selected = _select_smoke_dags(body.subset)
+    run_summaries: list[SmokeRunSummary] = []
+    for key, label, dag_id, payload in selected:
+        run_summaries.append(await _run_smoke_dag(key, label, dag_id, payload))
+
     audit_summary = await _verify_audit_chain()
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
-    smoke_passed = bool(run_summary.ok and audit_summary.ok)
+    runs_ok = bool(run_summaries) and all(r.ok for r in run_summaries)
+    smoke_passed = bool(runs_ok and audit_summary.ok)
 
     if smoke_passed:
         try:
@@ -2055,9 +2155,25 @@ async def bootstrap_smoke_subset(
                 actor_user_id=None,
                 metadata={
                     "subset": body.subset,
-                    "run_id": run_summary.run_id,
-                    "plan_id": run_summary.plan_id,
-                    "dag_id": run_summary.dag_id,
+                    # Keep legacy single-run fields populated with the
+                    # first (primary) run so anything already querying
+                    # the marker keeps working.
+                    "run_id": run_summaries[0].run_id,
+                    "plan_id": run_summaries[0].plan_id,
+                    "dag_id": run_summaries[0].dag_id,
+                    "dag_runs": [
+                        {
+                            "key": r.key,
+                            "dag_id": r.dag_id,
+                            "run_id": r.run_id,
+                            "plan_id": r.plan_id,
+                            "plan_status": r.plan_status,
+                            "task_count": r.task_count,
+                            "target_platform": r.target_platform,
+                        }
+                        for r in run_summaries
+                    ],
+                    "audit_tenant_count": audit_summary.tenant_count,
                     "elapsed_ms": elapsed_ms,
                 },
             )
@@ -2067,10 +2183,11 @@ async def bootstrap_smoke_subset(
             )
 
     logger.info(
-        "bootstrap: smoke-subset subset=%s smoke_passed=%s run=%s plan=%s "
-        "plan_status=%s audit_ok=%s elapsed=%dms",
-        body.subset, smoke_passed, run_summary.run_id, run_summary.plan_id,
-        run_summary.plan_status, audit_summary.ok, elapsed_ms,
+        "bootstrap: smoke-subset subset=%s smoke_passed=%s runs=%s "
+        "audit_ok=%s audit_tenants=%d elapsed=%dms",
+        body.subset, smoke_passed,
+        [(r.dag_id, r.ok, r.plan_status) for r in run_summaries],
+        audit_summary.ok, audit_summary.tenant_count, elapsed_ms,
     )
 
     try:
@@ -2083,7 +2200,7 @@ async def bootstrap_smoke_subset(
                 "subset": body.subset,
                 "smoke_passed": smoke_passed,
                 "elapsed_ms": elapsed_ms,
-                "dag": run_summary.model_dump(),
+                "dag_runs": [r.model_dump() for r in run_summaries],
                 "audit_chain": audit_summary.model_dump(),
             },
             actor="wizard",
@@ -2095,7 +2212,7 @@ async def bootstrap_smoke_subset(
         smoke_passed=smoke_passed,
         subset=body.subset,
         elapsed_ms=elapsed_ms,
-        runs=[run_summary],
+        runs=run_summaries,
         audit_chain=audit_summary,
     )
 

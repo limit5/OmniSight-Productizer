@@ -1,14 +1,15 @@
 """L6 Step 5 — ``POST /api/v1/bootstrap/smoke-subset`` tests.
 
 Covers the wizard's Step-5 smoke runner: validates + submits the
-compile-flash host_native DAG (DAG #1 from
-``scripts/prod_smoke_test.py``) and verifies the audit-log hash chain.
-On green the smoke_passed gate flips and the fifth gate turns green so
-finalize becomes reachable.
+compile-flash host_native DAG (DAG #1) and/or the cross-compile aarch64
+DAG (DAG #2) from ``scripts/prod_smoke_test.py`` and verifies the
+audit-log hash chain. On green (every selected DAG ok + audit intact)
+the smoke_passed gate flips and the fifth gate turns green so finalize
+becomes reachable.
 
 Scenarios:
 
-  * happy path — DAG validates, workflow starts, audit chain intact →
+  * happy path — DAG #1 validates, workflow starts, audit chain intact →
     ``smoke_passed=True``, marker flipped, ``STEP_SMOKE`` recorded
   * audit chain broken → ``smoke_passed=False`` even when the DAG is
     perfect; marker + step row stay empty so finalize still refuses
@@ -17,6 +18,8 @@ Scenarios:
   * endpoint stays wizard-scoped (unauthenticated path lives under
     ``/bootstrap/*`` — bootstrap-gate exemption tested elsewhere)
   * audit row ``bootstrap.smoke_subset`` emitted on every call
+  * ``subset=both`` returns two run summaries (DAG #1 + DAG #2) so the
+    wizard can display the "兩個 DAG 的 run summary" step
 """
 
 from __future__ import annotations
@@ -92,6 +95,8 @@ async def test_smoke_subset_happy_path_flips_gate(
     assert run["plan_id"] is not None
     assert body["audit_chain"]["ok"] is True
     assert body["audit_chain"]["first_bad_id"] is None
+    assert body["audit_chain"]["tenant_count"] == 2
+    assert body["audit_chain"]["bad_tenants"] == []
 
     # Marker + bootstrap_state both reflect the successful smoke.
     assert _boot._read_marker().get("smoke_passed") is True
@@ -99,6 +104,9 @@ async def test_smoke_subset_happy_path_flips_gate(
     assert recorded is not None
     assert recorded["metadata"]["subset"] == "dag1"
     assert recorded["metadata"]["run_id"] == run["run_id"]
+    # Per-DAG summary trail preserved for post-finalize observability.
+    assert recorded["metadata"]["dag_runs"][0]["dag_id"] == run["dag_id"]
+    assert recorded["metadata"]["audit_tenant_count"] == 2
 
 
 # ── audit chain broken ───────────────────────────────────────────────
@@ -199,19 +207,91 @@ async def test_smoke_subset_accepts_empty_body(
     assert body["smoke_passed"] is True
 
 
-# ── subset other than dag1 rejected ──────────────────────────────────
+# ── subset=both runs DAG #1 + DAG #2 ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_smoke_subset_both_runs_two_dags(
+    client, monkeypatch, _marker_tmp,
+):
+    """``subset=both`` returns a run summary for each DAG shipped in
+    ``scripts/prod_smoke_test.py`` so the wizard's Step-5 pane can
+    display the "兩個 DAG 的 run summary" required by L6 Step 5."""
+    await _stub_audit_chain(monkeypatch, ok=True)
+
+    r = await client.post(
+        "/api/v1/bootstrap/smoke-subset",
+        json={"subset": "both"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["subset"] == "both"
+    assert body["smoke_passed"] is True
+    assert len(body["runs"]) == 2, body["runs"]
+
+    dag_ids = sorted(r["dag_id"] for r in body["runs"])
+    assert dag_ids == [
+        "smoke-compile-flash-host-native",
+        "smoke-cross-compile-aarch64",
+    ]
+    for run in body["runs"]:
+        assert run["ok"] is True, run
+        assert run["plan_status"] in ("validated", "executing")
+        assert run["run_id"]
+        assert run["plan_id"] is not None
+        assert run["key"] in ("dag1", "dag2")
+        assert run["task_count"] == 2
+
+    # Persisted per-DAG trail matches the runs returned in the response.
+    recorded = await _boot.get_bootstrap_step(_boot.STEP_SMOKE)
+    assert recorded is not None
+    persisted_ids = sorted(
+        entry["dag_id"] for entry in recorded["metadata"]["dag_runs"]
+    )
+    assert persisted_ids == dag_ids
+
+
+# ── subset=dag2 runs only DAG #2 ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_smoke_subset_dag2_runs_only_aarch64(
+    client, monkeypatch, _marker_tmp,
+):
+    """``subset=dag2`` runs the aarch64 cross-compile DAG alone."""
+    await _stub_audit_chain(monkeypatch, ok=True)
+
+    r = await client.post(
+        "/api/v1/bootstrap/smoke-subset",
+        json={"subset": "dag2"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["subset"] == "dag2"
+    assert body["smoke_passed"] is True
+    assert len(body["runs"]) == 1
+    assert body["runs"][0]["dag_id"] == "smoke-cross-compile-aarch64"
+    assert body["runs"][0]["target_platform"] == "aarch64"
+    assert body["runs"][0]["key"] == "dag2"
+
+
+# ── unknown subset rejected ──────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_smoke_subset_rejects_unknown_subset(
     client, monkeypatch, _marker_tmp,
 ):
-    """Only ``dag1`` is accepted during bootstrap (422 on anything else)."""
+    """Only ``dag1`` / ``dag2`` / ``both`` are accepted — anything else 422s."""
     await _stub_audit_chain(monkeypatch, ok=True)
 
     r = await client.post(
         "/api/v1/bootstrap/smoke-subset",
-        json={"subset": "both"},
+        json={"subset": "dag3"},
         follow_redirects=False,
     )
     assert r.status_code == 422, r.text
@@ -246,4 +326,9 @@ async def test_smoke_subset_emits_audit_row(
     assert row["entity_id"] == _boot.STEP_SMOKE
     assert row["after"]["smoke_passed"] is True
     assert row["after"]["subset"] == "dag1"
+    assert row["after"]["dag_runs"][0]["dag_id"] == (
+        "smoke-compile-flash-host-native"
+    )
+    assert row["after"]["audit_chain"]["ok"] is True
+    assert row["after"]["audit_chain"]["tenant_count"] == 2
     assert row["actor"] == "wizard"
