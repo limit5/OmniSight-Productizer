@@ -79,10 +79,17 @@ async def bootstrap_admin_password(req: AdminPasswordRequest) -> AdminPasswordRe
         user id as actor
       * writes audit action ``bootstrap.admin_password_set``
 
-    Error contract:
-      * 409 if no admin still requires a password change (already done)
-      * 401 if current_password is wrong
-      * 422 if new_password fails the strength check
+    Error contract (each response includes a machine-readable ``kind`` so
+    the wizard UI can pick a matching banner + remediation hint without
+    string-parsing ``detail``):
+      * 409 + ``kind=already_rotated`` — no admin still requires a
+        password change (wizard re-opened after rotation).
+      * 401 + ``kind=current_password_wrong`` — current_password did not
+        authenticate against the default admin row.
+      * 422 + ``kind=password_too_short`` — new_password shorter than
+        :data:`auth.PASSWORD_MIN_LENGTH`.
+      * 422 + ``kind=password_too_weak`` — passed the length gate but
+        failed the zxcvbn ≥ :data:`auth.PASSWORD_MIN_ZXCVBN` check.
     """
     target = await _au.find_admin_requiring_password_change()
     if target is None:
@@ -91,6 +98,7 @@ async def bootstrap_admin_password(req: AdminPasswordRequest) -> AdminPasswordRe
             content={
                 "detail": "No admin currently requires a password change — "
                           "default credential has already been rotated.",
+                "kind": "already_rotated",
                 "admin_password_default": False,
             },
         )
@@ -99,14 +107,24 @@ async def bootstrap_admin_password(req: AdminPasswordRequest) -> AdminPasswordRe
     if verified is None:
         return JSONResponse(  # type: ignore[return-value]
             status_code=401,
-            content={"detail": "current password is incorrect"},
+            content={
+                "detail": "current password is incorrect",
+                "kind": "current_password_wrong",
+            },
         )
 
     strength_err = _au.validate_password_strength(req.new_password)
     if strength_err:
+        # Split "too short" from "too weak" so the UI can pick a dedicated
+        # banner — the former is a hard length gate, the latter surfaces
+        # zxcvbn warnings/suggestions the operator can act on.
+        if len(req.new_password) < _au.PASSWORD_MIN_LENGTH:
+            kind = "password_too_short"
+        else:
+            kind = "password_too_weak"
         return JSONResponse(  # type: ignore[return-value]
             status_code=422,
-            content={"detail": strength_err},
+            content={"detail": strength_err, "kind": kind},
         )
 
     # Rotate (clears must_change_password atomically).
@@ -643,6 +661,7 @@ async def bootstrap_start_services(
                         "mode must be one of: systemd, docker-compose, dev — "
                         f"got {override_mode!r}"
                     ),
+                    "kind": "bad_mode",
                 },
             )
         mode: DeployMode = override_mode  # type: ignore[assignment]
@@ -714,6 +733,7 @@ async def bootstrap_start_services(
                     f"launcher did not finish within {_START_TIMEOUT_SECS}s — "
                     "check host for stuck systemctl / docker-compose"
                 ),
+                "kind": "timeout",
                 "mode": mode,
                 "command": command,
             },
@@ -727,6 +747,7 @@ async def bootstrap_start_services(
                     f"launcher binary not found: {exc} — expected {command[0]!r} "
                     f"on PATH for mode={mode}"
                 ),
+                "kind": "binary_missing",
                 "mode": mode,
                 "command": command,
             },
@@ -757,6 +778,28 @@ async def bootstrap_start_services(
             "bootstrap: start-services FAILED mode=%s rc=%d stderr=%r",
             mode, returncode, stderr_tail[-400:],
         )
+        # Kind heuristic: sudo without the K1 NOPASSWD grant exits with a
+        # recognisable stderr line ("sudo: a password is required" or
+        # "sudo: no tty present"). ``systemctl`` with a missing unit
+        # writes "Failed to start ... unit not found" / "not loaded".
+        # Everything else is a catch-all ``unit_failed`` — the operator
+        # has stderr_tail to inspect.
+        stderr_lower = stderr_tail.lower()
+        if mode == "systemd" and (
+            "a password is required" in stderr_lower
+            or "no tty present" in stderr_lower
+            or "sorry, user " in stderr_lower
+            or "sudo: no password" in stderr_lower
+        ):
+            failure_kind = "sudoers_missing"
+        elif mode == "systemd" and (
+            "unit not found" in stderr_lower
+            or "not loaded" in stderr_lower
+            or "no such file" in stderr_lower
+        ):
+            failure_kind = "unit_missing"
+        else:
+            failure_kind = "unit_failed"
         return JSONResponse(  # type: ignore[return-value]
             status_code=502,
             content={
@@ -764,6 +807,7 @@ async def bootstrap_start_services(
                     f"launcher exited with code {returncode} — "
                     "see stderr_tail for the failure reason"
                 ),
+                "kind": failure_kind,
                 "mode": mode,
                 "command": command,
                 "returncode": returncode,

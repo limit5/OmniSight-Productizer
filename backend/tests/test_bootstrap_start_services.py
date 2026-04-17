@@ -135,6 +135,136 @@ async def test_start_services_systemd_nonzero_returns_502(client, monkeypatch):
     assert "unit not found" in body["stderr_tail"]
 
 
+# ── L8 #3 — kind-field classification per failure mode ────────────────
+#
+# The wizard UI picks a dedicated banner + remediation hint keyed by
+# ``kind`` rather than string-parsing stderr. These tests pin the
+# classification so a future stderr-wording change still routes to the
+# right UX bucket.
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_sudoers_missing(client, monkeypatch):
+    """systemd stderr 'sudo: a password is required' → kind=sudoers_missing."""
+    _patch_exec(
+        monkeypatch,
+        captured=[],
+        returncode=1,
+        stdout=b"",
+        stderr=b"sudo: a password is required\n",
+    )
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "systemd"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 502, r.text
+    body = r.json()
+    assert body.get("kind") == "sudoers_missing"
+    assert body.get("mode") == "systemd"
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_unit_missing(client, monkeypatch):
+    """systemd stderr 'Unit not found' → kind=unit_missing."""
+    _patch_exec(
+        monkeypatch,
+        captured=[],
+        returncode=5,
+        stdout=b"",
+        stderr=b"Failed to start omnisight-backend.service: Unit not found.\n",
+    )
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "systemd"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 502, r.text
+    assert r.json().get("kind") == "unit_missing"
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_unit_failed_catchall(client, monkeypatch):
+    """systemd stderr w/o sudoers/unit signals → kind=unit_failed catch-all."""
+    _patch_exec(
+        monkeypatch,
+        captured=[],
+        returncode=1,
+        stdout=b"",
+        stderr=b"Error: port 8000 already in use\n",
+    )
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "systemd"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 502, r.text
+    assert r.json().get("kind") == "unit_failed"
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_binary_missing(client, monkeypatch):
+    """FileNotFoundError path adds kind=binary_missing for UI routing."""
+    _patch_exec(monkeypatch, captured=[], raise_fnf=True)
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "systemd"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 502, r.text
+    assert r.json().get("kind") == "binary_missing"
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_timeout(client, monkeypatch):
+    """504 timeout adds kind=timeout so the UI picks the stall hint."""
+    from backend.routers import bootstrap as _br
+
+    _patch_exec(monkeypatch, captured=[], hang=True)
+    monkeypatch.setattr(_br, "_START_TIMEOUT_SECS", 0.1)
+
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "systemd"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 504, r.text
+    assert r.json().get("kind") == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_bad_mode(client):
+    """Unknown mode override 422 adds kind=bad_mode for the UI banner."""
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "kubernetes"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 422, r.text
+    assert r.json().get("kind") == "bad_mode"
+
+
+@pytest.mark.asyncio
+async def test_start_services_kind_unit_failed_for_docker_compose(client, monkeypatch):
+    """docker-compose rc!=0 routes to unit_failed (sudoers/unit branches are systemd-only)."""
+    _patch_exec(
+        monkeypatch,
+        captured=[],
+        returncode=2,
+        stdout=b"",
+        stderr=b"dependency failed to start: container omnisight-backend-1 is unhealthy\n",
+    )
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "docker-compose"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 502, r.text
+    body = r.json()
+    assert body.get("kind") == "unit_failed"
+    assert body.get("mode") == "docker-compose"
+
+
 # ── docker-compose mode ───────────────────────────────────────────────
 
 

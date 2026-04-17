@@ -37,16 +37,23 @@ import {
   Cpu,
 } from "lucide-react"
 import {
+  BOOTSTRAP_ADMIN_PASSWORD_KIND_COPY,
+  BOOTSTRAP_PROVIDER_KEY_URL,
   BOOTSTRAP_PROVISION_KIND_COPY,
+  BOOTSTRAP_START_SERVICES_KIND_COPY,
+  BootstrapAdminPasswordError,
   BootstrapLlmProvisionError,
+  BootstrapStartServicesError,
   bootstrapCfTunnelSkip,
   bootstrapDetectOllama,
   bootstrapLlmProvision,
   bootstrapParallelHealthCheck,
   bootstrapSetAdminPassword,
   bootstrapSmokeSubset,
+  bootstrapStartServices,
   finalizeBootstrap,
   getBootstrapStatus,
+  type BootstrapAdminPasswordKind,
   type BootstrapGates,
   type BootstrapHealthCheckResult,
   type BootstrapLlmProvisionKind,
@@ -55,6 +62,8 @@ import {
   type BootstrapOllamaDetectResponse,
   type BootstrapParallelHealthCheckResponse,
   type BootstrapSmokeSubsetResponse,
+  type BootstrapStartServicesKind,
+  type BootstrapStartServicesResponse,
   type BootstrapStatusResponse,
 } from "@/lib/api"
 import {
@@ -197,6 +206,44 @@ function StepPill({
   )
 }
 
+function AdminPasswordErrorBanner({
+  kind,
+  detail,
+}: {
+  kind: BootstrapAdminPasswordKind
+  detail: string
+}) {
+  const copy = BOOTSTRAP_ADMIN_PASSWORD_KIND_COPY[kind]
+  return (
+    <div
+      role="alert"
+      data-testid="bootstrap-admin-password-error"
+      data-kind={kind}
+      className="flex flex-col gap-1 p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10"
+    >
+      <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--destructive)]">
+        <AlertCircle size={12} /> {copy.title}
+      </div>
+      <p className="font-mono text-[11px] text-[var(--destructive)] break-words">
+        {detail}
+      </p>
+      <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+        {copy.hint}
+      </p>
+      {kind === "password_too_weak" && (
+        <p
+          data-testid="bootstrap-admin-password-weak-tips"
+          className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed"
+        >
+          Tip: combine an unusual phrase with numbers + symbols. Avoid reusing
+          a password you&rsquo;ve used elsewhere — K7&rsquo;s zxcvbn checker
+          heavily penalises known breach-corpus entries.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function AdminPasswordStep({
   alreadyGreen,
   onRotated,
@@ -208,6 +255,13 @@ function AdminPasswordStep({
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [busy, setBusy] = useState(false)
+  // ``errKind`` is set when the backend returned a classified failure so
+  // the UI can render a kind-keyed banner (see
+  // ``AdminPasswordErrorBanner``). ``localError`` covers the fall-through
+  // case — unclassified network / transport errors that do not map to a
+  // kind. Both are cleared before every submit.
+  const [errKind, setErrKind] = useState<BootstrapAdminPasswordKind | null>(null)
+  const [errDetail, setErrDetail] = useState<string>("")
   const [localError, setLocalError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
 
@@ -233,6 +287,8 @@ function AdminPasswordStep({
       if (!canSubmit) return
       setBusy(true)
       setLocalError(null)
+      setErrKind(null)
+      setErrDetail("")
       setSuccess(false)
       try {
         await bootstrapSetAdminPassword(currentPassword, newPassword)
@@ -242,8 +298,13 @@ function AdminPasswordStep({
         setConfirmPassword("")
         await onRotated()
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        setLocalError(msg)
+        if (err instanceof BootstrapAdminPasswordError) {
+          setErrKind(err.kind)
+          setErrDetail(err.detail || err.message)
+        } else {
+          const msg = err instanceof Error ? err.message : String(err)
+          setLocalError(msg)
+        }
       } finally {
         setBusy(false)
       }
@@ -389,10 +450,14 @@ function AdminPasswordStep({
           New password and confirmation do not match.
         </p>
       )}
-      {localError && (
+      {errKind && (
+        <AdminPasswordErrorBanner kind={errKind} detail={errDetail} />
+      )}
+      {!errKind && localError && (
         <p
           role="alert"
           data-testid="bootstrap-admin-password-error"
+          data-kind="unclassified"
           className="font-mono text-[11px] text-[var(--destructive)] break-words"
         >
           {localError}
@@ -646,16 +711,26 @@ function OllamaDetectPanel({
 function ProvisionErrorBanner({
   kind,
   detail,
+  providerId,
 }: {
   kind: BootstrapLlmProvisionKind
   detail: string
+  providerId: LlmProviderId | null
 }) {
   const copy = BOOTSTRAP_PROVISION_KIND_COPY[kind]
+  // ``key_invalid`` is the only kind where a provider-specific dashboard
+  // link meaningfully shortens the remediation — quota + network + 5xx
+  // errors don't need the operator to mint a new key.
+  const keyUrl =
+    kind === "key_invalid" && providerId
+      ? BOOTSTRAP_PROVIDER_KEY_URL[providerId]
+      : undefined
   return (
     <div
       role="alert"
       data-testid="bootstrap-llm-provider-error"
       data-kind={kind}
+      data-provider={providerId ?? ""}
       className="flex flex-col gap-1 p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10"
     >
       <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--destructive)]">
@@ -667,6 +742,17 @@ function ProvisionErrorBanner({
       <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
         {copy.hint}
       </p>
+      {keyUrl && (
+        <a
+          data-testid="bootstrap-llm-provider-key-url"
+          href={keyUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="self-start font-mono text-[10px] underline text-[var(--artifact-purple)] hover:opacity-80"
+        >
+          Open {providerId} API keys dashboard →
+        </a>
+      )}
     </div>
   )
 }
@@ -927,7 +1013,13 @@ function LlmProviderStep({
         </div>
       )}
 
-      {errKind && <ProvisionErrorBanner kind={errKind} detail={errDetail} />}
+      {errKind && (
+        <ProvisionErrorBanner
+          kind={errKind}
+          detail={errDetail}
+          providerId={selected}
+        />
+      )}
 
       {okResult && (
         <div
@@ -1264,6 +1356,150 @@ function HealthRowItem({
   )
 }
 
+function StartServicesErrorBanner({
+  kind,
+  detail,
+  stderrTail,
+  mode,
+}: {
+  kind: BootstrapStartServicesKind
+  detail: string
+  stderrTail: string
+  mode: string
+}) {
+  const copy = BOOTSTRAP_START_SERVICES_KIND_COPY[kind]
+  return (
+    <div
+      role="alert"
+      data-testid="bootstrap-start-services-error"
+      data-kind={kind}
+      data-mode={mode}
+      className="flex flex-col gap-1 p-3 rounded border border-[var(--destructive)] bg-[var(--destructive)]/10"
+    >
+      <div className="flex items-center gap-2 font-mono text-[11px] font-semibold text-[var(--destructive)]">
+        <AlertCircle size={12} /> {copy.title}
+      </div>
+      <p className="font-mono text-[11px] text-[var(--destructive)] break-words">
+        {detail}
+      </p>
+      <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+        {copy.hint}
+      </p>
+      {stderrTail && (
+        <pre
+          data-testid="bootstrap-start-services-stderr"
+          className="mt-1 p-2 rounded border border-[var(--border)] bg-[var(--muted)]/30 font-mono text-[10px] text-[var(--foreground)] whitespace-pre-wrap break-words max-h-40 overflow-auto"
+        >
+          {stderrTail}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+function StartServicesPanel({
+  anyRed,
+  onStartResolved,
+}: {
+  anyRed: boolean
+  onStartResolved: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [errKind, setErrKind] = useState<BootstrapStartServicesKind | null>(null)
+  const [errDetail, setErrDetail] = useState<string>("")
+  const [errStderr, setErrStderr] = useState<string>("")
+  const [errMode, setErrMode] = useState<string>("")
+  const [okResult, setOkResult] = useState<BootstrapStartServicesResponse | null>(null)
+
+  const run = useCallback(async () => {
+    setBusy(true)
+    setErrKind(null)
+    setErrDetail("")
+    setErrStderr("")
+    setErrMode("")
+    setOkResult(null)
+    try {
+      const result = await bootstrapStartServices()
+      setOkResult(result)
+      // Let the parent re-probe so any row that was red flips on the
+      // next health tick without waiting for the 3s interval.
+      onStartResolved()
+    } catch (err) {
+      if (err instanceof BootstrapStartServicesError) {
+        setErrKind(err.kind)
+        setErrDetail(err.detail || err.message)
+        setErrStderr(err.stderr_tail || "")
+        setErrMode(err.mode || "")
+      } else {
+        const msg = err instanceof Error ? err.message : String(err)
+        setErrDetail(msg)
+        setErrKind("unit_failed")
+      }
+    } finally {
+      setBusy(false)
+    }
+  }, [onStartResolved])
+
+  return (
+    <div
+      data-testid="bootstrap-start-services-panel"
+      data-any-red={anyRed ? "true" : "false"}
+      className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>LAUNCHER</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          POST /bootstrap/start-services
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        If a probe above is stuck red, kick the launcher from here. The
+        backend auto-detects the deploy mode (systemd / docker-compose /
+        dev) — a systemctl failure surfaces the exact kind (missing
+        sudoers, unit not installed, binary not on PATH, timeout) with a
+        targeted remediation hint.
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-start-services-button"
+          onClick={() => void run()}
+          disabled={busy}
+          className="flex items-center gap-1 font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)]/40 disabled:opacity-40"
+        >
+          {busy ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Rocket size={12} />
+          )}
+          Launch services
+        </button>
+        {okResult && (
+          <span
+            data-testid="bootstrap-start-services-ok"
+            data-status={okResult.status}
+            data-mode={okResult.mode}
+            className="font-mono text-[11px] text-[var(--status-green)]"
+          >
+            <Check size={12} className="inline mr-1" />
+            {okResult.status === "already_running"
+              ? "already running (dev mode)"
+              : `launched (${okResult.mode}, rc=${okResult.returncode})`}
+          </span>
+        )}
+      </div>
+      {errKind && (
+        <StartServicesErrorBanner
+          kind={errKind}
+          detail={errDetail}
+          stderrTail={errStderr}
+          mode={errMode}
+        />
+      )}
+    </div>
+  )
+}
+
 function ServiceHealthStep({
   onChanged,
 }: {
@@ -1357,6 +1593,14 @@ function ServiceHealthStep({
           />
         ))}
       </div>
+
+      <StartServicesPanel
+        anyRed={
+          snapshot != null &&
+          HEALTH_ROWS.some((row) => snapshot[row.id]?.status === "red")
+        }
+        onStartResolved={() => void runProbe()}
+      />
 
       <div className="flex items-center justify-between">
         <span

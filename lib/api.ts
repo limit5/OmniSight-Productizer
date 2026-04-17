@@ -2508,17 +2508,134 @@ export interface BootstrapAdminPasswordResponse {
   user_id: string
 }
 
+/**
+ * Machine-readable kinds emitted by ``POST /bootstrap/admin-password``.
+ * Each maps to a distinct wizard banner so the operator sees a targeted
+ * remediation path rather than a generic "something failed" string.
+ */
+export type BootstrapAdminPasswordKind =
+  | "password_too_short"
+  | "password_too_weak"
+  | "current_password_wrong"
+  | "already_rotated"
+
+/**
+ * Typed error raised by {@link bootstrapSetAdminPassword} on any backend
+ * error response. Carries the ``kind`` tag + server-supplied ``detail``
+ * so the UI can pick a matching banner without parsing the detail
+ * string.
+ */
+export class BootstrapAdminPasswordError extends Error {
+  kind: BootstrapAdminPasswordKind
+  detail: string
+  status: number
+  constructor(
+    kind: BootstrapAdminPasswordKind,
+    detail: string,
+    status: number,
+  ) {
+    super(detail)
+    this.name = "BootstrapAdminPasswordError"
+    this.kind = kind
+    this.detail = detail
+    this.status = status
+  }
+}
+
+function _isAdminPwKind(v: unknown): v is BootstrapAdminPasswordKind {
+  return (
+    v === "password_too_short" ||
+    v === "password_too_weak" ||
+    v === "current_password_wrong" ||
+    v === "already_rotated"
+  )
+}
+
+/**
+ * User-facing copy for each {@link BootstrapAdminPasswordKind}. Keep
+ * these short — they render in a ≤3-line banner and sit alongside the
+ * server-supplied ``detail`` which typically carries the zxcvbn warning
+ * + suggestions for the ``password_too_weak`` path.
+ */
+export const BOOTSTRAP_ADMIN_PASSWORD_KIND_COPY: Record<
+  BootstrapAdminPasswordKind,
+  { title: string; hint: string }
+> = {
+  password_too_short: {
+    title: "New password too short",
+    hint: "Server enforces the 12-character minimum before hashing. Extend the password and submit again.",
+  },
+  password_too_weak: {
+    title: "New password too guessable",
+    hint: "Server re-ran zxcvbn and scored the password below the K7 threshold. Mix classes (upper/lower/digit/symbol), avoid dictionary words, and try again.",
+  },
+  current_password_wrong: {
+    title: "Current password rejected",
+    hint: "The shipping default is `omnisight-admin`. If you've already rotated it elsewhere, use that rotated credential — the wizard will not accept a bypass.",
+  },
+  already_rotated: {
+    title: "Admin password already rotated",
+    hint: "No admin still carries the must_change_password flag. Refresh the wizard — Step 1 should already be green.",
+  },
+}
+
 export async function bootstrapSetAdminPassword(
   currentPassword: string,
   newPassword: string,
 ): Promise<BootstrapAdminPasswordResponse> {
-  return request<BootstrapAdminPasswordResponse>("/bootstrap/admin-password", {
-    method: "POST",
-    body: JSON.stringify({
-      current_password: currentPassword,
-      new_password: newPassword,
-    }),
-  })
+  const method = "POST"
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  }
+  if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
+  if (typeof document !== "undefined") {
+    const csrf = readCookie("omnisight_csrf")
+    if (csrf) baseHeaders["X-CSRF-Token"] = csrf
+  }
+  // Straight fetch — the shared ``request<T>`` helper buries the
+  // structured error body inside the Error message. For admin-password
+  // we want the ``{kind, detail}`` payload so the UI can pick a
+  // banner per kind (weak vs short vs wrong vs already_rotated).
+  let res: Response
+  try {
+    res = await fetch(`${API_V1}/bootstrap/admin-password`, {
+      method,
+      credentials: "include",
+      headers: baseHeaders,
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    // Network-unreachable is not one of the classified kinds — surface as
+    // plain Error so the caller falls back to the generic error display.
+    throw new Error(`Cannot reach OmniSight API: ${msg}`)
+  }
+  if (!res.ok) {
+    let kind: BootstrapAdminPasswordKind | null = null
+    let detail = `API ${res.status}`
+    try {
+      const body = await res.json()
+      if (_isAdminPwKind(body?.kind)) kind = body.kind
+      if (typeof body?.detail === "string" && body.detail.trim()) {
+        detail = body.detail
+      }
+    } catch {
+      try {
+        const text = await res.text()
+        if (text.trim()) detail = text.trim()
+      } catch {
+        /* ignore */
+      }
+    }
+    if (kind !== null) {
+      throw new BootstrapAdminPasswordError(kind, detail, res.status)
+    }
+    throw new Error(`API ${res.status}: ${detail}`)
+  }
+  return (await res.json()) as BootstrapAdminPasswordResponse
 }
 
 // ─── L3 — Step 2 Ollama local reachability probe ───────────────────
@@ -2680,6 +2797,18 @@ export const BOOTSTRAP_PROVISION_KIND_COPY: Record<
   },
 }
 
+/**
+ * Provider → dashboard URL where a fresh API key can be minted. Shown
+ * only on the ``key_invalid`` banner so the operator has a direct
+ * one-click remediation path. ``ollama`` is intentionally absent — it
+ * does not use keys and cannot emit ``key_invalid``.
+ */
+export const BOOTSTRAP_PROVIDER_KEY_URL: Record<string, string> = {
+  anthropic: "https://console.anthropic.com/settings/keys",
+  openai: "https://platform.openai.com/api-keys",
+  azure: "https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/OpenAI",
+}
+
 // ─── L5 — Step 4 (parallel health check / 4 live ticks) ───────────
 
 export type BootstrapHealthCheckStatus = "green" | "red" | "skipped"
@@ -2779,6 +2908,201 @@ export async function bootstrapSmokeSubset(
     method: "POST",
     body: JSON.stringify({ subset }),
   })
+}
+
+// ─── L5 / L7 — Step 4 (start-services launcher + kind-keyed errors) ──
+
+export type BootstrapStartServicesMode = "systemd" | "docker-compose" | "dev"
+
+export interface BootstrapStartServicesRequest {
+  mode?: string
+  compose_file?: string
+}
+
+export interface BootstrapStartServicesResponse {
+  status: string
+  mode: BootstrapStartServicesMode
+  command: string[]
+  returncode: number
+  stdout_tail: string
+  stderr_tail: string
+}
+
+/**
+ * Machine-readable kinds emitted by ``POST /bootstrap/start-services``.
+ * Each maps to a distinct wizard banner so an operator whose sudoers
+ * rule is missing sees a different remediation than one whose
+ * docker-compose binary is absent.
+ */
+export type BootstrapStartServicesKind =
+  | "bad_mode"
+  | "binary_missing"
+  | "timeout"
+  | "sudoers_missing"
+  | "unit_missing"
+  | "unit_failed"
+
+/**
+ * Typed error raised by {@link bootstrapStartServices} on any backend
+ * error response. Carries ``kind`` + server-supplied ``detail`` +
+ * ``stderr_tail`` (when present) so the UI can render a targeted
+ * banner with the raw failure tail for copy/paste debugging.
+ */
+export class BootstrapStartServicesError extends Error {
+  kind: BootstrapStartServicesKind
+  detail: string
+  status: number
+  mode: string
+  command: string[]
+  returncode: number | null
+  stdout_tail: string
+  stderr_tail: string
+  constructor(init: {
+    kind: BootstrapStartServicesKind
+    detail: string
+    status: number
+    mode?: string
+    command?: string[]
+    returncode?: number | null
+    stdout_tail?: string
+    stderr_tail?: string
+  }) {
+    super(init.detail)
+    this.name = "BootstrapStartServicesError"
+    this.kind = init.kind
+    this.detail = init.detail
+    this.status = init.status
+    this.mode = init.mode ?? ""
+    this.command = init.command ?? []
+    this.returncode = init.returncode ?? null
+    this.stdout_tail = init.stdout_tail ?? ""
+    this.stderr_tail = init.stderr_tail ?? ""
+  }
+}
+
+function _isStartKind(v: unknown): v is BootstrapStartServicesKind {
+  return (
+    v === "bad_mode" ||
+    v === "binary_missing" ||
+    v === "timeout" ||
+    v === "sudoers_missing" ||
+    v === "unit_missing" ||
+    v === "unit_failed"
+  )
+}
+
+/**
+ * User-facing copy for each {@link BootstrapStartServicesKind}. Remedy
+ * strings deliberately link to concrete install artefacts ship with
+ * the repo (``docs/ops/bootstrap_modes.md``, the sudoers snippet from
+ * ``generate_sudoers_snippet()``) so the operator has a copy/paste
+ * path out of the failure rather than a dead-end "try again".
+ */
+export const BOOTSTRAP_START_SERVICES_KIND_COPY: Record<
+  BootstrapStartServicesKind,
+  { title: string; hint: string }
+> = {
+  bad_mode: {
+    title: "Unknown deploy mode",
+    hint: "Only `systemd`, `docker-compose`, and `dev` are supported — check the auto-detection override or leave the field blank.",
+  },
+  binary_missing: {
+    title: "Launcher binary not found on PATH",
+    hint: "For systemd install `systemd` + `sudo`. For docker-compose install the Docker Engine + Compose v2. See docs/ops/bootstrap_modes.md.",
+  },
+  timeout: {
+    title: "Launcher timed out",
+    hint: "The launcher is still running after 120s — inspect `journalctl -u omnisight-backend` or `docker compose ps` on the host and retry once the service finishes.",
+  },
+  sudoers_missing: {
+    title: "K1 sudoers grant missing",
+    hint: "systemd mode needs a NOPASSWD rule for `systemctl start omnisight-*`. Install the snippet emitted by `generate_sudoers_snippet()` into `/etc/sudoers.d/omnisight-bootstrap` (validate with `visudo -c -f`).",
+  },
+  unit_missing: {
+    title: "systemd unit not installed",
+    hint: "`omnisight-backend.service` / `omnisight-frontend.service` were not found. Run `deploy/install_units.sh` (or copy the unit files from deploy/systemd/) and `systemctl daemon-reload`.",
+  },
+  unit_failed: {
+    title: "Launcher exited with a non-zero code",
+    hint: "Inspect stderr_tail below for the precise failure. Common fixes: clear a stale lock file, free the target port, re-run migrations.",
+  },
+}
+
+/**
+ * Launch the OmniSight services for the wizard's Step 4 (L5/L7). The
+ * backend auto-detects the deploy mode (systemd / docker-compose / dev)
+ * unless the caller pins one via ``mode``. On error the rejection
+ * carries a {@link BootstrapStartServicesError} with ``kind`` so the
+ * UI can pick a targeted banner (``sudoers_missing`` vs
+ * ``binary_missing`` vs ``timeout`` etc.).
+ */
+export async function bootstrapStartServices(
+  req?: BootstrapStartServicesRequest,
+): Promise<BootstrapStartServicesResponse> {
+  const method = "POST"
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  }
+  if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
+  if (typeof document !== "undefined") {
+    const csrf = readCookie("omnisight_csrf")
+    if (csrf) baseHeaders["X-CSRF-Token"] = csrf
+  }
+  let res: Response
+  try {
+    res = await fetch(`${API_V1}/bootstrap/start-services`, {
+      method,
+      credentials: "include",
+      headers: baseHeaders,
+      body: JSON.stringify(req ?? {}),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new BootstrapStartServicesError({
+      kind: "binary_missing",
+      detail: `Cannot reach OmniSight API: ${msg}`,
+      status: 0,
+    })
+  }
+  if (!res.ok) {
+    let kind: BootstrapStartServicesKind = "unit_failed"
+    let detail = `API ${res.status}`
+    let mode = ""
+    let command: string[] = []
+    let returncode: number | null = null
+    let stdout_tail = ""
+    let stderr_tail = ""
+    try {
+      const body = await res.json()
+      if (_isStartKind(body?.kind)) kind = body.kind
+      if (typeof body?.detail === "string" && body.detail.trim()) {
+        detail = body.detail
+      }
+      if (typeof body?.mode === "string") mode = body.mode
+      if (Array.isArray(body?.command)) command = body.command as string[]
+      if (typeof body?.returncode === "number") returncode = body.returncode
+      if (typeof body?.stdout_tail === "string") stdout_tail = body.stdout_tail
+      if (typeof body?.stderr_tail === "string") stderr_tail = body.stderr_tail
+    } catch {
+      try {
+        const text = await res.text()
+        if (text.trim()) detail = text.trim()
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new BootstrapStartServicesError({
+      kind,
+      detail,
+      status: res.status,
+      mode,
+      command,
+      returncode,
+      stdout_tail,
+      stderr_tail,
+    })
+  }
+  return (await res.json()) as BootstrapStartServicesResponse
 }
 
 // ─── L4 — Step 3 (Cloudflare Tunnel skip / LAN-only) ──────────────

@@ -20,6 +20,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     bootstrapCfTunnelSkip: vi.fn(),
     bootstrapParallelHealthCheck: vi.fn(),
     bootstrapSmokeSubset: vi.fn(),
+    bootstrapStartServices: vi.fn(),
   }
 })
 
@@ -40,7 +41,11 @@ vi.mock("@/components/omnisight/cloudflare-tunnel-setup", () => ({
 
 import BootstrapPage from "@/app/bootstrap/page"
 import * as api from "@/lib/api"
-import { BootstrapLlmProvisionError } from "@/lib/api"
+import {
+  BootstrapAdminPasswordError,
+  BootstrapLlmProvisionError,
+  BootstrapStartServicesError,
+} from "@/lib/api"
 
 const mockedGetStatus = api.getBootstrapStatus as unknown as ReturnType<typeof vi.fn>
 const mockedFinalize = api.finalizeBootstrap as unknown as ReturnType<typeof vi.fn>
@@ -50,6 +55,16 @@ const mockedDetectOllama = api.bootstrapDetectOllama as unknown as ReturnType<ty
 const mockedCfSkip = api.bootstrapCfTunnelSkip as unknown as ReturnType<typeof vi.fn>
 const mockedParallelHealth = api.bootstrapParallelHealthCheck as unknown as ReturnType<typeof vi.fn>
 const mockedSmokeSubset = api.bootstrapSmokeSubset as unknown as ReturnType<typeof vi.fn>
+const mockedStartServices = api.bootstrapStartServices as unknown as ReturnType<typeof vi.fn>
+
+/**
+ * A client-side-strong password that passes ``estimatePasswordStrength``
+ * (4 char classes, 18 chars, no common-bad substrings, no 4-char
+ * sequences, no 3-char repeats) so the submit button enables and the
+ * backend error-kind path can be exercised. Reusing a single constant
+ * keeps every L8 error-path test aligned with the same input.
+ */
+const STRONG_PASSWORD = "XkL3#mPqR7@vT9nB2$"
 
 const redStatus = {
   status: {
@@ -90,6 +105,7 @@ describe("BootstrapPage", () => {
     mockedDetectOllama.mockReset()
     mockedCfSkip.mockReset()
     mockedSmokeSubset.mockReset()
+    mockedStartServices.mockReset()
     mockedDetectOllama.mockResolvedValue({
       reachable: false,
       base_url: "http://localhost:11434",
@@ -1125,5 +1141,411 @@ describe("BootstrapPage", () => {
       ).toHaveAttribute("data-passed", "true")
     })
     expect(screen.queryByTestId("bootstrap-smoke-jump-back")).toBeNull()
+  })
+
+  // ─── L8 #3 — Error-path UX (weak password / LLM key invalid / systemctl) ─
+  //
+  // Each of the three wizard error paths must surface a kind-keyed banner
+  // so the operator can distinguish them without parsing error strings.
+
+  describe("L8 #3 Step 1 admin-password kind-keyed error banners", () => {
+    async function submitStep1Form(newPw: string) {
+      fireEvent.change(screen.getByTestId("bootstrap-admin-password-new"), {
+        target: { value: newPw },
+      })
+      fireEvent.change(screen.getByTestId("bootstrap-admin-password-confirm"), {
+        target: { value: newPw },
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-admin-password-submit"))
+    }
+
+    const kindCases: Array<{
+      kind:
+        | "password_too_short"
+        | "password_too_weak"
+        | "current_password_wrong"
+        | "already_rotated"
+      status: number
+      detail: string
+      expectedTitle: RegExp
+    }> = [
+      {
+        kind: "password_too_weak",
+        status: 422,
+        detail:
+          "Password is too weak: This is a top-10 common password. Add another word or two.",
+        expectedTitle: /too guessable/i,
+      },
+      {
+        kind: "password_too_short",
+        status: 422,
+        detail: "Password must be at least 12 characters",
+        expectedTitle: /too short/i,
+      },
+      {
+        kind: "current_password_wrong",
+        status: 401,
+        detail: "current password is incorrect",
+        expectedTitle: /Current password rejected/i,
+      },
+      {
+        kind: "already_rotated",
+        status: 409,
+        detail:
+          "No admin currently requires a password change — default credential has already been rotated.",
+        expectedTitle: /already rotated/i,
+      },
+    ]
+
+    for (const c of kindCases) {
+      it(`renders kind=${c.kind} banner with backend detail + kind-specific hint`, async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedSetAdminPw.mockRejectedValue(
+          new BootstrapAdminPasswordError(c.kind, c.detail, c.status),
+        )
+        render(<BootstrapPage />)
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-admin-password-form"),
+          ).toBeInTheDocument()
+        })
+        await submitStep1Form(STRONG_PASSWORD)
+
+        await waitFor(() => {
+          const banner = screen.getByTestId("bootstrap-admin-password-error")
+          expect(banner).toBeInTheDocument()
+          expect(banner.getAttribute("data-kind")).toBe(c.kind)
+          expect(banner).toHaveTextContent(c.expectedTitle)
+          expect(banner).toHaveTextContent(c.detail)
+        })
+
+        // ``password_too_weak`` banner carries the dedicated zxcvbn hint
+        // tip so the operator knows how to improve the password — other
+        // kinds deliberately omit it (wrong current / already rotated do
+        // not have a "mix classes" remediation).
+        const weakTips = screen.queryByTestId(
+          "bootstrap-admin-password-weak-tips",
+        )
+        if (c.kind === "password_too_weak") {
+          expect(weakTips).toBeInTheDocument()
+        } else {
+          expect(weakTips).toBeNull()
+        }
+
+        // Form stays mounted — no completion card unless the backend
+        // actually rotated the password.
+        expect(
+          screen.queryByTestId("bootstrap-admin-password-complete"),
+        ).toBeNull()
+      })
+    }
+
+    it("falls through to unclassified banner when the client throws a plain Error", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      mockedSetAdminPw.mockRejectedValue(
+        new Error("API 500: database connection refused"),
+      )
+      render(<BootstrapPage />)
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-admin-password-form"),
+        ).toBeInTheDocument()
+      })
+      await submitStep1Form(STRONG_PASSWORD)
+      await waitFor(() => {
+        const el = screen.getByTestId("bootstrap-admin-password-error")
+        expect(el.getAttribute("data-kind")).toBe("unclassified")
+        expect(el).toHaveTextContent(/database connection refused/)
+      })
+    })
+  })
+
+  describe("L8 #3 Step 2 key_invalid banner carries a provider-specific dashboard link", () => {
+    const providers: Array<{ id: "anthropic" | "openai" | "azure"; url: RegExp }> = [
+      { id: "anthropic", url: /console\.anthropic\.com/ },
+      { id: "openai", url: /platform\.openai\.com/ },
+      { id: "azure", url: /portal\.azure\.com/ },
+    ]
+
+    for (const p of providers) {
+      it(`renders the ${p.id} dashboard link when kind=key_invalid`, async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedProvisionLlm.mockRejectedValue(
+          new BootstrapLlmProvisionError(
+            "key_invalid",
+            `API key rejected by ${p.id}`,
+            401,
+          ),
+        )
+        render(<BootstrapPage />)
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-step-llm_provider"),
+          ).toBeInTheDocument()
+        })
+        fireEvent.click(screen.getByTestId("bootstrap-step-llm_provider"))
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-llm-provider-menu"),
+          ).toBeInTheDocument()
+        })
+        const option = screen.getByTestId(
+          `bootstrap-llm-provider-option-${p.id}`,
+        )
+        const radio = option.querySelector(
+          "input[type='radio']",
+        ) as HTMLInputElement
+        fireEvent.click(radio)
+        fireEvent.change(screen.getByTestId("bootstrap-llm-provider-api-key"), {
+          target: { value: "sk-sample-bad" },
+        })
+        if (p.id === "azure") {
+          fireEvent.change(
+            screen.getByTestId("bootstrap-llm-provider-azure-endpoint"),
+            { target: { value: "https://stub.openai.azure.com" } },
+          )
+        }
+        fireEvent.click(screen.getByTestId("bootstrap-llm-provider-submit"))
+
+        await waitFor(() => {
+          const link = screen.getByTestId("bootstrap-llm-provider-key-url")
+          expect(link).toBeInTheDocument()
+          expect(link.getAttribute("href")).toMatch(p.url)
+          expect(link.getAttribute("target")).toBe("_blank")
+          expect(link.getAttribute("rel")).toBe("noopener noreferrer")
+        })
+      })
+    }
+
+    it("does NOT render a key-url link on non-key_invalid kinds", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      mockedProvisionLlm.mockRejectedValue(
+        new BootstrapLlmProvisionError(
+          "network_unreachable",
+          "no response within 10s",
+          504,
+        ),
+      )
+      render(<BootstrapPage />)
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-llm_provider"),
+        ).toBeInTheDocument()
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-step-llm_provider"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-llm-provider-menu"),
+        ).toBeInTheDocument()
+      })
+      const option = screen.getByTestId("bootstrap-llm-provider-option-anthropic")
+      const radio = option.querySelector("input[type='radio']") as HTMLInputElement
+      fireEvent.click(radio)
+      fireEvent.change(screen.getByTestId("bootstrap-llm-provider-api-key"), {
+        target: { value: "sk-ant-whatever" },
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-llm-provider-submit"))
+      await waitFor(() => {
+        const banner = screen.getByTestId("bootstrap-llm-provider-error")
+        expect(banner.getAttribute("data-kind")).toBe("network_unreachable")
+      })
+      expect(
+        screen.queryByTestId("bootstrap-llm-provider-key-url"),
+      ).toBeNull()
+    })
+  })
+
+  describe("L8 #3 Step 4 start-services kind-keyed error banners + launcher UX", () => {
+    const servicesReadyStatus = {
+      ...redStatus,
+      status: {
+        ...redStatus.status,
+        admin_password_default: false,
+        llm_provider_configured: true,
+        cf_tunnel_configured: true,
+      },
+      missing_steps: ["smoke_passed"],
+    }
+
+    async function openServiceHealth() {
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-step-services_ready"),
+        ).toBeInTheDocument()
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-step-services_ready"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-start-services-panel"),
+        ).toBeInTheDocument()
+      })
+    }
+
+    const kindCases: Array<{
+      kind:
+        | "bad_mode"
+        | "binary_missing"
+        | "timeout"
+        | "sudoers_missing"
+        | "unit_missing"
+        | "unit_failed"
+      status: number
+      detail: string
+      stderr: string
+      expectedTitle: RegExp
+    }> = [
+      {
+        kind: "sudoers_missing",
+        status: 502,
+        detail: "launcher exited with code 1 — see stderr_tail",
+        stderr: "sudo: a password is required",
+        expectedTitle: /sudoers grant missing/i,
+      },
+      {
+        kind: "unit_missing",
+        status: 502,
+        detail: "launcher exited with code 5 — see stderr_tail",
+        stderr:
+          "Failed to start omnisight-backend.service: Unit not found.",
+        expectedTitle: /systemd unit not installed/i,
+      },
+      {
+        kind: "binary_missing",
+        status: 502,
+        detail: "launcher binary not found: docker",
+        stderr: "",
+        expectedTitle: /binary not found on PATH/i,
+      },
+      {
+        kind: "timeout",
+        status: 504,
+        detail: "launcher did not finish within 120s",
+        stderr: "",
+        expectedTitle: /timed out/i,
+      },
+      {
+        kind: "unit_failed",
+        status: 502,
+        detail: "launcher exited with code 3 — see stderr_tail",
+        stderr: "Error: port 8000 already in use",
+        expectedTitle: /non-zero code/i,
+      },
+    ]
+
+    for (const c of kindCases) {
+      it(`renders kind=${c.kind} banner with stderr_tail + remediation hint`, async () => {
+        mockedGetStatus.mockResolvedValue(servicesReadyStatus)
+        mockedParallelHealth.mockResolvedValue({
+          all_green: false,
+          elapsed_ms: 8,
+          backend: {
+            ok: false,
+            status: "red",
+            detail: "ConnectError: connection refused",
+            latency_ms: 4,
+          },
+          frontend: { ok: true, status: "green", detail: null, latency_ms: 3 },
+          db_migration: {
+            ok: true,
+            status: "green",
+            detail: null,
+            latency_ms: 1,
+          },
+          cf_tunnel: {
+            ok: true,
+            status: "skipped",
+            detail: "LAN-only",
+            latency_ms: 0,
+          },
+        })
+        mockedStartServices.mockRejectedValue(
+          new BootstrapStartServicesError({
+            kind: c.kind,
+            detail: c.detail,
+            status: c.status,
+            mode: "systemd",
+            command: ["sudo", "-n", "systemctl", "start", "omnisight-backend.service"],
+            returncode: c.kind === "timeout" ? null : 1,
+            stdout_tail: "",
+            stderr_tail: c.stderr,
+          }),
+        )
+
+        render(<BootstrapPage />)
+        await openServiceHealth()
+
+        fireEvent.click(screen.getByTestId("bootstrap-start-services-button"))
+
+        await waitFor(() => {
+          const banner = screen.getByTestId("bootstrap-start-services-error")
+          expect(banner).toBeInTheDocument()
+          expect(banner.getAttribute("data-kind")).toBe(c.kind)
+          expect(banner.getAttribute("data-mode")).toBe("systemd")
+          expect(banner).toHaveTextContent(c.expectedTitle)
+          expect(banner).toHaveTextContent(c.detail)
+        })
+
+        if (c.stderr) {
+          expect(
+            screen.getByTestId("bootstrap-start-services-stderr"),
+          ).toHaveTextContent(c.stderr)
+        } else {
+          expect(
+            screen.queryByTestId("bootstrap-start-services-stderr"),
+          ).toBeNull()
+        }
+      })
+    }
+
+    it("green-path: launch button shows success label + hides the banner", async () => {
+      mockedGetStatus.mockResolvedValue(servicesReadyStatus)
+      mockedStartServices.mockResolvedValue({
+        status: "started",
+        mode: "systemd",
+        command: [
+          "sudo",
+          "-n",
+          "systemctl",
+          "start",
+          "omnisight-backend.service",
+          "omnisight-frontend.service",
+        ],
+        returncode: 0,
+        stdout_tail: "Started omnisight-backend.service\n",
+        stderr_tail: "",
+      })
+      render(<BootstrapPage />)
+      await openServiceHealth()
+
+      fireEvent.click(screen.getByTestId("bootstrap-start-services-button"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-start-services-ok"),
+        ).toHaveAttribute("data-status", "started")
+      })
+      expect(
+        screen.queryByTestId("bootstrap-start-services-error"),
+      ).toBeNull()
+    })
+
+    it("dev-mode no-op: launcher reports already_running without an error banner", async () => {
+      mockedGetStatus.mockResolvedValue(servicesReadyStatus)
+      mockedStartServices.mockResolvedValue({
+        status: "already_running",
+        mode: "dev",
+        command: [],
+        returncode: 0,
+        stdout_tail: "",
+        stderr_tail: "",
+      })
+      render(<BootstrapPage />)
+      await openServiceHealth()
+      fireEvent.click(screen.getByTestId("bootstrap-start-services-button"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-start-services-ok"),
+        ).toHaveTextContent(/already running \(dev mode\)/i)
+      })
+    })
   })
 })
