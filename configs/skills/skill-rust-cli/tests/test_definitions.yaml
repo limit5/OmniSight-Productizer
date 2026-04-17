@@ -1,0 +1,70 @@
+# SKILL-RUST-CLI test definitions — X7 #303
+#
+# Authoritative list consumed by `backend/tests/test_skill_rust_cli.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-tokio-all-subcommands
+        name: "Render: tokio + all subcommands + completions"
+        type: unit
+        target: backend.rust_cli_scaffolder.render_project
+      - id: scaffold-sync-minimal
+        name: "Render: sync runtime (no tokio dep)"
+        type: unit
+        target: backend.rust_cli_scaffolder.render_project
+      - id: scaffold-no-completions
+        name: "completions=off skips the completions subcommand"
+        type: unit
+        target: backend.rust_cli_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by compliance skipped correctly"
+        type: unit
+        target: backend.rust_cli_scaffolder.render_project
+      - id: scaffold-bin-name-default
+        name: "bin_name defaults to slugified project_name"
+        type: unit
+        target: backend.rust_cli_scaffolder.ScaffoldOptions
+
+  - id: framework-binding
+    name: "X0-X4 framework binding tests"
+    tests:
+      - id: x0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.rust_cli_scaffolder.render_project
+      - id: x1-coverage-threshold-in-makefile
+        name: "Makefile + check_cov.sh enforce Rust 75% coverage floor"
+        type: unit
+        target: backend.rust_cli_scaffolder.render_project
+      - id: x2-cli-tooling-alignment
+        name: "Scaffold honours cli-tooling role (--version / --json / clap derive)"
+        type: unit
+        target: backend.rust_cli_scaffolder.render_project
+      - id: x3-cargo-dist-adapter-resolves
+        name: "CargoDistAdapter resolves against rendered Cargo.toml"
+        type: integration
+        target: backend.rust_cli_scaffolder.dry_run_build
+      - id: x4-compliance-runs
+        name: "X4 compliance bundle runs against rendered project"
+        type: integration
+        target: backend.rust_cli_scaffolder.pilot_report
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-rust-cli appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-rust-cli') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

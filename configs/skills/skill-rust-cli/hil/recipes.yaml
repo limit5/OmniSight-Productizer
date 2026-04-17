@@ -1,0 +1,74 @@
+# SKILL-RUST-CLI HIL recipes — X7 #303
+#
+# "Hardware" here is the release tarball landing on a workstation
+# (no container runtime or k8s cluster involved — unlike SKILL-GO-SERVICE).
+# Each recipe is a probe that can only run after a real cargo build /
+# cargo dist invocation, used by the operator-run Step 7 smoke path.
+
+recipes:
+  - id: release-binary-size
+    name: "Release binary ≤ 8 MiB"
+    description: >
+      Build the release binary (`cargo build --release`) and assert
+      it fits the cli-tooling role "Rust binary ≤ 8 MiB" budget. A
+      regression here usually means a heavyweight dep (`reqwest` full
+      TLS, `uuid` with `v4` random, etc.) landed without justification.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: file_size_ceiling
+      path: "target/release/{bin_name}"
+      ceiling_bytes: 8388608
+
+  - id: cli-cold-start
+    name: "Cold-start ≤ 50ms"
+    description: >
+      Run `target/release/<bin> --version` five times with a cold
+      page cache (`echo 3 > /proc/sys/vm/drop_caches` when operator
+      has root) and assert P95 wall time ≤ 50ms. Matches the
+      cli-tooling role Rust cold-start budget.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_wall_time
+      cmd: "target/release/{bin_name} --version"
+      iterations: 5
+      p95_ms_ceiling: 50
+
+  - id: cargo-dist-plan
+    name: "cargo dist plan succeeds"
+    description: >
+      `cargo dist plan` must exit zero offline, validating the
+      Cargo.toml `[workspace.metadata.dist]` block + the
+      dist-workspace.toml anchor. This is the X3 CargoDistAdapter's
+      offline hook.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "cargo dist plan"
+      expected_rc: 0
+
+  - id: cargo-dist-build-snapshot
+    name: "cargo dist build --artifacts=all (local target)"
+    description: >
+      `cargo dist build --artifacts=all --target $(rustc -vV |
+      awk '/host:/ {print $2}')` produces at least one archive
+      for the local host triple. Full 5-triple matrix requires
+      cross or dedicated runners — this recipe checks the local
+      slice, the CI pipeline drives the rest.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "cargo dist build --artifacts=all"
+      expected_rc: 0
+
+  - id: completions-load-bash
+    name: "bash completions loadable"
+    description: >
+      `target/release/<bin> completions bash > /tmp/cc.bash && bash
+      -n /tmp/cc.bash && source /tmp/cc.bash` — the cli-tooling role
+      rule "shell completion at least bash + zsh validated loadable"
+      lands here.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: shell_source
+      shell: bash
+      cmd: "target/release/{bin_name} completions bash"

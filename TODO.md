@@ -1205,9 +1205,9 @@ Legend:
 - [x] 預估：**1 day**
 
 ### X7. SKILL-RUST-CLI (#303)
-- [ ] Clap + anyhow + tokio 骨架
-- [ ] cargo-dist 多平台 release
-- [ ] 預估：**1 day**
+- [x] Clap + anyhow + tokio 骨架
+- [x] cargo-dist 多平台 release
+- [x] 預估：**1 day**
 
 ### X8. SKILL-DESKTOP-TAURI (#304)
 - [ ] Tauri 2.x 骨架 + 前端整合（React/Vue 可選）

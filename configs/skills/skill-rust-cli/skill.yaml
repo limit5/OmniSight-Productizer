@@ -1,0 +1,84 @@
+# X7 #303 — SKILL-RUST-CLI manifest.
+#
+# Third software-vertical skill pack. X5 SKILL-FASTAPI (#301) proved
+# the X0-X4 framework on Python; X6 SKILL-GO-SERVICE (#302) proved it
+# on Go; X7 stresses a third toolchain (cargo + rustc + cargo-dist)
+# and a different deliverable shape — a single-file native CLI binary
+# rather than a long-running HTTP server.
+#
+# Exercise:
+#   * X0  target_kind=software profile                (configs/platforms/linux-x86_64-native.yaml + 4 siblings)
+#   * X1  cargo test + llvm-cov 75% floor             (backend/software_simulator.py, rust threshold 75%)
+#   * X2  cli-tooling role default                    (configs/roles/software/cli-tooling.skill.md Rust row + backend-rust.skill.md)
+#   * X3  cargo-dist multi-platform release           (backend/build_adapters.py — CargoDistAdapter)
+#   * X4  SPDX license scan / CVE / SBOM              (backend/software_compliance/ — cargo ecosystem via Cargo.toml + cargo-license fallback)
+#
+# Scaffolds under `scaffolds/` emit a Rust 2021-edition CLI binary
+# using clap 4.x (derive), anyhow for error propagation, tokio 1.x
+# multi-thread runtime, tracing + tracing-subscriber for structured
+# logs, and a cargo-dist release config for 5 target triples (Linux
+# x86_64/arm64 gnu, Windows MSVC, macOS arm64/x86_64). Honours
+# cli-tooling role conventions: --version / --help / --json / --quiet
+# / --verbose, exit codes 0/1/2/130, is_terminal() for ANSI gating,
+# shell completions (bash/zsh/fish/pwsh).
+
+schema_version: 1
+name: skill-rust-cli
+description: >
+  Rust 2021 CLI skill pack. Generates a production-ready native CLI
+  binary using clap 4.x (derive macros), anyhow for error context,
+  tokio 1.x async runtime, tracing structured logs, and a cargo-dist
+  release config spanning Linux x86_64/arm64, Windows MSVC, and macOS
+  arm64/x86_64 (with lipo'd universal option). Wires cargo test +
+  cargo llvm-cov to the X1 Rust coverage floor (75%), embeds a
+  version-info command driven by build.rs (git SHA + semver),
+  ships shell completions for bash/zsh/fish/pwsh, honours cli-tooling
+  role rules (exit codes, --json machine output, TTY-gated ANSI), and
+  bundles cargo-deny + audit config for X4 compliance. Dogfoods the
+  cli-tooling role (Rust row) and the backend-rust role, and consumes
+  every X0-X4 framework layer end-to-end.
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - rust
+  - rust-2021
+  - cli
+  - clap
+  - clap-derive
+  - anyhow
+  - tokio
+  - tracing
+  - cargo-dist
+  - cargo-deny
+  - cargo-audit
+  - cross-platform
+  - single-binary
+  - shell-completion
+  - spdx
+  - x7

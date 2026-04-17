@@ -1,0 +1,66 @@
+# {{ project_name }}
+
+Rust CLI scaffolded by **SKILL-RUST-CLI** (X7 #303). Produces a
+single-file native binary spanning Linux x86_64/arm64 (gnu), Windows
+MSVC, and macOS arm64/x86_64 via `cargo-dist`.
+
+## Quick start
+
+```bash
+cargo run -- --help              # full help output
+cargo run -- version --json      # machine-readable version info
+cargo run -- status              # runtime status (text)
+cargo run -- init --path ./cfg   # scaffold a config dir
+cargo run -- completions bash    # emit bash completion script
+```
+
+## Build & release
+
+```bash
+make build              # cargo build --release
+make test               # cargo test + llvm-cov 75% floor
+make clippy             # cargo clippy -D warnings
+make dist-plan          # cargo dist plan (offline validation)
+make dist-build         # cargo dist build --artifacts=all
+make audit              # cargo audit (RustSec)
+make deny               # cargo deny check (license / ban / source)
+```
+
+## CLI contract (cli-tooling role mandates)
+
+| Rule | Implementation |
+| --- | --- |
+| `--version` ⇒ `name semver (sha)` | `env!("BUILD_GIT_SHA")` injected by `build.rs` |
+| `--help` is framework-generated | clap 4 derive `#[command(after_help = ...)]` |
+| `--json` for machine output | global clap flag; every data subcommand serialises via serde |
+| Exit codes `0 / 1 / 2 / 130` | `main -> ExitCode`, clap owns 2, ctrl_c owns 130 |
+| logs → stderr / data → stdout | `tracing-subscriber` writes to `std::io::stderr` |
+| ANSI gated on `is_terminal()` | `is-terminal` crate; off under `--json` |
+| shell completions | `completions` subcommand via `clap_complete` |
+
+## Framework gates validated
+
+| X-series | What the scaffold exercises |
+| --- | --- |
+| X0 | 5× `target_kind=software` profiles (Linux x86_64/arm64, Windows MSVC, macOS arm64/x86_64) |
+| X1 | `cargo llvm-cov --summary-only` + 75% floor (`COVERAGE_THRESHOLDS["rust"]`) |
+| X2 | cli-tooling role Rust row + backend-rust anti-patterns (no `unwrap()` in lib, no `String` alloc in hot loop, no `os::exit` bypass) |
+| X3 | `CargoDistAdapter` accepts `Cargo.toml` + `dist-workspace.toml` |
+| X4 | `software_compliance` bundle (cargo ecosystem via `cargo-license` + `Cargo.toml` fallback) |
+
+## Runtime
+
+Default runtime is **tokio multi-thread** (`#[tokio::main(flavor =
+"multi_thread")]`). Swap to the sync flavour by re-rendering with
+`runtime="sync"` — `main.rs` drops `async`, subcommands use their
+`_sync` paths, and `tokio` is dropped from `Cargo.toml`.
+
+## Subcommands
+
+- `init` — scaffold a config dir
+- `run` — execute the main workload (stub echoes input)
+- `status` — structured runtime report
+- `version` — `name semver (sha)`
+- `completions <shell>` — emit bash/zsh/fish/powershell completion script
+
+See `{{ bin_name }} --help` for full flag coverage.

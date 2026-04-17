@@ -1,0 +1,112 @@
+# X7 #303 — SKILL-RUST-CLI DAG tasks.
+#
+# Mirrors the X5/X6 DAG shape so the skill registry's tests/validate
+# path stays uniform across language-vertical packs. Each task maps
+# 1:1 to an X0-X4 capability, so running the full DAG is by design
+# a smoke test of the software vertical on Rust.
+
+tasks:
+  - id: rust-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render the Rust project from scaffolds/: Cargo.toml (crate
+      metadata + deps pinned + workspace.metadata.dist block),
+      rust-toolchain.toml (stable 1.76 pin), src/ layout,
+      dist-workspace.toml, .gitignore, .env.example. Idempotent
+      re-render: overwrites inside the scaffold surface, never
+      touches files outside it (e.g. operator-added modules under
+      src/commands/custom/).
+    depends_on: []
+    artifacts: [rust_skeleton]
+    estimated_hours: 1
+    framework_gate: x0-platform-schema
+
+  - id: rust-cli-core
+    name: "CLI app core (clap + anyhow + tokio)"
+    description: >
+      Emit `src/main.rs` (tokio runtime bootstrap), `src/cli.rs`
+      (clap derive Command tree), `src/error.rs` (anyhow aliases +
+      exit code mapping), `src/logging.rs` (tracing-subscriber
+      JSON handler, TTY-gated ANSI). Honours cli-tooling role: stderr
+      for logs, stdout for data, --quiet/--verbose/--json triad.
+    depends_on: [rust-scaffold-init]
+    artifacts: [rust_core]
+    estimated_hours: 1.5
+    framework_gate: x2-role-cli-tooling
+
+  - id: rust-subcommands
+    name: "Subcommands + --json output"
+    description: >
+      Render `src/commands/{init,run,status,version}.rs` with shared
+      JSON/text output trait. `init` scaffolds a fresh config dir,
+      `run` executes the main workload (stub that echoes args), `status`
+      prints a structured report, `version` prints `{name} semver
+      (sha)` (machine-parseable with --json). Each command carries
+      unit-level tests in the same file under #[cfg(test)] mod tests.
+    depends_on: [rust-cli-core]
+    artifacts: [rust_subcommands]
+    estimated_hours: 1.5
+
+  - id: rust-completions
+    name: "Shell completions"
+    description: >
+      Render the `completions` subcommand using clap_complete —
+      emits bash/zsh/fish/pwsh scripts for the CLI's own Command
+      tree on demand. Keeps release archives slim (operator pipes
+      to their shell config) while satisfying the cli-tooling role
+      "bash + zsh at minimum" rule.
+    depends_on: [rust-cli-core]
+    artifacts: [rust_completions]
+    estimated_hours: 0.5
+
+  - id: rust-tests
+    name: "cargo test + llvm-cov gate"
+    description: >
+      Render `tests/cli_integration.rs` using assert_cmd to exec the
+      built binary and assert on argv / exit code / stdout-stderr
+      separation. `scripts/check_cov.sh` runs `cargo llvm-cov
+      --summary-only` and enforces the X1 Rust 75% threshold. Makefile
+      `make test` wraps it.
+    depends_on: [rust-subcommands]
+    artifacts: [rust_tests]
+    estimated_hours: 1
+    framework_gate: x1-software-simulate
+
+  - id: rust-cargo-dist
+    name: "cargo-dist multi-platform release"
+    description: >
+      Emit `dist-workspace.toml` + `[workspace.metadata.dist]` in
+      Cargo.toml targeting 5 triples (Linux x86_64/arm64 gnu, Windows
+      MSVC, macOS arm64/x86_64) with --release profile, strip=true,
+      lto=fat, panic=abort for size. Consumed by
+      `backend.build_adapters.CargoDistAdapter` for the release
+      pipeline. `cargo dist plan` validates the config offline.
+    depends_on: [rust-cli-core]
+    artifacts: [rust_cargo_dist]
+    estimated_hours: 1
+    framework_gate: x3-cargo-dist-adapter
+
+  - id: rust-compliance
+    name: "X4 compliance gates"
+    description: >
+      Emit `spdx.allowlist.json` (default-deny GPL/AGPL, allow
+      Apache-2.0 / MIT / BSD / MPL-2.0), `deny.toml` for cargo-deny
+      (licenses + bans + sources + advisories), `.cargo/audit.toml`.
+      The compliance harness (backend.software_compliance.licenses)
+      detects the cargo ecosystem via Cargo.toml and runs
+      cargo-license when available.
+    depends_on: [rust-scaffold-init]
+    artifacts: [rust_compliance]
+    estimated_hours: 0.5
+    framework_gate: x4-software-compliance
+
+  - id: rust-pilot-report
+    name: "X0-X4 validation report"
+    description: >
+      End-to-end smoke: render project, run X3 cargo-dist dry-run
+      (checks the config is shipped), X4 compliance bundle — emit
+      one JSON report. Any framework regression fails this task
+      first.
+    depends_on: [rust-tests, rust-cargo-dist, rust-compliance]
+    artifacts: [rust_pilot_report]
+    estimated_hours: 0.5
