@@ -1,0 +1,92 @@
+name: Docker Publish
+
+# L10 #337 — on every `v*` tag push, build the backend + frontend
+# container images and push them to GHCR under the repo owner's
+# namespace. Two tags per image:
+#   - :latest            — floating tag, moves with each release
+#   - :<git-tag>          — immutable snapshot (e.g. v0.3.1)
+#
+# Multi-arch (linux/amd64 + linux/arm64) and docker-compose
+# registry-first consumption live on separate TODO lines (L10 #337
+# items 2–4) and are not scoped into this workflow yet.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (defaults to 'manual')"
+        required: false
+        default: "manual"
+
+permissions:
+  contents: read
+  # GHCR push requires write access to GitHub Packages. Scoped to
+  # the default GITHUB_TOKEN so no PAT management is required.
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: omnisight-backend
+  FRONTEND_IMAGE: omnisight-frontend
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            image: omnisight-backend
+            dockerfile: Dockerfile.backend
+          - name: frontend
+            image: omnisight-frontend
+            dockerfile: Dockerfile.frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR requires the namespace (repository_owner) to be
+      # lowercase even when the GitHub org/user has mixed case.
+      - name: compute lowercase owner
+        id: owner
+        run: |
+          echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: resolve tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build + push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}:latest
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}:${{ steps.tag.outputs.value }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
