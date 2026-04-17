@@ -45,6 +45,7 @@ CHARTER = PROJECT_ROOT / "docs" / "ops" / "orchestration_selection.md"
 
 NAMESPACE_PATH = K8S_DIR / "00-namespace.yaml"
 DEPLOYMENT_PATH = K8S_DIR / "10-deployment-backend.yaml"
+PDB_PATH = K8S_DIR / "15-pdb-backend.yaml"
 SERVICE_PATH = K8S_DIR / "20-service-backend.yaml"
 INGRESS_PATH = K8S_DIR / "30-ingress.yaml"
 HPA_PATH = K8S_DIR / "40-hpa-backend.yaml"
@@ -53,6 +54,7 @@ README_PATH = K8S_DIR / "README.md"
 ALL_MANIFEST_PATHS = [
     NAMESPACE_PATH,
     DEPLOYMENT_PATH,
+    PDB_PATH,
     SERVICE_PATH,
     INGRESS_PATH,
     HPA_PATH,
@@ -124,10 +126,14 @@ class TestK8sManifestFilesShape:
         # Namespace must be the first YAML kubectl apply -f walks so that
         # every namespaced object below can land into it.
         assert files[0].name == NAMESPACE_PATH.name
-        # Backend stack order: namespace → deploy → service → ingress → hpa.
+        # Backend stack order: namespace → deploy → pdb → service → ingress → hpa.
+        # PDB lands after Deployment so the pods it protects already exist
+        # by the time the budget kicks in (PDB doesn't strictly require it,
+        # but the operational read is cleaner).
         expected = [
             NAMESPACE_PATH.name,
             DEPLOYMENT_PATH.name,
+            PDB_PATH.name,
             SERVICE_PATH.name,
             INGRESS_PATH.name,
             HPA_PATH.name,
@@ -593,20 +599,12 @@ class TestCharterAlignment:
 
 
 # ---------------------------------------------------------------------------
-# TestScopeDisciplineSiblingRows — rows 1371/1372/1373/1374 own separate
-# manifests; G5 #2 must NOT silently drag them in.
+# TestScopeDisciplineSiblingRows — rows 1372/1373/1374 own separate
+# manifests; G5 #2 must NOT silently drag them in. Row 1371 (PDB) has
+# now landed under its own contract file (test_k8s_pdb_g5_3.py) and is
+# referenced from G5 #2's apply-order test instead.
 # ---------------------------------------------------------------------------
 class TestScopeDisciplineSiblingRows:
-    def test_no_poddisruptionbudget_yet(self) -> None:
-        # G5 #3 (row 1371) is a separate delivery. If a PDB shows up
-        # here without the sibling row being checked, that row has
-        # silently landed inside G5 #2 — visibility regression.
-        for path in ALL_MANIFEST_PATHS:
-            doc = _load(path)
-            assert doc.get("kind") != "PodDisruptionBudget", (
-                f"{path.name}: PDB belongs to G5 #3 row 1371, not G5 #2"
-            )
-
     def test_no_helm_chart_dir_yet(self) -> None:
         # G5 #5 (row 1373) is the Helm chart. If it exists when G5 #2
         # lands, the scope line between the rows has blurred.

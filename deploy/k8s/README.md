@@ -26,6 +26,7 @@ locked in §7:
 |---|---|---|---|
 | `00-namespace.yaml` | Namespace | v1 | charter §3.2 |
 | `10-deployment-backend.yaml` | Deployment | apps/v1 | charter §7.4 |
+| `15-pdb-backend.yaml` | PodDisruptionBudget | policy/v1 | charter §7.2 |
 | `20-service-backend.yaml` | Service | v1 | charter §7 |
 | `30-ingress.yaml` | Ingress | networking.k8s.io/v1 | charter §7.6 |
 | `40-hpa-backend.yaml` | HorizontalPodAutoscaler | autoscaling/v2 | charter §7.4 |
@@ -67,8 +68,10 @@ this against each PR.
 
 ## Scope — what this bundle does NOT include
 
-- `PodDisruptionBudget` → G5 #3 row 1371.
 - Readiness / liveness probes → G5 #4 row 1372.
 - Helm chart templates + `values-staging.yaml` / `values-prod.yaml` → G5 #5 row 1373.
 - CI smoke workflow + kind harness → G5 #6 row 1374.
 - `deploy/nomad/` or `deploy/swarm/` — out of scope per charter §7.8.
+
+`PodDisruptionBudget` (G5 #3 row 1371) is now part of the bundle —
+ships as `15-pdb-backend.yaml` with `policy/v1` and `minAvailable: 1`.

@@ -1,0 +1,51 @@
+# G5 #3 (TODO row 1371) — PodDisruptionBudget for the backend.
+#
+# Charter `docs/ops/orchestration_selection.md` §7.2:
+#   * apiVersion: policy/v1 (NOT policy/v1beta1 — that was removed in
+#     Kubernetes 1.25; v1 is the only surviving wire form on K8s 1.29).
+#   * minAvailable: 1.
+#
+# Why minAvailable=1 not maxUnavailable=1:
+#   On a 2-replica baseline both literals express the same arithmetic
+#   floor (one pod must always serve traffic). minAvailable is the
+#   directly-readable form of the HA promise — "at least 1 pod must
+#   remain available during voluntary disruptions" — and survives any
+#   future replicas bump cleanly: bumping replicas from 2 to 4 keeps
+#   minAvailable=1 honest (still ≥1 pod up) whereas maxUnavailable=1
+#   would silently drift to "up to 25% of pods may go down at once",
+#   weakening the contract without anyone noticing.
+#
+# Why this is a SEPARATE manifest from 10-deployment-backend.yaml:
+#   PDB targets pods via labels and is decoupled from the Deployment
+#   object. Keeping it in its own file lets `kubectl delete -f` /
+#   `kubectl apply --prune` operate on the PDB independently and makes
+#   the G5 #5 Helm chart toggle (`pdb.enabled`) a one-template flip.
+#
+# Selector deliberately mirrors the Deployment's spec.selector.matchLabels
+# (10-deployment-backend.yaml) — if the Deployment's selector ever
+# drifts, the PDB stops protecting the right pods. The G5 #3 contract
+# tests assert this label set is byte-equal to the Deployment selector.
+#
+# Voluntary vs involuntary disruptions:
+#   PDB only constrains VOLUNTARY disruptions (drain, eviction API,
+#   rolling updates that respect PDB). It does NOT protect against
+#   node hardware failure or kernel panic — that's the Deployment's
+#   replica count + the HPA's headroom doing their job. PDB is the
+#   "do not let cluster operators accidentally take us below HA-02
+#   while draining nodes" guard rail.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: omnisight-backend
+  namespace: omnisight
+  labels:
+    app.kubernetes.io/name: omnisight-backend
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: omnisight
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omnisight-backend
+      app.kubernetes.io/component: backend
