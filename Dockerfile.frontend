@@ -1,3 +1,21 @@
+# L10 #337: Next.js standalone runner on a minimal alpine base.
+#
+# Before: `node:20-alpine` shipped node (97 MB) + npm/corepack/yarn
+# (~22 MB) even though `node server.js` needs none of the package
+# managers. Image was 272 MB.
+#
+# After: final stage is `alpine:3.19` + `apk add nodejs` (only the
+# node runtime, no npm). Alpine's nodejs apk ships a node binary at
+# ~42 MB (vs. the official image's bundled 97 MB build with extras).
+# Both bases are musl-based so the Next.js standalone bundle (traced
+# against musl in the builder) works unchanged.
+#
+# Rationale for not just `rm -rf` npm/corepack in the original image:
+# Docker layers are additive — deleting files in a later RUN leaves
+# the earlier layer intact, so the image bytes don't shrink. A fresh
+# runner base with only what we need is the only way to actually
+# reduce the image.
+
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -18,8 +36,20 @@ ARG BACKEND_URL=http://backend:8000
 ENV BACKEND_URL=${BACKEND_URL}
 RUN pnpm run build
 
-# ── Production image ──
-FROM node:20-alpine AS runner
+# ── Production image ────────────────────────────────────────────────
+# alpine:3.19 ships nodejs 20.15.x via apk — matches the builder's
+# node 20 ABI and the standalone bundle works unchanged. Pinning 3.19
+# (vs. alpine:latest) keeps the Node major stable; a future bump to
+# 3.22+ would land us on node 22 which may or may not be compatible
+# with whatever the builder stage used that week.
+FROM alpine:3.19 AS runner
+
+# nodejs       : node runtime (no npm, no corepack, no yarn)
+# libstdc++    : required by some native addons at `require()` time
+# ca-certificates : outbound HTTPS from the app (e.g. auth callbacks)
+#                   would fail with "unable to verify the first
+#                   certificate" without a trust store. Load-bearing.
+RUN apk add --no-cache nodejs libstdc++ ca-certificates
 
 WORKDIR /app
 ENV NODE_ENV=production
@@ -28,6 +58,19 @@ ENV NODE_ENV=production
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
+
+# next.config.mjs sets `images: { unoptimized: true }` — Next.js will
+# not invoke sharp for image optimization. Next's standalone tracer
+# still bundles sharp + libvips (~33 MB) defensively. Removing the
+# unused libvips variants + the sharp dispatch packages saves the
+# image from carrying dead native code. Guarded by `|| true` in case
+# a future Next release stops bundling sharp (path disappears).
+RUN rm -rf /app/node_modules/.pnpm/@img+sharp-libvips-linux-x64* \
+           /app/node_modules/.pnpm/@img+sharp-libvips-linuxmusl-x64* \
+           /app/node_modules/.pnpm/@img+sharp-linux-x64* \
+           /app/node_modules/.pnpm/@img+sharp-linuxmusl-x64* \
+           /app/node_modules/.pnpm/sharp@* \
+    || true
 
 EXPOSE 3000
 
