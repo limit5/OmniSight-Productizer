@@ -75,6 +75,17 @@ open http://localhost:3000
 # Alternative: one-shot docker compose
 #   docker compose up --build
 #   (reads the same .env; exposes :3000 + :8000)
+
+# Or: one-click production deploy (WSL2 + Cloudflare Tunnel + your own domain)
+#   ./scripts/quick-start.sh
+#   Walks you through preflight → .env → docker compose prod → health
+#   checks → Cloudflare Tunnel setup (auto-creates tunnel + ingress + DNS
+#   CNAME from a CF API token) → cloudflared install/launch. The only
+#   un-automatable step (GoDaddy → Cloudflare nameserver change) is
+#   printed as a guided walkthrough: the script auto-detects whether
+#   you've already migrated via `dig NS`, and skips that section on re-runs.
+#   Re-run anytime — idempotent (.env / tunnel / DNS records all reuse-or-skip).
+#   Override the domain via: OMNISIGHT_DOMAIN=example.com ./scripts/quick-start.sh
 ```
 
 Interactive API docs live at `http://localhost:8000/docs` (FastAPI

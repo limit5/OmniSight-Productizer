@@ -420,6 +420,11 @@ _wait_for_health "Frontend" "http://localhost:${FRONTEND_PORT}/" "$HEALTH_RETRIE
 step "Step 4: Cloudflare Tunnel 設定（公網 HTTPS）"
 
 CF_READY=false
+# Populated from CF zones API (.result[0].name_servers). Step 5 reads this
+# to print the exact NS values the user must copy into GoDaddy. Stays empty
+# if the CF setup block is skipped (no token / zone not found), in which
+# case Step 5 falls back to "look them up in CF dashboard".
+CF_NAMESERVERS=()
 
 echo -e "${BOLD}你的域名：${DOMAIN}${NC}"
 echo ""
@@ -489,6 +494,19 @@ if [[ "$cf_setup" =~ ^[Yy] ]]; then
                     echo "  完成後重新執行此腳本即可。"
                 else
                     log "Zone: ${DOMAIN} (${CF_ZONE_ID}) — status: ${CF_ZONE_STATUS}"
+
+                    # Extract the 2 CF-assigned NS values so Step 5 can print
+                    # them verbatim. Plain `while IFS= read` (no bash-4 only
+                    # builtins) keeps this portable to bash 3.2. Capture jq
+                    # stdout to a variable first so a jq failure doesn't
+                    # silently null the array via process substitution +
+                    # set -e.
+                    CF_NS_RAW=$(echo "$CF_ZONES" | jq -r '.result[0].name_servers // [] | .[]' 2>/dev/null || true)
+                    if [ -n "$CF_NS_RAW" ]; then
+                        while IFS= read -r ns_line; do
+                            [ -n "$ns_line" ] && CF_NAMESERVERS+=("$ns_line")
+                        done <<< "$CF_NS_RAW"
+                    fi
 
                     if [ "$CF_ZONE_STATUS" = "pending" ]; then
                         warn "Zone 狀態為 'pending'——Nameserver 尚未遷移或正在傳播中。"
@@ -685,20 +703,173 @@ fi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Step 5: GoDaddy NS 遷移指引
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# GoDaddy doesn't expose a public NS-change API for consumer domains, so
+# this step is manual by necessity. What we *can* do:
+#   (a) Auto-detect current NS state (already on CF / still on GoDaddy /
+#       partially propagated) so we don't nag users who've already done it.
+#   (b) Print the exact two CF NS values (fetched from CF zones API above)
+#       so they don't need to tab-switch to the CF dashboard to copy them.
+#   (c) Walk them through the current GoDaddy UI with the correct menu path.
+#   (d) Give them verification commands + DNSSEC/MX safety warnings.
 step "Step 5: GoDaddy Nameserver 遷移（一次性手動步驟）"
 
-echo -e "${BOLD}如果你還沒有將 ${DOMAIN} 的 Nameserver 指向 Cloudflare：${NC}"
-echo ""
-echo "  1. 登入 GoDaddy：https://dcc.godaddy.com/manage/${DOMAIN}/dns"
-echo "  2.「Nameservers」→「Change」→「I'll use my own nameservers」"
-echo "  3. 填入 Cloudflare Dashboard → ${DOMAIN} → DNS 頁面提供的兩個 NS"
-echo "  4. 儲存 → 等待 DNS 傳播（5 分鐘 ~ 24 小時）"
-echo ""
+# ── (a) Probe current NS state ──
+# Force @1.1.1.1 so a broken /etc/resolv.conf inside WSL2 doesn't poison
+# the result. +time=3 +tries=1 bounds the query to ~3s. We tolerate a
+# trailing dot (dig returns "ns.cloudflare.com." with the terminator).
+CURRENT_NS=""
+NS_LOOKUP_TOOL=""
+if command -v dig &>/dev/null; then
+    NS_LOOKUP_TOOL="dig"
+    CURRENT_NS=$(dig +short +time=3 +tries=1 NS "$DOMAIN" @1.1.1.1 2>/dev/null | tr -d '\r' | sort -u || true)
+    # Retry without @1.1.1.1 if the public resolver was blocked (corp VPN).
+    [ -z "$CURRENT_NS" ] && CURRENT_NS=$(dig +short +time=3 +tries=1 NS "$DOMAIN" 2>/dev/null | tr -d '\r' | sort -u || true)
+elif command -v host &>/dev/null; then
+    NS_LOOKUP_TOOL="host"
+    CURRENT_NS=$(host -t NS "$DOMAIN" 2>/dev/null | awk '/name server/ {print $NF}' | sort -u || true)
+elif command -v nslookup &>/dev/null; then
+    NS_LOOKUP_TOOL="nslookup"
+    CURRENT_NS=$(nslookup -type=NS "$DOMAIN" 2>/dev/null | awk '/nameserver/ {print $NF}' | sort -u || true)
+fi
+
+# Classify: all-CF (done), some-CF (mid-propagation), no-CF (still GoDaddy), unknown.
+NS_STATE="unknown"
+NS_CF_COUNT=0
+NS_TOTAL_COUNT=0
+if [ -n "$CURRENT_NS" ]; then
+    NS_TOTAL_COUNT=$(printf '%s\n' "$CURRENT_NS" | grep -c . || true)
+    NS_CF_COUNT=$(printf '%s\n' "$CURRENT_NS" | grep -ci 'ns\.cloudflare\.com' || true)
+    # grep -c can print "0\n0" under set -e if no match; normalize.
+    NS_CF_COUNT=${NS_CF_COUNT//[^0-9]/}; NS_CF_COUNT=${NS_CF_COUNT:-0}
+    NS_TOTAL_COUNT=${NS_TOTAL_COUNT//[^0-9]/}; NS_TOTAL_COUNT=${NS_TOTAL_COUNT:-0}
+    if [ "$NS_TOTAL_COUNT" -gt 0 ] && [ "$NS_CF_COUNT" -eq "$NS_TOTAL_COUNT" ]; then
+        NS_STATE="all-cf"
+    elif [ "$NS_CF_COUNT" -gt 0 ]; then
+        NS_STATE="mixed"
+    else
+        NS_STATE="non-cf"
+    fi
+fi
+
+case "$NS_STATE" in
+    all-cf)
+        # Idempotent skip — most common on re-runs.
+        DETECTED_CF=$(printf '%s\n' "$CURRENT_NS" | sed 's/\.$//' | tr '\n' ' ')
+        log "偵測到 NS 已指向 Cloudflare：${DETECTED_CF}"
+        log "✓ NS 遷移已完成，跳過此步驟。"
+        ;;
+    mixed)
+        DETECTED_ALL=$(printf '%s\n' "$CURRENT_NS" | sed 's/\.$//' | tr '\n' ' ')
+        warn "偵測到 NS 正在傳播中（${NS_CF_COUNT}/${NS_TOTAL_COUNT} 已指向 Cloudflare）"
+        echo "   目前可見的 NS：${DETECTED_ALL}" | tee -a "$LOG_FILE"
+        echo "   請再等 30 分鐘 ~ 4 小時，所有 NS 都會收斂到 Cloudflare。" | tee -a "$LOG_FILE"
+        echo "   驗證：dig NS ${DOMAIN} +short    或    https://www.whatsmydns.net/#NS/${DOMAIN}" | tee -a "$LOG_FILE"
+        ;;
+    non-cf|unknown)
+        if [ "$NS_STATE" = "non-cf" ]; then
+            DETECTED_ALL=$(printf '%s\n' "$CURRENT_NS" | sed 's/\.$//' | tr '\n' ' ')
+            warn "偵測到 NS 尚未指向 Cloudflare（目前：${DETECTED_ALL}）"
+        elif [ -z "$NS_LOOKUP_TOOL" ]; then
+            warn "無 dig/host/nslookup 可用，無法自動探測 NS 狀態。"
+        else
+            warn "無法解析 ${DOMAIN} 的 NS 記錄（可能是新購域名未生效，或 ${NS_LOOKUP_TOOL} 查詢失敗）。"
+        fi
+
+        echo ""
+        echo -e "${BOLD}▸ 遷移步驟（只需做一次；之後 DNS 永遠在 Cloudflare 管理）${NC}"
+        echo ""
+
+        # ── Step A: 取得 CF 指定的 NS ──
+        echo -e "${BOLD}A. 取得 Cloudflare 為 ${DOMAIN} 指派的兩個 Nameserver${NC}"
+        echo ""
+        if [ "${#CF_NAMESERVERS[@]}" -gt 0 ]; then
+            echo "   本腳本已自動從 Cloudflare API 查詢，請複製以下兩個 NS："
+            echo ""
+            for ns in "${CF_NAMESERVERS[@]}"; do
+                echo -e "     ${BOLD}${CYAN}${ns}${NC}"
+            done
+            echo ""
+        else
+            echo "   （本腳本未取得 CF API Token 或 zone 尚未建立，請手動查詢）"
+            echo "   1. 登入 https://dash.cloudflare.com"
+            echo "   2. 點選 ${DOMAIN} 這個 site"
+            echo "   3. Overview 頁 → 右側「Cloudflare 指派的 Nameserver」區塊"
+            echo "   4. 會看到兩個以 .ns.cloudflare.com 結尾的名稱，複製備用。"
+            echo ""
+        fi
+
+        # ── Step B: GoDaddy UI walkthrough ──
+        echo -e "${BOLD}B. 到 GoDaddy 修改 Nameserver${NC}"
+        echo ""
+        echo "   1. 登入 GoDaddy："
+        echo -e "        ${CYAN}https://dcc.godaddy.com/control/portfolio${NC}"
+        echo "      （或舊版直達：https://dcc.godaddy.com/manage/${DOMAIN}/dns）"
+        echo ""
+        echo "   2. 找到 ${DOMAIN} → 點「⋮」或「DNS」按鈕"
+        echo ""
+        echo "   3. 切到「Nameservers」頁籤 → 點「Change」（變更 Nameservers）"
+        echo ""
+        echo "   4. 選「I'll use my own nameservers」（使用我自己的 Nameservers）"
+        echo ""
+        echo "   5. 填入 Step A 取得的那兩個 Cloudflare NS，儲存。"
+        echo ""
+        echo -e "      ${YELLOW}⚠  GoDaddy 會跳一個警告視窗說「這會讓域名暫時無法使用」${NC}"
+        echo "         → 這是正常的（DNS 傳播期間），確認即可。"
+        echo ""
+
+        # ── Step C: 驗證 ──
+        echo -e "${BOLD}C. 驗證 NS 傳播${NC}"
+        echo ""
+        echo "   傳播通常 5 分鐘 ~ 4 小時（上限 48 小時）。驗證方式："
+        echo ""
+        echo "   • 終端機："
+        echo -e "       ${CYAN}dig NS ${DOMAIN} +short${NC}"
+        echo "     → 若看到 *.ns.cloudflare.com → 完成 ✓"
+        echo "     → 若仍是 *.domaincontrol.com → GoDaddy 還在，請繼續等。"
+        echo ""
+        echo "   • 全球節點檢視："
+        echo -e "       ${CYAN}https://www.whatsmydns.net/#NS/${DOMAIN}${NC}"
+        echo ""
+        echo "   • Cloudflare Dashboard 上 zone status 會從「Pending」變「Active」，"
+        echo "     並寄確認信至你的 CF 帳號信箱。"
+        echo ""
+
+        # ── Step D: 安全提醒 ──
+        echo -e "${BOLD}▸ 切換前請先確認以下兩點，避免中斷服務${NC}"
+        echo ""
+        echo "   1. ${BOLD}Email / MX / TXT 記錄${NC} — 如果 ${DOMAIN} 目前有"
+        echo "      email（MX）或驗證 TXT（Google Workspace、SPF、DKIM 等），"
+        echo "      請先到 Cloudflare Dashboard → DNS 頁面確認 CF 已自動從 GoDaddy"
+        echo "      匯入這些記錄；若沒有，請在切換 NS 之前手動補上，"
+        echo "      否則 NS 一切換 email 就斷了。"
+        echo ""
+        echo "   2. ${BOLD}DNSSEC${NC} — 如果 GoDaddy 端有啟用 DNSSEC，"
+        echo "      必須先到 GoDaddy 關閉（Domain → DNS → DNSSEC → Disable），"
+        echo "      否則 NS 切換後 DNSSEC 驗證失敗 → 全球無法解析你的域名。"
+        echo "      驗證指令：${CYAN}dig DS ${DOMAIN} +short${NC}（有輸出 = 有 DNSSEC）"
+        echo ""
+
+        # ── 轉送完成後如何確認整條鏈路 ──
+        if [ "$CF_READY" = true ]; then
+            echo -e "${BOLD}▸ 完成後${NC}"
+            echo ""
+            echo "   Tunnel + Ingress + DNS CNAME 都已在本腳本中自動建好。"
+            echo "   NS 傳播完成後："
+            echo -e "     ${CYAN}curl -I https://${DOMAIN}${NC}  → 應回 HTTP/2 200"
+            echo "   若 60 分鐘後仍連不上，請重跑本腳本（腳本冪等）。"
+            echo ""
+        fi
+        ;;
+esac
 
 if [ "$CF_READY" = true ]; then
-    log "Cloudflare Tunnel 已就緒。NS 傳播完成後 https://${DOMAIN} 即可使用。"
+    if [ "$NS_STATE" = "all-cf" ]; then
+        log "Cloudflare Tunnel + NS 皆已就緒 → https://${DOMAIN} 立即可用 ✓"
+    else
+        log "Cloudflare Tunnel 已就緒。NS 傳播完成後 https://${DOMAIN} 即可使用。"
+    fi
 else
-    warn "Cloudflare Tunnel 未設定。首次使用請在 Bootstrap wizard → Step 3 完成。"
+    warn "Cloudflare Tunnel 未設定。首次使用請在 Bootstrap wizard → Step 3 完成，或重跑本腳本。"
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

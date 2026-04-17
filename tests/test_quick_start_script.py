@@ -375,3 +375,174 @@ def test_wsl_detection_simulation(tmp_path):
     # And the user-facing systemd-enablement tips must fire.
     assert "/etc/wsl.conf" in r2.stdout
     assert "wsl --shutdown" in r2.stdout
+
+
+# ──────────────────────────────────────────────────────────────────────
+# L9 — Step 5: GoDaddy NS migration guidance
+# ──────────────────────────────────────────────────────────────────────
+# GoDaddy has no public NS-change API for consumer domains, so the script
+# can never fully automate this. Instead it must: (a) auto-detect current
+# NS so re-runs skip silently-already-done work, (b) print the exact two
+# CF-assigned NS values the user has to type in, (c) walk them through
+# the current GoDaddy UI, (d) give verification commands + DNSSEC/MX
+# safety warnings. These tests guard each of those four contracts.
+
+
+def test_cf_nameservers_captured_from_zones_api():
+    """CF_NAMESERVERS must be populated from .result[0].name_servers so
+    Step 5 can print the two NS values verbatim without a tab-switch.
+    """
+    content = SCRIPT.read_text()
+    # The global array that Step 5 reads
+    assert "CF_NAMESERVERS=()" in content, (
+        "CF_NAMESERVERS must be initialized as an empty array alongside CF_READY"
+    )
+    # Populated via jq from the zones API response
+    assert ".result[0].name_servers" in content, (
+        "must read name_servers from the CF zones response"
+    )
+    # Portability: `while read` not `readarray` (bash 3.2 compat for macOS).
+    # readarray would break if we ever shipped this for macOS bash 3.2 hosts.
+    assert "readarray" not in content, (
+        "must use `while IFS= read` not `readarray` for bash 3.2 compatibility"
+    )
+
+
+def test_ns_auto_detect_uses_multiple_tools():
+    """NS detection must try dig → host → nslookup in that order, so the
+    script works on minimal WSL2 images that only have one of them.
+    """
+    content = SCRIPT.read_text()
+    assert "dig +short +time=3 +tries=1 NS" in content, (
+        "dig call must be bounded with +time=3 +tries=1 to avoid hangs"
+    )
+    assert "@1.1.1.1" in content, (
+        "dig should force a public resolver to survive broken /etc/resolv.conf"
+    )
+    assert 'host -t NS "$DOMAIN"' in content, "host fallback must be present"
+    assert "nslookup -type=NS" in content, "nslookup fallback must be present"
+
+
+def test_ns_state_classification_is_tri_state():
+    """A full NS cutover produces mid-propagation states where some NS
+    are already CF and others are still GoDaddy. The script must not
+    binary-classify — otherwise during propagation it'll falsely tell
+    users their NS is wrong.
+    """
+    content = SCRIPT.read_text()
+    # The three terminal states + unknown
+    assert 'NS_STATE="all-cf"' in content, "all-CF state (done) must exist"
+    assert 'NS_STATE="mixed"' in content, (
+        "mid-propagation state must exist — some NS CF, some GoDaddy"
+    )
+    assert 'NS_STATE="non-cf"' in content, "still-on-GoDaddy state must exist"
+    # Skip-when-done contract
+    assert "NS 遷移已完成，跳過此步驟" in content, (
+        "all-cf path must announce idempotent skip"
+    )
+
+
+def test_godaddy_ui_walkthrough_has_current_menu_path():
+    """The printed walkthrough must match the current (2024+) GoDaddy UI
+    path — if GoDaddy reorganizes again we'll need to update, but silent
+    drift to a stale path is the real failure mode.
+    """
+    content = SCRIPT.read_text()
+    # Current portfolio URL
+    assert "https://dcc.godaddy.com/control/portfolio" in content, (
+        "must point users at the 2024+ portfolio URL, not the legacy manage/ URL only"
+    )
+    # Exact menu strings GoDaddy still uses
+    assert "I'll use my own nameservers" in content, (
+        "must name the exact radio option as shown in GoDaddy's UI"
+    )
+    assert "Nameservers" in content, "must reference the Nameservers tab"
+    assert "Change" in content, "must reference the Change Nameservers action"
+
+
+def test_verification_commands_are_printed():
+    """After NS change, user needs to verify propagation. Script must print
+    both a command-line check and a web-based global view.
+    """
+    content = SCRIPT.read_text()
+    assert "dig NS ${DOMAIN} +short" in content, (
+        "must print the dig verification command with the user's actual domain"
+    )
+    assert "whatsmydns.net" in content, (
+        "must link to whatsmydns.net for global propagation check"
+    )
+    # DNSSEC warning — #1 footgun when switching registrar NS
+    assert "DNSSEC" in content, (
+        "must warn about DNSSEC, which bricks the domain if left enabled during cutover"
+    )
+    # MX/email warning — #2 footgun (email breaks silently)
+    assert "MX" in content, (
+        "must warn about MX/TXT records so email doesn't break on NS switch"
+    )
+
+
+def test_cf_nameservers_graceful_fallback_when_empty():
+    """If the CF API call failed or was skipped, CF_NAMESERVERS is empty.
+    Step 5 must still work — falling back to "look them up in CF dashboard"
+    rather than printing an empty NS list. This is the graceful-degradation
+    path most likely to regress silently, so guard it explicitly.
+    """
+    content = SCRIPT.read_text()
+    # The fallback branch: tests that CF_NAMESERVERS is guarded and when
+    # empty, fallback copy kicks in.
+    assert '"${#CF_NAMESERVERS[@]}" -gt 0' in content, (
+        "must guard CF_NAMESERVERS indexing with a length check (bash 3.2 + set -u safety)"
+    )
+    # The fallback text must point users at CF dashboard
+    assert "dash.cloudflare.com" in content, (
+        "empty-CF_NAMESERVERS fallback must direct users to CF dashboard"
+    )
+    assert ".ns.cloudflare.com" in content, (
+        "fallback must tell user to look for *.ns.cloudflare.com pattern"
+    )
+
+    # Behavioral: simulate the case with an empty array + non-cf state,
+    # run the classification block, and confirm the fallback branch fires.
+    # We extract Step 5 and stub everything around it.
+    src = SCRIPT.read_text()
+    step5_start = src.index("# Step 5: GoDaddy NS 遷移指引")
+    step5_end = src.index("# Step 6: 完成")
+    step5_block = src[step5_start:step5_end]
+
+    script = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        set -uo pipefail
+        RED=""; GREEN=""; YELLOW=""; CYAN=""; BOLD=""; NC=""
+        LOG_FILE=$(mktemp)
+        DOMAIN="example.com"
+        CF_READY=false
+        CF_NAMESERVERS=()
+        log()  {{ echo "LOG $*"; }}
+        warn() {{ echo "WARN $*"; }}
+        err()  {{ echo "ERR $*"; }}
+        step() {{ echo "STEP $*"; }}
+        # Force no lookup tools → NS_STATE=unknown → full manual block prints
+        command() {{ return 1; }}
+        {block}
+        """
+    ).format(block=step5_block)
+
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        f.write(script)
+        scratch = f.name
+
+    try:
+        r = subprocess.run(
+            ["bash", scratch], capture_output=True, text=True, timeout=10
+        )
+        # Fallback must fire — user directed to CF dashboard instead of
+        # a literal NS list:
+        assert "未取得 CF API Token" in r.stdout or "zone 尚未建立" in r.stdout, (
+            f"empty CF_NAMESERVERS must trigger the 'look up in CF dashboard' "
+            f"fallback, got:\n{r.stdout}\n{r.stderr}"
+        )
+        assert "dash.cloudflare.com" in r.stdout
+    finally:
+        os.unlink(scratch)
