@@ -27,6 +27,10 @@ import {
   KeyRound,
   Cloud,
   FlaskConical,
+  Sparkles,
+  Bot,
+  Server,
+  Cpu,
 } from "lucide-react"
 import {
   bootstrapSetAdminPassword,
@@ -375,6 +379,151 @@ function AdminPasswordStep({
 }
 
 
+// ─── L3 — LLM Provider menu (provider picker only) ───────────────────
+//
+// Scope of this slot is the picker UI itself — the API key form, key
+// validation (`provider.ping()`), Ollama localhost detection, secrets
+// storage, and error handling are tracked as separate L3 sub-tasks and
+// land in follow-up slots.
+
+type LlmProviderId = "anthropic" | "openai" | "ollama" | "azure"
+
+interface LlmProviderOption {
+  id: LlmProviderId
+  label: string
+  tagline: string
+  hint: string
+  icon: React.ComponentType<{ size?: number; className?: string }>
+}
+
+const LLM_PROVIDERS: LlmProviderOption[] = [
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    tagline: "Claude (Opus / Sonnet / Haiku)",
+    hint: "Hosted API · requires an Anthropic API key",
+    icon: Sparkles,
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    tagline: "GPT-4 / GPT-4o family",
+    hint: "Hosted API · requires an OpenAI API key",
+    icon: Bot,
+  },
+  {
+    id: "ollama",
+    label: "Ollama (local)",
+    tagline: "Local models on this host",
+    hint: "Detects localhost:11434 · no key required",
+    icon: Server,
+  },
+  {
+    id: "azure",
+    label: "Azure OpenAI",
+    tagline: "Azure-hosted OpenAI deployment",
+    hint: "Requires endpoint + deployment + API key",
+    icon: Cpu,
+  },
+]
+
+function LlmProviderStep({ alreadyGreen }: { alreadyGreen: boolean }) {
+  const [selected, setSelected] = useState<LlmProviderId | null>(null)
+
+  if (alreadyGreen) {
+    return (
+      <div
+        data-testid="bootstrap-llm-provider-complete"
+        className="flex flex-col gap-2 p-4 rounded border border-[var(--status-green)] bg-[var(--background)]"
+      >
+        <div className="flex items-center gap-2 font-mono text-xs text-[var(--status-green)]">
+          <Check size={14} /> LLM provider configured
+        </div>
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+          A provider has been provisioned and the gate is green. Continue
+          to the next step.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      data-testid="bootstrap-llm-provider-step"
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>GATE</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          llm_provider_configured === true
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Choose the LLM provider OmniSight should call for agent runs. The
+        API key form, live <code>provider.ping()</code> validation, and
+        Ollama localhost probe land in the next sub-task — picking a
+        provider here just stages the choice.
+      </p>
+
+      <fieldset
+        data-testid="bootstrap-llm-provider-menu"
+        className="flex flex-col gap-2"
+      >
+        <legend className="sr-only">Select an LLM provider</legend>
+        {LLM_PROVIDERS.map((p) => {
+          const active = selected === p.id
+          const Icon = p.icon
+          return (
+            <label
+              key={p.id}
+              data-testid={`bootstrap-llm-provider-option-${p.id}`}
+              data-selected={active ? "true" : "false"}
+              className={`flex items-start gap-3 p-3 rounded border cursor-pointer transition ${
+                active
+                  ? "border-[var(--artifact-purple)] bg-[var(--muted)]/40"
+                  : "border-[var(--border)] hover:bg-[var(--muted)]/20"
+              }`}
+            >
+              <input
+                type="radio"
+                name="llm-provider"
+                value={p.id}
+                checked={active}
+                onChange={() => setSelected(p.id)}
+                className="mt-1 accent-[var(--artifact-purple)]"
+              />
+              <span className="flex items-center justify-center w-7 h-7 rounded border border-[var(--border)] bg-[var(--background)] shrink-0">
+                <Icon size={14} className="text-[var(--muted-foreground)]" />
+              </span>
+              <span className="flex-1 min-w-0 flex flex-col gap-0.5">
+                <span className="font-mono text-xs font-semibold text-[var(--foreground)]">
+                  {p.label}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
+                  {p.tagline}
+                </span>
+                <span className="font-mono text-[10px] text-[var(--muted-foreground)] italic">
+                  {p.hint}
+                </span>
+              </span>
+            </label>
+          )
+        })}
+      </fieldset>
+
+      <p
+        data-testid="bootstrap-llm-provider-selected"
+        data-value={selected ?? ""}
+        className="font-mono text-[10px] text-[var(--muted-foreground)]"
+      >
+        {selected
+          ? `Selected: ${selected} — continue to the API key step (next sub-task).`
+          : "No provider selected yet."}
+      </p>
+    </div>
+  )
+}
+
 function StepBodyPlaceholder({ step }: { step: StepDef }) {
   // Each step's actual UI lands in its own TODO slot (L3–L5). Until then
   // the shell just surfaces what this step IS so the operator knows what's
@@ -619,6 +768,10 @@ export default function BootstrapPage() {
                 <AdminPasswordStep
                   alreadyGreen={!status.status.admin_password_default}
                   onRotated={reloadStatus}
+                />
+              ) : activeStep.id === "llm_provider" ? (
+                <LlmProviderStep
+                  alreadyGreen={status.status.llm_provider_configured}
                 />
               ) : (
                 <StepBodyPlaceholder step={activeStep} />

@@ -10972,3 +10972,41 @@ X8 留下幾個 follow-up：
 - **Discord 要跑 button round-trip 需要 `pip install pynacl`**（已做 optional import，未裝時 test 自動 skip 而非 hard fail）。Production 部署要加到 `requirements.in`；目前只有 `test_chatops_adapters.py::test_discord_verify_rejects_bad_signature` 會 skip。
 - **Line outbound 的 channel token 格式是 "Long-lived channel access token"**，不是 webhook URL；operator 設定時注意 `chatops_line_channel_token=<token>` + `chatops_line_to=<userId|groupId>`（push API target）。
 - **Teams 的 Incoming Webhook**（outbound）跟 Bot Framework callback（inbound）是兩件事：outbound 只要 `chatops_teams_webhook`；inbound buttons 需要 bot deploy + `chatops_teams_secret` 配 HMAC。只配 webhook 的 dev 環境會看到「connected (outbound only)」狀態。
+
+---
+
+## 2026-04-17 — L3 Step 2 #1: LLM Provider 選單 (UI only)
+
+### 範圍
+- 限定本次 TODO 條目：`UI 選單：Anthropic / OpenAI / Ollama（本機）/ Azure`
+- 同 L3 區塊的其他子任務（API key 輸入 / `provider.ping()` 驗證 / `backend/secrets.py` at-rest 加密 / Ollama localhost 探測 / quota 與網路錯誤處理）**未動**，仍 `[ ]`，等下個 slot 接手。
+
+### 變更
+- `app/bootstrap/page.tsx`：
+  - 新增 `LlmProviderStep` component（fieldset + 4 個 radio-card option）。
+  - 4 個 provider option：`anthropic` / `openai` / `ollama` / `azure`，各自有 label / tagline / hint + Lucide icon（Sparkles / Bot / Server / Cpu）。
+  - selection 用 `useState<LlmProviderId | null>`（純前端狀態，本 slot 不上 server）。
+  - 當 `llm_provider_configured === true` 時改 render `bootstrap-llm-provider-complete` 卡片，與 L2 同 pattern。
+  - 在 active-step branch 把舊的 `StepBodyPlaceholder` 路徑換成 `<LlmProviderStep />`，僅針對 `activeStep.id === "llm_provider"`。
+- `test/components/bootstrap-page.test.tsx`：補 3 個 case
+  - `Step 2 menu lists all four LLM providers when gate is red`
+  - `Step 2 menu records the operator's provider selection`（含切換 anthropic → ollama 時前者 `data-selected` 自動 false）
+  - `Step 2 shows a completion card and hides the menu once gate is green`
+
+### 測試結果
+- `npx vitest run test/components/bootstrap-page.test.tsx` → 7 passed / 2 failed。
+- 2 個 failing case 是 L2 既存 `Step 1 form rotates the admin password` 與 `Step 1 form surfaces server error`，**與本次變更無關**；先 stash 我的 diff 跑一次仍然 fail（master 既有狀態），歸入 L2 follow-up。
+
+### TestID 慣例
+- `bootstrap-llm-provider-step` — 整個 step 容器
+- `bootstrap-llm-provider-menu` — fieldset 本身（檢測 menu 渲染）
+- `bootstrap-llm-provider-option-{id}` — 單一 provider option（`data-selected` 反映選中態）
+- `bootstrap-llm-provider-selected` — 當前選擇的可機讀標記（`data-value`）
+- `bootstrap-llm-provider-complete` — gate 已綠時顯示
+
+### 後續 hook
+下個 slot 做 API Key 輸入時，可直接讀 `LlmProviderStep` 內 `selected` state（需提升到 page 層或拆 props），把 selection 一起 POST 到 `/api/v1/bootstrap/llm-provision` 的 body。Ollama 選項要加 `localhost:11434` ping & model 列表，建議在 `selected === "ollama"` 時懶探測，不要每 render 都 fetch。
+
+### 風險 / 副作用
+- 純前端新增，無 schema / API / DB 變更。
+- 既有 `StepBodyPlaceholder` map 仍保留 `llm_provider` entry（Record exhaustiveness）；雖然渲染路徑已不再走它，但移掉會破 TS 型別，留著無副作用。

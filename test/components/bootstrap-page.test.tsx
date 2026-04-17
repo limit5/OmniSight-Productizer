@@ -201,6 +201,95 @@ describe("BootstrapPage", () => {
     })
   })
 
+  it("Step 2 menu lists all four LLM providers when gate is red", async () => {
+    mockedGetStatus.mockResolvedValue(redStatus)
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId("bootstrap-step-llm_provider"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-llm-provider-menu")).toBeInTheDocument()
+    })
+
+    for (const id of ["anthropic", "openai", "ollama", "azure"]) {
+      expect(
+        screen.getByTestId(`bootstrap-llm-provider-option-${id}`),
+      ).toBeInTheDocument()
+    }
+    expect(screen.getByText("Anthropic")).toBeInTheDocument()
+    expect(screen.getByText("OpenAI")).toBeInTheDocument()
+    expect(screen.getByText("Ollama (local)")).toBeInTheDocument()
+    expect(screen.getByText("Azure OpenAI")).toBeInTheDocument()
+  })
+
+  it("Step 2 menu records the operator's provider selection", async () => {
+    mockedGetStatus.mockResolvedValue(redStatus)
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-llm_provider"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-llm-provider-menu")).toBeInTheDocument()
+    })
+
+    const anthropicOption = screen.getByTestId(
+      "bootstrap-llm-provider-option-anthropic",
+    )
+    const ollamaOption = screen.getByTestId(
+      "bootstrap-llm-provider-option-ollama",
+    )
+    const selectedLabel = screen.getByTestId("bootstrap-llm-provider-selected")
+
+    expect(anthropicOption.getAttribute("data-selected")).toBe("false")
+    expect(selectedLabel.getAttribute("data-value")).toBe("")
+
+    const anthropicRadio = anthropicOption.querySelector(
+      "input[type='radio']",
+    ) as HTMLInputElement
+    fireEvent.click(anthropicRadio)
+    expect(anthropicOption.getAttribute("data-selected")).toBe("true")
+    expect(selectedLabel.getAttribute("data-value")).toBe("anthropic")
+
+    const ollamaRadio = ollamaOption.querySelector(
+      "input[type='radio']",
+    ) as HTMLInputElement
+    fireEvent.click(ollamaRadio)
+    expect(ollamaOption.getAttribute("data-selected")).toBe("true")
+    expect(anthropicOption.getAttribute("data-selected")).toBe("false")
+    expect(selectedLabel.getAttribute("data-value")).toBe("ollama")
+  })
+
+  it("Step 2 shows a completion card and hides the menu once gate is green", async () => {
+    const halfGreen = {
+      ...redStatus,
+      status: { ...redStatus.status, llm_provider_configured: true },
+      missing_steps: redStatus.missing_steps.filter(
+        (s) => s !== "llm_provider_configured",
+      ),
+    }
+    mockedGetStatus.mockResolvedValue(halfGreen)
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-llm_provider"))
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("bootstrap-llm-provider-complete"),
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("bootstrap-llm-provider-menu")).toBeNull()
+  })
+
   it("Step 1 form surfaces server error without marking success", async () => {
     mockedGetStatus.mockResolvedValue(redStatus)
     mockedSetAdminPw.mockRejectedValue(new Error("current password is incorrect"))
