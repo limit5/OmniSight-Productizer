@@ -96,10 +96,11 @@ auto-generated Swagger) once the backend is up.
 Point a cloud provider at this repo and get a public URL in ~3 minutes:
 
 [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/limit5/OmniSight-Productizer/tree/master)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https%3A%2F%2Fgithub.com%2Flimit5%2FOmniSight-Productizer)
 
-Spec: [`deploy/digitalocean/app.yaml`](deploy/digitalocean/app.yaml) ·
-Caveats + post-deploy steps: [`deploy/digitalocean/README.md`](deploy/digitalocean/README.md).
-Railway + Render buttons follow in subsequent L11 steps.
+- DigitalOcean — Spec: [`deploy/digitalocean/app.yaml`](deploy/digitalocean/app.yaml) · Runbook: [`deploy/digitalocean/README.md`](deploy/digitalocean/README.md)
+- Railway — Spec: [`deploy/railway/railway.json`](deploy/railway/railway.json) · Runbook: [`deploy/railway/README.md`](deploy/railway/README.md)
+- Render button follows in subsequent L11 steps.
 
 ### Environment Variables
 
