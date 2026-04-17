@@ -35,6 +35,7 @@ import {
 import {
   BOOTSTRAP_PROVISION_KIND_COPY,
   BootstrapLlmProvisionError,
+  bootstrapCfTunnelSkip,
   bootstrapDetectOllama,
   bootstrapLlmProvision,
   bootstrapSetAdminPassword,
@@ -52,6 +53,7 @@ import {
   PASSWORD_MIN_LENGTH,
   PASSWORD_MIN_SCORE,
 } from "@/lib/password_strength"
+import CloudflareTunnelSetup from "@/components/omnisight/cloudflare-tunnel-setup"
 
 // ─── Step definitions ────────────────────────────────────────────────
 
@@ -941,6 +943,168 @@ function LlmProviderStep({
   )
 }
 
+// ─── L4 — Step 3 (Cloudflare Tunnel: embed B12 wizard + LAN-only skip) ──
+
+function CfTunnelStep({
+  alreadyGreen,
+  onChanged,
+}: {
+  alreadyGreen: boolean
+  onChanged: () => Promise<unknown>
+}) {
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const [skipBusy, setSkipBusy] = useState(false)
+  const [skipError, setSkipError] = useState<string | null>(null)
+  const [skipReason, setSkipReason] = useState<string>("")
+  const [showSkipForm, setShowSkipForm] = useState(false)
+
+  const handleWizardClose = useCallback(async () => {
+    setWizardOpen(false)
+    // After the operator closes the B12 modal (success or cancel), pull
+    // the bootstrap gate status so a successful provision flips the
+    // step to green without a manual refresh.
+    await onChanged()
+  }, [onChanged])
+
+  const handleSkip = useCallback(async () => {
+    setSkipBusy(true)
+    setSkipError(null)
+    try {
+      await bootstrapCfTunnelSkip(skipReason.trim())
+      await onChanged()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setSkipError(msg)
+    } finally {
+      setSkipBusy(false)
+    }
+  }, [skipReason, onChanged])
+
+  if (alreadyGreen) {
+    return (
+      <div
+        data-testid="bootstrap-cf-tunnel-complete"
+        className="flex flex-col gap-2 p-4 rounded border border-[var(--status-green)] bg-[var(--background)]"
+      >
+        <div className="flex items-center gap-2 font-mono text-xs text-[var(--status-green)]">
+          <Check size={14} /> Cloudflare Tunnel step complete
+        </div>
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+          Either a tunnel has been provisioned, or the operator opted for
+          a LAN-only deployment. Continue to the next step.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      data-testid="bootstrap-cf-tunnel-step"
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>GATE</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          cf_tunnel_configured === true
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Expose this install on the public internet through a Cloudflare
+        Tunnel (B12 wizard), or skip for a LAN-only deployment. The
+        B12 wizard writes <code>bootstrap_state.cf_tunnel_configured</code>
+        automatically once it provisions a tunnel; skip records an
+        audit warning so the choice is traceable.
+      </p>
+
+      <button
+        type="button"
+        data-testid="bootstrap-cf-tunnel-launch"
+        onClick={() => setWizardOpen(true)}
+        className="self-start flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90"
+      >
+        <Cloud size={12} />
+        Configure Cloudflare Tunnel…
+      </button>
+
+      <div className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)]">
+        <div className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+          LAN-ONLY
+        </div>
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+          If this install will only be reached from the local network,
+          you can skip the tunnel. An <code>audit_log</code> row is
+          written with warning severity so the choice is on record.
+        </p>
+        {!showSkipForm ? (
+          <button
+            type="button"
+            data-testid="bootstrap-cf-tunnel-skip-reveal"
+            onClick={() => setShowSkipForm(true)}
+            className="self-start font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)]/40"
+          >
+            Skip (LAN-only)
+          </button>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                Reason (optional — shown in audit log)
+              </span>
+              <input
+                type="text"
+                data-testid="bootstrap-cf-tunnel-skip-reason"
+                value={skipReason}
+                onChange={(e) => setSkipReason(e.target.value)}
+                placeholder="e.g. air-gapped lab install"
+                maxLength={500}
+                className="font-mono text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+              />
+            </label>
+            {skipError && (
+              <p
+                role="alert"
+                data-testid="bootstrap-cf-tunnel-skip-error"
+                className="font-mono text-[11px] text-[var(--destructive)] break-words"
+              >
+                {skipError}
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="bootstrap-cf-tunnel-skip-confirm"
+                onClick={() => void handleSkip()}
+                disabled={skipBusy}
+                className="flex items-center gap-2 font-mono text-[11px] px-2 py-1 rounded border border-[var(--destructive)] text-[var(--destructive)] hover:bg-[var(--destructive)]/10 disabled:opacity-40"
+              >
+                {skipBusy ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <AlertCircle size={12} />
+                )}
+                Confirm skip
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSkipForm(false)
+                  setSkipError(null)
+                }}
+                disabled={skipBusy}
+                className="font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)]/40 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <CloudflareTunnelSetup open={wizardOpen} onClose={handleWizardClose} />
+    </div>
+  )
+}
+
 function StepBodyPlaceholder({ step }: { step: StepDef }) {
   // Each step's actual UI lands in its own TODO slot (L3–L5). Until then
   // the shell just surfaces what this step IS so the operator knows what's
@@ -1190,6 +1354,11 @@ export default function BootstrapPage() {
                 <LlmProviderStep
                   alreadyGreen={status.status.llm_provider_configured}
                   onProvisioned={reloadStatus}
+                />
+              ) : activeStep.id === "cf_tunnel" ? (
+                <CfTunnelStep
+                  alreadyGreen={status.status.cf_tunnel_configured}
+                  onChanged={reloadStatus}
                 />
               ) : (
                 <StepBodyPlaceholder step={activeStep} />

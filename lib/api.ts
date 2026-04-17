@@ -2680,6 +2680,28 @@ export const BOOTSTRAP_PROVISION_KIND_COPY: Record<
   },
 }
 
+// ─── L4 — Step 3 (Cloudflare Tunnel skip / LAN-only) ──────────────
+
+export interface BootstrapCfTunnelSkipResponse {
+  status: string
+  cf_tunnel_configured: boolean
+}
+
+/**
+ * Record an operator-driven "skip Cloudflare tunnel" decision during
+ * wizard Step 3. The backend writes an audit row with warning
+ * severity and marks the gate satisfied so finalize can proceed —
+ * this is the documented LAN-only escape hatch, not a silent bypass.
+ */
+export async function bootstrapCfTunnelSkip(
+  reason?: string,
+): Promise<BootstrapCfTunnelSkipResponse> {
+  return request<BootstrapCfTunnelSkipResponse>("/bootstrap/cf-tunnel-skip", {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? "" }),
+  })
+}
+
 // ─── N3 — OpenAPI compile-time contract tripwire ──────────────────────────
 // These type aliases reach into `lib/generated/api-types.ts` (auto-generated
 // from the FastAPI app's OpenAPI schema). The moment any of the referenced

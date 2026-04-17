@@ -17,8 +17,24 @@ vi.mock("@/lib/api", async (importOriginal) => {
     bootstrapSetAdminPassword: vi.fn(),
     bootstrapLlmProvision: vi.fn(),
     bootstrapDetectOllama: vi.fn(),
+    bootstrapCfTunnelSkip: vi.fn(),
   }
 })
+
+// The embedded B12 wizard pulls in react-dom portals + SSE wiring. We
+// stub it so the bootstrap-page test can exercise the step shell in
+// isolation (launch button / skip form) without booting the full
+// Cloudflare flow.
+vi.mock("@/components/omnisight/cloudflare-tunnel-setup", () => ({
+  default: ({ open, onClose }: { open: boolean; onClose: () => void }) =>
+    open ? (
+      <div data-testid="cf-tunnel-modal-stub">
+        <button data-testid="cf-tunnel-modal-close" onClick={onClose}>
+          close
+        </button>
+      </div>
+    ) : null,
+}))
 
 import BootstrapPage from "@/app/bootstrap/page"
 import * as api from "@/lib/api"
@@ -29,6 +45,7 @@ const mockedFinalize = api.finalizeBootstrap as unknown as ReturnType<typeof vi.
 const mockedSetAdminPw = api.bootstrapSetAdminPassword as unknown as ReturnType<typeof vi.fn>
 const mockedProvisionLlm = api.bootstrapLlmProvision as unknown as ReturnType<typeof vi.fn>
 const mockedDetectOllama = api.bootstrapDetectOllama as unknown as ReturnType<typeof vi.fn>
+const mockedCfSkip = api.bootstrapCfTunnelSkip as unknown as ReturnType<typeof vi.fn>
 
 const redStatus = {
   status: {
@@ -67,6 +84,7 @@ describe("BootstrapPage", () => {
     mockedSetAdminPw.mockReset()
     mockedProvisionLlm.mockReset()
     mockedDetectOllama.mockReset()
+    mockedCfSkip.mockReset()
     mockedDetectOllama.mockResolvedValue({
       reachable: false,
       base_url: "http://localhost:11434",
@@ -439,6 +457,108 @@ describe("BootstrapPage", () => {
     expect(mockedProvisionLlm).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "anthropic", api_key: "sk-ant-valid" }),
     )
+  })
+
+  // ─── L4 Step 3 — Cloudflare Tunnel embed + LAN-only skip ───────────
+  //
+  // The step must (a) surface the B12 wizard behind a launch button and
+  // (b) expose an explicit "Skip (LAN-only)" escape hatch that flips the
+  // gate to green server-side. Green state replaces the controls with a
+  // completion card.
+
+  it("Step 3 reveals the B12 wizard and reloads status on close", async () => {
+    mockedGetStatus.mockResolvedValue(redStatus)
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-cf_tunnel")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-cf_tunnel"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-cf-tunnel-step")).toBeInTheDocument()
+    })
+
+    // Modal hidden until the launch button is clicked.
+    expect(screen.queryByTestId("cf-tunnel-modal-stub")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("bootstrap-cf-tunnel-launch"))
+    expect(screen.getByTestId("cf-tunnel-modal-stub")).toBeInTheDocument()
+
+    const pollsBefore = mockedGetStatus.mock.calls.length
+    fireEvent.click(screen.getByTestId("cf-tunnel-modal-close"))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("cf-tunnel-modal-stub")).toBeNull()
+    })
+    // Closing the modal triggers a status reload so a successful
+    // provision turns the gate green without a manual refresh.
+    await waitFor(() => {
+      expect(mockedGetStatus.mock.calls.length).toBeGreaterThan(pollsBefore)
+    })
+  })
+
+  it("Step 3 Skip (LAN-only) calls the skip API with the operator's reason", async () => {
+    const postSkipStatus = {
+      ...redStatus,
+      status: { ...redStatus.status, cf_tunnel_configured: true },
+      missing_steps: redStatus.missing_steps.filter(
+        (s) => s !== "cf_tunnel_configured",
+      ),
+    }
+    mockedGetStatus
+      .mockResolvedValueOnce(redStatus)
+      .mockResolvedValue(postSkipStatus)
+    mockedCfSkip.mockResolvedValue({ status: "skipped", cf_tunnel_configured: true })
+
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-cf_tunnel")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-cf_tunnel"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-cf-tunnel-step")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId("bootstrap-cf-tunnel-skip-reveal"))
+    fireEvent.change(screen.getByTestId("bootstrap-cf-tunnel-skip-reason"), {
+      target: { value: "air-gapped lab install" },
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-cf-tunnel-skip-confirm"))
+
+    await waitFor(() => {
+      expect(mockedCfSkip).toHaveBeenCalledWith("air-gapped lab install")
+    })
+    // The post-skip status poll flips the gate to green, so the
+    // completion card replaces the controls.
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-cf-tunnel-complete")).toBeInTheDocument()
+    })
+  })
+
+  it("Step 3 shows a completion card when the gate is already green", async () => {
+    const postCfGreen = {
+      ...redStatus,
+      status: { ...redStatus.status, cf_tunnel_configured: true },
+      missing_steps: redStatus.missing_steps.filter(
+        (s) => s !== "cf_tunnel_configured",
+      ),
+    }
+    mockedGetStatus.mockResolvedValue(postCfGreen)
+    render(<BootstrapPage />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-step-cf_tunnel")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("bootstrap-step-cf_tunnel"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("bootstrap-cf-tunnel-complete")).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("bootstrap-cf-tunnel-step")).toBeNull()
+    expect(screen.queryByTestId("bootstrap-cf-tunnel-launch")).toBeNull()
   })
 
   it("Step 1 form surfaces server error without marking success", async () => {

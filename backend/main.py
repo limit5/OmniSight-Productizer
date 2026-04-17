@@ -445,6 +445,13 @@ _BOOTSTRAP_EXEMPT_REL = {
     "/auth/login", "/auth/logout", "/auth/change-password",
     "/healthz", "/health",
 }
+# ``/cloudflare/*`` is exempt for L4 Step 3 — the wizard's Cloudflare
+# tunnel embed (B12 wizard) calls these endpoints before login. The
+# router itself still enforces operator RBAC once bootstrap has
+# finalized; this exemption only waives the redirect during install.
+_BOOTSTRAP_EXEMPT_REL_PREFIXES = (
+    "/cloudflare/",
+)
 _BOOTSTRAP_EXEMPT_RAW = {
     "/", "/healthz", "/docs", "/openapi.json", "/redoc",
     "/favicon.ico", "/robots.txt",
@@ -465,6 +472,8 @@ def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
     if rel == "/bootstrap" or rel.startswith("/bootstrap/"):
         return True
     if rel in _BOOTSTRAP_EXEMPT_REL or path in _BOOTSTRAP_EXEMPT_RAW:
+        return True
+    if any(rel.startswith(p) for p in _BOOTSTRAP_EXEMPT_REL_PREFIXES):
         return True
     if any(path.startswith(p) for p in _BOOTSTRAP_EXEMPT_RAW_PREFIXES):
         return True

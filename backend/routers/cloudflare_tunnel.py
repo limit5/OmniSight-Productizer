@@ -19,7 +19,7 @@ import os
 import secrets as _secrets_stdlib
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -41,7 +41,38 @@ from backend.events import bus
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/cloudflare", tags=["cloudflare-tunnel"])
 
-_require = _au.require_operator
+
+async def _require_operator_or_bootstrap(request: Request):
+    """Operator-only, except while the first-install wizard is active.
+
+    The bootstrap wizard at ``/bootstrap`` drives this router before any
+    admin has logged in (no session, no CSRF). As soon as
+    :func:`bootstrap.is_bootstrap_finalized_flag` flips, the normal
+    ``require_operator`` contract kicks back in — rotate-token / teardown
+    / status reads stay RBAC-protected for the lifetime of the install.
+    """
+    from backend import bootstrap as _boot
+
+    if not _boot.is_bootstrap_finalized_flag():
+        return None
+    # Delegate to the normal operator dep. We instantiate it directly
+    # (rather than via Depends chaining) so we can short-circuit above
+    # without paying the CSRF/cookie resolution cost during the wizard.
+    user = await _au.current_user(request)
+    sess_cookie = request.cookies.get(_au.SESSION_COOKIE) or ""
+    sess = await _au.get_session(sess_cookie) if sess_cookie else None
+    _au.csrf_check(request, sess)
+    if not _au.role_at_least(user.role, "operator"):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=403,
+            detail=f"Requires role=operator or higher (you are {user.role})",
+        )
+    return user
+
+
+_require = _require_operator_or_bootstrap
 
 # ── In-memory state (persisted to DB in production) ──────────────
 
@@ -273,6 +304,28 @@ async def provision_tunnel(body: ProvisionRequest, _user=Depends(_require)):
         after={"tunnel_name": body.tunnel_name, "hostnames": hostnames,
                "dns_records": len(created_dns_ids), "reused": tunnel_reused},
     )
+
+    # L4 Step 3 — drive the bootstrap wizard gate. Writing the marker +
+    # ``bootstrap_state.cf_tunnel_configured`` row is what lets finalize
+    # transition green (tunnel state alone is in-memory and would be lost
+    # across a restart).
+    try:
+        from backend import bootstrap as _boot
+
+        _boot.mark_cf_tunnel(configured=True)
+        await _boot.record_bootstrap_step(
+            _boot.STEP_CF_TUNNEL,
+            actor_user_id=None,
+            metadata={
+                "tunnel_id": created_tunnel.id,
+                "tunnel_name": created_tunnel.name,
+                "hostnames": hostnames,
+                "reused": tunnel_reused,
+                "source": "wizard",
+            },
+        )
+    except Exception as exc:
+        logger.warning("cf_tunnel: bootstrap state write failed (non-fatal): %s", exc)
 
     return ProvisionResponse(
         tunnel_id=created_tunnel.id,

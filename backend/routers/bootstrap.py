@@ -393,6 +393,80 @@ async def bootstrap_ollama_detect(base_url: str = "") -> OllamaDetectResponse:
     )
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L4 — Step 3 (Cloudflare Tunnel: skip / LAN-only audit)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class CfTunnelSkipRequest(BaseModel):
+    """Request body for the wizard's Step 3 ``skip tunnel`` transition.
+
+    The operator is explicitly asserting "this install is LAN-only / I
+    don't want remote access right now" — the wizard records the skip
+    so the finalize gate can go green, but audit captures the operator
+    intent with warning severity so it never looks like a silent bypass.
+    """
+
+    reason: str = Field(
+        default="",
+        max_length=500,
+        description="Optional free-text note stored with the audit row.",
+    )
+
+
+class CfTunnelSkipResponse(BaseModel):
+    status: str
+    cf_tunnel_configured: bool
+
+
+@router.post("/cf-tunnel-skip", response_model=CfTunnelSkipResponse)
+async def bootstrap_cf_tunnel_skip(req: CfTunnelSkipRequest) -> CfTunnelSkipResponse:
+    """Mark CF tunnel as intentionally skipped (LAN-only deployment).
+
+    Unauthenticated like the other wizard steps. Two side-effects:
+
+      1. Writes ``cf_tunnel_skipped=true`` to the bootstrap marker and
+         records ``STEP_CF_TUNNEL`` in ``bootstrap_state`` with
+         ``metadata.skipped=true`` so :func:`missing_required_steps`
+         clears the step for finalize.
+      2. Emits an audit row ``bootstrap.cf_tunnel_skipped`` with warning
+         severity — the operator chose LAN-only on purpose, but the
+         trail must show who took that call and when.
+    """
+    reason = (req.reason or "").strip()
+    _boot.mark_cf_tunnel(skipped=True)
+    try:
+        await _boot.record_bootstrap_step(
+            _boot.STEP_CF_TUNNEL,
+            actor_user_id=None,
+            metadata={"skipped": True, "reason": reason, "source": "wizard"},
+        )
+    except Exception as exc:
+        logger.warning("bootstrap: record_bootstrap_step(cf_tunnel skip) failed: %s", exc)
+
+    try:
+        await audit.log(
+            action="bootstrap.cf_tunnel_skipped",
+            entity_kind="bootstrap",
+            entity_id=_boot.STEP_CF_TUNNEL,
+            before=None,
+            after={
+                "skipped": True,
+                "reason": reason,
+                "severity": "warning",
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.cf_tunnel_skipped audit emit failed: %s", exc)
+
+    logger.warning(
+        "bootstrap: cf_tunnel step SKIPPED (LAN-only) via wizard — reason=%r",
+        reason or "<none>",
+    )
+    return CfTunnelSkipResponse(status="skipped", cf_tunnel_configured=True)
+
+
 class FinalizeRequest(BaseModel):
     reason: str | None = Field(
         default=None,
