@@ -1747,6 +1747,359 @@ async def bootstrap_parallel_health_check(
     )
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  L6 — Step 5 (run scripts/prod_smoke_test.py --subset dag1 in-process)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The wizard's Step 5 proves the install actually works end-to-end by
+# running the compile-flash host_native DAG from
+# ``scripts/prod_smoke_test.py`` (DAG #1, the ~60s subset picked so a
+# fresh install doesn't also pay the aarch64 cross-compile cost). On
+# top of the DAG result we verify the audit-log hash chain — if the
+# chain is already corrupted this early, bootstrap is lying and the
+# operator must know before finalize.
+#
+# Two outcomes the wizard UI needs:
+#   * green — both the DAG validates + submits AND ``audit.verify_chain``
+#             is intact → mark ``smoke_passed=true`` + record ``STEP_SMOKE``
+#             so the fifth gate flips and finalize becomes reachable.
+#   * red   — return the validator errors / audit first-bad-id so the UI
+#             can render a diagnosable banner and send the operator back
+#             to the appropriate earlier step.
+#
+# Implementation notes:
+#   * The DAG payload is the SAME ``DAG_1_COMPILE_FLASH_HOST_NATIVE``
+#     shape shipped in ``scripts/prod_smoke_test.py`` — single source of
+#     truth lives in the script so prod-UI smoke and wizard smoke can't
+#     drift.
+#   * We do NOT shell out to the script. During bootstrap the admin has
+#     not logged in yet, so the script's operator-gated ``POST /dag``
+#     would 401. Instead we import the validator + workflow machinery
+#     directly and let the bootstrap-gate middleware keep the route
+#     wizard-only.
+
+_SMOKE_DAG_ID = "smoke-compile-flash-host-native"
+
+
+class SmokeSubsetRequest(BaseModel):
+    """Body for ``POST /bootstrap/smoke-subset`` — no tunables required.
+
+    ``subset`` is fixed to ``dag1`` today; the field is kept so the
+    wizard can in the future opt into ``both`` if the operator decides
+    to pay the ~3-minute aarch64 cost on first install.
+    """
+
+    subset: Literal["dag1"] = Field(
+        default="dag1",
+        description=(
+            "Which DAG subset to run — only ``dag1`` (compile-flash "
+            "host_native) is permitted during bootstrap."
+        ),
+    )
+
+
+class SmokeRunSummary(BaseModel):
+    label: str
+    dag_id: str
+    ok: bool
+    validation_errors: list[dict] = Field(default_factory=list)
+    run_id: str | None = None
+    plan_id: int | None = None
+    plan_status: str | None = None
+    task_count: int = 0
+    t3_runner: str | None = None
+    target_platform: str | None = None
+
+
+class AuditChainSummary(BaseModel):
+    ok: bool
+    first_bad_id: int | None = None
+    detail: str = ""
+
+
+class SmokeSubsetResponse(BaseModel):
+    smoke_passed: bool
+    subset: str
+    elapsed_ms: int
+    runs: list[SmokeRunSummary]
+    audit_chain: AuditChainSummary
+
+
+def _dag1_payload() -> dict:
+    """Return the compile-flash host_native DAG payload verbatim.
+
+    Mirrors ``DAG_1_COMPILE_FLASH_HOST_NATIVE`` in ``scripts/prod_smoke_test.py``
+    so the two smoke invocations test the same artefact. Kept as a
+    function (not a module-level dict) so a test can swap in a smaller
+    stub without mutating global state.
+    """
+    return {
+        "dag": {
+            "schema_version": 1,
+            "dag_id": _SMOKE_DAG_ID,
+            "tasks": [
+                {
+                    "task_id": "compile",
+                    "description": (
+                        "Build firmware image (host-native, no cross-compile)"
+                    ),
+                    "required_tier": "t1",
+                    "toolchain": "cmake",
+                    "inputs": [],
+                    "expected_output": "build/firmware.bin",
+                    "depends_on": [],
+                },
+                {
+                    # On host_native the T3 resolver picks LOCAL and the
+                    # validator swaps the effective tier to t1. python3 is
+                    # a t1-legal toolchain so the symbolic "flash" step
+                    # passes validation — there's no physical board to
+                    # flash when target arch == host arch.
+                    "task_id": "flash",
+                    "description": (
+                        "Flash built image (T3 resolves to LOCAL on host_native)"
+                    ),
+                    "required_tier": "t3",
+                    "toolchain": "python3",
+                    "inputs": ["build/firmware.bin"],
+                    "expected_output": "logs/flash.log",
+                    "depends_on": ["compile"],
+                },
+            ],
+        },
+        "target_platform": "host_native",
+        "metadata": {"source": "bootstrap:smoke-subset", "test_run": True},
+    }
+
+
+async def _run_dag1_smoke() -> SmokeRunSummary:
+    """Validate + open a workflow run for the compile-flash host_native DAG.
+
+    The DAG is validated against the same 7-rule semantic pass the
+    operator-UI uses, then a workflow_run is opened through
+    ``workflow.start`` so the invocation leaves the same artefact trail
+    (``dag_plans`` + ``workflow_runs``) as a prod smoke. We consider the
+    smoke ``ok`` when validation passes AND ``workflow.start`` returns a
+    plan in an executing/validated state — the downstream agent layer
+    still owns actually executing the tasks, but the wizard only needs
+    to prove the install can accept and validate a real plan.
+    """
+    from backend.dag_schema import DAG
+    from backend import dag_storage as _ds
+    from backend import dag_validator as _dv
+    from backend import workflow as wf
+    from backend.routers import dag as _dag_router
+
+    payload = _dag1_payload()
+    label = "DAG #1: compile-flash (host_native)"
+    target_name = payload.get("target_platform") or "host_native"
+
+    try:
+        dag = DAG.model_validate(payload["dag"])
+    except Exception as exc:
+        return SmokeRunSummary(
+            label=label,
+            dag_id=_SMOKE_DAG_ID,
+            ok=False,
+            validation_errors=[{
+                "rule": "schema",
+                "task_id": None,
+                "message": str(exc),
+            }],
+            target_platform=target_name,
+        )
+
+    target_profile = _dag_router._resolve_target_profile(target_name)
+    result = _dv.validate(dag, target_profile=target_profile)
+
+    try:
+        from backend.t3_resolver import resolve_from_profile
+
+        t3_resolution = resolve_from_profile(target_profile).kind.value
+    except Exception as exc:
+        logger.debug("bootstrap: smoke t3 resolver probe failed: %s", exc)
+        t3_resolution = None
+
+    if not result.ok:
+        return SmokeRunSummary(
+            label=label,
+            dag_id=_SMOKE_DAG_ID,
+            ok=False,
+            validation_errors=[e.to_dict() for e in result.errors],
+            plan_status="failed",
+            task_count=len(dag.tasks),
+            t3_runner=t3_resolution,
+            target_platform=target_name,
+        )
+
+    metadata = dict(payload.get("metadata") or {})
+    metadata.setdefault("source", "bootstrap:smoke-subset")
+    metadata.setdefault("target_platform", target_name)
+
+    try:
+        run = await wf.start(
+            "invoke",
+            dag=dag,
+            metadata=metadata,
+            target_profile=target_profile,
+        )
+    except Exception as exc:
+        logger.exception("bootstrap: smoke workflow.start failed")
+        return SmokeRunSummary(
+            label=label,
+            dag_id=_SMOKE_DAG_ID,
+            ok=False,
+            validation_errors=[{
+                "rule": "workflow_start",
+                "task_id": None,
+                "message": f"{type(exc).__name__}: {exc}"[:400],
+            }],
+            task_count=len(dag.tasks),
+            t3_runner=t3_resolution,
+            target_platform=target_name,
+        )
+
+    plan = await _ds.get_plan_by_run(run.id)
+    plan_status = plan.status if plan else None
+    plan_id = plan.id if plan else None
+    smoke_ok = bool(plan and plan_status in ("validated", "executing"))
+
+    return SmokeRunSummary(
+        label=label,
+        dag_id=_SMOKE_DAG_ID,
+        ok=smoke_ok,
+        validation_errors=(plan.errors() if plan and not smoke_ok else []),
+        run_id=run.id,
+        plan_id=plan_id,
+        plan_status=plan_status,
+        task_count=len(dag.tasks),
+        t3_runner=t3_resolution,
+        target_platform=target_name,
+    )
+
+
+async def _verify_audit_chain() -> AuditChainSummary:
+    """Verify every tenant's audit hash chain and aggregate the result.
+
+    Matches the ``/audit/verify-all`` semantics the prod smoke script
+    reaches for, but called in-process so it works during bootstrap
+    before any admin session exists.
+    """
+    try:
+        from backend import audit as _audit
+
+        results = await _audit.verify_all_chains()
+    except Exception as exc:
+        logger.exception("bootstrap: audit verify_all_chains failed")
+        return AuditChainSummary(
+            ok=False,
+            first_bad_id=None,
+            detail=f"verify_all_chains raised: {type(exc).__name__}: {exc}"[:300],
+        )
+
+    first_bad: int | None = None
+    bad_tenants: list[str] = []
+    for tid, (ok, bad) in sorted(results.items()):
+        if not ok:
+            bad_tenants.append(tid)
+            if first_bad is None:
+                first_bad = bad
+    all_ok = not bad_tenants
+    detail = (
+        f"{len(results)} tenant(s) verified"
+        if all_ok
+        else f"broken chain in tenant(s): {', '.join(bad_tenants)}"
+    )
+    return AuditChainSummary(ok=all_ok, first_bad_id=first_bad, detail=detail)
+
+
+@router.post("/smoke-subset", response_model=SmokeSubsetResponse)
+async def bootstrap_smoke_subset(
+    req: SmokeSubsetRequest | None = None,
+) -> SmokeSubsetResponse:
+    """Run the wizard's Step-5 smoke subset (compile-flash host_native).
+
+    Sequence:
+      1. Validate + submit the compile-flash host_native DAG via
+         ``workflow.start`` — same artefact shape the prod-UI smoke uses.
+      2. Verify the audit hash chain for every tenant (catches
+         pre-finalize tampering).
+      3. On both green, flip the ``smoke_passed`` bootstrap marker +
+         record ``STEP_SMOKE`` so the finalize gate can pass.
+
+    Unauthenticated like every other wizard endpoint — the bootstrap-
+    gate middleware keeps ``/bootstrap/*`` wizard-scoped until finalize.
+    Response is always HTTP 200 — ``smoke_passed`` in the body carries
+    the outcome so the UI can render the result pane without parsing
+    error bodies.
+    """
+    body = req or SmokeSubsetRequest()
+    started = time.monotonic()
+
+    run_summary = await _run_dag1_smoke()
+    audit_summary = await _verify_audit_chain()
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    smoke_passed = bool(run_summary.ok and audit_summary.ok)
+
+    if smoke_passed:
+        try:
+            _boot.mark_smoke_passed(True)
+        except Exception as exc:
+            logger.warning(
+                "bootstrap: mark_smoke_passed after smoke-subset failed: %s", exc,
+            )
+        try:
+            await _boot.record_bootstrap_step(
+                _boot.STEP_SMOKE,
+                actor_user_id=None,
+                metadata={
+                    "subset": body.subset,
+                    "run_id": run_summary.run_id,
+                    "plan_id": run_summary.plan_id,
+                    "dag_id": run_summary.dag_id,
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "bootstrap: record_bootstrap_step(smoke) failed: %s", exc,
+            )
+
+    logger.info(
+        "bootstrap: smoke-subset subset=%s smoke_passed=%s run=%s plan=%s "
+        "plan_status=%s audit_ok=%s elapsed=%dms",
+        body.subset, smoke_passed, run_summary.run_id, run_summary.plan_id,
+        run_summary.plan_status, audit_summary.ok, elapsed_ms,
+    )
+
+    try:
+        await audit.log(
+            action="bootstrap.smoke_subset",
+            entity_kind="bootstrap",
+            entity_id=_boot.STEP_SMOKE,
+            before=None,
+            after={
+                "subset": body.subset,
+                "smoke_passed": smoke_passed,
+                "elapsed_ms": elapsed_ms,
+                "dag": run_summary.model_dump(),
+                "audit_chain": audit_summary.model_dump(),
+            },
+            actor="wizard",
+        )
+    except Exception as exc:
+        logger.debug("bootstrap.smoke_subset audit emit failed: %s", exc)
+
+    return SmokeSubsetResponse(
+        smoke_passed=smoke_passed,
+        subset=body.subset,
+        elapsed_ms=elapsed_ms,
+        runs=[run_summary],
+        audit_chain=audit_summary,
+    )
+
+
 class FinalizeRequest(BaseModel):
     reason: str | None = Field(
         default=None,

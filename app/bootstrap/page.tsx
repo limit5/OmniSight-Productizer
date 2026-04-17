@@ -44,6 +44,7 @@ import {
   bootstrapLlmProvision,
   bootstrapParallelHealthCheck,
   bootstrapSetAdminPassword,
+  bootstrapSmokeSubset,
   finalizeBootstrap,
   getBootstrapStatus,
   type BootstrapGates,
@@ -53,6 +54,7 @@ import {
   type BootstrapLlmProvisionResponse,
   type BootstrapOllamaDetectResponse,
   type BootstrapParallelHealthCheckResponse,
+  type BootstrapSmokeSubsetResponse,
   type BootstrapStatusResponse,
 } from "@/lib/api"
 import {
@@ -1406,6 +1408,203 @@ function ServiceHealthStep({
   )
 }
 
+// ─── L6 — Step 5 (smoke test subset: compile-flash host_native DAG) ──
+
+function SmokeSubsetStep({
+  alreadyGreen,
+  onPassed,
+}: {
+  alreadyGreen: boolean
+  onPassed: () => Promise<unknown>
+}) {
+  const [result, setResult] = useState<BootstrapSmokeSubsetResponse | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = useCallback(async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const next = await bootstrapSmokeSubset()
+      setResult(next)
+      if (next.smoke_passed) {
+        await onPassed()
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg)
+    } finally {
+      setBusy(false)
+    }
+  }, [onPassed])
+
+  const runSummary = result?.runs?.[0] ?? null
+  const auditOk = result?.audit_chain?.ok === true
+  const passed = result?.smoke_passed === true
+
+  return (
+    <div
+      data-testid="bootstrap-smoke-subset-step"
+      data-smoke-passed={alreadyGreen || passed ? "true" : "false"}
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>PROBE</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          POST /bootstrap/smoke-subset
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Runs the <code>compile-flash host_native</code> DAG from{" "}
+        <code>scripts/prod_smoke_test.py</code> (~60s) and verifies the
+        audit-log hash chain. On green the fifth gate flips and finalize
+        unlocks; on red the run summary + first-bad audit id are surfaced
+        so the operator can jump back to the offending step.
+      </p>
+
+      {alreadyGreen && !result && (
+        <p
+          data-testid="bootstrap-smoke-already-green"
+          className="font-mono text-[11px] text-[var(--status-green)]"
+        >
+          <Check size={12} className="inline mr-1" /> Smoke already passed —
+          backend gate is green. Re-run any time to re-verify.
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-smoke-run-button"
+          onClick={() => void run()}
+          disabled={busy}
+          className="flex items-center gap-1 px-3 py-1.5 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {busy ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <FlaskConical size={12} />
+          )}
+          {result ? "Re-run smoke" : "Run smoke subset"}
+        </button>
+        {result && (
+          <span
+            data-testid="bootstrap-smoke-elapsed"
+            className="font-mono text-[10px] text-[var(--muted-foreground)]"
+          >
+            last run: {result.elapsed_ms}ms · subset={result.subset}
+          </span>
+        )}
+      </div>
+
+      {result && (
+        <div
+          data-testid="bootstrap-smoke-result"
+          data-passed={passed ? "true" : "false"}
+          className="flex flex-col gap-2 p-3 rounded border border-[var(--border)] bg-[var(--muted)]/20"
+        >
+          <div
+            className={`flex items-center gap-2 font-mono text-xs font-semibold ${
+              passed
+                ? "text-[var(--status-green)]"
+                : "text-[var(--destructive)]"
+            }`}
+          >
+            {passed ? (
+              <>
+                <Check size={14} /> Smoke PASSED — smoke_passed gate is now
+                green.
+              </>
+            ) : (
+              <>
+                <AlertCircle size={14} /> Smoke FAILED — fix the highlighted
+                row and re-run.
+              </>
+            )}
+          </div>
+
+          {runSummary && (
+            <div
+              data-testid="bootstrap-smoke-run-summary"
+              data-run-ok={runSummary.ok ? "true" : "false"}
+              className="flex flex-col gap-1 font-mono text-[11px]"
+            >
+              <div>
+                <span className="text-[var(--muted-foreground)]">dag:</span>{" "}
+                <span>{runSummary.label}</span>
+              </div>
+              <div>
+                <span className="text-[var(--muted-foreground)]">run:</span>{" "}
+                <code>{runSummary.run_id ?? "—"}</code>
+                {" · "}
+                <span className="text-[var(--muted-foreground)]">plan:</span>{" "}
+                <code>{runSummary.plan_id ?? "—"}</code>
+                {" · "}
+                <span className="text-[var(--muted-foreground)]">status:</span>{" "}
+                <code>{runSummary.plan_status ?? "—"}</code>
+              </div>
+              <div>
+                <span className="text-[var(--muted-foreground)]">target:</span>{" "}
+                <code>{runSummary.target_platform ?? "—"}</code>
+                {" · "}
+                <span className="text-[var(--muted-foreground)]">t3:</span>{" "}
+                <code>{runSummary.t3_runner ?? "—"}</code>
+                {" · "}
+                <span className="text-[var(--muted-foreground)]">tasks:</span>{" "}
+                {runSummary.task_count}
+              </div>
+              {runSummary.validation_errors.length > 0 && (
+                <ul
+                  data-testid="bootstrap-smoke-errors"
+                  className="mt-1 list-disc pl-4 text-[var(--destructive)]"
+                >
+                  {runSummary.validation_errors.map((e, i) => (
+                    <li key={i}>
+                      <code>{e.rule}</code>
+                      {e.task_id ? ` (${e.task_id})` : ""}: {e.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          <div
+            data-testid="bootstrap-smoke-audit-summary"
+            data-audit-ok={auditOk ? "true" : "false"}
+            className={`flex items-center gap-2 font-mono text-[11px] ${
+              auditOk
+                ? "text-[var(--status-green)]"
+                : "text-[var(--destructive)]"
+            }`}
+          >
+            {auditOk ? <Check size={12} /> : <AlertCircle size={12} />}
+            <span>
+              audit hash chain: {auditOk ? "PASS" : "FAIL"}
+              {result.audit_chain.detail
+                ? ` · ${result.audit_chain.detail}`
+                : ""}
+              {result.audit_chain.first_bad_id != null
+                ? ` · first_bad_id=${result.audit_chain.first_bad_id}`
+                : ""}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <p
+          role="alert"
+          data-testid="bootstrap-smoke-error"
+          className="font-mono text-[11px] text-[var(--destructive)] break-words"
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function StepBodyPlaceholder({ step }: { step: StepDef }) {
   // Each step's actual UI lands in its own TODO slot (L3–L5). Until then
   // the shell just surfaces what this step IS so the operator knows what's
@@ -1691,6 +1890,11 @@ export default function BootstrapPage() {
                   onChanged={(allGreen) =>
                     setLocalGreenFor("services_ready", allGreen)
                   }
+                />
+              ) : activeStep.id === "smoke" ? (
+                <SmokeSubsetStep
+                  alreadyGreen={status.status.smoke_passed}
+                  onPassed={reloadStatus}
                 />
               ) : (
                 <StepBodyPlaceholder step={activeStep} />

@@ -2723,6 +2723,52 @@ export async function bootstrapParallelHealthCheck(
   )
 }
 
+// ─── L6 — Step 5 (smoke test subset — compile-flash host_native DAG) ──
+
+export interface BootstrapSmokeSubsetRunSummary {
+  label: string
+  dag_id: string
+  ok: boolean
+  validation_errors: Array<{
+    rule: string
+    task_id: string | null
+    message: string
+  }>
+  run_id: string | null
+  plan_id: number | null
+  plan_status: string | null
+  task_count: number
+  t3_runner: string | null
+  target_platform: string | null
+}
+
+export interface BootstrapSmokeAuditSummary {
+  ok: boolean
+  first_bad_id: number | null
+  detail: string
+}
+
+export interface BootstrapSmokeSubsetResponse {
+  smoke_passed: boolean
+  subset: string
+  elapsed_ms: number
+  runs: BootstrapSmokeSubsetRunSummary[]
+  audit_chain: BootstrapSmokeAuditSummary
+}
+
+/**
+ * Run the wizard's L6 Step-5 smoke subset — the compile-flash host_native
+ * DAG from ``scripts/prod_smoke_test.py`` (DAG #1) plus a full audit
+ * hash-chain verification. Returns the combined pass/fail result so the
+ * wizard can light the fifth gate without parsing error bodies.
+ */
+export async function bootstrapSmokeSubset(): Promise<BootstrapSmokeSubsetResponse> {
+  return request<BootstrapSmokeSubsetResponse>("/bootstrap/smoke-subset", {
+    method: "POST",
+    body: JSON.stringify({ subset: "dag1" }),
+  })
+}
+
 // ─── L4 — Step 3 (Cloudflare Tunnel skip / LAN-only) ──────────────
 
 export interface BootstrapCfTunnelSkipResponse {

@@ -1273,7 +1273,7 @@ Legend:
 - 預估：**1 day**
 
 ### L6. Step 5 — Smoke Test + 完成
-- [ ] 跑 `scripts/prod_smoke_test.py` 子集（選 compile-flash host_native DAG，~60s）
+- [x] 跑 `scripts/prod_smoke_test.py` 子集（選 compile-flash host_native DAG，~60s） *(done: `--subset dag1` CLI flag on the smoke script + `POST /api/v1/bootstrap/smoke-subset` endpoint runs DAG_1 in-process, verifies audit hash chain, and flips `smoke_passed` + records `STEP_SMOKE` on green; wizard Step 5 UI wired via `SmokeSubsetStep`)*
 - [ ] 顯示 audit_log hash chain 驗證結果、兩個 DAG 的 run summary
 - [ ] 全綠 → `POST /api/v1/bootstrap/finalize` → 寫 `bootstrap_finalized=true` → 導向 dashboard
 - [ ] 失敗 → 顯示錯誤 + 允許回到前面 step 修正
@@ -2053,6 +2053,145 @@ tests / HIL recipes / doc templates) per framework contract.
 
 ---
 
+## 🅣 Priority T — Billing & Payment Gateway（金流計費系統 — Stripe / ECPay / PayPal）
+
+> 背景：OmniSight 商業化需要完整的金流基建。採用「訂閱 + 用量（token 消耗）」混合制。同一時間只啟用一家金流，另外兩家作為備用。主要金流推薦 **Stripe**（完全自定義付款頁 + 3D Secure 2 頁內 modal + 原生 metered billing）；備用一 **綠界 ECPay**（台灣本地 TWD + 超商/ATM）；備用二 **PayPal**（國際客戶偏好）。
+>
+> **付款頁面策略**：Stripe 使用 Payment Element 嵌入 OmniSight 頁面（零跳轉 + 3DS2 modal）；ECPay 強制跳轉到 ECPay hosted page（無法自定義）；PayPal Advanced Checkout 卡片欄位可嵌入但 3DS 需跳轉。三家共用 `PaymentGateway` 統一介面，切換只需改 `OMNISIGHT_PAYMENT_GATEWAY` env。
+>
+> **定價模型**：Free ($0, 50K tokens) / Starter ($19, 500K) / Pro ($49, 2M) / Business ($149, 8M) / Enterprise ($499, 30M+)。超量按 $0.015-0.03/1K tokens。目標毛利率 70%。
+>
+> 相依（硬前置）：**L（Bootstrap，✅ 系統可部署）**、**K（Auth，✅ 客戶帳號）**、**I（Multi-tenancy，✅ 帳單 per-tenant）**。金流可在 V/R 之後或並行推進。
+
+### T0. PaymentGateway 統一介面 + 金流切換機制 (#326)
+- [ ] `backend/billing/gateway.py`：`PaymentGateway` ABC — `create_customer` / `create_subscription` / `report_usage` / `create_checkout_session` / `handle_webhook` / `cancel_subscription` / `get_invoices` / `refund`
+- [ ] `OMNISIGHT_PAYMENT_GATEWAY=stripe | ecpay | paypal` env 切換，啟動時只初始化一家
+- [ ] Gateway factory：`get_gateway() -> PaymentGateway`，singleton pattern
+- [ ] 統一 webhook router：`POST /api/v1/billing/webhook` → 依 gateway 分派到對應 adapter
+- [ ] 統一 error hierarchy：`PaymentError` / `CardDeclinedError` / `SubscriptionNotFoundError` / `WebhookVerificationError`
+- [ ] Billing event SSE：`billing.payment_succeeded` / `billing.payment_failed` / `billing.subscription_updated`
+- [ ] 測試：mock gateway 跑完整 lifecycle（create → subscribe → usage → invoice → cancel）
+- [ ] 預估：**1.5 day**
+
+### T1. Stripe 整合（主要金流）(#327)
+- [ ] `backend/billing/stripe_gateway.py`：實作 `PaymentGateway` ABC 的所有方法
+- [ ] Stripe Customer 建立：與 OmniSight user + tenant 綁定（`stripe_customer_id` 存 `users` 表）
+- [ ] Stripe Payment Element 前端整合：`components/omnisight/stripe-checkout.tsx`（`@stripe/react-stripe-js` + `PaymentElement`）
+- [ ] 3D Secure 2 處理：Stripe 自動觸發 + 頁內 modal（不跳轉）+ `payment_intent.requires_action` 狀態處理
+- [ ] Stripe Billing 訂閱：Product + Price（5 方案）+ Subscription + 試用期 + 升降級 proration
+- [ ] Metered billing：`stripe.SubscriptionItem.create_usage_record(quantity=token_count)` — 每次 agent 執行完畢時回報 token 消耗
+- [ ] Webhook 簽名驗證：`stripe.Webhook.construct_event(payload, sig, secret)` + 重放防護
+- [ ] Stripe Customer Portal link：讓客戶自助管理訂閱 / 更換卡片 / 查看發票
+- [ ] Stripe Tax（選配）：自動依客戶地區計算稅額
+- [ ] 測試：mock Stripe API → checkout → 3DS → subscribe → usage report → invoice → webhook → portal
+- [ ] 預估：**3.5 day**
+
+### T2. 綠界 ECPay 整合（備用一：台灣本地）(#328)
+- [ ] `backend/billing/ecpay_gateway.py`：實作 `PaymentGateway` ABC
+- [ ] ECPay `AioCheckOut` 整合：建立訂單 → redirect 到 ECPay 付款頁 → 回傳 ReturnURL + OrderResultURL
+- [ ] 信用卡 + 超商代碼 + ATM 虛擬帳號 三種付款方式
+- [ ] 3D Secure：由 ECPay 在其頁面內處理（merchant 端不需額外邏輯，但需處理驗證失敗回傳）
+- [ ] 定期定額（`PeriodAmount`）：對應訂閱方案，但無原生 metered billing → 自建用量累計 + 月底開補扣單
+- [ ] 自建用量追蹤：`backend/billing/usage_ledger.py` 累計 token 消耗，月底計算超量費 → 產生 ECPay 補扣訂單
+- [ ] Webhook（`OrderResultURL` POST）：驗證 `CheckMacValue` + 訂單狀態更新
+- [ ] 台灣發票整合（選配）：ECPay 電子發票 API（`E-Invoice`）
+- [ ] 測試：mock ECPay API → checkout redirect → 回傳 → 定期定額 → 用量補扣 → webhook 驗簽
+- [ ] 預估：**3 day**
+
+### T3. PayPal 整合（備用二：國際）(#329)
+- [ ] `backend/billing/paypal_gateway.py`：實作 `PaymentGateway` ABC
+- [ ] PayPal Advanced Checkout：JS SDK hosted card fields 嵌入 OmniSight 頁面
+- [ ] 3D Secure：`SCA_WHEN_REQUIRED` 觸發 → redirect to PayPal for authentication → redirect back
+- [ ] PayPal Subscriptions API：建 Plan + Subscription（試用 / 取消）
+- [ ] 無原生 metered billing → 複用 T2 的 `usage_ledger.py` + 月底 PayPal `capture` 補扣
+- [ ] Webhook（`PAYMENT.SALE.COMPLETED` / `BILLING.SUBSCRIPTION.*`）：驗簽 + 狀態同步
+- [ ] PayPal Disputes 處理：`CUSTOMER.DISPUTE.CREATED` → 自動回覆交易證據（agent 執行記錄 + token 用量明細）
+- [ ] 測試：mock PayPal API → checkout → 3DS redirect → subscribe → usage capture → webhook → dispute
+- [ ] 預估：**2.5 day**
+
+### T4. Token 用量追蹤 + Metered Billing 引擎 (#330)
+- [ ] `backend/billing/token_meter.py`：agent 執行完畢 → `record_usage(tenant_id, agent_id, task_id, input_tokens, output_tokens, model, cost_usd)`
+- [ ] 儲存：`token_usage` 表（tenant_id / timestamp / model / input_tokens / output_tokens / cost_usd / task_id）
+- [ ] 即時累計：per-tenant 當月已用 tokens + 已用成本（Redis cached counter，每次 record 時 incr）
+- [ ] 方案配額檢查：`check_quota(tenant_id)` → 超量時回傳 `QuotaAction`（`allow_and_bill` / `warn_approaching` / `hard_stop`）
+- [ ] Stripe 路徑：自動呼叫 `usage_records` API 回報（real-time）
+- [ ] ECPay / PayPal 路徑：累計到 `usage_ledger`，月底由 `T7 billing cycle` 結算
+- [ ] 混合模型成本計算：依 model ID 查 `_PRICING` 表（system.py）計算實際成本 → 乘以 markup → 帳單金額
+- [ ] SSE event：`billing.usage.tick`（每 10 次 record 推一次 → 前端 dashboard 即時更新）
+- [ ] Metrics：`billing_tokens_total{tenant_id, model}` / `billing_revenue_usd_total{tenant_id, plan}`
+- [ ] 測試：record 100 次 usage → 累計正確 → Stripe usage_record 呼叫正確 → 配額檢查 soft/hard 正確
+- [ ] 預估：**2.5 day**
+
+### T5. 訂閱管理（方案 / 試用 / 升降級 / 取消）(#331)
+- [ ] `backend/billing/plans.py`：5 方案定義（Free / Starter / Pro / Business / Enterprise）+ 每方案 token 含量 + 超量單價 + 功能 feature flags
+- [ ] Plan feature flags：`max_projects` / `max_agents` / `visual_preview` / `mobile_build` / `priority_model`（哪些功能各方案可用）
+- [ ] 試用期：Starter/Pro 提供 14 天試用（Stripe 原生 / ECPay 手動追蹤）
+- [ ] 升降級：mid-cycle proration（Stripe 原生 / ECPay+PayPal 手動計算剩餘天數差額）
+- [ ] 取消：grace period 到期才停權（不立即切斷）；到期前 3d / 1d SSE 提醒
+- [ ] `backend/routers/billing.py`：
+  - [ ] `GET /billing/plans` — 列出方案 + 當前使用者的方案
+  - [ ] `POST /billing/subscribe` — 建立訂閱 / 升降級
+  - [ ] `POST /billing/cancel` — 取消（立即 or 期末）
+  - [ ] `GET /billing/usage` — 當月 token 用量明細
+  - [ ] `GET /billing/invoices` — 歷史帳單
+- [ ] 測試：Free→Pro 升級 + proration 計算正確 + Pro→Starter 降級 + 取消 grace period
+- [ ] 預估：**2.5 day**
+
+### T6. Pricing Page + Checkout Flow UI (#332)
+- [ ] `app/pricing/page.tsx`：定價頁面——5 方案對比表 + 月/年切換 + 功能對照 + CTA 按鈕
+- [ ] `components/omnisight/pricing-table.tsx`：方案卡片元件（highlight 推薦方案 + current plan badge）
+- [ ] `components/omnisight/checkout-modal.tsx`：付款彈窗——嵌入 Stripe Payment Element（或 ECPay redirect / PayPal buttons，依 gateway 切換）
+- [ ] 3D Secure UX：Stripe modal 在 checkout-modal 內彈出（不離開 OmniSight）
+- [ ] 付款成功動畫 + 重導到 dashboard / workspace
+- [ ] 已訂閱使用者：CTA 變成「管理方案」→ 跳轉 T7 Customer Portal
+- [ ] Responsive：desktop + tablet + mobile 三版排版
+- [ ] 預估：**2 day**
+
+### T7. Customer Portal（帳單管理 + 發票 + 用量明細）(#333)
+- [ ] `app/settings/billing/page.tsx`：Settings 內的帳單管理頁
+- [ ] 當前方案 + 下次扣款日 + 已用 token / 含量 + 使用率 progress bar
+- [ ] Token 用量明細（`components/omnisight/usage-breakdown.tsx`）：per-day 折線圖 + per-model 分佈 + per-project 排名
+- [ ] 帳單歷史（`components/omnisight/invoice-history.tsx`）：每月 invoice 列表 + PDF 下載 + 付款狀態 badge
+- [ ] 付款方式管理：更換信用卡 / 查看到期日（Stripe Customer Portal link / ECPay 重新授權 / PayPal 管理）
+- [ ] 升降級入口：方案對比 + one-click 升級 / 確認降級
+- [ ] 預估：**2.5 day**
+
+### T8. Webhook 處理 + 付款失敗重試 + Dunning (#334)
+- [ ] `backend/billing/webhook_handler.py`：統一 webhook 入口 → 驗簽 → 分派到 gateway adapter → 更新訂閱/付款狀態
+- [ ] Webhook 冪等：`webhook_events` 表記錄 event_id → 重複事件 skip（防重放）
+- [ ] 付款失敗處理：
+  - [ ] 首次失敗：SSE 告警 + email 通知「請更新付款方式」
+  - [ ] 3 天後重試（Stripe Smart Retries 自動 / ECPay+PayPal 由 cron job 觸發）
+  - [ ] 7 天仍失敗：降級到 Free 方案 + 限制功能 + email 最終通知
+  - [ ] 14 天仍未修復：帳號進入 `suspended` 狀態（資料保留 30 天，之後歸檔）
+- [ ] Dunning email 範本：3 封（首次失敗 / 7 天警告 / 14 天停權）
+- [ ] Webhook audit：所有 webhook event 進 hash-chain `audit_log`
+- [ ] 測試：mock payment_failed → 3 次重試 → 降級 → 停權 → 恢復付款 → 自動升回
+- [ ] 預估：**2 day**
+
+### T9. 金流安全 + PCI DSS + 審計 (#335)
+- [ ] PCI DSS SAQ-A 合規：OmniSight 不儲存 / 不處理 / 不傳輸卡號（全由 Stripe/ECPay/PayPal tokenize）
+- [ ] API key 安全：Stripe secret key / ECPay HashKey+HashIV / PayPal client secret 存 `backend/secret_store.py` Fernet at-rest
+- [ ] Webhook secret 安全：每家 webhook signing secret 同上 Fernet 加密
+- [ ] 金額篡改防護：前端不傳金額，後端從 plan 定義計算 → 建 checkout session 時由後端設金額
+- [ ] Refund 權限控制：只有 admin role 可觸發退款 → audit_log 記錄
+- [ ] Rate limit：`/billing/subscribe` 和 `/billing/webhook` 加獨立 rate limit（防 brute force checkout）
+- [ ] 金流切換 audit：切換 gateway 時寫 `audit_log`（`billing.gateway_switched`，含 from/to/operator）
+- [ ] 金流健康檢查：`GET /api/v1/billing/health` — 驗 gateway API 可達 + webhook endpoint 可達 + 最近一次 webhook 時間
+- [ ] 滲透測試案例：重放 webhook / 偽造簽名 / 金額篡改 / 跨租戶訂閱操作 / Stripe key 洩漏偵測
+- [ ] 預估：**1.5 day**
+
+**Priority T 總預估**：**23.5 day**（solo ~5 週，2-person team ~3 週）
+
+**建議切段交付**：
+1. **T0 + T4 + T5**（6.5d）— 統一介面 + 用量追蹤 + 方案管理。billing 骨架可運行
+2. **T1**（3.5d）— Stripe 整合。首個可收費的完整路徑（自定義付款 + 3DS + 訂閱 + metered）
+3. **T6 + T7**（4.5d）— Pricing Page + Customer Portal。客戶面 UI 完成
+4. **T8 + T9**（3.5d）— Webhook + Dunning + 安全。production-ready
+5. **T2 + T3**（5.5d）— ECPay + PayPal 備用。按市場需求再開
+
+---
+
 ## Execution order (recommended)
 
 ### Phase 1 — clear the runway (1-2 weeks)
@@ -2162,6 +2301,13 @@ R4 (斷點續傳 + Checkpoint Timeline) — 2.5d
 → R8 + R9 (安全重試 + 統一通報) — 3d
 → R5 + R6 + R7 (Active-Standby HA + Serverless PaaS + Deployment Topology View) — 7d
 
+### Phase 24 — Billing & Payment Gateway（~5 week，需 L + K + I 前置，可與 Phase 22/23 並行）
+T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6.5d）
+→ T1 (Stripe 整合 — 自定義付款 + 3DS + metered) — 首個可收費路徑（3.5d）
+→ T6 + T7 (Pricing Page + Customer Portal) — 客戶面 UI（4.5d）
+→ T8 + T9 (Webhook + Dunning + PCI DSS) — production-ready（3.5d）
+→ T2 + T3 (ECPay + PayPal 備用) — 按市場需求再開（5.5d）
+
 ---
 
 ## Totals
@@ -2177,7 +2323,8 @@ R4 (斷點續傳 + Checkpoint Timeline) — 2.5d
 | X (software vertical) | 12 day |
 | R (watchdog + DR + UI) | 25.5 day |
 | V (visual design loop + workspace) | 48 day |
+| T (billing + payment gateway) | 23.5 day |
 | META | 4-8 day |
-| **Total** | **~537-708 day** |
+| **Total** | **~560.5-731.5 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.

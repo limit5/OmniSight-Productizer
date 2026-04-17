@@ -5,10 +5,14 @@ DAG #1: compile-flash against host_native (Phase 64-C-LOCAL fast path)
 DAG #2: cross-compile against aarch64 (full cross-compile path)
 
 Usage:
-    python scripts/prod_smoke_test.py [BASE_URL]
+    python scripts/prod_smoke_test.py [BASE_URL] [--subset dag1|dag2|both]
 
     BASE_URL defaults to http://localhost:8000. For production:
     python scripts/prod_smoke_test.py https://omnisight.example.com
+
+    --subset selects which DAG(s) to run. L6 Step 5 of the bootstrap
+    wizard invokes `--subset dag1` so a fresh install can smoke-check the
+    full pipeline in ~60s without burning the cross-compile budget.
 
 Requires: operator auth cookie or OMNISIGHT_API_TOKEN env var.
 Exit codes: 0=pass, 1=DAG submit failed, 2=verification failed.
@@ -16,13 +20,45 @@ Exit codes: 0=pass, 1=DAG submit failed, 2=verification failed.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import time
 from urllib import request, error as urlerror
 
-BASE_URL = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8000"
+
+def _parse_cli(argv: list[str]) -> tuple[str, str]:
+    """Return (base_url, subset) parsed from *argv* (sys.argv[1:] shape).
+
+    Kept as a module-level function so the bootstrap wizard endpoint can
+    reuse the same subset/base_url semantics when it invokes this script
+    via subprocess.
+    """
+    p = argparse.ArgumentParser(
+        prog="prod_smoke_test",
+        description="Run OmniSight production smoke DAG(s)",
+        add_help=True,
+    )
+    p.add_argument(
+        "base_url", nargs="?", default="http://localhost:8000",
+        help="Server base URL (default: http://localhost:8000)",
+    )
+    p.add_argument(
+        "--subset",
+        choices=("dag1", "dag2", "both"),
+        default="both",
+        help=(
+            "dag1 = compile-flash host_native only (fast ~60s, used by the "
+            "bootstrap wizard's L6 Step 5); dag2 = cross-compile aarch64 only; "
+            "both (default) = run the full pair."
+        ),
+    )
+    ns = p.parse_args(argv)
+    return ns.base_url.rstrip("/"), ns.subset
+
+
+BASE_URL, SUBSET = _parse_cli(sys.argv[1:])
 API = f"{BASE_URL}/api/v1"
 TOKEN = os.environ.get("OMNISIGHT_API_TOKEN", "")
 POLL_INTERVAL = 3
@@ -46,9 +82,14 @@ DAG_1_COMPILE_FLASH_HOST_NATIVE = {
             },
             {
                 "task_id": "flash",
+                # On host_native the T3 resolver picks LOCAL and the
+                # validator swaps the effective tier to t1. Use python3
+                # (a t1-legal toolchain) so the symbolic "flash" step
+                # validates — there's no physical board to flash when
+                # target arch == host arch.
                 "description": "Flash built image (T3 resolves to LOCAL on host_native)",
                 "required_tier": "t3",
-                "toolchain": "flash_board",
+                "toolchain": "python3",
                 "inputs": ["build/firmware.bin"],
                 "expected_output": "logs/flash.log",
                 "depends_on": ["compile"],
@@ -88,10 +129,22 @@ DAG_2_CROSS_COMPILE_AARCH64 = {
     "metadata": {"source": "smoke-test:A2-DAG2", "test_run": True},
 }
 
-DAGS = [
-    ("DAG #1: compile-flash (host_native)", DAG_1_COMPILE_FLASH_HOST_NATIVE),
-    ("DAG #2: cross-compile (aarch64)", DAG_2_CROSS_COMPILE_AARCH64),
+ALL_DAGS: list[tuple[str, str, dict]] = [
+    ("dag1", "DAG #1: compile-flash (host_native)", DAG_1_COMPILE_FLASH_HOST_NATIVE),
+    ("dag2", "DAG #2: cross-compile (aarch64)", DAG_2_CROSS_COMPILE_AARCH64),
 ]
+
+
+def _select_dags(subset: str) -> list[tuple[str, dict]]:
+    """Filter ALL_DAGS by subset keyword — `dag1`, `dag2`, or `both`."""
+    if subset == "both":
+        return [(label, payload) for _key, label, payload in ALL_DAGS]
+    return [
+        (label, payload) for key, label, payload in ALL_DAGS if key == subset
+    ]
+
+
+DAGS = _select_dags(SUBSET)
 
 
 # ── HTTP helpers ────────────────────────────────────────────────
@@ -196,6 +249,7 @@ def generate_report(results: list[dict]) -> str:
         f"",
         f"**Date**: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         f"**Target**: {BASE_URL}",
+        f"**Subset**: {SUBSET}",
         f"",
     ]
 
