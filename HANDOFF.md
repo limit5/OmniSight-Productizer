@@ -11541,3 +11541,77 @@ bash 語法：`bash -n scripts/deploy.sh` → 乾淨。
 
 ### 下一步
 - G3 row 1357 — `docs/ops/blue_green_runbook.md` runbook + 腳本彙整交付清單。這會是 G3 最後一顆 checkbox。
+
+
+---
+
+## 2026-04-18 — G3 #5 · `docs/ops/blue_green_runbook.md` runbook + 腳本彙整（HA-03 TODO row 1357 — G3 收官）
+
+### 本回合做了什麼
+TODO row 1357「交付：runbook `docs/ops/blue_green_runbook.md`、腳本」完成，並附 107 顆契約測試全綠。這是 G3（HA-03 Blue-Green）五顆 checkbox 的**最後一顆 / 收官**；row 1353–1356 已分別交付 `--strategy blue-green` flag、`bluegreen_switch.sh` 原子 primitive、pre-cut smoke + 5-min observe + 24h retention ceremony、`--rollback` 秒級切回；row 1357 把這些 primitive 包進 **operator-grade runbook**，並用契約測試把「runbook ↔ 腳本」的對齊鎖死，避免日後改腳本但忘了同步文件。
+
+### 交付物
+- `docs/ops/blue_green_runbook.md`（新檔，~370 行 Markdown，12 節）
+  - **§1 Why blue-green (and when it is *not* in scope)**：表格列出觸發條件（major dep bump / non-backward-compat schema migration / new container base image / N10 `deploy/blue-green-required` label）+ 明確指引「其他情況走 rolling」並指向 G2 contract，避免操作員把 patch-tier change 也走 blue-green（ceremony 8 min vs. rolling 90 s）。
+  - **§2 The five files that *are* blue-green state**：8 行表格列出 `active_color` / `active_upstream.caddy` / `upstream-{blue,green}.caddy` / `previous_color` / `cutover_timestamp` / `previous_retention_until` / `rollback_timestamp` 的 type / writer / meaning，明寫「Never edit by hand」+ tmp-then-mv pattern 讀者安全保證。
+  - **§3 Pre-flight**：N10 gate ack → state dir shape (含 status warning 處理表) → 兩 replica `/readyz` → `docker compose pull` → tab-2 hotkey。每步都附 fix command。
+  - **§4 Cutover ceremony**：anchored 引用 `scripts/deploy.sh` 行 477–705，9 步逐一描述 + §4.1 完整 exit code 表（0/3/4/5/6/7 + cutover happened? 欄）+ §4.2 dry-run。
+  - **§5 Rollback ceremony**：anchored 引用 `scripts/deploy.sh` 行 159–299，9 步逐一描述 + §5.1 exit code 表（0/2/3/5/8）+ §5.2 「explicitly does NOT do」5 條（無 git fetch / 無 N10 gate / 無 observe / 無 second-level rollback / 各自的 trade-off 說明）。
+  - **§6 Post-cutover hygiene**：T+0 / T+1h / T+24h / Anytime 四階段 owner + action 表 + 計算 retention 預算的 shell snippet。
+  - **§7 Manual primitive reference**：`bluegreen_switch.sh` 四個子指令 + exit code 表 + `OMNISIGHT_BLUEGREEN_DIR` sandbox 模式。
+  - **§8 Troubleshooting decision tree**：兩棵 ASCII 樹（cutover exit ? / rollback exit ?），分支末端就是 operator action — 3am 不需要再展開思考。
+  - **§9 Tunables cheat-sheet**：14 顆 env var 三段式表格（cutover / rollback / shared），每顆都有 default 值 + 一句話作用，「操作員只要 grep var 名就找到」。
+  - **§10 Script & contract index**：8 列表把每個腳本 → 契約測試 → 測試顆數對齊，未來改腳本要重跑哪顆測試一目了然。
+  - **§11 Anti-patterns**：5 條已知 footgun（手改 symlink / 提早停舊色 / prod 跑 SKIP_SMOKE / 同開兩 bypass / 誤以為 tmp.$$ pattern 不安全）+ 對應 contract test 名。
+  - **§12 Change-management checklist**：fenced code block 直接複製到 Linear/Jira ticket，pre-flight / cutover / post 三相位 + N10 ledger 收尾。
+- `backend/tests/test_blue_green_runbook.py`（新檔、107 顆、0.12 s 全綠）
+  - 11 class × 107 test：file shape / sections (12 顆) / cutover exit codes (6 顆) / rollback exit codes (5 顆) / switch exit codes (4 顆) / tunable env vars × 2 視角 (28 顆) / state files (8 顆) / referenced scripts × 2 視角 (12 顆) / sibling tests × 2 視角 (10 顆) / copy-paste correctness (6 顆) / anti-patterns (5 顆) / change-management checklist (3 顆) / discoverability (2 顆)。
+  - **關鍵契約**：
+    - `test_runbook_in_docs_ops` / `test_runbook_path_matches_handoff_promise` — runbook 路徑就是 HANDOFF 答應的位置，搬家會被抓。
+    - `test_sections_in_order` — 12 節必須照 pre-flight → cutover → rollback → post 順序，亂序會破壞操作員 top-to-bottom scan。
+    - `TestExitCodeCoverage` 三組 (cutover {0,3,4,5,6,7} / rollback {0,2,3,5,8} / switch {0,1,2,3}) — 任何 exit code 漏寫 runbook 表格 = 3am operator 看到 undocumented exit code，這 15 顆全綠才能保證 triage 樹不缺枝。
+    - `TestTunableCoverage` — 14 顆 env var 必須**同時**在 runbook 與 deploy.sh 出現（雙向斷言：runbook 列了 var ⇒ script 真讀；script 讀了 var ⇒ runbook 真列），單向 drift 都會被抓。
+    - `TestStateFileCoverage` — 8 顆 state file 必須在 runbook §2 表格出現，新增/刪除 state file 都要同步文件。
+    - `TestReferencedArtefactsExist` — runbook copy-paste 不能 404 operator（`scripts/deploy.sh` / `scripts/bluegreen_switch.sh` / `scripts/prod_smoke_test.py` / `scripts/check_bluegreen_gate.py` / `deploy/reverse-proxy/Caddyfile` / `docker-compose.prod.yml` 全要實際存在）。
+    - `TestSiblingContractIndex` — §10 contract index 列的 5 顆 sibling test 必須真的存在 + 名字真的在 runbook 出現，避免 index 老化。
+    - `TestCopyPasteCorrectness` — 三條 canonical 指令（`scripts/bluegreen_switch.sh status` / `scripts/deploy.sh --strategy blue-green prod` / `scripts/deploy.sh --rollback`）必須逐字出現，rename 子指令會被抓。
+    - `TestAntiPatterns` — 5 顆 footgun keyword 必須在 §11 anti-patterns 區段出現（不是全文 grep，是限縮到 §11 與 §12 之間），確保 anti-pattern 不被靜悄悄移到別節失去 emphasis。
+    - `TestChangeManagementChecklist` — §12 必須有 fenced code block + 三相位（Pre-flight/Cutover/Post）+ 三條 literal 指令字串，否則 ticket 複製就斷。
+- TODO row 1357 標記 `[x]` + 完整 annotation。
+- HANDOFF 本段。
+
+### 設計決策 & trade-off
+1. **為什麼 runbook 用 12 節而非更精簡？** 12 節對應「操作員一個工作流的所有 phase」：認識（§1）→ 看狀態（§2）→ 準備（§3）→ 執行 cutover（§4）→ 執行 rollback（§5）→ 後續（§6）→ 手動工具（§7）→ 出事查詢（§8）→ tunable 速查（§9）→ contract 對應（§10）→ 別做（§11）→ 把流程貼 ticket（§12）。每節都有契約測試把「title 必存在」鎖死，未來想合併也行但要刪 test。
+2. **為什麼把 exit code 表分開重寫而非從腳本 inspect？** Inspect 會因註解中的 `exit N` 假陽性 / 多 arm 中的條件性 exit 真陽性。直接用白名單斷言 (CUTOVER_EXIT_CODES = {0,3,4,5,6,7})，要新增 exit code 就強迫同時改 runbook + 測試 + 腳本三處 — 這就是 contract pinning 的價值。
+3. **為什麼 tunable 雙向斷言？** 單向「runbook 列 ⇒ script 必讀」抓 runbook 寫得太多 fiction；單向「script 讀 ⇒ runbook 必列」抓 script 加了新 env var 但忘了寫文件。雙向才能讓兩邊保持同步。代價：未來新增 tunable 要更新 `REQUIRED_TUNABLES` 列表 — 但這正是「強迫思考是否要文件化」的契機。
+4. **為什麼 §11 anti-patterns 用「在 §11 區段內」而非「全文 grep」？** Anti-pattern 必須在 anti-pattern 區段才有 visual emphasis；如果只全文 grep 過關，未來有人把警語移到 §3 的 footnote 裡就失去視覺提醒效果。限縮到 §11 與 §12 之間能抓這種 silent demotion。
+5. **為什麼 §12 checklist 同時驗 fenced code block + literal 指令字串？** Fenced block 確保 ticket 複製時格式不爛；literal 字串確保未來 ticket template 沿用的指令名 = 真實腳本子指令名。雙重保險。
+6. **為什麼不寫 G3 row 1357 第二要求「腳本」當作獨立 deliverable？** Row 1357 的「、腳本」原意是「runbook + 已交付腳本的彙整索引」 — 五個腳本（deploy.sh / bluegreen_switch.sh / prod_smoke_test.py / check_bluegreen_gate.py / Caddyfile）都已在 row 1353–1356 + 既有 phase 交付，只缺一個總覽。§10 Script & contract index 就是這個總覽：列出每個腳本 + 對應契約測試 + 測試顆數，新人 onboard 從這張表就能知道整個 G3 系統的 entry points。
+
+### 刻意**不**做的事
+- **不**改任何 runtime 程式碼（`scripts/deploy.sh` / `scripts/bluegreen_switch.sh` 一個字節都沒動）：row 1357 是純文件交付，runtime 在 row 1356 就已經完整。
+- **不**寫 reflow / 線上測試 / Selenium 之類的 e2e：runbook 是 Markdown 文件，contract 鎖到「文字內容對齊腳本實況」就足夠；e2e 會把測試從 0.12 s 拉到分鐘級且第一條 docker 指令就要實機 docker compose。
+- **不**啟動腳本實機驗證：G3 #1–#4 的契約測試已經 sandbox state dir 跑過 `--rollback` 真 flow（含 symlink 物件、retention math、no-op guard、exit codes 全部驗證）。row 1357 額外實機等於重複測試而非新增信心。
+- **不**將 `rollback_timestamp` 加入 `.gitignore`：G3 #4 HANDOFF 已 flag 為 follow-up，不在 row 1357 scope。實際影響：dev 在 sandbox 外手動跑過 `--rollback` 才會產生這個檔，contract 不要求它持久化。
+
+### 測試總結
+```
+backend/tests/test_blue_green_runbook.py ........................ 107 passed in 0.12s
+backend/tests/test_deploy_sh_rollback.py ............................ 40 passed
+backend/tests/test_deploy_sh_blue_green_flag.py ........................ 24 passed
+backend/tests/test_bluegreen_atomic_switch.py ............................ 32 passed
+backend/tests/test_bluegreen_precut_ceremony.py ........................... 29 passed
+backend/tests/test_deploy_sh_rolling.py ................................... 31 passed
+backend/tests/test_g2_delivery_bundle.py ................................. 28 passed
+backend/tests/test_reverse_proxy_caddyfile.py ........................... 24 passed
+-------- 315 passed in 0.92s, 零回歸 --------
+```
+
+### 風險 / 副作用
+- **Runbook 內容會跟著腳本演進**：未來改 deploy.sh 加 exit code / 改 env var 名 / 改 state file 名，必須同步改 runbook 否則 `test_blue_green_runbook.py` 紅。這是**設計目的**而非副作用：契約測試把「文件 ↔ 腳本」對齊變成 CI 級守門員，避免 runbook 慢慢變謊話。
+- **Markdown 結構也是契約**：12 節順序、table 寫法（`**N**` exit / `| N |` switch）、code-fence 都被測試 pin 住。將來如果想改用 docs 框架（mdBook / Docusaurus）需要先放寬 `REQUIRED_SECTIONS_IN_ORDER` 等斷言，否則 reflow 會破測試。建議：framework 遷移時先 deprecate test、做完遷移再重新 pin。
+- **Anti-patterns 章節是「黑名單」**：能列的 footgun 有限，新發現的（例如未來有人發現 Caddy reload 時序問題）需要主動加進 §11 + 加 keyword 到 `REQUIRED_ANTI_PATTERN_KEYWORDS`。沒加 = 沒鎖。
+
+### 下一步（G3 收官，下一波是 G4）
+- G3 (HA-03 Blue-Green) 五顆 checkbox 全數完成：row 1353 (`--strategy` flag) / 1354 (atomic primitive) / 1355 (ceremony) / 1356 (`--rollback`) / 1357 (runbook + 腳本) — 從 flag 到文件 closed-loop。
+- 接下來是 G4 (HA-04 SQLite → PostgreSQL 遷移 + streaming replica)，TODO 從 row 1359 起。G3 的 blue-green 機制將是 G4 schema migration 的安全網：non-backward-compat schema change 必走 G3 ceremony。
