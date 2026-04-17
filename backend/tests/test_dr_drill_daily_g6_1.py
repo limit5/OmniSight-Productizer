@@ -16,7 +16,10 @@ the same way).
 
 Sibling rows not covered by this test (explicit scope fence):
 
-    * row 1380 — RTO / RPO objective doc (next G6 row).
+    * row 1380 — RTO / RPO objective doc. Landed as G6 #2 at
+      ``docs/ops/dr_rto_rpo.md``; now pinned in
+      ``backend/tests/test_dr_rto_rpo_g6_2.py`` (the
+      ``TestNoRtoRpoDocYet`` guard was migrated out in that commit).
     * row 1381 — DB-primary / reverse-proxy manual failover runbook.
     * row 1382 — annual DR drill operator checklist.
     * row 1383 — ``scripts/dr_drill.sh`` + ``docs/ops/dr_runbook.md``
@@ -567,22 +570,13 @@ class TestScopeDisciplineSiblingRows:
 
 
 # ---------------------------------------------------------------------------
-# TestNoRtoRpoDocYet — row 1380 guard. Removed in the commit that
-# lands RTO/RPO wording per the explicit-migration pattern.
+# NOTE: `TestNoRtoRpoDocYet` was removed in the commit that landed
+# G6 #2 (TODO row 1380) — `docs/ops/dr_rto_rpo.md` now owns the
+# RTO / RPO objective doc (RTO ≤ 15 min, RPO ≤ 5 min), which is the
+# exact literal this guard used to forbid. The G6 #2-side contract
+# pinning lives in `backend/tests/test_dr_rto_rpo_g6_2.py` —
+# explicit-migration pattern, carried forward from G5 → G6 #1 → G6 #2.
 # ---------------------------------------------------------------------------
-class TestNoRtoRpoDocYet:
-    def test_no_dedicated_rto_rpo_doc(self) -> None:
-        # Row 1380 ("RTO / RPO 目標明文化") belongs to a dedicated
-        # doc file that is NOT in this commit. Pre-committing it
-        # is scope creep.
-        for candidate in (
-            PROJECT_ROOT / "docs" / "ops" / "dr_rto_rpo.md",
-            PROJECT_ROOT / "docs" / "ops" / "rto_rpo.md",
-        ):
-            assert not candidate.exists(), (
-                f"row 1380 (RTO/RPO doc) must not land with G6 #1 — "
-                f"saw {candidate.relative_to(PROJECT_ROOT)}"
-            )
 
 
 # ---------------------------------------------------------------------------
