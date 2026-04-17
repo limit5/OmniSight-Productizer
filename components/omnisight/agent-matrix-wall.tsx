@@ -19,6 +19,15 @@ export interface AgentMessage {
   message: string
   timestamp: string
   details?: string
+  /** R3 (#309): true when the LLM response was stitched together after
+   * hitting ``stop_reason=max_tokens``. The UI renders a small
+   * "↩ auto-continued" tag so the operator knows the message spans
+   * more than one provider call. */
+  autoContinued?: boolean
+  /** R3 (#309): how many continuation rounds it took. Optional label
+   * next to the tag so a 1-round stitch doesn't shout as loud as a
+   * 4-round one. */
+  continuationRounds?: number
 }
 
 export interface AgentHistoryEntry {
@@ -108,6 +117,28 @@ export interface AgentCognitiveHealth {
   lastUpdated?: string
 }
 
+/** R3 (#309) — Scratchpad Progress Indicator signal. */
+export interface AgentScratchpadSummary {
+  /** Latest saved turn number. */
+  turn: number
+  /** Denominator for the progress bar — usually ``loopMax`` or the planned total. */
+  totalTurns: number
+  /** Non-empty sections (out of 5) — drives the mini dot-strip. */
+  sectionsCount: number
+  /** Encrypted-on-disk size in bytes; rendered as a human-readable chip. */
+  sizeBytes: number
+  /** What kicked off the most recent save. */
+  trigger?: string
+  /** Optional sub-task label that was active when the save happened. */
+  subtask?: string | null
+  /** Seconds since the last successful save — powers the "2 min ago" label. */
+  ageSeconds?: number | null
+  /** ISO timestamp of the last save. */
+  updatedAtIso?: string | null
+  /** When true the agent has a saved scratchpad that survives a crash. */
+  recoverable?: boolean
+}
+
 export interface Agent {
   id: string
   name: string
@@ -124,6 +155,8 @@ export interface Agent {
   materializationPhase?: MaterializationPhase
   /** R2 (#308): Semantic Entropy Monitor signal — optional until first measurement. */
   cognitive?: AgentCognitiveHealth
+  /** R3 (#309): Scratchpad offload signal — optional until first save. */
+  scratchpad?: AgentScratchpadSummary
 }
 
 // Agent type configurations
@@ -396,6 +429,151 @@ function CognitiveHealthSection({ cognitive }: { cognitive: AgentCognitiveHealth
   )
 }
 
+// R3 (#309): Scratchpad Progress Indicator. Renders a progress bar + the
+// relative save age, plus a "Recoverable ●" badge when the agent errored
+// but has a saved scratchpad we can hot-resume from. Tucked into the
+// Cognitive Health card so the operator sees cognition + persistence
+// state in one glance.
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`
+}
+
+function formatAge(seconds: number | null | undefined): string {
+  if (seconds == null || !isFinite(seconds) || seconds < 0) return "—"
+  if (seconds < 5) return "just now"
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`
+  return `${Math.floor(seconds / 86400)} d ago`
+}
+
+function ScratchpadIndicator({
+  agentId,
+  summary,
+  status,
+}: {
+  agentId: string
+  summary: AgentScratchpadSummary
+  status: AgentStatus
+}) {
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewText, setPreviewText] = useState<string | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+
+  const denom = Math.max(summary.totalTurns || 1, summary.turn || 1, 1)
+  const pct = Math.max(0, Math.min(100, Math.round((summary.turn / denom) * 100)))
+  const recoverable = !!summary.recoverable && (status === "error" || status === "warning")
+
+  const loadPreview = useCallback(async () => {
+    if (previewText !== null || previewLoading) return
+    setPreviewLoading(true)
+    setPreviewError(null)
+    try {
+      const res = await fetch(`/api/v1/scratchpad/agents/${encodeURIComponent(agentId)}/preview`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setPreviewText(typeof data?.markdown === "string" ? data.markdown : "")
+    } catch (err) {
+      setPreviewError(String((err as Error).message || err))
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [agentId, previewLoading, previewText])
+
+  const togglePreview = useCallback(() => {
+    setPreviewOpen(prev => {
+      const next = !prev
+      if (next) void loadPreview()
+      return next
+    })
+  }, [loadPreview])
+
+  return (
+    <div className="mt-2">
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <span className="font-mono text-[9px] tracking-[0.16em] text-[var(--muted-foreground)]">
+          SCRATCHPAD
+        </span>
+        <div className="flex items-center gap-1.5">
+          {recoverable && (
+            <span
+              title="Agent has a recoverable scratchpad — can be hot-resumed"
+              className="inline-flex items-center gap-1 px-1 py-0.5 rounded text-[9px] font-mono uppercase"
+              style={{
+                color: "var(--validation-emerald,#10b981)",
+                backgroundColor: "color-mix(in srgb, var(--validation-emerald,#10b981) 18%, transparent)",
+              }}
+            >
+              <span aria-hidden>●</span>
+              Recoverable
+            </span>
+          )}
+          <span
+            className="font-mono text-[9px] tabular-nums text-[var(--muted-foreground)]"
+            title={summary.updatedAtIso || "no save yet"}
+          >
+            {formatAge(summary.ageSeconds)}
+          </span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            togglePreview()
+          }}
+          className="flex-1 group/bar"
+          aria-label="Open scratchpad preview"
+        >
+          <div className="h-1.5 w-full bg-[var(--secondary)]/60 rounded-full overflow-hidden relative">
+            <div
+              className="absolute inset-y-0 left-0 rounded-full transition-all"
+              style={{
+                width: `${pct}%`,
+                background:
+                  "linear-gradient(90deg, var(--neural-blue,#3b82f6) 0%, var(--artifact-purple,#a855f7) 100%)",
+              }}
+            />
+          </div>
+          <div className="flex items-center justify-between mt-1 gap-2">
+            <span className="font-mono text-[9px] tabular-nums text-[var(--muted-foreground)]">
+              turn {summary.turn}/{denom}
+            </span>
+            <span className="font-mono text-[9px] tabular-nums text-[var(--muted-foreground)]">
+              {summary.sectionsCount}/5 sections · {formatBytes(summary.sizeBytes)}
+            </span>
+          </div>
+        </button>
+      </div>
+      {previewOpen && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="mt-2 rounded border border-[var(--border)] bg-[var(--background)] p-2 max-h-56 overflow-y-auto"
+        >
+          {previewLoading && (
+            <div className="font-mono text-[10px] text-[var(--muted-foreground)]">Loading…</div>
+          )}
+          {previewError && (
+            <div className="font-mono text-[10px] text-[var(--critical-red)]">{previewError}</div>
+          )}
+          {!previewLoading && !previewError && previewText && (
+            <pre className="font-mono text-[10px] leading-snug whitespace-pre-wrap break-words text-[var(--foreground)]">
+              {previewText}
+            </pre>
+          )}
+          {!previewLoading && !previewError && !previewText && (
+            <div className="font-mono text-[10px] text-[var(--muted-foreground)]">(empty)</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface AgentCardProps {
   agent: Agent
   onRemove?: (id: string) => void
@@ -489,6 +667,15 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
           <CognitiveHealthSection cognitive={agent.cognitive} />
         )}
 
+        {/* Row 6 (R3 #309): Scratchpad Progress Indicator. */}
+        {agent.scratchpad && (
+          <ScratchpadIndicator
+            agentId={agent.id}
+            summary={agent.scratchpad}
+            status={agent.status}
+          />
+        )}
+
         {/* Remove Button - Positioned in header */}
         {onRemove && (
           <button
@@ -530,6 +717,39 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
               </div>
             )}
             
+            {agent.messages && agent.messages.length > 0 && (
+              <div className="space-y-2 mb-2">
+                <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase">Messages</span>
+                {agent.messages.slice(-5).map(msg => (
+                  <div key={msg.id} className="flex items-start gap-2">
+                    <span className="font-mono text-[10px] text-[var(--muted-foreground)] shrink-0 w-14">{msg.timestamp}</span>
+                    <div className="flex-1 min-w-0">
+                      <span className="font-mono text-xs text-[var(--foreground)] leading-relaxed break-words">
+                        {msg.message}
+                      </span>
+                      {msg.autoContinued && (
+                        <span
+                          className="ml-1.5 inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-mono"
+                          title={
+                            msg.continuationRounds
+                              ? `Stitched over ${msg.continuationRounds} continuation round(s) after stop_reason=max_tokens`
+                              : "Stitched after stop_reason=max_tokens"
+                          }
+                          style={{
+                            color: "var(--artifact-purple,#a855f7)",
+                            backgroundColor: "color-mix(in srgb, var(--artifact-purple,#a855f7) 18%, transparent)",
+                          }}
+                        >
+                          <span aria-hidden>↩</span>
+                          auto-continued{msg.continuationRounds ? ` ×${msg.continuationRounds}` : ""}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {agent.subTasks && agent.subTasks.length > 0 && !agent.history?.length && (
               <div className="space-y-2">
                 <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase">Tasks</span>

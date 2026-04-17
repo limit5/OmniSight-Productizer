@@ -638,6 +638,24 @@ async def tool_executor_node(state: GraphState) -> dict:
                 emit_tool_progress(tc.tool_name, status_label, output, index=i, success=success)
                 results.append(ToolResult(tool_name=tc.tool_name, output=output, success=success))
                 tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+                # R3 (#309) — opportunistic scratchpad flush after each
+                # successful tool call. Best-effort; a scratchpad write
+                # must never block tool execution.
+                if success and agent_id:
+                    try:
+                        from backend import scratchpad as _sp
+                        tracker = _sp.get_tracker(agent_id)
+                        if tracker.note_tool_done():
+                            prior = _sp.reload_latest(agent_id) or _sp.ScratchpadState(agent_id=agent_id)
+                            prior.current_task = prior.current_task or (state.task_id or "")
+                            prior.progress = (
+                                f"{prior.progress}\n- {tc.tool_name} ✓".strip()
+                                if prior.progress else f"- {tc.tool_name} ✓"
+                            )[:4000]
+                            prior.turn = (prior.turn or 0) + 1
+                            _sp.save(prior, trigger="tool_done", task_id=state.task_id)
+                    except Exception as _sp_exc:
+                        logger.debug("scratchpad tool_done flush skipped: %s", _sp_exc)
             except Exception as exc:
                 output = f"[ERROR] {tc.tool_name} failed: {exc}"
                 emit_tool_progress(tc.tool_name, "error", output, index=i, success=False)

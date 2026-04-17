@@ -212,6 +212,43 @@ class SSEAgentEntropy(BaseModel):
     timestamp: str = ""
 
 
+# ─── R3 (#309): Scratchpad Memory Offload + Auto-Continuation ───
+
+
+class SSEAgentScratchpadSaved(BaseModel):
+    """agent.scratchpad.saved — per-agent persistent-state flush.
+
+    Emitted by :mod:`backend.scratchpad` every 10 ReAct turns, on
+    tool-call completion, and on sub-task switch. ``size_bytes`` is the
+    encrypted on-disk length, not the plaintext memory cost.
+    """
+    agent_id: str
+    task_id: Optional[str] = None
+    turn: int
+    size_bytes: int
+    sections_count: int
+    trigger: str  # "turn_interval" | "tool_done" | "subtask_switch" | "manual"
+    subtask: Optional[str] = None
+    timestamp: str = ""
+
+
+class SSEAgentTokenContinuation(BaseModel):
+    """agent.token_continuation — one auto-continuation round.
+
+    Emitted when the LLM adapter returns ``stop_reason=max_tokens`` and
+    the AutoContinuation helper re-prompts the model. The UI uses this
+    to attach an "↩ auto-continued" tag to the most recent agent
+    message in the stream.
+    """
+    agent_id: str
+    task_id: Optional[str] = None
+    provider: str = "unknown"
+    continuation_round: int
+    total_rounds: int
+    appended_chars: int = 0
+    timestamp: str = ""
+
+
 # ─── R0 (#306): PEP Gateway event ───
 
 class SSEPepDecision(BaseModel):
@@ -286,6 +323,9 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "chatops.message": SSEChatOpsMessage,
     # R2 (#308): Semantic Entropy Monitor
     "agent.entropy": SSEAgentEntropy,
+    # R3 (#309): Scratchpad Memory Offload + Auto-Continuation
+    "agent.scratchpad.saved": SSEAgentScratchpadSaved,
+    "agent.token_continuation": SSEAgentTokenContinuation,
 }
 
 

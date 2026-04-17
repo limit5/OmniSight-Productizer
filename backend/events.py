@@ -401,6 +401,78 @@ def emit_agent_entropy(agent_id: str, entropy_score: float,
     _log(f"[ENTROPY] {agent_id} score={entropy_score:.3f} → {verdict.upper()}", level)
 
 
+def emit_agent_scratchpad_saved(
+    agent_id: str,
+    turn: int,
+    size_bytes: int,
+    sections_count: int,
+    *,
+    trigger: str = "turn_interval",
+    task_id: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str = "global",
+    tenant_id: str | None = None, **extra: Any,
+) -> None:
+    """R3 (#309): scratchpad flush event.
+
+    ``trigger`` explains why this write happened so the UI can label it
+    (``turn_interval`` | ``tool_done`` | ``subtask_switch`` | ``manual`` |
+    ``continuation_flush`` | ``crash_recovery``). ``size_bytes`` is the
+    ciphertext length on disk, not the plaintext size — callers should
+    not try to derive plaintext memory pressure from it.
+    """
+    bus.publish("agent.scratchpad.saved", {
+        "agent_id": agent_id,
+        "task_id": task_id,
+        "turn": turn,
+        "size_bytes": size_bytes,
+        "sections_count": sections_count,
+        "trigger": trigger,
+        "timestamp": datetime.now().isoformat(),
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[SCRATCHPAD] {agent_id} turn={turn} trigger={trigger} "
+        f"size={size_bytes}B sections={sections_count}",
+    )
+
+
+def emit_agent_token_continuation(
+    agent_id: str,
+    *,
+    task_id: str | None = None,
+    provider: str = "unknown",
+    continuation_round: int = 1,
+    total_rounds: int = 1,
+    appended_chars: int = 0,
+    session_id: str | None = None,
+    broadcast_scope: str = "global",
+    tenant_id: str | None = None, **extra: Any,
+) -> None:
+    """R3 (#309): emitted when the adapter auto-continues after max_tokens.
+
+    The UI uses this to attach an "↩ auto-continued" tag to the message
+    in the agent stream. ``continuation_round`` is 1-based and counts
+    only the continuations (the original truncated turn is not round 0).
+    """
+    bus.publish("agent.token_continuation", {
+        "agent_id": agent_id,
+        "task_id": task_id,
+        "provider": provider,
+        "continuation_round": continuation_round,
+        "total_rounds": total_rounds,
+        "appended_chars": appended_chars,
+        "timestamp": datetime.now().isoformat(),
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[CONTINUE] {agent_id} round={continuation_round}/{total_rounds} "
+        f"appended={appended_chars}c provider={provider}",
+    )
+
+
 def emit_debug_finding(
     task_id: str, agent_id: str, finding_type: str, severity: str, message: str,
     context: dict | None = None,

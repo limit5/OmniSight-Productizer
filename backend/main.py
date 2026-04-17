@@ -573,6 +573,8 @@ from backend.routers import chatops as _chatops_router  # R1 (#307) ChatOps Inte
 app.include_router(_chatops_router.router, prefix=settings.api_prefix)
 from backend.routers import entropy as _entropy_router  # R2 (#308) Semantic Entropy Monitor
 app.include_router(_entropy_router.router, prefix=settings.api_prefix)
+from backend.routers import scratchpad as _scratchpad_router  # R3 (#309) Scratchpad Offload + Auto-Continuation
+app.include_router(_scratchpad_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import

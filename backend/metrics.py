@@ -501,6 +501,26 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # R3 (#309): Scratchpad Memory Offload + Auto-Continuation ──
+    scratchpad_saves_total = Counter(
+        "omnisight_scratchpad_saves_total",
+        "Times an agent's scratchpad was flushed to disk",
+        labelnames=("agent_id", "trigger"),  # trigger: turn_interval|tool_done|subtask_switch|manual
+        registry=REGISTRY,
+    )
+    scratchpad_size_bytes = Gauge(
+        "omnisight_scratchpad_size_bytes",
+        "Size (bytes, on-disk ciphertext) of the most recent scratchpad write",
+        labelnames=("agent_id",),
+        registry=REGISTRY,
+    )
+    token_continuation_total = Counter(
+        "omnisight_token_continuation_total",
+        "Auto-continuation rounds issued after stop_reason=max_tokens",
+        labelnames=("agent_id", "provider"),
+        registry=REGISTRY,
+    )
+
     # R0 (#306): PEP Gateway — tool-call intercept decisions ───
     pep_decisions_total = Counter(
         "omnisight_pep_decisions_total",
@@ -595,6 +615,9 @@ else:
     pep_hold_duration_seconds = _NoOp()  # type: ignore
     semantic_entropy_score = _NoOp()  # type: ignore
     cognitive_deadlock_total = _NoOp()  # type: ignore
+    scratchpad_saves_total = _NoOp()  # type: ignore
+    scratchpad_size_bytes = _NoOp()  # type: ignore
+    token_continuation_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -948,4 +971,20 @@ def reset_for_tests() -> None:
         "omnisight_cognitive_deadlock_total",
         "Times an agent's entropy crossed the deadlock threshold",
         labelnames=("agent_id",), registry=REGISTRY,
+    )
+    global scratchpad_saves_total, scratchpad_size_bytes, token_continuation_total
+    scratchpad_saves_total = Counter(
+        "omnisight_scratchpad_saves_total",
+        "Times an agent's scratchpad was flushed to disk",
+        labelnames=("agent_id", "trigger"), registry=REGISTRY,
+    )
+    scratchpad_size_bytes = Gauge(
+        "omnisight_scratchpad_size_bytes",
+        "Size (bytes, on-disk ciphertext) of the most recent scratchpad write",
+        labelnames=("agent_id",), registry=REGISTRY,
+    )
+    token_continuation_total = Counter(
+        "omnisight_token_continuation_total",
+        "Auto-continuation rounds issued after stop_reason=max_tokens",
+        labelnames=("agent_id", "provider"), registry=REGISTRY,
     )

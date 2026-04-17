@@ -321,6 +321,16 @@ export function useEngine() {
               const score = Number(d.entropy_score) || 0
               logMsg = `[ENTROPY] ${d.agent_id} score=${score.toFixed(2)} → ${verdict.toUpperCase()}`
               logLevel = verdict === "deadlock" ? "error" : verdict === "warning" ? "warn" : "info"
+            } else if (event.event === "agent.scratchpad.saved") {
+              // R3 (#309): scratchpad flush. Always info-level — a save
+              // is a healthy checkpoint, not a warning.
+              logMsg = `[SCRATCHPAD] ${d.agent_id} turn=${d.turn} trigger=${d.trigger} size=${d.size_bytes}B`
+              logLevel = "info"
+            } else if (event.event === "agent.token_continuation") {
+              // R3 (#309): auto-continuation round. Warn level because it
+              // hints the provider's max_tokens ceiling is too tight.
+              logMsg = `[CONTINUE] ${d.agent_id} round=${d.continuation_round}/${d.total_rounds} +${d.appended_chars}c`
+              logLevel = "warn"
             }
 
             if (logMsg) {
@@ -365,6 +375,75 @@ export function useEngine() {
                   recentOutputs: a.cognitive?.recentOutputs,
                   lastUpdated: (d.timestamp as string) || new Date().toISOString(),
                 },
+              }
+            }))
+          } else if (event.event === "agent.scratchpad.saved") {
+            // R3 (#309): refresh the agent's Scratchpad Progress
+            // Indicator in place. The backend payload carries everything
+            // we need for the card; the optional preview is fetched
+            // lazily via /scratchpad/agents/<id>/preview on demand.
+            const d = event.data as Record<string, unknown>
+            const agentId = d.agent_id as string
+            const turn = Number(d.turn) || 0
+            const sizeBytes = Number(d.size_bytes) || 0
+            const sectionsCount = Number(d.sections_count) || 0
+            const trigger = (d.trigger as string) || "manual"
+            const updatedAtIso = (d.timestamp as string) || new Date().toISOString()
+            setAgents(prev => prev.map(a => {
+              if (a.id !== agentId) return a
+              const prevSummary = a.scratchpad
+              // Keep the highest totalTurns we've seen so the progress
+              // bar denominator doesn't regress when a tool-done save
+              // lands mid-cycle.
+              const totalTurns = Math.max(
+                Number((d as Record<string, unknown>).total_turns) || 0,
+                prevSummary?.totalTurns || 0,
+                turn,
+              )
+              return {
+                ...a,
+                scratchpad: {
+                  turn,
+                  totalTurns,
+                  sectionsCount,
+                  sizeBytes,
+                  trigger,
+                  subtask: (d.subtask as string | null) ?? prevSummary?.subtask ?? null,
+                  ageSeconds: 0,
+                  updatedAtIso,
+                  recoverable: true,
+                },
+              }
+            }))
+          } else if (event.event === "agent.token_continuation") {
+            // R3 (#309): attach the "↩ auto-continued" tag to the most
+            // recent assistant message in this agent's stream. If no
+            // matching message exists we synthesize a placeholder so the
+            // indicator still renders in the expanded card.
+            const d = event.data as Record<string, unknown>
+            const agentId = d.agent_id as string
+            const rounds = Number(d.total_rounds) || Number(d.continuation_round) || 1
+            setAgents(prev => prev.map(a => {
+              if (a.id !== agentId) return a
+              const existing = a.messages || []
+              const lastIdx = existing.length - 1
+              if (lastIdx >= 0) {
+                const target = existing[lastIdx]
+                const patched = { ...target, autoContinued: true, continuationRounds: rounds }
+                const next = [...existing]
+                next[lastIdx] = patched
+                return { ...a, messages: next }
+              }
+              return {
+                ...a,
+                messages: [{
+                  id: `cont-${agentId}-${Date.now()}`,
+                  type: "info" as const,
+                  message: "(output stitched from multiple provider calls)",
+                  timestamp: (d.timestamp as string) || new Date().toISOString(),
+                  autoContinued: true,
+                  continuationRounds: rounds,
+                }],
               }
             }))
           } else if (event.event === "task_update") {

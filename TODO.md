@@ -1303,23 +1303,23 @@ Legend:
 - [x] 預估：**2.5 day**（backend 1.5d + UI 1d）**✅ AI completed 2026-04-17**
 
 ### R3. Scratchpad Memory Offload + Auto-Continuation（心智卸載 + 自動續寫）(#309)
-- [ ] `backend/scratchpad.py`：per-agent persistent scratchpad file（`data/agents/<agent_id>/scratchpad.md`）
-- [ ] 自動寫入觸發：每 10 輪 ReAct 循環、每次 tool call 結束後、agent 切換子任務時
-- [ ] Scratchpad 格式：structured markdown（`## Current Task` / `## Progress` / `## Blockers` / `## Next Steps` / `## Context Summary`）
-- [ ] 加密 at-rest：沿用 `backend/secret_store.py` Fernet（scratchpad 可能含 code snippet + 設計決策）
-- [ ] Auto-continuation：`stop_reason=max_tokens` 偵測 → 自動發送「請從上次截斷處繼續輸出」→ 拼接結果 → 記 `token_continuation_total` metric
-- [ ] Scratchpad reload on resume：agent restart / crash recovery 時自動載入最新 scratchpad.md 到 context head
-- [ ] 清理策略：任務成功完成 → archive scratchpad（move to `data/agents/<agent_id>/archive/`）；失敗 → 保留供 debug
-- [ ] SSE event：`agent.scratchpad.saved`（agent_id / turn / size_bytes / sections_count）
-- [ ] Metrics：`scratchpad_saves_total` / `scratchpad_size_bytes` / `token_continuation_total`
-- [ ] **UI — Scratchpad Progress Indicator（擴充 `agent-matrix-wall.tsx` Health Card）**：
-  - [ ] Progress bar：scratchpad 持久化佔比（已寫入的 turn 數 / 總 turn 數）
-  - [ ] 最後寫入時間（relative，如「2 min ago」）
-  - [ ] 點擊展開 scratchpad 內容 preview（read-only，markdown rendered）
-  - [ ] 若 agent crash 且有 scratchpad → 卡片顯示「Recoverable ●」badge
-- [ ] **UI — Auto-Continuation Indicator**：在 agent message stream 中，auto-continued 的訊息標注「↩ auto-continued」小 tag
-- [ ] 整合測試：10 輪循環 → scratchpad 自動寫入；mock crash → reload scratchpad → agent 接續；max_tokens truncation → auto-continue → 拼接正確
-- [ ] 預估：**3 day**（backend 2d + UI 1d）
+- [x] `backend/scratchpad.py`：per-agent persistent scratchpad file（`data/agents/<agent_id>/scratchpad.md`）
+- [x] 自動寫入觸發：每 10 輪 ReAct 循環、每次 tool call 結束後、agent 切換子任務時
+- [x] Scratchpad 格式：structured markdown（`## Current Task` / `## Progress` / `## Blockers` / `## Next Steps` / `## Context Summary`）
+- [x] 加密 at-rest：沿用 `backend/secret_store.py` Fernet（scratchpad 可能含 code snippet + 設計決策）
+- [x] Auto-continuation：`stop_reason=max_tokens` 偵測 → 自動發送「請從上次截斷處繼續輸出」→ 拼接結果 → 記 `token_continuation_total` metric
+- [x] Scratchpad reload on resume：agent restart / crash recovery 時自動載入最新 scratchpad.md 到 context head
+- [x] 清理策略：任務成功完成 → archive scratchpad（move to `data/agents/<agent_id>/archive/`）；失敗 → 保留供 debug
+- [x] SSE event：`agent.scratchpad.saved`（agent_id / turn / size_bytes / sections_count）
+- [x] Metrics：`scratchpad_saves_total` / `scratchpad_size_bytes` / `token_continuation_total`
+- [x] **UI — Scratchpad Progress Indicator（擴充 `agent-matrix-wall.tsx` Health Card）**：
+  - [x] Progress bar：scratchpad 持久化佔比（已寫入的 turn 數 / 總 turn 數）
+  - [x] 最後寫入時間（relative，如「2 min ago」）
+  - [x] 點擊展開 scratchpad 內容 preview（read-only，markdown rendered）
+  - [x] 若 agent crash 且有 scratchpad → 卡片顯示「Recoverable ●」badge
+- [x] **UI — Auto-Continuation Indicator**：在 agent message stream 中，auto-continued 的訊息標注「↩ auto-continued」小 tag
+- [x] 整合測試：10 輪循環 → scratchpad 自動寫入；mock crash → reload scratchpad → agent 接續；max_tokens truncation → auto-continue → 拼接正確
+- [x] 預估：**3 day**（backend 2d + UI 1d）**✅ AI completed 2026-04-17**
 
 ### R4. CATC State Snapshot 斷點續傳 (#310)
 - [ ] O0 `TaskCard` dataclass 擴充：新增 `state_snapshot: Optional[str]`（BASE64 encoded JSON，含 scratchpad + tool_call_history + partial_output + turn_counter）
