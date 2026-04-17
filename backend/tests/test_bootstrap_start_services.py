@@ -274,10 +274,16 @@ async def test_start_services_env_override_picks_mode(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_detect_deploy_mode_falls_back_to_dev(monkeypatch):
-    """With no systemctl / docker on PATH and no env override, fall back to dev."""
+async def test_detect_deploy_mode_falls_back_to_dev(monkeypatch, tmp_path):
+    """With no systemctl / docker / container signals, the L7 probe returns dev."""
     from backend.routers import bootstrap as _br
+    from backend import deploy_mode as _dm
 
     monkeypatch.delenv("OMNISIGHT_DEPLOY_MODE", raising=False)
-    monkeypatch.setattr(_br.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(_dm.shutil, "which", lambda _name: None)
+    # Point every filesystem probe at a pristine tmp_path so nothing is present.
+    monkeypatch.setattr(_dm, "_DOCKERENV_MARKER", tmp_path / "nope-dockerenv")
+    monkeypatch.setattr(_dm, "_CGROUP_PATH", tmp_path / "nope-cgroup")
+    monkeypatch.setattr(_dm, "_SYSTEMD_RUN_DIR", tmp_path / "nope-systemd")
+    monkeypatch.setattr(_dm, "_DOCKER_SOCKET", tmp_path / "nope-docker.sock")
     assert _br._detect_deploy_mode() == "dev"

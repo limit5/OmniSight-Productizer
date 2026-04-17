@@ -1280,7 +1280,7 @@ Legend:
 - 預估：**0.5 day**
 
 ### L7. 部署模式偵測 + docker-compose 路徑
-- [ ] `detect_deploy_mode()`：偵測是否在 docker 內 / 是否有 systemd / 是否有 docker socket
+- [x] `detect_deploy_mode()`：偵測是否在 docker 內 / 是否有 systemd / 是否有 docker socket *(done: new `backend/deploy_mode.py` exposes `detect_deploy_mode() -> DeployModeDetection` with per-probe signals — `_is_in_docker()` checks `/.dockerenv` + `/proc/1/cgroup` for docker/containerd/kubepods tokens, `_has_systemd()` checks `/run/systemd/system` + systemctl on PATH, `_has_docker_socket()` checks `/var/run/docker.sock` is a real unix socket. Decision table: env `OMNISIGHT_DEPLOY_MODE` wins → in-docker+socket → docker-compose (compose-in-docker) → in-docker w/o socket → dev (no-op) → systemd → docker-compose (socket or binary) → dev fallback. Returns dataclass carrying `mode`, `in_docker`, `has_systemd`, `has_docker_socket`, `has_docker_binary`, `has_systemctl_binary`, `override_source`, `reason`, and per-probe `signals` dict for audit/UI. `backend/routers/bootstrap.py::_detect_deploy_mode()` now delegates to this so Step 4 launcher shares the richer probe without breaking callers. 22 new tests in `test_deploy_mode.py` cover every probe + decision row incl. regression guard that systemd wins over docker when both present.)*
 - [ ] 依模式提供不同 start-services 指令：
   - `systemd` 模式：`sudo systemctl start omnisight-*`（需 K1 的 scoped sudoers）
   - `docker-compose` 模式：`docker compose -f docker-compose.prod.yml up -d`

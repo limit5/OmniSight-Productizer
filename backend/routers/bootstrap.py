@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import time
 from typing import Literal
 
@@ -496,25 +495,17 @@ _START_TIMEOUT_SECS = 120
 def _detect_deploy_mode() -> DeployMode:
     """Pick the launch strategy based on what's available on the host.
 
-    Order of precedence:
-      1. ``OMNISIGHT_DEPLOY_MODE`` env var (explicit operator override).
-      2. Running under ``systemctl`` with the units installed → ``systemd``.
-      3. Docker compose binary available → ``docker-compose``.
-      4. Fallback → ``dev`` (no-op; dev already runs uvicorn / next dev).
-
-    Lives inside this module (rather than the L7 skeleton) so the Step 4
-    endpoint is self-contained — L7's richer implementation can replace
-    this when it lands without breaking the call site.
+    Delegates to :func:`backend.deploy_mode.detect_deploy_mode` — the
+    L7 richer probe inspects ``/.dockerenv``, ``/proc/1/cgroup``,
+    ``/run/systemd/system``, and ``/var/run/docker.sock`` in addition
+    to the PATH lookups the skeleton used. This wrapper exists because
+    the Step 4 launcher only needs the mode string; the full detection
+    record (with ``reason`` + per-probe signals) is exposed via
+    :mod:`backend.deploy_mode` for the wizard UI / audit trail.
     """
-    override = (os.environ.get("OMNISIGHT_DEPLOY_MODE") or "").strip().lower()
-    if override in ("systemd", "docker-compose", "dev"):
-        return override  # type: ignore[return-value]
+    from backend.deploy_mode import detect_deploy_mode as _detect_full
 
-    if shutil.which("systemctl") is not None:
-        return "systemd"
-    if shutil.which("docker") is not None:
-        return "docker-compose"
-    return "dev"
+    return _detect_full().mode
 
 
 class StartServicesRequest(BaseModel):
