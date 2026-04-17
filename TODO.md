@@ -1119,10 +1119,10 @@ Legend:
 - [x] 預估：**2.5 day**
 
 ### P9. SKILL-FLUTTER / SKILL-RN（跨平台, #294）
-- [ ] Flutter 3.x app 骨架 + 共用 iOS/Android config
-- [ ] React Native 0.76 app 骨架
-- [ ] 選一主推 + 另一為對照
-- [ ] 預估：**2 day**
+- [x] Flutter 3.x app 骨架 + 共用 iOS/Android config
+- [x] React Native 0.76 app 骨架
+- [x] 選一主推 + 另一為對照
+- [x] 預估：**2 day**
 
 ### P10. Mobile observability (#295)
 - [ ] Firebase Crashlytics / Sentry Mobile adapter
