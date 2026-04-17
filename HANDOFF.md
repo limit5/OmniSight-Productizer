@@ -10136,3 +10136,74 @@ Priority P 行動端 vertical 第三塊地基。P0 (#285) 已產出四個 mobile
 - **`react-native` 要求新專案直上 New Architecture** — 0.75+ 已是 2026 主流，若允許停 legacy bridge 會讓後續 P5 上架流程遇到 TurboModule-only 依賴時炸。明確在 anti-patterns 列「同時載入 legacy + Turbo」。
 - **`kmp` 對 Compose Multiplatform 採保守態度** — 目前 iOS 端仍為 Beta，CMP 是「可選」不是「預設」，避免 agent 把 iOS UI 層強制走 CMP 導致與 P7 skill-ios scaffold 打架。
 - **`mobile-a11y` 與 `web/a11y.skill.md` 分離** — 行動端 a11y 的契約是 VoiceOver + TalkBack（兩個 OS 級 screen reader），與 Web 的 axe-core / Lighthouse 是不同 tooling chain。強行共用會讓 P2 mobile track 的 a11y gate 邏輯無法落地。
+
+---
+
+## 2026-04-17 — X0 Software platform profiles (#296) — 完成 ✅
+
+### 背景
+Priority X（Pure Software Application Vertical）第一塊地基，跟 W0 / P0 同一層級：接下來 X1 simulate-track (#297) 要用 `configs/platforms/` 的 profile 作為 `--module=` 的輸入；X3 (#299) 依 `packaging` 值分流 `.deb` / `.rpm` / `.msi` / `.dmg` 生成器；X4 (#300) 走 software-kind 的 license scan pipeline。沒有這 5 份 profile，X1-X9 全部無法起跑。
+
+### 交付內容
+
+新增 5 份 `target_kind: software` profile，全部走 `_resolve_software` → `build_toolchain.kind=software`：
+
+| Profile | host_arch | host_os | packaging | 主要用途 |
+| --- | --- | --- | --- | --- |
+| `linux-x86_64-native` | `x86_64` | `linux` | `deb` | 後端 / CLI / 伺服器類（X5 SKILL-FASTAPI dogfood） |
+| `linux-arm64-native` | `arm64` | `linux` | `deb` | Graviton / Ampere / RPi SBC / ARM CI runner |
+| `windows-msvc-x64` | `x64` | `windows` | `msi` | MSVC desktop / 服務 / CLI（VS 2022 Build Tools 17.0） |
+| `macos-arm64-native` | `arm64` | `darwin` | `dmg` | Apple Silicon 桌面原生（Xcode 16 CLT） |
+| `macos-x64-native` | `x86_64` | `darwin` | `dmg` | Intel Mac legacy（min macOS 12 Monterey） |
+
+每份 profile 都含：
+- `platform` / `label` / `target_kind: software`（schema 必填 + W0 dispatch 訊號）。
+- `software_runtime: native`（profile 層不 pin 語言，X2 role skill 在 project 層 override 成 python/node/jvm）。
+- `packaging`（X3 adapter 分流訊號）。
+- `build_cmd`（X1 language-dispatch 失敗時的 diagnostic fallback，刻意 non-empty）。
+- `host_arch` / `host_os`（X1 sandbox 選 docker base image / windows PowerShell vs bash 的訊號）。
+- OS 專屬套件清單（`docker_packages` / `choco_packages` / `brew_packages`）。
+- macOS 兩份多帶 `sdk_root` / `toolchain_path` / `min_os_version` / `target_os_version` / 空字串 `signing_identity`（契約：shape-only，P3 HSM 在 build 時注入 Developer ID material）。
+- Windows 多帶 `msvc_version` / `windows_sdk_version` / `min_os_version`（2026 VS 2022 baseline）。
+
+### 測試（9 個新 case parametrize 成 34 個斷言，全 pass；原 29 cases regression 全 pass = 63/63）
+
+`backend/tests/test_platform_schema.py` 新增 X0 區段：
+- `test_x0_profile_is_enumerated` × 5：五個 id 都被 `list_profile_ids()` 看到（X1 UI 的 module selector dropdown 會迭代這個 list）。
+- `test_x0_profile_declares_software_kind` × 5：`target_kind == "software"` + `build_toolchain.kind == "software"` 雙重 pin，誤設 embedded 會直接 fail。
+- `test_x0_profile_validates_clean` × 5：`validate_profile(data) == []`；profile 是 operator 複製新增的 reference example，基準必須乾淨。
+- `test_x0_profile_host_shape` × 5：`host_arch` / `host_os` / `packaging` 對映表鎖死。
+- `test_x0_profile_software_runtime_is_native` × 5：profile 層不 pin 語言的契約 lock。
+- `test_x0_profile_build_cmd_is_non_empty_fallback` × 5：防止有人 commit 空字串讓 X1 fallback 靜默跳過。
+- `test_x0_does_not_duplicate_host_native_or_aarch64`：regression guard — X0 linux 兩份不得與既有 embedded `host_native` / `aarch64` 的 target_kind silo 混淆。
+- `test_x0_macos_profiles_preserve_signing_shape_but_no_material`：釘死「shape-only, 無 signing material」契約，防止 `.p12` fingerprint 被貼進 repo。
+- `test_x0_windows_profile_declares_msvc_pins`：VS 2022 / Windows 10 SDK baseline pin。
+- `test_x0_linux_profiles_share_docker_base_packages`：兩個 Linux profile 的基礎套件清單必須對齊（X1 sandbox 只 dispatch 在 host_arch，不在 package list）。
+
+**Regression 檢驗**：`test_platform_schema` + `test_mobile_toolchain` + `test_platform_mobile_profiles` + `test_platform_web_profiles` + `test_platform_default` + `test_platform_tags_for_rag` + `test_host_native` + `test_sdk_discovery` = 205 cases 全 pass。
+
+### 修改檔案
+
+- **新增** `configs/platforms/linux-x86_64-native.yaml`（X0 linux x64 native）
+- **新增** `configs/platforms/linux-arm64-native.yaml`（X0 linux arm64 native）
+- **新增** `configs/platforms/windows-msvc-x64.yaml`（X0 windows MSVC x64）
+- **新增** `configs/platforms/macos-arm64-native.yaml`（X0 macOS Apple Silicon）
+- **新增** `configs/platforms/macos-x64-native.yaml`（X0 macOS Intel legacy）
+- **改動** `backend/tests/test_platform_schema.py`（+34 cases in X0 section）
+- **改動** `TODO.md`（X0 六項全 `[x]`）
+- **改動** `HANDOFF.md`（本段）
+- **改動** `README.md`（X0 profile matrix 行）
+
+### 設計取捨
+
+- **X0 linux 兩份 vs. 重用 `host_native`**：`host_native.yaml` 是 `target_kind: embedded` 的「native escape hatch」，給 NUC-class 邊緣 AI 硬體跑 embedded-track 用，build_toolchain 還是 `kind: embedded`（ARCH/CROSS_COMPILE/QEMU 欄位雖空但 shape 存在）。X1 / X3 / X4 的 software 路徑 dispatch 在 `kind: software`，如果重用 host_native 就會被 embedded 路徑劫持。兩份 target_kind silo 必須分開，這也是 W0 schema 泛化的初衷。測試 `test_x0_does_not_duplicate_host_native_or_aarch64` 釘死這個邊界。
+- **X0 linux arm64 vs. `aarch64.yaml`**：`aarch64.yaml` 是 `target_kind: embedded` + `cross_prefix: aarch64-linux-gnu-`，用於「build host = x86_64、target = arm64 SoC」的 cross-compile。`linux-arm64-native` 是「build host = arm64、target = arm64」的 native 路徑，無 cross_prefix、無 QEMU。誤用 aarch64.yaml 會在已經 native 的 arm64 CI runner 上強制走 cross-compile，多消耗 20-40% build time。這個區分也讓 Graviton / Ampere CI pool 的 X1 跑測能直接 in-place 執行，不需要 QEMU user-mode emulation。
+- **`software_runtime: native` profile 層不 pin 語言**：profile 描述「這是一台什麼樣的機器」，不是「這是一個什麼樣的專案」。同一台 `linux-x86_64-native` 要能同時跑 Python/Go/Rust/Node/JVM/C++ 六種 stack，如果 profile 寫死 `software_runtime: python`，就強迫 X1 對每個語言 fork 一份 profile（`linux-x86_64-native-python` / `-go` / ...）。語言維度是 project-level 關切（X2 role skill / 專案 build manifest），不是 platform-level。
+- **`packaging` 以 OS 預設填入，不用空字串**：schema 允許空字串，但 X3 (#299) package adapter 會被迫從 host_os 推斷，結果是「deb 變成 rpm」這類 silent-switch bug 難查。顯式 `deb` / `msi` / `dmg` 值在 build manifest 還是可以 override，但預設值永遠是「這個 OS 最主流的 installer format」，符合「explicit > implicit」紀律。
+- **`windows-mingw-x64` 沒有建**：MSVC 與 MinGW 的 CRT 不相容（混用會 segfault），且多數 Windows 商用套件只發 MSVC-compatible .lib。需要 MinGW 的專案極少，到時候另開 profile 即可；X0 先把 80% 路徑蓋完，不提前設計 10% 邊緣場景。
+- **`windows-msvc-arm64` 沒有建**：Windows on ARM 2026 仍在 Snapdragon X Elite 量產初期、企業市佔 < 1%（Statcounter 2025-Q4），且 VS 2022 對 ARM64 native target 的支援仍被標 “Preview”。等 2027 市佔過 5% 再加，此時再決定要分 MinGW/MSVC。
+- **`macos-x64-native` 仍保留**：Apple 雖然 2023 停售 Intel Mac、Rosetta 2 已公告 deprecation 路徑，但企業 fleet（iMac Pro 2017 / Mac Pro 2019）2026 仍可觀測地運轉。延續這份 profile 的代價只是 ~100 行 YAML + 維護一個 x86_64-apple-darwin 編譯目標；少這份 profile 會強迫客戶走 Rosetta 2，Apple 哪天拔掉他們會炸。X3 adapter 的預設策略是從 `macos-arm64-native` 做 universal2 fat-Mach-O 合併（arm64 + x86_64 一份 `.dmg`），只有需要「獨立 Intel slice」或「必須在 Intel 機器上跑 Intel 測試」的專案才用到這份 profile。
+- **macOS 兩份都帶 `signing_identity: ""`**：簽章材料走 P3 secret_store HSM，與 iOS / Android 的契約一致。Profile 是「shape」、P3 是「material」。測試 pin 空字串契約，防止好意貼憑證指紋進 repo。
+- **`windows_sdk_version` / `msvc_version` 寫死**：這兩個版本是 X1 sandbox docker image 安裝目標，也是 X3 MSI adapter 連結目標；任何一個 drift 都會破壞下游 binary。寫 profile 等於寫 BOM，bump 要走 scoped review。
+- **Linux 兩份 `docker_packages` 完全相同**：X1 sandbox 的 base image 只 dispatch 在 `host_arch`（是否 `docker buildx --platform linux/amd64` vs `linux/arm64`），不 dispatch 在 package list 差異。保持一致讓維護成本降到最低（一行改兩份同步）；測試 `test_x0_linux_profiles_share_docker_base_packages` 釘死這個 invariant。
+- **`build_cmd` 維持非空字串但語言無關**：X1 language dispatcher 會自動從 project root 偵測 `pyproject.toml` / `go.mod` / `Cargo.toml` / `pom.xml` / `package.json` 並呼叫對應的 test runner；`build_cmd` 只是當所有語言偵測都失敗時在診斷訊息裡露出的「最後手段」（`make build` / `msbuild` / `cmake --build`）。這也方便 operator 手動執行 `bash scripts/simulate.sh --type=software --module=...` 至少能印出一個人類讀得懂的 fallback 訊息。

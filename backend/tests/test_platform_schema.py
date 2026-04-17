@@ -245,3 +245,136 @@ def test_validate_web_does_not_require_kernel_arch():
 def test_rejects_unsafe_platform_names(bad_name):
     with pytest.raises(PlatformProfileError):
         load_raw_profile(bad_name)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  X0 #296 — Software platform profiles (5 targets)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# These lock in the five X0 profiles that X1 simulate-track (#297),
+# X3 package adapters (#299), X4 license scan (#300), and the X5-X9
+# skill pilots dispatch on. Regressions on any of these fields will
+# break downstream X-series work, so we pin shape, kind, and the
+# discriminating fields (host_arch / host_os / packaging).
+
+X0_PROFILES = (
+    "linux-x86_64-native",
+    "linux-arm64-native",
+    "windows-msvc-x64",
+    "macos-arm64-native",
+    "macos-x64-native",
+)
+
+
+@pytest.mark.parametrize("profile_id", X0_PROFILES)
+def test_x0_profile_is_enumerated(profile_id):
+    """All five X0 profiles must be discoverable via list_profile_ids —
+    this is what X1's simulate-track module selector iterates over."""
+    assert profile_id in list_profile_ids()
+
+
+@pytest.mark.parametrize("profile_id", X0_PROFILES)
+def test_x0_profile_declares_software_kind(profile_id):
+    """Every X0 profile must dispatch to _resolve_software. If one
+    accidentally lands as `embedded`, X1's software track skips it."""
+    data = load_raw_profile(profile_id)
+    assert data.get("target_kind") == "software"
+    cfg = get_platform_config(profile_id)
+    assert cfg["build_toolchain"]["kind"] == "software"
+
+
+@pytest.mark.parametrize("profile_id", X0_PROFILES)
+def test_x0_profile_validates_clean(profile_id):
+    """X0 profiles must carry no validation errors — they're the
+    reference examples operators copy when adding a new software
+    target, so they have to be a clean baseline."""
+    data = load_raw_profile(profile_id)
+    assert validate_profile(data) == []
+
+
+@pytest.mark.parametrize(
+    "profile_id,expected_arch,expected_os,expected_pkg",
+    [
+        ("linux-x86_64-native", "x86_64", "linux", "deb"),
+        ("linux-arm64-native", "arm64", "linux", "deb"),
+        ("windows-msvc-x64", "x64", "windows", "msi"),
+        ("macos-arm64-native", "arm64", "darwin", "dmg"),
+        ("macos-x64-native", "x86_64", "darwin", "dmg"),
+    ],
+)
+def test_x0_profile_host_shape(profile_id, expected_arch, expected_os, expected_pkg):
+    """Discriminating fields — X3 package adapter and X1 language
+    dispatcher read these to pick the right toolchain + installer
+    generator."""
+    data = load_raw_profile(profile_id)
+    assert data["host_arch"] == expected_arch
+    assert data["host_os"] == expected_os
+    assert data["packaging"] == expected_pkg
+
+
+@pytest.mark.parametrize("profile_id", X0_PROFILES)
+def test_x0_profile_software_runtime_is_native(profile_id):
+    """X0 profiles describe a HOST shape, not a language runtime.
+    `software_runtime: native` is the agreed default; X2 role skills
+    override to python/node/jvm at project level, not here."""
+    data = load_raw_profile(profile_id)
+    assert data["software_runtime"] == "native"
+
+
+@pytest.mark.parametrize("profile_id", X0_PROFILES)
+def test_x0_profile_build_cmd_is_non_empty_fallback(profile_id):
+    """X1 simulate-track uses build_cmd as the diagnostic fallback when
+    language autodetection fails. Empty string would silently skip the
+    fallback — keep it non-empty."""
+    data = load_raw_profile(profile_id)
+    assert data["build_cmd"].strip()
+
+
+def test_x0_does_not_duplicate_host_native_or_aarch64():
+    """Regression guard: X0 linux profiles must NOT collide with
+    pre-existing embedded profiles (host_native / aarch64). Each must
+    remain in its own target_kind silo so resolvers dispatch cleanly."""
+    linux_x64 = load_raw_profile("linux-x86_64-native")
+    linux_arm = load_raw_profile("linux-arm64-native")
+    host_native = load_raw_profile("host_native")
+    aarch64 = load_raw_profile("aarch64")
+
+    assert linux_x64["target_kind"] == "software"
+    assert linux_arm["target_kind"] == "software"
+    assert host_native["target_kind"] == "embedded"
+    assert aarch64["target_kind"] == "embedded"
+
+
+def test_x0_macos_profiles_preserve_signing_shape_but_no_material():
+    """macOS software targets require Developer ID signing, but profile
+    must encode SHAPE only — signing_identity stays empty; P3 HSM
+    injects the material at build time. Pin the empty contract so a
+    well-meaning edit can't paste a cert fingerprint into the repo."""
+    for pid in ("macos-arm64-native", "macos-x64-native"):
+        data = load_raw_profile(pid)
+        assert "signing_identity" in data
+        assert data["signing_identity"] == ""
+        assert data["sdk_root"].endswith("Developer")
+        assert data["toolchain_path"].endswith("clang")
+
+
+def test_x0_windows_profile_declares_msvc_pins():
+    """Windows MSVC profile must pin VS 2022 + Windows 10 SDK — X1
+    sandbox installs this exact pair and X3 MSI adapter links against
+    it. Drifting either is a breaking change."""
+    data = load_raw_profile("windows-msvc-x64")
+    assert data["msvc_version"] == "17.0"
+    assert data["windows_sdk_version"].startswith("10.0.")
+    assert any(p.startswith("visualstudio2022") for p in data["choco_packages"])
+
+
+def test_x0_linux_profiles_share_docker_base_packages():
+    """linux-x86_64-native and linux-arm64-native must carry the same
+    minimal base package set — the X1 sandbox image dispatches on
+    host_arch, not on an arch-specific package list. Any divergence
+    here should be intentional and pinned separately."""
+    x64 = load_raw_profile("linux-x86_64-native")["docker_packages"]
+    arm = load_raw_profile("linux-arm64-native")["docker_packages"]
+    assert x64 == arm
+    assert "build-essential" in x64
+    assert "pkg-config" in x64

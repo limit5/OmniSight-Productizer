@@ -1,0 +1,81 @@
+# OmniSight Platform Profile: Linux x86_64 Native Software — X0 #296
+#
+# Pure-software target (backend services, CLIs, daemons, desktop apps)
+# produced AND run on Linux x86_64 host arch. No cross-compile, no
+# embedded SoC, no web runtime, no mobile ABI. First X-series profile
+# to land — X5 SKILL-FASTAPI dogfoods this one.
+#
+# Why this is separate from `host_native` (embedded):
+#   * `host_native` declares `target_kind: embedded` — it's the "run an
+#     embedded-track build natively" escape hatch for NUC-class edge AI
+#     hardware. It still resolves through `_resolve_embedded` with ARCH /
+#     CROSS_COMPILE / QEMU knobs (all empty, but the shape is
+#     embedded).
+#   * This profile declares `target_kind: software` — X1 simulate-track
+#     (#297), X3 build/package adapters (#299), X4 license scan (#300)
+#     dispatch on `kind=software`, not `kind=embedded`.
+#   Putting them in the same profile would force the software track to
+#   special-case `host_native` AND every future per-distro variant; the
+#   W0 split exists precisely so software tooling sees one uniform
+#   shape.
+#
+# Supported languages (routed through X2 role skills, #298):
+#   * Python 3.11+ (pip/uv/poetry)   → backend-python, X5 SKILL-FASTAPI
+#   * Go 1.22+     (modules)         → backend-go,     X6 SKILL-GO-SERVICE
+#   * Rust stable  (cargo)           → backend-rust,   X7 SKILL-RUST-CLI
+#   * Node 20 LTS  (npm/pnpm)        → backend-node
+#   * JVM 21       (maven/gradle)    → backend-java,   X9 SKILL-SPRING-BOOT
+#   * Native C/C++ (gcc/clang)
+#
+# The profile itself does NOT pin a language — it declares the host
+# shape. Language-specific constraints live in the role skill
+# (`configs/roles/backend-*.md`) and in the project's build manifest.
+# We set `software_runtime: native` because the profile is
+# runtime-agnostic; individual projects override via their role skill
+# (`software_runtime: python` etc.) when they know their stack.
+#
+# Packaging:
+#   Set to `deb` as the default Linux package format — X3 (#299) also
+#   emits `.rpm` through the same adapter, picked per-project via
+#   build manifest. Leaving this empty would force X3 to infer from
+#   distro, which we want to avoid (explicit > implicit for build
+#   reproducibility).
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * scripts/simulate.sh software track              [X1 #297]
+#   * X3 build & package adapters                     [X3 #299]
+#   * X4 SPDX license scan / CVE / SBOM               [X4 #300]
+
+platform: linux-x86_64-native
+label: "Linux x86_64 — Native Software (pip / npm / cargo / go / maven)"
+target_kind: software
+
+# Native host — no cross-compile, no emulation. X1 simulate-track uses
+# this as a dispatch signal to skip QEMU plumbing entirely.
+software_runtime: native
+packaging: deb
+
+# Generic build cmd: X1 simulate-track's language dispatcher picks the
+# actual per-language runner (pytest / go test / cargo test / mvn test
+# / npm test) from the project's build manifest. This string is a
+# fallback shown in diagnostics when the dispatcher can't determine a
+# language.
+build_cmd: "make build"
+
+# Host arch signal for X3 package adapters (.deb / .rpm emit the arch
+# into control metadata). Not consumed by the embedded resolver —
+# software resolver ignores, but the raw field is preserved in
+# get_platform_config's return dict.
+host_arch: x86_64
+host_os: linux
+
+# apt packages the X1 software-track sandbox image installs by default.
+# Projects pull language-specific packages via their role skill's
+# docker_packages override (pytest / go-toolchain / rustup etc.).
+docker_packages:
+  - build-essential
+  - pkg-config
+  - git
+  - curl
+  - ca-certificates

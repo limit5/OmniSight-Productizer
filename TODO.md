@@ -1151,12 +1151,12 @@ Legend:
 > 相依（硬前置）：**W0 platform profile schema 泛化**（W/P/X 共用）、**O0-O3**（CATC + Worker pool）。
 
 ### X0. Software platform profiles (#296)
-- [ ] `configs/platforms/linux-x86_64-native.yaml`
-- [ ] `configs/platforms/linux-arm64-native.yaml`
-- [ ] `configs/platforms/windows-msvc-x64.yaml`
-- [ ] `configs/platforms/macos-arm64-native.yaml`（需 macOS builder，參考 P1）
-- [ ] `configs/platforms/macos-x64-native.yaml`（Intel legacy）
-- [ ] 預估：**0.5 day**
+- [x] `configs/platforms/linux-x86_64-native.yaml`
+- [x] `configs/platforms/linux-arm64-native.yaml`
+- [x] `configs/platforms/windows-msvc-x64.yaml`
+- [x] `configs/platforms/macos-arm64-native.yaml`（需 macOS builder，參考 P1）
+- [x] `configs/platforms/macos-x64-native.yaml`（Intel legacy）
+- [x] 預估：**0.5 day**
 
 ### X1. Software simulate track (#297)
 - [ ] `scripts/simulate.sh` 新增 `software` track：語言-native test runner

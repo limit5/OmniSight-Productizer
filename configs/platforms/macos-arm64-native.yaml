@@ -1,0 +1,92 @@
+# OmniSight Platform Profile: macOS arm64 (Apple Silicon) Native — X0 #296
+#
+# Pure-software target on Apple Silicon macOS (M1 / M2 / M3 / M4). The
+# canonical target for new macOS software built in 2026 — Apple ended
+# Intel Mac sales in 2023 and Rosetta 2 is now positioned as a
+# compatibility shim, not a first-class ABI.
+#
+# Hard macOS-host requirement:
+#   macOS binaries (dylib, .dmg, .pkg, signed Mach-O) can ONLY be
+#   produced on a macOS host with Xcode Command Line Tools installed.
+#   Apple's licensing + proprietary linker prevent cross-compilation
+#   from Linux/Windows — this is the SAME constraint as iOS-arm64
+#   (see `configs/platforms/ios-arm64.yaml` header). Operators wire
+#   remote macOS builders through the P1-defined `OMNISIGHT_MACOS_BUILDER`
+#   delegation matrix; X1 simulate-track re-uses that channel verbatim
+#   so software-track macOS profiles don't need a separate runner
+#   abstraction.
+#
+# Why this is separate from `ios-arm64.yaml`:
+#   * `ios-arm64.yaml` declares `target_kind: mobile` — binary is a
+#     `.ipa`, ships to App Store, must be signed with Provisioning
+#     Profile + Developer ID Application cert, and runs on iPhone /
+#     iPad.
+#   * This profile declares `target_kind: software` — binary is a
+#     Mach-O executable / `.dylib` / `.app` bundle, ships via
+#     notarized `.dmg` or `.pkg` (or Homebrew cask / Mac App Store
+#     which is a separate upload channel), runs on macOS desktop.
+#   Signing certificate is different too — Developer ID Application
+#   (`com.apple.developer.applications`) not iOS Distribution cert.
+#
+# Notarization (2026 mandatory):
+#   `xcrun notarytool submit` + `stapler staple` flow is driven by X3
+#   (#299) macOS adapter. The profile encodes the shape (bundle id
+#   domain, hardened runtime on, minimum OS), not the per-project
+#   signing material.
+#
+# Supported stacks:
+#   * Swift / Objective-C (Xcode 16 CLT)
+#   * Native C/C++ (clang + apple libc++)
+#   * Rust apple-darwin (arm64-apple-darwin triple)
+#   * Node / Python / Go (native arm64 builds)
+#   * Electron / Tauri desktop bundles (X8 #304 Tauri pilot)
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * scripts/simulate.sh software track              [X1 #297]
+#   * X3 build & package adapters (.dmg / .pkg)       [X3 #299]
+#   * X4 license scan / CVE / SBOM                    [X4 #300]
+#   * X8 SKILL-DESKTOP-TAURI macOS variant            [X8 #304]
+
+platform: macos-arm64-native
+label: "macOS arm64 — Apple Silicon Native (Xcode 16 CLT)"
+target_kind: software
+
+software_runtime: native
+# .dmg is the default user-facing distribution; `.pkg` is the
+# enterprise / homebrew-cask path. X3 adapter emits both; project's
+# build manifest picks.
+packaging: dmg
+# CMake + Xcode generator is the most portable default. Swift Package
+# Manager projects override to `swift build -c release`, Cargo
+# projects to `cargo build --release --target aarch64-apple-darwin`.
+build_cmd: "cmake --build build --config Release"
+
+host_arch: arm64
+host_os: darwin
+
+# macOS deployment target. Apple's 2026 SDK baseline is macOS 14
+# (Sonoma); raising to 15 (Sequoia) excludes ~15% of active installs
+# per Apple's 2025-Q4 disclosure — keep the broader floor unless a
+# project opts into newer APIs.
+min_os_version: "14.0"
+target_os_version: "15.0"
+
+# Resolved from `xcode-select -p`; Xcode 16 RC is the 2026 baseline.
+# Projects override via `DEVELOPER_DIR` env at build time.
+sdk_root: "/Applications/Xcode.app/Contents/Developer"
+toolchain_path: "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+
+# Developer ID Application signing identity injected at build time
+# from P3 secret_store HSM. Never write a certificate fingerprint or
+# `.p12` path into this profile — profile is shape, P3 provides
+# material.
+signing_identity: ""
+
+# Homebrew packages the X1 macOS sandbox image installs when an
+# OMNISIGHT_MACOS_BUILDER is wired. Native macOS CI runners (GitHub
+# Actions `macos-14`) already ship Xcode CLT preinstalled.
+brew_packages:
+  - cmake
+  - git
+  - pkg-config

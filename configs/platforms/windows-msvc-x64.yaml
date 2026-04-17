@@ -1,0 +1,73 @@
+# OmniSight Platform Profile: Windows x64 (MSVC) Native Software — X0 #296
+#
+# Pure-software target for Windows x64 hosts compiling with the MSVC
+# toolchain (Visual Studio 2022 Build Tools / cl.exe / link.exe). This
+# covers the common Windows desktop / service / CLI path:
+#   * Native C/C++ binaries via MSBuild or CMake + MSVC generator
+#   * .NET 8 (dotnet SDK) for services and desktop apps
+#   * Electron / Tauri desktop bundles (`X8 SKILL-DESKTOP-TAURI`)
+#   * Go / Rust / Node / Python wheels produced on Windows for
+#     Windows-only dependencies
+#
+# Why MSVC is a separate profile (vs. Linux / macOS native):
+#   * Toolchain is completely different (cl.exe vs gcc/clang), invoked
+#     through `vswhere` + `vcvarsall.bat` environment activation, not a
+#     plain PATH binary.
+#   * Packaging story is .msi (WiX) / NSIS, not .deb / .rpm.
+#   * The CI runner pool is different (GitHub Actions
+#     `windows-2022`, Azure DevOps `windows-latest`) — X1 simulate-track
+#     dispatches shell differently (PowerShell instead of bash).
+#
+# MinGW / Cygwin / WSL are deliberately NOT covered by this profile:
+#   * MinGW binaries have a different ABI and link against different
+#     CRT — mixing MSVC-built .dll dependencies with MinGW-built
+#     executables is a known footgun. If a project needs MinGW, we'll
+#     add `windows-mingw-x64.yaml` as a separate profile.
+#   * WSL is a Linux host under the hood — use linux-x86_64-native for
+#     WSL builds.
+#
+# Signing (Authenticode / SmartScreen reputation):
+#   Signing certificates are injected at build time from P3 secret_store
+#   (HSM) the same way iOS / Android signing material flows. The profile
+#   encodes the shape, not the project-specific signing identity.
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * scripts/simulate.sh software track              [X1 #297]
+#   * X3 build & package adapters (.msi / NSIS)       [X3 #299]
+#   * X4 license scan / CVE / SBOM                    [X4 #300]
+#   * X8 SKILL-DESKTOP-TAURI Windows variant          [X8 #304]
+
+platform: windows-msvc-x64
+label: "Windows x64 — MSVC (Visual Studio 2022 Build Tools)"
+target_kind: software
+
+software_runtime: native
+# .msi is the enterprise-friendly default; NSIS installers are a
+# per-project override in the build manifest (X3 adapter emits both).
+packaging: msi
+# MSBuild wraps Visual Studio solutions; CMake projects override to
+# `cmake --build build --config Release`. PowerShell-invocable either
+# way — X1 simulate-track handles quoting.
+build_cmd: "msbuild /m /p:Configuration=Release"
+
+host_arch: x64
+host_os: windows
+
+# MSVC / Visual Studio version targeted by the X1 sandbox. Pinned to
+# VS 2022 (17.x) — current LTS; VS 2025 will land as a separate
+# profile once GA.
+msvc_version: "17.0"
+windows_sdk_version: "10.0.22621.0"
+# Windows Server 2022 (NT 10.0) baseline — matches GitHub Actions
+# `windows-2022` runner; raising to Server 2025 is a breaking change.
+min_os_version: "10.0.20348"
+
+# Chocolatey packages the X1 Windows sandbox image installs. .NET SDK
+# / node / rust / go / python are added per-project via role skill
+# overrides.
+choco_packages:
+  - visualstudio2022buildtools
+  - visualstudio2022-workload-vctools
+  - git
+  - cmake

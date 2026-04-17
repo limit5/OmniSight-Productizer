@@ -1,0 +1,46 @@
+# OmniSight Platform Profile: Linux arm64 Native Software — X0 #296
+#
+# Pure-software target on arm64 Linux hosts: Graviton / Ampere /
+# RaspberryPi-class SBC used as edge compute, or ARM-native CI runners
+# (GitHub Actions `ubuntu-24.04-arm`, Linaro, Oracle Ampere A1). No
+# cross-compile — the builder host IS arm64.
+#
+# Why this is NOT `aarch64.yaml`:
+#   * `aarch64.yaml` declares `target_kind: embedded` + cross_prefix
+#     `aarch64-linux-gnu-`. It's used when the BUILD host is x86_64 and
+#     the TARGET is an aarch64 SoC (typical embedded cross-compile
+#     story).
+#   * This profile declares `target_kind: software`. BUILD == TARGET ==
+#     arm64. No cross_prefix, no QEMU, no sysroot. X1 (#297) software
+#     track runs tests directly on the host.
+#   Using the wrong one will either (a) force a needless cross-compile
+#   on an already-native host (aarch64.yaml path), or (b) silently fall
+#   through to x86_64 binaries if run on ARM (no profile path). Keeping
+#   them separate is the explicit fix.
+#
+# Same language matrix as linux-x86_64-native (see that profile's
+# header) — pick the right host_arch for your CI runner pool.
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * scripts/simulate.sh software track              [X1 #297]
+#   * X3 build & package adapters (arm64 deb/rpm)     [X3 #299]
+#   * X4 SPDX license scan / CVE / SBOM               [X4 #300]
+
+platform: linux-arm64-native
+label: "Linux arm64 — Native Software (Graviton / Ampere / RPi)"
+target_kind: software
+
+software_runtime: native
+packaging: deb
+build_cmd: "make build"
+
+host_arch: arm64
+host_os: linux
+
+docker_packages:
+  - build-essential
+  - pkg-config
+  - git
+  - curl
+  - ca-certificates

@@ -1,0 +1,75 @@
+# OmniSight Platform Profile: macOS x86_64 (Intel Legacy) Native — X0 #296
+#
+# Pure-software target for the legacy Intel Mac installed base. Apple
+# ended Intel Mac sales in 2023; as of 2026 the installed base is
+# declining but still non-trivial for enterprise deployments and
+# professional / creative workflows running pre-M1 iMac Pro / Mac Pro
+# hardware. This profile exists so we can ship `x86_64-apple-darwin`
+# binaries without forcing users onto Rosetta 2 (Apple has announced
+# Rosetta 2 is on a deprecation path — no sunset date yet, but we
+# don't want to be the reason a customer's build breaks the day Apple
+# pulls it).
+#
+# Ship strategy — universal vs. split:
+#   Two options for macOS Intel support:
+#     (a) Build a universal2 binary (arm64 + x86_64 fat Mach-O) ONE
+#         time from the `macos-arm64-native` profile with `-target
+#         x86_64-apple-darwin` added; ship one `.dmg`.
+#     (b) Build two separate slices and ship two `.dmg` files.
+#   Default is (a) for single-binary projects (lipo'd output); X3
+#   (#299) adapter flips to (b) for projects that can't take the size
+#   hit or that have per-arch platform-specific deps. This profile is
+#   the dispatch target for case (b) or for any job that needs to run
+#   TESTS natively on an Intel mac (which universal-from-arm64 can't).
+#
+# Why this is not a mobile profile:
+#   Same reasoning as `macos-arm64-native.yaml` — Mach-O desktop
+#   binary, Developer ID Application cert, `.dmg`/`.pkg` distribution,
+#   runs on macOS desktop. `target_kind: software`.
+#
+# Minimum OS:
+#   macOS 12 (Monterey) is the last version that ran on the widest
+#   range of Intel Macs (2015+ hardware). Raising this cuts off iMac
+#   2015 / MacBook 2015. Lower than 12 drops API compatibility with
+#   the `XCTestDynamicOverlay` / modern Swift Concurrency shim set.
+#   Treat this value as a scoped decision — bump requires BOM impact
+#   review like `ios-arm64.yaml` min_os_version.
+#
+# Notarization:
+#   Same flow as `macos-arm64-native` — X3 (#299) drives
+#   `xcrun notarytool` + `stapler staple`. Apple's notary service
+#   accepts both arches through the same pipeline.
+#
+# Consumed by:
+#   * backend/platform.py::resolve_build_toolchain → kind=software
+#   * scripts/simulate.sh software track              [X1 #297]
+#   * X3 build & package adapters (.dmg / .pkg)       [X3 #299]
+#   * X4 license scan / CVE / SBOM                    [X4 #300]
+#   * X8 SKILL-DESKTOP-TAURI macOS x64 slice          [X8 #304]
+
+platform: macos-x64-native
+label: "macOS x86_64 — Intel Legacy Native (Xcode 16 CLT)"
+target_kind: software
+
+software_runtime: native
+packaging: dmg
+build_cmd: "cmake --build build --config Release"
+
+host_arch: x86_64
+host_os: darwin
+
+# 12 (Monterey) — last macOS that runs on 2015-era Intel Macs.
+# Matches the practical floor enterprise customers with Intel fleet
+# are on. Bump requires scoped review.
+min_os_version: "12.0"
+target_os_version: "15.0"
+
+sdk_root: "/Applications/Xcode.app/Contents/Developer"
+toolchain_path: "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+
+signing_identity: ""
+
+brew_packages:
+  - cmake
+  - git
+  - pkg-config
