@@ -190,6 +190,28 @@ class SSEChatOpsMessage(BaseModel):
     timestamp: str = ""
 
 
+# ─── R2 (#308): Semantic Entropy Monitor event ───
+
+
+class SSEAgentEntropy(BaseModel):
+    """agent.entropy — Semantic entropy measurement for a running agent.
+
+    Emitted by :mod:`backend.semantic_entropy` every N rounds once the
+    rolling window has ≥2 outputs. ``verdict`` is classified via the
+    warn / deadlock thresholds; on ``deadlock`` a companion
+    ``debug_finding`` of type ``cognitive_deadlock`` is also emitted.
+    """
+    agent_id: str
+    task_id: Optional[str] = None
+    entropy_score: float
+    threshold_warn: float = 0.5
+    threshold_deadlock: float = 0.7
+    verdict: str  # "ok" | "warning" | "deadlock"
+    window_size: int = 0
+    round: int = 0
+    timestamp: str = ""
+
+
 # ─── R0 (#306): PEP Gateway event ───
 
 class SSEPepDecision(BaseModel):
@@ -262,6 +284,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "pep.decision": SSEPepDecision,
     # R1 (#307): ChatOps Mirror
     "chatops.message": SSEChatOpsMessage,
+    # R2 (#308): Semantic Entropy Monitor
+    "agent.entropy": SSEAgentEntropy,
 }
 
 

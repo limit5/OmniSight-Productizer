@@ -487,6 +487,20 @@ if _AVAILABLE:
     )
     process_start_time.set(time.time())
 
+    # R2 (#308): Semantic Entropy Monitor ──────────────────────
+    semantic_entropy_score = Gauge(
+        "omnisight_semantic_entropy_score",
+        "Rolling-window pairwise cosine-similarity mean for an agent's outputs",
+        labelnames=("agent_id",),
+        registry=REGISTRY,
+    )
+    cognitive_deadlock_total = Counter(
+        "omnisight_cognitive_deadlock_total",
+        "Times an agent's entropy crossed the deadlock threshold",
+        labelnames=("agent_id",),
+        registry=REGISTRY,
+    )
+
     # R0 (#306): PEP Gateway — tool-call intercept decisions ───
     pep_decisions_total = Counter(
         "omnisight_pep_decisions_total",
@@ -579,6 +593,8 @@ else:
     pep_decisions_total = _NoOp()  # type: ignore
     pep_deny_total = _NoOp()  # type: ignore
     pep_hold_duration_seconds = _NoOp()  # type: ignore
+    semantic_entropy_score = _NoOp()  # type: ignore
+    cognitive_deadlock_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -921,4 +937,15 @@ def reset_for_tests() -> None:
         labelnames=("outcome",),
         buckets=(1, 5, 15, 60, 300, 900, 1800, 3600),
         registry=REGISTRY,
+    )
+    global semantic_entropy_score, cognitive_deadlock_total
+    semantic_entropy_score = Gauge(
+        "omnisight_semantic_entropy_score",
+        "Rolling-window pairwise cosine-similarity mean for an agent's outputs",
+        labelnames=("agent_id",), registry=REGISTRY,
+    )
+    cognitive_deadlock_total = Counter(
+        "omnisight_cognitive_deadlock_total",
+        "Times an agent's entropy crossed the deadlock threshold",
+        labelnames=("agent_id",), registry=REGISTRY,
     )

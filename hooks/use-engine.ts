@@ -312,6 +312,15 @@ export function useEngine() {
               const severity = (d.severity as string) || "info"
               logMsg = `[DEBUG] ${(d.finding_type as string || "").toUpperCase()}: ${d.message}`
               logLevel = severity === "error" || severity === "critical" ? "error" : severity === "warn" ? "warn" : "info"
+            } else if (event.event === "agent.entropy") {
+              // R2 (#308): Semantic Entropy Monitor measurement. Log line
+              // is informational at "ok", warn at "warning", error at
+              // "deadlock" so REPORTER VORTEX colouring matches the
+              // card's own verdict badge.
+              const verdict = (d.verdict as string) || "ok"
+              const score = Number(d.entropy_score) || 0
+              logMsg = `[ENTROPY] ${d.agent_id} score=${score.toFixed(2)} → ${verdict.toUpperCase()}`
+              logLevel = verdict === "deadlock" ? "error" : verdict === "warning" ? "warn" : "info"
             }
 
             if (logMsg) {
@@ -327,6 +336,37 @@ export function useEngine() {
                 ? { ...a, status: d.status as AgentStatus, thoughtChain: d.thought_chain || a.thoughtChain }
                 : a
             ))
+          } else if (event.event === "agent.entropy") {
+            // R2 (#308): update the agent's Cognitive Health block in
+            // place. We roll the sparkline locally (append-and-trim to
+            // 20) so the UI stays live even if the /entropy endpoint
+            // isn't polled. `recentOutputs` and `lastUpdated` are kept
+            // if present; the backend includes recent outputs via the
+            // REST snapshot, not on every SSE event.
+            const d = event.data as Record<string, unknown>
+            const score = Number(d.entropy_score) || 0
+            const verdict = ((d.verdict as string) || "ok") as "ok" | "warning" | "deadlock"
+            const warn = Number(d.threshold_warn ?? 0.5)
+            const dead = Number(d.threshold_deadlock ?? 0.7)
+            setAgents(prev => prev.map(a => {
+              if (a.id !== d.agent_id) return a
+              const prevSpark = a.cognitive?.sparkline ?? []
+              const sparkline = [...prevSpark, score].slice(-20)
+              return {
+                ...a,
+                cognitive: {
+                  entropyScore: score,
+                  verdict,
+                  thresholdWarn: warn,
+                  thresholdDeadlock: dead,
+                  sparkline,
+                  loopCount: a.cognitive?.loopCount ?? (Number(d.round) || prevSpark.length + 1),
+                  loopMax: a.cognitive?.loopMax ?? 10,
+                  recentOutputs: a.cognitive?.recentOutputs,
+                  lastUpdated: (d.timestamp as string) || new Date().toISOString(),
+                },
+              }
+            }))
           } else if (event.event === "task_update") {
             const d = event.data
             setTasks(prev => prev.map(t =>

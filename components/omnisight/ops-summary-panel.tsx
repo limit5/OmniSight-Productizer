@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Activity, DollarSign, Flame, Radio, Shield, Clock3, Cpu } from "lucide-react"
+import { Activity, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain } from "lucide-react"
 import { getOpsSummary, type OpsSummary } from "@/lib/api"
 
 const POLL_MS = 10_000
@@ -95,6 +95,19 @@ export function OpsSummaryPanel() {
         </div>
       )}
 
+      {/* R2 (#308): Highest-entropy agent at-a-glance. Hidden entirely
+          when the monitor hasn't produced any measurement yet so the
+          panel stays empty on fresh deployments. */}
+      {data && data.highest_entropy_agent && (
+        <div className="px-3 pb-2 -mt-1">
+          <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1">
+            <Brain size={10} aria-hidden />
+            HIGHEST ENTROPY
+          </div>
+          <HighestEntropyRow entry={data.highest_entropy_agent} />
+        </div>
+      )}
+
       {/* Phase 64-C-LOCAL UX-6: T3 runner dispatch breakdown.
           Hidden entirely until there's at least one dispatch — no
           noise on fresh deployments that haven't submitted any t3
@@ -161,6 +174,37 @@ function Kpi({
   )
 }
 
+function HighestEntropyRow({ entry }: {
+  entry: NonNullable<OpsSummary["highest_entropy_agent"]>
+}) {
+  const accent = entry.verdict === "deadlock"
+    ? "var(--critical-red,#ef4444)"
+    : entry.verdict === "warning"
+      ? "var(--fui-orange,#f59e0b)"
+      : "var(--validation-emerald,#10b981)"
+  const icon = entry.verdict === "deadlock" ? "🔴" : entry.verdict === "warning" ? "⚠️" : "✅"
+  return (
+    <div
+      className="flex items-center gap-2 font-mono text-[11px] tabular-nums"
+      title={`Verdict: ${entry.verdict}`}
+    >
+      <span aria-hidden>{icon}</span>
+      <span
+        className="px-1.5 py-0.5 rounded truncate max-w-[11rem]"
+        style={{
+          color: accent,
+          backgroundColor: `color-mix(in srgb, ${accent} 15%, transparent)`,
+        }}
+      >
+        {entry.agent_id}
+      </span>
+      <span style={{ color: accent }}>
+        {entry.score.toFixed(2)}
+      </span>
+    </div>
+  )
+}
+
 function RunnerPill({ label, value, accent }: { label: string; value: number; accent: string }) {
   return (
     <span className="inline-flex items-center gap-1" style={{ color: accent }}>
@@ -181,7 +225,11 @@ function StatusDot({ data, error }: { data: OpsSummary | null; error: string | n
     if (data.token_frozen) {
       color = "var(--critical-red,#ef4444)"
       label = "frozen"
-    } else if (data.budget_level !== "normal" || (data.watchdog_age_s !== null && data.watchdog_age_s > 120)) {
+    } else if (
+      data.budget_level !== "normal"
+      || (data.watchdog_age_s !== null && data.watchdog_age_s > 120)
+      || data.highest_entropy_agent?.verdict === "deadlock"
+    ) {
       color = "var(--fui-orange,#f59e0b)"
       label = "degraded"
     } else {

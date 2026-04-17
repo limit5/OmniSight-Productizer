@@ -201,6 +201,23 @@ async def ops_summary() -> dict:
     except Exception:
         pass
 
+    # R2 (#308): Semantic Entropy Monitor — surface the single highest-
+    # scoring agent so ops can spot "someone's spinning in circles"
+    # without visiting the matrix wall. Best-effort; never block the
+    # ops summary on an optional subsystem.
+    highest_entropy = None
+    try:
+        from backend import semantic_entropy as _se
+        top = _se.highest_entropy_agent()
+        if top is not None:
+            highest_entropy = {
+                "agent_id": top["agent_id"],
+                "score": top["entropy_score"],
+                "verdict": top["verdict"],
+            }
+    except Exception as exc:
+        logger.debug("ops_summary: semantic entropy lookup failed: %s", exc)
+
     # Phase 64-C-LOCAL UX-6: break down t3 dispatch counts per runner
     # so the Ops Summary panel can show the operator at a glance
     # whether the host==target happy path is firing (LOCAL >> BUNDLE)
@@ -221,6 +238,7 @@ async def ops_summary() -> dict:
         "checked_at": time.time(),
         "uptime_s": uptime,
         "t3_runners": t3_runners,
+        "highest_entropy_agent": highest_entropy,
         # Spend
         "daily_cost_usd": _sys.get_daily_cost(),
         "hourly_cost_usd": _sys.get_hourly_cost()

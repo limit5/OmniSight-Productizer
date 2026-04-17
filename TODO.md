@@ -1283,24 +1283,24 @@ Legend:
 - [x] 預估：**4 day**（backend 2.5d + UI 1.5d）**✅ AI completed 2026-04-17**
 
 ### R2. Semantic Entropy Monitor（語意熵值偵測）(#308)
-- [ ] `backend/semantic_entropy.py`：每 N 輪（預設 3）對 agent 最近 output 做 embedding similarity 計算
-- [ ] Embedding backend：sentence-transformers（本地 MiniLM）或 Anthropic embedding API（可插拔）
-- [ ] Entropy 指標：rolling window 5 輪的 pairwise cosine similarity 平均值；threshold 0.7 → `cognitive_deadlock` event
-- [ ] 整合 debug blackboard：entropy 超標寫入 `debug_findings` 表
-- [ ] 與既有 loop detection 協作：entropy check 在 loop detection 之前觸發，可更早抓到「措辭不同但語意空轉」
-- [ ] SSE event：`agent.entropy`（agent_id / entropy_score / threshold / verdict: ok | warning | deadlock）
-- [ ] Metrics：`semantic_entropy_score{agent_id}` gauge / `cognitive_deadlock_total` counter
-- [ ] 成本控制：MiniLM 本地推理 ~5ms / 輪；不用 LLM 評估 LLM（避免成本翻倍）
-- [ ] **UI — Agent Cognitive Health Card（擴充 `agent-matrix-wall.tsx`）**：
-  - [ ] 每個 agent 卡片新增「Cognitive Health」區塊
-  - [ ] Semantic entropy sparkline（最近 20 輪的 entropy 趨勢，微型折線圖）
-  - [ ] Entropy 當前值 + 閾值 badge（✅ < 0.5 / ⚠️ 0.5-0.7 / 🔴 > 0.7）
-  - [ ] ReAct loop counter（loop N / max M，auto-escalate at max）
-  - [ ] 當 entropy > threshold 時卡片邊框變紅 + 脈衝動畫（FUI scan-line 風格）
-  - [ ] 點擊 entropy sparkline 展開「最近 5 輪 output 摘要」popover（方便人工判斷是否真的卡住）
-- [ ] **UI — ops-summary-panel 延伸**：加「Highest Entropy Agent」badge（即時顯示 entropy 最高的 agent 名 + 分數）
-- [ ] 整合測試：mock 5 輪相似 output → entropy > threshold → deadlock event 發出 + UI sparkline 變紅
-- [ ] 預估：**2.5 day**（backend 1.5d + UI 1d）
+- [x] `backend/semantic_entropy.py`：每 N 輪（預設 3）對 agent 最近 output 做 embedding similarity 計算
+- [x] Embedding backend：sentence-transformers（本地 MiniLM）或 Anthropic embedding API（可插拔）
+- [x] Entropy 指標：rolling window 5 輪的 pairwise cosine similarity 平均值；threshold 0.7 → `cognitive_deadlock` event
+- [x] 整合 debug blackboard：entropy 超標寫入 `debug_findings` 表
+- [x] 與既有 loop detection 協作：entropy check 在 loop detection 之前觸發，可更早抓到「措辭不同但語意空轉」
+- [x] SSE event：`agent.entropy`（agent_id / entropy_score / threshold / verdict: ok | warning | deadlock）
+- [x] Metrics：`semantic_entropy_score{agent_id}` gauge / `cognitive_deadlock_total` counter
+- [x] 成本控制：MiniLM 本地推理 ~5ms / 輪；不用 LLM 評估 LLM（避免成本翻倍）
+- [x] **UI — Agent Cognitive Health Card（擴充 `agent-matrix-wall.tsx`）**：
+  - [x] 每個 agent 卡片新增「Cognitive Health」區塊
+  - [x] Semantic entropy sparkline（最近 20 輪的 entropy 趨勢，微型折線圖）
+  - [x] Entropy 當前值 + 閾值 badge（✅ < 0.5 / ⚠️ 0.5-0.7 / 🔴 > 0.7）
+  - [x] ReAct loop counter（loop N / max M，auto-escalate at max）
+  - [x] 當 entropy > threshold 時卡片邊框變紅 + 脈衝動畫（FUI scan-line 風格）
+  - [x] 點擊 entropy sparkline 展開「最近 5 輪 output 摘要」popover（方便人工判斷是否真的卡住）
+- [x] **UI — ops-summary-panel 延伸**：加「Highest Entropy Agent」badge（即時顯示 entropy 最高的 agent 名 + 分數）
+- [x] 整合測試：mock 5 輪相似 output → entropy > threshold → deadlock event 發出 + UI sparkline 變紅
+- [x] 預估：**2.5 day**（backend 1.5d + UI 1d）**✅ AI completed 2026-04-17**
 
 ### R3. Scratchpad Memory Offload + Auto-Continuation（心智卸載 + 自動續寫）(#309)
 - [ ] `backend/scratchpad.py`：per-agent persistent scratchpad file（`data/agents/<agent_id>/scratchpad.md`）

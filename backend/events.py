@@ -215,6 +215,17 @@ def emit_agent_update(agent_id: str, status: str, thought_chain: str = "",
     level = "error" if status == "error" else "warn" if status == "warning" else "info"
     _log(f"[AGENT] {agent_id} → {status.upper()}" + (f": {thought_chain[:80]}" if thought_chain else ""), level)
 
+    # R2 (#308): feed thought_chain into the semantic-entropy monitor so
+    # rephrased-but-identical reasoning is caught before the retry /
+    # wall-clock stuck-detector rules fire. Best-effort — an embedder
+    # failure must never block agent_update.
+    if thought_chain and status in {"running", "warning", "error"}:
+        try:
+            from backend.semantic_entropy import record_output
+            record_output(agent_id, thought_chain, task_id=extra.get("task_id"))
+        except Exception:
+            pass
+
 
 def emit_task_update(task_id: str, status: str, assigned_agent_id: str | None = None,
                      session_id: str | None = None,
@@ -345,6 +356,49 @@ def emit_simulation(sim_id: str, action: str, detail: str = "",
        tenant_id=_auto_tenant(tenant_id))
     level_label = "error" if action == "result" and extra.get("status") == "fail" else "info"
     _log(f"[SIM] {sim_id} {action}: {detail}", level=level_label)
+
+
+def emit_agent_entropy(agent_id: str, entropy_score: float,
+                       verdict: str,
+                       threshold_warn: float = 0.5,
+                       threshold_deadlock: float = 0.7,
+                       window_size: int = 0,
+                       round_idx: int | None = None,
+                       task_id: str | None = None,
+                       session_id: str | None = None,
+                       broadcast_scope: str = "global",
+                       tenant_id: str | None = None, **extra: Any) -> None:
+    """R2 (#308): per-agent semantic-entropy measurement.
+
+    ``verdict`` is ``"ok" | "warning" | "deadlock"``. Deadlock verdicts
+    should also trigger an ``emit_debug_finding`` of type
+    ``cognitive_deadlock``; the entropy module already does that.
+    """
+    # Caller may forward the raw monitor payload which uses ``round`` as
+    # the key — accept both names.
+    if round_idx is None:
+        round_idx = int(extra.pop("round", 0) or 0)
+    else:
+        extra.pop("round", None)
+    extra.pop("threshold", None)
+    try:
+        score_4 = float(f"{entropy_score:.4f}")
+    except Exception:
+        score_4 = entropy_score
+    bus.publish("agent.entropy", {
+        "agent_id": agent_id,
+        "task_id": task_id,
+        "entropy_score": score_4,
+        "threshold_warn": threshold_warn,
+        "threshold_deadlock": threshold_deadlock,
+        "verdict": verdict,
+        "window_size": window_size,
+        "round": round_idx,
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    level = "warn" if verdict == "warning" else "error" if verdict == "deadlock" else "info"
+    _log(f"[ENTROPY] {agent_id} score={entropy_score:.3f} → {verdict.upper()}", level)
 
 
 def emit_debug_finding(

@@ -15,3 +15,8 @@ class FindingType(str, Enum):
     timeout = "timeout"
     loop_breaker_trigger = "loop_breaker_trigger"
     cross_agent_observation = "cross_agent/observation"
+    # R2 (#308): semantic-entropy deadlock — agent's recent outputs are
+    # paraphrases of each other. Caught before wall-clock / retry-count
+    # timers so cognitive spin is flagged earlier than classic stuck
+    # detection.
+    cognitive_deadlock = "cognitive_deadlock"

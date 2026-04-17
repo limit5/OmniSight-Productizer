@@ -316,6 +316,36 @@ html {
   animation: breathing-pulse-red 2s ease-in-out infinite;
 }
 
+/* R2 (#308) — FUI scan-line overlay for cognitively-deadlocked agents.
+ * Rides on top of the existing pulse-red so the card still breathes,
+ * but adds a horizontal sweep to make it obvious the agent is stuck. */
+@keyframes entropy-scan-sweep {
+  0%   { transform: translateY(-100%); opacity: 0; }
+  25%  { opacity: 0.85; }
+  100% { transform: translateY(120%);  opacity: 0; }
+}
+
+.entropy-scan {
+  position: relative;
+}
+
+.entropy-scan::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(239, 68, 68, 0) 0%,
+    rgba(239, 68, 68, 0.18) 48%,
+    rgba(239, 68, 68, 0.35) 50%,
+    rgba(239, 68, 68, 0.18) 52%,
+    rgba(239, 68, 68, 0) 100%
+  );
+  animation: entropy-scan-sweep 2.6s linear infinite;
+  mix-blend-mode: screen;
+}
+
 /* Text glow effects */
 .text-glow-blue {
   text-shadow: 0 0 10px var(--neural-blue), 0 0 20px var(--neural-blue-dim);

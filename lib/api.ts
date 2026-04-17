@@ -1390,10 +1390,45 @@ export interface OpsSummary {
   /** Phase 64-C-LOCAL UX-6: T3 runner dispatch breakdown. local + bundle
    * always present; ssh / qemu populated once those runners land. */
   t3_runners?: { local: number; ssh: number; qemu: number; bundle: number }
+  /** R2 (#308): the single agent with the highest current semantic-entropy
+   * score, or null if the monitor hasn't produced a measurement yet. */
+  highest_entropy_agent?: {
+    agent_id: string
+    score: number
+    verdict: "ok" | "warning" | "deadlock"
+  } | null
 }
 
 export async function getOpsSummary(): Promise<OpsSummary> {
   return request<OpsSummary>("/ops/summary")
+}
+
+// ─── R2 (#308) Semantic Entropy Monitor ──────────────────────
+
+export interface AgentEntropySnapshot {
+  agent_id: string
+  entropy_score: number
+  verdict: "ok" | "warning" | "deadlock"
+  sparkline: number[]
+  recent_outputs: string[]
+  round_counter: number
+  loop_count: number
+  loop_max: number
+  last_updated: number
+  deadlock_events: number
+}
+
+export interface EntropyAgentsResponse {
+  agents: AgentEntropySnapshot[]
+  highest: AgentEntropySnapshot | null
+}
+
+export async function getEntropyAgents(): Promise<EntropyAgentsResponse> {
+  return request<EntropyAgentsResponse>("/entropy/agents")
+}
+
+export async function getEntropyAgent(agentId: string): Promise<AgentEntropySnapshot> {
+  return request<AgentEntropySnapshot>(`/entropy/agents/${encodeURIComponent(agentId)}`)
 }
 
 // ─── O9 (#272) Orchestration Observability ───────────────────

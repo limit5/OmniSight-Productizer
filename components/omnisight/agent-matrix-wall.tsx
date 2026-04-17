@@ -88,6 +88,26 @@ export const AI_MODEL_INFO = new Proxy({} as Record<string, ModelDisplayInfo>, {
   },
 })
 
+/** R2 (#308) — Cognitive Health signal block for the Agent Matrix Wall. */
+export interface AgentCognitiveHealth {
+  /** Rolling-window pairwise cosine-similarity mean (0..1). Higher = more repetitive. */
+  entropyScore: number
+  /** Classifier verdict derived from the score + thresholds. */
+  verdict: "ok" | "warning" | "deadlock"
+  /** Warn / deadlock thresholds echoed from the backend so the UI stays in sync. */
+  thresholdWarn: number
+  thresholdDeadlock: number
+  /** Last-N entropy scores — drives the sparkline. */
+  sparkline: number[]
+  /** ReAct loop counter (loop N / max M). */
+  loopCount: number
+  loopMax: number
+  /** Last ~5 recent outputs (truncated) — powers the popover. */
+  recentOutputs?: string[]
+  /** ISO timestamp of the most recent measurement. */
+  lastUpdated?: string
+}
+
 export interface Agent {
   id: string
   name: string
@@ -102,6 +122,8 @@ export interface Agent {
   messages?: AgentMessage[]
   requiresConfirmation?: boolean
   materializationPhase?: MaterializationPhase
+  /** R2 (#308): Semantic Entropy Monitor signal — optional until first measurement. */
+  cognitive?: AgentCognitiveHealth
 }
 
 // Agent type configurations
@@ -175,7 +197,10 @@ function getResultColor(result: AgentHistoryEntry["result"]): string {
   }
 }
 
-function getAgentBorderClass(type: string, status: AgentStatus): string {
+function getAgentBorderClass(type: string, status: AgentStatus, cognitive?: AgentCognitiveHealth): string {
+  // R2 (#308): a cognitive deadlock overrides the nominal status colour —
+  // an agent can be status="running" and still be semantically stuck.
+  if (cognitive?.verdict === "deadlock") return "border-[var(--critical-red)]"
   if (status === "warning") return "border-[var(--hardware-orange)]"
   if (status === "error") return "border-[var(--critical-red)]"
   if (status === "awaiting_confirmation") return "border-[var(--artifact-purple)]"
@@ -190,7 +215,10 @@ function getAgentBorderClass(type: string, status: AgentStatus): string {
   return "border-[var(--border)]"
 }
 
-function getAgentPulseClass(status: AgentStatus, type: string): string {
+function getAgentPulseClass(status: AgentStatus, type: string, cognitive?: AgentCognitiveHealth): string {
+  // R2 (#308): deadlock → red pulse with FUI scan-line vibe. Takes
+  // precedence so the operator can spot a spinning agent at a glance.
+  if (cognitive?.verdict === "deadlock") return "pulse-red entropy-scan"
   if (status === "running") {
     switch (type) {
       case "firmware": return "pulse-orange"
@@ -248,6 +276,126 @@ function TaskDots({ progress, status }: { progress: { current: number; total: nu
   )
 }
 
+// R2 (#308): Cognitive Health section — entropy sparkline + verdict badge +
+// ReAct loop counter. Kept inline (no extra file) so each Agent card stays
+// self-contained and the popover can share the card's click context.
+function EntropySparkline({ values, verdict }: { values: number[]; verdict: AgentCognitiveHealth["verdict"] }) {
+  const W = 72
+  const H = 18
+  const data = values.slice(-20)
+  if (data.length < 2) {
+    return <div className="w-[72px] h-[18px] opacity-40 font-mono text-[9px] flex items-center justify-center">—</div>
+  }
+  const min = Math.min(0, ...data)
+  const max = Math.max(1, ...data)
+  const range = Math.max(0.001, max - min)
+  const stepX = data.length > 1 ? W / (data.length - 1) : W
+  const pts = data.map((v, i) => {
+    const x = i * stepX
+    const y = H - ((v - min) / range) * H
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(" ")
+  const stroke = verdict === "deadlock"
+    ? "var(--critical-red,#ef4444)"
+    : verdict === "warning"
+      ? "var(--fui-orange,#f59e0b)"
+      : "var(--validation-emerald,#10b981)"
+  return (
+    <svg width={W} height={H} className="shrink-0" aria-hidden>
+      <polyline
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.2}
+        points={pts}
+      />
+    </svg>
+  )
+}
+
+function VerdictBadge({ verdict, score, warnThreshold, deadThreshold }: {
+  verdict: AgentCognitiveHealth["verdict"]
+  score: number
+  warnThreshold: number
+  deadThreshold: number
+}) {
+  const icon = verdict === "deadlock" ? "🔴" : verdict === "warning" ? "⚠️" : "✅"
+  const color = verdict === "deadlock"
+    ? "var(--critical-red,#ef4444)"
+    : verdict === "warning"
+      ? "var(--fui-orange,#f59e0b)"
+      : "var(--validation-emerald,#10b981)"
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono tabular-nums"
+      style={{
+        color,
+        backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`,
+      }}
+      title={`Warn ≥ ${warnThreshold.toFixed(2)}, Deadlock ≥ ${deadThreshold.toFixed(2)}`}
+    >
+      <span aria-hidden>{icon}</span>
+      {score.toFixed(2)}
+    </span>
+  )
+}
+
+function CognitiveHealthSection({ cognitive }: { cognitive: AgentCognitiveHealth }) {
+  const [showPopover, setShowPopover] = useState(false)
+  const atMax = cognitive.loopCount >= cognitive.loopMax
+  return (
+    <div className="mt-2 border-t border-[var(--border)]/60 pt-2">
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <span className="font-mono text-[9px] tracking-[0.16em] text-[var(--muted-foreground)]">
+          COGNITIVE HEALTH
+        </span>
+        <span
+          className={`font-mono text-[9px] tabular-nums ${atMax ? "text-[var(--critical-red,#ef4444)]" : "text-[var(--muted-foreground)]"}`}
+          title={atMax ? "ReAct loop at max — auto-escalate" : "ReAct loop counter"}
+        >
+          loop {cognitive.loopCount}/{cognitive.loopMax}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 relative">
+        <button
+          type="button"
+          aria-label="Show recent outputs"
+          onClick={(e) => {
+            e.stopPropagation()
+            setShowPopover(p => !p)
+          }}
+          className="rounded hover:bg-[var(--secondary)]/60 transition-colors"
+        >
+          <EntropySparkline values={cognitive.sparkline} verdict={cognitive.verdict} />
+        </button>
+        <VerdictBadge
+          verdict={cognitive.verdict}
+          score={cognitive.entropyScore}
+          warnThreshold={cognitive.thresholdWarn}
+          deadThreshold={cognitive.thresholdDeadlock}
+        />
+        {showPopover && cognitive.recentOutputs && cognitive.recentOutputs.length > 0 && (
+          <div
+            className="absolute z-50 top-full left-0 mt-1 p-2 rounded border border-[var(--border)] bg-[var(--background)] shadow-lg w-64 max-h-48 overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="font-mono text-[9px] uppercase tracking-widest text-[var(--muted-foreground)] mb-1">
+              Last {cognitive.recentOutputs.length} outputs
+            </div>
+            <ol className="space-y-1">
+              {cognitive.recentOutputs.map((out, i) => (
+                <li key={i} className="font-mono text-[10px] text-[var(--foreground)] leading-relaxed break-words">
+                  <span className="text-[var(--muted-foreground)] mr-1">{i + 1}.</span>
+                  {out}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 interface AgentCardProps {
   agent: Agent
   onRemove?: (id: string) => void
@@ -262,8 +410,8 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
   const hasContent = agent.subTasks?.length || agent.history?.length || agent.messages?.length
   
   return (
-    <div 
-      className={`holo-glass-simple rounded transition-all duration-300 ${getAgentBorderClass(agent.type, agent.status)} ${getAgentPulseClass(agent.status, agent.type)} group relative overflow-hidden glitch-hover corner-brackets`}
+    <div
+      className={`holo-glass-simple rounded transition-all duration-300 ${getAgentBorderClass(agent.type, agent.status, agent.cognitive)} ${getAgentPulseClass(agent.status, agent.type, agent.cognitive)} group relative overflow-hidden glitch-hover corner-brackets`}
     >
       {/* Header - Always visible */}
       <div 
@@ -334,7 +482,13 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
         <p className="font-mono text-xs text-[var(--muted-foreground)] mt-2 leading-relaxed line-clamp-3 break-all">
           {agent.thoughtChain}
         </p>
-        
+
+        {/* Row 5 (R2 #308): Cognitive Health — rendered inline so the
+            verdict and sparkline stay visible without expanding the card. */}
+        {agent.cognitive && (
+          <CognitiveHealthSection cognitive={agent.cognitive} />
+        )}
+
         {/* Remove Button - Positioned in header */}
         {onRemove && (
           <button
