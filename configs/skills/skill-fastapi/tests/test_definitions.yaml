@@ -1,0 +1,78 @@
+# SKILL-FASTAPI test definitions — X5 #301
+#
+# Authoritative list consumed by `backend/tests/test_skill_fastapi.py`.
+# Each entry maps a pilot-validation gate to the Python target that
+# exercises it.
+
+test_suites:
+  - id: scaffold-unit
+    name: "Scaffold render tests"
+    tests:
+      - id: scaffold-postgres-jwt-both
+        name: "Render: postgres + jwt + both deploy targets"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+      - id: scaffold-sqlite-none-docker
+        name: "Render: sqlite + no auth + docker-only"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+      - id: scaffold-postgres-oauth2-helm
+        name: "Render: postgres + oauth2 + helm-only"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+      - id: scaffold-gated-files
+        name: "Files gated by database/auth/deploy skipped correctly"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+      - id: scaffold-package-name-slug
+        name: "package_name is derived from project_name slug"
+        type: unit
+        target: backend.fastapi_scaffolder._derive_package_name
+
+  - id: framework-binding
+    name: "X0-X4 framework binding tests"
+    tests:
+      - id: x0-platform-profile-exists
+        name: "Resolved profile loads via backend.platform"
+        type: integration
+        target: backend.fastapi_scaffolder.render_project
+      - id: x1-coverage-threshold-in-pyproject
+        name: "pyproject.toml pins --cov-fail-under=80 (X1 python threshold)"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+      - id: x2-role-python-alignment
+        name: "Scaffold honours backend-python role anti-patterns"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+      - id: x3-docker-adapter-resolves
+        name: "DockerImageAdapter resolves against rendered Dockerfile"
+        type: integration
+        target: backend.fastapi_scaffolder.dry_run_build
+      - id: x3-helm-adapter-resolves
+        name: "HelmChartAdapter resolves against rendered chart"
+        type: integration
+        target: backend.fastapi_scaffolder.dry_run_build
+      - id: x4-compliance-runs
+        name: "X4 compliance bundle runs against rendered project"
+        type: integration
+        target: backend.fastapi_scaffolder.pilot_report
+      - id: n3-openapi-dump-shipped
+        name: "scripts/dump_openapi.py follows N3 contract (argparse --check)"
+        type: unit
+        target: backend.fastapi_scaffolder.render_project
+
+  - id: registry-integration
+    name: "Skill registry integration tests"
+    tests:
+      - id: pack-discoverable
+        name: "skill-fastapi appears in list_skills()"
+        type: unit
+        target: backend.skill_registry.list_skills
+      - id: pack-validates-clean
+        name: "validate_skill('skill-fastapi') returns ok=True"
+        type: unit
+        target: backend.skill_registry.validate_skill
+      - id: pack-all-artifact-kinds
+        name: "Manifest declares all 5 artifact kinds"
+        type: unit
+        target: backend.skill_registry.validate_skill

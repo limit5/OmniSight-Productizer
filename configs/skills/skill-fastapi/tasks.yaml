@@ -1,0 +1,123 @@
+# X5 #301 — SKILL-FASTAPI DAG tasks.
+#
+# Every task here maps 1:1 to an X0-X4 framework capability, so
+# running the full DAG is by design a smoke test of the entire
+# software vertical.
+
+tasks:
+  - id: fa-scaffold-init
+    name: "Scaffold project skeleton"
+    description: >
+      Render FastAPI project from scaffolds/: pyproject.toml with
+      fastapi/uvicorn/sqlalchemy/alembic/pydantic-settings pins,
+      src-layout package tree, .env.example, Makefile. Idempotent
+      re-render: overwrites inside the scaffold surface, never
+      touches user files outside (e.g. `src/<pkg>/domain/`).
+    depends_on: []
+    artifacts: [fa_skeleton]
+    estimated_hours: 2
+    framework_gate: x0-platform-schema
+
+  - id: fa-app-core
+    name: "FastAPI app core"
+    description: >
+      Emit `main.py` (FastAPI app factory with lifespan), `config.py`
+      (pydantic-settings BaseSettings + env loading), `db.py`
+      (SQLAlchemy 2.x async engine + session scope dependency),
+      `core/logging.py` (structured JSON formatter) — matches
+      the backend-python role skill's defaults.
+    depends_on: [fa-scaffold-init]
+    artifacts: [fa_core]
+    estimated_hours: 2
+    framework_gate: x2-role-backend-python
+
+  - id: fa-api-v1
+    name: "API v1 router + health"
+    description: >
+      Render `/api/v1/health` (liveness + readiness probe), Pydantic
+      v2 request/response models, and a sample `/api/v1/items` CRUD
+      router demonstrating async SQLAlchemy sessions, OpenAPI tags,
+      and status-code conventions.
+    depends_on: [fa-app-core]
+    artifacts: [fa_api_v1]
+    estimated_hours: 2
+
+  - id: fa-alembic
+    name: "Alembic migrations"
+    description: >
+      Emit `alembic.ini`, `alembic/env.py` (async engine aware),
+      `script.py.mako`, and an initial `0001_initial.py` migration
+      that creates the `items` table. Round-trips cleanly with
+      `alembic upgrade head` + `alembic downgrade base`.
+    depends_on: [fa-api-v1]
+    artifacts: [fa_alembic]
+    estimated_hours: 1
+
+  - id: fa-tests
+    name: "pytest + httpx + coverage"
+    description: >
+      Render `tests/conftest.py` (TestClient + AsyncClient fixtures
+      + isolated DB), health endpoint test, items CRUD test. Wires
+      `pytest.ini` with coverage 80% floor (matches X1
+      COVERAGE_THRESHOLDS["python"]).
+    depends_on: [fa-api-v1]
+    artifacts: [fa_tests]
+    estimated_hours: 1
+    framework_gate: x1-software-simulate
+
+  - id: fa-openapi-dump
+    name: "OpenAPI dump script"
+    description: >
+      Emit `scripts/dump_openapi.py` with the same contract as
+      OmniSight's N3 governance script (offline `app.openapi()` →
+      JSON, `--check` mode fails on drift). Wires the project into
+      contract-testing CI out of the box.
+    depends_on: [fa-app-core]
+    artifacts: [fa_openapi_dump]
+    estimated_hours: 0.5
+    framework_gate: n3-openapi-governance
+
+  - id: fa-docker
+    name: "Dockerfile + compose"
+    description: >
+      Multi-stage Dockerfile (builder stage uses uv for fast
+      resolve, runtime stage is python:3.12-slim with only runtime
+      deps) + `docker-compose.yml` (service + postgres for local
+      dev). Wires to `backend.build_adapters.DockerImageAdapter`.
+    depends_on: [fa-app-core]
+    artifacts: [fa_docker]
+    estimated_hours: 1
+    framework_gate: x3-docker-adapter
+
+  - id: fa-helm
+    name: "Helm chart"
+    description: >
+      Emit `deploy/helm/` chart with Chart.yaml, values.yaml,
+      deployment.yaml, service.yaml, ingress.yaml. Lintable by
+      `helm lint`, packageable by `backend.build_adapters.HelmChartAdapter`.
+    depends_on: [fa-docker]
+    artifacts: [fa_helm]
+    estimated_hours: 1
+    framework_gate: x3-helm-adapter
+
+  - id: fa-compliance
+    name: "X4 compliance gates"
+    description: >
+      Emit `spdx.allowlist.json` (default-deny GPL/AGPL, allowlist
+      Apache-2.0 / MIT / BSD families). The compliance harness picks
+      it up via `backend.software_compliance.licenses`.
+    depends_on: [fa-scaffold-init]
+    artifacts: [fa_compliance]
+    estimated_hours: 0.5
+    framework_gate: x4-software-compliance
+
+  - id: fa-pilot-report
+    name: "X0-X4 pilot validation report"
+    description: >
+      End-to-end smoke: render project, run X3 docker build dry-run,
+      run X3 helm lint dry-run, run X4 compliance bundle, emit
+      one JSON report. Used by `test_skill_fastapi.py` as a living
+      spec — any framework regression fails this task first.
+    depends_on: [fa-tests, fa-docker, fa-helm, fa-compliance]
+    artifacts: [fa_pilot_report]
+    estimated_hours: 1

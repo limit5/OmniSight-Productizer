@@ -1192,12 +1192,12 @@ Legend:
 - [x] 預估：**1 day**
 
 ### X5. SKILL-FASTAPI (pilot, #301)
-- [ ] FastAPI service 骨架 + Alembic + Pydantic
-- [ ] Dockerfile + docker-compose.yml + helm chart
-- [ ] pytest + httpx + coverage
-- [ ] OpenAPI spec 自動生成（整合 N3 OpenAPI governance）
-- [ ] **First software skill — validates X0-X4**
-- [ ] 預估：**1.5 day**
+- [x] FastAPI service 骨架 + Alembic + Pydantic
+- [x] Dockerfile + docker-compose.yml + helm chart
+- [x] pytest + httpx + coverage
+- [x] OpenAPI spec 自動生成（整合 N3 OpenAPI governance）
+- [x] **First software skill — validates X0-X4**
+- [x] 預估：**1.5 day**
 
 ### X6. SKILL-GO-SERVICE (#302)
 - [ ] Gin/Fiber 微服務骨架

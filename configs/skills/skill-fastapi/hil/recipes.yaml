@@ -1,0 +1,49 @@
+# SKILL-FASTAPI HIL (hardware-in-the-loop) recipes — X5 #301
+#
+# "Hardware" here is the deploy target (a real container runtime or
+# k8s cluster). Each recipe describes a physical-side probe that can
+# only run after a real deploy (not a dry-run) — used by the
+# operator-run Step 7 smoke, not by CI.
+
+recipes:
+  - id: docker-smoke-health
+    name: "Docker smoke — /api/v1/health"
+    description: >
+      After `docker run -d -p 8000:8000 <image>`, hit /api/v1/health
+      five times from a cold container, assert P95 ≤ 200ms and every
+      response has `{"status":"ok"}`. Catches the "image starts but
+      lifespan deadlocks" class of regressions.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: http_ttfb
+      url: "http://localhost:8000/api/v1/health"
+      iterations: 5
+      p95_ms_ceiling: 200
+
+  - id: helm-install-smoke
+    name: "Helm install smoke (kind cluster)"
+    description: >
+      `helm install pilot ./deploy/helm -f values-kind.yaml` on a
+      freshly-started kind cluster; wait for rollout, port-forward,
+      curl /api/v1/health once. Validates that the Chart.yaml /
+      values.yaml / deployment.yaml shapes render & apply without
+      kubectl rejecting the manifest.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: kubectl_rollout
+      release: pilot
+      timeout_s: 120
+
+  - id: openapi-contract-drift
+    name: "OpenAPI drift smoke"
+    description: >
+      `python scripts/dump_openapi.py --check` against a
+      just-committed `openapi.json`. Must exit 0. Re-running after
+      a model edit without regenerating must exit 1. This probe
+      validates the N3 governance contract stayed intact through
+      the scaffold render.
+    targets: [linux-x86_64-native]
+    probe:
+      kind: cli_exit_code
+      cmd: "python scripts/dump_openapi.py --check"
+      expected_rc: 0

@@ -10290,3 +10290,100 @@ X1 尾聲為接下來的 X2-X9 留好接口：
 - **X3 (#299) package adapter**（`.deb` / `.rpm` / `.msi` / `.dmg`）會讀 X1 輸出的 `packaging` 欄位分派；X0 已把 OS 預設值寫入 profile、X1 在 JSON envelope 直通。
 - **X4 (#300) SPDX license / CVE / SBOM**：X1 的 `language` 欄位同時是 X4 選 license-scanner 的 key（`pip-licenses` / `go-licenses` / `cargo-license` / `license-maven-plugin` / `license-checker` / `nuget-license`）；shape 已定。
 - **X5-X9 Dogfood SKILL-FASTAPI / GO-SERVICE / RUST-CLI / NODE-CLI / SPRING-BOOT**：五個語言 pilot 各自會是 X1 的首批真實消費者，預期每個 pilot 都會撞出 1-2 個 parser edge case（各 framework 自有 test-summary 格式）；測試檔已留好 `TestPytestParser` / `TestGoParser` / ... 的擴充空間。
+
+## 2026-04-17 — X5 SKILL-FASTAPI (#301) — 完成 ✅
+
+### 背景
+X0 (#296) 把 5 份 software platform profile 落地、X1 (#297) 給 software vertical 裝上「語言-native runner + coverage gate + benchmark 比較」、X2 (#298) 寫了 9 份 software role skill、X3 (#299) 用 12 份 build/package adapter 把跨語言 artifact 生產線鋪好、X4 (#300) 補上 SPDX + CVE + SBOM 三道合規 gate。但這五層框架在沒有「真實 skill pack」消費之前，只是 shape 對了的 plumbing — 同樣的道理 C5 skill framework 要等 D1 SKILL-UVC 才被 end-to-end 驗證、W0-W5 web 框架要等 W6 SKILL-NEXTJS。X5 就是這個角色：第一支軟體 vertical 的 skill pack，同時也是 dogfood — OmniSight 自己的 backend 就是 FastAPI，所以 scaffold 出來的客戶服務和我們產品跑的是同一條 stack。
+
+### 交付內容
+
+**1. `configs/skills/skill-fastapi/` — skill pack（manifest + 5 件 artifacts）**
+
+- `skill.yaml`（schema_version 1、description 鎖「first software skill / dogfood」、keywords 含 `pilot` / `x5` / `fastapi` / `python` / `dogfood` / `n3-governance` / `spdx`，5 件 artifacts 全宣告）
+- `SKILL.md`（為什麼 pilot、choice knobs 矩陣、render 用法、N3 OpenAPI governance 對接說明）
+- `tasks.yaml`（10 條 DAG task，每條都釘一個 X-series framework gate：`x0-platform-schema` / `x2-role-backend-python` / `x1-software-simulate` / `n3-openapi-governance` / `x3-docker-adapter` / `x3-helm-adapter` / `x4-software-compliance` ...）
+- `tests/test_definitions.yaml`（scaffold / framework-binding / registry-integration 三個 suite、合計 17 個 spec entries）
+- `hil/recipes.yaml`（docker-smoke-health / helm-install-smoke / openapi-contract-drift 3 道 operator-run 實機探針）
+- `docs/integration_guide.md`（render → 產出樹 → `make install / test / openapi / docker / helm` → N3 contract wiring）
+
+**2. `configs/skills/skill-fastapi/scaffolds/` — 34 份 scaffold 檔（含 `.j2` 模板與靜態副本）**
+
+專案根：`pyproject.toml.j2`（fastapi~=0.110 / uvicorn[standard] / sqlalchemy[asyncio]~=2.0 / alembic / pydantic-settings、pytest --cov-fail-under=80 釘死、ruff + mypy --strict 預設）、`Dockerfile.j2`（multi-stage、builder 走 uv 失敗 fallback pip、runtime `python:3.12-slim` + non-root `app:10001` + HEALTHCHECK）、`docker-compose.yml.j2`（service + postgres:16-alpine 含 pg_isready healthcheck）、`alembic.ini.j2`、`Makefile.j2`（12 個 target 含 `openapi` / `docker` / `helm`）、`.env.example.j2`、`.gitignore`、`README.md.j2`、`spdx.allowlist.json`（default-deny GPL/AGPL，allow Apache/MIT/BSD/ISC/MPL-2.0/PSF-2.0）。
+
+`src/app/`（render 時會 rename 成 `src/<package_name>/`）：`__init__.py.j2`（版號）、`main.py.j2`（FastAPI app factory + async lifespan + CORS + `/api/v1` 注入，lifespan 之外 `create_app()` 不 touch DB，N3 dump 可離線跑）、`config.py.j2`（pydantic-settings BaseSettings、env_file=".env"，knob-aware：有 auth=jwt 才加 `jwt_*` 欄位，有 oauth2 才加 `oauth2_*`）、`db.py`（SQLAlchemy 2.x `create_async_engine` + `async_sessionmaker`、`get_db` 依賴、`session_scope` context manager）、`models.py` + `schemas.py`（Pydantic v2 + ORM-mode `from_attributes=True`）、`core/logging.py`（python-json-logger + 降噪 sqlalchemy.engine / uvicorn.access）、`core/security.py.j2`（auth=jwt 時 pyjwt + passlib bcrypt、auth=oauth2 時 authlib；auth=none 時整檔不 render）、`api/v1/{__init__.py.j2,health.py.j2,items.py.j2}`（aggregator + liveness probe + CRUD demo）。
+
+`alembic/`：`env.py.j2`（async engine 版 env.py、從 pydantic-settings 拿 URL）、`script.py.mako`（Alembic 標準模板）、`versions/0001_initial.py`（建 `items` 表 + `ix_items_name` index，upgrade / downgrade 對稱）。
+
+`tests/`：`conftest.py.j2`（先 `os.environ.setdefault` seed JWT / DB URL、再 import app，pytest_asyncio fixture 建 in-memory sqlite + `Base.metadata.create_all` / drop_all、httpx `AsyncClient + ASGITransport`）、`test_health.py`、`test_items.py`（CRUD round-trip + 404 negative）。
+
+`deploy/helm/`：`Chart.yaml.j2`、`values.yaml.j2`（replicaCount=2、probes 指 `/api/v1/health`、securityContext.runAsUser=10001 + readOnlyRootFilesystem + drop ALL capabilities）、`templates/deployment.yaml.j2` / `service.yaml.j2` / `ingress.yaml.j2`（Helm `{{ ... }}` 語法用 `{{ '{{' }}`/`{{ '}}' }}` 轉義在 Jinja 層，render 後還原為 Helm 原生 template 語法，可被 helm lint 消化）。
+
+`scripts/dump_openapi.py.j2`：byte-for-byte 同 OmniSight 自己 `scripts/dump_openapi.py` 的 N3 contract — 離線 `create_app().openapi()` → JSON、`--check` 模式 on-disk 比對 drift 非 0 exit、`sort_keys=True` 保證 diff 穩定。
+
+**3. `backend/fastapi_scaffolder.py`（~450 行，新檔）**
+
+- `ScaffoldOptions`（project_name / package_name / database / auth / deploy / compliance / platform_profile 7 個 knobs、`validate()` 鎖閉合值域、`resolved_package_name()` 吃 explicit 或 fallback slug）
+- `_derive_package_name(project_name)`（slugify：lowercase + 非 alphanum → `_`、leading digit 加 `app_` prefix、空字串 fallback `app`）
+- `render_project(out_dir, options, overwrite=True)`：scan `_SCAFFOLDS_DIR`，每個檔 (a) 計算 rendered relpath（`.j2` 脫副檔名、`src/app/` → `src/<pkg>/`）、(b) `_should_skip` 依 knob 過濾（auth=none 跳 security.py、deploy=docker 跳 `deploy/helm/`、deploy=helm 跳 Dockerfile + docker-compose、compliance=off 跳 spdx.allowlist.json）、(c) Jinja StrictUndefined render 或 byte-for-byte copy，回 `RenderOutcome` 含 files_written / bytes / warnings / package_name / profile_binding。
+- `dry_run_build(out_dir, options)`：deploy=docker/both 時建 `DockerImageAdapter` 跑 `_validate_source`（等同「有 Dockerfile 嗎」）+ `resolve_image_uri`；deploy=helm/both 時建 `HelmChartAdapter` 跑 `_validate_source(source.manifest=out_dir/deploy/helm)`；另外驗 `scripts/dump_openapi.py` 存在且含 `--check` flag，回 `{docker, helm, openapi_dump, package_name}` 平鋪 dict。
+- `pilot_report(out_dir, options)`：把 X0 profile 名、X1 pyproject 內正則抽出的 `--cov-fail-under=<n>`、X3 dry_run_build、X4 `software_compliance.run_all`（`ecosystem=None` 讓 `detect_ecosystem` 自動跑，不寫死 python）聚合成一份 JSON-safe dict，shape `{skill, out_dir, options, x0_profile, x1_coverage_floor, x3_build, x4_compliance}`。
+- `validate_pack()`：封裝 `skill_registry.validate_skill("skill-fastapi")`，回 installed / ok / issues / artifact_kinds，供 CLI 與測試用。
+
+**4. 測試（57 cases 全 pass，`backend/tests/test_skill_fastapi.py`）**
+
+- `TestSkillPackRegistry` × 7：pack 出現在 `list_skills`、`validate_skill` ok=True、5 件 artifact_kinds 全宣告、CORE-05 相依釘住、keywords 含 pilot/x5/fastapi 等 marker、`validate_pack()` helper、skill dir 解析。
+- `TestDerivePackageName` × 6：hyphen → underscore、大寫 → 小寫、數字開頭加 `app_`、全非字母 fallback `app`、空字串 fallback、snake_case 保持。
+- `TestScaffoldOptions` × 9：預設 validate、bad database/auth/deploy 拒收、空 project_name 拒收、explicit package_name 贏過 slug、`builds_docker()` / `builds_helm()` 對 3 個 deploy 值正確。
+- `TestRenderOutcome` × 9：33 份必要檔全渲染（含 3 個 helm templates）、auth=none 跳 security.py、deploy=docker 跳 helm、deploy=helm 跳 Dockerfile、compliance=off 跳 spdx、database=sqlite/postgres 各自指紋在 `.env` / docker-compose、idempotent re-render、overwrite=False 產 `skipped existing` warning。
+- `TestRenderedCode` × 4：src 全樹 compileall、conftest.py + alembic/env.py + scripts/dump_openapi.py 各自 compile。
+- `TestX0PlatformBinding` × 2：linux-x86_64-native 解析 target_kind=software、outcome.profile_binding 對齊。
+- `TestX1CoverageThreshold` × 3：pyproject 釘 `--cov-fail-under=80`、`asyncio_mode = "auto"`、httpx dev 依賴在。
+- `TestX2RoleAlignment` × 4：config 用 pydantic_settings、runtime 包沒有 bare `os.environ[...]` / `os.environ.get(...)`（conftest 被 allow-list）、db.py 含 `create_async_engine` + `async_sessionmaker` + `get_db`、logging.py 用 `JsonFormatter`。
+- `TestX3DockerAdapter` × 2：`DockerImageAdapter._validate_source` 吃下 rendered tree、dry_run_build deploy=docker 單邊 report。
+- `TestX3HelmAdapter` × 3：`HelmChartAdapter._validate_source(manifest=deploy/helm)` 吃下 Chart.yaml、deploy=helm 單邊 report、deploy=both 兩邊都 pass。
+- `TestX4Compliance` × 2：spdx allowlist 預設 deny GPL/AGPL + allow Apache/MIT、pilot_report 的 x4 bundle 有 license/cve/sbom 三個 gate。
+- `TestN3OpenApiGovernance` × 4：dump_openapi.py 在、含 `--check` + `create_app` + `.openapi()`、`from <pkg>.main import create_app` 用 rendered package 名、dry_run_build 的 openapi_dump flag 全 True。
+- `TestPilotReport` × 2：shape 對齊（skill / x0 / x1 / x3 / x4 5 個頂層 key）、json.dumps 不炸。
+
+**Regression 檢驗**：`test_build_adapters` + `test_skill_nextjs` + `test_software_simulator` = 208 cases 全 pass，零回歸。
+
+### 修改檔案
+
+- **新增** `configs/skills/skill-fastapi/skill.yaml`（87 lines）
+- **新增** `configs/skills/skill-fastapi/SKILL.md`（65 lines）
+- **新增** `configs/skills/skill-fastapi/tasks.yaml`（127 lines，10 tasks）
+- **新增** `configs/skills/skill-fastapi/tests/test_definitions.yaml`（3 suites、17 entries）
+- **新增** `configs/skills/skill-fastapi/hil/recipes.yaml`（3 recipes）
+- **新增** `configs/skills/skill-fastapi/docs/integration_guide.md`（render + N3 wiring）
+- **新增** `configs/skills/skill-fastapi/scaffolds/**`（34 份 scaffold：pyproject / Dockerfile / docker-compose / Makefile / src/app × 13 / alembic × 3 / tests × 4 / scripts × 1 / deploy/helm × 5 + 靜態副本）
+- **新增** `backend/fastapi_scaffolder.py`（~450 lines）
+- **新增** `backend/tests/test_skill_fastapi.py`（57 cases）
+- **改動** `TODO.md`（X5 六項全 `[x]`）
+- **改動** `HANDOFF.md`（本段）
+- **改動** `README.md`（X5 pilot 記錄 + Priority X 行補 X5）
+
+### 設計取捨
+
+- **為什麼 mirror SKILL-NEXTJS 而不另起 software pilot 慣例**：C5 skill framework 的每一個層面（manifest / artifact_kinds / tasks.yaml DAG / hil recipes / dry_run helpers）已經被 D1 / D29 / W6 三次驗證；X5 若另立新 layout 等於讓下游 X6-X9（Go / Rust / Tauri / Spring Boot）各自重新發明結構。共用 shape 讓 `validate_pack()` / CLI lister / HMI pack browser 一套邏輯打通。
+- **`src/app/` 固定目錄 + render-time rename，而不是 Jinja 內套路徑插值**：Jinja2 檔案 loader 走 FileSystemLoader，模板選取吃的是檔名而非可變路徑；若路徑用 `{{ package_name }}/...` 就要手動 walk + 手動算目的地，等於把 Jinja 的 benefit 丟掉。固定 `src/app/` 當 scaffold 一部分、在 `render_project` 裡一次性 `_rewrite_package_path` 取代，邏輯集中、測試好打（`TestDerivePackageName` 專 cover slug）。
+- **package_name slug 加 `app_` prefix 而不是拒收數字開頭**：PyPI 規則允許數字開頭（`7zip`），但 Python import statement 不允許（`import 7zip` 是 syntax error）。Scaffolder 生的是 import 得到的套件名，prefix 是最小侵入的修補；若 raise 反而逼使用者重新跑 CLI，差勁 UX。
+- **Helm template 的 `{{ }}` 用 `{{ '{{' }}` 轉義**：Jinja + Helm 都用 `{{ ... }}` 語法，渲染時必定 collision。`{% raw %}{% endraw %}` 也能解，但整段 raw 會讓 Jinja 完全不插值；我們需要在 `image: {{ project_name }}:{{ version }}` 這種同行混插（前者 Jinja、後者 Helm）有可能出現，所以每個 Helm token 個別轉義較保守、測試 `assert '{{ .Release.Name }}' in dep` 釘住輸出正確。
+- **`create_app()` app factory vs. module-level `app = FastAPI()`**：兩個理由——（1）pytest 每個 test 用 isolated app instance，避免 lifespan 在上個 test 結束時殘留 engine；（2）`scripts/dump_openapi.py` 要能離線跑 — `app.openapi()` 不需要 lifespan、但 module-level `app` 會在 import 時就 trigger `Settings()` 載入 .env，這在 CI 沒 .env 的第一次 lint job 會炸。factory 模式讓 schema 抽取比 lifespan 執行更鬆耦合。
+- **`os.environ.setdefault` 在 conftest.py 被 allow-list**：X2 role anti-pattern 是「runtime 直接讀 os.environ」—— 但 test bootstrapping 必須在 `from <pkg>.main import create_app` 之前把 `DATABASE_URL` / `JWT_SECRET` 先 seed 好，否則 pydantic-settings 會去讀 `.env`（test 不應該依賴 tester 家目錄的 .env）。allow-list 策略：`test_no_bare_os_environ_reads_in_runtime` 只掃 `src/<pkg>/`，不掃 `tests/` —— runtime 包永遠乾淨、test setup 可以 seed。這跟 backend-python role 文件第 28 行「絕對不直接讀 os.environ」的意圖一致（role 講的是 runtime，不是 test bootstrap）。
+- **`compliance.run_all(ecosystem=None)` 讓 X4 自動偵測**：若強制 `ecosystem="python"`，`detect_ecosystem` 就被繞過，之後如果 X4 升級加了「多語言混合專案分 scope 掃」的新 behaviour，X5 的 pilot_report 會看不到。保留 `None` 契約讓 X4 的 auto-detect 永遠有效；測試只檢驗三個 gate（license/cve/sbom）在 bundle 裡、不釘具體 verdict（CI runner 裝不裝 trivy 無法控），這樣 smoke 在乾淨 container 與有工具 runner 都能綠。
+- **`auth=none` 整檔不 render，而不是 render 後內容空掉**：空檔 + `from <pkg>.core.security import *` 的 downstream 會 silent 過，反而讓專案 grow 起來還維持 security.py 這個假檔，混淆 reader。完全不 render + 其他 module 不 import 它 = lint 不抱怨 + ls 一眼看到「這個專案沒接入 auth」，explicit > implicit。
+- **`deploy` knob 用 string 三擇一而不是 bool 兩個 flag**：`{docker: bool, helm: bool}` 會允許 `{False, False}` 這個無意義狀態；`"docker"|"helm"|"both"` 的 closed enum 天生排除該邊緣、也讓 HMI / CLI 的 UI 可用 radio button 而非兩個 checkbox。
+- **Helm chart 把 readOnlyRootFilesystem + non-root user 10001 寫死**：和 Dockerfile 的 `USER app(10001)` 配對，避免 image / chart drift（image 跑 non-root、chart 卻允許 root，或反之，都是常見 misconfiguration）。10001 是 backend-python role 建議值，和 OmniSight 自己 backend Dockerfile 一致。
+- **`pytest --cov-fail-under=80` 釘在 pyproject，而不是 CI 設定**：專案離開我們之後，CI pipeline 可能被客戶改掉、但 pyproject 是專案 source of truth。X1 `COVERAGE_THRESHOLDS["python"]=80` 是 framework-level 底線，複製到每個生成出來的 skill 專案的 pyproject，就算他們把 `.github/workflows/ci.yml` 換成 CircleCI 也不會被削掉。
+- **dump_openapi.py 把 `.openapi()` 結果 `json.dumps(..., sort_keys=True)`**：OpenAPI schema 在不同 Pydantic 版本、甚至不同 python hash seed 下會有 property 順序波動；`sort_keys=True` 讓 `--check` 的 byte-for-byte 比對不被順序漂移騙出 false positive。N3 governance 本來就這樣做，scaffold 只是複製同一個紀律。
+
+### 未來工作項目
+
+X5 完成後，X6-X9 四個 skill pack 可以平行展開：
+- **X6 SKILL-GO-SERVICE (#302)**：Gin / Fiber 骨架、`goreleaser` multi-platform release；X3 adapter 已有 `goreleaser` hook。
+- **X7 SKILL-RUST-CLI (#303)**：Clap + anyhow + tokio、`cargo-dist` multi-platform；X3 adapter 已有 `cargo-dist` hook。
+- **X8 SKILL-DESKTOP-TAURI (#304)**：Tauri 2.x + 前端整合；X3 adapter 已有 `electron-builder` 類比，Tauri 另接。
+- **X9 SKILL-SPRING-BOOT (#305)**：Spring Boot 3 + Flyway + JUnit 5；X1 Java runner 已打過一次。
+
+另外 X5 落地後打開一個小跟進：SKILL-FASTAPI 的 HIL recipe（`helm-install-smoke`）需要 kind cluster 才能跑，後續可與 P13 (operator 的 k8s playground) 整合當 demo；不在 X5 scope 內、列在 deferred work。

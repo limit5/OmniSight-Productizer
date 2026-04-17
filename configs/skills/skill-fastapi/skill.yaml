@@ -1,0 +1,84 @@
+# X5 #301 — SKILL-FASTAPI manifest.
+#
+# First software-vertical skill pack — the pilot that validates the
+# X0-X4 framework end-to-end (same pilot pattern D1 SKILL-UVC applied
+# to C5, D29 SKILL-HMI-WEBUI applied to C26, and W6 SKILL-NEXTJS
+# applied to W0-W5). Dogfoods OmniSight's own FastAPI backend stack
+# so generated skill packs consume the same toolchain we already
+# operate in production.
+#
+# Exercise:
+#   * X0  target_kind=software profile schema        (configs/platforms/linux-x86_64-native.yaml)
+#   * X1  pytest / coverage / benchmark gates        (backend/software_simulator.py, python threshold 80%)
+#   * X2  backend-python role default                (configs/roles/software/backend-python.skill.md)
+#   * X3  docker + helm build adapters               (backend/build_adapters.py DockerImageAdapter / HelmChartAdapter)
+#   * X4  SPDX license scan / CVE / SBOM             (backend/software_compliance/)
+#
+# Scaffolds under `scaffolds/` produce a production-ready FastAPI
+# project: pydantic-settings config, SQLAlchemy 2.x async ORM,
+# Alembic migrations, uvicorn ASGI, pytest + httpx AsyncClient,
+# multi-stage Dockerfile, docker-compose for local dev, and a Helm
+# chart skeleton for k8s deploy. The per-project `scripts/dump_openapi.py`
+# is byte-for-byte contract-compatible with OmniSight's N3 OpenAPI
+# governance (offline `app.openapi()` → JSON + `--check` drift gate).
+
+schema_version: 1
+name: skill-fastapi
+description: >
+  FastAPI 0.110+ pilot skill pack. Generates a production-ready
+  Python 3.11+ backend service with Pydantic v2, SQLAlchemy 2.x async
+  ORM, Alembic migrations, uvicorn ASGI, pytest + httpx test
+  harness, 80% coverage gate aligned with X1 software simulate-track,
+  multi-stage Dockerfile, docker-compose for local dev, Helm chart
+  for k8s, and offline OpenAPI dump wired into N3 contract governance.
+  Validates the X0-X5 software framework end-to-end (first software
+  skill, dogfoods OmniSight's own FastAPI stack).
+version: "1.0.0"
+author: "OmniSight Productizer"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - fastapi
+  - python
+  - python-3.11
+  - pydantic
+  - pydantic-v2
+  - sqlalchemy
+  - alembic
+  - uvicorn
+  - pytest
+  - httpx
+  - coverage
+  - docker
+  - docker-compose
+  - helm
+  - openapi
+  - n3-governance
+  - spdx
+  - pilot
+  - x5
+  - dogfood
