@@ -881,3 +881,285 @@ def test_idempotency_full_rerun_announces_support_in_error_copy():
         "the error-path cleanup banner must mention idempotency so users "
         "know a clean re-run is safe (it doesn't corrupt state)"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# L9 — Configurable domain + API subdomain + tunnel name
+# ──────────────────────────────────────────────────────────────────────
+# Contract: users running staging + prod on the same CF account, or users
+# who simply don't want to use the `sora-dev.app` default, must be able to
+# override all three knobs via environment variables WITHOUT forking the
+# script. The knobs:
+#   - OMNISIGHT_DOMAIN        (primary FQDN, default sora-dev.app)
+#   - OMNISIGHT_API_SUBDOMAIN (single label, default api)
+#   - OMNISIGHT_TUNNEL_NAME   (CF tunnel name, default omnisight-prod)
+# And: invalid values must fail FAST (before LOG_FILE init is fine, but
+# before any Docker / CF API calls) with a clear error — otherwise a typo
+# like `OMNISIGHT_DOMAIN=https://foo.com` produces a cryptic CF 404 ~40s
+# into the run.
+
+
+def test_domain_env_override_source_guard():
+    """All three knobs must use the `${VAR:-default}` pattern so an unset or
+    empty env var falls back to the baked-in default.
+    """
+    content = SCRIPT.read_text()
+    assert 'DOMAIN="${OMNISIGHT_DOMAIN:-sora-dev.app}"' in content, (
+        "DOMAIN must honor OMNISIGHT_DOMAIN env with sora-dev.app default"
+    )
+    assert 'API_SUBDOMAIN="${OMNISIGHT_API_SUBDOMAIN:-api}"' in content, (
+        "API_SUBDOMAIN must be env-overridable via OMNISIGHT_API_SUBDOMAIN"
+    )
+    assert 'TUNNEL_NAME="${OMNISIGHT_TUNNEL_NAME:-omnisight-prod}"' in content, (
+        "TUNNEL_NAME must be env-overridable via OMNISIGHT_TUNNEL_NAME"
+    )
+
+
+def test_validators_exist_for_all_three_knobs():
+    """Each configurable knob has a validator that fires before any
+    side-effecting work. The validator names are load-bearing — they're
+    called by name from the main flow, so a rename without updating the
+    call site would silently skip validation.
+    """
+    content = SCRIPT.read_text()
+    assert "_validate_domain()" in content
+    assert "_validate_api_subdomain()" in content
+    assert "_validate_tunnel_name()" in content
+    # And each one must be called against its knob
+    assert '_validate_domain "$DOMAIN"' in content
+    assert '_validate_api_subdomain "$API_SUBDOMAIN"' in content
+    assert '_validate_tunnel_name "$TUNNEL_NAME"' in content
+    # Whitespace-strip on every knob — users paste with trailing spaces
+    assert '_strip_ws "$DOMAIN"' in content
+    assert '_strip_ws "$API_SUBDOMAIN"' in content
+    assert '_strip_ws "$TUNNEL_NAME"' in content
+
+
+def test_help_documents_env_vars():
+    """`--help` must list all 3 env vars with their defaults so users don't
+    need to read the script source to discover them.
+    """
+    r = subprocess.run(
+        [str(SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert r.returncode == 0
+    assert "OMNISIGHT_DOMAIN" in r.stdout, "help must name OMNISIGHT_DOMAIN"
+    assert "OMNISIGHT_API_SUBDOMAIN" in r.stdout
+    assert "OMNISIGHT_TUNNEL_NAME" in r.stdout
+    # Defaults must be explicit
+    assert "sora-dev.app" in r.stdout
+    assert "omnisight-prod" in r.stdout
+    # A usage example should be present so users know the expected syntax
+    assert "OMNISIGHT_DOMAIN=" in r.stdout
+
+
+def test_deployment_banner_prints_resolved_values():
+    """Banner shows effective DOMAIN / API subdomain / tunnel name BEFORE
+    any Docker/CF work — this is the "last chance to Ctrl-C" checkpoint.
+    Guard two paths: defaults (prints hint) and custom (no hint).
+    """
+    # Default path: banner shows sora-dev.app + the "all defaults" hint.
+    r_default = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    # --dry-run may return 0 or 1 depending on preflight, but the banner
+    # fires before preflight.
+    assert "部署設定" in r_default.stdout, (
+        f"banner missing on default run:\n{r_default.stdout[-800:]}"
+    )
+    assert "Domain:        sora-dev.app" in r_default.stdout
+    assert "API subdomain: api.sora-dev.app" in r_default.stdout
+    assert "Tunnel name:   omnisight-prod" in r_default.stdout
+    assert "全部為預設值" in r_default.stdout, (
+        "default-values hint must fire when no env vars are set"
+    )
+
+    # Custom path: banner reflects overrides + no "all defaults" hint.
+    r_custom = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            **os.environ,
+            "OMNISIGHT_DOMAIN": "app.example.com",
+            "OMNISIGHT_TUNNEL_NAME": "omnisight-staging",
+        },
+    )
+    assert "Domain:        app.example.com" in r_custom.stdout
+    assert "API subdomain: api.app.example.com" in r_custom.stdout
+    assert "Tunnel name:   omnisight-staging" in r_custom.stdout
+    # No "all defaults" hint when at least one override is set
+    assert "全部為預設值" not in r_custom.stdout
+
+
+@pytest.mark.parametrize(
+    "env,expected_err_snippet",
+    [
+        # URL pasted as domain — the most common paste-error
+        ({"OMNISIGHT_DOMAIN": "https://foo.com"}, "OMNISIGHT_DOMAIN 含無效字元"),
+        # Single-label hostname — CF would reject anyway but fail fast here
+        ({"OMNISIGHT_DOMAIN": "localhost"}, "OMNISIGHT_DOMAIN 格式無效"),
+        # Uppercase — CF normalizes but we reject for clarity
+        ({"OMNISIGHT_DOMAIN": "SORA-DEV.APP"}, "必須全小寫"),
+        # API subdomain with a dot (two labels) → rejected as single-label only
+        ({"OMNISIGHT_API_SUBDOMAIN": "foo.bar"}, "OMNISIGHT_API_SUBDOMAIN 格式無效"),
+        # Tunnel name with a space — rejects via regex catch
+        ({"OMNISIGHT_TUNNEL_NAME": "bad name"}, "OMNISIGHT_TUNNEL_NAME 格式無效"),
+        # Tunnel name > 32 chars → length check fires
+        (
+            {"OMNISIGHT_TUNNEL_NAME": "x" * 33},
+            "OMNISIGHT_TUNNEL_NAME 超過 32 字元上限",
+        ),
+    ],
+)
+def test_invalid_env_values_rejected_with_clear_message(env, expected_err_snippet):
+    """Every invalid knob must exit non-zero with a per-knob diagnostic so
+    users know WHICH env var is wrong + WHY. Generic "invalid config" is not
+    enough — users will blame the wrong variable.
+    """
+    r = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={**os.environ, **env},
+    )
+    assert r.returncode != 0, (
+        f"invalid env {env} should reject, but script exited 0:\n{r.stdout[-500:]}"
+    )
+    # err() writes to stdout (tee), so check both streams.
+    combined = r.stdout + r.stderr
+    assert expected_err_snippet in combined, (
+        f"env {env} should emit {expected_err_snippet!r}, got:\n{combined[-500:]}"
+    )
+
+
+def test_whitespace_stripped_from_env_values():
+    """Paste-with-spaces is a silent bug magnet. `OMNISIGHT_DOMAIN=" foo.com "`
+    from a quoted value in a .env file must be stripped before validation —
+    otherwise the regex rejects a perfectly good domain.
+    """
+    r = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={**os.environ, "OMNISIGHT_DOMAIN": "  sora-dev.app  "},
+    )
+    # Must NOT reject — validation should see the stripped value.
+    assert "OMNISIGHT_DOMAIN 格式無效" not in r.stdout
+    assert "OMNISIGHT_DOMAIN 含無效字元" not in r.stdout
+    # Banner should show the stripped form (no leading/trailing spaces
+    # around "sora-dev.app").
+    assert "Domain:        sora-dev.app\n" in r.stdout, (
+        f"whitespace-stripped value should be echoed without extra spaces, "
+        f"got:\n{r.stdout[-500:]}"
+    )
+
+
+def test_domain_propagates_to_all_downstream_consumers():
+    """$DOMAIN must flow into every downstream consumer — NS probe, CF API
+    calls, CNAME values, GoDaddy walkthrough, final summary. A regression
+    that hardcodes any of these to `sora-dev.app` would break custom-domain
+    users silently (they'd deploy but https://<their-domain> would 404).
+    """
+    content = SCRIPT.read_text()
+    # Spot-check critical downstream sites use $DOMAIN (not a literal):
+    assert 'zones?name=${DOMAIN}' in content, "CF zone lookup must use $DOMAIN"
+    assert '"$DOMAIN" "${API_SUBDOMAIN}.${DOMAIN}"' in content, (
+        "CNAME loop must iterate both DOMAIN and API_SUBDOMAIN.DOMAIN"
+    )
+    assert 'dig +short +time=3 +tries=1 NS "$DOMAIN"' in content, (
+        "NS probe must use $DOMAIN"
+    )
+    assert "https://${DOMAIN}" in content, "final summary must print live URL"
+    # And no lingering literal `sora-dev.app` outside the default-assignment
+    # line + the --help + banner-hint contexts (which are allowed).
+    sora_refs = [ln for ln in content.splitlines() if "sora-dev.app" in ln]
+    # Allowed locations:
+    #   1. DOMAIN="${OMNISIGHT_DOMAIN:-sora-dev.app}" (the default)
+    #   2. --help copy block mentioning the default
+    #   3. error-message example "範例正確格式：sora-dev.app ..."
+    # No downstream consumer (CF API URL, CNAME body, banner echo) may
+    # reference the literal — they must read $DOMAIN.
+    forbidden = [
+        ln for ln in sora_refs
+        if "OMNISIGHT_DOMAIN:-sora-dev.app" not in ln
+        and "預設: sora-dev.app" not in ln
+        and "範例正確格式" not in ln
+        # Validator error messages cite sora-dev.app as an example of the
+        # expected format — not a downstream consumer.
+        and "需符合 FQDN 格式" not in ln
+    ]
+    assert not forbidden, (
+        f"sora-dev.app appears in downstream consumer(s) — should use "
+        f"$DOMAIN instead:\n" + "\n".join(forbidden)
+    )
+
+
+def test_validators_accept_common_valid_domains():
+    """Source the validators and exercise them against a realistic set of
+    valid domains. Behavioral test — catches regex regressions that pass
+    source-grep but would reject in practice.
+    """
+    import tempfile
+
+    # Extract the 3 validators + _strip_ws into a standalone harness.
+    src = SCRIPT.read_text()
+    # The block runs from _strip_ws() to the end of _validate_tunnel_name()
+    start = src.index("_strip_ws() {")
+    end = src.index("\n\n# Prompt for a secret", start)
+    block = src[start:end]
+
+    harness = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        set -uo pipefail
+        # Stub err() — the validators call it on reject.
+        err()  {{ echo "ERR $*" >&2; }}
+        {block}
+
+        # Positive cases — must accept
+        for d in "sora-dev.app" "app.example.com" "a.b.c.d" \
+                 "foo-bar.example.co.uk" "$(printf 'x%.0s' {{1..60}}).example.com"; do
+            _validate_domain "$d" || {{ echo "REJECTED_DOMAIN: $d"; exit 1; }}
+        done
+        for s in "api" "v2" "app" "a" "x-y"; do
+            _validate_api_subdomain "$s" || {{ echo "REJECTED_SUB: $s"; exit 1; }}
+        done
+        for t in "omnisight-prod" "omnisight_staging" "abc123" "x" "$(printf 'x%.0s' {{1..32}})"; do
+            _validate_tunnel_name "$t" || {{ echo "REJECTED_TUNNEL: $t"; exit 1; }}
+        done
+        echo "ALL_ACCEPT_OK"
+        """
+    ).format(block=block)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        f.write(harness)
+        path = f.name
+
+    try:
+        r = subprocess.run(
+            ["bash", path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0, (
+            f"positive validator harness failed:\n"
+            f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+        )
+        assert "ALL_ACCEPT_OK" in r.stdout
+    finally:
+        os.unlink(path)

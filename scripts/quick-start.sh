@@ -25,9 +25,16 @@ set -euo pipefail
 # a failing `docker compose up` isn't masked by the trailing pager commands.
 
 # ── 可設定參數 ──
+# All three values can be overridden via environment variables so users
+# running side-by-side clusters (e.g. staging + prod on one CF account) can
+# use distinct domains / subdomains / tunnel names without forking the
+# script. Empty string → fall back to default; whitespace is stripped before
+# validation so `OMNISIGHT_DOMAIN=" foo.com "` in a .env file doesn't break.
+# See _validate_domain / _validate_api_subdomain / _validate_tunnel_name
+# below — invalid values exit early at Step 0 with a clear diagnostic.
 DOMAIN="${OMNISIGHT_DOMAIN:-sora-dev.app}"
-API_SUBDOMAIN="api"
-TUNNEL_NAME="omnisight-prod"
+API_SUBDOMAIN="${OMNISIGHT_API_SUBDOMAIN:-api}"
+TUNNEL_NAME="${OMNISIGHT_TUNNEL_NAME:-omnisight-prod}"
 COMPOSE_FILE="docker-compose.prod.yml"
 BACKEND_PORT=8000
 FRONTEND_PORT=3000
@@ -53,6 +60,82 @@ warn() { echo -e "${YELLOW}⚠️${NC}  $*" | tee -a "$LOG_FILE"; }
 err()  { echo -e "${RED}❌${NC} $*" | tee -a "$LOG_FILE"; }
 step() { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n" | tee -a "$LOG_FILE"; }
 
+# Strip leading/trailing whitespace — users sometimes paste env values with
+# stray spaces (especially from copy-paste of dashboard snippets), and we
+# should silently tolerate that rather than emit a cryptic CF-API error.
+_strip_ws() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# Accept only valid FQDNs (lowercase letters/digits/hyphens, no scheme, no
+# path, at least one dot, ≤253 chars total, each label 1-63 chars, no leading
+# or trailing hyphen per RFC 1035). Rejects URLs, single-label hostnames, and
+# whitespace-riddled values — any of which would flow straight into CF API
+# calls + CNAME values and produce silent corruption 40 seconds into the run.
+_validate_domain() {
+    local d="$1"
+    [ -z "$d" ] && { err "OMNISIGHT_DOMAIN 不可為空"; return 1; }
+    if [ "${#d}" -gt 253 ]; then
+        err "域名長度超過 253 字元（RFC 1035 上限）：${d}"
+        return 1
+    fi
+    # No scheme / no slashes / no whitespace / no uppercase — catch the most
+    # common paste-errors first with a friendly message before the regex.
+    case "$d" in
+        *://*|*/*|*\ *|*$'\t'*)
+            err "OMNISIGHT_DOMAIN 含無效字元（不可包含 ://、/、或空白）：'${d}'"
+            err "  範例正確格式：sora-dev.app 或 app.example.com"
+            return 1
+            ;;
+    esac
+    if [ "$d" != "$(echo "$d" | tr '[:upper:]' '[:lower:]')" ]; then
+        err "OMNISIGHT_DOMAIN 必須全小寫：'${d}'"
+        return 1
+    fi
+    # RFC 1035-ish label regex; requires at least one dot so single-label
+    # values like `localhost` are rejected early (CF would reject them anyway
+    # but the error would land deep inside Step 4).
+    if ! [[ "$d" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]; then
+        err "OMNISIGHT_DOMAIN 格式無效：'${d}'"
+        err "  需符合 FQDN 格式（例：sora-dev.app、app.example.com），至少含一個 '.'"
+        return 1
+    fi
+    return 0
+}
+
+# API subdomain is a single DNS label (1-63 chars, [a-z0-9-], no leading/
+# trailing hyphen). Empty string is allowed via the `:-api` default earlier
+# but a user-provided override must still be a valid label.
+_validate_api_subdomain() {
+    local s="$1"
+    [ -z "$s" ] && { err "OMNISIGHT_API_SUBDOMAIN 不可為空"; return 1; }
+    if ! [[ "$s" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+        err "OMNISIGHT_API_SUBDOMAIN 格式無效：'${s}'（需為單一 DNS label，例：api、v2、app）"
+        return 1
+    fi
+    return 0
+}
+
+# CF tunnel names: letters, digits, hyphens, underscores — max 32 chars per
+# CF's dashboard UI. CF API is actually more permissive but we mirror the UI
+# so the tunnel shows up cleanly in the CF dashboard for the user.
+_validate_tunnel_name() {
+    local t="$1"
+    [ -z "$t" ] && { err "OMNISIGHT_TUNNEL_NAME 不可為空"; return 1; }
+    if [ "${#t}" -gt 32 ]; then
+        err "OMNISIGHT_TUNNEL_NAME 超過 32 字元上限：'${t}'"
+        return 1
+    fi
+    if ! [[ "$t" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        err "OMNISIGHT_TUNNEL_NAME 格式無效：'${t}'（僅允許字母、數字、連字號、底線）"
+        return 1
+    fi
+    return 0
+}
+
 # Prompt for a secret without echoing to screen. Falls back to plain read
 # when stdin isn't a TTY (e.g. CI) — there the caller feeds the value in
 # pre-redacted anyway.
@@ -73,9 +156,20 @@ for arg in "$@"; do
         --dry-run)  DRY_RUN=true ;;
         --uninstall) UNINSTALL=true ;;
         --help|-h)
-            echo "用法: $0 [--dry-run] [--uninstall]"
-            echo "  --dry-run    只檢查前置條件，不實際執行"
-            echo "  --uninstall  清除所有 OmniSight 容器、volumes、cloudflared"
+            cat <<EOF
+用法: $0 [--dry-run] [--uninstall]
+  --dry-run    只檢查前置條件，不實際執行
+  --uninstall  清除所有 OmniSight 容器、volumes、cloudflared
+
+環境變數（全部可選，用於覆寫預設值）：
+  OMNISIGHT_DOMAIN         對外主域名                   [預設: sora-dev.app]
+  OMNISIGHT_API_SUBDOMAIN  API 子網域（會變成 X.DOMAIN）[預設: api]
+  OMNISIGHT_TUNNEL_NAME    Cloudflare Tunnel 名稱        [預設: omnisight-prod]
+
+範例：
+  OMNISIGHT_DOMAIN=app.example.com \\
+      OMNISIGHT_TUNNEL_NAME=omnisight-staging $0
+EOF
             exit 0
             ;;
     esac
@@ -85,6 +179,28 @@ done
 mkdir -p "$(dirname "$LOG_FILE")"
 echo "OmniSight quick-start log — $(date)" > "$LOG_FILE"
 log "日誌輸出至：$LOG_FILE"
+
+# ── 覆寫參數驗證 + 設定摘要 ──
+# Runs after LOG_FILE exists so err() has somewhere to tee. Fails fast here
+# (before any Docker / CF work) so a typo like OMNISIGHT_DOMAIN=https://foo.com
+# doesn't produce a cryptic error 40 seconds in.
+DOMAIN="$(_strip_ws "$DOMAIN")"
+API_SUBDOMAIN="$(_strip_ws "$API_SUBDOMAIN")"
+TUNNEL_NAME="$(_strip_ws "$TUNNEL_NAME")"
+_validate_domain "$DOMAIN" || exit 1
+_validate_api_subdomain "$API_SUBDOMAIN" || exit 1
+_validate_tunnel_name "$TUNNEL_NAME" || exit 1
+
+# Echo the three knobs back so operators immediately see what they'll deploy.
+# This is the only place a mistyped OMNISIGHT_DOMAIN gets a second chance to
+# be caught by eyeballs before CF API side-effects kick in.
+echo -e "${BOLD}部署設定：${NC}" | tee -a "$LOG_FILE"
+echo "  Domain:        ${DOMAIN}" | tee -a "$LOG_FILE"
+echo "  API subdomain: ${API_SUBDOMAIN}.${DOMAIN}" | tee -a "$LOG_FILE"
+echo "  Tunnel name:   ${TUNNEL_NAME}" | tee -a "$LOG_FILE"
+if [ "${OMNISIGHT_DOMAIN:-}" = "" ] && [ "${OMNISIGHT_API_SUBDOMAIN:-}" = "" ] && [ "${OMNISIGHT_TUNNEL_NAME:-}" = "" ]; then
+    echo "  （全部為預設值；可透過 OMNISIGHT_DOMAIN / OMNISIGHT_API_SUBDOMAIN / OMNISIGHT_TUNNEL_NAME 覆寫，詳見 --help）" | tee -a "$LOG_FILE"
+fi
 
 # ── Ctrl+C 清理 ──
 _cleanup_on_exit() {
