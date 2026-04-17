@@ -225,13 +225,13 @@ app.add_middleware(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _PASSWORD_CHANGE_EXEMPT = {
     "/auth/change-password", "/auth/login", "/auth/logout",
-    "/auth/whoami", "/health",
+    "/auth/whoami", "/health", "/healthz", "/readyz",
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  I9 — Per-IP / per-user / per-tenant rate limiting
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_RATE_LIMIT_EXEMPT = {"/health", "/auth/login", "/auth/logout"}
+_RATE_LIMIT_EXEMPT = {"/health", "/healthz", "/readyz", "/auth/login", "/auth/logout"}
 
 
 @app.middleware("http")
@@ -459,7 +459,7 @@ async def _must_change_password_gate(request, call_next):
 # system).
 _BOOTSTRAP_EXEMPT_REL = {
     "/auth/login", "/auth/logout", "/auth/change-password",
-    "/healthz", "/health",
+    "/healthz", "/health", "/readyz",
 }
 # ``/cloudflare/*`` is exempt for L4 Step 3 — the wizard's Cloudflare
 # tunnel embed (B12 wizard) calls these endpoints before login. The
@@ -469,7 +469,7 @@ _BOOTSTRAP_EXEMPT_REL_PREFIXES = (
     "/cloudflare/",
 )
 _BOOTSTRAP_EXEMPT_RAW = {
-    "/", "/healthz", "/docs", "/openapi.json", "/redoc",
+    "/", "/healthz", "/readyz", "/docs", "/openapi.json", "/redoc",
     "/favicon.ico", "/robots.txt",
 }
 _BOOTSTRAP_EXEMPT_RAW_PREFIXES = (
@@ -508,7 +508,7 @@ def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
 # (so it becomes the outermost layer) — we want to count even requests
 # that the bootstrap gate would otherwise redirect, AND we want 503s
 # to short-circuit before any other middleware does real work.
-_GRACEFUL_SHUTDOWN_EXEMPT_RAW = {"/healthz", "/health"}
+_GRACEFUL_SHUTDOWN_EXEMPT_RAW = {"/healthz", "/health", "/readyz"}
 
 
 @app.middleware("http")
@@ -607,6 +607,10 @@ async def _security_headers(request, call_next):
 
 # Mount routers
 app.include_router(health.router, prefix=settings.api_prefix)
+# G1 #2 — `/healthz` (liveness) and `/readyz` (readiness) are mounted
+# at the server root so systemd / docker-compose / k8s / CF health
+# checks don't need to know about the API prefix.
+app.include_router(health.probe_router)
 app.include_router(agents.router, prefix=settings.api_prefix)
 app.include_router(tasks.router, prefix=settings.api_prefix)
 app.include_router(chat.router, prefix=settings.api_prefix)
