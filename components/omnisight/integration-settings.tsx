@@ -107,11 +107,15 @@ function SettingsSection({ title, integration, status, statusTestId, onTestResul
               : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
             }`}>
               {testResult.status === "ok" ? "Connected" : testResult.message || testResult.status}
-              {/* user / version are open-ended metadata on the integration
-                  probe response (unknown-typed); coerce to string before
-                  rendering so React's ReactNode contract stays satisfied. */}
+              {/* user / version / scopes are open-ended metadata on the
+                  integration probe response (unknown-typed); coerce to
+                  string before rendering so React's ReactNode contract
+                  stays satisfied. `scopes` lands here from the GitHub probe
+                  (B14 Part E row 240) so the operator can confirm the
+                  token carries the expected OAuth privileges. */}
               {testResult.user ? ` (${String(testResult.user)})` : null}
               {testResult.version ? ` — ${String(testResult.version)}` : null}
+              {testResult.scopes ? ` [scopes: ${String(testResult.scopes)}]` : null}
             </div>
           )}
         </div>
@@ -2581,7 +2585,12 @@ function TabStatusBadge({ status, testId, message }: {
 // standalone health check — so the CI/CD badge is driven purely by the
 // passive "configured" signal from `tabStatus.cicd`.
 const TAB_INTEGRATIONS: Record<"git" | "gerrit" | "webhooks" | "cicd", readonly string[]> = {
-  git: ["ssh"],
+  // B14 Part E row 240: each Git forge owns its own probe so the tab badge
+  // flips red whenever ANY forge probe fails (a stale GitHub token
+  // shouldn't be hidden by a working SSH key). The Git tab now dispatches
+  // three independent SettingsSections (SSH / GitHub / GitLab); each
+  // surfaces its own TEST button and routes the result back here.
+  git: ["ssh", "github", "gitlab"],
   gerrit: ["gerrit"],
   webhooks: ["jira", "slack"],
   cicd: [],
@@ -2950,19 +2959,69 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                     </div>
                   )
                 })()}
-                {/* Legacy scalar fallback fields */}
+                {/* SSH key falls back into the GIT REPOSITORIES section because
+                    its TEST button (`integration="ssh"`) probes the on-disk
+                    private key — the natural home alongside the credential
+                    registry. GitHub + GitLab settings live in their own
+                    sections below so each forge owns its TEST button. */}
                 <div className="pt-1.5 pb-0.5">
                   <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">Default Credentials (fallback)</span>
                 </div>
                 <SettingField label="SSH Key" value={getVal("git", "ssh_key_path")} onChange={v => setVal("git_ssh_key_path", v)} />
-                <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
-                <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
-                <SettingField label="GitLab URL" value={getVal("git", "gitlab_url", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
-                {/* B14 Part B rows 1-5: collapsible Multiple Instances sub-area
-                    — child pipes JSON token-maps into parent `dirty` on each
-                    mutation so SAVE & APPLY persists OMNISIGHT_*_TOKEN_MAP. */}
-                <MultipleInstancesSection setVal={setVal} />
               </SettingsSection>
+
+              {/* B14 Part E row 240: dedicated GITHUB section so the TEST
+                  button hits the GitHub `_test_github` probe (`GET /user`)
+                  and surfaces the resolved login + OAuth scopes alongside
+                  the saved token. Pre-row-240 the GitHub field shared the
+                  GIT REPOSITORIES section, whose TEST only exercised the
+                  SSH key — so a working GitHub token + a missing SSH key
+                  would render a misleading red dot, and a broken token
+                  could hide behind a green dot. Splitting fixes both. */}
+              <SettingsSection title="GITHUB" integration="github" onTestResult={recordProbeResult}>
+                <SettingField
+                  label="Token"
+                  value={getVal("git", "github_token", "github_token")}
+                  type="password"
+                  onChange={v => setVal("github_token", v)}
+                />
+                <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
+                  TEST calls <code>GET https://api.github.com/user</code> with this token and reports the resolved login + OAuth scopes.
+                </div>
+              </SettingsSection>
+
+              {/* GitLab needs URL + Token — TEST hits `_test_gitlab` which
+                  calls `GET /api/v4/version` against the configured base URL
+                  and surfaces the GitLab instance version (the canonical
+                  reachability + auth probe for self-managed deployments). */}
+              <SettingsSection title="GITLAB" integration="gitlab" onTestResult={recordProbeResult}>
+                <SettingField
+                  label="URL"
+                  value={getVal("git", "gitlab_url", "gitlab_url")}
+                  onChange={v => setVal("gitlab_url", v)}
+                />
+                <SettingField
+                  label="Token"
+                  value={getVal("git", "gitlab_token", "gitlab_token")}
+                  type="password"
+                  onChange={v => setVal("gitlab_token", v)}
+                />
+                <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
+                  TEST calls <code>GET {`{URL}`}/api/v4/version</code> and reports the GitLab instance version. URL defaults to <code>https://gitlab.com</code> when blank.
+                </div>
+              </SettingsSection>
+
+              {/* B14 Part B rows 1-5: collapsible Multiple Instances sub-area
+                  — child pipes JSON token-maps into parent `dirty` on each
+                  mutation so SAVE & APPLY persists OMNISIGHT_*_TOKEN_MAP.
+                  Lives below the per-forge sections because it spans both
+                  GitHub Enterprise and self-hosted GitLab; not wrapped in a
+                  SettingsSection because the multi-instance map already
+                  carries per-row TEST buttons and shouldn't masquerade as a
+                  single-probe section. */}
+              <div className="border border-[var(--border)] rounded-md px-3 py-2 -mt-1">
+                <MultipleInstancesSection setVal={setVal} />
+              </div>
             </TabsContent>
 
             {/* Tab 2 — Gerrit Code Review (settings + wizard entry).

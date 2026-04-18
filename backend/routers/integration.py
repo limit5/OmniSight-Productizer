@@ -1315,60 +1315,101 @@ async def _test_gerrit() -> dict:
 
 
 async def _test_github() -> dict:
+    # B14 Part E row 240: surface the OAuth scopes alongside the login so
+    # the operator can confirm the token has the privileges OmniSight needs
+    # (`repo`, `workflow`, …) without round-tripping to GitHub's UI. Scopes
+    # ride on the `X-OAuth-Scopes` response header, so we include `-D -` to
+    # capture headers and split on the blank line. Header parsing mirrors
+    # `_probe_github_token` so the two paths stay consistent.
     if not settings.github_token:
         return {"status": "not_configured", "message": "GitHub token not set"}
     proc = await asyncio.create_subprocess_exec(
-        "curl", "-s", "-H", f"Authorization: token {settings.github_token}",
+        "curl", "-s", "-D", "-",
+        "-H", f"Authorization: token {settings.github_token}",
         "https://api.github.com/user",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
+    raw = stdout.decode(errors="replace")
+    scopes = ""
+    body = raw
+    if "\r\n\r\n" in raw:
+        head, _, rest = raw.partition("\r\n\r\n")
+        while "\r\n\r\n" in rest and rest.lstrip().startswith("HTTP/"):
+            head, _, rest = rest.partition("\r\n\r\n")
+        for line in head.splitlines():
+            if line.lower().startswith("x-oauth-scopes:"):
+                scopes = line.split(":", 1)[1].strip()
+                break
+        body = rest
     try:
         import json
-        data = json.loads(stdout)
+        data = json.loads(body)
         if "login" in data:
-            return {"status": "ok", "user": data["login"]}
+            return {"status": "ok", "user": data["login"], "scopes": scopes}
         return {"status": "error", "message": data.get("message", "Unknown error")}
     except Exception:
         return {"status": "error", "message": "Invalid response from GitHub API"}
 
 
 async def _test_gitlab() -> dict:
+    # B14 Part E row 240 spec: `GET /api/v4/version` → display version. The
+    # version endpoint is the canonical "is this GitLab reachable + is my
+    # token valid" probe (it requires authentication on self-managed
+    # instances), and it returns the instance version which is more useful
+    # for diagnostics than the bare username.
     if not settings.gitlab_token:
         return {"status": "not_configured", "message": "GitLab token not set"}
-    base = settings.gitlab_url or "https://gitlab.com"
+    base = (settings.gitlab_url or "https://gitlab.com").rstrip("/")
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", "-H", f"PRIVATE-TOKEN: {settings.gitlab_token}",
-        f"{base}/api/v4/user",
+        f"{base}/api/v4/version",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
     try:
         import json
         data = json.loads(stdout)
-        if "username" in data:
-            return {"status": "ok", "user": data["username"]}
-        return {"status": "error", "message": data.get("message", "Unknown error")}
+        if isinstance(data, dict) and "version" in data:
+            result = {"status": "ok", "version": data["version"], "url": base}
+            if data.get("revision"):
+                result["revision"] = data["revision"]
+            return result
+        message = "Unknown error"
+        if isinstance(data, dict):
+            message = data.get("message") or data.get("error") or message
+        return {"status": "error", "message": message}
     except Exception:
         return {"status": "error", "message": "Invalid response from GitLab API"}
 
 
 async def _test_jira() -> dict:
+    # B14 Part E row 240 spec: `GET /rest/api/2/serverInfo` → display
+    # version. serverInfo carries `version` + `serverTitle` + `buildNumber`
+    # which is exactly what an operator wants to see when diagnosing a
+    # Jira link, and it works on Cloud and Server alike.
     if not settings.notification_jira_url or not settings.notification_jira_token:
         return {"status": "not_configured", "message": "Jira URL or token not set"}
+    base = settings.notification_jira_url.rstrip("/")
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s",
         "-H", f"Authorization: Bearer {settings.notification_jira_token}",
-        f"{settings.notification_jira_url}/rest/api/2/myself",
+        f"{base}/rest/api/2/serverInfo",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
     try:
         import json
         data = json.loads(stdout)
-        if "displayName" in data:
-            return {"status": "ok", "user": data["displayName"]}
-        return {"status": "error", "message": data.get("message", str(data)[:100])}
+        if isinstance(data, dict) and "version" in data:
+            result = {"status": "ok", "version": data["version"]}
+            if data.get("serverTitle"):
+                result["server_title"] = data["serverTitle"]
+            return result
+        message = "Unknown error"
+        if isinstance(data, dict):
+            message = data.get("message") or str(data)[:100]
+        return {"status": "error", "message": message}
     except Exception:
         return {"status": "error", "message": "Invalid response from Jira"}
 

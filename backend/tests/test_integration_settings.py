@@ -1859,3 +1859,122 @@ class TestGerritFinalize:
         assert _s.gerrit_ssh_port == 29419
         assert _s.gerrit_project == "project/new"
         assert _s.gerrit_enabled is True
+
+
+class TestConnectionResponseShape:
+    """B14 Part E row 240 — pin the per-forge probe response shapes that
+    the front-end Test Connection buttons rely on. Each probe goes through
+    the same dispatcher (``POST /system/test/<integration>``) but the
+    metadata it surfaces differs by forge:
+      - GitHub returns ``user`` (login) + ``scopes`` (X-OAuth-Scopes)
+      - GitLab returns ``version`` + optional ``revision``
+      - Jira   returns ``version`` + optional ``server_title``
+      - Gerrit returns ``version``
+    The Test Connection button renders these values inline, so a regression
+    that drops one of them silently degrades the operator UX.
+
+    Placed last in the module — TestGerritWebhookInfo's secret-rotation
+    tests are pre-existing-flaky against test ordering, so we keep our
+    new tests downstream of them to avoid disturbing the run order they
+    were written against. The flakiness is unrelated to this work; see
+    the test_generate_* docstrings for the underlying state assumption.
+    """
+
+    @pytest.mark.asyncio
+    async def test_github_probe_surfaces_login_and_scopes(self, client, monkeypatch):
+        """GitHub probe must produce both ``user`` (login) and ``scopes``
+        keys — even when scopes is empty — so the front-end can always
+        unconditionally render `(login) [scopes: ...]`."""
+        from backend.routers import integration as _i
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            class _Proc:
+                returncode = 0
+                async def communicate(self):
+                    body = (
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"X-OAuth-Scopes: repo, workflow\r\n"
+                        b"Content-Type: application/json\r\n"
+                        b"\r\n"
+                        b"{\"login\": \"octocat\"}"
+                    )
+                    return body, b""
+            return _Proc()
+
+        monkeypatch.setattr(_i.settings, "github_token", "ghp_dummy")
+        monkeypatch.setattr(
+            _i.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
+        )
+        resp = await client.post("/api/v1/system/test/github")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["user"] == "octocat"
+        assert data["scopes"] == "repo, workflow"
+
+    @pytest.mark.asyncio
+    async def test_gitlab_probe_surfaces_version(self, client, monkeypatch):
+        """GitLab probe must hit /api/v4/version (not /user) so the
+        operator sees the GitLab instance version after pressing TEST."""
+        from backend.routers import integration as _i
+
+        called_url = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            called_url["url"] = args[-1]
+
+            class _Proc:
+                returncode = 0
+                async def communicate(self):
+                    return b'{"version": "16.7.0", "revision": "abc1234"}', b""
+            return _Proc()
+
+        monkeypatch.setattr(_i.settings, "gitlab_token", "glpat_dummy")
+        monkeypatch.setattr(_i.settings, "gitlab_url", "https://gitlab.example.com/")
+        monkeypatch.setattr(
+            _i.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
+        )
+        resp = await client.post("/api/v1/system/test/gitlab")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["version"] == "16.7.0"
+        assert called_url["url"].endswith("/api/v4/version")
+        assert "/api/v4/user" not in called_url["url"]
+
+    @pytest.mark.asyncio
+    async def test_jira_probe_surfaces_version_via_server_info(
+        self, client, monkeypatch,
+    ):
+        """Jira probe must hit /rest/api/2/serverInfo (not /myself) so
+        the operator sees the Jira instance version after pressing TEST."""
+        from backend.routers import integration as _i
+
+        called_url = {}
+
+        async def _fake_create_subprocess_exec(*args, **kwargs):
+            called_url["url"] = args[-1]
+
+            class _Proc:
+                returncode = 0
+                async def communicate(self):
+                    return (
+                        b'{"version": "9.12.5", "serverTitle": "Acme Jira"}',
+                        b"",
+                    )
+            return _Proc()
+
+        monkeypatch.setattr(
+            _i.settings, "notification_jira_url", "https://jira.example.com",
+        )
+        monkeypatch.setattr(_i.settings, "notification_jira_token", "jira_dummy")
+        monkeypatch.setattr(
+            _i.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
+        )
+        resp = await client.post("/api/v1/system/test/jira")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["version"] == "9.12.5"
+        assert called_url["url"].endswith("/rest/api/2/serverInfo")
+        assert "/myself" not in called_url["url"]

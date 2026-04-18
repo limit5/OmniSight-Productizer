@@ -1326,17 +1326,93 @@ describe("IntegrationSettings — Part D tab split", () => {
    * token-map UI introduced in Part B. This lock-in test asserts all five
    * surfaces are reachable from the default (Git) tab without additional
    * navigation, so a future refactor can't silently demote any of them.
+   *
+   * B14 Part E row 240 update: GitHub + GitLab now live in dedicated
+   * SettingsSections (each with its own TEST button → `_test_github` /
+   * `_test_gitlab` probes), so the field-label assertions check for the
+   * new section-title brand + the simplified "Token" / "URL" field labels
+   * that live inside each section.
    */
   it("Git tab exposes GitHub token, GitLab token/URL, SSH key, and Multiple Instances (row 232)", async () => {
     render(<IntegrationSettings open={true} onClose={() => {}} />)
     // Git tab is the default — no user.click needed.
     await screen.findByRole("tab", { name: /GIT\b/ })
     expect(screen.getByText("SSH Key")).toBeTruthy()
-    expect(screen.getByText("GitHub Token")).toBeTruthy()
-    expect(screen.getByText("GitLab Token")).toBeTruthy()
-    expect(screen.getByText("GitLab URL")).toBeTruthy()
+    // Brand-named section titles host the per-forge fields. Each
+    // SettingsSection title renders inside the expand/collapse header
+    // button alongside its TEST button.
+    expect(screen.getByText("GITHUB")).toBeTruthy()
+    expect(screen.getByText("GITLAB")).toBeTruthy()
+    // Each forge section exposes its credential field. Multiple "Token"
+    // and "URL" labels exist (Gerrit tab is force-mounted), so we count
+    // rather than asserting uniqueness — GITHUB contributes a Token,
+    // GITLAB contributes a URL + Token.
+    expect(screen.getAllByText("Token").length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText("URL").length).toBeGreaterThanOrEqual(1)
     // MultipleInstancesSection header — the multi-repo token-map UI from Part B.
     expect(screen.getByText(/Multiple Instances/i)).toBeTruthy()
+  })
+
+  /**
+   * B14 Part E row 240 — every Git forge settings section must expose a
+   * Test Connection button that dispatches to the correct backend probe
+   * (`github` → `_test_github`, `gitlab` → `_test_gitlab`, `gerrit` →
+   * `_test_gerrit`, `jira` → `_test_jira`). Pre-row-240 GitHub + GitLab
+   * shared the GIT REPOSITORIES section whose only TEST exercised the
+   * SSH key, so a working GitHub token + a missing SSH key would render
+   * a misleading red dot. This test pins the new contract: each forge
+   * section calls `testIntegration("<forge>")` independently.
+   */
+  it("each Git forge section has its own TEST button wired to the right probe (row 240)", async () => {
+    const mockedTestIntegration = api.testIntegration as unknown as ReturnType<typeof vi.fn>
+    mockedTestIntegration.mockReset()
+    // GitHub probe → resolved login + scopes per Part E spec.
+    mockedTestIntegration.mockImplementation(async (kind: string) => {
+      if (kind === "github") {
+        return { status: "ok", user: "octocat", scopes: "repo, workflow" }
+      }
+      if (kind === "gitlab") {
+        return { status: "ok", version: "16.7.0", url: "https://gitlab.com" }
+      }
+      if (kind === "ssh") {
+        return { status: "not_configured", message: "SSH key not set" }
+      }
+      return { status: "error", message: `unexpected probe: ${kind}` }
+    })
+
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    await screen.findByRole("tab", { name: /GIT\b/ })
+
+    // Each SettingsSection renders its TEST control as a role="button"
+    // span inside the section header. There is one per integration prop
+    // (ssh / github / gitlab) on the Git tab, so getAllByText returns
+    // three elements. We click the GitHub one (index 1) and the GitLab
+    // one (index 2) and confirm the dispatcher called the right probe.
+    const testButtons = screen.getAllByText("TEST")
+    expect(testButtons.length).toBeGreaterThanOrEqual(3)
+
+    // GitHub section is the second SettingsSection on the Git tab
+    // (after GIT REPOSITORIES). Click its TEST → expect a github probe.
+    await user.click(testButtons[1])
+    await waitFor(() =>
+      expect(mockedTestIntegration).toHaveBeenCalledWith("github"),
+    )
+    // The probe response surfaces the login + scopes inline.
+    await waitFor(() =>
+      expect(screen.getByText(/octocat/)).toBeTruthy(),
+    )
+    expect(screen.getByText(/scopes: repo, workflow/)).toBeTruthy()
+
+    // GitLab section is the third SettingsSection. Click its TEST →
+    // expect a gitlab probe and the version surfaced inline.
+    await user.click(testButtons[2])
+    await waitFor(() =>
+      expect(mockedTestIntegration).toHaveBeenCalledWith("gitlab"),
+    )
+    await waitFor(() =>
+      expect(screen.getByText(/16\.7\.0/)).toBeTruthy(),
+    )
   })
 
   /**
