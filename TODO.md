@@ -253,7 +253,7 @@ Legend:
 >
 > 不碰 O 系列（O0-O10 全部不動）——只改 prompt 組裝層。
 
-- [ ] `backend/prompt_registry.py` 新增 `get_skill_metadata(path) -> dict`：回傳 `{name, description, trigger_condition, token_cost}` 不含完整 body
+- [x] `backend/prompt_registry.py` 新增 `get_skill_metadata(path) -> dict`：回傳 `{name, description, trigger_condition, token_cost}` 不含完整 body
 - [ ] `backend/prompt_registry.py` 新增 `get_skill_full(path) -> str`：回傳完整 skill content（按需呼叫）
 - [ ] `backend/prompt_loader.py` `build_system_prompt()` 改為兩階段：
   - [ ] Phase 1（啟動時）：只注入所有 skill 的 metadata list（~500 chars total vs 現在 ~50K chars）

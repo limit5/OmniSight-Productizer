@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +46,14 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_ROOT = _PROJECT_ROOT / "backend" / "agents" / "prompts"
+SKILLS_ROOT = _PROJECT_ROOT / "configs" / "skills"
+ROLES_ROOT = _PROJECT_ROOT / "configs" / "roles"
 CANARY_RATE_PCT = 5  # design-locked: 5%
+
+# B15 #350: Anthropic rule-of-thumb for token estimation (≈4 chars / token).
+# Used by get_skill_metadata() so operators can budget skill load-outs
+# without running the tokenizer.
+_CHARS_PER_TOKEN = 4
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -72,6 +80,170 @@ def _normalise_path(path: str) -> str:
     if p.suffix != ".md":
         raise PathRejected(f"prompt path must end .md, got {p.suffix!r}")
     return str(p.relative_to(_PROJECT_ROOT))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  B15 #350 — Skill Lazy Loading (metadata-only lookup)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _resolve_skill_path(path: str | Path) -> Optional[Path]:
+    """Resolve a skill identifier to its on-disk markdown file.
+
+    Accepts any of:
+      * bare skill name          → ``configs/skills/<name>/SKILL.md``
+      * relative/absolute path   → used directly if it exists
+      * directory path           → ``<dir>/SKILL.md`` if present
+
+    Returns ``None`` when nothing resolves (caller decides whether that's
+    an error — `get_skill_metadata` degrades gracefully, returns ``{}``).
+
+    Read-only: unlike `_normalise_path`, this does not enforce the
+    prompt-registry whitelist because metadata can be safely exposed for
+    any skill/role markdown shipped in the repo.
+    """
+    if not path:
+        return None
+    raw = str(path)
+    p = Path(raw)
+
+    # Absolute or relative to project root.
+    if p.is_absolute():
+        candidate = p
+    else:
+        # Bare name (single path segment, no extension) → try
+        # `configs/skills/<name>/SKILL.md` first.
+        if "/" not in raw and "\\" not in raw and p.suffix == "":
+            bare = SKILLS_ROOT / raw / "SKILL.md"
+            if bare.is_file():
+                return bare.resolve()
+        candidate = (_PROJECT_ROOT / p).resolve()
+
+    if candidate.is_dir():
+        nested = candidate / "SKILL.md"
+        if nested.is_file():
+            return nested.resolve()
+        return None
+    if candidate.is_file():
+        return candidate.resolve()
+    return None
+
+
+def _parse_frontmatter_text(text: str) -> tuple[dict, str]:
+    """Split ``text`` into (frontmatter_dict, body). Frontmatter is the
+    leading ``---\\n…\\n---`` YAML block; everything after is body.
+    Returns ``({}, text)`` when no frontmatter is present or yaml fails."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not match:
+        return {}, text
+    try:
+        import yaml
+        fm = yaml.safe_load(match.group(1)) or {}
+        if not isinstance(fm, dict):
+            fm = {}
+    except Exception as exc:
+        logger.warning("skill frontmatter parse failed: %s", exc)
+        fm = {}
+    body = text[match.end():]
+    return fm, body
+
+
+def _derive_trigger_condition(fm: dict, body: str) -> str:
+    """Pull the skill's trigger hint out of (a) frontmatter keys or
+    (b) the ``## When to use`` markdown section — whichever is present.
+    Empty string if neither exists (the skill hasn't declared one yet —
+    B15 TODO row 286 will backfill these).
+    """
+    for key in ("trigger_condition", "trigger", "when_to_use"):
+        val = fm.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, (list, tuple)) and val:
+            return " / ".join(str(x).strip() for x in val if str(x).strip())
+
+    # Fallback: scan markdown body for a "When to use" heading.
+    m = re.search(
+        r"(?im)^#{1,6}\s*when\s+to\s+use\b[^\n]*\n(.+?)(?=\n#{1,6}\s|\Z)",
+        body,
+        re.DOTALL,
+    )
+    if m:
+        section = m.group(1).strip()
+        if section:
+            # Truncate — trigger hint is not the whole section.
+            return section[:500] + ("…" if len(section) > 500 else "")
+    return ""
+
+
+def get_skill_metadata(path: str | Path) -> dict:
+    """B15 (#350) — return a skill's *advertising card* without paying
+    the token cost of loading its full body.
+
+    Keys returned (always present, may be empty):
+      * ``name``               — frontmatter ``name`` or file/dir stem
+      * ``description``        — frontmatter ``description`` (one-line)
+      * ``trigger_condition``  — when the agent should load this skill
+                                 (frontmatter ``trigger_condition`` /
+                                 ``trigger`` / ``when_to_use`` or the
+                                 ``## When to use`` markdown section)
+      * ``token_cost``         — rough token count of the *full* body
+                                 (chars ÷ 4, Anthropic rule of thumb)
+
+    Extra keys passed through when present: ``keywords``, ``version``,
+    ``path`` (absolute on-disk path as string).
+
+    Missing or unreadable files return ``{}`` — callers can treat this
+    as "skill unknown" without a try/except.
+    """
+    resolved = _resolve_skill_path(path)
+    if resolved is None:
+        return {}
+    try:
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("get_skill_metadata: read %s failed: %s", resolved, exc)
+        return {}
+
+    fm, body = _parse_frontmatter_text(text)
+
+    # OmniSight skill packs (configs/skills/<name>/) also ship a sibling
+    # `skill.yaml` manifest — merge it in as a fallback so metadata keys
+    # missing from SKILL.md frontmatter are filled from the manifest.
+    sibling_yaml = resolved.parent / "skill.yaml"
+    if sibling_yaml.is_file():
+        try:
+            import yaml
+            ydata = yaml.safe_load(sibling_yaml.read_text(encoding="utf-8")) or {}
+            if isinstance(ydata, dict):
+                for k, v in ydata.items():
+                    fm.setdefault(k, v)
+        except Exception as exc:
+            logger.warning("get_skill_metadata: skill.yaml parse failed for %s: %s",
+                           sibling_yaml, exc)
+
+    # Prefer explicit frontmatter name; fall back to parent dir name for
+    # configs/skills/<name>/SKILL.md, else the file stem.
+    name = fm.get("name") or ""
+    if not name:
+        if resolved.name.lower() == "skill.md":
+            name = resolved.parent.name
+        else:
+            name = resolved.stem.replace(".skill", "")
+
+    description = fm.get("description") or ""
+    if isinstance(description, str):
+        description = " ".join(description.split())  # collapse YAML folding
+
+    meta: dict = {
+        "name": str(name),
+        "description": str(description),
+        "trigger_condition": _derive_trigger_condition(fm, body),
+        "token_cost": max(1, len(body) // _CHARS_PER_TOKEN) if body else 0,
+        "path": str(resolved),
+    }
+    for passthrough in ("keywords", "version", "label", "label_en"):
+        if passthrough in fm:
+            meta[passthrough] = fm[passthrough]
+    return meta
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

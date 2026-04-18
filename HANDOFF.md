@@ -12148,3 +12148,48 @@ Part C TODO 字面把 row 221（entry button）跟 row 222-226（Step 1-5 互動
 
 ### 下一步
 - B14 Part C row 222（Step 1 — Test Connection）：在 wizard 內把 Step 1 列從 PENDING 換成 active form — 加 URL / SSH host / SSH port 三輸入欄 + `Test Connection` 按鈕；backend 端在 `backend/routers/integration.py` 加 `POST /api/v1/integration/gerrit/test` 接 SSH probe（`gerrit version`）+ REST `/config/server/version` fallback。這是 Part C 第一步 real-world I/O。也可以考慮把 wizard 內 `steps` array 抽出 component 根之外，讓後續 rows 可以把「互動式 step 元件」逐步接進 slot。
+
+---
+
+## 2026-04-18 — B15 row 256：`get_skill_metadata(path) -> dict`（Skill Lazy Loading 第一塊拼圖）
+
+### 範圍（嚴格 row-level）
+- **僅** B15 第一個 checkbox（TODO.md 第 256 列）：在 `backend/prompt_registry.py` 新增讀取-only 的 `get_skill_metadata(path) -> dict`，回傳 `{name, description, trigger_condition, token_cost}` 但**不包含完整 body**。這是 B15 progressive-disclosure（Google Android CLI + Skills 模式）的底層零件——讓後續 row 258（`build_system_prompt` 兩階段改造）可以用 metadata list 替掉 ~50K chars 的完整 skill 注入。
+- **沒**做：row 257（`get_skill_full`）、row 258（prompt_loader 兩階段）、row 261（ReAct `[LOAD_SKILL:]` 協議）、row 262（feature flag）、row 263（A/B 驗證）、row 264（metrics）。這些都要等 row 256 這個基礎 API 定型後才能接上去。
+- 不碰 O 系列（O0-O10 全部不動），不碰 DB schema，不碰 `_normalise_path` 的 prompt-registry 白名單——只加純函式 + 測試。
+
+### 做了什麼（檔案 × 變更）
+1. **`backend/prompt_registry.py`**（+~155 行）
+   - 新增 module-level 常數：`SKILLS_ROOT = configs/skills/`、`ROLES_ROOT = configs/roles/`、`_CHARS_PER_TOKEN = 4`（Anthropic rule-of-thumb token 估算）。
+   - 新增 `_resolve_skill_path(path)` 辅助：接受（a）裸名 `"skill-android"` → `configs/skills/skill-android/SKILL.md`、（b）絕對/相對路徑、（c）目錄路徑（自動補 `SKILL.md`），失敗回 `None`。刻意**不走** `_normalise_path` 白名單（prompt-registry 白名單是為 DB 寫入防護設計的，metadata 查詢是 read-only）。
+   - 新增 `_parse_frontmatter_text(text)`：切出 YAML frontmatter dict 與 body，yaml 解析失敗時 logger.warning 後降級回 `({}, text)`——不讓壞 frontmatter 炸掉 caller。
+   - 新增 `_derive_trigger_condition(fm, body)`：三層 fallback（frontmatter `trigger_condition` / `trigger` / `when_to_use` 任一鍵 → markdown body 的 `## When to use` section → 空字串）。支援 list/tuple frontmatter 值（用 ` / ` 串接）。section 內文截斷 500 字元避免 trigger hint 膨脹。
+   - 新增 **`get_skill_metadata(path) -> dict`**（公開 API）：
+     - 必回 key：`name` / `description` / `trigger_condition` / `token_cost` / `path`。
+     - 附加 key（frontmatter 有才輸出）：`keywords` / `version` / `label` / `label_en`。
+     - **sibling `skill.yaml` merge**：OmniSight 的 skill pack（如 `configs/skills/skill-android/`）同目錄有 `skill.yaml` 放 manifest，`SKILL.md` 只放 narrative。函式先讀 SKILL.md frontmatter，再用 `skill.yaml` `setdefault` 補齊缺漏鍵——讓 OmniSight 格式和 Anthropic 標準 frontmatter 格式都能吃。
+     - **body-free 契約**：回傳 dict **絕不包含完整 body**（這是整個 B15 Progressive Disclosure 的基本盤）。`token_cost` 用 `len(body) // 4` 估算——operator 可以在不跑 tokenizer 的情況下預算 skill load-out。
+     - **missing/unreadable 回 `{}`**：caller 不需要 try/except。
+2. **`backend/tests/test_prompt_registry.py`**（+~110 行，7 個新測試）
+   - `test_get_skill_metadata_parses_full_frontmatter`：完整 frontmatter（name / description / trigger_condition / keywords / version），驗證 `token_cost` 落在合理區間（~150-300 for 800-char body）。
+   - `test_get_skill_metadata_accepts_relative_path`：絕對路徑一樣可 resolve。
+   - `test_get_skill_metadata_falls_back_to_when_to_use_section`：frontmatter 沒 trigger 鍵時從 markdown `## When to use` section 拉出 trigger hint，且不污染 `## Other section` 內容。
+   - `test_get_skill_metadata_missing_file_returns_empty`：`""` 和 `"does-not-exist"` 都回空 dict。
+   - `test_get_skill_metadata_handles_missing_frontmatter`：純 markdown 無 frontmatter 時 name fallback 到父目錄名，`token_cost >= 1`。
+   - `test_get_skill_metadata_does_not_leak_body`：**契約保證測試**——植入 `SECRET_BODY_MARKER`+5000 chars 到 body，斷言 metadata 每個 value 都不含此字串。B15 整個節能優化的正當性基礎，若未來 refactor 誤把 body 放進回傳 dict 這個測試會馬上炸。
+   - `test_get_skill_metadata_ships_for_real_skill_android`：smoke test 針對 repo 內實際 `configs/skills/skill-android/SKILL.md`，驗證 resolver 在真實資料下能跑、且 sibling `skill.yaml` merge 真的把 description 填進來（SKILL.md 本身沒 frontmatter，description 只能從 skill.yaml 拉）。
+3. **`TODO.md`**：第 256 列 `- [ ]` → `- [x]`；257-264 仍 pending。
+4. **本 HANDOFF 條目**。
+
+### 設計刻意保守
+- **不擴 `_normalise_path` 白名單，加平行 `_resolve_skill_path`**：prompt-registry 白名單是為 DB 寫入防護設計的，把 `configs/skills/*` 加進去會讓 `register_active` 之類的 DB 寫入函式誤收 skill pack。平行 helper 保留各自的 blast radius——寫入仍然只能碰 `backend/agents/prompts/`，讀取 metadata 可以碰任何 skill markdown。
+- **sibling `skill.yaml` 用 `setdefault` 而非覆蓋**：SKILL.md frontmatter 優先，manifest 補漏。這樣 SKILL.md 若顯式宣告 trigger_condition 會蓋過 manifest——內容定義優於 manifest 是 Anthropic SKILL.md 生態的慣例。
+- **token_cost 用 `max(1, len//4)` 而不是 `len//4`**：非空 body 至少 1 token，避免短 skill（<4 chars）算出 0 造成 caller 的 sort/rank 行為怪異。
+- **刻意不做的事**：（a）沒加 LRU cache——skill 總數小（<50），檔案讀取 + YAML 解析在現代 SSD 上 <1ms，cache 會讓測試 monkeypatch `SKILLS_ROOT` 變麻煩；等 row 258 真的開始每次 ReAct loop 都掃 metadata 再加 cache 不遲。（b）沒加 schema validation（pydantic / jsonschema）——`dict` 回傳型別已足夠契約，schema 加進來就要 sync 到 B15 後續所有 consumer，現在引入是 premature coupling。（c）沒有暴露到 `/api/...` REST——row 258 會決定 metadata 是 server-only（prompt assembly 時用）還是要 expose 給前端 debug UI，過早開 endpoint 會鎖死設計。
+
+### 驗證
+- `backend/.venv/bin/python -m pytest backend/tests/test_prompt_registry.py backend/tests/test_prompt_registry_bootstrap.py -v` → 33 passed（26 舊 + 7 新）0 failed；既有 `_normalise_path` / `register_active` / `pick_for_request` / `evaluate_canary` / `promote_canary` / `bootstrap_from_disk` 全部不受影響。
+- Smoke script：`python -c "from backend import prompt_registry as pr; print(pr.get_skill_metadata('skill-android'))"` → 回傳包含 Android Kotlin 2.0 + Jetpack Compose 描述的 dict、token_cost=1379、path 指向 `configs/skills/skill-android/SKILL.md`。
+
+### 下一步
+- B15 row 257：`get_skill_full(path) -> str`——回傳**完整** SKILL.md body（按需呼叫）。要決定的契約點：（i）要不要一併包 frontmatter，還是只給 body？（ii）token_cost 超過某閾值要不要 warn？（iii）路徑 resolver 重用 row 256 的 `_resolve_skill_path`（推薦）。一旦 row 257 落地，row 258 的 `build_system_prompt()` 兩階段就可以開始設計——這是 B15 最大的變更點，會觸及 ReAct loop 的 prompt 組裝契約。
