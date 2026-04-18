@@ -167,7 +167,7 @@ Legend:
 
 **Part B — FUI 錯誤頁面（400/500 系列）**
 - [x] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
-- [ ] `app/error.tsx`（Client error boundary）：「發生錯誤」+ 重試按鈕 + 展開區：error.message + stack（prod 隱藏 stack）
+- [x] `app/error.tsx`（Client error boundary）：「發生錯誤」+ 重試按鈕 + 展開區：error.message + stack（prod 隱藏 stack）
 - [ ] `app/global-error.tsx`（Root layout crash）：最外層 fallback，minimal FUI 風格
 - [ ] `components/omnisight/error-page.tsx`：共用 FUI error 頁面元件，支援：
   - [ ] `code`（400/401/403/404/500/502/503）
