@@ -254,7 +254,7 @@ Legend:
 > 不碰 O 系列（O0-O10 全部不動）——只改 prompt 組裝層。
 
 - [x] `backend/prompt_registry.py` 新增 `get_skill_metadata(path) -> dict`：回傳 `{name, description, trigger_condition, token_cost}` 不含完整 body
-- [ ] `backend/prompt_registry.py` 新增 `get_skill_full(path) -> str`：回傳完整 skill content（按需呼叫）
+- [x] `backend/prompt_registry.py` 新增 `get_skill_full(path) -> str`：回傳完整 skill content（按需呼叫）
 - [ ] `backend/prompt_loader.py` `build_system_prompt()` 改為兩階段：
   - [ ] Phase 1（啟動時）：只注入所有 skill 的 metadata list（~500 chars total vs 現在 ~50K chars）
   - [ ] Phase 2（ReAct loop 中）：依 CATC `domain_context` + 使用者 prompt 自動匹配 → 載入相關 skill 完整內容
@@ -271,7 +271,7 @@ Legend:
 > 不碰既有程式碼——只新增/修改 `configs/roles/*.md` skill 檔案。
 
 **Part A — Cherry-pick 高價值 Role Skills（缺失補齊）**
-- [ ] `configs/roles/security-engineer.md`：從 agency-agents 的 Security Engineer 轉換——自動 security review（XSS / injection / auth bypass / CSP 違規 / secret 洩漏偵測）。整合 S2 系列 + PEP Gateway 使用
+- [x] `configs/roles/security-engineer.md`：從 agency-agents 的 Security Engineer 轉換——自動 security review（XSS / injection / auth bypass / CSP 違規 / secret 洩漏偵測）。整合 S2 系列 + PEP Gateway 使用
 - [ ] `configs/roles/code-reviewer.md`：從 agency-agents 的 Code Reviewer 轉換——通用 code review（非只 merge conflict）。review checklist + 效能 / 可讀性 / 安全性 / 測試覆蓋 4 維度評分。搭配 O6 Merger Agent 作為 pre-review 階段
 - [ ] `configs/roles/software-architect.md`：架構決策框架——trade-off 分析模板 + ADR（Architecture Decision Record）自動生成 + 技術債評估
 - [ ] `configs/roles/sre.md`：Site Reliability Engineer——incident response SOP + runbook 自動生成 + SLO/SLI 定義 + post-mortem 模板。搭配 R0 PEP + R1 ChatOps
