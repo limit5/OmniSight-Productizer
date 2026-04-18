@@ -122,6 +122,7 @@ async def get_settings(_user=Depends(_au.require_operator)):
         "webhooks": {
             "github_secret": "configured" if settings.github_webhook_secret else "",
             "gitlab_secret": "configured" if settings.gitlab_webhook_secret else "",
+            "gerrit_secret": "configured" if settings.gerrit_webhook_secret else "",
             "jira_secret": "configured" if settings.jira_webhook_secret else "",
         },
         "ci": {

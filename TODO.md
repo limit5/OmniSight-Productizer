@@ -231,7 +231,7 @@ Legend:
 - [x] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
   - [x] Tab 1「Git」：GitHub token + GitLab token/URL + SSH key + Multi-instance map
   - [x] Tab 2「Gerrit」：Gerrit Code Review 全部設定 + Setup Wizard 入口
-  - [ ] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示
+  - [x] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示
   - [ ] Tab 4「CI/CD」：GitHub Actions / Jenkins / GitLab CI 開關 + 設定
 - [ ] 每個 tab 頂部顯示 connection status badge（✅ connected / ⚠️ not configured / ❌ error）
 - [ ] 預估：**0.5 day**

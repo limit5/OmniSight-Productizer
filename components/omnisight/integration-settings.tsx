@@ -2523,6 +2523,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
     webhooks: (
       hasValue("webhooks", "github_secret", "github_webhook_secret") ||
       hasValue("webhooks", "gitlab_secret", "gitlab_webhook_secret") ||
+      hasValue("webhooks", "gerrit_secret") ||
       hasValue("webhooks", "jira_secret", "jira_webhook_secret") ||
       hasValue("jira", "url") ||
       hasValue("slack", "webhook")
@@ -2837,19 +2838,81 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             {/* Tab 3 — Webhook secrets + issue/notification integrations. Jira
                 and Slack land here because they are webhook-driven outbound
                 channels — keeping them with the inbound secrets avoids
-                scattering "webhook" URLs across multiple tabs. */}
+                scattering "webhook" URLs across multiple tabs.
+
+                B14 Part D row 234: every inbound webhook secret gets a
+                per-field status dot (green = configured / grey = empty) so an
+                operator can tell at a glance which forges are wired up
+                without squinting at the masked password field. Gerrit is
+                rendered as a READ-ONLY row with a "ROTATE IN WIZARD" action
+                — exposing a plaintext input would let users silently
+                overwrite a rotated secret and break Gerrit event signature
+                verification. */}
             <TabsContent value="webhooks" className="space-y-2 mt-0">
               <SettingsSection title="INBOUND WEBHOOK SECRETS">
-                {/* Gerrit webhook secret lives behind the Gerrit Setup Wizard
-                    (rotate-only via generate_gerrit_webhook_secret) and is
-                    intentionally not editable as a plain field here — exposing
-                    a plaintext input would let users overwrite a rotated
-                    secret and silently break Gerrit event verification. */}
-                <SettingField label="GitHub Secret" value={getVal("webhooks", "github_secret", "github_webhook_secret")} type="password" onChange={v => setVal("github_webhook_secret", v)} />
-                <SettingField label="GitLab Secret" value={getVal("webhooks", "gitlab_secret", "gitlab_webhook_secret")} type="password" onChange={v => setVal("gitlab_webhook_secret", v)} />
-                <SettingField label="Jira Secret" value={getVal("webhooks", "jira_secret", "jira_webhook_secret")} type="password" onChange={v => setVal("jira_webhook_secret", v)} />
+                {([
+                  { label: "GitHub Secret", category: "webhooks", field: "github_secret", dirtyKey: "github_webhook_secret" },
+                  { label: "GitLab Secret", category: "webhooks", field: "gitlab_secret", dirtyKey: "gitlab_webhook_secret" },
+                  { label: "Jira Secret", category: "webhooks", field: "jira_secret", dirtyKey: "jira_webhook_secret" },
+                ] as const).map(({ label, category, field, dirtyKey }) => {
+                  const configured = hasValue(category, field, dirtyKey)
+                  return (
+                    <div key={dirtyKey} className="flex items-center gap-2">
+                      <label
+                        className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1"
+                        data-testid={`webhook-secret-label-${dirtyKey}`}
+                      >
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${configured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`}
+                          title={badgeTitle(configured)}
+                          data-testid={`webhook-secret-dot-${dirtyKey}`}
+                        />
+                        {label}
+                      </label>
+                      <input
+                        type="password"
+                        value={getVal(category, field, dirtyKey)}
+                        onChange={e => setVal(dirtyKey, e.target.value)}
+                        placeholder={configured ? "••• configured •••" : "paste secret here"}
+                        data-testid={`webhook-secret-input-${dirtyKey}`}
+                        className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:border-[var(--neural-blue)]"
+                      />
+                    </div>
+                  )
+                })}
+                {(() => {
+                  const gerritConfigured = hasValue("webhooks", "gerrit_secret")
+                  return (
+                    <div className="flex items-center gap-2" data-testid="webhook-secret-row-gerrit">
+                      <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${gerritConfigured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`}
+                          title={badgeTitle(gerritConfigured)}
+                          data-testid="webhook-secret-dot-gerrit"
+                        />
+                        Gerrit Secret
+                      </label>
+                      <div className="flex-1 flex items-center gap-2">
+                        <span
+                          className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)]/50 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] select-none"
+                          data-testid="webhook-secret-status-gerrit"
+                        >
+                          {gerritConfigured ? "••• configured (rotate-only) •••" : "not configured"}
+                        </span>
+                        <button
+                          onClick={() => setGerritWizardOpen(true)}
+                          className="px-2 py-1 rounded font-mono text-[9px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors shrink-0"
+                          title="Gerrit webhook secret is rotate-only — open Setup Wizard Step 5"
+                          data-testid="webhook-secret-rotate-gerrit"
+                        >
+                          ROTATE IN WIZARD
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })()}
                 <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
-                  Gerrit webhook secret is rotated via the Setup Wizard (Step 5).
+                  Gerrit secret is never rendered in plaintext — rotating is one-way via the Setup Wizard (Step 5).
                 </div>
               </SettingsSection>
 

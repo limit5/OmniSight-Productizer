@@ -1340,6 +1340,108 @@ describe("IntegrationSettings — Part D tab split", () => {
   })
 
   /**
+   * B14 Part D row 234 — Tab 3 "Webhooks" must surface GitHub / GitLab /
+   * Gerrit / Jira inbound webhook secrets each with a per-field status
+   * indicator (green dot = configured / grey dot = empty). Gerrit is
+   * rotate-only — it appears as a read-only row with a "ROTATE IN WIZARD"
+   * CTA that opens the Gerrit Setup Wizard — never as a plaintext input,
+   * since overwriting a rotated secret silently breaks event signature
+   * verification. This lock-in test pins all four rows in place so a
+   * future refactor can't silently drop the status indicator or demote
+   * Gerrit's rotate-only contract.
+   */
+  it("Webhooks tab shows status indicators for all four secrets + rotate-only Gerrit row (row 234)", async () => {
+    // Backend reports two secrets configured (GitHub + Gerrit) so we can
+    // assert the green dot state for those rows and the grey dot state
+    // for the unconfigured ones (GitLab + Jira).
+    mockedGetSettings.mockResolvedValue({
+      webhooks: {
+        github_secret: "configured",
+        gitlab_secret: "",
+        gerrit_secret: "configured",
+        jira_secret: "",
+      },
+    })
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const webhooksTab = await screen.findByRole("tab", { name: /WEBHOOKS/ })
+    await user.click(webhooksTab)
+
+    // All four labels are on-tab (Gerrit joins the existing three).
+    await waitFor(() =>
+      expect(screen.getByText("GitHub Secret")).toBeTruthy(),
+    )
+    expect(screen.getByText("GitLab Secret")).toBeTruthy()
+    expect(screen.getByText("Jira Secret")).toBeTruthy()
+    expect(screen.getByText("Gerrit Secret")).toBeTruthy()
+
+    // Per-field status dots reflect the backend-reported "configured" state.
+    const emerald = "var(--validation-emerald)"
+    const githubDot = screen.getByTestId("webhook-secret-dot-github_webhook_secret")
+    const gitlabDot = screen.getByTestId("webhook-secret-dot-gitlab_webhook_secret")
+    const jiraDot = screen.getByTestId("webhook-secret-dot-jira_webhook_secret")
+    const gerritDot = screen.getByTestId("webhook-secret-dot-gerrit")
+    expect(githubDot.className).toContain(emerald)
+    expect(gerritDot.className).toContain(emerald)
+    expect(gitlabDot.className).not.toContain(emerald)
+    expect(jiraDot.className).not.toContain(emerald)
+
+    // GitHub / GitLab / Jira are editable password inputs; Gerrit is NOT.
+    expect(
+      (screen.getByTestId(
+        "webhook-secret-input-github_webhook_secret",
+      ) as HTMLInputElement).type,
+    ).toBe("password")
+    expect(
+      screen.queryByTestId("webhook-secret-input-gerrit_webhook_secret"),
+    ).toBeNull()
+
+    // The Gerrit row surfaces a rotate-only status span + wizard CTA.
+    expect(
+      screen.getByTestId("webhook-secret-status-gerrit").textContent,
+    ).toContain("configured")
+    const rotateBtn = screen.getByTestId("webhook-secret-rotate-gerrit")
+    expect(rotateBtn.textContent).toContain("ROTATE IN WIZARD")
+
+    // Clicking "ROTATE IN WIZARD" opens the Gerrit Setup Wizard (Step 1
+    // badge is the unambiguous proof that the wizard is now open).
+    await user.click(rotateBtn)
+    await waitFor(() =>
+      expect(screen.getByTestId("gerrit-wizard-step-1-badge")).toBeTruthy(),
+    )
+  })
+
+  /**
+   * B14 Part D row 234 — when Gerrit's webhook secret is unset, the row's
+   * status dot is grey and the status span reads "not configured". This
+   * isolates the empty-state rendering so a regression that always shows
+   * "configured" (e.g. a truthy-string bug) is caught.
+   */
+  it("Webhooks tab renders Gerrit row as 'not configured' when secret is empty (row 234)", async () => {
+    mockedGetSettings.mockResolvedValue({
+      webhooks: {
+        github_secret: "",
+        gitlab_secret: "",
+        gerrit_secret: "",
+        jira_secret: "",
+      },
+    })
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const webhooksTab = await screen.findByRole("tab", { name: /WEBHOOKS/ })
+    await user.click(webhooksTab)
+    await waitFor(() =>
+      expect(screen.getByText("Gerrit Secret")).toBeTruthy(),
+    )
+    expect(
+      screen.getByTestId("webhook-secret-status-gerrit").textContent,
+    ).toContain("not configured")
+    expect(
+      screen.getByTestId("webhook-secret-dot-gerrit").className,
+    ).not.toContain("var(--validation-emerald)")
+  })
+
+  /**
    * B14 Part D row 233 — Tab 2 "Gerrit" must collect every Gerrit Code
    * Review config scalar AND expose the Setup Wizard entry point. That
    * means the following surfaces are all reachable on a single tab click:

@@ -50,6 +50,43 @@ class TestSettingsEndpoint:
         })
         assert resp.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_webhooks_block_reports_four_secret_states(
+        self, client, monkeypatch
+    ):
+        """B14 Part D row 234 — the Webhooks tab UI drives its per-field
+        status dots off the ``webhooks`` block of ``GET /system/settings``,
+        which must carry a "configured"/"" flag for GitHub, GitLab,
+        Gerrit, AND Jira. Gerrit is the newly-added row — regressing to
+        the prior three-key shape would break the frontend's rotate-only
+        Gerrit indicator without any compile-time signal.
+        """
+        from backend import config as _cfg
+
+        monkeypatch.setattr(_cfg.settings, "github_webhook_secret", "gh-secret")
+        monkeypatch.setattr(_cfg.settings, "gitlab_webhook_secret", "")
+        monkeypatch.setattr(_cfg.settings, "gerrit_webhook_secret", "ger-secret")
+        monkeypatch.setattr(_cfg.settings, "jira_webhook_secret", "")
+        resp = await client.get("/api/v1/system/settings")
+        assert resp.status_code == 200
+        webhooks = resp.json()["webhooks"]
+        # All four keys present — contract for the Tab 3 status dots.
+        assert set(webhooks.keys()) >= {
+            "github_secret", "gitlab_secret", "gerrit_secret", "jira_secret",
+        }
+        # Mapping: truthy → "configured"; empty → "".
+        assert webhooks["github_secret"] == "configured"
+        assert webhooks["gitlab_secret"] == ""
+        assert webhooks["gerrit_secret"] == "configured"
+        assert webhooks["jira_secret"] == ""
+        # Plaintext of the actual secret must NEVER leak — the frontend is
+        # explicitly designed around the "configured"/"" contract, so a
+        # regression that echoes the raw value would both violate the
+        # rotate-only invariant and break the status-dot derivation.
+        for v in webhooks.values():
+            assert "gh-secret" not in v
+            assert "ger-secret" not in v
+
 
 class TestConnectionEndpoints:
 
