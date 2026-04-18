@@ -353,6 +353,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         const method = (init?.method || "GET").toUpperCase()
         const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(method)
 
+        // B13 Part A (#339): first-run bootstrap_required 503 → redirect to
+        // the FUI /setup-required landing page instead of surfacing a raw
+        // error toast. Suppresses retry, swallows the call's resolution (so
+        // downstream .catch toasts don't fire before navigation), and bails
+        // out if we're already on /setup-required so that page can render
+        // its diagnostic panel from the live 503 payload.
+        if (res.status === 503) {
+          let parsed: { error?: string } | null = null
+          try { parsed = JSON.parse(body) as { error?: string } } catch { /* not JSON */ }
+          if (parsed && parsed.error === "bootstrap_required") {
+            if (typeof window !== "undefined"
+                && window.location.pathname !== "/setup-required") {
+              window.location.assign("/setup-required")
+              return new Promise<T>(() => { /* never resolves — page is unloading */ })
+            }
+            throw new Error(`API 503: ${body}`)
+          }
+        }
+
         // Retry on 429 (rate limited) and 503 (overloaded) — all methods, with backoff
         if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
           const retryAfter = parseInt(res.headers.get("Retry-After") || "0", 10)
