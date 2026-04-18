@@ -22,14 +22,22 @@
  *              recovery: a 10s countdown followed by a full-page reload,
  *              which re-fires any initial data fetches the page owns.
  *              The operator can cancel by dismissing the toast.
+ *   - row 194: `offline` (TypeError from fetch — DNS / no network)
+ *              → info toast「網路連線中斷，嘗試重新連線...」with a spinning
+ *              retry indicator. Coalesces to a single toast (rapid
+ *              fire-fail-fire-fail loops won't stack), stays on-screen
+ *              until either (a) the user dismisses it or (b) the browser
+ *              fires an `online` event, at which point we reload the
+ *              page to re-fire any failed initial fetches.
  *
  * Styling mirrors `components/omnisight/toast-center.tsx` — corner brackets,
  * holo-glass, variant-mapped accent colours (orange for warning, red for
- * error) — so the error UX stays coherent with the decision-pending toasts.
+ * error, cyan for info) — so the error UX stays coherent with the
+ * decision-pending toasts.
  */
 
 import { useCallback, useEffect, useState } from "react"
-import { AlertOctagon, ChevronDown, ChevronRight, RefreshCw, ShieldAlert, X } from "lucide-react"
+import { AlertOctagon, ChevronDown, ChevronRight, RefreshCw, ShieldAlert, WifiOff, X } from "lucide-react"
 import { onApiError, type ApiError } from "@/lib/api"
 
 const AUTO_DISMISS_WARNING_MS = 5000
@@ -42,7 +50,7 @@ const AUTO_DISMISS_ERROR_MS = 10_000
 const AUTO_RETRY_MS = 10_000
 const MAX_TOASTS = 3
 
-type ToastVariant = "warning" | "error"
+type ToastVariant = "warning" | "error" | "info"
 
 interface ToastItem {
   id: string
@@ -103,6 +111,21 @@ function _itemFor(err: ApiError): ToastItem | null {
       retryOnExpire: true,
     }
   }
+  if (err.kind === "offline") {
+    // No autoDismiss / no countdown — the toast lives until the operator
+    // dismisses or the browser's `online` event triggers an auto-reload.
+    return {
+      id: `offline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: "offline",
+      variant: "info",
+      title: "網路連線中斷",
+      description: "嘗試重新連線...",
+      httpLabel: "OFFLINE",
+      traceId: null,
+      createdAt: Date.now(),
+      autoDismissMs: 0,
+    }
+  }
   return null
 }
 
@@ -112,6 +135,13 @@ function _variantStyle(variant: ToastVariant) {
       color: "var(--critical-red,#ef4444)",
       Icon: AlertOctagon,
       headerLabel: "ERROR",
+    }
+  }
+  if (variant === "info") {
+    return {
+      color: "var(--fui-cyan,#22d3ee)",
+      Icon: WifiOff,
+      headerLabel: "INFO",
     }
   }
   return {
@@ -150,29 +180,55 @@ export function ApiErrorToastCenter() {
     const off = onApiError((err) => {
       const item = _itemFor(err)
       if (!item) return
-      setToasts((cur) => [item, ...cur].slice(0, MAX_TOASTS))
+      setToasts((cur) => {
+        // Offline coalesces — multiple failed requests during one outage
+        // produce many `offline` ApiErrors but only one toast is useful.
+        // Keep the existing toast (preserves its createdAt + id) so the
+        // online-listener reload trigger doesn't lose its target.
+        if (item.kind === "offline" && cur.some((t) => t.kind === "offline")) {
+          return cur
+        }
+        return [item, ...cur].slice(0, MAX_TOASTS)
+      })
     })
     return off
   }, [])
 
   useEffect(() => {
     if (toasts.length === 0) return
-    const timers = toasts.map((t) => {
-      const remaining = Math.max(0, t.autoDismissMs - (Date.now() - t.createdAt))
-      return setTimeout(() => {
-        // Retry-on-expire toasts trigger a full page reload, which re-
-        // fires any initial data fetches the page owns. Dismissal (user
-        // click) removes the toast before the timer fires and cancels
-        // the reload via the cleanup below.
-        if (t.retryOnExpire && typeof window !== "undefined") {
-          window.location.reload()
-          return
-        }
-        dismiss(t.id)
-      }, remaining)
-    })
+    const timers = toasts
+      // autoDismissMs === 0 means "live forever until user dismiss / online
+      // event" — used by the offline toast.
+      .filter((t) => t.autoDismissMs > 0)
+      .map((t) => {
+        const remaining = Math.max(0, t.autoDismissMs - (Date.now() - t.createdAt))
+        return setTimeout(() => {
+          // Retry-on-expire toasts trigger a full page reload, which re-
+          // fires any initial data fetches the page owns. Dismissal (user
+          // click) removes the toast before the timer fires and cancels
+          // the reload via the cleanup below.
+          if (t.retryOnExpire && typeof window !== "undefined") {
+            window.location.reload()
+            return
+          }
+          dismiss(t.id)
+        }, remaining)
+      })
     return () => { for (const timer of timers) clearTimeout(timer) }
   }, [toasts, dismiss])
+
+  // row 194: when the browser fires `online` while an offline toast is
+  // visible, reload the page so any failed initial fetches re-fire. The
+  // listener is only mounted while a relevant toast exists so we don't
+  // hijack reloads triggered by other sources of intermittent connectivity.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const hasOffline = toasts.some((t) => t.kind === "offline")
+    if (!hasOffline) return
+    const onOnline = () => { window.location.reload() }
+    window.addEventListener("online", onOnline)
+    return () => window.removeEventListener("online", onOnline)
+  }, [toasts])
 
   // 1Hz tick ONLY while a countdown toast is visible, so steady-state
   // idle re-renders cost nothing. Refresh the baseline synchronously when
@@ -245,6 +301,16 @@ export function ApiErrorToastCenter() {
                     <span>
                       自動重試 <span className="font-bold">{countdownSec}</span>s
                     </span>
+                  </div>
+                )}
+                {t.kind === "offline" && (
+                  <div
+                    data-testid={`api-error-retry-${t.kind}`}
+                    className="mt-1 flex items-center gap-1 font-mono text-[10px] tracking-[0.1em]"
+                    style={{ color }}
+                  >
+                    <RefreshCw className="w-3 h-3 animate-spin" aria-hidden />
+                    <span>等待網路恢復</span>
                   </div>
                 )}
                 {hasDetails && (

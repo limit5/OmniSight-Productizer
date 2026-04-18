@@ -364,3 +364,135 @@ describe("ApiErrorToastCenter — 502/503 auto-retry (row 193)", () => {
     expect(screen.queryByTestId("api-error-toast-service_unavailable")).toBeNull()
   })
 })
+
+// ── row 194: offline → 「網路連線中斷」info toast + retry indicator ───────
+//
+// `request()` classifies a TypeError out of fetch() as kind=offline (DNS
+// failure, no network, browser offline). Idempotent GETs retry twice with
+// 1s + 2s backoff before the terminal error is emitted on the bus, so
+// driving the test means flushing ~10s of fake timers.
+//
+// The toast lives until the operator dismisses OR the browser fires an
+// `online` event. On `online`, the toast triggers `window.location.reload()`
+// so any failed initial fetches re-fire automatically.
+describe("ApiErrorToastCenter — offline (row 194)", () => {
+  const originalLocation = window.location
+
+  beforeEach(() => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: {
+        href: "http://localhost/dashboard",
+        pathname: "/dashboard",
+        search: "",
+        origin: "http://localhost",
+        assign: vi.fn(),
+        reload: vi.fn(),
+      },
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: originalLocation,
+    })
+  })
+
+  async function driveOffline() {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    global.fetch = vi
+      .fn()
+      .mockImplementation(() => Promise.reject(new TypeError("Failed to fetch"))) as unknown as typeof fetch
+    const p = getHealth().catch((e) => e)
+    // Idempotent GET: 1s + 2s backoff retries before terminal failure.
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    const result = await p
+    expect(result).toBeInstanceOf(ApiError)
+    return result as ApiError
+  }
+
+  it("renders an info toast「網路連線中斷」when fetch rejects with TypeError", async () => {
+    render(<ApiErrorToastCenter />)
+    await driveOffline()
+
+    const toast = await screen.findByTestId("api-error-toast-offline")
+    expect(toast).toBeInTheDocument()
+    expect(screen.getByText("網路連線中斷")).toBeInTheDocument()
+    expect(screen.getByText("INFO")).toBeInTheDocument()
+    expect(screen.getByText("OFFLINE")).toBeInTheDocument()
+    expect(screen.getByText(/嘗試重新連線/)).toBeInTheDocument()
+  })
+
+  it("shows a spinning retry indicator", async () => {
+    render(<ApiErrorToastCenter />)
+    await driveOffline()
+
+    const indicator = await screen.findByTestId("api-error-retry-offline")
+    expect(indicator).toBeInTheDocument()
+    expect(indicator).toHaveTextContent(/網路恢復/)
+  })
+
+  it("does NOT auto-dismiss after the warning/error windows", async () => {
+    render(<ApiErrorToastCenter />)
+    await driveOffline()
+
+    expect(await screen.findByTestId("api-error-toast-offline")).toBeInTheDocument()
+    // Past 5s warning window AND 10s error window — toast must persist
+    // until network recovery or explicit dismissal.
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+    expect(screen.queryByTestId("api-error-toast-offline")).toBeInTheDocument()
+  })
+
+  it("coalesces repeated offline errors into a single toast", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    global.fetch = vi
+      .fn()
+      .mockImplementation(() => Promise.reject(new TypeError("Failed to fetch"))) as unknown as typeof fetch
+    render(<ApiErrorToastCenter />)
+
+    // Fire three failed requests concurrently — three terminal `offline`
+    // errors hit the bus, but the component should coalesce them.
+    const p1 = getHealth().catch(() => undefined)
+    const p2 = getHealth().catch(() => undefined)
+    const p3 = getHealth().catch(() => undefined)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    await Promise.all([p1, p2, p3])
+
+    expect(screen.getAllByTestId("api-error-toast-offline")).toHaveLength(1)
+  })
+
+  it("reloads the page when the browser fires `online`", async () => {
+    render(<ApiErrorToastCenter />)
+    await driveOffline()
+    await screen.findByTestId("api-error-toast-offline")
+
+    const reloadSpy = window.location.reload as unknown as ReturnType<typeof vi.fn>
+    expect(reloadSpy).not.toHaveBeenCalled()
+
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    expect(reloadSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("dismiss button removes the toast and detaches the online listener", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    render(<ApiErrorToastCenter />)
+    await driveOffline()
+
+    await screen.findByTestId("api-error-toast-offline")
+    await user.click(screen.getByRole("button", { name: /dismiss/i }))
+    expect(screen.queryByTestId("api-error-toast-offline")).toBeNull()
+
+    // After dismiss, an `online` event must NOT trigger a reload.
+    await act(async () => {
+      window.dispatchEvent(new Event("online"))
+    })
+    const reloadSpy = window.location.reload as unknown as ReturnType<typeof vi.fn>
+    expect(reloadSpy).not.toHaveBeenCalled()
+  })
+})
