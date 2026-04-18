@@ -773,15 +773,18 @@ class TestEnums:
 
 @pytest.fixture()
 async def client(tmp_path, monkeypatch):
-    from backend import db
+    from backend import db, bootstrap as _boot
     from backend.main import app
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
     await db.init()
+    # Finalize bootstrap so the gate middleware doesn't return 503.
+    _boot._gate_cache["finalized"] = True
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
         yield ac
+    _boot._gate_cache["finalized"] = False
     await db.close()
 
 

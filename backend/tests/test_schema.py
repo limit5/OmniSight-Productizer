@@ -163,6 +163,11 @@ class TestSSESchemaExport:
             "pep.decision",
             # R1 (#307) ChatOps Interactive
             "chatops.message",
+            # R2 (#308) Semantic Entropy Monitor
+            "agent.entropy",
+            # R3 (#309) Scratchpad + Auto-Continuation
+            "agent.scratchpad.saved",
+            "agent.token_continuation",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 
