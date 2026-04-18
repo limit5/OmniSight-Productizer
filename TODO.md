@@ -195,6 +195,58 @@ Legend:
 
 - [ ] 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
 
+### B14. UX 改善 — Bootstrap Wizard + Git Forge 設定 + Integration 頁面優化（#340）
+
+> 背景：deep audit 發現 6 個 UX 問題影響首次使用者和 Git forge 整合使用者。Bootstrap wizard 不包含 Git forge 設定、多 repo token map 無 UI、Gerrit 設定無引導、Integration 頁面欄位過多、Settings 缺 connection test。這些問題不擋上線但會影響使用體驗。
+
+**Part A — Bootstrap Wizard 加入 Git Forge 設定步驟（選填）**
+- [ ] Bootstrap wizard 在 Step 3（CF Tunnel）後加 Step 3.5「Git Forge 設定（選填）」
+- [ ] Step 3.5 UI：三選一 tab（GitHub / GitLab / Gerrit）+ 「跳過，稍後設定」按鈕
+- [ ] GitHub tab：token 輸入 + 「Test Connection」按鈕 → 呼叫 GitHub API 驗證 → 成功顯示 user/org name
+- [ ] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
+- [ ] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
+- [ ] 「跳過」不影響 bootstrap finalization（Git forge 非必要 gate）
+- [ ] 預估：**1 day**
+
+**Part B — Multi-repo Token Map UI**
+- [ ] Settings → Integration → Git 區塊新增「Multiple Instances」展開區
+- [ ] 「Add GitHub Instance」按鈕 → 表單：hostname（如 `github.enterprise.com`）+ token
+- [ ] 「Add GitLab Instance」按鈕 → 表單：URL + token
+- [ ] 列表顯示所有已設定的 instance + 每個有「Test」/「Remove」按鈕
+- [ ] 儲存時寫入 `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`（JSON 格式）
+- [ ] 後端 API：`GET/PUT /api/v1/settings/git/token-map` → 讀寫 token map（token 遮罩顯示）
+- [ ] 預估：**1 day**
+
+**Part C — Gerrit Setup Wizard（獨立引導）**
+- [ ] Settings → Integration → Gerrit 區塊加「Setup Wizard」按鈕 → 開啟 modal 引導
+- [ ] Step 1：輸入 Gerrit URL + SSH host/port → 「Test Connection」驗證
+- [ ] Step 2：SSH key 設定引導（顯示公鑰 → 提示貼到 Gerrit Settings → SSH Keys）
+- [ ] Step 3：`merger-agent-bot` 帳號設定引導（說明如何建 bot 帳號 + 設定 group）
+- [ ] Step 4：submit-rule 驗證（呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule）
+- [ ] Step 5：webhook 設定引導（顯示 webhook URL + secret → 提示貼到 Gerrit）
+- [ ] 完成後寫入 config + 顯示「Gerrit 整合已啟用」
+- [ ] 預估：**1.5 day**
+
+**Part D — Integration Settings 頁面分 tab**
+- [ ] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
+  - [ ] Tab 1「Git」：GitHub token + GitLab token/URL + SSH key + Multi-instance map
+  - [ ] Tab 2「Gerrit」：Gerrit Code Review 全部設定 + Setup Wizard 入口
+  - [ ] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示
+  - [ ] Tab 4「CI/CD」：GitHub Actions / Jenkins / GitLab CI 開關 + 設定
+- [ ] 每個 tab 頂部顯示 connection status badge（✅ connected / ⚠️ not configured / ❌ error）
+- [ ] 預估：**0.5 day**
+
+**Part E — Connection Test 按鈕**
+- [ ] 每個 Git forge 設定區塊加「Test Connection」按鈕
+- [ ] GitHub：`GET /user` → 顯示帳號名 + scope
+- [ ] GitLab：`GET /api/v4/version` → 顯示版本
+- [ ] Gerrit：SSH `gerrit version` → 顯示版本
+- [ ] Jira：`GET /rest/api/2/serverInfo` → 顯示版本
+- [ ] 測試結果即時顯示在按鈕旁（✅ / ❌ + 錯誤訊息）
+- [ ] 預估：**0.5 day**
+
+**B14 總預估**：**4.5 day**
+
 ---
 
 ## 🅒 Priority C — L4 Layer A (shared infrastructure)
