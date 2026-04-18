@@ -167,6 +167,9 @@ async def lifespan(app: FastAPI):
     # and stops cleanly at shutdown.
     from backend import host_metrics as _hm
     host_metrics_task = asyncio.create_task(_hm.run_sampling_loop())
+    # H1: whole-host ring buffer (60 × 5s snapshots = 5 min history).
+    # Feeds the AIMD capacity planner + the GET /host/metrics endpoint.
+    host_ringbuf_task = asyncio.create_task(_hm.run_host_sampling_loop())
     # G7 (HA-07): flip the backend_instance_up gauge to 1 once the
     # app is fully booted. Shutdown flips it back to 0 so the
     # reverse-proxy drops this replica from rotation before the
@@ -187,7 +190,7 @@ async def lifespan(app: FastAPI):
         _log.info("[lifecycle] graceful_shutdown result: %s", result)
     except Exception as exc:
         _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
-    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task, host_metrics_task):
+    for t in (pubsub_task, watchdog_task, sweep_task, dlq_task, iq_task, ft_task, md_task, drf_task, quota_task, host_metrics_task, host_ringbuf_task):
         t.cancel()
         try:
             await t

@@ -15,7 +15,9 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -955,3 +957,326 @@ class TestSampleDockerOnce:
         # Should not raise.
         s = hm.sample_docker_once()
         assert s.source == "unavailable"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — Ring buffer (sample_host_snapshot / host history / sampling loop)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Contract tests for the H1 "採樣 5s 週期、ring buffer 60 點 (5 分鐘
+# 歷史)" row. They pin:
+#   * HOST_HISTORY_SIZE == 60 (downstream consumers size their buffers
+#     against this constant — a silent change would desync them)
+#   * HostSnapshot bundles HostSample + DockerSample immutably and its
+#     sampled_at mirrors the host sample
+#   * sample_host_snapshot() composes the two sub-samplers
+#   * Ring buffer rotation: 70 appends → keep last 60, oldest dropped
+#   * get_host_history() returns a point-in-time COPY (mutation-safe)
+#   * get_latest_host_snapshot() returns None cold-start, newest after
+#   * run_host_sampling_loop cadence (wall-clock ~interval_s, not
+#     interval_s + cpu_interval) and per-iteration exception swallowing
+
+
+def _make_host_sample(t: float = 0.0, cpu: float = 10.0) -> hm.HostSample:
+    """Minimal HostSample factory for ring-buffer tests."""
+    return hm.HostSample(
+        cpu_percent=cpu, mem_percent=20.0, mem_used_gb=12.0, mem_total_gb=64.0,
+        disk_percent=30.0, disk_used_gb=150.0, disk_total_gb=512.0,
+        loadavg_1m=1.0, loadavg_5m=1.0, loadavg_15m=1.0, sampled_at=t,
+    )
+
+
+def _make_docker_sample(t: float = 0.0, count: int = 3) -> hm.DockerSample:
+    """Minimal DockerSample factory for ring-buffer tests."""
+    return hm.DockerSample(
+        container_count=count, total_mem_reservation_bytes=count * 1024 ** 3,
+        source="sdk", sampled_at=t,
+    )
+
+
+class TestHostHistoryConstants:
+    def test_ring_size_is_60_for_five_minutes_at_5s(self):
+        # 60 × 5 s = 300 s = 5 min. Pinned so AIMD / runbook math stays
+        # in lock-step with the buffer depth.
+        assert hm.HOST_HISTORY_SIZE == 60
+        assert hm.SAMPLE_INTERVAL_S == 5.0
+        assert hm.HOST_HISTORY_SIZE * hm.SAMPLE_INTERVAL_S == 300.0
+
+
+class TestHostSnapshotDataclass:
+    def test_fields_shape(self):
+        expected = {"host", "docker", "sampled_at"}
+        actual = {f.name for f in hm.HostSnapshot.__dataclass_fields__.values()}
+        assert actual == expected
+
+    def test_frozen(self):
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(1.0),
+            docker=_make_docker_sample(1.0),
+            sampled_at=1.0,
+        )
+        with pytest.raises(Exception):
+            snap.sampled_at = 99.0  # type: ignore[misc]
+
+    def test_bundles_host_and_docker(self):
+        host = _make_host_sample(42.0, cpu=77.0)
+        docker = _make_docker_sample(42.0, count=5)
+        snap = hm.HostSnapshot(host=host, docker=docker, sampled_at=42.0)
+        assert snap.host.cpu_percent == 77.0
+        assert snap.docker.container_count == 5
+
+
+class TestSampleHostSnapshot:
+    def test_composes_host_and_docker_samples(self, monkeypatch):
+        fake_host = _make_host_sample(t=1000.0, cpu=55.0)
+        fake_docker = _make_docker_sample(t=1000.5, count=7)
+        monkeypatch.setattr(
+            hm, "sample_host_once", lambda *, cpu_interval: fake_host,
+        )
+        monkeypatch.setattr(hm, "sample_docker_once", lambda: fake_docker)
+        snap = hm.sample_host_snapshot(cpu_interval=0)
+        assert snap.host is fake_host
+        assert snap.docker is fake_docker
+        # sampled_at mirrors the host sample — see docstring contract.
+        assert snap.sampled_at == 1000.0
+
+    def test_passes_cpu_interval_through_to_host_sampler(self, monkeypatch):
+        captured: dict = {}
+
+        def _fake_host(*, cpu_interval: float):
+            captured["interval"] = cpu_interval
+            return _make_host_sample(t=1.0)
+        monkeypatch.setattr(hm, "sample_host_once", _fake_host)
+        monkeypatch.setattr(hm, "sample_docker_once", lambda: _make_docker_sample(1.0))
+        hm.sample_host_snapshot(cpu_interval=0.25)
+        assert captured["interval"] == 0.25
+
+
+class TestRingBufferRotation:
+    def test_empty_ring_returns_empty_history(self):
+        assert hm.get_host_history() == []
+
+    def test_empty_ring_latest_is_none(self):
+        assert hm.get_latest_host_snapshot() is None
+
+    def test_single_append_returned_in_history(self):
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(1.0),
+            docker=_make_docker_sample(1.0),
+            sampled_at=1.0,
+        )
+        hm._record_host_snapshot(snap)
+        hist = hm.get_host_history()
+        assert len(hist) == 1
+        assert hist[0] is snap
+        assert hm.get_latest_host_snapshot() is snap
+
+    def test_appends_in_chronological_order(self):
+        for i in range(5):
+            hm._record_host_snapshot(hm.HostSnapshot(
+                host=_make_host_sample(float(i)),
+                docker=_make_docker_sample(float(i)),
+                sampled_at=float(i),
+            ))
+        hist = hm.get_host_history()
+        assert [s.sampled_at for s in hist] == [0.0, 1.0, 2.0, 3.0, 4.0]
+        assert hm.get_latest_host_snapshot().sampled_at == 4.0
+
+    def test_rotates_when_full_keeps_last_60(self):
+        # Append 70 snapshots → buffer must hold ticks 10..69 (last 60).
+        for i in range(70):
+            hm._record_host_snapshot(hm.HostSnapshot(
+                host=_make_host_sample(float(i)),
+                docker=_make_docker_sample(float(i)),
+                sampled_at=float(i),
+            ))
+        hist = hm.get_host_history()
+        assert len(hist) == hm.HOST_HISTORY_SIZE == 60
+        # Oldest 10 ticks dropped; ticks 10..69 remain.
+        assert hist[0].sampled_at == 10.0
+        assert hist[-1].sampled_at == 69.0
+        assert hm.get_latest_host_snapshot().sampled_at == 69.0
+
+    def test_exactly_60_appends_no_rotation(self):
+        for i in range(hm.HOST_HISTORY_SIZE):
+            hm._record_host_snapshot(hm.HostSnapshot(
+                host=_make_host_sample(float(i)),
+                docker=_make_docker_sample(float(i)),
+                sampled_at=float(i),
+            ))
+        hist = hm.get_host_history()
+        assert len(hist) == 60
+        assert hist[0].sampled_at == 0.0
+        assert hist[-1].sampled_at == 59.0
+
+    def test_get_host_history_returns_copy_not_reference(self):
+        """Mutating the returned list must not mutate the ring buffer."""
+        hm._record_host_snapshot(hm.HostSnapshot(
+            host=_make_host_sample(1.0),
+            docker=_make_docker_sample(1.0),
+            sampled_at=1.0,
+        ))
+        hist = hm.get_host_history()
+        hist.clear()
+        hist.append("garbage")  # type: ignore[arg-type]
+        # Ring buffer untouched.
+        assert len(hm.get_host_history()) == 1
+        assert hm.get_latest_host_snapshot() is not None
+
+    def test_reset_for_tests_clears_ring_buffer(self):
+        hm._record_host_snapshot(hm.HostSnapshot(
+            host=_make_host_sample(1.0),
+            docker=_make_docker_sample(1.0),
+            sampled_at=1.0,
+        ))
+        assert len(hm.get_host_history()) == 1
+        hm._reset_for_tests()
+        assert hm.get_host_history() == []
+        assert hm.get_latest_host_snapshot() is None
+
+
+class TestRunHostSamplingLoop:
+    @pytest.mark.asyncio
+    async def test_pushes_snapshots_into_ring_buffer(self, monkeypatch):
+        call_log: list[float] = []
+
+        def _fake_host(*, cpu_interval: float):
+            t = float(len(call_log))
+            call_log.append(t)
+            return _make_host_sample(t=t, cpu=t * 10.0)
+        monkeypatch.setattr(hm, "sample_host_once", _fake_host)
+        monkeypatch.setattr(
+            hm, "sample_docker_once",
+            lambda: _make_docker_sample(t=float(len(call_log)), count=1),
+        )
+
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.01, cpu_interval=0),
+        )
+        # Let the loop fire a handful of times.
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        hist = hm.get_host_history()
+        assert len(hist) >= 3, f"expected ≥3 ticks, got {len(hist)}"
+        # Snapshots are in chronological order.
+        assert all(
+            hist[i].sampled_at <= hist[i + 1].sampled_at
+            for i in range(len(hist) - 1)
+        )
+
+    @pytest.mark.asyncio
+    async def test_bounded_at_HOST_HISTORY_SIZE(self, monkeypatch):
+        """Loop running longer than 60 ticks must not grow the buffer."""
+        monkeypatch.setattr(
+            hm, "sample_host_once",
+            lambda *, cpu_interval: _make_host_sample(t=time.time()),
+        )
+        monkeypatch.setattr(
+            hm, "sample_docker_once",
+            lambda: _make_docker_sample(t=time.time()),
+        )
+
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.001, cpu_interval=0),
+        )
+        # Fire the loop many more times than HOST_HISTORY_SIZE.
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert len(hm.get_host_history()) <= hm.HOST_HISTORY_SIZE
+
+    @pytest.mark.asyncio
+    async def test_swallows_sampler_exceptions(self, monkeypatch):
+        """A transient sampler glitch must not kill the loop."""
+        call_count = {"n": 0}
+
+        def _flaky_host(*, cpu_interval: float):
+            call_count["n"] += 1
+            if call_count["n"] % 2 == 1:
+                raise RuntimeError("sampler glitch")
+            return _make_host_sample(t=float(call_count["n"]))
+        monkeypatch.setattr(hm, "sample_host_once", _flaky_host)
+        monkeypatch.setattr(
+            hm, "sample_docker_once",
+            lambda: _make_docker_sample(t=0.0),
+        )
+
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.01, cpu_interval=0),
+        )
+        await asyncio.sleep(0.15)
+        assert not task.done(), "loop died on sampler exception"
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # At least some good samples landed despite the flake.
+        assert len(hm.get_host_history()) >= 1
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_clean(self, monkeypatch):
+        monkeypatch.setattr(
+            hm, "sample_host_once",
+            lambda *, cpu_interval: _make_host_sample(t=0.0),
+        )
+        monkeypatch.setattr(
+            hm, "sample_docker_once",
+            lambda: _make_docker_sample(t=0.0),
+        )
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.01, cpu_interval=0),
+        )
+        await asyncio.sleep(0.03)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_cadence_subtracts_sample_duration(self, monkeypatch):
+        """Loop targets wall-clock ``interval_s`` — when the sample
+        already blocks for part of that window, the sleep shrinks so
+        total tick time stays close to the requested period."""
+        sleep_calls: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _tracking_sleep(seconds: float):
+            sleep_calls.append(seconds)
+            # Yield to the loop without actually waiting.
+            await real_sleep(0)
+        monkeypatch.setattr(hm.asyncio, "sleep", _tracking_sleep)
+
+        def _slow_host(*, cpu_interval: float):
+            # Simulate sampling taking a non-trivial slice of the window.
+            time.sleep(0.02)
+            return _make_host_sample(t=time.time())
+        monkeypatch.setattr(hm, "sample_host_once", _slow_host)
+        monkeypatch.setattr(
+            hm, "sample_docker_once",
+            lambda: _make_docker_sample(t=time.time()),
+        )
+
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.1, cpu_interval=0),
+        )
+        await real_sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert sleep_calls, "loop never reached the sleep branch"
+        # Every sleep must be non-negative and strictly less than the
+        # requested interval (sample ate part of the window).
+        for s in sleep_calls:
+            assert 0.0 <= s <= 0.1

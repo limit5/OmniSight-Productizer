@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,6 +73,14 @@ logger = logging.getLogger(__name__)
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 SAMPLE_INTERVAL_S = 5.0
+HOST_HISTORY_SIZE = 60
+"""Ring-buffer depth for the host-level sampling loop. At the 5s
+``SAMPLE_INTERVAL_S`` cadence this holds 5 minutes of snapshots — long
+enough for AIMD and the observability runbook to distinguish a single
+noisy tick from a sustained overload, short enough that the whole
+buffer fits in a few tens of KB and a fresh dashboard load still
+finishes within one SSE frame."""
+
 CULPRIT_CPU_MARGIN_PCT = 150.0
 """When overall host CPU is hot, derate *only* the tenant whose CPU% is
 at least this margin above the next-highest tenant. Below this margin
@@ -196,6 +205,23 @@ class DockerSample:
     sampled_at: float
 
 
+@dataclass(frozen=True)
+class HostSnapshot:
+    """One 5s tick of whole-host state — ring-buffer entry.
+
+    Bundles ``HostSample`` (psutil / loadavg) with ``DockerSample``
+    (container count + memory reservation) into a single immutable
+    record so ring-buffer readers always see consistent pairs — never
+    "CPU% from tick N paired with container count from tick N-1".
+
+    ``sampled_at`` mirrors the host sample's timestamp so history can
+    be sorted / windowed without peeking inside either sub-record.
+    """
+    host: HostSample
+    docker: DockerSample
+    sampled_at: float
+
+
 @dataclass
 class TenantUsage:
     """Aggregated per-tenant resource view (one snapshot)."""
@@ -232,12 +258,18 @@ _latest_by_tenant: dict[str, TenantUsage] = {}
 # Usage accounting feed (billing). Keyed by tenant_id.
 _accounting: dict[str, UsageAccumulator] = {}
 
+# H1 ring buffer — last HOST_HISTORY_SIZE snapshots of whole-host state.
+# deque(maxlen=...) rotates for free: append when full pops the oldest,
+# so memory stays bounded even if the backend runs for weeks.
+_host_history: deque[HostSnapshot] = deque(maxlen=HOST_HISTORY_SIZE)
+
 
 def _reset_for_tests() -> None:
     with _lock:
         _prev_cpu.clear()
         _latest_by_tenant.clear()
         _accounting.clear()
+        _host_history.clear()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -873,6 +905,96 @@ def _update_latest(usage_by_tenant: dict[str, TenantUsage]) -> None:
     with _lock:
         _latest_by_tenant.clear()
         _latest_by_tenant.update(usage_by_tenant)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — Host ring buffer + sampling loop
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def sample_host_snapshot(*, cpu_interval: float = 1.0) -> HostSnapshot:
+    """One-shot combined host + docker sample — ring-buffer entry factory.
+
+    Runs ``sample_host_once`` (psutil + loadavg) followed by
+    ``sample_docker_once`` (SDK → CLI fallback) and bundles the two
+    immutable sub-samples into a ``HostSnapshot``. Never raises: each
+    sub-sampler has its own degradation path, so a missing psutil /
+    unreachable docker daemon yields a snapshot with zeroed / baseline
+    fields rather than tearing the sampling loop down.
+    """
+    host = sample_host_once(cpu_interval=cpu_interval)
+    docker = sample_docker_once()
+    return HostSnapshot(host=host, docker=docker, sampled_at=host.sampled_at)
+
+
+def _record_host_snapshot(snap: HostSnapshot) -> None:
+    """Append ``snap`` to the ring buffer (rotates oldest out when full)."""
+    with _lock:
+        _host_history.append(snap)
+
+
+def get_host_history() -> list[HostSnapshot]:
+    """Return a point-in-time copy of the host history, oldest first.
+
+    Copying under the lock means callers never observe a partially-
+    rotated buffer. The ring is capped at ``HOST_HISTORY_SIZE`` so the
+    returned list is short enough (≤60 items) to serialise in one JSON
+    payload or one SSE frame without chunking.
+    """
+    with _lock:
+        return list(_host_history)
+
+
+def get_latest_host_snapshot() -> HostSnapshot | None:
+    """Return the most recent snapshot, or ``None`` if the sampler
+    hasn't produced one yet (cold-start grace window)."""
+    with _lock:
+        if not _host_history:
+            return None
+        return _host_history[-1]
+
+
+async def run_host_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S,
+                                  *, cpu_interval: float = 1.0) -> None:
+    """Lifespan task — sample host + docker every ``interval_s`` seconds
+    and push into the ring buffer.
+
+    The loop targets a *wall-clock* cadence of ``interval_s``: it
+    measures how long the sample itself took (``sample_host_once``
+    blocks for ``cpu_interval`` seconds inside ``psutil.cpu_percent``,
+    and the CLI docker fallback can occasionally be slow) and subtracts
+    that from the sleep. If a sample overruns ``interval_s`` the loop
+    fires the next sample immediately rather than drifting further
+    behind.
+
+    Swallows per-iteration exceptions so a transient psutil / docker
+    glitch never cancels the lifespan task — failures are counted in
+    ``metrics.persist_failure_total{module="host_metrics"}`` for the
+    observability runbook's alert on sustained collection loss.
+    """
+    logger.info(
+        "host_metrics: host sampling loop starting (interval=%.1fs, history=%d)",
+        interval_s, HOST_HISTORY_SIZE,
+    )
+    try:
+        while True:
+            tick_start = time.monotonic()
+            try:
+                snap = sample_host_snapshot(cpu_interval=cpu_interval)
+                _record_host_snapshot(snap)
+            except Exception as exc:
+                logger.warning(
+                    "host_metrics host-sample iteration failed: %s", exc,
+                )
+                try:
+                    from backend import metrics as _m
+                    _m.persist_failure_total.labels(module="host_metrics").inc()
+                except Exception:
+                    pass
+            elapsed = time.monotonic() - tick_start
+            await asyncio.sleep(max(0.0, interval_s - elapsed))
+    except asyncio.CancelledError:
+        logger.info("host_metrics: host sampling loop cancelled")
+        raise
 
 
 async def run_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S) -> None:
