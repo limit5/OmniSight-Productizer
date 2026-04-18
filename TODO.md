@@ -169,12 +169,12 @@ Legend:
 - [x] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
 - [x] `app/error.tsx`（Client error boundary）：「發生錯誤」+ 重試按鈕 + 展開區：error.message + stack（prod 隱藏 stack）
 - [x] `app/global-error.tsx`（Root layout crash）：最外層 fallback，minimal FUI 風格
-- [ ] `components/omnisight/error-page.tsx`：共用 FUI error 頁面元件，支援：
-  - [ ] `code`（400/401/403/404/500/502/503）
-  - [ ] `friendlyMessage`（人類可讀的友善訊息）
-  - [ ] `technicalDetail`（工程師細節，預設折疊）
-  - [ ] `actions`（按鈕列表：回首頁 / 登入 / 重試 / 回報問題）
-  - [ ] FUI 風格：暗色 + 大號 error code + 掃描線 + 微弱脈衝動畫
+- [x] `components/omnisight/error-page.tsx`：共用 FUI error 頁面元件，支援：
+  - [x] `code`（400/401/403/404/500/502/503）
+  - [x] `friendlyMessage`（人類可讀的友善訊息）
+  - [x] `technicalDetail`（工程師細節，預設折疊）
+  - [x] `actions`（按鈕列表：回首頁 / 登入 / 重試 / 回報問題）
+  - [x] FUI 風格：暗色 + 大號 error code + 掃描線 + 微弱脈衝動畫
 - [ ] 各 HTTP code 的友善訊息對照：
   - [ ] 400：「請求格式有誤，請檢查輸入後重試」
   - [ ] 401：「登入已過期，請重新登入」+ 登入按鈕
