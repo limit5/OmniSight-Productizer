@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
-import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users } from "lucide-react"
+import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users, ShieldCheck } from "lucide-react"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -1127,6 +1127,16 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
   const [botVerify, setBotVerify] = useState<api.GerritBotVerifyResult | null>(null)
   const [botCmdCopied, setBotCmdCopied] = useState(false)
   const [step3Ackd, setStep3Ackd] = useState(false)
+  // B14 Part C row 225 — Step 4: verify that the target project's
+  // `project.config` on `refs/meta/config` carries the O7 dual-+2 ACL
+  // (ai-reviewer-bots + non-ai-reviewer label grants, submit gated to
+  // non-ai-reviewer). The probe never mutates Gerrit — rule installation
+  // stays manual per docs/ops/gerrit_dual_two_rule.md §2.
+  const [submitRuleProject, setSubmitRuleProject] = useState("")
+  const [submitRuleVerifying, setSubmitRuleVerifying] = useState(false)
+  const [submitRuleVerify, setSubmitRuleVerify] =
+    useState<api.GerritSubmitRuleVerifyResult | null>(null)
+  const [step4Ackd, setStep4Ackd] = useState(false)
 
   const parsedPort = (() => {
     const trimmed = sshPort.trim()
@@ -1218,6 +1228,30 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }, [sshHost, parsedPort, portValid])
 
+  const onVerifySubmitRule = useCallback(async () => {
+    if (!sshHost.trim() || !portValid || !submitRuleProject.trim()) return
+    setSubmitRuleVerifying(true)
+    setSubmitRuleVerify(null)
+    try {
+      const res = await api.verifyGerritSubmitRule({
+        ssh_host: sshHost.trim(),
+        ssh_port: parsedPort as number,
+        project: submitRuleProject.trim(),
+      })
+      setSubmitRuleVerify(res)
+    } catch (err) {
+      setSubmitRuleVerify({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to reach the Gerrit submit-rule probe",
+      })
+    } finally {
+      setSubmitRuleVerifying(false)
+    }
+  }, [sshHost, parsedPort, portValid, submitRuleProject])
+
   if (!open || typeof document === "undefined") return null
 
   const pubkeyReady = pubkey?.status === "ok" && !!pubkey.public_key
@@ -1234,6 +1268,23 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     : botGroupReady
       ? "READY"
       : "PENDING"
+
+  const step3Done = step3Ackd
+  const submitRuleReady = submitRuleVerify?.status === "ok"
+  const step4Badge: "DONE" | "READY" | "PENDING" = step4Ackd
+    ? "DONE"
+    : submitRuleReady
+      ? "READY"
+      : "PENDING"
+  const submitRuleProjectValid = /^[A-Za-z0-9][A-Za-z0-9_\-./]{0,199}$/.test(
+    submitRuleProject.trim(),
+  )
+  const canVerifySubmitRule =
+    step3Done &&
+    submitRuleProject.trim().length > 0 &&
+    submitRuleProjectValid &&
+    !submitRuleVerifying
+  const submitRuleChecks = submitRuleVerify?.checks ?? []
 
   const botHostSlug = sshHost.trim() || "<host>"
   const botPortSlug = portValid ? String(parsedPort) : String(GERRIT_DEFAULT_SSH_PORT)
@@ -1260,14 +1311,11 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }
 
-  const laterSteps: { title: string; body: string }[] = [
-    {
-      title: "Step 4 — submit-rule 驗證",
-      body: "呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule（merger + non-ai-reviewer）。",
-    },
+  const laterSteps: { title: string; body: string; offset: number }[] = [
     {
       title: "Step 5 — Webhook 設定",
       body: "顯示 webhook URL + secret，引導貼到 Gerrit；完成後寫入 config 並標註整合啟用。",
+      offset: 5,
     },
   ]
 
@@ -1293,7 +1341,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3">
           <p className="font-mono text-[10px] leading-relaxed text-[var(--foreground)]">
-            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟。
+            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟（Steps 1–4 已就緒，Step 5 建置中）。
           </p>
 
           <div
@@ -1757,14 +1805,191 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
             )}
           </div>
 
+          <div
+            data-testid="gerrit-wizard-step-4"
+            data-state={step4Badge.toLowerCase()}
+            className={`p-3 rounded border space-y-2 ${
+              step3Done
+                ? "border-[var(--neural-blue)]/40 bg-[var(--background)]"
+                : "border-[var(--border)] bg-[var(--background)] opacity-60"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                4
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                  Step 4 — submit-rule 驗證
+                </div>
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                  讀取 <code>refs/meta/config:project.config</code> 並核對 O7 雙簽 +2 ACL：
+                  <code>ai-reviewer-bots</code> + <code>non-ai-reviewer</code> 可投票，
+                  <code>submit</code> 僅開放給 <code>non-ai-reviewer</code>（人類 hard gate）。
+                </div>
+              </div>
+              <span
+                data-testid="gerrit-wizard-step-4-badge"
+                className={`flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded self-start ${
+                  step4Badge === "DONE"
+                    ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                    : step4Badge === "READY"
+                      ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                      : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                }`}
+              >
+                {step4Badge}
+              </span>
+            </div>
+
+            {!step3Done ? (
+              <div
+                data-testid="gerrit-wizard-step-4-gated"
+                className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1"
+              >
+                Step 3 通過後解鎖。先確認 <code>merger-agent-bot</code> group 已就緒。
+              </div>
+            ) : (
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="gerrit-wizard-submit-rule-project"
+                    className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0"
+                  >
+                    Project
+                  </label>
+                  <input
+                    id="gerrit-wizard-submit-rule-project"
+                    data-testid="gerrit-wizard-submit-rule-project"
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={submitRuleProject}
+                    onChange={(e) => {
+                      setSubmitRuleProject(e.target.value)
+                      setSubmitRuleVerify(null)
+                    }}
+                    placeholder="omnisight-productizer"
+                    className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                  />
+                </div>
+                {submitRuleProject.trim().length > 0 && !submitRuleProjectValid && (
+                  <div
+                    data-testid="gerrit-wizard-submit-rule-project-invalid"
+                    className="font-mono text-[9px] text-[var(--critical-red)]"
+                  >
+                    Project must be letters/digits/_/-/./ and start with a word character.
+                  </div>
+                )}
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-verify-submit-rule"
+                    onClick={onVerifySubmitRule}
+                    disabled={!canVerifySubmitRule}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {submitRuleVerifying ? (
+                      <Loader size={10} className="animate-spin" />
+                    ) : (
+                      <ShieldCheck size={10} />
+                    )}
+                    {submitRuleVerifying ? "Verifying…" : "Verify Submit-Rule"}
+                  </button>
+                </div>
+
+                {submitRuleVerify && (
+                  <div
+                    data-testid="gerrit-wizard-submit-rule-result"
+                    data-status={submitRuleVerify.status}
+                    className={`font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 ${
+                      submitRuleReady
+                        ? "bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)]"
+                        : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                    }`}
+                  >
+                    {submitRuleReady ? (
+                      <Check size={10} className="mt-0.5 flex-shrink-0" />
+                    ) : (
+                      <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                    )}
+                    {submitRuleReady ? (
+                      <span>
+                        Project{" "}
+                        <strong>
+                          {submitRuleVerify.project ?? submitRuleProject.trim()}
+                        </strong>{" "}
+                        carries the dual-+2 rule. 三項 ACL 全部符合。
+                      </span>
+                    ) : (
+                      <span>
+                        {submitRuleVerify.message ||
+                          "Gerrit submit-rule verification failed"}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {submitRuleChecks.length > 0 && (
+                  <ul
+                    data-testid="gerrit-wizard-submit-rule-checks"
+                    className="space-y-0.5 list-none p-0 m-0"
+                  >
+                    {submitRuleChecks.map((c) => (
+                      <li
+                        key={c.id}
+                        data-testid={`gerrit-wizard-submit-rule-check-${c.id}`}
+                        data-ok={c.ok ? "true" : "false"}
+                        className={`font-mono text-[9px] leading-relaxed flex items-start gap-1.5 ${
+                          c.ok
+                            ? "text-[var(--validation-emerald)]"
+                            : "text-[var(--critical-red)]"
+                        }`}
+                      >
+                        {c.ok ? (
+                          <Check size={10} className="mt-0.5 flex-shrink-0" />
+                        ) : (
+                          <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                        )}
+                        <span>
+                          <strong>{c.id}</strong>
+                          {c.ok ? " — ok" : `: ${c.detail || "missing"}`}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {submitRuleReady && (
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-step-4-ack"
+                    onClick={() => setStep4Ackd(true)}
+                    disabled={step4Ackd}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Check size={10} />
+                    {step4Ackd ? "Submit-rule confirmed" : "Submit-rule 已套用"}
+                  </button>
+                )}
+
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed">
+                  未通過時，請參考 <code>.gerrit/project.config.example</code> 與{" "}
+                  <code>docs/ops/gerrit_dual_two_rule.md §2</code> 在{" "}
+                  <code>refs/meta/config</code> 上推送對應的規則。
+                </div>
+              </div>
+            )}
+          </div>
+
           <ol className="space-y-2 list-none p-0 m-0">
-            {laterSteps.map((s, i) => (
+            {laterSteps.map((s) => (
               <li
-                key={i}
+                key={s.offset}
                 className="flex gap-2 p-2 rounded border border-[var(--border)] bg-[var(--background)]"
               >
                 <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
-                  {i + 4}
+                  {s.offset}
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
@@ -1783,15 +2008,16 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
           <div className="p-2 rounded bg-[var(--hardware-orange)]/10 border border-[var(--hardware-orange)]/30">
             <div className="font-mono text-[9px] text-[var(--hardware-orange)] font-semibold">
-              PARTIAL — STEPS 1–3 ONLY
+              PARTIAL — STEPS 1–4 ONLY
             </div>
             <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-1">
-              Step 1 (Test Connection, row 222), Step 2 (SSH key display, row 223) and
-              Step 3 (merger-agent-bot group verify, row 224) are wired.
-              All three are probe/display-only and do not write to
+              Step 1 (Test Connection, row 222), Step 2 (SSH key display, row 223),
+              Step 3 (merger-agent-bot group verify, row 224), and Step 4
+              (submit-rule verify, row 225) are wired. All four are
+              probe/display-only and do not write to
               <code className="mx-1">settings.gerrit_*</code>
-              — a later row wires the wizard finalization path. Steps 4–5
-              (submit-rule probe, webhook wiring) arrive in subsequent rows.
+              — a later row wires the wizard finalization path. Step 5
+              (webhook wiring) arrives in a subsequent row.
             </div>
           </div>
         </div>

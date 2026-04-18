@@ -715,6 +715,311 @@ class TestGerritBotVerify:
         assert "merger-agent-bot" not in captured["args"]
 
 
+class TestGerritSubmitRuleVerify:
+    """B14 Part C row 225 — Gerrit Setup Wizard Step 4 (submit-rule 驗證).
+
+    The endpoint fetches ``refs/meta/config:project.config`` over the
+    Gerrit SSH transport (``git fetch`` + ``git show``) and looks for the
+    three dual-+2 ACL fragments. Tests stub ``_fetch_gerrit_project_config``
+    instead of stubbing three chained subprocesses — the probe's
+    pattern-matching is the load-bearing logic here, and the fetch
+    helper is covered indirectly by the subprocess-arg assertions.
+    """
+
+    _GOOD_CONFIG = """
+[project]
+    description = Test.
+
+[access "refs/heads/*"]
+    label-Code-Review = -2..+2 group ai-reviewer-bots
+    label-Code-Review = -2..+2 group non-ai-reviewer
+    submit = group non-ai-reviewer
+
+[label "Code-Review"]
+    function = NoBlock
+"""
+
+    _MISSING_SUBMIT_CONFIG = """
+[access "refs/heads/*"]
+    label-Code-Review = -2..+2 group ai-reviewer-bots
+    label-Code-Review = -2..+2 group non-ai-reviewer
+"""
+
+    _MISSING_HUMANS_CONFIG = """
+[access "refs/heads/*"]
+    label-Code-Review = -2..+2 group ai-reviewer-bots
+    submit = group non-ai-reviewer
+"""
+
+    _COMMENTED_RULE_CONFIG = """
+[access "refs/heads/*"]
+#    label-Code-Review = -2..+2 group ai-reviewer-bots
+#    label-Code-Review = -2..+2 group non-ai-reviewer
+#    submit = group non-ai-reviewer
+"""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_all_three_checks_pass(self, client, monkeypatch):
+        """project.config declares all three ACL fragments → status=ok
+        and every check surfaces `ok=True` so the wizard can flip READY."""
+        from backend.routers import integration as ir
+
+        async def _fake_fetch(host, port, project):
+            return (0, self._GOOD_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "omnisight-productizer",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["project"] == "omnisight-productizer"
+        assert data["missing"] == []
+        check_ids = {c["id"] for c in data["checks"]}
+        assert check_ids == {
+            "ai_reviewers_can_vote",
+            "humans_can_vote",
+            "submit_gated_to_humans",
+        }
+        assert all(c["ok"] for c in data["checks"])
+
+    @pytest.mark.asyncio
+    async def test_missing_submit_gate_surfaces_per_check(
+        self, client, monkeypatch
+    ):
+        """project.config with vote grants but no `submit = group non-ai-reviewer`
+        must flag `submit_gated_to_humans` as failing — that's the
+        load-bearing fence per CLAUDE.md Safety Rules."""
+        from backend.routers import integration as ir
+
+        async def _fake_fetch(host, port, project):
+            return (0, self._MISSING_SUBMIT_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "omnisight-productizer",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert data["missing"] == ["submit_gated_to_humans"]
+        assert "submit" in data["message"].lower()
+        # The other two should be explicitly ok — UI renders them green.
+        by_id = {c["id"]: c for c in data["checks"]}
+        assert by_id["ai_reviewers_can_vote"]["ok"] is True
+        assert by_id["humans_can_vote"]["ok"] is True
+        assert by_id["submit_gated_to_humans"]["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_missing_human_grant_surfaces_per_check(
+        self, client, monkeypatch
+    ):
+        """Missing the `non-ai-reviewer` Code-Review grant → `humans_can_vote`
+        flagged. Humans literally cannot cast the hard-gate +2 without it."""
+        from backend.routers import integration as ir
+
+        async def _fake_fetch(host, port, project):
+            return (0, self._MISSING_HUMANS_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "omnisight-productizer",
+            },
+        )
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "humans_can_vote" in data["missing"]
+
+    @pytest.mark.asyncio
+    async def test_commented_out_rule_is_not_a_match(
+        self, client, monkeypatch
+    ):
+        """Comment-scrubbing guards against a stale `.example` config
+        landing on refs/meta/config with every rule commented out."""
+        from backend.routers import integration as ir
+
+        async def _fake_fetch(host, port, project):
+            return (0, self._COMMENTED_RULE_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "omnisight-productizer",
+            },
+        )
+        data = resp.json()
+        assert data["status"] == "error"
+        assert set(data["missing"]) == {
+            "ai_reviewers_can_vote",
+            "humans_can_vote",
+            "submit_gated_to_humans",
+        }
+
+    @pytest.mark.asyncio
+    async def test_git_fetch_failure_is_surfaced_verbatim(
+        self, client, monkeypatch
+    ):
+        """When git fetch fails (missing ref, auth, …) the probe returns
+        the stderr so the operator can debug — we truncate to 300 chars
+        to avoid spamming the UI with a full stack trace."""
+        from backend.routers import integration as ir
+
+        async def _fake_fetch(host, port, project):
+            return (
+                1,
+                "",
+                "fatal: Couldn't find remote ref refs/meta/config",
+            )
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "omnisight-productizer",
+            },
+        )
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "couldn't find remote ref" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_ssh_host_short_circuits(self, client, monkeypatch):
+        """Empty ssh_host must reject before any subprocess spawns, for
+        symmetry with Step 1 / Step 3 validation."""
+        from backend.routers import integration as ir
+
+        called = {"count": 0}
+
+        async def _fake_fetch(*_args, **_kwargs):
+            called["count"] += 1
+            return (0, self._GOOD_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "",
+                "ssh_port": 29418,
+                "project": "omnisight-productizer",
+            },
+        )
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "host is required" in data["message"].lower()
+        assert called["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_project_short_circuits(self, client, monkeypatch):
+        """Empty project name must reject — an empty Gerrit project would
+        expand to `ssh://host:port/` which is a legal URL but meaningless."""
+        from backend.routers import integration as ir
+
+        called = {"count": 0}
+
+        async def _fake_fetch(*_args, **_kwargs):
+            called["count"] += 1
+            return (0, self._GOOD_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "",
+            },
+        )
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "project is required" in data["message"].lower()
+        assert called["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_malicious_project_name_rejected(
+        self, client, monkeypatch
+    ):
+        """Project names with shell metacharacters / path traversal must
+        be rejected with a friendly error — `create_subprocess_exec`
+        already neutralises shell injection, but the explicit regex gives
+        operators a better message than an opaque git fetch failure."""
+        from backend.routers import integration as ir
+
+        called = {"count": 0}
+
+        async def _fake_fetch(*_args, **_kwargs):
+            called["count"] += 1
+            return (0, self._GOOD_CONFIG, "")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        for bad in (
+            "../omnisight-productizer",
+            "/etc/passwd",
+            "project; rm -rf /",
+            "project name with spaces",
+        ):
+            resp = await client.post(
+                "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+                json={
+                    "ssh_host": "gerrit.example.com",
+                    "ssh_port": 29418,
+                    "project": bad,
+                },
+            )
+            data = resp.json()
+            assert data["status"] == "error", f"should reject {bad!r}"
+            assert called["count"] == 0, f"fetch should not fire for {bad!r}"
+
+    @pytest.mark.asyncio
+    async def test_invalid_port_rejected(self, client, monkeypatch):
+        """Symmetric with Step 3's port validation."""
+        from backend.routers import integration as ir
+
+        async def _fake_fetch(*_args, **_kwargs):  # pragma: no cover — must not fire
+            raise AssertionError("fetch should not spawn for invalid port")
+
+        monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 99999,
+                "project": "omnisight-productizer",
+            },
+        )
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "between 1 and 65535" in data["message"]
+
+
 class TestGitTokenMapEndpoint:
     """B14 Part B row 217 — masked GET/PUT of the multi-instance token map."""
 

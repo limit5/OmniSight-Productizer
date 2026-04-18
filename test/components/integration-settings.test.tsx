@@ -32,6 +32,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     updateGitTokenMap: vi.fn(),
     getGitForgeSshPubkey: vi.fn(),
     verifyGerritMergerBot: vi.fn(),
+    verifyGerritSubmitRule: vi.fn(),
   }
 })
 
@@ -43,6 +44,7 @@ const mockedGetProviders = api.getProviders as unknown as ReturnType<typeof vi.f
 const mockedTestGitForgeToken = api.testGitForgeToken as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitForgeSshPubkey = api.getGitForgeSshPubkey as unknown as ReturnType<typeof vi.fn>
 const mockedVerifyGerritMergerBot = api.verifyGerritMergerBot as unknown as ReturnType<typeof vi.fn>
+const mockedVerifyGerritSubmitRule = api.verifyGerritSubmitRule as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitTokenMap = (api as unknown as {
   getGitTokenMap: ReturnType<typeof vi.fn>
 }).getGitTokenMap
@@ -499,6 +501,246 @@ describe("GerritSetupWizardDialog — Step 3 (merger-agent-bot 帳號設定)", (
     expect(result.getAttribute("data-status")).toBe("error")
     expect(result.textContent).toContain("network offline")
     expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+})
+
+/**
+ * B14 Part C row 225 — Gerrit Setup Wizard Step 4 (submit-rule 驗證).
+ *
+ * Step 4 reads `refs/meta/config:project.config` on the target project
+ * and confirms the O7 dual-+2 ACL (ai-reviewer-bots +
+ * non-ai-reviewer votes, submit gated to non-ai-reviewer). Gated behind
+ * Step 3's ack so operators can't jump ahead of the bot-group check.
+ *
+ * Covered:
+ *   - Gated: Step 4 hides the Verify button until Step 3 flips DONE
+ *   - Project input must pass client-side regex before Verify enables
+ *   - Happy path: all three checks green → badge READY, per-check list renders
+ *   - Failing checks surface inline with detail text, ack suppressed
+ *   - Ack flips READY → DONE
+ *   - Thrown probe surfaces a friendly fallback
+ */
+describe("GerritSetupWizardDialog — Step 4 (submit-rule 驗證)", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedTestGitForgeToken.mockReset()
+    mockedVerifyGerritMergerBot.mockReset()
+    mockedVerifyGerritSubmitRule.mockReset()
+    mockedGetSettings.mockResolvedValue({})
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  async function passSteps1Through3(
+    host = "bot@gerrit.example.com",
+    port = 29418,
+  ) {
+    mockedTestGitForgeToken.mockResolvedValueOnce({
+      status: "ok",
+      version: "3.8.1",
+      ssh_host: host,
+      ssh_port: port,
+    })
+    mockedVerifyGerritMergerBot.mockResolvedValueOnce({
+      status: "ok",
+      group: "merger-agent-bot",
+      member_count: 1,
+      members: [{ username: "merger-agent-bot" }],
+    })
+    await renderAndOpenWizard()
+    fireEvent.change(screen.getByTestId("gerrit-wizard-ssh-host"), {
+      target: { value: host },
+    })
+    fireEvent.click(screen.getByTestId("gerrit-wizard-test"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-1-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+    await screen.findByTestId("gerrit-wizard-bot-result")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-3-ack"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+  }
+
+  it("keeps Step 4 gated until Step 3 flips DONE", async () => {
+    await renderAndOpenWizard()
+    expect(screen.getByTestId("gerrit-wizard-step-4-gated")).toBeTruthy()
+    expect(
+      screen.queryByTestId("gerrit-wizard-verify-submit-rule"),
+    ).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("disables Verify until a valid project name is entered", async () => {
+    await passSteps1Through3()
+    const btn = await screen.findByTestId(
+      "gerrit-wizard-verify-submit-rule",
+    )
+    expect((btn as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "omnisight-productizer" } },
+    )
+    expect((btn as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it("surfaces a regex error for malformed project names", async () => {
+    await passSteps1Through3()
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "../etc/passwd" } },
+    )
+    expect(
+      screen.getByTestId("gerrit-wizard-submit-rule-project-invalid"),
+    ).toBeTruthy()
+    expect(
+      (screen.getByTestId(
+        "gerrit-wizard-verify-submit-rule",
+      ) as HTMLButtonElement).disabled,
+    ).toBe(true)
+  })
+
+  it("flips Step 4 to READY when all three ACL checks pass", async () => {
+    mockedVerifyGerritSubmitRule.mockResolvedValueOnce({
+      status: "ok",
+      project: "omnisight-productizer",
+      ssh_host: "bot@gerrit.example.com",
+      ssh_port: 29418,
+      checks: [
+        { id: "ai_reviewers_can_vote", ok: true },
+        { id: "humans_can_vote", ok: true },
+        { id: "submit_gated_to_humans", ok: true },
+      ],
+      missing: [],
+    })
+    await passSteps1Through3()
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "omnisight-productizer" } },
+    )
+    fireEvent.click(screen.getByTestId("gerrit-wizard-verify-submit-rule"))
+    await waitFor(() => {
+      expect(mockedVerifyGerritSubmitRule).toHaveBeenCalledWith({
+        ssh_host: "bot@gerrit.example.com",
+        ssh_port: 29418,
+        project: "omnisight-productizer",
+      })
+    })
+    const result = await screen.findByTestId(
+      "gerrit-wizard-submit-rule-result",
+    )
+    expect(result.getAttribute("data-status")).toBe("ok")
+    expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
+      "READY",
+    )
+    for (const id of [
+      "ai_reviewers_can_vote",
+      "humans_can_vote",
+      "submit_gated_to_humans",
+    ]) {
+      expect(
+        screen
+          .getByTestId(`gerrit-wizard-submit-rule-check-${id}`)
+          .getAttribute("data-ok"),
+      ).toBe("true")
+    }
+  })
+
+  it("surfaces per-check failures when the submit gate is missing", async () => {
+    mockedVerifyGerritSubmitRule.mockResolvedValueOnce({
+      status: "error",
+      project: "omnisight-productizer",
+      checks: [
+        { id: "ai_reviewers_can_vote", ok: true },
+        { id: "humans_can_vote", ok: true },
+        {
+          id: "submit_gated_to_humans",
+          ok: false,
+          detail:
+            "`submit` is not gated to `non-ai-reviewer` — any group with submit permission would bypass the human hard gate.",
+        },
+      ],
+      missing: ["submit_gated_to_humans"],
+      message:
+        "project.config is missing 1 dual-+2 rule: `submit` is not gated to `non-ai-reviewer` …",
+    })
+    await passSteps1Through3()
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "omnisight-productizer" } },
+    )
+    fireEvent.click(screen.getByTestId("gerrit-wizard-verify-submit-rule"))
+    const result = await screen.findByTestId(
+      "gerrit-wizard-submit-rule-result",
+    )
+    expect(result.getAttribute("data-status")).toBe("error")
+    expect(
+      screen
+        .getByTestId("gerrit-wizard-submit-rule-check-submit_gated_to_humans")
+        .getAttribute("data-ok"),
+    ).toBe("false")
+    expect(screen.queryByTestId("gerrit-wizard-step-4-ack")).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("flips Step 4 from READY to DONE on operator ack", async () => {
+    mockedVerifyGerritSubmitRule.mockResolvedValueOnce({
+      status: "ok",
+      project: "omnisight-productizer",
+      checks: [
+        { id: "ai_reviewers_can_vote", ok: true },
+        { id: "humans_can_vote", ok: true },
+        { id: "submit_gated_to_humans", ok: true },
+      ],
+      missing: [],
+    })
+    await passSteps1Through3()
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "omnisight-productizer" } },
+    )
+    fireEvent.click(screen.getByTestId("gerrit-wizard-verify-submit-rule"))
+    await screen.findByTestId("gerrit-wizard-submit-rule-result")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-4-ack"))
+    expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
+      "DONE",
+    )
+  })
+
+  it("catches a thrown probe and renders a fallback error", async () => {
+    mockedVerifyGerritSubmitRule.mockRejectedValueOnce(
+      new Error("network offline"),
+    )
+    await passSteps1Through3()
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "omnisight-productizer" } },
+    )
+    fireEvent.click(screen.getByTestId("gerrit-wizard-verify-submit-rule"))
+    const result = await screen.findByTestId(
+      "gerrit-wizard-submit-rule-result",
+    )
+    expect(result.getAttribute("data-status")).toBe("error")
+    expect(result.textContent).toContain("network offline")
+    expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
       "PENDING",
     )
   })

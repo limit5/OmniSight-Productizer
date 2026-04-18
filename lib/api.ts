@@ -1410,6 +1410,50 @@ export async function verifyGerritMergerBot(args: {
   })
 }
 
+// ─── B14 Part C row 225: Verify the Gerrit dual-+2 submit-rule ───
+//
+// Gerrit Setup Wizard Step 4 fetches `refs/meta/config:project.config`
+// from the target project and pattern-matches the three ACL fragments
+// that encode the O7 dual-+2 policy:
+//   (A) label-Code-Review granted to `ai-reviewer-bots`
+//   (B) label-Code-Review granted to `non-ai-reviewer`
+//   (C) submit restricted to `non-ai-reviewer` (human hard gate)
+// Any missing fragment is surfaced per-check so the operator can diff
+// against `.gerrit/project.config.example` shipped in the repo.
+export interface GerritSubmitRuleCheck {
+  id: string
+  ok: boolean
+  detail?: string
+}
+
+export interface GerritSubmitRuleVerifyResult {
+  status: "ok" | "error"
+  project?: string
+  ssh_host?: string
+  ssh_port?: number
+  checks?: GerritSubmitRuleCheck[]
+  missing?: string[]
+  message?: string
+}
+
+export async function verifyGerritSubmitRule(args: {
+  ssh_host: string
+  ssh_port?: number
+  project: string
+}): Promise<GerritSubmitRuleVerifyResult> {
+  return request<GerritSubmitRuleVerifyResult>(
+    "/system/git-forge/gerrit/verify-submit-rule",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ssh_host: args.ssh_host,
+        ssh_port: args.ssh_port ?? 29418,
+        project: args.project,
+      }),
+    },
+  )
+}
+
 // ─── Tenant Secrets (I4) ───
 
 export interface TenantSecret {

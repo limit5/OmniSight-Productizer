@@ -802,6 +802,270 @@ async def verify_gerrit_merger_bot(
     return result
 
 
+# ─── B14 Part C row 225: Gerrit submit-rule (dual-+2) probe ──────────────
+#
+# Step 4 of the Gerrit Setup Wizard verifies that the target project's
+# ``project.config`` on ``refs/meta/config`` carries the O7 dual-+2
+# policy (see CLAUDE.md Safety Rules + docs/ops/gerrit_dual_two_rule.md §2
+# for the authoritative rule). Gerrit exposes no SSH command that dumps
+# arbitrary files, so the probe uses ``git fetch`` + ``git show`` over
+# the same SSH transport used by Steps 1/3 — this keeps a single set of
+# credentials load-bearing and avoids a second auth surface (HTTP
+# password) just for Step 4.
+#
+# What counts as "dual-+2 rule" for this probe?
+#
+#   (A) ``label-Code-Review`` is granted to the ``ai-reviewer-bots``
+#       group (so AI reviewers — Merger / lint-bot / security-bot —
+#       can cast +2 votes at all).
+#   (B) ``label-Code-Review`` is granted to the ``non-ai-reviewer``
+#       group (so humans can cast the hard-gate +2).
+#   (C) ``submit`` is gated to the ``non-ai-reviewer`` group (so no
+#       bot can bypass the human hard gate — this is the load-bearing
+#       fence CLAUDE.md Safety Rules guards).
+#
+# Any one of these missing is flagged — the wizard surfaces the
+# missing item(s) verbatim so the operator can diff against the
+# canonical ``.gerrit/project.config.example`` shipped in the repo.
+# The probe never mutates Gerrit; it never writes back to ``settings``.
+
+class GerritSubmitRuleVerify(BaseModel):
+    ssh_host: str = ""
+    ssh_port: int = 29418
+    project: str = ""
+
+
+# Validates Gerrit project paths: letters, digits, `_`, `-`, `.`, `/`.
+# Rejects leading `/`, `..` components, and anything a shell/URL could
+# surprise us with. `git fetch` is invoked via `create_subprocess_exec`
+# (no shell), so this is belt + braces — catching obvious typos early.
+_GERRIT_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-./]{0,199}$")
+
+
+def _validate_gerrit_project(project: str) -> str | None:
+    """Return an error message if the project name is rejected, else None."""
+    proj = (project or "").strip()
+    if not proj:
+        return "Project is required"
+    if not _GERRIT_PROJECT_RE.match(proj):
+        return (
+            "Project must be letters/digits/_/-/./ and start with a word "
+            "character"
+        )
+    if ".." in proj.split("/") or proj.startswith("/") or proj.endswith("/"):
+        return "Project path looks malformed"
+    return None
+
+
+# The three ACL fragments we look for in `project.config`. Match the
+# Gerrit access-section grammar loosely: we accept any range prefix
+# (e.g. `-1..+1`, `-2..+2`) so a tenant who has tightened the label
+# range still passes, and we accept either the canonical
+# `[access "refs/heads/*"]` scope or an inherited All-Projects scope.
+# The group name is the load-bearing identity.
+_DUAL_TWO_CHECKS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "ai_reviewers_can_vote",
+        re.compile(
+            r"label-Code-Review\s*=\s*-?\d+\.\.\+?\d+\s+group\s+ai-reviewer-bots\b",
+            re.IGNORECASE,
+        ),
+        "AI reviewer bots are missing `label-Code-Review` grant "
+        "(group `ai-reviewer-bots`).",
+    ),
+    (
+        "humans_can_vote",
+        re.compile(
+            r"label-Code-Review\s*=\s*-?\d+\.\.\+?\d+\s+group\s+non-ai-reviewer\b",
+            re.IGNORECASE,
+        ),
+        "Human reviewers are missing `label-Code-Review` grant "
+        "(group `non-ai-reviewer`).",
+    ),
+    (
+        "submit_gated_to_humans",
+        re.compile(
+            r"^\s*submit\s*=\s*group\s+non-ai-reviewer\b", re.IGNORECASE | re.MULTILINE
+        ),
+        "`submit` is not gated to `non-ai-reviewer` — any group with "
+        "submit permission would bypass the human hard gate.",
+    ),
+]
+
+
+async def _fetch_gerrit_project_config(
+    ssh_host: str, ssh_port: int, project: str
+) -> tuple[int, str, str]:
+    """Run ``git fetch`` + ``git show`` over the Gerrit SSH transport to
+    read ``project.config`` off ``refs/meta/config``. Returns the tuple
+    ``(returncode, stdout, stderr)`` so the caller can route Gerrit
+    error output (``fatal: …``) verbatim into the probe result.
+
+    The temp-repo lives under ``tempfile.TemporaryDirectory`` and is
+    torn down on exit regardless of outcome. ``GIT_TERMINAL_PROMPT=0``
+    keeps git from blocking on a broken auth path (vs. blocking on an
+    invisible prompt); ``BatchMode=yes`` + ``ConnectTimeout=5`` on
+    ``GIT_SSH_COMMAND`` mirror ``_probe_gerrit_ssh`` so the transport
+    behaviour matches Step 1.
+    """
+    import tempfile
+
+    ref = "refs/meta/config"
+    url = f"ssh://{ssh_host}:{int(ssh_port)}/{project}"
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": (
+            "ssh -o StrictHostKeyChecking=accept-new "
+            "-o ConnectTimeout=5 -o BatchMode=yes"
+        ),
+    }
+    with tempfile.TemporaryDirectory(prefix="gerrit-submit-rule-") as tmp:
+        # `git init` + fetch instead of `git clone` because cloning
+        # refs/meta/config directly (not an advertised branch) requires
+        # a follow-up `git fetch` anyway — collapsing the two calls.
+        init = await asyncio.create_subprocess_exec(
+            "git", "init", "-q", tmp,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        await init.communicate()
+        if init.returncode != 0:  # pragma: no cover — git missing from image
+            return (init.returncode or 1, "", "git init failed")
+
+        fetch = await asyncio.create_subprocess_exec(
+            "git", "-C", tmp, "fetch", "--depth=1", url, ref,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _, fetch_err = await fetch.communicate()
+        if fetch.returncode != 0:
+            return (
+                fetch.returncode or 1,
+                "",
+                fetch_err.decode(errors="replace").strip(),
+            )
+
+        show = await asyncio.create_subprocess_exec(
+            "git", "-C", tmp, "show", "FETCH_HEAD:project.config",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        show_out, show_err = await show.communicate()
+        return (
+            show.returncode or 0,
+            show_out.decode(errors="replace"),
+            show_err.decode(errors="replace").strip(),
+        )
+
+
+async def _probe_gerrit_submit_rule(
+    ssh_host: str, ssh_port: int, project: str
+) -> dict:
+    """Fetch ``refs/meta/config:project.config`` from ``project`` and
+    verify it declares the dual-+2 ACL triple
+    (``ai-reviewer-bots`` can vote, ``non-ai-reviewer`` can vote,
+    ``submit`` gated to ``non-ai-reviewer``).
+
+    Shape mirrors the other ``_probe_gerrit_*`` helpers::
+
+        { status: "ok"|"error", project, checks: [...], missing: [...],
+          ssh_host, ssh_port }
+
+    ``checks`` is the authoritative per-check breakdown the UI renders
+    inline; ``missing`` is a convenience list of the failing check IDs
+    so the wizard can show a single red bullet list.
+    """
+    host = (ssh_host or "").strip()
+    if not host:
+        return {"status": "error", "message": "SSH host is required"}
+    proj_err = _validate_gerrit_project(project)
+    if proj_err:
+        return {"status": "error", "message": proj_err}
+    try:
+        port = int(ssh_port) if ssh_port is not None else 29418
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "SSH port must be an integer"}
+    if port < 1 or port > 65535:
+        return {
+            "status": "error",
+            "message": "SSH port must be between 1 and 65535",
+        }
+
+    proj = project.strip()
+    rc, stdout, stderr = await _fetch_gerrit_project_config(host, port, proj)
+    if rc != 0:
+        err = stderr or stdout or "git fetch failed"
+        return {
+            "status": "error",
+            "project": proj,
+            "ssh_host": host,
+            "ssh_port": port,
+            "message": err[:300],
+        }
+    config = stdout or ""
+    # Strip comment-only lines so a commented-out rule in a sample file
+    # can't trick the probe into a false-positive match.
+    scrubbed = "\n".join(
+        line for line in config.splitlines() if not line.lstrip().startswith(("#", ";"))
+    )
+    checks: list[dict] = []
+    missing: list[str] = []
+    for check_id, pattern, detail in _DUAL_TWO_CHECKS:
+        ok = bool(pattern.search(scrubbed))
+        checks.append({"id": check_id, "ok": ok, "detail": "" if ok else detail})
+        if not ok:
+            missing.append(check_id)
+
+    if missing:
+        friendly = "; ".join(c["detail"] for c in checks if not c["ok"])
+        return {
+            "status": "error",
+            "project": proj,
+            "ssh_host": host,
+            "ssh_port": port,
+            "checks": checks,
+            "missing": missing,
+            "message": (
+                f"project.config is missing {len(missing)} dual-+2 rule"
+                f"{'s' if len(missing) != 1 else ''}: {friendly}"
+            ),
+        }
+    return {
+        "status": "ok",
+        "project": proj,
+        "ssh_host": host,
+        "ssh_port": port,
+        "checks": checks,
+        "missing": [],
+    }
+
+
+@router.post("/git-forge/gerrit/verify-submit-rule")
+async def verify_gerrit_submit_rule(
+    body: GerritSubmitRuleVerify, _user=Depends(_au.require_admin)
+):
+    """Verify the target Gerrit project carries the O7 dual-+2 submit rule.
+
+    B14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:
+    reads ``refs/meta/config:project.config`` over the Gerrit SSH
+    transport and pattern-matches the three ACL lines that encode the
+    dual-+2 gate. Installation of the rule stays manual (it requires
+    ``Push`` on ``refs/meta/config`` which is an admin-only ref) per
+    docs/ops/gerrit_dual_two_rule.md §2.
+    """
+    try:
+        result = await asyncio.wait_for(
+            _probe_gerrit_submit_rule(body.ssh_host, body.ssh_port, body.project),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        return {"status": "error", "message": "Connection timed out (30s)"}
+    except Exception as exc:  # pragma: no cover — network-level failure
+        return {"status": "error", "message": str(exc)}
+    return result
+
+
 # ── Test functions ──
 
 async def _test_ssh() -> dict:
