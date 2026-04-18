@@ -133,11 +133,10 @@ def test_frontend_build_preserves_backend_url_arg(compose: dict) -> None:
     # Frontend's Next.js build needs BACKEND_URL baked in for the
     # rewrite proxy. Regressing this would silently break the prod
     # frontend → backend wiring on the local-build fallback path.
-    # G2 #2 (HA-02) — after the dual-replica split, the frontend SSR
-    # points at backend-a (the default upstream); Caddy fronts external
-    # traffic and G2 #3 will move this to the proxy DNS name.
+    # G2 #4 — frontend SSR routes through Caddy (health-aware) so it
+    # survives backend rolling restart without OOM. See commit eae6e0a.
     args = compose["services"]["frontend"]["build"].get("args") or {}
-    assert args.get("BACKEND_URL") == "http://backend-a:8000"
+    assert args.get("BACKEND_URL") == "http://caddy:8000"
 
 
 # ---------------------------------------------------------------------------
