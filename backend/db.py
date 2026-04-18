@@ -656,7 +656,8 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     PRIMARY KEY (user_id, pref_key)
 );
 CREATE INDEX IF NOT EXISTS idx_user_prefs_user ON user_preferences(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_prefs_tenant ON user_preferences(tenant_id);
+-- idx_user_prefs_tenant: created in _migrate() after ADD COLUMN tenant_id
+-- (existing DBs may have user_preferences without tenant_id column).
 
 -- I4: Tenant-scoped secrets (git_credentials, provider_keys, cloudflare_tokens…)
 CREATE TABLE IF NOT EXISTS tenant_secrets (
