@@ -23,9 +23,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import paramiko
+try:
+    import paramiko
+except ImportError:
+    paramiko = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _require_paramiko():
+    """Raise a clear error if paramiko is not installed."""
+    if paramiko is None:
+        raise ImportError(
+            "paramiko is required for SSH runner (C1 remote execution). "
+            "Install it with: pip install paramiko\n"
+            "Or install OmniSight with SSH extras: pip install -e '.[ssh]'"
+        )
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -150,8 +163,9 @@ def find_target_for_arch(target_arch: str, target_os: str = "linux") -> SSHTarge
     return None
 
 
-def _connect(target: SSHTarget) -> paramiko.SSHClient:
+def _connect(target: SSHTarget) -> "paramiko.SSHClient":
     """Create and return a connected SSH client."""
+    _require_paramiko()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 

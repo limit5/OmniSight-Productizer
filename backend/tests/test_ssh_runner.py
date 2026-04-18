@@ -17,6 +17,10 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
+# paramiko is an optional dependency — skip the entire test module
+# if it's not installed (instead of failing at collection time).
+pytest.importorskip("paramiko", reason="paramiko not installed — C1 SSH runner tests skipped")
+
 from backend import t3_resolver as r
 from backend import container as _ct
 from backend import ssh_runner as sr

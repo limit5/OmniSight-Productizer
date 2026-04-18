@@ -71,3 +71,11 @@ zxcvbn-python>=4.4.24
 # --- I9/I10: Redis-backed rate limiting + multi-worker shared state ---
 redis>=5.0.0
 redis[hiredis]>=5.0.0
+
+# --- C1: SSH remote runner (optional) ----------------------------------
+# Only needed for cross-arch targets requiring paramiko-based remote
+# execution. The module (backend/ssh_runner.py) lazy-imports paramiko
+# and raises a clear error at call time if missing — so the system
+# starts and runs fine without it. Install when you need SSH:
+#   pip install paramiko
+paramiko>=3.4.0
