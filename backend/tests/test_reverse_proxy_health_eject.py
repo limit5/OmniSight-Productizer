@@ -79,28 +79,33 @@ def reverse_proxy_block(caddyfile_text: str) -> str:
     are not Caddy block scopes but we need to discount them
     anyway).
     """
-    # Find the `reverse_proxy` directive header line.
+    # Find ALL `reverse_proxy` directive blocks (the Caddyfile may
+    # contain multiple — e.g. :443 external + :8000 internal proxy).
+    # Concatenate them so health-directive assertions cover every block.
     lines = caddyfile_text.splitlines()
-    start = None
-    for i, ln in enumerate(lines):
-        if ln.strip().startswith("reverse_proxy") and ln.rstrip().endswith("{"):
-            start = i
-            break
-    assert start is not None, "reverse_proxy directive with body not found"
+    all_blocks: list[str] = []
 
-    # Walk forward, counting braces while ignoring placeholder braces.
-    depth = 0
-    body_lines: list[str] = []
-    for ln in lines[start:]:
-        scrubbed = re.sub(r"\{\$[^}]*\}", "", ln)
-        scrubbed = re.sub(r"\{http\.[^}]*\}", "", scrubbed)
-        scrubbed = re.sub(r"\{(remote_host|scheme|host|uri)\}", "", scrubbed)
-        depth += scrubbed.count("{") - scrubbed.count("}")
-        body_lines.append(ln)
-        if depth == 0 and body_lines:
-            break
-    assert depth == 0, "reverse_proxy directive braces never closed"
-    return "\n".join(body_lines)
+    i = 0
+    while i < len(lines):
+        if lines[i].strip().startswith("reverse_proxy") and lines[i].rstrip().endswith("{"):
+            depth = 0
+            body_lines: list[str] = []
+            for ln in lines[i:]:
+                scrubbed = re.sub(r"\{\$[^}]*\}", "", ln)
+                scrubbed = re.sub(r"\{http\.[^}]*\}", "", scrubbed)
+                scrubbed = re.sub(r"\{(remote_host|scheme|host|uri)\}", "", scrubbed)
+                depth += scrubbed.count("{") - scrubbed.count("}")
+                body_lines.append(ln)
+                if depth == 0 and body_lines:
+                    break
+            assert depth == 0, "reverse_proxy directive braces never closed"
+            all_blocks.append("\n".join(body_lines))
+            i += len(body_lines)
+        else:
+            i += 1
+
+    assert all_blocks, "no reverse_proxy directive with body found"
+    return "\n".join(all_blocks)
 
 
 # ── 1. Active probe — the /readyz contract ──────────────────────────

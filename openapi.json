@@ -95,6 +95,52 @@
         "title": "AISuggestion",
         "type": "object"
       },
+      "AdminPasswordRequest": {
+        "description": "Request body for the wizard's Step 1 password rotation.\n\n``current_password`` is verified against the default admin row (the\none still flagged ``must_change_password=1``). ``new_password`` is\nre-validated server-side using :func:`auth.validate_password_strength`\n— the 12-char + zxcvbn ≥ 3 bar owned by K7/K1.",
+        "properties": {
+          "current_password": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Current Password",
+            "type": "string"
+          },
+          "new_password": {
+            "maxLength": 512,
+            "minLength": 12,
+            "title": "New Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "title": "AdminPasswordRequest",
+        "type": "object"
+      },
+      "AdminPasswordResponse": {
+        "properties": {
+          "admin_password_default": {
+            "title": "Admin Password Default",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "admin_password_default",
+          "user_id"
+        ],
+        "title": "AdminPasswordResponse",
+        "type": "object"
+      },
       "Agent": {
         "properties": {
           "ai_model": {
@@ -426,6 +472,47 @@
         "title": "AttestationVerifyRequest",
         "type": "object"
       },
+      "AuditChainSummary": {
+        "properties": {
+          "bad_tenants": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Bad Tenants",
+            "type": "array"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "first_bad_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Bad Id"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "tenant_count": {
+            "default": 0,
+            "title": "Tenant Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "AuditChainSummary",
+        "type": "object"
+      },
       "AuditQueryRequest": {
         "properties": {
           "action": {
@@ -620,6 +707,63 @@
         "title": "BootChainVerifyRequest",
         "type": "object"
       },
+      "BootstrapResetRequest": {
+        "description": "Body for ``POST /bootstrap/reset``.\n\n``reason`` is captured into the audit row so QA runs can be traced\nback (e.g. \"running E2E suite\", \"manual reset for screenshot\").",
+        "properties": {
+          "reason": {
+            "default": "",
+            "description": "Optional free-text note recorded with the audit row.",
+            "maxLength": 500,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "BootstrapResetRequest",
+        "type": "object"
+      },
+      "BootstrapResetResponse": {
+        "properties": {
+          "actor_user_id": {
+            "title": "Actor User Id",
+            "type": "string"
+          },
+          "admins_reflagged": {
+            "title": "Admins Reflagged",
+            "type": "integer"
+          },
+          "bootstrap_state_rows_deleted": {
+            "title": "Bootstrap State Rows Deleted",
+            "type": "integer"
+          },
+          "deploy_mode": {
+            "enum": [
+              "systemd",
+              "docker-compose",
+              "dev"
+            ],
+            "title": "Deploy Mode",
+            "type": "string"
+          },
+          "marker_cleared": {
+            "title": "Marker Cleared",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "deploy_mode",
+          "bootstrap_state_rows_deleted",
+          "admins_reflagged",
+          "marker_cleared",
+          "actor_user_id"
+        ],
+        "title": "BootstrapResetResponse",
+        "type": "object"
+      },
       "BudgetCheckRequest": {
         "properties": {
           "files": {
@@ -739,6 +883,38 @@
         "title": "CertArtifactRequest",
         "type": "object"
       },
+      "CfTunnelSkipRequest": {
+        "description": "Request body for the wizard's Step 3 ``skip tunnel`` transition.\n\nThe operator is explicitly asserting \"this install is LAN-only / I\ndon't want remote access right now\" — the wizard records the skip\nso the finalize gate can go green, but audit captures the operator\nintent with warning severity so it never looks like a silent bypass.",
+        "properties": {
+          "reason": {
+            "default": "",
+            "description": "Optional free-text note stored with the audit row.",
+            "maxLength": 500,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "CfTunnelSkipRequest",
+        "type": "object"
+      },
+      "CfTunnelSkipResponse": {
+        "properties": {
+          "cf_tunnel_configured": {
+            "title": "Cf Tunnel Configured",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "cf_tunnel_configured"
+        ],
+        "title": "CfTunnelSkipResponse",
+        "type": "object"
+      },
       "ChangePasswordRequest": {
         "properties": {
           "current_password": {
@@ -796,6 +972,52 @@
           "message"
         ],
         "title": "ChatResponse",
+        "type": "object"
+      },
+      "CheckResult": {
+        "description": "One of the four parallel probes' outcome.\n\n``status`` is tri-state: ``skipped`` means the probe was not\napplicable (e.g. CF tunnel when the operator chose LAN-only). The\nwizard UI treats ``green`` and ``skipped`` both as a green check;\nonly ``red`` keeps the step gated.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "green",
+              "red",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "status"
+        ],
+        "title": "CheckResult",
         "type": "object"
       },
       "CircuitResetRequest": {
@@ -1806,6 +2028,49 @@
         "title": "FeatureBudgetRequest",
         "type": "object"
       },
+      "FinalizeRequest": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional free-text note persisted with the finalize row.",
+            "title": "Reason"
+          }
+        },
+        "title": "FinalizeRequest",
+        "type": "object"
+      },
+      "FinalizeResponse": {
+        "properties": {
+          "actor_user_id": {
+            "title": "Actor User Id",
+            "type": "string"
+          },
+          "finalized": {
+            "title": "Finalized",
+            "type": "boolean"
+          },
+          "status": {
+            "additionalProperties": true,
+            "title": "Status",
+            "type": "object"
+          }
+        },
+        "required": [
+          "finalized",
+          "status",
+          "actor_user_id"
+        ],
+        "title": "FinalizeResponse",
+        "type": "object"
+      },
       "FirmwareSignRequest": {
         "properties": {
           "image_path": {
@@ -2140,6 +2405,64 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "HumanVotePayload": {
+        "description": "Per-vote shape for reconciliation calls.  ``groups`` comes from\nthe Gerrit account look-up; orchestrator-side cache.",
+        "properties": {
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Groups",
+            "type": "array"
+          },
+          "score": {
+            "title": "Score",
+            "type": "integer"
+          },
+          "voter": {
+            "title": "Voter",
+            "type": "string"
+          }
+        },
+        "required": [
+          "voter",
+          "groups",
+          "score"
+        ],
+        "title": "HumanVotePayload",
+        "type": "object"
+      },
+      "HumanVoteRequest": {
+        "properties": {
+          "change_id": {
+            "title": "Change Id",
+            "type": "string"
+          },
+          "commit": {
+            "title": "Commit",
+            "type": "string"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "votes": {
+            "items": {
+              "$ref": "#/components/schemas/HumanVotePayload"
+            },
+            "title": "Votes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "change_id",
+          "project",
+          "commit",
+          "votes"
+        ],
+        "title": "HumanVoteRequest",
+        "type": "object"
+      },
       "ICCEmbedRequest": {
         "properties": {
           "image_size": {
@@ -2350,6 +2673,31 @@
         "title": "IngestRequest",
         "type": "object"
       },
+      "InjectRequest": {
+        "properties": {
+          "agent_id": {
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "author": {
+            "default": "dashboard",
+            "title": "Author",
+            "type": "string"
+          },
+          "text": {
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "text"
+        ],
+        "title": "InjectRequest",
+        "type": "object"
+      },
       "InvokeHaltResponse": {
         "properties": {
           "containers_stopped": {
@@ -2432,6 +2780,86 @@
           "width"
         ],
         "title": "LineScanComposeRequest",
+        "type": "object"
+      },
+      "LlmProvisionRequest": {
+        "description": "Request body for the wizard's L3 Step 2 provider provisioning.\n\n``api_key`` is required for every hosted provider (anthropic / openai\n/ azure); ``ollama`` is local and authenticates by reachability only.\n``base_url`` is mandatory for Azure (the resource endpoint) and\noptional for Ollama (defaults to ``http://localhost:11434``). A\ncaller-supplied ``model`` is echoed back into\n:attr:`settings.llm_model` so the agent factory picks it up.",
+        "properties": {
+          "api_key": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Api Key",
+            "type": "string"
+          },
+          "azure_deployment": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Azure Deployment",
+            "type": "string"
+          },
+          "base_url": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "LlmProvisionRequest",
+        "type": "object"
+      },
+      "LlmProvisionResponse": {
+        "properties": {
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "provider",
+          "model",
+          "fingerprint",
+          "latency_ms"
+        ],
+        "title": "LlmProvisionResponse",
         "type": "object"
       },
       "LoadGCodeRequest": {
@@ -2697,6 +3125,47 @@
         "title": "OTATestRequest",
         "type": "object"
       },
+      "OllamaDetectResponse": {
+        "description": "Response for read-only Ollama reachability probe.\n\n``reachable`` is true iff ``GET {base_url}/api/tags`` returned 200.\n``models`` carries the names Ollama reported (may be empty if the\nhost has no models pulled yet). ``kind`` is one of the\n:class:`backend.llm_secrets.ProviderPingError` classifications on\nfailure, or empty string on success.",
+        "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "reachable": {
+            "title": "Reachable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reachable",
+          "base_url",
+          "latency_ms"
+        ],
+        "title": "OllamaDetectResponse",
+        "type": "object"
+      },
       "OrchestratorMessage": {
         "properties": {
           "content": {
@@ -2947,6 +3416,70 @@
         "title": "PageSectionReq",
         "type": "object"
       },
+      "ParallelHealthCheckRequest": {
+        "description": "Body for ``POST /bootstrap/parallel-health-check``.\n\nEvery field is optional so the wizard can fire a bare POST on\ndefault installations — operator overrides are only needed when\nrunning behind a reverse proxy or in docker-compose with non-default\nservice names.",
+        "properties": {
+          "backend_url": {
+            "default": "",
+            "description": "Optional override for the backend /healthz URL.",
+            "maxLength": 1024,
+            "title": "Backend Url",
+            "type": "string"
+          },
+          "frontend_url": {
+            "default": "",
+            "description": "Optional override for the frontend readiness URL.",
+            "maxLength": 1024,
+            "title": "Frontend Url",
+            "type": "string"
+          },
+          "timeout_secs": {
+            "default": 5.0,
+            "description": "Per-probe hard timeout (default 5s).",
+            "maximum": 30.0,
+            "minimum": 0.1,
+            "title": "Timeout Secs",
+            "type": "number"
+          }
+        },
+        "title": "ParallelHealthCheckRequest",
+        "type": "object"
+      },
+      "ParallelHealthCheckResponse": {
+        "description": "Aggregated result of the four Step-4 probes.\n\n``all_green`` is True iff none of the four checks reports ``red``\n(``skipped`` counts as green because nothing is actually broken).\n``elapsed_ms`` is the wall-clock cost of the slowest probe, not the\nsum — the four checks fan out in parallel.",
+        "properties": {
+          "all_green": {
+            "title": "All Green",
+            "type": "boolean"
+          },
+          "backend": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "cf_tunnel": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "db_migration": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "elapsed_ms": {
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "frontend": {
+            "$ref": "#/components/schemas/CheckResult"
+          }
+        },
+        "required": [
+          "all_green",
+          "elapsed_ms",
+          "backend",
+          "frontend",
+          "db_migration",
+          "cf_tunnel"
+        ],
+        "title": "ParallelHealthCheckResponse",
+        "type": "object"
+      },
       "ParseRequest": {
         "properties": {
           "text": {
@@ -3004,6 +3537,20 @@
           }
         },
         "title": "PatchUserRequest",
+        "type": "object"
+      },
+      "PepDecisionRequest": {
+        "properties": {
+          "decision": {
+            "description": "approve | reject",
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "PepDecisionRequest",
         "type": "object"
       },
       "PipelineStartRequest": {
@@ -3442,6 +3989,70 @@
         "title": "ReleaseRequest",
         "type": "object"
       },
+      "ReplanRequest": {
+        "properties": {
+          "approver": {
+            "title": "Approver",
+            "type": "string"
+          },
+          "forbidden_globs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forbidden Globs"
+          },
+          "jira_ticket": {
+            "title": "Jira Ticket",
+            "type": "string"
+          },
+          "new_story": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Story"
+          },
+          "override_human_review": {
+            "default": false,
+            "title": "Override Human Review",
+            "type": "boolean"
+          },
+          "priority": {
+            "default": "P2",
+            "title": "Priority",
+            "type": "string"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          }
+        },
+        "required": [
+          "jira_ticket",
+          "approver"
+        ],
+        "title": "ReplanRequest",
+        "type": "object"
+      },
       "ResolveRequest": {
         "properties": {
           "option_id": {
@@ -3874,6 +4485,43 @@
         "title": "SecurityTestRequest",
         "type": "object"
       },
+      "SendRequest": {
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "buttons": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Buttons",
+            "type": "array"
+          },
+          "channel": {
+            "description": "discord | teams | line | *",
+            "title": "Channel",
+            "type": "string"
+          },
+          "meta": {
+            "additionalProperties": true,
+            "title": "Meta",
+            "type": "object"
+          },
+          "title": {
+            "default": "OmniSight",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "body"
+        ],
+        "title": "SendRequest",
+        "type": "object"
+      },
       "SensorTestRequest": {
         "properties": {
           "recipe_id": {
@@ -4097,6 +4745,155 @@
         "title": "SlotSwitchRequest",
         "type": "object"
       },
+      "SmokeRunSummary": {
+        "properties": {
+          "dag_id": {
+            "title": "Dag Id",
+            "type": "string"
+          },
+          "key": {
+            "default": "",
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "plan_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Id"
+          },
+          "plan_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Status"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "t3_runner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T3 Runner"
+          },
+          "target_platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Platform"
+          },
+          "task_count": {
+            "default": 0,
+            "title": "Task Count",
+            "type": "integer"
+          },
+          "validation_errors": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Validation Errors",
+            "type": "array"
+          }
+        },
+        "required": [
+          "label",
+          "dag_id",
+          "ok"
+        ],
+        "title": "SmokeRunSummary",
+        "type": "object"
+      },
+      "SmokeSubsetRequest": {
+        "description": "Body for ``POST /bootstrap/smoke-subset``.\n\n``subset`` selects which DAG(s) to invoke:\n  * ``dag1`` (default) — the compile-flash host_native DAG, ~60s;\n    matches what L6 Step 5 locked in for the fast-path wizard run.\n  * ``dag2`` — the aarch64 cross-compile DAG, validation + plan\n    persistence only (no physical cross-compile runs in-process).\n  * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5 UI\n    can render a run summary for each DAG shipped in\n    ``scripts/prod_smoke_test.py``.\n\nThe wizard drives ``subset=\"both\"`` so the operator sees the\n\"兩個 DAG 的 run summary\" (Step 5 TODO); external callers / CLI\nusers can still pin to ``dag1`` for the 60-second fast path.",
+        "properties": {
+          "subset": {
+            "default": "dag1",
+            "description": "Which DAG subset to run — ``dag1`` (compile-flash host_native, ~60s fast path), ``dag2`` (aarch64 cross-compile), or ``both`` (wizard default on Step 5).",
+            "enum": [
+              "dag1",
+              "dag2",
+              "both"
+            ],
+            "title": "Subset",
+            "type": "string"
+          }
+        },
+        "title": "SmokeSubsetRequest",
+        "type": "object"
+      },
+      "SmokeSubsetResponse": {
+        "properties": {
+          "audit_chain": {
+            "$ref": "#/components/schemas/AuditChainSummary"
+          },
+          "elapsed_ms": {
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/SmokeRunSummary"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "smoke_passed": {
+            "title": "Smoke Passed",
+            "type": "boolean"
+          },
+          "subset": {
+            "title": "Subset",
+            "type": "string"
+          }
+        },
+        "required": [
+          "smoke_passed",
+          "subset",
+          "elapsed_ms",
+          "runs",
+          "audit_chain"
+        ],
+        "title": "SmokeSubsetResponse",
+        "type": "object"
+      },
       "SocSecurityRequest": {
         "properties": {
           "features": {
@@ -4117,6 +4914,73 @@
           "soc_id"
         ],
         "title": "SocSecurityRequest",
+        "type": "object"
+      },
+      "StartServicesRequest": {
+        "description": "Body for ``POST /bootstrap/start-services``.\n\n``mode`` overrides the auto-detection when the operator needs to pin\na specific launch strategy (e.g. CI forcing ``dev``). ``compose_file``\nis passed through to ``docker compose -f`` in docker-compose mode.",
+        "properties": {
+          "compose_file": {
+            "default": "",
+            "description": "Override path for docker compose file (defaults to docker-compose.prod.yml).",
+            "maxLength": 256,
+            "title": "Compose File",
+            "type": "string"
+          },
+          "mode": {
+            "default": "",
+            "description": "Deploy mode override: systemd / docker-compose / dev. Empty → auto-detect.",
+            "maxLength": 32,
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "title": "StartServicesRequest",
+        "type": "object"
+      },
+      "StartServicesResponse": {
+        "properties": {
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Command",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "systemd",
+              "docker-compose",
+              "dev"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "returncode": {
+            "title": "Returncode",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stderr_tail": {
+            "title": "Stderr Tail",
+            "type": "string"
+          },
+          "stdout_tail": {
+            "title": "Stdout Tail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "mode",
+          "command",
+          "returncode",
+          "stdout_tail",
+          "stderr_tail"
+        ],
+        "title": "StartServicesResponse",
         "type": "object"
       },
       "StartStreamRequest": {
@@ -5656,6 +6520,107 @@
           "vendor_id"
         ],
         "title": "VendorSDKCreate",
+        "type": "object"
+      },
+      "WaitReadyRequest": {
+        "description": "Body for ``POST /bootstrap/wait-ready``.\n\n``timeout_secs`` caps the total wait; ``interval_secs`` is the gap\nbetween probes. ``url`` overrides the default readyz target (useful\nwhen the wizard runs behind a reverse proxy or on a non-standard\nport). ``fallback_healthz`` keeps older backends (no ``/readyz`` yet)\nworking: on a 404 the probe swaps the suffix to ``/healthz`` once.",
+        "properties": {
+          "fallback_healthz": {
+            "default": true,
+            "description": "If the readyz URL 404s, swap the suffix to /healthz and keep polling. Lets wizards on pre-G1 backends still converge.",
+            "title": "Fallback Healthz",
+            "type": "boolean"
+          },
+          "interval_secs": {
+            "default": 2.0,
+            "description": "Seconds to sleep between probes.",
+            "maximum": 30.0,
+            "minimum": 0.05,
+            "title": "Interval Secs",
+            "type": "number"
+          },
+          "timeout_secs": {
+            "default": 180.0,
+            "description": "Upper bound on total wait time (default 180s).",
+            "maximum": 600.0,
+            "minimum": 0.05,
+            "title": "Timeout Secs",
+            "type": "number"
+          },
+          "url": {
+            "default": "",
+            "description": "Optional override for the readyz URL.",
+            "maxLength": 1024,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "title": "WaitReadyRequest",
+        "type": "object"
+      },
+      "WaitReadyResponse": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "elapsed_ms": {
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "fallback_applied": {
+            "default": false,
+            "title": "Fallback Applied",
+            "type": "boolean"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Status Code"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "reason": {
+            "enum": [
+              "ready",
+              "timeout",
+              "connection_error"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ready",
+          "url",
+          "attempts",
+          "elapsed_ms",
+          "reason"
+        ],
+        "title": "WaitReadyResponse",
         "type": "object"
       },
       "WebAuthnChallengeBeginRequest": {
@@ -8620,6 +9585,566 @@
         ]
       }
     },
+    "/api/v1/bootstrap/admin-password": {
+      "post": {
+        "description": "Rotate the shipping default admin credential during the wizard.\n\nThis endpoint is intentionally unauthenticated — during L2 Step 1 no\nadmin is logged in yet. It identifies the target user as the single\nadmin row carrying ``must_change_password=1`` (i.e. the one\n:func:`auth.ensure_default_admin` created with the bundled\n``omnisight-admin`` fallback). The operator's ``current_password``\nmust still verify against that row, so an attacker without access\nto the default password cannot trigger this flow.\n\nOn success:\n  * rotates the password (clears ``must_change_password``)\n  * records ``bootstrap_state.admin_password_set`` with the admin's\n    user id as actor\n  * writes audit action ``bootstrap.admin_password_set``\n\nError contract (each response includes a machine-readable ``kind`` so\nthe wizard UI can pick a matching banner + remediation hint without\nstring-parsing ``detail``):\n  * 409 + ``kind=already_rotated`` — no admin still requires a\n    password change (wizard re-opened after rotation).\n  * 401 + ``kind=current_password_wrong`` — current_password did not\n    authenticate against the default admin row.\n  * 422 + ``kind=password_too_short`` — new_password shorter than\n    :data:`auth.PASSWORD_MIN_LENGTH`.\n  * 422 + ``kind=password_too_weak`` — passed the length gate but\n    failed the zxcvbn ≥ :data:`auth.PASSWORD_MIN_ZXCVBN` check.",
+        "operationId": "bootstrap_admin_password_api_v1_bootstrap_admin_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminPasswordResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Admin Password",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/cf-tunnel-skip": {
+      "post": {
+        "description": "Mark CF tunnel as intentionally skipped (LAN-only deployment).\n\nUnauthenticated like the other wizard steps. Two side-effects:\n\n  1. Writes ``cf_tunnel_skipped=true`` to the bootstrap marker and\n     records ``STEP_CF_TUNNEL`` in ``bootstrap_state`` with\n     ``metadata.skipped=true`` so :func:`missing_required_steps`\n     clears the step for finalize.\n  2. Emits an audit row ``bootstrap.cf_tunnel_skipped`` with warning\n     severity — the operator chose LAN-only on purpose, but the\n     trail must show who took that call and when.",
+        "operationId": "bootstrap_cf_tunnel_skip_api_v1_bootstrap_cf_tunnel_skip_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CfTunnelSkipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CfTunnelSkipResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Cf Tunnel Skip",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/finalize": {
+      "post": {
+        "description": "Close out the wizard — admin only, requires every gate green.\n\n409 conditions (the wizard should keep the operator on the current\nstep):\n  * any live gate is still red (password default, no LLM key,\n    CF tunnel unprovisioned, smoke not green)\n  * any required step row is missing from ``bootstrap_state``\nOn success, writes a ``finalized`` audit row into\n``bootstrap_state`` and flips the persisted\n``bootstrap_finalized=true`` app-setting flag.",
+        "operationId": "bootstrap_finalize_api_v1_bootstrap_finalize_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/FinalizeRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FinalizeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Finalize",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/llm-provision": {
+      "post": {
+        "description": "Verify + persist an LLM provider credential during wizard Step L3.\n\nFlow:\n  1. ``provider.ping()`` — a single REST probe against the hosted\n     provider that classifies the failure into ``key_invalid``,\n     ``quota_exceeded``, ``network_unreachable``, or ``bad_request``.\n     Ollama uses the local ``/api/tags`` probe so the same path also\n     satisfies the \"Ollama reachability\" bullet of L3 Step 2.\n  2. On success, persist the credential encrypted-at-rest via\n     :mod:`backend.llm_secrets` (Fernet; key from ``OMNISIGHT_SECRET_KEY``\n     or ``data/.secret_key``).\n  3. Mirror the active provider into ``settings.llm_provider`` and\n     clear the LLM factory cache so the next ``get_llm()`` call uses\n     the fresh credential without an env reload.\n  4. Record ``bootstrap_state.llm_provider_configured`` and emit an\n     audit row — mirrors the admin-password step's contract.\n\nIntentionally unauthenticated: during the wizard the operator has\nno admin session yet. The global bootstrap-gate middleware\n(:mod:`backend.main`) only permits ``/bootstrap/*`` until the wizard\nfinalizes, so the endpoint cannot be reached after install.\n\nError codes mirror ``_PING_KIND_TO_STATUS``:\n  * 401 — key was rejected (invalid / expired)\n  * 429 — provider returned quota exhausted\n  * 504 — network unreachable / timeout\n  * 400 — bad request shape (e.g. Azure w/o base_url)\n  * 502 — provider 5xx",
+        "operationId": "bootstrap_llm_provision_api_v1_bootstrap_llm_provision_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmProvisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmProvisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Llm Provision",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/ollama-detect": {
+      "get": {
+        "description": "Probe a local Ollama daemon before the operator commits.\n\nRead-only companion to :func:`bootstrap_llm_provision` — used by the\nwizard's L3 Step 2 when the operator picks \"Ollama (local)\". Hits\n``GET {base_url}/api/tags`` (default ``http://localhost:11434``) and\nreports reachability + available models so the UI can render a\nmodel dropdown without writing any state.\n\nThis endpoint never persists credentials, never touches\n``bootstrap_state``, and never emits an audit row — it is a pure\nprobe. The ``provision`` call is still the single writer.\n\nResponse is always 200; the ``reachable`` boolean + ``kind`` field\ncarry the outcome so the UI does not have to parse HTTP status codes\nfor a UX affordance.",
+        "operationId": "bootstrap_ollama_detect_api_v1_bootstrap_ollama_detect_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "base_url",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Base Url",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OllamaDetectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Ollama Detect",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/parallel-health-check": {
+      "post": {
+        "description": "Run the four Step-4 readiness probes in parallel.\n\nThe wizard's Step 4 UI shows four checkboxes (backend / frontend /\nDB migration / CF tunnel). A single call to this endpoint returns\nthe state of all four so the UI lights them from one server\nobservation — no racing between independent polls. ``cf_tunnel``\nis tri-state: ``skipped`` when the operator chose LAN-only at\nStep 3, otherwise ``green`` / ``red`` against the live CF API.\n\nLike every other wizard endpoint this route is unauthenticated\n(the admin hasn't logged in yet) and lives under ``/bootstrap/*``\nso the gate middleware lets it through before finalize. Response\nis always HTTP 200 — per-probe status lives in the body.",
+        "operationId": "bootstrap_parallel_health_check_api_v1_bootstrap_parallel_health_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ParallelHealthCheckRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParallelHealthCheckResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Parallel Health Check",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/reset": {
+      "post": {
+        "description": "Wipe wizard state so the next page-load lands back in ``/bootstrap``.\n\nStrictly a **QA escape hatch**: refused unless the deploy mode is\n``dev`` so no production install can accidentally drop its bootstrap\nrecord. Side-effects on success:\n\n  1. ``DELETE FROM bootstrap_state`` — every recorded step is gone,\n     so :func:`missing_required_steps` reports a fresh install.\n  2. ``clear_marker()`` — wipes ``data/.bootstrap_state.json``\n     (smoke_passed, cf_tunnel_*, ``bootstrap_finalized``).\n  3. ``flag_all_admins_must_change_password()`` — every enabled\n     admin row is re-flagged so the L2 Step 1 password-rotation\n     gate fires again. We don't restore the original ``omnisight-\n     admin`` plaintext (we never stored it) — re-flagging is enough\n     to drive the wizard.\n  4. Resets the in-process gate cache so the very next request hits\n     the redirect middleware instead of the sticky ``True`` cache.\n  5. Emits ``bootstrap.reset`` audit row with the actor + reason +\n     ``severity=warning`` so the trail shows who blew the wizard\n     away and why.\n\nError contract:\n  * 401/403 — caller is not an admin (``require_admin``)\n  * 403 — deploy mode is anything other than ``dev`` (the body\n    names the detected mode so QA can see why)\n  * 500 — db or marker IO failed mid-flight (response still reports\n    partial counts so the operator can re-attempt)",
+        "operationId": "bootstrap_reset_api_v1_bootstrap_reset_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BootstrapResetRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootstrapResetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Reset",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/service-tick": {
+      "get": {
+        "description": "SSE stream: pipe live service logs into the wizard's Step 4 UI.\n\nCounterpart to ``POST /bootstrap/start-services``. Once the launcher\nreturns, the UI opens this EventSource to watch the services come\nup in real time. Each decoded log line becomes a\n``bootstrap.service.tick`` event carrying ``{line, stream, seq, ts}``.\n\nMode dispatch mirrors ``_detect_deploy_mode`` (systemd / docker-compose\n/ dev). ``dev`` emits a single informational tick and closes so the\nUI doesn't hang waiting for output on a dev box with no managed\nunits.\n\nLifecycle events:\n  * ``start`` — mode + command + pid (once, at the top)\n  * ``bootstrap.service.tick`` — one per log line (stdout + stderr\n    are interleaved in source order with a monotonically increasing\n    ``seq`` so the UI can render a stable transcript)\n  * ``heartbeat`` — every ~10s of silence to keep the connection\n    alive through proxies\n  * ``done`` — when the tailer exits OR ``max_seconds`` elapses OR\n    the client disconnects\n\nQuery parameters:\n  * ``mode`` — systemd / docker-compose / dev (empty → auto-detect)\n  * ``compose_file`` — override for docker compose mode\n  * ``tail`` — historical lines to replay before following (default 50)\n  * ``max_seconds`` — upper bound on stream duration (default 300s)\n\nKept unauthenticated like the rest of ``/bootstrap/*`` so the wizard\ncan stream without an admin session. The bootstrap-gate middleware\nstill blocks access after finalize.",
+        "operationId": "bootstrap_service_tick_api_v1_bootstrap_service_tick_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "compose_file",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Compose File",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tail",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Tail",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_seconds",
+            "required": false,
+            "schema": {
+              "default": 300,
+              "title": "Max Seconds",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Service Tick",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/smoke-subset": {
+      "post": {
+        "description": "Run the wizard's Step-5 smoke subset (compile-flash host_native and/or\ncross-compile aarch64).\n\nSequence:\n  1. Validate + submit each selected DAG via ``workflow.start`` —\n     same artefact shape the prod-UI smoke uses. ``subset=both``\n     yields one run summary per DAG so Step 5 can render both.\n  2. Verify the audit hash chain for every tenant (catches\n     pre-finalize tampering).\n  3. On every selected DAG green AND audit chain intact, flip the\n     ``smoke_passed`` bootstrap marker + record ``STEP_SMOKE`` so\n     the finalize gate can pass.\n\nUnauthenticated like every other wizard endpoint — the bootstrap-\ngate middleware keeps ``/bootstrap/*`` wizard-scoped until finalize.\nResponse is always HTTP 200 — ``smoke_passed`` in the body carries\nthe outcome so the UI can render the result pane without parsing\nerror bodies.",
+        "operationId": "bootstrap_smoke_subset_api_v1_bootstrap_smoke_subset_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SmokeSubsetRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmokeSubsetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Smoke Subset",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/start-services": {
+      "post": {
+        "description": "Launch the OmniSight services for the wizard's Step 4.\n\nDispatches by deploy mode:\n  * ``systemd`` → ``systemctl start omnisight-backend omnisight-frontend``\n  * ``docker-compose`` → ``docker compose -f <file> up -d``\n  * ``dev`` → no-op (processes are already running under uvicorn /\n    next-dev); the endpoint returns ``status=\"already_running\"``.\n\nUnauthenticated like the other wizard endpoints — during the wizard\nthere is no admin session yet and the bootstrap-gate middleware\nlimits who can reach ``/bootstrap/*`` before finalize.\n\nSide-effects:\n  * ``logger.info`` with the full argv\n  * audit row ``bootstrap.start_services`` capturing mode + return\n    code so a failed start has a traceable fingerprint.\n\nHTTP contract:\n  * 200 on success (returncode==0, or dev no-op)\n  * 502 when the launcher exited non-zero — stdout/stderr tails are\n    echoed back in the body so the SSE-log follow-up (next checkbox)\n    has a first point of reference.\n  * 504 on timeout after ``_START_TIMEOUT_SECS``.",
+        "operationId": "bootstrap_start_services_api_v1_bootstrap_start_services_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StartServicesRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartServicesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Start Services",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/status": {
+      "get": {
+        "description": "Public read of the four-gate status + finalized flag.\n\nExempt from auth so the wizard UI can poll it during install before\nthe admin has even logged in. No secrets leak — each field is a\nboolean derived from already-public server state.",
+        "operationId": "bootstrap_status_api_v1_bootstrap_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Bootstrap Status Api V1 Bootstrap Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Bootstrap Status",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
+    "/api/v1/bootstrap/wait-ready": {
+      "post": {
+        "description": "Block until the backend's readyz probe goes green or 180s elapses.\n\nThe wizard's Step 4 kicks services via ``start-services``, streams\ntheir logs via ``service-tick``, and finally calls this endpoint to\nget one deterministic boolean: did the stack actually come up? We\npoll ``GET {url}`` every ``interval_secs`` and return as soon as any\nprobe reports a 2xx. If no probe succeeds within ``timeout_secs`` we\nreturn ``ready=false`` with ``reason=timeout`` (or\n``connection_error`` if every probe failed at the transport layer —\nthe distinction matters for UX: a misconfigured URL vs. services\nthat are still booting).\n\nLives under ``/bootstrap/*`` so the gate middleware lets it through\nbefore finalize. Unauthenticated like every other wizard step.\n\nResponse is always HTTP 200 — the polling itself completed, the\n``ready`` boolean carries the outcome so the UI can render a\ngreen/red check without parsing error bodies.",
+        "operationId": "bootstrap_wait_ready_api_v1_bootstrap_wait_ready_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WaitReadyRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitReadyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bootstrap Wait Ready",
+        "tags": [
+          "bootstrap"
+        ]
+      }
+    },
     "/api/v1/budget-strategy": {
       "get": {
         "operationId": "get_budget_strategy_api_v1_budget_strategy_get",
@@ -8817,6 +10342,229 @@
         "summary": "Chat Stream",
         "tags": [
           "chat"
+        ]
+      }
+    },
+    "/api/v1/chatops/inject": {
+      "post": {
+        "operationId": "chatops_inject_api_v1_chatops_inject_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Chatops Inject Api V1 Chatops Inject Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Chatops Inject",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/chatops/mirror": {
+      "get": {
+        "operationId": "chatops_mirror_api_v1_chatops_mirror_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Chatops Mirror Api V1 Chatops Mirror Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Chatops Mirror",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/chatops/send": {
+      "post": {
+        "operationId": "chatops_send_api_v1_chatops_send_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Chatops Send Api V1 Chatops Send Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Chatops Send",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/chatops/status": {
+      "get": {
+        "operationId": "chatops_status_api_v1_chatops_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Chatops Status Api V1 Chatops Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Chatops Status",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/chatops/webhook/discord": {
+      "post": {
+        "operationId": "discord_webhook_api_v1_chatops_webhook_discord_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Discord Webhook Api V1 Chatops Webhook Discord Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Discord Webhook",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/chatops/webhook/line": {
+      "post": {
+        "operationId": "line_webhook_api_v1_chatops_webhook_line_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Line Webhook Api V1 Chatops Webhook Line Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Line Webhook",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/chatops/webhook/teams": {
+      "post": {
+        "operationId": "teams_webhook_api_v1_chatops_webhook_teams_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Teams Webhook Api V1 Chatops Webhook Teams Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Teams Webhook",
+        "tags": [
+          "chatops"
         ]
       }
     },
@@ -12534,6 +14282,74 @@
         ]
       }
     },
+    "/api/v1/entropy/agents": {
+      "get": {
+        "description": "Return semantic-entropy snapshots for every tracked agent.\n\nAlso exposes the current highest-entropy agent so the ops summary\ncan render without re-scanning. Empty response is ``{\"agents\": [],\n\"highest\": null}`` — the UI treats an empty list as \"monitor\nhasn't yet collected a measurement\".",
+        "operationId": "list_entropy_api_v1_entropy_agents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Entropy Api V1 Entropy Agents Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Entropy",
+        "tags": [
+          "entropy"
+        ]
+      }
+    },
+    "/api/v1/entropy/agents/{agent_id}": {
+      "get": {
+        "operationId": "get_entropy_api_v1_entropy_agents__agent_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Entropy Api V1 Entropy Agents  Agent Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Entropy",
+        "tags": [
+          "entropy"
+        ]
+      }
+    },
     "/api/v1/events": {
       "get": {
         "description": "Persistent SSE connection. Pushes all real-time events to the frontend.",
@@ -12624,6 +14440,7 @@
     },
     "/api/v1/health": {
       "get": {
+        "description": "Legacy liveness payload (kept for backwards compatibility).",
         "operationId": "health_check_api_v1_health_get",
         "responses": {
           "200": {
@@ -14700,6 +16517,29 @@
         ]
       }
     },
+    "/api/v1/livez": {
+      "get": {
+        "operationId": "livez_prefixed_api_v1_livez_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Livez Prefixed Api V1 Livez Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Livez Prefixed",
+        "tags": [
+          "health"
+        ]
+      }
+    },
     "/api/v1/memory/{memory_id}/restore": {
       "post": {
         "operationId": "restore_memory_api_v1_memory__memory_id__restore_post",
@@ -14760,6 +16600,122 @@
         "summary": "Get Metrics",
         "tags": [
           "observability"
+        ]
+      }
+    },
+    "/api/v1/mobile-compliance/gates": {
+      "get": {
+        "description": "List the three P6 gates. Shape mirrors C8 ``/compliance/tools``.",
+        "operationId": "list_gates_api_v1_mobile_compliance_gates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Gates Api V1 Mobile Compliance Gates Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Gates",
+        "tags": [
+          "mobile-compliance"
+        ]
+      }
+    },
+    "/api/v1/mobile-compliance/privacy-label": {
+      "post": {
+        "description": "Generate a privacy label report without running the other gates.\n\nUseful for previewing a label before shipping a build.",
+        "operationId": "generate_privacy_label_api_v1_mobile_compliance_privacy_label_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Generate Privacy Label Api V1 Mobile Compliance Privacy Label Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate Privacy Label",
+        "tags": [
+          "mobile-compliance"
+        ]
+      }
+    },
+    "/api/v1/mobile-compliance/run": {
+      "post": {
+        "description": "Run the P6 bundle over ``app_path``.\n\nRequest body:\n    {\n      \"app_path\": \"/absolute/path/to/mobile/app\",\n      \"platform\": \"ios\" | \"android\" | \"both\",   # optional (default: both)\n      \"min_target_sdk\": 35,                      # optional\n    }\n\nReturns the bundle JSON. A non-passing bundle returns 200 too —\nthe caller inspects ``passed`` to decide whether to proceed to\nP5 store submission.",
+        "operationId": "run_bundle_api_v1_mobile_compliance_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Bundle Api V1 Mobile Compliance Run Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Bundle",
+        "tags": [
+          "mobile-compliance"
         ]
       }
     },
@@ -15392,6 +17348,313 @@
         "summary": "Ops Summary",
         "tags": [
           "observability"
+        ]
+      }
+    },
+    "/api/v1/orchestration/awaiting-human": {
+      "get": {
+        "description": "Lightweight list-only view for Slack / CLI bots.",
+        "operationId": "orchestration_awaiting_human_api_v1_orchestration_awaiting_human_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Orchestration Awaiting Human Api V1 Orchestration Awaiting Human Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Orchestration Awaiting Human",
+        "tags": [
+          "orchestration-observability"
+        ]
+      }
+    },
+    "/api/v1/orchestration/queue-tick": {
+      "post": {
+        "description": "Force a queue tick + push the SSE event.\n\nReturns the snapshot that was emitted so the caller doesn't have to\nchase it via SSE if all they wanted was a one-off probe.",
+        "operationId": "orchestration_queue_tick_api_v1_orchestration_queue_tick_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Orchestration Queue Tick Api V1 Orchestration Queue Tick Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Orchestration Queue Tick",
+        "tags": [
+          "orchestration-observability"
+        ]
+      }
+    },
+    "/api/v1/orchestration/snapshot": {
+      "get": {
+        "description": "Single roll-up for the orchestration panel.\n\nReturns:\n  * ``queue.by_priority`` / ``queue.by_state`` / ``queue.total``\n  * ``locks.by_task`` / ``locks.total_paths`` / ``locks.total_tasks``\n  * ``merger.plus_two_total`` / ``merger.abstain_total`` /\n    ``merger.security_refusal_total`` plus rate fields\n  * ``workers.active`` / ``workers.inflight`` / ``workers.capacity``\n  * ``awaiting_human_plus_two`` — list of pending changes\n  * ``awaiting_human_warn_hours`` — soft alert threshold",
+        "operationId": "orchestration_snapshot_api_v1_orchestration_snapshot_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Orchestration Snapshot Api V1 Orchestration Snapshot Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Orchestration Snapshot",
+        "tags": [
+          "orchestration-observability"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/check-change-ready": {
+      "post": {
+        "description": "Pure query: evaluate the submit-rule for a given vote set.\n\nNo side-effects; useful from the UI / CLI / observability layer.",
+        "operationId": "check_change_ready_endpoint_api_v1_orchestrator_check_change_ready_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HumanVoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Check Change Ready Endpoint Api V1 Orchestrator Check Change Ready Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check Change Ready Endpoint",
+        "tags": [
+          "orchestrator"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/human-vote": {
+      "post": {
+        "description": "Gerrit webhook entry: a human (or AI bot) cast a Code-Review.\n\nWe re-evaluate the submit-rule + drive submit / withdraw flows.",
+        "operationId": "human_vote_endpoint_api_v1_orchestrator_human_vote_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HumanVoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Human Vote Endpoint Api V1 Orchestrator Human Vote Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Human Vote Endpoint",
+        "tags": [
+          "orchestrator"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/intake": {
+      "post": {
+        "description": "Jira webhook intake.  Reads raw body so signature verification\nworks, then drives the ``orchestrator_gateway.intake`` pipeline.\n\nOn success: 200 JSON with the intake outcome (``state`` tells the\ncaller whether CATCs were queued or held for PM review).\nOn failure: 4xx/5xx JSON with ``{reason, detail, context}``.",
+        "operationId": "intake_endpoint_api_v1_orchestrator_intake_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Intake Endpoint Api V1 Orchestrator Intake Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Intake Endpoint",
+        "tags": [
+          "orchestrator"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/merge-conflict": {
+      "post": {
+        "description": "Gerrit webhook entry: a merge conflict was detected on a change.\n\nBody shape matches :class:`MergeConflictRequest`.  Gerrit's native\nwebhooks plugin posts this payload after the orchestrator's webhook\nmapper normalises the event.  We re-use the Jira HMAC secret for\nsignature verification so operators only maintain one secret.",
+        "operationId": "merge_conflict_endpoint_api_v1_orchestrator_merge_conflict_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Merge Conflict Endpoint Api V1 Orchestrator Merge Conflict Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Merge Conflict Endpoint",
+        "tags": [
+          "orchestrator"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/replan": {
+      "post": {
+        "description": "PM-approved replan for a previously-intaken ticket.",
+        "operationId": "replan_endpoint_api_v1_orchestrator_replan_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Replan Endpoint Api V1 Orchestrator Replan Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Replan Endpoint",
+        "tags": [
+          "orchestrator"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/status": {
+      "get": {
+        "description": "Operator surface — every intake session in this process.",
+        "operationId": "list_status_endpoint_api_v1_orchestrator_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Status Endpoint Api V1 Orchestrator Status Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Status Endpoint",
+        "tags": [
+          "orchestrator"
+        ]
+      }
+    },
+    "/api/v1/orchestrator/status/{jira_ticket}": {
+      "get": {
+        "description": "Return the DAG + CATC + Gerrit snapshot for a Jira ticket.",
+        "operationId": "status_endpoint_api_v1_orchestrator_status__jira_ticket__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jira_ticket",
+            "required": true,
+            "schema": {
+              "title": "Jira Ticket",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Status Endpoint Api V1 Orchestrator Status  Jira Ticket  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Status Endpoint",
+        "tags": [
+          "orchestrator"
         ]
       }
     },
@@ -17415,6 +19678,243 @@
         "summary": "Run Test Recipe",
         "tags": [
           "payment"
+        ]
+      }
+    },
+    "/api/v1/pep/breaker/reset": {
+      "post": {
+        "operationId": "pep_breaker_reset_api_v1_pep_breaker_reset_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Breaker Reset Api V1 Pep Breaker Reset Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pep Breaker Reset",
+        "tags": [
+          "pep"
+        ]
+      }
+    },
+    "/api/v1/pep/decision/{pep_id}": {
+      "post": {
+        "description": "Resolve a PEP held id directly (alias for the R1 button round-trip).\n\nLooks up the PEP HELD registry, maps to its ``decision_id``, then\ndelegates to the decision engine just like the /decisions router\napprove/reject does. This exists so ChatOps buttons can POST to a\nstable ``/pep/decision/{pep_id}`` URL without knowing the DE id\n(which only the backend has).",
+        "operationId": "pep_decision_api_v1_pep_decision__pep_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pep_id",
+            "required": true,
+            "schema": {
+              "title": "Pep Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PepDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Decision Api V1 Pep Decision  Pep Id  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pep Decision",
+        "tags": [
+          "chatops"
+        ]
+      }
+    },
+    "/api/v1/pep/decisions": {
+      "get": {
+        "operationId": "pep_decisions_api_v1_pep_decisions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Decisions Api V1 Pep Decisions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pep Decisions",
+        "tags": [
+          "pep"
+        ]
+      }
+    },
+    "/api/v1/pep/held": {
+      "get": {
+        "operationId": "pep_held_api_v1_pep_held_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Held Api V1 Pep Held Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pep Held",
+        "tags": [
+          "pep"
+        ]
+      }
+    },
+    "/api/v1/pep/live": {
+      "get": {
+        "operationId": "pep_live_api_v1_pep_live_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Live Api V1 Pep Live Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pep Live",
+        "tags": [
+          "pep"
+        ]
+      }
+    },
+    "/api/v1/pep/policy": {
+      "get": {
+        "operationId": "pep_policy_api_v1_pep_policy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Policy Api V1 Pep Policy Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pep Policy",
+        "tags": [
+          "pep"
+        ]
+      }
+    },
+    "/api/v1/pep/status": {
+      "get": {
+        "operationId": "pep_status_api_v1_pep_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pep Status Api V1 Pep Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pep Status",
+        "tags": [
+          "pep"
         ]
       }
     },
@@ -20467,6 +22967,25 @@
         ]
       }
     },
+    "/api/v1/readyz": {
+      "get": {
+        "operationId": "readyz_prefixed_api_v1_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readyz Prefixed",
+        "tags": [
+          "health"
+        ]
+      }
+    },
     "/api/v1/realtime/cyclictest/configs": {
       "get": {
         "operationId": "list_cyclictest_configs_api_v1_realtime_cyclictest_configs_get",
@@ -21269,6 +23788,209 @@
         ]
       }
     },
+    "/api/v1/rum/dashboard": {
+      "get": {
+        "operationId": "dashboard_api_v1_rum_dashboard_get",
+        "parameters": [
+          {
+            "description": "Filter to one page bucket (use '*' for site-wide rollup).",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one page bucket (use '*' for site-wide rollup).",
+              "title": "Page"
+            }
+          },
+          {
+            "description": "Filter to one CWV name (LCP / INP / CLS / TTFB / FCP).",
+            "in": "query",
+            "name": "metric",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one CWV name (LCP / INP / CLS / TTFB / FCP).",
+              "title": "Metric"
+            }
+          },
+          {
+            "description": "Wipe in-memory aggregator (operator only).",
+            "in": "query",
+            "name": "reset",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Wipe in-memory aggregator (operator only).",
+              "title": "Reset",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Dashboard Api V1 Rum Dashboard Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dashboard",
+        "tags": [
+          "web-observability"
+        ]
+      }
+    },
+    "/api/v1/rum/errors": {
+      "post": {
+        "description": "Ingest one browser error event.\n\nExpected payload:\n\n    {\n      \"message\": \"TypeError: x is undefined\",  // required\n      \"stack\": \"at app.js:1:2\\n...\",\n      \"page\": \"/blog\",\n      \"level\": \"error\",          // error / warning / fatal\n      \"release\": \"1.42.0\",\n      \"environment\": \"production\",\n      \"fingerprint\": \"...\",      // optional — derived if absent\n      \"sessionId\": \"...\",\n      \"userAgent\": \"...\"\n    }\n\nRoutes the event through the ``ErrorToIntentRouter`` (JIRA / GitHub\nIssues / GitLab Issues) and returns the resulting ticket ref (if any).",
+        "operationId": "ingest_error_api_v1_rum_errors_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ingest Error Api V1 Rum Errors Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ingest Error",
+        "tags": [
+          "web-observability"
+        ]
+      }
+    },
+    "/api/v1/rum/errors/recent": {
+      "get": {
+        "operationId": "errors_recent_api_v1_rum_errors_recent_get",
+        "parameters": [
+          {
+            "description": "Max number of fingerprints.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Max number of fingerprints.",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Errors Recent Api V1 Rum Errors Recent Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Errors Recent",
+        "tags": [
+          "web-observability"
+        ]
+      }
+    },
+    "/api/v1/rum/health": {
+      "get": {
+        "operationId": "rum_health_api_v1_rum_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rum Health Api V1 Rum Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Rum Health",
+        "tags": [
+          "web-observability"
+        ]
+      }
+    },
+    "/api/v1/rum/vitals": {
+      "post": {
+        "description": "Ingest one Core Web Vital sample.\n\nExpected payload (web-vitals JS lib output passed through sendBeacon):\n\n    {\n      \"name\": \"LCP\",          // required — LCP / INP / CLS / TTFB / FCP\n      \"value\": 2400.5,        // required — ms (or unitless for CLS)\n      \"page\": \"/blog\",        // optional — defaults to \"/\"\n      \"rating\": \"good\",       // optional — re-derived if absent\n      \"navType\": \"navigate\",  // optional\n      \"sessionId\": \"...\",     // optional\n      \"userAgent\": \"...\",     // optional (navigator.userAgent)\n      \"locale\": \"en-US\"       // optional (navigator.language)\n    }\n\nReturns ``{\"accepted\": True, \"rating\": \"...\"}`` so test harnesses\nand curl users can verify the classification.",
+        "operationId": "ingest_vital_api_v1_rum_vitals_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ingest Vital Api V1 Rum Vitals Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ingest Vital",
+        "tags": [
+          "web-observability"
+        ]
+      }
+    },
     "/api/v1/safety/artifacts": {
       "get": {
         "operationId": "list_artifacts_api_v1_safety_artifacts_get",
@@ -21442,6 +24164,173 @@
         "summary": "Get Standard",
         "tags": [
           "safety"
+        ]
+      }
+    },
+    "/api/v1/scratchpad/agents": {
+      "get": {
+        "description": "Compact summary for every agent that has a scratchpad.\n\nEmpty list if nothing's been flushed yet. The UI treats that as\n\"the agent either hasn't been started or crashed before the first\nsave\" and falls back to the old card layout.",
+        "operationId": "list_agents_api_v1_scratchpad_agents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Agents Api V1 Scratchpad Agents Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Agents",
+        "tags": [
+          "scratchpad"
+        ]
+      }
+    },
+    "/api/v1/scratchpad/agents/{agent_id}": {
+      "get": {
+        "operationId": "get_summary_api_v1_scratchpad_agents__agent_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Summary Api V1 Scratchpad Agents  Agent Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Summary",
+        "tags": [
+          "scratchpad"
+        ]
+      }
+    },
+    "/api/v1/scratchpad/agents/{agent_id}/archive": {
+      "get": {
+        "operationId": "get_archive_api_v1_scratchpad_agents__agent_id__archive_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Archive Api V1 Scratchpad Agents  Agent Id  Archive Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Archive",
+        "tags": [
+          "scratchpad"
+        ]
+      }
+    },
+    "/api/v1/scratchpad/agents/{agent_id}/preview": {
+      "get": {
+        "description": "Decrypted markdown body, capped so the UI doesn't choke on a\n100 KB paste. ``max_chars`` default aligns with the UI modal's\nmax height of ~120 lines.",
+        "operationId": "get_preview_api_v1_scratchpad_agents__agent_id__preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_chars",
+            "required": false,
+            "schema": {
+              "default": 8000,
+              "title": "Max Chars",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Preview Api V1 Scratchpad Agents  Agent Id  Preview Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Preview",
+        "tags": [
+          "scratchpad"
         ]
       }
     },
@@ -29910,6 +32799,73 @@
         "summary": "Get Workspace Info",
         "tags": [
           "workspaces"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Liveness probe — fast, no I/O.\n\nReturns 200 whenever the event loop can service the request. We\nintentionally do *not* check the DB here: a DB stall should not\nmake the orchestrator restart a healthy process — that is the job\nof ``/readyz``.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/livez": {
+      "get": {
+        "operationId": "livez_livez_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Livez Livez Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Livez",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Readiness probe — DB + migrations + provider chain.",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readyz",
+        "tags": [
+          "health"
         ]
       }
     }
