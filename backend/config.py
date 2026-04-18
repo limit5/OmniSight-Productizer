@@ -207,6 +207,17 @@ class Settings(BaseSettings):
     # queue eat my task?" without blocking the user indefinitely.
     orchestration_distributed_wait_s: float = 600.0
 
+    # H2 row 1514: Coordinator turbo auto-derate opt-out.
+    # When true (default), a sustained host-CPU breach (> 80% for 30s) will
+    # transparently shrink turbo's parallel budget from 8 → 2 (supervised).
+    # Operators on a dedicated host who would rather ride out a spike than
+    # lose throughput can set this to false. Because the safety net is then
+    # off, switching INTO turbo mode while h2_auto_derate=false requires an
+    # explicit `confirm_turbo=True` hand-off (API: ?confirm_turbo=true) so
+    # the caller can't accidentally put a host under OOM pressure with no
+    # backstop.
+    h2_auto_derate: bool = True
+
     # M5: prewarm pool multi-tenant safety. Values:
     #   * "per_tenant" — pool bucketed by tenant_id; A's prewarm cannot
     #     be consumed by B (default; SaaS-safe).

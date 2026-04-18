@@ -78,6 +78,13 @@ def _reset_rate_limit_for_tests() -> None:  # test hook
 
 class ModeRequest(BaseModel):
     mode: str = Field(..., description="One of manual | supervised | full_auto | turbo")
+    # H2 row 1514: operators running with h2_auto_derate=false must
+    # explicitly confirm when switching into turbo — without the safety
+    # net, a sustained CPU spike will NOT auto-shrink the budget.
+    confirm_turbo: bool = Field(
+        default=False,
+        description="Required when h2_auto_derate=false and mode=turbo.",
+    )
 
 
 @router.get("/operation-mode")
@@ -106,11 +113,22 @@ async def put_mode(
     session_token = request.cookies.get(_au.SESSION_COOKIE) or None
     try:
         if session_token:
-            mode = await de.set_session_mode(session_token, req.mode)
+            mode = await de.set_session_mode(
+                session_token, req.mode, confirm_turbo=req.confirm_turbo
+            )
         else:
-            mode = de.set_mode(req.mode)
+            mode = de.set_mode(req.mode, confirm_turbo=req.confirm_turbo)
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+    except de.TurboConfirmRequired as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "code": "turbo_confirm_required",
+                "hint": "re-send the request with confirm_turbo=true",
+            },
+        )
     return {
         "mode": mode.value,
         "parallel_cap": de._PARALLEL_BUDGET[mode],

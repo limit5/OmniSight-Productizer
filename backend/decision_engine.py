@@ -206,6 +206,25 @@ H2_TURBO_RECOVER_COOLDOWN_S: float = float(
 )
 
 
+class TurboConfirmRequired(Exception):
+    """Raised when switching to turbo mode while h2_auto_derate=false
+    without an explicit confirm flag. See `is_auto_derate_enabled`."""
+
+
+def is_auto_derate_enabled() -> bool:
+    """Return whether the turbo auto-derate safety net is engaged.
+
+    Read live from ``backend.config.settings`` so tests / ops can flip
+    the flag at runtime (``settings.h2_auto_derate = False``) without
+    re-importing this module.
+    """
+    try:
+        from backend.config import settings as _settings
+        return bool(getattr(_settings, "h2_auto_derate", True))
+    except Exception:
+        return True
+
+
 @dataclass
 class _TurboDerateState:
     derate_active: bool = False
@@ -255,8 +274,18 @@ def evaluate_turbo_derate(
     State mutation is protected by _state_lock. Transitions (derate
     engaged / recovered) emit coordinator.turbo_derate /
     coordinator.turbo_recover SSE events while the lock is NOT held.
+
+    When ``settings.h2_auto_derate`` is False the safety net is off: we
+    neither engage nor recover on our own, and leave the state machine
+    frozen at whatever it last observed. A caller that disabled the
+    switch *while* derate was active stays derated — they have to flip
+    the flag back on (or call ``clear_turbo_derate()``) to recover.
     """
     t = now if now is not None else time.time()
+
+    if not is_auto_derate_enabled():
+        with _state_lock:
+            return _turbo_derate_state.derate_active
 
     if cpu_percent is None:
         try:
@@ -338,7 +367,39 @@ def turbo_derate_snapshot() -> dict[str, Any]:
             "threshold_pct": H2_TURBO_DERATE_CPU_PCT,
             "sustain_required_s": H2_TURBO_DERATE_SUSTAIN_S,
             "cooldown_required_s": H2_TURBO_RECOVER_COOLDOWN_S,
+            "auto_derate_enabled": is_auto_derate_enabled(),
         }
+
+
+def clear_turbo_derate() -> bool:
+    """Force-clear an active derate state. Used by operators who flipped
+    ``h2_auto_derate=false`` while derate was engaged and want the cap
+    lifted back to turbo budget without waiting for the 2-min cooldown
+    (which is disabled along with the auto-engage path). Returns True
+    if a transition occurred, False if already inactive.
+    """
+    changed = False
+    with _state_lock:
+        if _turbo_derate_state.derate_active:
+            _turbo_derate_state.derate_active = False
+            _turbo_derate_state.last_transition_at = time.time()
+            _turbo_derate_state.high_cpu_since = None
+            _turbo_derate_state.low_cpu_since = None
+            changed = True
+    if changed:
+        _emit_turbo_transition(
+            "coordinator.turbo_recover",
+            {
+                "cpu_percent": None,
+                "threshold_pct": H2_TURBO_DERATE_CPU_PCT,
+                "cooldown_s": 0.0,
+                "cooldown_required_s": H2_TURBO_RECOVER_COOLDOWN_S,
+                "restored_to_budget": _PARALLEL_BUDGET[OperationMode.turbo],
+                "manual_clear": True,
+                "at": time.time(),
+            },
+        )
+    return changed
 
 
 def _effective_budget(mode: OperationMode) -> int:
@@ -712,13 +773,35 @@ async def get_session_mode_async(session_token: str | None) -> OperationMode:
     return get_mode()
 
 
-async def set_session_mode(session_token: str, mode: OperationMode | str) -> OperationMode:
-    """Set the operation mode for a specific session. Emits SSE `mode_changed`."""
+async def set_session_mode(
+    session_token: str,
+    mode: OperationMode | str,
+    *,
+    confirm_turbo: bool = False,
+) -> OperationMode:
+    """Set the operation mode for a specific session. Emits SSE `mode_changed`.
+
+    When ``settings.h2_auto_derate`` is False the turbo safety net is
+    disabled. In that configuration, switching **into** turbo requires
+    ``confirm_turbo=True`` — otherwise ``TurboConfirmRequired`` is
+    raised so the caller explicitly acknowledges they're running
+    without the auto-derate backstop.
+    """
     if isinstance(mode, str):
         try:
             mode = OperationMode(mode)
         except ValueError as exc:
             raise ValueError(f"unknown mode: {mode}") from exc
+    if (
+        mode == OperationMode.turbo
+        and not is_auto_derate_enabled()
+        and not confirm_turbo
+    ):
+        raise TurboConfirmRequired(
+            "h2_auto_derate is disabled; switching to turbo requires "
+            "explicit confirm_turbo=True (the host has no auto-shrink "
+            "safety net under sustained CPU pressure)."
+        )
     from backend import auth as _auth
     prev_mode = await get_session_mode_async(session_token)
     await _auth.update_session_metadata(session_token, {"operation_mode": mode.value})
@@ -751,14 +834,33 @@ async def set_session_mode(session_token: str, mode: OperationMode | str) -> Ope
     return mode
 
 
-def set_mode(mode: OperationMode | str) -> OperationMode:
-    """Switch the global (fallback) operation mode. Emits SSE `mode_changed`."""
+def set_mode(
+    mode: OperationMode | str,
+    *,
+    confirm_turbo: bool = False,
+) -> OperationMode:
+    """Switch the global (fallback) operation mode. Emits SSE `mode_changed`.
+
+    When ``settings.h2_auto_derate`` is False, switching *into* turbo
+    requires ``confirm_turbo=True`` — see :class:`TurboConfirmRequired`
+    for the rationale.
+    """
     global _current_mode
     if isinstance(mode, str):
         try:
             mode = OperationMode(mode)
         except ValueError as exc:
             raise ValueError(f"unknown mode: {mode}") from exc
+    if (
+        mode == OperationMode.turbo
+        and not is_auto_derate_enabled()
+        and not confirm_turbo
+    ):
+        raise TurboConfirmRequired(
+            "h2_auto_derate is disabled; switching to turbo requires "
+            "explicit confirm_turbo=True (the host has no auto-shrink "
+            "safety net under sustained CPU pressure)."
+        )
     with _state_lock:
         prev = _current_mode
         _current_mode = mode
