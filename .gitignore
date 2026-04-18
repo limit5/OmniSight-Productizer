@@ -47,6 +47,12 @@ data/.secret_key
 /coverage/
 /.vitest-cache/
 
+# Pytest / coverage.py — local test + CI shard XML artifacts
+.coverage
+.coverage.*
+coverage-*.xml
+/htmlcov/
+
 # Playwright
 /test-results/
 /playwright-report/
