@@ -50,8 +50,13 @@ def test_production_env_accepts_strict_auth(monkeypatch):
     monkeypatch.setenv("OMNISIGHT_ENV", "production")
     monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "strict")
     monkeypatch.setenv("OMNISIGHT_ADMIN_PASSWORD", "a-very-strong-password-123")
+    # H1 audit: strict mode now requires a non-empty DECISION_BEARER too
+    # (previously just a warning). Supply a real bearer so this test
+    # only checks the ENV=production path, not the bearer gate.
+    monkeypatch.setenv("OMNISIGHT_DECISION_BEARER", "a-strong-random-bearer-123")
     monkeypatch.setattr(settings, "env", "production")
     monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "ci_mode", False)
     monkeypatch.setattr(settings, "llm_provider", "ollama")
 
     warnings = validate_startup_config(strict=True)

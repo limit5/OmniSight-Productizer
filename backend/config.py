@@ -9,6 +9,14 @@ _startup_logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     app_name: str = "OmniSight Engine"
     debug: bool = False  # Set OMNISIGHT_DEBUG=true for development
+    # H7 audit (2026-04-19): dedicated CI bypass for startup validation
+    # so the e2e job doesn't have to re-purpose OMNISIGHT_DEBUG. DEBUG
+    # carries "chatty logs + dev shortcuts"; CI_MODE carries ONLY
+    # "strict-mode validation relaxed". Keeping them independent means
+    # a future debug-only hot-path (verbose log, extra metric) won't
+    # accidentally leak through CI — and a CI-specific mode won't
+    # accidentally bring dev-only code paths into the probe.
+    ci_mode: bool = False  # Set OMNISIGHT_CI_MODE=true only in CI runners
     env: str = ""  # "production" triggers hard security checks (exit 78 on failure)
     api_prefix: str = "/api/v1"
 
@@ -302,12 +310,14 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
     list of warnings (empty = clean). Raises `ConfigValidationError`
     on a *hard* problem if strict mode is on.
 
-    `strict` defaults to True when `settings.debug == False`, False
-    when debug is on — dev workflow stays lenient, prod boots refuse
-    to start with a known-dangerous config.
+    `strict` defaults to True when *neither* `settings.debug` nor
+    `settings.ci_mode` is set, False when either is on — dev workflow
+    stays lenient, CI runners stay lenient (H7 audit: preferred over
+    re-purposing DEBUG for CI), prod boots refuse to start with a
+    known-dangerous config.
     """
     if strict is None:
-        strict = not settings.debug
+        strict = not (settings.debug or settings.ci_mode)
 
     warnings: list[str] = []
     hard_errors: list[str] = []

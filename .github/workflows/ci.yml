@@ -317,15 +317,16 @@ jobs:
           # env var — set it so the matrix browser is actually picked
           # up (`--project` needs the project to exist).
           OMNISIGHT_PW_BROWSERS: all
-          # backend/config.py `validate_startup_config(strict=None)`
-          # defaults `strict = not settings.debug`. Without OMNISIGHT_DEBUG=true
-          # the webServer refuses to boot because the CI runner has no
-          # ANTHROPIC_API_KEY and OMNISIGHT_AUTH_MODE defaults to 'open'
-          # (both strict-mode hard errors). Debug mode downgrades both
-          # to warnings so the backend boots and playwright can talk
-          # to /readyz. Safe: the CI process is ephemeral, not exposed.
-          OMNISIGHT_DEBUG: "true"
-          # Paired with OMNISIGHT_DEBUG — even in debug mode we don't
+          # H7 audit (2026-04-19): use OMNISIGHT_CI_MODE — a dedicated
+          # bypass flag that only relaxes `validate_startup_config`'s
+          # strict gate — instead of repurposing OMNISIGHT_DEBUG.
+          # DEBUG=true also flips verbose logging and dev-only code
+          # paths that CI doesn't need. CI_MODE is narrow: it tells
+          # validate_startup_config "we're in a sandbox, no
+          # ANTHROPIC_API_KEY, AUTH_MODE=open is fine", nothing else.
+          # Safe: the CI process is ephemeral, not exposed.
+          OMNISIGHT_CI_MODE: "true"
+          # Paired with OMNISIGHT_CI_MODE — even in CI we don't
           # want the noisy "anthropic provider has no key" log line on
           # every request. `ollama` is the zero-config fallback the
           # config layer treats as "no key needed" (agents/llm.py).
