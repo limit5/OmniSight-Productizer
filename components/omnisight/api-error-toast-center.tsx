@@ -8,27 +8,40 @@
  * full-page bounce (401 → /login, 503 bootstrap_required → /setup-required
  * already redirect inside `request()` before the bus fires).
  *
- * Phase 1 (row 191): 403 `forbidden` → warning toast「權限不足」.
- * Later rows will extend the handler for 500 / 502 / 503-other / offline.
+ * Rows handled so far:
+ *   - row 191: 403 `forbidden`     → warning toast「權限不足」
+ *   - row 192: 500 `server_error`  → error toast「系統錯誤」+ expandable
+ *                                    region showing the trace ID so the
+ *                                    operator can paste it into a bug
+ *                                    report without hunting in devtools.
  *
  * Styling mirrors `components/omnisight/toast-center.tsx` — corner brackets,
- * holo-glass, neural-cyan/orange accents — so the error UX stays coherent
- * with the decision-pending toasts.
+ * holo-glass, variant-mapped accent colours (orange for warning, red for
+ * error) — so the error UX stays coherent with the decision-pending toasts.
  */
 
 import { useCallback, useEffect, useState } from "react"
-import { ShieldAlert, X } from "lucide-react"
+import { AlertOctagon, ChevronDown, ChevronRight, ShieldAlert, X } from "lucide-react"
 import { onApiError, type ApiError } from "@/lib/api"
 
-const AUTO_DISMISS_MS = 5000
+const AUTO_DISMISS_WARNING_MS = 5000
+// Errors (500) stay on-screen longer so the operator can expand the
+// technical detail and copy the trace ID before dismissal.
+const AUTO_DISMISS_ERROR_MS = 10_000
 const MAX_TOASTS = 3
+
+type ToastVariant = "warning" | "error"
 
 interface ToastItem {
   id: string
   kind: ApiError["kind"]
+  variant: ToastVariant
   title: string
   description: string
+  httpLabel: string
+  traceId: string | null
   createdAt: number
+  autoDismissMs: number
 }
 
 function _itemFor(err: ApiError): ToastItem | null {
@@ -36,19 +49,66 @@ function _itemFor(err: ApiError): ToastItem | null {
     return {
       id: `forbidden-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: "forbidden",
+      variant: "warning",
       title: "權限不足",
       description: "您沒有此操作的存取權限，請聯繫系統管理員。",
+      httpLabel: "HTTP 403",
+      traceId: err.traceId,
       createdAt: Date.now(),
+      autoDismissMs: AUTO_DISMISS_WARNING_MS,
+    }
+  }
+  if (err.kind === "server_error") {
+    return {
+      id: `server_error-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: "server_error",
+      variant: "error",
+      title: "系統錯誤",
+      description: "系統發生內部錯誤，我們已收到通知。",
+      httpLabel: "HTTP 500",
+      traceId: err.traceId,
+      createdAt: Date.now(),
+      autoDismissMs: AUTO_DISMISS_ERROR_MS,
     }
   }
   return null
 }
 
+function _variantStyle(variant: ToastVariant) {
+  if (variant === "error") {
+    return {
+      color: "var(--critical-red,#ef4444)",
+      Icon: AlertOctagon,
+      headerLabel: "ERROR",
+    }
+  }
+  return {
+    color: "var(--fui-orange,#f59e0b)",
+    Icon: ShieldAlert,
+    headerLabel: "WARNING",
+  }
+}
+
 export function ApiErrorToastCenter() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const dismiss = useCallback((id: string) => {
     setToasts((cur) => cur.filter((t) => t.id !== id))
+    setExpanded((cur) => {
+      if (!cur.has(id)) return cur
+      const next = new Set(cur)
+      next.delete(id)
+      return next
+    })
+  }, [])
+
+  const toggleExpanded = useCallback((id: string) => {
+    setExpanded((cur) => {
+      const next = new Set(cur)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
   }, [])
 
   useEffect(() => {
@@ -63,7 +123,7 @@ export function ApiErrorToastCenter() {
   useEffect(() => {
     if (toasts.length === 0) return
     const timers = toasts.map((t) => {
-      const remaining = Math.max(0, AUTO_DISMISS_MS - (Date.now() - t.createdAt))
+      const remaining = Math.max(0, t.autoDismissMs - (Date.now() - t.createdAt))
       return setTimeout(() => dismiss(t.id), remaining)
     })
     return () => { for (const t of timers) clearTimeout(t) }
@@ -79,7 +139,10 @@ export function ApiErrorToastCenter() {
       className="fixed bottom-4 right-4 z-[60] flex flex-col-reverse gap-2 w-[min(360px,calc(100vw-2rem))] pointer-events-none"
     >
       {toasts.map((t) => {
-        const color = "var(--fui-orange,#f59e0b)"
+        const style = _variantStyle(t.variant)
+        const { color, Icon, headerLabel } = style
+        const isExpanded = expanded.has(t.id)
+        const hasDetails = t.traceId !== null
         return (
           <div
             key={t.id}
@@ -92,17 +155,17 @@ export function ApiErrorToastCenter() {
             }}
           >
             <div className="flex items-start gap-2 p-2.5">
-              <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" style={{ color }} aria-hidden />
+              <Icon className="w-4 h-4 shrink-0 mt-0.5" style={{ color }} aria-hidden />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
                   <span
                     className="font-mono text-[9px] tracking-[0.25em] font-bold"
                     style={{ color }}
                   >
-                    WARNING
+                    {headerLabel}
                   </span>
                   <span className="font-mono text-[9px] text-[var(--muted-foreground,#94a3b8)]">
-                    HTTP 403
+                    {t.httpLabel}
                   </span>
                 </div>
                 <div className="font-mono font-bold text-[12px] tracking-[0.04em] leading-tight text-[var(--foreground,#e2e8f0)]">
@@ -111,6 +174,41 @@ export function ApiErrorToastCenter() {
                 <div className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] leading-tight mt-0.5">
                   {t.description}
                 </div>
+                {hasDetails && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => toggleExpanded(t.id)}
+                      aria-expanded={isExpanded}
+                      aria-controls={`api-error-details-${t.id}`}
+                      data-testid={`api-error-toggle-${t.kind}`}
+                      className="mt-1 flex items-center gap-1 font-mono text-[9px] tracking-[0.15em] text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--foreground,#e2e8f0)] uppercase"
+                    >
+                      {isExpanded
+                        ? <ChevronDown className="w-3 h-3" aria-hidden />
+                        : <ChevronRight className="w-3 h-3" aria-hidden />}
+                      技術詳情
+                    </button>
+                    {isExpanded && (
+                      <div
+                        id={`api-error-details-${t.id}`}
+                        data-testid={`api-error-details-${t.kind}`}
+                        className="mt-1 rounded-sm border border-[var(--border,#334155)] bg-black/30 px-2 py-1.5 font-mono text-[10px] text-[var(--foreground,#e2e8f0)]"
+                      >
+                        <div className="flex items-center gap-1.5 text-[var(--muted-foreground,#94a3b8)] text-[9px] tracking-[0.2em] uppercase mb-0.5">
+                          Trace ID
+                        </div>
+                        <div
+                          data-testid={`api-error-trace-${t.kind}`}
+                          className="select-all break-all text-[10px]"
+                          style={{ color }}
+                        >
+                          {t.traceId}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
               <button
                 onClick={() => dismiss(t.id)}
