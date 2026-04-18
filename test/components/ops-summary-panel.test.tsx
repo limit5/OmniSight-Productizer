@@ -129,3 +129,110 @@ describe("OpsSummaryPanel — H3 row 1524 coordinator transparency", () => {
     expect(screen.queryByText("COORDINATOR")).toBeNull()
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────
+// H3 row 1526 — overload Badge: "Coordinator auto-derated to <mode>" with
+// hover tooltip surfacing the raw `derate_reason` set by the Coordinator.
+// ─────────────────────────────────────────────────────────────────────────
+describe("OpsSummaryPanel — H3 row 1526 derate badge", () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it("renders the auto-derate badge with target mode label and reason tooltip when derated", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 4, // ratio = 0.33 → supervised rung
+        queue_depth: 3,
+        deferred_5m: 12,
+        derated: true,
+        derate_reason: "CPU 87% > threshold",
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-derate-badge")).toBeInTheDocument()
+    })
+    const badge = screen.getByTestId("ops-derate-badge")
+    // Label calls out the target mode the Coordinator dropped toward.
+    expect(badge.textContent).toContain("Coordinator auto-derated to supervised")
+    expect(badge.getAttribute("data-derate-target")).toBe("supervised")
+    // Tooltip exposes the raw reason from the backend snapshot.
+    expect(badge.getAttribute("title")).toContain("CPU 87% > threshold")
+    expect(badge.getAttribute("title")).toContain("effective 4 / 12 tokens")
+    // Warning visual (FUI orange) so the operator notices on hover.
+    expect(badge.className).toContain("fui-orange")
+    // Accessible label so screen readers surface the same info.
+    expect(badge.getAttribute("role")).toBe("status")
+    expect(badge.getAttribute("aria-label")).toContain("CPU 87%")
+  })
+
+  it("hides the badge entirely when coordinator.derated is false", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 12,
+        queue_depth: 0,
+        deferred_5m: 0,
+        derated: false,
+        derate_reason: null,
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-coordinator-section")).toBeInTheDocument()
+    })
+    // Coordinator section visible, badge not present.
+    expect(screen.queryByTestId("ops-derate-badge")).toBeNull()
+  })
+
+  it("falls back to a sensible tooltip when the backend omits a reason string", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 6,
+        queue_depth: 0,
+        deferred_5m: 0,
+        derated: true,
+        // Backend may report derated=true with a missing reason if the
+        // sweep raced the audit emit — surface a fallback so hover still
+        // explains *what* happened.
+        derate_reason: null,
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-derate-badge")).toBeInTheDocument()
+    })
+    const badge = screen.getByTestId("ops-derate-badge")
+    expect(badge.getAttribute("title")).toContain("Reason unavailable")
+  })
+
+  it("labels heavy derates as manual when the effective budget collapses", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 1, // ratio ≈ 0.083 → manual rung
+        queue_depth: 8,
+        deferred_5m: 30,
+        derated: true,
+        derate_reason: "MEM 96% > threshold",
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-derate-badge")).toBeInTheDocument()
+    })
+    const badge = screen.getByTestId("ops-derate-badge")
+    expect(badge.getAttribute("data-derate-target")).toBe("manual")
+    expect(badge.textContent).toContain("Coordinator auto-derated to manual")
+    expect(badge.getAttribute("title")).toContain("MEM 96%")
+  })
+})

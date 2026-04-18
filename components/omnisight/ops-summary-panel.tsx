@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  Activity, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain,
+  Activity, AlertTriangle, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain,
   Layers, TimerReset, Gauge,
 } from "lucide-react"
 import { getOpsSummary, type OpsSummary } from "@/lib/api"
@@ -109,9 +109,12 @@ export function OpsSummaryPanel() {
           className="px-3 pb-2 -mt-1"
           data-testid="ops-coordinator-section"
         >
-          <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1">
+          <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1 flex-wrap">
             <Gauge size={10} aria-hidden />
             COORDINATOR
+            {data.coordinator.derated && (
+              <DerateBadge entry={data.coordinator} />
+            )}
           </div>
           <CoordinatorRow entry={data.coordinator} />
         </div>
@@ -286,6 +289,56 @@ function CoordinatorRow({ entry }: {
 function formatBudget(n: number): string {
   // Keep integer budgets clean; show one decimal only when fractional.
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
+
+
+// H3 row 1526: derate-target labels follow H4a's mode-multiplier table —
+// turbo=1.0, full_auto=0.7, supervised=0.4, manual=0.15. The H2 auto
+// derater specifically drops the turbo budget down to the supervised cap,
+// so the "supervised" rung is the common landing zone.
+function deriveDerateTargetMode(
+  entry: NonNullable<OpsSummary["coordinator"]>,
+): "manual" | "supervised" | "full_auto" {
+  const ratio = entry.capacity_max > 0
+    ? entry.effective_budget / entry.capacity_max
+    : 1
+  if (ratio <= 0.2) return "manual"
+  if (ratio <= 0.5) return "supervised"
+  return "full_auto"
+}
+
+
+/**
+ * H3 row 1526 — overload Badge that surfaces the Coordinator's auto-derate
+ * decision. Renders only when `entry.derated === true`. The label calls out
+ * the target mode the Coordinator dropped the effective budget toward
+ * ("Coordinator auto-derated to supervised"); the hover tooltip exposes the
+ * raw `derate_reason` string the backend attached to `set_derate(...)` (e.g.
+ * "CPU 87% > threshold") so operators can tell *why* it kicked in without
+ * digging through the audit log.
+ */
+function DerateBadge({ entry }: {
+  entry: NonNullable<OpsSummary["coordinator"]>
+}) {
+  const target = deriveDerateTargetMode(entry)
+  const label = `Coordinator auto-derated to ${target}`
+  const reason = entry.derate_reason?.trim()
+    ? entry.derate_reason.trim()
+    : "Reason unavailable"
+  const tooltip = `${label} — ${reason} (effective ${formatBudget(entry.effective_budget)} / ${entry.capacity_max} tokens)`
+  return (
+    <span
+      data-testid="ops-derate-badge"
+      data-derate-target={target}
+      title={tooltip}
+      role="status"
+      aria-label={tooltip}
+      className="inline-flex items-center gap-1 ml-auto px-1.5 py-0.5 rounded-sm font-mono text-[9px] tracking-[0.12em] uppercase text-[var(--fui-orange,#f59e0b)] bg-[color-mix(in_srgb,var(--fui-orange,#f59e0b)_18%,transparent)] border border-[var(--fui-orange,#f59e0b)]/40"
+    >
+      <AlertTriangle size={9} aria-hidden />
+      <span>{label}</span>
+    </span>
+  )
 }
 
 
