@@ -731,6 +731,20 @@ export function HostDevicePanel({
           >
             <span className="inline-block text-right" style={{ minWidth: 22 }}>{detectingCount || 0}</span> DETECTING
           </p>
+          {/* H3 row 1523: hardcoded baseline of the reference rig (16c / 64GB /
+            * 512GB). Kept static on purpose — downstream H4a token-bucket math
+            * (`CAPACITY_MAX = min(cores*0.8, mem/2) = 12`) assumes this target
+            * envelope, so the header advertises it even when SSE lands a
+            * different host. */}
+          <p
+            data-testid="host-baseline"
+            className="font-mono text-xs text-[var(--muted-foreground)] inline-block ml-auto"
+            title="Reference rig baseline (hardcoded): 16 cores / 64 GB RAM / 512 GB disk"
+          >
+            BASELINE <span className="text-[var(--hardware-orange)]">16c</span>
+            {" / "}<span className="text-[var(--artifact-purple)]">64GB</span>
+            {" / "}<span className="text-[var(--validation-emerald)]">512GB</span>
+          </p>
         </div>
       </div>
       

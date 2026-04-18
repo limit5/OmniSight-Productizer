@@ -152,6 +152,41 @@ describe("HostDevicePanel — host.metrics.tick SSE wiring", () => {
     expect(screen.getByTestId("sparkline-cpu").getAttribute("data-empty")).toBe("true")
   })
 
+  // H3 row 1523: hardcoded baseline pill on the HOST & DEVICES header.
+  // Stays pinned at 16c / 64GB / 512GB even when SSE brings a tick whose
+  // baseline differs, because it advertises the reference-rig envelope
+  // used by downstream H4a concurrency-budget math.
+  it("renders the hardcoded '16c / 64GB / 512GB' baseline in the header", () => {
+    primeSSE()
+    render(<HostDevicePanel />)
+    const baseline = screen.getByTestId("host-baseline")
+    expect(baseline).toBeInTheDocument()
+    expect(baseline.textContent?.replace(/\s+/g, " ")).toContain("BASELINE 16c / 64GB / 512GB")
+  })
+
+  it("keeps the baseline pinned at 16c / 64GB / 512GB even if the tick reports different totals", () => {
+    const sse = primeSSE()
+    render(<HostDevicePanel />)
+    act(() => {
+      sse.emit({
+        event: "host.metrics.tick",
+        data: {
+          host: {
+            cpu_percent: 10, mem_percent: 10, mem_used_gb: 2, mem_total_gb: 8,
+            disk_percent: 5, disk_used_gb: 10, disk_total_gb: 128,
+            loadavg_1m: 0.1, loadavg_5m: 0.1, loadavg_15m: 0.1,
+            sampled_at: 1700000000,
+          },
+          docker: { container_count: 0, total_mem_reservation_bytes: 0, source: "sdk", sampled_at: 1700000000 },
+          baseline: { cpu_cores: 4, mem_total_gb: 8, disk_total_gb: 128, cpu_model: "Tiny CPU" },
+          high_pressure: false,
+          sampled_at: 1700000000,
+        },
+      })
+    })
+    expect(screen.getByTestId("host-baseline").textContent?.replace(/\s+/g, " ")).toContain("BASELINE 16c / 64GB / 512GB")
+  })
+
   it("grows sparkline polylines as ticks accumulate", () => {
     const sse = primeSSE()
     render(<HostDevicePanel />)
