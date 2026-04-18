@@ -462,11 +462,18 @@ async def http_client(tmp_path, monkeypatch):
         ("t-alpha", "Alpha", "free"),
     )
     await conn.commit()
+
+    # Finalize bootstrap so the bootstrap gate middleware doesn't
+    # intercept API calls with 503 "bootstrap_required".
+    from backend import bootstrap as _boot
+    _boot._gate_cache["finalized"] = True
+
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
+        _boot._gate_cache["finalized"] = False  # reset for other tests
         await db.close()
 
 

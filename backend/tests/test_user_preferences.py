@@ -7,20 +7,30 @@ from httpx import AsyncClient, ASGITransport
 pytestmark = pytest.mark.asyncio
 
 
-async def _app():
-    """Build a minimal FastAPI app with auth + preferences routers."""
-    import os
-    os.environ.setdefault("OMNISIGHT_AUTH_MODE", "open")
-    from backend.main import app
-    return app
-
-
 @pytest.fixture
-async def client():
-    app = await _app()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+async def client(tmp_path, monkeypatch):
+    """Provide an async HTTP test client with fresh DB + finalized bootstrap."""
+    db_path = tmp_path / "user_prefs_test.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "open")
+    from backend import config as _cfg
+    _cfg.settings.database_path = str(db_path)
+    from backend import db
+    db._DB_PATH = db._resolve_db_path()
+    from backend.main import app
+    await db.init()
+
+    # Finalize bootstrap so the gate middleware doesn't return 503.
+    from backend import bootstrap as _boot
+    _boot._gate_cache["finalized"] = True
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        _boot._gate_cache["finalized"] = False
+        await db.close()
 
 
 class TestUserPreferences:
