@@ -20,6 +20,18 @@ async def client(tmp_path, monkeypatch):
     from backend.main import app
     await db.init()
 
+    # Seed the anonymous user — in open auth mode, current_user()
+    # returns id="anonymous". user_preferences has FK(user_id)
+    # REFERENCES users(id), so this user must exist in the table.
+    from backend import auth as _auth
+    await _auth.ensure_default_admin()
+    conn = db._conn()
+    await conn.execute(
+        "INSERT OR IGNORE INTO users (id, email, name, role, password_hash) "
+        "VALUES ('anonymous', 'anonymous@local', '(anonymous)', 'admin', '')"
+    )
+    await conn.commit()
+
     # Finalize bootstrap so the gate middleware doesn't return 503.
     from backend import bootstrap as _boot
     _boot._gate_cache["finalized"] = True

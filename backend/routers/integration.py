@@ -50,10 +50,10 @@ def _get_masked_credentials() -> list[dict]:
         return []
 
 
-async def _get_tenant_secrets_summary(user: dict) -> dict:
+async def _get_tenant_secrets_summary(user) -> dict:
     """Fetch tenant-scoped secrets grouped by type for the settings view."""
     try:
-        tid = user.get("tenant_id", "t-default")
+        tid = getattr(user, "tenant_id", "t-default")
         set_tenant_id(tid)
         from backend import tenant_secrets as sec
         items = await sec.list_secrets()
@@ -68,7 +68,7 @@ async def _get_tenant_secrets_summary(user: dict) -> dict:
             })
         return {"tenant_id": tid, "secrets": grouped}
     except Exception:
-        return {"tenant_id": user.get("tenant_id", "t-default"), "secrets": {}}
+        return {"tenant_id": getattr(user, "tenant_id", "t-default"), "secrets": {}}
 
 
 @router.get("/settings")
