@@ -32,7 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - uses: actions/setup-python@v5
@@ -89,7 +88,6 @@ jobs:
         with: { python-version: "3.12", cache: pip }
       - run: pip install --require-hashes -r backend/requirements.txt
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - run: pnpm install --frozen-lockfile --prefer-offline
@@ -162,7 +160,6 @@ jobs:
         # tuple swaps). New real-bug violations (F-series) fail CI.
         run: ruff check backend
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - run: pnpm install --frozen-lockfile --prefer-offline
@@ -233,7 +230,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - run: pnpm install --frozen-lockfile --prefer-offline
@@ -267,7 +263,6 @@ jobs:
         with: { python-version: "3.12", cache: pip }
       - run: pip install --require-hashes -r backend/requirements.txt
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - run: pnpm install --frozen-lockfile --prefer-offline
