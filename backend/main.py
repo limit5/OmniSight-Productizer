@@ -562,8 +562,15 @@ async def _graceful_shutdown_gate(request, call_next):
 
 @app.middleware("http")
 async def _bootstrap_gate(request, call_next):
-    """L1 #2 — redirect to ``/bootstrap`` until the wizard is finalized."""
-    from starlette.responses import RedirectResponse
+    """L1 #2 — redirect to ``/bootstrap`` until the wizard is finalized.
+
+    API paths (``/api/v1/*``) get a JSON 503 instead of 307 redirect.
+    The 307 redirect is only for browser page navigations. Without this
+    distinction, the frontend's 20+ polling hooks each follow the 307,
+    receive HTML instead of JSON, create parse-error objects, and
+    eventually OOM the Node.js process (~3 minutes at default heap).
+    """
+    from starlette.responses import RedirectResponse, JSONResponse
 
     path = request.url.path
     rel = path.removeprefix(settings.api_prefix)
@@ -574,6 +581,20 @@ async def _bootstrap_gate(request, call_next):
     if await _boot.is_bootstrap_finalized():
         return await call_next(request)
 
+    # API calls: return JSON error so the frontend can handle it
+    # programmatically (show banner, stop polling) instead of following
+    # a redirect to an HTML page and OOM'ing on parse errors.
+    if path.startswith(settings.api_prefix + "/") or path.startswith("/api/"):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "bootstrap_required",
+                "detail": "系統尚未完成初始設定，請先完成 Bootstrap wizard。",
+                "redirect": "/bootstrap",
+            },
+        )
+
+    # Browser page navigations: 307 redirect to the wizard.
     # Use 307 to preserve method + body (so a fetch/POST doesn't get
     # silently downgraded to GET on redirect — the client decides
     # whether to follow).
