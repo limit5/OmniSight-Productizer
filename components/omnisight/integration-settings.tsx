@@ -1075,29 +1075,77 @@ function NetworkEgressSection() {
 }
 
 /**
- * B14 Part C row 221 (first checkbox of Part C):
+ * B14 Part C rows 221–222:
  *
- * Scaffolded modal that serves as the entry-point for the Gerrit Code Review
- * setup walkthrough. This row delivers **only** the button + modal shell +
- * 5-step overview; the actual interactive logic for each step (Test-Connection
- * probe, SSH-key display, merger-agent-bot creation guide, submit-rule probe
- * against project.config, webhook URL/secret) lands in subsequent Part C rows.
+ * Modal that walks the operator through the 5-step Gerrit Code Review
+ * setup. The entry-point shell + 5-step overview landed in row 221;
+ * row 222 wires the interactive Step 1 "Test Connection" probe.
  *
- * Each step item shows a PENDING badge to make "scaffold-only" honest to the
- * operator — no green checks appear until the corresponding interactive row
- * wires up the real probe / write-back.
+ * Step 1 collects the Gerrit REST URL (optional), SSH host, and SSH
+ * port, then calls `api.testGitForgeToken({ provider: "gerrit", ssh_host,
+ * ssh_port, url })` — the same non-mutating backend probe the Bootstrap
+ * wizard's Step 3.5 Gerrit tab uses — so both entry-points share one
+ * code path (`_probe_gerrit_ssh` → `ssh -p {port} {host} gerrit version`).
+ * On success the Gerrit version surfaces inline and Step 1's badge flips
+ * PENDING → DONE; Steps 2–5 remain PENDING until later rows wire them up.
+ *
+ * This row is probe-only — it does NOT persist to `settings.gerrit_*`.
+ * A later row ties the wizard's "finalize" path to the existing settings
+ * PUT so an unfinished wizard never leaves a half-configured Gerrit
+ * endpoint in `settings.*`.
  *
  * Rendered via createPortal at z-[110] to sit above the parent IntegrationSettings
  * portal (z-[100]); backdrop click and X close.
  */
+const GERRIT_DEFAULT_SSH_PORT = 29418
+
 function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [url, setUrl] = useState("")
+  const [sshHost, setSshHost] = useState("")
+  const [sshPort, setSshPort] = useState<string>(String(GERRIT_DEFAULT_SSH_PORT))
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState<api.GitForgeTokenTestResult | null>(null)
+
+  const parsedPort = (() => {
+    const trimmed = sshPort.trim()
+    if (!trimmed) return GERRIT_DEFAULT_SSH_PORT
+    const n = Number(trimmed)
+    return Number.isFinite(n) && Number.isInteger(n) ? n : NaN
+  })()
+  const portValid =
+    Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+  const canTest = sshHost.trim().length > 0 && portValid && !testing
+
+  const onTest = useCallback(async () => {
+    if (!canTest) return
+    setTesting(true)
+    setResult(null)
+    try {
+      const res = await api.testGitForgeToken({
+        provider: "gerrit",
+        ssh_host: sshHost.trim(),
+        ssh_port: parsedPort as number,
+        url: url.trim(),
+      })
+      setResult(res)
+    } catch (err) {
+      setResult({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to reach the Gerrit SSH probe",
+      })
+    } finally {
+      setTesting(false)
+    }
+  }, [sshHost, parsedPort, url, canTest])
+
   if (!open || typeof document === "undefined") return null
 
-  const steps: { title: string; body: string }[] = [
-    {
-      title: "Step 1 — Connection probe",
-      body: "輸入 Gerrit REST URL + SSH host / port，Test Connection 驗證 reachability 與版本。",
-    },
+  const step1Done = result?.status === "ok"
+
+  const laterSteps: { title: string; body: string }[] = [
     {
       title: "Step 2 — SSH key 設定",
       body: "顯示 OmniSight 的公鑰，引導貼到 Gerrit Settings → SSH Keys；驗證 key fingerprint。",
@@ -1141,14 +1189,175 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
             引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟。
           </p>
 
+          <div
+            data-testid="gerrit-wizard-step-1"
+            className="p-3 rounded border border-[var(--neural-blue)]/40 bg-[var(--background)] space-y-2"
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                1
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                  Step 1 — Connection probe
+                </div>
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                  輸入 Gerrit REST URL + SSH host / port，Test Connection 驗證 reachability 與版本。
+                </div>
+              </div>
+              <span
+                data-testid="gerrit-wizard-step-1-badge"
+                className={`flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded self-start ${
+                  step1Done
+                    ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                    : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                }`}
+              >
+                {step1Done ? "DONE" : "PENDING"}
+              </span>
+            </div>
+
+            <div className="space-y-1.5 pt-1">
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor="gerrit-wizard-url"
+                  className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0"
+                >
+                  REST URL
+                </label>
+                <input
+                  id="gerrit-wizard-url"
+                  data-testid="gerrit-wizard-url"
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value)
+                    setResult(null)
+                  }}
+                  placeholder="https://gerrit.example.com (optional)"
+                  className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor="gerrit-wizard-ssh-host"
+                  className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0"
+                >
+                  SSH Host
+                </label>
+                <input
+                  id="gerrit-wizard-ssh-host"
+                  data-testid="gerrit-wizard-ssh-host"
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={sshHost}
+                  onChange={(e) => {
+                    setSshHost(e.target.value)
+                    setResult(null)
+                  }}
+                  placeholder="merger-agent-bot@gerrit.example.com"
+                  className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor="gerrit-wizard-ssh-port"
+                  className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0"
+                >
+                  SSH Port
+                </label>
+                <input
+                  id="gerrit-wizard-ssh-port"
+                  data-testid="gerrit-wizard-ssh-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  step={1}
+                  autoComplete="off"
+                  value={sshPort}
+                  onChange={(e) => {
+                    setSshPort(e.target.value)
+                    setResult(null)
+                  }}
+                  placeholder={String(GERRIT_DEFAULT_SSH_PORT)}
+                  className="w-28 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)]"
+                />
+                <span className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                  (default {GERRIT_DEFAULT_SSH_PORT})
+                </span>
+              </div>
+              {!portValid && sshPort.trim().length > 0 && (
+                <div
+                  data-testid="gerrit-wizard-port-invalid"
+                  className="font-mono text-[9px] text-[var(--critical-red)]"
+                >
+                  Port must be an integer between 1 and 65535.
+                </div>
+              )}
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  data-testid="gerrit-wizard-test"
+                  onClick={onTest}
+                  disabled={!canTest}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {testing ? (
+                    <Loader size={10} className="animate-spin" />
+                  ) : (
+                    <Check size={10} />
+                  )}
+                  {testing ? "Testing…" : "Test Connection"}
+                </button>
+              </div>
+              {result && (
+                <div
+                  data-testid="gerrit-wizard-result"
+                  data-status={result.status}
+                  className={`font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 ${
+                    result.status === "ok"
+                      ? "bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)]"
+                      : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                  }`}
+                >
+                  {result.status === "ok" ? (
+                    <Check size={10} className="mt-0.5 flex-shrink-0" />
+                  ) : (
+                    <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                  )}
+                  {result.status === "ok" ? (
+                    <div className="flex flex-col gap-0.5">
+                      <span>
+                        Connected — Gerrit{" "}
+                        <strong data-testid="gerrit-wizard-version">
+                          {result.version ?? "(unknown version)"}
+                        </strong>
+                      </span>
+                      {result.ssh_host ? (
+                        <span className="opacity-80">
+                          SSH: <code>{result.ssh_host}:{result.ssh_port}</code>
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <span>{result.message || "Gerrit SSH probe failed"}</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
           <ol className="space-y-2 list-none p-0 m-0">
-            {steps.map((s, i) => (
+            {laterSteps.map((s, i) => (
               <li
                 key={i}
                 className="flex gap-2 p-2 rounded border border-[var(--border)] bg-[var(--background)]"
               >
                 <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
-                  {i + 1}
+                  {i + 2}
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
@@ -1167,13 +1376,13 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
           <div className="p-2 rounded bg-[var(--hardware-orange)]/10 border border-[var(--hardware-orange)]/30">
             <div className="font-mono text-[9px] text-[var(--hardware-orange)] font-semibold">
-              SCAFFOLD ONLY
+              PARTIAL — STEP 1 ONLY
             </div>
             <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-1">
-              This modal is the entry-point delivered in B14 Part C row 221. Interactive
-              logic for each step (Test-Connection probe, SSH-key upload hint,
-              merger-agent-bot guide, submit-rule probe, webhook wiring) arrives in
-              the next rows of Part C. Closing this modal does not persist anything.
+              Step 1 (Test Connection) landed in B14 Part C row 222. Step 1 is probe-only and does not
+              write to <code className="mx-1">settings.gerrit_*</code>
+              — a later row wires the wizard finalization path. Steps 2–5 (SSH key display,
+              merger-agent-bot guide, submit-rule probe, webhook wiring) arrive in subsequent rows.
             </div>
           </div>
         </div>
