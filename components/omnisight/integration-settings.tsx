@@ -234,14 +234,24 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
   )
 }
 
-/** B14 Part B rows 1-3 — collapsible "Multiple Instances" sub-area inside
+/** B14 Part B rows 1-4 — collapsible "Multiple Instances" sub-area inside
  *  the GIT REPOSITORIES block. Row 1 delivered the expandable scaffold;
- *  row 2 added "Add GitHub Instance" (hostname + token); row 3 (this
- *  revision) adds the parallel "Add GitLab Instance" (URL + token, e.g.
- *  https://gitlab.example.com). Both forms are still local-state only —
- *  the instance list rendering, env-var persistence, and the
- *  `/system/settings/git/token-map` backend land in the subsequent
- *  Part B rows (215-217). */
+ *  row 2 added "Add GitHub Instance" (hostname + token); row 3 added the
+ *  parallel "Add GitLab Instance" (URL + token); row 4 (this revision)
+ *  wires the instance list + per-row TEST / REMOVE buttons. Wiring is
+ *  still local-state only — env-var persistence and the
+ *  `/system/settings/git/token-map` backend land in rows 216-217, and
+ *  TEST currently short-circuits to a stub "not wired" probe pending the
+ *  row-217 backend endpoint. */
+interface TokenMapInstance {
+  id: string
+  platform: "github" | "gitlab"
+  host: string
+  token: string
+  testStatus?: "idle" | "testing" | "ok" | "error"
+  testMessage?: string
+}
+
 function MultipleInstancesSection() {
   const [expanded, setExpanded] = useState(false)
   const [addingGithub, setAddingGithub] = useState(false)
@@ -250,6 +260,7 @@ function MultipleInstancesSection() {
   const [addingGitlab, setAddingGitlab] = useState(false)
   const [glUrl, setGlUrl] = useState("")
   const [glToken, setGlToken] = useState("")
+  const [instances, setInstances] = useState<TokenMapInstance[]>([])
 
   const resetGithubForm = () => {
     setAddingGithub(false)
@@ -263,6 +274,67 @@ function MultipleInstancesSection() {
     setGlToken("")
   }
 
+  const handleAddGithub = () => {
+    if (!ghHost || !ghToken) return
+    const id = `gh-${ghHost}-${Date.now()}`
+    setInstances(prev => [...prev, { id, platform: "github", host: ghHost, token: ghToken, testStatus: "idle" }])
+    resetGithubForm()
+  }
+
+  const handleAddGitlab = () => {
+    if (!glUrl || !glToken) return
+    const id = `gl-${glUrl}-${Date.now()}`
+    setInstances(prev => [...prev, { id, platform: "gitlab", host: glUrl, token: glToken, testStatus: "idle" }])
+    resetGitlabForm()
+  }
+
+  const handleRemove = (id: string) => {
+    setInstances(prev => prev.filter(i => i.id !== id))
+  }
+
+  // Row 215 delivers the button wiring; row 217's backend probe is not
+  // reachable yet, so TEST flips into a deterministic stub result so the
+  // result-surface codepath is exercised end-to-end at build time.
+  const handleTest = async (id: string) => {
+    setInstances(prev => prev.map(i =>
+      i.id === id ? { ...i, testStatus: "testing", testMessage: undefined } : i
+    ))
+    await new Promise(r => setTimeout(r, 400))
+    setInstances(prev => prev.map(i =>
+      i.id === id
+        ? { ...i, testStatus: "error", testMessage: "probe endpoint lands in row 217" }
+        : i
+    ))
+  }
+
+  const renderStatusBadge = (inst: TokenMapInstance) => {
+    if (inst.testStatus === "testing") {
+      return (
+        <span className="inline-flex items-center gap-0.5 font-mono text-[8px] text-[var(--neural-blue)]">
+          <Loader size={9} className="animate-spin" /> TESTING
+        </span>
+      )
+    }
+    if (inst.testStatus === "ok") {
+      return (
+        <span className="inline-flex items-center gap-0.5 font-mono text-[8px] text-[var(--validation-emerald)]">
+          <Check size={9} /> OK
+        </span>
+      )
+    }
+    if (inst.testStatus === "error") {
+      return (
+        <span
+          title={inst.testMessage}
+          className="inline-flex items-center gap-0.5 font-mono text-[8px] text-[var(--critical-red)]"
+        >
+          <AlertTriangle size={9} /> ERR
+        </span>
+      )
+    }
+    return null
+  }
+
   return (
     <div className="pt-2 border-t border-[var(--border)]/50 mt-1">
       <button
@@ -271,6 +343,11 @@ function MultipleInstancesSection() {
       >
         <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider flex-1 text-left">
           Multiple Instances
+          {instances.length > 0 && (
+            <span className="ml-1 px-1 py-0.5 rounded bg-[var(--neural-blue)]/15 text-[var(--neural-blue)] normal-case">
+              {instances.length}
+            </span>
+          )}
         </span>
         <span className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60">
           GitHub Enterprise · self-hosted GitLab
@@ -281,13 +358,58 @@ function MultipleInstancesSection() {
       </button>
       {expanded && (
         <div className="mt-1 px-1 py-1.5 space-y-1">
-          <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60">
-            No additional instances configured.
-          </div>
+          {instances.length === 0 ? (
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60">
+              No additional instances configured.
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {instances.map(inst => {
+                const platformColor = inst.platform === "github"
+                  ? "var(--neural-blue)"
+                  : "var(--hardware-orange)"
+                return (
+                  <div
+                    key={inst.id}
+                    className="flex items-center gap-2 p-1.5 rounded border border-[var(--border)] bg-[var(--background)]"
+                  >
+                    <span
+                      className="font-mono text-[8px] px-1 py-0.5 rounded uppercase shrink-0"
+                      style={{ backgroundColor: `${platformColor}22`, color: platformColor }}
+                    >
+                      {inst.platform}
+                    </span>
+                    <span className="font-mono text-[10px] text-[var(--foreground)] flex-1 truncate" title={inst.host}>
+                      {inst.host}
+                    </span>
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] shrink-0" title="Token is masked — full value held only in local state">
+                      •••{inst.token.slice(-4)}
+                    </span>
+                    {renderStatusBadge(inst)}
+                    <button
+                      onClick={() => handleTest(inst.id)}
+                      disabled={inst.testStatus === "testing"}
+                      title="Probe this instance's API (row 217 delivers the backend)"
+                      className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-30 transition-colors shrink-0"
+                    >
+                      TEST
+                    </button>
+                    <button
+                      onClick={() => handleRemove(inst.id)}
+                      title="Remove this instance from the map"
+                      className="p-0.5 rounded hover:bg-[var(--critical-red)]/10 transition-colors shrink-0"
+                    >
+                      <Trash2 size={10} className="text-[var(--muted-foreground)] hover:text-[var(--critical-red)]" />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
           <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-50 leading-relaxed">
             Map per-host tokens via OMNISIGHT_GITHUB_TOKEN_MAP /
-            OMNISIGHT_GITLAB_TOKEN_MAP. List, save & test arrive in the
-            next Part B rows.
+            OMNISIGHT_GITLAB_TOKEN_MAP. Save & probe backend arrives in
+            Part B rows 216-217.
           </div>
 
           {addingGithub ? (
@@ -319,9 +441,9 @@ function MultipleInstancesSection() {
                 </button>
                 <button
                   disabled={!ghHost || !ghToken}
-                  onClick={resetGithubForm}
+                  onClick={handleAddGithub}
                   className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
-                  title="Save handler arrives in Part B row 216"
+                  title="Persistence to OMNISIGHT_GITHUB_TOKEN_MAP arrives in row 216"
                 >
                   ADD
                 </button>
@@ -365,9 +487,9 @@ function MultipleInstancesSection() {
                 </button>
                 <button
                   disabled={!glUrl || !glToken}
-                  onClick={resetGitlabForm}
+                  onClick={handleAddGitlab}
                   className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--hardware-orange)] text-black font-semibold disabled:opacity-30"
-                  title="Save handler arrives in Part B row 216"
+                  title="Persistence to OMNISIGHT_GITLAB_TOKEN_MAP arrives in row 216"
                 >
                   ADD
                 </button>
