@@ -1671,3 +1671,204 @@ class TestHostPromPublish:
             for n in (ticks["n"], ticks["n"] - 1)
         )
         assert 'omnisight_host_container_count{source="sdk"}' in text
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — host.metrics.tick SSE event
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Covers:
+#   * _snapshot_to_sse_payload shape (host / docker / baseline / high_pressure)
+#   * _publish_host_sse_tick uses bus.publish with the correct event name
+#   * run_host_sampling_loop emits one tick per iteration
+#   * publisher swallows event-bus errors so the loop survives
+#   * SSE_EVENT_SCHEMAS registers the schema for codegen / validation
+
+
+class TestHostSseTickPayload:
+    def test_payload_includes_host_block(self):
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=10.0, cpu=42.5),
+            docker=_make_docker_sample(t=10.0, count=4),
+            sampled_at=10.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        assert payload["host"]["cpu_percent"] == 42.5
+        assert payload["host"]["mem_total_gb"] == 64.0
+        assert payload["host"]["sampled_at"] == 10.0
+
+    def test_payload_includes_docker_block_with_source(self):
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0),
+            docker=hm.DockerSample(
+                container_count=7,
+                total_mem_reservation_bytes=1024 ** 3,
+                source="cli",
+                sampled_at=1.0,
+            ),
+            sampled_at=1.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        assert payload["docker"]["container_count"] == 7
+        assert payload["docker"]["source"] == "cli"
+        assert payload["docker"]["total_mem_reservation_bytes"] == 1024 ** 3
+
+    def test_payload_pins_baseline(self):
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0),
+            docker=_make_docker_sample(t=1.0),
+            sampled_at=1.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        assert payload["baseline"]["cpu_cores"] == hm.HOST_BASELINE.cpu_cores
+        assert payload["baseline"]["mem_total_gb"] == hm.HOST_BASELINE.mem_total_gb
+        assert payload["baseline"]["disk_total_gb"] == hm.HOST_BASELINE.disk_total_gb
+        assert payload["baseline"]["cpu_model"] == hm.HOST_BASELINE.cpu_model
+
+    def test_payload_high_pressure_false_under_threshold(self):
+        # loadavg_1m=1.0 / 16 cores = 0.0625 ratio → not high pressure.
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0),
+            docker=_make_docker_sample(t=1.0),
+            sampled_at=1.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        assert payload["high_pressure"] is False
+
+    def test_payload_high_pressure_true_over_threshold(self):
+        # loadavg_1m=15.0 / 16 cores = 0.9375 ratio > 0.9 → high pressure.
+        host = hm.HostSample(
+            cpu_percent=10.0, mem_percent=20.0,
+            mem_used_gb=12.0, mem_total_gb=64.0,
+            disk_percent=30.0, disk_used_gb=150.0, disk_total_gb=512.0,
+            loadavg_1m=15.0, loadavg_5m=10.0, loadavg_15m=5.0, sampled_at=1.0,
+        )
+        snap = hm.HostSnapshot(
+            host=host, docker=_make_docker_sample(t=1.0), sampled_at=1.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        assert payload["high_pressure"] is True
+
+    def test_payload_serialises_to_json(self):
+        # Must round-trip through json.dumps because the EventBus path
+        # serialises before delivery — un-serialisable types would crash
+        # bus.publish at runtime.
+        import json
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0),
+            docker=_make_docker_sample(t=1.0),
+            sampled_at=1.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        # Should not raise.
+        text = json.dumps(payload)
+        assert '"host"' in text and '"docker"' in text and '"baseline"' in text
+
+
+class TestHostSseTickPublish:
+    def test_publish_calls_bus_with_event_name(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        class _FakeBus:
+            def publish(self, event, data, **_kwargs):
+                captured.append((event, data))
+
+        from backend import events as _events
+
+        monkeypatch.setattr(_events, "bus", _FakeBus())
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=99.0, cpu=33.0),
+            docker=_make_docker_sample(t=99.0, count=2),
+            sampled_at=99.0,
+        )
+        hm._publish_host_sse_tick(snap)
+        assert len(captured) == 1
+        event, data = captured[0]
+        assert event == "host.metrics.tick"
+        assert data["host"]["cpu_percent"] == 33.0
+        assert data["docker"]["container_count"] == 2
+        assert data["sampled_at"] == 99.0
+
+    def test_publish_swallows_bus_errors(self, monkeypatch):
+        class _BrokenBus:
+            def publish(self, *a, **k):
+                raise RuntimeError("redis unreachable")
+
+        from backend import events as _events
+        monkeypatch.setattr(_events, "bus", _BrokenBus())
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0),
+            docker=_make_docker_sample(t=1.0),
+            sampled_at=1.0,
+        )
+        # Must NOT raise — loop survives a broken bus.
+        hm._publish_host_sse_tick(snap)
+
+
+class TestHostSseTickLoopIntegration:
+    @pytest.mark.asyncio
+    async def test_loop_emits_one_event_per_tick(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        class _CaptureBus:
+            def publish(self, event, data, **_kwargs):
+                captured.append((event, data))
+
+        from backend import events as _events
+        monkeypatch.setattr(_events, "bus", _CaptureBus())
+
+        ticks = {"n": 0}
+
+        def fake_sample(cpu_interval: float = 1.0) -> hm.HostSnapshot:
+            ticks["n"] += 1
+            return hm.HostSnapshot(
+                host=_make_host_sample(t=float(ticks["n"]), cpu=float(ticks["n"])),
+                docker=_make_docker_sample(t=float(ticks["n"]), count=ticks["n"]),
+                sampled_at=float(ticks["n"]),
+            )
+
+        monkeypatch.setattr(hm, "sample_host_snapshot", fake_sample)
+
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.01, cpu_interval=0.0),
+        )
+        try:
+            for _ in range(50):
+                if len(captured) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        assert len(captured) >= 3
+        # Every captured event uses the H1 event name.
+        assert all(event == "host.metrics.tick" for event, _ in captured)
+        # Successive ticks carry monotonically increasing sampled_at.
+        sampled = [d["sampled_at"] for _, d in captured]
+        assert all(sampled[i] <= sampled[i + 1] for i in range(len(sampled) - 1))
+
+
+class TestHostSseTickSchemaRegistered:
+    def test_event_name_in_schema_registry(self):
+        from backend.sse_schemas import SSE_EVENT_SCHEMAS, SSEHostMetricsTick
+        assert "host.metrics.tick" in SSE_EVENT_SCHEMAS
+        assert SSE_EVENT_SCHEMAS["host.metrics.tick"] is SSEHostMetricsTick
+
+    def test_payload_validates_against_schema(self):
+        from backend.sse_schemas import SSEHostMetricsTick
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=5.0, cpu=12.0),
+            docker=_make_docker_sample(t=5.0, count=3),
+            sampled_at=5.0,
+        )
+        payload = hm._snapshot_to_sse_payload(snap)
+        # Pydantic v2 — model_validate should accept the payload as-is.
+        model = SSEHostMetricsTick.model_validate(payload)
+        assert model.host.cpu_percent == 12.0
+        assert model.docker.container_count == 3
+        assert model.baseline.cpu_cores == hm.HOST_BASELINE.cpu_cores
+        assert model.high_pressure is False

@@ -947,6 +947,82 @@ def _record_host_snapshot(snap: HostSnapshot) -> None:
         _host_history.append(snap)
 
 
+def _snapshot_to_sse_payload(snap: HostSnapshot) -> dict:
+    """Serialise a ``HostSnapshot`` for the ``host.metrics.tick`` SSE event.
+
+    Mirrors the per-snapshot shape of ``GET /api/v1/host/metrics`` (router
+    helper ``_snapshot_to_dict``) so the UI can use the same parser for
+    both the initial fetch and subsequent tick deltas. We additionally
+    include:
+
+      * ``baseline``       — the static ``HOST_BASELINE`` (cpu_cores /
+        mem_total_gb / disk_total_gb / cpu_model). Sent on every tick
+        because clients that re-subscribe mid-stream wouldn't otherwise
+        see it; the cost is ~80 bytes per tick.
+      * ``high_pressure``  — pre-computed loadavg ratio test so the UI
+        doesn't need to know the WSL2 0.9 threshold; also lets the
+        Coordinator (H2) consume the same field without recomputing.
+
+    Floats are rounded to the same precision the REST endpoint uses so
+    SSE consumers can compare/diff snapshots from the two sources without
+    floating-point drift.
+    """
+    return {
+        "host": {
+            "cpu_percent": round(snap.host.cpu_percent, 2),
+            "mem_percent": round(snap.host.mem_percent, 2),
+            "mem_used_gb": round(snap.host.mem_used_gb, 3),
+            "mem_total_gb": round(snap.host.mem_total_gb, 3),
+            "disk_percent": round(snap.host.disk_percent, 2),
+            "disk_used_gb": round(snap.host.disk_used_gb, 3),
+            "disk_total_gb": round(snap.host.disk_total_gb, 3),
+            "loadavg_1m": round(snap.host.loadavg_1m, 3),
+            "loadavg_5m": round(snap.host.loadavg_5m, 3),
+            "loadavg_15m": round(snap.host.loadavg_15m, 3),
+            "sampled_at": snap.host.sampled_at,
+        },
+        "docker": {
+            "container_count": snap.docker.container_count,
+            "total_mem_reservation_bytes": snap.docker.total_mem_reservation_bytes,
+            "source": snap.docker.source,
+            "sampled_at": snap.docker.sampled_at,
+        },
+        "baseline": {
+            "cpu_cores": HOST_BASELINE.cpu_cores,
+            "mem_total_gb": HOST_BASELINE.mem_total_gb,
+            "disk_total_gb": HOST_BASELINE.disk_total_gb,
+            "cpu_model": HOST_BASELINE.cpu_model,
+        },
+        "high_pressure": is_high_pressure_loadavg(snap.host.loadavg_1m),
+        "sampled_at": snap.sampled_at,
+    }
+
+
+def _publish_host_sse_tick(snap: HostSnapshot) -> None:
+    """Push one ``host.metrics.tick`` SSE event for the freshest snapshot.
+
+    Best-effort: an event-bus glitch (no running loop, JSON serialisation
+    failure, Redis pub/sub flake) must never tear down the sampling
+    lifespan task — observability is allowed to degrade silently before
+    it's allowed to take down the backend. Exceptions are logged at
+    debug level so chronic outages remain greppable in container logs.
+    """
+    try:
+        from backend.events import bus
+    except Exception as exc:
+        logger.debug("host SSE bus import failed: %s", exc)
+        return
+    try:
+        payload = _snapshot_to_sse_payload(snap)
+    except Exception as exc:
+        logger.debug("host SSE payload build failed: %s", exc)
+        return
+    try:
+        bus.publish("host.metrics.tick", payload)
+    except Exception as exc:
+        logger.debug("host SSE publish failed: %s", exc)
+
+
 def _publish_host_prom_metrics(snap: HostSnapshot) -> None:
     """Push the freshest host snapshot into the H1 Prometheus gauges.
 
@@ -1083,6 +1159,7 @@ async def run_host_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S,
                 snap = sample_host_snapshot(cpu_interval=cpu_interval)
                 _record_host_snapshot(snap)
                 _publish_host_prom_metrics(snap)
+                _publish_host_sse_tick(snap)
             except Exception as exc:
                 logger.warning(
                     "host_metrics host-sample iteration failed: %s", exc,

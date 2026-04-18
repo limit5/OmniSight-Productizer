@@ -295,6 +295,54 @@ class SSEDecision(BaseModel):
     timestamp: str = ""
 
 
+class SSEHostBaseline(BaseModel):
+    """Static host baseline (HOST_BASELINE) — pinned per H1 spec."""
+    cpu_cores: int
+    mem_total_gb: int
+    disk_total_gb: int
+    cpu_model: str
+
+
+class SSEHostSamplePayload(BaseModel):
+    """Per-tick whole-host psutil snapshot."""
+    cpu_percent: float
+    mem_percent: float
+    mem_used_gb: float
+    mem_total_gb: float
+    disk_percent: float
+    disk_used_gb: float
+    disk_total_gb: float
+    loadavg_1m: float
+    loadavg_5m: float
+    loadavg_15m: float
+    sampled_at: float
+
+
+class SSEDockerSamplePayload(BaseModel):
+    """Per-tick docker-daemon view (count + reservation, with source tag)."""
+    container_count: int
+    total_mem_reservation_bytes: int
+    source: str  # "sdk" | "cli" | "unavailable"
+    sampled_at: float
+
+
+class SSEHostMetricsTick(BaseModel):
+    """host.metrics.tick — H1 5s whole-host sampling push.
+
+    Mirrors the per-snapshot shape of ``GET /api/v1/host/metrics``'s
+    ``current`` field plus a static ``baseline`` and a pre-computed
+    ``high_pressure`` flag (loadavg_1m / cpu_cores > 0.9). Carried at the
+    ``SAMPLE_INTERVAL_S`` cadence (5 s) so subscribers can render live
+    sparklines without polling the REST endpoint.
+    """
+    host: SSEHostSamplePayload
+    docker: SSEDockerSamplePayload
+    baseline: SSEHostBaseline
+    high_pressure: bool
+    sampled_at: float
+    timestamp: str = ""
+
+
 # Registry for schema export
 SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "agent_update": SSEAgentUpdate,
@@ -326,6 +374,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     # R3 (#309): Scratchpad Memory Offload + Auto-Continuation
     "agent.scratchpad.saved": SSEAgentScratchpadSaved,
     "agent.token_continuation": SSEAgentTokenContinuation,
+    # H1: whole-host metrics sampling tick (5 s cadence)
+    "host.metrics.tick": SSEHostMetricsTick,
 }
 
 
