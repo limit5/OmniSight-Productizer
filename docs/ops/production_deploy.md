@@ -164,61 +164,178 @@ the newest `backend/alembic/versions/*.py`.
 
 ---
 
-## 4. Deploy (choose one path)
+## 4. Deploy
 
-### 4.1 Path A — systemd (single-host, recommended for first launch)
+> **IMPORTANT — decide first-time vs subsequent deploy.**
+>
+> `scripts/deploy.sh` is a **re-deploy / upgrade** tool. Its three
+> strategies (`systemd` / `rolling` / `blue-green`) all assume the
+> services / containers / blue-green state directory **already exist**.
+>
+> - **First-time** (services never booted on this host) → §4.1 or §4.2
+>   (one-time bootstrap).
+> - **Subsequent deploys** → §4.3 (`scripts/deploy.sh`).
+>
+> After the first bootstrap, record the host in the change log (§10)
+> so the next operator knows the bootstrap is done and can go straight
+> to §4.3.
 
-```bash
-# 1. Install (first time only)
-sudo cp deploy/systemd/omnisight-backend.service /etc/systemd/system/
-sudo cp deploy/systemd/omnisight-worker@.service /etc/systemd/system/
-sudo cp deploy/systemd/omnisight-frontend.service /etc/systemd/system/
-sudo cp deploy/systemd/cloudflared.service /etc/systemd/system/
-# Edit placeholders (USER_HOME / USERNAME) in each file first.
-sudo systemctl daemon-reload
+### 4.1 First-time — Path A: systemd (single-host, recommended)
 
-# 2. Start — order matters: tunnel last so it opens only when ready
-sudo systemctl enable --now omnisight-backend.service
-# Wait ~10s for lifespan startup (DB init + validation + bg tasks)
-sleep 10
-curl -sSf http://127.0.0.1:8000/readyz | jq .    # must return 200 + ready:true
-
-sudo systemctl enable --now omnisight-worker@1.service
-sudo systemctl enable --now omnisight-worker@2.service
-
-sudo systemctl enable --now omnisight-frontend.service
-sleep 5
-curl -sSf http://127.0.0.1:3000/                 # Next.js landing
-
-sudo systemctl enable --now cloudflared.service  # opens public URL
-```
-
-### 4.2 Path B — docker-compose HA (dual-replica + Caddy)
+Run these **in order** on a clean host. Each block is idempotent
+enough that re-running after a mid-failure resume is safe (the
+`enable --now` and `systemctl status` gates report existing state
+instead of erroring). Total time: ~10 min on a warm host, ~25 min
+on a cold one.
 
 ```bash
 cd /home/$USER/work/sora/OmniSight-Productizer
 
-# Pull / build images
+# ─── (a) Backend deps + frontend build ────────────────────────
+pip install --require-hashes -r backend/requirements.txt
+pnpm install --frozen-lockfile --prefer-offline
+pnpm run build
+
+# ─── (b) Initialise the SQLite database ───────────────────────
+mkdir -p data data/backups
+python3 -m alembic -c backend/alembic.ini upgrade head
+sqlite3 data/omnisight.db "SELECT version_num FROM alembic_version;"
+# Expected: the revision matching the newest file prefix under
+#   backend/alembic/versions/*.py
+
+# ─── (c) Install systemd unit files (one-time) ────────────────
+# Edit each file first: replace `USER_HOME` / `USERNAME` placeholders
+# with the actual runtime user's $HOME path + username. Leave the
+# rest (ExecStart, ReadWritePaths, KillSignal, TimeoutStopSec) alone —
+# those are pinned to match backend/lifecycle.py + backend/worker.py.
+sudo cp deploy/systemd/omnisight-backend.service  /etc/systemd/system/
+sudo cp deploy/systemd/omnisight-worker@.service  /etc/systemd/system/
+sudo cp deploy/systemd/omnisight-frontend.service /etc/systemd/system/
+sudo cp deploy/systemd/cloudflared.service        /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# ─── (d) Start services (order matters — tunnel LAST) ─────────
+# Backend first; wait up to 25s for lifespan (DB init + config
+# validation + 11 background tasks + G1 signal handler). Cold-start
+# with alembic + startup_cleanup can take 15-40s.
+sudo systemctl enable --now omnisight-backend
+for i in $(seq 1 30); do
+  if curl -sSf http://127.0.0.1:8000/readyz >/dev/null 2>&1; then
+    echo "backend ready after ${i}s"; break
+  fi
+  sleep 1
+done
+curl -sSf http://127.0.0.1:8000/readyz | jq .ready    # must be true
+
+# Workers (scale @N per OMNISIGHT_WORKERS; 2-3 is typical).
+sudo systemctl enable --now omnisight-worker@1
+sudo systemctl enable --now omnisight-worker@2
+
+# Frontend (Next.js production server).
+sudo systemctl enable --now omnisight-frontend
+sleep 5 && curl -sSf http://127.0.0.1:3000/ >/dev/null
+
+# Cloudflare Tunnel LAST — opens the public URL only after the
+# stack above is verified ready. If you swap this order you'll
+# answer external 5xx for the tunnel-open → backend-ready window.
+sudo systemctl enable --now cloudflared
+
+# ─── (e) Verify the whole stack is live ───────────────────────
+for unit in omnisight-backend omnisight-worker@1 omnisight-worker@2 \
+            omnisight-frontend cloudflared; do
+  echo "--- $unit ---"
+  sudo systemctl is-active "$unit"
+done
+```
+
+Record this bootstrap in §10 with the host + date.
+
+### 4.2 First-time — Path B: docker-compose HA (dual-replica + Caddy)
+
+Use this when the deploy target is a docker host and you want the
+G2 rolling-restart topology from day 1. Bootstrap brings up both
+`backend-a` + `backend-b` + Caddy so `scripts/deploy.sh --strategy
+rolling` works for subsequent upgrades.
+
+```bash
+cd /home/$USER/work/sora/OmniSight-Productizer
+
+# ─── (a) Pull the release image (GHCR) or build locally ───────
+# `pull_policy: missing` in compose means it only pulls when absent;
+# an explicit pull avoids the first-boot race where compose builds
+# from the Dockerfile instead (slower + no reproducible tag).
 docker compose -f docker-compose.prod.yml pull || \
   docker compose -f docker-compose.prod.yml build
 
-# Bring up with ordered health gating
+# ─── (b) First-boot: brings up all services ───────────────────
+# docker-compose.prod.yml orders:
+#   backend-a + backend-b  (parallel, healthcheck /readyz)
+#   caddy                  (depends_on both backends: service_healthy)
+#   frontend               (depends_on caddy: service_healthy)
 docker compose -f docker-compose.prod.yml up -d
-docker compose -f docker-compose.prod.yml ps    # all should be "healthy"
+docker compose -f docker-compose.prod.yml ps
+# Expected: STATE=running, HEALTH=healthy on every row.
 
-# Verify both replicas
-curl -sSf http://127.0.0.1:8000/readyz | jq .status    # backend-a
-curl -sSf http://127.0.0.1:8001/readyz | jq .status    # backend-b
-curl -sSf http://127.0.0.1/                            # Caddy → frontend
+# ─── (c) First-time alembic upgrade inside the container ──────
+# The compose-mounted volume `omnisight-data` persists the DB; alembic
+# runs INSIDE backend-a so it sees the containerised /app/data path.
+docker compose -f docker-compose.prod.yml exec -T backend-a \
+  python3 -m alembic -c /app/backend/alembic.ini upgrade head
+
+# ─── (d) Verify both replicas + Caddy fan-out ─────────────────
+curl -sSf http://127.0.0.1:8000/readyz | jq .ready    # backend-a
+curl -sSf http://127.0.0.1:8001/readyz | jq .ready    # backend-b
+curl -sSf http://127.0.0.1:80/                        # Caddy → frontend
 ```
 
-### 4.3 Optional — observability sidecars
+### 4.3 Subsequent deploys — `scripts/deploy.sh`
+
+Once either bootstrap above is complete, use `scripts/deploy.sh` for
+every future upgrade. Its three strategies correspond to the topology
+you bootstrapped:
+
+| Strategy | When to use | Command |
+|----------|-------------|---------|
+| `systemd` (default) | Path A bootstrap (single-host) | `scripts/deploy.sh prod <tag>` |
+| `rolling` | Path B bootstrap (dual-replica) | `scripts/deploy.sh --strategy rolling prod <tag>` |
+| `blue-green` | Path B + N10 blue-green gate triggered (major dep bump) | `scripts/deploy.sh --strategy blue-green prod <tag>` |
+
+`scripts/deploy.sh` already handles:
+* git fetch + checkout of the tag (§1 inside the script);
+* WAL-safe SQLite backup via `sqlite3 .backup` (§2 inside);
+* N10 blue-green gate for prod (§1b — refuses if the last-merged PR
+  was labelled `requires-blue-green` but `systemd` strategy is
+  chosen);
+* `pip install --require-hashes` + `pnpm run build` before restart;
+* Strategy-appropriate restart (systemctl restart / drain-recreate-
+  readyz poll per replica / cutover ceremony);
+* `/api/v1/health` smoke against every active port.
+
+Rollback:
 
 ```bash
+scripts/deploy.sh --rollback
+# Blue-green path only. Flips the Caddy upstream symlink back to the
+# previous color (kept warm for 24 h). <5 s to complete. See
+# docs/ops/blue_green_runbook.md for the retention window semantics.
+```
+
+For a systemd rollback (Path A), checkout the previous tag and
+re-run `scripts/deploy.sh prod <prev-tag>`; the lifespan teardown
+honours C2 WAL-checkpoint + G1 graceful drain so the restart is
+safe even without blue-green.
+
+### 4.4 Optional — observability sidecars
+
+```bash
+# Path B only — Prometheus + Grafana under the `observability` profile.
 docker compose -f docker-compose.prod.yml --profile observability up -d
 # Prometheus at :9090, Grafana at :3001
-# Load deploy/observability/prometheus/alerts.yml into Prometheus
-# Load deploy/observability/grafana/ha.json into Grafana
+# After first boot:
+#   - Load deploy/observability/prometheus/alerts.yml as a rule file
+#     (adds the 4 alerts: ReplicaLagHigh, RollingDeploy5xxRateHigh,
+#      BackendInstanceDown, MigrationMismatch per H2 audit).
+#   - Import deploy/observability/grafana/ha.json as a dashboard.
 ```
 
 ---
