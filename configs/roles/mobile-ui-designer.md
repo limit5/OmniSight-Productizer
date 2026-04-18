@@ -461,6 +461,43 @@ trigger_condition: "使用者提到 mobile UI / SwiftUI / Jetpack Compose / Flut
 - [ ] 多語系：所有可見字串走 i18n bundle，無英文 hardcode
 - [ ] 與 `mobile-a11y.skill.md` baseline 對齊（PR 自審清單那邊每項都過）
 
+## Cross-Workspace A11y Routing（V → P + W，B16 Part C row 292）
+
+**背景**：B16 Part C row 292 要求「強化後的 a11y skill 同時適用於 W（Web）+ V（Visual workspace）+ P（Mobile a11y）」。本 role（V5 #321）是 Visual workspace 的 mobile design-time emit code 入口；當 design-stage 階段發現 mobile a11y 可疑訊號（VoiceOver / TalkBack label 缺失、target 小於 44 pt / 48 dp、Dynamic Type xxxLarge 破版風險、dark mode contrast 失守、missing role / accessibilityTraits、Reduce Motion 動效未 fallback），必須**relay 到對應 a11y skill 由其仲裁**，而非自行裁決後 emit code。
+
+對齊 `docs/design/b16-part-c-a11y-comparison.md` §5 row 3 與 `mobile/mobile-a11y.skill.md` 的 `## Cross-Workspace Scope`。
+
+### Mobile design-time a11y pre-flight 必要動作
+
+emit SwiftUI / Compose / Flutter code **之前**：
+
+1. **Contrast 預審（雙態）**：呼叫 `load_design_tokens()` 拿 light + dark 兩態 palette → 對 `(text token, bg token, text-size)` 在**兩態**皆驗 WCAG formula；任一態 < 4.5:1（正文）/ < 3:1（大字 / UI）→ relay 給 `target_agent_id = "mobile-a11y"` 並阻塞 emit
+2. **Touch target 預審**：互動元件 base size < `frame(width: 44, height: 44)`（iOS）/ < `Modifier.size(48.dp)`（Android）/ Flutter 自畫 button hit area < 48 dp → relay 給 `target_agent_id = "mobile-a11y"`，硬性 block；icon-only button 預設不縮 `h-6 w-6`
+3. **Dynamic Type / Font Scale 預審**：emit code 必對照 `mobile-a11y.skill.md` Critical Rule #8 — `.font(.body)` / `MaterialTheme.typography.*` / `Theme.of(context).textTheme.*` 全程使用，**零** `.font(.system(size:))` / 寫死 `sp`；違反 → relay 給 `target_agent_id = "mobile-a11y"`
+4. **A11y 元數據預審**：每個互動元件的 `accessibilityLabel` / `accessibilityHint` / `accessibilityTraits` / `Modifier.semantics { contentDescription, role, stateDescription }` / `Semantics(label, hint, button, ...)` 在 emit 時就填齊；若 label 與可見文字不一致 → relay 給 `target_agent_id = "mobile-a11y"`（Critical Rule #5）
+5. **Live region 預審**：toast / loading / error / route-change 四類動態 surface 對照 `mobile-a11y.skill.md` Critical Rules #6 — iOS `.accessibilityNotification(.announcement(...))` / Compose `liveRegion = LiveRegionMode.Polite|Assertive` / Flutter `Semantics(liveRegion: true)` 必補；polite / assertive 不確定 → relay 給 `target_agent_id = "mobile-a11y"`
+6. **Reduce Motion / Reduce Transparency 預審**：spring / parallax / 大動效必有 fade / opacity fallback；漏接 `@Environment(\.accessibilityReduceMotion)` / `LocalAccessibilityManager` → relay 給 `target_agent_id = "mobile-a11y"`
+7. **i18n a11y label 預審**：a11y label 必走 i18n bundle（`NSLocalizedString` / `stringResource(R.string.*)` / `AppLocalizations.of(context).x`）；硬編英文 → relay 給 `target_agent_id = "mobile-a11y"`
+
+### Cross-Agent Observation 路由（B1 #209 對齊）
+
+| 違反類型 | target_agent_id | blocking |
+|---|---|---|
+| Mobile a11y baseline（VoiceOver / TalkBack label / Dynamic Type / target ≥ 44 pt / 48 dp / dark mode contrast / focus trap） | `mobile-a11y` | `true`（critical：盲測卡關 / 破版 / target < 44pt） |
+| 與 web 共用設計 token / contrast 方案需 sync | `a11y` | `false` |
+| 跨 mobile 平台（SwiftUI / Compose / Flutter）某一份 emit 與 sibling design-system 不同步 | `ui-designer` | `false` |
+| 違反屬於 mobile 平台 build / sign / store-submit pipeline | `ios-swift` / `android-kotlin` / `flutter-dart` | `false` |
+| Reporter 合規（ADA / EAA / Section 508 / Google Play a11y / App Store a11y guideline） | `reporter/compliance` | `false` |
+
+反向：`mobile-a11y` skill 在 P2 simulate-track gate（`AccessibilityChecks` / XCUITest a11y 斷言）發現的 violation 若可在 design-time 修補（token contrast / 平台 primitive 替換 / typography ramp 對映 / a11y 元數據填齊），會 relay 回 `target_agent_id = "mobile-ui-designer"` 由本 role 在下次 emit 時對映修正。
+
+### 不跨足界線
+
+- 本 role **不**直接執行 `AccessibilityChecks` / Accessibility Scanner / Xcode Accessibility Inspector runtime audit（那是 `mobile-a11y` skill 在 P2 simulate-track 的職責）
+- 本 role **不**裁決「a11y violation 是 hard fail 還是 warning」— 由 `mobile-a11y` skill 對齊 `AccessibilityChecks` WARN/ERROR 與 P2 閘門標準
+- 本 role **不**重複 `ui-designer.md` 的 React + shadcn + Tailwind design-time 職責；web-only design pattern relay 給 V1
+- 本 role **不**走 Web-only 條款（pa11y / Lighthouse / `:focus-visible` outline / `<img alt>` / `<label htmlFor>` / heading semantic order）— 走 `web/a11y.skill.md` 對映；mobile 本檔對映 VoiceOver / TalkBack 與 platform a11y trait
+
 ## Trigger Condition（B15 Lazy-Loading Hint）
 
 **When to load this skill:**

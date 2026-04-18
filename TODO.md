@@ -289,7 +289,7 @@ Legend:
 **Part C — Accessibility Auditor 強化 W5**
 - [x] 比對 agency-agents 的 Accessibility Auditor 和現有 `web-a11y.md`
 - [x] 補齊缺失項：focus order 驗證流程 + screen reader 測試腳本 + 色彩對比自動計算 + 動態內容 ARIA live region 檢查
-- [ ] 將強化後的 a11y skill 同時適用於 W（Web）+ V（Visual workspace）+ P（Mobile a11y）
+- [x] 將強化後的 a11y skill 同時適用於 W（Web）+ V（Visual workspace）+ P（Mobile a11y）
 - 預估：**0.5 day**
 
 **B16 總預估**：**3 day**

@@ -148,6 +148,48 @@ trigger_condition: "使用者提到 mobile a11y / VoiceOver / TalkBack / Dynamic
 - [ ] 多語系 a11y 字串皆本地化
 - [ ] P2 simulate-track 的 `AccessibilityChecks` 0 violation
 
+## Cross-Workspace Scope（W + V + P）
+
+**背景**：B16 Part C row 292 要求「強化後的 a11y skill 同時適用於 W（Web）+ V（Visual workspace）+ P（Mobile a11y）」。本檔（P）負責 Mobile runtime 階段的 a11y 閘門；本節以**雙向交叉引用**接入 W 與 V，與 `configs/roles/web/a11y.skill.md` 的 `## Cross-Workspace Scope` 對稱呼應，避免兩檔互相吞併或重複定義。對齊 `docs/design/b16-part-c-a11y-comparison.md` §5 row 3 的吸收策略。
+
+### 三 workspace 職責切分（mobile 視角）
+
+| Workspace | 主檔（authoritative） | 本檔（P）負責 | 不在本檔負責 |
+|---|---|---|---|
+| **P（Mobile runtime — VoiceOver / TalkBack / Dynamic Type / Switch Control）** | **本檔** `configs/roles/mobile/mobile-a11y.skill.md` | iOS XCUITest `accessibilityLabel` 斷言、Android Espresso `AccessibilityChecks`、VoiceOver / TalkBack 盲測 protocol、Dynamic Type xxxLarge / Font Scale 200% reflow、44 pt × 48 dp target size、Switch Control / Switch Access、Reduce Motion / Reduce Transparency 分支、a11y label i18n | — |
+| **V（Visual workspace — 設計稿 / Figma 階段 mobile a11y pre-flight）** | `configs/roles/mobile-ui-designer.md`（V5 #321）+ `configs/roles/ui-designer.md`（V1 #317） | 提供 mobile a11y 規範作為 design-time gate 的依據（44 pt / 48 dp target、Dynamic Type ramp 對映、SwiftUI / Compose / Flutter a11y 元數據對映表、dark mode 雙態 contrast）；接收 V5 / V1 relay 的 design-stage finding 並裁定是否 block `mobile_component_registry` 下游 emit | 不直接 emit SwiftUI / Compose / Flutter / React 程式碼（那是 V5 / V1 sibling） |
+| **W（Web — WCAG 2.2 AA browser runtime）** | `configs/roles/web/a11y.skill.md` | 共享四大強化資產的「概念 + 決策樹」：Focus Order Audit、Screen Reader Testing Protocol、Contrast Automation、Dynamic Content Live Region Checklist | **不**負責 Web 平台專屬 pattern（axe-core / pa11y / Lighthouse / `:focus-visible` / shadcn / Radix focus trap / `aria-live` HTML attribute / heading semantic `<h1>~<h6>`）— 全數由 `web/a11y.skill.md` 對映實作 |
+
+### 強化資產跨 workspace 對映表（mobile 主視角）
+
+`web/a11y.skill.md` 新增的四大資產屬於 **workspace-agnostic 方法論**；本檔對映到 mobile 平台的對應 API 與工具如下：
+
+| 資產 | P（Mobile — 本檔對映） | V（Visual / 設計稿 — 預審） | W（Web — sibling） |
+|---|---|---|---|
+| Focus / Keyboard Order Audit | iOS：Accessibility Inspector → Audit + 外接鍵盤 + Switch Control 線性掃描；Android：Accessibility Scanner + TalkBack `linearNavigation` + Switch Access scan | Figma frame 必標 mobile `Tab` order / VoiceOver swipe 順序 annotation，由 `mobile-ui-designer` PR review 補 | `scripts/a11y_focus_order.js`（Playwright） |
+| Screen Reader Testing Protocol | VoiceOver（iOS）+ TalkBack（Android）盲測四階段（Setup / Navigation / Interactive Component / Dynamic Content），對映 `web/a11y.skill.md` Phase 1-4；XCUITest `accessibilityLabel != nil && != ""` 100% + Espresso `AccessibilityChecks` 0 violation | 設計稿必標 SR 念稿（label + hint + role + value），由 `mobile-ui-designer` 在 emit code 時填齊 `accessibilityLabel` / `contentDescription` / `Semantics(label:)` | `scripts/a11y_screen_reader_protocol.sh --driver voiceover\|nvda\|jaws` |
+| Contrast Automation | iOS Asset Catalog dark / light 雙 variant + Xcode Accessibility Inspector contrast；Android `MaterialTheme.colorScheme` dynamic color + Accessibility Scanner contrast；對比公式相同（WCAG formula 4.5 / 3 / 3） | Figma Stark / axe plugin（design-time gate）；`design_token_loader` 反向對齊 `MobileDesignTokens` 與 Figma variables | `scripts/a11y_contrast_matrix.py --tokens configs/web/design.tokens.json` |
+| Dynamic Content ARIA Live Region | iOS：`UIAccessibility.post(notification: .announcement, argument:)` / SwiftUI `.accessibilityNotification(.announcement(...))`；Android：`Modifier.semantics { liveRegion = LiveRegionMode.Polite \| Assertive }` / View 體系 `View.announceForAccessibility(...)`；Flutter：`Semantics(liveRegion: true, child:)` | 設計稿必註明動態變更 surface 的 announcement 文案 + polite / assertive 選擇，由 `mobile-ui-designer` 在 emit 時對映平台 API | `scripts/a11y_live_region_check.py`（grep `aria-live` / `role=status\|alert\|log\|timer`） |
+
+### Cross-Agent Observation 路由（B1 #209 對齊）
+
+當本檔（mobile-a11y）發現 mobile a11y violation 時，視 surface 屬性 emit `cross_agent/observation` finding，`target_agent_id` 對應如下：
+
+- 違反屬於 SwiftUI / Compose / Flutter design-time 元件樹 → `target_agent_id = "mobile-ui-designer"`（V5）
+- 違反屬於跨 mobile / web 共用設計 token / contrast 方案 → `target_agent_id = "ui-designer"`（V1）
+- 違反屬於 mobile 平台 build / sign / store-submit pipeline → `target_agent_id = "ios-swift"` / `"android-kotlin"` / `"flutter-dart"`
+- 違反屬於 web a11y baseline 規範（與 mobile pattern 衝突需 sync） → `target_agent_id = "a11y"`
+- 違反屬於 reporter 合規（ADA / EAA / Section 508 / Google Play a11y policy / App Store a11y guideline） → `target_agent_id = "reporter/compliance"`
+- `blocking = true` 套用於 critical（VoiceOver / TalkBack 盲測卡關、Dynamic Type 破版、target < 44pt / 48dp）；warn 級走 non-blocking
+
+反向：V5 / V1 / web a11y / mobile platform engineer 任一 sibling 在 design-time / runtime 發現 mobile a11y 可疑 pattern，relay 回 `target_agent_id = "mobile-a11y"` 由本檔仲裁是否進 P2 simulate-track gate（`AccessibilityChecks` / XCUITest a11y 斷言）。
+
+### 不跨足界線（單一職責保護）
+
+- 本檔**不**重複 `web/a11y.skill.md` 的 Web 平台 API（axe-core / pa11y / Lighthouse / `:focus-visible` outline / `aria-live` HTML attribute / heading semantic order）
+- 本檔**不**取代 `mobile-ui-designer.md` / `ui-designer.md` 的 design-time emit code 職責；只提供 a11y 規則作為 design-time gate 的依據
+- web-only 條款（pa11y CLI / Lighthouse Accessibility ≥ 90 / `:focus-visible` outline 替代 / `<img alt>` 屬性、`<label htmlFor>` 關聯）**不**在本檔列為 hard fail；走 `web/a11y.skill.md` 對映
+
 ## Trigger Condition（B15 Lazy-Loading Hint）
 
 **When to load this skill:**
