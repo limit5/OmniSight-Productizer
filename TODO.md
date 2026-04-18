@@ -185,7 +185,7 @@ Legend:
   - [x] 503：「系統維護中」或「設定未完成」（依 error.error 欄位區分）
 
 **Part C — API Error 統一攔截**
-- [ ] `lib/api.ts` 全域 error handler：
+- [x] `lib/api.ts` 全域 error handler：
   - [ ] 503 `bootstrap_required` → redirect `/setup-required`（不 toast）
   - [ ] 401 → redirect `/login?next=<current_path>`（不 toast）
   - [ ] 403 → toast warning「權限不足」

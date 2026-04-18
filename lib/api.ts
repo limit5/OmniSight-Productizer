@@ -319,7 +319,222 @@ function readCookie(name: string): string | null {
   return null
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// ─── B13 Part C (#339): Global API error handler ────────────────────────
+//
+// Single point of classification for every non-OK response coming out of
+// `request()`. Does three things on the *terminal* failure (after the
+// retry loop is exhausted — not on transient retries, so we never
+// double-toast):
+//
+//   1. 401                 → redirect to `/login?next=<current>`
+//   2. 503 bootstrap_required → redirect to `/setup-required`
+//                              (retained from Part A — kept inline in
+//                              `request()` because it short-circuits the
+//                              retry loop and swallows the resolution)
+//   3. everything else     → emit a typed `ApiError` via the
+//                              `onApiError` bus so the FUI toast layer
+//                              (or any caller) can surface it.
+//
+// The handler also emits for offline / timeout failures so the UI can
+// show a "連線中斷，嘗試重新連線..." indicator.
+//
+// We deliberately do NOT import `@/hooks/use-toast` here: `lib/api.ts`
+// is a leaf module and the shadcn `<Toaster />` isn't mounted in the
+// root layout. Keeping the bus callback-based means any surface (shadcn
+// Toaster, a future FUI ApiErrorToastCenter, a Cypress test spy) can
+// subscribe without pulling React into this file.
+
+export type ApiErrorKind =
+  | "bad_request"          // 400
+  | "unauthorized"         // 401
+  | "forbidden"            // 403
+  | "not_found"            // 404
+  | "validation"           // 422
+  | "rate_limited"         // 429
+  | "bootstrap_required"   // 503 + {error: "bootstrap_required"}
+  | "server_error"         // 500
+  | "bad_gateway"          // 502
+  | "service_unavailable"  // 503 (non-bootstrap)
+  | "timeout"              // AbortError
+  | "offline"              // TypeError from fetch (DNS / no network)
+  | "unknown"
+
+/**
+ * Typed error raised by `request()` on every non-OK response. Callers
+ * can `instanceof ApiError` and branch on `.kind` / `.status` /
+ * `.traceId` without parsing string messages.
+ */
+export class ApiError extends Error {
+  kind: ApiErrorKind
+  status: number
+  body: string
+  parsed: Record<string, unknown> | null
+  traceId: string | null
+  path: string
+  method: string
+
+  constructor(args: {
+    kind: ApiErrorKind
+    status: number
+    body: string
+    parsed: Record<string, unknown> | null
+    traceId: string | null
+    path: string
+    method: string
+    message?: string
+  }) {
+    super(args.message ?? `API ${args.status}: ${args.body}`)
+    this.name = "ApiError"
+    this.kind = args.kind
+    this.status = args.status
+    this.body = args.body
+    this.parsed = args.parsed
+    this.traceId = args.traceId
+    this.path = args.path
+    this.method = args.method
+  }
+}
+
+type ApiErrorListener = (err: ApiError) => void
+const _apiErrorListeners = new Set<ApiErrorListener>()
+
+/**
+ * Subscribe to terminal API errors from every call through `request()`.
+ * The FUI toast layer mounts one of these in the root layout; tests
+ * also use it to assert on classification without stubbing fetch-level
+ * internals. Returns an unsubscribe.
+ */
+export function onApiError(listener: ApiErrorListener): () => void {
+  _apiErrorListeners.add(listener)
+  return () => { _apiErrorListeners.delete(listener) }
+}
+
+function _emitApiError(err: ApiError): void {
+  for (const l of Array.from(_apiErrorListeners)) {
+    try { l(err) } catch (e) { console.warn("[onApiError]", e) }
+  }
+}
+
+function _parseJsonSafe(body: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(body)
+    return v && typeof v === "object" ? v as Record<string, unknown> : null
+  } catch { return null }
+}
+
+function _extractTraceId(
+  res: Response | null,
+  parsed: Record<string, unknown> | null,
+): string | null {
+  const fromHeader = res?.headers.get("X-Trace-Id")
+    || res?.headers.get("X-Request-Id")
+    || null
+  if (fromHeader) return fromHeader
+  if (!parsed) return null
+  const raw = parsed.trace_id ?? parsed.traceId ?? parsed.request_id
+  return typeof raw === "string" && raw.length > 0 ? raw : null
+}
+
+function _classifyStatus(
+  status: number,
+  parsed: Record<string, unknown> | null,
+  isOffline: boolean,
+  isTimeout: boolean,
+): ApiErrorKind {
+  if (isOffline) return "offline"
+  if (isTimeout) return "timeout"
+  if (status === 400) return "bad_request"
+  if (status === 401) return "unauthorized"
+  if (status === 403) return "forbidden"
+  if (status === 404) return "not_found"
+  if (status === 422) return "validation"
+  if (status === 429) return "rate_limited"
+  if (status === 500) return "server_error"
+  if (status === 502) return "bad_gateway"
+  if (status === 503) {
+    return parsed?.error === "bootstrap_required"
+      ? "bootstrap_required"
+      : "service_unavailable"
+  }
+  return "unknown"
+}
+
+/**
+ * Build the terminal `ApiError`, emit it to listeners, and trigger the
+ * redirects that must happen before the error propagates:
+ *
+ *   - 401 → `/login?next=<current>` (skip if already on /login*)
+ *
+ * The 503 bootstrap redirect is handled inside `request()` because it
+ * must short-circuit the retry loop and swallow the promise resolution.
+ */
+function _handleTerminalError(args: {
+  status: number
+  body: string
+  parsed: Record<string, unknown> | null
+  res: Response | null
+  path: string
+  method: string
+  isOffline: boolean
+  isTimeout: boolean
+  skipGlobalHandler: boolean
+}): ApiError {
+  const kind = _classifyStatus(args.status, args.parsed, args.isOffline, args.isTimeout)
+  const traceId = _extractTraceId(args.res, args.parsed)
+  const err = new ApiError({
+    kind,
+    status: args.status,
+    body: args.body,
+    parsed: args.parsed,
+    traceId,
+    path: args.path,
+    method: args.method,
+    message: args.isTimeout
+      ? `Request timeout: ${args.path}`
+      : args.isOffline
+        ? `Network offline: ${args.path}`
+        : `API ${args.status}: ${args.body}`,
+  })
+
+  if (args.skipGlobalHandler) return err
+
+  // 401 → redirect to /login?next=<current>. Skip if we're already on
+  // the login page (the form itself will surface the auth failure) or
+  // on /setup-required (bootstrap path — operator hasn't logged in yet).
+  if (kind === "unauthorized" && typeof window !== "undefined") {
+    const here = window.location.pathname
+    const skip =
+      here.startsWith("/login")
+      || here === "/setup-required"
+    if (!skip) {
+      const next = encodeURIComponent(
+        window.location.pathname + window.location.search,
+      )
+      window.location.assign(`/login?next=${next}`)
+    }
+  }
+
+  _emitApiError(err)
+  return err
+}
+
+interface RequestOptions {
+  /**
+   * When true, suppresses the redirect side effect AND emits nothing on
+   * the `onApiError` bus. Use on auth endpoints (`/auth/login`) and any
+   * call where the caller wants full control over the UX — the typed
+   * `ApiError` is still thrown so the caller can branch on `.kind`.
+   */
+  skipGlobalErrorHandler?: boolean
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  options?: RequestOptions,
+): Promise<T> {
+  const skipGlobalHandler = options?.skipGlobalErrorHandler ?? false
+  const methodUpper = (init?.method || "GET").toUpperCase()
   let lastError: Error | null = null
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController()
@@ -329,7 +544,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       // call so the backend's auth_mode=session/strict can recognise
       // the operator. CSRF token is read from the non-HttpOnly cookie
       // and echoed via X-CSRF-Token for state-changing methods.
-      const method = (init?.method || "GET").toUpperCase()
       const baseHeaders: Record<string, string> = {
         "Content-Type": "application/json",
       }
@@ -337,7 +551,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         baseHeaders["X-Tenant-Id"] = _currentTenantId
       }
       if (typeof document !== "undefined"
-          && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+          && !["GET", "HEAD", "OPTIONS"].includes(methodUpper)) {
         const csrf = readCookie("omnisight_csrf")
         if (csrf) baseHeaders["X-CSRF-Token"] = csrf
       }
@@ -350,26 +564,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       clearTimeout(timer)
       if (!res.ok) {
         const body = await res.text().catch(() => "")
-        const method = (init?.method || "GET").toUpperCase()
-        const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(method)
+        const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(methodUpper)
+        const parsed = _parseJsonSafe(body)
 
-        // B13 Part A (#339): first-run bootstrap_required 503 → redirect to
-        // the FUI /setup-required landing page instead of surfacing a raw
-        // error toast. Suppresses retry, swallows the call's resolution (so
-        // downstream .catch toasts don't fire before navigation), and bails
-        // out if we're already on /setup-required so that page can render
-        // its diagnostic panel from the live 503 payload.
-        if (res.status === 503) {
-          let parsed: { error?: string } | null = null
-          try { parsed = JSON.parse(body) as { error?: string } } catch { /* not JSON */ }
-          if (parsed && parsed.error === "bootstrap_required") {
-            if (typeof window !== "undefined"
-                && window.location.pathname !== "/setup-required") {
-              window.location.assign("/setup-required")
-              return new Promise<T>(() => { /* never resolves — page is unloading */ })
-            }
-            throw new Error(`API 503: ${body}`)
+        // B13 Part A (#339): first-run bootstrap_required 503 → redirect
+        // to the FUI /setup-required landing page instead of surfacing a
+        // raw error toast. Short-circuits retry, swallows the promise
+        // resolution, and bails out if we're already on /setup-required
+        // so that page can render its diagnostic panel from the live 503.
+        if (res.status === 503 && parsed?.error === "bootstrap_required") {
+          if (!skipGlobalHandler
+              && typeof window !== "undefined"
+              && window.location.pathname !== "/setup-required") {
+            window.location.assign("/setup-required")
+            // Never resolves — the current page is unloading.
+            return new Promise<T>(() => { /* unloading */ })
           }
+          throw _handleTerminalError({
+            status: 503, body, parsed, res,
+            path, method: methodUpper,
+            isOffline: false, isTimeout: false, skipGlobalHandler,
+          })
         }
 
         // Retry on 429 (rate limited) and 503 (overloaded) — all methods, with backoff
@@ -387,20 +602,39 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
           continue
         }
-        throw new Error(`API ${res.status}: ${body}`)
+        throw _handleTerminalError({
+          status: res.status, body, parsed, res,
+          path, method: methodUpper,
+          isOffline: false, isTimeout: false, skipGlobalHandler,
+        })
       }
       if (res.status === 204) return undefined as T
       return res.json()
     } catch (e) {
       clearTimeout(timer)
-      if (e instanceof DOMException && e.name === "AbortError") {
-        const method = (init?.method || "GET").toUpperCase()
-        const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(method)
-        lastError = new Error(`Request timeout: ${path}`)
+      // Already a terminal ApiError — propagate unchanged (don't re-emit).
+      if (e instanceof ApiError) {
+        throw e
+      }
+      const isTimeout = e instanceof DOMException && e.name === "AbortError"
+      const isOffline = e instanceof TypeError
+      if (isTimeout || isOffline) {
+        const isIdempotent = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"].includes(methodUpper)
+        lastError = new Error(
+          isTimeout ? `Request timeout: ${path}` : `Network offline: ${path}`,
+        )
         if (isIdempotent && attempt < MAX_RETRIES) {
           await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
           continue
         }
+        // Terminal network failure → emit ApiError so the FUI toast
+        // layer can show「網路連線中斷，嘗試重新連線...」without the
+        // caller having to pattern-match on string messages.
+        throw _handleTerminalError({
+          status: 0, body: "", parsed: null, res: null,
+          path, method: methodUpper,
+          isOffline, isTimeout, skipGlobalHandler,
+        })
       }
       throw lastError || e
     }
@@ -1060,6 +1294,35 @@ export async function updateSettings(updates: Record<string, string | number | b
 
 export async function testIntegration(type: string): Promise<{ status: string; message?: string; [key: string]: unknown }> {
   return request<{ status: string; message?: string }>(`/system/test/${type}`, { method: "POST" })
+}
+
+// ─── B14 Part A row 3: Probe a candidate Git-forge token ───
+//
+// Validates a token supplied by the operator (e.g. in the Bootstrap
+// Step 3.5 Git Forge form) without mutating `settings.github_token`.
+// Only `provider: "github"` is wired in this row; `gitlab` / `gerrit`
+// ride the same endpoint in follow-up rows.
+export interface GitForgeTokenTestResult {
+  status: "ok" | "error"
+  user?: string
+  name?: string
+  scopes?: string
+  message?: string
+}
+
+export async function testGitForgeToken(args: {
+  provider: "github" | "gitlab" | "gerrit"
+  token: string
+  url?: string
+}): Promise<GitForgeTokenTestResult> {
+  return request<GitForgeTokenTestResult>("/system/test/git-forge-token", {
+    method: "POST",
+    body: JSON.stringify({
+      provider: args.provider,
+      token: args.token,
+      url: args.url ?? "",
+    }),
+  })
 }
 
 // ─── Tenant Secrets (I4) ───
