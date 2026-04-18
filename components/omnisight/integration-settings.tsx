@@ -2821,6 +2821,16 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 <SettingField label="SSH Host" value={getVal("gerrit", "ssh_host")} onChange={v => setVal("gerrit_ssh_host", v)} />
                 <SettingField label="SSH Port" value={getVal("gerrit", "ssh_port")} onChange={v => setVal("gerrit_ssh_port", v)} />
                 <SettingField label="Project" value={getVal("gerrit", "project")} onChange={v => setVal("gerrit_project", v)} />
+                {/* B14 Part D row 233 — surface the last Gerrit Code Review
+                    scalar that wasn't previously editable in the UI. CSV of
+                    git-remote names post-merge push fan-out targets; read +
+                    written by backend/routers/webhooks.py:295 and whitelisted
+                    for PUT in backend/routers/integration.py _UPDATABLE_FIELDS.
+                    `gerrit_webhook_secret` is NOT rendered here by design —
+                    it's rotate-only via the Setup Wizard Step 5, so exposing
+                    a plaintext input would let users overwrite a rotated
+                    secret and silently break event signature verification. */}
+                <SettingField label="Replication Targets" value={getVal("gerrit", "replication_targets")} onChange={v => setVal("gerrit_replication_targets", v)} />
               </SettingsSection>
             </TabsContent>
 

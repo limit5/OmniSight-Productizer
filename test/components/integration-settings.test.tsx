@@ -1338,4 +1338,37 @@ describe("IntegrationSettings — Part D tab split", () => {
     // MultipleInstancesSection header — the multi-repo token-map UI from Part B.
     expect(screen.getByText(/Multiple Instances/i)).toBeTruthy()
   })
+
+  /**
+   * B14 Part D row 233 — Tab 2 "Gerrit" must collect every Gerrit Code
+   * Review config scalar AND expose the Setup Wizard entry point. That
+   * means the following surfaces are all reachable on a single tab click:
+   *   - Setup Wizard entry button (opens GerritSetupWizardDialog)
+   *   - Enabled toggle          (settings.gerrit_enabled)
+   *   - URL                     (settings.gerrit_url)
+   *   - SSH Host                (settings.gerrit_ssh_host)
+   *   - SSH Port                (settings.gerrit_ssh_port)
+   *   - Project                 (settings.gerrit_project)
+   *   - Replication Targets     (settings.gerrit_replication_targets)
+   * `gerrit_webhook_secret` is intentionally NOT on this tab (rotate-only
+   * via the Setup Wizard Step 5). `gerrit_instances` is covered by the
+   * Multi-instance UI on the Git tab. This lock-in test prevents future
+   * refactors from silently demoting any scalar — every new Gerrit config
+   * field should either appear here or be deliberately excluded.
+   */
+  it("Gerrit tab exposes all Gerrit Code Review settings + Setup Wizard entry (row 233)", async () => {
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const gerritTab = await screen.findByRole("tab", { name: /GERRIT/ })
+    await user.click(gerritTab)
+    // Setup Wizard entry — the load-bearing CTA for first-time users.
+    await waitFor(() => expect(screen.getByText("SETUP WIZARD")).toBeTruthy())
+    // Every Gerrit Code Review scalar has a visible <label>.
+    expect(screen.getByText("Enabled")).toBeTruthy()
+    expect(screen.getByText("URL")).toBeTruthy()
+    expect(screen.getByText("SSH Host")).toBeTruthy()
+    expect(screen.getByText("SSH Port")).toBeTruthy()
+    expect(screen.getByText("Project")).toBeTruthy()
+    expect(screen.getByText("Replication Targets")).toBeTruthy()
+  })
 })
