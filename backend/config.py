@@ -324,11 +324,17 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             (hard_errors if strict else warnings).append(msg)
     else:
         # Empty bearer leaves DE mutator endpoints open. Fine in dev,
-        # foot-gun in prod.
-        warnings.append(
+        # foot-gun in prod. Audit H1 (2026-04-19): upgrade to hard error
+        # under strict mode — mirrors C1's admin-password treatment, so
+        # a production deploy that forgets the bearer env can't silently
+        # ship open mutator endpoints.
+        msg = (
             "OMNISIGHT_DECISION_BEARER is empty — Decision Engine "
-            "mutator endpoints (approve/reject/undo/mode) are OPEN."
+            "mutator endpoints (approve/reject/undo/mode) are OPEN. "
+            "Set to a strong random secret ≥ "
+            f"{_MIN_BEARER_LEN} chars before exposing the URL."
         )
+        (hard_errors if strict else warnings).append(msg)
 
     # ── Provider key shape ──
     for field, prefixes in _PROVIDER_PREFIXES.items():
