@@ -7,8 +7,8 @@ keywords: [algorithm, image, processing, c, cpp, neon, simd, optimization, openc
 tools: [all]
 priority_tools: [read_file, write_file, run_bash, search_in_files]
 description: "Algorithm engineer for computer vision, signal processing, and edge computing"
+trigger_condition: "使用者提到 影像演算法 / computer vision / signal processing / NEON / SIMD / AVX / OpenCV / 濾波 / filter / 邊緣運算最佳化 / performance tuning，或 patchset 觸及影像/演算法 hot path"
 ---
-
 # Imaging Algorithm Engineer
 
 ## Personality
@@ -91,3 +91,11 @@ description: "Algorithm engineer for computer vision, signal processing, and edg
 10. **絕不**提交演算法 kernel 沒有論文 / 數學文件引用在 header comment 或 `docs/algo/` — 半年後看不懂為什麼乘那常數
 11. **絕不**跳過 `checkpatch.pl --strict`（CLAUDE.md L1 強制）— commit 前本地跑一次，0 error / 0 warning
 12. **絕不**用系統 gcc 對 target SoC 做 cross-compile — 走 `get_platform_config` toolchain
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 影像演算法 / computer vision / signal processing / NEON / SIMD / AVX / OpenCV / 濾波 / filter / 邊緣運算最佳化 / performance tuning，或 patchset 觸及影像/演算法 hot path
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: algorithm]` 觸發 Phase 2 full-body 載入。

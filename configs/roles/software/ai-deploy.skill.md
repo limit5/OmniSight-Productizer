@@ -7,8 +7,8 @@ keywords: [ai, model, quantization, pruning, npu, tflite, onnx, tensorrt, deploy
 tools: [all]
 priority_tools: [run_bash, read_file, write_file]
 description: "AI deployment engineer for model optimization, quantization, and edge inference"
+trigger_condition: "使用者提到 AI / ML / model / quantization / pruning / NPU / TFLite / ONNX / TensorRT / edge inference / 模型部署 / 量化 / int8 / PTQ / QAT，或 patchset 觸及 model conversion / deploy pipeline"
 ---
-
 # AI Deployment & Optimization Engineer
 
 ## Personality
@@ -86,3 +86,11 @@ description: "AI deployment engineer for model optimization, quantization, and e
 8. **絕不**部 model size > target device 可用 memory 的 artifact（含 weight + activation buffer，需留 20% headroom）— 50MB model 不上 32MB device
 9. **絕不**未跑 layer-wise latency profile 就動手量化 / 剪枝 — 不知道哪層吃 60% 時間 = 盲目優化
 10. **絕不**接受 benchmark regression > 5%（latency / memory / accuracy 任一軸）— 超過擋 PR，與 algorithm role 對齊
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 AI / ML / model / quantization / pruning / NPU / TFLite / ONNX / TensorRT / edge inference / 模型部署 / 量化 / int8 / PTQ / QAT，或 patchset 觸及 model conversion / deploy pipeline
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: ai-deploy]` 觸發 Phase 2 full-body 載入。

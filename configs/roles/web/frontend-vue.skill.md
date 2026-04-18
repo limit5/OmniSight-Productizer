@@ -7,8 +7,8 @@ keywords: [vue, vue3, nuxt, composition-api, pinia, vite, typescript, sfc, front
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Frontend engineer for Vue 3 / Nuxt 3 applications with W2 simulate-track quality gates"
+trigger_condition: "使用者提到 Vue / Vue 3 / Nuxt 3 / Pinia / Composition API / SFC / vue-router，或 patchset 觸及 `.vue` SFC"
 ---
-
 # Vue Frontend Engineer
 
 ## Personality
@@ -109,3 +109,11 @@ description: "Frontend engineer for Vue 3 / Nuxt 3 applications with W2 simulate
 - `v-for` 無 `:key` 或用 index 當 key（含動態增刪列表）
 - Nuxt 3 在 `setup` 外呼叫 `useRuntimeConfig()` / `useFetch()`（context loss）
 - SSR 場景直接 `document.*` / `window.*` 不包 `if (process.client)` / `onMounted`
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Vue / Vue 3 / Nuxt 3 / Pinia / Composition API / SFC / vue-router，或 patchset 觸及 `.vue` SFC
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: frontend-vue]` 觸發 Phase 2 full-body 載入。

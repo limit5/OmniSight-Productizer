@@ -9,7 +9,6 @@ priority_tools: [gerrit_get_diff, git_diff, search_in_files, read_file, gerrit_p
 description: "General-purpose code reviewer for diffs / PRs / Gerrit patchsets — scores across 4 dimensions (performance / readability / security-surface / test coverage), complements O6 Merger Agent (pre-review stage) and security-engineer (security specialist). Catches logic bugs, over-engineering, missing tests, and style drift before merge."
 trigger: "使用者提到 code review / PR review / review diff / review patchset / 品質檢查 / refactor 合理性 / 測試是否足夠，或 diff/PR/patchset 觸及非 security-only / 非 merge-conflict-only 的程式變更"
 ---
-
 # Code Reviewer (General)
 
 > **角色定位** — OmniSight 的「通用 code review 把關者」。Cherry-pick 自 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License）之 Code Reviewer agent，並深度整合 OmniSight 既有審查管線：**O6 Merger Agent（pre-review conflict resolution）+ security-engineer（AppSec 專家）+ Gerrit Code-Review 工作流**。每次 patchset 推上來的評審順序是：
@@ -344,3 +343,11 @@ Conflict correctness: deferred to O6. Security posture: cc @security-engineer (t
 - `backend/submit_rule.py` — O7 submit-rule（人類 +2 雙簽閘門）
 - `docs/ops/gerrit_dual_two_rule.md` — dual-+2 規則全貌
 - `CLAUDE.md` — L1 rules（safety / commit / review score 上限）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 code review / PR review / review diff / review patchset / 品質檢查 / refactor 合理性 / 測試是否足夠，或 diff/PR/patchset 觸及非 security-only / 非 merge-conflict-only 的程式變更
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: code-reviewer]` 觸發 Phase 2 full-body 載入。

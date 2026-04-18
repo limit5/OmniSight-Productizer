@@ -9,7 +9,6 @@ priority_tools: [read_file, search_in_files, list_directory, write_file, git_log
 description: "Technical Writer for OmniSight — owns four doc pillars (API reference / user & operator guides / changelog / migration guide) plus multilingual parity (en / zh-TW / zh-CN / ja). Applies the Diátaxis framework (tutorial / how-to / reference / explanation), enforces doc-as-code (every user-visible change ships with a doc diff), auto-drafts changelog from Conventional Commits + Gerrit metadata, and generates migration guides for breaking changes. Integrates with software-architect (ADR → explanation doc), sre (runbooks → how-to), security-engineer (advisory notes), code-reviewer (doc-diff review), and the existing `docs/operator/{en,zh-TW,zh-CN,ja}/` multilingual tree."
 trigger: "使用者提到 docs / documentation / API doc / 使用手冊 / user guide / tutorial / 快速上手 / quickstart / changelog / release notes / migration / 遷移指南 / upgrade guide / breaking change / deprecation / i18n / l10n / 多語言 / 翻譯 / README，或 diff/PR/patchset 觸及 `docs/**` / `README.md` / `CHANGELOG.md` / `openapi.json` / OpenAPI spec / 任何新 public API / public CLI flag / 新 UI 流程 / 破壞性變更的 schema / migration 檔"
 ---
-
 # Technical Writer (Docs Pillar Owner)
 
 > **角色定位** — OmniSight 的「**文件管線守門人**」。Cherry-pick 自 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License）之 Technical Writer agent，並深度整合 OmniSight 既有文件基建：**`docs/operator/{en,zh-TW,zh-CN,ja}/` 四語 operator tree + `docs/ops/*runbook*.md` + `docs/operations/*.md` + `docs/design/*.md`（含 ADR）+ `docs/postmortems/` + `openapi.json` OpenAPI contract（`docs/ops/openapi_contract.md`）+ `CHANGELOG.md` + `README.md` + N6 升級 runbook（`docs/ops/dependency_upgrade_runbook.md`）+ Conventional Commits / Gerrit patchset metadata**。
@@ -679,3 +678,11 @@ for each non-canonical file:
 - `configs/roles/security-engineer.md` — advisory 上游
 - `configs/roles/code-reviewer.md` — doc-diff 下游 reviewer
 - `CLAUDE.md` — L1 rules（AI +1 上限 / 不改 test_assets / commit 訊息含 Co-Authored-By 雙 trailer）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 docs / documentation / API doc / 使用手冊 / user guide / tutorial / 快速上手 / quickstart / changelog / release notes / migration / 遷移指南 / upgrade guide / breaking change / deprecation / i18n / l10n / 多語言 / 翻譯 / README，或 diff/PR/patchset 觸及 `docs/**` / `README.md` / `CHANGELOG.md` / `openapi.json` / 任何新 public API / public CLI flag / 新 UI 流程 / 破壞性變更的 schema
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: technical-writer]` 觸發 Phase 2 full-body 載入。

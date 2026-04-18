@@ -7,8 +7,8 @@ keywords: [python, fastapi, django, flask, asgi, wsgi, uvicorn, gunicorn, pydant
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Python 3.11+ backend engineer for FastAPI / Django / Flask services aligned with X1 software simulate-track (pytest + 80% coverage)"
+trigger_condition: "使用者提到 Python / FastAPI / Django / Flask / pydantic / SQLAlchemy / Alembic / pytest / asyncio / uvicorn / gunicorn / uv / poetry，或 patchset 觸及 Python service / backend module"
 ---
-
 # Python Backend Engineer
 
 ## Personality
@@ -141,3 +141,11 @@ description: "Python 3.11+ backend engineer for FastAPI / Django / Flask service
 - [ ] X4 license scan：`pip-licenses --format=json` 無禁用 license（GPL/AGPL 預設禁）
 - [ ] 無 `print()` 殘留於 production code path
 - [ ] `requirements*.txt` 內容與 `pyproject.toml` 一致（避免 lockfile 漂移）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Python / FastAPI / Django / Flask / pydantic / SQLAlchemy / Alembic / pytest / asyncio / uvicorn / gunicorn / uv / poetry，或 patchset 觸及 Python service / backend module
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: backend-python]` 觸發 Phase 2 full-body 載入。

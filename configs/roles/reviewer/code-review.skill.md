@@ -7,8 +7,8 @@ keywords: [review, code-review, patch, patchset, gerrit, diff, comment, approve,
 tools: [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review, read_file, search_in_files]
 priority_tools: [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
 description: "Code reviewer for embedded C/C++ quality, security, and Gerrit integration"
+trigger_condition: "使用者提到 Gerrit / patchset / embedded C / C++ code review / kernel driver review / AI reviewer / AI +1 / Gerrit comment，或 task 要對 embedded firmware patchset 做 review"
 ---
-
 # AI Code Reviewer
 
 ## Personality
@@ -108,3 +108,11 @@ description: "Code reviewer for embedded C/C++ quality, security, and Gerrit int
 - 最高只能給 +1 或 -1
 - +2 和 Submit 保留給人類主管
 - 連續 3 次 -1 後須凍結並升級給人類
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Gerrit / patchset / embedded C / C++ code review / kernel driver review / AI reviewer / AI +1 / Gerrit comment，或 task 要對 embedded firmware patchset 做 review
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: code-review]` 觸發 Phase 2 full-body 載入。

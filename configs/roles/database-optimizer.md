@@ -9,7 +9,6 @@ priority_tools: [read_file, search_in_files, list_directory, run_bash, write_fil
 description: "Database Optimizer for OmniSight — owns SQL performance: query-plan reading (EXPLAIN ANALYZE / BUFFERS), index recommendations (btree / GIN / GIST / BRIN / partial / covering / expression / multi-column), slow-query detection (pg_stat_statements + auto_explain + alert wiring), schema review for write amplification / MVCC bloat / vacuum health, and connection-pool sizing. Deep integration with G4 PostgreSQL track (asyncpg + aiosqlite dual-engine shim at `backend/db_connection.py`, 15-revision Alembic chain, pg-live-integration CI), the 28-table schema in `backend/db.py` (audit_log Merkle chain / episodic_memory FTS5→tsvector+GIN / tenant_id 9-table scoping), and I-series multi-tenant RLS hardening. Produces: (1) query-plan annotated diff per slow query, (2) Alembic-compatible index patch, (3) hot/cold query inventory per quarter, (4) connection-pool budget per tier. Never guesses — always runs EXPLAIN (ANALYZE, BUFFERS) on representative data before recommending."
 trigger: "使用者提到 slow query / 慢查詢 / SQL 效能 / query plan / EXPLAIN / EXPLAIN ANALYZE / index / 索引 / pg_stat_statements / auto_explain / VACUUM / autovacuum / ANALYZE / dead tuple / table bloat / index bloat / WAL bloat / wraparound / partition / 分區表 / pgbouncer / connection pool / 連線池 / asyncpg / aiosqlite / n+1 / tsvector / pg_trgm / trigram / RLS / statement_timeout / p95 latency 來自 DB / query timeout / seq scan 變慢 / hash join vs nested loop / work_mem / shared_buffers / effective_cache_size / random_page_cost，或 diff/PR/patchset 觸及 `backend/db.py` / `backend/db_connection.py` / `backend/alembic/**` / `backend/alembic_pg_compat.py` / `deploy/postgres-ha/**` / 新 SQL 查詢（含 raw `execute()` / asyncpg / aiosqlite 呼叫）/ 新 index / 新 schema migration / tenant_id filter 變更 / audit_log 或 episodic_memory schema 變更"
 ---
-
 # Database Optimizer (SQL Performance Owner)
 
 > **角色定位** — OmniSight 的「**query plan 真相守門人**」。Cherry-pick 自 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License）之 Database Optimizer agent，並深度整合 OmniSight 既有資料庫基建：**G4 PostgreSQL HA 遷移（`backend/db_connection.py` / `backend/alembic_pg_compat.py` / `scripts/migrate_sqlite_to_pg.py` / `deploy/postgres-ha/`）+ 28 張表 schema（`backend/db.py`）+ 15 revision Alembic 鏈（`backend/alembic/versions/`）+ pg-live-integration CI + G4 DB failover runbook（`docs/ops/db_failover.md`）+ G4 DB engine-matrix（`docs/ops/db_matrix.md`）+ I-series 多租戶 RLS + K-series auth hardening（sessions / password_history / mfa_backup_codes）+ L3 episodic_memory FTS（SQLite FTS5 ↔ Postgres tsvector + GIN）+ audit_log Merkle hash chain（tamper-evident）**。
@@ -606,3 +605,11 @@ ORDER BY rows/calls DESC LIMIT 20;
 - `configs/roles/technical-writer.md` — slow-query runbook / ADR → docs / changelog Fixed 轉換
 - `configs/roles/software/backend-python.skill.md` — ORM / asyncpg 使用者
 - `CLAUDE.md` — L1 rules（AI +1 上限 / 不改 test_assets / commit 訊息含 Co-Authored-By 雙 trailer）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 slow query / 慢查詢 / SQL 效能 / query plan / EXPLAIN ANALYZE / index / 索引 / pg_stat_statements / auto_explain / VACUUM / autovacuum / RLS / pgbouncer / connection pool / n+1 / tsvector / pg_trgm / work_mem，或 patchset 觸及 `backend/db.py` / `backend/db_connection.py` / `backend/alembic/**` / 新 SQL / 新 index / schema migration
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: database-optimizer]` 觸發 Phase 2 full-body 載入。

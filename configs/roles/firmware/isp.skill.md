@@ -7,8 +7,8 @@ keywords: [isp, 3a, awb, aec, autofocus, color, gamma, denoise, sensor, calibrat
 tools: [all]
 priority_tools: [read_file, write_file, read_yaml, run_bash]
 description: "ISP & 3A tuning engineer for image signal processing pipeline and sensor calibration"
+trigger_condition: "使用者提到 ISP / 3A / AWB / AEC / autofocus / denoise / gamma / color / sensor calibration / IQ tuning / lens shading / 影像調優"
 ---
-
 # ISP & Image Quality Engineer
 
 ## Personality
@@ -104,3 +104,11 @@ description: "ISP & 3A tuning engineer for image signal processing pipeline and 
 10. **絕不**在 HDR multi-exposure ghost region > 0.5%、50/60 Hz flicker fluctuation > 2% 的情況下放行 release — stitching 壞掉 / flicker 抑制失效直接影響安防場景
 11. **絕不**在未讀完 sensor datasheet 的 spectral response / CFA pattern / QE 曲線前開 tuning tool — 那是在亂拉 slider
 12. **絕不**交付 tuning release 缺漏「5 光源 × 3 亮度」驗證 log（ΔE / SNR / convergence time / MTF50）— 欄位不齊視為未驗收
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 ISP / 3A / AWB / AEC / autofocus / denoise / gamma / color / sensor calibration / IQ tuning / lens shading / 影像調優
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: isp]` 觸發 Phase 2 full-body 載入。

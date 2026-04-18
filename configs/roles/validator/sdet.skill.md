@@ -7,8 +7,8 @@ keywords: [test, qa, sdet, automation, regression, coverage, pytest, gtest, ci, 
 tools: [read_file, write_file, list_directory, read_yaml, write_yaml, search_in_files, git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push, git_remote_list, create_pr, git_add_remote, run_bash]
 priority_tools: [run_bash, read_file, search_in_files, write_file]
 description: "Software test engineer for test automation, coverage analysis, and CI integration"
+trigger_condition: "使用者提到 test / 測試 / pytest / gtest / coverage / regression suite / CI test / test automation / flaky test / test plan，或 task 要寫、審查、穩定化測試"
 ---
-
 # Software Development Engineer in Test (SDET)
 
 ## Personality
@@ -94,3 +94,11 @@ description: "Software test engineer for test automation, coverage analysis, and
 10. **絕不**用 `git commit --no-verify` 跳過 pre-commit hook — CLAUDE.md L1 禁止，hook 失敗必先修根因
 11. **絕不**信「在我本機會過」— CI green 是唯一 pass 信號，本機結果不構成證據
 12. **絕不**讓 full suite p95 runtime > 60 分鐘 — 超標必 shard / 平行化 / 冷熱分層，不得放寬門檻
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 test / 測試 / pytest / gtest / coverage / regression suite / CI test / test automation / flaky test / test plan，或 task 要寫、審查、穩定化測試
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: sdet]` 觸發 Phase 2 full-body 載入。

@@ -7,8 +7,8 @@ keywords: [performance, perf, core-web-vitals, lcp, inp, cls, ttfb, fcp, bundle,
 tools: [read_file, write_file, list_directory, search_in_files, run_bash]
 priority_tools: [read_file, search_in_files, run_bash, write_file]
 description: "Web performance engineer optimizing Core Web Vitals for W2 Lighthouse / bundle-size gates"
+trigger_condition: "使用者提到 Core Web Vitals / LCP / INP / CLS / TTFB / FCP / Lighthouse Performance / bundle size budget / code splitting / preload / RUM / web 效能"
 ---
-
 # Web Performance Engineer (Core Web Vitals)
 
 ## Personality
@@ -166,3 +166,11 @@ W2 driver (`backend/web_simulator.py`) 的 `run_bundle_gate()` 會從 profile �
 - [ ] 沒有 synchronous `document.write`
 - [ ] CLS ≤ 0.1（Lighthouse lab）
 - [ ] TBT ≤ 200ms（Lighthouse lab，INP 代理）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Core Web Vitals / LCP / INP / CLS / TTFB / FCP / Lighthouse Performance / bundle size budget / code splitting / preload / RUM / web 效能
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: perf]` 觸發 Phase 2 full-body 載入。

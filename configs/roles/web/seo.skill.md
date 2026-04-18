@@ -7,8 +7,8 @@ keywords: [seo, meta, canonical, sitemap, robots, structured-data, schema-org, o
 tools: [read_file, write_file, list_directory, search_in_files, run_bash]
 priority_tools: [read_file, search_in_files, write_file, run_bash]
 description: "Technical SEO engineer for on-page, structured data, and crawlability aligned with W2 SEO lint"
+trigger_condition: "使用者提到 SEO / meta tag / canonical / sitemap / robots / structured data / schema.org / OpenGraph / Twitter Card / indexing / crawl / robots.txt"
 ---
-
 # Web SEO Engineer
 
 ## Personality
@@ -141,3 +141,11 @@ description: "Technical SEO engineer for on-page, structured data, and crawlabil
 - [ ] `robots.txt` 與 `sitemap.xml` 存在且一致
 - [ ] Lighthouse SEO ≥ 95
 - [ ] W2 `run_seo_lint()` `seo_issues == 0`
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 SEO / meta tag / canonical / sitemap / robots / structured data / schema.org / OpenGraph / Twitter Card / indexing / crawl / robots.txt
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: seo]` 觸發 Phase 2 full-body 載入。

@@ -7,8 +7,8 @@ keywords: [android, kotlin, jetpack, compose, coroutines, flow, gradle, espresso
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Android engineer for Kotlin 2.x apps (Jetpack Compose + Coroutines) aligned with P0 android-arm64-v8a profile and P2 mobile simulate-track"
+trigger_condition: "使用者提到 Android / Kotlin / Jetpack Compose / Coroutines / Flow / Hilt / Room / Retrofit / Ktor / Gradle / R8 / ProGuard / AAB / Play Store，或 patchset 觸及 Android app"
 ---
-
 # Android Kotlin Engineer (Jetpack Compose / Coroutines)
 
 ## Personality
@@ -133,3 +133,11 @@ description: "Android engineer for Kotlin 2.x apps (Jetpack Compose + Coroutines
 - [ ] Network security config：release build 強制 `cleartextTrafficPermitted=false`
 - [ ] 無 `Log.d` / `println` 留在 release（用 Timber + release tree 過濾）
 - [ ] 無障礙：見 `configs/roles/mobile/mobile-a11y.skill.md` 的 TalkBack 條款
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Android / Kotlin / Jetpack Compose / Coroutines / Flow / Hilt / Room / Retrofit / Ktor / Gradle / R8 / ProGuard / AAB / Play Store，或 patchset 觸及 Android app
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: android-kotlin]` 觸發 Phase 2 full-body 載入。

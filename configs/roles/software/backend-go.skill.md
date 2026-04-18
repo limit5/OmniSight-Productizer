@@ -7,8 +7,8 @@ keywords: [go, golang, gin, fiber, echo, chi, net-http, grpc, protobuf, modules,
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Go 1.22+ backend engineer for gin / fiber / net/http / gRPC services aligned with X1 software simulate-track (go test + 70% coverage)"
+trigger_condition: "使用者提到 Go / Golang / gin / fiber / echo / chi / net/http / gRPC / goroutine / context / Cobra / goreleaser / go test，或 patchset 觸及 Go module / Go service"
 ---
-
 # Go Backend Engineer
 
 ## Personality
@@ -145,3 +145,11 @@ description: "Go 1.22+ backend engineer for gin / fiber / net/http / gRPC servic
 - [ ] Dockerfile 走 `scratch` 或 `distroless/static` 為 final stage
 - [ ] `goreleaser check` 通過（X3 release adapter 預檢）
 - [ ] X4 license scan：`go-licenses report ./...` 無禁用 license
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Go / Golang / gin / fiber / echo / chi / net/http / gRPC / goroutine / context / Cobra / goreleaser / go test，或 patchset 觸及 Go module / Go service
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: backend-go]` 觸發 Phase 2 full-body 載入。

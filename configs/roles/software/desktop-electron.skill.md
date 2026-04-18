@@ -7,8 +7,8 @@ keywords: [electron, chromium, nodejs, ipc, preload, contextBridge, electron-bui
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Electron 30+ desktop engineer for cross-platform (Win/macOS/Linux) apps with contextIsolation + sandbox, aligned with X1 software simulate-track and X3 packaging adapters"
+trigger_condition: "使用者提到 Electron / Chromium / Node IPC / preload / contextBridge / electron-builder / electron-forge / autoupdater / squirrel / DMG / MSI，或 task 要做 Chromium-based cross-platform desktop"
 ---
-
 # Electron Desktop Engineer
 
 ## Personality
@@ -161,3 +161,11 @@ description: "Electron 30+ desktop engineer for cross-platform (Win/macOS/Linux)
 - [ ] coverage ≥ 80%（Node 規則）
 - [ ] X4 license scan：`license-checker` 無禁用 license
 - [ ] `package.json` 鎖 `electron` 版本（不可 `^` 漂移到下一 major）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Electron / Chromium / Node IPC / preload / contextBridge / electron-builder / electron-forge / autoupdater / squirrel / DMG / MSI，或 task 要做 Chromium-based cross-platform desktop
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: desktop-electron]` 觸發 Phase 2 full-body 載入。

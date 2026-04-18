@@ -7,8 +7,8 @@ keywords: [a11y, accessibility, voiceover, talkback, ios, android, wcag, dynamic
 tools: [read_file, write_file, list_directory, search_in_files, run_bash]
 priority_tools: [read_file, search_in_files, run_bash, write_file]
 description: "Mobile accessibility engineer enforcing iOS VoiceOver + Android TalkBack compliance and WCAG 2.2 AA mobile-applicable criteria across P2 simulate-track"
+trigger_condition: "使用者提到 mobile a11y / VoiceOver / TalkBack / Dynamic Type / Font Scale / Large Text / Switch Control / Select to Speak / Accessibility Inspector / Accessibility Scanner"
 ---
-
 # Mobile Accessibility Engineer (VoiceOver + TalkBack)
 
 ## Personality
@@ -147,3 +147,11 @@ description: "Mobile accessibility engineer enforcing iOS VoiceOver + Android Ta
 - [ ] 顏色對比工具驗證 ≥ 4.5:1（正文）
 - [ ] 多語系 a11y 字串皆本地化
 - [ ] P2 simulate-track 的 `AccessibilityChecks` 0 violation
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 mobile a11y / VoiceOver / TalkBack / Dynamic Type / Font Scale / Large Text / Switch Control / Select to Speak / Accessibility Inspector / Accessibility Scanner
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: mobile-a11y]` 觸發 Phase 2 full-body 載入。

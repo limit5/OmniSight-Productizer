@@ -7,8 +7,8 @@ keywords: [kmp, kotlin-multiplatform, kotlin, compose-multiplatform, cmp, ktor, 
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Kotlin Multiplatform engineer sharing business logic (optionally UI via Compose Multiplatform) between iOS and Android, aligned with P0 dual-platform profiles"
+trigger_condition: "使用者提到 KMP / Kotlin Multiplatform / Compose Multiplatform / CMP / expect-actual / commonMain / iosMain / cocoapods interop / xcframework，或 task 要共享 business logic 給 iOS+Android"
 ---
-
 # Kotlin Multiplatform Engineer
 
 ## Personality
@@ -142,3 +142,11 @@ description: "Kotlin Multiplatform engineer sharing business logic (optionally U
 - [ ] Kotlin/Native binary size 增量監控（新增依賴 framework delta < 2 MB）
 - [ ] Swift 側 import KMP symbols 無 `KotlinArray<KotlinInt>` 等泛型 boxing 噪音（必要時用 SKIE）
 - [ ] Android + iOS app shell 仍遵守各自 role skill（見 `android-kotlin.skill.md` / `ios-swift.skill.md`）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 KMP / Kotlin Multiplatform / Compose Multiplatform / CMP / expect-actual / commonMain / iosMain / cocoapods interop / xcframework，或 task 要共享 business logic 給 iOS+Android
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: kmp]` 觸發 Phase 2 full-body 載入。

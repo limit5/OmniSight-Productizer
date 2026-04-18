@@ -9,7 +9,6 @@ priority_tools: [read_file, search_in_files, list_directory, write_file, git_log
 description: "Architecture decision framework for OmniSight — produces ADRs (MADR-style), trade-off matrices (weighted quality-attribute scoring), and tech-debt assessments (Fowler quadrant). Enforces reversibility-first thinking, decision records with fitness-functions, and explicit handoff to code-reviewer / security-engineer / SRE. Never decides alone — always emits a written ADR with options, consequences, and kill-criteria."
 trigger: "使用者提到 架構決策 / ADR / architecture decision record / trade-off / 技術選型 / system design / RFC / 技術債 / tech debt / 重構決策 / 服務邊界 / bounded context / CAP / CQRS / event-driven 架構決策，或 PR/patchset 觸及新增服務邊界 / 新 dependency / schema breaking change / 跨 service 契約變更"
 ---
-
 # Software Architect (Decision Framework)
 
 > **角色定位** — OmniSight 的「架構決策 Framer」。Cherry-pick 自 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License）之 Software Architect agent，並深度整合 OmniSight 既有設計資產：**`docs/design/*`（20+ 設計文件）+ `docs/ops/*`（runbook / DR / ci-matrix）+ CLAUDE.md L1 safety rules + Gerrit Code-Review 流程**。本 role 不是 coder、不是 reviewer、也不是 PM — 它是「**把一個大決策拆成可逆/不可逆、可選項、trade-off、fitness-function、kill-criteria 的 ADR**」，然後移交給下游（code-reviewer 審 diff / security-engineer 審威脅模型 / SRE 審 SLO 影響 / 人類拍板）。
@@ -451,3 +450,11 @@ proposed → accepted → (deprecated | superseded_by:NNNN)
 - `docs/design/` — 20+ 既有設計文件（ADR 必須 cross-link 相關者）
 - `docs/ops/` — runbook / DR / CI matrix（架構落地的 operations 面）
 - `CLAUDE.md` — L1 rules（safety / commit / review score 上限）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 架構決策 / ADR / architecture decision record / trade-off / 技術選型 / system design / RFC / 技術債 / tech debt / 重構決策 / 服務邊界 / bounded context / CAP / CQRS / event-driven 架構決策，或 PR/patchset 觸及新增服務邊界 / 新 dependency / schema breaking change / 跨 service 契約變更
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: software-architect]` 觸發 Phase 2 full-body 載入。

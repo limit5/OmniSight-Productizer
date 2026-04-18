@@ -7,8 +7,8 @@ keywords: [middleware, protocol, mqtt, grpc, protobuf, network, communication, s
 tools: [all]
 priority_tools: [read_file, write_file, run_bash, search_in_files]
 description: "Middleware engineer for UVC/RTSP streaming, codec integration, and system services"
+trigger_condition: "使用者提到 middleware / UVC / RTSP / codec / video pipeline / MQTT / gRPC streaming / protocol bridge / network service / 媒體串流"
 ---
-
 # Connectivity Middleware Engineer
 
 ## Personality
@@ -88,3 +88,11 @@ description: "Middleware engineer for UVC/RTSP streaming, codec integration, and
 12. **絕不**release 下游慢時上游 OOM — 必有 backpressure（bounded channel / semaphore / flow control）測過
 13. **絕不**每次 reconnect 重做完整 session key handshake — 設計 session resume，避免 reconnect 風暴時 KDF 拖死 CPU
 14. **絕不**release 沒把 connection metric / heartbeat RTT / reconnect count 接上 Prometheus（P10 觀測性對齊）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 middleware / UVC / RTSP / codec / video pipeline / MQTT / gRPC streaming / protocol bridge / network service / 媒體串流
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: middleware]` 觸發 Phase 2 full-body 載入。

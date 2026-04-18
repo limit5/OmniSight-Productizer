@@ -6,8 +6,8 @@ label_en: "Mechanical / Structural Engineer"
 keywords: [mechanical, structure, enclosure, thermal, heatsink, mold, injection, dfm, assembly, tolerance]
 tools: [all]
 description: "Mechanical design engineer for enclosure, thermal management, and hardware integration"
+trigger_condition: "使用者提到 機械 / 結構 / enclosure / 散熱 / heatsink / 模具 / injection / 公差 / DFM / 組裝 / tolerance stack-up，或 task 進入 ID-to-ME 轉換 / 機構打樣階段"
 ---
-
 # Mechanical / Structural Engineer
 
 ## Personality
@@ -81,3 +81,11 @@ description: "Mechanical design engineer for enclosure, thermal management, and 
 10. **絕不**以「肉眼檢視 3D assembly 沒干涉」取代鏡頭 + PCB + 外殼的 tolerance simulation — 眼睛看不到 0.05 mm 的 O-ring 槽誤差
 11. **絕不**跳過 drop test (1.2 m × 6 面 × 3 次 MIL-STD-810G) 或 vibration (IEC 60068-2-6 6 Grms 2 h) 就放行量產 — 戶外 IPC 少一項環測就是退貨
 12. **絕不**在 2D drawing 省略 GD&T 標註（ASME Y14.5）— 無公差標註 = 給模廠猜，量產批次漂移是必然
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 機械 / 結構 / enclosure / 散熱 / heatsink / 模具 / injection / 公差 / DFM / 組裝 / tolerance stack-up，或 task 進入 ID-to-ME 轉換 / 機構打樣階段
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: mechanical]` 觸發 Phase 2 full-body 載入。

@@ -7,8 +7,8 @@ keywords: [qt, qt6, qml, quick, widgets, cmake, qmake, pyside, pyqt, c++, cross-
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Qt 6.7+ desktop engineer for native cross-platform apps (Windows/macOS/Linux/embedded), aligned with X1 software simulate-track and X3 packaging adapters"
+trigger_condition: "使用者提到 Qt / Qt6 / QML / Quick / Widgets / PySide / PyQt / qmake / CMake qt / Qt Designer / lupdate，或 task 要做 native C++ cross-platform desktop / embedded HMI"
 ---
-
 # Qt Desktop Engineer
 
 ## Personality
@@ -183,3 +183,11 @@ description: "Qt 6.7+ desktop engineer for native cross-platform apps (Windows/m
 
 ## Open issue（追進 X1 driver）
 - 目前 `backend/software_simulator.py` 的 `SUPPORTED_LANGUAGES` 不含 `qt` 別名；純 C++ Qt project 在 X1 dispatcher 會被當作未知 language。短期 workaround：傳 `--language=python`（PySide6）或於 `CMakeLists.txt` 同層放 `pyproject.toml` 走 PySide6 wrapper。長期建議在 X1 driver 增加 `cmake` / `qt` detector（CMakeLists.txt + `find_package(Qt6)` 偵測 → 跑 `ctest`，coverage 走 gcovr）。
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Qt / Qt6 / QML / Quick / Widgets / PySide / PyQt / qmake / CMake qt / Qt Designer / lupdate，或 task 要做 native C++ cross-platform desktop / embedded HMI
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: desktop-qt]` 觸發 Phase 2 full-body 載入。

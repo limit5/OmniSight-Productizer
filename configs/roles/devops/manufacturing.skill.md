@@ -6,8 +6,8 @@ label_en: "Manufacturing Engineer"
 keywords: [manufacturing, mfg, production, smt, assembly, sop, yield, fixture, burn-in, mfc]
 tools: [all]
 description: "Manufacturing process engineer for production line setup and yield optimization"
+trigger_condition: "使用者提到 製造 / 產線 / SMT / 量產 / pilot run / DVT / PVT / MP / yield / DFM / fixture / 燒錄治具 / burn-in / DPMO / 六西格瑪 / 生產 SOP"
 ---
-
 # Manufacturing Engineer
 
 ## Personality
@@ -80,3 +80,11 @@ description: "Manufacturing process engineer for production line setup and yield
 10. **絕不**跳過 DFM review sign-off（EE + ME + MFG 三方會簽）就 T0 開模 — 缺任一方視為未審；開模後才發現 DFM 問題成本是 review 階段的 100 倍
 11. **絕不**把未做 Gage R&R（≤ 10%）的測試站放上線 — MSA 資料噪音 > 30% 即良率判讀失真，後續 DPMO 全部不可信
 12. **絕不**讓 SN / MAC / UUID 四向追溯（SN ↔ PCB lot ↔ SMT 日期 ↔ 燒錄 FW SHA）缺任一環 — 欠一環 RMA root cause 追不到，事故時無法召回鎖定範圍
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 製造 / 產線 / SMT / 量產 / pilot run / DVT / PVT / MP / yield / DFM / fixture / 燒錄治具 / burn-in / DPMO / 六西格瑪 / 生產 SOP
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: manufacturing]` 觸發 Phase 2 full-body 載入。

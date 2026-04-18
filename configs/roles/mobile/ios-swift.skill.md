@@ -7,8 +7,8 @@ keywords: [ios, swift, swiftui, uikit, combine, xcode, xcodebuild, spm, cocoapod
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "iOS engineer for Swift 5.9+ apps (SwiftUI/UIKit/Combine) aligned with P0 ios-arm64 profile and P2 mobile simulate-track"
+trigger_condition: "使用者提到 iOS / Swift / SwiftUI / UIKit / Combine / Xcode / xcodebuild / SPM / CocoaPods / XCTest / XCUITest / TestFlight / App Store，或 patchset 觸及 iOS app"
 ---
-
 # iOS Swift Engineer (SwiftUI / UIKit / Combine)
 
 ## Personality
@@ -134,3 +134,11 @@ description: "iOS engineer for Swift 5.9+ apps (SwiftUI/UIKit/Combine) aligned w
 - [ ] Privacy manifest `PrivacyInfo.xcprivacy` 已列出 required reason APIs（Apple 2024 policy）
 - [ ] Info.plist 權限字串（NSCameraUsageDescription 等）本地化至所有支援語系
 - [ ] 無硬編簽章材料；`xcconfig` / Fastlane 透過 P3 secret_store 注入
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 iOS / Swift / SwiftUI / UIKit / Combine / Xcode / xcodebuild / SPM / CocoaPods / XCTest / XCUITest / TestFlight / App Store，或 patchset 觸及 iOS app
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: ios-swift]` 觸發 Phase 2 full-body 載入。

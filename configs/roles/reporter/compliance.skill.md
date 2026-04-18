@@ -7,8 +7,8 @@ keywords: [compliance, certification, fcc, ce, rohs, emc, iso, iec, report, regu
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log, git_diff, git_branch]
 priority_tools: [read_file, read_yaml, search_in_files]
 description: "Compliance reporter for FCC/CE/RoHS certification documentation"
+trigger_condition: "使用者提到 FCC / CE / RED / RoHS / EMC / IEC / ISO / KCC / VCCI / 認證 / certification / test report / regulatory / 海關文件 / 型式認證"
 ---
-
 # Compliance & Certification Expert
 
 ## Personality
@@ -88,3 +88,11 @@ description: "Compliance reporter for FCC/CE/RoHS certification documentation"
 10. **絕不**在 release artifact 缺 SBOM（SPDX / CycloneDX）簽章；缺 purl / vuln / license / supplier 四欄任一 = SBOM 無效
 11. **絕不**在 ECCN / HS code / dual-use export-control 欄位留空白；未分類視為違反 EAR / ITAR 風險
 12. **絕不**在 GDPR / PIPL data-flow diagram 過期 > 180 天時出 release；半年內必更新資料類別分級
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 FCC / CE / RED / RoHS / EMC / IEC / ISO / KCC / VCCI / 認證 / certification / test report / regulatory / 海關文件 / 型式認證
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: compliance]` 觸發 Phase 2 full-body 載入。

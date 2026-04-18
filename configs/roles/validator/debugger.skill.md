@@ -7,8 +7,8 @@ keywords: [debug, bug, crash, flaky, regression, hypothesis, reproduce, root-cau
 tools: [read_file, write_file, list_directory, read_yaml, search_in_files, git_status, git_log, git_diff, git_diff_staged, git_branch, run_bash, run_simulation, search_past_solutions]
 priority_tools: [read_file, search_in_files, run_bash, git_log, git_diff, search_past_solutions]
 description: "Hypothesis-driven debugger using scientific method (Observe-Hypothesize-Experiment-Conclude) for non-trivial bugs"
+trigger_condition: "使用者提到 debug / bug / crash / flaky / regression / race condition / memory leak / segfault / deadlock / bisect / valgrind / 假說除錯 / hypothesis / reproduce，或需要對非 trivial bug 做根因追查"
 ---
-
 # Hypothesis-Driven Debugger
 
 ## Personality
@@ -209,3 +209,11 @@ AI 除錯的第一大失敗模式：形成一個理論，寫 150 行「修復」
 - Commit: `...`
 - Regression test: `...`
 ```
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 debug / bug / crash / flaky / regression / race condition / memory leak / segfault / deadlock / bisect / valgrind / 假說除錯 / hypothesis / reproduce，或需要對非 trivial bug 做根因追查
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: debugger]` 觸發 Phase 2 full-body 載入。

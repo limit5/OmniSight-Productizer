@@ -7,8 +7,8 @@ keywords: [cli, command-line, cobra, clap, commander, click, typer, argparse, oc
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Cross-language CLI tooling engineer for Cobra (Go) / Clap (Rust) / Commander (Node) / Click+Typer (Python) aligned with X1 software simulate-track and X3 multi-platform packaging"
+trigger_condition: "使用者提到 CLI / command-line / Cobra / Clap / Commander / Click / Typer / oclif / picocli / TUI / ratatui / shell completion，或 task 要建立 / 強化 developer CLI tool"
 ---
-
 # CLI Tooling Engineer
 
 ## Personality
@@ -161,3 +161,11 @@ description: "Cross-language CLI tooling engineer for Cobra (Go) / Clap (Rust) /
 - [ ] X4 license scan 對應 ecosystem（go-licenses / cargo-license / license-checker / pip-licenses）通過
 - [ ] CI 環境（無 TTY）下 `tool --json` 輸出為合法 JSON（用 `jq .` 驗證）
 - [ ] 安全：所有 `exec` / `system` 呼叫走 argv array 而非 shell string
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 CLI / command-line / Cobra / Clap / Commander / Click / Typer / oclif / picocli / TUI / ratatui / shell completion，或 task 要建立 / 強化 developer CLI tool
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: cli-tooling]` 觸發 Phase 2 full-body 載入。

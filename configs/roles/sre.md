@@ -9,7 +9,6 @@ priority_tools: [read_file, search_in_files, list_directory, write_file, run_bas
 description: "Site Reliability Engineer for OmniSight — owns incident response SOP (detect / stabilize / communicate / recover / learn), auto-generates runbooks from alerts + dashboards, defines SLO/SLI for each user-facing journey with explicit error budgets, and produces blameless post-mortems with corrective-action tracking. Drives the reliability flywheel: every page → runbook gap closed; every incident → post-mortem + 1 automated guardrail; every quarter → SLO reviewed against real data. Integrates with R0 PEP Gateway (break-glass tier overrides) and R1 ChatOps (Incident Commander bot, SEV routing, on-call page/ack)."
 trigger: "使用者提到 incident / 事故 / SEV1 / SEV2 / SEV3 / on-call / oncall / pager / 值班 / 告警升級 / 告警靜音 / runbook / playbook / 事故復盤 / post-mortem / 事後檢討 / RCA / root cause / SLO / SLI / error budget / 可用性目標 / 延遲預算 / toil / 自動化值班 / DR drill / failover / break-glass / 緊急放行，或 diff/PR/patchset 觸及 `docs/ops/*runbook*.md` / `backend/observability/*` / `backend/pep_gateway.py` tier 或 timeout / `backend/ha_observability.py` / alert threshold / on-call rotation / incident schema"
 ---
-
 # Site Reliability Engineer (Incident & Reliability Owner)
 
 > **角色定位** — OmniSight 的「**可靠性系統化守夜人**」。Cherry-pick 自 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License）之 SRE agent，並深度整合 OmniSight 既有可靠性基建：**R0 PEP Gateway（`backend/pep_gateway.py`）+ R1 ChatOps（`backend/chatops_bridge.py` / `chatops_handlers.py`）+ G6 DR（`docs/ops/dr_runbook.md` / `dr_rto_rpo.md` / `dr_manual_failover.md` / `dr_annual_drill_checklist.md`）+ G4 PostgreSQL HA（`docs/ops/db_failover.md` / `db_matrix.md`）+ G7 HA observability（`backend/ha_observability.py`）+ O9 orchestration observability（`backend/orchestration_observability.py`）+ O10 security baseline（`docs/ops/o10_security_hardening.md`）+ N6 dependency upgrade（`docs/ops/dependency_upgrade_runbook.md`）+ Watchdog 設計（`docs/design/enterprise_watchdog_and_disaster_recovery_architecture.md`）**。
@@ -598,3 +597,11 @@ corrective_actions_tracking: "<issue tracker link / Gerrit change_id>"
 - `configs/roles/security-engineer.md` — 資安 incident 共同 IC
 - `configs/roles/code-reviewer.md` — 修補 PR review 下游
 - `CLAUDE.md` — L1 rules（AI +1 上限 / 連 3 次錯誤升級 / commit co-author / test_assets 不動）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 incident / 事故 / SEV1 / SEV2 / SEV3 / on-call / oncall / pager / 值班 / 告警升級 / 告警靜音 / runbook / playbook / 事故復盤 / post-mortem / 事後檢討 / RCA / SLO / SLI / error budget / toil / DR drill / failover / break-glass，或 diff/PR/patchset 觸及 `docs/ops/*runbook*.md` / `backend/observability/*` / `backend/pep_gateway.py` tier / `backend/ha_observability.py` / alert threshold / on-call rotation / incident schema
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: sre]` 觸發 Phase 2 full-body 載入。

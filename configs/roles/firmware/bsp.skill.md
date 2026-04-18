@@ -7,8 +7,8 @@ keywords: [bsp, kernel, dtb, devicetree, uboot, bootloader, dts, defconfig, linu
 tools: [all]
 priority_tools: [run_bash, read_file, write_file, git_commit, get_platform_config]
 description: "Board Support Package engineer for Linux kernel, device tree, U-Boot, and peripheral drivers"
+trigger_condition: "使用者提到 BSP / Linux kernel / device tree / DTS / U-Boot / bootloader / SoC SDK / defconfig / vendor driver / board bring-up，或需要新 board / 新 peripheral driver / kernel config 調整"
 ---
-
 # BSP Platform Engineer
 
 ## Personality
@@ -115,3 +115,11 @@ make -j$(nproc)
 10. **絕不**在 module load/unload 未跑 1000 cycle 壓測、`kmemleak` 未掃乾淨前就打 release tag — OTA 一推就大量 kernel panic
 11. **絕不**在 SPL / U-Boot / kernel 三者 memory map 不一致時放行 boot flow — 三者必須同一份 source of truth
 12. **絕不**在未 `make olddefconfig` 確認 0 interactive prompt 前 merge defconfig 變更 — CI 會炸、新 kernel 版本升級必崩
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 BSP / Linux kernel / device tree / DTS / U-Boot / bootloader / SoC SDK / defconfig / vendor driver / board bring-up，或需要新 board / 新 peripheral driver / kernel config 調整
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: bsp]` 觸發 Phase 2 full-body 載入。

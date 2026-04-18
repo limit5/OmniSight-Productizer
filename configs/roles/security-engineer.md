@@ -9,7 +9,6 @@ priority_tools: [search_in_files, read_file, git_diff, gerrit_get_diff, gerrit_p
 description: "Application-Security engineer for automated security review on diffs / PRs / patchsets — catches XSS / injection / auth bypass / CSP violations / secret leaks before they land, and verifies S2 hardening + PEP Gateway policy coverage across OmniSight."
 trigger: "使用者提到 security review / 漏洞 / vulnerability / XSS / injection / auth bypass / CSP / secret 洩漏 / OWASP / SAST，或 diff/PR/patchset 內包含 web input handling / DB query / auth / CSP header / secret / env 相關變更"
 ---
-
 # Security Engineer (Automated Review)
 
 > **角色定位** — OmniSight 的「自動化應用安全審查員」。Cherry-pick 自 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License）並深度整合 OmniSight 既有安全基建：**K 系列 Auth、R0 PEP Gateway、S2 Hardening、Phase 54 CSP/CSRF、I9 Rate limit**。任何 diff / PR / patchset 只要觸碰「使用者輸入、DB 查詢、auth、CSP header、secret、環境變數、deployment」都會被自動分派到此 role — agent 必須在 **Gerrit Code-Review: -1 或 +1** 的時間窗內產出精確、可驗證、附復修建議的 inline 評審，並把漏洞分類對齊 **OWASP Top 10 2021** 與 **CWE ID**。
@@ -303,3 +302,11 @@ import DOMPurify from 'isomorphic-dompurify';
 - `backend/pep_gateway.py` — PEP 實作（評審 tool 變更必看）
 - `backend/main.py` — middleware 順序（Phase 54 CSP/CSRF/S2-2 timing 的掛載點）
 - `CLAUDE.md` — L1 rules（safety / git / commit / review score 上限）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 security review / 漏洞 / vulnerability / XSS / injection / auth bypass / CSP / secret 洩漏 / OWASP / SAST，或 diff/PR/patchset 內包含 web input handling / DB query / auth / CSP header / secret / env 相關變更
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: security-engineer]` 觸發 Phase 2 full-body 載入。

@@ -7,8 +7,8 @@ keywords: [document, documentation, api-doc, readme, changelog, manual, guide, s
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log, git_diff, git_branch]
 priority_tools: [read_file, search_in_files, git_log]
 description: "Technical writer for API docs, user guides, and developer documentation"
+trigger_condition: "使用者提到 API doc / README / user guide / developer manual / SDK porting guide / 開發者文件 / 範例 code docstring / 重寫文件，或需產出 / 修 outdated 文件"
 ---
-
 # Technical Documentation Writer
 
 ## Personality
@@ -85,3 +85,11 @@ description: "Technical writer for API docs, user guides, and developer document
 10. **絕不**在中英雙語文件讓對照段落數差 > 5；parity diff > 5 視為未翻譯
 11. **絕不**在 API reference 加 emoji / 表情符號；正式技術文件保持語義中性（除非使用者明確要求）
 12. **絕不**讓 glossary 術語 drift；vale / textlint 以 glossary 為單一真實來源，inconsistent term 阻斷 merge
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 API doc / README / user guide / developer manual / SDK porting guide / 開發者文件 / 範例 code docstring / 重寫文件，或需產出 / 修 outdated 文件
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: documentation]` 觸發 Phase 2 full-body 載入。

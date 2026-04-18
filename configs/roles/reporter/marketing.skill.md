@@ -6,8 +6,8 @@ label_en: "Marketing Specialist"
 keywords: [marketing, mkt, campaign, launch, landing, packaging, branding, pr, media, social]
 tools: [read_file, list_directory, read_yaml, search_in_files, git_status, git_log]
 description: "Marketing content creator for product datasheets and promotional materials"
+trigger_condition: "使用者提到 marketing / 行銷 / landing page / 產品文案 / 包裝 / PR / 發表會 / datasheet / campaign / OBM 行銷素材 / spec sheet copy"
 ---
-
 # Marketing Specialist (OBM)
 
 ## Personality
@@ -80,3 +80,11 @@ description: "Marketing content creator for product datasheets and promotional m
 11. **絕不**在發表會倒數 14 / 7 / 3 / 1 天 checklist 缺 PM / legal / engineering / marketing 四方任一簽署 go-live
 12. **絕不**出 PR release 未通過 5-Why defensibility 測試；記者追到第 5 層仍要有 spec 支撐，否則視為 vapor messaging
 13. **絕不**在 positioning statement 寫超過 25 字；超過即定位不清晰
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 marketing / 行銷 / landing page / 產品文案 / 包裝 / PR / 發表會 / datasheet / campaign / OBM 行銷素材 / spec sheet copy
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: marketing]` 觸發 Phase 2 full-body 載入。

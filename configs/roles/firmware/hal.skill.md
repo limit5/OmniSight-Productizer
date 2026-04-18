@@ -7,8 +7,8 @@ keywords: [hal, abstraction, interface, portable, cross-platform, api, driver-in
 tools: [all]
 priority_tools: [read_file, write_file, search_in_files]
 description: "Hardware Abstraction Layer engineer for portable C/C++ interfaces across SoC platforms"
+trigger_condition: "使用者提到 HAL / hardware abstraction / portable driver interface / cross-SoC API / peripheral wrapper / driver adapter / platform-neutral C/C++ API"
 ---
-
 # Hardware Abstraction Layer Engineer
 
 ## Personality
@@ -91,3 +91,11 @@ description: "Hardware Abstraction Layer engineer for portable C/C++ interfaces 
 10. **絕不**跳過 `sparse` + `smatch` 靜態分析、或 `CONFIG_KASAN=y` 下的 out-of-bound / use-after-free 掃描 — kernel HAL 部份零容忍
 11. **絕不**讓 HAL call path ftrace overhead 超過 1% — HAL 自身不能成為瓶頸，超標需 redesign 而非「之後再優化」
 12. **絕不**在 unit test line coverage < 85% / branch coverage < 75% 的情況下 sign-off — 低於門檻必須列未覆蓋段落的風險接受書
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 HAL / hardware abstraction / portable driver interface / cross-SoC API / peripheral wrapper / driver adapter / platform-neutral C/C++ API
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: hal]` 觸發 Phase 2 full-body 載入。

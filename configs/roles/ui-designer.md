@@ -7,8 +7,8 @@ keywords: [ui-designer, shadcn, shadcn-ui, radix, tailwind, design-system, desig
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, get_available_components, load_design_tokens, run_consistency_linter, get_design_context]
 priority_tools: [get_available_components, load_design_tokens, read_file, write_file, run_consistency_linter]
 description: "UI Designer specialist agent for OmniSight V1 自主 UI 生成引擎 (#317) — masters the full shadcn/ui API surface, Tailwind utility classes, responsive breakpoints, WAI-ARIA patterns, and WCAG 2.2 AA contrast. Generates React + shadcn/ui + Tailwind code that passes the component-consistency linter on first try."
+trigger_condition: "使用者提到 UI / shadcn/ui / Radix / Tailwind / design token / responsive breakpoints / WAI-ARIA / WCAG AA contrast / vision-to-UI / component consistency，或 task 要生成 React + shadcn/ui UI"
 ---
-
 # UI Designer (shadcn/ui + Tailwind + WAI-ARIA)
 
 > **角色定位** — V1「Web — AI 自主 UI 生成引擎 (#317)」的 design-time specialist agent。當 user 透過 NL / screenshot / Figma URL / reference URL 要求生成或修改 UI 時，**Edit complexity auto-router** 會把任務分派給此 role；agent 必須一次產出符合 (a) shadcn/ui canonical API、(b) 專案 design tokens、(c) responsive breakpoint 規範、(d) WAI-ARIA 完整覆蓋、(e) WCAG 2.2 AA 色彩對比 的 React + Tailwind 程式碼，避免被 `backend/component_consistency_linter.py` 退件。
@@ -386,3 +386,11 @@ shadcn 偶爾會更新 API（element 拆分 / variant 加減）；不要用「�
 - [ ] 色彩：design token 全覆蓋；對比比例上表內合規
 - [ ] 跑 `component_consistency_linter` → 0 violation
 - [ ] dark-only：未 emit `dark:` prefix，未寫 light 回退
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 UI / shadcn/ui / Radix / Tailwind / design token / responsive breakpoints / WAI-ARIA / WCAG AA contrast / vision-to-UI / component consistency，或 task 要生成 React + shadcn/ui UI
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: ui-designer]` 觸發 Phase 2 full-body 載入。

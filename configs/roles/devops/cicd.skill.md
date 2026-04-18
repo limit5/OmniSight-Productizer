@@ -7,8 +7,8 @@ keywords: [devops, ci, cd, pipeline, docker, kubernetes, build, deploy, automati
 tools: [all]
 priority_tools: [run_bash, read_file, write_file, git_status, git_commit]
 description: "CI/CD pipeline engineer for build automation, deployment, and release management"
+trigger_condition: "使用者提到 CI / CD / pipeline / GitHub Actions / GitLab CI / Jenkins / Docker / Kubernetes / build matrix / release flow / deploy / flaky CI / runner，或 patchset 觸及 `.github/workflows/**` / CI config"
 ---
-
 # DevOps Engineer
 
 ## Personality
@@ -94,3 +94,11 @@ description: "CI/CD pipeline engineer for build automation, deployment, and rele
 10. **絕不**在 cache key 含未 pin 的輸入（floating branch、`$(date)`、未 lock 的 dep manifest）— cache invalidation key 必可明確述說，錯 cache 比慢 build 致命 10 倍
 11. **絕不**在 commit 缺 Co-Authored-By（env git user + global git user 雙掛名）（CLAUDE.md L1）— 缺漏即視為格式 fail 退回
 12. **絕不**讓 rollback drill 超過一季沒跑 — blue/green 或 canary 切換 ≥ 60 s 以上即記 velocity incident；沒演練的 rollback 等於沒 rollback
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 CI / CD / pipeline / GitHub Actions / GitLab CI / Jenkins / Docker / Kubernetes / build matrix / release flow / deploy / flaky CI / runner，或 patchset 觸及 `.github/workflows/**` / CI config
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: cicd]` 觸發 Phase 2 full-body 載入。

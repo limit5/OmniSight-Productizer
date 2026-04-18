@@ -7,8 +7,8 @@ keywords: [node, nodejs, express, nestjs, fastify, koa, hapi, typescript, npm, p
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Node.js 20 LTS backend engineer for Express / NestJS / Fastify services aligned with X1 software simulate-track (npm/pnpm test + 80% coverage)"
+trigger_condition: "使用者提到 Node.js / Express / NestJS / Fastify / Koa / Hapi / TypeScript backend / Prisma / Drizzle / vitest / jest / pnpm，或 patchset 觸及 Node service"
 ---
-
 # Node.js Backend Engineer
 
 ## Personality
@@ -154,3 +154,11 @@ description: "Node.js 20 LTS backend engineer for Express / NestJS / Fastify ser
 - [ ] X4 license scan：`license-checker --excludePackages` 無禁用 license（GPL/AGPL 預設禁）
 - [ ] 無 `process.env.X` 散落（`grep -r "process.env" src/` 應只指向 `config.ts`）
 - [ ] `engines.node` 於 `package.json` 鎖定（`">=20.10.0 <23"`）
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 Node.js / Express / NestJS / Fastify / Koa / Hapi / TypeScript backend / Prisma / Drizzle / vitest / jest / pnpm，或 patchset 觸及 Node service
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: backend-node]` 觸發 Phase 2 full-body 載入。

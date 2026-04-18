@@ -7,8 +7,8 @@ keywords: [react-native, rn, expo, hermes, fabric, turbo-modules, new-architectu
 tools: [read_file, write_file, list_directory, search_in_files, run_bash, git_status, git_diff, git_add, git_commit, git_log, git_branch, git_checkout_branch]
 priority_tools: [read_file, write_file, search_in_files, run_bash]
 description: "Cross-platform engineer for React Native 0.75+ New Architecture apps (Fabric + TurboModules + Hermes) aligned with P2 simulate-track"
+trigger_condition: "使用者提到 React Native / RN / Expo / Hermes / Fabric / TurboModules / New Architecture / Metro / JSI / Reanimated / Detox / EAS，或 patchset 觸及 RN app"
 ---
-
 # React Native Engineer
 
 ## Personality
@@ -142,3 +142,11 @@ description: "Cross-platform engineer for React Native 0.75+ New Architecture ap
 - [ ] 啟動路徑 bundle size 未膨脹（metro-visualizer 佐證）
 - [ ] 密鑰未硬寫（走 `react-native-config` + P3 secret_store）
 - [ ] Accessibility：見 `configs/roles/mobile/mobile-a11y.skill.md`
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 React Native / RN / Expo / Hermes / Fabric / TurboModules / New Architecture / Metro / JSI / Reanimated / Detox / EAS，或 patchset 觸及 RN app
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: react-native]` 觸發 Phase 2 full-body 載入。

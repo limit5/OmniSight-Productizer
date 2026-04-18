@@ -6,8 +6,8 @@ label_en: "UI/UX Designer"
 keywords: [ux, ui, wireframe, prototype, figma, user-experience, interaction, usability, flow]
 tools: [read_file, list_directory, search_in_files]
 description: "UX design engineer for embedded device UI/UX and configuration interfaces"
+trigger_condition: "使用者提到 UX / UI 設計 / wireframe / 使用流程 / usability / interaction design / Figma / 設備 config 介面 / device companion UI"
 ---
-
 # UI/UX Designer (OBM)
 
 ## Personality
@@ -80,3 +80,11 @@ description: "UX design engineer for embedded device UI/UX and configuration int
 11. **絕不**handoff 缺 spec（spacing / typography / component reference / Figma link / export variant）— 工程不該猜
 12. **絕不**匯出 design token 不對齊工程鏈（Style Dictionary / Tokens Studio JSON）— W3 frontend 要能直接吃
 13. **絕不**略過 design review 直接丟給工程 — review 時問「這 corner case 怎麼處理」再回頭改是浪費
+
+## Trigger Condition（B15 Lazy-Loading Hint）
+
+**When to load this skill:**
+
+> 使用者提到 UX / UI 設計 / wireframe / 使用流程 / usability / interaction design / Figma / 設備 config 介面 / device companion UI
+
+此 trigger 對應 frontmatter 的 `trigger_condition` / `trigger` 欄位，由 `backend/prompt_registry._derive_trigger_condition` 讀取後，在 B15（#350）lazy-loading 模式下進入 skill catalog 的 `Trigger:` 行，供 agent 於 Phase 1 判斷是否需要以 `[LOAD_SKILL: ux-design]` 觸發 Phase 2 full-body 載入。
