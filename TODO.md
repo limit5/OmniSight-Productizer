@@ -190,7 +190,7 @@ Legend:
   - [x] 401 → redirect `/login?next=<current_path>`（不 toast）
   - [x] 403 → toast warning「權限不足」
   - [x] 500 → toast error「系統錯誤」+ 展開區顯示 trace ID
-  - [ ] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
+  - [x] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
   - [ ] 網路斷線 → toast info「網路連線中斷，嘗試重新連線...」+ retry indicator
 
 - [ ] 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
@@ -204,7 +204,7 @@ Legend:
 - [x] Step 3.5 UI：三選一 tab（GitHub / GitLab / Gerrit）+ 「跳過，稍後設定」按鈕
 - [x] GitHub tab：token 輸入 + 「Test Connection」按鈕 → 呼叫 GitHub API 驗證 → 成功顯示 user/org name
 - [x] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
-- [ ] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
+- [x] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
 - [ ] 「跳過」不影響 bootstrap finalization（Git forge 非必要 gate）
 - [ ] 預估：**1 day**
 

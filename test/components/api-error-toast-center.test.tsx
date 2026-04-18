@@ -12,9 +12,13 @@
  *   - row 192: 500 server_error  → error toast「系統錯誤」with an
  *                                   expandable「技術詳情」region that
  *                                   reveals the trace ID.
+ *   - row 193: 502 bad_gateway / 503 service_unavailable
+ *              → warning toast「服務暫時不可用」with a countdown and a
+ *                full-page reload when the countdown expires (cancelable
+ *                via dismiss).
  */
 
-import { describe, expect, it, vi, afterEach } from "vitest"
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest"
 import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
@@ -200,5 +204,163 @@ describe("ApiErrorToastCenter — 500 server_error (row 192)", () => {
     await drive500({ body: { detail: "boom", trace_id: "req_trace" } })
 
     expect(screen.queryByTestId("api-error-toast-forbidden")).toBeNull()
+  })
+})
+
+// ── row 193: 502/503 → 「服務暫時不可用」toast + auto-retry ─────────────
+//
+// `request()` auto-retries 429/503 internally with backoff; 502 is also
+// retried when the method is idempotent (GET is). By the time the toast
+// fires, the fetch-level retries are exhausted — the toast exists to let
+// the operator know that one last full-page reload is about to happen, and
+// to give them a chance to cancel via dismiss.
+describe("ApiErrorToastCenter — 502/503 auto-retry (row 193)", () => {
+  const originalLocation = window.location
+
+  beforeEach(() => {
+    // JSDOM doesn't let us spy on the real `window.location.reload`, so we
+    // replace the whole object with a stub whose `.reload` is a vi.fn.
+    // Matches what test/lib/api-error-handler.test.ts does for `.assign`.
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: {
+        href: "http://localhost/dashboard",
+        pathname: "/dashboard",
+        search: "",
+        origin: "http://localhost",
+        assign: vi.fn(),
+        reload: vi.fn(),
+      },
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: originalLocation,
+    })
+  })
+
+  async function drive502({
+    body = { detail: "upstream down" },
+    headers,
+  }: {
+    body?: unknown
+    headers?: Record<string, string>
+  } = {}) {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mockFetchAlways(502, body, headers)
+    const p = getHealth().catch((e) => e)
+    // Idempotent GET retries twice (1s + 2s backoff) for 5xx.
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    const result = await p
+    expect(result).toBeInstanceOf(ApiError)
+    return result as ApiError
+  }
+
+  async function drive503({
+    body = { detail: "maintenance" },
+    headers,
+  }: {
+    body?: unknown
+    headers?: Record<string, string>
+  } = {}) {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mockFetchAlways(503, body, headers)
+    const p = getHealth().catch((e) => e)
+    // 503 has its own retry branch (429/503 → Retry-After + exponential).
+    // Default backoff: 1s + 2s = 3s across 2 retries → 5s is safe slack.
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    const result = await p
+    expect(result).toBeInstanceOf(ApiError)
+    return result as ApiError
+  }
+
+  it("renders a warning toast「服務暫時不可用」on 502 response", async () => {
+    render(<ApiErrorToastCenter />)
+    await drive502()
+
+    const toast = await screen.findByTestId("api-error-toast-bad_gateway")
+    expect(toast).toBeInTheDocument()
+    expect(screen.getByText("服務暫時不可用")).toBeInTheDocument()
+    expect(screen.getByText("WARNING")).toBeInTheDocument()
+    expect(screen.getByText("HTTP 502")).toBeInTheDocument()
+    expect(screen.getByText(/後端服務無法回應/)).toBeInTheDocument()
+  })
+
+  it("renders a warning toast「服務暫時不可用」on 503 (non-bootstrap)", async () => {
+    render(<ApiErrorToastCenter />)
+    await drive503()
+
+    const toast = await screen.findByTestId("api-error-toast-service_unavailable")
+    expect(toast).toBeInTheDocument()
+    expect(screen.getByText("服務暫時不可用")).toBeInTheDocument()
+    expect(screen.getByText("HTTP 503")).toBeInTheDocument()
+    expect(screen.getByText(/維護/)).toBeInTheDocument()
+  })
+
+  it("shows a visible auto-retry countdown that ticks down", async () => {
+    render(<ApiErrorToastCenter />)
+    await drive502()
+
+    const countdown = await screen.findByTestId("api-error-countdown-bad_gateway")
+    expect(countdown).toBeInTheDocument()
+    // Initially shows a value close to 10s (exact value depends on timer
+    // slack from the retry backoff, but must be positive and ≤ 10).
+    const initialText = countdown.textContent || ""
+    const initialMatch = initialText.match(/(\d+)\s*s/)
+    expect(initialMatch).toBeTruthy()
+    const initialSec = Number(initialMatch![1])
+    expect(initialSec).toBeGreaterThan(0)
+    expect(initialSec).toBeLessThanOrEqual(10)
+
+    // Advance 3s worth of 1Hz ticks.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    const laterText = screen.getByTestId("api-error-countdown-bad_gateway").textContent || ""
+    const laterMatch = laterText.match(/(\d+)\s*s/)
+    expect(laterMatch).toBeTruthy()
+    expect(Number(laterMatch![1])).toBeLessThan(initialSec)
+  })
+
+  it("reloads the page when the countdown expires (auto-retry)", async () => {
+    render(<ApiErrorToastCenter />)
+    await drive502()
+
+    const reloadSpy = window.location.reload as unknown as ReturnType<typeof vi.fn>
+    expect(reloadSpy).not.toHaveBeenCalled()
+
+    // Push past the 10s auto-retry window (plus slack for JSDOM scheduling).
+    await act(async () => { await vi.advanceTimersByTimeAsync(11_000) })
+    expect(reloadSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("dismiss button cancels the auto-retry (no page reload)", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    render(<ApiErrorToastCenter />)
+    await drive502()
+
+    await screen.findByTestId("api-error-toast-bad_gateway")
+    await user.click(screen.getByRole("button", { name: /dismiss/i }))
+    expect(screen.queryByTestId("api-error-toast-bad_gateway")).toBeNull()
+
+    // Advance well past the auto-retry window — reload must NOT fire.
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+    const reloadSpy = window.location.reload as unknown as ReturnType<typeof vi.fn>
+    expect(reloadSpy).not.toHaveBeenCalled()
+  })
+
+  it("does NOT render a 502/503 toast for 500 (scope isolation)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mockFetchAlways(500, { detail: "boom", trace_id: "req_trace" })
+    render(<ApiErrorToastCenter />)
+    const p = getHealth().catch((e) => e)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    await p
+
+    expect(screen.queryByTestId("api-error-toast-bad_gateway")).toBeNull()
+    expect(screen.queryByTestId("api-error-toast-service_unavailable")).toBeNull()
   })
 })
