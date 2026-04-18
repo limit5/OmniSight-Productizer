@@ -188,7 +188,7 @@ Legend:
 - [x] `lib/api.ts` 全域 error handler：
   - [x] 503 `bootstrap_required` → redirect `/setup-required`（不 toast）
   - [x] 401 → redirect `/login?next=<current_path>`（不 toast）
-  - [ ] 403 → toast warning「權限不足」
+  - [x] 403 → toast warning「權限不足」
   - [ ] 500 → toast error「系統錯誤」+ 展開區顯示 trace ID
   - [ ] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
   - [ ] 網路斷線 → toast info「網路連線中斷，嘗試重新連線...」+ retry indicator
