@@ -234,24 +234,33 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
   )
 }
 
-/** B14 Part B rows 1-2 — collapsible "Multiple Instances" sub-area inside the
- *  GIT REPOSITORIES block. Row 1 delivered the expandable scaffold;
- *  row 2 (this revision) adds the "Add GitHub Instance" button + inline
- *  form (hostname + token, e.g. github.enterprise.com). The submit handler
- *  is intentionally local-state only — the instance list rendering,
- *  Add GitLab Instance, env-var persistence, and the
+/** B14 Part B rows 1-3 — collapsible "Multiple Instances" sub-area inside
+ *  the GIT REPOSITORIES block. Row 1 delivered the expandable scaffold;
+ *  row 2 added "Add GitHub Instance" (hostname + token); row 3 (this
+ *  revision) adds the parallel "Add GitLab Instance" (URL + token, e.g.
+ *  https://gitlab.example.com). Both forms are still local-state only —
+ *  the instance list rendering, env-var persistence, and the
  *  `/system/settings/git/token-map` backend land in the subsequent
- *  Part B rows (214-217). */
+ *  Part B rows (215-217). */
 function MultipleInstancesSection() {
   const [expanded, setExpanded] = useState(false)
   const [addingGithub, setAddingGithub] = useState(false)
   const [ghHost, setGhHost] = useState("")
   const [ghToken, setGhToken] = useState("")
+  const [addingGitlab, setAddingGitlab] = useState(false)
+  const [glUrl, setGlUrl] = useState("")
+  const [glToken, setGlToken] = useState("")
 
   const resetGithubForm = () => {
     setAddingGithub(false)
     setGhHost("")
     setGhToken("")
+  }
+
+  const resetGitlabForm = () => {
+    setAddingGitlab(false)
+    setGlUrl("")
+    setGlToken("")
   }
 
   return (
@@ -277,8 +286,8 @@ function MultipleInstancesSection() {
           </div>
           <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-50 leading-relaxed">
             Map per-host tokens via OMNISIGHT_GITHUB_TOKEN_MAP /
-            OMNISIGHT_GITLAB_TOKEN_MAP. List, GitLab, save & test arrive
-            in the next Part B rows.
+            OMNISIGHT_GITLAB_TOKEN_MAP. List, save & test arrive in the
+            next Part B rows.
           </div>
 
           {addingGithub ? (
@@ -324,6 +333,52 @@ function MultipleInstancesSection() {
               className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 transition-colors"
             >
               <Plus size={10} /> Add GitHub Instance
+            </button>
+          )}
+
+          {addingGitlab ? (
+            <div className="mt-2 p-2 rounded border border-[var(--hardware-orange)]/30 bg-[var(--secondary)] space-y-1.5">
+              <div className="font-mono text-[8px] text-[var(--hardware-orange)] uppercase tracking-wider">
+                Add GitLab Instance
+              </div>
+              <SettingField
+                label="URL"
+                value={glUrl}
+                onChange={setGlUrl}
+              />
+              <SettingField
+                label="Token"
+                value={glToken}
+                type="password"
+                onChange={setGlToken}
+              />
+              <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60 leading-relaxed">
+                e.g. https://gitlab.example.com — used as the key in
+                OMNISIGHT_GITLAB_TOKEN_MAP. Persistence wired in row 216.
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={resetGitlabForm}
+                  className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+                >
+                  CANCEL
+                </button>
+                <button
+                  disabled={!glUrl || !glToken}
+                  onClick={resetGitlabForm}
+                  className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--hardware-orange)] text-black font-semibold disabled:opacity-30"
+                  title="Save handler arrives in Part B row 216"
+                >
+                  ADD
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAddingGitlab(true)}
+              className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] text-[var(--hardware-orange)] hover:bg-[var(--hardware-orange)]/10 transition-colors"
+            >
+              <Plus size={10} /> Add GitLab Instance
             </button>
           )}
         </div>

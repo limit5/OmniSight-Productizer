@@ -11957,3 +11957,27 @@ TenantSecrets 的「Add Secret 按鈕 → expand 表單 → CANCEL/ADD 兩鈕對
 
 ### 下一步
 - B14 Part B row 214：複製本 row markup，把「GitHub」字樣換 GitLab，欄位改 `URL` + `Token`，並考慮共用 helper 抽 `<InstanceForm kind="github" />` 元件（看 row 215 列表落地後是否仍有 DRY 收益）。
+
+## 2026-04-18 — B14 Part B 第三顆 row 214：「Add GitLab Instance」按鈕 + 表單
+
+### 範圍（嚴格 row-level）
+- **僅** TODO 第 214 列：在 `MultipleInstancesSection` 內既有的「Add GitHub Instance」之後，加上平行的「+ Add GitLab Instance」按鈕。點擊後展開內嵌表單，欄位 = `URL`（如 `https://gitlab.example.com`） + `Token`（password 型）。
+- ADD 鈕在兩欄都填寫前 `disabled`；CANCEL 鈕還原狀態並收合表單。
+- **沒**做：row 215（list/Test/Remove）、row 216（env-var 寫入 `OMNISIGHT_GITLAB_TOKEN_MAP`）、row 217（後端 `/system/settings/git/token-map`）— 後續 commit 補。
+
+### 設計刻意保守
+- **沿用 row 213 的 idiom**：state 三變數（`addingGitlab` / `glUrl` / `glToken`）+ `resetGitlabForm` helper + 內嵌表單。markup 跟 GitHub 卡片對稱，未來 row 215 若抽 `<InstanceForm kind="…" />` 一次重構即可收兩處。
+- **配色 `--hardware-orange`**：跟 `GIT REPOSITORIES` section 內 credential registry row 1035 列 `gitlab` 卡片同色 — operator 已建立「橘 = GitLab」mental model，不引入新色票。
+- **ADD 鈕 onClick = `resetGitlabForm`**：與 GitHub 同樣是 scaffold 行為（title `"Save handler arrives in Part B row 216"`），row 216 把它換成 PUT `/system/settings/git/token-map` 即可。
+- **沒擴 lucide-react import / 沒新增依賴**：沿用 `Plus`、`SettingField`，零增量 bundle。
+- **更新 hint 文案**：把 row 213 留下的「List, GitLab, save & test arrive in the next Part B rows」改為「List, save & test arrive in the next Part B rows」（GitLab 已經到位）。
+
+### 為什麼跟 GitHub 卡片並列而非 segmented control
+GitHub Enterprise + self-hosted GitLab 是兩條獨立的多 instance 軸（一個 org 通常只用其中一個或兩者都用），並列 button 讓 operator 同時看見兩條入口；做 segmented control 反而強迫先選平台才看得到操作，多一個 click。當未來新增 Bitbucket 等更多平台時再評估收成 dropdown。
+
+### 驗證
+- `npx tsc --noEmit` 對 `components/omnisight/integration-settings.tsx` 零報錯。
+- 變更僅 +73 -6 行 SLOC，純 UI scaffold，不會影響任何既有 settings 載入 / 儲存路徑。
+
+### 下一步
+- B14 Part B row 215：列表顯示所有已設定的 instance + 每個有「Test」/「Remove」按鈕。預期會把目前 row 1058 的「No additional instances configured.」placeholder 換成真正的 instance list（資料來源是 row 217 backend），並抽 `<InstanceForm kind="github"|"gitlab" />` 共用 component 避免 GitHub / GitLab 兩段 markup 持續發散。
