@@ -375,3 +375,72 @@ def test_get_skill_metadata_ships_for_real_skill_android(monkeypatch):
     assert meta["name"]
     assert meta["token_cost"] > 0
     assert "path" in meta
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  B15 #350 — get_skill_full (on-demand full body loader)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_get_skill_full_returns_entire_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr, "SKILLS_ROOT", tmp_path)
+    raw = """---
+name: my-skill
+description: demo skill
+---
+# Body heading
+
+Full instructions go here.
+
+## When to use
+
+Always.
+"""
+    _write_skill(tmp_path, "my-skill", raw)
+    full = pr.get_skill_full("my-skill")
+    # The full text includes frontmatter AND body — it's the thing the
+    # ReAct loop injects verbatim on [LOAD_SKILL: ...].
+    assert "name: my-skill" in full
+    assert "# Body heading" in full
+    assert "Full instructions go here." in full
+    assert full == raw
+
+
+def test_get_skill_full_accepts_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr, "SKILLS_ROOT", tmp_path)
+    body = "---\nname: absskill\ndescription: via abs path\n---\nbody xyz\n"
+    skill = _write_skill(tmp_path, "absskill", body)
+    full = pr.get_skill_full(str(skill))
+    assert full == body
+
+
+def test_get_skill_full_missing_returns_empty_string(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr, "SKILLS_ROOT", tmp_path)
+    assert pr.get_skill_full("does-not-exist") == ""
+    assert pr.get_skill_full("") == ""
+
+
+def test_get_skill_full_complements_metadata(tmp_path, monkeypatch):
+    """get_skill_metadata + get_skill_full together should cover the
+    full file — metadata does not leak body, full loader returns it."""
+    monkeypatch.setattr(pr, "SKILLS_ROOT", tmp_path)
+    raw = """---
+name: pair
+description: paired lookup
+---
+BODY_MARKER_CONTENT
+"""
+    _write_skill(tmp_path, "pair", raw)
+    meta = pr.get_skill_metadata("pair")
+    full = pr.get_skill_full("pair")
+    assert "BODY_MARKER_CONTENT" not in str(meta)
+    assert "BODY_MARKER_CONTENT" in full
+
+
+def test_get_skill_full_ships_for_real_skill_android():
+    """Smoke test against real configs/skills/skill-android/SKILL.md."""
+    full = pr.get_skill_full("skill-android")
+    if not full:
+        pytest.skip("skill-android not present in this checkout")
+    assert len(full) > 100  # non-trivial content
+    # Frontmatter + body, not just metadata.
+    assert "---" in full

@@ -246,6 +246,33 @@ def get_skill_metadata(path: str | Path) -> dict:
     return meta
 
 
+def get_skill_full(path: str | Path) -> str:
+    """B15 (#350) — return a skill's *complete* markdown content
+    (frontmatter + body) for on-demand injection after the agent has
+    consulted `get_skill_metadata` and decided to load it.
+
+    Pairs with `get_skill_metadata`:
+      * `get_skill_metadata` — advertising card only (~150 chars).
+      * `get_skill_full`     — full skill body for the ReAct loop to
+                               inject on `[LOAD_SKILL: …]` signal.
+
+    Accepts the same identifiers as `get_skill_metadata` (bare name,
+    relative path, absolute path, or directory containing SKILL.md).
+
+    Missing or unreadable files return an empty string — the lazy-loader
+    treats "" as "skill body unavailable" and logs, so a malformed skill
+    never crashes the ReAct loop.
+    """
+    resolved = _resolve_skill_path(path)
+    if resolved is None:
+        return ""
+    try:
+        return resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("get_skill_full: read %s failed: %s", resolved, exc)
+        return ""
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Data classes
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
