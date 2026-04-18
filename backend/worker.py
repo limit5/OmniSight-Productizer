@@ -14,7 +14,10 @@ upstream:
     file scope.
   * **Redis ``workers:active`` set + per-worker heartbeat key with
     TTL** — the operator surface (and, later, the orchestrator) can
-    spot a dead worker within 90 s.
+    spot a dead worker within 45 s (post-C4 audit 2026-04-19; previously
+    90 s). Note this is the *registry* TTL, not file-path dist-lock TTL.
+    File-path locks still expire on their own 30-min schedule; a
+    dead-worker lock cleanup cron is a follow-up row.
 
 The runtime stays pluggable so unit tests don't need real Docker or
 Gerrit:
@@ -77,8 +80,15 @@ logger = logging.getLogger(__name__)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 DEFAULT_CAPACITY = 1
-DEFAULT_HEARTBEAT_INTERVAL_S = 30      # spec: TTL 90s, refresh every 30s
-DEFAULT_HEARTBEAT_TTL_S = 90           # spec
+# C4 audit 2026-04-19: halved from 30s / 90s to 15s / 45s so a SIGKILL'd
+# worker drops from the `workers:active` registry inside 45 s instead of
+# 90 s. Refresh interval stays at TTL/3 (1.5x headroom for missed pings).
+# Note: this is ONLY the registry heartbeat — file-path dist-locks still
+# expire on DEFAULT_LOCK_TTL_S (30 min). A follow-up row should add a
+# dead-worker lock-release cron that keys off this registry TTL so a
+# SIGKILL'd worker's paths are reclaimable within ~45 s, not 30 min.
+DEFAULT_HEARTBEAT_INTERVAL_S = 15      # refresh every 15 s
+DEFAULT_HEARTBEAT_TTL_S = 45           # 3x interval — 2 missed pings = dead
 DEFAULT_VISIBILITY_TIMEOUT_S = 5 * 60  # spec: workers ack within 5 min
 DEFAULT_LOOP_IDLE_S = 1.0              # idle backoff when queue is empty
 DEFAULT_LOCK_WAIT_S = 0.0              # don't block — re-queue and try later
