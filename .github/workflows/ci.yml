@@ -259,6 +259,18 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - run: pnpm install --frozen-lockfile --prefer-offline
+      # Workaround: vitest 4.x pulls rolldown@1.0.0-rc.15 which ships
+      # platform-specific native bindings as optionalDependencies. pnpm
+      # + `--frozen-lockfile` + the setup-node cache can conspire to
+      # skip the current-platform binding (npm bug
+      # https://github.com/npm/cli/issues/4828 inherited by pnpm's
+      # compat layer), leaving rolldown with "Cannot find native
+      # binding". Install the linux-x64-gnu binding explicitly (no
+      # --save so lockfile stays frozen). Drop this step once vitest /
+      # rolldown ship a post-rc.15 release that guarantees platform
+      # binding installation.
+      - name: ensure rolldown linux-x64 binding (vitest 4.x workaround)
+        run: pnpm install --no-save @rolldown/binding-linux-x64-gnu@1.0.0-rc.15
       - name: vitest with coverage
         run: pnpm exec vitest run --coverage
       - name: upload coverage
@@ -292,6 +304,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version-file: ".nvmrc", cache: pnpm }
       - run: pnpm install --frozen-lockfile --prefer-offline
+      # Same rolldown linux-x64 workaround as frontend-unit (vitest 4.x
+      # pulls rolldown which can skip its platform binding under
+      # --frozen-lockfile; see that job for the full rationale).
+      - name: ensure rolldown linux-x64 binding (vitest 4.x workaround)
+        run: pnpm install --no-save @rolldown/binding-linux-x64-gnu@1.0.0-rc.15
       - name: install playwright + system libs
         run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
       - name: run playwright (${{ matrix.browser }})
@@ -300,6 +317,19 @@ jobs:
           # env var — set it so the matrix browser is actually picked
           # up (`--project` needs the project to exist).
           OMNISIGHT_PW_BROWSERS: all
+          # backend/config.py `validate_startup_config(strict=None)`
+          # defaults `strict = not settings.debug`. Without OMNISIGHT_DEBUG=true
+          # the webServer refuses to boot because the CI runner has no
+          # ANTHROPIC_API_KEY and OMNISIGHT_AUTH_MODE defaults to 'open'
+          # (both strict-mode hard errors). Debug mode downgrades both
+          # to warnings so the backend boots and playwright can talk
+          # to /readyz. Safe: the CI process is ephemeral, not exposed.
+          OMNISIGHT_DEBUG: "true"
+          # Paired with OMNISIGHT_DEBUG — even in debug mode we don't
+          # want the noisy "anthropic provider has no key" log line on
+          # every request. `ollama` is the zero-config fallback the
+          # config layer treats as "no key needed" (agents/llm.py).
+          OMNISIGHT_LLM_PROVIDER: ollama
         run: pnpm exec playwright test --project=${{ matrix.browser }} --reporter=line
       - name: upload report
         if: failure()
