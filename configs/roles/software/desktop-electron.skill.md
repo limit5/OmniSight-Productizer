@@ -97,6 +97,29 @@ description: "Electron 30+ desktop engineer for cross-platform (Win/macOS/Linux)
 - 記憶體（idle）：main process ≤ 200 MiB，renderer ≤ 250 MiB
 - Auto-update：installer 含簽章 + electron-updater 走 HTTPS 校驗
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`BrowserWindow` 三大 flag 正確**：`contextIsolation: true` / `sandbox: true` / `nodeIntegration: false`（0 例外）
+- [ ] **CSP 嚴格 `default-src 'self'`，0 `unsafe-eval`**
+- [ ] **Preload script 100% 走 `contextBridge.exposeInMainWorld`**，renderer 無 `window.require`
+- [ ] **electronegativity 0 critical**（`@doyensec/electronegativity` audit）
+- [ ] **Coverage ≥ 80%**（Node 規則；Vitest `--coverage` 含 main + preload）
+- [ ] **Vitest + Playwright-for-Electron 全綠**
+- [ ] **`tsc --noEmit` 0 error**（main + renderer 雙端）
+- [ ] **`eslint . --max-warnings 0` + `prettier --check .`**
+- [ ] **安裝包大小**：Windows NSIS ≤ 120 MiB / macOS dmg ≤ 130 MiB / Linux AppImage ≤ 110 MiB
+- [ ] **Cold start ≤ 2.5s** on mid-tier hardware
+- [ ] **Idle memory**：main ≤ 200 MiB / renderer ≤ 250 MiB
+- [ ] **`electron-builder --dir` build smoke ≥ 2 平台**（Linux + 一個非 Linux）
+- [ ] **Code sign + notarize 走 P3 secret_store**（Windows Authenticode + macOS Developer ID + Notarization）— 0 secret 進 repo
+- [ ] **Auto-update endpoint HTTPS + 簽章驗證**（electron-updater）
+- [ ] **Electron 版本鎖 ≥ 28**（不 `^` 漂移）— 跟 Chromium security patch
+- [ ] **X4 license scan 0 禁用 license**（`license-checker`）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - `nodeIntegration: true` / `contextIsolation: false` — 等於把 Node API 暴露給任意 renderer XSS
 - `webPreferences.webSecurity: false` — 關掉 same-origin 等於拆掉 sandbox 牆

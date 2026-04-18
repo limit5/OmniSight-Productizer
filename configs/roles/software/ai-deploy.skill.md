@@ -57,3 +57,19 @@ description: "AI deployment engineer for model optimization, quantization, and e
 - 量化後精度損失 < 1% (mAP/accuracy)
 - 推論延遲符合產品需求 (如 < 33ms for 30fps)
 - 模型大小須在目標設備記憶體限制內
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **量化後 accuracy 損失 ≤ 1%**（mAP / top-1 / top-5 擇一對齊任務）— 量化前後跑同一 validation set 比對，A/B table 寫進 PR description
+- [ ] **推論延遲 p95 ≤ 33ms @ target SoC**（對齊 30fps real-time pipeline）— 單張 single-image latency，非 throughput ÷ batch
+- [ ] **模型大小 ≤ target device 可用記憶體**（含 weight + activation buffer，預留 20% headroom）— 50MB model 不上 32MB device
+- [ ] **ONNX 轉譯 round-trip loss ≤ 0.1%**（FP32 PyTorch/TF → ONNX → FP32 ONNX Runtime 做 tensor diff）— 超過即回去查 opset 版本
+- [ ] **PTQ calibration dataset ≥ 500 張且涵蓋真實分布** — 抓 100 張隨機圖 calibrate 不可接受
+- [ ] **Scalar / CPU fallback path 可跑** — NPU 未就緒時 degraded 可用；CI runner 無 NPU 也要綠
+- [ ] **Model artifact 帶 SHA-256 + version + calibration set 記錄**（release manifest）— 無 checksum 禁止進 release bucket
+- [ ] **Layer-wise latency profile 報告存檔**（`test_assets/benchmarks/` 外的 report 區）— 知道哪層吃 60% 時間才准動手
+- [ ] **Target SoC toolchain 走 `get_platform_config`**（CLAUDE.md L1 強制）— 絕不用系統 gcc cross-compile
+- [ ] **Benchmark regression budget ≤ 5%**（latency / memory / accuracy 三軸）— 超過擋 PR，與 algorithm role 對齊
+- [ ] **CLAUDE.md L1 合規**：AI reviewer +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`

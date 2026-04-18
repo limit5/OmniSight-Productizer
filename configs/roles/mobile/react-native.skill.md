@@ -80,6 +80,31 @@ description: "Cross-platform engineer for React Native 0.75+ New Architecture ap
 - 啟動時間 TTI（time to interactive）< 2.5 s on mid-tier Android (Pixel 5 等效)
 - New Architecture 啟用驗證：`global.__turboModuleProxy !== undefined` 在 dev menu 可見
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`npx tsc --noEmit` 0 error** — TypeScript 5.x strict + `noUncheckedIndexedAccess: true` + `noImplicitAny: true`
+- [ ] **`eslint . --ext .ts,.tsx` 0 error** — config extends `@react-native` + `plugin:react-hooks/recommended`
+- [ ] **`prettier --check .` 綠** — format drift 即退件
+- [ ] **Jest unit 覆蓋率 ≥ 70%** — `--coverage` + `coverage-summary.json` 驗；對齊 P2 simulate-track
+- [ ] **Detox smoke 雙平台 0 crash** — 冷啟動 + 主要 flow 在 iOS Simulator + Android AVD 都綠
+- [ ] **Hermes engine 啟用（iOS + Android）** — `__HERMES__` global 驗；JSC fallback 列為 fail
+- [ ] **New Architecture（Fabric + TurboModules）啟用驗證** — `global.__turboModuleProxy !== undefined` 在 dev menu 可見
+- [ ] **TTI（time to interactive）< 2.5 s on mid-tier Android** — Pixel 5 等效機種量測；> 2.5s 退件
+- [ ] **60 fps sustained on mid-tier device** — Flipper Performance / Perf Monitor 無持續 < 60fps 區段
+- [ ] **Metro bundle 大小 iOS ≤ 25 MB、Android .aab base split ≤ 20 MB** — release 模式量測
+- [ ] **JS bundle size regression ≤ +5%** — 每 PR 由 `metro-visualizer` + CI diff；> 500 KB delta 必 justification
+- [ ] **Hermes bytecode size delta ≤ 1 MB per new dep** — `hermes-engine -emit-binary` 量測；超過需 justification
+- [ ] **Bridge crossing count < 100 / frame during animation** — Reanimated worklet 替代 JS animation；`nativeCallSyncHook` count 驗
+- [ ] **Legacy NativeModule 新增 count = 0** — 一律 TurboModule；grep 回流 legacy API 應為 0
+- [ ] **Crash-free users ≥ 99.5%** — Sentry / Firebase Crashlytics proxy；連兩週低於即 rollback
+- [ ] **TalkBack + VoiceOver smoke pass** — 對齊 `mobile-a11y.skill.md`；`accessibilityLabel` / `accessibilityRole` 覆蓋率 100%
+- [ ] **Touch target ≥ 44 pt（iOS）/ 48 dp（Android）合規率 = 100%**
+- [ ] **Single workflow lock（RN CLI or Expo Managed or Bare 擇一）** — 三態混用 = fail
+- [ ] **Secrets via `react-native-config` + P3 secret_store** — JS bundle 內無硬編 key；grep `process.env\.` 於 bundle 應為 0
+- [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
+
 ## Anti-patterns（禁止）
 - 同時載入 legacy NativeModule + TurboModule（同一專案二元開關要明確）
 - 在 JS thread 做重運算（> 16 ms）— 移到 Reanimated worklet 或原生 module

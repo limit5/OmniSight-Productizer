@@ -89,6 +89,30 @@ description: "Tauri 2.x desktop engineer (Rust backend + system webview frontend
 - 記憶體（idle）：≤ 80 MiB（system webview 共享 process）
 - Auto-update：minisign 公鑰嵌入 binary，更新檔案 HTTPS + 簽章雙驗證
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **後端 Coverage ≥ 75%**（Rust 規則；`cargo llvm-cov`）
+- [ ] **前端 Coverage ≥ 80%**（Node 規則；Vitest `--coverage`）
+- [ ] **`cargo test --no-fail-fast` + Vitest + Playwright 全綠**
+- [ ] **`cargo clippy --all-targets -- -D warnings` 0 warning** + `cargo fmt --check` 0 diff
+- [ ] **Frontend：`tsc --noEmit` 0 error + `eslint . --max-warnings 0`**
+- [ ] **Capability JSON 逐條 grant，0 `**` wildcard**（CI grep 驗 `"permissions": ["**"]`）
+- [ ] **CSP 嚴格（無 `unsafe-eval` / 無 `*` wildcard）**
+- [ ] **所有 `#[tauri::command]` 100% 對應一條 capability**
+- [ ] **安裝包大小**：Windows MSI ≤ 15 MiB / macOS dmg ≤ 12 MiB / Linux AppImage ≤ 18 MiB（比 Electron 小 8-10×）
+- [ ] **Cold start ≤ 800ms**
+- [ ] **Idle RSS ≤ 80 MiB**（system webview 共享）
+- [ ] **`tauri build` smoke ≥ 2 平台**
+- [ ] **Code sign + notarize 走 P3 secret_store**（macOS Developer ID + Windows Authenticode）— 0 secret 進 repo
+- [ ] **Updater minisign 公鑰嵌入 binary + HTTPS 雙驗證**
+- [ ] **Tauri 版本鎖 ≥ 2.0**（完成 Tauri 1.x allowlist → 2.x capability migration）
+- [ ] **X4 license scan：Rust + Node 雙 ecosystem 0 禁用 license**（cargo-license + license-checker）
+- [ ] **`cargo audit` 0 high / 0 critical** + `pnpm audit --audit-level=high` 0 high / 0 critical
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 在 capability 設定 `"permissions": ["**"]` — 等於關掉權限模型
 - 把 `app_handle.shell().command(user_input)` 不過濾 — command injection

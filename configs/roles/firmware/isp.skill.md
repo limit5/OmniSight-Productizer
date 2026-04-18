@@ -69,3 +69,23 @@ description: "ISP & 3A tuning engineer for image signal processing pipeline and 
 - Color accuracy: ΔE < 3.0 (under D65 illuminant)
 - SNR: > 38dB at normal exposure
 - 所有參數須有對應的 YAML/JSON 配置檔
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Color ΔE ≤ 3.0 under D65**（24-patch color checker，lab 燈箱量測）— 目視判色不算交付
+- [ ] **Color ΔE ≤ 5.0 under tungsten (3200K) / 螢光燈 (4000K) / 鈉燈 (2000K) / LED**（跨光源驗證）— D65 單光源驗收不夠
+- [ ] **SNR ≥ 38 dB at 100 lux、≥ 30 dB at 10 lux**（Imatest / 自家 IQ rig 量測）— 低光不過 = 安防場景失效
+- [ ] **3A convergence time ≤ 3 frame**（AE / AWB / AF 從場景切換到 steady-state，30 fps 下 ≤ 100 ms）— 量日夜切換、進出隧道、燈光切換
+- [ ] **PSNR ≥ 36 dB on golden scene**（ISP 輸出 vs. reference；`test_assets/` 下 golden raw 僅讀）— 低於門檻代表 pipeline 迴歸
+- [ ] **MTF50 ≥ target**（中心 / 四角分別量；lens + sensor 模組定義）— 模糊問題在量化後才能追責
+- [ ] **ISP pipeline 順序嚴守 BLC → LSC → Demosaic → CCM → Gamma → NR → EE → AWB**（自動化 pipeline dump 對比 canonical）— 為省 cycle 亂調視為設計 bug
+- [ ] **HDR multi-exposure split 驗證：ghost region 面積 ≤ 0.5%**（motion scene 靜態遮擋測試）— 太高代表 stitching 壞掉
+- [ ] **Flicker 抑制：50 Hz / 60 Hz mains 下畫面強度 fluctuation ≤ 2%**（螢光燈場景錄 60 s log）
+- [ ] **Valgrind 0 leak / 0 invalid read on algo-track sim**（CLAUDE.md L1 memory safety）— 演算法模擬必跑
+- [ ] **所有 tuning 參數以 YAML 綁 sensor + lens + module vendor**（`hardware_manifest.yaml` 對應）— magic number 埋 C code 視為設計 debt
+- [ ] **每個 tuning release 附 5 光源 × 3 亮度 驗證 log（ΔE / SNR / convergence time）**— 欄位不齊視為未驗收
+- [ ] **交叉編譯走 `get_platform_config` + `CMAKE_TOOLCHAIN_FILE`**（CLAUDE.md L1 compilation rule）— host gcc 生 ISP binary 視為 toolchain 污染
+- [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
+- [ ] **`test_assets/` 下 golden raw / golden JPEG 零 mutation**（CLAUDE.md L1）— regression ground truth

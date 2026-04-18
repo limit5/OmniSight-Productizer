@@ -90,6 +90,28 @@ description: "Node.js 20 LTS backend engineer for Express / NestJS / Fastify ser
 - 記憶體（idle worker）：Express/Fastify ≤ 80 MiB、NestJS ≤ 120 MiB
 - Bundle size（若打包）：服務端 entry ≤ 5 MiB（不含 node_modules）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Coverage ≥ 80%**（`COVERAGE_THRESHOLDS["node"]` = 80%；Vitest / Jest `--coverage`）— 低於擋 PR
+- [ ] **0 test failure**，所有 async test 都 `await` / `return`（避免 false-positive pass）
+- [ ] **`tsc --noEmit` 0 error** — strict + noUncheckedIndexedAccess + exactOptionalPropertyTypes 全開
+- [ ] **`eslint . --max-warnings 0`**（`@typescript-eslint/strict-type-checked` + `eslint-plugin-security`）
+- [ ] **`prettier --check .` 0 diff**
+- [ ] **`pnpm audit --audit-level=high` 0 high / 0 critical**
+- [ ] **啟動時間**：Express ≤ 800ms / Fastify ≤ 400ms / NestJS ≤ 1.5s（cold）
+- [ ] **Idle RSS**：Express/Fastify ≤ 80 MiB / NestJS ≤ 120 MiB
+- [ ] **Bundle entry ≤ 5 MiB**（不含 node_modules）
+- [ ] **Lockfile 已 commit**（`pnpm-lock.yaml` / `package-lock.json`）；CI 走 `--frozen-lockfile`
+- [ ] **Dockerfile multi-stage**，final 走 `node:20-slim` 或 distroless — 不含 devDep / build tool
+- [ ] **OpenAPI / JSON schema 匯出**（NestJS swagger / Fastify schema-to-OpenAPI）
+- [ ] **X4 license scan 0 禁用 license**（GPL/AGPL 預設禁）
+- [ ] **`process.env.X` 只出現在 `config.ts`**（`zod.parse()` fail-fast）— grep 驗證
+- [ ] **`engines.node` 鎖定版本**（`">=20.10.0 <23"`）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - `process.env.X` 散落各處 — 集中於 `config.ts`，啟動時 `zod.parse()` 驗證
 - 同步 fs / crypto API（`fs.readFileSync` / `crypto.pbkdf2Sync`）於 request handler — 卡 event loop

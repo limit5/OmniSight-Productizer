@@ -46,3 +46,21 @@ description: "Industrial design reporter for product aesthetics and CMF specific
 - 高仿真外觀 Mockup 製作
 - 模具開模圖面審核
 - 人因工程與使用者握持體驗設計
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **STEP model 交付率 100%** — 每個 concept sign-off 必附可直接進模具廠的 STEP / Parasolid 檔，缺檔不算交付
+- [ ] **ID / MD alignment checklist 雙簽** — ID / 機構 RD 兩方 checklist 全綠才放行；任一項紅燈阻斷開模
+- [ ] **Thermal / airflow simulation 通過** — CFD 跑 max ambient + max compute load，Tj < 限制值 + 外殼 hotspot < 45 degC
+- [ ] **IP rating 文件化（IPxy）** — IP6x 防塵 / IPx7 防水逐項測試報告留檔，無報告視為未驗證
+- [ ] **材料成本 ≤ BOM budget** — ID 選型的 CMF 每項附單價，超 budget 必附替代方案
+- [ ] **Vendor tooling lead-time 文件化** — 模具廠 quote 含 T0 / T1 / T2 時程，缺 lead-time 不排量產
+- [ ] **Packaging DFM 綠燈** — 紙盒 / 內襯 / 印刷套版走 packaging supplier DFM review，紅燈重做
+- [ ] **色差 ΔE ≤ 1.5 批次間** — 量產批次對標色卡 ΔE 超 1.5 視為 CMF 失控
+- [ ] **分模線（parting line）concept 階段已標** — 給模具廠前自跑一輪 DFM review
+- [ ] **Draft angle 全面標註** — 任何曲面 / 直壁缺 draft angle 視為不可開模
+- [ ] **Tolerance stack 計算留檔** — 縫隙 > 0.3 mm 或高低差 > 0.1 mm 視為可見瑕疵
+- [ ] **UV / 鹽霧 / 耐候測試通過** — outdoor 產品缺 UV 500h / 鹽霧 48h 測試不得量產
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

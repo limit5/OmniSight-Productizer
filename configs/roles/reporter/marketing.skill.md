@@ -47,3 +47,20 @@ description: "Marketing content creator for product datasheets and promotional m
 - 宣傳影片與官網素材製作管理
 - Landing Page 上線與 A/B 測試
 - 發布會規劃與媒體評測解禁 (Embargo)
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Positioning statement ≤ 25 words** — 超過 25 字視為定位不清晰，重寫
+- [ ] **ICP（Ideal Customer Profile）文字化** — 產業 / 規模 / use-case / budget / decision-maker 五欄缺一不算 ICP
+- [ ] **Value-prop matrix 覆蓋 ≥ 3 personas** — 每個 persona 對應一組 jobs-to-be-done + pain + gain，缺 persona 視為 scope 太窄
+- [ ] **PR release 5-Why defensibility 通過** — 記者問到第 5 層仍有 spec 支撐，否則視為 vapor messaging
+- [ ] **Messaging hierarchy 與 ≥ 5 位使用者測試** — 少於 5 位樣本的文案改版不得 scale
+- [ ] **所有 spec claim 引 `hardware_manifest.yaml`** — 未引來源視為抄襲 / 捏造
+- [ ] **競品比較附資料來源 URL + 抓取日** — 無來源不得對外，防 legal 風險
+- [ ] **A/B 測試樣本 ≥ 1000 UV 且達 95% CI** — 未達即宣稱「轉換率提升」視為統計造假
+- [ ] **Embargo 零違反** — 媒體解禁日 00:00 前任何洩漏 = PR 信譽歸零
+- [ ] **Packaging ΔE ≤ 2.0 批次間** — 批次色差超 2.0 視為 branding drift
+- [ ] **發表會倒數 14 / 7 / 3 / 1 天 checklist 四簽** — PM / legal / engineering / marketing 四方簽署，缺一不 go-live
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

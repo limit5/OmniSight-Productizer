@@ -83,6 +83,26 @@ description: "Technical SEO engineer for on-page, structured data, and crawlabil
 - `sitemap.xml` URL 與 robots.txt 公告的位置一致
 - hreflang 存在（多語站）且指向完整 canonical
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Lighthouse SEO ≥ 95**（`LIGHTHOUSE_MIN_SEO`）— W2 simulate-track 閘門；< 95 hard fail
+- [ ] **W2 `run_seo_lint()` `seo_issues == 0`** — title / description / viewport / canonical / og 五條靜態 lint 全綠
+- [ ] **每頁 `<title>` 唯一且 ≤ 60 字元** — 重複或截斷 → SERP 折疊為 duplicate content
+- [ ] **每頁 `<meta description>` 120–160 字且非複製貼上** — CI 跑 duplicate-description 檢查
+- [ ] **每頁 `<link rel="canonical">` 指向 200 OK URL** — 301 chain / 404 canonical → hard fail
+- [ ] **Open Graph 五欄齊全** — `og:title` / `og:description` / `og:image` / `og:url` / `og:type` 缺一 → PR block
+- [ ] **Twitter Card 標籤存在** — `twitter:card` (summary_large_image 預設)
+- [ ] **JSON-LD 通過 Google Rich Results Test** — 手寫 schema 必驗，不符 schema.org → 移除或修正
+- [ ] **JSON-LD 與可見內容 100% 一致** — 自動化 diff 可見文字 vs structured data；不一致 = Google 視為 spam hard fail
+- [ ] **`robots.txt` 與 `sitemap.xml` 一致** — sitemap 內不得出現 `noindex` 頁；robots `Disallow` 不得覆蓋 canonical target
+- [ ] **`sitemap.xml` URL 與 robots.txt 公告位置一致** — `Sitemap:` directive 指向實際 200 OK URL
+- [ ] **hreflang（多語站）指向完整 canonical** — 雙向自我引用 + x-default 必備
+- [ ] **SPA 禁止 client-only meta 注入** — SSR / prerender / SSG 擇一；view-source 必見完整 `<head>`
+- [ ] **CWV P75 符合 ranking threshold** — LCP < 2.5s / INP < 200ms / CLS < 0.1（CWV 為 Google ranking factor，交由 `web-perf` 達標）
+- [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - SPA 只在 client-side 注入 meta tags（爬蟲拿到空 `<head>`，SEO 失效）—— 必須 SSR / prerender
 - `<title>` 或 meta 重複於多頁（duplicate content penalty）

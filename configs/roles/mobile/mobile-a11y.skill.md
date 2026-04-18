@@ -86,6 +86,30 @@ description: "Mobile accessibility engineer enforcing iOS VoiceOver + Android Ta
 - 動態內容變更有 live region 或明確 announcement
 - Reduce Motion / Reduce Transparency 分支已實作（不只是開發測試時忽略）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Android Espresso `AccessibilityChecks` violations = 0** — WARN + ERROR 皆視為 fail；P2 simulate-track gate
+- [ ] **iOS XCUITest `accessibilityLabel != nil && != ""` 合規率 = 100%** — 每個互動元件斷言
+- [ ] **WCAG 2.2 AA 對比合規率 = 100%** — 正文 ≥ 4.5:1、大字 ≥ 3:1（≥ 17pt iOS / ≥ 18sp Android，bold ≥ 14pt）、UI 元件 ≥ 3:1；以 WCAG formula 算不憑肉眼
+- [ ] **Touch target ≥ 44 × 44 pt（iOS）/ ≥ 48 × 48 dp（Android）合規率 = 100%** — icon-only button 預設符合；< 44pt 直接退件
+- [ ] **TalkBack + VoiceOver 盲測通過（每 sprint 至少一次全流程）** — 戴耳機關螢幕從啟動到主要任務完成
+- [ ] **Dynamic Type xxxLarge 不破版率 = 100%** — iOS 拉到 `accessibilityXXXLarge`，截圖入 PR 佐證
+- [ ] **Android Font Scale 200% 不破版率 = 100%** — Settings → Display size and text → Font size max，截圖入 PR 佐證
+- [ ] **螢幕閱讀器 live region 覆蓋率 = 100%** — 所有動態內容變更以 `liveRegion` / `accessibilityNotification(.announcement)` 宣告
+- [ ] **200% zoom（iOS Magnifier / Android Magnification）無 clipping** — 主要 flow 放大 2x 文字不裁切、按鈕不消失
+- [ ] **顏色不為唯一語意承載者（色盲安全）合規率 = 100%** — error / success 同時有 icon + 文字 + 顏色
+- [ ] **裝飾圖標 explicit `accessibilityHidden` 覆蓋率 = 100%** — 不讓 AT 念出 `"image, image, image"` 噪音
+- [ ] **Modal / Dialog focus trap + 焦點宣告新 surface 合規率 = 100%** — focus 不飄回背景 tree
+- [ ] **自訂 control 皆宣告 `accessibilityTraits` / `role` 合規率 = 100%** — 不讓 AT 把 dropdown 念成 `image`
+- [ ] **a11y label 多語系本地化覆蓋率 = 100%** — 日語 / zh-Hant 使用者聽到對應語言，無英文 hardcode
+- [ ] **Switch Control（iOS）+ Switch Access（Android）sequential focus 可達率 = 100%** — 所有互動元件皆能以 switch 抵達
+- [ ] **Reduce Motion / Reduce Transparency 分支實作覆蓋率 = 100%** — spring / parallax 有 fade / opacity fallback
+- [ ] **Accessibility Inspector 的 Audit 0 critical issue（iOS）** — PR 自審必跑
+- [ ] **Accessibility Scanner 0 "high" severity issue（Android）** — PR 自審必跑
+- [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
+
 ## Anti-patterns（禁止）
 - `accessibilityLabel` 蓋過可見文字（造成 AT 使用者聽到的資訊跟看到的不同）
 - 用顏色作為唯一語意（錯誤只有紅色，無 icon / 文字）

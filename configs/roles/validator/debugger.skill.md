@@ -115,6 +115,24 @@ description: "Hypothesis-driven debugger using scientific method (Observe-Hypoth
 3. **全部否定** → 回到 Phase 1 重新觀察（遺漏了某些東西）
 4. **更新 DEBUG.md** — `## Root Cause` 和 `## Fix` 區塊
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Hypothesis-driven loop 可見於 DEBUG.md** — Observation → Hypothesis（≥ 3）→ Experiment → Root Cause → Fix 五段缺一不算除錯
+- [ ] **Bulldozer fix 零容忍** — 在確認假說前寫 > 5 行「修復」視為違反 Anti-Bulldozer Rule，退稿重來
+- [ ] **Fix 必配 regression test commit** — 無 test 的 fix 等於「下季再踩一次」
+- [ ] **MTTD（mean-time-to-diagnose）P2 ≤ 2h** — 從 Bug 指派到根因確認中位數 ≤ 2h；> 2h 觸發 pair debugging
+- [ ] **Minimum repro steps 100% 文件化** — 不可重現 Bug 進 `docs/flaky/` quarantine + 條件紀錄，放過視為失職
+- [ ] **假說 ≥ 3 條才啟動 Experiment** — 只列 1 條假說視為推土準備動作
+- [ ] **實驗變更 ≤ 5 行** — 超過 5 行代表假說太模糊，退回 Phase 2
+- [ ] **一次只改一個變數** — 合併兩修復 = 資料污染，退稿
+- [ ] **Root cause 寫「系統允許它發生」不寫「某人忘了」** — blameless 是硬性規則，違反退稿
+- [ ] **連續 2 次同錯升級人類** — CLAUDE.md L1 Agent Behavior 硬規
+- [ ] **Valgrind 零 leak**（C/C++）— CLAUDE.md L1 Code Quality Rules：algo-track 必過 Valgrind
+- [ ] **L3 past-solution 條目新增** — 每個 closed bug 寫 past-solution 條目以複用
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/` 讓測試過、HANDOFF.md 更新
+
 ## 反推土機規則（Anti-Bulldozer Rule）
 
 AI 除錯的第一大失敗模式：形成一個理論，寫 150 行「修復」，沒用，再寫 150 行深入同一個錯誤理論。

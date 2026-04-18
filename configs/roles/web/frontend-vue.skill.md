@@ -68,6 +68,25 @@ description: "Frontend engineer for Vue 3 / Nuxt 3 applications with W2 simulate
 - `v-html` 使用必附消毒函式或白名單註解，防 XSS
 - `computed` 不含副作用，`watch` 一律指定 `{ deep, immediate, flush }`
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Lighthouse Performance ≥ 80**（`LIGHTHOUSE_MIN_PERF`）— W2 simulate-track 閘門；< 80 hard fail
+- [ ] **Lighthouse Accessibility ≥ 90**（`LIGHTHOUSE_MIN_A11Y`）— 對齊 `web-a11y` role 交付
+- [ ] **Lighthouse SEO ≥ 95**（`LIGHTHOUSE_MIN_SEO`）— 對齊 `web-seo` role 交付
+- [ ] **Bundle size ≤ profile `bundle_size_budget`** — static 500 KiB / SSR-Node 5 MiB / CF 1 MiB / Vercel 50 MiB；單檔 ≤ budget / 2
+- [ ] **CWV P75：LCP < 2.5s / INP < 200ms / CLS < 0.1** — `backend/observability/vitals.py` RUM P75
+- [ ] **TypeScript `strict: true` + `vue-tsc --noEmit` 0 error** — `<script setup lang="ts">` 全檔 strict；`defineProps<Props>()` 型別為準
+- [ ] **SSR hydration mismatch 0 warning** — dev console 紅字 = PR block；`onMounted` / `import.meta.client` 隔離 browser-only code
+- [ ] **`nitro.preset` 對齊 W1 profile** — static / node / cloudflare / vercel 一一對應；`preset: undefined` 上 production → hard fail
+- [ ] **`v-for` 100% 有穩定 `:key`** — `:key="item.id"` 類穩定 ID；用 index 當 key 於動態列表 → hard fail
+- [ ] **`v-html` 100% 消毒** — DOMPurify 或白名單註解；未消毒 → XSS hard fail
+- [ ] **Nuxt 3 context-aware APIs 只在 setup 內呼叫** — `useRuntimeConfig()` / `useFetch()` 於 setup 外 → `[nuxt] instance unavailable` hard fail
+- [ ] **Cold-start SSR TTFB ≤ 500ms**（Node preset）/ ≤ 300ms（CF edge preset）— 超出需 edge cache / streaming
+- [ ] **LCP asset preloaded** — hero image / above-the-fold asset 必有 `<link rel="preload">` 或 `fetchpriority="high"`
+- [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 混用 Composition 與 Options API 於同一個元件
 - 用 `ref` 包 object/array 而不用 `reactive`（降低 tree-shake 友善度）

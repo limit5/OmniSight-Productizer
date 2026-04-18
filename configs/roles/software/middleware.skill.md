@@ -52,3 +52,22 @@ description: "Middleware engineer for UVC/RTSP streaming, codec integration, and
 - 所有 API 須使用 Protobuf/JSON Schema 定義
 - 串流延遲 < 100ms (local network)
 - 自動重連須在 5 秒內完成
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **長連線必帶 heartbeat**（TCP keepalive ≤ 60s / MQTT PINGREQ / gRPC keepalive）— 無 heartbeat 等於不知道斷線
+- [ ] **串流 glass-to-glass latency p95 ≤ 100ms (local LAN)** — 含 encode + network + jitter-buffer + decode 全程
+- [ ] **自動重連 P50 ≤ 5s / P99 ≤ 30s**（含 exponential backoff + jitter）— retry-storm 不可打爆 server
+- [ ] **Protobuf `.proto` 通過 `buf lint` + `buf breaking`** — 0 wire-incompatible 變更進 main
+- [ ] **Connection state machine 顯式枚舉**（CONNECTING / CONNECTED / RECONNECTING / FAILED）— 禁止單一 `isConnected` boolean
+- [ ] **所有 HTTP / gRPC call 帶 timeout**（≤ 10s default）+ 至少一層 circuit breaker — 無 timeout 直接 reject
+- [ ] **Throughput baseline 跑過 load test**（k6 / ghz / vegeta），≥ 1000 req/s 單實例或對齊產品需求 — 報告存檔
+- [ ] **p99 latency ≤ 3× p50**（tail latency 不可飆）— 飆表示 jitter / GC / lock contention 要查
+- [ ] **Graceful shutdown 測過**：SIGTERM → drain in-flight → close conn，**0 dropped request** in 30s window
+- [ ] **0 goroutine / thread leak**（Go：`goleak.VerifyNone` / pprof；Rust：tokio-console）— 每次 PR CI 跑
+- [ ] **Backpressure 機制測過**（下游慢時上游不 OOM；bounded channel / semaphore）
+- [ ] **TLS 一律啟用**，內網也不例外（零信任）— 禁止 `--insecure` 進 production config
+- [ ] **P10 觀測性對齊**：connection metric / heartbeat RTT / reconnect count 上 Prometheus
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`

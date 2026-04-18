@@ -76,6 +76,29 @@ description: "Android engineer for Kotlin 2.x apps (Jetpack Compose + Coroutines
 - 啟用 R8 full mode（`android.enableR8.fullMode=true`）+ resource shrinking
 - 權限最小化：只宣告實際使用的 `<uses-permission>`；runtime permission 有 rationale flow
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`./gradlew :app:assembleRelease :app:bundleRelease` 綠** — Release build 失敗不能 ship
+- [ ] **`./gradlew lintRelease` 0 error、0 fatal** — non-fatal warning 必開 issue 追蹤
+- [ ] **`detekt` + `ktlint` 0 error** — 專案根 `detekt.yml` 設 `max-issues: 0`
+- [ ] **Kotlin 單元測試覆蓋率 ≥ 70%**（Jacoco `executionData`）— 對齊 P2 simulate-track
+- [ ] **Espresso smoke 0 ANR / 0 crash** — `omnisight_pixel8_api34` AVD 跑冷啟動 → 主要 flow → 背景回前景
+- [ ] **AVD boot-complete < 60 s** — P2 simulate-track 硬上限；超過 = CI timeout
+- [ ] **Cold-start p95 ≤ 800 ms（Pixel 6 class）** — Baseline Profile 已產，`benchmark-macro-junit4` 驗
+- [ ] **AAB 大小：base split ≤ 40 MB、per-density split ≤ 15 MB** — Play Store 150 MB 上限前緩衝
+- [ ] **APK bundle size regression ≤ +5%** — 每 PR 由 CI diff 出歷史對照；超過需 justification
+- [ ] **60 fps sustained on mid-tier device** — Pixel 5 等效機種主要 flow 無 jank frame > 16 ms 比例 < 1%
+- [ ] **R8 full mode 啟用 + resource shrinking = true** — `android.enableR8.fullMode=true` 必開
+- [ ] **ProGuard / R8 keep rules 最小集** — grep `-keep class \*\*` 應為 0；每條 keep 指向具體 reflection 使用點
+- [ ] **Crash-free users ≥ 99.5%** — Firebase Crashlytics proxy，連兩週低於即 rollback
+- [ ] **Play pre-launch report 0 high-severity issue** — low-memory crash / a11y violation 必修完才能 promote production track
+- [ ] **TalkBack smoke 通過 + focus order 正確** — 對齊 `mobile-a11y.skill.md` 的 Android 條款
+- [ ] **Touch target ≥ 48 × 48 dp 合規率 = 100%**（Material guideline + WCAG 2.5.8 AA）
+- [ ] **Signing via P3 secret_store HSM + Play upload key** — 無 keystore password 於 `build.gradle.kts`
+- [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
+
 ## Anti-patterns（禁止）
 - `GlobalScope.launch { ... }`（lifecycle 失控）— 改用 `viewModelScope` / `lifecycleScope`
 - 在 Compose `@Composable` 函式內副作用未包 `LaunchedEffect` / `DisposableEffect` / `rememberCoroutineScope`

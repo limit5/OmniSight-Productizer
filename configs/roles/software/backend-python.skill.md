@@ -82,6 +82,27 @@ description: "Python 3.11+ backend engineer for FastAPI / Django / Flask service
 - 記憶體（idle worker）：FastAPI worker ≤ 80 MiB、Django ≤ 120 MiB
 - Benchmark 回歸（opt-in `--benchmark=on`）：`pytest-benchmark` 結果寫入 `test_assets/benchmarks/<module>.json`
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Coverage ≥ 80%**（`COVERAGE_THRESHOLDS["python"]` = 80%；`pytest --cov=src --cov-fail-under=80`）— 低於擋 PR
+- [ ] **pytest 0 failure / 0 error**；warning 走 `filterwarnings` 顯式分類
+- [ ] **`ruff check .` + `ruff format --check .` 0 error**（取代 black + isort + flake8）
+- [ ] **`mypy --strict src/` 或 `pyright --strict` 0 error** — async function 必 annotate return type
+- [ ] **啟動時間**：FastAPI ≤ 1.5s / Django ≤ 3s / Flask ≤ 0.8s（cold, uvicorn/gunicorn 預熱前）
+- [ ] **Idle worker RSS**：FastAPI ≤ 80 MiB / Django ≤ 120 MiB
+- [ ] **Alembic migration 雙向可跑**（`upgrade head` + `downgrade -1`）— 單向 migration 擋 PR
+- [ ] **OpenAPI spec 自動匯出**（FastAPI `/openapi.json` / drf-spectacular `schema.yml`）
+- [ ] **Dockerfile multi-stage**，final 走 distroless — 不含 build tool
+- [ ] **Lockfile 已 commit**（`uv.lock` / `poetry.lock` / `requirements.lock`）+ 與 `pyproject.toml` 一致
+- [ ] **X4 license scan 0 禁用 license**（`pip-licenses --format=json`；GPL/AGPL 預設禁）
+- [ ] **`pip-audit` / `safety` 0 high / 0 critical CVE**
+- [ ] **0 `print()` 殘留在 production path**（grep 驗）— 走 `logging.getLogger(__name__)` + JSON formatter
+- [ ] **Benchmark regression ≤ 10%**（opt-in `pytest-benchmark`，寫入 `test_assets/benchmarks/`）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 同步 endpoint 直接呼叫 `time.sleep()` / blocking IO（async server 整個 event loop 卡住）— 改 `asyncio.sleep` 或丟 thread pool
 - 在 FastAPI route 內 `Session(engine)` 手動建立連線 — 改 `Depends(get_db)`

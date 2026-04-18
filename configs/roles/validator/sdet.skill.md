@@ -61,3 +61,21 @@ description: "Software test engineer for test automation, coverage analysis, and
 - 所有 public API 須有對應的測試案例
 - 測試須可在 CI 環境中無人值守執行
 - 測試失敗須有清晰的錯誤訊息和重現步驟
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **X1 per-language coverage threshold** — Python ≥ 80% / C++ ≥ 75% / TS ≥ 80%（branch coverage，不是 line）
+- [ ] **Test pyramid: unit ≥ 80% / integration ≥ 60% / e2e ≥ 20% critical journey** — 倒三角視為慢性自殺
+- [ ] **Flakiness rate < 1% over 7-day window** — 滾動七天失敗率 ≥ 1% 自動進 quarantine + 開 P1 issue
+- [ ] **Full suite p95 runtime ≤ 60 min** — 超標 → 平行化 / shard / 冷熱分層，不得放寬
+- [ ] **Public API contract tests 到位** — 每個 public API schema change 由 pact / openapi-diff 把關
+- [ ] **Deterministic fixtures 100%** — `freeze_time` / seeded RNG / 固定 timezone，依賴 wall-clock 視為 flaky risk
+- [ ] **Bug fix 必配 regression test** — 無 regression test 的 fix 不得 merge
+- [ ] **Test 獨立性驗證** — `pytest -p no:randomly --reverse` 能過才算獨立，依賴順序視為 bug
+- [ ] **`@pytest.mark.skip("flaky")` 無 owner + deadline 不得存在** — skip 必附 issue + owner
+- [ ] **`test_assets/` 讀寫保護**（CLAUDE.md L1）— 測試寫 test_assets 視為作弊，CI 阻斷
+- [ ] **pre-commit hook 不得 `--no-verify`** — CLAUDE.md 禁
+- [ ] **CI green 為唯一信號** — 「在我本機會過」不被接受
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

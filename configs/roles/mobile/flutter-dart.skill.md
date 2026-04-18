@@ -77,6 +77,31 @@ description: "Cross-platform engineer for Flutter 3.22+ / Dart 3.4+ apps targeti
 - 啟動時間：`flutter run --profile` 啟動 first frame ≤ 2 s（中階機）
 - Null-safety 完整（`dart migrate` 已完成；無 `// @dart=2.x` legacy pragmas）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`flutter analyze` 0 error、0 warning** — baseline 為 `flutter_lints` + `very_good_analysis`；warning 視同 fail
+- [ ] **`dart format --set-exit-if-changed .` 綠** — format drift 即退件
+- [ ] **Dart 單元 + widget 測試覆蓋率 ≥ 70%** — `flutter test --coverage` + `lcov` 驗；對齊 P2 simulate-track
+- [ ] **Integration test 0 crash** — `integration_test/app_test.dart` 冷啟動 → 主要 flow → 前背景切換全綠
+- [ ] **AOT compile 綠 on iOS + Android** — `flutter build ipa --release` + `flutter build appbundle --release` 雙平台皆成功
+- [ ] **Golden test diff ≤ 0.02** — `flutter test --update-goldens` 後 CI 驗 pixel diff ratio ≤ 2%
+- [ ] **Cold-start first frame ≤ 2 s on 中階機** — `flutter run --profile` 量測；> 2 s 退件
+- [ ] **iOS .ipa ≤ 30 MB（release + bitcode stripped）** — App Store thinning 後 slice size
+- [ ] **Android .aab base split ≤ 25 MB** — Play upload size budget
+- [ ] **App size regression ≤ +5%** — 每 PR 由 CI diff；超過需 justification
+- [ ] **60 fps sustained on mid-tier device** — DevTools Performance overlay 無 red raster bar；> 16 ms frame < 1%
+- [ ] **Impeller renderer 啟用 + jank perf 驗證** — iOS 預設；Android 3.22+ opt-in 需 perf diff 佐證
+- [ ] **`AsyncValue` loading / error / data 三態完整率 = 100%** — 只處理 data = 退件
+- [ ] **Crash-free users ≥ 99.5%** — Sentry / Firebase Crashlytics proxy；連兩週低於即 rollback
+- [ ] **TalkBack + VoiceOver smoke pass** — 對齊 `mobile-a11y.skill.md`；每個 `Semantics(label:)` 有值
+- [ ] **Touch target ≥ 44 pt（iOS）/ 48 dp（Android）合規率 = 100%**
+- [ ] **i18n bundle 覆蓋率 = 100%** — 所有 view-layer string 走 `AppLocalizations.of(context).x`；英文 hardcode = 0
+- [ ] **Null-safety 完整（無 `// @dart=2.x` legacy pragmas）** — `dart migrate` 已完成
+- [ ] **Signing via P3 secret_store（iOS 簽章 + Android keystore）** — `android/key.properties` 無明文
+- [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
+
 ## Anti-patterns（禁止）
 - `setState` 於大型樹（> 50 widget 的 subtree）— 改用 Riverpod / Bloc 精準重建
 - `BuildContext` 跨 `async` gap 使用（先存 `mounted` 檢查 + `if (!mounted) return`）

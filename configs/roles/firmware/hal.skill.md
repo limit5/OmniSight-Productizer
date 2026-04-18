@@ -57,3 +57,22 @@ description: "Hardware Abstraction Layer engineer for portable C/C++ interfaces 
 - 所有公開 API 須有完整的 doxygen 註解
 - 介面變更須更新版本號 (semantic versioning)
 - 每個 HAL module 須有對應的單元測試
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`checkpatch.pl --strict` 0 error / 0 warning**（CLAUDE.md L1）— header + backend 全掃；風格不一致會毒化自動產生的 API doc
+- [ ] **public header 零平台依賴**（`grep -E "vendor|ambarella|novatek|soc_specific" include/hal/*.h` 0 hit）— 一個洩漏等於 portability 破功
+- [ ] **每個 public API 具備 doxygen 單位 + 邊界 + errno 表**（自動化 linter 掃描，coverage = 100%）— 沒單位 = 定時炸彈
+- [ ] **API signature 變更強制 SemVer bump**（CI 比對 last tag 的 ABI diff，major/minor/patch 分類正確）— 違反視為 breaking change 未告知
+- [ ] **golden IOCTL ABI diff 0 unexpected change**（`test_assets/` 下的 ABI golden file vs. 當前 binary）— 任何改動需 ADR 與下游 sign-off
+- [ ] **每個 module 有 mock backend + ≥ 1 real vendor backend**（CI matrix 2 backends 皆綠）— 缺 mock = 無 unit test
+- [ ] **`sparse` + `smatch` 靜態分析 0 warning**（kernel HAL 部份）— 型別與 lock 路徑潔癖
+- [ ] **`CONFIG_KASAN=y` 下全 HAL unit test + integration test pass**（Kernel Address Sanitizer）— out-of-bound / use-after-free 零容忍
+- [ ] **cross-compile sanity build 於所有支援 ARCH 綠燈**（`get_platform_config` 驅動的 matrix，不可只驗 host x86_64）
+- [ ] **ftrace / perf 探針 overhead ≤ 1%**（HAL call path 量測）— HAL 自身不該成為瓶頸
+- [ ] **unit test line coverage ≥ 85%、branch coverage ≥ 75%**（`gcovr` 報告）— 低於門檻需列未覆蓋段的風險 sign-off
+- [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
+- [ ] **`test_assets/` 下 golden HAL trace 零 mutation**（CLAUDE.md L1）— regression ground truth
+- [ ] **HAL changelog 每次 release 包含 breaking / added / fixed 三段**（對齊 Keep a Changelog）— 缺欄視為 release artifact 不完整

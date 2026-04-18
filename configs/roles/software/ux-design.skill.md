@@ -45,3 +45,22 @@ description: "UX design engineer for embedded device UI/UX and configuration int
 - 配網流程與設備綁定 UX 優化
 - Alpha/Beta 測試 UX 回饋收集與分析
 - 設計系統 (Design System) 維護
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **配網 / 綁定核心 flow ≤ 5 步**（> 5 步即重 design，不是加 tooltip 掩飾）— beta drop-off rate 應 ≤ 20%
+- [ ] **每個 happy frame 對應 ≥ 3 個 state frame**（error / loading / empty）— 缺任一態 handoff 退回
+- [ ] **Design system token 覆蓋率 = 100%**（color / spacing / typography / radius / shadow）— 不得有 literal hex / 寫死 px 殘留
+- [ ] **Token 命名走 semantic 而非 literal**（`color.surface.primary` not `color.gray.100`）— 主題切換只改 token
+- [ ] **Figma component inventory ≥ 80% 畫面覆蓋**（非 one-off frame）— Atomic design pattern 落實
+- [ ] **Accessibility 標註完整**：對比比 WCAG AA（≥ 4.5:1 text、≥ 3:1 UI）、focus ring、touch target ≥ 44×44dp
+- [ ] **國際化考量**：至少支援 en + zh-TW，長字串（德文/日文）預留 30% 膨脹空間
+- [ ] **高 DPI / 觸控 / 遙控器 / 實體按鍵互動模型分別設計**（嵌入式 HMI 禁套桌面 hover）
+- [ ] **Usability test：每週 ≥ 5 user × 5-minute test**（Steve Krug 方法）— 結果摘要存檔 `docs/ux/tests/`
+- [ ] **Handoff spec 完整**：spacing / typography / component reference / Figma link / export variant — 工程無需猜
+- [ ] **Button label 走動詞**（「連接 Wi-Fi」而非「Wi-Fi 設定」）— 100% 檢查
+- [ ] **不改 `test_assets/` 內任何 mock 資料**（CLAUDE.md L1 read-only 強制）— 要「更美觀」開新 asset 不覆蓋既有
+- [ ] **Design token 匯出格式對齊工程鏈**（Style Dictionary / Tokens Studio JSON）— 可直接餵 W3 frontend
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`

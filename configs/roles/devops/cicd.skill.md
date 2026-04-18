@@ -59,3 +59,23 @@ description: "CI/CD pipeline engineer for build automation, deployment, and rele
 - Docker 映像使用 multi-stage build 最小化
 - 所有 secrets 透過 CI/CD variables，禁止明文
 - Build artifacts 有版本號和 SHA 標記
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Pipeline latency (PR open → merge-candidate artifact) p95 ≤ 15 min**（常規 build）— Pipeline IS the contract；超標視為 velocity incident
+- [ ] **Cache hit rate ≥ 80%** on warm branch builds（自家 CI stats dashboard）— 低於門檻代表 cache key 設計錯誤
+- [ ] **Flaky test detection：任何 test 連 7 天出現綠紅交替 ≥ 2 次自動標 `flaky` + P1 issue**（零容忍 rerun 文化）
+- [ ] **`.github/workflows/*.yml` / `.gitlab-ci.yml` 通過 `actionlint` + `yamllint` 零 error**（每次 push 必跑）
+- [ ] **Secret scan 綠燈**（`gitleaks` + `trufflehog` 雙工具，history 全掃）— CLAUDE.md L1：secrets in code = already leaked
+- [ ] **Cross-compile 100% 透過 `get_platform_config` 提供的 toolchain**（CLAUDE.md L1 compilation rule）— 系統 gcc 出現在 CI log 視為違規
+- [ ] **有 CMake toolchain file 時必用 `-DCMAKE_TOOLCHAIN_FILE=...` + `--sysroot=...`**（CLAUDE.md L1）
+- [ ] **Multi-stage Dockerfile 所有 final image size ≤ 200 MB**（`docker images --format "{{.Size}}"` 量測）— 超標需 review builder vs. runtime 邊界
+- [ ] **所有 production image tag 為 semver 或 git SHA，零 `latest`**（`kubectl get pods -o yaml` 驗證）
+- [ ] **SBOM 每次 release 自動產生**（`syft` 或 `cyclonedx-cli`；artifact 上傳 registry）— 無 SBOM 不得 release
+- [ ] **Deployment rollback drill 季度 ≥ 1 次且 ≤ 60 s 內完成**（blue/green 或 canary）— 沒演練的 rollback = 沒 rollback
+- [ ] **Blue/green switchover ≤ 60 s**（traffic ramp 含 health-check gate）
+- [ ] **`--no-verify` / force-push master 出現次數 = 0**（CLAUDE.md L1 禁止）— audit log 季度盤
+- [ ] **Commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
+- [ ] **Pipeline 超過 15 min 須附 profile 報告 + 改善計畫**（非單純放著爛）

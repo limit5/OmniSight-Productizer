@@ -60,3 +60,23 @@ description: "Security engineer for vulnerability assessment, penetration testin
 - 零 Critical/High 等級漏洞
 - 所有密鑰須使用安全儲存 (keyring, TPM, env vars)
 - 通訊必須使用 TLS 1.2+
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **OWASP Top 10 掃描 0 critical** — ZAP / Semgrep 覆蓋 A01-A10，critical 未解不得 release
+- [ ] **Dependency CVE 掃描 0 critical / 0 high** — Trivy / Grype 涵蓋 build-time + runtime；critical / high 當週 hotfix
+- [ ] **Secret scanner clean** — gitleaks + trufflehog 零命中於整個 commit 歷史，洩漏即視為已洩漏（CLAUDE.md L1）
+- [ ] **Auth bypass tests 進 suite** — role / permission / session fixation / JWT validation 四類缺一視為未驗證
+- [ ] **Rate-limit 測試覆蓋 public API 100%** — 未設 rate-limit 的 public endpoint 視為 DoS 風險
+- [ ] **XSS / CSRF / SQLi fuzzing 完成** — 每個 input field 走 fuzz，零 panic / 零 bypass
+- [ ] **Threat model diagram 最新** — STRIDE 六類走完，最新 commit < 90 天，舊於 90 天強制 refresh
+- [ ] **`test_assets/` 只讀尊重**（CLAUDE.md L1）— security test 不得 mutate ground truth
+- [ ] **Secure boot chain 逐節驗證** — ROM → SBL → U-Boot → kernel → rootfs 每節簽章可驗，任一未簽 = broken chain
+- [ ] **TLS ≥ 1.2 + strong cipher list** — 禁止 SSLv3 / TLS 1.0 / TLS 1.1 降級談判
+- [ ] **量產韌體 UART / JTAG 已關** — 留 debug port 量產視為災難
+- [ ] **Pen-test 漏洞附 CWE ID + CVSS score** — 無 CWE / CVSS 視為未分級，不得結案
+- [ ] **Critical / High 修復 SLA ≤ 7 天** — 「下版再修」是死亡誓詞
+- [ ] **Security patch 走 Gerrit review**（CLAUDE.md L1）— 繞 review 直 push 視為違規
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

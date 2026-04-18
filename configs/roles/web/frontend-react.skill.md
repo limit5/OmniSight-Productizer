@@ -70,6 +70,24 @@ description: "Frontend engineer for React / Next.js / Remix applications with W2
 - 每個 Client Component 必須能在 React StrictMode 下雙次渲染不炸
 - `useEffect` cleanup 必寫，避免記憶體洩漏
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Lighthouse Performance ≥ 80**（`LIGHTHOUSE_MIN_PERF`）— W2 simulate-track 閘門；< 80 hard fail
+- [ ] **Lighthouse Accessibility ≥ 90**（`LIGHTHOUSE_MIN_A11Y`）— 對齊 `web-a11y` role 交付
+- [ ] **Lighthouse SEO ≥ 95**（`LIGHTHOUSE_MIN_SEO`）— 對齊 `web-seo` role 交付
+- [ ] **Bundle size ≤ profile `bundle_size_budget`** — static 500 KiB / SSR-Node 5 MiB / CF 1 MiB / Vercel 50 MiB；單檔 ≤ budget / 2
+- [ ] **Bundle-analyzer PR diff ≤ +5 KiB** — 非必要情況下 bundle 只減不增；超出需 reviewer 明確核准
+- [ ] **CWV P75：LCP < 2.5s / INP < 200ms / CLS < 0.1** — `backend/observability/vitals.py` 以 RUM 為準
+- [ ] **TypeScript `strict: true` + `tsc --noEmit` 0 error** — `any` / `@ts-ignore` 必附 TODO 與 issue 連結
+- [ ] **React StrictMode 雙次渲染 0 warning** — 每個 Client Component 必通過
+- [ ] **`useEffect` cleanup 100% 覆蓋** — 所有 subscription / timer / AbortController 都要 return cleanup fn
+- [ ] **Server Component 0 client-only import** — build 期 lint；`window` / `localStorage` 於 SSR → hard fail
+- [ ] **Cold-start SSR TTFB ≤ 500ms**（Next.js App Router / Node adapter）— 超出需 edge cache / streaming SSR
+- [ ] **LCP asset preloaded** — hero image / above-the-fold asset 必有 `<link rel="preload">` 或 `fetchpriority="high"`
+- [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 用 `useEffect` 做 data fetching（改用 Server Components / TanStack Query）
 - `any` 型別、`@ts-ignore` 而不附 TODO

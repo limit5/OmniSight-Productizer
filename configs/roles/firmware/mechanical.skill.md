@@ -47,3 +47,22 @@ description: "Mechanical design engineer for enclosure, thermal management, and 
 - DFM（可製造性設計）評估
 - 3D 列印原型與工程樣機組裝
 - 鏡頭模組與 PCB 的機構干涉排除
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **STEP / STP 3D model + 2D drawing 具備完整 GD&T 標註**（ASME Y14.5）— 無公差標註的圖紙 = 給模廠猜
+- [ ] **Tolerance stack-up 報告（worst-case + RSS 兩版）關鍵尺寸 ≤ ±0.1 mm**（鏡頭光軸 / O-ring 槽 / 連接器對位）— 只交 nominal 視為未驗收
+- [ ] **IP rating 驗證：宣稱 IP67 必通過 IP68 測試**（1 m 水深 30 min、sand+dust 8 h）— spec 當地板不當天花板
+- [ ] **熱設計 Tj ≤ T_max − 15°C derating margin**（SoC peak workload + 55°C ambient，實測 thermal resistance）— typical TDP 不算數
+- [ ] **Vibration FEA + 實測：正弦 5–500 Hz、3-axis 隨機 6 Grms 2 h 無共振破壞**（IEC 60068-2-6）
+- [ ] **Drop test 1.2 m × 6 面 × 3 次：無結構破壞 + 功能正常**（MIL-STD-810G）
+- [ ] **Thermal shock -20°C ↔ 70°C × 100 cycle：無開裂 / O-ring 無永久變形**
+- [ ] **DFM review checklist 全項 sign-off**（拔模角 ≥ 1°、主壁厚均勻 ±10%、肋位 ≤ 0.6× 主壁厚避免縮水痕）
+- [ ] **BOM 總成本 ≤ 目標單價**（主管核定 budget；每個成本超標元件須附替代方案評估）
+- [ ] **模具 T0 前所有塑膠件標註脫模方向 + 收縮率（ABS 0.5% / PC 0.6% / PA+GF 0.3%）**— 缺則模廠自行假設、T1 就歪
+- [ ] **鏡頭模組公差 X/Y/Z 三軸齊標，Z (focus shift) ≤ ±30 µm**（CRA 與像面距）— 產線人工調焦成本關鍵
+- [ ] **戶外實地驗證 ≥ 30 天**（太陽直曬 + 雨 + 沙塵；非僅 lab 溫箱）— 對齊核心信念 3
+- [ ] **`test_assets/` 下 drop / vibration golden waveform 零 mutation**（CLAUDE.md L1）— regression ground truth
+- [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail

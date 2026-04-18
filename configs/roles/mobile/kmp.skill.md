@@ -89,6 +89,27 @@ description: "Kotlin Multiplatform engineer sharing business logic (optionally U
 - 序列化對 Swift 側可用（`kotlinx.serialization` 產出的 model 在 iOS 側能以 `KotlinxSerialization` 或透明 bridging 消費）
 - Memory model：Kotlin/Native 新 memory model 確保啟用（K2 預設）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`./gradlew :shared:build` 綠（含 iOS targets）** — 失敗不能 ship
+- [ ] **`./gradlew :shared:assembleXCFramework` 產物完整** — 含 `ios-arm64` + `ios-arm64_x86_64-simulator` 雙 slice
+- [ ] **`./gradlew :shared:allTests` 綠** — JVM + iOS simulator + android unit 三 target 都跑
+- [ ] **共用測試覆蓋率 ≥ 70%（commonMain + commonTest）** — `kotlin-test` + Jacoco (androidJvm) + Xcode coverage (iosSimulatorArm64)
+- [ ] **`expect` / `actual` 對稱性 = 100%** — 每個 `expect` 在所有宣告的 platform target 都有 `actual`；CI grep gate
+- [ ] **commonMain 平台洩漏 = 0** — grep `import java\.` / `import android\.` / `import platform\.` 在 commonMain 應為 0
+- [ ] **Kotlin 嚴格模式 compile 綠** — `-Werror` + `-Xexplicit-api=strict` + K2 compiler
+- [ ] **detekt + ktlint 0 error** — 專案根 `detekt.yml` 設 `max-issues: 0`
+- [ ] **Kotlin/Native binary size delta ≤ 2 MB per new dep** — 每 PR 由 CI diff；超過需 justification
+- [ ] **xcframework slice 總大小 ≤ 15 MB（release, arm64）** — 過大代表 unused code 未 tree-shake
+- [ ] **Swift 側 ergonomic score ≥ 90%** — `KotlinArray<KotlinInt>` / `KotlinUnit` / completion-handler noise 比例 < 10%；必要時用 SKIE / KMP-NativeCoroutines
+- [ ] **suspend fn 跨 Swift 邊界用 SKIE / KMP-NativeCoroutines 比例 = 100%** — iOS 側不出現 `runBlocking` 呼 suspend
+- [ ] **Kotlin/Native 新 memory model 啟用驗證** — K2 預設啟用；專案設定 explicit
+- [ ] **純 coroutines + Flow，shared 無 `CompletableFuture` / RxJava** — grep 於 commonMain 應為 0
+- [ ] **Android host app + iOS host app 仍遵守各自 role skill** — 對齊 `android-kotlin.skill.md` / `ios-swift.skill.md` 條款
+- [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
+
 ## Anti-patterns（禁止）
 - 在 `commonMain` 直接 `import java.util.Date`（改 `kotlinx.datetime.Instant`）
 - `actual` 實作兩側邏輯差太遠（應該 API 表面一致，只換底層）— 若行為真的差異大，該抽兩個 `expect`

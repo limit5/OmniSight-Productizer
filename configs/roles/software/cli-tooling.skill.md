@@ -97,6 +97,30 @@ description: "Cross-language CLI tooling engineer for Cobra (Go) / Clap (Rust) /
 - 退出碼有文件化（`--help` 或 README 對應表）
 - Signal handling：SIGINT 走 graceful shutdown（不可 dangling resource）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **三大 flag 齊全**：`--version` / `--help` / `--json`（`tool --json | jq .` 驗合法 JSON）— 缺一擋 PR
+- [ ] **`--version` 印 `{name} {semver} ({git_sha})`**（build-time inject）
+- [ ] **`--help` 含 example section**（非僅 flag list）
+- [ ] **Happy path exit code = 0** / usage error = 2 / SIGINT = 130 / generic error = 1（文件化於 `--help` epilog）
+- [ ] **Cold start**：Go/Rust binary ≤ 50ms / Node pkg ≤ 200ms / Python pyinstaller ≤ 400ms / GraalVM native ≤ 50ms
+- [ ] **Binary 大小**：Go ≤ 20 MiB / Rust ≤ 8 MiB / Node pkg ≤ 50 MiB / Python pyinstaller ≤ 25 MiB / GraalVM ≤ 30 MiB
+- [ ] **Coverage 對應 host language**：Python 80% / Go 70% / Rust 75% / Node 80% / Java 70%（X1 `COVERAGE_THRESHOLDS`）
+- [ ] **Shell completion ≥ bash + zsh 產出且可 source**（framework 內建）
+- [ ] **Cross-platform build smoke ≥ 2 target**（Linux x86_64 + 一個 arm64 / Windows / macOS）
+- [ ] **Signal handling**：SIGINT → graceful cleanup，0 dangling temp file / lock（自動化測）
+- [ ] **`--quiet` 模式完全靜音**（無 progress bar / 無 log）
+- [ ] **CI non-TTY 環境不卡互動 prompt**（`--yes` / `--non-interactive` 旁路測過）
+- [ ] **`--debug` 不印 secret**（API key / password / token redact 驗證）
+- [ ] **`exec` / `system` 呼叫走 argv array**（無 shell string 拼接）— 0 command injection surface
+- [ ] **Stdout 純 data，stderr 純 log**（`tool | jq .` pipeline 不汙染）
+- [ ] **X3 release adapter `check` 通過**（goreleaser / cargo-dist / pkg / pyinstaller）
+- [ ] **X4 license scan 通過**（go-licenses / cargo-license / license-checker / pip-licenses）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 在 `--help` 輸出中印 emoji / 特殊字元 — CI / SSH 環境可能亂碼
 - `os.exit(1)` / `panic()` 直接結束，不執行 deferred cleanup（Go: `defer` 不會跑；Rust: drop 不會跑）

@@ -85,6 +85,27 @@ description: "Go 1.22+ backend engineer for gin / fiber / net/http / gRPC servic
 - Memory（idle）：≤ 30 MiB RSS
 - gRPC：所有 proto 走 `buf lint` + `buf breaking`（避免 wire-incompatible 變更）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Coverage ≥ 70%**（`COVERAGE_THRESHOLDS["go"]` = 70%；X1 software simulate-track 門檻）— 低於擋 PR
+- [ ] **`go test -race -count=1 ./...` 0 failure**（race detector 必開）— concurrent bug 沒測過 = 沒測
+- [ ] **`go vet ./...` 0 issue**
+- [ ] **`golangci-lint run` 0 issue**（gosec + staticcheck + errcheck + revive preset）
+- [ ] **`gofmt -s -d .` + `goimports -d .` 0 diff**
+- [ ] **`go mod tidy` 後 0 diff**（lockfile 乾淨）
+- [ ] **Binary (stripped) ≤ 25 MiB**（API server；`CGO_ENABLED=0 -ldflags "-s -w"`）
+- [ ] **Cold start ≤ 200ms**（standalone binary）
+- [ ] **Idle RSS ≤ 30 MiB**
+- [ ] **OpenAPI / proto schema 匯出到 `api/`**（N3 governance 對齊）
+- [ ] **gRPC `buf lint` + `buf breaking` 0 error**（wire-compatible 保證）
+- [ ] **Dockerfile multi-stage，final 走 `scratch` 或 `distroless/static`** — 不留 build tool
+- [ ] **X4 license scan：`go-licenses report ./...` 0 禁用 license**（GPL/AGPL 預設禁）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃過 PR diff）
+- [ ] **Cross-build smoke ≥ 2 target**（linux/amd64 + darwin/arm64 或 linux/arm64）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、SoC target 走 `get_platform_config` toolchain、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - `panic()` 當 error handling — 走 `error` 回傳（library code）；`panic` 只用於 main / init 不可恢復狀態
 - `_ = err` 吞 error — checkstyle errcheck 會擋

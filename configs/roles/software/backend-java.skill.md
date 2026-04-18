@@ -87,6 +87,28 @@ description: "JVM 21 LTS backend engineer for Spring Boot 3 / Quarkus 3 services
 - 記憶體（idle）：Spring Boot ≤ 256 MiB / Quarkus JVM ≤ 128 MiB / Quarkus native ≤ 50 MiB
 - Jar 大小：fat jar ≤ 80 MiB（以 Spring Boot 3 baseline；過大要做 layered jar 拆分）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Coverage ≥ 70%**（`COVERAGE_THRESHOLDS["java"]` = 70%；JaCoCo branch + line）— 低於擋 PR
+- [ ] **JUnit 5 0 failure**，`@Disabled` 必附 issue 連結 + sunset 日期
+- [ ] **`mvn verify` / `gradle check` 0 error**（含 spotbugs / checkstyle / PMD）
+- [ ] **`mvn spotless:check` 0 diff**（Google Java Style 或 Palantir Java Format）
+- [ ] **OWASP Dependency Check 0 high / 0 critical CVE** — 有即擋 release
+- [ ] **啟動時間**：Spring Boot ≤ 5s / Quarkus JVM ≤ 2s / Quarkus native ≤ 100ms
+- [ ] **Idle RSS**：Spring Boot ≤ 256 MiB / Quarkus JVM ≤ 128 MiB / Quarkus native ≤ 50 MiB
+- [ ] **Fat jar ≤ 80 MiB**（超過 layered jar 拆分）
+- [ ] **Constructor injection 100%**（無 `@Autowired` field）— 可靜態 grep 驗
+- [ ] **Flyway / Liquibase migration 可 forward + rollback**（雙向驗證）
+- [ ] **OpenAPI spec 匯出**（SpringDoc / Quarkus SmallRye OpenAPI）
+- [ ] **`application.yaml` 0 明文密碼 / token**（走 env + Vault）
+- [ ] **`actuator/health` + `actuator/metrics` 啟用**（P10 觀測性對齊）
+- [ ] **Container image 走 buildpacks 或 Quarkus container build**（非手寫 Dockerfile with tool leftover）
+- [ ] **X4 license scan 0 禁用 license**（`mvn license:aggregate-third-party-report`）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - `Thread.sleep()` 於 reactive chain — 改 `Mono.delay()` / virtual thread
 - 同步 blocking call 於 WebFlux handler（卡 reactor 事件迴圈）

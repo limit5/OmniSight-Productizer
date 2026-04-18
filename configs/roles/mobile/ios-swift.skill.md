@@ -75,6 +75,31 @@ description: "iOS engineer for Swift 5.9+ apps (SwiftUI/UIKit/Combine) aligned w
 - 啟動時間：冷啟動 p95 ≤ 1.5 s（`POSIX DYLD_PRINT_STATISTICS=1` 或 MetricKit `MXAppLaunchMetric`）
 - 無障礙：所有互動元件皆設 `accessibilityLabel` / `accessibilityHint`（詳見 `configs/roles/mobile/mobile-a11y.skill.md`）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`xcodebuild -sdk iphoneos -configuration Release` 0 warning** — `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES` 打開；warning = fail
+- [ ] **Swift strict concurrency 0 warning**（Swift 6 `complete` on new files）— `@unchecked Sendable` 皆附 justification
+- [ ] **XCTest 單元測試覆蓋率 ≥ 70%** — `SWIFT_LINE_COVERAGE=YES` + `xcrun xccov view --report` 驗
+- [ ] **XCUITest smoke 0 crash** — 啟動 → 登入（mock）→ 主要 flow → 登出全綠
+- [ ] **截圖 matrix ≥ 3 機型 × 2 locale** — iPhone SE / iPhone 15 / iPhone 15 Pro Max × en / zh-Hant
+- [ ] **Cold-start p95 ≤ 1.5 s** — MetricKit `MXAppLaunchMetric` 或 `DYLD_PRINT_STATISTICS=1` 量測
+- [ ] **主要 flow resident memory ≤ 150 MB** — Instruments Allocations 穩態驗
+- [ ] **.ipa 單 slice App Thinning 後 ≤ 60 MB** — App Store 4G download limit 200 MB 前緩衝
+- [ ] **IPA size regression ≤ +5%** — 每 PR 由 CI diff；超過需 justification
+- [ ] **60 fps sustained on iPhone SE 3rd gen** — Instruments Core Animation > 16 ms frame < 1%
+- [ ] **`swiftlint` 0 error + `-warnings-as-errors` compile** — lint config 在 repo，CI gate
+- [ ] **Privacy Manifest `PrivacyInfo.xcprivacy` 列齊 required reason APIs** — Apple 2024 policy；缺 = binary rejection
+- [ ] **Apple notarized + TestFlight 可上傳** — `notarytool submit` 回 `Accepted`
+- [ ] **Crash-free users ≥ 99.5%** — MetricKit `MXCrashDiagnostic` / Sentry proxy；連兩週低於即 rollback
+- [ ] **VoiceOver smoke pass + focus order 正確** — 每個互動元件 `accessibilityLabel != nil && != ""`
+- [ ] **Touch target ≥ 44 × 44 pt 合規率 = 100%**（Apple HIG）
+- [ ] **無 `print(...)` 於 Release build** — 改用 `os.Logger` + privacy level
+- [ ] **Info.plist 權限字串已本地化至所有支援語系** — NSCameraUsageDescription 等
+- [ ] **簽章材料走 P3 secret_store HSM** — `.p12` / `.mobileprovision` 不進 repo
+- [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
+
 ## Anti-patterns（禁止）
 - 在 SwiftUI View 的 `body` 裡做副作用（`fetchData()` 直接呼叫）— 改用 `.task { ... }` 或 `@Observable` + 注入的 use-case
 - 強制展開 `!`（除 `IBOutlet`、單元測試斷言、`try!` 於已驗證資源以外的情境）

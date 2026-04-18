@@ -56,3 +56,20 @@ description: "Compliance reporter for FCC/CE/RoHS certification documentation"
 - 所有文檔須引用對應的標準條款號
 - 硬體規格須從 hardware_manifest.yaml 讀取，禁止手動填寫
 - 使用結構化格式 (markdown table) 以利自動化處理
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **SBOM 產出率 100%** — 每個 release artifact 必附簽章 SBOM（SPDX / CycloneDX），缺則 release 凍結
+- [ ] **License scan 0 禁用 license** — `pip-licenses` / `cargo-license` / `license-checker` 掃出 GPL / AGPL default deny，違者進 legal review 才放行
+- [ ] **CVE scan 0 critical / 0 high** — Trivy / Grype 掃 runtime 與 build-time 依賴；critical / high 未解不得送認證
+- [ ] **SBOM 關鍵欄位 100% 填滿** — purl / vuln / license / supplier 四欄缺一視為 SBOM 無效
+- [ ] **Compliance matrix traceability = 1.0** — 每條 compliance claim 必能 chain 回 requirement ID → clause → test case → measured value，缺一格退稿
+- [ ] **Export-control flags 覆蓋率 100%** — ECCN / HS code / dual-use 標記每個 release 逐項勾，無標視為未分類
+- [ ] **GDPR / PIPL data inventory 現況** — 每個 release 附最新 data-flow diagram + 資料類別分級，半年內必更新
+- [ ] **測試實驗室 accreditation ID 附於每條 claim** — ISO/IEC 17025 accreditation 缺 = 報告不被 authority 採信
+- [ ] **Raw data + measurement uncertainty 100% 留存** — 沒 uncertainty budget 的量測等於沒量測
+- [ ] **ROHS XRF 抽驗率 ≥ 供應商 CoC 10%** — 只靠 CoC 不抽驗就是合規造假風險
+- [ ] **spec 與 code behavior 一致性驗證** — 送測前必跑 X1 simulate-track 比對，drift > 0 不送測
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

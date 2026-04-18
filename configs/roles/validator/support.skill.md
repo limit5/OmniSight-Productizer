@@ -47,3 +47,22 @@ description: "Technical support engineer for issue triage, troubleshooting, and 
 - 現場 (Field) 問題除錯與回報
 - OTA 更新推播後的客戶回饋監控
 - 產品生命週期維護支援
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Ticket-to-fix loop time p95 ≤ 48h** — P1 客訴 48h 內需給出 fix ETA 或 workaround，超時視為 SLA breach
+- [ ] **Repro-script coverage ≥ 70% of P1 tickets** — 低於 70% 視為 engineering-ready handoff 品質不足
+- [ ] **Knowledge-base article freshness ≤ 90 天** — 超過 90 天未驗證 KB 文章標 stale，下季清理
+- [ ] **Auto-classifier precision ≥ 85%** — ticket 自動分類 precision < 85% 退回模型重訓
+- [ ] **Escalation-to-SEV path 測試通過** — 季度演練一次，未演練視為 DR 未驗證
+- [ ] **每個 ticket 附 `support/tickets/<YYYY-MM-DD>-<slug>.md`** — 現象 / 環境 / firmware SHA / serial / 客戶回饋五欄缺一不收案
+- [ ] **同模式 RMA ≥ 3 筆 escalate engineering** — 未 escalate 視為 signal 漏接
+- [ ] **OTA 後 48h 高頻監控** — 新 regression 未在 48h 內發現，視為監控失效
+- [ ] **客戶回覆零技術術語誤用** — "ISP noise floor" 直接丟給客戶視為不合格
+- [ ] **升級 case 附 repro steps + 影片 + log + FA** — engineering-ready 四件缺一，退回 support 重整
+- [ ] **客戶 PII 走 GDPR-compliant CRM** — personal email / 一般 Slack 存 PII 視為合規違規
+- [ ] **Hotfix 韌體必簽章** — 未簽韌體流出一台 = secure boot chain 崩壞
+- [ ] **Ticket 關閉必寫 root cause** — 無 root cause 視為未閉環，下季同問題再現
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

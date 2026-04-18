@@ -113,6 +113,29 @@ description: "Qt 6.7+ desktop engineer for native cross-platform apps (Windows/m
 - 記憶體（idle main window）：≤ 80 MiB（Qt Quick）/ ≤ 50 MiB（Qt Widgets）
 - DPI：所有 QML 走 `Qt.application.scaling`，所有 Widgets 設 `Qt.AA_EnableHighDpiScaling`
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **PySide6 Coverage ≥ 80%**（Python 規則；`pytest --cov=src`）— 低於擋 PR
+- [ ] **C++ Coverage ≥ 70%**（gcovr / lcov；對齊 Java baseline）
+- [ ] **`qmllint qml/*.qml` 0 warning**
+- [ ] **`clang-tidy` + `clang-format --dry-run --Werror` 0 issue**（C++）
+- [ ] **`ruff check .` + `mypy --strict` 0 error**（PySide6）
+- [ ] **`qmltestrunner` / `pytest-qt` 全綠**
+- [ ] **Cold start ≤ 1.5s (Qt Quick) / ≤ 800ms (Qt Widgets)**
+- [ ] **安裝包大小**：windeployqt ≤ 80 MiB / macdeployqt ≤ 100 MiB / AppImage ≤ 90 MiB
+- [ ] **Idle main window RSS ≤ 80 MiB (Qt Quick) / ≤ 50 MiB (Qt Widgets)**
+- [ ] **Deploy smoke ≥ 2 平台**（windeployqt / macdeployqt / linuxdeployqt 任二）
+- [ ] **`*.ts` 翻譯檔對齊 UI string**（`lupdate` 無 diff；`lrelease` 產 `*.qm` 進 resource）
+- [ ] **Qt6 版本鎖 ≥ 6.7 LTS**（`find_package(Qt6 ... REQUIRED)` 顯式 minimum version）
+- [ ] **X4 license scan：Qt LGPLv3 dynamic link 條款合規** 或 Qt Commercial license 明示 — 違反產品不能出貨
+- [ ] **高 DPI ≥ 2x screen 無模糊**（`devicePixelRatio` 適配測過）
+- [ ] **Code sign（macOS Developer ID / Windows Authenticode）走 P3 secret_store**
+- [ ] **PyQt6 / PySide6 不混用**（license / symbol 衝突）— CI grep 驗
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、SoC target 走 `get_platform_config` toolchain、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 同時用 PyQt6 + PySide6 — license 混亂、symbol 衝突
 - C++ 用 `new` 不配 `deleteLater` 或 parent ownership — 記憶體洩漏；走 Qt parent-child memory model

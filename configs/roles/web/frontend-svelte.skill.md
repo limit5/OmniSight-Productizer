@@ -68,6 +68,25 @@ description: "Frontend engineer for Svelte 5 / SvelteKit applications with W2 si
 - SSR 階段不能存取 `window` / `document`（Svelte 的 `browser` flag 是硬門檻）
 - Form Actions 必有 progressive enhancement（不預期 JS 存在）
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Lighthouse Performance ≥ 80**（`LIGHTHOUSE_MIN_PERF`）— W2 simulate-track 閘門；< 80 hard fail
+- [ ] **Lighthouse Accessibility ≥ 90**（`LIGHTHOUSE_MIN_A11Y`）— 對齊 `web-a11y` role 交付
+- [ ] **Lighthouse SEO ≥ 95**（`LIGHTHOUSE_MIN_SEO`）— 對齊 `web-seo` role 交付
+- [ ] **Bundle size ≤ profile `bundle_size_budget`** — static 500 KiB / SSR-Node 5 MiB / CF 1 MiB / Vercel 50 MiB；Svelte 產出通常有餘裕但仍需 `vite-bundle-visualizer` 巡檢
+- [ ] **CWV P75：LCP < 2.5s / INP < 200ms / CLS < 0.1** — `backend/observability/vitals.py` RUM P75
+- [ ] **TypeScript `strict: true` + `svelte-check` 0 error** — 所有 `+page.server.ts` load 附 `satisfies PageServerLoad`
+- [ ] **adapter 對齊 W1 profile** — `adapter-static` / `adapter-node` / `adapter-cloudflare` / `adapter-vercel` 一一對應；`adapter-auto` 上 production → hard fail
+- [ ] **SSR hydration mismatch 0 warning** — dev console 紅字 = PR block；`browser` flag / `onMount` 隔離 browser-only code
+- [ ] **Form Actions 100% progressive enhancement** — 所有 `<form>` 必附 `use:enhance` 且 JS 關閉仍能送出
+- [ ] **`+page.server.ts` 不洩漏 secret 至 client bundle** — 自動化 grep + runtime lint；server-only env 不可進 universal load
+- [ ] **`{@html}` 100% 消毒** — DOMPurify 或白名單 sanitizer，未消毒 → hard fail
+- [ ] **Cold-start SSR TTFB ≤ 500ms**（Node adapter）/ ≤ 300ms（CF edge）— 超出需 edge cache / streaming
+- [ ] **LCP asset preloaded** — hero image / above-the-fold asset 必有 `<link rel="preload">` 或 `fetchpriority="high"`
+- [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - Svelte 5 新程式碼使用 `export let` / `$:` / `store.subscribe`（改用 Runes + Rune 相容 store）
 - 用 `{@html}` 不附消毒（XSS 風險）

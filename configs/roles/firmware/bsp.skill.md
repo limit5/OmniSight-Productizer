@@ -81,3 +81,22 @@ make -j$(nproc)
 - 每個 commit 須包含硬體對應說明 (sensor model, I2C address, board name)
 - 模組載入/卸載須無 kernel panic 或 memory leak
 - 若使用 vendor SDK，編譯時嚴禁使用系統預設 GCC，必須使用 vendor toolchain
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **`checkpatch.pl --strict` 0 error / 0 warning**（CLAUDE.md L1）— 所有 kernel / U-Boot / driver patch 強制；違反直接退稿
+- [ ] **`make dt_binding_check` 綠燈**（kernel 內建 schema）— DTS 節點必對應 YAML binding doc，缺則 block merge
+- [ ] **交叉編譯 100% 走 `get_platform_config` 提供的 toolchain**（CLAUDE.md L1 compilation rule）— 系統 gcc 出現在 build log = 直接退稿
+- [ ] **若有 vendor CMake toolchain file 必用 `-DCMAKE_TOOLCHAIN_FILE=...` + `--sysroot=...`**（CLAUDE.md L1）— 缺任一等同繞過 toolchain
+- [ ] **boot-to-login ≤ 8 s**（U-Boot SPL 起算到 rootfs login prompt，SoC 常溫量測）— 超過需附 bootgraph 火焰圖分析
+- [ ] **kernel boot time ≤ 3 s**（`printk.time=1` 時間戳到 `Run /sbin/init`）— 用於判 defconfig 是否塞太多 driver
+- [ ] **`make olddefconfig` 0 interactive prompt**（CI sanity）— defconfig 穩定、新 kernel 版本不需人工補選
+- [ ] **U-Boot / Petalinux / Yocto build 可重現**（SOURCE_DATE_EPOCH 固定後 SHA 相同）— 供應鏈與 SBOM 前提
+- [ ] **module load/unload 壓測 1000 cycle 0 kernel panic / 0 memleak**（`kmemleak` scan 乾淨）— 量產 OTA 前必跑
+- [ ] **冷熱機驗證覆蓋 -10°C ~ 60°C**（真實量產 PCB，溫箱 log 存檔）— 僅 dev board 驗過不算交付
+- [ ] **bring-up log 附 register dump + 訊號波形截圖**（PMIC / clock / reset）— 純結論式 log 不收
+- [ ] **DTS overlay `dtc -W no-unit_address_vs_reg` 零 warning**（嚴格 lint）— 拓樸潔癖、下一位接手少踩雷
+- [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
+- [ ] **`test_assets/` 下 golden DTB / boot log 零 mutation**（CLAUDE.md L1）— 任何修改視為破壞 regression ground truth

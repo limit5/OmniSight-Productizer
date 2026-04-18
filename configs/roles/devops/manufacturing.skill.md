@@ -45,3 +45,23 @@ description: "Manufacturing process engineer for production line setup and yield
 - 自動化燒錄與測試治具 (MFC) 開發
 - 小批量試產 (Pilot Run) 規劃
 - 不良品分析 (FA) 與良率提升
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **SMT 良率 ≥ 99.5%**（AOI + ICT + 人工複檢合計；每批次統計 DPMO ≤ 500）— 低於門檻回頭 review schematic / layout
+- [ ] **整機 First-Pass Yield (FPY) ≥ 95%**（FA first run，不含 rework pass 的結果）— 設計品質的 leading indicator
+- [ ] **DPMO ≤ 500**（Motorola Six Sigma 等級；大樣本統計顯著 n ≥ 300）— 取代「幾台 pass / 幾台 fail」的小樣本判讀
+- [ ] **FFF / FOT 測試治具覆蓋率 ≥ 95%**（Functional Final / Functional On-line；每顆 SKU 對應測項 matrix 填滿）
+- [ ] **ICT (In-Circuit Test) 覆蓋 ≥ 90% nets**（測點覆蓋率報告，不可測 nets 需 DFT review sign-off）
+- [ ] **Gage R&R ≤ 10%**（MSA；每個新上線測試站必跑）— > 30% 即資料不可信
+- [ ] **Serial Number / MAC / UUID 每台唯一且可追溯**（SN ↔ PCB lot ↔ SMT 日期 ↔ 燒錄 FW SHA 四向 join）— 欠一環 = 追不到 RMA root cause
+- [ ] **治具設計 fail-close（斷電 / 感測器失效 default 判 fail）**（FMEA 審查紀錄留檔）— 寧可誤殺不放過
+- [ ] **Pilot Run 樣本數 ≥ 300 才簽 CP1k ≥ 1.33**（統計顯著；< 30 件視為 anecdotal）
+- [ ] **SOP 版本控管與 PLM 對齊**（產線上貼的 QR code 掃描 = PLM 當前版本）— 事故必須可回溯
+- [ ] **SOP 每步驟附實拍圖 + red/green 錯對比**（operator 友善度；文字 only 視為未完成）
+- [ ] **Burn-in 時間 ≥ 4 h @ 55°C**（或統計依 early-life failure 曲線調整）— 不得為趕 ship 跳過
+- [ ] **FA root cause report 細到元件等級 + 失效機制**（禁止「虛焊」「不良品」籠統結論）— `mfg/fa/<YYYY-MM-DD>.md` 留檔
+- [ ] **OBM vendor IQC 盲樣抽驗 ≥ 5% lot**（對方自報數據併行驗證）
+- [ ] **DFM review sign-off：EE + ME + MFG 三方會簽**（T0 開模前；缺任一視為未審）

@@ -91,6 +91,29 @@ description: "Rust stable backend engineer for axum / actix-web / rocket service
 - 記憶體（idle）：≤ 15 MiB RSS（無 GC / 預測性高）
 - Miri 跑 unsafe 區塊（若有）：`cargo +nightly miri test`
 
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Coverage ≥ 75%**（`COVERAGE_THRESHOLDS["rust"]` = 75%；`cargo llvm-cov --lcov`）— 低於擋 PR
+- [ ] **`cargo test --all-features --no-fail-fast` 全綠**
+- [ ] **`cargo clippy --all-targets --all-features -- -D warnings` 0 warning**（warning-as-error）
+- [ ] **`cargo fmt --check` 0 diff**
+- [ ] **`cargo audit` 0 high / 0 critical CVE**
+- [ ] **`cargo deny check` 0 deny**（license / source / advisories / bans）
+- [ ] **Binary ≤ 8 MiB**（release + strip + lto = "fat"）
+- [ ] **Cold start ≤ 100ms**
+- [ ] **Idle RSS ≤ 15 MiB**
+- [ ] **`unsafe` 區塊 100% 帶 `// SAFETY:` 註解**（CI grep 驗證）
+- [ ] **Miri 0 UB**（若有 `unsafe`；`cargo +nightly miri test`）
+- [ ] **`rust-toolchain.toml` pin 版本** + `Cargo.lock` commit（service crate）
+- [ ] **Cross-build smoke ≥ 2 target**（`x86_64-unknown-linux-gnu` + 一個 macOS / Windows）
+- [ ] **OpenAPI spec 匯出**（utoipa / aide），或 proto 走 `buf lint` + `buf breaking`
+- [ ] **Dockerfile multi-stage**，final 走 distroless — 不含 build tool
+- [ ] **X4 license scan 0 禁用 license**（`cargo-license --json`）
+- [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、SoC target 走 `get_platform_config` toolchain、不改 `test_assets/`
+
 ## Anti-patterns（禁止）
 - 過度 `unwrap()` / `expect()` 於 library code — 改 `?` 傳遞或回傳 `Result<_, MyError>`
 - `clone()` 取代 borrow 解 lifetime 問題（先想 `&` / `Arc` / `Cow`）

@@ -58,3 +58,21 @@ description: "Algorithm engineer for computer vision, signal processing, and edg
 - SIMD 版本須有 scalar fallback
 - 效能測試報告須包含 latency (ms) 和 throughput (fps)
 - 記憶體使用須在 target 平台限制內
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Valgrind 0 leak / 0 invalid access**（CLAUDE.md L1 強制；algo simulate-track 跑 memcheck）— 「反正是 C library bug」不可接受
+- [ ] **`checkpatch.pl --strict` 0 error / 0 warning**（CLAUDE.md L1 強制）— commit 前本地跑一次
+- [ ] **SIMD kernel 對應 scalar reference bit-exact 比對通過**（每 kernel 一個 gtest case）— 差 1 LSB 都 fail
+- [ ] **Benchmark regression ≤ 5%**（latency ms + throughput fps 雙軸，vs baseline commit）— 超過擋 PR
+- [ ] **Unit test coverage ≥ 70%**（gcovr / lcov 從 ctest 收集，對齊 Java baseline）
+- [ ] **Scalar fallback path 在 `#ifdef __ARM_NEON` / `#ifdef __AVX2__` 外可獨立編譯 + 通過同一組測試** — CI runner 無 SIMD 也綠
+- [ ] **Runtime CPU feature detection 存在**（`__builtin_cpu_supports` / HWCAP）— 舊 Xeon 不 SIGILL
+- [ ] **Hot loop 0 malloc / 0 heap allocation**（用 Valgrind massif 或 `perf record -e page-faults` 驗）
+- [ ] **記憶體對齊顯式宣告**（`aligned_alloc` / `posix_memalign` + UBSan 跑過）— 靠「應該會對齊」禁
+- [ ] **Target 平台實機 benchmark 數字存檔於 `test_assets/benchmarks/`**（read-only，不可改既有；只 append 新 baseline）
+- [ ] **演算法有論文 / 數學文件引用在 header comment 或 `docs/algo/`** — 半年後自己能看懂為什麼乘那常數
+- [ ] **Target SoC toolchain 走 `get_platform_config`**（CLAUDE.md L1 強制）— 絕不用系統 gcc
+- [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`

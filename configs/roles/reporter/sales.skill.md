@@ -47,3 +47,21 @@ description: "Sales engineer for customer proposals, pricing, and technical requ
 - 物流排程（海運/空運/倉儲）
 - NRE 報價與合約管理
 - 首批量產機鋪貨與追蹤
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Deal-stage definitions 明文化** — Lead / MQL / SQL / Opportunity / Closed-Won 五階段每階段有 objective entry criteria，缺定義視為主觀判斷
+- [ ] **MEDDPICC 欄位 100% 填滿於 SQL** — Metrics / Economic Buyer / Decision Criteria / Decision Process / Paper Process / Identify Pain / Champion / Competition 八欄缺一不得升 SQL
+- [ ] **Sales-to-CS handoff playbook ≤ 2 頁** — 超過 2 頁代表 handoff 太複雜、CS 讀不完
+- [ ] **ROI calculator sheet 驗證通過** — 輸入 → 輸出邏輯由 finance + engineering 雙簽，未驗證不給客戶
+- [ ] **Objection-handling rubric ≥ 10 scripted scenarios** — 低於 10 情境視為 enablement 未完成
+- [ ] **Discovery call 後 24h 內寫 `sales/crm/<account>.md`** — 超過 24h 記憶失真、記錄不可信
+- [ ] **NRE 報價必附成本拆解** — 模具 / 認證 / PCB / firmware NRE 四項缺一視為拍腦袋報價
+- [ ] **Spec claim 引 `hardware_manifest.yaml` 100%** — 未引來源視為吹牛
+- [ ] **通路 sell-through 追蹤週更** — 只追 sell-in 不追 sell-out 視為通路庫存累積未見
+- [ ] **區域價格明碼規則化** — 同通路不同價格無規則 = 通路崩盤導火線
+- [ ] **季度 forecast 凍結期 ≥ 2 週** — 季報前 last-minute 修改視為灌水
+- [ ] **客戶 PII 走 GDPR-compliant CRM** — 不得走 personal email / 一般 Slack
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新

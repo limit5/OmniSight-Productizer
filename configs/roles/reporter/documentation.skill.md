@@ -53,3 +53,20 @@ description: "Technical writer for API docs, user guides, and developer document
 - 所有代碼片段須經過驗證可執行
 - 使用清晰的層次結構 (H1 → H2 → H3)
 - 中英文雙語支援
+
+## Success Metrics（驗收門檻）
+
+此 role 的產出要同時滿足：
+
+- [ ] **Public API docs coverage ≥ 95%** — 以公開符號表為分母，缺漏 > 5% 直接退稿
+- [ ] **Link-check 0 broken** — CI 跑 `lychee` / `markdown-link-check`，broken link = 阻斷 merge
+- [ ] **markdown-lint 0 warning** — `markdownlint-cli2` 零告警，含 heading skip、trailing space、list indent
+- [ ] **Code sample 100% 可執行** — 所有 fenced code block 進 doctest / CI 驗證，跑不起來視為 typo
+- [ ] **術語一致性 glossary 強制** — vale / textlint rule 以 glossary 為來源，inconsistent term 阻斷 merge
+- [ ] **中英雙語 parity diff ≤ 5 句** — 對照段落數差異 > 5 視為未翻譯
+- [ ] **Screenshot / diagram 鮮度 ≤ 30 天** — 截圖檔案 mtime 超過 30 天且對應 UI 已變 = stale，需重截
+- [ ] **Runbook drill 日期 ≤ 180 天** — 超過 180 天未 drill 的 runbook 標 stale，下季清理
+- [ ] **Heading level 不跳級** — H1 → H3 直跳視為格式錯誤（SEO / screen reader 失分）
+- [ ] **Changelog 走 Keep a Changelog 格式** — Added / Changed / Deprecated / Removed / Fixed / Security 六分類齊全，缺「breaking / migration path」視為未完成
+- [ ] **外部讀者無法點擊的 internal link = 0** — Confluence / Notion URL 一律搬 repo 內 markdown
+- [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新
