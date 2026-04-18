@@ -7,6 +7,11 @@
     ":dependencyDashboard",
     ":enableVulnerabilityAlertsWithLabel(security)"
   ],
+  "baseBranches": [
+    "$default",
+    "compat/nextjs-15",
+    "compat/pydantic-v2"
+  ],
   "timezone": "Asia/Taipei",
   "schedule": ["every weekend"],
   "labels": ["dependencies"],
