@@ -225,7 +225,7 @@ Legend:
 - [x] Step 4：submit-rule 驗證（呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule）
 - [x] Step 5：webhook 設定引導（顯示 webhook URL + secret → 提示貼到 Gerrit）
 - [x] 完成後寫入 config + 顯示「Gerrit 整合已啟用」
-- [ ] 預估：**1.5 day**
+- [x] 預估：**1.5 day**
 
 **Part D — Integration Settings 頁面分 tab**
 - [ ] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
