@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 import { useAuth } from "@/lib/auth-context"
 import {
@@ -8,6 +8,7 @@ import {
   getMyHostMetrics,
   type TenantUsage,
 } from "@/lib/api"
+import { useHostMetricsTick } from "@/hooks/use-host-metrics-tick"
 import {
   Cpu,
   HardDrive,
@@ -57,7 +58,8 @@ interface HostInfo {
   uptime: string
 }
 
-// Placeholder — replaced by real data from backend GET /system/info
+// Seed shown before the first SSE `host.metrics.tick` / `/system/info`
+// fetch lands. Fields are overwritten as soon as data arrives.
 const defaultHostInfo: HostInfo = {
   hostname: "loading...",
   os: "--",
@@ -424,6 +426,35 @@ export function HostDevicePanel({
   const [isScanning, setIsScanning] = useState(false)
   const [hostData, setHostData] = useState(hostInfo)
 
+  // H3: real-time CPU / mem / disk / loadavg / container counts pushed
+  // by the backend `host.metrics.tick` SSE (5s cadence). Replaces the
+  // placeholder numbers that used to sit in this panel.
+  const { latest: hostTick, baseline: hostBaseline, connected: hostSseConnected } =
+    useHostMetricsTick()
+
+  // Merge: /system/info supplies static identity (hostname/os/kernel/arch/uptime +
+  // cpu model/cores), SSE supplies live load. SSE wins whenever it has data.
+  const mergedHost = useMemo<HostInfo>(() => {
+    const base: HostInfo = { ...hostData }
+    if (hostTick) {
+      base.cpuUsage = hostTick.host.cpu_percent
+      // mem_*_gb → legacy MB fields used by HostInfoSection (divides by 1024)
+      base.memoryUsed = hostTick.host.mem_used_gb * 1024
+      base.memoryTotal = hostTick.host.mem_total_gb * 1024
+    }
+    // Fill identity gaps from baseline when /system/info hasn't landed yet.
+    if (hostBaseline) {
+      if (!base.cpuModel || base.cpuModel === "Detecting...") {
+        base.cpuModel = hostBaseline.cpu_model
+      }
+      if (!base.cpuCores) base.cpuCores = hostBaseline.cpu_cores
+      if (!base.memoryTotal && hostBaseline.mem_total_gb > 0) {
+        base.memoryTotal = hostBaseline.mem_total_gb * 1024
+      }
+    }
+    return base
+  }, [hostData, hostTick, hostBaseline])
+
   // Sync props → internal state when backend pushes new data
   useEffect(() => {
     setHostData(hostInfo)
@@ -507,12 +538,29 @@ export function HostDevicePanel({
       {/* Scrollable Content */}
       <div className="flex-1 overflow-auto pr-2 space-y-4">
         {/* Host Info */}
-        <div className="holo-glass-simple rounded p-3">
-          <div className="flex items-center gap-2 mb-3">
-            <Monitor size={14} className="text-[var(--neural-blue)]" />
-            <span className="font-mono text-xs text-[var(--neural-blue)]">SYSTEM INFO</span>
+        <div className="holo-glass-simple rounded p-3" data-testid="system-info">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Monitor size={14} className="text-[var(--neural-blue)]" />
+              <span className="font-mono text-xs text-[var(--neural-blue)]">SYSTEM INFO</span>
+            </div>
+            <span
+              data-testid="host-sse-status"
+              className={`font-mono text-[10px] ${
+                hostSseConnected
+                  ? "text-[var(--validation-emerald)]"
+                  : "text-[var(--muted-foreground)]"
+              }`}
+              title={
+                hostSseConnected
+                  ? "host.metrics.tick SSE live"
+                  : "Waiting for host.metrics.tick"
+              }
+            >
+              {hostSseConnected ? "● SSE LIVE" : "○ SSE WAITING"}
+            </span>
           </div>
-          <HostInfoSection info={hostData} />
+          <HostInfoSection info={mergedHost} />
         </div>
 
         {/* M4: Per-tenant usage bars (admin → all tenants; user → self) */}

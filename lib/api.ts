@@ -111,6 +111,45 @@ export type SSEEvent =
   // ─── R3 (#309) Scratchpad + Auto-Continuation ───
   | { event: "agent.scratchpad.saved"; data: { agent_id: string; turn: number; size_bytes: number; sections_count: number; timestamp: string } }
   | { event: "agent.token_continuation"; data: { agent_id: string; continuation_round: number; timestamp: string } }
+  // ─── H1 / H3: whole-host metrics tick (5s cadence) ───
+  | { event: "host.metrics.tick"; data: HostMetricsTickEvent }
+
+export interface HostMetricsTickSample {
+  cpu_percent: number
+  mem_percent: number
+  mem_used_gb: number
+  mem_total_gb: number
+  disk_percent: number
+  disk_used_gb: number
+  disk_total_gb: number
+  loadavg_1m: number
+  loadavg_5m: number
+  loadavg_15m: number
+  sampled_at: number
+}
+
+export interface HostMetricsTickDocker {
+  container_count: number
+  total_mem_reservation_bytes: number
+  source: string
+  sampled_at: number
+}
+
+export interface HostMetricsTickBaseline {
+  cpu_cores: number
+  mem_total_gb: number
+  disk_total_gb: number
+  cpu_model: string
+}
+
+export interface HostMetricsTickEvent {
+  host: HostMetricsTickSample
+  docker: HostMetricsTickDocker
+  baseline: HostMetricsTickBaseline
+  high_pressure: boolean
+  sampled_at: number
+  timestamp?: string
+}
 
 // ─── Global SSE manager ───
 // 48A-Fix P0: a single EventSource per origin, shared across every caller.
@@ -153,6 +192,8 @@ const SSE_EVENT_TYPES = [
   "pep.decision",
   // ─── R1 (#307) ChatOps Interactive ───
   "chatops.message",
+  // ─── H1 / H3 whole-host metrics tick ───
+  "host.metrics.tick",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"
