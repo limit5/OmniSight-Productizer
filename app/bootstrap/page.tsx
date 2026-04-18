@@ -1368,13 +1368,7 @@ function GitForgeStep({
         ) : activeTab === "gitlab" ? (
           <GitLabTokenForm onSaved={onCompleted} />
         ) : (
-          <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
-            The <strong>token / URL entry</strong> and{" "}
-            <strong>Test Connection</strong> controls for{" "}
-            {activeDef.label} land in the next B14 row. For now, switch
-            tabs to preview each provider, or skip below and configure
-            later from <strong>Settings → Integration</strong>.
-          </p>
+          <GerritSshForm onSaved={onCompleted} />
         )}
       </div>
 
@@ -1724,6 +1718,235 @@ function GitLabTokenForm({ onSaved }: { onSaved: () => void }) {
       {saveError && (
         <div
           data-testid="bootstrap-git-forge-gitlab-save-error"
+          className="flex items-start gap-2 p-2 rounded border border-[var(--status-red)] bg-[var(--status-red)]/10 font-mono text-[11px] text-[var(--status-red)]"
+        >
+          <AlertCircle size={12} className="mt-0.5" />
+          <span>{saveError}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── B14 Part A row 5: Gerrit URL + SSH host/port + Test SSH ─────────
+//
+// Lives inside the Step 3.5 "gerrit" tab panel. Unlike GitHub/GitLab
+// the credential under test here is an SSH reachability check, not a
+// token: Gerrit's first-class transport is SSH, and the merger agent
+// will later drive `gerrit review` / `gerrit version` over the same
+// endpoint. "Test SSH" calls `testGitForgeToken({ provider: "gerrit",
+// ssh_host, ssh_port, url })` which the backend routes to
+// `_probe_gerrit_ssh` → `ssh -p {port} {host} gerrit version`.
+//
+// On success the Gerrit version surfaces so the operator can confirm
+// they are reaching the right instance before Save & Continue persists
+// `gerrit_enabled`, `gerrit_url`, `gerrit_ssh_host`, and `gerrit_ssh_port`.
+// Same two-step test/save split as the token-based forms — SSH failures
+// never leave a half-configured Gerrit endpoint in `settings.*`.
+
+const DEFAULT_GERRIT_SSH_PORT = 29418
+
+function GerritSshForm({ onSaved }: { onSaved: () => void }) {
+  const [url, setUrl] = useState("")
+  const [sshHost, setSshHost] = useState("")
+  const [sshPort, setSshPort] = useState<string>(String(DEFAULT_GERRIT_SSH_PORT))
+  const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [result, setResult] = useState<GitForgeTokenTestResult | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const parsedPort = (() => {
+    const trimmed = sshPort.trim()
+    if (!trimmed) return DEFAULT_GERRIT_SSH_PORT
+    const n = Number(trimmed)
+    return Number.isFinite(n) && Number.isInteger(n) ? n : NaN
+  })()
+  const portValid =
+    Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+  const canTest = sshHost.trim().length > 0 && portValid && !busy
+
+  const onTest = useCallback(async () => {
+    if (!canTest) return
+    setBusy(true)
+    setResult(null)
+    setSaveError(null)
+    try {
+      const res = await testGitForgeToken({
+        provider: "gerrit",
+        ssh_host: sshHost.trim(),
+        ssh_port: parsedPort as number,
+        url: url.trim(),
+      })
+      setResult(res)
+    } catch (err) {
+      setResult({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to reach the Gerrit SSH probe",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }, [sshHost, parsedPort, url, canTest])
+
+  const onSave = useCallback(async () => {
+    if (saving || result?.status !== "ok") return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await updateSettings({
+        gerrit_enabled: true,
+        gerrit_url: (result.url ?? url.trim()) || "",
+        gerrit_ssh_host: result.ssh_host ?? sshHost.trim(),
+        gerrit_ssh_port: result.ssh_port ?? (parsedPort as number),
+      })
+      onSaved()
+    } catch (err) {
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save Gerrit settings",
+      )
+    } finally {
+      setSaving(false)
+    }
+  }, [sshHost, url, parsedPort, saving, result, onSaved])
+
+  const ok = result?.status === "ok"
+
+  return (
+    <div className="flex flex-col gap-2" data-testid="bootstrap-git-forge-gerrit-form">
+      <label
+        htmlFor="bootstrap-git-forge-gerrit-url"
+        className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]"
+      >
+        REST URL (optional — used later for webhooks / submit-rule checks)
+      </label>
+      <input
+        id="bootstrap-git-forge-gerrit-url"
+        data-testid="bootstrap-git-forge-gerrit-url"
+        type="text"
+        autoComplete="off"
+        spellCheck={false}
+        value={url}
+        onChange={(e) => {
+          setUrl(e.target.value)
+          setResult(null)
+          setSaveError(null)
+        }}
+        placeholder="https://gerrit.example.com"
+        className="font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus:outline-none focus:border-[var(--artifact-purple)]"
+      />
+      <label
+        htmlFor="bootstrap-git-forge-gerrit-ssh-host"
+        className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]"
+      >
+        SSH HOST ([user@]host — merger-agent-bot account recommended)
+      </label>
+      <input
+        id="bootstrap-git-forge-gerrit-ssh-host"
+        data-testid="bootstrap-git-forge-gerrit-ssh-host"
+        type="text"
+        autoComplete="off"
+        spellCheck={false}
+        value={sshHost}
+        onChange={(e) => {
+          setSshHost(e.target.value)
+          setResult(null)
+          setSaveError(null)
+        }}
+        placeholder="merger-agent-bot@gerrit.example.com"
+        className="font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus:outline-none focus:border-[var(--artifact-purple)]"
+      />
+      <label
+        htmlFor="bootstrap-git-forge-gerrit-ssh-port"
+        className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]"
+      >
+        SSH PORT (Gerrit default: {DEFAULT_GERRIT_SSH_PORT})
+      </label>
+      <input
+        id="bootstrap-git-forge-gerrit-ssh-port"
+        data-testid="bootstrap-git-forge-gerrit-ssh-port"
+        type="number"
+        min={1}
+        max={65535}
+        step={1}
+        autoComplete="off"
+        spellCheck={false}
+        value={sshPort}
+        onChange={(e) => {
+          setSshPort(e.target.value)
+          setResult(null)
+          setSaveError(null)
+        }}
+        placeholder={String(DEFAULT_GERRIT_SSH_PORT)}
+        className="font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus:outline-none focus:border-[var(--artifact-purple)] w-32"
+      />
+      {!portValid && sshPort.trim().length > 0 && (
+        <div
+          data-testid="bootstrap-git-forge-gerrit-port-invalid"
+          className="font-mono text-[10px] text-[var(--status-red)]"
+        >
+          Port must be an integer between 1 and 65535.
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-git-forge-gerrit-test"
+          onClick={onTest}
+          disabled={!canTest}
+          className="flex items-center gap-2 px-3 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[11px] font-semibold hover:bg-[var(--muted)]/40 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Activity size={12} />}
+          {busy ? "Testing…" : "Test SSH"}
+        </button>
+        {ok && (
+          <button
+            type="button"
+            data-testid="bootstrap-git-forge-gerrit-save"
+            onClick={onSave}
+            disabled={saving}
+            className="flex items-center gap-2 px-3 py-1.5 rounded bg-[var(--artifact-purple)] text-white font-mono text-[11px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {saving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            {saving ? "Saving…" : "Save & Continue"}
+          </button>
+        )}
+      </div>
+      {result && (
+        <div
+          data-testid="bootstrap-git-forge-gerrit-result"
+          data-status={result.status}
+          className={`flex items-start gap-2 p-2 rounded border font-mono text-[11px] ${
+            ok
+              ? "border-[var(--status-green)] bg-[var(--status-green)]/10 text-[var(--status-green)]"
+              : "border-[var(--status-red)] bg-[var(--status-red)]/10 text-[var(--status-red)]"
+          }`}
+        >
+          {ok ? <Check size={12} className="mt-0.5" /> : <AlertCircle size={12} className="mt-0.5" />}
+          {ok ? (
+            <div className="flex flex-col gap-0.5">
+              <span>
+                Gerrit{" "}
+                <strong data-testid="bootstrap-git-forge-gerrit-version">
+                  {result.version}
+                </strong>
+              </span>
+              {result.ssh_host ? (
+                <span className="text-[10px] opacity-80">
+                  SSH: <code>{result.ssh_host}:{result.ssh_port}</code>
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <span>{result.message || "Gerrit SSH probe failed"}</span>
+          )}
+        </div>
+      )}
+      {saveError && (
+        <div
+          data-testid="bootstrap-git-forge-gerrit-save-error"
           className="flex items-start gap-2 p-2 rounded border border-[var(--status-red)] bg-[var(--status-red)]/10 font-mono text-[11px] text-[var(--status-red)]"
         >
           <AlertCircle size={12} className="mt-0.5" />

@@ -1302,36 +1302,49 @@ export async function testIntegration(type: string): Promise<{ status: string; m
   return request<{ status: string; message?: string }>(`/system/test/${type}`, { method: "POST" })
 }
 
-// ─── B14 Part A row 3: Probe a candidate Git-forge token ───
+// ─── B14 Part A row 3+: Probe a candidate Git-forge credential ───
 //
-// Validates a token supplied by the operator (e.g. in the Bootstrap
-// Step 3.5 Git Forge form) without mutating `settings.github_token`.
-// Only `provider: "github"` is wired in this row; `gitlab` / `gerrit`
-// ride the same endpoint in follow-up rows.
+// Validates a credential supplied by the operator (e.g. in the Bootstrap
+// Step 3.5 Git Forge form) without mutating `settings.*_token`. Shape
+// varies by provider:
+//   - GitHub: { token }                     → REST `/user`
+//   - GitLab: { token, url? }               → REST `/api/v4/version`
+//   - Gerrit: { ssh_host, ssh_port, url? }  → SSH `gerrit version`
 export interface GitForgeTokenTestResult {
   status: "ok" | "error"
   user?: string
   name?: string
   scopes?: string
-  // GitLab probe only — resolved instance version + revision + effective URL.
+  // GitLab / Gerrit — resolved instance version.
   version?: string
   revision?: string
   url?: string
+  // Gerrit — echoes the probed SSH endpoint so the caller can persist
+  // the exact host/port that validated.
+  ssh_host?: string
+  ssh_port?: number
   message?: string
 }
 
 export async function testGitForgeToken(args: {
   provider: "github" | "gitlab" | "gerrit"
-  token: string
+  token?: string
   url?: string
+  ssh_host?: string
+  ssh_port?: number
 }): Promise<GitForgeTokenTestResult> {
+  const body: Record<string, string | number> = {
+    provider: args.provider,
+    token: args.token ?? "",
+    url: args.url ?? "",
+  }
+  if (args.provider === "gerrit") {
+    body.ssh_host = args.ssh_host ?? ""
+    body.ssh_port = args.ssh_port ?? 29418
+  }
   return request<GitForgeTokenTestResult>("/system/git-forge/test-token", {
     method: "POST",
-    body: JSON.stringify({
-      provider: args.provider,
-      token: args.token,
-      url: args.url ?? "",
-    }),
+    body: JSON.stringify(body),
   })
 }
 

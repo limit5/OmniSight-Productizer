@@ -1552,6 +1552,201 @@ describe("BootstrapPage", () => {
         expect(mockedFinalize).not.toHaveBeenCalled()
       })
     })
+
+    // ─── B14 Part A row 5 — Gerrit tab URL + SSH host/port + Test SSH ──
+    //
+    // Operator enters (optional) REST URL + SSH host + SSH port → clicks
+    // Test SSH → backend probe runs `ssh -p {port} {host} gerrit version`.
+    // On success the Gerrit version surfaces so the operator can verify
+    // they are reaching the right server before Save & Continue persists
+    // gerrit_enabled + url + ssh_host + ssh_port.
+
+    describe("Gerrit tab SSH probe", () => {
+      async function switchToGerritTab() {
+        await openGitForgeStep()
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-tab-gerrit"))
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gerrit-form"),
+          ).toBeInTheDocument()
+        })
+      }
+
+      it("Test SSH button is disabled until an SSH host is typed", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        render(<BootstrapPage />)
+        await switchToGerritTab()
+
+        const btn = screen.getByTestId("bootstrap-git-forge-gerrit-test")
+        expect(btn).toBeDisabled()
+
+        // URL alone shouldn't enable — SSH host is the probed field.
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-url"),
+          { target: { value: "https://gerrit.example.com" } },
+        )
+        expect(btn).toBeDisabled()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-ssh-host"),
+          { target: { value: "merger-agent-bot@gerrit.example.com" } },
+        )
+        expect(btn).toBeEnabled()
+      })
+
+      it("disables Test SSH when the port field is out of range", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        render(<BootstrapPage />)
+        await switchToGerritTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-ssh-host"),
+          { target: { value: "bot@gerrit.example" } },
+        )
+        // Baseline: default port renders enabled.
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gerrit-test"),
+        ).toBeEnabled()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-ssh-port"),
+          { target: { value: "70000" } },
+        )
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gerrit-test"),
+        ).toBeDisabled()
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gerrit-port-invalid"),
+        ).toBeInTheDocument()
+      })
+
+      it("successful probe renders the resolved Gerrit version", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          version: "3.9.2",
+          ssh_host: "merger-agent-bot@gerrit.example.com",
+          ssh_port: 29418,
+          url: "https://gerrit.example.com",
+        })
+        render(<BootstrapPage />)
+        await switchToGerritTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-url"),
+          { target: { value: "https://gerrit.example.com" } },
+        )
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-ssh-host"),
+          { target: { value: "merger-agent-bot@gerrit.example.com" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gerrit-test"))
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gerrit-result"),
+          ).toHaveAttribute("data-status", "ok")
+        })
+        expect(mockedTestGitForgeToken).toHaveBeenCalledWith({
+          provider: "gerrit",
+          ssh_host: "merger-agent-bot@gerrit.example.com",
+          ssh_port: 29418,
+          url: "https://gerrit.example.com",
+        })
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gerrit-version"),
+        ).toHaveTextContent("3.9.2")
+        // Save & Continue only appears after a green probe.
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gerrit-save"),
+        ).toBeInTheDocument()
+      })
+
+      it("failed probe renders the backend error without showing Save", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "error",
+          message: "Permission denied (publickey).",
+        })
+        render(<BootstrapPage />)
+        await switchToGerritTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-ssh-host"),
+          { target: { value: "nobody@gerrit.example.com" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gerrit-test"))
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gerrit-result"),
+          ).toHaveAttribute("data-status", "error")
+        })
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gerrit-result"),
+        ).toHaveTextContent(/Permission denied/)
+        expect(
+          screen.queryByTestId("bootstrap-git-forge-gerrit-save"),
+        ).toBeNull()
+      })
+
+      it("Save & Continue persists gerrit_* settings and flips complete", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          version: "3.10.0",
+          ssh_host: "bot@gerrit.example",
+          ssh_port: 29418,
+          url: "https://gerrit.example",
+        })
+        mockedUpdateSettings.mockResolvedValue({
+          status: "updated",
+          applied: [
+            "gerrit_enabled",
+            "gerrit_url",
+            "gerrit_ssh_host",
+            "gerrit_ssh_port",
+          ],
+          rejected: {},
+        })
+        render(<BootstrapPage />)
+        await switchToGerritTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-url"),
+          { target: { value: "https://gerrit.example" } },
+        )
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gerrit-ssh-host"),
+          { target: { value: "bot@gerrit.example" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gerrit-test"))
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gerrit-save"),
+          ).toBeInTheDocument()
+        })
+
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gerrit-save"))
+
+        await waitFor(() => {
+          expect(mockedUpdateSettings).toHaveBeenCalledWith({
+            gerrit_enabled: true,
+            gerrit_url: "https://gerrit.example",
+            gerrit_ssh_host: "bot@gerrit.example",
+            gerrit_ssh_port: 29418,
+          })
+        })
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-step"),
+          ).toHaveAttribute("data-already-green", "true")
+        })
+        // Finalize must not have been called — saving Gerrit settings
+        // is a local settings write, not a bootstrap gate flip.
+        expect(mockedFinalize).not.toHaveBeenCalled()
+      })
+    })
   })
 
   // ─── L8 #3 — Error-path UX (weak password / LLM key invalid / systemctl) ─

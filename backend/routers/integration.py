@@ -231,7 +231,66 @@ async def test_integration(integration: str, _user=Depends(_au.require_admin)):
 class GitForgeTokenTest(BaseModel):
     provider: str  # "github" | "gitlab" | "gerrit"
     token: str = ""
-    url: str = ""  # optional — for GitLab self-hosted instances
+    url: str = ""  # optional — for GitLab self-hosted instances / Gerrit REST URL
+    ssh_host: str = ""  # Gerrit only — `[user@]host` for the SSH probe
+    ssh_port: int = 29418  # Gerrit only — SSH port (Gerrit default 29418)
+
+
+async def _probe_gerrit_ssh(ssh_host: str, ssh_port: int, url: str = "") -> dict:
+    """Run ``ssh -p {port} {host} gerrit version`` against a *candidate*
+    Gerrit SSH endpoint and return the parsed version. Never reads from
+    or mutates ``settings``.
+
+    B14 Part A row 5 — Bootstrap Step 3.5 Gerrit tab. Mirrors the
+    GitHub / GitLab probes in spirit (non-mutating, timeout-bounded,
+    structured ``{status, version|message}`` result) but uses SSH
+    because Gerrit's canonical API over SSH (``gerrit version``) is the
+    only probe that exercises the same transport the merger agent and
+    the replication path will later use — a token-only HTTP probe would
+    not catch SSH key / host-key mismatches.
+
+    The host field may contain ``user@host`` (standard ssh syntax); the
+    SSH key is pulled from the operator's running environment via the
+    ssh client's default search path. ``StrictHostKeyChecking=accept-new``
+    lets first-time probes succeed on a fresh host without a manual
+    ``ssh-keyscan`` dance while still protecting against later host-key
+    swaps (once the key is recorded).
+    """
+    host = (ssh_host or "").strip()
+    if not host:
+        return {"status": "error", "message": "SSH host is required"}
+    try:
+        port = int(ssh_port) if ssh_port is not None else 29418
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "SSH port must be an integer"}
+    if port < 1 or port > 65535:
+        return {"status": "error", "message": "SSH port must be between 1 and 65535"}
+    proc = await asyncio.create_subprocess_exec(
+        "ssh", "-p", str(port),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=5",
+        "-o", "BatchMode=yes",
+        host,
+        "gerrit", "version",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode == 0:
+        # Gerrit prints `gerrit version 3.9.2` on stdout.
+        raw = stdout.decode(errors="replace").strip()
+        m = re.search(r"gerrit version\s+(\S+)", raw, re.IGNORECASE)
+        version = m.group(1) if m else raw or "unknown"
+        result = {
+            "status": "ok",
+            "version": version,
+            "ssh_host": host,
+            "ssh_port": port,
+        }
+        if url:
+            result["url"] = url.strip().rstrip("/")
+        return result
+    err = (stderr or stdout).decode(errors="replace").strip()
+    return {"status": "error", "message": err[:300] or "SSH probe failed"}
 
 
 async def _probe_gitlab_token(token: str, url: str) -> dict:
@@ -340,26 +399,26 @@ async def _probe_github_token(token: str) -> dict:
 async def test_git_forge_token(
     body: GitForgeTokenTest, _user=Depends(_au.require_admin)
 ):
-    """Validate a candidate Git forge token WITHOUT persisting it.
+    """Validate a candidate Git forge credential WITHOUT persisting it.
 
     Used by the Bootstrap Step 3.5 Git Forge setup to let the operator
-    sanity-check their PAT before they commit it to settings. Only
-    ``github`` is implemented in this row; ``gitlab`` / ``gerrit`` come
-    in follow-up B14 rows.
+    sanity-check their credential before they commit it to settings.
+    ``github`` / ``gitlab`` run a token probe against the respective
+    REST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since
+    Gerrit's first-class transport is SSH, not HTTP.
     """
     provider = (body.provider or "").strip().lower()
     if provider not in {"github", "gitlab", "gerrit"}:
         raise HTTPException(400, f"Unknown provider: {body.provider}")
-    if provider == "gerrit":
-        # Placeholder until the Gerrit SSH probe row lands.
-        return {
-            "status": "error",
-            "message": "gerrit token probe not yet implemented",
-        }
     try:
         if provider == "gitlab":
             result = await asyncio.wait_for(
                 _probe_gitlab_token(body.token, body.url), timeout=15,
+            )
+        elif provider == "gerrit":
+            result = await asyncio.wait_for(
+                _probe_gerrit_ssh(body.ssh_host, body.ssh_port, body.url),
+                timeout=15,
             )
         else:
             result = await asyncio.wait_for(

@@ -124,15 +124,120 @@ class TestGitForgeTokenProbe:
         assert settings.github_token == before
 
     @pytest.mark.asyncio
-    async def test_gerrit_not_implemented_yet(self, client):
+    async def test_gerrit_empty_ssh_host_returns_error(self, client):
         resp = await client.post(
             "/api/v1/system/git-forge/test-token",
-            json={"provider": "gerrit", "token": "whatever"},
+            json={"provider": "gerrit", "ssh_host": "", "ssh_port": 29418},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "error"
-        assert "not yet implemented" in data["message"]
+        assert "ssh host" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_gerrit_rejects_invalid_port(self):
+        """A port outside 1-65535 must surface an error before ssh fires."""
+        from backend.routers import integration as ir
+
+        result = await ir._probe_gerrit_ssh("merger-agent-bot@host.example", 70000)
+        assert result["status"] == "error"
+        assert "port" in result["message"].lower()
+
+        result_zero = await ir._probe_gerrit_ssh("merger-agent-bot@host.example", 0)
+        assert result_zero["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_gerrit_does_not_mutate_settings_on_failure(self, client):
+        """Probing with a bad SSH endpoint must NOT overwrite Gerrit settings."""
+        from backend.config import settings
+        before_enabled = settings.gerrit_enabled
+        before_host = settings.gerrit_ssh_host
+        before_port = settings.gerrit_ssh_port
+        before_url = settings.gerrit_url
+        await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={
+                "provider": "gerrit",
+                "ssh_host": "nobody@gerrit.invalid.example",
+                "ssh_port": 29418,
+                "url": "https://gerrit.invalid.example",
+            },
+        )
+        assert settings.gerrit_enabled == before_enabled
+        assert settings.gerrit_ssh_host == before_host
+        assert settings.gerrit_ssh_port == before_port
+        assert settings.gerrit_url == before_url
+
+    @pytest.mark.asyncio
+    async def test_gerrit_ok_path_parses_version(self, monkeypatch):
+        """With the ssh subprocess mocked, the OK path surfaces the Gerrit version."""
+        from backend.routers import integration as ir
+
+        class _StubProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"gerrit version 3.9.2\n", b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _StubProc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+        result = await ir._probe_gerrit_ssh(
+            "merger-agent-bot@gerrit.example", 29418, "https://gerrit.example",
+        )
+        assert result["status"] == "ok"
+        assert result["version"] == "3.9.2"
+        assert result["ssh_host"] == "merger-agent-bot@gerrit.example"
+        assert result["ssh_port"] == 29418
+        assert result["url"] == "https://gerrit.example"
+
+    @pytest.mark.asyncio
+    async def test_gerrit_ssh_failure_bubbles_stderr(self, monkeypatch):
+        """SSH failures (bad key, connection refused) must surface as status=error."""
+        from backend.routers import integration as ir
+
+        class _StubProc:
+            returncode = 255
+
+            async def communicate(self):
+                return b"", b"Permission denied (publickey).\n"
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _StubProc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+        result = await ir._probe_gerrit_ssh("nobody@gerrit.example", 29418)
+        assert result["status"] == "error"
+        assert "Permission denied" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_gerrit_probe_reads_from_request_not_settings(self, monkeypatch):
+        """The probe must hit the endpoint from the request body, never settings."""
+        from backend.routers import integration as ir
+
+        captured: dict = {}
+
+        class _StubProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"gerrit version 3.10.0\n", b""
+
+        async def _fake_exec(*args, **_kwargs):
+            captured["args"] = args
+            return _StubProc()
+
+        # Point settings at something bogus to prove we ignore it.
+        from backend.config import settings
+        monkeypatch.setattr(settings, "gerrit_ssh_host", "should-not-be-used.example")
+        monkeypatch.setattr(settings, "gerrit_ssh_port", 12345)
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        result = await ir._probe_gerrit_ssh("bot@fresh.example", 29418)
+        assert result["status"] == "ok"
+        assert "fresh.example" in " ".join(str(a) for a in captured["args"])
+        assert "should-not-be-used" not in " ".join(str(a) for a in captured["args"])
 
     @pytest.mark.asyncio
     async def test_gitlab_empty_token_returns_error(self, client):
