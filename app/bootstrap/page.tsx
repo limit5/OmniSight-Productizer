@@ -1245,11 +1245,34 @@ function CfTunnelStep({
 // block on Git forge credentials, so this step is gated on local state
 // (`localGreen.git_forge`) rather than a backend gate flag.
 //
-// The detailed per-tab UI (token inputs + Test Connection wired to
-// `POST /system/test/{github|gitlab|gerrit}`) lands in the follow-up
-// B14 rows. This step's minimal shell lets the operator either open
-// the full Integration Settings in a new tab or explicitly skip; both
-// paths flip `localGreen.git_forge=true` so the auto-advance moves on.
+// This row introduces the three-way tab shell (GitHub / GitLab /
+// Gerrit) + an explicit "Skip — configure later" button. The deeper
+// per-tab form controls (token inputs + Test Connection wired to
+// `POST /system/test/{github|gitlab|gerrit}`) land in the follow-up
+// B14 rows; each tab panel here renders a preview of the fields that
+// the operator will fill in next. Both the skip button and a future
+// "Test Connection succeeded" path flip `localGreen.git_forge=true`
+// so the auto-advance moves on.
+
+type GitForgeTab = "github" | "gitlab" | "gerrit"
+
+const GIT_FORGE_TABS: { id: GitForgeTab; label: string; hint: string }[] = [
+  {
+    id: "github",
+    label: "GitHub",
+    hint: "Personal Access Token with repo + pull_request scopes",
+  },
+  {
+    id: "gitlab",
+    label: "GitLab",
+    hint: "Self-hosted URL + Personal Access Token (api scope)",
+  },
+  {
+    id: "gerrit",
+    label: "Gerrit",
+    hint: "REST URL + SSH host/port for the merger-agent-bot account",
+  },
+]
 
 function GitForgeStep({
   alreadyGreen,
@@ -1258,30 +1281,25 @@ function GitForgeStep({
   alreadyGreen: boolean
   onCompleted: () => void
 }) {
-  if (alreadyGreen) {
-    return (
-      <div
-        data-testid="bootstrap-git-forge-complete"
-        className="flex flex-col gap-2 p-4 rounded border border-[var(--status-green)] bg-[var(--background)]"
-      >
-        <div className="flex items-center gap-2 font-mono text-xs text-[var(--status-green)]">
-          <Check size={14} /> Git forge setup is optional — skipped by default
-        </div>
-        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-          This step does not block finalize. You can connect GitHub,
-          GitLab, or Gerrit anytime from <strong>Settings →
-          Integration</strong>. Continue to the next step, or use this
-          pane to preview the upcoming per-forge setup tabs.
-        </p>
-      </div>
-    )
-  }
+  const [activeTab, setActiveTab] = useState<GitForgeTab>("github")
+  const activeDef = GIT_FORGE_TABS.find((t) => t.id === activeTab) ?? GIT_FORGE_TABS[0]
 
   return (
     <div
       data-testid="bootstrap-git-forge-step"
+      data-already-green={alreadyGreen ? "true" : "false"}
       className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
     >
+      {alreadyGreen && (
+        <div
+          data-testid="bootstrap-git-forge-complete"
+          className="flex items-center gap-2 p-2 rounded border border-[var(--status-green)] bg-[var(--status-green)]/10 font-mono text-[11px] text-[var(--status-green)]"
+        >
+          <Check size={12} />
+          Marked complete — skip applied. Switch tabs below to revisit setup,
+          or continue to the next step.
+        </div>
+      )}
       <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
         <span>OPTIONAL</span>
         <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
@@ -1297,27 +1315,56 @@ function GitForgeStep({
       </p>
 
       <div
-        data-testid="bootstrap-git-forge-tabs-placeholder"
-        className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)]"
+        data-testid="bootstrap-git-forge-tabs"
+        role="tablist"
+        aria-label="Git forge provider"
+        className="flex rounded border border-[var(--border)] overflow-hidden"
       >
-        <div className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
-          PROVIDERS
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {(["GitHub", "GitLab", "Gerrit"] as const).map((tab) => (
-            <span
-              key={tab}
-              data-testid={`bootstrap-git-forge-tab-${tab.toLowerCase()}`}
-              className="font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] bg-[var(--muted)]/30 text-[var(--muted-foreground)]"
+        {GIT_FORGE_TABS.map((tab) => {
+          const selected = activeTab === tab.id
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`bootstrap-git-forge-panel-${tab.id}`}
+              id={`bootstrap-git-forge-tab-${tab.id}`}
+              data-testid={`bootstrap-git-forge-tab-${tab.id}`}
+              data-active={selected}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex-1 px-3 py-2 font-mono text-[11px] font-semibold transition ${
+                selected
+                  ? "bg-[var(--artifact-purple)] text-white"
+                  : "bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]/40"
+              }`}
             >
-              {tab}
-            </span>
-          ))}
+              {tab.label}
+            </button>
+          )
+        })}
+      </div>
+
+      <div
+        role="tabpanel"
+        id={`bootstrap-git-forge-panel-${activeDef.id}`}
+        aria-labelledby={`bootstrap-git-forge-tab-${activeDef.id}`}
+        data-testid={`bootstrap-git-forge-panel-${activeDef.id}`}
+        className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)] bg-[var(--muted)]/20"
+      >
+        <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+          <GitBranch size={12} />
+          <span>{activeDef.label.toUpperCase()} PROVIDER</span>
         </div>
+        <p className="font-mono text-[11px] text-[var(--foreground)] leading-relaxed">
+          {activeDef.hint}
+        </p>
         <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
-          Per-provider forms (token entry + Test Connection) land in
-          B14 follow-up rows. For now, use <strong>Settings →
-          Integration</strong> after finalize, or skip below.
+          The <strong>token / URL entry</strong> and{" "}
+          <strong>Test Connection</strong> controls for{" "}
+          {activeDef.label} land in the next B14 row. For now, switch
+          tabs to preview each provider, or skip below and configure
+          later from <strong>Settings → Integration</strong>.
         </p>
       </div>
 

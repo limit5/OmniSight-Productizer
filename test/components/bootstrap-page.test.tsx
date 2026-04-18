@@ -1144,6 +1144,96 @@ describe("BootstrapPage", () => {
     expect(screen.queryByTestId("bootstrap-smoke-jump-back")).toBeNull()
   })
 
+  // ─── B14 Part A — Step 3.5 Git Forge tabs + skip ─────────────────────
+  //
+  // Row 2 of B14 Part A: Step 3.5 renders a three-way tab (GitHub /
+  // GitLab / Gerrit) + an explicit "Skip — configure later" button.
+  // Skipping flips ``localGreen.git_forge=true`` so the wizard
+  // auto-advances; the step stays optional (not a finalize gate).
+
+  describe("B14 Part A Step 3.5 Git Forge tabs", () => {
+    async function openGitForgeStep() {
+      await waitFor(() => {
+        expect(screen.getByTestId("bootstrap-step-git_forge")).toBeInTheDocument()
+      })
+      fireEvent.click(screen.getByTestId("bootstrap-step-git_forge"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-git-forge-step"),
+        ).toBeInTheDocument()
+      })
+    }
+
+    it("renders all three provider tabs with GitHub active by default", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+      await openGitForgeStep()
+
+      expect(
+        screen.getByTestId("bootstrap-git-forge-tab-github"),
+      ).toHaveAttribute("aria-selected", "true")
+      expect(
+        screen.getByTestId("bootstrap-git-forge-tab-gitlab"),
+      ).toHaveAttribute("aria-selected", "false")
+      expect(
+        screen.getByTestId("bootstrap-git-forge-tab-gerrit"),
+      ).toHaveAttribute("aria-selected", "false")
+      expect(
+        screen.getByTestId("bootstrap-git-forge-panel-github"),
+      ).toBeInTheDocument()
+    })
+
+    it("switches the active panel when clicking GitLab or Gerrit tabs", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+      await openGitForgeStep()
+
+      fireEvent.click(screen.getByTestId("bootstrap-git-forge-tab-gitlab"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-git-forge-tab-gitlab"),
+        ).toHaveAttribute("aria-selected", "true")
+      })
+      expect(
+        screen.getByTestId("bootstrap-git-forge-panel-gitlab"),
+      ).toBeInTheDocument()
+
+      fireEvent.click(screen.getByTestId("bootstrap-git-forge-tab-gerrit"))
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-git-forge-tab-gerrit"),
+        ).toHaveAttribute("aria-selected", "true")
+      })
+      expect(
+        screen.getByTestId("bootstrap-git-forge-panel-gerrit"),
+      ).toBeInTheDocument()
+    })
+
+    it("Skip button flips the step to complete without touching finalize gates", async () => {
+      mockedGetStatus.mockResolvedValue(redStatus)
+      render(<BootstrapPage />)
+      await openGitForgeStep()
+
+      // Before skip: step body rendered but not marked already-green yet.
+      // (The seed defaults git_forge=true so the operator isn't stalled
+      // on this optional step; we still want Skip to be an explicit,
+      // observable action.)
+      fireEvent.click(screen.getByTestId("bootstrap-git-forge-skip"))
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("bootstrap-git-forge-step"),
+        ).toHaveAttribute("data-already-green", "true")
+      })
+      expect(
+        screen.getByTestId("bootstrap-git-forge-complete"),
+      ).toBeInTheDocument()
+      // Skip is a client-only flip — it must not issue any backend calls
+      // (no dedicated git-forge API exists; see localGreen.git_forge).
+      expect(mockedFinalize).not.toHaveBeenCalled()
+    })
+  })
+
   // ─── L8 #3 — Error-path UX (weak password / LLM key invalid / systemctl) ─
   //
   // Each of the three wizard error paths must surface a kind-keyed banner
