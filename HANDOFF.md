@@ -12240,3 +12240,40 @@ Part C TODO 字面把 row 221（entry button）跟 row 222-226（Step 1-5 互動
 
 ### 下一步
 - B15 row 257：`get_skill_full(path) -> str`——回傳**完整** SKILL.md body（按需呼叫）。要決定的契約點：（i）要不要一併包 frontmatter，還是只給 body？（ii）token_cost 超過某閾值要不要 warn？（iii）路徑 resolver 重用 row 256 的 `_resolve_skill_path`（推薦）。一旦 row 257 落地，row 258 的 `build_system_prompt()` 兩階段就可以開始設計——這是 B15 最大的變更點，會觸及 ReAct loop 的 prompt 組裝契約。
+
+---
+
+## 2026-04-18 — V6 #4 row 1551：Multi-device grid view (`components/omnisight/device-grid.tsx`)
+
+### 範圍（嚴格 row-level）
+- **僅** V6 第四個 checkbox（TODO.md 第 1551 列）：把 V6 #3 的 `DeviceFrame` fan 成一個 responsive grid——同一頁面（或不同頁面）× 六機型同時預覽（iPhone 15 / SE / iPad / Pixel 8 / Galaxy Fold / Galaxy Tab）。
+- **沒**做：V6 #5（agent visual context injection）、V6 #6（build error auto-fix）——屬不同 row，不在本回合 scope；也沒動任何 backend / sandbox / screenshot primitive / device-frame 本體。
+
+### 做了什麼（檔案 × 變更）
+1. **新檔 `components/omnisight/device-grid.tsx`**（~380 行 / `"use client"`）
+   - 四支純 helper：`normaliseDeviceGridItems`（dedup + drop unknown + falsy filter，永不拋）/ `filterDeviceGridItems`（platform/form 交集）/ `buildDeviceGridStyle`（columns>0 → `repeat(n, minmax(0, 1fr))`、否則 auto-fit + min clamp 48）/ `nextSelectionIndex`（ArrowLeft/Right wrap、Up/Down jump column clamp 首末行、Home/End、current=-1 視為 0、total=0 → -1）。全部 byte-identical deterministic，讓 V6 #5 的 SSR shell 可以 precompute layout。
+   - `DeviceGrid` component：接 `devices?` + grid-wide `screenshotUrl`/`loading`/`empty`，per-cell override beat grid 默認（只要 `!== undefined`）；`platforms?` / `forms?` 過濾；`selectedDevice` + `onSelectDevice` 同時啟用才 emit `aria-selected`；click frame 或 Arrow/Home/End 都呼叫 `onSelectDevice(id)`；無 handler 時所有鍵靜默 no-op。
+   - `resolvedItems` / `gridStyle` / `selectedIndex` 全 `React.useMemo`，`handleKeyDown` `React.useCallback`，避免 V6 #5 每輪 ReAct 重 render 整 grid。
+   - 三層 testid convention：`{testid}` (section) / `{testid}-header` / `{testid}-empty` / `{testid}-grid` / `{testid}-cell-<device>` / `{testid}-frame-<device>`；後者 spread 進 child `DeviceFrame` 觸發 V6 #3 內部的 `-bezel`/`-screen`/`-screenshot`/`-label`/`-home` 子 testid。
+   - 空狀態（`devices=[]`、filter 清空、全部 unknown id）→ `role=status` placeholder + customisable `emptyLabel`。
+2. **新檔 `test/components/device-grid.test.tsx`**（54 顆契約測試 / 1.31s 全綠）分桶：defaults 2 + normalise 6 + filter 5 + buildGridStyle 7 + nextSelectionIndex 7 + default render 3 + overrides 6 + filtering 3 + selection 8 + empty 3 + header+layout 4。
+3. **TODO.md row 1551**：`- [ ]` → `- [x]`。
+4. **本 HANDOFF 條目**。
+
+### 設計刻意保守
+- **grid 不持有 state**：`selectedDevice` / `loading` / `screenshotUrl` 全走 props。V6 #5 agent visual context 要做 ReAct loop × 6 device × per-turn 更新時，state 一定在 caller（orchestrator），grid 只是 view。內部 useState 會跟外部 state 打架。
+- **unknown device id 靜默 drop 而非 throw**：agent 可能從 backend 傳未來版本才有的 preset id（例如 `galaxy-s26`），grid 不該因此崩掉整個 dashboard。drop + 繼續渲染其他已知 id 是正確退化。
+- **dedup 首次勝**：caller 若不小心傳兩次 `iphone-15`（例如 filter merge bug），grid 不抱怨也不渲染兩次——保持穩定排序；第一筆的 override 勝出。
+- **`minmax(..., 1fr)` + auto-fit**：不 pin 固定 columns 是為了讓 Mobile Workspace 主頁面（V7）的 sidebar 開/關時 grid 自然 reflow。pinned `columns` 只給有明確 grid 版型需求的 caller（例如「Mobile preview 2×3」card 模式）。
+- **鍵盤導航 wrap vs clamp 混用**：左右 wrap 是單維；上下 clamp 是二維（跨 row 不回繞）——對齊 W3C APG grid pattern。Home/End 跳到 first/last——對齊 combobox/listbox 習慣。
+- **`data-device-count` 上掛 section**：V6 #5 的 DOM walker 可一次 query 確定「這個 grid 渲染了幾個機型」不用遍歷；比起掃 `querySelectorAll("[data-device]")` 還要去重 cell vs frame 子 element 的雙層 data-device attr 要乾淨。
+- **刻意不做的事**：（a）沒加 drag-reorder——V7 annotator 會另外加 reorder，現在 bake 進 grid 會讓 grid 肩上承擔過多責任；（b）沒加 loading skeleton fade-in 動畫——V6 #3 `DeviceFrame` 已經有 shimmer，grid 不該有二次 animation；（c）沒把 default devices 從 `DEFAULT_DEVICE_GRID_ITEMS` 抽到 context / provider——overkill for 6-item list；（d）沒加 `aria-live`——grid 更新不是"新消息通知"，是"view 切換"，應該靠 caller 用 toast/aria-live region 自行通知。
+
+### 驗證
+- `npx vitest run test/components/device-grid.test.tsx` → 54 passed / 0 failed（1.31s）。
+- `npx vitest run test/components/` → 850 passed / 2 failed / 852 total；剩 2 顆 bootstrap-page failures 是 V6 #3 row 已記錄的 master flake（Step 1 form rotates / Step 1 form surfaces server error），與本 row 無關。
+- Scope 自律驗證：只動 2 檔（`components/omnisight/device-grid.tsx` + `test/components/device-grid.test.tsx`）；零改動 V6 #1/#2/#3 / V5 sibling / `components/omnisight/device-frame.tsx` / backend / `package.json` / `requirements.txt` / CLAUDE.md / SOP / docs。
+
+### 下一步
+- V6 #5（TODO row 1552）：agent visual context injection（mobile）——每輪 ReAct 結束後觸發 V6 #2 `capture()` 拿 6 機型截圖 → 組 multimodal content block 塞進 Opus 4.7 prompt（`type: "image"` + `source: {type: "base64", media_type: "image/png", data: <bytes>}`）。Grid 本身 read-only 不 owned caller，V6 #5 要決定的是 orchestrator 側的 screenshot cache 策略（同 screenshotUrl 連續多 turn 不重傳、bytes TTL、差異 diff）。
+- V6 #6（TODO row 1553）：build error → auto-fix——V6 #1 `mobile_sandbox.py` 已有 `parse_build_error()` 抓 Gradle/Xcode 診斷；缺的是把它餵回 agent prompt 的 wiring 層。
