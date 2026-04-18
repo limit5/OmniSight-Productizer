@@ -193,7 +193,7 @@ Legend:
   - [x] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
   - [x] 網路斷線 → toast info「網路連線中斷，嘗試重新連線...」+ retry indicator
 
-- [ ] 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
+- [x] 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
 
 ### B14. UX 改善 — Bootstrap Wizard + Git Forge 設定 + Integration 頁面優化（#340）
 

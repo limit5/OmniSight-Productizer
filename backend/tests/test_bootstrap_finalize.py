@@ -130,6 +130,55 @@ async def test_finalize_works_without_body(client, _admin_override):
     assert r.json()["finalized"] is True
 
 
+# ── B14 Part A: skipping Step 3.5 (Git Forge) must not block finalize ──
+
+
+def test_git_forge_not_in_required_steps():
+    # Structural lock: Step 3.5 Git Forge is optional by spec (B14 #340 Part
+    # A). Promoting it into REQUIRED_STEPS would turn the "Skip" button into
+    # a soft-brick — finalize would then 409 for every operator who opts
+    # out. If a future step ever legitimately needs to gate finalize, it
+    # must ship with its own wizard UI that records the step row.
+    assert "git_forge_configured" not in _boot.REQUIRED_STEPS
+    assert "git_forge_skipped" not in _boot.REQUIRED_STEPS
+
+
+@pytest.mark.asyncio
+async def test_finalize_succeeds_when_git_forge_skipped(client, _admin_override):
+    """Operator walks through the wizard, hits "Skip" on Step 3.5 Git Forge,
+    then finalizes. The skip button is a client-only flip
+    (``localGreen.git_forge=true``) — it does not record any
+    ``bootstrap_state`` row for git_forge. Finalize must still return 200
+    because git_forge is not a finalize gate.
+    """
+    admin = _admin_override
+    # Record exactly the four REQUIRED_STEPS — no git_forge row at all, as
+    # if the operator hit the Skip button on Step 3.5.
+    for step in _boot.REQUIRED_STEPS:
+        await _boot.record_bootstrap_step(step, actor_user_id=admin.id)
+
+    recorded = {s["step"] for s in await _boot.list_bootstrap_steps()}
+    assert "git_forge_configured" not in recorded
+    assert "git_forge_skipped" not in recorded
+
+    r = await client.post(
+        "/api/v1/bootstrap/finalize",
+        json={"reason": "skipped git forge"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["finalized"] is True
+    assert body["status"]["admin_password_default"] is False
+    assert body["status"]["llm_provider_configured"] is True
+    assert body["status"]["cf_tunnel_configured"] is True
+    assert body["status"]["smoke_passed"] is True
+    # Response status dict only carries the four real gates — git_forge is
+    # deliberately absent from BootstrapStatus.
+    assert "git_forge_configured" not in body["status"]
+    assert _boot.is_bootstrap_finalized_flag() is True
+
+
 # ── guard: gates red ────────────────────────────────────────────
 
 
