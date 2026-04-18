@@ -97,3 +97,20 @@ async def client(tmp_path, monkeypatch):
     finally:
         await db.close()
         _boot._gate_cache_reset()
+
+
+@pytest.fixture(autouse=True)
+def _reset_bootstrap_gate_between_tests():
+    """Reset the bootstrap gate cache between every test.
+
+    Without this, a test that sets _gate_cache["finalized"] = True
+    (e.g. via the shared `client` fixture) leaks that state into
+    subsequent tests — causing flaky failures where bootstrap_gate
+    tests expect the gate to be "red" but find it "green" due to
+    a prior test's leftover cache. The in-process cache has no TTL
+    short enough to prevent this in a fast test run.
+    """
+    from backend import bootstrap as _boot
+    _boot._gate_cache_reset()
+    yield
+    _boot._gate_cache_reset()

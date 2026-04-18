@@ -180,9 +180,19 @@ def _force_green(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gate_redirects_non_exempt_when_bootstrap_red(client, _force_red):
+    # API paths get 503 JSON (not 307 redirect) so the frontend can
+    # handle the response programmatically without OOM'ing on redirect
+    # loops. See commit af18eb0.
     r = await client.get("/api/v1/agents", follow_redirects=False)
-    assert r.status_code == 307
-    assert r.headers["location"] == "/bootstrap"
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"] == "bootstrap_required"
+    assert body["redirect"] == "/bootstrap"
+
+    # Browser page navigations still get 307 redirect.
+    r2 = await client.get("/some-page", follow_redirects=False)
+    assert r2.status_code == 307
+    assert r2.headers["location"] == "/bootstrap"
 
 
 @pytest.mark.asyncio
@@ -240,11 +250,24 @@ async def test_gate_steps_aside_once_green(client, _force_green):
 
 
 @pytest.mark.asyncio
-async def test_gate_preserves_method_on_redirect(client, _force_red):
-    """307 (not 302) so client retains POST/PUT semantics on follow."""
+async def test_gate_returns_503_for_api_post_when_red(client, _force_red):
+    """API POST gets 503 JSON (not 307 redirect) to prevent OOM."""
     r = await client.post(
         "/api/v1/agents",
         json={"name": "test"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"] == "bootstrap_required"
+
+
+@pytest.mark.asyncio
+async def test_gate_preserves_method_on_browser_redirect(client, _force_red):
+    """Browser page navigations still get 307 (not 302) to preserve method."""
+    r = await client.post(
+        "/some-form-page",
+        content="data",
         follow_redirects=False,
     )
     assert r.status_code == 307
