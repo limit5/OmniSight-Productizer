@@ -163,7 +163,7 @@ Legend:
   - [x] 可展開「技術詳情」區塊：顯示 503 JSON 內容 + backend 版本 + 各 gate 狀態（admin_password / llm_provider / cf_tunnel / smoke）
   - [x] FUI 風格：暗色背景 + 掃描線動畫 + neural-grid 元素 + Orbitron 標題字型
 - [x] `lib/api.ts` 攔截器：API response `error === "bootstrap_required"` → 不走 error toast → `window.location = "/setup-required"`
-- [ ] `middleware.ts`（或 `proxy.ts`）：未登入 + 503 bootstrap_required → redirect 到 `/setup-required`（不是 `/login`）
+- [x] `middleware.ts`（或 `proxy.ts`）：未登入 + 503 bootstrap_required → redirect 到 `/setup-required`（不是 `/login`）
 
 **Part B — FUI 錯誤頁面（400/500 系列）**
 - [ ] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
