@@ -168,7 +168,7 @@ Legend:
 **Part B — FUI 錯誤頁面（400/500 系列）**
 - [x] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
 - [x] `app/error.tsx`（Client error boundary）：「發生錯誤」+ 重試按鈕 + 展開區：error.message + stack（prod 隱藏 stack）
-- [ ] `app/global-error.tsx`（Root layout crash）：最外層 fallback，minimal FUI 風格
+- [x] `app/global-error.tsx`（Root layout crash）：最外層 fallback，minimal FUI 風格
 - [ ] `components/omnisight/error-page.tsx`：共用 FUI error 頁面元件，支援：
   - [ ] `code`（400/401/403/404/500/502/503）
   - [ ] `friendlyMessage`（人類可讀的友善訊息）
@@ -1865,6 +1865,128 @@ Legend:
 
 ---
 
+## 🅢 Priority S2 — Security Hardening Phase 2（Anti-Reconnaissance + Zero-day Mitigation + UBA）
+
+> 背景：Phase 54 + K 系列 + R0 PEP 建立了基礎安全層（auth / CSRF / CSP / rate limit / PEP Gateway / sandbox）。S2 針對進階威脅——AI 輔助逆向工程、zero-day exploit、自動化 fuzzing——補齊「減少可觀測面 → 讓弱點無法利用 → 異常偵測 + 自動封鎖」三層防禦。
+>
+> **設計原則**：安全不是做到「不可破」，是做到「攻擊成本 > 收益」。每一項措施都提高攻擊者的成本，讓他們去找更容易的目標。
+>
+> 相依：**K（Auth，✅ done）**、**R0（PEP，✅ done）**、**G2（Caddy，✅ done）**、**I9（Rate limit，✅ done）**。S2 的所有項目都不依賴未完成的 Priority——可立即開工。
+
+### S2-0. API 隱形化 — Production 資訊遮蔽 (#341)
+- [ ] Production 關閉 `/docs` + `/redoc` + `/openapi.json`：`if settings.env == "production": app.docs_url = None; app.redoc_url = None; app.openapi_url = None`
+- [ ] Dev / Staging 保留（依 `OMNISIGHT_ENV` 切換）
+- [ ] `/api/v1/health` response 在 prod 移除 `version` + `phase` 欄位（攻擊者無法對應已知 CVE）
+- [ ] Caddy response headers 清理：移除 `X-Powered-By` / `Via` 等框架指紋
+- [ ] Error response 遮蔽：prod 只回 `{"error": "...", "trace_id": "..."}` 不含 stack trace / 內部 module path
+- [ ] 測試：prod mode 下 `/docs` → 404；`/api/v1/health` 不含 version；error response 不含 traceback
+- [ ] 預估：**0.5 day**
+
+### S2-1. Container Readonly Filesystem（不可變基建）(#342)
+- [ ] `docker-compose.prod.yml` 所有 app service 加 `read_only: true`
+- [ ] `tmpfs` 掛載 `/tmp`（runtime 暫存需要可寫）：`tmpfs: ["/tmp:size=500M"]`
+- [ ] Docker volumes（`omnisight-data` / `omnisight-artifacts` / `omnisight-sdks`）保持可寫
+- [ ] 驗證：container 啟動後 `touch /app/test` → `Read-only file system` error
+- [ ] 驗證：DB 讀寫正常（走 volume）、backend 正常運作
+- [ ] 預估：**0.5 day**
+
+### S2-2. Response Timing Jitter（防 Timing Side-channel）(#343)
+- [ ] `backend/main.py` 新增 middleware：每個 response 加 50-150ms random delay（`asyncio.sleep(random.uniform(0.05, 0.15))`）
+- [ ] 只在 `settings.env == "production"` 啟用（dev 不加 delay）
+- [ ] 排除 `/healthz` + `/readyz`（健康檢查需要即時回應）
+- [ ] 效果：attacker 無法透過 response time 差異推測「資源是否存在」或「查詢是否命中」
+- [ ] 預估：**0.5 day**
+
+### S2-3. API 行為指紋 + User Behavior Analytics (UBA)（#344）
+- [ ] `backend/uba.py`：Session-level API 呼叫序列追蹤器
+  - [ ] 記錄每個 session 的 endpoint 訪問序列（ring buffer, 最近 100 筆）
+  - [ ] 正常使用者 baseline pattern：`login → whoami → agents → tasks → DAG → status → ...`（從 audit log 統計產生）
+  - [ ] 異常 pattern 偵測規則：
+    - [ ] 字母序掃描（`/api/v1/a` → `/api/v1/b` → `/api/v1/c` → ...）→ 自動化偵察
+    - [ ] 高速 4xx（每分鐘 > 20 個 404/403/422）→ fuzzing 嘗試
+    - [ ] 非人類 timing（requests 間隔 < 50ms 且持續 > 10 秒）→ bot / 自動化工具
+    - [ ] 從未登入但狂打 API → 匿名偵察
+  - [ ] 偏離度評分（deviation score）：與 baseline 的 cosine distance → threshold 超過 0.7 觸發
+- [ ] 觸發動作階梯（遞進式）：
+  - [ ] Score 0.5-0.7：加重 rate limit（從 60 req/min 降到 10 req/min）+ 寫 audit `uba.suspicious`
+  - [ ] Score 0.7-0.9：暫時封鎖 session（15 min）+ SSE 告警 operator + ChatOps 通知
+  - [ ] Score > 0.9：封鎖 IP（1 hour）+ 自動建 Jira ticket `security_incident` + PagerDuty L3
+- [ ] SSE event：`uba.anomaly`（session_id / deviation_score / triggered_rules / action_taken）
+- [ ] Metrics：`uba_anomaly_total{rule}` / `uba_block_total{level}` / `uba_false_positive_total`
+- [ ] Dashboard UI（`components/omnisight/uba-panel.tsx`）：即時顯示 top suspicious sessions + deviation score trend
+- [ ] 預估：**3 day**
+
+### S2-4. Honeypot Endpoints（蜜罐端點）(#345)
+- [ ] `backend/routers/honeypot.py`：10 個「看起來脆弱」的 dummy endpoints
+  - [ ] `GET /api/v1/admin/config` → 403 + 記錄 attacker IP + session
+  - [ ] `GET /api/v1/debug/env` → 403
+  - [ ] `GET /api/v1/internal/users` → 403
+  - [ ] `GET /api/v1/.env` → 403
+  - [ ] `GET /api/v1/backup/download` → 403
+  - [ ] `POST /api/v1/admin/shell` → 403
+  - [ ] `GET /api/v1/phpinfo` → 403（常見 scanner 會打的）
+  - [ ] `GET /wp-admin/` → 403（WordPress scanner）
+  - [ ] `GET /.git/config` → 403
+  - [ ] `GET /api/v1/graphql` → 403
+- [ ] 任何觸碰 honeypot 的 request → 自動觸發 UBA（S2-3）最高級別封鎖
+- [ ] 審計：所有 honeypot 觸碰進 hash-chain audit_log `honeypot.triggered`
+- [ ] 不影響正常使用者（這些路徑在正常操作中不會被訪問）
+- [ ] 預估：**0.5 day**
+
+### S2-5. Cloudflare WAF + Bot Management 配置 (#346)
+- [ ] `docs/ops/cloudflare_waf_setup.md`：WAF 設定 runbook
+- [ ] Cloudflare Dashboard 設定：
+  - [ ] 開啟 OWASP Core Ruleset（Managed Rules）
+  - [ ] 開啟 Cloudflare Specials（已知攻擊 pattern）
+  - [ ] 設定 5 條自訂 WAF rules（Free plan 上限）：
+    - [ ] Rule 1：block `User-Agent` 含 `sqlmap` / `nikto` / `nmap` / `masscan`
+    - [ ] Rule 2：block request body 含 `<script>` / `javascript:` / `onerror=`
+    - [ ] Rule 3：challenge 每分鐘 > 30 requests 的 IP（JS challenge, 不直接 block）
+    - [ ] Rule 4：block 非 GET/POST/PUT/DELETE 的 HTTP method（TRACE / OPTIONS abuse）
+    - [ ] Rule 5：block User-Agent 為空的 request
+  - [ ] Bot Fight Mode：開啟（自動 challenge 已知 bot）
+  - [ ] Security Level：Medium（正常）→ 遇攻擊時可臨時切 High / I'm Under Attack
+- [ ] 預估：**0.5 day**（主要是 Cloudflare Dashboard 設定 + 寫 runbook）
+
+### S2-6. HSTS Preload + Security.txt + 安全 headers 補齊 (#347)
+- [ ] HSTS header 加 `preload`：`Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`
+- [ ] 提交到 [hstspreload.org](https://hstspreload.org/)（瀏覽器內建強制 HTTPS 名單）
+- [ ] `/.well-known/security.txt`：聯繫方式 + PGP key + 漏洞回報獎勵政策
+- [ ] CSP 加 `report-uri` / `report-to`：CSP 違規時收到通知
+- [ ] `X-Permitted-Cross-Domain-Policies: none`（防 Flash/PDF cross-domain）
+- [ ] Caddy 加 `Cache-Control: no-store` 對 API responses（防 proxy cache 洩漏 sensitive data）
+- [ ] 預估：**0.5 day**
+
+### S2-7. eBPF Runtime Monitoring（Falco / Tetragon）(#348)
+- [ ] `deploy/security/falco/falco_rules.yaml`：自訂規則
+  - [ ] 偵測 container 內 shell spawn（`/bin/sh` / `/bin/bash` 被 non-init PID 呼叫）
+  - [ ] 偵測敏感檔案讀取（`/etc/shadow` / `/etc/passwd` / `/proc/*/environ`）
+  - [ ] 偵測非預期 network connection（container 對外連線到非白名單 IP）
+  - [ ] 偵測 ptrace / strace 系統呼叫（debugger attach 嘗試）
+  - [ ] 偵測 privilege escalation（capability change / setuid）
+- [ ] `docker-compose.prod.yml` 加 Falco sidecar（optional `--profile security`）
+- [ ] Falco alert → 寫入 audit_log + SSE `security.kernel_alert` + ChatOps L2 通知
+- [ ] 預估：**2 day**
+
+### S2-8. GitHub Repo 安全 + Secret Scanning (#349)
+- [ ] 確認 GitHub repo 設為 Private（如果是 Public → 立即切 Private）
+- [ ] 開啟 GitHub Secret Scanning（自動偵測 commit 中的 API key / token）
+- [ ] 開啟 Dependabot alerts（與 N2 Renovate 互補，多一層）
+- [ ] Branch protection：main 需 PR + 至少 1 reviewer + status check pass
+- [ ] `.gitignore` 審計：確認所有 secret 檔案都被排除（`.env` / `*.pem` / `*.key` / `credentials*`）
+- [ ] 預估：**0.5 day**（主要是 GitHub Settings 操作）
+
+**Priority S2 總預估**：**8.5 day**（solo ~2 週，可與其他 Priority 並行）
+
+**建議切段交付**：
+1. **S2-0 + S2-1 + S2-6 + S2-8**（2d）— 即時可做的 hardening：API 隱形 + readonly fs + security headers + repo private
+2. **S2-5**（0.5d）— Cloudflare WAF 設定（Dashboard 操作 + runbook）
+3. **S2-2 + S2-4**（1d）— Timing jitter + honeypot（被動防禦）
+4. **S2-3**（3d）— UBA 行為分析（主動偵測——最大工程量但最高價值）
+5. **S2-7**（2d）— eBPF kernel monitoring（最深層防禦）
+
+---
+
 ## 🅓 Priority D — L4 Layer B (per-product skill packs)
 
 Each pack must deliver 5 artifacts (DAG tasks / code scaffolds / integration
@@ -2442,7 +2564,14 @@ R4 (斷點續傳 + Checkpoint Timeline) — 2.5d
 → R8 + R9 (安全重試 + 統一通報) — 3d
 → R5 + R6 + R7 (Active-Standby HA + Serverless PaaS + Deployment Topology View) — 7d
 
-### Phase 24 — Billing & Payment Gateway（~5 week，需 L + K + I 前置，可與 Phase 22/23 並行）
+### Phase 24 — Security Hardening Phase 2（~2 week，無硬前置——可立即開工，可與 Phase 21-23 並行）
+S2-0 + S2-1 + S2-6 + S2-8 (API 隱形 + readonly fs + security headers + repo private) — 即時 hardening（2d）
+→ S2-5 (Cloudflare WAF 設定) — Dashboard 操作 + runbook（0.5d）
+→ S2-2 + S2-4 (Timing jitter + honeypot) — 被動防禦（1d）
+→ S2-3 (UBA 行為分析) — 主動偵測（3d）
+→ S2-7 (eBPF kernel monitoring) — 最深層防禦（2d）
+
+### Phase 25 — Billing & Payment Gateway（~5 week，需 L + K + I 前置，可與 Phase 22-24 並行）
 T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6.5d）
 → T1 (Stripe 整合 — 自定義付款 + 3DS + metered) — 首個可收費路徑（3.5d）
 → T6 + T7 (Pricing Page + Customer Portal) — 客戶面 UI（4.5d）
@@ -2464,8 +2593,9 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 | X (software vertical) | 12 day |
 | R (watchdog + DR + UI) | 25.5 day |
 | V (visual design loop + workspace) | 48 day |
+| S2 (security hardening phase 2) | 8.5 day |
 | T (billing + payment gateway) | 25 day |
 | META | 4-8 day |
-| **Total** | **~562-732.5 day** |
+| **Total** | **~570.5-741 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.
