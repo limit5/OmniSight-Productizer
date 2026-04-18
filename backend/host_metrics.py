@@ -947,6 +947,38 @@ def _record_host_snapshot(snap: HostSnapshot) -> None:
         _host_history.append(snap)
 
 
+def _publish_host_prom_metrics(snap: HostSnapshot) -> None:
+    """Push the freshest host snapshot into the H1 Prometheus gauges.
+
+    Five gauges track whole-host pressure:
+      * ``host_cpu_percent``       — psutil cpu_percent (0-100)
+      * ``host_mem_percent``       — derived from (total-available)/total
+      * ``host_disk_percent``      — root fs usage (0-100)
+      * ``host_loadavg_1m``        — raw 1m load average (not normalised)
+      * ``host_container_count``   — running docker containers, labelled
+        by ``source`` (sdk / cli / unavailable) so dashboards can tell
+        whether the count is authoritative or best-effort.
+
+    Swallows exceptions: the sampling loop is best-effort observability
+    and must never tear down the backend if Prometheus client is not
+    installed or a gauge set fails.
+    """
+    try:
+        from backend import metrics as _m
+    except Exception:
+        return
+    try:
+        _m.host_cpu_percent.set(snap.host.cpu_percent)
+        _m.host_mem_percent.set(snap.host.mem_percent)
+        _m.host_disk_percent.set(snap.host.disk_percent)
+        _m.host_loadavg_1m.set(snap.host.loadavg_1m)
+        _m.host_container_count.labels(source=snap.docker.source).set(
+            snap.docker.container_count,
+        )
+    except Exception as exc:
+        logger.debug("host metrics publish failed: %s", exc)
+
+
 def get_host_history() -> list[HostSnapshot]:
     """Return a point-in-time copy of the host history, oldest first.
 
@@ -1050,6 +1082,7 @@ async def run_host_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S,
             try:
                 snap = sample_host_snapshot(cpu_interval=cpu_interval)
                 _record_host_snapshot(snap)
+                _publish_host_prom_metrics(snap)
             except Exception as exc:
                 logger.warning(
                     "host_metrics host-sample iteration failed: %s", exc,

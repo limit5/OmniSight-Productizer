@@ -1470,3 +1470,204 @@ class TestIsHostHighPressure:
         hm._record_host_snapshot(old_hot)
         hm._record_host_snapshot(new_calm)
         assert hm.is_host_high_pressure() is False
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — Host Prometheus gauge publisher
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Covers the five H1 gauges that run_host_sampling_loop pushes each
+# tick:
+#   * host_cpu_percent / host_mem_percent / host_disk_percent
+#   * host_loadavg_1m (raw 1m load average, not normalised)
+#   * host_container_count{source=sdk|cli|unavailable}
+#
+# The publisher must be a no-op when prometheus_client is absent and
+# never raise — the sampling loop can't afford to die on a scrape.
+
+
+class TestHostPromPublish:
+    def test_publish_writes_all_five_host_gauges(self):
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+        snap = hm.HostSnapshot(
+            host=hm.HostSample(
+                cpu_percent=42.5, mem_percent=77.25,
+                mem_used_gb=49.0, mem_total_gb=64.0,
+                disk_percent=88.0, disk_used_gb=450.0, disk_total_gb=512.0,
+                loadavg_1m=14.4, loadavg_5m=12.0, loadavg_15m=10.0,
+                sampled_at=100.0,
+            ),
+            docker=hm.DockerSample(
+                container_count=7, total_mem_reservation_bytes=0,
+                source="sdk", sampled_at=100.0,
+            ),
+            sampled_at=100.0,
+        )
+        hm._publish_host_prom_metrics(snap)
+        from prometheus_client import generate_latest
+        text = generate_latest(m.REGISTRY).decode()
+        assert "omnisight_host_cpu_percent 42.5" in text
+        assert "omnisight_host_mem_percent 77.25" in text
+        assert "omnisight_host_disk_percent 88.0" in text
+        assert "omnisight_host_loadavg_1m 14.4" in text
+        assert 'omnisight_host_container_count{source="sdk"} 7.0' in text
+
+    def test_publish_labels_container_count_by_source_cli(self):
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0, cpu=15.0),
+            docker=hm.DockerSample(
+                container_count=3, total_mem_reservation_bytes=0,
+                source="cli", sampled_at=1.0,
+            ),
+            sampled_at=1.0,
+        )
+        hm._publish_host_prom_metrics(snap)
+        from prometheus_client import generate_latest
+        text = generate_latest(m.REGISTRY).decode()
+        assert 'omnisight_host_container_count{source="cli"} 3.0' in text
+        # The sdk series should not exist since we never set it in this
+        # process — Prometheus shouldn't invent labels.
+        assert 'omnisight_host_container_count{source="sdk"}' not in text
+
+    def test_publish_handles_unavailable_source(self):
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=2.0, cpu=0.0),
+            docker=hm.DockerSample(
+                container_count=0, total_mem_reservation_bytes=0,
+                source="unavailable", sampled_at=2.0,
+            ),
+            sampled_at=2.0,
+        )
+        hm._publish_host_prom_metrics(snap)
+        from prometheus_client import generate_latest
+        text = generate_latest(m.REGISTRY).decode()
+        assert 'omnisight_host_container_count{source="unavailable"} 0.0' in text
+
+    def test_publish_second_call_overwrites_previous_value(self):
+        """Gauges are set-values, not counters — a second publish must
+        replace the reading rather than accumulate."""
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+        snap_a = hm.HostSnapshot(
+            host=_make_host_sample(t=1.0, cpu=10.0),
+            docker=_make_docker_sample(1.0, count=2),
+            sampled_at=1.0,
+        )
+        snap_b = hm.HostSnapshot(
+            host=_make_host_sample(t=2.0, cpu=55.5),
+            docker=_make_docker_sample(2.0, count=9),
+            sampled_at=2.0,
+        )
+        hm._publish_host_prom_metrics(snap_a)
+        hm._publish_host_prom_metrics(snap_b)
+        from prometheus_client import generate_latest
+        text = generate_latest(m.REGISTRY).decode()
+        # Latest CPU wins; first-tick value must be gone.
+        assert "omnisight_host_cpu_percent 55.5" in text
+        assert "omnisight_host_cpu_percent 10.0" not in text
+        assert 'omnisight_host_container_count{source="sdk"} 9.0' in text
+
+    def test_publish_is_noop_when_metrics_module_import_fails(self, monkeypatch):
+        """If the metrics import itself blows up, the publisher swallows
+        the exception — the sampling loop must keep running."""
+        import builtins
+        real_import = builtins.__import__
+
+        def raising_import(name, *args, **kwargs):
+            if name == "backend.metrics" or name == "backend":
+                raise ImportError("simulated missing dep")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", raising_import)
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=3.0, cpu=1.0),
+            docker=_make_docker_sample(3.0),
+            sampled_at=3.0,
+        )
+        # Must not raise — no assertion on side-effects, by design.
+        hm._publish_host_prom_metrics(snap)
+
+    def test_publish_is_noop_when_a_gauge_set_raises(self, monkeypatch):
+        """Individual gauge failures are logged & swallowed — the
+        sampling loop never tears down on a bad write."""
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+
+        class Boom:
+            def set(self, *_a, **_kw):
+                raise RuntimeError("prometheus exploded")
+            def labels(self, *_a, **_kw):
+                return self
+
+        monkeypatch.setattr(m, "host_cpu_percent", Boom())
+        snap = hm.HostSnapshot(
+            host=_make_host_sample(t=4.0, cpu=1.0),
+            docker=_make_docker_sample(4.0),
+            sampled_at=4.0,
+        )
+        hm._publish_host_prom_metrics(snap)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_sampling_loop_publishes_each_tick(self, monkeypatch):
+        """The lifespan loop must call the publisher each iteration so
+        /metrics reflects the freshest tick without a lag of one cycle."""
+        if not m.is_available():
+            pytest.skip("prometheus_client not installed")
+        m.reset_for_tests()
+
+        ticks = {"n": 0}
+
+        def fake_sample(cpu_interval: float = 1.0) -> hm.HostSnapshot:
+            ticks["n"] += 1
+            return hm.HostSnapshot(
+                host=hm.HostSample(
+                    cpu_percent=float(ticks["n"]),
+                    mem_percent=11.0, mem_used_gb=7.0, mem_total_gb=64.0,
+                    disk_percent=22.0, disk_used_gb=100.0, disk_total_gb=512.0,
+                    loadavg_1m=float(ticks["n"]),
+                    loadavg_5m=0.0, loadavg_15m=0.0,
+                    sampled_at=float(ticks["n"]),
+                ),
+                docker=hm.DockerSample(
+                    container_count=ticks["n"], total_mem_reservation_bytes=0,
+                    source="sdk", sampled_at=float(ticks["n"]),
+                ),
+                sampled_at=float(ticks["n"]),
+            )
+
+        monkeypatch.setattr(hm, "sample_host_snapshot", fake_sample)
+        task = asyncio.create_task(
+            hm.run_host_sampling_loop(interval_s=0.01, cpu_interval=0.0),
+        )
+        try:
+            # Give the loop a handful of iterations.
+            for _ in range(50):
+                if ticks["n"] >= 2:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        from prometheus_client import generate_latest
+        text = generate_latest(m.REGISTRY).decode()
+        # Whichever of the last two ticks happened to win the race, the
+        # cpu gauge must equal that tick's integer cpu_percent.
+        assert any(
+            f"omnisight_host_cpu_percent {float(n)}" in text
+            for n in (ticks["n"], ticks["n"] - 1)
+        )
+        assert 'omnisight_host_container_count{source="sdk"}' in text

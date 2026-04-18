@@ -219,6 +219,38 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # H1: host-level gauges populated every SAMPLE_INTERVAL_S by
+    # host_metrics.run_host_sampling_loop — whole-machine view that sits
+    # beside the per-tenant cgroup numbers. Gauges (not counters) because
+    # they represent an instantaneous sample, not a monotonic total;
+    # Prometheus scrapes whatever the most recent tick published.
+    host_cpu_percent = Gauge(
+        "omnisight_host_cpu_percent",
+        "Whole-host CPU utilisation (0-100) from psutil.cpu_percent",
+        registry=REGISTRY,
+    )
+    host_mem_percent = Gauge(
+        "omnisight_host_mem_percent",
+        "Whole-host memory utilisation (0-100); derived from (total-available)/total",
+        registry=REGISTRY,
+    )
+    host_disk_percent = Gauge(
+        "omnisight_host_disk_percent",
+        "Root filesystem utilisation (0-100) from psutil.disk_usage('/')",
+        registry=REGISTRY,
+    )
+    host_loadavg_1m = Gauge(
+        "omnisight_host_loadavg_1m",
+        "1-minute load average (raw, not normalised by core count)",
+        registry=REGISTRY,
+    )
+    host_container_count = Gauge(
+        "omnisight_host_container_count",
+        "Running Docker container count (SDK primary, CLI fallback) labelled by source",
+        labelnames=("source",),  # sdk | cli | unavailable
+        registry=REGISTRY,
+    )
+
     # Phase 62: skills extraction (Knowledge Generation L1) ─────
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total",
@@ -624,6 +656,11 @@ else:
     tenant_cpu_seconds_total = _NoOp()  # type: ignore
     tenant_mem_gb_seconds_total = _NoOp()  # type: ignore
     tenant_derate_total = _NoOp()  # type: ignore
+    host_cpu_percent = _NoOp()  # type: ignore
+    host_mem_percent = _NoOp()  # type: ignore
+    host_disk_percent = _NoOp()  # type: ignore
+    host_loadavg_1m = _NoOp()  # type: ignore
+    host_container_count = _NoOp()  # type: ignore
     skill_extracted_total = _NoOp()  # type: ignore
     skill_promoted_total = _NoOp()  # type: ignore
     intelligence_score = _NoOp()  # type: ignore
@@ -700,6 +737,8 @@ def reset_for_tests() -> None:
     global tenant_cpu_percent, tenant_mem_used_gb, tenant_disk_used_gb
     global tenant_sandbox_count, tenant_cpu_seconds_total
     global tenant_mem_gb_seconds_total, tenant_derate_total
+    global host_cpu_percent, host_mem_percent, host_disk_percent
+    global host_loadavg_1m, host_container_count
     global skill_extracted_total, skill_promoted_total
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
@@ -830,6 +869,31 @@ def reset_for_tests() -> None:
         "omnisight_tenant_derate_total",
         "Per-tenant AIMD derate events",
         labelnames=("tenant_id", "reason"), registry=REGISTRY,
+    )
+    host_cpu_percent = Gauge(
+        "omnisight_host_cpu_percent",
+        "Whole-host CPU utilisation (0-100)",
+        registry=REGISTRY,
+    )
+    host_mem_percent = Gauge(
+        "omnisight_host_mem_percent",
+        "Whole-host memory utilisation (0-100)",
+        registry=REGISTRY,
+    )
+    host_disk_percent = Gauge(
+        "omnisight_host_disk_percent",
+        "Root filesystem utilisation (0-100)",
+        registry=REGISTRY,
+    )
+    host_loadavg_1m = Gauge(
+        "omnisight_host_loadavg_1m",
+        "1-minute load average",
+        registry=REGISTRY,
+    )
+    host_container_count = Gauge(
+        "omnisight_host_container_count",
+        "Running Docker container count labelled by source",
+        labelnames=("source",), registry=REGISTRY,
     )
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total", "Skill extraction events",
