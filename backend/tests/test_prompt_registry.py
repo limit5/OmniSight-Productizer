@@ -359,7 +359,7 @@ description: huge skill
     meta = pr.get_skill_metadata("big")
     for v in meta.values():
         assert "SECRET_BODY_MARKER" not in str(v), (
-            f"body leaked into metadata key; metadata must be body-free"
+            "body leaked into metadata key; metadata must be body-free"
         )
     # And the token_cost should reflect the body size (chars/4).
     assert meta["token_cost"] >= 1000

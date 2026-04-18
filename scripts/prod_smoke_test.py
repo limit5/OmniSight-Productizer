@@ -246,11 +246,11 @@ def verify_audit_chain() -> tuple[bool, str]:
 def generate_report(results: list[dict]) -> str:
     lines = [
         "## A2 L1-05 Prod Smoke Test Report",
-        f"",
+        "",
         f"**Date**: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         f"**Target**: {BASE_URL}",
         f"**Subset**: {SUBSET}",
-        f"",
+        "",
     ]
 
     all_pass = True
@@ -291,7 +291,7 @@ def generate_report(results: list[dict]) -> str:
 # ── Main ────────────────────────────────────────────────────────
 
 def main() -> int:
-    print(f"OmniSight Prod Smoke Test — A2 L1-05")
+    print("OmniSight Prod Smoke Test — A2 L1-05")
     print(f"Target: {BASE_URL}")
 
     results: list[dict] = []

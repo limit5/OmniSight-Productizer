@@ -37,7 +37,6 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
 
 # Tracked frameworks — bumping the major of any of these triggers the
 # blue-green gate even if Renovate has not yet labelled the PR.

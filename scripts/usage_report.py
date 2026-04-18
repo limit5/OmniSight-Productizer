@@ -35,7 +35,6 @@ import argparse
 import csv
 import io
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any

@@ -91,8 +91,8 @@ def _self_test() -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
         tmp.write(good_code)
         good_path = Path(tmp.name)
-    assert scan_file(bad_path), f"expected offender in bad fixture"
-    assert not scan_file(good_path), f"unexpected offender in good fixture"
+    assert scan_file(bad_path), "expected offender in bad fixture"
+    assert not scan_file(good_path), "unexpected offender in good fixture"
     bad_path.unlink()
     good_path.unlink()
     print("self-test ✓")

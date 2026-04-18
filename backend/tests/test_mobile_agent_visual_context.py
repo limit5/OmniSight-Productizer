@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import FrozenInstanceError
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import pytest
 

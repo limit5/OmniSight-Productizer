@@ -21,12 +21,10 @@ Pins ``backend/mobile_annotation_context.py`` against the V7 row spec:
 from __future__ import annotations
 
 import threading
-import time
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 import pytest
 
-from backend import mobile_annotation_context as mac
 from backend.mobile_annotation_context import (
     ANNOTATION_TYPE_CLICK,
     ANNOTATION_TYPE_RECT,
@@ -44,7 +42,6 @@ from backend.mobile_annotation_context import (
     MobileAnnotationBundle,
     MobileAnnotationContextBuilder,
     MobileAnnotationContextError,
-    MobileAnnotationPayload,
     build_mobile_text_content_block,
     mobile_annotation_from_dict,
     mobile_annotations_from_list,
