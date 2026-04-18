@@ -276,7 +276,7 @@ Legend:
 - [x] `configs/roles/software-architect.md`：架構決策框架——trade-off 分析模板 + ADR（Architecture Decision Record）自動生成 + 技術債評估
 - [x] `configs/roles/sre.md`：Site Reliability Engineer——incident response SOP + runbook 自動生成 + SLO/SLI 定義 + post-mortem 模板。搭配 R0 PEP + R1 ChatOps
 - [x] `configs/roles/technical-writer.md`：文件生成專家——API docs / user guide / changelog / migration guide 品質標準 + 多語言模板
-- [ ] `configs/roles/database-optimizer.md`：SQL 效能分析 + index 建議 + query plan 解讀 + slow query 偵測。搭配 G4 PostgreSQL
+- [x] `configs/roles/database-optimizer.md`：SQL 效能分析 + index 建議 + query plan 解讀 + slow query 偵測。搭配 G4 PostgreSQL
 - 預估：**0.5 day**（轉換 + 調整格式 + 加入 OmniSight-specific context）
 
 **Part B — 現有 19 個 Role Skills Pattern Upgrade**
