@@ -1405,7 +1405,7 @@ Legend:
 - [x] `psutil` 採樣：`cpu_percent(interval=1)` / `virtual_memory()` (用 `available` 反推) / `disk_usage('/')` / `os.getloadavg()`
 - [x] Docker SDK 抓 running container 數 + 總 mem reservation；Docker Desktop 情境 fallback `docker stats --no-stream`
 - [x] 採樣 5s 週期、ring buffer 60 點（5 分鐘歷史）
-- [ ] WSL2 輔助訊號：`loadavg_1m / 16 > 0.9` 也標記為 high pressure（host 其他進程）
+- [x] WSL2 輔助訊號：`loadavg_1m / 16 > 0.9` 也標記為 high pressure（host 其他進程）
 - [ ] Prometheus gauges：`host_cpu_percent` / `host_mem_percent` / `host_disk_percent` / `host_loadavg_1m` / `host_container_count`
 - [ ] Endpoint：`GET /api/v1/host/metrics`（current + history）
 - [ ] SSE event：`host.metrics.tick`（5s 推送）

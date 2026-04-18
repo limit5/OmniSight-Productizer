@@ -1280,3 +1280,193 @@ class TestRunHostSamplingLoop:
         # requested interval (sample ate part of the window).
         for s in sleep_calls:
             assert 0.0 <= s <= 0.1
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — WSL2 high-pressure loadavg signal
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Contract tests for the H1 "WSL2 輔助訊號" TODO row. They pin:
+#   * HIGH_PRESSURE_LOADAVG_RATIO == 0.9 (downstream H2 coordinator /
+#     sandbox_prewarm OR this into their derate precondition — a silent
+#     change would shift the high-pressure activation point)
+#   * Ratio math: loadavg_1m / cpu_cores > threshold, strictly greater
+#   * HOST_BASELINE.cpu_cores is the default denominator (16 under
+#     current baseline) and lookup is at call-time (future-proofs
+#     against runtime HOST_BASELINE swap)
+#   * Edge cases — zero cores, negative cores, NaN loadavg — degrade
+#     to False rather than raising, because the helper sits on the
+#     hot path and callers must never see an exception here
+#   * is_host_high_pressure() reads the ring buffer, returns False on
+#     cold start (no tick yet), and accepts an explicit snapshot for
+#     replay / unit tests
+
+
+class TestHighPressureLoadavgConstant:
+    def test_threshold_value_pinned_at_0_9(self):
+        # Pinned so H2 coordinator / runbook stay in lock-step. A change
+        # here shifts every derate activation, so it must be deliberate.
+        assert hm.HIGH_PRESSURE_LOADAVG_RATIO == 0.9
+
+
+class TestIsHighPressureLoadavg:
+    def test_ratio_above_threshold_is_high_pressure(self):
+        # loadavg 15 / 16 cores = 0.9375 → above 0.9 → high pressure.
+        assert hm.is_high_pressure_loadavg(15.0, cpu_cores=16) is True
+
+    def test_ratio_below_threshold_is_not_high_pressure(self):
+        # loadavg 10 / 16 cores = 0.625 → below 0.9 → calm host.
+        assert hm.is_high_pressure_loadavg(10.0, cpu_cores=16) is False
+
+    def test_ratio_exactly_at_threshold_is_not_high_pressure(self):
+        # Strict ">" — a saturated-but-not-overloaded host doesn't derate.
+        # 14.4 / 16 = exactly 0.9.
+        assert hm.is_high_pressure_loadavg(14.4, cpu_cores=16) is False
+
+    def test_ratio_just_above_threshold_is_high_pressure(self):
+        # Smallest nudge past the threshold trips it.
+        assert hm.is_high_pressure_loadavg(14.41, cpu_cores=16) is True
+
+    def test_defaults_to_host_baseline_cpu_cores(self):
+        # No cpu_cores → use HOST_BASELINE.cpu_cores (16 under current
+        # baseline). Matches the TODO spec "loadavg_1m / 16 > 0.9".
+        assert hm.is_high_pressure_loadavg(15.0) is True
+        assert hm.is_high_pressure_loadavg(10.0) is False
+
+    def test_cpu_cores_lookup_is_at_call_time(self, monkeypatch):
+        # Future-proof: a runtime detector that swaps HOST_BASELINE must
+        # automatically retune the threshold without rebinding callers.
+        swapped = hm.HostBaseline(cpu_cores=8, mem_total_gb=32,
+                                   disk_total_gb=256, cpu_model="fake")
+        monkeypatch.setattr(hm, "HOST_BASELINE", swapped)
+        # 8 cores: 7.5 / 8 = 0.9375 → high pressure on the swapped host
+        # even though the same loadavg on a 16-core host would be calm.
+        assert hm.is_high_pressure_loadavg(7.5) is True
+        assert hm.is_high_pressure_loadavg(6.0) is False  # 0.75
+
+    def test_custom_threshold_overrides_constant(self):
+        # Tunability for future experimentation / H2 A/B testing.
+        assert hm.is_high_pressure_loadavg(
+            13.0, cpu_cores=16, threshold=0.8,
+        ) is True  # 0.8125 > 0.8
+        assert hm.is_high_pressure_loadavg(
+            13.0, cpu_cores=16, threshold=0.85,
+        ) is False  # 0.8125 not > 0.85
+
+    def test_zero_cpu_cores_returns_false(self):
+        # Pathological (would ZeroDivisionError) — degrade to False so
+        # the sampler hot path never raises.
+        assert hm.is_high_pressure_loadavg(10.0, cpu_cores=0) is False
+
+    def test_negative_cpu_cores_returns_false(self):
+        assert hm.is_high_pressure_loadavg(10.0, cpu_cores=-1) is False
+
+    def test_negative_loadavg_returns_false(self):
+        # Shouldn't happen in practice but defended: a negative ratio
+        # is never "high pressure".
+        assert hm.is_high_pressure_loadavg(-5.0, cpu_cores=16) is False
+
+    def test_zero_loadavg_is_not_high_pressure(self):
+        # Completely idle host — explicitly not high-pressure (guards
+        # against the ``ratio > 0`` short-circuit being confused with
+        # the threshold check).
+        assert hm.is_high_pressure_loadavg(0.0, cpu_cores=16) is False
+
+    def test_nan_loadavg_returns_false(self):
+        # ``_read_loadavg`` on weird platforms could hand back NaN via
+        # psutil shims; NaN comparisons are always False, so the helper
+        # must degrade gracefully rather than leaking a NaN-truthy.
+        nan = float("nan")
+        assert hm.is_high_pressure_loadavg(nan, cpu_cores=16) is False
+
+
+class TestIsHostHighPressure:
+    def test_cold_start_returns_false(self):
+        # No snapshot in the ring buffer yet → "pressure unknown" → False.
+        # Prevents the first few seconds after boot looking derated.
+        assert hm.get_latest_host_snapshot() is None
+        assert hm.is_host_high_pressure() is False
+
+    def test_reads_latest_ring_buffer_entry(self):
+        # loadavg 15 / 16 = 0.9375 → high pressure on the baseline host.
+        hot = hm.HostSnapshot(
+            host=hm.HostSample(
+                cpu_percent=10.0, mem_percent=20.0,
+                mem_used_gb=12.0, mem_total_gb=64.0,
+                disk_percent=30.0, disk_used_gb=150.0, disk_total_gb=512.0,
+                loadavg_1m=15.0, loadavg_5m=14.0, loadavg_15m=13.0,
+                sampled_at=100.0,
+            ),
+            docker=_make_docker_sample(100.0),
+            sampled_at=100.0,
+        )
+        hm._record_host_snapshot(hot)
+        assert hm.is_host_high_pressure() is True
+
+    def test_latest_entry_below_threshold_is_calm(self):
+        calm = hm.HostSnapshot(
+            host=hm.HostSample(
+                cpu_percent=10.0, mem_percent=20.0,
+                mem_used_gb=12.0, mem_total_gb=64.0,
+                disk_percent=30.0, disk_used_gb=150.0, disk_total_gb=512.0,
+                loadavg_1m=5.0, loadavg_5m=5.0, loadavg_15m=5.0,
+                sampled_at=100.0,
+            ),
+            docker=_make_docker_sample(100.0),
+            sampled_at=100.0,
+        )
+        hm._record_host_snapshot(calm)
+        assert hm.is_host_high_pressure() is False
+
+    def test_accepts_explicit_snapshot(self):
+        # Replay path — pass a specific tick without touching the ring.
+        hot_sample = hm.HostSample(
+            cpu_percent=0.0, mem_percent=0.0,
+            mem_used_gb=0.0, mem_total_gb=64.0,
+            disk_percent=0.0, disk_used_gb=0.0, disk_total_gb=512.0,
+            loadavg_1m=20.0, loadavg_5m=0.0, loadavg_15m=0.0,
+            sampled_at=0.0,
+        )
+        snap = hm.HostSnapshot(
+            host=hot_sample, docker=_make_docker_sample(0.0), sampled_at=0.0,
+        )
+        assert hm.is_host_high_pressure(snap) is True
+
+    def test_accepts_explicit_hostsample(self):
+        # Coordinator may have a bare HostSample (no docker pair) in
+        # some paths — helper must handle both shapes transparently.
+        hot_sample = hm.HostSample(
+            cpu_percent=0.0, mem_percent=0.0,
+            mem_used_gb=0.0, mem_total_gb=64.0,
+            disk_percent=0.0, disk_used_gb=0.0, disk_total_gb=512.0,
+            loadavg_1m=20.0, loadavg_5m=0.0, loadavg_15m=0.0,
+            sampled_at=0.0,
+        )
+        assert hm.is_host_high_pressure(hot_sample) is True
+
+    def test_uses_only_latest_tick_not_history(self):
+        # Append an old high-pressure tick, then a recent calm tick —
+        # the helper must reflect the *current* state, not historical.
+        old_hot = hm.HostSnapshot(
+            host=hm.HostSample(
+                cpu_percent=0.0, mem_percent=0.0,
+                mem_used_gb=0.0, mem_total_gb=64.0,
+                disk_percent=0.0, disk_used_gb=0.0, disk_total_gb=512.0,
+                loadavg_1m=20.0, loadavg_5m=0.0, loadavg_15m=0.0,
+                sampled_at=1.0,
+            ),
+            docker=_make_docker_sample(1.0), sampled_at=1.0,
+        )
+        new_calm = hm.HostSnapshot(
+            host=hm.HostSample(
+                cpu_percent=0.0, mem_percent=0.0,
+                mem_used_gb=0.0, mem_total_gb=64.0,
+                disk_percent=0.0, disk_used_gb=0.0, disk_total_gb=512.0,
+                loadavg_1m=2.0, loadavg_5m=0.0, loadavg_15m=0.0,
+                sampled_at=2.0,
+            ),
+            docker=_make_docker_sample(2.0), sampled_at=2.0,
+        )
+        hm._record_host_snapshot(old_hot)
+        hm._record_host_snapshot(new_calm)
+        assert hm.is_host_high_pressure() is False

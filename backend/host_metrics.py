@@ -91,6 +91,21 @@ CULPRIT_MIN_CPU_PCT = 80.0
 culprit. Prevents derating a quiet tenant when the host is being
 pegged by a non-containerised workload."""
 
+HIGH_PRESSURE_LOADAVG_RATIO = 0.9
+"""WSL2 auxiliary high-pressure threshold on the normalised 1-minute
+load average (``loadavg_1m / cpu_cores``).
+
+On WSL2, processes running on the Windows host sit outside the Linux
+VM and are invisible to ``psutil.cpu_percent`` — but the Linux kernel
+still feels I/O and scheduler contention and reflects it in
+``loadavg_1m``. A 1-minute loadavg above 90% of the allocated core
+count is a reliable proxy for "host is hot" when native CPU% under-
+reports. H2's coordinator ORs this signal with its CPU/mem precondition
+so prewarm pauses even when psutil is clean but the WSL2 host isn't.
+
+Comparison is strictly greater-than so a saturated-but-not-overloaded
+host (ratio == 0.9) doesn't false-trigger the derate path."""
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Dataclasses
@@ -951,6 +966,60 @@ def get_latest_host_snapshot() -> HostSnapshot | None:
         if not _host_history:
             return None
         return _host_history[-1]
+
+
+def is_high_pressure_loadavg(loadavg_1m: float,
+                             cpu_cores: int | None = None,
+                             *, threshold: float = HIGH_PRESSURE_LOADAVG_RATIO) -> bool:
+    """Return True when the normalised 1m load average exceeds ``threshold``.
+
+    Pure function — tests ``loadavg_1m / cpu_cores > threshold`` with
+    the WSL2 rationale documented on ``HIGH_PRESSURE_LOADAVG_RATIO``.
+
+    ``cpu_cores`` defaults to ``HOST_BASELINE.cpu_cores`` (16 under the
+    current baseline). Lookup happens at call time — if a future runtime
+    detector swaps ``HOST_BASELINE`` the threshold automatically follows
+    without re-binding callers.
+
+    Edge cases:
+      * ``cpu_cores <= 0``            — returns False (avoids ZeroDivision
+        and nonsensical negative-core hosts rather than raising).
+      * ``loadavg_1m`` negative / NaN — returns False (treated as
+        "no reading" so a ``_read_loadavg`` fallback on a platform
+        without loadavg doesn't false-trigger derate).
+    """
+    cores = cpu_cores if cpu_cores is not None else HOST_BASELINE.cpu_cores
+    if cores <= 0:
+        return False
+    try:
+        ratio = loadavg_1m / cores
+    except (TypeError, ZeroDivisionError):
+        return False
+    # NaN compares False against anything → also short-circuits negative.
+    if not (ratio > 0.0):
+        return False
+    return ratio > threshold
+
+
+def is_host_high_pressure(snapshot: "HostSnapshot | HostSample | None" = None) -> bool:
+    """High-pressure check over the ring buffer (or an explicit sample).
+
+    Thin convenience wrapper the coordinator / prewarm paths call on
+    every decision cycle: pulls the latest ``HostSnapshot`` out of the
+    ring buffer and runs the loadavg ratio test. Pass an explicit
+    ``HostSnapshot`` / ``HostSample`` to check a specific tick (tests,
+    replay from history).
+
+    Returns ``False`` when no sample has landed yet (cold-start grace) —
+    callers treat "no data" as "no pressure known" so the first few
+    seconds after boot don't look artificially derated.
+    """
+    if snapshot is None:
+        snapshot = get_latest_host_snapshot()
+    if snapshot is None:
+        return False
+    host = snapshot.host if isinstance(snapshot, HostSnapshot) else snapshot
+    return is_high_pressure_loadavg(host.loadavg_1m)
 
 
 async def run_host_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S,
