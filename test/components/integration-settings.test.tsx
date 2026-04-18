@@ -30,6 +30,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     updateSettings: vi.fn(),
     getGitTokenMap: vi.fn(),
     updateGitTokenMap: vi.fn(),
+    getGitForgeSshPubkey: vi.fn(),
   }
 })
 
@@ -39,6 +40,7 @@ import * as api from "@/lib/api"
 const mockedGetSettings = api.getSettings as unknown as ReturnType<typeof vi.fn>
 const mockedGetProviders = api.getProviders as unknown as ReturnType<typeof vi.fn>
 const mockedTestGitForgeToken = api.testGitForgeToken as unknown as ReturnType<typeof vi.fn>
+const mockedGetGitForgeSshPubkey = api.getGitForgeSshPubkey as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitTokenMap = (api as unknown as {
   getGitTokenMap: ReturnType<typeof vi.fn>
 }).getGitTokenMap
@@ -163,5 +165,165 @@ describe("GerritSetupWizardDialog — Step 1 (Test Connection)", () => {
     const result = await screen.findByTestId("gerrit-wizard-result")
     expect(result.getAttribute("data-status")).toBe("error")
     expect(result.textContent).toContain("network offline")
+  })
+})
+
+/**
+ * B14 Part C row 223 — Gerrit Setup Wizard Step 2 (SSH key 設定引導).
+ *
+ * Step 2 is gated behind Step 1: until Step 1's probe flips DONE,
+ * Step 2 shows a muted "Waiting for Step 1" message and exposes no
+ * Load Public Key button. Once Step 1 passes, the operator clicks
+ * Load Public Key → `getGitForgeSshPubkey()` fires → the key + SHA256
+ * fingerprint + source path are rendered with a Copy button and an
+ * "I've added it to Gerrit" ack button that flips the badge DONE.
+ *
+ * Covered:
+ *   - Gated: Step 2 hides inputs until Step 1 flips DONE
+ *   - Happy path: load → pubkey textarea + fingerprint shown; badge READY
+ *   - Ack flips badge READY → DONE
+ *   - Backend error surface (key not found / unreadable)
+ *   - Copy button writes to the clipboard stub
+ */
+describe("GerritSetupWizardDialog — Step 2 (SSH key 設定引導)", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedTestGitForgeToken.mockReset()
+    mockedGetGitForgeSshPubkey.mockReset()
+    mockedGetSettings.mockResolvedValue({})
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  async function passStep1() {
+    mockedTestGitForgeToken.mockResolvedValueOnce({
+      status: "ok",
+      version: "3.8.1",
+      ssh_host: "bot@gerrit.example.com",
+      ssh_port: 29418,
+    })
+    await renderAndOpenWizard()
+    fireEvent.change(screen.getByTestId("gerrit-wizard-ssh-host"), {
+      target: { value: "bot@gerrit.example.com" },
+    })
+    fireEvent.click(screen.getByTestId("gerrit-wizard-test"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-1-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+  }
+
+  it("keeps Step 2 gated until Step 1 flips DONE", async () => {
+    await renderAndOpenWizard()
+    // Before Step 1 passes, Step 2 shows the gated message and no Load button.
+    expect(screen.getByTestId("gerrit-wizard-step-2-gated")).toBeTruthy()
+    expect(screen.queryByTestId("gerrit-wizard-load-pubkey")).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-2-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("loads the public key + fingerprint and flips Step 2 to READY", async () => {
+    mockedGetGitForgeSshPubkey.mockResolvedValueOnce({
+      status: "ok",
+      public_key:
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISAMPLEKEYXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX merger-agent-bot@omnisight",
+      fingerprint: "SHA256:abcdef0123456789abcdef0123456789abcdef0123",
+      key_path: "/home/merger/.ssh/id_ed25519.pub",
+      key_type: "ssh-ed25519",
+      comment: "merger-agent-bot@omnisight",
+    })
+
+    await passStep1()
+    const loadBtn = await screen.findByTestId("gerrit-wizard-load-pubkey")
+    fireEvent.click(loadBtn)
+
+    const textarea = await screen.findByTestId("gerrit-wizard-pubkey")
+    expect((textarea as HTMLTextAreaElement).value).toContain(
+      "ssh-ed25519 AAAAC3",
+    )
+    expect(screen.getByTestId("gerrit-wizard-step-2-badge").textContent).toBe(
+      "READY",
+    )
+    const meta = screen.getByTestId("gerrit-wizard-pubkey-meta")
+    expect(meta.textContent).toContain(
+      "SHA256:abcdef0123456789abcdef0123456789abcdef0123",
+    )
+    expect(meta.textContent).toContain("/home/merger/.ssh/id_ed25519.pub")
+  })
+
+  it("flips Step 2 from READY to DONE when the operator acknowledges", async () => {
+    mockedGetGitForgeSshPubkey.mockResolvedValueOnce({
+      status: "ok",
+      public_key: "ssh-ed25519 AAAA...KEY merger-agent-bot@omnisight",
+      fingerprint: "SHA256:xxx",
+      key_path: "/home/merger/.ssh/id_ed25519.pub",
+      key_type: "ssh-ed25519",
+      comment: "merger-agent-bot@omnisight",
+    })
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-load-pubkey"))
+    await screen.findByTestId("gerrit-wizard-pubkey")
+
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-2-ack"))
+    expect(screen.getByTestId("gerrit-wizard-step-2-badge").textContent).toBe(
+      "DONE",
+    )
+  })
+
+  it("surfaces a backend error when the public key cannot be loaded", async () => {
+    mockedGetGitForgeSshPubkey.mockResolvedValueOnce({
+      status: "error",
+      message: "SSH public key not found: /home/merger/.ssh/id_ed25519.pub",
+    })
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-load-pubkey"))
+
+    const err = await screen.findByTestId("gerrit-wizard-pubkey-error")
+    expect(err.textContent).toContain("SSH public key not found")
+    // The pubkey textarea should not render on error.
+    expect(screen.queryByTestId("gerrit-wizard-pubkey")).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-2-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("copies the public key to the clipboard and shows a Copied affordance", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    mockedGetGitForgeSshPubkey.mockResolvedValueOnce({
+      status: "ok",
+      public_key: "ssh-ed25519 AAAA...COPYME merger-agent-bot@omnisight",
+      fingerprint: "SHA256:xxx",
+      key_path: "/home/merger/.ssh/id_ed25519.pub",
+      key_type: "ssh-ed25519",
+    })
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-load-pubkey"))
+    await screen.findByTestId("gerrit-wizard-pubkey")
+
+    fireEvent.click(screen.getByTestId("gerrit-wizard-copy-pubkey"))
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(
+        "ssh-ed25519 AAAA...COPYME merger-agent-bot@omnisight",
+      )
+    })
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("gerrit-wizard-copy-pubkey").textContent,
+      ).toContain("Copied")
+    })
   })
 })

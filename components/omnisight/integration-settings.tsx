@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
-import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw } from "lucide-react"
+import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy } from "lucide-react"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -1105,6 +1105,12 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
   const [sshPort, setSshPort] = useState<string>(String(GERRIT_DEFAULT_SSH_PORT))
   const [testing, setTesting] = useState(false)
   const [result, setResult] = useState<api.GitForgeTokenTestResult | null>(null)
+  // B14 Part C row 223 — Step 2: fetch + display the OmniSight SSH public
+  // key so the operator can paste it into Gerrit Settings → SSH Keys.
+  const [pubkeyLoading, setPubkeyLoading] = useState(false)
+  const [pubkey, setPubkey] = useState<api.GitForgeSshPubkey | null>(null)
+  const [pubkeyCopied, setPubkeyCopied] = useState(false)
+  const [step2Ackd, setStep2Ackd] = useState(false)
 
   const parsedPort = (() => {
     const trimmed = sshPort.trim()
@@ -1141,15 +1147,48 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }, [sshHost, parsedPort, url, canTest])
 
-  if (!open || typeof document === "undefined") return null
-
   const step1Done = result?.status === "ok"
 
+  const onLoadPubkey = useCallback(async () => {
+    setPubkeyLoading(true)
+    setPubkeyCopied(false)
+    try {
+      const res = await api.getGitForgeSshPubkey()
+      setPubkey(res)
+    } catch (err) {
+      setPubkey({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to load SSH public key",
+      })
+    } finally {
+      setPubkeyLoading(false)
+    }
+  }, [])
+
+  const onCopyPubkey = useCallback(async () => {
+    const text = pubkey?.public_key
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setPubkeyCopied(true)
+    } catch {
+      /* clipboard may not be available (e.g. non-secure context) */
+    }
+  }, [pubkey])
+
+  if (!open || typeof document === "undefined") return null
+
+  const pubkeyReady = pubkey?.status === "ok" && !!pubkey.public_key
+  const step2Badge: "DONE" | "READY" | "PENDING" = step2Ackd
+    ? "DONE"
+    : pubkeyReady
+      ? "READY"
+      : "PENDING"
+
   const laterSteps: { title: string; body: string }[] = [
-    {
-      title: "Step 2 — SSH key 設定",
-      body: "顯示 OmniSight 的公鑰，引導貼到 Gerrit Settings → SSH Keys；驗證 key fingerprint。",
-    },
     {
       title: "Step 3 — merger-agent-bot 帳號",
       body: "說明如何建立 bot 帳號與加入 group（Code-Review +2 的 dual-sign gate 右半邊）。",
@@ -1350,6 +1389,148 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
             </div>
           </div>
 
+          <div
+            data-testid="gerrit-wizard-step-2"
+            data-state={step2Badge.toLowerCase()}
+            className={`p-3 rounded border space-y-2 ${
+              step1Done
+                ? "border-[var(--neural-blue)]/40 bg-[var(--background)]"
+                : "border-[var(--border)] bg-[var(--background)] opacity-60"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                2
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                  Step 2 — SSH key 設定
+                </div>
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                  顯示 OmniSight 的 SSH 公鑰，複製後貼到 Gerrit Settings → SSH Keys。
+                </div>
+              </div>
+              <span
+                data-testid="gerrit-wizard-step-2-badge"
+                className={`flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded self-start ${
+                  step2Badge === "DONE"
+                    ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                    : step2Badge === "READY"
+                      ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                      : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                }`}
+              >
+                {step2Badge}
+              </span>
+            </div>
+
+            {!step1Done ? (
+              <div
+                data-testid="gerrit-wizard-step-2-gated"
+                className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1"
+              >
+                Step 1 通過後解鎖。先完成 Test Connection。
+              </div>
+            ) : (
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-load-pubkey"
+                    onClick={onLoadPubkey}
+                    disabled={pubkeyLoading}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {pubkeyLoading ? (
+                      <Loader size={10} className="animate-spin" />
+                    ) : (
+                      <Key size={10} />
+                    )}
+                    {pubkeyLoading
+                      ? "Loading…"
+                      : pubkey
+                        ? "Reload Public Key"
+                        : "Load Public Key"}
+                  </button>
+                </div>
+
+                {pubkey?.status === "error" && (
+                  <div
+                    data-testid="gerrit-wizard-pubkey-error"
+                    className="font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                  >
+                    <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                    <span>{pubkey.message || "Failed to load SSH public key"}</span>
+                  </div>
+                )}
+
+                {pubkeyReady && (
+                  <>
+                    <label
+                      htmlFor="gerrit-wizard-pubkey"
+                      className="block font-mono text-[9px] text-[var(--muted-foreground)]"
+                    >
+                      Public key — paste this line into Gerrit Settings → SSH Keys:
+                    </label>
+                    <textarea
+                      id="gerrit-wizard-pubkey"
+                      data-testid="gerrit-wizard-pubkey"
+                      readOnly
+                      value={pubkey?.public_key ?? ""}
+                      rows={3}
+                      className="w-full font-mono text-[9px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] resize-none break-all"
+                    />
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        data-testid="gerrit-wizard-copy-pubkey"
+                        onClick={onCopyPubkey}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+                      >
+                        {pubkeyCopied ? (
+                          <Check size={10} />
+                        ) : (
+                          <Copy size={10} />
+                        )}
+                        {pubkeyCopied ? "Copied" : "Copy"}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="gerrit-wizard-step-2-ack"
+                        onClick={() => setStep2Ackd(true)}
+                        disabled={step2Ackd}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <Check size={10} />
+                        {step2Ackd ? "Added to Gerrit" : "I've added it to Gerrit"}
+                      </button>
+                    </div>
+                    <div
+                      data-testid="gerrit-wizard-pubkey-meta"
+                      className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed space-y-0.5"
+                    >
+                      {pubkey?.fingerprint ? (
+                        <div>
+                          Fingerprint: <code>{pubkey.fingerprint}</code>
+                        </div>
+                      ) : null}
+                      {pubkey?.key_path ? (
+                        <div>
+                          Source: <code>{pubkey.key_path}</code>
+                          {pubkey.key_type ? ` (${pubkey.key_type})` : ""}
+                        </div>
+                      ) : null}
+                      <div>
+                        前往 <strong>Gerrit → Settings → SSH Keys → Add Key</strong> 把整行公鑰貼入；
+                        貼完按下「I&apos;ve added it to Gerrit」把 Step 2 標記完成。
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
           <ol className="space-y-2 list-none p-0 m-0">
             {laterSteps.map((s, i) => (
               <li
@@ -1357,7 +1538,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                 className="flex gap-2 p-2 rounded border border-[var(--border)] bg-[var(--background)]"
               >
                 <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
-                  {i + 2}
+                  {i + 3}
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
@@ -1376,13 +1557,14 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
           <div className="p-2 rounded bg-[var(--hardware-orange)]/10 border border-[var(--hardware-orange)]/30">
             <div className="font-mono text-[9px] text-[var(--hardware-orange)] font-semibold">
-              PARTIAL — STEP 1 ONLY
+              PARTIAL — STEPS 1 &amp; 2 ONLY
             </div>
             <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-1">
-              Step 1 (Test Connection) landed in B14 Part C row 222. Step 1 is probe-only and does not
-              write to <code className="mx-1">settings.gerrit_*</code>
-              — a later row wires the wizard finalization path. Steps 2–5 (SSH key display,
-              merger-agent-bot guide, submit-rule probe, webhook wiring) arrive in subsequent rows.
+              Step 1 (Test Connection, row 222) and Step 2 (SSH key display, row 223) are wired.
+              Both are probe/display-only and do not write to
+              <code className="mx-1">settings.gerrit_*</code>
+              — a later row wires the wizard finalization path. Steps 3–5 (merger-agent-bot guide,
+              submit-rule probe, webhook wiring) arrive in subsequent rows.
             </div>
           </div>
         </div>

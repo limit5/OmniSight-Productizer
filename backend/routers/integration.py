@@ -574,6 +574,101 @@ async def test_git_forge_token(
     return result
 
 
+async def _resolve_ssh_public_key() -> dict:
+    """Read the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.
+
+    B14 Part C row 223 — Step 2 of the Gerrit Setup Wizard. The operator
+    needs the exact ``ssh-ed25519 AAAA… comment`` line that Gerrit's
+    account-level "Add New SSH Key" form accepts. We also surface the
+    fingerprint (from ``ssh-keygen -lf``) so the operator can cross-check
+    it against what Gerrit shows after pasting.
+
+    Never writes. Never exposes the private key — only the ``.pub``
+    sibling. Derives the ``.pub`` path from ``settings.git_ssh_key_path``
+    (which points at the private key by default, e.g.
+    ``~/.ssh/id_ed25519``); if the setting is already the ``.pub`` file
+    it is used as-is. Returning a structured ``{status, public_key,
+    fingerprint, key_path, key_type, comment}`` dict keeps the shape
+    symmetric with the other probes (``_probe_*``) so the wizard's Step
+    2 code path mirrors Step 1.
+    """
+    raw_path = (settings.git_ssh_key_path or "").strip()
+    if not raw_path:
+        return {
+            "status": "error",
+            "message": "git_ssh_key_path is not configured",
+        }
+    base = Path(raw_path).expanduser()
+    pub_path = base if str(base).endswith(".pub") else Path(str(base) + ".pub")
+    if not pub_path.exists():
+        return {
+            "status": "error",
+            "message": f"SSH public key not found: {pub_path}",
+            "key_path": str(pub_path),
+        }
+    if not os.access(str(pub_path), os.R_OK):
+        return {
+            "status": "error",
+            "message": f"SSH public key not readable: {pub_path}",
+            "key_path": str(pub_path),
+        }
+    try:
+        public_key = pub_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "message": f"Failed to read public key: {exc}",
+            "key_path": str(pub_path),
+        }
+    if not public_key:
+        return {
+            "status": "error",
+            "message": f"SSH public key is empty: {pub_path}",
+            "key_path": str(pub_path),
+        }
+    # `<type> <base64> [comment]` — comment is optional per OpenSSH format.
+    parts = public_key.split(None, 2)
+    key_type = parts[0] if parts else ""
+    comment = parts[2] if len(parts) >= 3 else ""
+    # Best-effort fingerprint. Failure here is non-fatal — the public
+    # key itself is the load-bearing payload; the fingerprint is
+    # operator-facing cross-check only.
+    fingerprint = ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh-keygen", "-lf", str(pub_path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        if proc.returncode == 0:
+            # `256 SHA256:xxxx user@host (ED25519)`
+            fp_parts = stdout.decode(errors="replace").strip().split(None, 3)
+            if len(fp_parts) >= 2 and fp_parts[1].startswith("SHA256:"):
+                fingerprint = fp_parts[1]
+    except (asyncio.TimeoutError, FileNotFoundError, OSError):
+        fingerprint = ""
+    return {
+        "status": "ok",
+        "public_key": public_key,
+        "fingerprint": fingerprint,
+        "key_path": str(pub_path),
+        "key_type": key_type,
+        "comment": comment,
+    }
+
+
+@router.get("/git-forge/ssh-pubkey")
+async def get_git_forge_ssh_pubkey(_user=Depends(_au.require_operator)):
+    """Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.
+
+    Read-only — never mutates settings, never exposes the private key.
+    Drives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-
+    Gerrit flow) and is safe to surface to any operator-role session
+    since the public half of an SSH keypair is non-secret by design.
+    """
+    return await _resolve_ssh_public_key()
+
+
 # ── Test functions ──
 
 async def _test_ssh() -> dict:

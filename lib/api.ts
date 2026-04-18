@@ -1348,6 +1348,27 @@ export async function testGitForgeToken(args: {
   })
 }
 
+// ─── B14 Part C row 223: Fetch the OmniSight SSH public key ───
+//
+// Gerrit Setup Wizard Step 2 shows the public key the operator must paste
+// into `Gerrit Settings → SSH Keys`. The backend derives the `.pub` path
+// from `settings.git_ssh_key_path` and returns the raw key line plus a
+// SHA256 fingerprint for cross-checking. The private key never leaves
+// the host — only the public half is surfaced.
+export interface GitForgeSshPubkey {
+  status: "ok" | "error"
+  public_key?: string
+  fingerprint?: string
+  key_path?: string
+  key_type?: string
+  comment?: string
+  message?: string
+}
+
+export async function getGitForgeSshPubkey(): Promise<GitForgeSshPubkey> {
+  return request<GitForgeSshPubkey>("/system/git-forge/ssh-pubkey")
+}
+
 // ─── Tenant Secrets (I4) ───
 
 export interface TenantSecret {

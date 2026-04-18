@@ -368,6 +368,140 @@ class TestGitForgeTokenProbe:
         assert "repo" in result["scopes"]
 
 
+class TestGitForgeSshPubkey:
+    """B14 Part C row 223 — Gerrit Setup Wizard Step 2 (public key surface)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_public_key_and_fingerprint(
+        self, client, monkeypatch, tmp_path
+    ):
+        """With a real .pub file on disk, the endpoint surfaces the key
+        line, the SHA256 fingerprint (best-effort), and the resolved path."""
+        from backend.config import settings
+        from backend.routers import integration as ir
+
+        key_path = tmp_path / "id_ed25519"
+        pub_path = tmp_path / "id_ed25519.pub"
+        pub_path.write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISAMPLE merger-agent-bot@omnisight\n"
+        )
+
+        class _KeygenProc:
+            returncode = 0
+
+            async def communicate(self):
+                return (
+                    b"256 SHA256:abcdef0123456789 merger-agent-bot@omnisight (ED25519)\n",
+                    b"",
+                )
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _KeygenProc()
+
+        monkeypatch.setattr(settings, "git_ssh_key_path", str(key_path))
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["public_key"].startswith("ssh-ed25519 AAAAC3")
+        assert data["key_path"] == str(pub_path)
+        assert data["key_type"] == "ssh-ed25519"
+        assert data["comment"] == "merger-agent-bot@omnisight"
+        assert data["fingerprint"] == "SHA256:abcdef0123456789"
+
+    @pytest.mark.asyncio
+    async def test_accepts_pub_path_directly(
+        self, client, monkeypatch, tmp_path
+    ):
+        """If git_ssh_key_path is already a .pub path, use it as-is rather
+        than appending another .pub suffix."""
+        from backend.config import settings
+        from backend.routers import integration as ir
+
+        pub_path = tmp_path / "custom_key.pub"
+        pub_path.write_text("ssh-rsa AAAAB3 operator@host\n")
+
+        async def _noop_keygen(*_args, **_kwargs):
+            raise FileNotFoundError("ssh-keygen not available in this test")
+
+        monkeypatch.setattr(settings, "git_ssh_key_path", str(pub_path))
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _noop_keygen)
+
+        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["key_path"] == str(pub_path)
+        assert data["key_type"] == "ssh-rsa"
+        # ssh-keygen failure leaves fingerprint blank but doesn't fail the call.
+        assert data["fingerprint"] == ""
+
+    @pytest.mark.asyncio
+    async def test_missing_public_key_returns_error(
+        self, client, monkeypatch, tmp_path
+    ):
+        """Point git_ssh_key_path at a location with no .pub → error + hint."""
+        from backend.config import settings
+
+        missing = tmp_path / "no_such_key"
+        monkeypatch.setattr(settings, "git_ssh_key_path", str(missing))
+
+        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "not found" in data["message"].lower()
+        assert data["key_path"] == str(missing) + ".pub"
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_path_returns_error(self, client, monkeypatch):
+        """An empty git_ssh_key_path must surface a configuration error, not crash."""
+        from backend.config import settings
+        monkeypatch.setattr(settings, "git_ssh_key_path", "")
+
+        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "not configured" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_never_returns_private_key(
+        self, client, monkeypatch, tmp_path
+    ):
+        """The endpoint must surface only the .pub content — never the
+        private key — even when both files exist side-by-side."""
+        from backend.config import settings
+        from backend.routers import integration as ir
+
+        key_path = tmp_path / "id_ed25519"
+        pub_path = tmp_path / "id_ed25519.pub"
+        private_marker = "-----BEGIN OPENSSH PRIVATE KEY-----\nDO-NOT-LEAK-ME\n-----END OPENSSH PRIVATE KEY-----\n"
+        key_path.write_text(private_marker)
+        pub_path.write_text("ssh-ed25519 AAAAPUBLIC merger@omnisight\n")
+
+        class _KeygenProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"256 SHA256:zzzz merger@omnisight (ED25519)\n", b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _KeygenProc()
+
+        monkeypatch.setattr(settings, "git_ssh_key_path", str(key_path))
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "DO-NOT-LEAK-ME" not in body
+        assert "BEGIN OPENSSH PRIVATE KEY" not in body
+        assert "AAAAPUBLIC" in body
+
+
 class TestGitTokenMapEndpoint:
     """B14 Part B row 217 — masked GET/PUT of the multi-instance token map."""
 
