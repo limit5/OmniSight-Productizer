@@ -43,6 +43,9 @@ alembic==1.14.0
 # --- Observability ----------------------------------------------------
 prometheus-client==0.21.1
 structlog==24.4.0
+# H1 host-metrics: psutil drives cpu/mem/disk sampling in
+# backend/host_metrics.sample_host_once().
+psutil>=5.9.0
 
 # --- Testing ----------------------------------------------------------
 pytest==8.3.5

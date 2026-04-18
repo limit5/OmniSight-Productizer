@@ -51,6 +51,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    import psutil  # type: ignore[import-not-found]
+except ImportError:
+    psutil = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,6 +116,38 @@ class ContainerSample:
     cpu_usage_usec: int          # cumulative CPU usage from cpu.stat
     memory_bytes: int            # instantaneous memory.current
     sampled_at: float            # wall-clock time.time()
+
+
+@dataclass(frozen=True)
+class HostSample:
+    """One host-level (whole-machine) sample.
+
+    Sits alongside the per-container ``ContainerSample`` — capacity
+    planning needs *both*: cgroup scrapes tell us which tenant is hot,
+    while psutil numbers tell us whether the host itself is under
+    pressure (including workloads outside our container registry).
+
+    Memory "used" is derived as ``total - available`` rather than using
+    psutil's ``.used`` attribute: on Linux, ``.used`` sums stale page
+    cache and typically over-reports; ``.available`` is what the kernel
+    itself considers reclaimable and matches the "free -h" intuition
+    the TODO H1 spec is written against.
+
+    Percentage fields are 0-100 floats. GB fields use 1024^3 bytes.
+    ``loadavg_*`` are raw os.getloadavg() values (not normalised by
+    core count — that derivation lives in the H2 coordinator).
+    """
+    cpu_percent: float
+    mem_percent: float
+    mem_used_gb: float
+    mem_total_gb: float
+    disk_percent: float
+    disk_used_gb: float
+    disk_total_gb: float
+    loadavg_1m: float
+    loadavg_5m: float
+    loadavg_15m: float
+    sampled_at: float
 
 
 @dataclass
@@ -216,6 +253,110 @@ def _read_memory_bytes(cgroup_dir: Path) -> int:
         return int((cgroup_dir / "memory.current").read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Host-level sampling (psutil + os.getloadavg)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _read_loadavg() -> tuple[float, float, float]:
+    """``os.getloadavg()`` with a zeroed fallback for platforms that
+    don't expose it (Windows native, some minimal chroots). Kept
+    separate so tests can monkey-patch it without touching psutil.
+    """
+    try:
+        la1, la5, la15 = os.getloadavg()
+        return float(la1), float(la5), float(la15)
+    except (OSError, AttributeError):
+        return 0.0, 0.0, 0.0
+
+
+def sample_host_once(*, cpu_interval: float = 1.0) -> HostSample:
+    """One-shot host-level sample via ``psutil`` + ``os.getloadavg()``.
+
+    Fields populated:
+      * ``cpu_percent``          — ``psutil.cpu_percent(interval=cpu_interval)``
+      * ``mem_percent``/``mem_used_gb``/``mem_total_gb`` — derived from
+        ``psutil.virtual_memory()``; "used" is ``total - available`` so
+        the number matches the kernel's reclaimable-memory view rather
+        than over-counting page cache.
+      * ``disk_percent``/``disk_used_gb``/``disk_total_gb`` —
+        ``psutil.disk_usage('/')``.
+      * ``loadavg_{1m,5m,15m}``  — ``os.getloadavg()`` (stdlib, works
+        even when psutil is absent).
+
+    ``cpu_interval`` defaults to 1.0s per TODO H1 spec. Pass 0 to get a
+    non-blocking read that uses the previous psutil invocation's
+    timestamp as the delta baseline — useful inside the 5s sampling
+    loop where we don't want to spend a whole second blocking.
+
+    If psutil is not importable (dev environments without the optional
+    dependency), the psutil-sourced fields fall back to ``0.0`` /
+    ``HOST_BASELINE.*`` totals; loadavg still works because it's
+    stdlib. Callers treat the return as best-effort and never raise.
+    """
+    now = time.time()
+    la1, la5, la15 = _read_loadavg()
+
+    if psutil is None:
+        logger.debug("psutil unavailable; returning baseline-only HostSample")
+        return HostSample(
+            cpu_percent=0.0,
+            mem_percent=0.0,
+            mem_used_gb=0.0,
+            mem_total_gb=float(HOST_BASELINE.mem_total_gb),
+            disk_percent=0.0,
+            disk_used_gb=0.0,
+            disk_total_gb=float(HOST_BASELINE.disk_total_gb),
+            loadavg_1m=la1,
+            loadavg_5m=la5,
+            loadavg_15m=la15,
+            sampled_at=now,
+        )
+
+    try:
+        cpu_pct = float(psutil.cpu_percent(interval=cpu_interval))
+    except Exception as exc:
+        logger.debug("psutil.cpu_percent failed: %s", exc)
+        cpu_pct = 0.0
+
+    try:
+        vm = psutil.virtual_memory()
+        mem_total_gb = float(vm.total) / (1024 ** 3)
+        # Use vm.available (kernel-reclaimable) not vm.used — the latter
+        # over-reports on Linux by counting stale page cache.
+        mem_used_gb = float(vm.total - vm.available) / (1024 ** 3)
+        mem_pct = (1.0 - float(vm.available) / float(vm.total)) * 100.0 if vm.total else 0.0
+    except Exception as exc:
+        logger.debug("psutil.virtual_memory failed: %s", exc)
+        mem_total_gb = float(HOST_BASELINE.mem_total_gb)
+        mem_used_gb = 0.0
+        mem_pct = 0.0
+
+    try:
+        du = psutil.disk_usage("/")
+        disk_total_gb = float(du.total) / (1024 ** 3)
+        disk_used_gb = float(du.used) / (1024 ** 3)
+        disk_pct = float(du.percent)
+    except Exception as exc:
+        logger.debug("psutil.disk_usage('/') failed: %s", exc)
+        disk_total_gb = float(HOST_BASELINE.disk_total_gb)
+        disk_used_gb = 0.0
+        disk_pct = 0.0
+
+    return HostSample(
+        cpu_percent=cpu_pct,
+        mem_percent=mem_pct,
+        mem_used_gb=mem_used_gb,
+        mem_total_gb=mem_total_gb,
+        disk_percent=disk_pct,
+        disk_used_gb=disk_used_gb,
+        disk_total_gb=disk_total_gb,
+        loadavg_1m=la1,
+        loadavg_5m=la5,
+        loadavg_15m=la15,
+        sampled_at=now,
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

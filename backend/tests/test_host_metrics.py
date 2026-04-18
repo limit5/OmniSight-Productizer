@@ -357,3 +357,222 @@ class TestHostBaseline:
         expected = {"cpu_cores", "mem_total_gb", "disk_total_gb", "cpu_model"}
         actual = {f.name for f in hm.HostBaseline.__dataclass_fields__.values()}
         assert actual == expected
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — psutil host sampling (sample_host_once)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# These contract tests pin the H1 "psutil 採樣" TODO row. They cover:
+#   * HostSample dataclass shape + immutability
+#   * psutil-present path: cpu_percent / virtual_memory (available-based)
+#     / disk_usage('/') / os.getloadavg() are all consumed correctly
+#   * psutil-absent path: function still returns a HostSample, loadavg
+#     still populates, and the HOST_BASELINE totals are used as fallback
+#     (this is the "soft import" contract — dev envs without psutil
+#     installed still boot)
+#   * _read_loadavg() swallows OSError / AttributeError → (0,0,0)
+
+class _FakeVM:
+    """Drop-in for psutil.virtual_memory()."""
+    def __init__(self, total: int, available: int):
+        self.total = total
+        self.available = available
+
+
+class _FakeDU:
+    """Drop-in for psutil.disk_usage(path)."""
+    def __init__(self, total: int, used: int, percent: float):
+        self.total = total
+        self.used = used
+        self.percent = percent
+
+
+class _FakePsutil:
+    """Minimal psutil shim — enough surface for sample_host_once()."""
+    def __init__(self, *, cpu_pct: float, vm: _FakeVM, du: _FakeDU):
+        self._cpu_pct = cpu_pct
+        self._vm = vm
+        self._du = du
+        self.cpu_percent_calls: list[float] = []
+        self.disk_usage_calls: list[str] = []
+
+    def cpu_percent(self, interval: float = None):  # type: ignore[override]
+        self.cpu_percent_calls.append(interval)
+        return self._cpu_pct
+
+    def virtual_memory(self):
+        return self._vm
+
+    def disk_usage(self, path: str):
+        self.disk_usage_calls.append(path)
+        return self._du
+
+
+class TestHostSampleDataclass:
+    def test_fields_shape(self):
+        expected = {
+            "cpu_percent", "mem_percent", "mem_used_gb", "mem_total_gb",
+            "disk_percent", "disk_used_gb", "disk_total_gb",
+            "loadavg_1m", "loadavg_5m", "loadavg_15m", "sampled_at",
+        }
+        actual = {f.name for f in hm.HostSample.__dataclass_fields__.values()}
+        assert actual == expected
+
+    def test_frozen(self):
+        s = hm.HostSample(
+            cpu_percent=1.0, mem_percent=2.0, mem_used_gb=3.0, mem_total_gb=4.0,
+            disk_percent=5.0, disk_used_gb=6.0, disk_total_gb=7.0,
+            loadavg_1m=8.0, loadavg_5m=9.0, loadavg_15m=10.0, sampled_at=11.0,
+        )
+        with pytest.raises(Exception):
+            s.cpu_percent = 99.0  # type: ignore[misc]
+
+
+class TestSampleHostOnce:
+    def test_uses_psutil_cpu_percent_with_requested_interval(self, monkeypatch):
+        fake = _FakePsutil(
+            cpu_pct=37.5,
+            vm=_FakeVM(total=64 * 1024 ** 3, available=32 * 1024 ** 3),
+            du=_FakeDU(total=512 * 1024 ** 3, used=100 * 1024 ** 3, percent=20.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (1.5, 2.0, 2.5))
+
+        s = hm.sample_host_once(cpu_interval=1.0)
+
+        assert s.cpu_percent == 37.5
+        assert fake.cpu_percent_calls == [1.0]
+
+    def test_memory_used_is_total_minus_available_not_psutil_used(self, monkeypatch):
+        # Half memory available → mem_percent == 50%, used == 32 GB.
+        fake = _FakePsutil(
+            cpu_pct=0.0,
+            vm=_FakeVM(total=64 * 1024 ** 3, available=32 * 1024 ** 3),
+            du=_FakeDU(total=0, used=0, percent=0.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (0.0, 0.0, 0.0))
+
+        s = hm.sample_host_once(cpu_interval=0)
+        assert s.mem_total_gb == pytest.approx(64.0, abs=0.01)
+        assert s.mem_used_gb == pytest.approx(32.0, abs=0.01)
+        assert s.mem_percent == pytest.approx(50.0, abs=0.1)
+
+    def test_disk_sampled_from_root(self, monkeypatch):
+        fake = _FakePsutil(
+            cpu_pct=0.0,
+            vm=_FakeVM(total=1, available=1),
+            du=_FakeDU(total=512 * 1024 ** 3, used=256 * 1024 ** 3, percent=50.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (0.0, 0.0, 0.0))
+
+        s = hm.sample_host_once(cpu_interval=0)
+        assert fake.disk_usage_calls == ["/"]
+        assert s.disk_total_gb == pytest.approx(512.0, abs=0.01)
+        assert s.disk_used_gb == pytest.approx(256.0, abs=0.01)
+        assert s.disk_percent == 50.0
+
+    def test_loadavg_populated_from_os_getloadavg(self, monkeypatch):
+        fake = _FakePsutil(
+            cpu_pct=0.0,
+            vm=_FakeVM(total=1, available=1),
+            du=_FakeDU(total=1, used=0, percent=0.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (4.25, 3.5, 2.1))
+
+        s = hm.sample_host_once(cpu_interval=0)
+        assert s.loadavg_1m == 4.25
+        assert s.loadavg_5m == 3.5
+        assert s.loadavg_15m == 2.1
+
+    def test_psutil_absent_falls_back_to_baseline_totals(self, monkeypatch):
+        monkeypatch.setattr(hm, "psutil", None)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (1.0, 1.0, 1.0))
+
+        s = hm.sample_host_once(cpu_interval=0)
+        # Function still returns a HostSample — no exception.
+        assert isinstance(s, hm.HostSample)
+        # Usage fields are zero because we couldn't read them.
+        assert s.cpu_percent == 0.0
+        assert s.mem_used_gb == 0.0
+        assert s.disk_used_gb == 0.0
+        # But the *totals* fall back to HOST_BASELINE so downstream
+        # percent calculations don't divide by zero.
+        assert s.mem_total_gb == float(hm.HOST_BASELINE.mem_total_gb)
+        assert s.disk_total_gb == float(hm.HOST_BASELINE.disk_total_gb)
+        # Loadavg is stdlib so it still works.
+        assert s.loadavg_1m == 1.0
+
+    def test_psutil_cpu_percent_exception_is_swallowed(self, monkeypatch):
+        class Boom(_FakePsutil):
+            def cpu_percent(self, interval=None):
+                raise RuntimeError("sampler glitch")
+        fake = Boom(
+            cpu_pct=0.0,
+            vm=_FakeVM(total=1, available=1),
+            du=_FakeDU(total=1, used=0, percent=0.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (0.0, 0.0, 0.0))
+        s = hm.sample_host_once(cpu_interval=0)
+        assert s.cpu_percent == 0.0  # gracefully degraded, not raised
+
+    def test_psutil_virtual_memory_exception_uses_baseline(self, monkeypatch):
+        class Boom(_FakePsutil):
+            def virtual_memory(self):
+                raise RuntimeError("vm sampler glitch")
+        fake = Boom(
+            cpu_pct=10.0,
+            vm=_FakeVM(total=1, available=1),
+            du=_FakeDU(total=512 * 1024 ** 3, used=0, percent=0.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (0.0, 0.0, 0.0))
+        s = hm.sample_host_once(cpu_interval=0)
+        # CPU + disk still work; mem uses baseline fallback.
+        assert s.cpu_percent == 10.0
+        assert s.mem_total_gb == float(hm.HOST_BASELINE.mem_total_gb)
+        assert s.mem_used_gb == 0.0
+        assert s.mem_percent == 0.0
+        assert s.disk_total_gb == pytest.approx(512.0, abs=0.01)
+
+    def test_sampled_at_is_wall_clock(self, monkeypatch):
+        fake = _FakePsutil(
+            cpu_pct=0.0,
+            vm=_FakeVM(total=1, available=1),
+            du=_FakeDU(total=1, used=0, percent=0.0),
+        )
+        monkeypatch.setattr(hm, "psutil", fake)
+        monkeypatch.setattr(hm, "_read_loadavg", lambda: (0.0, 0.0, 0.0))
+        import time as _time
+        before = _time.time()
+        s = hm.sample_host_once(cpu_interval=0)
+        after = _time.time()
+        assert before <= s.sampled_at <= after
+
+
+class TestReadLoadavg:
+    def test_returns_tuple_of_three_floats(self):
+        # Real os.getloadavg() on Linux — just check the shape.
+        la1, la5, la15 = hm._read_loadavg()
+        assert isinstance(la1, float)
+        assert isinstance(la5, float)
+        assert isinstance(la15, float)
+        # All non-negative.
+        assert la1 >= 0 and la5 >= 0 and la15 >= 0
+
+    def test_swallows_oserror(self, monkeypatch):
+        def boom():
+            raise OSError("no loadavg here")
+        monkeypatch.setattr(os, "getloadavg", boom)
+        assert hm._read_loadavg() == (0.0, 0.0, 0.0)
+
+    def test_swallows_attributeerror(self, monkeypatch):
+        """Windows stdlib doesn't ship os.getloadavg at all."""
+        def boom():
+            raise AttributeError("getloadavg undefined")
+        monkeypatch.setattr(os, "getloadavg", boom)
+        assert hm._read_loadavg() == (0.0, 0.0, 0.0)
