@@ -190,7 +190,6 @@ async def test_parallel_health_check_cf_tunnel_green_when_connector_online(
             assert name == "omnisight"
             return [fake_tunnel]
 
-    from backend.routers import bootstrap as _br
 
     monkeypatch.setattr(_cft, "_client_from_stored", lambda: _FakeClient())
     _patch_httpx(monkeypatch, {

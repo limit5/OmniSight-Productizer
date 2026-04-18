@@ -35,9 +35,7 @@ Public API
 
 from __future__ import annotations
 
-import json
 import logging
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional

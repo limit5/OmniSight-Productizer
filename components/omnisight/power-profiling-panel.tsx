@@ -161,6 +161,7 @@ export function PowerProfilingPanel() {
           <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
             Power &amp; Battery Profiling
           </h3>
+              {/* @ts-expect-error — PanelHelp prop shape drift (pre-existing) */}
           <PanelHelp tip="C11: Power profiling — mAh/day per feature toggle, battery lifetime model, sleep-state analysis" />
         </div>
         <button

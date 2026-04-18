@@ -15,7 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -504,7 +503,7 @@ class TestInstallSkill:
                 "artifacts": [{"kind": k, "path": f"{k}/"} for k in REQUIRED_ARTIFACT_KINDS],
             },
         )
-        info = install_skill(src, skills_dir=registry, overwrite=True)
+        install_skill(src, skills_dir=registry, overwrite=True)
         manifest = load_manifest(registry / "overwrite-me" / "skill.yaml")
         assert manifest.version == "2.0.0"
 

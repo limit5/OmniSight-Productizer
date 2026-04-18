@@ -10,7 +10,6 @@ import pytest
 
 from backend.datasheet_parser import (
     CONFIDENCE_THRESHOLD,
-    DatasheetResult,
     FieldExtraction,
     apply_operator_overrides,
     extract_text_from_string,

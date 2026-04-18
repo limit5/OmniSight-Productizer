@@ -39,7 +39,6 @@ from typing import Optional
 
 from backend.observability.base import (
     GOOD_THRESHOLDS,
-    KNOWN_VITALS,
     POOR_THRESHOLDS,
     WebVital,
     classify_vital,

@@ -414,7 +414,6 @@ class TestSandboxNetIntegration:
 
     async def test_a_and_b_isolated_at_launch(self, fresh_db, monkeypatch):
         """Acceptance: A allows api.openai.com, B internal CIDR only."""
-        from backend import sandbox_net as sn
         from backend import tenant_egress as te
         from backend.config import settings as _settings
 

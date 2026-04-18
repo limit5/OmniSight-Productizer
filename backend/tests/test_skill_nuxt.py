@@ -38,7 +38,6 @@ import pytest
 from backend.deploy.base import BuildArtifact
 from backend.nuxt_scaffolder import (
     ScaffoldOptions,
-    _AUTH_ONLY_FILES,
     _COMPLIANCE_PATHS,
     _PINIA_ONLY_FILES,
     _SCAFFOLDS_DIR,

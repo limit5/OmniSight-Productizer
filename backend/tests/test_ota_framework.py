@@ -44,7 +44,6 @@ from backend.ota_framework import (
     list_rollback_policies,
     list_rollout_strategies,
     list_signature_schemes,
-    register_ota_cert,
     reload_ota_config_for_tests,
     run_ota_test,
     sign_firmware,

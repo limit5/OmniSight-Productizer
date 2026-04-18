@@ -3,7 +3,6 @@
 Tests run without Redis (in-memory fallback) by default.
 """
 
-import asyncio
 import pytest
 from backend.shared_state import (
     SharedCounter,
@@ -233,7 +232,6 @@ class TestEventBusCrossWorker:
 
     def test_deliver_local(self):
         from backend.events import bus
-        import asyncio
         q = bus.subscribe()
         bus._deliver_local("test_event", '{"msg": "hello"}')
         msg = q.get_nowait()

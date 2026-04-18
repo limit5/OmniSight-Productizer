@@ -15,7 +15,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from backend.db_context import current_tenant_id, tenant_insert_value, tenant_where
+from backend.db_context import tenant_insert_value, tenant_where
 
 logger = logging.getLogger(__name__)
 

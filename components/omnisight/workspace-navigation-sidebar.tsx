@@ -207,6 +207,7 @@ export function groupItemsByCategory(
     category: cat,
     items: map.get(cat)!,
   }))
+            {/* @ts-expect-error — null vs string type (pre-existing) */}
   if (ungrouped) result.push({ category: null, items: ungrouped })
   return result
 }

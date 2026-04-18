@@ -88,9 +88,7 @@ Contract pinned by ``backend/tests/test_mobile_sandbox.py``
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
 import re
 import shlex
 import shutil
@@ -1111,7 +1109,7 @@ class SubprocessAndroidExecutor:
             proc = self._run(argv, timeout_s=config.install_timeout_s)
         except subprocess.TimeoutExpired:
             return InstallReport(
-                status="fail", detail=f"adb install timed out",
+                status="fail", detail="adb install timed out",
             )
         except Exception as exc:  # noqa: BLE001
             return InstallReport(status="fail", detail=f"adb error: {exc}")

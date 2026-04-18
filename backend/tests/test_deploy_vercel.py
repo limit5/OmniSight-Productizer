@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import httpx
 import pytest
@@ -11,7 +10,6 @@ import respx
 
 from backend.deploy import BuildArtifact
 from backend.deploy.base import (
-    DeployConflictError,
     InvalidDeployTokenError,
     MissingDeployScopeError,
     DeployRateLimitError,

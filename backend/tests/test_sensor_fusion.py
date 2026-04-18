@@ -906,14 +906,14 @@ class TestAuditLogging:
             status=TestStatus.passed,
             target_device="test",
         )
-        r = await log_sensor_test_result(result)
+        await log_sensor_test_result(result)
         # May be None if audit module not available in test context
 
     @pytest.mark.asyncio
     async def test_log_ekf_result_no_crash(self):
         from backend.sensor_fusion import log_ekf_result, EKFResult
         result = EKFResult(profile_id="test", state=EKFState.converged)
-        r = await log_ekf_result(result)
+        await log_ekf_result(result)
 
     @pytest.mark.asyncio
     async def test_log_calibration_result_no_crash(self):
@@ -922,7 +922,7 @@ class TestAuditLogging:
             profile_id="imu_6axis",
             status=CalibrationStatus.calibrated,
         )
-        r = await log_calibration_result(result)
+        await log_calibration_result(result)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

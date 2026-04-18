@@ -25,7 +25,6 @@ import asyncio
 import json
 from typing import Iterable
 
-import httpx
 import pytest
 
 

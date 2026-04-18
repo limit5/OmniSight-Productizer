@@ -11,7 +11,6 @@ import respx
 from backend.cloudflare_client import CF_API_BASE
 from backend.deploy import BuildArtifact
 from backend.deploy.base import (
-    DeployConflictError,
     InvalidDeployTokenError,
     MissingDeployScopeError,
     DeployRateLimitError,

@@ -21,13 +21,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend import auth as _au
 from backend import chatops_bridge as bridge
 from backend import agent_hints
-from backend.chatops_bridge import Inbound
 from backend import chatops_handlers as _chatops_handlers  # noqa: F401 — side-effect registration
 
 logger = logging.getLogger(__name__)

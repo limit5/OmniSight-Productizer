@@ -20,45 +20,23 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from backend.imaging_pipeline import (
-    ArtifactDefinition,
     BitDepth,
     ColorMode,
-    ColorModeDef,
-    CompatibleSoC,
     GateVerdict,
-    ICCEmbedResult,
-    ICCEmbeddingFormat,
-    ICCProfileBinary,
     ICCProfileClass,
-    ICCStandardProfile,
-    ISPPipelineResult,
     ISPStageId,
-    ISPStageDef,
     ImagingDomain,
-    ImagingGateResult,
     OCREngine,
     OCROutputFormat,
-    OCRResult,
     OutputFormat,
-    OutputFormatDef,
     RenderingIntent,
-    SANEBackendTemplate,
-    SANEOptionDef,
     SANEStatus,
     SensorType,
-    SensorTypeDef,
-    TWAINCapability,
-    TWAINDriverTemplate,
     TWAINState,
-    TWAINStateDef,
-    TestRecipe,
-    TestRecipeResult,
     TestStatus,
     clear_imaging_certs,
     embed_icc_profile,

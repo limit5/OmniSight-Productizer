@@ -14,11 +14,8 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.telemetry_backend import (
     ConsentStatus,
-    DashboardQueryType,
-    EventSeverity,
     EventType,
     IngestStatus,
-    RedactionStrategy,
     RetentionAction,
     TelemetryDomain,
     TestStatus,
@@ -50,8 +47,6 @@ from backend.telemetry_backend import (
     query_dashboard_panel,
     record_consent,
     redact_pii,
-    register_telemetry_cert,
-    reload_telemetry_config_for_tests,
     reset_telemetry_state_for_tests,
     run_retention_purge,
     run_telemetry_test,

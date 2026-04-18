@@ -29,8 +29,6 @@ import pytest
 from backend import ui_sandbox as us
 from backend import ui_sandbox_lifecycle as ul
 from backend.ui_sandbox import (
-    DEFAULT_CONTAINER_PORT,
-    DEFAULT_HOST_PORT_RANGE,
     DEFAULT_IDLE_LIMIT_S,
     SandboxConfig,
     SandboxError,

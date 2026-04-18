@@ -31,7 +31,7 @@ adb, no ssh is touched.
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -58,7 +58,6 @@ from backend.mobile_sandbox import (
     MobileSandboxConfig,
     MobileSandboxConfigError,
     MobileSandboxError,
-    MobileSandboxInstance,
     MobileSandboxManager,
     MobileSandboxNotFound,
     MobileSandboxStatus,

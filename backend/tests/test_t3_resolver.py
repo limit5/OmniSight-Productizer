@@ -13,7 +13,6 @@ set locks in:
 
 from __future__ import annotations
 
-import pytest
 
 from backend import t3_resolver as r
 

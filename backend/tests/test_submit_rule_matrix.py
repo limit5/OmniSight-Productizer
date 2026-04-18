@@ -18,7 +18,6 @@ Spec-mandated matrix (TODO.md → O7 → Submit-rule 測試矩陣):
 
 from __future__ import annotations
 
-import pytest
 
 from backend.submit_rule import (
     GROUP_AI_BOTS,

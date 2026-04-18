@@ -9,7 +9,7 @@ Replay:
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 from sse_starlette.sse import EventSourceResponse
 
 from backend.events import bus

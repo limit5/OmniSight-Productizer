@@ -52,7 +52,7 @@ Contract (pinned by ``backend/tests/test_edit_complexity_router.py``)
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping

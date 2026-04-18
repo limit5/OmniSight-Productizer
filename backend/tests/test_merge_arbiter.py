@@ -17,14 +17,13 @@ branches:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from backend import merge_arbiter as arb
 from backend import merger_agent as ma
-from backend.submit_rule import ReviewerVote, human_vote, merger_vote
+from backend.submit_rule import human_vote, merger_vote
 
 
 def _run(coro):

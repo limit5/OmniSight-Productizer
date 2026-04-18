@@ -179,7 +179,6 @@ def test_llm_provider_whitespace_key_is_unconfigured(monkeypatch):
 
 
 def test_cf_tunnel_configured_via_marker(tmp_path):
-    from pathlib import Path
     from backend import bootstrap
 
     bootstrap._reset_for_tests(tmp_path / "marker.json")

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
-import pytest
 
 
 def test_session_id_from_token_deterministic():

@@ -60,7 +60,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 from backend import submit_rule as _sr
 

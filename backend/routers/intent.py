@@ -14,10 +14,7 @@ bot-harvester probing for the free LLM backend.
 
 from __future__ import annotations
 
-import io
 import logging
-import re
-import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -159,7 +156,7 @@ class IngestRepoRequest(BaseModel):
 async def ingest_repo(req: IngestRepoRequest,
                       _user=Depends(_au.require_operator)) -> dict:
     """Clone a repo, introspect manifests, return a ParsedSpec."""
-    from backend.repo_ingest import ingest_repo as _ingest, IntrospectionResult
+    from backend.repo_ingest import ingest_repo as _ingest
     try:
         spec, intro = await _ingest(req.url)
     except ValueError as exc:

@@ -68,11 +68,10 @@ import hashlib
 import io
 import json
 import logging
-import os
 import secrets
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -1859,7 +1858,7 @@ def _run_auth_recipe_step(action: str):
         assert validate_session(sess.token)
     elif action == "refresh":
         sess = create_session("u-test", "ten-test")
-        refreshed = refresh_session(sess.token)
+        refresh_session(sess.token)
     elif action == "logout":
         sess = create_session("u-test", "ten-test")
         assert revoke_session(sess.token)

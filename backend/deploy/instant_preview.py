@@ -49,7 +49,6 @@ import socket
 import subprocess
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Optional
 
 from backend.deploy.base import (

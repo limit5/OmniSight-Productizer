@@ -760,7 +760,7 @@ def run_test_recipe(recipe_id: str) -> TestResult:
             details=[{"error": f"Unknown recipe: {recipe_id}"}],
         )
 
-    recipe = recipes[recipe_id]
+    recipes[recipe_id]
     t0 = time.monotonic()
 
     if recipe_id == "vendor_adapter_lifecycle":

@@ -18,14 +18,12 @@ import json
 import re
 
 import httpx
-import pytest
 import respx
 
 from backend.mobile_observability import (
     ANRDetector,
     ANRDetectorConfig,
     HangEvent,
-    MobileCrash,
     RenderMetric,
     RenderMetricAggregator,
     classify_render,

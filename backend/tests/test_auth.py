@@ -210,7 +210,6 @@ async def test_github_installation_upsert_and_list(_auth_db):
 
 @pytest.mark.asyncio
 async def test_rotate_session_creates_new_and_graces_old(_auth_db):
-    import time
     _, auth = _auth_db
     u = await auth.create_user("r@b.com", "Bob", role="viewer", password="pw")
     old_sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="TestBrowser/1.0")
@@ -261,10 +260,9 @@ async def test_rotate_session_nonexistent_raises(_auth_db):
 @pytest.mark.asyncio
 async def test_rotate_user_sessions_on_role_change(_auth_db):
     _, auth = _auth_db
-    from backend import db
     u = await auth.create_user("rc@b.com", "Carol", role="viewer", password="pw")
     s1 = await auth.create_session(u.id, ip="1.1.1.1", user_agent="UA1")
-    s2 = await auth.create_session(u.id, ip="2.2.2.2", user_agent="UA2")
+    await auth.create_session(u.id, ip="2.2.2.2", user_agent="UA2")
 
     count = await auth.rotate_user_sessions(u.id, exclude_token=None)
     assert count == 2

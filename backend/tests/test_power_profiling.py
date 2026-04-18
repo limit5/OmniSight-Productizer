@@ -15,8 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-import math
-import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,16 +26,13 @@ from backend.power_profiling import (
     BatterySpec,
     CurrentSample,
     DutyCycleProfile,
-    FeaturePowerBudget,
     FeaturePowerBudgetItem,
     FeatureToggleDef,
-    LifetimeEstimate,
     PowerDomainDef,
     ProfilingSession,
     ProfilingStatus,
     SleepState,
     SleepStateDef,
-    SleepTransitionEvent,
     TransitionDirection,
     clear_power_certs,
     compute_feature_power_budget,

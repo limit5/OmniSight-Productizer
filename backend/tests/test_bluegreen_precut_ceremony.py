@@ -396,7 +396,7 @@ class TestDryRun:
         (sandbox / "active_upstream.caddy").symlink_to("upstream-blue.caddy")
         # Point bluegreen_switch.sh at the sandbox so the repo state
         # isn't mutated.
-        env = {
+        {
             "OMNISIGHT_BLUEGREEN_DIR": str(sandbox),
             "OMNISIGHT_BLUEGREEN_DRY_RUN": "1",
             # Skip the build steps by using a compose file we know

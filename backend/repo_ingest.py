@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from backend.git_credentials import find_credential_for_url, get_token_for_url
+from backend.git_credentials import get_token_for_url
 from backend.intent_parser import Field, ParsedSpec
 
 logger = logging.getLogger(__name__)

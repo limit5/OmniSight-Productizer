@@ -28,29 +28,20 @@ import pytest
 
 from backend.dag_schema import DAG, Task
 from backend.payment_compliance import (
-    ArtifactDefinition,
     CertArtifactBundle,
     CertArtifactStatus,
     EMVLevel,
-    EMVLevelDef,
     EMVTestResult,
     GateFinding,
     GateVerdict,
     HSMSession,
     HSMSessionStatus,
     HSMVendor,
-    HSMVendorDef,
     KeyInjectionResult,
     KeyInjectionStatus,
-    P2PEDomainDef,
     PCIDSSLevel,
-    PCIDSSLevelDef,
-    PCIDSSRequirement,
-    PCIPTSModule,
-    PCIPTSRule,
     PaymentDomain,
     PaymentGateResult,
-    TestRecipe,
     TestStatus,
     clear_hsm_sessions_for_tests,
     clear_payment_certs,
@@ -832,7 +823,7 @@ class TestAuditLogIntegration:
     def test_async_log_with_mock(self):
         dag = _make_dag()
         result = validate_pci_dss_gate(dag, "L1", [])
-        mock_append = AsyncMock()
+        AsyncMock()
         with patch("backend.payment_compliance.logger"):
             loop = asyncio.new_event_loop()
             try:

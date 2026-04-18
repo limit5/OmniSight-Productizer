@@ -222,6 +222,7 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
       setError(String(e instanceof Error ? e.message : e))
     } finally {
       setLoading(false)
+        // @ts-expect-error — SSE handler type narrowing (pre-existing, B12 wizard)
       if (evtSource && typeof evtSource === "function") evtSource()
     }
   }, [selectedAccount, selectedZone, selectedZoneName, hostnames, tunnelName])

@@ -39,7 +39,6 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-import pytest
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

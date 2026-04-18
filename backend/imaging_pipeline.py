@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import struct
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -897,7 +896,7 @@ TW_UINT16 DS_Image_MemXfer(pTW_IMAGEMEMXFER pMemXfer);
     for cap in cap_defs:
         cap_cases.append(f"    case {cap.cap_id}:")
         cap_cases.append(f"        /* {cap.description} */")
-        cap_cases.append(f"        return TWRC_SUCCESS;")
+        cap_cases.append("        return TWRC_SUCCESS;")
     cap_switch = "\n".join(cap_cases)
 
     source = f"""/* TWAIN Data Source — {device_name}
@@ -1348,7 +1347,7 @@ def generate_icc_profile_binary(profile_id: str) -> ICCProfileBinary:
     add_tag(b"cprt", cprt_data)
 
     gamma_val = profile.gamma
-    inv_gamma = 1.0 / gamma_val
+    1.0 / gamma_val
     curve_data = b"curv" + b"\x00" * 4 + struct.pack(">I", 1) + struct.pack(">H", int(gamma_val * 256))
 
     if is_grey:

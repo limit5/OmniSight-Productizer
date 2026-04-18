@@ -104,6 +104,13 @@ export type SSEEvent =
     }
   | { event: "pep.decision"; data: PepDecisionEvent }
   | { event: "chatops.message"; data: ChatOpsMessageEvent }
+  // ─── B12 Cloudflare Tunnel wizard ───
+  | { event: "cf_tunnel_provision"; data: { step: string; detail: string; progress: number; timestamp: string } }
+  // ─── R2 (#308) Semantic Entropy Monitor ───
+  | { event: "agent.entropy"; data: { agent_id: string; entropy_score: number; threshold: number; verdict: "ok" | "warning" | "deadlock"; timestamp: string } }
+  // ─── R3 (#309) Scratchpad + Auto-Continuation ───
+  | { event: "agent.scratchpad.saved"; data: { agent_id: string; turn: number; size_bytes: number; sections_count: number; timestamp: string } }
+  | { event: "agent.token_continuation"; data: { agent_id: string; continuation_round: number; timestamp: string } }
 
 // ─── Global SSE manager ───
 // 48A-Fix P0: a single EventSource per origin, shared across every caller.

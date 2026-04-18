@@ -666,7 +666,7 @@ def _extract_bearer(req: Request) -> str:
     return ""
 
 
-async def _validate_api_key(req: Request) -> "ApiKey | None":
+async def _validate_api_key(req: Request) -> "ApiKey | None":  # noqa: F821
     """Check if the request carries a valid per-key bearer token (K6).
     Falls back to legacy OMNISIGHT_DECISION_BEARER env for backwards compat
     during migration window."""

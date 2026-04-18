@@ -14,9 +14,7 @@ Covers:
 
 from __future__ import annotations
 
-import time
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -33,7 +31,6 @@ from backend.compliance_harness import (
     get_tool,
     list_tools,
     log_compliance_report,
-    log_compliance_report_sync,
     register_tool,
     run_tool,
 )
@@ -383,7 +380,7 @@ class TestUACTestWrapper:
     def test_run_with_sample_rate(self, mock_exec):
         mock_exec.return_value = (0, SAMPLE_UAC_OUTPUT, "")
         w = UACTestWrapper()
-        report = w.run("/dev/snd/0", profile="uac2", sample_rate=48000, channels=2)
+        w.run("/dev/snd/0", profile="uac2", sample_rate=48000, channels=2)
         call_args = mock_exec.call_args[0][0]
         assert "--sample-rate" in call_args
         assert "--channels" in call_args

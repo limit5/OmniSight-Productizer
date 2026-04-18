@@ -36,7 +36,6 @@ Public API:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import struct
@@ -44,9 +43,8 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -1034,7 +1032,7 @@ class StructuredLightCodec:
         min_d = float("inf")
         max_d = 0.0
         block = 7
-        half = block // 2
+        block // 2
 
         # Reference pattern (projected)
         ref_pattern = self._generate_speckle()[0]
@@ -1624,7 +1622,7 @@ class PointCloudProcessor:
     def _export_pcd(self, cloud: PointCloudData) -> bytes:
         """Export as PCD (Point Cloud Data) binary format."""
         has_color = len(cloud.colors) == cloud.point_count
-        has_normal = len(cloud.normals) == cloud.point_count
+        len(cloud.normals) == cloud.point_count
 
         fields = "x y z"
         size = "4 4 4"
@@ -1996,7 +1994,7 @@ class RegistrationEngine:
                 ndt_cfg = entry
                 break
 
-        resolution = ndt_cfg.get("resolution", 1.0) if ndt_cfg else 1.0
+        ndt_cfg.get("resolution", 1.0) if ndt_cfg else 1.0
         step_size = ndt_cfg.get("step_size", 0.1) if ndt_cfg else 0.1
         max_iter = ndt_cfg.get("max_iterations", 35) if ndt_cfg else 35
 
@@ -2104,7 +2102,7 @@ class SlamHook:
             self.initialize()
 
         self._frame_id += 1
-        t = time.time()
+        time.time()
 
         if self._slam_type == SlamType.visual_slam.value:
             pose = self._process_visual(depth_frame, color_frame)
@@ -2361,7 +2359,7 @@ class CalibrationEngine:
             wrapped_phase = true_phase % (2.0 * math.pi)
 
             # Simulate measured phase with noise
-            noise = 0.01 * len(frames)  # more frames -> less noise
+            0.01 * len(frames)  # more frames -> less noise
             measured_phase = wrapped_phase + 0.005 / max(1, len(frames))
 
             phase_measurements.append({
@@ -2905,7 +2903,7 @@ def _run_stereo_disparity_recipe(recipe_id: str, t0: float) -> TestResult:
             shift = 8  # pixel disparity
             right = bytes([128 + ((c - shift) % 64) for c in range(w * h)])
 
-            config = StereoConfig(algorithm=algo.value, num_disparities=32, block_size=5)
+            StereoConfig(algorithm=algo.value, num_disparities=32, block_size=5)
             pipeline = create_stereo_pipeline(algo.value,
                                               num_disparities=32, block_size=5)
 

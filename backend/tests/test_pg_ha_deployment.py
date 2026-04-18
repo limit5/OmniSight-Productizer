@@ -42,7 +42,6 @@ Sibling contracts:
 """
 from __future__ import annotations
 
-import os
 import stat
 import subprocess
 import sys
@@ -541,7 +540,6 @@ class TestEnvExample:
         # Don't let someone accidentally commit a real credential
         # masquerading as a placeholder. Any 16+ char-long hex/base64-ish
         # string that isn't the sentinel is suspicious.
-        import re
         for line in text.splitlines():
             if line.startswith("POSTGRES_PASSWORD=") or line.startswith("REPLICATION_PASSWORD="):
                 _, _, val = line.partition("=")

@@ -49,20 +49,15 @@ Design properties
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
-import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Protocol
 
 from backend import merger_agent as ma
 from backend.submit_rule import (
-    GROUP_AI_BOTS,
-    GROUP_HUMAN,
-    GROUP_MERGER,
     ReviewerVote,
     SubmitDecision,
     SubmitReason,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import asdict
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 

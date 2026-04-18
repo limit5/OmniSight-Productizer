@@ -15,7 +15,6 @@ Covers the global redirect middleware added in
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 

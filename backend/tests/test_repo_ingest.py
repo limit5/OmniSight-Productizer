@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from backend.repo_ingest import (
-    IntrospectionResult,
     _build_auth_url,
     _validate_url,
     clone_repo,

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 
 # ─── Event envelope ───
@@ -59,7 +58,7 @@ def test_tenant_scope_delivers_to_matching_subscriber():
         "task_id": "t1", "status": "done", "assigned_agent_id": None,
     }, broadcast_scope="tenant", tenant_id="t-acme")
 
-    assert not q_globex.empty() is False or q_globex.qsize() == 0
+    assert q_globex.empty() is not False or q_globex.qsize() == 0
     # acme should receive
     msg = q_acme.get_nowait()
     data = json.loads(msg["data"])

@@ -22,7 +22,6 @@ Module is pure IO — no global state, no singletons.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re

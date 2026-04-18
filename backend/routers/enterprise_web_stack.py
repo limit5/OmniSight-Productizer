@@ -11,10 +11,9 @@ import logging
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend import auth as _au
 from backend import enterprise_web_stack as ews
 
 logger = logging.getLogger(__name__)

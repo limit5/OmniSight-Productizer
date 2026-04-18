@@ -57,7 +57,7 @@ def upgrade() -> None:
             f"ALTER TABLE api_keys ADD COLUMN tenant_id TEXT DEFAULT '{DEFAULT_TENANT_ID}'"
         )
         conn.exec_driver_sql(
-            f"UPDATE api_keys SET tenant_id = ? WHERE tenant_id IS NULL",
+            "UPDATE api_keys SET tenant_id = ? WHERE tenant_id IS NULL",
             (DEFAULT_TENANT_ID,),
         )
         conn.exec_driver_sql(

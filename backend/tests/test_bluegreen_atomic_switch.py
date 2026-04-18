@@ -87,7 +87,7 @@ def sandbox(tmp_path: Path) -> Path:
         shutil.copy2(STATE_DIR / name, work / name)
     # Recreate the symlink (shutil.copy2 on a symlink follows it by default
     # on some platforms, so be explicit here).
-    target = (STATE_DIR / "active_upstream.caddy").resolve().name
+    (STATE_DIR / "active_upstream.caddy").resolve().name
     (work / "active_upstream.caddy").symlink_to("upstream-blue.caddy")
     # Sanity: make sure the fresh sandbox starts in a known state.
     assert (work / "active_color").read_text().strip() == "blue"

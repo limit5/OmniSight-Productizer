@@ -15,7 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +35,6 @@ from backend.hil_plugins.camera import CameraHILPlugin, CAMERA_METRICS
 from backend.hil_plugins.audio import AudioHILPlugin, AUDIO_METRICS
 from backend.hil_plugins.display import DisplayHILPlugin, DISPLAY_METRICS
 from backend.hil_registry import (
-    HILRequirement,
-    HILValidationResult,
     create_plugin,
     get_plugin_class,
     list_registered_plugins,

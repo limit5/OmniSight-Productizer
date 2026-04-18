@@ -21,9 +21,8 @@ Public API:
 from __future__ import annotations
 
 import logging
-import math
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -776,7 +775,7 @@ def compute_feature_power_budget(
     base_lifetime_h = effective_cap / base_avg if base_avg > 0 else float("inf")
 
     all_toggles = list_feature_toggles()
-    toggle_map = {t.toggle_id: t for t in all_toggles}
+    {t.toggle_id: t for t in all_toggles}
 
     items: list[FeaturePowerBudgetItem] = []
     total_extra_ma = 0.0

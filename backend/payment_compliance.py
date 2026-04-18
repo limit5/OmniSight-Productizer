@@ -22,13 +22,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import secrets
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 

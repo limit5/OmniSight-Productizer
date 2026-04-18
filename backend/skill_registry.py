@@ -36,8 +36,6 @@ import yaml
 
 from backend.skill_manifest import (
     REQUIRED_ARTIFACT_KINDS,
-    SCHEMA_VERSION,
-    ArtifactRef,
     SkillManifest,
 )
 

@@ -17,10 +17,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
-import time
-from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,12 +26,9 @@ from backend.radio_compliance import (
     ChecklistItem,
     EmissionsCategory,
     EmissionsTestResult,
-    RadioArtifactDef,
     RadioChecklist,
     RadioRegion,
-    RadioRegionDef,
     SARResult,
-    TestRecipe,
     TestStatus,
     clear_radio_certs,
     generate_cert_artifacts,
@@ -46,7 +39,6 @@ from backend.radio_compliance import (
     list_artifact_definitions,
     list_regions,
     log_radio_test_result,
-    log_radio_test_result_sync,
     register_radio_cert,
     reload_radio_standards_for_tests,
     run_emissions_test,

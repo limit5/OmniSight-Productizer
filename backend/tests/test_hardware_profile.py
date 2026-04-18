@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from backend.hardware_profile import (
     SCHEMA_VERSION,
     HardwareProfile,
-    MemoryMap,
     MemoryRegion,
     Peripheral,
 )

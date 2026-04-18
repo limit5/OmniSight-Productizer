@@ -16,27 +16,14 @@ Covers:
 
 from __future__ import annotations
 
-import json
-import time
-from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from backend.connectivity import (
-    ChecklistItem,
-    CompositionResult,
-    CompositionRule,
-    ConnArtifactDef,
-    ConnCertArtifact,
-    ConnChecklist,
     ConnectivityProtocol,
-    ConnTestRecipe,
     ConnTestResult,
-    ProtocolDef,
     ProtocolLayer,
-    SubSkillDef,
     TestCategory,
     TestStatus,
     TransportType,
@@ -794,7 +781,7 @@ class TestAuditIntegration:
 
     @pytest.mark.asyncio
     async def test_log_handles_import_error(self):
-        result = ConnTestResult(
+        ConnTestResult(
             recipe_id="TEST", protocol="ble",
             status=TestStatus.pending, target_device="dev",
         )

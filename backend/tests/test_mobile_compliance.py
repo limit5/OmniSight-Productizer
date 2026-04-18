@@ -27,7 +27,6 @@ import pytest
 
 from backend.mobile_compliance import (
     ASCGuidelinesReport,
-    MIN_TARGET_SDK,
     MobileComplianceBundle,
     PlayPolicyReport,
     PrivacyLabelReport,
@@ -916,7 +915,7 @@ class TestCLI:
         (docs / "data_safety.yaml").write_text(
             "declared_sdks:\n  - androidx.core\n  - com.google.firebase\n"
         )
-        label_out = tmp_path / "label.json"
+        tmp_path / "label.json"
         ds_out = tmp_path / "ds.yaml"
         from backend.mobile_compliance.__main__ import main
         main([

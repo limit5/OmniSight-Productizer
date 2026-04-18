@@ -1288,7 +1288,7 @@ def _notify_intent_bridge_gerrit_pushed(*, task_id: str, card: TaskCard,
     Gerrit push itself has already succeeded.
     """
     try:
-        from backend import intent_bridge
+        pass
     except Exception as exc:
         logger.debug("intent_bridge import failed in worker: %s", exc)
         return

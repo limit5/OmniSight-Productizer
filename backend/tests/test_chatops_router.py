@@ -11,7 +11,6 @@ decision_engine coroutine needs to actually run.
 
 from __future__ import annotations
 
-import json
 
 import pytest
 from fastapi import FastAPI
@@ -184,7 +183,6 @@ def test_webhook_rejects_unverified_discord(client, monkeypatch):
 
 def test_chatops_inject_flow_fires_resume_event(client):
     """ChatOps inject over HTTP → agent_hints.resume_event fires."""
-    import asyncio
 
     ev = agent_hints.resume_event("hot-agent")
     assert not ev.is_set()

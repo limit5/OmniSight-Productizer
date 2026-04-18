@@ -29,7 +29,7 @@ import math
 import shutil
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -1596,7 +1596,7 @@ def generate_cert_artifacts(
     spec = spec or {}
     test_results = test_results or []
     provided = set(spec.get("provided_artifacts", []))
-    result_map = {r.recipe_id: r for r in test_results}
+    {r.recipe_id: r for r in test_results}
 
     art_defs = list_artifact_definitions()
     artifacts: list[SensorFusionCertArtifact] = []

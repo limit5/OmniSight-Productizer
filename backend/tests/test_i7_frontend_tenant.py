@@ -8,7 +8,7 @@ Verifies:
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from dataclasses import dataclass
 
 
@@ -126,7 +126,7 @@ async def test_user_tenants_admin_gets_all():
         ("t-default", "Default", "free", 1),
     ]
     conn = FakeConn(rows)
-    user = FakeUser(id="u1", email="a@b.com", name="Admin", role="admin")
+    FakeUser(id="u1", email="a@b.com", name="Admin", role="admin")
 
     with patch("backend.db._conn", return_value=conn):
         async with conn.execute(

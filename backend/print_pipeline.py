@@ -36,13 +36,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import struct
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -830,7 +829,7 @@ def generate_postscript(
     for page_num in range(1, pages + 1):
         lines.append(f"%%Page: {page_num} {page_num}")
         lines.append("gsave")
-        lines.append(f"/DeviceRGB setcolorspace")
+        lines.append("/DeviceRGB setcolorspace")
         lines.append(f"{sample_w} {sample_h} 8 [{sample_w} 0 0 -{sample_h} 0 {sample_h}]")
 
         hex_sample = raster_data[:min(300, len(raster_data))].hex()
@@ -881,7 +880,7 @@ def render_pdf_to_raster(
         page_count = max(1, markers)
 
     row_bytes = w * bytes_per_pixel
-    total_bytes = row_bytes * h * page_count
+    row_bytes * h * page_count
 
     raster_bytes = _generate_synthetic_raster(w, h, bytes_per_pixel, page_count)
 
@@ -1341,7 +1340,7 @@ def validate_print_gate(
     if required_domains is None:
         required_domains = [d.value for d in PrintDomain if d != PrintDomain.integration]
 
-    all_defs = {a.id: a for a in list_artifact_definitions()}
+    {a.id: a for a in list_artifact_definitions()}
     findings: list[dict[str, str]] = []
     domains_passed = 0
 

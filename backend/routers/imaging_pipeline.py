@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field

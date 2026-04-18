@@ -126,7 +126,7 @@ import base64
 import logging
 import threading
 import time as _time_mod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 
 logger = logging.getLogger(__name__)

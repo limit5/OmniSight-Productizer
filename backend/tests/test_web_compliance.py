@@ -24,8 +24,6 @@ import pytest
 from backend.web_compliance import (
     DEFAULT_DENY_LICENSES,
     GDPRReport,
-    SPDXReport,
-    WCAGReport,
     WCAG_AA_MANUAL_CHECKLIST,
     bundle_to_compliance_report,
     run_all,
@@ -42,15 +40,11 @@ from backend.web_compliance.gdpr import (
     _scan_rtbf_endpoint,
 )
 from backend.web_compliance.spdx import (
-    PackageLicense,
     _expand_atoms,
     _license_matches,
     _normalise_license,
-    _walk_node_modules,
 )
 from backend.web_compliance.wcag import (
-    WCAGAutoIssue,
-    WCAGManualItem,
     _parse_axe_output,
 )
 

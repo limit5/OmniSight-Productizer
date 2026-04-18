@@ -22,7 +22,6 @@ from backend.mobile_observability import (
 from backend.mobile_observability.firebase_crashlytics import (
     CRASHLYTICS_INGEST,
     FirebaseCrashlyticsAdapter,
-    PERF_MONITORING_INGEST,
 )
 
 

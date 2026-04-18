@@ -55,7 +55,6 @@ from backend.ui_screenshot import (
     PlaywrightEngine,
     PlaywrightUnavailable,
     ScreenshotCapture,
-    ScreenshotEngine,
     ScreenshotError,
     ScreenshotRequest,
     ScreenshotService,
@@ -869,7 +868,6 @@ def test_as_hook_wires_into_lifecycle_via_set_screenshot_hook(tmp_path):
     from backend.ui_sandbox import (
         SandboxConfig,
         SandboxManager,
-        SandboxStatus,
     )
     from backend.ui_sandbox_lifecycle import SandboxLifecycle
 

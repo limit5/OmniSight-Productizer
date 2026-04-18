@@ -41,7 +41,6 @@ pin the wire format without touching the filesystem.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import logging

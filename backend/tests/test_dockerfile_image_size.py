@@ -29,7 +29,6 @@ pull tolerates ~180 MB, which both images comfortably fit.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil

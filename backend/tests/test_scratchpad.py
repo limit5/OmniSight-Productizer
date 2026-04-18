@@ -10,7 +10,6 @@ env override so no test touches ``data/agents/``.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 

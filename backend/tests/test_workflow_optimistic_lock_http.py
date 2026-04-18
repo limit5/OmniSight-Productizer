@@ -7,7 +7,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_list_runs_includes_version(client):
-    res = await client.post("/api/v1/workflow/runs", json={"kind": "invoke"})
+    await client.post("/api/v1/workflow/runs", json={"kind": "invoke"})
     listing = await client.get("/api/v1/workflow/runs")
     assert listing.status_code == 200
     runs = listing.json()["runs"]

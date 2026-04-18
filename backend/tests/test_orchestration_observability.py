@@ -164,7 +164,6 @@ class TestSnapshot:
     def test_snapshot_queue_uses_live_backend(self):
         """Push something onto the in-memory queue, then verify snapshot."""
         from backend import queue_backend as qb, orchestration_observability as obs
-        from backend.catc import TaskCard
         qb.set_backend_for_tests(qb.InMemoryQueueBackend())
         try:
             qb.push(_dummy_task_card(), priority=qb.PriorityLevel.P1)

@@ -12,7 +12,6 @@ from backend.mobile_observability import (
     KNOWN_RENDER_METRICS,
     MobileCrash,
     MobileObservabilityAdapter,
-    MobileObservabilityError,
     POOR_RENDER_MS,
     RenderMetric,
     classify_render,

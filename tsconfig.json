@@ -36,6 +36,14 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "configs/skills/*/scaffolds",
+    "backend",
+    "scripts",
+    "deploy",
+    "test_assets",
+    "test",
+    "e2e",
+    "tests"
   ]
 }

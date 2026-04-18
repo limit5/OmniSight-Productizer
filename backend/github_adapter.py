@@ -222,7 +222,6 @@ class GithubAdapter:
         label = f"status:{self.status_map.get(status, status.value)}"
         state = "closed" if status == IntentStatus.done else "open"
 
-        request_body = {"state": state, "labels": [label]}
         http_status, body = await self._api(
             "PATCH", f"/repos/{owner}/{repo}/issues/{num}",
             {"state": state},

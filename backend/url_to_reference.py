@@ -111,12 +111,11 @@ from __future__ import annotations
 
 import html as _html_lib
 import ipaddress
-import json
 import logging
 import re
 import socket
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence

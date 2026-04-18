@@ -402,7 +402,7 @@ class SharedTokenUsage:
         r = get_sync_redis()
         if r:
             try:
-                pipe = r.pipeline()
+                r.pipeline()
                 field_key = self._rkey()
                 raw = r.hget(field_key, model)
                 entry = json.loads(raw) if raw else {

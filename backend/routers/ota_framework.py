@@ -13,7 +13,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend import auth as _au
 from backend import ota_framework as ota
 
 logger = logging.getLogger(__name__)

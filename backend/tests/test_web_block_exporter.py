@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -42,7 +41,6 @@ from backend.web_block_exporter import (
     BlockFile,
     BlockValidationError,
     EmptyBlockError,
-    ExportResult,
     InvalidBlockNameError,
     UnsafeBlockPathError,
     assert_safe_relative_path,

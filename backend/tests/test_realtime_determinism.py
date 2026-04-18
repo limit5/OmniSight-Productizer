@@ -23,30 +23,23 @@ Covers:
 
 from __future__ import annotations
 
-import math
-import time
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from backend.realtime_determinism import (
     BuildType,
-    CyclictestConfig,
     CyclictestResult,
     GateFinding,
     GateVerdict,
     HistogramBucket,
     LatencyPercentiles,
     LatencySample,
-    LatencyTierDef,
     RTOSType,
-    RTProfileDef,
     SchedulerPolicy,
     RunStatus,
     ThresholdGateResult,
     TraceCapture,
-    TraceToolDef,
     TraceToolType,
     build_histogram,
     capture_scheduler_trace,
@@ -721,7 +714,7 @@ class TestAuditIntegration:
         mock_audit = MagicMock()
         mock_audit.log = AsyncMock(return_value=42)
         with patch.dict("sys.modules", {"backend.audit": mock_audit}):
-            log_id = await log_cyclictest_result(result)
+            await log_cyclictest_result(result)
 
     @pytest.mark.asyncio
     async def test_log_gate_result(self):
@@ -730,7 +723,7 @@ class TestAuditIntegration:
         mock_audit = MagicMock()
         mock_audit.log = AsyncMock(return_value=43)
         with patch.dict("sys.modules", {"backend.audit": mock_audit}):
-            log_id = await log_gate_result(gate)
+            await log_gate_result(gate)
 
     @pytest.mark.asyncio
     async def test_log_trace_capture(self):
@@ -738,7 +731,7 @@ class TestAuditIntegration:
         mock_audit = MagicMock()
         mock_audit.log = AsyncMock(return_value=44)
         with patch.dict("sys.modules", {"backend.audit": mock_audit}):
-            log_id = await log_trace_capture(capture)
+            await log_trace_capture(capture)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

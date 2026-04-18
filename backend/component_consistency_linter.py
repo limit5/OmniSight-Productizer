@@ -46,10 +46,9 @@ Contract (pinned by ``backend/tests/test_component_consistency_linter.py``)
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Iterator, Mapping

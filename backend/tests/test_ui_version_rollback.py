@@ -45,7 +45,6 @@ from backend.ui_version_rollback import (
     GitCommandResult,
     InvalidCommitRef,
     RollbackRequest,
-    RollbackResult,
     RollbackSandboxNotFound,
     SubprocessGitRunner,
     VersionRollback,

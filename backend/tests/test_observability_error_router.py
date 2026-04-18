@@ -8,7 +8,6 @@ import pytest
 
 from backend import intent_source
 from backend.intent_source import (
-    IntentStatus,
     IntentStory,
     SubtaskPayload,
     SubtaskRef,

@@ -89,11 +89,10 @@ import shutil
 import struct
 import subprocess
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 

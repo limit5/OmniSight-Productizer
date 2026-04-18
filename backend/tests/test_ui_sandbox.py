@@ -54,7 +54,6 @@ from backend.ui_sandbox import (
     READY_PATTERNS,
     UI_SANDBOX_SCHEMA_VERSION,
     CompileError,
-    DockerClient,
     SandboxAlreadyExists,
     SandboxConfig,
     SandboxError,
@@ -904,7 +903,7 @@ def test_manager_stop_is_idempotent_on_terminal(tmp_path: Path):
     mgr, docker, _, _ = _manager_for(tmp_path)
     mgr.create(_sample_config(tmp_path, session_id="sess-t", host_port=40170))
     mgr.start("sess-t")
-    first = mgr.stop("sess-t")
+    mgr.stop("sess-t")
     calls_before = len(docker.stop_calls)
     second = mgr.stop("sess-t")
     assert second.status is SandboxStatus.stopped

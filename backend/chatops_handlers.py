@@ -14,7 +14,6 @@ back to the user (Discord embed body, Teams card, Line reply).
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from backend import chatops_bridge as bridge
 from backend import agent_hints
@@ -141,7 +140,7 @@ async def _rollback(inbound: Inbound, agent_id: str) -> str:
     try:
         from backend import workspace as _ws
     except Exception:
-        return f"⚠️ workspace module unavailable; rollback recorded but not executed"
+        return "⚠️ workspace module unavailable; rollback recorded but not executed"
     rollback_fn = None
     for name in ("rollback_agent_worktree", "discard_and_recreate", "reset_agent_worktree"):
         fn = getattr(_ws, name, None)

@@ -39,19 +39,15 @@ Public API
 from __future__ import annotations
 
 import enum
-import hashlib
-import json
 import logging
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Sequence
 
 from backend.app_store_connect import (
-    AppStoreConnectError,
     AppStoreCredentials,
-    FakeTransport,
     HttpTransport,
     Transport,
     TransportResponse,
@@ -59,7 +55,6 @@ from backend.app_store_connect import (
 )
 from backend.google_play_developer import (
     GooglePlayCredentials,
-    GooglePlayError,
     issue_service_account_jwt,
 )
 

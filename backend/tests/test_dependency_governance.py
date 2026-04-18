@@ -1092,7 +1092,7 @@ def test_n9_setup_script_exists_and_executable() -> None:
     # bash script — first line must be a shebang, and stat must show +x.
     first = N9_SETUP_SCRIPT.read_text(encoding="utf-8").splitlines()[0]
     assert first.startswith("#!"), f"setup script missing shebang: {first!r}"
-    import os, stat
+    import stat
     mode = N9_SETUP_SCRIPT.stat().st_mode
     assert mode & stat.S_IXUSR, "scripts/fallback_setup.sh must be executable"
 
@@ -1659,7 +1659,8 @@ def test_n10_deploy_gate_skips_non_prod() -> None:
 
 
 def test_n10_deploy_gate_respects_skip_env() -> None:
-    import os, subprocess
+    import os
+    import subprocess
     env = os.environ.copy()
     env["OMNISIGHT_CHECK_BLUEGREEN"] = "0"
     proc = subprocess.run(

@@ -9,7 +9,6 @@ from backend.mobile_observability import (
     ANRDetectorConfig,
     DEFAULT_ANR_CRITICAL_MS,
     DEFAULT_ANR_WARNING_MS,
-    HangEvent,
     android_anr_snippet,
     ios_watchdog_snippet,
 )

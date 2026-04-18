@@ -82,12 +82,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType

@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
 from backend.observability import (
     CoreWebVitalsAggregator,
-    DashboardSnapshot,
-    MetricStats,
     WebVital,
     get_default_aggregator,
     reset_default_aggregator,

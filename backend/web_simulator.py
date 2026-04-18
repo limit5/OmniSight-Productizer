@@ -53,7 +53,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -255,7 +255,8 @@ def run_lighthouse(app_path: Path, *, url: str | None = None, timeout: int = 120
             return LighthouseScores(source="mock")
         data = json.loads(out_file.read_text())
         cat = data.get("categories", {})
-        to_pct = lambda k: int(round(100 * (cat.get(k, {}).get("score") or 0)))
+        def to_pct(k):
+            return int(round(100 * (cat.get(k, {}).get("score") or 0)))
         return LighthouseScores(
             performance=to_pct("performance"),
             accessibility=to_pct("accessibility"),

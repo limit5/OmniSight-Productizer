@@ -20,23 +20,14 @@ no toolchain installed.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from backend.software_compliance import (
-    CVEReport,
-    DEFAULT_DENY_LICENSES,
-    DEFAULT_FAIL_ON,
-    ECOSYSTEMS,
     LicenseReport,
     PackageLicense,
-    SBOM_FORMATS,
-    SBOMDocument,
-    SoftwareComplianceBundle,
-    Vulnerability,
     bundle_to_compliance_report,
     detect_ecosystem,
     emit_sbom,

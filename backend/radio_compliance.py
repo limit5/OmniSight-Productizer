@@ -30,7 +30,7 @@ import logging
 import shutil
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -614,7 +614,7 @@ def generate_cert_artifacts(
     test_results = test_results or []
     provided_artifacts = set(spec.get("provided_artifacts", []))
 
-    result_map: dict[str, EmissionsTestResult] = {
+    {
         r.recipe_id: r for r in test_results
     }
 

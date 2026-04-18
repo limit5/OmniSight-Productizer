@@ -68,7 +68,7 @@ from backend.figma_to_mobile import (
 from backend.mobile_component_registry import (
     PLATFORMS as REGISTRY_PLATFORMS,
 )
-from backend.vision_to_ui import VisionImage, validate_image
+from backend.vision_to_ui import validate_image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

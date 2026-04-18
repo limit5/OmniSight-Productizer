@@ -7,8 +7,6 @@ and gate validation.
 
 from __future__ import annotations
 
-import math
-import struct
 
 import pytest
 
@@ -17,18 +15,14 @@ from backend.depth_sensing import (
     DepthDomain,
     SensorId,
     SensorState,
-    StructuredLightPattern,
     StereoAlgorithm,
     PointCloudBackend,
     PointCloudFormat,
     FilterType,
     RegistrationAlgorithm,
-    SlamType,
-    CalibrationType,
     DepthResultStatus,
     SensorConfig,
     DepthFrame,
-    StereoConfig,
     PointCloudData,
     RegistrationResult,
     CalibrationResult,

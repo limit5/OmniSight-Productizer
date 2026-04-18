@@ -13,7 +13,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend import auth as _au
 from backend import security_stack as sec
 
 logger = logging.getLogger(__name__)

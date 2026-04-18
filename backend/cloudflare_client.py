@@ -15,11 +15,9 @@ Token values are NEVER logged — only fingerprints (last-4).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
 
 import httpx
 

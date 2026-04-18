@@ -15,20 +15,16 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from backend.dag_schema import DAG, Task
 from backend.safety_compliance import (
-    ArtifactDefinition,
     GateFinding,
     GateVerdict,
     SafetyGateResult,
-    SafetyLevel,
     SafetyStandard,
-    SafetyStandardDef,
     check_all_standards,
     check_compliance,
     clear_safety_certs,
@@ -38,7 +34,6 @@ from backend.safety_compliance import (
     list_artifact_definitions,
     list_standards,
     log_safety_gate_result,
-    log_safety_gate_result_sync,
     register_safety_cert,
     reload_standards_for_tests,
     validate_safety_gate,

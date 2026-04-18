@@ -11,7 +11,6 @@ import respx
 from backend.deploy import BuildArtifact
 from backend.deploy.base import (
     DeployConflictError,
-    DeployError,
     InvalidDeployTokenError,
     MissingDeployScopeError,
     DeployRateLimitError,

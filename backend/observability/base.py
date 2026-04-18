@@ -43,7 +43,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping, Optional
+from typing import Any, ClassVar, Optional
 
 from backend import secret_store
 

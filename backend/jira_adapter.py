@@ -32,7 +32,6 @@ from typing import Any, Mapping
 from backend.intent_source import (
     AdapterError,
     HttpCall,
-    IntentSource,
     IntentStatus,
     IntentStory,
     SubtaskPayload,

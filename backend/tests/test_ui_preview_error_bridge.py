@@ -27,12 +27,10 @@ from typing import Any, Mapping, Sequence
 import pytest
 
 from backend import ui_preview_error_bridge as peb
-from backend import ui_sandbox as us
 from backend.ui_sandbox import (
     CompileError,
     SandboxConfig,
     SandboxManager,
-    SandboxStatus,
     parse_compile_error,
 )
 from backend.ui_preview_error_bridge import (

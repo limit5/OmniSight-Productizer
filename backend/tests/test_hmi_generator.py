@@ -16,7 +16,6 @@ from backend import hmi_framework as hf
 from backend import hmi_generator as g
 from backend.hmi_generator import (
     BudgetExceeded,
-    GeneratedBundle,
     GeneratorRequest,
     PageSection,
 )

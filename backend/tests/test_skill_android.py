@@ -39,7 +39,6 @@ from backend.android_scaffolder import (
     RenderOutcome,
     ScaffoldOptions,
     _BILLING_ONLY_FILES,
-    _COMPLIANCE_GATED,
     _PLATFORM_PROFILE_ID,
     _PUSH_ONLY_FILES,
     _SCAFFOLDS_DIR,

@@ -409,7 +409,7 @@ async def webauthn_complete_authenticate(user_id: str, credential_json: dict) ->
     try:
         from webauthn.helpers import parse_authentication_credential_json
         credential = parse_authentication_credential_json(json.dumps(credential_json))
-        verification = verify_authentication_response(
+        verify_authentication_response(
             credential=credential,
             expected_challenge=challenge,
             expected_rp_id=_rp_id(),

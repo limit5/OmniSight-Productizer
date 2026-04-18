@@ -7,7 +7,6 @@ import pytest
 from backend.mobile_observability import (
     GOOD_RENDER_MS,
     POOR_RENDER_MS,
-    RenderDashboardSnapshot,
     RenderMetric,
     RenderMetricAggregator,
     RenderStats,

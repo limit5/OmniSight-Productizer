@@ -18,9 +18,6 @@ Covers the LLM provider provisioning flow driven by the wizard:
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from pathlib import Path
 
 import httpx
 import pytest
@@ -46,7 +43,7 @@ async def _wizard_client(tmp_path, monkeypatch):
     db_path = tmp_path / "wizard.db"
     marker = tmp_path / "bootstrap.json"
     secret_path = tmp_path / "llm.enc"
-    secret_key_path = tmp_path / ".secret_key"
+    tmp_path / ".secret_key"
 
     monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
     monkeypatch.setenv("OMNISIGHT_SECRET_KEY", "test-secret-key-material-abcdef")

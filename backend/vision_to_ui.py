@@ -70,7 +70,7 @@ import base64
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -326,7 +326,7 @@ def validate_image(
 def build_multimodal_message(
     image: VisionImage,
     prompt: str,
-) -> "HumanMessage":  # type: ignore[name-defined]
+) -> "HumanMessage":  # type: ignore[name-defined]  # noqa: F821
     """Return a ``HumanMessage`` whose content is ``[text, image]``.
 
     The image block uses Anthropic's documented base64 source shape.

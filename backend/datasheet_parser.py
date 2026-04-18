@@ -22,10 +22,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 from backend.hardware_profile import (
-    SCHEMA_VERSION,
     HardwareProfile,
     MemoryMap,
     MemoryRegion,

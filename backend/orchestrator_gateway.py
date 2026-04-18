@@ -50,10 +50,9 @@ import logging
 import os
 import re
 import time
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 from backend import queue_backend
 from backend.catc import TaskCard, globs_overlap

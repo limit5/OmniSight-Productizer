@@ -501,7 +501,6 @@ class TestHttpSurface:
 
     async def test_replan_override_ships(self, client, monkeypatch):
         tasks = []
-        prior = None
         for i in range(10):
             tasks.append(Task(
                 task_id=f"T{i}", description="step",
@@ -510,7 +509,6 @@ class TestHttpSurface:
                 inputs=([f"out_{i-1}/r.bin"] if i else []),
                 depends_on=[f"T{i-1}"] if i else [],
             ))
-            prior = f"T{i}"
         big = DAG(dag_id="PROJ-big", tasks=tasks)
         monkeypatch.setattr(
             "backend.orchestrator_gateway._default_splitter",

@@ -146,7 +146,7 @@ async def test_write_audit_extracts_session(_s0_db):
     class FakeRequest:
         state = FakeState()
 
-    rid = await audit.write_audit(
+    await audit.write_audit(
         FakeRequest(), action="test", entity_kind="thing",
         entity_id="x", actor="me@test.com",
     )

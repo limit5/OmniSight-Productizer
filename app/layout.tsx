@@ -54,6 +54,7 @@ export default async function RootLayout({
         <Providers>
           {children}
         </Providers>
+        {/* @ts-expect-error Vercel Analytics nonce prop types lag behind runtime */}
         {process.env.NODE_ENV === 'production' && <Analytics nonce={nonce} />}
       </body>
     </html>

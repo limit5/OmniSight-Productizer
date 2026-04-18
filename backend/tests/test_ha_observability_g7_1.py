@@ -25,7 +25,6 @@ Principles (Step 4 SOP):
 from __future__ import annotations
 
 import importlib
-import os
 
 import pytest
 
@@ -132,7 +131,6 @@ def test_noop_stubs_support_labels_and_ops():
     """Even when prometheus_client is unavailable, every G7 metric
     must still chain ``.labels(...).inc|set|observe(...)`` without
     raising — call sites are NOT expected to guard every bump."""
-    import importlib
     mod = importlib.import_module("backend.metrics")
     _NoOp = None
     for name in dir(mod):

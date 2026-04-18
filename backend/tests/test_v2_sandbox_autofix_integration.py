@@ -40,7 +40,6 @@ from __future__ import annotations
 import base64
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -54,7 +53,6 @@ from backend import ui_sandbox_lifecycle as usl
 from backend import ui_sandbox_sse as uss
 from backend import ui_screenshot as us
 from backend.ui_agent_visual_context import (
-    AGENT_VISUAL_CONTEXT_EVENT_BUILT,
     AgentVisualContextBuilder,
     AgentVisualContextPayload,
 )
@@ -65,7 +63,6 @@ from backend.ui_preview_error_bridge import (
 )
 from backend.ui_responsive_viewport import (
     DEFAULT_VIEWPORT_MATRIX,
-    ResponsiveCaptureReport,
     ResponsiveViewportCapture,
 )
 from backend.ui_sandbox import (

@@ -49,8 +49,6 @@ from backend import url_to_reference as utr
 from backend.url_to_reference import (
     DEFAULT_URL_REF_MODEL,
     DEFAULT_URL_REF_PROVIDER,
-    DEFAULT_USER_AGENT,
-    DEFAULT_FETCH_TIMEOUT,
     HTML_PROMPT_CAP,
     MAX_HTML_BYTES,
     MAX_URL_LENGTH,
@@ -71,7 +69,7 @@ from backend.url_to_reference import (
     run_url_to_reference,
 )
 from backend.component_consistency_linter import LintReport
-from backend.vision_to_ui import SUPPORTED_MIME_TYPES, VisionImage
+from backend.vision_to_ui import VisionImage
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

@@ -336,7 +336,7 @@ async def cancel_run(run_id: str, expected_version: int) -> int:
 async def retry_run(run_id: str, expected_version: int) -> WorkflowRun:
     """Reset a failed/halted run back to 'running' for retry.
     Returns the updated WorkflowRun."""
-    new_ver = await _bump_version(run_id, expected_version, {
+    await _bump_version(run_id, expected_version, {
         "status": "running",
         "completed_at": None,
     })

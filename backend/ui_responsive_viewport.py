@@ -104,7 +104,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from backend.ui_screenshot import (
-    SCREENSHOT_EVENT_CAPTURED,
     ScreenshotCapture,
     ScreenshotError,
     ScreenshotService,

@@ -36,7 +36,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import struct
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field

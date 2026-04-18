@@ -22,7 +22,7 @@ from typing import Any
 
 import aiosqlite
 
-from backend.db_context import require_current_tenant, tenant_insert_value
+from backend.db_context import require_current_tenant
 from backend.secret_store import decrypt, encrypt, fingerprint
 
 logger = logging.getLogger(__name__)

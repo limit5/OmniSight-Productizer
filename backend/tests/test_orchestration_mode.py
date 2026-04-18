@@ -22,8 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import threading
-import time
 
 import pytest
 
@@ -36,7 +34,6 @@ from backend.queue_backend import (
 )
 from backend import orchestration_mode as om
 from backend.orchestration_mode import (
-    DispatchOutcome,
     DispatchRequest,
     OrchestrationMode,
     PARITY_EVENT_SEQUENCE,

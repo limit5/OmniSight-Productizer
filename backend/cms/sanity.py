@@ -157,7 +157,7 @@ class SanityCMSSource(CMSSource):
 
         req_params: dict[str, Any] = {"query": groq}
         for k, v in (params or {}).items():
-            req_params[f"$" + k] = v
+            req_params["$" + k] = v
         data = await self._get(
             f"/v{self._api_version}/data/query/{self._dataset}",
             params=req_params,

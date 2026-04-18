@@ -20,7 +20,7 @@ import logging
 import math
 import statistics
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -545,7 +545,7 @@ def run_cyclictest(
             status=RunStatus.error.value,
         )
 
-    profile = get_rt_profile(profile_id)
+    get_rt_profile(profile_id)
     started = time.time()
 
     if latency_samples is not None and len(latency_samples) > 0:
@@ -776,18 +776,18 @@ def generate_rtos_config_header(profile_id: str) -> str:
 def generate_latency_report(result: CyclictestResult) -> str:
     pctls = result.percentiles
     lines = [
-        f"# Cyclictest Latency Report",
-        f"",
+        "# Cyclictest Latency Report",
+        "",
         f"**Profile:** {result.profile_id}",
         f"**Config:** {result.config_id}",
         f"**Status:** {result.status}",
         f"**Duration:** {result.duration_s:.2f}s",
         f"**Samples:** {pctls.sample_count}",
-        f"",
-        f"## Percentile Breakdown",
-        f"",
-        f"| Percentile | Latency (µs) |",
-        f"|-----------|-------------|",
+        "",
+        "## Percentile Breakdown",
+        "",
+        "| Percentile | Latency (µs) |",
+        "|-----------|-------------|",
         f"| Min       | {pctls.min_us:.1f} |",
         f"| P50       | {pctls.p50_us:.1f} |",
         f"| P90       | {pctls.p90_us:.1f} |",
@@ -798,7 +798,7 @@ def generate_latency_report(result: CyclictestResult) -> str:
         f"| Avg       | {pctls.avg_us:.1f} |",
         f"| Stddev    | {pctls.stddev_us:.1f} |",
         f"| Jitter    | {pctls.jitter_us:.1f} |",
-        f"",
+        "",
     ]
 
     return "\n".join(lines) + "\n"

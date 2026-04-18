@@ -34,7 +34,6 @@ import pytest
 from backend.deploy.base import BuildArtifact
 from backend.nextjs_scaffolder import (
     ScaffoldOptions,
-    _AUTH_ONLY_FILES,
     _SCAFFOLDS_DIR,
     _SKILL_DIR,
     _TRPC_ONLY_FILES,
@@ -44,7 +43,7 @@ from backend.nextjs_scaffolder import (
     render_project,
     validate_pack,
 )
-from backend.platform import get_platform_config, load_raw_profile
+from backend.platform import load_raw_profile
 from backend.skill_registry import get_skill, list_skills, validate_skill
 
 

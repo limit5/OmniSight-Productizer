@@ -38,7 +38,6 @@ without Redis / Gerrit / a sandbox.  Production wiring lives in
 from __future__ import annotations
 
 import base64
-import enum
 import hashlib
 import hmac
 import json

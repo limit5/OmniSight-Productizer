@@ -8,7 +8,6 @@ enrichment path (rule-based fallback always available).
 
 from __future__ import annotations
 
-import os
 
 import pytest
 

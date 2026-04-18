@@ -409,7 +409,6 @@ async def curl_json_call(
     """
     import asyncio
     import tempfile
-    import shlex
 
     hdr = dict(headers or {})
     hdr.setdefault("Accept", "application/json")

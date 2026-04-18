@@ -38,7 +38,6 @@ Siblings (this is row 1357 / G3 #5 — the bundle):
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest

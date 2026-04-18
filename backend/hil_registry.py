@@ -26,7 +26,6 @@ import yaml
 
 from backend.hil_plugin import (
     HILPlugin,
-    PluginFamily,
     PluginInfo,
     PluginRunSummary,
     run_plugin_lifecycle,

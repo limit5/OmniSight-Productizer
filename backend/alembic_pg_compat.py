@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable
 
 
@@ -196,7 +195,7 @@ def _translate_insert_or_replace(sql: str) -> str:
     )
     if not head_match:
         return _INSERT_OR_REPLACE_RE.sub("INSERT INTO", sql)
-    table = head_match.group(1)
+    head_match.group(1)
     cols_text = head_match.group(2)
     cols = [c.strip() for c in cols_text.split(",") if c.strip()]
     # First column is the conflict target (convention: PK first).

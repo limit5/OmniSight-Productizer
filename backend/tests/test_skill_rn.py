@@ -23,7 +23,6 @@ from backend.rn_scaffolder import (
     RenderOutcome,
     ScaffoldOptions,
     _ANDROID_PROFILE_ID,
-    _COMPLIANCE_GATED,
     _IOS_PROFILE_ID,
     _PAYMENTS_ONLY_FILES,
     _PUSH_ONLY_FILES,

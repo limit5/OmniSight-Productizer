@@ -21,58 +21,36 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from backend.print_pipeline import (
-    ArtifactDefinition,
-    CUPSBackend,
-    ColorSpaceDef,
-    CompatibleSoC,
     DuplexMode,
     GateVerdict,
-    GhostscriptDevice,
-    IPPAttribute,
-    IPPJob,
     IPPJobState,
-    IPPJobStateDef,
-    IPPOperation,
     InkChannel,
-    InkSet,
-    JobLifecycleState,
     MediaSize,
-    PCLCommand,
     PCLStream,
     PCLVersion,
     PDFVersion,
     PDLLanguage,
-    PDLLanguageDef,
     PSLevel,
-    PSOperator,
     PostScriptDocument,
     PrintColorSpace,
     PrintDomain,
-    PrintGateResult,
     PrintQuality,
     PrintProfileSelection,
     PrintRenderingIntent,
     PriorityLevel,
-    PriorityLevelDef,
     QueueJob,
     QueuePolicy,
-    QueuePolicyDef,
     RasterFormat,
-    RasterFormatDef,
     RasterOutput,
-    RenderingIntentDef,
     SpoolerConfig,
     SpoolerJobState,
-    TestRecipe,
     TestRecipeResult,
     TestStatus,
-    PaperProfileSlot,
     advance_queue_job_to_completion,
     cancel_ipp_job,
     cancel_queue_job,
@@ -289,7 +267,6 @@ class TestIPPJobLifecycle:
         # Job auto-completes, so we need a fresh pending job
         _reset_ipp_jobs()
         # Create a job that stays pending (mock _advance)
-        from unittest.mock import patch
         with patch("backend.print_pipeline._advance_ipp_job"):
             job = submit_ipp_job("ipp://test/print", "application/pdf")
         assert job.state == IPPJobState.pending.value

@@ -868,7 +868,7 @@ async def dispatch_t3(
     *,
     tenant_id: str | None = None,
     tenant_budget: float | None = None,
-) -> tuple[Optional["ContainerInfo"], "T3RunnerKind"]:
+) -> "tuple[ContainerInfo | None, T3RunnerKind]":  # noqa: F821
     """Phase 64-C-LOCAL S2 — single entry point for the T3 dispatcher.
 
     Consults the resolver, bumps the prometheus counter so the Ops

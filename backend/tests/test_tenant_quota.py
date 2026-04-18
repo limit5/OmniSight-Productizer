@@ -19,8 +19,6 @@ so each test gets a clean per-tenant tree without touching production
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
 import time
 from pathlib import Path

@@ -51,13 +51,11 @@ from backend.ui_screenshot import (
     PNG_SIGNATURE,
     VIEWPORT_DESKTOP,
     VIEWPORT_MOBILE,
-    VIEWPORT_TABLET,
     CaptureTimeout,
     ScreenshotCapture,
     ScreenshotError,
     ScreenshotRequest,
     ScreenshotService,
-    Viewport,
     ViewportUnknown,
 )
 

@@ -105,8 +105,8 @@ import re
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Callable, Deque, Iterable, Mapping, Protocol
+from dataclasses import dataclass
+from typing import Any, Callable, Deque, Mapping, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)

@@ -458,7 +458,7 @@ class TestGenerateProjectReport:
     @pytest.mark.asyncio
     async def test_full_pipeline(self):
         from backend.report_generator import generate_project_report
-        from backend.workflow import StepRecord, WorkflowRun
+        from backend.workflow import WorkflowRun
 
         mock_run = WorkflowRun(
             id="wf-full", kind="invoke", started_at=1000.0,

@@ -25,15 +25,13 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import pytest
 
 from backend import ui_agent_visual_context as avc
 from backend import ui_responsive_viewport as urv
-from backend import ui_screenshot as us
 from backend.ui_agent_visual_context import (
     AGENT_VISUAL_CONTEXT_EVENT_BUILDING,
     AGENT_VISUAL_CONTEXT_EVENT_BUILT,
@@ -52,7 +50,6 @@ from backend.ui_agent_visual_context import (
     AgentVisualContextImage,
     AgentVisualContextPayload,
     apply_image_byte_budget,
-    build_content_blocks,
     build_human_message,
     build_image_content_block,
     build_text_content_block,
@@ -65,7 +62,6 @@ from backend.ui_preview_error_bridge import (
 from backend.ui_responsive_viewport import (
     BatchAborted,
     ResponsiveViewportCapture,
-    ViewportCaptureOutcome,
 )
 from backend.ui_sandbox import SandboxConfig, SandboxManager
 from backend.ui_screenshot import (

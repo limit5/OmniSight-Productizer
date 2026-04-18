@@ -52,7 +52,7 @@ async def _auth_db(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_lockout_after_threshold(_auth_db):
     db_mod, auth_mod = _auth_db
-    user = await auth_mod.create_user(
+    await auth_mod.create_user(
         email="lock@test.com", name="Lock", role="viewer", password="correct-pass-123",
     )
     for i in range(auth_mod.LOCKOUT_THRESHOLD):
