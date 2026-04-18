@@ -113,4 +113,11 @@ EXPOSE 8000
 # via ENV here — pydantic-settings reads OMNISIGHT_* env vars and rejects
 # an empty string as `int`; leaving the env unset lets the class default
 # (workers: int = 0 → auto) take over when operator hasn't overridden.
-CMD ["sh", "-c", "WORKERS=${OMNISIGHT_WORKERS:-$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers $WORKERS"]
+# H3 audit (2026-04-19): `--no-access-log` mirrors what the systemd
+# unit already does (deploy/systemd/omnisight-backend.service:37). Caddy
+# polls /readyz every 2 s during rolling deploys; uvicorn's INFO-level
+# access log turns that into 30 lines/minute of probe noise that drowns
+# out real request signals. Structured request observability lives in
+# structlog middleware + explicit handler logs — uvicorn's TCP-style
+# access log adds no value on top.
+CMD ["sh", "-c", "WORKERS=${OMNISIGHT_WORKERS:-$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers $WORKERS --no-access-log"]

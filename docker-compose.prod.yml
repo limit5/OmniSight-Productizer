@@ -103,7 +103,7 @@ services:
     command:
       - "sh"
       - "-c"
-      - "WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS"
+      - "WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS --no-access-log"
     ports:
       - "8001:8001"
     volumes:
