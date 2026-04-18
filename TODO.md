@@ -247,6 +247,23 @@ Legend:
 
 **B14 總預估**：**4.5 day**
 
+### B15. Skill Lazy Loading — Agent Token 效率優化（#350）
+
+> 背景：目前 agent 每次啟動都把完整 role skill 塞進 system prompt（~50K chars = ~12.5K tokens）。Google Android CLI + Skills 的「Progressive Disclosure」模式證明只送 metadata → 按需載入可減少 70% token 用量。此優化影響所有 agent（不只 Mobile），是橫切面效率改善。
+>
+> 不碰 O 系列（O0-O10 全部不動）——只改 prompt 組裝層。
+
+- [ ] `backend/prompt_registry.py` 新增 `get_skill_metadata(path) -> dict`：回傳 `{name, description, trigger_condition, token_cost}` 不含完整 body
+- [ ] `backend/prompt_registry.py` 新增 `get_skill_full(path) -> str`：回傳完整 skill content（按需呼叫）
+- [ ] `backend/prompt_loader.py` `build_system_prompt()` 改為兩階段：
+  - [ ] Phase 1（啟動時）：只注入所有 skill 的 metadata list（~500 chars total vs 現在 ~50K chars）
+  - [ ] Phase 2（ReAct loop 中）：依 CATC `domain_context` + 使用者 prompt 自動匹配 → 載入相關 skill 完整內容
+- [ ] `backend/agents/nodes.py` ReAct loop 加 skill-on-demand 邏輯：agent 輸出 `[LOAD_SKILL: skill_name]` → system 注入完整 skill → 繼續推理
+- [ ] Feature flag：`OMNISIGHT_SKILL_LOADING=eager|lazy`（預設 `eager` 保持向後相容，切 `lazy` 啟用新模式）
+- [ ] A/B test 驗證：同一 task 用 eager vs lazy 跑，比較完成率 + token 用量 + response 品質
+- [ ] Metrics：`skill_load_total{mode}` / `skill_token_saved_total` / `skill_load_latency_ms`
+- [ ] 預估：**1.5 day**
+
 ---
 
 ## 🅒 Priority C — L4 Layer A (shared infrastructure)
@@ -1225,7 +1242,37 @@ Legend:
 - [x] 線上 UI metric（render time / frame drop）
 - [x] 預估：**0.5 day**
 
-**Priority P 總預估**：**20 day**（含簽章鏈 + store 合規的繁複度）
+### P11. Android CLI 整合 — Google 官方工具鏈取代自建 Gradle wrapper (#351)
+
+> 背景：Google 於 2026-04-18 發布 Android CLI（`android create/run/emulator/sdk`），支援任何 AI agent，任務完成速度 3 倍、token 用量減少 70%。OmniSight P1/P2 自建的 Gradle wrapper + emulator 管理可用 Android CLI 取代（Android 部分）。iOS 部分（xcrun simctl / fastlane gym）不受影響。
+>
+> 不碰 O 系列——只改 P1/P2 的 Android tool 呼叫路徑。
+
+- [ ] 安裝 Android CLI（`d.android.com/tools/agents` 下載）到 Docker mobile-build image + host
+- [ ] `backend/mobile_toolchain.py` 新增 `android_cli_command(action, project_path)` 替代路徑：
+  - [ ] `android create` 取代手動 template scaffolding
+  - [ ] `android run` 取代 `gradle_wrapper_command("installDebug")`
+  - [ ] `android sdk install` 取代 Docker image 內的手動 SDK 安裝
+- [ ] `backend/mobile_simulator.py` Android emulator 管理改用 `android emulator` CLI：
+  - [ ] 建立 AVD：`android emulator create`
+  - [ ] 啟動：`android emulator start`
+  - [ ] 截圖：保留 `adb shell screencap`（Android CLI 暫無截圖 API）
+- [ ] Fallback 機制：`shutil.which("android")` 偵測 → 有則用 CLI → 無則 fallback 到既有 Gradle wrapper
+- [ ] `configs/platforms/android-*.yaml` 新增 `android_cli_available: bool` 欄位
+- [ ] 測試：有/無 Android CLI 兩條路徑都能 build + deploy + emulator boot
+- [ ] 預估：**2 day**
+
+### P12. Android Skills MCP Server 整合 (#352)
+
+> 背景：社群已有 [android-skills-mcp](https://github.com/skydoves/android-skills-mcp) MCP server，提供 `list_skills` / `search_skills` / `get_skill` 三個 tool，expose 所有 Android 官方 skill。OmniSight 的 agent 可直接取得 Android best practices（Navigation 3 setup、AGP 9 migration、R8 config 等）。
+
+- [ ] MCP server 設定：加入 `android-skills-mcp` 到 OmniSight MCP config（`npx android-skills-mcp` stdio mode）
+- [ ] `backend/agents/tools.py` 新增 `android_skill_search` tool：agent 可搜尋 + 取得 Android skill 內容注入 context
+- [ ] `configs/roles/android-kotlin.md` 更新：加入「優先使用 Android Skills 取得 best practice」指引
+- [ ] 測試：agent 搜尋 "navigation3" skill → 取得正確內容 → 可用於 code generation
+- [ ] 預估：**0.5 day**
+
+**Priority P 總預估**：**22.5 day**（原 20d + P11 2d + P12 0.5d）
 
 **建議切段交付**：
 1. P0+P1+P2（5.5d）— 平台基礎：profiles + toolchains + simulate track
@@ -1234,6 +1281,7 @@ Legend:
 4. P5+P6（4d）— Store 提交 + 合規 gates，首支可售
 5. P8/P7 另一 + P9（4.5d）— 另一原生 + 跨平台補齊
 6. P10（0.5d）— 觀測性
+7. **P11 + P12**（2.5d）— Android CLI + Skills MCP（可與其他 phase 並行）
 
 ---
 
@@ -2591,13 +2639,13 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 | C (software tracks) | 129-187 day |
 | O (enterprise orchestration) | 20 day |
 | W (web vertical) | 13.5 day |
-| P (mobile vertical) | 20 day |
+| P (mobile vertical) | 22.5 day |
 | X (software vertical) | 12 day |
 | R (watchdog + DR + UI) | 25.5 day |
 | V (visual design loop + workspace) | 48 day |
 | S2 (security hardening phase 2) | 8.5 day |
 | T (billing + payment gateway) | 25 day |
 | META | 4-8 day |
-| **Total** | **~570.5-741 day** |
+| **Total** | **~574.5-745 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.
