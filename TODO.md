@@ -280,7 +280,7 @@ Legend:
 - 預估：**0.5 day**（轉換 + 調整格式 + 加入 OmniSight-specific context）
 
 **Part B — 現有 19 個 Role Skills Pattern Upgrade**
-- [ ] 所有 role skill 加入 **Personality section**：從「指令式」（你是 X 專家，請做 Y）升級為「人格式」（你是 X，有 N 年經驗，你的核心信念是 Z，你絕不會做 W）。讓 agent 行為更一致、更少脫軌
+- [x] 所有 role skill 加入 **Personality section**：從「指令式」（你是 X 專家，請做 Y）升級為「人格式」（你是 X，有 N 年經驗，你的核心信念是 Z，你絕不會做 W）。讓 agent 行為更一致、更少脫軌
 - [ ] 所有 role skill 加入 **Success Metrics section**：明確定義「什麼叫做成功完成」——例如 frontend-react：Lighthouse ≥ 90 + 0 a11y violation + 0 console error + bundle size ≤ budget
 - [ ] 所有 role skill 加入 **Critical Rules section**：per-role 不可違反規則（比 CLAUDE.md L1 更精確）——例如 backend-python：never return 500 without logging trace_id、never use f-string SQL
 - [ ] 所有 role skill 加入 **Trigger Condition**（搭配 B15 Lazy Loading）：定義何時該載入此 skill（例如 `trigger: "使用者提到 React / component / 前端 / UI"`)
