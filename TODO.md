@@ -242,7 +242,7 @@ Legend:
 - [x] GitLab：`GET /api/v4/version` → 顯示版本
 - [x] Gerrit：SSH `gerrit version` → 顯示版本
 - [x] Jira：`GET /rest/api/2/serverInfo` → 顯示版本
-- [ ] 測試結果即時顯示在按鈕旁（✅ / ❌ + 錯誤訊息）
+- [x] 測試結果即時顯示在按鈕旁（✅ / ❌ + 錯誤訊息）
 - 預估：**0.5 day**
 
 **B14 總預估**：**4.5 day**

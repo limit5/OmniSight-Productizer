@@ -97,27 +97,59 @@ function SettingsSection({ title, integration, status, statusTestId, onTestResul
         )}
         {expanded ? <ChevronUp size={10} className="text-[var(--muted-foreground)]" /> : <ChevronDown size={10} className="text-[var(--muted-foreground)]" />}
       </button>
-      {expanded && (
-        <div className="px-3 py-2 space-y-1.5">
-          {children}
-          {testResult && (
-            <div className={`font-mono text-[9px] px-2 py-1 rounded ${
-              testResult.status === "ok" ? "bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)]"
-              : testResult.status === "not_configured" ? "bg-[var(--secondary)] text-[var(--muted-foreground)]"
-              : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
-            }`}>
-              {testResult.status === "ok" ? "Connected" : testResult.message || testResult.status}
+      {/* B14 Part E row 245 — always-visible result strip pinned directly
+          under the header's TEST button so the outcome (✅ Connected /
+          ❌ error message) stays adjacent to the trigger even when the
+          section body is collapsed. Replaces the prior layout that
+          buried the message at the bottom of the expanded form. */}
+      {(testResult || testing) && (
+        <div
+          data-testid={integration ? `integration-test-result-${integration}` : undefined}
+          data-status={testing ? "testing" : testResult?.status}
+          className={`font-mono text-[9px] px-3 py-1.5 border-t border-[var(--border)] flex items-start gap-1.5 ${
+            testing ? "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+            : testResult?.status === "ok" ? "bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)]"
+            : testResult?.status === "not_configured" ? "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+            : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+          }`}
+        >
+          {testing ? (
+            <>
+              <Loader size={10} className="mt-0.5 animate-spin flex-shrink-0" />
+              <span>Testing…</span>
+            </>
+          ) : testResult?.status === "ok" ? (
+            <>
+              <Check size={10} className="mt-0.5 flex-shrink-0" />
               {/* user / version / scopes are open-ended metadata on the
                   integration probe response (unknown-typed); coerce to
                   string before rendering so React's ReactNode contract
                   stays satisfied. `scopes` lands here from the GitHub probe
                   (B14 Part E row 240) so the operator can confirm the
                   token carries the expected OAuth privileges. */}
-              {testResult.user ? ` (${String(testResult.user)})` : null}
-              {testResult.version ? ` — ${String(testResult.version)}` : null}
-              {testResult.scopes ? ` [scopes: ${String(testResult.scopes)}]` : null}
-            </div>
-          )}
+              <span>
+                Connected
+                {testResult.user ? ` (${String(testResult.user)})` : null}
+                {testResult.version ? ` — ${String(testResult.version)}` : null}
+                {testResult.scopes ? ` [scopes: ${String(testResult.scopes)}]` : null}
+              </span>
+            </>
+          ) : testResult?.status === "not_configured" ? (
+            <>
+              <WifiOff size={10} className="mt-0.5 flex-shrink-0" />
+              <span>{testResult.message || "Not configured"}</span>
+            </>
+          ) : testResult ? (
+            <>
+              <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+              <span>{testResult.message || testResult.status || "Connection failed"}</span>
+            </>
+          ) : null}
+        </div>
+      )}
+      {expanded && (
+        <div className="px-3 py-2 space-y-1.5">
+          {children}
         </div>
       )}
     </div>
