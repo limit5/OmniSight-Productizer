@@ -192,3 +192,214 @@ class TestErrorCheckNode:
             max_retries=3,
         )
         assert _should_retry(state) == "summarizer"
+
+
+# ─── B15 #350: Skill-on-demand ReAct loop ───
+
+
+class _FakeLLMResponse:
+    """Stand-in for an LLM response — supports `.content` access and
+    the optional `.tool_calls` list that LangChain bindings surface."""
+
+    def __init__(self, content: str, tool_calls: list | None = None):
+        self.content = content
+        if tool_calls is not None:
+            self.tool_calls = tool_calls
+
+
+class _ScriptedLLM:
+    """Returns one scripted response per `.invoke()` call. Records the
+    messages it received so tests can assert the loaded-skill body was
+    actually injected."""
+
+    def __init__(self, scripted: list[_FakeLLMResponse]):
+        self._scripted = list(scripted)
+        self.calls: list[list] = []
+
+    def invoke(self, messages):
+        self.calls.append(list(messages))
+        if not self._scripted:
+            return _FakeLLMResponse("")
+        return self._scripted.pop(0)
+
+
+class TestSkillOnDemandReActLoop:
+    """B15 #350 row 261 — when OMNISIGHT_SKILL_LOADING=lazy, the specialist
+    node loops on `[LOAD_SKILL: <name>]` markers and injects full skill
+    bodies before the agent produces its final tool-calls / answer."""
+
+    @pytest.mark.asyncio
+    async def test_lazy_mode_loads_skill_on_marker(self, monkeypatch):
+        """Agent emits [LOAD_SKILL: ...] → skill body injected; second
+        invocation sees the injected body and produces the final answer."""
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setenv("OMNISIGHT_SKILL_LOADING", "lazy")
+
+        injection_payload = "## Skill: fake-skill\n\nBSP kernel driver body"
+
+        scripted = [
+            _FakeLLMResponse("Reasoning… [LOAD_SKILL: fake-skill]"),
+            _FakeLLMResponse("Firmware analysis complete."),
+        ]
+        fake_llm = _ScriptedLLM(scripted)
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: fake_llm)
+        monkeypatch.setattr(
+            _nodes, "build_system_prompt", lambda **kw: "PROMPT",
+        )
+        monkeypatch.setattr(
+            _nodes, "build_skill_injection",
+            lambda explicit_skills, domain_context, user_prompt: (
+                injection_payload
+                if explicit_skills == ["fake-skill"] else ""
+            ),
+        )
+
+        state = GraphState(
+            user_command="write a BSP driver",
+            routed_to="firmware",
+            model_name="",
+        )
+        firmware_node = _nodes._specialist_node_factory("firmware")
+        update = await firmware_node(state)
+
+        # Second invocation happened → skill body in message trail.
+        assert len(fake_llm.calls) == 2
+        second_call_text = "\n".join(
+            getattr(m, "content", "") for m in fake_llm.calls[1]
+        )
+        assert "BSP kernel driver body" in second_call_text
+
+        # Final answer comes from the second (post-injection) response.
+        assert "Firmware analysis complete." in update["answer"]
+
+        # Skill-load trail is returned as extra messages so retries see it.
+        trail = "".join(
+            getattr(m, "content", "") for m in update["messages"]
+        )
+        assert "[LOAD_SKILL: fake-skill]" in trail
+        assert "BSP kernel driver body" in trail
+
+    @pytest.mark.asyncio
+    async def test_eager_mode_ignores_load_skill_markers(self, monkeypatch):
+        """Back-compat: in eager mode the node returns the first response
+        verbatim and never re-invokes the LLM for skill loading."""
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setenv("OMNISIGHT_SKILL_LOADING", "eager")
+
+        scripted = [
+            _FakeLLMResponse("No skills needed — [LOAD_SKILL: fake-skill]"),
+        ]
+        fake_llm = _ScriptedLLM(scripted)
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: fake_llm)
+        monkeypatch.setattr(
+            _nodes, "build_system_prompt", lambda **kw: "PROMPT",
+        )
+        # This would blow up if called — eager must not hit it.
+        monkeypatch.setattr(
+            _nodes, "build_skill_injection",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("eager called")),
+        )
+
+        state = GraphState(
+            user_command="run",
+            routed_to="software",
+        )
+        software_node = _nodes._specialist_node_factory("software")
+        update = await software_node(state)
+
+        # Exactly one LLM call; marker text passes through unchanged in the
+        # returned answer (eager path prepends `[SOFTWARE AGENT] ` prefix).
+        assert len(fake_llm.calls) == 1
+        assert "[LOAD_SKILL: fake-skill]" in update["answer"]
+
+    @pytest.mark.asyncio
+    async def test_lazy_mode_caps_at_max_iterations(self, monkeypatch):
+        """An agent that keeps asking for skills is capped; we emit a
+        `skill_load_capped` phase event and return the last response."""
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setenv("OMNISIGHT_SKILL_LOADING", "lazy")
+
+        # Every scripted response asks for *another* skill. We should cap
+        # after _MAX_SKILL_LOAD_ITERATIONS and break out of the loop.
+        scripted = [
+            _FakeLLMResponse(f"[LOAD_SKILL: skill-{i}]")
+            for i in range(_nodes._MAX_SKILL_LOAD_ITERATIONS + 5)
+        ]
+        fake_llm = _ScriptedLLM(scripted)
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: fake_llm)
+        monkeypatch.setattr(
+            _nodes, "build_system_prompt", lambda **kw: "PROMPT",
+        )
+        monkeypatch.setattr(
+            _nodes, "build_skill_injection",
+            lambda explicit_skills, domain_context, user_prompt: (
+                f"body-for-{explicit_skills[0]}"
+            ),
+        )
+
+        events: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _nodes, "emit_pipeline_phase",
+            lambda phase, detail: events.append((phase, detail)),
+        )
+
+        state = GraphState(user_command="x", routed_to="firmware")
+        firmware_node = _nodes._specialist_node_factory("firmware")
+        update = await firmware_node(state)
+
+        # We cap total LLM invocations at _MAX_SKILL_LOAD_ITERATIONS + 1
+        # (initial call + one re-invoke per iteration).
+        assert len(fake_llm.calls) == _nodes._MAX_SKILL_LOAD_ITERATIONS + 1
+        # Cap event was emitted.
+        assert any(phase == "skill_load_capped" for phase, _ in events)
+        # Node still returns a coherent answer (doesn't raise).
+        assert "answer" in update
+
+    @pytest.mark.asyncio
+    async def test_lazy_mode_missing_skill_is_skipped(self, monkeypatch):
+        """When `build_skill_injection` returns empty (skill name unknown),
+        we emit skill_load_miss and do NOT loop forever on the same name."""
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setenv("OMNISIGHT_SKILL_LOADING", "lazy")
+
+        # Agent keeps asking for "ghost" which never resolves.
+        scripted = [
+            _FakeLLMResponse("[LOAD_SKILL: ghost]"),
+            _FakeLLMResponse("[LOAD_SKILL: ghost]"),
+            _FakeLLMResponse("final answer"),
+        ]
+        fake_llm = _ScriptedLLM(scripted)
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: fake_llm)
+        monkeypatch.setattr(
+            _nodes, "build_system_prompt", lambda **kw: "PROMPT",
+        )
+        monkeypatch.setattr(
+            _nodes, "build_skill_injection",
+            lambda explicit_skills, domain_context, user_prompt: "",
+        )
+
+        events: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            _nodes, "emit_pipeline_phase",
+            lambda phase, detail: events.append((phase, detail)),
+        )
+
+        state = GraphState(user_command="x", routed_to="firmware")
+        firmware_node = _nodes._specialist_node_factory("firmware")
+        update = await firmware_node(state)
+
+        # At least one miss event fired.
+        assert any(phase == "skill_load_miss" for phase, _ in events)
+        # We terminated (dedup prevented infinite re-requests for "ghost").
+        assert "answer" in update
+        # The second "[LOAD_SKILL: ghost]" is filtered by the dedup set so
+        # we break immediately after the miss — only 2 LLM calls total.
+        assert len(fake_llm.calls) == 2

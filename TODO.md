@@ -258,7 +258,7 @@ Legend:
 - [x] `backend/prompt_loader.py` `build_system_prompt()` 改為兩階段：
   - [x] Phase 1（啟動時）：只注入所有 skill 的 metadata list（~500 chars total vs 現在 ~50K chars）
   - [x] Phase 2（ReAct loop 中）：依 CATC `domain_context` + 使用者 prompt 自動匹配 → 載入相關 skill 完整內容
-- [ ] `backend/agents/nodes.py` ReAct loop 加 skill-on-demand 邏輯：agent 輸出 `[LOAD_SKILL: skill_name]` → system 注入完整 skill → 繼續推理
+- [x] `backend/agents/nodes.py` ReAct loop 加 skill-on-demand 邏輯：agent 輸出 `[LOAD_SKILL: skill_name]` → system 注入完整 skill → 繼續推理
 - [ ] Feature flag：`OMNISIGHT_SKILL_LOADING=eager|lazy`（預設 `eager` 保持向後相容，切 `lazy` 啟用新模式）
 - [ ] A/B test 驗證：同一 task 用 eager vs lazy 跑，比較完成率 + token 用量 + response 品質
 - [ ] Metrics：`skill_load_total{mode}` / `skill_token_saved_total` / `skill_load_latency_ms`

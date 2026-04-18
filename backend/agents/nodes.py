@@ -21,7 +21,12 @@ from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase
-from backend.prompt_loader import build_system_prompt
+from backend.prompt_loader import (
+    build_system_prompt,
+    build_skill_injection,
+    extract_load_skill_requests,
+    _resolve_skill_loading_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +384,13 @@ async def _handle_llm_error(exc: Exception, agent_type: str, model_name: str) ->
     return None  # Fall through to rule-based fallback
 
 
+#  B15 #350 — Skill Lazy Loading: inner-loop cap for [LOAD_SKILL:] markers.
+#  Each specialist invocation may pull at most this many extra skill bodies
+#  before we force a decision (answer or tool-call). Bounds runaway agents
+#  that would otherwise keep asking for more skills.
+_MAX_SKILL_LOAD_ITERATIONS = 3
+
+
 def _specialist_node_factory(agent_type: str):
     """Create a specialist node that can request tool calls."""
 
@@ -412,7 +424,67 @@ def _specialist_node_factory(agent_type: str):
                 )
             sys = SystemMessage(content=prompt)
             try:
-                resp = llm.invoke([sys, *state.messages])
+                # B15 #350: when skill loading is in "lazy" mode, the system
+                # prompt carries only a skill catalog. The agent may emit
+                # `[LOAD_SKILL: <name>]` markers asking for the full body of
+                # one or more skills. We loop up to _MAX_SKILL_LOAD_ITERATIONS
+                # times, each time injecting the requested skill bodies as a
+                # fresh SystemMessage and re-invoking the LLM.
+                lazy_mode = _resolve_skill_loading_mode(None) == "lazy"
+                extra_messages: list = []
+                loaded_skills: set[str] = set()
+                resp = None
+                for skill_iter in range(_MAX_SKILL_LOAD_ITERATIONS + 1):
+                    resp = llm.invoke([sys, *state.messages, *extra_messages])
+                    if not lazy_mode:
+                        break
+                    agent_output = getattr(resp, "content", "") or ""
+                    requested = extract_load_skill_requests(agent_output)
+                    # Filter out skills we've already loaded this turn.
+                    new_requests = [s for s in requested if s not in loaded_skills]
+                    if not new_requests:
+                        break
+                    if skill_iter >= _MAX_SKILL_LOAD_ITERATIONS:
+                        emit_pipeline_phase(
+                            "skill_load_capped",
+                            f"{agent_type} reached skill-load cap "
+                            f"({_MAX_SKILL_LOAD_ITERATIONS}); ignoring "
+                            f"{', '.join(new_requests)}",
+                        )
+                        break
+                    injection = build_skill_injection(
+                        explicit_skills=new_requests,
+                        domain_context="",
+                        user_prompt=cmd,
+                    )
+                    if not injection:
+                        emit_pipeline_phase(
+                            "skill_load_miss",
+                            f"{agent_type} requested skills not found: "
+                            f"{', '.join(new_requests)}",
+                        )
+                        # Record as "loaded" so we don't loop forever asking
+                        # for a name that doesn't resolve.
+                        loaded_skills.update(new_requests)
+                        continue
+                    loaded_skills.update(new_requests)
+                    emit_pipeline_phase(
+                        "skill_loaded",
+                        f"{agent_type} loaded skill(s): "
+                        f"{', '.join(new_requests)} "
+                        f"({len(injection)} chars)",
+                    )
+                    # Keep the agent's request visible and append the
+                    # injected skill body so the next LLM call sees both.
+                    extra_messages.append(AIMessage(content=agent_output))
+                    extra_messages.append(SystemMessage(
+                        content=(
+                            "[LOADED_SKILL] The following skill body was "
+                            "loaded at your request. Use it to continue your "
+                            "reasoning and then produce tool calls or a "
+                            "final answer.\n\n" + injection
+                        )
+                    ))
 
                 # Check if LLM requested tool calls
                 if hasattr(resp, "tool_calls") and resp.tool_calls:
@@ -425,7 +497,7 @@ def _specialist_node_factory(agent_type: str):
                     ]
                     return {
                         "tool_calls": tool_calls,
-                        "messages": [resp],
+                        "messages": [*extra_messages, resp],
                         "actions": [
                             AgentAction(
                                 type="update_status",
@@ -452,7 +524,7 @@ def _specialist_node_factory(agent_type: str):
                             detail=f"Processing: {cmd}",
                         )
                     ],
-                    "messages": [AIMessage(content=answer)],
+                    "messages": [*extra_messages, AIMessage(content=answer)],
                 }
 
             except Exception as exc:
