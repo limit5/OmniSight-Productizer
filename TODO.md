@@ -157,7 +157,7 @@ Legend:
 > 背景：目前 400/500 系列錯誤頁面使用 Next.js 預設白底黑字，與 FUI 暗色掃描線風格完全不搭。Bootstrap 未完成時 API 回 503 JSON，工程師能看懂，但一般使用者看到「503 Service Unavailable」會以為系統壞了。需要**雙層 UX**：友善的人類訊息 + 可展開的技術詳情。
 
 **Part A — Bootstrap Required 專用頁面**
-- [ ] `app/setup-required/page.tsx`：全屏 FUI 風格「系統需要完成初始設定」頁面
+- [x] `app/setup-required/page.tsx`：全屏 FUI 風格「系統需要完成初始設定」頁面
   - [ ] 友善訊息：「歡迎！這是您第一次使用 OmniSight，只需幾分鐘即可完成基礎配置。」
   - [ ] CTA 按鈕：「▶ 開始設定」→ 導向 `/bootstrap`
   - [ ] 可展開「技術詳情」區塊：顯示 503 JSON 內容 + backend 版本 + 各 gate 狀態（admin_password / llm_provider / cf_tunnel / smoke）
