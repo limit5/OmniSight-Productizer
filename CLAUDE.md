@@ -10,6 +10,7 @@ These rules are injected into EVERY agent prompt. They cannot be overridden.
 ## Code Quality Rules
 - All C/C++ code must pass `checkpatch.pl --strict` before commit.
 - All commits must include a descriptive message referencing the task ID.
+- When performing `git commit`, strictly follow this rule: the commit message MUST include the environment-configured git user as a co-author via a `Co-Authored-By: <git user.name> <<git user.email>>` trailer (resolved from `git config user.name` / `git config user.email`).
 - Memory safety: run Valgrind on all algo-track simulations. Zero leaks required.
 
 ## Safety Rules
