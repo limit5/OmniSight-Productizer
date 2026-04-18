@@ -411,13 +411,21 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
     # The bootstrap admin password ships as `omnisight-admin`. Hard-
     # fail if that's still in use under prod, so an internet-exposed
     # instance can't have its default admin trivially logged into.
+    # Audit C1 (2026-04-19): both "unset" and "literal default" must be
+    # hard errors under strict mode — the fallback in backend/auth.py
+    # L631 silently lands the well-known credential when the env is
+    # unset, and the must_change_password/428 gate is defence-in-depth,
+    # not a licence to ship with deterministic defaults on exposed URLs.
     admin_pw = (os.environ.get("OMNISIGHT_ADMIN_PASSWORD") or "").strip()
     if not admin_pw:
-        warnings.append(
-            "OMNISIGHT_ADMIN_PASSWORD unset — bootstrap admin will use "
-            "the dev default 'omnisight-admin'. SET THIS before exposing "
-            "the URL or change the admin's password via /users/{id}."
+        msg = (
+            "OMNISIGHT_ADMIN_PASSWORD unset — bootstrap admin will fall "
+            "back to the well-known default 'omnisight-admin' "
+            "(backend/auth.py ensure_default_admin). Refuse to start in "
+            "strict mode — set OMNISIGHT_ADMIN_PASSWORD to a strong "
+            "random secret before exposing the URL."
         )
+        (hard_errors if strict else warnings).append(msg)
     elif admin_pw == "omnisight-admin":
         msg = (
             "OMNISIGHT_ADMIN_PASSWORD is the literal default "
