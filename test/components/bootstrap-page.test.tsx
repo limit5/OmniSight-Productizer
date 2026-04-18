@@ -325,9 +325,9 @@ describe("BootstrapPage", () => {
     // Submit disabled until new password is long enough + matches.
     expect(submit).toBeDisabled()
 
-    fireEvent.change(next, { target: { value: "a-strong-new-password-abc" } })
+    fireEvent.change(next, { target: { value: "Str0ng-Key!x42-zebra" } })
     expect(submit).toBeDisabled()  // confirm empty
-    fireEvent.change(confirm, { target: { value: "a-strong-new-password-abc" } })
+    fireEvent.change(confirm, { target: { value: "Str0ng-Key!x42-zebra" } })
     expect(submit).not.toBeDisabled()
 
     fireEvent.click(submit)
@@ -335,7 +335,7 @@ describe("BootstrapPage", () => {
     await waitFor(() => {
       expect(mockedSetAdminPw).toHaveBeenCalledWith(
         "omnisight-admin",
-        "a-strong-new-password-abc",
+        "Str0ng-Key!x42-zebra",
       )
     })
     // reloadStatus is called after rotation → the 2nd poll returns the
@@ -914,11 +914,11 @@ describe("BootstrapPage", () => {
 
     fireEvent.change(
       screen.getByTestId("bootstrap-admin-password-new"),
-      { target: { value: "a-strong-new-password-abc" } },
+      { target: { value: "Str0ng-Key!x42-zebra" } },
     )
     fireEvent.change(
       screen.getByTestId("bootstrap-admin-password-confirm"),
-      { target: { value: "a-strong-new-password-abc" } },
+      { target: { value: "Str0ng-Key!x42-zebra" } },
     )
     fireEvent.click(screen.getByTestId("bootstrap-admin-password-submit"))
 

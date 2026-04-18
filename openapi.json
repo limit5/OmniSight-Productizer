@@ -2197,6 +2197,115 @@
         "title": "GenerateReportRequest",
         "type": "object"
       },
+      "GerritBotVerify": {
+        "properties": {
+          "group": {
+            "default": "merger-agent-bot",
+            "title": "Group",
+            "type": "string"
+          },
+          "ssh_host": {
+            "default": "",
+            "title": "Ssh Host",
+            "type": "string"
+          },
+          "ssh_port": {
+            "default": 29418,
+            "title": "Ssh Port",
+            "type": "integer"
+          }
+        },
+        "title": "GerritBotVerify",
+        "type": "object"
+      },
+      "GerritFinalizeBody": {
+        "description": "Wizard finalize payload — Steps 1-5 collected on the client side, this\nis the single atomic write into ``settings.gerrit_*`` that flips the\nintegration ON. Fields mirror the wizard inputs:\n\n* ``url`` — REST URL the operator entered in Step 1 (optional; some\n  shops only run SSH-only Gerrit and never enable the REST plugin).\n* ``ssh_host`` / ``ssh_port`` — Step 1 SSH endpoint that already\n  passed the ``gerrit version`` probe.\n* ``project`` — the project path validated by Step 4's submit-rule\n  probe (e.g. ``project/omnisight-core``).\n* ``replication_targets`` — optional CSV of remote names; empty is\n  fine for most installs (single-Gerrit deploys).",
+        "properties": {
+          "project": {
+            "default": "",
+            "title": "Project",
+            "type": "string"
+          },
+          "replication_targets": {
+            "default": "",
+            "title": "Replication Targets",
+            "type": "string"
+          },
+          "ssh_host": {
+            "title": "Ssh Host",
+            "type": "string"
+          },
+          "ssh_port": {
+            "default": 29418,
+            "title": "Ssh Port",
+            "type": "integer"
+          },
+          "url": {
+            "default": "",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ssh_host"
+        ],
+        "title": "GerritFinalizeBody",
+        "type": "object"
+      },
+      "GerritSubmitRuleVerify": {
+        "properties": {
+          "project": {
+            "default": "",
+            "title": "Project",
+            "type": "string"
+          },
+          "ssh_host": {
+            "default": "",
+            "title": "Ssh Host",
+            "type": "string"
+          },
+          "ssh_port": {
+            "default": 29418,
+            "title": "Ssh Port",
+            "type": "integer"
+          }
+        },
+        "title": "GerritSubmitRuleVerify",
+        "type": "object"
+      },
+      "GitForgeTokenTest": {
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "ssh_host": {
+            "default": "",
+            "title": "Ssh Host",
+            "type": "string"
+          },
+          "ssh_port": {
+            "default": 29418,
+            "title": "Ssh Port",
+            "type": "integer"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          },
+          "url": {
+            "default": "",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "GitForgeTokenTest",
+        "type": "object"
+      },
       "HALEndpointReq": {
         "properties": {
           "description": {
@@ -3008,6 +3117,12 @@
       },
       "ModeRequest": {
         "properties": {
+          "confirm_turbo": {
+            "default": false,
+            "description": "Required when h2_auto_derate=false and mode=turbo.",
+            "title": "Confirm Turbo",
+            "type": "boolean"
+          },
           "mode": {
             "description": "One of manual | supervised | full_auto | turbo",
             "title": "Mode",
@@ -6057,6 +6172,46 @@
           }
         },
         "title": "TokenBudgetResponse",
+        "type": "object"
+      },
+      "TokenMapInstance": {
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "TokenMapInstance",
+        "type": "object"
+      },
+      "TokenMapUpdate": {
+        "properties": {
+          "github": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TokenMapInstance"
+            },
+            "title": "Github",
+            "type": "array"
+          },
+          "gitlab": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TokenMapInstance"
+            },
+            "title": "Gitlab",
+            "type": "array"
+          }
+        },
+        "title": "TokenMapUpdate",
         "type": "object"
       },
       "TraceCaptureRequest": {
@@ -15098,7 +15253,7 @@
     },
     "/api/v1/host/metrics": {
       "get": {
-        "description": "Return per-tenant resource usage.\n\n* ``tenant_id`` omitted:\n    - admin → full list of all tenants with running sandboxes\n    - non-admin → auto-scoped to the caller's own tenant\n* ``tenant_id`` set:\n    - admin → any tenant\n    - non-admin → only their own, else 403",
+        "description": "Return per-tenant resource usage plus the H1 whole-host block.\n\nPer-tenant half:\n  * ``tenant_id`` omitted:\n      - admin → full list of all tenants with running sandboxes\n      - non-admin → auto-scoped to the caller's own tenant\n  * ``tenant_id`` set:\n      - admin → any tenant\n      - non-admin → only their own, else 403\n\nWhole-host half (``host`` field): always included, same shape for\nevery authenticated caller — baseline (HOST_BASELINE), the most\nrecent ring-buffer snapshot (``current``), and the full history list\n(``history``, oldest first, up to ``HOST_HISTORY_SIZE`` entries).",
         "operationId": "get_host_metrics_api_v1_host_metrics_get",
         "parameters": [
           {
@@ -15150,7 +15305,7 @@
     },
     "/api/v1/host/metrics/me": {
       "get": {
-        "description": "Shortcut for the UI's \"current tenant\" bar — same shape as\n``/metrics?tenant_id=<self>`` but with no query string.",
+        "description": "Shortcut for the UI's \"current tenant\" bar — same shape as\n``/metrics?tenant_id=<self>`` but with no query string. Also\ncarries the H1 ``host`` block so the panel can render the whole\nmachine view in the same request.",
         "operationId": "get_my_tenant_metrics_api_v1_host_metrics_me_get",
         "responses": {
           "200": {
@@ -26972,6 +27127,226 @@
         ]
       }
     },
+    "/api/v1/system/git-forge/gerrit/finalize": {
+      "post": {
+        "description": "Persist the wizard's collected Gerrit settings and flip\n``gerrit_enabled`` on — the closing act of the Setup Wizard.\n\nSteps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).\nWithout this finalize step the operator would have to re-enter every\nStep 1 value into the Settings form by hand to actually turn the\nintegration on, defeating the wizard. This endpoint is the single\natomic write that promotes wizard inputs into ``settings.gerrit_*``\nand reports success so the UI can render the「Gerrit 整合已啟用」\nconfirmation banner.\n\nValidation is intentionally narrow:\n  * ``ssh_host`` must be non-empty (Step 1 cannot have passed\n    otherwise; we double-check here so a hand-rolled curl can't\n    write garbage).\n  * ``ssh_port`` must be in [1, 65535].\n  * ``url`` and ``project`` are normalised (trim) but not\n    round-tripped to Gerrit again — Step 1 + Step 4 already proved\n    they work.\n\nThe webhook secret is *not* echoed back even masked — the Step 5\ngenerate response was the one-and-only reveal.",
+        "operationId": "finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GerritFinalizeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Finalize Gerrit Integration",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/git-forge/gerrit/verify-bot": {
+      "post": {
+        "description": "Verify the ``merger-agent-bot`` Gerrit group exists and has members.\n\nB14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH\ntransport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit\nls-members`` instead of ``gerrit version`` so the probe only succeeds\nwhen the O7 dual-+2 group is properly seated. Never mutates Gerrit —\ngroup creation + member-add stay manual (they require admin rights\nper the runbook in docs/ops/gerrit_dual_two_rule.md §1).",
+        "operationId": "verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GerritBotVerify"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Gerrit Merger Bot",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/git-forge/gerrit/verify-submit-rule": {
+      "post": {
+        "description": "Verify the target Gerrit project carries the O7 dual-+2 submit rule.\n\nB14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:\nreads ``refs/meta/config:project.config`` over the Gerrit SSH\ntransport and pattern-matches the three ACL lines that encode the\ndual-+2 gate. Installation of the rule stays manual (it requires\n``Push`` on ``refs/meta/config`` which is an admin-only ref) per\ndocs/ops/gerrit_dual_two_rule.md §2.",
+        "operationId": "verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GerritSubmitRuleVerify"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Gerrit Submit Rule",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/git-forge/gerrit/webhook-info": {
+      "get": {
+        "description": "Return the inbound webhook URL + secret status the operator must\npaste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).\n\nNever returns the plain secret — only ``secret_configured`` plus a\n``secret_masked`` preview so the operator can confirm what's wired\nwithout re-revealing it. Use ``POST .../webhook-secret/generate`` to\nrotate (which returns the new plain value exactly once).",
+        "operationId": "get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Gerrit Webhook Info",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/git-forge/gerrit/webhook-secret/generate": {
+      "post": {
+        "description": "Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.\n\n32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with\n~256 bits of entropy, well above the 128-bit floor recommended for\nHMAC-SHA256 keys. The plain value is returned **only** in this\nresponse — the operator must capture it before closing the wizard;\nsubsequent ``webhook-info`` calls will surface only the masked\npreview. Rotating here invalidates whatever secret Gerrit currently\nholds, so the operator must re-paste the new value into Gerrit's\n``webhooks.config`` for events to keep verifying.",
+        "operationId": "generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Generate Gerrit Webhook Secret",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/git-forge/ssh-pubkey": {
+      "get": {
+        "description": "Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.\n\nRead-only — never mutates settings, never exposes the private key.\nDrives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-\nGerrit flow) and is safe to surface to any operator-role session\nsince the public half of an SSH keypair is non-secret by design.",
+        "operationId": "get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Git Forge Ssh Pubkey",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/git-forge/test-token": {
+      "post": {
+        "description": "Validate a candidate Git forge credential WITHOUT persisting it.\n\nUsed by the Bootstrap Step 3.5 Git Forge setup to let the operator\nsanity-check their credential before they commit it to settings.\n``github`` / ``gitlab`` run a token probe against the respective\nREST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since\nGerrit's first-class transport is SSH, not HTTP.",
+        "operationId": "test_git_forge_token_api_v1_system_git_forge_test_token_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitForgeTokenTest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Git Forge Token",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
     "/api/v1/system/info": {
       "get": {
         "operationId": "get_system_info_api_v1_system_info_get",
@@ -27808,6 +28183,64 @@
           }
         },
         "summary": "Update Settings",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/system/settings/git/token-map": {
+      "get": {
+        "description": "Return the configured per-host token maps with tokens masked.\n\nShape::\n\n    {\n      \"github\": [{\"platform\": \"github\", \"host\": \"...\", \"token_masked\": \"...\"}],\n      \"gitlab\": [...],\n    }\n\nEmpty platforms surface as empty lists — never ``null`` — so the UI\ncan render \"no additional instances configured\" without branching on\npresence.",
+        "operationId": "get_git_token_map_api_v1_system_settings_git_token_map_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Git Token Map",
+        "tags": [
+          "integration"
+        ]
+      },
+      "put": {
+        "description": "Replace the per-host token maps.\n\nA blank ``token`` for a given host preserves the existing secret so the\nUI can round-trip the masked list without re-prompting every token.\nRemoving a host just means omitting it from the PUT body — this\nendpoint is a replace, not a patch.\n\nDuplicate hosts in the payload are merged last-write-wins (the final\nentry in the list). Empty host strings are ignored.",
+        "operationId": "update_git_token_map_api_v1_system_settings_git_token_map_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenMapUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Git Token Map",
         "tags": [
           "integration"
         ]

@@ -168,6 +168,8 @@ class TestSSESchemaExport:
             # R3 (#309) Scratchpad + Auto-Continuation
             "agent.scratchpad.saved",
             "agent.token_continuation",
+            # H1 whole-host 5s sampling push
+            "host.metrics.tick",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 

@@ -916,6 +916,460 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/bootstrap/admin-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Admin Password
+         * @description Rotate the shipping default admin credential during the wizard.
+         *
+         *     This endpoint is intentionally unauthenticated — during L2 Step 1 no
+         *     admin is logged in yet. It identifies the target user as the single
+         *     admin row carrying ``must_change_password=1`` (i.e. the one
+         *     :func:`auth.ensure_default_admin` created with the bundled
+         *     ``omnisight-admin`` fallback). The operator's ``current_password``
+         *     must still verify against that row, so an attacker without access
+         *     to the default password cannot trigger this flow.
+         *
+         *     On success:
+         *       * rotates the password (clears ``must_change_password``)
+         *       * records ``bootstrap_state.admin_password_set`` with the admin's
+         *         user id as actor
+         *       * writes audit action ``bootstrap.admin_password_set``
+         *
+         *     Error contract (each response includes a machine-readable ``kind`` so
+         *     the wizard UI can pick a matching banner + remediation hint without
+         *     string-parsing ``detail``):
+         *       * 409 + ``kind=already_rotated`` — no admin still requires a
+         *         password change (wizard re-opened after rotation).
+         *       * 401 + ``kind=current_password_wrong`` — current_password did not
+         *         authenticate against the default admin row.
+         *       * 422 + ``kind=password_too_short`` — new_password shorter than
+         *         :data:`auth.PASSWORD_MIN_LENGTH`.
+         *       * 422 + ``kind=password_too_weak`` — passed the length gate but
+         *         failed the zxcvbn ≥ :data:`auth.PASSWORD_MIN_ZXCVBN` check.
+         */
+        post: operations["bootstrap_admin_password_api_v1_bootstrap_admin_password_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/cf-tunnel-skip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Cf Tunnel Skip
+         * @description Mark CF tunnel as intentionally skipped (LAN-only deployment).
+         *
+         *     Unauthenticated like the other wizard steps. Two side-effects:
+         *
+         *       1. Writes ``cf_tunnel_skipped=true`` to the bootstrap marker and
+         *          records ``STEP_CF_TUNNEL`` in ``bootstrap_state`` with
+         *          ``metadata.skipped=true`` so :func:`missing_required_steps`
+         *          clears the step for finalize.
+         *       2. Emits an audit row ``bootstrap.cf_tunnel_skipped`` with warning
+         *          severity — the operator chose LAN-only on purpose, but the
+         *          trail must show who took that call and when.
+         */
+        post: operations["bootstrap_cf_tunnel_skip_api_v1_bootstrap_cf_tunnel_skip_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Finalize
+         * @description Close out the wizard — admin only, requires every gate green.
+         *
+         *     409 conditions (the wizard should keep the operator on the current
+         *     step):
+         *       * any live gate is still red (password default, no LLM key,
+         *         CF tunnel unprovisioned, smoke not green)
+         *       * any required step row is missing from ``bootstrap_state``
+         *     On success, writes a ``finalized`` audit row into
+         *     ``bootstrap_state`` and flips the persisted
+         *     ``bootstrap_finalized=true`` app-setting flag.
+         */
+        post: operations["bootstrap_finalize_api_v1_bootstrap_finalize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/llm-provision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Llm Provision
+         * @description Verify + persist an LLM provider credential during wizard Step L3.
+         *
+         *     Flow:
+         *       1. ``provider.ping()`` — a single REST probe against the hosted
+         *          provider that classifies the failure into ``key_invalid``,
+         *          ``quota_exceeded``, ``network_unreachable``, or ``bad_request``.
+         *          Ollama uses the local ``/api/tags`` probe so the same path also
+         *          satisfies the "Ollama reachability" bullet of L3 Step 2.
+         *       2. On success, persist the credential encrypted-at-rest via
+         *          :mod:`backend.llm_secrets` (Fernet; key from ``OMNISIGHT_SECRET_KEY``
+         *          or ``data/.secret_key``).
+         *       3. Mirror the active provider into ``settings.llm_provider`` and
+         *          clear the LLM factory cache so the next ``get_llm()`` call uses
+         *          the fresh credential without an env reload.
+         *       4. Record ``bootstrap_state.llm_provider_configured`` and emit an
+         *          audit row — mirrors the admin-password step's contract.
+         *
+         *     Intentionally unauthenticated: during the wizard the operator has
+         *     no admin session yet. The global bootstrap-gate middleware
+         *     (:mod:`backend.main`) only permits ``/bootstrap/*`` until the wizard
+         *     finalizes, so the endpoint cannot be reached after install.
+         *
+         *     Error codes mirror ``_PING_KIND_TO_STATUS``:
+         *       * 401 — key was rejected (invalid / expired)
+         *       * 429 — provider returned quota exhausted
+         *       * 504 — network unreachable / timeout
+         *       * 400 — bad request shape (e.g. Azure w/o base_url)
+         *       * 502 — provider 5xx
+         */
+        post: operations["bootstrap_llm_provision_api_v1_bootstrap_llm_provision_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/ollama-detect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bootstrap Ollama Detect
+         * @description Probe a local Ollama daemon before the operator commits.
+         *
+         *     Read-only companion to :func:`bootstrap_llm_provision` — used by the
+         *     wizard's L3 Step 2 when the operator picks "Ollama (local)". Hits
+         *     ``GET {base_url}/api/tags`` (default ``http://localhost:11434``) and
+         *     reports reachability + available models so the UI can render a
+         *     model dropdown without writing any state.
+         *
+         *     This endpoint never persists credentials, never touches
+         *     ``bootstrap_state``, and never emits an audit row — it is a pure
+         *     probe. The ``provision`` call is still the single writer.
+         *
+         *     Response is always 200; the ``reachable`` boolean + ``kind`` field
+         *     carry the outcome so the UI does not have to parse HTTP status codes
+         *     for a UX affordance.
+         */
+        get: operations["bootstrap_ollama_detect_api_v1_bootstrap_ollama_detect_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/parallel-health-check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Parallel Health Check
+         * @description Run the four Step-4 readiness probes in parallel.
+         *
+         *     The wizard's Step 4 UI shows four checkboxes (backend / frontend /
+         *     DB migration / CF tunnel). A single call to this endpoint returns
+         *     the state of all four so the UI lights them from one server
+         *     observation — no racing between independent polls. ``cf_tunnel``
+         *     is tri-state: ``skipped`` when the operator chose LAN-only at
+         *     Step 3, otherwise ``green`` / ``red`` against the live CF API.
+         *
+         *     Like every other wizard endpoint this route is unauthenticated
+         *     (the admin hasn't logged in yet) and lives under ``/bootstrap/*``
+         *     so the gate middleware lets it through before finalize. Response
+         *     is always HTTP 200 — per-probe status lives in the body.
+         */
+        post: operations["bootstrap_parallel_health_check_api_v1_bootstrap_parallel_health_check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Reset
+         * @description Wipe wizard state so the next page-load lands back in ``/bootstrap``.
+         *
+         *     Strictly a **QA escape hatch**: refused unless the deploy mode is
+         *     ``dev`` so no production install can accidentally drop its bootstrap
+         *     record. Side-effects on success:
+         *
+         *       1. ``DELETE FROM bootstrap_state`` — every recorded step is gone,
+         *          so :func:`missing_required_steps` reports a fresh install.
+         *       2. ``clear_marker()`` — wipes ``data/.bootstrap_state.json``
+         *          (smoke_passed, cf_tunnel_*, ``bootstrap_finalized``).
+         *       3. ``flag_all_admins_must_change_password()`` — every enabled
+         *          admin row is re-flagged so the L2 Step 1 password-rotation
+         *          gate fires again. We don't restore the original ``omnisight-
+         *          admin`` plaintext (we never stored it) — re-flagging is enough
+         *          to drive the wizard.
+         *       4. Resets the in-process gate cache so the very next request hits
+         *          the redirect middleware instead of the sticky ``True`` cache.
+         *       5. Emits ``bootstrap.reset`` audit row with the actor + reason +
+         *          ``severity=warning`` so the trail shows who blew the wizard
+         *          away and why.
+         *
+         *     Error contract:
+         *       * 401/403 — caller is not an admin (``require_admin``)
+         *       * 403 — deploy mode is anything other than ``dev`` (the body
+         *         names the detected mode so QA can see why)
+         *       * 500 — db or marker IO failed mid-flight (response still reports
+         *         partial counts so the operator can re-attempt)
+         */
+        post: operations["bootstrap_reset_api_v1_bootstrap_reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/service-tick": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bootstrap Service Tick
+         * @description SSE stream: pipe live service logs into the wizard's Step 4 UI.
+         *
+         *     Counterpart to ``POST /bootstrap/start-services``. Once the launcher
+         *     returns, the UI opens this EventSource to watch the services come
+         *     up in real time. Each decoded log line becomes a
+         *     ``bootstrap.service.tick`` event carrying ``{line, stream, seq, ts}``.
+         *
+         *     Mode dispatch mirrors ``_detect_deploy_mode`` (systemd / docker-compose
+         *     / dev). ``dev`` emits a single informational tick and closes so the
+         *     UI doesn't hang waiting for output on a dev box with no managed
+         *     units.
+         *
+         *     Lifecycle events:
+         *       * ``start`` — mode + command + pid (once, at the top)
+         *       * ``bootstrap.service.tick`` — one per log line (stdout + stderr
+         *         are interleaved in source order with a monotonically increasing
+         *         ``seq`` so the UI can render a stable transcript)
+         *       * ``heartbeat`` — every ~10s of silence to keep the connection
+         *         alive through proxies
+         *       * ``done`` — when the tailer exits OR ``max_seconds`` elapses OR
+         *         the client disconnects
+         *
+         *     Query parameters:
+         *       * ``mode`` — systemd / docker-compose / dev (empty → auto-detect)
+         *       * ``compose_file`` — override for docker compose mode
+         *       * ``tail`` — historical lines to replay before following (default 50)
+         *       * ``max_seconds`` — upper bound on stream duration (default 300s)
+         *
+         *     Kept unauthenticated like the rest of ``/bootstrap/*`` so the wizard
+         *     can stream without an admin session. The bootstrap-gate middleware
+         *     still blocks access after finalize.
+         */
+        get: operations["bootstrap_service_tick_api_v1_bootstrap_service_tick_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/smoke-subset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Smoke Subset
+         * @description Run the wizard's Step-5 smoke subset (compile-flash host_native and/or
+         *     cross-compile aarch64).
+         *
+         *     Sequence:
+         *       1. Validate + submit each selected DAG via ``workflow.start`` —
+         *          same artefact shape the prod-UI smoke uses. ``subset=both``
+         *          yields one run summary per DAG so Step 5 can render both.
+         *       2. Verify the audit hash chain for every tenant (catches
+         *          pre-finalize tampering).
+         *       3. On every selected DAG green AND audit chain intact, flip the
+         *          ``smoke_passed`` bootstrap marker + record ``STEP_SMOKE`` so
+         *          the finalize gate can pass.
+         *
+         *     Unauthenticated like every other wizard endpoint — the bootstrap-
+         *     gate middleware keeps ``/bootstrap/*`` wizard-scoped until finalize.
+         *     Response is always HTTP 200 — ``smoke_passed`` in the body carries
+         *     the outcome so the UI can render the result pane without parsing
+         *     error bodies.
+         */
+        post: operations["bootstrap_smoke_subset_api_v1_bootstrap_smoke_subset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/start-services": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Start Services
+         * @description Launch the OmniSight services for the wizard's Step 4.
+         *
+         *     Dispatches by deploy mode:
+         *       * ``systemd`` → ``systemctl start omnisight-backend omnisight-frontend``
+         *       * ``docker-compose`` → ``docker compose -f <file> up -d``
+         *       * ``dev`` → no-op (processes are already running under uvicorn /
+         *         next-dev); the endpoint returns ``status="already_running"``.
+         *
+         *     Unauthenticated like the other wizard endpoints — during the wizard
+         *     there is no admin session yet and the bootstrap-gate middleware
+         *     limits who can reach ``/bootstrap/*`` before finalize.
+         *
+         *     Side-effects:
+         *       * ``logger.info`` with the full argv
+         *       * audit row ``bootstrap.start_services`` capturing mode + return
+         *         code so a failed start has a traceable fingerprint.
+         *
+         *     HTTP contract:
+         *       * 200 on success (returncode==0, or dev no-op)
+         *       * 502 when the launcher exited non-zero — stdout/stderr tails are
+         *         echoed back in the body so the SSE-log follow-up (next checkbox)
+         *         has a first point of reference.
+         *       * 504 on timeout after ``_START_TIMEOUT_SECS``.
+         */
+        post: operations["bootstrap_start_services_api_v1_bootstrap_start_services_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bootstrap Status
+         * @description Public read of the four-gate status + finalized flag.
+         *
+         *     Exempt from auth so the wizard UI can poll it during install before
+         *     the admin has even logged in. No secrets leak — each field is a
+         *     boolean derived from already-public server state.
+         */
+        get: operations["bootstrap_status_api_v1_bootstrap_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bootstrap/wait-ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bootstrap Wait Ready
+         * @description Block until the backend's readyz probe goes green or 180s elapses.
+         *
+         *     The wizard's Step 4 kicks services via ``start-services``, streams
+         *     their logs via ``service-tick``, and finally calls this endpoint to
+         *     get one deterministic boolean: did the stack actually come up? We
+         *     poll ``GET {url}`` every ``interval_secs`` and return as soon as any
+         *     probe reports a 2xx. If no probe succeeds within ``timeout_secs`` we
+         *     return ``ready=false`` with ``reason=timeout`` (or
+         *     ``connection_error`` if every probe failed at the transport layer —
+         *     the distinction matters for UX: a misconfigured URL vs. services
+         *     that are still booting).
+         *
+         *     Lives under ``/bootstrap/*`` so the gate middleware lets it through
+         *     before finalize. Unauthenticated like every other wizard step.
+         *
+         *     Response is always HTTP 200 — the polling itself completed, the
+         *     ``ready`` boolean carries the outcome so the UI can render a
+         *     green/red check without parsing error bodies.
+         */
+        post: operations["bootstrap_wait_ready_api_v1_bootstrap_wait_ready_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/budget-strategy": {
         parameters: {
             query?: never;
@@ -984,6 +1438,125 @@ export interface paths {
          *     then the final answer is streamed token-by-token here.
          */
         post: operations["chat_stream_api_v1_chat_stream_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/inject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Chatops Inject */
+        post: operations["chatops_inject_api_v1_chatops_inject_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/mirror": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Chatops Mirror */
+        get: operations["chatops_mirror_api_v1_chatops_mirror_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Chatops Send */
+        post: operations["chatops_send_api_v1_chatops_send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Chatops Status */
+        get: operations["chatops_status_api_v1_chatops_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/webhook/discord": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Discord Webhook */
+        post: operations["discord_webhook_api_v1_chatops_webhook_discord_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/webhook/line": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Line Webhook */
+        post: operations["line_webhook_api_v1_chatops_webhook_line_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chatops/webhook/teams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Teams Webhook */
+        post: operations["teams_webhook_api_v1_chatops_webhook_teams_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2663,6 +3236,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/entropy/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Entropy
+         * @description Return semantic-entropy snapshots for every tracked agent.
+         *
+         *     Also exposes the current highest-entropy agent so the ops summary
+         *     can render without re-scanning. Empty response is ``{"agents": [],
+         *     "highest": null}`` — the UI treats an empty list as "monitor
+         *     hasn't yet collected a measurement".
+         */
+        get: operations["list_entropy_api_v1_entropy_agents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/entropy/agents/{agent_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Entropy */
+        get: operations["get_entropy_api_v1_entropy_agents__agent_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -2712,7 +3327,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Health Check */
+        /**
+         * Health Check
+         * @description Legacy liveness payload (kept for backwards compatibility).
+         */
         get: operations["health_check_api_v1_health_get"];
         put?: never;
         post?: never;
@@ -3087,14 +3705,20 @@ export interface paths {
         };
         /**
          * Get Host Metrics
-         * @description Return per-tenant resource usage.
+         * @description Return per-tenant resource usage plus the H1 whole-host block.
          *
-         *     * ``tenant_id`` omitted:
-         *         - admin → full list of all tenants with running sandboxes
-         *         - non-admin → auto-scoped to the caller's own tenant
-         *     * ``tenant_id`` set:
-         *         - admin → any tenant
-         *         - non-admin → only their own, else 403
+         *     Per-tenant half:
+         *       * ``tenant_id`` omitted:
+         *           - admin → full list of all tenants with running sandboxes
+         *           - non-admin → auto-scoped to the caller's own tenant
+         *       * ``tenant_id`` set:
+         *           - admin → any tenant
+         *           - non-admin → only their own, else 403
+         *
+         *     Whole-host half (``host`` field): always included, same shape for
+         *     every authenticated caller — baseline (HOST_BASELINE), the most
+         *     recent ring-buffer snapshot (``current``), and the full history list
+         *     (``history``, oldest first, up to ``HOST_HISTORY_SIZE`` entries).
          */
         get: operations["get_host_metrics_api_v1_host_metrics_get"];
         put?: never;
@@ -3115,7 +3739,9 @@ export interface paths {
         /**
          * Get My Tenant Metrics
          * @description Shortcut for the UI's "current tenant" bar — same shape as
-         *     ``/metrics?tenant_id=<self>`` but with no query string.
+         *     ``/metrics?tenant_id=<self>`` but with no query string. Also
+         *     carries the H1 ``host`` block so the panel can render the whole
+         *     machine view in the same request.
          */
         get: operations["get_my_tenant_metrics_api_v1_host_metrics_me_get"];
         put?: never;
@@ -3817,6 +4443,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Livez Prefixed */
+        get: operations["livez_prefixed_api_v1_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/memory/{memory_id}/restore": {
         parameters: {
             query?: never;
@@ -3845,6 +4488,79 @@ export interface paths {
         get: operations["get_metrics_api_v1_metrics_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-compliance/gates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Gates
+         * @description List the three P6 gates. Shape mirrors C8 ``/compliance/tools``.
+         */
+        get: operations["list_gates_api_v1_mobile_compliance_gates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-compliance/privacy-label": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Privacy Label
+         * @description Generate a privacy label report without running the other gates.
+         *
+         *     Useful for previewing a label before shipping a build.
+         */
+        post: operations["generate_privacy_label_api_v1_mobile_compliance_privacy_label_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-compliance/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Bundle
+         * @description Run the P6 bundle over ``app_path``.
+         *
+         *     Request body:
+         *         {
+         *           "app_path": "/absolute/path/to/mobile/app",
+         *           "platform": "ios" | "android" | "both",   # optional (default: both)
+         *           "min_target_sdk": 35,                      # optional
+         *         }
+         *
+         *     Returns the bundle JSON. A non-passing bundle returns 200 too —
+         *     the caller inspects ``passed`` to decide whether to proceed to
+         *     P5 store submission.
+         */
+        post: operations["run_bundle_api_v1_mobile_compliance_run_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4117,6 +4833,232 @@ export interface paths {
         };
         /** Ops Summary */
         get: operations["ops_summary_api_v1_ops_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestration/awaiting-human": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Orchestration Awaiting Human
+         * @description Lightweight list-only view for Slack / CLI bots.
+         */
+        get: operations["orchestration_awaiting_human_api_v1_orchestration_awaiting_human_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestration/queue-tick": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Orchestration Queue Tick
+         * @description Force a queue tick + push the SSE event.
+         *
+         *     Returns the snapshot that was emitted so the caller doesn't have to
+         *     chase it via SSE if all they wanted was a one-off probe.
+         */
+        post: operations["orchestration_queue_tick_api_v1_orchestration_queue_tick_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestration/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Orchestration Snapshot
+         * @description Single roll-up for the orchestration panel.
+         *
+         *     Returns:
+         *       * ``queue.by_priority`` / ``queue.by_state`` / ``queue.total``
+         *       * ``locks.by_task`` / ``locks.total_paths`` / ``locks.total_tasks``
+         *       * ``merger.plus_two_total`` / ``merger.abstain_total`` /
+         *         ``merger.security_refusal_total`` plus rate fields
+         *       * ``workers.active`` / ``workers.inflight`` / ``workers.capacity``
+         *       * ``awaiting_human_plus_two`` — list of pending changes
+         *       * ``awaiting_human_warn_hours`` — soft alert threshold
+         */
+        get: operations["orchestration_snapshot_api_v1_orchestration_snapshot_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/check-change-ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Change Ready Endpoint
+         * @description Pure query: evaluate the submit-rule for a given vote set.
+         *
+         *     No side-effects; useful from the UI / CLI / observability layer.
+         */
+        post: operations["check_change_ready_endpoint_api_v1_orchestrator_check_change_ready_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/human-vote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Human Vote Endpoint
+         * @description Gerrit webhook entry: a human (or AI bot) cast a Code-Review.
+         *
+         *     We re-evaluate the submit-rule + drive submit / withdraw flows.
+         */
+        post: operations["human_vote_endpoint_api_v1_orchestrator_human_vote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/intake": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Intake Endpoint
+         * @description Jira webhook intake.  Reads raw body so signature verification
+         *     works, then drives the ``orchestrator_gateway.intake`` pipeline.
+         *
+         *     On success: 200 JSON with the intake outcome (``state`` tells the
+         *     caller whether CATCs were queued or held for PM review).
+         *     On failure: 4xx/5xx JSON with ``{reason, detail, context}``.
+         */
+        post: operations["intake_endpoint_api_v1_orchestrator_intake_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/merge-conflict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge Conflict Endpoint
+         * @description Gerrit webhook entry: a merge conflict was detected on a change.
+         *
+         *     Body shape matches :class:`MergeConflictRequest`.  Gerrit's native
+         *     webhooks plugin posts this payload after the orchestrator's webhook
+         *     mapper normalises the event.  We re-use the Jira HMAC secret for
+         *     signature verification so operators only maintain one secret.
+         */
+        post: operations["merge_conflict_endpoint_api_v1_orchestrator_merge_conflict_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/replan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replan Endpoint
+         * @description PM-approved replan for a previously-intaken ticket.
+         */
+        post: operations["replan_endpoint_api_v1_orchestrator_replan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Status Endpoint
+         * @description Operator surface — every intake session in this process.
+         */
+        get: operations["list_status_endpoint_api_v1_orchestrator_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orchestrator/status/{jira_ticket}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Status Endpoint
+         * @description Return the DAG + CATC + Gerrit snapshot for a Jira ticket.
+         */
+        get: operations["status_endpoint_api_v1_orchestrator_status__jira_ticket__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5089,6 +6031,134 @@ export interface paths {
         put?: never;
         /** Run Test Recipe */
         post: operations["run_test_recipe_api_v1_payment_test_recipes__recipe_id__run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/breaker/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pep Breaker Reset */
+        post: operations["pep_breaker_reset_api_v1_pep_breaker_reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/decision/{pep_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pep Decision
+         * @description Resolve a PEP held id directly (alias for the R1 button round-trip).
+         *
+         *     Looks up the PEP HELD registry, maps to its ``decision_id``, then
+         *     delegates to the decision engine just like the /decisions router
+         *     approve/reject does. This exists so ChatOps buttons can POST to a
+         *     stable ``/pep/decision/{pep_id}`` URL without knowing the DE id
+         *     (which only the backend has).
+         */
+        post: operations["pep_decision_api_v1_pep_decision__pep_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pep Decisions */
+        get: operations["pep_decisions_api_v1_pep_decisions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/held": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pep Held */
+        get: operations["pep_held_api_v1_pep_held_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/live": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pep Live */
+        get: operations["pep_live_api_v1_pep_live_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pep Policy */
+        get: operations["pep_policy_api_v1_pep_policy_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pep/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pep Status */
+        get: operations["pep_status_api_v1_pep_status_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -6524,6 +7594,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/readyz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Readyz Prefixed */
+        get: operations["readyz_prefixed_api_v1_readyz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/realtime/cyclictest/configs": {
         parameters: {
             query?: never;
@@ -6864,6 +7951,130 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/rum/dashboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Dashboard */
+        get: operations["dashboard_api_v1_rum_dashboard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rum/errors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest Error
+         * @description Ingest one browser error event.
+         *
+         *     Expected payload:
+         *
+         *         {
+         *           "message": "TypeError: x is undefined",  // required
+         *           "stack": "at app.js:1:2\n...",
+         *           "page": "/blog",
+         *           "level": "error",          // error / warning / fatal
+         *           "release": "1.42.0",
+         *           "environment": "production",
+         *           "fingerprint": "...",      // optional — derived if absent
+         *           "sessionId": "...",
+         *           "userAgent": "..."
+         *         }
+         *
+         *     Routes the event through the ``ErrorToIntentRouter`` (JIRA / GitHub
+         *     Issues / GitLab Issues) and returns the resulting ticket ref (if any).
+         */
+        post: operations["ingest_error_api_v1_rum_errors_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rum/errors/recent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Errors Recent */
+        get: operations["errors_recent_api_v1_rum_errors_recent_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rum/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Rum Health */
+        get: operations["rum_health_api_v1_rum_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/rum/vitals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ingest Vital
+         * @description Ingest one Core Web Vital sample.
+         *
+         *     Expected payload (web-vitals JS lib output passed through sendBeacon):
+         *
+         *         {
+         *           "name": "LCP",          // required — LCP / INP / CLS / TTFB / FCP
+         *           "value": 2400.5,        // required — ms (or unitless for CLS)
+         *           "page": "/blog",        // optional — defaults to "/"
+         *           "rating": "good",       // optional — re-derived if absent
+         *           "navType": "navigate",  // optional
+         *           "sessionId": "...",     // optional
+         *           "userAgent": "...",     // optional (navigator.userAgent)
+         *           "locale": "en-US"       // optional (navigator.language)
+         *         }
+         *
+         *     Returns ``{"accepted": True, "rating": "..."}`` so test harnesses
+         *     and curl users can verify the classification.
+         */
+        post: operations["ingest_vital_api_v1_rum_vitals_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/safety/artifacts": {
         parameters: {
             query?: never;
@@ -6941,6 +8152,86 @@ export interface paths {
         };
         /** Get Standard */
         get: operations["get_standard_api_v1_safety_standards__standard_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/scratchpad/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Agents
+         * @description Compact summary for every agent that has a scratchpad.
+         *
+         *     Empty list if nothing's been flushed yet. The UI treats that as
+         *     "the agent either hasn't been started or crashed before the first
+         *     save" and falls back to the old card layout.
+         */
+        get: operations["list_agents_api_v1_scratchpad_agents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/scratchpad/agents/{agent_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Summary */
+        get: operations["get_summary_api_v1_scratchpad_agents__agent_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/scratchpad/agents/{agent_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Archive */
+        get: operations["get_archive_api_v1_scratchpad_agents__agent_id__archive_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/scratchpad/agents/{agent_id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Preview
+         * @description Decrypted markdown body, capped so the UI doesn't choke on a
+         *     100 KB paste. ``max_chars`` default aligns with the UI modal's
+         *     max height of ~120 lines.
+         */
+        get: operations["get_preview_api_v1_scratchpad_agents__agent_id__preview_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -8142,6 +9433,207 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/git-forge/gerrit/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finalize Gerrit Integration
+         * @description Persist the wizard's collected Gerrit settings and flip
+         *     ``gerrit_enabled`` on — the closing act of the Setup Wizard.
+         *
+         *     Steps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).
+         *     Without this finalize step the operator would have to re-enter every
+         *     Step 1 value into the Settings form by hand to actually turn the
+         *     integration on, defeating the wizard. This endpoint is the single
+         *     atomic write that promotes wizard inputs into ``settings.gerrit_*``
+         *     and reports success so the UI can render the「Gerrit 整合已啟用」
+         *     confirmation banner.
+         *
+         *     Validation is intentionally narrow:
+         *       * ``ssh_host`` must be non-empty (Step 1 cannot have passed
+         *         otherwise; we double-check here so a hand-rolled curl can't
+         *         write garbage).
+         *       * ``ssh_port`` must be in [1, 65535].
+         *       * ``url`` and ``project`` are normalised (trim) but not
+         *         round-tripped to Gerrit again — Step 1 + Step 4 already proved
+         *         they work.
+         *
+         *     The webhook secret is *not* echoed back even masked — the Step 5
+         *     generate response was the one-and-only reveal.
+         */
+        post: operations["finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/git-forge/gerrit/verify-bot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Gerrit Merger Bot
+         * @description Verify the ``merger-agent-bot`` Gerrit group exists and has members.
+         *
+         *     B14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH
+         *     transport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit
+         *     ls-members`` instead of ``gerrit version`` so the probe only succeeds
+         *     when the O7 dual-+2 group is properly seated. Never mutates Gerrit —
+         *     group creation + member-add stay manual (they require admin rights
+         *     per the runbook in docs/ops/gerrit_dual_two_rule.md §1).
+         */
+        post: operations["verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/git-forge/gerrit/verify-submit-rule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Gerrit Submit Rule
+         * @description Verify the target Gerrit project carries the O7 dual-+2 submit rule.
+         *
+         *     B14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:
+         *     reads ``refs/meta/config:project.config`` over the Gerrit SSH
+         *     transport and pattern-matches the three ACL lines that encode the
+         *     dual-+2 gate. Installation of the rule stays manual (it requires
+         *     ``Push`` on ``refs/meta/config`` which is an admin-only ref) per
+         *     docs/ops/gerrit_dual_two_rule.md §2.
+         */
+        post: operations["verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/git-forge/gerrit/webhook-info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Gerrit Webhook Info
+         * @description Return the inbound webhook URL + secret status the operator must
+         *     paste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).
+         *
+         *     Never returns the plain secret — only ``secret_configured`` plus a
+         *     ``secret_masked`` preview so the operator can confirm what's wired
+         *     without re-revealing it. Use ``POST .../webhook-secret/generate`` to
+         *     rotate (which returns the new plain value exactly once).
+         */
+        get: operations["get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/git-forge/gerrit/webhook-secret/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Gerrit Webhook Secret
+         * @description Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.
+         *
+         *     32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with
+         *     ~256 bits of entropy, well above the 128-bit floor recommended for
+         *     HMAC-SHA256 keys. The plain value is returned **only** in this
+         *     response — the operator must capture it before closing the wizard;
+         *     subsequent ``webhook-info`` calls will surface only the masked
+         *     preview. Rotating here invalidates whatever secret Gerrit currently
+         *     holds, so the operator must re-paste the new value into Gerrit's
+         *     ``webhooks.config`` for events to keep verifying.
+         */
+        post: operations["generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/git-forge/ssh-pubkey": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Git Forge Ssh Pubkey
+         * @description Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.
+         *
+         *     Read-only — never mutates settings, never exposes the private key.
+         *     Drives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-
+         *     Gerrit flow) and is safe to surface to any operator-role session
+         *     since the public half of an SSH keypair is non-secret by design.
+         */
+        get: operations["get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/git-forge/test-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Git Forge Token
+         * @description Validate a candidate Git forge credential WITHOUT persisting it.
+         *
+         *     Used by the Bootstrap Step 3.5 Git Forge setup to let the operator
+         *     sanity-check their credential before they commit it to settings.
+         *     ``github`` / ``gitlab`` run a token probe against the respective
+         *     REST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since
+         *     Gerrit's first-class transport is SSH, not HTTP.
+         */
+        post: operations["test_git_forge_token_api_v1_system_git_forge_test_token_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/system/info": {
         parameters: {
             query?: never;
@@ -8625,6 +10117,49 @@ export interface paths {
          * @description Update integration settings at runtime (not persisted to .env).
          */
         put: operations["update_settings_api_v1_system_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/system/settings/git/token-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Git Token Map
+         * @description Return the configured per-host token maps with tokens masked.
+         *
+         *     Shape::
+         *
+         *         {
+         *           "github": [{"platform": "github", "host": "...", "token_masked": "..."}],
+         *           "gitlab": [...],
+         *         }
+         *
+         *     Empty platforms surface as empty lists — never ``null`` — so the UI
+         *     can render "no additional instances configured" without branching on
+         *     presence.
+         */
+        get: operations["get_git_token_map_api_v1_system_settings_git_token_map_get"];
+        /**
+         * Update Git Token Map
+         * @description Replace the per-host token maps.
+         *
+         *     A blank ``token`` for a given host preserves the existing secret so the
+         *     UI can round-trip the masked list without re-prompting every token.
+         *     Removing a host just means omitting it from the PUT body — this
+         *     endpoint is a replace, not a patch.
+         *
+         *     Duplicate hosts in the payload are merged last-write-wins (the final
+         *     entry in the list). Empty host strings are ignored.
+         */
+        put: operations["update_git_token_map_api_v1_system_settings_git_token_map_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -10813,6 +12348,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/healthz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Healthz
+         * @description Liveness probe — fast, no I/O.
+         *
+         *     Returns 200 whenever the event loop can service the request. We
+         *     intentionally do *not* check the DB here: a DB stall should not
+         *     make the orchestrator restart a healthy process — that is the job
+         *     of ``/readyz``.
+         */
+        get: operations["healthz_healthz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Livez */
+        get: operations["livez_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/readyz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readyz
+         * @description Readiness probe — DB + migrations + provider chain.
+         */
+        get: operations["readyz_readyz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -10853,6 +12450,30 @@ export interface components {
             title: string;
             /** Type */
             type: string;
+        };
+        /**
+         * AdminPasswordRequest
+         * @description Request body for the wizard's Step 1 password rotation.
+         *
+         *     ``current_password`` is verified against the default admin row (the
+         *     one still flagged ``must_change_password=1``). ``new_password`` is
+         *     re-validated server-side using :func:`auth.validate_password_strength`
+         *     — the 12-char + zxcvbn ≥ 3 bar owned by K7/K1.
+         */
+        AdminPasswordRequest: {
+            /** Current Password */
+            current_password: string;
+            /** New Password */
+            new_password: string;
+        };
+        /** AdminPasswordResponse */
+        AdminPasswordResponse: {
+            /** Admin Password Default */
+            admin_password_default: boolean;
+            /** Status */
+            status: string;
+            /** User Id */
+            user_id: string;
         };
         /** Agent */
         Agent: {
@@ -11019,6 +12640,25 @@ export interface components {
              */
             provider_id: string;
         };
+        /** AuditChainSummary */
+        AuditChainSummary: {
+            /** Bad Tenants */
+            bad_tenants?: string[];
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /** First Bad Id */
+            first_bad_id?: number | null;
+            /** Ok */
+            ok: boolean;
+            /**
+             * Tenant Count
+             * @default 0
+             */
+            tenant_count: number;
+        };
         /** AuditQueryRequest */
         AuditQueryRequest: {
             /**
@@ -11158,6 +12798,39 @@ export interface components {
                 [key: string]: string;
             }[];
         };
+        /**
+         * BootstrapResetRequest
+         * @description Body for ``POST /bootstrap/reset``.
+         *
+         *     ``reason`` is captured into the audit row so QA runs can be traced
+         *     back (e.g. "running E2E suite", "manual reset for screenshot").
+         */
+        BootstrapResetRequest: {
+            /**
+             * Reason
+             * @description Optional free-text note recorded with the audit row.
+             * @default
+             */
+            reason: string;
+        };
+        /** BootstrapResetResponse */
+        BootstrapResetResponse: {
+            /** Actor User Id */
+            actor_user_id: string;
+            /** Admins Reflagged */
+            admins_reflagged: number;
+            /** Bootstrap State Rows Deleted */
+            bootstrap_state_rows_deleted: number;
+            /**
+             * Deploy Mode
+             * @enum {string}
+             */
+            deploy_mode: "systemd" | "docker-compose" | "dev";
+            /** Marker Cleared */
+            marker_cleared: boolean;
+            /** Status */
+            status: string;
+        };
         /** BudgetCheckRequest */
         BudgetCheckRequest: {
             /**
@@ -11246,6 +12919,30 @@ export interface components {
              */
             standard: string;
         };
+        /**
+         * CfTunnelSkipRequest
+         * @description Request body for the wizard's Step 3 ``skip tunnel`` transition.
+         *
+         *     The operator is explicitly asserting "this install is LAN-only / I
+         *     don't want remote access right now" — the wizard records the skip
+         *     so the finalize gate can go green, but audit captures the operator
+         *     intent with warning severity so it never looks like a silent bypass.
+         */
+        CfTunnelSkipRequest: {
+            /**
+             * Reason
+             * @description Optional free-text note stored with the audit row.
+             * @default
+             */
+            reason: string;
+        };
+        /** CfTunnelSkipResponse */
+        CfTunnelSkipResponse: {
+            /** Cf Tunnel Configured */
+            cf_tunnel_configured: boolean;
+            /** Status */
+            status: string;
+        };
         /** ChangePasswordRequest */
         ChangePasswordRequest: {
             /** Current Password */
@@ -11265,6 +12962,28 @@ export interface components {
             message: components["schemas"]["OrchestratorMessage"];
             /** Tasks */
             tasks?: components["schemas"]["Task"][];
+        };
+        /**
+         * CheckResult
+         * @description One of the four parallel probes' outcome.
+         *
+         *     ``status`` is tri-state: ``skipped`` means the probe was not
+         *     applicable (e.g. CF tunnel when the operator chose LAN-only). The
+         *     wizard UI treats ``green`` and ``skipped`` both as a green check;
+         *     only ``red`` keeps the step gated.
+         */
+        CheckResult: {
+            /** Detail */
+            detail?: string | null;
+            /** Latency Ms */
+            latency_ms?: number | null;
+            /** Ok */
+            ok: boolean;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "green" | "red" | "skipped";
         };
         /** CircuitResetRequest */
         CircuitResetRequest: {
@@ -11932,6 +13651,25 @@ export interface components {
              */
             enabled_features?: string[];
         };
+        /** FinalizeRequest */
+        FinalizeRequest: {
+            /**
+             * Reason
+             * @description Optional free-text note persisted with the finalize row.
+             */
+            reason?: string | null;
+        };
+        /** FinalizeResponse */
+        FinalizeResponse: {
+            /** Actor User Id */
+            actor_user_id: string;
+            /** Finalized */
+            finalized: boolean;
+            /** Status */
+            status: {
+                [key: string]: unknown;
+            };
+        };
         /** FirmwareSignRequest */
         FirmwareSignRequest: {
             /**
@@ -12023,6 +13761,106 @@ export interface components {
              * @default
              */
             title: string;
+        };
+        /** GerritBotVerify */
+        GerritBotVerify: {
+            /**
+             * Group
+             * @default merger-agent-bot
+             */
+            group: string;
+            /**
+             * Ssh Host
+             * @default
+             */
+            ssh_host: string;
+            /**
+             * Ssh Port
+             * @default 29418
+             */
+            ssh_port: number;
+        };
+        /**
+         * GerritFinalizeBody
+         * @description Wizard finalize payload — Steps 1-5 collected on the client side, this
+         *     is the single atomic write into ``settings.gerrit_*`` that flips the
+         *     integration ON. Fields mirror the wizard inputs:
+         *
+         *     * ``url`` — REST URL the operator entered in Step 1 (optional; some
+         *       shops only run SSH-only Gerrit and never enable the REST plugin).
+         *     * ``ssh_host`` / ``ssh_port`` — Step 1 SSH endpoint that already
+         *       passed the ``gerrit version`` probe.
+         *     * ``project`` — the project path validated by Step 4's submit-rule
+         *       probe (e.g. ``project/omnisight-core``).
+         *     * ``replication_targets`` — optional CSV of remote names; empty is
+         *       fine for most installs (single-Gerrit deploys).
+         */
+        GerritFinalizeBody: {
+            /**
+             * Project
+             * @default
+             */
+            project: string;
+            /**
+             * Replication Targets
+             * @default
+             */
+            replication_targets: string;
+            /** Ssh Host */
+            ssh_host: string;
+            /**
+             * Ssh Port
+             * @default 29418
+             */
+            ssh_port: number;
+            /**
+             * Url
+             * @default
+             */
+            url: string;
+        };
+        /** GerritSubmitRuleVerify */
+        GerritSubmitRuleVerify: {
+            /**
+             * Project
+             * @default
+             */
+            project: string;
+            /**
+             * Ssh Host
+             * @default
+             */
+            ssh_host: string;
+            /**
+             * Ssh Port
+             * @default 29418
+             */
+            ssh_port: number;
+        };
+        /** GitForgeTokenTest */
+        GitForgeTokenTest: {
+            /** Provider */
+            provider: string;
+            /**
+             * Ssh Host
+             * @default
+             */
+            ssh_host: string;
+            /**
+             * Ssh Port
+             * @default 29418
+             */
+            ssh_port: number;
+            /**
+             * Token
+             * @default
+             */
+            token: string;
+            /**
+             * Url
+             * @default
+             */
+            url: string;
         };
         /** HALEndpointReq */
         HALEndpointReq: {
@@ -12144,6 +13982,30 @@ export interface components {
             status: string;
             /** Version */
             version: string;
+        };
+        /**
+         * HumanVotePayload
+         * @description Per-vote shape for reconciliation calls.  ``groups`` comes from
+         *     the Gerrit account look-up; orchestrator-side cache.
+         */
+        HumanVotePayload: {
+            /** Groups */
+            groups: string[];
+            /** Score */
+            score: number;
+            /** Voter */
+            voter: string;
+        };
+        /** HumanVoteRequest */
+        HumanVoteRequest: {
+            /** Change Id */
+            change_id: string;
+            /** Commit */
+            commit: string;
+            /** Project */
+            project: string;
+            /** Votes */
+            votes: components["schemas"]["HumanVotePayload"][];
         };
         /** ICCEmbedRequest */
         ICCEmbedRequest: {
@@ -12283,6 +14145,18 @@ export interface components {
              */
             opt_in: boolean;
         };
+        /** InjectRequest */
+        InjectRequest: {
+            /** Agent Id */
+            agent_id: string;
+            /**
+             * Author
+             * @default dashboard
+             */
+            author: string;
+            /** Text */
+            text: string;
+        };
         /** InvokeHaltResponse */
         InvokeHaltResponse: {
             /**
@@ -12343,6 +14217,56 @@ export interface components {
              * @description Line width in pixels
              */
             width: number;
+        };
+        /**
+         * LlmProvisionRequest
+         * @description Request body for the wizard's L3 Step 2 provider provisioning.
+         *
+         *     ``api_key`` is required for every hosted provider (anthropic / openai
+         *     / azure); ``ollama`` is local and authenticates by reachability only.
+         *     ``base_url`` is mandatory for Azure (the resource endpoint) and
+         *     optional for Ollama (defaults to ``http://localhost:11434``). A
+         *     caller-supplied ``model`` is echoed back into
+         *     :attr:`settings.llm_model` so the agent factory picks it up.
+         */
+        LlmProvisionRequest: {
+            /**
+             * Api Key
+             * @default
+             */
+            api_key: string;
+            /**
+             * Azure Deployment
+             * @default
+             */
+            azure_deployment: string;
+            /**
+             * Base Url
+             * @default
+             */
+            base_url: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /** Provider */
+            provider: string;
+        };
+        /** LlmProvisionResponse */
+        LlmProvisionResponse: {
+            /** Fingerprint */
+            fingerprint: string;
+            /** Latency Ms */
+            latency_ms: number;
+            /** Model */
+            model: string;
+            /** Models */
+            models?: string[];
+            /** Provider */
+            provider: string;
+            /** Status */
+            status: string;
         };
         /** LoadGCodeRequest */
         LoadGCodeRequest: {
@@ -12438,6 +14362,12 @@ export interface components {
         /** ModeRequest */
         ModeRequest: {
             /**
+             * Confirm Turbo
+             * @description Required when h2_auto_derate=false and mode=turbo.
+             * @default false
+             */
+            confirm_turbo: boolean;
+            /**
              * Mode
              * @description One of manual | supervised | full_auto | turbo
              */
@@ -12507,6 +14437,36 @@ export interface components {
              * @default /tmp/ota_test
              */
             work_dir: string;
+        };
+        /**
+         * OllamaDetectResponse
+         * @description Response for read-only Ollama reachability probe.
+         *
+         *     ``reachable`` is true iff ``GET {base_url}/api/tags`` returned 200.
+         *     ``models`` carries the names Ollama reported (may be empty if the
+         *     host has no models pulled yet). ``kind`` is one of the
+         *     :class:`backend.llm_secrets.ProviderPingError` classifications on
+         *     failure, or empty string on success.
+         */
+        OllamaDetectResponse: {
+            /** Base Url */
+            base_url: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /**
+             * Kind
+             * @default
+             */
+            kind: string;
+            /** Latency Ms */
+            latency_ms: number;
+            /** Models */
+            models?: string[];
+            /** Reachable */
+            reachable: boolean;
         };
         /** OrchestratorMessage */
         OrchestratorMessage: {
@@ -12678,6 +14638,54 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * ParallelHealthCheckRequest
+         * @description Body for ``POST /bootstrap/parallel-health-check``.
+         *
+         *     Every field is optional so the wizard can fire a bare POST on
+         *     default installations — operator overrides are only needed when
+         *     running behind a reverse proxy or in docker-compose with non-default
+         *     service names.
+         */
+        ParallelHealthCheckRequest: {
+            /**
+             * Backend Url
+             * @description Optional override for the backend /healthz URL.
+             * @default
+             */
+            backend_url: string;
+            /**
+             * Frontend Url
+             * @description Optional override for the frontend readiness URL.
+             * @default
+             */
+            frontend_url: string;
+            /**
+             * Timeout Secs
+             * @description Per-probe hard timeout (default 5s).
+             * @default 5
+             */
+            timeout_secs: number;
+        };
+        /**
+         * ParallelHealthCheckResponse
+         * @description Aggregated result of the four Step-4 probes.
+         *
+         *     ``all_green`` is True iff none of the four checks reports ``red``
+         *     (``skipped`` counts as green because nothing is actually broken).
+         *     ``elapsed_ms`` is the wall-clock cost of the slowest probe, not the
+         *     sum — the four checks fan out in parallel.
+         */
+        ParallelHealthCheckResponse: {
+            /** All Green */
+            all_green: boolean;
+            backend: components["schemas"]["CheckResult"];
+            cf_tunnel: components["schemas"]["CheckResult"];
+            db_migration: components["schemas"]["CheckResult"];
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            frontend: components["schemas"]["CheckResult"];
+        };
         /** ParseRequest */
         ParseRequest: {
             /**
@@ -12700,6 +14708,14 @@ export interface components {
             name?: string | null;
             /** Role */
             role?: string | null;
+        };
+        /** PepDecisionRequest */
+        PepDecisionRequest: {
+            /**
+             * Decision
+             * @description approve | reject
+             */
+            decision: string;
         };
         /** PipelineStartRequest */
         PipelineStartRequest: {
@@ -12962,6 +14978,29 @@ export interface components {
              * @default
              */
             version: string;
+        };
+        /** ReplanRequest */
+        ReplanRequest: {
+            /** Approver */
+            approver: string;
+            /** Forbidden Globs */
+            forbidden_globs?: string[] | null;
+            /** Jira Ticket */
+            jira_ticket: string;
+            /** New Story */
+            new_story?: string | null;
+            /**
+             * Override Human Review
+             * @default false
+             */
+            override_human_review: boolean;
+            /**
+             * Priority
+             * @default P2
+             */
+            priority: string;
+            /** Token Budget */
+            token_budget?: number | null;
         };
         /** ResolveRequest */
         ResolveRequest: {
@@ -13226,6 +15265,29 @@ export interface components {
              */
             timeout_s: number;
         };
+        /** SendRequest */
+        SendRequest: {
+            /** Body */
+            body: string;
+            /** Buttons */
+            buttons?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Channel
+             * @description discord | teams | line | *
+             */
+            channel: string;
+            /** Meta */
+            meta?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Title
+             * @default OmniSight
+             */
+            title: string;
+        };
         /** SensorTestRequest */
         SensorTestRequest: {
             /**
@@ -13352,6 +15414,77 @@ export interface components {
              */
             target_slot: string;
         };
+        /** SmokeRunSummary */
+        SmokeRunSummary: {
+            /** Dag Id */
+            dag_id: string;
+            /**
+             * Key
+             * @default
+             */
+            key: string;
+            /** Label */
+            label: string;
+            /** Ok */
+            ok: boolean;
+            /** Plan Id */
+            plan_id?: number | null;
+            /** Plan Status */
+            plan_status?: string | null;
+            /** Run Id */
+            run_id?: string | null;
+            /** T3 Runner */
+            t3_runner?: string | null;
+            /** Target Platform */
+            target_platform?: string | null;
+            /**
+             * Task Count
+             * @default 0
+             */
+            task_count: number;
+            /** Validation Errors */
+            validation_errors?: {
+                [key: string]: unknown;
+            }[];
+        };
+        /**
+         * SmokeSubsetRequest
+         * @description Body for ``POST /bootstrap/smoke-subset``.
+         *
+         *     ``subset`` selects which DAG(s) to invoke:
+         *       * ``dag1`` (default) — the compile-flash host_native DAG, ~60s;
+         *         matches what L6 Step 5 locked in for the fast-path wizard run.
+         *       * ``dag2`` — the aarch64 cross-compile DAG, validation + plan
+         *         persistence only (no physical cross-compile runs in-process).
+         *       * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5 UI
+         *         can render a run summary for each DAG shipped in
+         *         ``scripts/prod_smoke_test.py``.
+         *
+         *     The wizard drives ``subset="both"`` so the operator sees the
+         *     "兩個 DAG 的 run summary" (Step 5 TODO); external callers / CLI
+         *     users can still pin to ``dag1`` for the 60-second fast path.
+         */
+        SmokeSubsetRequest: {
+            /**
+             * Subset
+             * @description Which DAG subset to run — ``dag1`` (compile-flash host_native, ~60s fast path), ``dag2`` (aarch64 cross-compile), or ``both`` (wizard default on Step 5).
+             * @default dag1
+             * @enum {string}
+             */
+            subset: "dag1" | "dag2" | "both";
+        };
+        /** SmokeSubsetResponse */
+        SmokeSubsetResponse: {
+            audit_chain: components["schemas"]["AuditChainSummary"];
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /** Runs */
+            runs: components["schemas"]["SmokeRunSummary"][];
+            /** Smoke Passed */
+            smoke_passed: boolean;
+            /** Subset */
+            subset: string;
+        };
         /** SocSecurityRequest */
         SocSecurityRequest: {
             /**
@@ -13364,6 +15497,46 @@ export interface components {
              * @description SoC identifier
              */
             soc_id: string;
+        };
+        /**
+         * StartServicesRequest
+         * @description Body for ``POST /bootstrap/start-services``.
+         *
+         *     ``mode`` overrides the auto-detection when the operator needs to pin
+         *     a specific launch strategy (e.g. CI forcing ``dev``). ``compose_file``
+         *     is passed through to ``docker compose -f`` in docker-compose mode.
+         */
+        StartServicesRequest: {
+            /**
+             * Compose File
+             * @description Override path for docker compose file (defaults to docker-compose.prod.yml).
+             * @default
+             */
+            compose_file: string;
+            /**
+             * Mode
+             * @description Deploy mode override: systemd / docker-compose / dev. Empty → auto-detect.
+             * @default
+             */
+            mode: string;
+        };
+        /** StartServicesResponse */
+        StartServicesResponse: {
+            /** Command */
+            command: string[];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "systemd" | "docker-compose" | "dev";
+            /** Returncode */
+            returncode: number;
+            /** Status */
+            status: string;
+            /** Stderr Tail */
+            stderr_tail: string;
+            /** Stdout Tail */
+            stdout_tail: string;
         };
         /** StartStreamRequest */
         StartStreamRequest: {
@@ -13902,6 +16075,29 @@ export interface components {
              */
             warn_threshold: number;
         };
+        /** TokenMapInstance */
+        TokenMapInstance: {
+            /** Host */
+            host: string;
+            /**
+             * Token
+             * @default
+             */
+            token: string;
+        };
+        /** TokenMapUpdate */
+        TokenMapUpdate: {
+            /**
+             * Github
+             * @default []
+             */
+            github: components["schemas"]["TokenMapInstance"][];
+            /**
+             * Gitlab
+             * @default []
+             */
+            gitlab: components["schemas"]["TokenMapInstance"][];
+        };
         /** TraceCaptureRequest */
         TraceCaptureRequest: {
             /**
@@ -14175,6 +16371,67 @@ export interface components {
             toolchain: string;
             /** Vendor Id */
             vendor_id: string;
+        };
+        /**
+         * WaitReadyRequest
+         * @description Body for ``POST /bootstrap/wait-ready``.
+         *
+         *     ``timeout_secs`` caps the total wait; ``interval_secs`` is the gap
+         *     between probes. ``url`` overrides the default readyz target (useful
+         *     when the wizard runs behind a reverse proxy or on a non-standard
+         *     port). ``fallback_healthz`` keeps older backends (no ``/readyz`` yet)
+         *     working: on a 404 the probe swaps the suffix to ``/healthz`` once.
+         */
+        WaitReadyRequest: {
+            /**
+             * Fallback Healthz
+             * @description If the readyz URL 404s, swap the suffix to /healthz and keep polling. Lets wizards on pre-G1 backends still converge.
+             * @default true
+             */
+            fallback_healthz: boolean;
+            /**
+             * Interval Secs
+             * @description Seconds to sleep between probes.
+             * @default 2
+             */
+            interval_secs: number;
+            /**
+             * Timeout Secs
+             * @description Upper bound on total wait time (default 180s).
+             * @default 180
+             */
+            timeout_secs: number;
+            /**
+             * Url
+             * @description Optional override for the readyz URL.
+             * @default
+             */
+            url: string;
+        };
+        /** WaitReadyResponse */
+        WaitReadyResponse: {
+            /** Attempts */
+            attempts: number;
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /**
+             * Fallback Applied
+             * @default false
+             */
+            fallback_applied: boolean;
+            /** Last Error */
+            last_error?: string | null;
+            /** Last Status Code */
+            last_status_code?: number | null;
+            /** Ready */
+            ready: boolean;
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "ready" | "timeout" | "connection_error";
+            /** Url */
+            url: string;
         };
         /** WebAuthnChallengeBeginRequest */
         WebAuthnChallengeBeginRequest: {
@@ -16265,6 +18522,390 @@ export interface operations {
             };
         };
     };
+    bootstrap_admin_password_api_v1_bootstrap_admin_password_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminPasswordResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_cf_tunnel_skip_api_v1_bootstrap_cf_tunnel_skip_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CfTunnelSkipRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CfTunnelSkipResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_finalize_api_v1_bootstrap_finalize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["FinalizeRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FinalizeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_llm_provision_api_v1_bootstrap_llm_provision_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmProvisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmProvisionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_ollama_detect_api_v1_bootstrap_ollama_detect_get: {
+        parameters: {
+            query?: {
+                base_url?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OllamaDetectResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_parallel_health_check_api_v1_bootstrap_parallel_health_check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ParallelHealthCheckRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParallelHealthCheckResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_reset_api_v1_bootstrap_reset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["BootstrapResetRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootstrapResetResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_service_tick_api_v1_bootstrap_service_tick_get: {
+        parameters: {
+            query?: {
+                mode?: string;
+                compose_file?: string;
+                tail?: number;
+                max_seconds?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_smoke_subset_api_v1_bootstrap_smoke_subset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SmokeSubsetRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmokeSubsetResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_start_services_api_v1_bootstrap_start_services_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["StartServicesRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartServicesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bootstrap_status_api_v1_bootstrap_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    bootstrap_wait_ready_api_v1_bootstrap_wait_ready_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["WaitReadyRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WaitReadyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_budget_strategy_api_v1_budget_strategy_get: {
         parameters: {
             query?: never;
@@ -16424,6 +19065,197 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    chatops_inject_api_v1_chatops_inject_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    chatops_mirror_api_v1_chatops_mirror_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    chatops_send_api_v1_chatops_send_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    chatops_status_api_v1_chatops_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    discord_webhook_api_v1_chatops_webhook_discord_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    line_webhook_api_v1_chatops_webhook_line_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    teams_webhook_api_v1_chatops_webhook_teams_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -19369,6 +22201,61 @@ export interface operations {
             };
         };
     };
+    list_entropy_api_v1_entropy_agents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_entropy_api_v1_entropy_agents__agent_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     event_stream_api_v1_events_get: {
         parameters: {
             query?: never;
@@ -21115,6 +24002,28 @@ export interface operations {
             };
         };
     };
+    livez_prefixed_api_v1_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     restore_memory_api_v1_memory__memory_id__restore_post: {
         parameters: {
             query?: never;
@@ -21164,6 +24073,102 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_gates_api_v1_mobile_compliance_gates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    generate_privacy_label_api_v1_mobile_compliance_privacy_label_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_bundle_api_v1_mobile_compliance_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -21658,6 +24663,262 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    orchestration_awaiting_human_api_v1_orchestration_awaiting_human_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    orchestration_queue_tick_api_v1_orchestration_queue_tick_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    orchestration_snapshot_api_v1_orchestration_snapshot_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    check_change_ready_endpoint_api_v1_orchestrator_check_change_ready_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HumanVoteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    human_vote_endpoint_api_v1_orchestrator_human_vote_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HumanVoteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    intake_endpoint_api_v1_orchestrator_intake_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    merge_conflict_endpoint_api_v1_orchestrator_merge_conflict_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    replan_endpoint_api_v1_orchestrator_replan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplanRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_status_endpoint_api_v1_orchestrator_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    status_endpoint_api_v1_orchestrator_status__jira_ticket__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jira_ticket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -23351,6 +26612,197 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pep_breaker_reset_api_v1_pep_breaker_reset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    pep_decision_api_v1_pep_decision__pep_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pep_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PepDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pep_decisions_api_v1_pep_decisions_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pep_held_api_v1_pep_held_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    pep_live_api_v1_pep_live_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pep_policy_api_v1_pep_policy_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    pep_status_api_v1_pep_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -25791,6 +29243,26 @@ export interface operations {
             };
         };
     };
+    readyz_prefixed_api_v1_readyz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     list_cyclictest_configs_api_v1_realtime_cyclictest_configs_get: {
         parameters: {
             query?: never;
@@ -26420,6 +29892,144 @@ export interface operations {
             };
         };
     };
+    dashboard_api_v1_rum_dashboard_get: {
+        parameters: {
+            query?: {
+                /** @description Filter to one page bucket (use '*' for site-wide rollup). */
+                page?: string | null;
+                /** @description Filter to one CWV name (LCP / INP / CLS / TTFB / FCP). */
+                metric?: string | null;
+                /** @description Wipe in-memory aggregator (operator only). */
+                reset?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingest_error_api_v1_rum_errors_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    errors_recent_api_v1_rum_errors_recent_get: {
+        parameters: {
+            query?: {
+                /** @description Max number of fingerprints. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rum_health_api_v1_rum_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    ingest_vital_api_v1_rum_vitals_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     list_artifacts_api_v1_safety_artifacts_get: {
         parameters: {
             query?: never;
@@ -26540,6 +30150,129 @@ export interface operations {
             header?: never;
             path: {
                 standard_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_agents_api_v1_scratchpad_agents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_summary_api_v1_scratchpad_agents__agent_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_archive_api_v1_scratchpad_agents__agent_id__archive_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_preview_api_v1_scratchpad_agents__agent_id__preview_get: {
+        parameters: {
+            query?: {
+                max_chars?: number;
+            };
+            header?: never;
+            path: {
+                agent_id: string;
             };
             cookie?: never;
         };
@@ -28635,6 +32368,198 @@ export interface operations {
             };
         };
     };
+    finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GerritFinalizeBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GerritBotVerify"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GerritSubmitRuleVerify"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    test_git_forge_token_api_v1_system_git_forge_test_token_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GitForgeTokenTest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_system_info_api_v1_system_info_get: {
         parameters: {
             query?: never;
@@ -29253,6 +33178,59 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["SettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_git_token_map_api_v1_system_settings_git_token_map_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    update_git_token_map_api_v1_system_settings_git_token_map_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenMapUpdate"];
             };
         };
         responses: {
@@ -33085,6 +37063,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    healthz_healthz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    livez_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    readyz_readyz_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };
