@@ -6,9 +6,10 @@ import asyncio
 import logging
 import os
 import re
+import secrets as _secrets
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend import auth as _au
@@ -1064,6 +1065,127 @@ async def verify_gerrit_submit_rule(
     except Exception as exc:  # pragma: no cover — network-level failure
         return {"status": "error", "message": str(exc)}
     return result
+
+
+# ─── B14 Part C row 226: Gerrit webhook setup (Step 5) ──────────────────
+#
+# Step 5 of the Gerrit Setup Wizard wires the inbound webhook surface so
+# Gerrit can deliver `patchset-created` / `comment-added` / `change-merged`
+# events back to OmniSight. Two pieces have to land in Gerrit's
+# `webhooks.config` (under `refs/meta/config` — same admin path as Step 4):
+#
+#   url    = <OmniSight base URL>/api/v1/webhooks/gerrit
+#   secret = <HMAC-SHA256 shared secret> (settings.gerrit_webhook_secret)
+#
+# The probe never mutates Gerrit. Instead it surfaces the URL the operator
+# must paste plus the *current* secret status (configured / not). For the
+# common case where the operator hasn't picked a secret yet (fresh
+# install), the wizard offers a one-click "Generate Secret" that writes a
+# 32-byte URL-safe token into `settings.gerrit_webhook_secret` and returns
+# the *plain* value exactly once — the operator pastes it into Gerrit, then
+# the value is masked on subsequent reads (no re-reveal endpoint by design;
+# rotate to invalidate-and-re-issue is the supported recovery path).
+#
+# The webhook URL is derived from the inbound `Request` so it follows the
+# same scheme/host the operator is talking to (cloudflared tunnel, direct
+# LAN IP, localhost, …). `X-Forwarded-Proto` / `X-Forwarded-Host` are
+# honoured first because cloudflared / nginx terminates HTTPS upstream and
+# would otherwise leave the URL stuck on `http://internal-host:8000`.
+
+_WEBHOOK_PATH = "/api/v1/webhooks/gerrit"
+
+
+def _mask_secret(value: str) -> str:
+    """Mask a webhook secret for display. ``_mask`` lives at module scope
+    but is tuned for tokens (3 + tail). Webhook secrets are URL-safe
+    base64; show the first 4 + last 4 so the operator can cross-check
+    against what they pasted into Gerrit without leaking the rotation
+    surface."""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def _derive_webhook_url(request: Request) -> str:
+    """Build the externally-facing URL Gerrit will POST events to.
+
+    Honours ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` first because
+    cloudflared (default deploy) terminates HTTPS upstream — without
+    these headers we'd hand the operator ``http://127.0.0.1:8000/...``,
+    which Gerrit cannot reach. Falls back to ``Request.base_url`` which
+    Starlette derives from the actual HTTP/1.1 ``Host`` header.
+    """
+    fwd_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    fwd_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    if fwd_proto and fwd_host:
+        return f"{fwd_proto}://{fwd_host}{_WEBHOOK_PATH}"
+    base = str(request.base_url or "").rstrip("/")
+    if base:
+        return f"{base}{_WEBHOOK_PATH}"
+    return _WEBHOOK_PATH
+
+
+@router.get("/git-forge/gerrit/webhook-info")
+async def get_gerrit_webhook_info(
+    request: Request, _user=Depends(_au.require_admin)
+):
+    """Return the inbound webhook URL + secret status the operator must
+    paste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).
+
+    Never returns the plain secret — only ``secret_configured`` plus a
+    ``secret_masked`` preview so the operator can confirm what's wired
+    without re-revealing it. Use ``POST .../webhook-secret/generate`` to
+    rotate (which returns the new plain value exactly once).
+    """
+    secret = settings.gerrit_webhook_secret or ""
+    return {
+        "status": "ok",
+        "webhook_url": _derive_webhook_url(request),
+        "secret_configured": bool(secret),
+        "secret_masked": _mask_secret(secret),
+        "signature_header": "X-Gerrit-Signature",
+        "signature_algorithm": "hmac-sha256",
+        "event_types": ["patchset-created", "comment-added", "change-merged"],
+    }
+
+
+@router.post("/git-forge/gerrit/webhook-secret/generate")
+async def generate_gerrit_webhook_secret(
+    request: Request, _user=Depends(_au.require_admin)
+):
+    """Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.
+
+    32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with
+    ~256 bits of entropy, well above the 128-bit floor recommended for
+    HMAC-SHA256 keys. The plain value is returned **only** in this
+    response — the operator must capture it before closing the wizard;
+    subsequent ``webhook-info`` calls will surface only the masked
+    preview. Rotating here invalidates whatever secret Gerrit currently
+    holds, so the operator must re-paste the new value into Gerrit's
+    ``webhooks.config`` for events to keep verifying.
+    """
+    new_secret = _secrets.token_urlsafe(32)
+    settings.gerrit_webhook_secret = new_secret
+    logger.info(
+        "gerrit_webhook_secret rotated by user=%s len=%d",
+        getattr(_user, "username", "?"),
+        len(new_secret),
+    )
+    return {
+        "status": "ok",
+        "secret": new_secret,
+        "secret_masked": _mask_secret(new_secret),
+        "webhook_url": _derive_webhook_url(request),
+        "signature_header": "X-Gerrit-Signature",
+        "signature_algorithm": "hmac-sha256",
+        "note": (
+            "Save this value now — it will not be shown again. Paste it "
+            "into Gerrit `refs/meta/config:webhooks.config` under the "
+            "matching `[remote ...]` block as `secret = <value>`."
+        ),
+    }
 
 
 # ── Test functions ──

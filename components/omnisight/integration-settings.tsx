@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
-import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users, ShieldCheck } from "lucide-react"
+import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users, ShieldCheck, Webhook } from "lucide-react"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -1079,8 +1079,9 @@ function NetworkEgressSection() {
  *
  * Modal that walks the operator through the 5-step Gerrit Code Review
  * setup. The entry-point shell + 5-step overview landed in row 221;
- * row 222 wired Step 1 (Test Connection), row 223 wired Step 2 (SSH
- * key 設定), row 224 wires Step 3 (`merger-agent-bot` 帳號 + group 設定).
+ * rows 222–225 wired Steps 1–4 (Test Connection, SSH key, merger-agent-bot,
+ * submit-rule). Row 226 wires Step 5 — the inbound webhook URL + HMAC
+ * secret the operator pastes into Gerrit's `webhooks.config`.
  *
  * Step 1 collects the Gerrit REST URL (optional), SSH host, and SSH
  * port, then calls `api.testGitForgeToken({ provider: "gerrit", ssh_host,
@@ -1094,13 +1095,21 @@ function NetworkEgressSection() {
  * create-group` + `gerrit set-members` SSH commands the operator must
  * run as a Gerrit admin, then calls `api.verifyGerritMergerBot(...)` to
  * confirm the `merger-agent-bot` group exists and has ≥1 member — the
- * AI half of the O7 dual-+2 submit gate. Steps 4–5 stay PENDING until
- * later rows wire them up.
+ * AI half of the O7 dual-+2 submit gate. Step 4 fetches
+ * `refs/meta/config:project.config` and pattern-matches the dual-+2 ACL.
+ * Step 5 surfaces the inbound webhook URL (derived from the inbound
+ * Request's Forwarded headers / base_url) and the HMAC-SHA256 secret
+ * status (configured / not). Operators can mint + persist a fresh
+ * `gerrit_webhook_secret` via `api.generateGerritWebhookSecret()` — the
+ * plain value is shown exactly once for copy-to-clipboard; subsequent
+ * reads return only the masked preview. Rotate to recover.
  *
- * None of these rows persist to `settings.gerrit_*`. A later row ties
- * the wizard's "finalize" path to the existing settings PUT so an
- * unfinished wizard never leaves a half-configured Gerrit endpoint in
- * `settings.*`.
+ * Steps 1–4 do not persist to `settings.gerrit_*`. Step 5 *does* mutate
+ * one field (`settings.gerrit_webhook_secret`) via the rotate endpoint —
+ * that's intentional because the wizard is the only place this secret
+ * is generated. A later row ties the wizard's "finalize" path to the
+ * existing settings PUT so an unfinished wizard never leaves a
+ * half-configured Gerrit endpoint in `settings.*`.
  *
  * Rendered via createPortal at z-[110] to sit above the parent IntegrationSettings
  * portal (z-[100]); backdrop click and X close.
@@ -1137,6 +1146,19 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
   const [submitRuleVerify, setSubmitRuleVerify] =
     useState<api.GerritSubmitRuleVerifyResult | null>(null)
   const [step4Ackd, setStep4Ackd] = useState(false)
+  // B14 Part C row 226 — Step 5: webhook 設定引導. Show the inbound webhook
+  // URL the operator must paste into Gerrit's `webhooks.config` and the
+  // status of the HMAC-SHA256 secret. Generating mints + persists a fresh
+  // secret on the backend and returns the plain value exactly once — we
+  // hold it in component state so the operator can copy it before closing.
+  const [webhookInfo, setWebhookInfo] = useState<api.GerritWebhookInfo | null>(null)
+  const [webhookInfoLoading, setWebhookInfoLoading] = useState(false)
+  const [webhookGenerating, setWebhookGenerating] = useState(false)
+  const [webhookSecretPlain, setWebhookSecretPlain] = useState<string>("")
+  const [webhookGenError, setWebhookGenError] = useState<string>("")
+  const [webhookUrlCopied, setWebhookUrlCopied] = useState(false)
+  const [webhookSecretCopied, setWebhookSecretCopied] = useState(false)
+  const [step5Ackd, setStep5Ackd] = useState(false)
 
   const parsedPort = (() => {
     const trimmed = sshPort.trim()
@@ -1252,6 +1274,73 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }, [sshHost, parsedPort, portValid, submitRuleProject])
 
+  const onLoadWebhookInfo = useCallback(async () => {
+    setWebhookInfoLoading(true)
+    try {
+      const res = await api.getGerritWebhookInfo()
+      setWebhookInfo(res)
+    } catch (err) {
+      setWebhookInfo({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to load webhook info",
+      })
+    } finally {
+      setWebhookInfoLoading(false)
+    }
+  }, [])
+
+  const onGenerateWebhookSecret = useCallback(async () => {
+    setWebhookGenerating(true)
+    setWebhookGenError("")
+    setWebhookSecretCopied(false)
+    try {
+      const res = await api.generateGerritWebhookSecret()
+      if (res.status === "ok" && res.secret) {
+        setWebhookSecretPlain(res.secret)
+        setWebhookInfo({
+          status: "ok",
+          webhook_url: res.webhook_url,
+          secret_configured: true,
+          secret_masked: res.secret_masked,
+          signature_header: res.signature_header,
+          signature_algorithm: res.signature_algorithm,
+        })
+      } else {
+        setWebhookGenError(res.message || "Failed to generate secret")
+      }
+    } catch (err) {
+      setWebhookGenError(
+        err instanceof Error ? err.message : "Failed to generate secret",
+      )
+    } finally {
+      setWebhookGenerating(false)
+    }
+  }, [])
+
+  const onCopyWebhookUrl = useCallback(async () => {
+    const text = webhookInfo?.webhook_url
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setWebhookUrlCopied(true)
+    } catch {
+      /* clipboard may not be available (e.g. non-secure context) */
+    }
+  }, [webhookInfo])
+
+  const onCopyWebhookSecret = useCallback(async () => {
+    if (!webhookSecretPlain) return
+    try {
+      await navigator.clipboard.writeText(webhookSecretPlain)
+      setWebhookSecretCopied(true)
+    } catch {
+      /* clipboard may not be available (e.g. non-secure context) */
+    }
+  }, [webhookSecretPlain])
+
   if (!open || typeof document === "undefined") return null
 
   const pubkeyReady = pubkey?.status === "ok" && !!pubkey.public_key
@@ -1286,6 +1375,15 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     !submitRuleVerifying
   const submitRuleChecks = submitRuleVerify?.checks ?? []
 
+  const step4Done = step4Ackd
+  const webhookSecretReady =
+    !!webhookInfo && webhookInfo.status === "ok" && !!webhookInfo.secret_configured
+  const step5Badge: "DONE" | "READY" | "PENDING" = step5Ackd
+    ? "DONE"
+    : webhookSecretReady
+      ? "READY"
+      : "PENDING"
+
   const botHostSlug = sshHost.trim() || "<host>"
   const botPortSlug = portValid ? String(parsedPort) : String(GERRIT_DEFAULT_SSH_PORT)
   const botSetupCommands =
@@ -1311,14 +1409,6 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }
 
-  const laterSteps: { title: string; body: string; offset: number }[] = [
-    {
-      title: "Step 5 — Webhook 設定",
-      body: "顯示 webhook URL + secret，引導貼到 Gerrit；完成後寫入 config 並標註整合啟用。",
-      offset: 5,
-    },
-  ]
-
   return createPortal(
     <div className="fixed inset-0 z-[110] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
@@ -1341,7 +1431,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3">
           <p className="font-mono text-[10px] leading-relaxed text-[var(--foreground)]">
-            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟（Steps 1–4 已就緒，Step 5 建置中）。
+            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟（Steps 1–5 全部就緒）。
           </p>
 
           <div
@@ -1982,43 +2072,218 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
             )}
           </div>
 
-          <ol className="space-y-2 list-none p-0 m-0">
-            {laterSteps.map((s) => (
-              <li
-                key={s.offset}
-                className="flex gap-2 p-2 rounded border border-[var(--border)] bg-[var(--background)]"
-              >
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
-                  {s.offset}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
-                    {s.title}
-                  </div>
-                  <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
-                    {s.body}
-                  </div>
+          <div
+            data-testid="gerrit-wizard-step-5"
+            data-state={step5Badge.toLowerCase()}
+            className={`p-3 rounded border space-y-2 ${
+              step4Done
+                ? "border-[var(--neural-blue)]/40 bg-[var(--background)]"
+                : "border-[var(--border)] bg-[var(--background)] opacity-60"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                5
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                  Step 5 — Webhook 設定
                 </div>
-                <span className="flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded bg-[var(--secondary)] text-[var(--muted-foreground)] self-start">
-                  PENDING
-                </span>
-              </li>
-            ))}
-          </ol>
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                  顯示 inbound webhook URL + HMAC-SHA256 secret，貼到 Gerrit{" "}
+                  <code>refs/meta/config:webhooks.config</code> 的{" "}
+                  <code>[remote ...]</code> 區塊以接收 patchset / comment / merged 事件。
+                </div>
+              </div>
+              <span
+                data-testid="gerrit-wizard-step-5-badge"
+                className={`flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded self-start ${
+                  step5Badge === "DONE"
+                    ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                    : step5Badge === "READY"
+                      ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                      : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                }`}
+              >
+                {step5Badge}
+              </span>
+            </div>
 
-          <div className="p-2 rounded bg-[var(--hardware-orange)]/10 border border-[var(--hardware-orange)]/30">
-            <div className="font-mono text-[9px] text-[var(--hardware-orange)] font-semibold">
-              PARTIAL — STEPS 1–4 ONLY
-            </div>
-            <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-1">
-              Step 1 (Test Connection, row 222), Step 2 (SSH key display, row 223),
-              Step 3 (merger-agent-bot group verify, row 224), and Step 4
-              (submit-rule verify, row 225) are wired. All four are
-              probe/display-only and do not write to
-              <code className="mx-1">settings.gerrit_*</code>
-              — a later row wires the wizard finalization path. Step 5
-              (webhook wiring) arrives in a subsequent row.
-            </div>
+            {!step4Done ? (
+              <div
+                data-testid="gerrit-wizard-step-5-gated"
+                className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1"
+              >
+                Step 4 通過後解鎖。先確認 <code>refs/meta/config:project.config</code>{" "}
+                帶有 dual-+2 ACL，否則 webhook 啟用後會收到 Gerrit 拒簽的事件。
+              </div>
+            ) : (
+              <div className="space-y-1.5 pt-1">
+                {!webhookInfo && (
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-load-webhook-info"
+                    onClick={onLoadWebhookInfo}
+                    disabled={webhookInfoLoading}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {webhookInfoLoading ? (
+                      <Loader size={10} className="animate-spin" />
+                    ) : (
+                      <Webhook size={10} />
+                    )}
+                    {webhookInfoLoading ? "Loading…" : "Load webhook info"}
+                  </button>
+                )}
+
+                {webhookInfo && webhookInfo.status === "error" && (
+                  <div
+                    data-testid="gerrit-wizard-webhook-info-error"
+                    className="font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                  >
+                    <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                    <span>{webhookInfo.message || "Failed to load webhook info"}</span>
+                  </div>
+                )}
+
+                {webhookInfo && webhookInfo.status === "ok" && webhookInfo.webhook_url && (
+                  <>
+                    <div className="space-y-0.5">
+                      <div className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                        Webhook URL（貼到 <code>url = ...</code>）
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <code
+                          data-testid="gerrit-wizard-webhook-url"
+                          className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--secondary)] text-[var(--foreground)] break-all"
+                        >
+                          {webhookInfo.webhook_url}
+                        </code>
+                        <button
+                          type="button"
+                          data-testid="gerrit-wizard-copy-webhook-url"
+                          onClick={onCopyWebhookUrl}
+                          className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+                        >
+                          <Copy size={10} />
+                          {webhookUrlCopied ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-0.5 pt-1">
+                      <div className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                        HMAC secret（貼到 <code>secret = ...</code>）
+                      </div>
+                      {webhookInfo.secret_configured ? (
+                        <div className="flex items-center gap-2">
+                          <code
+                            data-testid="gerrit-wizard-webhook-secret-masked"
+                            className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--secondary)] text-[var(--foreground)]"
+                          >
+                            {webhookInfo.secret_masked || "configured"}
+                          </code>
+                          <span
+                            data-testid="gerrit-wizard-webhook-secret-status"
+                            className="flex-shrink-0 font-mono text-[9px] text-[var(--validation-emerald)]"
+                          >
+                            configured
+                          </span>
+                        </div>
+                      ) : (
+                        <div
+                          data-testid="gerrit-wizard-webhook-secret-empty"
+                          className="font-mono text-[9px] text-[var(--hardware-orange)]"
+                        >
+                          目前尚未設定 secret — 點下方按鈕產生一組新的。
+                        </div>
+                      )}
+                    </div>
+
+                    {webhookSecretPlain && (
+                      <div className="space-y-0.5 pt-1 p-2 rounded border border-[var(--validation-emerald)]/40 bg-[var(--validation-emerald)]/5">
+                        <div className="font-mono text-[9px] text-[var(--validation-emerald)] font-semibold">
+                          NEW SECRET — 僅顯示一次，請立即複製
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <code
+                            data-testid="gerrit-wizard-webhook-secret-plain"
+                            className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] text-[var(--foreground)] break-all"
+                          >
+                            {webhookSecretPlain}
+                          </code>
+                          <button
+                            type="button"
+                            data-testid="gerrit-wizard-copy-webhook-secret"
+                            onClick={onCopyWebhookSecret}
+                            className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 transition-colors"
+                          >
+                            <Copy size={10} />
+                            {webhookSecretCopied ? "Copied" : "Copy"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {webhookGenError && (
+                      <div
+                        data-testid="gerrit-wizard-webhook-gen-error"
+                        className="font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                      >
+                        <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                        <span>{webhookGenError}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        data-testid="gerrit-wizard-generate-webhook-secret"
+                        onClick={onGenerateWebhookSecret}
+                        disabled={webhookGenerating}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {webhookGenerating ? (
+                          <Loader size={10} className="animate-spin" />
+                        ) : (
+                          <Key size={10} />
+                        )}
+                        {webhookGenerating
+                          ? "Generating…"
+                          : webhookInfo.secret_configured
+                            ? "Rotate secret"
+                            : "Generate secret"}
+                      </button>
+                      {webhookSecretReady && (
+                        <button
+                          type="button"
+                          data-testid="gerrit-wizard-step-5-ack"
+                          onClick={() => setStep5Ackd(true)}
+                          disabled={step5Ackd}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <Check size={10} />
+                          {step5Ackd ? "Webhook confirmed" : "Webhook 已套用"}
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1">
+                      Gerrit 端設定範本（push 到 <code>refs/meta/config:webhooks.config</code>）：
+                    </div>
+                    <pre
+                      data-testid="gerrit-wizard-webhook-config-snippet"
+                      className="font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] text-[var(--foreground)] overflow-x-auto whitespace-pre"
+                    >{`[remote "omnisight"]\n  url = ${webhookInfo.webhook_url}\n  secret = <paste-the-secret-here>\n  event = patchset-created\n  event = comment-added\n  event = change-merged\n  sslVerify = true`}</pre>
+                    <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed">
+                      Signature header：<code>{webhookInfo.signature_header || "X-Gerrit-Signature"}</code>{" "}
+                      / algo：<code>{webhookInfo.signature_algorithm || "hmac-sha256"}</code>。Rotate
+                      會立即作廢舊 secret，記得同步更新 Gerrit 端。
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

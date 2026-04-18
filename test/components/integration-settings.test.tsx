@@ -33,6 +33,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
     getGitForgeSshPubkey: vi.fn(),
     verifyGerritMergerBot: vi.fn(),
     verifyGerritSubmitRule: vi.fn(),
+    getGerritWebhookInfo: vi.fn(),
+    generateGerritWebhookSecret: vi.fn(),
   }
 })
 
@@ -45,6 +47,8 @@ const mockedTestGitForgeToken = api.testGitForgeToken as unknown as ReturnType<t
 const mockedGetGitForgeSshPubkey = api.getGitForgeSshPubkey as unknown as ReturnType<typeof vi.fn>
 const mockedVerifyGerritMergerBot = api.verifyGerritMergerBot as unknown as ReturnType<typeof vi.fn>
 const mockedVerifyGerritSubmitRule = api.verifyGerritSubmitRule as unknown as ReturnType<typeof vi.fn>
+const mockedGetGerritWebhookInfo = api.getGerritWebhookInfo as unknown as ReturnType<typeof vi.fn>
+const mockedGenerateGerritWebhookSecret = api.generateGerritWebhookSecret as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitTokenMap = (api as unknown as {
   getGitTokenMap: ReturnType<typeof vi.fn>
 }).getGitTokenMap
@@ -743,5 +747,287 @@ describe("GerritSetupWizardDialog — Step 4 (submit-rule 驗證)", () => {
     expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
       "PENDING",
     )
+  })
+})
+
+/**
+ * B14 Part C row 226 — Gerrit Setup Wizard Step 5 (webhook 設定引導).
+ *
+ * Step 5 surfaces the inbound webhook URL + HMAC-SHA256 secret status.
+ * Generating mints + persists a fresh secret on the backend and returns
+ * the plain value exactly once — the wizard caches it in component
+ * state so the operator can copy-to-clipboard before closing.
+ *
+ * Covered:
+ *   - Gated: Step 5 hides the Load button until Step 4 acks DONE
+ *   - Load surfaces webhook URL + masked secret preview
+ *   - Generate flow: backend mints secret → plain value rendered + copy
+ *     button + ack flips PENDING → READY → DONE on operator confirm
+ *   - Rotate label appears when a secret is already configured
+ *   - Backend error rendering (failed load + failed generate)
+ *   - Plain secret never appears until generate (no leak from masked GET)
+ */
+describe("GerritSetupWizardDialog — Step 5 (webhook 設定)", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedTestGitForgeToken.mockReset()
+    mockedVerifyGerritMergerBot.mockReset()
+    mockedVerifyGerritSubmitRule.mockReset()
+    mockedGetGerritWebhookInfo.mockReset()
+    mockedGenerateGerritWebhookSecret.mockReset()
+    mockedGetSettings.mockResolvedValue({})
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  async function passSteps1Through4(
+    host = "bot@gerrit.example.com",
+    port = 29418,
+  ) {
+    mockedTestGitForgeToken.mockResolvedValueOnce({
+      status: "ok",
+      version: "3.8.1",
+      ssh_host: host,
+      ssh_port: port,
+    })
+    mockedVerifyGerritMergerBot.mockResolvedValueOnce({
+      status: "ok",
+      group: "merger-agent-bot",
+      member_count: 1,
+      members: [{ username: "merger-agent-bot" }],
+    })
+    mockedVerifyGerritSubmitRule.mockResolvedValueOnce({
+      status: "ok",
+      project: "omnisight-productizer",
+      checks: [
+        { id: "ai_reviewers_can_vote", ok: true },
+        { id: "humans_can_vote", ok: true },
+        { id: "submit_gated_to_humans", ok: true },
+      ],
+      missing: [],
+    })
+    await renderAndOpenWizard()
+    fireEvent.change(screen.getByTestId("gerrit-wizard-ssh-host"), {
+      target: { value: host },
+    })
+    fireEvent.click(screen.getByTestId("gerrit-wizard-test"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-1-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+    await screen.findByTestId("gerrit-wizard-bot-result")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-3-ack"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: "omnisight-productizer" } },
+    )
+    fireEvent.click(screen.getByTestId("gerrit-wizard-verify-submit-rule"))
+    await screen.findByTestId("gerrit-wizard-submit-rule-result")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-4-ack"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+  }
+
+  it("keeps Step 5 gated until Step 4 flips DONE", async () => {
+    await renderAndOpenWizard()
+    expect(screen.getByTestId("gerrit-wizard-step-5-gated")).toBeTruthy()
+    expect(
+      screen.queryByTestId("gerrit-wizard-load-webhook-info"),
+    ).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("loads webhook info and renders URL + masked secret when configured", async () => {
+    mockedGetGerritWebhookInfo.mockResolvedValueOnce({
+      status: "ok",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      secret_configured: true,
+      secret_masked: "abcd…wxyz",
+      signature_header: "X-Gerrit-Signature",
+      signature_algorithm: "hmac-sha256",
+    })
+    await passSteps1Through4()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    await waitFor(() => {
+      expect(mockedGetGerritWebhookInfo).toHaveBeenCalledTimes(1)
+    })
+    const url = await screen.findByTestId("gerrit-wizard-webhook-url")
+    expect(url.textContent).toBe(
+      "https://omnisight.example.com/api/v1/webhooks/gerrit",
+    )
+    expect(
+      screen.getByTestId("gerrit-wizard-webhook-secret-masked").textContent,
+    ).toBe("abcd…wxyz")
+    expect(
+      screen.getByTestId("gerrit-wizard-webhook-secret-status").textContent,
+    ).toBe("configured")
+    // Already configured → button label is "Rotate", not "Generate".
+    expect(
+      screen.getByTestId("gerrit-wizard-generate-webhook-secret").textContent,
+    ).toContain("Rotate")
+    // Step 5 should now be READY (configured) but not DONE until ack.
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "READY",
+    )
+  })
+
+  it("offers Generate when no secret is configured + no plain leak before mint", async () => {
+    mockedGetGerritWebhookInfo.mockResolvedValueOnce({
+      status: "ok",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      secret_configured: false,
+      secret_masked: "",
+      signature_header: "X-Gerrit-Signature",
+      signature_algorithm: "hmac-sha256",
+    })
+    await passSteps1Through4()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    await screen.findByTestId("gerrit-wizard-webhook-secret-empty")
+    expect(
+      screen.queryByTestId("gerrit-wizard-webhook-secret-plain"),
+    ).toBeNull()
+    expect(
+      screen.getByTestId("gerrit-wizard-generate-webhook-secret").textContent,
+    ).toContain("Generate")
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("generates a secret, surfaces the plain value once, and acks to DONE", async () => {
+    mockedGetGerritWebhookInfo.mockResolvedValueOnce({
+      status: "ok",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      secret_configured: false,
+      secret_masked: "",
+    })
+    mockedGenerateGerritWebhookSecret.mockResolvedValueOnce({
+      status: "ok",
+      secret: "PLAIN_SECRET_TOKEN_1234567890_xyz",
+      secret_masked: "PLAI…_xyz",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      signature_header: "X-Gerrit-Signature",
+      signature_algorithm: "hmac-sha256",
+      note: "Save this value now — it will not be shown again.",
+    })
+    await passSteps1Through4()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    await screen.findByTestId("gerrit-wizard-webhook-secret-empty")
+    fireEvent.click(
+      screen.getByTestId("gerrit-wizard-generate-webhook-secret"),
+    )
+    const plain = await screen.findByTestId(
+      "gerrit-wizard-webhook-secret-plain",
+    )
+    expect(plain.textContent).toBe("PLAIN_SECRET_TOKEN_1234567890_xyz")
+    // Status flips to configured once mint succeeds.
+    expect(
+      screen.getByTestId("gerrit-wizard-webhook-secret-status").textContent,
+    ).toBe("configured")
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "READY",
+    )
+    // Operator confirms they pasted into Gerrit → DONE.
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-5-ack"))
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "DONE",
+    )
+  })
+
+  it("renders a friendly error when webhook info load fails", async () => {
+    mockedGetGerritWebhookInfo.mockRejectedValueOnce(
+      new Error("network offline"),
+    )
+    await passSteps1Through4()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    const err = await screen.findByTestId("gerrit-wizard-webhook-info-error")
+    expect(err.textContent).toContain("network offline")
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("renders a friendly error when generate fails and keeps PENDING", async () => {
+    mockedGetGerritWebhookInfo.mockResolvedValueOnce({
+      status: "ok",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      secret_configured: false,
+      secret_masked: "",
+    })
+    mockedGenerateGerritWebhookSecret.mockRejectedValueOnce(
+      new Error("backend 500"),
+    )
+    await passSteps1Through4()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    await screen.findByTestId("gerrit-wizard-webhook-secret-empty")
+    fireEvent.click(
+      screen.getByTestId("gerrit-wizard-generate-webhook-secret"),
+    )
+    const err = await screen.findByTestId("gerrit-wizard-webhook-gen-error")
+    expect(err.textContent).toContain("backend 500")
+    // No plain secret rendered when generate fails — defends against
+    // "ack the gate before the secret actually persisted" footgun.
+    expect(
+      screen.queryByTestId("gerrit-wizard-webhook-secret-plain"),
+    ).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+      "PENDING",
+    )
+    expect(screen.queryByTestId("gerrit-wizard-step-5-ack")).toBeNull()
+  })
+
+  it("renders the Gerrit `webhooks.config` snippet for paste", async () => {
+    mockedGetGerritWebhookInfo.mockResolvedValueOnce({
+      status: "ok",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      secret_configured: true,
+      secret_masked: "abcd…wxyz",
+      signature_header: "X-Gerrit-Signature",
+      signature_algorithm: "hmac-sha256",
+    })
+    await passSteps1Through4()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    const snippet = await screen.findByTestId(
+      "gerrit-wizard-webhook-config-snippet",
+    )
+    // Snippet must literally contain the URL the operator just saw +
+    // the three event types — operators copy this verbatim into Gerrit.
+    expect(snippet.textContent).toContain(
+      "https://omnisight.example.com/api/v1/webhooks/gerrit",
+    )
+    expect(snippet.textContent).toContain("event = patchset-created")
+    expect(snippet.textContent).toContain("event = comment-added")
+    expect(snippet.textContent).toContain("event = change-merged")
   })
 })

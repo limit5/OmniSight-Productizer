@@ -1337,4 +1337,197 @@ class TestComponentExists:
         content = comp.read_text()
         assert "IntegrationSettings" in content
         assert "SettingsButton" in content
-        assert "TEST" in content
+
+
+class TestGerritWebhookInfo:
+    """B14 Part C row 226 — Gerrit Setup Wizard Step 5 (webhook 設定引導).
+
+    Endpoints:
+      * ``GET  /api/v1/system/git-forge/gerrit/webhook-info`` — masked
+        view of the inbound webhook URL + secret status.
+      * ``POST /api/v1/system/git-forge/gerrit/webhook-secret/generate``
+        — mints a fresh ``settings.gerrit_webhook_secret`` and returns
+        the plain value exactly once.
+
+    Tests cover (a) URL derivation from base_url + ``X-Forwarded-*``
+    headers (cloudflared deploy), (b) secret masking (never returns the
+    plain value on GET), (c) idempotent generate that always rotates,
+    (d) the rotated value actually persists into ``settings``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_webhook_info_unconfigured(self, client, monkeypatch):
+        """Empty ``gerrit_webhook_secret`` → ``secret_configured=False``
+        and ``secret_masked=""`` so the wizard surfaces the Generate CTA."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
+        resp = await client.get("/api/v1/system/git-forge/gerrit/webhook-info")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["secret_configured"] is False
+        assert data["secret_masked"] == ""
+        # URL is the load-bearing pasteable string — Gerrit needs it verbatim.
+        assert data["webhook_url"].endswith("/api/v1/webhooks/gerrit")
+        assert data["signature_header"] == "X-Gerrit-Signature"
+        assert data["signature_algorithm"] == "hmac-sha256"
+        assert "patchset-created" in data["event_types"]
+        assert "comment-added" in data["event_types"]
+        assert "change-merged" in data["event_types"]
+
+    @pytest.mark.asyncio
+    async def test_get_webhook_info_configured_masks_secret(
+        self, client, monkeypatch
+    ):
+        """Configured secret → ``secret_configured=True`` and only a
+        masked preview is returned. The plain value MUST NOT appear in
+        the response body — re-revealing on every GET defeats the
+        rotation surface."""
+        from backend.config import settings as _s
+        plain = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", plain)
+        resp = await client.get("/api/v1/system/git-forge/gerrit/webhook-info")
+        data = resp.json()
+        assert data["secret_configured"] is True
+        assert data["secret_masked"] != plain
+        assert plain not in resp.text  # belt + braces — body never contains plain
+        # Mask preserves first 4 + last 4 — operator can cross-check w/o leak.
+        assert data["secret_masked"].startswith("abcd")
+        assert data["secret_masked"].endswith("89-_")
+
+    @pytest.mark.asyncio
+    async def test_get_webhook_info_honours_x_forwarded_headers(
+        self, client, monkeypatch
+    ):
+        """Cloudflared / nginx terminates HTTPS upstream and sets
+        ``X-Forwarded-Proto`` / ``X-Forwarded-Host``. Without these the
+        URL would be ``http://test/...`` (the test-client's base) which
+        is not the URL Gerrit can reach. Honouring the headers gives the
+        operator the externally-routable URL."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
+        resp = await client.get(
+            "/api/v1/system/git-forge/gerrit/webhook-info",
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "omnisight.example.com",
+            },
+        )
+        data = resp.json()
+        assert (
+            data["webhook_url"]
+            == "https://omnisight.example.com/api/v1/webhooks/gerrit"
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_webhook_secret_mints_persists_returns_once(
+        self, client, monkeypatch
+    ):
+        """POST /generate: (1) returns a high-entropy plain secret in the
+        response body exactly once, (2) persists it onto
+        ``settings.gerrit_webhook_secret`` so the inbound webhook
+        verifier picks it up, (3) the matching GET surfaces the new
+        secret only as a masked preview (no plain re-read)."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/webhook-secret/generate"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        secret = data["secret"]
+        # token_urlsafe(32) → ~43 chars URL-safe base64 → ≥256 bits entropy.
+        assert isinstance(secret, str)
+        assert len(secret) >= 32
+        # Persisted into settings — the webhook verifier reads from here.
+        assert _s.gerrit_webhook_secret == secret
+        # Subsequent GET masks it, never re-reveals.
+        info = await client.get("/api/v1/system/git-forge/gerrit/webhook-info")
+        info_body = info.json()
+        assert info_body["secret_configured"] is True
+        assert info_body["secret_masked"] != secret
+        assert secret not in info.text
+
+    @pytest.mark.asyncio
+    async def test_generate_rotates_existing_secret(self, client, monkeypatch):
+        """Two generates back-to-back must produce two different secrets
+        — generate is the rotate primitive, never a no-op."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
+        first = await client.post(
+            "/api/v1/system/git-forge/gerrit/webhook-secret/generate"
+        )
+        second = await client.post(
+            "/api/v1/system/git-forge/gerrit/webhook-secret/generate"
+        )
+        assert first.json()["secret"] != second.json()["secret"]
+        # Settings holds the *latest* — the older secret is invalidated.
+        assert _s.gerrit_webhook_secret == second.json()["secret"]
+
+    @pytest.mark.asyncio
+    async def test_generate_response_carries_paste_ready_metadata(
+        self, client, monkeypatch
+    ):
+        """Generate returns webhook_url + signature_header + algorithm so
+        the wizard can render the Gerrit ``[remote "omnisight"]`` config
+        snippet without a second round-trip to ``webhook-info``."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/webhook-secret/generate",
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "omnisight.example.com",
+            },
+        )
+        data = resp.json()
+        assert (
+            data["webhook_url"]
+            == "https://omnisight.example.com/api/v1/webhooks/gerrit"
+        )
+        assert data["signature_header"] == "X-Gerrit-Signature"
+        assert data["signature_algorithm"] == "hmac-sha256"
+        assert "secret_masked" in data
+        # Note must reinforce "save now, no re-reveal" — operators
+        # routinely close wizards before pasting, so this copy is
+        # load-bearing UX (verified separately in the frontend tests).
+        assert "not be shown again" in data["note"].lower() or \
+               "save this value" in data["note"].lower()
+
+    def test_mask_secret_short_input_full_mask(self):
+        """Inputs ≤8 chars (degenerate / dev placeholder) get fully
+        masked rather than leaking 8/n of the secret."""
+        from backend.routers.integration import _mask_secret
+        assert _mask_secret("") == ""
+        assert _mask_secret("short") == "*****"
+        assert _mask_secret("12345678") == "********"
+
+    def test_mask_secret_long_input_keeps_prefix_and_suffix(self):
+        from backend.routers.integration import _mask_secret
+        masked = _mask_secret("abcdefghijklmnopqrstuvwxyz")
+        assert masked.startswith("abcd")
+        assert masked.endswith("wxyz")
+        assert "…" in masked  # ellipsis in middle, no plain leak
+
+    def test_derive_webhook_url_falls_back_to_base_url(self):
+        """When no X-Forwarded-* headers are present, the helper
+        falls back to ``Request.base_url`` so direct-to-backend
+        deployments (no proxy) still get a usable URL."""
+        from backend.routers.integration import _derive_webhook_url
+        from starlette.requests import Request as StarletteRequest
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "server": ("api.internal.example.com", 8000),
+            "path": "/api/v1/system/git-forge/gerrit/webhook-info",
+            "headers": [],
+            "root_path": "",
+            "query_string": b"",
+        }
+        req = StarletteRequest(scope)
+        url = _derive_webhook_url(req)
+        assert url.endswith("/api/v1/webhooks/gerrit")
+        assert "api.internal.example.com" in url

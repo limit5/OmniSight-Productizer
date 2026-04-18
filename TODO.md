@@ -223,7 +223,7 @@ Legend:
 - [x] Step 2：SSH key 設定引導（顯示公鑰 → 提示貼到 Gerrit Settings → SSH Keys）
 - [x] Step 3：`merger-agent-bot` 帳號設定引導（說明如何建 bot 帳號 + 設定 group）
 - [x] Step 4：submit-rule 驗證（呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule）
-- [ ] Step 5：webhook 設定引導（顯示 webhook URL + secret → 提示貼到 Gerrit）
+- [x] Step 5：webhook 設定引導（顯示 webhook URL + secret → 提示貼到 Gerrit）
 - [ ] 完成後寫入 config + 顯示「Gerrit 整合已啟用」
 - [ ] 預估：**1.5 day**
 

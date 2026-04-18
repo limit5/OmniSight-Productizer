@@ -1454,6 +1454,50 @@ export async function verifyGerritSubmitRule(args: {
   )
 }
 
+// ─── B14 Part C row 226: Gerrit webhook setup (Step 5) ───
+//
+// Step 5 of the Gerrit Setup Wizard surfaces the inbound webhook URL
+// (`<base>/api/v1/webhooks/gerrit`) and the HMAC-SHA256 secret the
+// operator must paste into Gerrit's `webhooks.config` (under
+// `refs/meta/config`). `getGerritWebhookInfo()` is read-only and only
+// returns a masked preview of the configured secret. Use
+// `generateGerritWebhookSecret()` to mint + persist a new secret — the
+// plain value is returned exactly once in that response and never again,
+// so the wizard must keep it in component state for the operator to copy
+// before they close the modal.
+export interface GerritWebhookInfo {
+  status: "ok" | "error"
+  webhook_url?: string
+  secret_configured?: boolean
+  secret_masked?: string
+  signature_header?: string
+  signature_algorithm?: string
+  event_types?: string[]
+  message?: string
+}
+
+export interface GerritWebhookSecretRotateResult {
+  status: "ok" | "error"
+  secret?: string  // plain value — surfaced exactly once, never re-readable
+  secret_masked?: string
+  webhook_url?: string
+  signature_header?: string
+  signature_algorithm?: string
+  note?: string
+  message?: string
+}
+
+export async function getGerritWebhookInfo(): Promise<GerritWebhookInfo> {
+  return request<GerritWebhookInfo>("/system/git-forge/gerrit/webhook-info")
+}
+
+export async function generateGerritWebhookSecret(): Promise<GerritWebhookSecretRotateResult> {
+  return request<GerritWebhookSecretRotateResult>(
+    "/system/git-forge/gerrit/webhook-secret/generate",
+    { method: "POST" },
+  )
+}
+
 // ─── Tenant Secrets (I4) ───
 
 export interface TenantSecret {
