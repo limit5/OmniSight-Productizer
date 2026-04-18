@@ -1502,7 +1502,7 @@ Legend:
 - [x] 採樣 5s 週期、ring buffer 60 點（5 分鐘歷史）
 - [x] WSL2 輔助訊號：`loadavg_1m / 16 > 0.9` 也標記為 high pressure（host 其他進程）
 - [x] Prometheus gauges：`host_cpu_percent` / `host_mem_percent` / `host_disk_percent` / `host_loadavg_1m` / `host_container_count`
-- [ ] Endpoint：`GET /api/v1/host/metrics`（current + history）
+- [x] Endpoint：`GET /api/v1/host/metrics`（current + history）
 - [ ] SSE event：`host.metrics.tick`（5s 推送）
 - [ ] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
 - 預估：**0.5 day**
