@@ -12048,3 +12048,41 @@ TODO row 215 本身的字面要求是「每個 instance 要有 TEST / REMOVE 按
 
 ### 下一步
 - B14 Part B row 217：加 `backend/routers/integration.py` 的 `GET/PUT /api/v1/system/settings/git/token-map` 專用 endpoint（mask tokens on read，full values on write）；同步把 `github_token_map` / `gitlab_token_map` 加進 `_UPDATABLE_FIELDS`（或刻意留白走專用 endpoint）；前端用新 endpoint 替換 row 216 這套走 dirty/SAVE 的 fallback（或保留作為次要路徑）。決策點：是否把 `github_token` / `gitlab_token` 這些 legacy 單值欄位也挪到新 endpoint，避免雙軌維護。
+
+---
+
+## 2026-04-18 — B14 Part C 第一顆 row 221：Gerrit 區塊加「SETUP WIZARD」按鈕 + modal 引導 scaffold
+
+### 範圍（嚴格 row-level）
+- **僅** TODO 第 221 列（Part C 的第一個 checkbox）：在 Settings → Integration → GERRIT CODE REVIEW 區塊新增「SETUP WIZARD」按鈕；點擊後於 `document.body` portal 渲染出 `GerritSetupWizardDialog` modal，列出 5 個步驟的 overview（Connection probe / SSH key / merger-agent-bot / submit-rule 驗證 / Webhook）。
+- **沒**做：row 222-226（Step 1-5 的互動邏輯，包含 REST+SSH probe、公鑰顯示、bot 帳號建立引導、`project.config` 雙簽 +2 rule 探測、webhook URL/secret 產生與落地）。這五步全部以 `PENDING` badge 展示，明告 operator 還是 scaffold-only，不能誤以為 wizard 已經可用。
+
+### 做了什麼（檔案 × 變更）
+1. **`components/omnisight/integration-settings.tsx`**
+   - 新增 `GerritSetupWizardDialog` component（class-less `function`，無 props-side-effect）— 以 `createPortal` 掛在 `document.body`，`z-[110]` 刻意高於外層 `IntegrationSettings` modal 的 `z-[100]` 一個 layer，保證 wizard 永遠蓋在 Settings 上面。
+   - 在 `IntegrationSettings` 元件頂層新增 `gerritWizardOpen` state；在 `GERRIT CODE REVIEW` `SettingsSection` body 最上方加一條 inline 引導列：左側 hint `New to Gerrit? Open the guided walkthrough.`，右側 `SETUP WIZARD` 按鈕（`Settings` icon + 文字，沿用 `bg-[var(--neural-blue)]/10` 品牌色）。
+   - 在 main modal 根 `div` 內（`DISCARD` / `SAVE & APPLY` footer 後）mount `<GerritSetupWizardDialog open={gerritWizardOpen} onClose={...} />`，確保 wizard 與 parent modal 共享同一個 portal 樹的 unmount lifecycle（當 IntegrationSettings 被關掉時 wizard 也會跟著卸載）。
+2. **`TODO.md`**
+   - 第 221 列 `- [ ]` → `- [x]`；222-228 仍 pending（Step 1-5 + 「完成後寫入 config」+ 預估 bullet）。
+3. **本 HANDOFF 條目**。
+
+### 設計刻意保守
+- **沒新增依賴 / 沒新增 import**：`Settings`, `X` icon 全部已在檔首 `lucide-react` import；`createPortal` 本就是這個檔案的既有 pattern（parent modal 也走 portal）。零增量 bundle、零 package.json diff。
+- **PENDING badge + SCAFFOLD ONLY 警示框**：跟 Part B row 215 的「TEST 按鈕短路 + 人類可讀 title」同精神 — 寧可可見但明確標註「還沒接通」，也不要藏起按鈕讓 row 221 看起來「完成」卻 UX 不兌現字面。operator 打開 wizard 第一眼就看到橘色 `SCAFFOLD ONLY` 區塊，知道 row 222-226 還沒落地。
+- **5 步清單直接硬編碼在 component 內**：steps 這類 static copy 尚不值得抽到獨立 const / i18n file；等 row 222 開始實作真正 step 時，自然會演化出 `{ title, body, probe?: async () => TestResult }` 這種結構，屆時再抽公用 file 就好，現在抽反而 over-engineer。
+- **z-[110] 高 parent modal 10 個 layer**：刻意不跟 parent 同層（z-100）— 若同層 DOM 後插入的會在上層，行為依賴順序很脆弱。明確 +10 讓 stacking order 變成「對設計意圖的斷言」。
+- **button 放在 section body 頂而非 section header**：`SettingsSection` header 已經有 `TEST` 徵信 button 與 chevron expand/collapse，擠進第三顆按鈕會讓 header 動作過多且點擊目標擁擠。放 body 第一列不僅視覺獨立、也讓 collapse 起來時 wizard 按鈕跟著收 — 符合「section 收合 = 該 section 所有動作都收合」的直覺。
+- **modal width 跟 `max-w-xl` （比 parent modal `max-w-lg` 寬一階）**：wizard 要展示 5 列帶 badge 的 step，每列需要容納 step title + 說明 + PENDING badge；若跟 parent 同樣 `max-w-lg`，文字會包行到三行讓列表視覺 noisy。寬一階後每列穩定在一~二行內。
+- **backdrop click + X + CLOSE button 三路徑都可關**：UX 一致性 — 跟 parent IntegrationSettings 同（parent 目前 X + backdrop 兩路徑；wizard 多加一個 footer CLOSE 因為內容較多捲動後 header X 不在視野內）。
+
+### 為什麼只交付 entry-point 不一次做完 5 步
+Part C TODO 字面把 row 221（entry button）跟 row 222-226（Step 1-5 互動）清楚切成六個 checkbox。每個 checkbox 是獨立 reviewable unit — 例如 row 222 要加 `testGerritConnection(url, ssh_host, ssh_port)` backend probe + 前端 fetch、row 226 要產生 webhook secret + mask，都遠比「打開 modal」複雜。把 row 221 壓縮到 modal shell-only 可以讓 commit 小、diff 聚焦、reviewer 不需要同時審查 frontend UI + 5 個 backend probe。
+
+### 驗證
+- `pnpm exec tsc --noEmit --skipLibCheck` 零輸出（typecheck clean）。
+- `pnpm exec eslint components/omnisight/integration-settings.tsx` 零輸出（lint clean）。
+- 變更只動 `components/omnisight/integration-settings.tsx`（+ TODO、+ 本 HANDOFF）；不動 backend router、不動 `/system/settings` PUT 契約、不動 `_UPDATABLE_FIELDS`；純 frontend scaffold。
+- 互動 trace（mental run-through）：點 `SYSTEM INTEGRATIONS` → parent modal 開 → 展開 `GERRIT CODE REVIEW` → 看到 hint + SETUP WIZARD 按鈕 → 點 SETUP WIZARD → wizard modal 疊在 parent 之上顯示 5 step overview + 橘色 SCAFFOLD ONLY 提醒 → 點 backdrop / X / CLOSE 任一 → wizard 關、parent 仍開。
+
+### 下一步
+- B14 Part C row 222（Step 1 — Test Connection）：在 wizard 內把 Step 1 列從 PENDING 換成 active form — 加 URL / SSH host / SSH port 三輸入欄 + `Test Connection` 按鈕；backend 端在 `backend/routers/integration.py` 加 `POST /api/v1/integration/gerrit/test` 接 SSH probe（`gerrit version`）+ REST `/config/server/version` fallback。這是 Part C 第一步 real-world I/O。也可以考慮把 wizard 內 `steps` array 抽出 component 根之外，讓後續 rows 可以把「互動式 step 元件」逐步接進 slot。

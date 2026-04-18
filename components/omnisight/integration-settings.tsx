@@ -1074,11 +1074,130 @@ function NetworkEgressSection() {
   )
 }
 
+/**
+ * B14 Part C row 221 (first checkbox of Part C):
+ *
+ * Scaffolded modal that serves as the entry-point for the Gerrit Code Review
+ * setup walkthrough. This row delivers **only** the button + modal shell +
+ * 5-step overview; the actual interactive logic for each step (Test-Connection
+ * probe, SSH-key display, merger-agent-bot creation guide, submit-rule probe
+ * against project.config, webhook URL/secret) lands in subsequent Part C rows.
+ *
+ * Each step item shows a PENDING badge to make "scaffold-only" honest to the
+ * operator — no green checks appear until the corresponding interactive row
+ * wires up the real probe / write-back.
+ *
+ * Rendered via createPortal at z-[110] to sit above the parent IntegrationSettings
+ * portal (z-[100]); backdrop click and X close.
+ */
+function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open || typeof document === "undefined") return null
+
+  const steps: { title: string; body: string }[] = [
+    {
+      title: "Step 1 — Connection probe",
+      body: "輸入 Gerrit REST URL + SSH host / port，Test Connection 驗證 reachability 與版本。",
+    },
+    {
+      title: "Step 2 — SSH key 設定",
+      body: "顯示 OmniSight 的公鑰，引導貼到 Gerrit Settings → SSH Keys；驗證 key fingerprint。",
+    },
+    {
+      title: "Step 3 — merger-agent-bot 帳號",
+      body: "說明如何建立 bot 帳號與加入 group（Code-Review +2 的 dual-sign gate 右半邊）。",
+    },
+    {
+      title: "Step 4 — submit-rule 驗證",
+      body: "呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule（merger + non-ai-reviewer）。",
+    },
+    {
+      title: "Step 5 — Webhook 設定",
+      body: "顯示 webhook URL + secret，引導貼到 Gerrit；完成後寫入 config 並標註整合啟用。",
+    },
+  ]
+
+  return createPortal(
+    <div className="fixed inset-0 z-[110] flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-10 w-full max-w-xl max-h-[85vh] m-4 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-2xl flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)] bg-[var(--secondary)]">
+          <div className="flex items-center gap-2">
+            <Settings size={14} className="text-[var(--neural-blue)]" />
+            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">
+              GERRIT SETUP WIZARD
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-[var(--background)] transition-colors"
+            aria-label="Close wizard"
+          >
+            <X size={14} className="text-[var(--muted-foreground)]" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3">
+          <p className="font-mono text-[10px] leading-relaxed text-[var(--foreground)]">
+            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟。
+          </p>
+
+          <ol className="space-y-2 list-none p-0 m-0">
+            {steps.map((s, i) => (
+              <li
+                key={i}
+                className="flex gap-2 p-2 rounded border border-[var(--border)] bg-[var(--background)]"
+              >
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                  {i + 1}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                    {s.title}
+                  </div>
+                  <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                    {s.body}
+                  </div>
+                </div>
+                <span className="flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded bg-[var(--secondary)] text-[var(--muted-foreground)] self-start">
+                  PENDING
+                </span>
+              </li>
+            ))}
+          </ol>
+
+          <div className="p-2 rounded bg-[var(--hardware-orange)]/10 border border-[var(--hardware-orange)]/30">
+            <div className="font-mono text-[9px] text-[var(--hardware-orange)] font-semibold">
+              SCAFFOLD ONLY
+            </div>
+            <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-1">
+              This modal is the entry-point delivered in B14 Part C row 221. Interactive
+              logic for each step (Test-Connection probe, SSH-key upload hint,
+              merger-agent-bot guide, submit-rule probe, webhook wiring) arrives in
+              the next rows of Part C. Closing this modal does not persist anything.
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end px-4 py-2 border-t border-[var(--border)] bg-[var(--secondary)]">
+          <button
+            onClick={onClose}
+            className="px-3 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)] text-black font-semibold hover:opacity-90 transition-colors"
+          >
+            CLOSE
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
   const [saving, setSaving] = useState(false)
   const [providers, setProviders] = useState<api.ProviderConfig[]>([])
+  const [gerritWizardOpen, setGerritWizardOpen] = useState(false)
 
   useEffect(() => {
     if (open) {
@@ -1298,6 +1417,23 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
           </SettingsSection>
 
           <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">
+            {/* B14 Part C row 221: entry-point button that opens the Gerrit
+                Setup Wizard modal. The 5-step interactive content (URL+SSH
+                test / SSH-key hint / merger-agent-bot / submit-rule probe /
+                webhook wiring) is scaffolded inside the modal and fleshed
+                out in subsequent Part C rows. */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-[9px] text-[var(--muted-foreground)] leading-tight">
+                New to Gerrit? Open the guided walkthrough.
+              </span>
+              <button
+                onClick={() => setGerritWizardOpen(true)}
+                className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+                title="Open a 5-step guided walkthrough for Gerrit Code Review integration"
+              >
+                <Settings size={10} /> SETUP WIZARD
+              </button>
+            </div>
             <ToggleField label="Enabled" value={getVal("gerrit", "enabled") === "true"} onChange={v => setVal("gerrit_enabled", v)} />
             <SettingField label="URL" value={getVal("gerrit", "url")} onChange={v => setVal("gerrit_url", v)} />
             <SettingField label="SSH Host" value={getVal("gerrit", "ssh_host")} onChange={v => setVal("gerrit_ssh_host", v)} />
@@ -1354,6 +1490,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
           </div>
         </div>
       </div>
+      <GerritSetupWizardDialog open={gerritWizardOpen} onClose={() => setGerritWizardOpen(false)} />
     </div>,
     document.body
   )

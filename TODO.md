@@ -218,7 +218,7 @@ Legend:
 - [x] 預估：**1 day**
 
 **Part C — Gerrit Setup Wizard（獨立引導）**
-- [ ] Settings → Integration → Gerrit 區塊加「Setup Wizard」按鈕 → 開啟 modal 引導
+- [x] Settings → Integration → Gerrit 區塊加「Setup Wizard」按鈕 → 開啟 modal 引導
 - [ ] Step 1：輸入 Gerrit URL + SSH host/port → 「Test Connection」驗證
 - [ ] Step 2：SSH key 設定引導（顯示公鑰 → 提示貼到 Gerrit Settings → SSH Keys）
 - [ ] Step 3：`merger-agent-bot` 帳號設定引導（說明如何建 bot 帳號 + 設定 group）
