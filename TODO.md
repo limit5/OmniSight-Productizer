@@ -1514,7 +1514,7 @@ Legend:
 - [x] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
 - [x] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
 - [x] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
-- [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
+- [x] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻<!-- 2026-04-18 H2 row 1517: `backend/tests/test_h2_integration_host_pressure.py` 新增 4 顆端到端整合測試（`TestFullPressureLifecycle` + `TestMemPressureBlocksAcquireSymmetry` + `TestContainerCapBlocksAcquireSymmetry` + `TestSnapshotDrivenDerateRecoverCycle`），以 mock `host_metrics._host_history` ring buffer 為單一壓力來源，於同一 flow 串通三段：(1) 高壓 snapshot 安裝後 `_ModeSlot.acquire()` 在 precondition 迴圈內 defer，`_shared_parallel` 維持 0、`sandbox.deferred` SSE + audit 攜 `host_cpu_high` reason emit；(2) 以 virtual clock 30s 驅動 `evaluate_turbo_derate()`，engage `coordinator.turbo_derate`（cpu=95 / threshold 80 / derated_to=2 / from=8）+ Phase-53 `entity_id=engaged` audit row + `_effective_budget(turbo)==2`；(3) snapshot 換成 cpu=10 後 acquire 完成 → 重置 `low_cpu_since`（acquire 路徑會以 wall-clock 污染虛擬時鐘）→ 虛擬 120s cooldown 觸發 `coordinator.turbo_recover` + `entity_id=recovered` + 回到 budget=8。Mem 軸與 container_cap 軸補兩顆對稱對照測試，`TestSnapshotDrivenDerateRecoverCycle` 則走無顯式 cpu_percent 的 production sampling path。全 H2 suite 91 顆（integration 4 + precondition 15 + backoff_audit 15 + turbo_derate 20 + derate_audit 9 + auto_derate_switch 13 + prewarm_pause 15）4.79s 綠，零回歸。 -->
 - 預估：**2 day**
 
 ### H3. UI Host Load Panel + Coordinator 決策透明化
