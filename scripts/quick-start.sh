@@ -366,12 +366,13 @@ elif [ ! -d /run/systemd/system ] || [ "$(ps -p 1 -o comm= 2>/dev/null || echo u
     warn "偵測到非 systemd init → cloudflared 將以 nohup 背景程序運行。"
 fi
 
-# 網路連線
-if ! curl -sf --max-time 5 "https://api.cloudflare.com/client/v4/" >/dev/null 2>&1; then
+# 網路連線（只檢查 TCP/TLS 可達，不檢查 HTTP 狀態——
+# CF API 無 auth 時回 400，但連線本身是通的）
+if curl -s --max-time 5 -o /dev/null -w "" "https://api.cloudflare.com/client/v4/" 2>/dev/null; then
+    log "網路連線正常（Cloudflare API 可達）"
+else
     warn "無法連線到 Cloudflare API。Cloudflare Tunnel 設定可能失敗。"
     echo "   請確認網路連線正常。"
-else
-    log "網路連線正常"
 fi
 
 # 前置檢查結果
