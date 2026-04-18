@@ -181,10 +181,10 @@ jobs:
         # rest 60% (Phase 51 baseline; raise in v1 once gaps are
         # filled).
         shard:
-          - { name: decision, paths: "tests/test_decision_engine.py tests/test_decision_rules.py tests/test_decision_rules_persistence.py tests/test_decision_api.py tests/test_decision_sse.py tests/test_ambiguity_budget.py tests/test_stuck_detector.py", min: 85 }
-          - { name: pipeline, paths: "tests/test_pipeline.py tests/test_release.py tests/test_handoff.py", min: 60 }
-          - { name: schema,   paths: "tests/test_schema.py tests/test_event_system.py tests/test_artifact_pipeline.py tests/test_artifacts.py", min: 60 }
-          - { name: rest,     paths: "tests/", min: 60 }
+          - { name: decision, paths: "backend/tests/test_decision_engine.py backend/tests/test_decision_rules.py backend/tests/test_decision_rules_persistence.py backend/tests/test_decision_api.py backend/tests/test_decision_sse.py backend/tests/test_ambiguity_budget.py backend/tests/test_stuck_detector.py", min: 85 }
+          - { name: pipeline, paths: "backend/tests/test_pipeline.py backend/tests/test_release.py backend/tests/test_handoff.py", min: 60 }
+          - { name: schema,   paths: "backend/tests/test_schema.py backend/tests/test_event_system.py backend/tests/test_artifact_pipeline.py backend/tests/test_artifacts.py", min: 60 }
+          - { name: rest,     paths: "backend/tests/", min: 60 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -193,11 +193,21 @@ jobs:
       - name: pytest ${{ matrix.shard.name }}
         env:
           OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-${{ matrix.shard.name }}.db
+        # Run from repo root (not `cd backend`) so sys.path[0] is the
+        # project root rather than `backend/`. The previous `cd backend`
+        # put `backend/` on sys.path[0] and backend/platform.py (W0 #274
+        # + P0 #285) shadowed stdlib `platform` during pytest startup —
+        # uuid.py's `import platform` → `backend/platform.py` without a
+        # `system()` attr → AttributeError → exit 2 on every shard.
+        # `--rootdir=backend -c backend/pytest.ini` keeps coverage
+        # config, testpaths, and asyncio_mode resolution identical to
+        # the old cd-into-backend layout.
         run: |
-          cd backend
           pytest ${{ matrix.shard.paths }} \
+            --rootdir=backend \
+            -c backend/pytest.ini \
             --cov=backend \
-            --cov-report=xml:../coverage-${{ matrix.shard.name }}.xml \
+            --cov-report=xml:coverage-${{ matrix.shard.name }}.xml \
             --cov-fail-under=${{ matrix.shard.min }} \
             -q
       - name: upload coverage
