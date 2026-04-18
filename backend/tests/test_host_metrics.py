@@ -576,3 +576,382 @@ class TestReadLoadavg:
             raise AttributeError("getloadavg undefined")
         monkeypatch.setattr(os, "getloadavg", boom)
         assert hm._read_loadavg() == (0.0, 0.0, 0.0)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — Docker-daemon sampling (sample_docker_once)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# These contract tests pin the H1 "Docker SDK 抓 running container 數 +
+# 總 mem reservation；Docker Desktop 情境 fallback `docker stats
+# --no-stream`" TODO row. They cover:
+#   * DockerSample dataclass shape + immutability
+#   * SDK primary path: containers.list(filters={"status":"running"})
+#     → sum HostConfig.MemoryReservation (with fallback to .Memory),
+#     source="sdk"
+#   * CLI fallback path: when SDK is unavailable or errors, parse
+#     `docker stats --no-stream` output, source="cli"
+#   * Both-paths-fail: source="unavailable", counts zero, no exception
+#   * docker stats MemUsage column parser handles MiB/GiB/MB/GB/B/no-unit
+
+import subprocess as _subprocess
+from unittest.mock import MagicMock
+
+
+class _FakeContainer:
+    """Drop-in for docker-py container objects."""
+    def __init__(self, host_config: dict | None = None):
+        self.attrs = {"HostConfig": host_config or {}}
+
+
+class _FakeContainersCollection:
+    def __init__(self, containers: list[_FakeContainer]):
+        self._containers = containers
+        self.list_calls: list[dict] = []
+
+    def list(self, filters=None, **kwargs):  # noqa: A002
+        self.list_calls.append(filters or {})
+        return list(self._containers)
+
+
+class _FakeDockerClient:
+    def __init__(self, containers: list[_FakeContainer]):
+        self.containers = _FakeContainersCollection(containers)
+
+
+class _FakeDockerSDK:
+    """Drop-in for the ``docker`` module."""
+    def __init__(self, client: _FakeDockerClient | None = None, raise_on_from_env: Exception | None = None):
+        self._client = client
+        self._raise = raise_on_from_env
+        self.from_env_calls: list[dict] = []
+
+    def from_env(self, **kwargs):
+        self.from_env_calls.append(kwargs)
+        if self._raise is not None:
+            raise self._raise
+        return self._client
+
+
+class TestDockerSampleDataclass:
+    def test_fields_shape(self):
+        expected = {
+            "container_count", "total_mem_reservation_bytes",
+            "source", "sampled_at",
+        }
+        actual = {f.name for f in hm.DockerSample.__dataclass_fields__.values()}
+        assert actual == expected
+
+    def test_frozen(self):
+        s = hm.DockerSample(
+            container_count=3, total_mem_reservation_bytes=1024,
+            source="sdk", sampled_at=1000.0,
+        )
+        with pytest.raises(Exception):
+            s.container_count = 99  # type: ignore[misc]
+
+    def test_source_is_string(self):
+        s = hm.DockerSample(
+            container_count=0, total_mem_reservation_bytes=0,
+            source="unavailable", sampled_at=0.0,
+        )
+        assert isinstance(s.source, str)
+
+
+class TestSdkMemReservationBytes:
+    def test_reservation_preferred_over_memory(self):
+        c = _FakeContainer({"MemoryReservation": 500, "Memory": 1000})
+        assert hm._sdk_mem_reservation_bytes(c) == 500
+
+    def test_falls_back_to_memory_when_reservation_unset(self):
+        c = _FakeContainer({"MemoryReservation": 0, "Memory": 2048})
+        assert hm._sdk_mem_reservation_bytes(c) == 2048
+
+    def test_falls_back_to_memory_when_reservation_missing(self):
+        c = _FakeContainer({"Memory": 2048})
+        assert hm._sdk_mem_reservation_bytes(c) == 2048
+
+    def test_returns_zero_when_both_unset(self):
+        c = _FakeContainer({})
+        assert hm._sdk_mem_reservation_bytes(c) == 0
+
+    def test_handles_missing_host_config(self):
+        c = _FakeContainer()
+        c.attrs = {}  # no HostConfig key at all
+        assert hm._sdk_mem_reservation_bytes(c) == 0
+
+    def test_swallows_exception(self):
+        c = MagicMock()
+        type(c).attrs = property(lambda _self: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert hm._sdk_mem_reservation_bytes(c) == 0
+
+
+class TestSampleDockerViaSdk:
+    def test_none_when_sdk_not_installed(self, monkeypatch):
+        monkeypatch.setattr(hm, "docker_sdk", None)
+        assert hm._sample_docker_via_sdk() is None
+
+    def test_returns_count_and_total(self, monkeypatch):
+        containers = [
+            _FakeContainer({"MemoryReservation": 256 * 1024 ** 2}),   # 256 MiB
+            _FakeContainer({"MemoryReservation": 1024 ** 3}),         # 1 GiB
+            _FakeContainer({"Memory": 512 * 1024 ** 2}),              # 512 MiB via hard limit
+        ]
+        fake_sdk = _FakeDockerSDK(client=_FakeDockerClient(containers))
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+        result = hm._sample_docker_via_sdk()
+        assert result is not None
+        count, total = result
+        assert count == 3
+        assert total == (256 * 1024 ** 2) + (1024 ** 3) + (512 * 1024 ** 2)
+
+    def test_filters_running_only(self, monkeypatch):
+        client = _FakeDockerClient([])
+        fake_sdk = _FakeDockerSDK(client=client)
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+        hm._sample_docker_via_sdk()
+        # Running-only filter must be passed to containers.list().
+        assert client.containers.list_calls == [{"status": "running"}]
+
+    def test_returns_none_when_from_env_raises(self, monkeypatch):
+        fake_sdk = _FakeDockerSDK(raise_on_from_env=RuntimeError("daemon unreachable"))
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+        assert hm._sample_docker_via_sdk() is None
+
+    def test_returns_none_when_list_raises(self, monkeypatch):
+        client = MagicMock()
+        client.containers.list.side_effect = RuntimeError("api 500")
+        fake_sdk = _FakeDockerSDK(client=client)
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+        assert hm._sample_docker_via_sdk() is None
+
+    def test_empty_container_list_returns_zeros(self, monkeypatch):
+        fake_sdk = _FakeDockerSDK(client=_FakeDockerClient([]))
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+        result = hm._sample_docker_via_sdk()
+        assert result == (0, 0)
+
+
+class TestParseDockerStatsMemColumn:
+    def test_mib(self):
+        assert hm._parse_docker_stats_mem_column("127.5MiB / 1.95GiB") == int(127.5 * 1024 ** 2)
+
+    def test_gib(self):
+        assert hm._parse_docker_stats_mem_column("2GiB / 4GiB") == 2 * 1024 ** 3
+
+    def test_mb_decimal(self):
+        assert hm._parse_docker_stats_mem_column("100MB / 1GB") == 100 * 10 ** 6
+
+    def test_gb_decimal(self):
+        assert hm._parse_docker_stats_mem_column("1.5GB / 0B") == int(1.5 * 10 ** 9)
+
+    def test_kib(self):
+        assert hm._parse_docker_stats_mem_column("512KiB / 1GiB") == 512 * 1024
+
+    def test_bytes(self):
+        assert hm._parse_docker_stats_mem_column("4096B / 0B") == 4096
+
+    def test_zero_bytes(self):
+        assert hm._parse_docker_stats_mem_column("0B / 0B") == 0
+
+    def test_empty_string_returns_zero(self):
+        assert hm._parse_docker_stats_mem_column("") == 0
+
+    def test_malformed_returns_zero(self):
+        assert hm._parse_docker_stats_mem_column("not-a-number-MiB") == 0
+
+    def test_no_unit_treated_as_bytes(self):
+        assert hm._parse_docker_stats_mem_column("1234 / 0") == 1234
+
+    def test_column_without_slash(self):
+        # Edge case: just the LHS with no divider.
+        assert hm._parse_docker_stats_mem_column("256MiB") == 256 * 1024 ** 2
+
+
+class TestSampleDockerViaCli:
+    def test_none_when_docker_cli_absent(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: None)
+        assert hm._sample_docker_via_cli() is None
+
+    def test_returns_count_and_total_from_stats(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        fake_out = (
+            "abc123\t100MiB / 1GiB\n"
+            "def456\t200MiB / 1GiB\n"
+            "789xyz\t50MiB / 1GiB\n"
+        )
+        fake_proc = MagicMock(returncode=0, stdout=fake_out, stderr="")
+
+        def _run(*args, **kwargs):
+            return fake_proc
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        result = hm._sample_docker_via_cli()
+        assert result is not None
+        count, total = result
+        assert count == 3
+        assert total == 350 * 1024 ** 2
+
+    def test_none_when_subprocess_returns_nonzero(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        fake_proc = MagicMock(returncode=1, stdout="", stderr="cannot connect")
+
+        def _run(*args, **kwargs):
+            return fake_proc
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        assert hm._sample_docker_via_cli() is None
+
+    def test_none_when_subprocess_times_out(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+
+        def _run(*args, **kwargs):
+            raise _subprocess.TimeoutExpired(cmd="docker stats", timeout=10)
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        assert hm._sample_docker_via_cli() is None
+
+    def test_none_when_subprocess_raises_oserror(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+
+        def _run(*args, **kwargs):
+            raise OSError("no such file")
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        assert hm._sample_docker_via_cli() is None
+
+    def test_empty_stdout_returns_zeros(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        fake_proc = MagicMock(returncode=0, stdout="", stderr="")
+
+        def _run(*args, **kwargs):
+            return fake_proc
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        assert hm._sample_docker_via_cli() == (0, 0)
+
+    def test_ignores_blank_and_malformed_lines(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        fake_out = (
+            "abc123\t100MiB / 1GiB\n"
+            "\n"                         # blank — skip
+            "malformed_no_tab\n"          # no tab — skip
+            "def456\t200MiB / 1GiB\n"
+        )
+        fake_proc = MagicMock(returncode=0, stdout=fake_out, stderr="")
+
+        def _run(*args, **kwargs):
+            return fake_proc
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        result = hm._sample_docker_via_cli()
+        assert result == (2, 300 * 1024 ** 2)
+
+    def test_invokes_docker_stats_no_stream(self, monkeypatch):
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        captured: dict = {}
+
+        def _run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return MagicMock(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        hm._sample_docker_via_cli()
+        assert captured["cmd"][:3] == ["docker", "stats", "--no-stream"]
+        assert "--format" in captured["cmd"]
+        # Must time-box: we'd rather be unavailable than hang the sampler.
+        assert captured["kwargs"]["timeout"] == hm.DOCKER_STATS_TIMEOUT_S
+
+
+class TestSampleDockerOnce:
+    def test_sdk_path_preferred_when_available(self, monkeypatch):
+        containers = [_FakeContainer({"MemoryReservation": 1024 ** 3})]
+        fake_sdk = _FakeDockerSDK(client=_FakeDockerClient(containers))
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+
+        # Spy on CLI path — must not be called when SDK works.
+        cli_calls = []
+
+        def _cli_boom():
+            cli_calls.append(1)
+            return None
+        monkeypatch.setattr(hm, "_sample_docker_via_cli", _cli_boom)
+
+        s = hm.sample_docker_once()
+        assert s.source == "sdk"
+        assert s.container_count == 1
+        assert s.total_mem_reservation_bytes == 1024 ** 3
+        assert cli_calls == []
+
+    def test_falls_back_to_cli_when_sdk_unavailable(self, monkeypatch):
+        # SDK absent → primary path returns None.
+        monkeypatch.setattr(hm, "docker_sdk", None)
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        fake_proc = MagicMock(
+            returncode=0,
+            stdout="abc\t512MiB / 1GiB\n",
+            stderr="",
+        )
+        monkeypatch.setattr(hm.subprocess, "run", lambda *a, **k: fake_proc)
+
+        s = hm.sample_docker_once()
+        assert s.source == "cli"
+        assert s.container_count == 1
+        assert s.total_mem_reservation_bytes == 512 * 1024 ** 2
+
+    def test_falls_back_to_cli_when_sdk_connection_fails(self, monkeypatch):
+        # Docker Desktop scenario — SDK module imports fine but can't
+        # reach the daemon.
+        fake_sdk = _FakeDockerSDK(raise_on_from_env=RuntimeError("no docker socket"))
+        monkeypatch.setattr(hm, "docker_sdk", fake_sdk)
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        fake_proc = MagicMock(
+            returncode=0,
+            stdout="abc\t100MiB / 1GiB\ndef\t200MiB / 1GiB\n",
+            stderr="",
+        )
+        monkeypatch.setattr(hm.subprocess, "run", lambda *a, **k: fake_proc)
+
+        s = hm.sample_docker_once()
+        assert s.source == "cli"
+        assert s.container_count == 2
+        assert s.total_mem_reservation_bytes == 300 * 1024 ** 2
+
+    def test_returns_unavailable_when_both_paths_fail(self, monkeypatch):
+        monkeypatch.setattr(hm, "docker_sdk", None)
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: None)
+        s = hm.sample_docker_once()
+        assert s.source == "unavailable"
+        assert s.container_count == 0
+        assert s.total_mem_reservation_bytes == 0
+
+    def test_returns_unavailable_when_cli_rc_nonzero(self, monkeypatch):
+        monkeypatch.setattr(hm, "docker_sdk", None)
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(
+            hm.subprocess, "run",
+            lambda *a, **k: MagicMock(returncode=1, stdout="", stderr="err"),
+        )
+        s = hm.sample_docker_once()
+        assert s.source == "unavailable"
+        assert s.container_count == 0
+        assert s.total_mem_reservation_bytes == 0
+
+    def test_sampled_at_is_wall_clock(self, monkeypatch):
+        monkeypatch.setattr(hm, "docker_sdk", None)
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: None)
+        import time as _time
+        before = _time.time()
+        s = hm.sample_docker_once()
+        after = _time.time()
+        assert before <= s.sampled_at <= after
+
+    def test_never_raises(self, monkeypatch):
+        # Even if both paths misbehave in unexpected ways, the public
+        # API must not raise — the sampling loop depends on this.
+        class Grenade:
+            def from_env(self, **_kwargs):
+                raise Exception("grenade")
+        monkeypatch.setattr(hm, "docker_sdk", Grenade())
+        monkeypatch.setattr(hm.shutil, "which", lambda _name: "/usr/bin/docker")
+
+        def _run(*a, **k):
+            raise Exception("another grenade")
+        monkeypatch.setattr(hm.subprocess, "run", _run)
+        # Should not raise.
+        s = hm.sample_docker_once()
+        assert s.source == "unavailable"

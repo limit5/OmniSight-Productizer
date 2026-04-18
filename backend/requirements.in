@@ -46,6 +46,12 @@ structlog==24.4.0
 # H1 host-metrics: psutil drives cpu/mem/disk sampling in
 # backend/host_metrics.sample_host_once().
 psutil>=5.9.0
+# H1 host-metrics: docker-py SDK is the primary path for
+# sample_docker_once() — container count + mem reservation. The module
+# soft-imports it and falls back to `docker stats --no-stream`, so this
+# pin is strongly recommended (for fidelity) but not strictly required
+# (Docker Desktop scenarios already fall through to the CLI).
+docker>=7.0.0
 
 # --- Testing ----------------------------------------------------------
 pytest==8.3.5

@@ -46,6 +46,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -55,6 +57,11 @@ try:
     import psutil  # type: ignore[import-not-found]
 except ImportError:
     psutil = None  # type: ignore[assignment]
+
+try:
+    import docker as docker_sdk  # type: ignore[import-not-found]
+except ImportError:
+    docker_sdk = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +154,45 @@ class HostSample:
     loadavg_1m: float
     loadavg_5m: float
     loadavg_15m: float
+    sampled_at: float
+
+
+@dataclass(frozen=True)
+class DockerSample:
+    """One Docker-daemon-wide sample.
+
+    Counts every *running* container the daemon knows about (not just
+    ``omnisight-agent-*``) because capacity planning needs to reason
+    about total host contention — a developer running their own
+    postgres/redis in Docker Desktop still eats memory we'd otherwise
+    give to agents.
+
+    Fields:
+      * ``container_count``            — int, running containers only
+      * ``total_mem_reservation_bytes`` — sum of each container's
+        ``HostConfig.MemoryReservation`` (soft limit). Falls back to
+        ``HostConfig.Memory`` (hard limit) when reservation is unset,
+        and 0 when neither is set (unlimited container).
+      * ``source`` — which path produced the sample:
+          - ``"sdk"``         — docker-py SDK via unix socket
+          - ``"cli"``         — ``docker stats --no-stream`` fallback
+          - ``"unavailable"`` — both paths failed; counts default to 0
+        Source is surfaced so dashboards / alerts can tell whether we
+        still have the high-fidelity reservation number or only the
+        best-effort stats-usage proxy.
+      * ``sampled_at``                 — wall-clock ``time.time()``.
+
+    The SDK path is preferred because ``containers.list()`` exposes
+    ``HostConfig.MemoryReservation`` directly (what we *promised* the
+    container, which is what AIMD admission should gate on). The CLI
+    fallback — ``docker stats --no-stream`` — only reports current
+    *usage*, so in that path we sum the usage column as a best-effort
+    proxy. Dashboards should prefer the SDK number; the CLI number is
+    there to keep the Docker Desktop/WSL2 case from going blind.
+    """
+    container_count: int
+    total_mem_reservation_bytes: int
+    source: str
     sampled_at: float
 
 
@@ -355,6 +401,197 @@ def sample_host_once(*, cpu_interval: float = 1.0) -> HostSample:
         loadavg_1m=la1,
         loadavg_5m=la5,
         loadavg_15m=la15,
+        sampled_at=now,
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Docker-daemon sampling (SDK primary, CLI fallback)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DOCKER_STATS_TIMEOUT_S = 10
+"""Max wall time for the ``docker stats --no-stream`` fallback.
+
+``--no-stream`` is usually sub-second, but on a cold Docker Desktop the
+first invocation has to spin up the engine bridge which can take several
+seconds. 10s is a generous ceiling — we'd rather time out and return
+``source='unavailable'`` than block the 5s sampling loop."""
+
+
+def _sdk_mem_reservation_bytes(container) -> int:
+    """Extract ``HostConfig.MemoryReservation`` (soft limit) from a
+    docker-py container object, falling back to ``HostConfig.Memory``
+    (hard limit) when reservation is unset. Returns 0 when both are
+    unset (unlimited container).
+
+    ``container.attrs`` is the cached ``docker inspect`` payload. We
+    read it lazily (``containers.list()`` already warms the cache) so
+    we don't pay an extra round-trip per container.
+    """
+    try:
+        host_config = container.attrs.get("HostConfig", {}) or {}
+    except Exception:
+        return 0
+    reservation = int(host_config.get("MemoryReservation") or 0)
+    if reservation > 0:
+        return reservation
+    # Fall back to the hard limit — if the user capped the container at
+    # 2 GB, the reservation is effectively 2 GB even if unset.
+    return int(host_config.get("Memory") or 0)
+
+
+def _sample_docker_via_sdk() -> tuple[int, int] | None:
+    """Primary path — docker-py SDK.
+
+    Returns ``(container_count, total_mem_reservation_bytes)`` or
+    ``None`` if the SDK isn't installed / the daemon isn't reachable
+    / any per-container read raises. Callers treat ``None`` as "fall
+    back to the CLI path".
+    """
+    if docker_sdk is None:
+        return None
+    try:
+        client = docker_sdk.from_env(timeout=5)  # type: ignore[union-attr]
+        # status filter ensures we only see *running* containers; stopped
+        # ones don't consume scheduler slots so they don't count toward
+        # admission pressure.
+        containers = client.containers.list(filters={"status": "running"})
+    except Exception as exc:
+        logger.debug("docker SDK unavailable: %s", exc)
+        return None
+    count = len(containers)
+    total = 0
+    for c in containers:
+        total += _sdk_mem_reservation_bytes(c)
+    return count, total
+
+
+def _parse_docker_stats_mem_column(col: str) -> int:
+    """Parse the LHS of a ``docker stats`` MemUsage column.
+
+    docker stats renders memory as ``"<used> / <limit>"``, e.g.:
+        ``"127.5MiB / 1.95GiB"``
+        ``"512MB / 0B"``          (no limit set)
+        ``"0B / 0B"``             (container just started)
+
+    We take the part before the ``/`` and convert to bytes. Returns 0
+    on any parse failure so a malformed row doesn't poison the total.
+    """
+    try:
+        left = col.split("/", 1)[0].strip()
+    except Exception:
+        return 0
+    if not left:
+        return 0
+    # Strip the unit suffix. Order matters — check longer suffixes first
+    # so "KiB" doesn't match as "B".
+    units = [
+        ("PiB", 1024 ** 5), ("TiB", 1024 ** 4), ("GiB", 1024 ** 3),
+        ("MiB", 1024 ** 2), ("KiB", 1024),
+        ("PB", 10 ** 15), ("TB", 10 ** 12), ("GB", 10 ** 9),
+        ("MB", 10 ** 6), ("kB", 10 ** 3), ("KB", 10 ** 3),
+        ("B", 1),
+    ]
+    for suffix, mult in units:
+        if left.endswith(suffix):
+            num_part = left[: -len(suffix)].strip()
+            try:
+                return int(float(num_part) * mult)
+            except ValueError:
+                return 0
+    # No unit → assume bytes.
+    try:
+        return int(float(left))
+    except ValueError:
+        return 0
+
+
+def _sample_docker_via_cli() -> tuple[int, int] | None:
+    """Fallback path — ``docker stats --no-stream``.
+
+    Used on Docker Desktop / WSL2 where the docker-py SDK can't reach
+    the engine over the local unix socket (the CLI shells through
+    ``npipe`` or a relocated socket). The CLI does NOT expose
+    MemoryReservation, so we return *current usage* as a best-effort
+    proxy for reservation — flagged as ``source='cli'`` on the
+    returned ``DockerSample``.
+
+    Returns ``(container_count, total_mem_usage_bytes)`` or ``None`` if
+    the CLI isn't on PATH or the invocation fails.
+    """
+    if shutil.which("docker") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "stats", "--no-stream",
+                "--format", "{{.ID}}\t{{.MemUsage}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=DOCKER_STATS_TIMEOUT_S,
+            check=False,
+        )
+    except Exception as exc:
+        # Broad except is intentional — the sampler is a best-effort
+        # observer and must not let a subprocess quirk (TimeoutExpired,
+        # OSError, or a monkey-patched grenade in tests) tear down the
+        # lifespan task.
+        logger.debug("docker stats fallback failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.debug(
+            "docker stats returned rc=%d stderr=%s",
+            proc.returncode, (proc.stderr or "").strip(),
+        )
+        return None
+    count = 0
+    total = 0
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        count += 1
+        total += _parse_docker_stats_mem_column(parts[1])
+    return count, total
+
+
+def sample_docker_once() -> DockerSample:
+    """One-shot Docker-daemon sample — SDK primary, CLI fallback.
+
+    Returns a ``DockerSample`` with ``source='unavailable'`` (and zero
+    counts) when neither path succeeds — e.g. Docker isn't installed,
+    or we're running inside a container without access to the docker
+    socket. Callers treat that as "zero pressure from docker" rather
+    than raising; the psutil sample still tells the capacity planner
+    whether the host itself is hot.
+    """
+    now = time.time()
+    sdk_result = _sample_docker_via_sdk()
+    if sdk_result is not None:
+        count, total = sdk_result
+        return DockerSample(
+            container_count=count,
+            total_mem_reservation_bytes=total,
+            source="sdk",
+            sampled_at=now,
+        )
+    cli_result = _sample_docker_via_cli()
+    if cli_result is not None:
+        count, total = cli_result
+        return DockerSample(
+            container_count=count,
+            total_mem_reservation_bytes=total,
+            source="cli",
+            sampled_at=now,
+        )
+    return DockerSample(
+        container_count=0,
+        total_mem_reservation_bytes=0,
+        source="unavailable",
         sampled_at=now,
     )
 
