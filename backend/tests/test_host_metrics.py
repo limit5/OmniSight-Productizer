@@ -10,6 +10,7 @@ Covers:
   * reset_accounting scope (single tenant vs all)
   * Prometheus gauge publish (tenant_cpu_percent labels set)
   * get_tenant_usage fallback when no samples yet
+  * H1 — HOST_BASELINE constant contract (shape + values + immutability)
 """
 
 from __future__ import annotations
@@ -315,3 +316,44 @@ class TestEnumerate:
         assert len(rows) == 1
         assert rows[0]["tenant_id"] == "tenantA"
         ct._containers.clear()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H1 — HOST_BASELINE contract
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# These tests pin the H1 "baseline hardcode" row from TODO.md:
+#     HOST_BASELINE = HostBaseline(cpu_cores=16, mem_total_gb=64,
+#                                  disk_total_gb=512,
+#                                  cpu_model="AMD Ryzen 9 9950X")
+# Downstream capacity planner (AIMD admission) depends on the shape *and*
+# the exact values, so any drift here is a breaking change worth flagging
+# at test-time rather than in a capacity incident.
+
+class TestHostBaseline:
+    def test_host_baseline_is_a_hostbaseline_instance(self):
+        assert isinstance(hm.HOST_BASELINE, hm.HostBaseline)
+
+    def test_host_baseline_values_match_h1_spec(self):
+        assert hm.HOST_BASELINE.cpu_cores == 16
+        assert hm.HOST_BASELINE.mem_total_gb == 64
+        assert hm.HOST_BASELINE.disk_total_gb == 512
+        assert hm.HOST_BASELINE.cpu_model == "AMD Ryzen 9 9950X"
+
+    def test_host_baseline_field_types(self):
+        assert isinstance(hm.HOST_BASELINE.cpu_cores, int)
+        assert isinstance(hm.HOST_BASELINE.mem_total_gb, int)
+        assert isinstance(hm.HOST_BASELINE.disk_total_gb, int)
+        assert isinstance(hm.HOST_BASELINE.cpu_model, str)
+
+    def test_host_baseline_is_immutable(self):
+        # ``frozen=True`` guarantees no runtime code can mutate the ceiling.
+        with pytest.raises(Exception):
+            hm.HOST_BASELINE.cpu_cores = 99  # type: ignore[misc]
+
+    def test_hostbaseline_dataclass_shape(self):
+        # Catches accidental field rename — downstream serialisers key off
+        # these exact attribute names.
+        expected = {"cpu_cores", "mem_total_gb", "disk_total_gb", "cpu_model"}
+        actual = {f.name for f in hm.HostBaseline.__dataclass_fields__.values()}
+        assert actual == expected

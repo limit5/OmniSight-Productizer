@@ -75,6 +75,33 @@ pegged by a non-containerised workload."""
 #  Dataclasses
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+@dataclass(frozen=True)
+class HostBaseline:
+    """Static description of the physical host the backend is provisioned on.
+
+    H1 scope is a "baseline hardcode" — we don't auto-detect at boot because
+    the surrounding capacity planner (AIMD admission / quota headroom) needs
+    a stable ceiling that survives container restarts and doesn't drift when
+    psutil reports a temporarily-degraded core count (e.g. hotplug on WSL2).
+    Any future "runtime-detected baseline" work replaces ``HOST_BASELINE``
+    with a detected instance of the same shape — callers should keep reading
+    through ``HOST_BASELINE`` so that swap is a one-liner.
+    """
+
+    cpu_cores: int
+    mem_total_gb: int
+    disk_total_gb: int
+    cpu_model: str
+
+
+HOST_BASELINE = HostBaseline(
+    cpu_cores=16,
+    mem_total_gb=64,
+    disk_total_gb=512,
+    cpu_model="AMD Ryzen 9 9950X",
+)
+
+
 @dataclass
 class ContainerSample:
     """One cgroup scrape for a single container."""
