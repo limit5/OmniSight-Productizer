@@ -172,6 +172,187 @@ H2_REASON_CONTAINER = "container_cap"
 H2_BACKOFF_BASE_S: float = float(_os.environ.get("OMNISIGHT_H2_BACKOFF_BASE_S", "1.0"))
 H2_BACKOFF_CAP_S: float = float(_os.environ.get("OMNISIGHT_H2_BACKOFF_CAP_S", "30.0"))
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H2 row 1513: Turbo auto-derate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# When the host CPU stays above H2_TURBO_DERATE_CPU_PCT for at least
+# H2_TURBO_DERATE_SUSTAIN_S seconds, a session running in turbo mode is
+# temporarily served the *supervised* parallel budget (2) instead of the
+# turbo budget (8). The lower ceiling shrinks new-acquirer capacity
+# without revoking in-flight holders, matching the existing "mode switch
+# only affects fresh acquires" contract.
+#
+# Recovery is automatic once the CPU drops below the threshold AND the
+# low-pressure condition persists for H2_TURBO_RECOVER_COOLDOWN_S
+# seconds. A CPU spike mid-cooldown interrupts the cooldown — the system
+# stays derated until a full cooldown window passes below-threshold.
+#
+# The state machine advances in two places:
+#   1. The host sampling loop (5s cadence) calls evaluate_turbo_derate()
+#      once per tick to progress sustained / cooldown timers naturally.
+#   2. Each _ModeSlot.acquire() also calls it so the precondition is
+#      re-checked even in test runners where the sampling loop isn't
+#      running.
+
+H2_TURBO_DERATE_CPU_PCT: float = float(
+    _os.environ.get("OMNISIGHT_H2_TURBO_DERATE_CPU_PCT", "80.0")
+)
+H2_TURBO_DERATE_SUSTAIN_S: float = float(
+    _os.environ.get("OMNISIGHT_H2_TURBO_DERATE_SUSTAIN_S", "30.0")
+)
+H2_TURBO_RECOVER_COOLDOWN_S: float = float(
+    _os.environ.get("OMNISIGHT_H2_TURBO_RECOVER_COOLDOWN_S", "120.0")
+)
+
+
+@dataclass
+class _TurboDerateState:
+    derate_active: bool = False
+    # First time CPU crossed above threshold while not yet derated.
+    # Reset to None on every below-threshold sample.
+    high_cpu_since: float | None = None
+    # First time CPU dropped at/below threshold after derate started.
+    # Reset to None on any above-threshold sample so a spike interrupts
+    # the cooldown (the 2-min cooldown must be continuous).
+    low_cpu_since: float | None = None
+    # Wall-clock timestamp of the last derate/recover transition.
+    # Surfaced on the coordinator.turbo_derate / .turbo_recover events
+    # and read by tests.
+    last_transition_at: float | None = None
+
+
+_turbo_derate_state = _TurboDerateState()
+
+
+def _emit_turbo_transition(event: str, payload: dict[str, Any]) -> None:
+    """Best-effort SSE emit for turbo_derate / turbo_recover transitions.
+
+    Not audit-logged (that is row 1516). Logger.info keeps a paper
+    trail even when the SSE bus is unavailable (tests, cold start).
+    """
+    logger.info("coordinator turbo transition: %s %s", event, payload)
+    try:
+        from backend.events import bus as _bus
+        _bus.publish(event, payload)
+    except Exception as exc:
+        logger.debug("%s SSE publish failed: %s", event, exc)
+
+
+def evaluate_turbo_derate(
+    *,
+    now: float | None = None,
+    cpu_percent: float | None = None,
+) -> bool:
+    """Advance the turbo auto-derate state machine and return derate_active.
+
+    When *cpu_percent* is None the function reads the latest
+    HostSnapshot from ``backend.host_metrics``. When no snapshot
+    exists (cold start), the state is left unchanged — we neither
+    derate nor recover on unknown host pressure.
+
+    Safe to call from sync contexts (sampling loop, _ModeSlot.acquire).
+    State mutation is protected by _state_lock. Transitions (derate
+    engaged / recovered) emit coordinator.turbo_derate /
+    coordinator.turbo_recover SSE events while the lock is NOT held.
+    """
+    t = now if now is not None else time.time()
+
+    if cpu_percent is None:
+        try:
+            from backend import host_metrics as _hm
+            snap = _hm.get_latest_host_snapshot()
+        except Exception:
+            snap = None
+        if snap is None:
+            with _state_lock:
+                return _turbo_derate_state.derate_active
+        cpu_percent = float(snap.host.cpu_percent)
+
+    transition_event: str | None = None
+    transition_payload: dict[str, Any] | None = None
+    with _state_lock:
+        state = _turbo_derate_state
+        above = cpu_percent > H2_TURBO_DERATE_CPU_PCT
+        if above:
+            # CPU spike — cancel any in-progress cooldown.
+            state.low_cpu_since = None
+            if not state.derate_active:
+                if state.high_cpu_since is None:
+                    state.high_cpu_since = t
+                if t - state.high_cpu_since >= H2_TURBO_DERATE_SUSTAIN_S:
+                    state.derate_active = True
+                    state.last_transition_at = t
+                    transition_event = "coordinator.turbo_derate"
+                    transition_payload = {
+                        "cpu_percent": cpu_percent,
+                        "threshold_pct": H2_TURBO_DERATE_CPU_PCT,
+                        "sustained_s": t - state.high_cpu_since,
+                        "sustain_required_s": H2_TURBO_DERATE_SUSTAIN_S,
+                        "derated_to_budget": _PARALLEL_BUDGET[OperationMode.supervised],
+                        "from_budget": _PARALLEL_BUDGET[OperationMode.turbo],
+                        "at": t,
+                    }
+                    state.high_cpu_since = None
+        else:
+            state.high_cpu_since = None
+            if state.derate_active:
+                if state.low_cpu_since is None:
+                    state.low_cpu_since = t
+                if t - state.low_cpu_since >= H2_TURBO_RECOVER_COOLDOWN_S:
+                    state.derate_active = False
+                    cooldown_elapsed = t - state.low_cpu_since
+                    state.low_cpu_since = None
+                    state.last_transition_at = t
+                    transition_event = "coordinator.turbo_recover"
+                    transition_payload = {
+                        "cpu_percent": cpu_percent,
+                        "threshold_pct": H2_TURBO_DERATE_CPU_PCT,
+                        "cooldown_s": cooldown_elapsed,
+                        "cooldown_required_s": H2_TURBO_RECOVER_COOLDOWN_S,
+                        "restored_to_budget": _PARALLEL_BUDGET[OperationMode.turbo],
+                        "at": t,
+                    }
+        active = state.derate_active
+
+    if transition_event is not None and transition_payload is not None:
+        _emit_turbo_transition(transition_event, transition_payload)
+    return active
+
+
+def is_turbo_derated() -> bool:
+    """Read-only accessor for the current derate flag (observational)."""
+    with _state_lock:
+        return _turbo_derate_state.derate_active
+
+
+def turbo_derate_snapshot() -> dict[str, Any]:
+    """Expose the current state machine for tests + UI telemetry."""
+    with _state_lock:
+        s = _turbo_derate_state
+        return {
+            "derate_active": s.derate_active,
+            "high_cpu_since": s.high_cpu_since,
+            "low_cpu_since": s.low_cpu_since,
+            "last_transition_at": s.last_transition_at,
+            "threshold_pct": H2_TURBO_DERATE_CPU_PCT,
+            "sustain_required_s": H2_TURBO_DERATE_SUSTAIN_S,
+            "cooldown_required_s": H2_TURBO_RECOVER_COOLDOWN_S,
+        }
+
+
+def _effective_budget(mode: OperationMode) -> int:
+    """Parallel budget with the turbo-derate override applied.
+
+    Only turbo is affected — supervised / full_auto / manual keep
+    their static budgets. When derate is active, a turbo session is
+    served the supervised budget (2) until the cooldown completes.
+    """
+    if mode == OperationMode.turbo:
+        if is_turbo_derated():
+            return _PARALLEL_BUDGET[OperationMode.supervised]
+    return _PARALLEL_BUDGET[mode]
+
 
 def _h2_backoff_delay(attempt: int) -> float:
     """Exponential backoff: base * 2^(attempt-1), capped at H2_BACKOFF_CAP_S.
@@ -326,14 +507,19 @@ class _ModeSlot:
 
     def _get_cap(self) -> int:
         mode = get_session_mode(self._session_token) if self._session_token else get_mode()
-        return _PARALLEL_BUDGET[mode]
+        # Refresh the turbo-derate state machine so a sustained high-CPU
+        # window tightens the cap even if the sampling loop hasn't had
+        # a chance to tick yet (tests, cold-start).
+        evaluate_turbo_derate()
+        return _effective_budget(mode)
 
     async def _get_cap_async(self) -> int:
         if self._session_token:
             mode = await get_session_mode_async(self._session_token)
         else:
             mode = get_mode()
-        return _PARALLEL_BUDGET[mode]
+        evaluate_turbo_derate()
+        return _effective_budget(mode)
 
     def _is_turbo(self) -> bool:
         mode = get_session_mode(self._session_token) if self._session_token else get_mode()
@@ -939,6 +1125,10 @@ def _reset_for_tests() -> None:
         _pending.clear()
         _history.clear()
         _current_mode = OperationMode.supervised
+        _turbo_derate_state.derate_active = False
+        _turbo_derate_state.high_cpu_since = None
+        _turbo_derate_state.low_cpu_since = None
+        _turbo_derate_state.last_transition_at = None
     _shared_parallel.set(0)
     _shared_mode.set("current_mode", "supervised")
     _parallel_async_cond = None

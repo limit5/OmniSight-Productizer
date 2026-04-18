@@ -1160,6 +1160,15 @@ async def run_host_sampling_loop(interval_s: float = SAMPLE_INTERVAL_S,
                 _record_host_snapshot(snap)
                 _publish_host_prom_metrics(snap)
                 _publish_host_sse_tick(snap)
+                # H2 row 1513: advance the Coordinator's turbo
+                # auto-derate state machine with this tick's CPU
+                # reading. Triggers derate / recover transitions on
+                # the 5s cadence without waiting for an acquire().
+                try:
+                    from backend import decision_engine as _de
+                    _de.evaluate_turbo_derate(cpu_percent=snap.host.cpu_percent)
+                except Exception as exc:
+                    logger.debug("turbo-derate evaluate failed: %s", exc)
             except Exception as exc:
                 logger.warning(
                     "host_metrics host-sample iteration failed: %s", exc,
