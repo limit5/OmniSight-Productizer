@@ -239,7 +239,7 @@ Legend:
 **Part E — Connection Test 按鈕**
 - [x] 每個 Git forge 設定區塊加「Test Connection」按鈕
 - [x] GitHub：`GET /user` → 顯示帳號名 + scope
-- [ ] GitLab：`GET /api/v4/version` → 顯示版本
+- [x] GitLab：`GET /api/v4/version` → 顯示版本
 - [ ] Gerrit：SSH `gerrit version` → 顯示版本
 - [ ] Jira：`GET /rest/api/2/serverInfo` → 顯示版本
 - [ ] 測試結果即時顯示在按鈕旁（✅ / ❌ + 錯誤訊息）
