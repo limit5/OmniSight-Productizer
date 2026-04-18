@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -78,6 +79,18 @@ _async_cond: asyncio.Condition | None = None
 
 _DEFAULT_TENANT = "t-default"
 
+# H3 row 1524: Coordinator transparency — queue depth, deferred-5m,
+# effective budget (derate). `_waiters` counts tasks currently blocked
+# in `acquire()` waiting for a free slot; `_deferred_events` is a
+# rolling timestamp deque for tasks that had to wait for *any* slot
+# in the last DEFERRED_WINDOW_S; `_derate_ratio` shrinks the effective
+# budget when the coordinator decides the host is under pressure.
+DEFERRED_WINDOW_S: float = 300.0  # 5-minute rolling window
+_waiters: int = 0
+_deferred_events: deque[float] = deque()
+_derate_ratio: float = 1.0
+_derate_reason: str | None = None
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Internal helpers
@@ -129,6 +142,37 @@ def _has_grace_expired_grants(bucket: _TenantBucket, now: float) -> list[_Grant]
     ]
 
 
+def _effective_capacity_max_locked() -> float:
+    """Effective concurrency budget after derate — must be called with _lock held."""
+    # Floor at 1.0 so a full derate can't produce a zero-capacity deadlock.
+    return max(1.0, CAPACITY_MAX * _derate_ratio)
+
+
+def _trim_deferred_events_locked(now: float) -> None:
+    cutoff = now - DEFERRED_WINDOW_S
+    while _deferred_events and _deferred_events[0] < cutoff:
+        _deferred_events.popleft()
+
+
+def _record_deferral() -> None:
+    now = time.time()
+    with _lock:
+        _deferred_events.append(now)
+        _trim_deferred_events_locked(now)
+
+
+def _waiters_inc() -> None:
+    global _waiters
+    with _lock:
+        _waiters += 1
+
+
+def _waiters_dec() -> None:
+    global _waiters
+    with _lock:
+        _waiters = max(0, _waiters - 1)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -154,7 +198,7 @@ def try_acquire(
             return False
 
         total_used = _total_used()
-        if total_used + cost > CAPACITY_MAX:
+        if total_used + cost > _effective_capacity_max_locked():
             return False
 
         is_borrowed = bucket.used + cost > bucket.guaranteed
@@ -182,31 +226,42 @@ async def acquire(
     if _async_cond is None:
         _async_cond = asyncio.Condition()
 
+    # Fast path: slot available immediately → no deferral, no queue bump.
+    if try_acquire(tenant_id, cost, is_turbo):
+        return True
+
+    # Slow path: record a deferral (5-min rolling counter) and bump the
+    # queue-depth gauge for the duration of the wait so the ops panel
+    # can surface "N tasks are actually stuck waiting for a slot".
+    _record_deferral()
+    _waiters_inc()
+
     deadline = (time.time() + timeout_s) if timeout_s else None
 
-    while True:
-        if try_acquire(tenant_id, cost, is_turbo):
-            return True
+    try:
+        while True:
+            remaining = None
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
 
-        remaining = None
-        if deadline is not None:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                return False
+            async with _async_cond:
+                try:
+                    await asyncio.wait_for(
+                        _async_cond.wait(),
+                        timeout=min(remaining, 1.0) if remaining else 1.0,
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
-        async with _async_cond:
-            try:
-                await asyncio.wait_for(
-                    _async_cond.wait(),
-                    timeout=min(remaining, 1.0) if remaining else 1.0,
-                )
-            except asyncio.TimeoutError:
-                pass
-
-        if deadline is not None and time.time() >= deadline:
             if try_acquire(tenant_id, cost, is_turbo):
                 return True
-            return False
+
+            if deadline is not None and time.time() >= deadline:
+                return False
+    finally:
+        _waiters_dec()
 
 
 def release(tenant_id: str | None = None, cost: float = 1.0) -> None:
@@ -338,6 +393,8 @@ def snapshot() -> dict[str, Any]:
     """Return current capacity state for API / SSE telemetry."""
     with _lock:
         _recalc_guarantees()
+        now = time.time()
+        _trim_deferred_events_locked(now)
         tenants = {}
         for b in _buckets.values():
             tenants[b.tenant_id] = {
@@ -347,14 +404,55 @@ def snapshot() -> dict[str, Any]:
                 "grant_count": len(b.grants),
                 "turbo_cap": _tenant_turbo_cap(b.tenant_id),
             }
+        effective = _effective_capacity_max_locked()
         return {
             "capacity_max": CAPACITY_MAX,
+            "effective_capacity_max": effective,
+            "derated": _derate_ratio < 1.0,
+            "derate_ratio": _derate_ratio,
+            "derate_reason": _derate_reason,
+            "queue_depth": _waiters,
+            "deferred_5m": len(_deferred_events),
             "total_used": _total_used(),
-            "total_free": CAPACITY_MAX - _total_used(),
+            "total_free": effective - _total_used(),
             "active_tenants": len([b for b in _buckets.values() if b.used > 0]),
             "registered_tenants": len(_buckets),
             "tenants": tenants,
         }
+
+
+def queue_depth() -> int:
+    """Number of tasks currently blocked in `acquire()` waiting for a slot."""
+    with _lock:
+        return _waiters
+
+
+def deferred_count_recent() -> int:
+    """Deferred-task count in the last DEFERRED_WINDOW_S (5 min)."""
+    with _lock:
+        _trim_deferred_events_locked(time.time())
+        return len(_deferred_events)
+
+
+def effective_capacity_max() -> float:
+    """Effective budget tokens after derate — may be < CAPACITY_MAX."""
+    with _lock:
+        return _effective_capacity_max_locked()
+
+
+def set_derate(ratio: float, reason: str | None = None) -> None:
+    """Set the derate multiplier (0 < ratio <= 1).
+
+    Called by the Coordinator when host pressure crosses a threshold to
+    shrink the effective budget below CAPACITY_MAX. Wakes any waiters
+    so they re-check capacity against the new ceiling.
+    """
+    global _derate_ratio, _derate_reason
+    ratio = max(0.0, min(1.0, float(ratio)))
+    with _lock:
+        _derate_ratio = ratio
+        _derate_reason = reason if ratio < 1.0 else None
+    _notify_waiters()
 
 
 def tenant_usage(tenant_id: str) -> dict[str, Any]:
@@ -461,7 +559,11 @@ def _try_emit_grace_enforced(
 
 def _reset_for_tests() -> None:
     """Clear all state. Not for production use."""
-    global _async_cond
+    global _async_cond, _waiters, _derate_ratio, _derate_reason
     with _lock:
         _buckets.clear()
+        _deferred_events.clear()
+        _waiters = 0
+        _derate_ratio = 1.0
+        _derate_reason = None
     _async_cond = None

@@ -1975,6 +1975,17 @@ export interface OpsSummary {
     score: number
     verdict: "ok" | "warning" | "deadlock"
   } | null
+  /** H3 row 1524: DRF coordinator pressure — queue depth (tasks waiting
+   * for a slot), deferred count in the last 5 minutes, and the effective
+   * concurrency budget (may be < capacity_max when derated). */
+  coordinator?: {
+    capacity_max: number
+    effective_budget: number
+    queue_depth: number
+    deferred_5m: number
+    derated: boolean
+    derate_reason?: string | null
+  } | null
 }
 
 export async function getOpsSummary(): Promise<OpsSummary> {

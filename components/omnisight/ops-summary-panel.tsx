@@ -13,7 +13,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Activity, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain } from "lucide-react"
+import {
+  Activity, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain,
+  Layers, TimerReset, Gauge,
+} from "lucide-react"
 import { getOpsSummary, type OpsSummary } from "@/lib/api"
 
 const POLL_MS = 10_000
@@ -95,6 +98,25 @@ export function OpsSummaryPanel() {
         </div>
       )}
 
+      {/* H3 row 1524: Coordinator transparency — queue depth (tasks
+          currently blocked waiting for a token), deferred count in the
+          last 5 min, and the effective concurrency budget (may be less
+          than CAPACITY_MAX when the Coordinator has derated the host).
+          Hidden until the backend actually surfaces the snapshot so
+          older backends degrade gracefully. */}
+      {data && data.coordinator && (
+        <div
+          className="px-3 pb-2 -mt-1"
+          data-testid="ops-coordinator-section"
+        >
+          <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1">
+            <Gauge size={10} aria-hidden />
+            COORDINATOR
+          </div>
+          <CoordinatorRow entry={data.coordinator} />
+        </div>
+      )}
+
       {/* R2 (#308): Highest-entropy agent at-a-glance. Hidden entirely
           when the monitor hasn't produced any measurement yet so the
           panel stays empty on fresh deployments. */}
@@ -159,10 +181,21 @@ const TONE_CLASS: Record<Tone, string> = {
 }
 
 function Kpi({
-  icon: Icon, label, value, tone,
-}: { icon: typeof Activity; label: string; value: string; tone: Tone }) {
+  icon: Icon, label, value, tone, title, testId,
+}: {
+  icon: typeof Activity
+  label: string
+  value: string
+  tone: Tone
+  title?: string
+  testId?: string
+}) {
   return (
-    <div className="flex flex-col items-start gap-0.5 p-2 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.2))] bg-white/5">
+    <div
+      className="flex flex-col items-start gap-0.5 p-2 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.2))] bg-white/5"
+      title={title}
+      data-testid={testId}
+    >
       <div className="flex items-center gap-1 font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)]">
         <Icon className="w-3 h-3" aria-hidden />
         {label}
@@ -204,6 +237,57 @@ function HighestEntropyRow({ entry }: {
     </div>
   )
 }
+
+function CoordinatorRow({ entry }: {
+  entry: NonNullable<OpsSummary["coordinator"]>
+}) {
+  const queueTone: Tone = entry.queue_depth === 0
+    ? "ok"
+    : entry.queue_depth > 5 ? "warn" : "info"
+  const deferredTone: Tone = entry.deferred_5m === 0
+    ? "ok"
+    : entry.deferred_5m > 20 ? "warn" : "info"
+  // effective budget: warn when the coordinator is actively derated,
+  // otherwise neutral info — a matching capacity_max is the happy path.
+  const budgetTone: Tone = entry.derated ? "warn" : "info"
+  const budgetTitle = entry.derated
+    ? `Derated${entry.derate_reason ? `: ${entry.derate_reason}` : ""} — effective ${entry.effective_budget} / ${entry.capacity_max} tokens`
+    : `Coordinator budget: ${entry.effective_budget} / ${entry.capacity_max} tokens`
+  return (
+    <div
+      className="grid grid-cols-3 gap-2"
+      data-testid="ops-coordinator-row"
+    >
+      <Kpi
+        icon={Layers}
+        label="QUEUE"
+        value={String(entry.queue_depth)}
+        tone={queueTone}
+      />
+      <Kpi
+        icon={TimerReset}
+        label="DEFERRED 5m"
+        value={String(entry.deferred_5m)}
+        tone={deferredTone}
+      />
+      <Kpi
+        icon={Gauge}
+        label="EFF BUDGET"
+        value={`${formatBudget(entry.effective_budget)}/${entry.capacity_max}`}
+        tone={budgetTone}
+        title={budgetTitle}
+        testId="ops-eff-budget"
+      />
+    </div>
+  )
+}
+
+
+function formatBudget(n: number): string {
+  // Keep integer budgets clean; show one decimal only when fractional.
+  return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
+
 
 function RunnerPill({ label, value, accent }: { label: string; value: number; accent: string }) {
   return (

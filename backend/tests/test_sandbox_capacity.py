@@ -382,3 +382,96 @@ class TestReset:
         snap = sc.snapshot()
         assert snap["total_used"] == 0
         assert snap["tenants"] == {}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H3 row 1524 — Coordinator transparency
+#  queue_depth, deferred_5m, effective budget, derate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestCoordinatorTransparency:
+    def test_fresh_snapshot_has_zero_pressure_and_no_derate(self):
+        snap = sc.snapshot()
+        assert snap["queue_depth"] == 0
+        assert snap["deferred_5m"] == 0
+        assert snap["derated"] is False
+        assert snap["derate_ratio"] == 1.0
+        assert snap["derate_reason"] is None
+        assert snap["effective_capacity_max"] == sc.CAPACITY_MAX
+
+    def test_set_derate_shrinks_effective_budget(self):
+        sc.set_derate(0.5, reason="CPU 87% > threshold")
+        snap = sc.snapshot()
+        assert snap["derated"] is True
+        assert snap["derate_ratio"] == 0.5
+        assert snap["derate_reason"] == "CPU 87% > threshold"
+        assert snap["effective_capacity_max"] == sc.CAPACITY_MAX * 0.5
+
+    def test_derate_caps_try_acquire_at_effective_budget(self):
+        sc.set_derate(0.5)  # effective budget = 6.0
+        # Should accept up to 6 tokens worth of work
+        assert sc.try_acquire("t-a", cost=6.0) is True
+        # Anything above the effective budget must be rejected even
+        # though CAPACITY_MAX (12) has spare room.
+        assert sc.try_acquire("t-b", cost=1.0) is False
+
+    def test_clearing_derate_restores_full_capacity(self):
+        sc.set_derate(0.5, reason="cpu hot")
+        sc.set_derate(1.0)  # clear
+        snap = sc.snapshot()
+        assert snap["derated"] is False
+        assert snap["derate_reason"] is None
+        assert sc.try_acquire("t-a", cost=12.0) is True
+
+    def test_derate_ratio_floor_never_zero(self):
+        # A fully clamped ratio must still leave at least 1 effective
+        # token so waiters can't deadlock forever.
+        sc.set_derate(0.0)
+        snap = sc.snapshot()
+        assert snap["effective_capacity_max"] >= 1.0
+
+    def test_deferred_counter_records_wait_events(self):
+        # Fill capacity so every subsequent acquire() is deferred.
+        for _ in range(sc.CAPACITY_MAX):
+            sc.try_acquire("t-a", cost=1.0)
+
+        async def _attempt():
+            # Very short timeout → acquire returns False, but the
+            # attempt still counts as a deferral.
+            return await sc.acquire("t-b", cost=1.0, timeout_s=0.05)
+
+        results = asyncio.get_event_loop().run_until_complete(
+            asyncio.gather(_attempt(), _attempt())
+        )
+        assert results == [False, False]
+        assert sc.deferred_count_recent() == 2
+        # queue_depth must drop back to 0 once the waiters finish.
+        assert sc.queue_depth() == 0
+
+    def test_deferred_events_expire_after_window(self):
+        # Stuff in an old deferral beyond the 5-min window and verify
+        # the rolling trim drops it from the count.
+        sc._deferred_events.append(time.time() - (sc.DEFERRED_WINDOW_S + 1))
+        assert sc.deferred_count_recent() == 0
+        snap = sc.snapshot()
+        assert snap["deferred_5m"] == 0
+
+    def test_queue_depth_reflects_waiter_during_wait(self):
+        # Saturate capacity.
+        for _ in range(sc.CAPACITY_MAX):
+            sc.try_acquire("t-a", cost=1.0)
+
+        async def _driver():
+            async def _wait():
+                return await sc.acquire("t-b", cost=1.0, timeout_s=0.3)
+            task = asyncio.create_task(_wait())
+            # Give the task a chance to fail the fast path and register.
+            await asyncio.sleep(0.05)
+            depth_during = sc.queue_depth()
+            result = await task
+            return depth_during, result
+
+        depth_during, result = asyncio.get_event_loop().run_until_complete(_driver())
+        assert depth_during == 1
+        assert result is False
+        assert sc.queue_depth() == 0

@@ -234,11 +234,31 @@ async def ops_summary() -> dict:
     except Exception as exc:
         logger.debug("ops_summary: t3 runner lookup failed: %s", exc)
 
+    # H3 row 1524: Coordinator transparency — queue depth / deferred-5m /
+    # effective concurrency budget so the Ops Summary panel can show
+    # when the DRF token bucket is saturated or the Coordinator has
+    # derated the effective budget below CAPACITY_MAX.
+    coordinator_snap: dict[str, Any] | None = None
+    try:
+        from backend import sandbox_capacity as _sc
+        snap = _sc.snapshot()
+        coordinator_snap = {
+            "capacity_max": snap["capacity_max"],
+            "effective_budget": snap["effective_capacity_max"],
+            "queue_depth": snap["queue_depth"],
+            "deferred_5m": snap["deferred_5m"],
+            "derated": snap["derated"],
+            "derate_reason": snap.get("derate_reason"),
+        }
+    except Exception as exc:
+        logger.debug("ops_summary: coordinator lookup failed: %s", exc)
+
     return {
         "checked_at": time.time(),
         "uptime_s": uptime,
         "t3_runners": t3_runners,
         "highest_entropy_agent": highest_entropy,
+        "coordinator": coordinator_snap,
         # Spend
         "daily_cost_usd": _sys.get_daily_cost(),
         "hourly_cost_usd": _sys.get_hourly_cost()
