@@ -197,8 +197,43 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
 
 
 async def close() -> None:
+    """Checkpoint WAL + close the database connection.
+
+    The checkpoint is C2 (audit 2026-04-19): previously ``close()`` just
+    dropped the connection, which under aiosqlite means the WAL file
+    (.db-wal) may still hold committed transactions that haven't been
+    folded back into the main DB. If the process is then SIGKILLed
+    before the OS flushes the WAL (e.g. drain timeout → systemd escalates
+    to SIGKILL, or the host crashes), restart recovery has to replay the
+    WAL. Most of the time that works — but any filesystem-level
+    corruption of the WAL during the unclean shutdown becomes silent
+    data loss.
+
+    ``wal_checkpoint(RESTART)`` forces every committed page into the
+    main DB and resets the WAL to size 0 before we let go of the
+    connection. Takes ~ms on typical data volumes; errors are logged
+    but never raised because the ``close`` path must be infallible —
+    a failed checkpoint still leaves the DB readable on next boot via
+    normal WAL replay. ``PASSIVE`` is a fallback for the rare case where
+    ``RESTART`` is blocked by another reader (unlikely in lifespan
+    teardown since all handlers have drained).
+    """
     global _db
     if _db:
+        for mode in ("RESTART", "PASSIVE"):
+            try:
+                async with _db.execute(f"PRAGMA wal_checkpoint({mode})") as cur:
+                    row = await cur.fetchone()
+                if row is not None:
+                    # row = (busy, log, checkpointed). busy=0 means clean.
+                    logger.debug(
+                        "[db] wal_checkpoint(%s) busy=%s log=%s checkpointed=%s",
+                        mode, row[0], row[1], row[2],
+                    )
+                if row is None or row[0] == 0:
+                    break  # clean checkpoint → stop; no need for PASSIVE fallback
+            except Exception as exc:
+                logger.warning("[db] wal_checkpoint(%s) failed: %s", mode, exc)
         await _db.close()
         _db = None
 
