@@ -1,0 +1,105 @@
+# Staging compose — mirrors production but on different ports.
+# Runs on WSL Ubuntu-22.04 for pre-release validation.
+#
+# Usage:
+#   cd ~/work/sora/OmniSight-Productizer
+#   cp .env.example .env.staging
+#   # Edit .env.staging: set API keys + OMNISIGHT_ENV=staging
+#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d
+#
+# Port mapping (avoids conflict with production on Ubuntu-24.04):
+#   Frontend:  3010 (prod: 3000)
+#   Backend-A: 8010 (prod: 8000)
+#   Backend-B: 8011 (prod: 8001)
+#   No Caddy/HTTPS — staging is internal only.
+
+services:
+  backend-a:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8010:8000"
+    volumes:
+      - staging-data:/app/data
+      - staging-artifacts:/app/.artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OMNISIGHT_DEBUG=false
+      - OMNISIGHT_AUTH_MODE=strict
+      - OMNISIGHT_ENV=staging
+      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      - OMNISIGHT_INSTANCE_ID=staging-a
+    env_file:
+      - .env.staging
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  backend-b:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command:
+      - "sh"
+      - "-c"
+      - "WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS"
+    ports:
+      - "8011:8001"
+    volumes:
+      - staging-data:/app/data
+      - staging-artifacts:/app/.artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OMNISIGHT_DEBUG=false
+      - OMNISIGHT_AUTH_MODE=strict
+      - OMNISIGHT_ENV=staging
+      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      - OMNISIGHT_INSTANCE_ID=staging-b
+    env_file:
+      - .env.staging
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        BACKEND_URL: http://backend-a:8000
+    ports:
+      - "3010:3000"
+    environment:
+      - BACKEND_URL=http://backend-a:8000
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=4096
+    depends_on:
+      backend-a:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  staging-data:
+    driver: local
+  staging-artifacts:
+    driver: local
