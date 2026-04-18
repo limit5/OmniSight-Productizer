@@ -1319,4 +1319,23 @@ describe("IntegrationSettings — Part D tab split", () => {
     expect(screen.getByText("GitLab Secret")).toBeTruthy()
     expect(screen.getByText("Jira Secret")).toBeTruthy()
   })
+
+  /**
+   * B14 Part D row 232 — Tab 1 "Git" must collect GitHub token, GitLab
+   * token + URL, SSH key, and expose the Multiple Instances multi-repo
+   * token-map UI introduced in Part B. This lock-in test asserts all five
+   * surfaces are reachable from the default (Git) tab without additional
+   * navigation, so a future refactor can't silently demote any of them.
+   */
+  it("Git tab exposes GitHub token, GitLab token/URL, SSH key, and Multiple Instances (row 232)", async () => {
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    // Git tab is the default — no user.click needed.
+    await screen.findByRole("tab", { name: /GIT\b/ })
+    expect(screen.getByText("SSH Key")).toBeTruthy()
+    expect(screen.getByText("GitHub Token")).toBeTruthy()
+    expect(screen.getByText("GitLab Token")).toBeTruthy()
+    expect(screen.getByText("GitLab URL")).toBeTruthy()
+    // MultipleInstancesSection header — the multi-repo token-map UI from Part B.
+    expect(screen.getByText(/Multiple Instances/i)).toBeTruthy()
+  })
 })
