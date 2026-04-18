@@ -17,6 +17,8 @@
 
 import Link, { type LinkProps } from "next/link"
 import {
+  useEffect,
+  useRef,
   useState,
   type ComponentType,
   type CSSProperties,
@@ -89,7 +91,7 @@ const CODE_PRESETS: Record<ErrorCode, CodePreset> = {
     systemLabel: "SYS.INPUT · MALFORMED",
     displayCode: "400",
     title: "請求格式有誤",
-    friendlyMessage: "您的請求未通過格式檢查，請確認輸入內容後重試。",
+    friendlyMessage: "請求格式有誤，請檢查輸入後重試。",
     accent: "orange",
     icon: AlertTriangle,
   },
@@ -97,7 +99,7 @@ const CODE_PRESETS: Record<ErrorCode, CodePreset> = {
     systemLabel: "SYS.AUTH · SESSION EXPIRED",
     displayCode: "401",
     title: "登入已過期",
-    friendlyMessage: "您的登入狀態已失效，請重新登入以繼續操作。",
+    friendlyMessage: "登入已過期，請重新登入。",
     accent: "orange",
     icon: LogIn,
   },
@@ -105,7 +107,7 @@ const CODE_PRESETS: Record<ErrorCode, CodePreset> = {
     systemLabel: "SYS.ACL · FORBIDDEN",
     displayCode: "403",
     title: "沒有存取權限",
-    friendlyMessage: "您目前的帳號沒有此頁面的存取權限，請聯繫管理員開通。",
+    friendlyMessage: "您沒有此頁面的存取權限，請聯繫管理員開通。",
     accent: "orange",
     icon: Lock,
   },
@@ -113,7 +115,7 @@ const CODE_PRESETS: Record<ErrorCode, CodePreset> = {
     systemLabel: "SYS.ROUTE · NO MATCH",
     displayCode: "404",
     title: "找不到此頁面",
-    friendlyMessage: "您所尋找的頁面不存在或已移除，請確認網址是否正確。",
+    friendlyMessage: "此頁面不存在或已移除，請確認網址是否正確。",
     accent: "red",
     icon: AlertTriangle,
   },
@@ -121,7 +123,7 @@ const CODE_PRESETS: Record<ErrorCode, CodePreset> = {
     systemLabel: "SYS.EXCEPTION · INTERNAL",
     displayCode: "500",
     title: "系統發生內部錯誤",
-    friendlyMessage: "我們已收到錯誤通知，請稍後重試或回報下方 trace ID。",
+    friendlyMessage: "系統發生內部錯誤，我們已收到通知。",
     accent: "red",
     icon: ShieldAlert,
   },
@@ -129,18 +131,33 @@ const CODE_PRESETS: Record<ErrorCode, CodePreset> = {
     systemLabel: "SYS.UPSTREAM · BAD GATEWAY",
     displayCode: "502",
     title: "後端服務暫時不可用",
-    friendlyMessage: "上游服務目前無法回應，請稍後重試。",
+    friendlyMessage: "後端服務暫時不可用，請稍後重試。",
     accent: "red",
     icon: AlertTriangle,
   },
   503: {
     systemLabel: "SYS.SERVICE · UNAVAILABLE",
     displayCode: "503",
-    title: "服務維護中",
-    friendlyMessage: "系統正在進行維護或初始設定，請稍後再試。",
+    title: "系統維護中",
+    friendlyMessage: "系統維護中，請稍後再試。",
     accent: "orange",
     icon: Wrench,
   },
+}
+
+/**
+ * Alternate preset for 503 when the backend reports `error === "bootstrap_required"`.
+ * The bootstrap case is semantically different from a maintenance window — we want
+ * users to act on it (finish setup) rather than wait — so we flip the copy and the
+ * default action via the `bootstrapRequired` prop (or `/errors/503?bootstrap=1`).
+ */
+const BOOTSTRAP_REQUIRED_PRESET: CodePreset = {
+  systemLabel: "SYS.BOOTSTRAP · SETUP PENDING",
+  displayCode: "503",
+  title: "設定未完成",
+  friendlyMessage: "系統初始設定尚未完成，請先完成 bootstrap 流程。",
+  accent: "orange",
+  icon: Wrench,
 }
 
 export interface ErrorPageAction {
@@ -165,6 +182,25 @@ export interface ErrorPageProps {
   icon?: ComponentType<{ size?: number; className?: string; style?: CSSProperties }>
   defaultExpanded?: boolean
   footer?: ReactNode
+  /**
+   * Optional trace identifier shown under the friendly message. Rendered as a
+   * selectable mono badge so a user can screenshot or paste it into a bug
+   * report. Primary use case is the 500 preset ("系統發生內部錯誤，我們已收到通知"
+   * + trace ID).
+   */
+  traceId?: string
+  /**
+   * When set, display a countdown under the friendly message and reload the
+   * window automatically once it reaches zero. Primary use case is the 502
+   * preset ("後端服務暫時不可用"). Pass `0` or a negative number to disable.
+   */
+  autoRetrySeconds?: number
+  /**
+   * When true on a 503 page, swap the friendly copy to the "設定未完成"
+   * bootstrap variant and default the primary action to `/setup-required`.
+   * Callers use this when the backend reports `error === "bootstrap_required"`.
+   */
+  bootstrapRequired?: boolean
 }
 
 function actionClassName(variant: ErrorPageAction["variant"]) {
@@ -233,7 +269,10 @@ function ActionNode({ action }: { action: ErrorPageAction }) {
  * Keeps this component useful as a drop-in "just tell me the code" fallback
  * while letting feature pages fully customize when they need retry/report.
  */
-function defaultActionsFor(code: ErrorCode): ErrorPageAction[] {
+function defaultActionsFor(
+  code: ErrorCode,
+  opts: { bootstrapRequired?: boolean } = {},
+): ErrorPageAction[] {
   switch (code) {
     case 401:
       return [
@@ -251,9 +290,31 @@ function defaultActionsFor(code: ErrorCode): ErrorPageAction[] {
           external: true,
         },
       ]
+    case 503:
+      if (opts.bootstrapRequired) {
+        return [
+          {
+            label: "前往設定",
+            href: "/setup-required",
+            icon: Wrench,
+            variant: "primary",
+          },
+          { label: "回首頁", href: "/", icon: Home, variant: "secondary" },
+        ]
+      }
+      return [
+        {
+          label: "重試",
+          onClick: () => {
+            if (typeof window !== "undefined") window.location.reload()
+          },
+          icon: RefreshCw,
+          variant: "primary",
+        },
+        { label: "回首頁", href: "/", icon: Home, variant: "secondary" },
+      ]
     case 500:
     case 502:
-    case 503:
       return [
         {
           label: "重試",
@@ -274,8 +335,57 @@ function defaultActionsFor(code: ErrorCode): ErrorPageAction[] {
   }
 }
 
+/**
+ * Countdown badge that triggers `window.location.reload()` once it reaches 0.
+ * Split out so 502 (and any future caller) can opt in via `autoRetrySeconds`
+ * without the component needing to know about React timers elsewhere.
+ */
+function AutoRetryCountdown({ seconds }: { seconds: number }) {
+  const [remaining, setRemaining] = useState(Math.max(0, Math.floor(seconds)))
+  const reloadedRef = useRef(false)
+
+  useEffect(() => {
+    setRemaining(Math.max(0, Math.floor(seconds)))
+    reloadedRef.current = false
+  }, [seconds])
+
+  useEffect(() => {
+    if (remaining <= 0) {
+      if (!reloadedRef.current && typeof window !== "undefined") {
+        reloadedRef.current = true
+        window.location.reload()
+      }
+      return
+    }
+    const t = window.setTimeout(() => setRemaining((v) => v - 1), 1000)
+    return () => window.clearTimeout(t)
+  }, [remaining])
+
+  return (
+    <div
+      className="mt-4 inline-flex items-center gap-2 rounded border border-[var(--holo-glass-border)] bg-black/30 px-3 py-1.5 font-mono text-[11px] text-[var(--muted-foreground)]"
+      role="status"
+      aria-live="polite"
+      data-testid="error-page-auto-retry"
+    >
+      <RefreshCw
+        size={12}
+        className={remaining > 0 ? "animate-spin" : ""}
+        aria-hidden="true"
+      />
+      <span>
+        將於 <span className="text-[var(--neural-blue)]">{remaining}s</span> 後自動重試
+      </span>
+    </div>
+  )
+}
+
 export function ErrorPage(props: ErrorPageProps) {
-  const preset = CODE_PRESETS[props.code]
+  const useBootstrapPreset =
+    props.code === 503 && Boolean(props.bootstrapRequired)
+  const preset = useBootstrapPreset
+    ? BOOTSTRAP_REQUIRED_PRESET
+    : CODE_PRESETS[props.code]
   const accentKey: AccentKey = props.accent ?? preset.accent
   const accent = ACCENT_TOKENS[accentKey]
   const Icon = props.icon ?? preset.icon ?? AlertTriangle
@@ -286,9 +396,13 @@ export function ErrorPage(props: ErrorPageProps) {
   const actions =
     props.actions && props.actions.length > 0
       ? props.actions
-      : defaultActionsFor(props.code)
+      : defaultActionsFor(props.code, {
+          bootstrapRequired: useBootstrapPreset,
+        })
 
   const [expanded, setExpanded] = useState(Boolean(props.defaultExpanded))
+  const autoRetryActive =
+    typeof props.autoRetrySeconds === "number" && props.autoRetrySeconds > 0
 
   return (
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[var(--deep-space-start)]">
@@ -346,6 +460,30 @@ export function ErrorPage(props: ErrorPageProps) {
           <div className="mt-3 font-mono text-sm text-[var(--muted-foreground)] text-center leading-relaxed">
             {friendlyMessage}
           </div>
+
+          {(props.traceId || autoRetryActive) && (
+            <div className="mt-4 flex flex-col items-center gap-2">
+              {props.traceId ? (
+                <div
+                  className="inline-flex items-center gap-2 rounded border border-[var(--holo-glass-border)] bg-black/30 px-3 py-1.5 font-mono text-[11px]"
+                  data-testid="error-page-trace-id"
+                >
+                  <span className="uppercase tracking-widest text-[var(--muted-foreground)]">
+                    trace id
+                  </span>
+                  <span
+                    className="select-all break-all text-[var(--neural-blue)]"
+                    style={{ color: accent.text }}
+                  >
+                    {props.traceId}
+                  </span>
+                </div>
+              ) : null}
+              {autoRetryActive ? (
+                <AutoRetryCountdown seconds={props.autoRetrySeconds as number} />
+              ) : null}
+            </div>
+          )}
 
           {actions.length > 0 && (
             <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">

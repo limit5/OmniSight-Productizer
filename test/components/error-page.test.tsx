@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
-import { render, screen, fireEvent } from "@testing-library/react"
+import { act, render, screen, fireEvent } from "@testing-library/react"
 
 /**
  * Unit tests for the shared FUI error page component (B13 Part B, #339).
@@ -51,8 +51,81 @@ describe("ErrorPage", () => {
     render(<ErrorPage code={404} />)
     expect(screen.getByText("找不到此頁面")).toBeInTheDocument()
     expect(
-      screen.getByText(/您所尋找的頁面不存在或已移除/),
+      screen.getByText(/此頁面不存在或已移除/),
     ).toBeInTheDocument()
+  })
+
+  it.each([
+    [400, "請求格式有誤，請檢查輸入後重試。"],
+    [401, "登入已過期，請重新登入。"],
+    [403, "您沒有此頁面的存取權限，請聯繫管理員開通。"],
+    [404, "此頁面不存在或已移除，請確認網址是否正確。"],
+    [500, "系統發生內部錯誤，我們已收到通知。"],
+    [502, "後端服務暫時不可用，請稍後重試。"],
+    [503, "系統維護中，請稍後再試。"],
+  ] as const)(
+    "exposes the spec-defined friendly message for HTTP %s",
+    (code, message) => {
+      render(<ErrorPage code={code} />)
+      expect(screen.getByText(message)).toBeInTheDocument()
+    },
+  )
+
+  it("renders a copyable trace ID when supplied (500 preset)", () => {
+    render(<ErrorPage code={500} traceId="req_abc-123" />)
+    const badge = screen.getByTestId("error-page-trace-id")
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveTextContent("req_abc-123")
+  })
+
+  it("omits the trace ID badge entirely when traceId is empty", () => {
+    render(<ErrorPage code={500} />)
+    expect(screen.queryByTestId("error-page-trace-id")).not.toBeInTheDocument()
+  })
+
+  it("renders an auto-retry countdown and reloads when it hits zero (502)", () => {
+    vi.useFakeTimers()
+    const reload = window.location.reload as unknown as ReturnType<typeof vi.fn>
+    try {
+      render(<ErrorPage code={502} autoRetrySeconds={2} />)
+      const badge = screen.getByTestId("error-page-auto-retry")
+      expect(badge).toHaveTextContent("2s")
+
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(badge).toHaveTextContent("1s")
+
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(badge).toHaveTextContent("0s")
+
+      act(() => {
+        vi.advanceTimersByTime(0)
+      })
+      expect(reload).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("swaps 503 to the bootstrap-required preset when bootstrapRequired is true", () => {
+    render(<ErrorPage code={503} bootstrapRequired />)
+    expect(screen.getByText("設定未完成")).toBeInTheDocument()
+    expect(
+      screen.getByText(/系統初始設定尚未完成/),
+    ).toBeInTheDocument()
+    const go = screen.getByRole("link", { name: /前往設定/ })
+    expect(go).toHaveAttribute("href", "/setup-required")
+    // Default maintenance copy must NOT leak through when bootstrap is active.
+    expect(screen.queryByText("系統維護中，請稍後再試。")).not.toBeInTheDocument()
+  })
+
+  it("keeps 503 on the maintenance preset when bootstrapRequired is false", () => {
+    render(<ErrorPage code={503} />)
+    expect(screen.getByText("系統維護中")).toBeInTheDocument()
+    expect(screen.queryByText("設定未完成")).not.toBeInTheDocument()
   })
 
   it("lets callers override title, friendlyMessage, and systemLabel", () => {
