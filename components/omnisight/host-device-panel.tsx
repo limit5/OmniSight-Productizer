@@ -8,8 +8,13 @@ import {
   getMyHostMetrics,
   type TenantUsage,
 } from "@/lib/api"
-import { useHostMetricsTick } from "@/hooks/use-host-metrics-tick"
 import {
+  useHostMetricsTick,
+  type HostMetricsHistoryPoint,
+} from "@/hooks/use-host-metrics-tick"
+import {
+  Activity,
+  Boxes,
   Cpu,
   HardDrive,
   MemoryStick,
@@ -203,9 +208,223 @@ function DeviceCard({
   )
 }
 
+// 60-pt SVG sparkline. Pure presentational: caller passes the rolling
+// window from `useHostMetricsTick().history` (capped at 60 by the hook).
+// `domainMax` lets percentage metrics share a consistent 0..100 y-axis so
+// shape changes reflect actual pressure, not auto-scaling. Unbounded
+// metrics (loadavg / container count) auto-fit by passing `null`.
+export function MetricSparkline({
+  values,
+  color,
+  domainMax = null,
+  width = 96,
+  height = 18,
+  testId,
+}: {
+  values: number[]
+  color: string
+  domainMax?: number | null
+  width?: number
+  height?: number
+  testId?: string
+}) {
+  if (values.length < 2) {
+    return (
+      <div
+        data-testid={testId}
+        data-empty="true"
+        className="opacity-30 font-mono text-[9px] flex items-center justify-end"
+        style={{ width, height }}
+      >
+        —
+      </div>
+    )
+  }
+  const min = 0
+  const max = domainMax ?? Math.max(1, ...values)
+  const range = Math.max(0.001, max - min)
+  const stepX = width / (values.length - 1)
+  const pts = values
+    .map((v, i) => {
+      const x = i * stepX
+      const y = height - ((Math.max(min, Math.min(max, v)) - min) / range) * height
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(" ")
+  return (
+    <svg
+      data-testid={testId}
+      data-points={values.length}
+      width={width}
+      height={height}
+      className="shrink-0"
+      aria-hidden
+    >
+      <polyline fill="none" stroke={color} strokeWidth={1.2} points={pts} />
+    </svg>
+  )
+}
+
+interface LiveTickFields {
+  cpuUsage: number       // %
+  memPercent: number     // %
+  memUsedGb: number
+  memTotalGb: number
+  diskPercent: number    // %
+  diskUsedGb: number
+  diskTotalGb: number
+  loadavg1m: number
+  containerCount: number
+}
+
+// Memory available is total - used (cgroup-style; the SSE tick reports
+// the same `mem_total_gb − mem_used_gb` semantics the backend computes).
+const memAvailable = (t: LiveTickFields) =>
+  Math.max(0, t.memTotalGb - t.memUsedGb)
+
+function LiveMetricsSection({
+  tick,
+  history,
+  cpuModel,
+  cpuCores,
+  arch,
+}: {
+  tick: LiveTickFields | null
+  history: HostMetricsHistoryPoint[]
+  cpuModel: string
+  cpuCores: number
+  arch: string
+}) {
+  const cpuValues = history.map((p) => p.cpu_percent)
+  const memValues = history.map((p) => p.mem_percent)
+  const diskValues = history.map((p) => p.disk_percent)
+  const loadValues = history.map((p) => p.loadavg_1m)
+  const containerValues = history.map((p) => p.container_count)
+  const fmt = (v: number, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : "—")
+  return (
+    <div className="space-y-2">
+      {/* CPU */}
+      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-cpu">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <Cpu size={12} className="text-[var(--hardware-orange)] shrink-0" />
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">CPU</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <MetricSparkline
+              values={cpuValues}
+              color="var(--hardware-orange)"
+              domainMax={100}
+              testId="sparkline-cpu"
+            />
+            <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums" style={{ minWidth: 56 }}>
+              {tick ? `${fmt(tick.cpuUsage)}%` : "—"}
+            </span>
+          </div>
+        </div>
+        <div className="font-mono text-xs text-[var(--foreground)] break-words" title={cpuModel}>{cpuModel}</div>
+        <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5">{cpuCores}C / {arch}</div>
+      </div>
+
+      {/* Memory — % + used/total + available */}
+      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-mem">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <MemoryStick size={12} className="text-[var(--artifact-purple)] shrink-0" />
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Memory</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <MetricSparkline
+              values={memValues}
+              color="var(--artifact-purple)"
+              domainMax={100}
+              testId="sparkline-mem"
+            />
+            <span className="font-mono text-xs font-medium text-[var(--artifact-purple)] tabular-nums" style={{ minWidth: 56 }}>
+              {tick ? `${fmt(tick.memPercent, 0)}%` : "—"}
+            </span>
+          </div>
+        </div>
+        <div className="font-mono text-xs text-[var(--foreground)] tabular-nums">
+          {tick ? `${fmt(tick.memUsedGb, 1)} GB / ${fmt(tick.memTotalGb, 0)} GB` : "—"}
+        </div>
+        <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5 tabular-nums" data-testid="metric-mem-available">
+          available {tick ? `${fmt(memAvailable(tick), 1)} GB` : "—"}
+        </div>
+      </div>
+
+      {/* Disk */}
+      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-disk">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <HardDrive size={12} className="text-[var(--validation-emerald)] shrink-0" />
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Disk</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <MetricSparkline
+              values={diskValues}
+              color="var(--validation-emerald)"
+              domainMax={100}
+              testId="sparkline-disk"
+            />
+            <span className="font-mono text-xs font-medium text-[var(--validation-emerald)] tabular-nums" style={{ minWidth: 56 }}>
+              {tick ? `${fmt(tick.diskPercent, 0)}%` : "—"}
+            </span>
+          </div>
+        </div>
+        <div className="font-mono text-xs text-[var(--foreground)] tabular-nums">
+          {tick ? `${fmt(tick.diskUsedGb, 0)} GB / ${fmt(tick.diskTotalGb, 0)} GB` : "—"}
+        </div>
+      </div>
+
+      {/* Load avg 1m */}
+      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-loadavg">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <Activity size={12} className="text-[var(--neural-blue)] shrink-0" />
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Load 1m</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <MetricSparkline
+              values={loadValues}
+              color="var(--neural-blue)"
+              testId="sparkline-loadavg"
+            />
+            <span className="font-mono text-xs font-medium text-[var(--neural-blue)] tabular-nums" style={{ minWidth: 56 }}>
+              {tick ? fmt(tick.loadavg1m) : "—"}
+            </span>
+          </div>
+        </div>
+        <div className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">
+          {cpuCores > 0 && tick ? `${fmt(tick.loadavg1m / cpuCores * 100, 0)}% of ${cpuCores}C` : ""}
+        </div>
+      </div>
+
+      {/* Running containers */}
+      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-containers">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <Boxes size={12} className="text-[var(--fui-orange,var(--hardware-orange))] shrink-0" />
+            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Containers</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <MetricSparkline
+              values={containerValues}
+              color="var(--fui-orange,var(--hardware-orange))"
+              testId="sparkline-containers"
+            />
+            <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums" style={{ minWidth: 56 }}>
+              {tick ? `${tick.containerCount}` : "—"}
+            </span>
+          </div>
+        </div>
+        <div className="font-mono text-[10px] text-[var(--muted-foreground)]">running</div>
+      </div>
+    </div>
+  )
+}
+
 function HostInfoSection({ info }: { info: HostInfo }) {
-  const memoryPercent = info.memoryTotal > 0 ? Math.round((info.memoryUsed / info.memoryTotal) * 100) : 0
-  
   return (
     <div className="space-y-2">
       {/* System Info - Hostname & Uptime */}
@@ -219,51 +438,12 @@ function HostInfoSection({ info }: { info: HostInfo }) {
           <div className="font-mono text-xs font-medium text-[var(--validation-emerald)]">{info.uptime}</div>
         </div>
       </div>
-      
+
       {/* OS & Kernel */}
       <div className="p-2 rounded bg-[var(--secondary)]">
         <div className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider mb-1">OS</div>
         <div className="font-mono text-xs text-[var(--foreground)] break-words" title={info.os}>{info.os}</div>
         <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1.5 break-all" title={info.kernel}>{info.kernel}</div>
-      </div>
-      
-      {/* CPU */}
-      <div className="p-2 rounded bg-[var(--secondary)]">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
-            <Cpu size={12} className="text-[var(--hardware-orange)] shrink-0" />
-            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">CPU</span>
-          </div>
-          <span className="font-mono text-xs font-medium text-[var(--hardware-orange)]">{info.cpuUsage.toFixed(2)}%</span>
-        </div>
-        <div className="font-mono text-xs text-[var(--foreground)] break-words" title={info.cpuModel}>{info.cpuModel}</div>
-        <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5">{info.cpuCores}C / {info.arch}</div>
-        <div className="mt-2 h-1 rounded-full bg-[var(--border)] overflow-hidden">
-          <div 
-            className="h-full rounded-full bg-[var(--hardware-orange)] transition-all duration-500"
-            style={{ width: `${info.cpuUsage}%` }}
-          />
-        </div>
-      </div>
-      
-      {/* Memory */}
-      <div className="p-2 rounded bg-[var(--secondary)]">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
-            <MemoryStick size={12} className="text-[var(--artifact-purple)] shrink-0" />
-            <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Memory</span>
-          </div>
-          <span className="font-mono text-xs font-medium text-[var(--artifact-purple)]">{memoryPercent}%</span>
-        </div>
-        <div className="font-mono text-xs text-[var(--foreground)]">
-          {(info.memoryUsed / 1024).toFixed(1)} GB / {(info.memoryTotal / 1024).toFixed(0)} GB
-        </div>
-        <div className="mt-2 h-1 rounded-full bg-[var(--border)] overflow-hidden">
-          <div 
-            className="h-full rounded-full bg-[var(--artifact-purple)] transition-all duration-500"
-            style={{ width: `${memoryPercent}%` }}
-          />
-        </div>
       </div>
     </div>
   )
@@ -429,8 +609,12 @@ export function HostDevicePanel({
   // H3: real-time CPU / mem / disk / loadavg / container counts pushed
   // by the backend `host.metrics.tick` SSE (5s cadence). Replaces the
   // placeholder numbers that used to sit in this panel.
-  const { latest: hostTick, baseline: hostBaseline, connected: hostSseConnected } =
-    useHostMetricsTick()
+  const {
+    latest: hostTick,
+    baseline: hostBaseline,
+    history: hostHistory,
+    connected: hostSseConnected,
+  } = useHostMetricsTick()
 
   // Merge: /system/info supplies static identity (hostname/os/kernel/arch/uptime +
   // cpu model/cores), SSE supplies live load. SSE wins whenever it has data.
@@ -454,6 +638,21 @@ export function HostDevicePanel({
     }
     return base
   }, [hostData, hostTick, hostBaseline])
+
+  const liveTick = useMemo<LiveTickFields | null>(() => {
+    if (!hostTick) return null
+    return {
+      cpuUsage: hostTick.host.cpu_percent,
+      memPercent: hostTick.host.mem_percent,
+      memUsedGb: hostTick.host.mem_used_gb,
+      memTotalGb: hostTick.host.mem_total_gb,
+      diskPercent: hostTick.host.disk_percent,
+      diskUsedGb: hostTick.host.disk_used_gb,
+      diskTotalGb: hostTick.host.disk_total_gb,
+      loadavg1m: hostTick.host.loadavg_1m,
+      containerCount: hostTick.docker.container_count,
+    }
+  }, [hostTick])
 
   // Sync props → internal state when backend pushes new data
   useEffect(() => {
@@ -561,6 +760,17 @@ export function HostDevicePanel({
             </span>
           </div>
           <HostInfoSection info={mergedHost} />
+          {/* H3 row 1522: live load metrics (CPU/Mem/Disk/Load1m/Containers)
+            * with 60-pt sparklines fed by the SSE history ring buffer. */}
+          <div className="mt-2">
+            <LiveMetricsSection
+              tick={liveTick}
+              history={hostHistory}
+              cpuModel={mergedHost.cpuModel}
+              cpuCores={mergedHost.cpuCores}
+              arch={mergedHost.arch}
+            />
+          </div>
         </div>
 
         {/* M4: Per-tenant usage bars (admin → all tenants; user → self) */}
