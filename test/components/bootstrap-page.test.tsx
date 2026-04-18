@@ -137,7 +137,7 @@ describe("BootstrapPage", () => {
     })
   })
 
-  it("renders all six wizard steps with the first red step auto-focused", async () => {
+  it("renders all seven wizard steps with the first red step auto-focused", async () => {
     mockedGetStatus.mockResolvedValue(redStatus)
     render(<BootstrapPage />)
 
@@ -146,12 +146,13 @@ describe("BootstrapPage", () => {
     })
     expect(screen.getByTestId("bootstrap-step-llm_provider")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-cf_tunnel")).toBeInTheDocument()
+    expect(screen.getByTestId("bootstrap-step-git_forge")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-services_ready")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-smoke")).toBeInTheDocument()
     expect(screen.getByTestId("bootstrap-step-finalize")).toBeInTheDocument()
 
-    // First red step is auto-focused → STEP 1 / 6 header reflects admin_password.
-    expect(screen.getByText("STEP 1 / 6")).toBeInTheDocument()
+    // First red step is auto-focused → STEP 1 / 7 header reflects admin_password.
+    expect(screen.getByText("STEP 1 / 7")).toBeInTheDocument()
   })
 
   it("disables the Finalize button while gates are red + shows missing_steps", async () => {
@@ -188,7 +189,7 @@ describe("BootstrapPage", () => {
     render(<BootstrapPage />)
 
     await waitFor(() => {
-      expect(screen.getByText("STEP 6 / 6")).toBeInTheDocument()
+      expect(screen.getByText("STEP 7 / 7")).toBeInTheDocument()
     })
 
     const btn = screen.getByTestId("bootstrap-finalize-button")
@@ -1031,7 +1032,7 @@ describe("BootstrapPage", () => {
       screen.getByTestId("bootstrap-smoke-jump-back-llm_provider"),
     )
     await waitFor(() => {
-      expect(screen.getByText("STEP 2 / 6")).toBeInTheDocument()
+      expect(screen.getByText("STEP 2 / 7")).toBeInTheDocument()
     })
   })
 
@@ -1078,7 +1079,7 @@ describe("BootstrapPage", () => {
       screen.getByTestId("bootstrap-smoke-jump-back-services_ready"),
     )
     await waitFor(() => {
-      expect(screen.getByText("STEP 4 / 6")).toBeInTheDocument()
+      expect(screen.getByText("STEP 5 / 7")).toBeInTheDocument()
     })
   })
 

@@ -35,6 +35,7 @@ import {
   Bot,
   Server,
   Cpu,
+  GitBranch,
 } from "lucide-react"
 import {
   BOOTSTRAP_ADMIN_PASSWORD_KIND_COPY,
@@ -79,6 +80,7 @@ type StepId =
   | "admin_password"
   | "llm_provider"
   | "cf_tunnel"
+  | "git_forge"
   | "services_ready"
   | "smoke"
   | "finalize"
@@ -125,6 +127,16 @@ const STEPS: StepDef[] = [
     subtitle: "Provision remote access (or skip for LAN-only)",
     icon: Cloud,
     isGreen: (g) => g.cf_tunnel_configured,
+  },
+  {
+    id: "git_forge",
+    title: "Git Forge (optional)",
+    subtitle: "Connect GitHub / GitLab / Gerrit now, or skip for later",
+    icon: GitBranch,
+    // Optional step — not a finalize gate. Driven by localGreen so the
+    // pill flips green when the operator either configures a forge or
+    // explicitly opts out via the "Skip" button.
+    isGreen: (_g, _finalized, localGreen) => localGreen.git_forge === true,
   },
   {
     id: "services_ready",
@@ -1226,6 +1238,104 @@ function CfTunnelStep({
   )
 }
 
+// ─── B14 Part A — Step 3.5 (Git Forge setup, optional) ───────────────
+//
+// Slot for per-forge (GitHub / GitLab / Gerrit) configuration during
+// first-install. Intentionally optional — `finalizeBootstrap` does not
+// block on Git forge credentials, so this step is gated on local state
+// (`localGreen.git_forge`) rather than a backend gate flag.
+//
+// The detailed per-tab UI (token inputs + Test Connection wired to
+// `POST /system/test/{github|gitlab|gerrit}`) lands in the follow-up
+// B14 rows. This step's minimal shell lets the operator either open
+// the full Integration Settings in a new tab or explicitly skip; both
+// paths flip `localGreen.git_forge=true` so the auto-advance moves on.
+
+function GitForgeStep({
+  alreadyGreen,
+  onCompleted,
+}: {
+  alreadyGreen: boolean
+  onCompleted: () => void
+}) {
+  if (alreadyGreen) {
+    return (
+      <div
+        data-testid="bootstrap-git-forge-complete"
+        className="flex flex-col gap-2 p-4 rounded border border-[var(--status-green)] bg-[var(--background)]"
+      >
+        <div className="flex items-center gap-2 font-mono text-xs text-[var(--status-green)]">
+          <Check size={14} /> Git forge setup is optional — skipped by default
+        </div>
+        <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+          This step does not block finalize. You can connect GitHub,
+          GitLab, or Gerrit anytime from <strong>Settings →
+          Integration</strong>. Continue to the next step, or use this
+          pane to preview the upcoming per-forge setup tabs.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      data-testid="bootstrap-git-forge-step"
+      className="flex flex-col gap-3 p-4 rounded border border-[var(--border)] bg-[var(--background)]"
+    >
+      <div className="flex items-center gap-2 font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+        <span>OPTIONAL</span>
+        <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
+          not a finalize gate
+        </code>
+      </div>
+      <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+        Connect OmniSight to one or more Git forges (GitHub / GitLab /
+        Gerrit) so the review + merge agents can act on patches. You can
+        set this up now or skip and configure it later under
+        <code className="mx-1">Settings → Integration</code>. Skipping does
+        not block finalize.
+      </p>
+
+      <div
+        data-testid="bootstrap-git-forge-tabs-placeholder"
+        className="flex flex-col gap-2 p-3 rounded border border-dashed border-[var(--border)]"
+      >
+        <div className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">
+          PROVIDERS
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {(["GitHub", "GitLab", "Gerrit"] as const).map((tab) => (
+            <span
+              key={tab}
+              data-testid={`bootstrap-git-forge-tab-${tab.toLowerCase()}`}
+              className="font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] bg-[var(--muted)]/30 text-[var(--muted-foreground)]"
+            >
+              {tab}
+            </span>
+          ))}
+        </div>
+        <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+          Per-provider forms (token entry + Test Connection) land in
+          B14 follow-up rows. For now, use <strong>Settings →
+          Integration</strong> after finalize, or skip below.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-git-forge-skip"
+          onClick={onCompleted}
+          className="flex items-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90"
+        >
+          <Check size={12} />
+          Skip — configure later in Settings → Integration
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ─── L5 — Step 4 (parallel health check: 4 live ticks) ──────────────
 //
 // Polls ``POST /api/v1/bootstrap/parallel-health-check`` every 3s and
@@ -2076,6 +2186,10 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
       gate: "cf_tunnel_configured === true",
       todo: "L4 — create/link Cloudflare tunnel or explicit skip for LAN-only",
     },
+    git_forge: {
+      gate: "optional (not a finalize gate)",
+      todo: "B14 Part A — GitHub / GitLab / Gerrit per-tab setup + Test Connection",
+    },
     services_ready: {
       gate: "parallel-health-check.all_green === true",
       todo: "L5 — backend/frontend/DB/CF connector live ticks",
@@ -2114,6 +2228,10 @@ function _emptyLocalGreen(): Record<StepId, boolean> {
   // Centralised so STEPS additions don't drift from the seed value.
   const out = {} as Record<StepId, boolean>
   for (const s of STEPS) out[s.id] = false
+  // Optional (non-gate) steps seed-green so auto-advance doesn't stall
+  // on them and finalize is never blocked. Operators can still click
+  // the sidebar pill to open and configure these steps explicitly.
+  out.git_forge = true
   return out
 }
 
@@ -2338,6 +2456,11 @@ export default function BootstrapPage() {
                 <CfTunnelStep
                   alreadyGreen={status.status.cf_tunnel_configured}
                   onChanged={reloadStatus}
+                />
+              ) : activeStep.id === "git_forge" ? (
+                <GitForgeStep
+                  alreadyGreen={localGreen.git_forge === true}
+                  onCompleted={() => setLocalGreenFor("git_forge", true)}
                 />
               ) : activeStep.id === "services_ready" ? (
                 <ServiceHealthStep

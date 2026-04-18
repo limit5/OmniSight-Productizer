@@ -200,7 +200,7 @@ Legend:
 > 背景：deep audit 發現 6 個 UX 問題影響首次使用者和 Git forge 整合使用者。Bootstrap wizard 不包含 Git forge 設定、多 repo token map 無 UI、Gerrit 設定無引導、Integration 頁面欄位過多、Settings 缺 connection test。這些問題不擋上線但會影響使用體驗。
 
 **Part A — Bootstrap Wizard 加入 Git Forge 設定步驟（選填）**
-- [ ] Bootstrap wizard 在 Step 3（CF Tunnel）後加 Step 3.5「Git Forge 設定（選填）」
+- [x] Bootstrap wizard 在 Step 3（CF Tunnel）後加 Step 3.5「Git Forge 設定（選填）」
 - [ ] Step 3.5 UI：三選一 tab（GitHub / GitLab / Gerrit）+ 「跳過，稍後設定」按鈕
 - [ ] GitHub tab：token 輸入 + 「Test Connection」按鈕 → 呼叫 GitHub API 驗證 → 成功顯示 user/org name
 - [ ] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
