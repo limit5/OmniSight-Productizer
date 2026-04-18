@@ -1313,6 +1313,10 @@ export interface GitForgeTokenTestResult {
   user?: string
   name?: string
   scopes?: string
+  // GitLab probe only — resolved instance version + revision + effective URL.
+  version?: string
+  revision?: string
+  url?: string
   message?: string
 }
 

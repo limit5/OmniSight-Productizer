@@ -124,15 +124,113 @@ class TestGitForgeTokenProbe:
         assert settings.github_token == before
 
     @pytest.mark.asyncio
-    async def test_gitlab_not_implemented_yet(self, client):
+    async def test_gerrit_not_implemented_yet(self, client):
         resp = await client.post(
             "/api/v1/system/git-forge/test-token",
-            json={"provider": "gitlab", "token": "glpat-xxx"},
+            json={"provider": "gerrit", "token": "whatever"},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "error"
         assert "not yet implemented" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_gitlab_empty_token_returns_error(self, client):
+        resp = await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={"provider": "gitlab", "token": "", "url": ""},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "required" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_gitlab_rejects_malformed_url(self):
+        """A URL without http(s):// must surface an error before curl fires."""
+        from backend.routers import integration as ir
+
+        result = await ir._probe_gitlab_token("glpat-fake", "gitlab.example.com")
+        assert result["status"] == "error"
+        assert "http" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_gitlab_does_not_mutate_settings_on_failure(self, client):
+        """Probing with a bad token must NOT overwrite settings.gitlab_token."""
+        from backend.config import settings
+        before_token = settings.gitlab_token
+        before_url = settings.gitlab_url
+        await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={
+                "provider": "gitlab",
+                "token": "glpat-obviously-not-valid",
+                "url": "https://gitlab.example.com",
+            },
+        )
+        assert settings.gitlab_token == before_token
+        assert settings.gitlab_url == before_url
+
+    @pytest.mark.asyncio
+    async def test_gitlab_ok_path_parses_version(self, monkeypatch):
+        """With the curl subprocess mocked, the OK path surfaces version/url."""
+        from backend.routers import integration as ir
+
+        class _StubProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"version": "16.7.0-ee", "revision": "abc1234"}', b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _StubProc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+        result = await ir._probe_gitlab_token(
+            "glpat-fake", "https://gitlab.example.com",
+        )
+        assert result["status"] == "ok"
+        assert result["version"] == "16.7.0-ee"
+        assert result["revision"] == "abc1234"
+        assert result["url"] == "https://gitlab.example.com"
+
+    @pytest.mark.asyncio
+    async def test_gitlab_defaults_to_gitlab_com_when_url_blank(self, monkeypatch):
+        """Blank URL should resolve to https://gitlab.com in the probe result."""
+        from backend.routers import integration as ir
+
+        class _StubProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"version": "16.7.0"}', b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _StubProc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+        result = await ir._probe_gitlab_token("glpat-fake", "")
+        assert result["status"] == "ok"
+        assert result["url"] == "https://gitlab.com"
+
+    @pytest.mark.asyncio
+    async def test_gitlab_error_response_bubbles_message(self, monkeypatch):
+        """GitLab 401/403 JSON error bodies must surface as status=error."""
+        from backend.routers import integration as ir
+
+        class _StubProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"message": "401 Unauthorized"}', b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _StubProc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+        result = await ir._probe_gitlab_token("glpat-wrong", "https://gitlab.com")
+        assert result["status"] == "error"
+        assert "401" in result["message"]
 
     @pytest.mark.asyncio
     async def test_github_ok_path_parses_login(self, monkeypatch):

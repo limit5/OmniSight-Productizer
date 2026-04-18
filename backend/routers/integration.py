@@ -234,6 +234,55 @@ class GitForgeTokenTest(BaseModel):
     url: str = ""  # optional — for GitLab self-hosted instances
 
 
+async def _probe_gitlab_token(token: str, url: str) -> dict:
+    """Call GitLab's ``GET /api/v4/version`` with the supplied token and
+    return the instance ``version`` + ``revision``. Never reads from
+    ``settings``. ``url`` is optional — falls back to ``gitlab.com``.
+
+    B14 Part A row 4 — Bootstrap Step 3.5 GitLab tab. The probe is
+    intentionally distinct from ``_test_gitlab`` (which exercises
+    ``settings.gitlab_token`` + ``settings.gitlab_url``) so a candidate
+    token can be validated before being written."""
+    if not token:
+        return {"status": "error", "message": "Token is required"}
+    base = (url or "").strip().rstrip("/") or "https://gitlab.com"
+    if not (base.startswith("http://") or base.startswith("https://")):
+        return {
+            "status": "error",
+            "message": "URL must start with http:// or https://",
+        }
+    proc = await asyncio.create_subprocess_exec(
+        "curl", "-s",
+        "-H", f"PRIVATE-TOKEN: {token}",
+        "-H", "User-Agent: OmniSight-Bootstrap",
+        f"{base}/api/v4/version",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    raw = stdout.decode(errors="replace")
+    try:
+        import json
+        data = json.loads(raw)
+    except Exception:
+        return {
+            "status": "error",
+            "message": "Invalid response from GitLab API",
+        }
+    if isinstance(data, dict) and "version" in data:
+        result = {
+            "status": "ok",
+            "version": data["version"],
+            "url": base,
+        }
+        if data.get("revision"):
+            result["revision"] = data["revision"]
+        return result
+    message = "GitLab returned an unexpected response"
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("error") or message
+    return {"status": "error", "message": message}
+
+
 async def _probe_github_token(token: str) -> dict:
     """Call GitHub's ``GET /user`` with the supplied token and return
     the resolved login + display name. Never reads from ``settings``."""
@@ -301,14 +350,21 @@ async def test_git_forge_token(
     provider = (body.provider or "").strip().lower()
     if provider not in {"github", "gitlab", "gerrit"}:
         raise HTTPException(400, f"Unknown provider: {body.provider}")
-    if provider != "github":
-        # Placeholder until GitLab / Gerrit rows land.
+    if provider == "gerrit":
+        # Placeholder until the Gerrit SSH probe row lands.
         return {
             "status": "error",
-            "message": f"{provider} token probe not yet implemented",
+            "message": "gerrit token probe not yet implemented",
         }
     try:
-        result = await asyncio.wait_for(_probe_github_token(body.token), timeout=15)
+        if provider == "gitlab":
+            result = await asyncio.wait_for(
+                _probe_gitlab_token(body.token, body.url), timeout=15,
+            )
+        else:
+            result = await asyncio.wait_for(
+                _probe_github_token(body.token), timeout=15,
+            )
     except asyncio.TimeoutError:
         return {"status": "error", "message": "Connection timed out (15s)"}
     except Exception as exc:  # pragma: no cover — network-level failure

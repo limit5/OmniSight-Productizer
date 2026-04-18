@@ -1365,6 +1365,8 @@ function GitForgeStep({
         </p>
         {activeTab === "github" ? (
           <GitHubTokenForm onSaved={onCompleted} />
+        ) : activeTab === "gitlab" ? (
+          <GitLabTokenForm onSaved={onCompleted} />
         ) : (
           <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
             The <strong>token / URL entry</strong> and{" "}
@@ -1535,6 +1537,193 @@ function GitHubTokenForm({ onSaved }: { onSaved: () => void }) {
       {saveError && (
         <div
           data-testid="bootstrap-git-forge-github-save-error"
+          className="flex items-start gap-2 p-2 rounded border border-[var(--status-red)] bg-[var(--status-red)]/10 font-mono text-[11px] text-[var(--status-red)]"
+        >
+          <AlertCircle size={12} className="mt-0.5" />
+          <span>{saveError}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── B14 Part A row 4: GitLab URL + token + Test Connection ──────────
+//
+// Lives inside the Step 3.5 "gitlab" tab panel. Mirrors the GitHub form
+// but adds a URL field for self-hosted instances (defaults to
+// `https://gitlab.com` if blank). Test Connection calls
+// `testGitForgeToken({ provider: "gitlab", url, token })` which the
+// backend routes to `_probe_gitlab_token` → `GET {url}/api/v4/version`.
+// On success the GitLab instance version surfaces so the operator can
+// verify they pasted the right URL / token against the right server
+// before Save & Continue persists both `gitlab_token` and `gitlab_url`.
+//
+// As with the GitHub form, test and save are two distinct actions so a
+// bad token can never land in `settings.gitlab_token` — the release +
+// issue-tracker paths read that field directly.
+
+function GitLabTokenForm({ onSaved }: { onSaved: () => void }) {
+  const [url, setUrl] = useState("")
+  const [token, setToken] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [result, setResult] = useState<GitForgeTokenTestResult | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const onTest = useCallback(async () => {
+    const trimmedToken = token.trim()
+    if (!trimmedToken || busy) return
+    setBusy(true)
+    setResult(null)
+    setSaveError(null)
+    try {
+      const res = await testGitForgeToken({
+        provider: "gitlab",
+        token: trimmedToken,
+        url: url.trim(),
+      })
+      setResult(res)
+    } catch (err) {
+      setResult({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to reach the GitLab API probe",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }, [token, url, busy])
+
+  const onSave = useCallback(async () => {
+    if (saving || result?.status !== "ok") return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      // The probe returns the *effective* URL (falls back to
+      // https://gitlab.com when the operator leaves the field blank) —
+      // persist that so later reads of `settings.gitlab_url` match
+      // what was actually validated.
+      await updateSettings({
+        gitlab_token: token.trim(),
+        gitlab_url: result.url ?? url.trim(),
+      })
+      onSaved()
+    } catch (err) {
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save the token",
+      )
+    } finally {
+      setSaving(false)
+    }
+  }, [token, url, saving, result, onSaved])
+
+  const canTest = token.trim().length > 0 && !busy
+  const ok = result?.status === "ok"
+
+  return (
+    <div className="flex flex-col gap-2" data-testid="bootstrap-git-forge-gitlab-form">
+      <label
+        htmlFor="bootstrap-git-forge-gitlab-url"
+        className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]"
+      >
+        INSTANCE URL (optional — defaults to https://gitlab.com)
+      </label>
+      <input
+        id="bootstrap-git-forge-gitlab-url"
+        data-testid="bootstrap-git-forge-gitlab-url"
+        type="text"
+        autoComplete="off"
+        spellCheck={false}
+        value={url}
+        onChange={(e) => {
+          setUrl(e.target.value)
+          setResult(null)
+          setSaveError(null)
+        }}
+        placeholder="https://gitlab.example.com"
+        className="font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus:outline-none focus:border-[var(--artifact-purple)]"
+      />
+      <label
+        htmlFor="bootstrap-git-forge-gitlab-token"
+        className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]"
+      >
+        PERSONAL ACCESS TOKEN (api scope)
+      </label>
+      <input
+        id="bootstrap-git-forge-gitlab-token"
+        data-testid="bootstrap-git-forge-gitlab-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        value={token}
+        onChange={(e) => {
+          setToken(e.target.value)
+          setResult(null)
+          setSaveError(null)
+        }}
+        placeholder="glpat-..."
+        className="font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus:outline-none focus:border-[var(--artifact-purple)]"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-git-forge-gitlab-test"
+          onClick={onTest}
+          disabled={!canTest}
+          className="flex items-center gap-2 px-3 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[11px] font-semibold hover:bg-[var(--muted)]/40 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Activity size={12} />}
+          {busy ? "Testing…" : "Test Connection"}
+        </button>
+        {ok && (
+          <button
+            type="button"
+            data-testid="bootstrap-git-forge-gitlab-save"
+            onClick={onSave}
+            disabled={saving}
+            className="flex items-center gap-2 px-3 py-1.5 rounded bg-[var(--artifact-purple)] text-white font-mono text-[11px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {saving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            {saving ? "Saving…" : "Save & Continue"}
+          </button>
+        )}
+      </div>
+      {result && (
+        <div
+          data-testid="bootstrap-git-forge-gitlab-result"
+          data-status={result.status}
+          className={`flex items-start gap-2 p-2 rounded border font-mono text-[11px] ${
+            ok
+              ? "border-[var(--status-green)] bg-[var(--status-green)]/10 text-[var(--status-green)]"
+              : "border-[var(--status-red)] bg-[var(--status-red)]/10 text-[var(--status-red)]"
+          }`}
+        >
+          {ok ? <Check size={12} className="mt-0.5" /> : <AlertCircle size={12} className="mt-0.5" />}
+          {ok ? (
+            <div className="flex flex-col gap-0.5">
+              <span>
+                GitLab{" "}
+                <strong data-testid="bootstrap-git-forge-gitlab-version">
+                  {result.version}
+                </strong>
+                {result.revision ? ` (${result.revision})` : ""}
+              </span>
+              {result.url ? (
+                <span className="text-[10px] opacity-80">
+                  Instance: <code>{result.url}</code>
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <span>{result.message || "GitLab API rejected the token"}</span>
+          )}
+        </div>
+      )}
+      {saveError && (
+        <div
+          data-testid="bootstrap-git-forge-gitlab-save-error"
           className="flex items-start gap-2 p-2 rounded border border-[var(--status-red)] bg-[var(--status-red)]/10 font-mono text-[11px] text-[var(--status-red)]"
         >
           <AlertCircle size={12} className="mt-0.5" />

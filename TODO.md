@@ -203,7 +203,7 @@ Legend:
 - [x] Bootstrap wizard 在 Step 3（CF Tunnel）後加 Step 3.5「Git Forge 設定（選填）」
 - [x] Step 3.5 UI：三選一 tab（GitHub / GitLab / Gerrit）+ 「跳過，稍後設定」按鈕
 - [x] GitHub tab：token 輸入 + 「Test Connection」按鈕 → 呼叫 GitHub API 驗證 → 成功顯示 user/org name
-- [ ] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
+- [x] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
 - [ ] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
 - [ ] 「跳過」不影響 bootstrap finalization（Git forge 非必要 gate）
 - [ ] 預估：**1 day**

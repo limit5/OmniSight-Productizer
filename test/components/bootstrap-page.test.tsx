@@ -1369,6 +1369,189 @@ describe("BootstrapPage", () => {
         expect(mockedFinalize).not.toHaveBeenCalled()
       })
     })
+
+    // ─── B14 Part A row 4 — GitLab tab URL + token + Test Connection ──
+    //
+    // Operator enters (optional) instance URL + PAT → clicks Test
+    // Connection → backend probe hits `GET {url}/api/v4/version`. On
+    // success the GitLab instance version surfaces so the operator can
+    // verify they pasted the right URL / token against the right
+    // server before Save & Continue persists both fields.
+
+    describe("GitLab tab token probe", () => {
+      async function switchToGitLabTab() {
+        await openGitForgeStep()
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-tab-gitlab"))
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gitlab-form"),
+          ).toBeInTheDocument()
+        })
+      }
+
+      it("Test Connection button is disabled until a token is typed", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        render(<BootstrapPage />)
+        await switchToGitLabTab()
+
+        const btn = screen.getByTestId("bootstrap-git-forge-gitlab-test")
+        expect(btn).toBeDisabled()
+
+        // URL alone should not enable the button — token is required.
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-url"),
+          { target: { value: "https://gitlab.example.com" } },
+        )
+        expect(btn).toBeDisabled()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-token"),
+          { target: { value: "glpat-fake" } },
+        )
+        expect(btn).toBeEnabled()
+      })
+
+      it("successful probe renders the resolved GitLab instance version", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          version: "16.7.0-ee",
+          revision: "abc1234",
+          url: "https://gitlab.example.com",
+        })
+        render(<BootstrapPage />)
+        await switchToGitLabTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-url"),
+          { target: { value: "https://gitlab.example.com" } },
+        )
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-token"),
+          { target: { value: "glpat-real-looking-token" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gitlab-test"))
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gitlab-result"),
+          ).toHaveAttribute("data-status", "ok")
+        })
+        expect(mockedTestGitForgeToken).toHaveBeenCalledWith({
+          provider: "gitlab",
+          token: "glpat-real-looking-token",
+          url: "https://gitlab.example.com",
+        })
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gitlab-version"),
+        ).toHaveTextContent("16.7.0-ee")
+        // Save & Continue only appears after a green probe.
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gitlab-save"),
+        ).toBeInTheDocument()
+      })
+
+      it("probing with a blank URL sends url='' so the backend can default", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          version: "16.7.0",
+          url: "https://gitlab.com",
+        })
+        render(<BootstrapPage />)
+        await switchToGitLabTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-token"),
+          { target: { value: "glpat-cloud" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gitlab-test"))
+
+        await waitFor(() => {
+          expect(mockedTestGitForgeToken).toHaveBeenCalledWith({
+            provider: "gitlab",
+            token: "glpat-cloud",
+            url: "",
+          })
+        })
+      })
+
+      it("failed probe renders the backend error without showing Save", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "error",
+          message: "401 Unauthorized",
+        })
+        render(<BootstrapPage />)
+        await switchToGitLabTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-token"),
+          { target: { value: "glpat-wrong" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gitlab-test"))
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gitlab-result"),
+          ).toHaveAttribute("data-status", "error")
+        })
+        expect(
+          screen.getByTestId("bootstrap-git-forge-gitlab-result"),
+        ).toHaveTextContent(/401 Unauthorized/)
+        expect(
+          screen.queryByTestId("bootstrap-git-forge-gitlab-save"),
+        ).toBeNull()
+      })
+
+      it("Save & Continue persists gitlab_token + gitlab_url and flips complete", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          version: "16.7.0-ee",
+          url: "https://gitlab.example.com",
+        })
+        mockedUpdateSettings.mockResolvedValue({
+          status: "updated",
+          applied: ["gitlab_token", "gitlab_url"],
+          rejected: {},
+        })
+        render(<BootstrapPage />)
+        await switchToGitLabTab()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-url"),
+          { target: { value: "https://gitlab.example.com" } },
+        )
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-gitlab-token"),
+          { target: { value: "glpat-good" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gitlab-test"))
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-gitlab-save"),
+          ).toBeInTheDocument()
+        })
+
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-gitlab-save"))
+
+        await waitFor(() => {
+          expect(mockedUpdateSettings).toHaveBeenCalledWith({
+            gitlab_token: "glpat-good",
+            gitlab_url: "https://gitlab.example.com",
+          })
+        })
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-step"),
+          ).toHaveAttribute("data-already-green", "true")
+        })
+        // Finalize must not have been called — saving a PAT is a local
+        // settings write, not a bootstrap gate flip.
+        expect(mockedFinalize).not.toHaveBeenCalled()
+      })
+    })
   })
 
   // ─── L8 #3 — Error-path UX (weak password / LLM key invalid / systemctl) ─
