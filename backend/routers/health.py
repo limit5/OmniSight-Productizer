@@ -238,7 +238,19 @@ def _build_readyz_payload(checks: dict, ready: bool) -> dict:
 
 
 async def _readyz_handler() -> JSONResponse:
+    # G7 (HA-07): time the probe and label the histogram sample with
+    # outcome so Grafana can split p50/p99 by ready / not_ready /
+    # draining. `outcome` is resolved once we know the verdict.
+    import time as _time
     from backend import lifecycle as _lifecycle
+    from backend import metrics as _metrics
+
+    _started = _time.perf_counter()
+
+    def _observe(outcome: str) -> None:
+        _metrics.readyz_latency_seconds.labels(outcome=outcome).observe(
+            _time.perf_counter() - _started,
+        )
 
     checks: dict = {}
 
@@ -249,6 +261,7 @@ async def _readyz_handler() -> JSONResponse:
     if _lifecycle.coordinator.shutting_down:
         checks["draining"] = {"ok": False, "detail": "server_is_draining"}
         payload = _build_readyz_payload(checks, ready=False)
+        _observe("draining")
         return JSONResponse(
             status_code=503,
             content=payload,
@@ -270,6 +283,8 @@ async def _readyz_handler() -> JSONResponse:
 
     ready = db_ok and mig_ok and prov_ok
     payload = _build_readyz_payload(checks, ready=ready)
+    outcome = "ready" if ready else "not_ready"
+    _observe(outcome)
     return JSONResponse(
         status_code=200 if ready else 503,
         content=payload,

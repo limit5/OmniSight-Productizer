@@ -167,7 +167,17 @@ async def lifespan(app: FastAPI):
     # and stops cleanly at shutdown.
     from backend import host_metrics as _hm
     host_metrics_task = asyncio.create_task(_hm.run_sampling_loop())
+    # G7 (HA-07): flip the backend_instance_up gauge to 1 once the
+    # app is fully booted. Shutdown flips it back to 0 so the
+    # reverse-proxy drops this replica from rotation before the
+    # in-flight drain window.
+    from backend import ha_observability as _hao
+    _hao.mark_instance_up()
     yield
+    try:
+        _hao.mark_instance_down()
+    except Exception as exc:
+        _log.debug("[lifecycle] mark_instance_down failed: %s", exc)
     # G1: graceful drain — flip gate, flush SSE, wait in-flight (30 s),
     # close DB. Background tasks are cancelled AFTER the drain so any
     # in-flight request that depends on them still has a chance to
@@ -210,6 +220,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# G7 (HA-07): register HTTP middleware that feeds the rolling 5xx
+# rate metric. Registered here so it wraps ALL other middleware +
+# routers — every response, including error responses produced by
+# Starlette's default handlers, gets recorded.
+from backend import ha_observability as _ha_observability
+_ha_observability.register_middleware(app)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

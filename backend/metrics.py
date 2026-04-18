@@ -542,6 +542,59 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # G7 (HA-07): observability for HA signals ─────────────────
+    # `backend_instance_up` is the classic "is this backend alive"
+    # gauge. We set it to 1 at boot and flip it to 0 when the
+    # lifecycle coordinator begins draining — the reverse-proxy /
+    # k8s service can use `instance_up == 1` to decide which pods to
+    # send traffic to. The instance_id label lets Prometheus scrape
+    # multiple replicas behind the same target.
+    backend_instance_up = Gauge(
+        "omnisight_backend_instance_up",
+        "1 when this backend replica is serving traffic, 0 when draining/down",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+    # `rolling_deploy_responses_total` is the source-of-truth counter
+    # for the 5xx rate. Labels are the HTTP status class (2xx/3xx/
+    # 4xx/5xx). PromQL can compute the rate at any horizon as
+    # `rate(…{status_class="5xx"}[5m]) / rate(…[5m])`.
+    rolling_deploy_responses_total = Counter(
+        "omnisight_rolling_deploy_responses_total",
+        "HTTP responses served during the rolling deploy window, by status class",
+        labelnames=("status_class",),  # 2xx | 3xx | 4xx | 5xx
+        registry=REGISTRY,
+    )
+    # `rolling_deploy_5xx_rate` is a convenience gauge exporting the
+    # in-process rolling 5xx share (0.0..1.0) over the last 60s. The
+    # gauge lets alert rules that can't / don't want to do PromQL
+    # rate-of-rate math fire directly off a single scalar.
+    rolling_deploy_5xx_rate = Gauge(
+        "omnisight_rolling_deploy_5xx_rate",
+        "Rolling-window 5xx response rate (0..1) computed in-process",
+        registry=REGISTRY,
+    )
+    # `replica_lag_seconds` — Postgres streaming replication lag, in
+    # seconds. Populated by the pg_ha sampler calling
+    # `ha_observability.update_replica_lag()`. The `replica` label
+    # carries the standby application_name.
+    replica_lag_seconds = Gauge(
+        "omnisight_replica_lag_seconds",
+        "Streaming replication lag from primary to standby, in seconds",
+        labelnames=("replica",),
+        registry=REGISTRY,
+    )
+    # `readyz_latency_seconds` — end-to-end wall-clock latency of the
+    # /readyz probe. Buckets tuned for fast probe paths: most replies
+    # should be <50ms; a single bucket past 1s catches a stalled DB.
+    readyz_latency_seconds = Histogram(
+        "omnisight_readyz_latency_seconds",
+        "Wall-clock seconds to serve the /readyz probe",
+        labelnames=("outcome",),  # ready | not_ready | draining
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+        registry=REGISTRY,
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -618,6 +671,11 @@ else:
     scratchpad_saves_total = _NoOp()  # type: ignore
     scratchpad_size_bytes = _NoOp()  # type: ignore
     token_continuation_total = _NoOp()  # type: ignore
+    backend_instance_up = _NoOp()  # type: ignore
+    rolling_deploy_responses_total = _NoOp()  # type: ignore
+    rolling_deploy_5xx_rate = _NoOp()  # type: ignore
+    replica_lag_seconds = _NoOp()  # type: ignore
+    readyz_latency_seconds = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -662,6 +720,8 @@ def reset_for_tests() -> None:
     global awaiting_human_pending, awaiting_human_age_seconds
     global worker_pool_capacity
     global process_start_time
+    # G7 HA-07 — forward-declared below where rebinding happens; listed
+    # here to keep all `reset_for_tests()` rebindings in one place.
     REGISTRY = CollectorRegistry()
     decision_total = Counter(
         "omnisight_decision_total", "Decisions registered",
@@ -987,4 +1047,34 @@ def reset_for_tests() -> None:
         "omnisight_token_continuation_total",
         "Auto-continuation rounds issued after stop_reason=max_tokens",
         labelnames=("agent_id", "provider"), registry=REGISTRY,
+    )
+    # G7 (HA-07): observability for HA signals ─────────────────
+    global backend_instance_up, rolling_deploy_responses_total
+    global rolling_deploy_5xx_rate, replica_lag_seconds, readyz_latency_seconds
+    backend_instance_up = Gauge(
+        "omnisight_backend_instance_up",
+        "1 when this backend replica is serving traffic, 0 when draining/down",
+        labelnames=("instance_id",), registry=REGISTRY,
+    )
+    rolling_deploy_responses_total = Counter(
+        "omnisight_rolling_deploy_responses_total",
+        "HTTP responses served during the rolling deploy window, by status class",
+        labelnames=("status_class",), registry=REGISTRY,
+    )
+    rolling_deploy_5xx_rate = Gauge(
+        "omnisight_rolling_deploy_5xx_rate",
+        "Rolling-window 5xx response rate (0..1) computed in-process",
+        registry=REGISTRY,
+    )
+    replica_lag_seconds = Gauge(
+        "omnisight_replica_lag_seconds",
+        "Streaming replication lag from primary to standby, in seconds",
+        labelnames=("replica",), registry=REGISTRY,
+    )
+    readyz_latency_seconds = Histogram(
+        "omnisight_readyz_latency_seconds",
+        "Wall-clock seconds to serve the /readyz probe",
+        labelnames=("outcome",),
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+        registry=REGISTRY,
     )
