@@ -127,6 +127,31 @@ services:
       retries: 3
       start_period: 20s
 
+  # G2 #4 — Caddy reverse proxy for zero-downtime rolling restart.
+  # Sits in front of both backend replicas with /readyz health checks.
+  # Frontend SSR and browser API calls both route through Caddy so
+  # neither path is affected when one backend replica restarts.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./deploy/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - omnisight-caddy-data:/data
+      - omnisight-caddy-config:/config
+    depends_on:
+      backend-a:
+        condition: service_healthy
+      backend-b:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
   frontend:
     image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: missing
@@ -134,19 +159,23 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
       args:
-        # Frontend SSR hits backend-a directly (default upstream). Once the
-        # Caddy service lands in G2 #3 this will move to the proxy address
-        # so SSR survives backend-a rolling restart as well.
-        BACKEND_URL: http://backend-a:8000
+        # Frontend SSR routes through Caddy so it survives backend
+        # rolling restart — Caddy ejects unhealthy replicas from the
+        # upstream pool and routes to the surviving one.
+        BACKEND_URL: http://caddy:8000
     ports:
       - "3000:3000"
     environment:
-      - BACKEND_URL=http://backend-a:8000
+      # SSR proxy → Caddy (health-aware) instead of backend-a (fragile)
+      - BACKEND_URL=http://caddy:8000
       - NODE_ENV=production
+      # Prevent OOM when backend is briefly unreachable during deploy:
+      # ECONNREFUSED errors pile up as JS objects → V8 heap grows →
+      # default 1.7 GB limit → OOM kill. 4 GB gives enough headroom
+      # for error bursts to be GC'd before hitting the ceiling.
+      - NODE_OPTIONS=--max-old-space-size=4096
     depends_on:
-      backend-a:
-        condition: service_healthy
-      backend-b:
+      caddy:
         condition: service_healthy
     restart: always
     healthcheck:
@@ -194,6 +223,10 @@ volumes:
   omnisight-artifacts:
     driver: local
   omnisight-sdks:
+    driver: local
+  omnisight-caddy-data:
+    driver: local
+  omnisight-caddy-config:
     driver: local
   omnisight-prom:
     driver: local

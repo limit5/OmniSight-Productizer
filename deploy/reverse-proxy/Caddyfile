@@ -43,6 +43,38 @@
 	redir https://{host}{uri} permanent
 }
 
+# Internal HTTP :8000 — Docker-internal backend proxy for frontend SSR.
+# Frontend's BACKEND_URL=http://caddy:8000 routes through here instead of
+# directly to backend-a, so SSR survives rolling restart without OOM.
+# NOT exposed to host (only Docker network). Same upstream pool + health
+# checks as the :443 block.
+:8000 {
+	reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000} {$OMNISIGHT_UPSTREAM_B:backend-b:8001} {
+		lb_policy round_robin
+		lb_try_duration 5s
+		lb_try_interval 250ms
+
+		health_uri /readyz
+		health_port 0
+		health_method GET
+		health_interval 2s
+		health_timeout 2s
+		health_status 2xx
+		health_passes 1
+		health_fails 3
+
+		fail_duration 30s
+		max_fails 3
+		unhealthy_status 5xx
+
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		flush_interval -1
+	}
+}
+
 # Main HTTPS listener. `{$OMNISIGHT_PUBLIC_HOSTNAME::443}` expands to the
 # configured hostname (ACME-issued cert) or falls back to `:443` (internal
 # cert via `tls internal` for dev/CI/air-gapped installs).
