@@ -136,9 +136,9 @@ export default function SetupRequiredPage() {
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[var(--deep-space-start)]">
       <NeuralGrid />
 
-      {/* Scan-line overlay — inline so we don't depend on the existing
-          `.scan-line` keyframe being positioned relative to a specific
-          panel geometry. */}
+      {/* Static CRT scan-line grid — inline so we don't depend on the
+          existing `.scanlines` ::after being positioned relative to a
+          specific panel geometry. */}
       <div
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 z-0 opacity-40"
@@ -148,6 +148,10 @@ export default function SetupRequiredPage() {
         }}
       />
 
+      {/* Animated FUI scan-line sweep — a single bright bar travels
+          top→bottom to sell the "probing system gates" feel. */}
+      <div aria-hidden="true" className="fui-scan-sweep" />
+
       <main className="relative z-10 w-full max-w-2xl px-6 py-10">
         <div className="holo-glass-simple corner-brackets rounded-lg p-8 md:p-10">
           {/* Header stripe */}
@@ -155,13 +159,30 @@ export default function SetupRequiredPage() {
             <div className="h-10 w-10 rounded-full border-2 border-[var(--neural-blue)] flex items-center justify-center animate-pulse">
               <Rocket size={18} className="text-[var(--neural-blue)]" />
             </div>
-            <span className="font-mono text-[10px] uppercase tracking-[0.3em] text-[var(--neural-blue)]">
+            <span
+              className="text-[10px] uppercase tracking-[0.3em] text-[var(--neural-blue)]"
+              style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
+            >
               SYS.BOOTSTRAP · AWAITING OPERATOR
             </span>
           </div>
 
+          {/* Orbitron Latin display title — Chinese glyphs fall back to
+              system fonts because Orbitron only ships a Latin subset, so
+              a dedicated English code-name keeps the Orbitron look front
+              and center. */}
+          <div
+            className="mb-2 text-center text-3xl md:text-4xl font-bold uppercase tracking-[0.2em] text-[var(--neural-blue)] text-glow-blue"
+            style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
+          >
+            BOOTSTRAP&nbsp;REQUIRED
+          </div>
+
           {/* Friendly headline */}
-          <h1 className="font-sans text-2xl md:text-3xl font-semibold tracking-fui text-[var(--foreground)] text-center">
+          <h1
+            className="text-2xl md:text-3xl font-semibold tracking-fui text-[var(--foreground)] text-center"
+            style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
+          >
             系統需要完成初始設定
           </h1>
           <p className="mt-3 font-mono text-sm text-[var(--muted-foreground)] text-center leading-relaxed">

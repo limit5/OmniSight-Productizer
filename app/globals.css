@@ -346,6 +346,44 @@ html {
   mix-blend-mode: screen;
 }
 
+/* B13 Part A (#339) — FUI bootstrap-required scan-line sweep.
+ * A single bright horizontal bar travels top→bottom across the viewport,
+ * layered on top of the CRT scanline grid to sell the "system is probing"
+ * feel on the setup-required landing page. */
+@keyframes fui-scan-sweep {
+  0%   { transform: translateY(-20%); opacity: 0; }
+  10%  { opacity: 0.9; }
+  90%  { opacity: 0.9; }
+  100% { transform: translateY(120vh); opacity: 0; }
+}
+
+.fui-scan-sweep {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  overflow: hidden;
+}
+
+.fui-scan-sweep::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 14vh;
+  background: linear-gradient(
+    180deg,
+    rgba(56, 189, 248, 0) 0%,
+    rgba(56, 189, 248, 0.08) 40%,
+    rgba(56, 189, 248, 0.32) 50%,
+    rgba(56, 189, 248, 0.08) 60%,
+    rgba(56, 189, 248, 0) 100%
+  );
+  animation: fui-scan-sweep 5.2s linear infinite;
+  mix-blend-mode: screen;
+}
+
 /* Text glow effects */
 .text-glow-blue {
   text-shadow: 0 0 10px var(--neural-blue), 0 0 20px var(--neural-blue-dim);
