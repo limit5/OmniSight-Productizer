@@ -51,7 +51,7 @@ async function main() {
   let chromium;
   try {
     ({ chromium } = require('playwright'));
-  } catch (err) {
+  } catch {
     console.error('NOTE: playwright not installed — focus-order check skipped.');
     console.error('      Install: pnpm add -D playwright && pnpm exec playwright install chromium');
     process.exit(0);

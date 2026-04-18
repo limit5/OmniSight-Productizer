@@ -8,14 +8,13 @@
  * semantics. Contract tests opt in explicitly.
  */
 import { setupServer } from "msw/node"
+import { afterAll, afterEach, beforeAll } from "vitest"
 import { handlers } from "./handlers"
 
 export const server = setupServer(...handlers)
 
 /** Use from a `describe` block to mount and tear down MSW. */
 export function useMswServer() {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { afterAll, afterEach, beforeAll } = require("vitest") as typeof import("vitest")
   beforeAll(() => server.listen({ onUnhandledRequest: "error" }))
   afterEach(() => server.resetHandlers())
   afterAll(() => server.close())

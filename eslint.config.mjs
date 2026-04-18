@@ -65,4 +65,17 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-expressions": "off",
     },
   },
+
+  // scripts/ is Node.js CLI land without package.json "type":"module".
+  // .js files are CJS by default and use require() legitimately; forcing
+  // ESM here would require .mjs rename + __filename shim + doc updates
+  // for no runtime gain. The TS-aware rule still applies to scripts/*.ts
+  // and scripts/*.mjs should we ever add them.
+  {
+    files: ["scripts/**/*.js"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+      "@typescript-eslint/no-var-requires": "off",
+    },
+  },
 )

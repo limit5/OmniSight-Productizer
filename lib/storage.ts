@@ -97,7 +97,12 @@ export function useUserStorage(key: string): [string | null, (v: string | null) 
 
   const snapshotRef = useRef<string | null>(null)
   const keyRef = useRef(fullKey)
-  keyRef.current = fullKey
+  // Latest-ref pattern: subscribe closure reads keyRef.current on every
+  // storage event; useEffect keeps it in sync without forcing
+  // useSyncExternalStore to re-subscribe (which would thrash).
+  useEffect(() => {
+    keyRef.current = fullKey
+  }, [fullKey])
 
   const subscribe = (onStoreChange: () => void) => {
     const unsub = onStorageChange((changedKey) => {
@@ -137,7 +142,11 @@ export function useStorageSync(key: string, onSync: (newValue: string | null) =>
   const userId = user?.id ?? null
   const fullKey = prefixedKey(currentTenantId, userId, key)
   const onSyncRef = useRef(onSync)
-  onSyncRef.current = onSync
+  // Latest-ref pattern: onSync's identity may change every render; keep
+  // the ref current without re-binding the storage listener.
+  useEffect(() => {
+    onSyncRef.current = onSync
+  })
 
   useEffect(() => {
     return onStorageChange((changedKey, newValue) => {
