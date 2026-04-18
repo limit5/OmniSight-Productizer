@@ -156,7 +156,14 @@ describe("B13 Part C — global API error handler", () => {
   })
 
   describe("401 → /login?next=<current>", () => {
-    it("redirects to /login with the current path encoded in ?next", async () => {
+    // Contract pinned by lib/api.ts:542-562 (B14 Part A row 3 cd750c01):
+    // 401 is *redirect XOR emit*. When the redirect fires, the handler
+    // short-circuits and does NOT publish on the onApiError bus — the
+    // page is about to unload, so a toast would race the navigation and
+    // flash. When the redirect is skipped (already on /login or
+    // /setup-required), the bus DOES receive the event so the surface
+    // that's staying mounted can react.
+    it("redirects to /login with the current path encoded in ?next and does NOT emit on the bus", async () => {
       const loc = installLocation("/dashboard", "?tab=agents")
       const errs: ApiError[] = []
       unsubscribers.push(onApiError((e) => errs.push(e)))
@@ -167,23 +174,34 @@ describe("B13 Part C — global API error handler", () => {
       expect(loc.assign).toHaveBeenCalledWith(
         "/login?next=" + encodeURIComponent("/dashboard?tab=agents"),
       )
-      expect(errs[0].kind).toBe("unauthorized")
+      // Redirect path short-circuits — bus stays silent (no toast race).
+      expect(errs).toHaveLength(0)
     })
 
-    it("does NOT redirect when already on /login (avoids infinite loop)", async () => {
+    it("does NOT redirect when already on /login (avoids infinite loop) and emits on the bus", async () => {
       const loc = installLocation("/login", "?next=/x")
-      mockFetchOnce(401, { detail: "bad credentials" })
+      const errs: ApiError[] = []
+      unsubscribers.push(onApiError((e) => errs.push(e)))
 
+      mockFetchOnce(401, { detail: "bad credentials" })
       await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+
       expect(loc.assign).not.toHaveBeenCalled()
+      // skipRedirect branch — bus DOES receive so the login form can react.
+      expect(errs[0].kind).toBe("unauthorized")
+      expect(errs[0].status).toBe(401)
     })
 
-    it("does NOT redirect when on /setup-required (bootstrap operator path)", async () => {
+    it("does NOT redirect when on /setup-required (bootstrap operator path) and emits on the bus", async () => {
       const loc = installLocation("/setup-required")
-      mockFetchOnce(401, { detail: "not logged in yet" })
+      const errs: ApiError[] = []
+      unsubscribers.push(onApiError((e) => errs.push(e)))
 
+      mockFetchOnce(401, { detail: "not logged in yet" })
       await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+
       expect(loc.assign).not.toHaveBeenCalled()
+      expect(errs[0].kind).toBe("unauthorized")
     })
   })
 
