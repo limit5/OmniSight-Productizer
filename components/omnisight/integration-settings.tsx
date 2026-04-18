@@ -234,15 +234,18 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
   )
 }
 
-/** B14 Part B rows 1-4 — collapsible "Multiple Instances" sub-area inside
+/** B14 Part B rows 1-5 — collapsible "Multiple Instances" sub-area inside
  *  the GIT REPOSITORIES block. Row 1 delivered the expandable scaffold;
  *  row 2 added "Add GitHub Instance" (hostname + token); row 3 added the
- *  parallel "Add GitLab Instance" (URL + token); row 4 (this revision)
- *  wires the instance list + per-row TEST / REMOVE buttons. Wiring is
- *  still local-state only — env-var persistence and the
- *  `/system/settings/git/token-map` backend land in rows 216-217, and
- *  TEST currently short-circuits to a stub "not wired" probe pending the
- *  row-217 backend endpoint. */
+ *  parallel "Add GitLab Instance" (URL + token); row 4 wired the instance
+ *  list + per-row TEST / REMOVE buttons; row 5 (this revision) pipes
+ *  mutations into the parent's `dirty` state so SAVE & APPLY serialises
+ *  the list into `github_token_map` / `gitlab_token_map` JSON (the
+ *  in-memory settings fields whose env-var form is
+ *  `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`). The
+ *  dedicated masked `/system/settings/git/token-map` endpoint lands in
+ *  row 217 — until then, TEST short-circuits to a stub "not wired"
+ *  probe. */
 interface TokenMapInstance {
   id: string
   platform: "github" | "gitlab"
@@ -252,7 +255,28 @@ interface TokenMapInstance {
   testMessage?: string
 }
 
-function MultipleInstancesSection() {
+// Serialize instances → JSON map shape consumed by
+// `settings.github_token_map` / `settings.gitlab_token_map`
+// (env-var name: OMNISIGHT_GITHUB_TOKEN_MAP / OMNISIGHT_GITLAB_TOKEN_MAP).
+// Empty list → empty string so the backend treats it as "no map
+// configured" rather than `"{}"` (both parse to {} in _load_json_map
+// but empty string is the idiomatic "unset" value).
+function serializeTokenMap(
+  instances: TokenMapInstance[],
+  platform: "github" | "gitlab",
+): string {
+  const entries = instances
+    .filter(i => i.platform === platform)
+    .map(i => [i.host, i.token] as const)
+  if (entries.length === 0) return ""
+  return JSON.stringify(Object.fromEntries(entries))
+}
+
+function MultipleInstancesSection({
+  setVal,
+}: {
+  setVal: (configKey: string, value: string | boolean) => void
+}) {
   const [expanded, setExpanded] = useState(false)
   const [addingGithub, setAddingGithub] = useState(false)
   const [ghHost, setGhHost] = useState("")
@@ -274,22 +298,44 @@ function MultipleInstancesSection() {
     setGlToken("")
   }
 
+  // Row 216: every mutation recomputes the two JSON maps and pushes them
+  // into the parent's `dirty` reducer via `setVal`, so that the SAVE &
+  // APPLY button serialises the instance list into `github_token_map` /
+  // `gitlab_token_map`. We compute from the *next* state (inside the
+  // setter's updater) so we don't double-render or race React 18 batching.
+  const pushTokenMapsFromNext = (next: TokenMapInstance[]) => {
+    setVal("github_token_map", serializeTokenMap(next, "github"))
+    setVal("gitlab_token_map", serializeTokenMap(next, "gitlab"))
+  }
+
   const handleAddGithub = () => {
     if (!ghHost || !ghToken) return
     const id = `gh-${ghHost}-${Date.now()}`
-    setInstances(prev => [...prev, { id, platform: "github", host: ghHost, token: ghToken, testStatus: "idle" }])
+    setInstances(prev => {
+      const next = [...prev, { id, platform: "github" as const, host: ghHost, token: ghToken, testStatus: "idle" as const }]
+      pushTokenMapsFromNext(next)
+      return next
+    })
     resetGithubForm()
   }
 
   const handleAddGitlab = () => {
     if (!glUrl || !glToken) return
     const id = `gl-${glUrl}-${Date.now()}`
-    setInstances(prev => [...prev, { id, platform: "gitlab", host: glUrl, token: glToken, testStatus: "idle" }])
+    setInstances(prev => {
+      const next = [...prev, { id, platform: "gitlab" as const, host: glUrl, token: glToken, testStatus: "idle" as const }]
+      pushTokenMapsFromNext(next)
+      return next
+    })
     resetGitlabForm()
   }
 
   const handleRemove = (id: string) => {
-    setInstances(prev => prev.filter(i => i.id !== id))
+    setInstances(prev => {
+      const next = prev.filter(i => i.id !== id)
+      pushTokenMapsFromNext(next)
+      return next
+    })
   }
 
   // Row 215 delivers the button wiring; row 217's backend probe is not
@@ -408,8 +454,8 @@ function MultipleInstancesSection() {
           )}
           <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-50 leading-relaxed">
             Map per-host tokens via OMNISIGHT_GITHUB_TOKEN_MAP /
-            OMNISIGHT_GITLAB_TOKEN_MAP. Save & probe backend arrives in
-            Part B rows 216-217.
+            OMNISIGHT_GITLAB_TOKEN_MAP. SAVE & APPLY serialises this list
+            into JSON; masked read-back lands in row 217.
           </div>
 
           {addingGithub ? (
@@ -430,7 +476,7 @@ function MultipleInstancesSection() {
               />
               <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60 leading-relaxed">
                 e.g. github.enterprise.com — used as the key in
-                OMNISIGHT_GITHUB_TOKEN_MAP. Persistence wired in row 216.
+                OMNISIGHT_GITHUB_TOKEN_MAP. SAVE & APPLY serialises the list.
               </div>
               <div className="flex gap-2 justify-end">
                 <button
@@ -443,7 +489,7 @@ function MultipleInstancesSection() {
                   disabled={!ghHost || !ghToken}
                   onClick={handleAddGithub}
                   className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
-                  title="Persistence to OMNISIGHT_GITHUB_TOKEN_MAP arrives in row 216"
+                  title="Adds this host→token pair to the pending github_token_map JSON; SAVE & APPLY persists it"
                 >
                   ADD
                 </button>
@@ -476,7 +522,7 @@ function MultipleInstancesSection() {
               />
               <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60 leading-relaxed">
                 e.g. https://gitlab.example.com — used as the key in
-                OMNISIGHT_GITLAB_TOKEN_MAP. Persistence wired in row 216.
+                OMNISIGHT_GITLAB_TOKEN_MAP. SAVE & APPLY serialises the list.
               </div>
               <div className="flex gap-2 justify-end">
                 <button
@@ -489,7 +535,7 @@ function MultipleInstancesSection() {
                   disabled={!glUrl || !glToken}
                   onClick={handleAddGitlab}
                   className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--hardware-orange)] text-black font-semibold disabled:opacity-30"
-                  title="Persistence to OMNISIGHT_GITLAB_TOKEN_MAP arrives in row 216"
+                  title="Adds this URL→token pair to the pending gitlab_token_map JSON; SAVE & APPLY persists it"
                 >
                   ADD
                 </button>
@@ -1245,8 +1291,10 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
             <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
             <SettingField label="GitLab URL" value={getVal("git", "gitlab_url", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
-            {/* B14 Part B row 1: collapsible Multiple Instances sub-area */}
-            <MultipleInstancesSection />
+            {/* B14 Part B rows 1-5: collapsible Multiple Instances sub-area
+                — child pipes JSON token-maps into parent `dirty` on each
+                mutation so SAVE & APPLY persists OMNISIGHT_*_TOKEN_MAP. */}
+            <MultipleInstancesSection setVal={setVal} />
           </SettingsSection>
 
           <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">

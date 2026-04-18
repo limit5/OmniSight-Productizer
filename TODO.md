@@ -213,7 +213,7 @@ Legend:
 - [x] 「Add GitHub Instance」按鈕 → 表單：hostname（如 `github.enterprise.com`）+ token
 - [x] 「Add GitLab Instance」按鈕 → 表單：URL + token
 - [x] 列表顯示所有已設定的 instance + 每個有「Test」/「Remove」按鈕
-- [ ] 儲存時寫入 `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`（JSON 格式）
+- [x] 儲存時寫入 `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`（JSON 格式）
 - [ ] 後端 API：`GET/PUT /api/v1/settings/git/token-map` → 讀寫 token map（token 遮罩顯示）
 - [ ] 預估：**1 day**
 

@@ -12006,3 +12006,42 @@ TODO row 215 本身的字面要求是「每個 instance 要有 TEST / REMOVE 按
 
 ### 下一步
 - B14 Part B row 216：把 `handleAddGithub` / `handleAddGitlab` / `handleRemove` 的 body 從「mutate local state」換成「也寫入 `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`（JSON）」。需要先決定 env-var 的寫入 pathway（app-level env 覆寫 vs. 新 settings field），參考 `.env.local` / `configs/*.yaml` 既有 pattern。
+
+---
+
+## 回合 N+1 — B14 Part B row 216：SAVE 時序列化 instance list 成 `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`（JSON）
+
+> 撰寫時間：2026-04-18
+
+### 範圍（嚴格 row-level）
+- **僅** TODO 第 216 列：把 row 213-215 的 instance 列表從「純 local state」接上 parent 的 `dirty` 字典，讓 SAVE & APPLY 把序列化後的 JSON 打進既有 `/system/settings` PUT 流程。
+- **沒**做：row 217（backend dedicated `/system/settings/git/token-map` + 遮罩）、`_UPDATABLE_FIELDS` 白名單 allowlist（後端允許寫 `github_token_map` / `gitlab_token_map` 的 whitelist 擴充屬於 row 217 的 scope，row 216 只負責前端 serialization + 經由 dirty 流入既有 PUT 路徑）、TEST 短路移除（仍是 row 217 依賴）、初始載入（masked load-back 也在 row 217）。
+
+### 做了什麼（檔案 × 變更）
+1. **`components/omnisight/integration-settings.tsx`**
+   - 新增 module-scope 純函式 `serializeTokenMap(instances, platform)`：filter + `Object.fromEntries` → `JSON.stringify`；空列表回 `""`（對齊 `_load_json_map("")` → `{}` 的「unset」語意，避免多發出 `"{}"` 這個「等價但語義模糊」的 dirty payload）。
+   - `MultipleInstancesSection` 由無 props 轉為 `{ setVal }` 接收 parent 的 dirty reducer；prop 型別直接沿用 parent `setVal` 的 `(configKey: string, value: string | boolean) => void`。
+   - `handleAddGithub` / `handleAddGitlab` / `handleRemove` 的 body 改為 `setInstances(prev => { const next = ...; pushTokenMapsFromNext(next); return next })`，其中 `pushTokenMapsFromNext(next)` 同時對 `github_token_map` 與 `gitlab_token_map` 兩個 key 呼叫 `setVal`，無論這次 mutation 是哪個平台都保證「dirty 字典裡兩側 map 與 local state 對齊」（這讓「剛加一個 github → 又移除掉唯一的 gitlab」這類交錯操作不會漏推 gitlab_token_map="")。
+   - Parent callsite 傳入 `<MultipleInstancesSection setVal={setVal} />`。
+   - 更新三處 hint / title / comment：
+     - 根 hint「Save & probe backend arrives in Part B rows 216-217.」→「SAVE & APPLY serialises this list into JSON; masked read-back lands in row 217.」
+     - 表單 hint「Persistence wired in row 216.」(×2) → 「SAVE & APPLY serialises the list.」
+     - ADD button `title`（×2）從「Persistence to OMNISIGHT_*_TOKEN_MAP arrives in row 216」改為「Adds this host→token pair to the pending *_token_map JSON; SAVE & APPLY persists it」。
+   - 檔案頂 block comment 由「rows 1-4」擴為「rows 1-5」，並點名這次 revision 的範圍。
+2. **`TODO.md`**
+   - 第 216 列 `- [ ]` → `- [x]`；rows 217-218 仍 pending。
+3. **本 HANDOFF 條目**。
+
+### 關鍵設計決策
+- **為何用 functional updater 內部推 setVal，而不是 useEffect 監看 `instances`**：`useEffect([instances])` 會在 mount 階段觸發一次，把 `""` / `""` 推進 `dirty`，讓「剛打開 Integration Settings 什麼都沒動」的狀態也會出現「N unsaved change(s)」footer — 這是 UX 雜訊。Functional updater 內推只在實際 mutation 時觸發，mount 階段 `dirty` 仍然乾淨。
+- **為何兩個 map 每次都一起推**：要避免「add github / remove github 交錯 add/remove gitlab」時只推單邊 → 另一邊在 dirty 裡 stale。兩個都推冪等且便宜（JSON stringify 一個小 dict）。
+- **為何空列表回 `""` 而不是 `"{}"`**：後端 `_load_json_map` 對 `""` 和 `"{}"` 都回 `{}`，但 `""` 是 `settings.github_token_map` 的 default 值 → 推 `""` 進 dirty 相當於「reset 成預設」；`"{}"` 雖然功能等價但會讓 env-var round-trip 看起來像「明確設了空 map」，兩者語意微妙不同。選 `""` 貼近 pydantic default。
+- **為何不在這個 row 擴 `_UPDATABLE_FIELDS` 白名單**：後端 PUT `/system/settings` 的 whitelist 目前不含 `github_token_map` / `gitlab_token_map`，所以 row 216 的 dirty payload 即使送過去也會被 `rejected` 。這是刻意的 — row 217 的 backend 落點（`/system/settings/git/token-map` 專用端點 + mask）才是 whitelist 擴充的正確 scope。row 216 的契約只是「SAVE 時把前端 state 變成 JSON 打進 updates」，實際 persistence 的 e2e closed-loop 要等 row 217 才 green。換句話說：本列交付 **frontend serialization**，row 217 接 **backend persistence**；兩者分列正是為了逐列獨立 review。
+
+### 驗證
+- `pnpm exec tsc --noEmit --skipLibCheck` 零輸出（typecheck clean）。
+- `pnpm exec eslint components/omnisight/integration-settings.tsx` 零輸出（lint clean）。
+- 變更只動 `components/omnisight/integration-settings.tsx`（+ TODO、+ 本 HANDOFF）；不動 backend、不動 `/system/settings` router、不動 `_UPDATABLE_FIELDS` 白名單；純 frontend 串接。
+
+### 下一步
+- B14 Part B row 217：加 `backend/routers/integration.py` 的 `GET/PUT /api/v1/system/settings/git/token-map` 專用 endpoint（mask tokens on read，full values on write）；同步把 `github_token_map` / `gitlab_token_map` 加進 `_UPDATABLE_FIELDS`（或刻意留白走專用 endpoint）；前端用新 endpoint 替換 row 216 這套走 dirty/SAVE 的 fallback（或保留作為次要路徑）。決策點：是否把 `github_token` / `gitlab_token` 這些 legacy 單值欄位也挪到新 endpoint，避免雙軌維護。
