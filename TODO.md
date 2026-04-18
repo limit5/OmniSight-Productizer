@@ -206,7 +206,7 @@ Legend:
 - [x] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
 - [x] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
 - [x] 「跳過」不影響 bootstrap finalization（Git forge 非必要 gate）
-- [ ] 預估：**1 day**
+- [x] 預估：**1 day**（Step 3.5 slot 0.2d + 三-tab UI 0.2d + GitHub test 0.2d + GitLab test 0.1d + Gerrit SSH test 0.2d + skip-non-blocking 0.1d = 1d closed-loop）
 
 **Part B — Multi-repo Token Map UI**
 - [ ] Settings → Integration → Git 區塊新增「Multiple Instances」展開區
