@@ -31,6 +31,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     getGitTokenMap: vi.fn(),
     updateGitTokenMap: vi.fn(),
     getGitForgeSshPubkey: vi.fn(),
+    verifyGerritMergerBot: vi.fn(),
   }
 })
 
@@ -41,6 +42,7 @@ const mockedGetSettings = api.getSettings as unknown as ReturnType<typeof vi.fn>
 const mockedGetProviders = api.getProviders as unknown as ReturnType<typeof vi.fn>
 const mockedTestGitForgeToken = api.testGitForgeToken as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitForgeSshPubkey = api.getGitForgeSshPubkey as unknown as ReturnType<typeof vi.fn>
+const mockedVerifyGerritMergerBot = api.verifyGerritMergerBot as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitTokenMap = (api as unknown as {
   getGitTokenMap: ReturnType<typeof vi.fn>
 }).getGitTokenMap
@@ -325,5 +327,179 @@ describe("GerritSetupWizardDialog — Step 2 (SSH key 設定引導)", () => {
         screen.getByTestId("gerrit-wizard-copy-pubkey").textContent,
       ).toContain("Copied")
     })
+  })
+})
+
+/**
+ * B14 Part C row 224 — Gerrit Setup Wizard Step 3 (merger-agent-bot 帳號設定).
+ *
+ * Step 3 shows the operator the `gerrit create-group` + `gerrit
+ * set-members` SSH commands (pre-filled with Step 1's host/port) and
+ * then calls `verifyGerritMergerBot({ ssh_host, ssh_port })` to confirm
+ * that the `merger-agent-bot` Gerrit group exists and has at least one
+ * member — the AI half of the O7 dual-+2 submit gate
+ * (CLAUDE.md Safety Rules + docs/ops/gerrit_dual_two_rule.md §1).
+ *
+ * Covered:
+ *   - Gated: Step 3 hides the verify button until Step 1 flips DONE
+ *   - Commands textarea echoes the Step 1 host/port
+ *   - Happy path: verify → members surface, badge flips READY
+ *   - Empty / missing group → error message, badge stays PENDING
+ *   - Ack flips READY → DONE
+ *   - Thrown API error surfaces a friendly fallback message
+ */
+describe("GerritSetupWizardDialog — Step 3 (merger-agent-bot 帳號設定)", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedTestGitForgeToken.mockReset()
+    mockedVerifyGerritMergerBot.mockReset()
+    mockedGetSettings.mockResolvedValue({})
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  async function passStep1(host = "bot@gerrit.example.com", port = 29418) {
+    mockedTestGitForgeToken.mockResolvedValueOnce({
+      status: "ok",
+      version: "3.8.1",
+      ssh_host: host,
+      ssh_port: port,
+    })
+    await renderAndOpenWizard()
+    fireEvent.change(screen.getByTestId("gerrit-wizard-ssh-host"), {
+      target: { value: host },
+    })
+    fireEvent.click(screen.getByTestId("gerrit-wizard-test"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-1-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+  }
+
+  it("keeps Step 3 gated until Step 1 flips DONE", async () => {
+    await renderAndOpenWizard()
+    expect(screen.getByTestId("gerrit-wizard-step-3-gated")).toBeTruthy()
+    expect(screen.queryByTestId("gerrit-wizard-verify-bot")).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("pre-fills the admin SSH commands with the Step 1 host/port", async () => {
+    await passStep1("bot@gerrit.example.com", 29418)
+    const commands = (await screen.findByTestId(
+      "gerrit-wizard-bot-commands",
+    )) as HTMLTextAreaElement
+    expect(commands.value).toContain("ssh -p 29418 bot@gerrit.example.com")
+    expect(commands.value).toContain("create-group merger-agent-bot")
+    expect(commands.value).toContain("create-group ai-reviewer-bots")
+    expect(commands.value).toContain("create-group non-ai-reviewer")
+    expect(commands.value).toContain(
+      "set-members merger-agent-bot",
+    )
+  })
+
+  it("verifies the bot group and flips Step 3 to READY", async () => {
+    mockedVerifyGerritMergerBot.mockResolvedValueOnce({
+      status: "ok",
+      group: "merger-agent-bot",
+      member_count: 1,
+      members: [
+        {
+          username: "merger-agent-bot",
+          full_name: "Merger Agent",
+          email: "merger-agent-bot@svc.omnisight.internal",
+        },
+      ],
+      ssh_host: "bot@gerrit.example.com",
+      ssh_port: 29418,
+    })
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+
+    await waitFor(() => {
+      expect(mockedVerifyGerritMergerBot).toHaveBeenCalledWith({
+        ssh_host: "bot@gerrit.example.com",
+        ssh_port: 29418,
+      })
+    })
+
+    const result = await screen.findByTestId("gerrit-wizard-bot-result")
+    expect(result.getAttribute("data-status")).toBe("ok")
+    expect(
+      screen.getByTestId("gerrit-wizard-bot-member-count").textContent,
+    ).toBe("1")
+    expect(
+      screen.getByTestId("gerrit-wizard-bot-members").textContent,
+    ).toContain("merger-agent-bot")
+    expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+      "READY",
+    )
+  })
+
+  it("surfaces the backend error when the group has no members", async () => {
+    mockedVerifyGerritMergerBot.mockResolvedValueOnce({
+      status: "error",
+      group: "merger-agent-bot",
+      member_count: 0,
+      members: [],
+      message:
+        "Group 'merger-agent-bot' has no members. Add the service account with `gerrit set-members merger-agent-bot --add <bot-account>`.",
+    })
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+
+    const result = await screen.findByTestId("gerrit-wizard-bot-result")
+    expect(result.getAttribute("data-status")).toBe("error")
+    expect(result.textContent).toContain("no members")
+    // The ack button must not render when verification failed.
+    expect(screen.queryByTestId("gerrit-wizard-step-3-ack")).toBeNull()
+    expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+      "PENDING",
+    )
+  })
+
+  it("flips Step 3 from READY to DONE when the operator acknowledges", async () => {
+    mockedVerifyGerritMergerBot.mockResolvedValueOnce({
+      status: "ok",
+      group: "merger-agent-bot",
+      member_count: 1,
+      members: [{ username: "merger-agent-bot" }],
+    })
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+    await screen.findByTestId("gerrit-wizard-bot-result")
+
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-3-ack"))
+    expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+      "DONE",
+    )
+  })
+
+  it("catches a thrown probe and renders a fallback error", async () => {
+    mockedVerifyGerritMergerBot.mockRejectedValueOnce(
+      new Error("network offline"),
+    )
+
+    await passStep1()
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+
+    const result = await screen.findByTestId("gerrit-wizard-bot-result")
+    expect(result.getAttribute("data-status")).toBe("error")
+    expect(result.textContent).toContain("network offline")
+    expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+      "PENDING",
+    )
   })
 })

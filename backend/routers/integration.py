@@ -669,6 +669,139 @@ async def get_git_forge_ssh_pubkey(_user=Depends(_au.require_operator)):
     return await _resolve_ssh_public_key()
 
 
+# ─── B14 Part C row 224: Gerrit merger-agent-bot group probe ──────────────
+#
+# Step 3 of the Gerrit Setup Wizard walks the operator through creating the
+# O7 submit-rule groups — specifically the `merger-agent-bot` group whose
+# single member signs the AI half of the dual-+2 gate (see CLAUDE.md Safety
+# Rules + docs/ops/gerrit_dual_two_rule.md §1). The probe here is non-
+# mutating: it runs `ssh -p {port} {host} gerrit ls-members merger-agent-bot`
+# against the operator's Gerrit and returns the member list. An empty or
+# missing group is a *configuration* error, not a transport error, so we
+# surface it as `status: "error"` with a message the UI can render verbatim.
+# No `create-group` / `set-members` calls are made here — those require
+# admin privileges and must stay manual per the runbook.
+
+class GerritBotVerify(BaseModel):
+    ssh_host: str = ""
+    ssh_port: int = 29418
+    group: str = "merger-agent-bot"
+
+
+async def _probe_gerrit_ls_members(
+    ssh_host: str, ssh_port: int, group: str
+) -> dict:
+    """Run ``ssh -p {port} {host} gerrit ls-members {group}`` and parse the
+    table Gerrit prints. Shape mirrors ``_probe_gerrit_ssh`` — the caller
+    should funnel us through ``asyncio.wait_for(..., timeout=15)``.
+
+    Gerrit's ``ls-members`` output is a header row plus one row per member::
+
+        id    username    full name    email
+        1000001    merger-agent-bot    Merger Agent    merger@svc...
+
+    We only need the member count + a short preview of usernames for the
+    UI. Failure modes we distinguish:
+
+      - SSH transport failure  → ``status=error`` with raw stderr (first 300 chars)
+      - Group not found        → Gerrit exits nonzero with ``fatal: No such group``
+      - Group exists, no members → ``status=error`` (configuration gap)
+      - Group exists, members   → ``status=ok`` with ``members`` + ``member_count``
+    """
+    host = (ssh_host or "").strip()
+    if not host:
+        return {"status": "error", "message": "SSH host is required"}
+    grp = (group or "").strip() or "merger-agent-bot"
+    try:
+        port = int(ssh_port) if ssh_port is not None else 29418
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "SSH port must be an integer"}
+    if port < 1 or port > 65535:
+        return {"status": "error", "message": "SSH port must be between 1 and 65535"}
+    proc = await asyncio.create_subprocess_exec(
+        "ssh", "-p", str(port),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=5",
+        "-o", "BatchMode=yes",
+        host,
+        "gerrit", "ls-members", grp,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err = (stderr or stdout).decode(errors="replace").strip()
+        return {
+            "status": "error",
+            "group": grp,
+            "message": err[:300] or "gerrit ls-members failed",
+        }
+    raw = stdout.decode(errors="replace").strip()
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    # Drop the header row if present (first column is literally "id" or
+    # "_account_id"). Be defensive — some Gerrit builds omit the header
+    # when called over SSH with a TTY-less session.
+    members: list[dict] = []
+    for ln in lines:
+        parts = ln.split("\t") if "\t" in ln else ln.split(None, 3)
+        first = (parts[0] or "").strip().lower() if parts else ""
+        if first in {"id", "_account_id", "account_id"}:
+            continue
+        if not parts or not parts[0].strip():
+            continue
+        username = parts[1].strip() if len(parts) >= 2 else ""
+        full_name = parts[2].strip() if len(parts) >= 3 else ""
+        email = parts[3].strip() if len(parts) >= 4 else ""
+        members.append({
+            "username": username,
+            "full_name": full_name,
+            "email": email,
+        })
+    if not members:
+        return {
+            "status": "error",
+            "group": grp,
+            "member_count": 0,
+            "members": [],
+            "message": (
+                f"Group '{grp}' has no members. Add the service account with "
+                f"`gerrit set-members {grp} --add <bot-account>`."
+            ),
+        }
+    return {
+        "status": "ok",
+        "group": grp,
+        "member_count": len(members),
+        "members": members,
+        "ssh_host": host,
+        "ssh_port": port,
+    }
+
+
+@router.post("/git-forge/gerrit/verify-bot")
+async def verify_gerrit_merger_bot(
+    body: GerritBotVerify, _user=Depends(_au.require_admin)
+):
+    """Verify the ``merger-agent-bot`` Gerrit group exists and has members.
+
+    B14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH
+    transport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit
+    ls-members`` instead of ``gerrit version`` so the probe only succeeds
+    when the O7 dual-+2 group is properly seated. Never mutates Gerrit —
+    group creation + member-add stay manual (they require admin rights
+    per the runbook in docs/ops/gerrit_dual_two_rule.md §1).
+    """
+    try:
+        result = await asyncio.wait_for(
+            _probe_gerrit_ls_members(body.ssh_host, body.ssh_port, body.group),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        return {"status": "error", "message": "Connection timed out (15s)"}
+    except Exception as exc:  # pragma: no cover — network-level failure
+        return {"status": "error", "message": str(exc)}
+    return result
+
+
 # ── Test functions ──
 
 async def _test_ssh() -> dict:

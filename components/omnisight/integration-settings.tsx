@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
-import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy } from "lucide-react"
+import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users } from "lucide-react"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -1075,11 +1075,12 @@ function NetworkEgressSection() {
 }
 
 /**
- * B14 Part C rows 221–222:
+ * B14 Part C rows 221–224:
  *
  * Modal that walks the operator through the 5-step Gerrit Code Review
  * setup. The entry-point shell + 5-step overview landed in row 221;
- * row 222 wires the interactive Step 1 "Test Connection" probe.
+ * row 222 wired Step 1 (Test Connection), row 223 wired Step 2 (SSH
+ * key 設定), row 224 wires Step 3 (`merger-agent-bot` 帳號 + group 設定).
  *
  * Step 1 collects the Gerrit REST URL (optional), SSH host, and SSH
  * port, then calls `api.testGitForgeToken({ provider: "gerrit", ssh_host,
@@ -1087,12 +1088,19 @@ function NetworkEgressSection() {
  * wizard's Step 3.5 Gerrit tab uses — so both entry-points share one
  * code path (`_probe_gerrit_ssh` → `ssh -p {port} {host} gerrit version`).
  * On success the Gerrit version surfaces inline and Step 1's badge flips
- * PENDING → DONE; Steps 2–5 remain PENDING until later rows wire them up.
+ * PENDING → DONE. Step 2 loads the OmniSight SSH public key via
+ * `api.getGitForgeSshPubkey()` and guides the operator through pasting
+ * it into Gerrit Settings → SSH Keys. Step 3 shows the `gerrit
+ * create-group` + `gerrit set-members` SSH commands the operator must
+ * run as a Gerrit admin, then calls `api.verifyGerritMergerBot(...)` to
+ * confirm the `merger-agent-bot` group exists and has ≥1 member — the
+ * AI half of the O7 dual-+2 submit gate. Steps 4–5 stay PENDING until
+ * later rows wire them up.
  *
- * This row is probe-only — it does NOT persist to `settings.gerrit_*`.
- * A later row ties the wizard's "finalize" path to the existing settings
- * PUT so an unfinished wizard never leaves a half-configured Gerrit
- * endpoint in `settings.*`.
+ * None of these rows persist to `settings.gerrit_*`. A later row ties
+ * the wizard's "finalize" path to the existing settings PUT so an
+ * unfinished wizard never leaves a half-configured Gerrit endpoint in
+ * `settings.*`.
  *
  * Rendered via createPortal at z-[110] to sit above the parent IntegrationSettings
  * portal (z-[100]); backdrop click and X close.
@@ -1111,6 +1119,14 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
   const [pubkey, setPubkey] = useState<api.GitForgeSshPubkey | null>(null)
   const [pubkeyCopied, setPubkeyCopied] = useState(false)
   const [step2Ackd, setStep2Ackd] = useState(false)
+  // B14 Part C row 224 — Step 3: verify that `merger-agent-bot` exists as
+  // a Gerrit group with at least one member (the AI half of the O7
+  // dual-+2 submit gate). Group creation + membership remain manual per
+  // the runbook — we only probe via `gerrit ls-members`.
+  const [botVerifying, setBotVerifying] = useState(false)
+  const [botVerify, setBotVerify] = useState<api.GerritBotVerifyResult | null>(null)
+  const [botCmdCopied, setBotCmdCopied] = useState(false)
+  const [step3Ackd, setStep3Ackd] = useState(false)
 
   const parsedPort = (() => {
     const trimmed = sshPort.trim()
@@ -1179,6 +1195,29 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }, [pubkey])
 
+  const onVerifyBot = useCallback(async () => {
+    if (!sshHost.trim() || !portValid) return
+    setBotVerifying(true)
+    setBotVerify(null)
+    try {
+      const res = await api.verifyGerritMergerBot({
+        ssh_host: sshHost.trim(),
+        ssh_port: parsedPort as number,
+      })
+      setBotVerify(res)
+    } catch (err) {
+      setBotVerify({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to reach the Gerrit ls-members probe",
+      })
+    } finally {
+      setBotVerifying(false)
+    }
+  }, [sshHost, parsedPort, portValid])
+
   if (!open || typeof document === "undefined") return null
 
   const pubkeyReady = pubkey?.status === "ok" && !!pubkey.public_key
@@ -1188,11 +1227,40 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
       ? "READY"
       : "PENDING"
 
+  const botGroupReady =
+    botVerify?.status === "ok" && (botVerify.member_count ?? 0) > 0
+  const step3Badge: "DONE" | "READY" | "PENDING" = step3Ackd
+    ? "DONE"
+    : botGroupReady
+      ? "READY"
+      : "PENDING"
+
+  const botHostSlug = sshHost.trim() || "<host>"
+  const botPortSlug = portValid ? String(parsedPort) : String(GERRIT_DEFAULT_SSH_PORT)
+  const botSetupCommands =
+    `# 1) Create the three groups (admin-only; run once per Gerrit instance):\n` +
+    `ssh -p ${botPortSlug} ${botHostSlug} gerrit create-group merger-agent-bot \\\n` +
+    `    --visible-to-all --description "O6 Merger Agent service account."\n` +
+    `ssh -p ${botPortSlug} ${botHostSlug} gerrit create-group ai-reviewer-bots \\\n` +
+    `    --visible-to-all --description "Umbrella for every AI reviewer."\n` +
+    `ssh -p ${botPortSlug} ${botHostSlug} gerrit create-group non-ai-reviewer \\\n` +
+    `    --visible-to-all --description "Humans ONLY. Bots forbidden."\n\n` +
+    `# 2) Add the bot service account to both bot groups:\n` +
+    `ssh -p ${botPortSlug} ${botHostSlug} gerrit set-members merger-agent-bot \\\n` +
+    `    --add merger-agent-bot@svc.omnisight.internal\n` +
+    `ssh -p ${botPortSlug} ${botHostSlug} gerrit set-members ai-reviewer-bots \\\n` +
+    `    --add merger-agent-bot@svc.omnisight.internal`
+
+  const onCopyBotCommands = async () => {
+    try {
+      await navigator.clipboard.writeText(botSetupCommands)
+      setBotCmdCopied(true)
+    } catch {
+      /* clipboard may not be available (e.g. non-secure context) */
+    }
+  }
+
   const laterSteps: { title: string; body: string }[] = [
-    {
-      title: "Step 3 — merger-agent-bot 帳號",
-      body: "說明如何建立 bot 帳號與加入 group（Code-Review +2 的 dual-sign gate 右半邊）。",
-    },
     {
       title: "Step 4 — submit-rule 驗證",
       body: "呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule（merger + non-ai-reviewer）。",
@@ -1531,6 +1599,164 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
             )}
           </div>
 
+          <div
+            data-testid="gerrit-wizard-step-3"
+            data-state={step3Badge.toLowerCase()}
+            className={`p-3 rounded border space-y-2 ${
+              step1Done
+                ? "border-[var(--neural-blue)]/40 bg-[var(--background)]"
+                : "border-[var(--border)] bg-[var(--background)] opacity-60"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                3
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                  Step 3 — merger-agent-bot 帳號
+                </div>
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                  建立 bot 帳號與對應 group（<code>merger-agent-bot</code> + <code>ai-reviewer-bots</code>），
+                  構成 O7 雙簽 +2 的 AI 右半邊。Verify 之前需先由 Gerrit admin 執行下方 SSH 指令。
+                </div>
+              </div>
+              <span
+                data-testid="gerrit-wizard-step-3-badge"
+                className={`flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded self-start ${
+                  step3Badge === "DONE"
+                    ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                    : step3Badge === "READY"
+                      ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                      : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                }`}
+              >
+                {step3Badge}
+              </span>
+            </div>
+
+            {!step1Done ? (
+              <div
+                data-testid="gerrit-wizard-step-3-gated"
+                className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1"
+              >
+                Step 1 通過後解鎖。先完成 Test Connection。
+              </div>
+            ) : (
+              <div className="space-y-1.5 pt-1">
+                <label
+                  htmlFor="gerrit-wizard-bot-commands"
+                  className="block font-mono text-[9px] text-[var(--muted-foreground)]"
+                >
+                  Admin SSH commands — run on any host with admin Gerrit access:
+                </label>
+                <textarea
+                  id="gerrit-wizard-bot-commands"
+                  data-testid="gerrit-wizard-bot-commands"
+                  readOnly
+                  value={botSetupCommands}
+                  rows={8}
+                  className="w-full font-mono text-[9px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] resize-none whitespace-pre"
+                />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-copy-bot-commands"
+                    onClick={onCopyBotCommands}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+                  >
+                    {botCmdCopied ? <Check size={10} /> : <Copy size={10} />}
+                    {botCmdCopied ? "Copied" : "Copy Commands"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-verify-bot"
+                    onClick={onVerifyBot}
+                    disabled={botVerifying}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {botVerifying ? (
+                      <Loader size={10} className="animate-spin" />
+                    ) : (
+                      <Users size={10} />
+                    )}
+                    {botVerifying ? "Verifying…" : "Verify Bot Group"}
+                  </button>
+                </div>
+
+                {botVerify && (
+                  <div
+                    data-testid="gerrit-wizard-bot-result"
+                    data-status={botVerify.status}
+                    className={`font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 ${
+                      botGroupReady
+                        ? "bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)]"
+                        : "bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                    }`}
+                  >
+                    {botGroupReady ? (
+                      <Check size={10} className="mt-0.5 flex-shrink-0" />
+                    ) : (
+                      <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                    )}
+                    {botGroupReady ? (
+                      <div className="flex flex-col gap-0.5">
+                        <span>
+                          Group{" "}
+                          <strong>{botVerify.group ?? "merger-agent-bot"}</strong>{" "}
+                          has{" "}
+                          <strong data-testid="gerrit-wizard-bot-member-count">
+                            {botVerify.member_count}
+                          </strong>{" "}
+                          member
+                          {(botVerify.member_count ?? 0) === 1 ? "" : "s"}.
+                        </span>
+                        {botVerify.members && botVerify.members.length > 0 ? (
+                          <span
+                            data-testid="gerrit-wizard-bot-members"
+                            className="opacity-80"
+                          >
+                            {botVerify.members
+                              .map((m) => m.username || m.email || "(unnamed)")
+                              .slice(0, 5)
+                              .join(", ")}
+                            {botVerify.members.length > 5
+                              ? ` +${botVerify.members.length - 5} more`
+                              : ""}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span>
+                        {botVerify.message ||
+                          "merger-agent-bot group is not configured"}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {botGroupReady && (
+                  <button
+                    type="button"
+                    data-testid="gerrit-wizard-step-3-ack"
+                    onClick={() => setStep3Ackd(true)}
+                    disabled={step3Ackd}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Check size={10} />
+                    {step3Ackd ? "Bot account confirmed" : "I've configured the bot account"}
+                  </button>
+                )}
+
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed">
+                  參考 <code>docs/ops/gerrit_dual_two_rule.md §1</code> 了解三個 group 的權責：
+                  <code>non-ai-reviewer</code>（人類 hard gate）、<code>ai-reviewer-bots</code>（umbrella）、
+                  <code>merger-agent-bot</code>（O6 Merger 專屬）。
+                </div>
+              </div>
+            )}
+          </div>
+
           <ol className="space-y-2 list-none p-0 m-0">
             {laterSteps.map((s, i) => (
               <li
@@ -1538,7 +1764,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                 className="flex gap-2 p-2 rounded border border-[var(--border)] bg-[var(--background)]"
               >
                 <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] text-[9px] font-mono flex items-center justify-center font-semibold">
-                  {i + 3}
+                  {i + 4}
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
@@ -1557,14 +1783,15 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
           <div className="p-2 rounded bg-[var(--hardware-orange)]/10 border border-[var(--hardware-orange)]/30">
             <div className="font-mono text-[9px] text-[var(--hardware-orange)] font-semibold">
-              PARTIAL — STEPS 1 &amp; 2 ONLY
+              PARTIAL — STEPS 1–3 ONLY
             </div>
             <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-1">
-              Step 1 (Test Connection, row 222) and Step 2 (SSH key display, row 223) are wired.
-              Both are probe/display-only and do not write to
+              Step 1 (Test Connection, row 222), Step 2 (SSH key display, row 223) and
+              Step 3 (merger-agent-bot group verify, row 224) are wired.
+              All three are probe/display-only and do not write to
               <code className="mx-1">settings.gerrit_*</code>
-              — a later row wires the wizard finalization path. Steps 3–5 (merger-agent-bot guide,
-              submit-rule probe, webhook wiring) arrive in subsequent rows.
+              — a later row wires the wizard finalization path. Steps 4–5
+              (submit-rule probe, webhook wiring) arrive in subsequent rows.
             </div>
           </div>
         </div>

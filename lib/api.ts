@@ -1369,6 +1369,47 @@ export async function getGitForgeSshPubkey(): Promise<GitForgeSshPubkey> {
   return request<GitForgeSshPubkey>("/system/git-forge/ssh-pubkey")
 }
 
+// ─── B14 Part C row 224: Verify the merger-agent-bot Gerrit group ───
+//
+// Gerrit Setup Wizard Step 3 shows the operator the SSH commands they must
+// run against their Gerrit instance to (a) create the `merger-agent-bot`,
+// `ai-reviewer-bots`, and `non-ai-reviewer` groups and (b) add the bot
+// service account to the first two. After they run the commands, they hit
+// "Verify bot account" which calls this helper — the backend runs
+// `ssh -p {port} {host} gerrit ls-members merger-agent-bot` and returns
+// the member list so the UI can confirm the O7 dual-+2 gate's AI half is
+// wired up before moving on to submit-rule validation in Step 4.
+export interface GerritBotMember {
+  username: string
+  full_name?: string
+  email?: string
+}
+
+export interface GerritBotVerifyResult {
+  status: "ok" | "error"
+  group?: string
+  member_count?: number
+  members?: GerritBotMember[]
+  ssh_host?: string
+  ssh_port?: number
+  message?: string
+}
+
+export async function verifyGerritMergerBot(args: {
+  ssh_host: string
+  ssh_port?: number
+  group?: string
+}): Promise<GerritBotVerifyResult> {
+  return request<GerritBotVerifyResult>("/system/git-forge/gerrit/verify-bot", {
+    method: "POST",
+    body: JSON.stringify({
+      ssh_host: args.ssh_host,
+      ssh_port: args.ssh_port ?? 29418,
+      group: args.group ?? "merger-agent-bot",
+    }),
+  })
+}
+
 // ─── Tenant Secrets (I4) ───
 
 export interface TenantSecret {

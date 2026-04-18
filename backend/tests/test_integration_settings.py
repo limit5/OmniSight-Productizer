@@ -502,6 +502,219 @@ class TestGitForgeSshPubkey:
         assert "AAAAPUBLIC" in body
 
 
+class TestGerritBotVerify:
+    """B14 Part C row 224 — Gerrit Setup Wizard Step 3 (``merger-agent-bot``
+    group verification).
+
+    The endpoint shells out to
+    ``ssh -p {port} {host} gerrit ls-members {group}``. These tests stub
+    the subprocess so no real SSH call is made; the assertions focus on
+    (1) the ``ok`` path surfacing the member list, (2) configuration gaps
+    (empty group / missing group) collapsing to ``status=error`` with a
+    useful message, and (3) input validation for host / port.
+    """
+
+    @pytest.mark.asyncio
+    async def test_verifies_group_and_returns_members(
+        self, client, monkeypatch
+    ):
+        """Happy path: Gerrit prints a tab-separated table → parser
+        surfaces member_count + username list for the UI."""
+        from backend.routers import integration as ir
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self):
+                # Gerrit ls-members output format (tab separated).
+                out = (
+                    b"id\tusername\tfull name\temail\n"
+                    b"1000001\tmerger-agent-bot\tMerger Agent"
+                    b"\tmerger-agent-bot@svc.omnisight.internal\n"
+                )
+                return out, b""
+
+        captured = {}
+
+        async def _fake_exec(*args, **_kwargs):
+            captured["args"] = args
+            return _Proc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-bot",
+            json={"ssh_host": "gerrit.example.com", "ssh_port": 29418},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["group"] == "merger-agent-bot"
+        assert data["member_count"] == 1
+        assert data["members"][0]["username"] == "merger-agent-bot"
+        assert data["members"][0]["email"].endswith(
+            "@svc.omnisight.internal"
+        )
+        # Confirm we actually invoked `gerrit ls-members merger-agent-bot`.
+        assert "ls-members" in captured["args"]
+        assert "merger-agent-bot" in captured["args"]
+
+    @pytest.mark.asyncio
+    async def test_empty_group_surfaces_configuration_error(
+        self, client, monkeypatch
+    ):
+        """Group exists but has zero members → `status=error` with a
+        pointer to `gerrit set-members` so the operator can fix it."""
+        from backend.routers import integration as ir
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self):
+                # Header only — group exists but is empty.
+                return b"id\tusername\tfull name\temail\n", b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _Proc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-bot",
+            json={"ssh_host": "gerrit.example.com", "ssh_port": 29418},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert data["member_count"] == 0
+        assert data["members"] == []
+        assert "no members" in data["message"].lower()
+        assert "set-members" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_missing_group_surfaces_gerrit_stderr(
+        self, client, monkeypatch
+    ):
+        """`gerrit ls-members` exits nonzero if the group is not found
+        → surface Gerrit's own message (first 300 chars)."""
+        from backend.routers import integration as ir
+
+        class _Proc:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"fatal: Group Not Found : merger-agent-bot\n"
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _Proc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-bot",
+            json={"ssh_host": "gerrit.example.com", "ssh_port": 29418},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "group not found" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_ssh_host_rejected_before_subprocess(
+        self, client, monkeypatch
+    ):
+        """Empty ssh_host must short-circuit — no subprocess is spawned
+        (otherwise a blank host would blow up with an opaque `ssh` error)."""
+        from backend.routers import integration as ir
+
+        called = {"count": 0}
+
+        async def _fake_exec(*_args, **_kwargs):
+            called["count"] += 1
+
+            class _P:
+                returncode = 0
+
+                async def communicate(self):
+                    return b"", b""
+
+            return _P()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-bot",
+            json={"ssh_host": "", "ssh_port": 29418},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "host is required" in data["message"].lower()
+        assert called["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_invalid_port_rejected(self, client, monkeypatch):
+        """Out-of-range ssh_port must surface the range error without
+        attempting the ssh call."""
+        from backend.routers import integration as ir
+
+        async def _fake_exec(*_args, **_kwargs):  # pragma: no cover — should not fire
+            raise AssertionError("subprocess should not be spawned for invalid port")
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-bot",
+            json={"ssh_host": "gerrit.example.com", "ssh_port": 99999},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "between 1 and 65535" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_custom_group_passed_through(
+        self, client, monkeypatch
+    ):
+        """Allow the operator to probe a non-default group name (e.g.
+        `ai-reviewer-bots`) so Step 3 UI can be reused for follow-ups."""
+        from backend.routers import integration as ir
+
+        captured = {}
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return (
+                    b"id\tusername\tfull name\temail\n"
+                    b"1000001\tlint-bot\tLint Bot\tlint@svc\n",
+                    b"",
+                )
+
+        async def _fake_exec(*args, **_kwargs):
+            captured["args"] = args
+            return _Proc()
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/verify-bot",
+            json={
+                "ssh_host": "gerrit.example.com",
+                "ssh_port": 29418,
+                "group": "ai-reviewer-bots",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["group"] == "ai-reviewer-bots"
+        # The subprocess should have been invoked with the custom group.
+        assert "ai-reviewer-bots" in captured["args"]
+        assert "merger-agent-bot" not in captured["args"]
+
+
 class TestGitTokenMapEndpoint:
     """B14 Part B row 217 — masked GET/PUT of the multi-instance token map."""
 
