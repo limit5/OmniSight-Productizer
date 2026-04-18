@@ -180,10 +180,19 @@ jobs:
         # clock. Decision-related modules require 85% coverage; the
         # rest 60% (Phase 51 baseline; raise in v1 once gaps are
         # filled).
+        # `min` is the --cov-fail-under threshold. Subset shards can't
+        # meaningfully threshold-check coverage because `--cov=backend`
+        # measures ALL ~5,700 backend/*.py files but the shard only runs
+        # a handful of tests — the subset will always report single-digit
+        # coverage. Only the `rest` shard (which runs all tests) gets a
+        # real floor. Subset shards still produce coverage-<name>.xml
+        # artifacts for the upload step; a future row can combine them
+        # with `coverage combine` + a single `coverage report --fail-under`
+        # and restore the per-shard thresholds (decision 85, others 60).
         shard:
-          - { name: decision, paths: "backend/tests/test_decision_engine.py backend/tests/test_decision_rules.py backend/tests/test_decision_rules_persistence.py backend/tests/test_decision_api.py backend/tests/test_decision_sse.py backend/tests/test_ambiguity_budget.py backend/tests/test_stuck_detector.py", min: 85 }
-          - { name: pipeline, paths: "backend/tests/test_pipeline.py backend/tests/test_release.py backend/tests/test_handoff.py", min: 60 }
-          - { name: schema,   paths: "backend/tests/test_schema.py backend/tests/test_event_system.py backend/tests/test_artifact_pipeline.py backend/tests/test_artifacts.py", min: 60 }
+          - { name: decision, paths: "backend/tests/test_decision_engine.py backend/tests/test_decision_rules.py backend/tests/test_decision_rules_persistence.py backend/tests/test_decision_api.py backend/tests/test_decision_sse.py backend/tests/test_ambiguity_budget.py backend/tests/test_stuck_detector.py", min: 0 }
+          - { name: pipeline, paths: "backend/tests/test_pipeline.py backend/tests/test_release.py backend/tests/test_handoff.py", min: 0 }
+          - { name: schema,   paths: "backend/tests/test_schema.py backend/tests/test_event_system.py backend/tests/test_artifact_pipeline.py backend/tests/test_artifacts.py", min: 0 }
           - { name: rest,     paths: "backend/tests/", min: 60 }
     steps:
       - uses: actions/checkout@v4
@@ -199,11 +208,18 @@ jobs:
         # + P0 #285) shadowed stdlib `platform` during pytest startup —
         # uuid.py's `import platform` → `backend/platform.py` without a
         # `system()` attr → AttributeError → exit 2 on every shard.
+        #
+        # `python3 -m pytest` (NOT the bare `pytest` CLI) is required so
+        # python adds the repo root to sys.path[0] — otherwise
+        # `from backend.xxx import ...` inside the tests hits
+        # `ModuleNotFoundError: No module named 'backend'` at collection
+        # time (CI has no editable install, no backend/__init__.py to
+        # make it an implicit namespace package from pytest's rootdir).
         # `--rootdir=backend -c backend/pytest.ini` keeps coverage
         # config, testpaths, and asyncio_mode resolution identical to
         # the old cd-into-backend layout.
         run: |
-          pytest ${{ matrix.shard.paths }} \
+          python3 -m pytest ${{ matrix.shard.paths }} \
             --rootdir=backend \
             -c backend/pytest.ini \
             --cov=backend \
