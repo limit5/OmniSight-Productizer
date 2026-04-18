@@ -234,13 +234,26 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
   )
 }
 
-/** B14 Part B row 1 — collapsible "Multiple Instances" sub-area inside the
- *  GIT REPOSITORIES block. This row delivers only the expandable scaffold;
- *  the Add GitHub / Add GitLab forms, the instance list, the save-to-env
- *  hookup, and the backend `/system/settings/git/token-map` API land in
- *  the subsequent Part B rows and will replace the placeholder body. */
+/** B14 Part B rows 1-2 — collapsible "Multiple Instances" sub-area inside the
+ *  GIT REPOSITORIES block. Row 1 delivered the expandable scaffold;
+ *  row 2 (this revision) adds the "Add GitHub Instance" button + inline
+ *  form (hostname + token, e.g. github.enterprise.com). The submit handler
+ *  is intentionally local-state only — the instance list rendering,
+ *  Add GitLab Instance, env-var persistence, and the
+ *  `/system/settings/git/token-map` backend land in the subsequent
+ *  Part B rows (214-217). */
 function MultipleInstancesSection() {
   const [expanded, setExpanded] = useState(false)
+  const [addingGithub, setAddingGithub] = useState(false)
+  const [ghHost, setGhHost] = useState("")
+  const [ghToken, setGhToken] = useState("")
+
+  const resetGithubForm = () => {
+    setAddingGithub(false)
+    setGhHost("")
+    setGhToken("")
+  }
+
   return (
     <div className="pt-2 border-t border-[var(--border)]/50 mt-1">
       <button
@@ -264,9 +277,55 @@ function MultipleInstancesSection() {
           </div>
           <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-50 leading-relaxed">
             Map per-host tokens via OMNISIGHT_GITHUB_TOKEN_MAP /
-            OMNISIGHT_GITLAB_TOKEN_MAP. Add / Test / Remove controls
-            arrive in the next Part B rows.
+            OMNISIGHT_GITLAB_TOKEN_MAP. List, GitLab, save & test arrive
+            in the next Part B rows.
           </div>
+
+          {addingGithub ? (
+            <div className="mt-2 p-2 rounded border border-[var(--neural-blue)]/30 bg-[var(--secondary)] space-y-1.5">
+              <div className="font-mono text-[8px] text-[var(--neural-blue)] uppercase tracking-wider">
+                Add GitHub Instance
+              </div>
+              <SettingField
+                label="Hostname"
+                value={ghHost}
+                onChange={setGhHost}
+              />
+              <SettingField
+                label="Token"
+                value={ghToken}
+                type="password"
+                onChange={setGhToken}
+              />
+              <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60 leading-relaxed">
+                e.g. github.enterprise.com — used as the key in
+                OMNISIGHT_GITHUB_TOKEN_MAP. Persistence wired in row 216.
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={resetGithubForm}
+                  className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+                >
+                  CANCEL
+                </button>
+                <button
+                  disabled={!ghHost || !ghToken}
+                  onClick={resetGithubForm}
+                  className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
+                  title="Save handler arrives in Part B row 216"
+                >
+                  ADD
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAddingGithub(true)}
+              className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 transition-colors"
+            >
+              <Plus size={10} /> Add GitHub Instance
+            </button>
+          )}
         </div>
       )}
     </div>

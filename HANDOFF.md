@@ -11934,3 +11934,26 @@ backend/tests/test_reverse_proxy_caddyfile.py ........................... 24 pas
 
 ### 下一步
 - V4 #4 Brand consistency validator（TODO row 1537）：post-deploy 掃描所有 color/font 是否在 design system 允許範圍，違規列 warning。會跟 V4 #3 互補 — 一個是「打包要散播的元件」，一個是「驗證已散播的元件還守規矩」。
+
+## 2026-04-18 — B14 Part B 第二顆 row 213：「Add GitHub Instance」按鈕 + 表單
+
+### 範圍（嚴格 row-level）
+- **僅** TODO 第 213 列：在前一回合（commit 56ea9b2）建立的 `MultipleInstancesSection` collapsible 內，加上「+ Add GitHub Instance」按鈕，點擊後展開內嵌表單，欄位 = `Hostname`（如 `github.enterprise.com`） + `Token`（password 型）。
+- ADD 鈕在兩欄都填寫前 `disabled`；CANCEL 鈕還原狀態並收合表單。
+- **沒**做：row 214（GitLab）、row 215（list/Test/Remove）、row 216（env-var 寫入 `OMNISIGHT_GITHUB_TOKEN_MAP`）、row 217（後端 `/system/settings/git/token-map`）— 這四列在後續 commit 補。
+
+### 設計刻意保守
+- **本地 state 一個 component 內結束**：`addingGithub` / `ghHost` / `ghToken` 全在 `MultipleInstancesSection` 內，沒拉 props、沒接 `api.*`、沒擴 settings reducer。row 216 接上 persistence 時再把 onSave handler 拉出去。
+- **ADD 鈕 onClick = `resetGithubForm`**：用 title `"Save handler arrives in Part B row 216"` 自我標註 — 點下去只會關閉表單清空欄位，「假裝有送出」。這是刻意的「scaffold 行為」，避免在還沒有 backend 時誤導 operator 以為已經寫進去。row 216 把 `resetGithubForm` 換成真正的 PUT `/system/settings/git/token-map` 即可。
+- **沒擴 lucide-react import**：沿用既有的 `Plus`（已從 row 230 `Add Secret` 進來），零新依賴。
+- **沿用 `SettingField`**：與 `TenantSecretsSection` 同 component，hostname / password 欄位 UI / a11y 一致。
+
+### 為什麼樣式跟 `TenantSecretsSection` 對齊
+TenantSecrets 的「Add Secret 按鈕 → expand 表單 → CANCEL/ADD 兩鈕對齊右側」是 settings panel 的既定 idiom。沿用同 layout 讓 operator 從另一個 section 切過來時不需要重學互動，而且 row 214（Add GitLab）落地後可直接複製本 row 的 markup 改字串，未來 row 215 的「列表 + Remove 按鈕」也可沿用 `TenantSecretsSection` row 174-189 的 `Trash2` 模式。
+
+### 驗證
+- `npx tsc --noEmit` 對 `components/omnisight/integration-settings.tsx` 零報錯。
+- 變更僅 +60 -10 行 SLOC，純 UI scaffold，不會影響任何既有 settings 載入 / 儲存路徑。
+
+### 下一步
+- B14 Part B row 214：複製本 row markup，把「GitHub」字樣換 GitLab，欄位改 `URL` + `Token`，並考慮共用 helper 抽 `<InstanceForm kind="github" />` 元件（看 row 215 列表落地後是否仍有 DRY 收益）。
