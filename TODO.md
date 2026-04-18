@@ -158,7 +158,7 @@ Legend:
 
 **Part A — Bootstrap Required 專用頁面**
 - [x] `app/setup-required/page.tsx`：全屏 FUI 風格「系統需要完成初始設定」頁面
-  - [ ] 友善訊息：「歡迎！這是您第一次使用 OmniSight，只需幾分鐘即可完成基礎配置。」
+  - [x] 友善訊息：「歡迎！這是您第一次使用 OmniSight，只需幾分鐘即可完成基礎配置。」
   - [ ] CTA 按鈕：「▶ 開始設定」→ 導向 `/bootstrap`
   - [ ] 可展開「技術詳情」區塊：顯示 503 JSON 內容 + backend 版本 + 各 gate 狀態（admin_password / llm_provider / cf_tunnel / smoke）
   - [ ] FUI 風格：暗色背景 + 掃描線動畫 + neural-grid 元素 + Orbitron 標題字型
