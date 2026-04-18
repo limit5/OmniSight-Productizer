@@ -1504,7 +1504,7 @@ Legend:
 - [x] Prometheus gauges：`host_cpu_percent` / `host_mem_percent` / `host_disk_percent` / `host_loadavg_1m` / `host_container_count`
 - [x] Endpoint：`GET /api/v1/host/metrics`（current + history）
 - [x] SSE event：`host.metrics.tick`（5s 推送）
-- [ ] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
+- [x] 測試：mock psutil、驗證 ring buffer rotation、Docker unavailable 時的 fallback
 - 預估：**0.5 day**
 
 ### H2. Coordinator 負載感知調度（precondition + backoff）
