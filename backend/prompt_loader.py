@@ -11,11 +11,27 @@ Prompt assembly order:
     3. Handoff      (context from previous agent, if any)
 
 Falls back to built-in prompts when config files are missing.
+
+B15 #350 — Skill Lazy Loading (Progressive Disclosure):
+  * ``build_system_prompt(mode="eager")``  — legacy behaviour: the role skill's
+    full markdown body is inlined (~50K chars, ~12.5K tokens).
+  * ``build_system_prompt(mode="lazy")``   — Phase 1: only a compact metadata
+    catalog (~500 chars) is injected; the agent consults it and emits
+    ``[LOAD_SKILL: <name>]`` to request a full body.
+  * ``build_skill_injection(domain_context, user_prompt, …)`` — Phase 2: given
+    the CATC ``domain_context`` plus the user's prompt, keyword-match against
+    the catalog and return the full bodies of the top-ranked skills so the
+    ReAct loop can inject them on demand.
+
+The default mode follows the ``OMNISIGHT_SKILL_LOADING`` env var (``eager`` if
+unset) so the optimisation can be rolled out behind a feature flag without
+changing caller code.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -301,6 +317,308 @@ def _parse_frontmatter(path: Path) -> dict:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  B15 #350 — Skill catalog (Phase 1) + on-demand matching (Phase 2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Total chars allowed for the skill metadata catalog in lazy mode.
+# ~500 chars/skill × ~10 skills advertised = ~5K chars (~1.2K tokens) versus
+# ~50K chars if we inlined full bodies. The catalog is truncated if a
+# deployment ships a huge skill library.
+_MAX_SKILL_CATALOG = 6000
+
+# How many skills Phase 2 may inject at once. Guardrails against a runaway
+# ReAct loop that would otherwise pull in every skill in the repo.
+_MAX_PHASE2_SKILLS = 3
+_MAX_PHASE2_CHARS = _MAX_ROLE_SKILL  # reuse role-skill budget for parity
+
+_SKILL_CATALOG_PREAMBLE = (
+    "The following skills are available **on demand** — their full bodies "
+    "are NOT pre-loaded to save tokens. To consult a skill's full content, "
+    "emit the marker `[LOAD_SKILL: <skill_name>]` on its own line and the "
+    "system will inject that skill's body into the next turn."
+)
+
+
+def _resolve_skill_loading_mode(requested: str | None) -> str:
+    """Return ``"eager"`` or ``"lazy"``. Explicit caller arg wins; otherwise
+    fall back to ``OMNISIGHT_SKILL_LOADING`` env var; otherwise ``"eager"``
+    for backward compatibility."""
+    if requested in ("eager", "lazy"):
+        return requested
+    env = (os.environ.get("OMNISIGHT_SKILL_LOADING") or "").strip().lower()
+    return env if env in ("eager", "lazy") else "eager"
+
+
+def list_all_skills_metadata() -> list[dict]:
+    """Enumerate every skill under ``configs/roles/**/*.skill.md`` and
+    ``configs/skills/*/SKILL.md`` and return its metadata card
+    (name, description, trigger_condition, token_cost, path, …).
+
+    Skills with no parseable content are skipped. Used by Phase 1 to build
+    the catalog and by Phase 2 to score matches."""
+    # Deferred import avoids a circular edge: prompt_registry also imports
+    # from the same project tree during bootstrap.
+    from backend.prompt_registry import get_skill_metadata
+
+    out: list[dict] = []
+    seen_paths: set[str] = set()
+
+    # Role skills — configs/roles/{category}/{role}.skill.md
+    if _ROLES_DIR.is_dir():
+        for category_dir in sorted(_ROLES_DIR.iterdir()):
+            if not category_dir.is_dir():
+                continue
+            for skill_file in sorted(category_dir.glob("*.skill.md")):
+                meta = get_skill_metadata(str(skill_file))
+                if not meta:
+                    continue
+                meta["category"] = category_dir.name
+                meta["role_id"] = skill_file.stem.replace(".skill", "")
+                meta["kind"] = "role"
+                seen_paths.add(meta.get("path", ""))
+                out.append(meta)
+
+    # Task skills — configs/skills/{name}/SKILL.md
+    if _SKILLS_DIR.is_dir():
+        for skill_dir in sorted(_SKILLS_DIR.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            meta = get_skill_metadata(str(skill_file))
+            if not meta:
+                continue
+            if meta.get("path") in seen_paths:
+                continue
+            meta.setdefault("name", skill_dir.name)
+            meta["kind"] = "task"
+            out.append(meta)
+
+    return out
+
+
+def _format_skill_card(meta: dict) -> str:
+    """Render one metadata entry as a catalog bullet. Keeps each card under
+    ~250 chars so the full catalog stays near the ~500-char-per-skill budget
+    set out in the B15 design note."""
+    name = meta.get("name") or "?"
+    kind = meta.get("kind", "")
+    category = meta.get("category", "")
+    tok = meta.get("token_cost") or 0
+    header = f"- **{name}**"
+    if kind == "role" and category:
+        header += f" (role/{category})"
+    elif kind == "task":
+        header += " (task skill)"
+    if tok:
+        header += f" [~{tok} tok]"
+
+    desc = (meta.get("description") or "").strip()
+    if len(desc) > 180:
+        desc = desc[:177] + "…"
+
+    trig = (meta.get("trigger_condition") or "").strip()
+    if len(trig) > 160:
+        trig = trig[:157] + "…"
+
+    lines = [header]
+    if desc:
+        lines.append(f"  · {desc}")
+    if trig:
+        lines.append(f"  · Trigger: {trig}")
+    return "\n".join(lines)
+
+
+def build_skill_catalog(skills: list[dict] | None = None) -> str:
+    """Phase 1 — format the metadata catalog that lazy-mode system prompts
+    inject in place of a full role skill body.
+
+    Deterministic ordering (by kind then name) so identical prompts hash
+    identically across restarts — important for prompt-registry canary
+    replay."""
+    if skills is None:
+        skills = list_all_skills_metadata()
+    if not skills:
+        return ""
+
+    # Stable sort: role skills first (more load-bearing), then task skills.
+    def _key(m: dict) -> tuple[int, str, str]:
+        kind_rank = 0 if m.get("kind") == "role" else 1
+        return (kind_rank, m.get("category", ""), m.get("name", ""))
+
+    ordered = sorted(skills, key=_key)
+
+    body_parts = [_SKILL_CATALOG_PREAMBLE, ""]
+    total = len(body_parts[0]) + 1
+    for meta in ordered:
+        card = _format_skill_card(meta)
+        if total + len(card) + 1 > _MAX_SKILL_CATALOG:
+            body_parts.append("… [catalog truncated; ask operator to "
+                              "split by agent_type]")
+            break
+        body_parts.append(card)
+        total += len(card) + 1
+
+    return "\n".join(body_parts)
+
+
+def _skill_tokens(text: str) -> set[str]:
+    """Lowercase word-bag of a skill's searchable fields — used for scoring.
+    Keeps tokens ≥3 chars to drop stop-words cheaply without a full NLP pass."""
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower())}
+
+
+def match_skills_for_context(
+    domain_context: str = "",
+    user_prompt: str = "",
+    *,
+    skills: list[dict] | None = None,
+    top_k: int = _MAX_PHASE2_SKILLS,
+) -> list[dict]:
+    """Phase 2 — keyword-score every skill against the CATC ``domain_context``
+    + the user's current prompt and return the top ``top_k`` matches.
+
+    Scoring: each skill's ``keywords`` / ``description`` / ``trigger_condition``
+    / ``name`` is tokenised; overlap with the query token-bag gives the score.
+    Keywords are weighted 2× (explicit signal) and name matches 3×.
+
+    Returns [] when nothing scores above 0 — caller should treat this as
+    "no skill is clearly relevant, proceed with base prompt"."""
+    if skills is None:
+        skills = list_all_skills_metadata()
+    if not skills:
+        return []
+    query = f"{domain_context}\n{user_prompt}".strip()
+    if not query:
+        return []
+
+    query_tokens = _skill_tokens(query)
+    if not query_tokens:
+        return []
+
+    scored: list[tuple[int, dict]] = []
+    for meta in skills:
+        kw_list = meta.get("keywords") or []
+        if isinstance(kw_list, str):
+            kw_list = [kw_list]
+        kw_tokens = _skill_tokens(" ".join(str(k) for k in kw_list))
+        desc_tokens = _skill_tokens(
+            f"{meta.get('description','')} {meta.get('trigger_condition','')}"
+        )
+        name_tokens = _skill_tokens(
+            f"{meta.get('name','')} {meta.get('role_id','')} "
+            f"{meta.get('category','')}"
+        )
+
+        score = (
+            3 * len(query_tokens & name_tokens)
+            + 2 * len(query_tokens & kw_tokens)
+            + 1 * len(query_tokens & desc_tokens)
+        )
+        if score > 0:
+            scored.append((score, meta))
+
+    scored.sort(key=lambda t: (-t[0], t[1].get("name", "")))
+    return [m for _, m in scored[:top_k]]
+
+
+def build_skill_injection(
+    domain_context: str = "",
+    user_prompt: str = "",
+    *,
+    explicit_skills: list[str] | None = None,
+    top_k: int = _MAX_PHASE2_SKILLS,
+) -> str:
+    """Phase 2 entry point — return a ready-to-inject system message chunk
+    containing the full bodies of skills relevant to this ReAct turn.
+
+    Two ways to select skills:
+      * ``explicit_skills`` — agent emitted ``[LOAD_SKILL: <name>]`` markers.
+        Caller extracts the names and passes them here directly.
+      * ``domain_context`` + ``user_prompt`` — auto-match via keyword score.
+
+    The returned string is ``""`` when no skill is selected or bodies fail
+    to load. Otherwise, headers separate each skill with ``---`` and the
+    whole chunk is truncated to ``_MAX_PHASE2_CHARS`` to bound injection
+    size.
+    """
+    from backend.prompt_registry import get_skill_full, get_skill_metadata
+
+    selected: list[dict] = []
+    if explicit_skills:
+        # Build a by-name index across role + task skills so the agent
+        # can emit `[LOAD_SKILL: android-kotlin]` for role skills that
+        # don't live under configs/skills/ (prompt_registry's path
+        # resolver only looks there).
+        catalog_index: dict[str, dict] | None = None
+        for name in explicit_skills:
+            meta = get_skill_metadata(name)
+            if not meta:
+                if catalog_index is None:
+                    catalog_index = {
+                        m.get("name", ""): m
+                        for m in list_all_skills_metadata()
+                        if m.get("name")
+                    }
+                meta = catalog_index.get(name)
+            if meta:
+                selected.append(meta)
+    if not selected:
+        selected = match_skills_for_context(
+            domain_context=domain_context,
+            user_prompt=user_prompt,
+            top_k=top_k,
+        )
+    if not selected:
+        return ""
+
+    chunks: list[str] = []
+    total = 0
+    for meta in selected:
+        body = get_skill_full(meta.get("path") or meta.get("name") or "")
+        if not body:
+            continue
+        header = f"## Skill: {meta.get('name','?')}"
+        block = f"{header}\n\n{body.strip()}"
+        if total + len(block) > _MAX_PHASE2_CHARS:
+            remaining = _MAX_PHASE2_CHARS - total
+            if remaining < 200:
+                break
+            block = block[:remaining] + "\n... [skill body truncated]"
+            chunks.append(block)
+            total = _MAX_PHASE2_CHARS
+            break
+        chunks.append(block)
+        total += len(block)
+
+    return "\n\n---\n\n".join(chunks)
+
+
+# Regex for parsing [LOAD_SKILL: <name>] markers an agent emits during ReAct.
+_LOAD_SKILL_PATTERN = re.compile(r"\[LOAD_SKILL:\s*([^\]\n]+)\]")
+
+
+def extract_load_skill_requests(agent_output: str) -> list[str]:
+    """Parse an agent response for ``[LOAD_SKILL: <name>]`` markers.
+
+    Returns unique skill names in the order they first appeared.
+    Pairs with `build_skill_injection(explicit_skills=...)` so the ReAct
+    loop can echo "here's the body you asked for" into the next turn.
+    """
+    if not agent_output:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _LOAD_SKILL_PATTERN.finditer(agent_output):
+        name = m.group(1).strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Prompt Assembly
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -352,11 +670,30 @@ def build_system_prompt(
     sub_type: str = "",
     handoff_context: str = "",
     task_skill_context: str = "",
+    *,
+    mode: str | None = None,
+    domain_context: str = "",
 ) -> str:
     """Assemble the full system prompt from model rules + role skill + task skill + handoff.
 
-    Falls back to built-in prompts if config files are missing.
+    Two-phase skill loading (B15 #350):
+
+      * ``mode="eager"`` (default for back-compat) — the role skill's full
+        markdown body is inlined (legacy behaviour). ~50K chars / ~12.5K tok.
+      * ``mode="lazy"`` — Phase 1: only the metadata catalog is injected,
+        plus a small "pre-load hint" section naming the skills most
+        relevant to ``domain_context`` so the agent can load them
+        immediately without waiting for a ReAct round-trip.
+      * ``mode=None`` — resolved from ``OMNISIGHT_SKILL_LOADING`` env var
+        (default ``eager``), so operators can flip modes without patching
+        callers.
+
+    ``domain_context`` is the CATC ``domain_context`` string (see
+    ``backend/catc.py``). It is only consulted in lazy mode to pick the
+    Phase-2 pre-load hint. Falls back to built-in prompts if config files
+    are missing.
     """
+    resolved_mode = _resolve_skill_loading_mode(mode)
     sections: list[str] = []
 
     # 0. L1 Core Rules (CLAUDE.md — immutable, always first)
@@ -369,18 +706,53 @@ def build_system_prompt(
     if model_rules:
         sections.append(f"# Model Behavior Rules\n\n{model_rules}")
 
-    # 2. Role skill (defines agent behavior)
-    role_skill = load_role_skill(agent_type, sub_type)
-    if role_skill:
-        sections.append(f"# Role: {sub_type or agent_type}\n\n{role_skill}")
-    elif agent_type in _BUILTIN_PROMPTS:
-        sections.append(_BUILTIN_PROMPTS[agent_type])
-    else:
-        sections.append(
-            f"You are an AI agent of type '{agent_type}'. "
-            "You have access to file, git, and bash tools. "
-            "Use them to complete the user's request."
+    # 2. Role skill (defines agent behavior).
+    #    eager → inline full body (legacy).
+    #    lazy  → inline a compact metadata catalog + Phase-2 pre-load hint.
+    if resolved_mode == "lazy":
+        catalog = build_skill_catalog()
+        # Always carry a minimal identity header even in lazy mode — the
+        # agent still needs to know who it is.
+        identity = _BUILTIN_PROMPTS.get(
+            agent_type,
+            f"You are an AI agent of type '{agent_type}'.",
         )
+        lazy_parts = [identity]
+        if catalog:
+            lazy_parts.append("\n## Available Skills (on-demand)\n\n" + catalog)
+        # Phase-2 pre-load hint: if we already know the CATC domain_context,
+        # surface the top matching skill names so the agent can emit
+        # [LOAD_SKILL: …] on its very first turn rather than guessing.
+        if domain_context:
+            hints = match_skills_for_context(
+                domain_context=domain_context,
+                user_prompt="",
+                top_k=_MAX_PHASE2_SKILLS,
+            )
+            if hints:
+                hint_names = ", ".join(h.get("name", "?") for h in hints)
+                lazy_parts.append(
+                    "\n## Relevant skills for this task\n\n"
+                    f"Based on the task's domain_context, consider loading: "
+                    f"**{hint_names}**. Emit `[LOAD_SKILL: <name>]` to pull "
+                    "the full body into the next turn."
+                )
+        sections.append(
+            f"# Role: {sub_type or agent_type} (lazy-loaded skills)\n\n"
+            + "\n".join(lazy_parts)
+        )
+    else:
+        role_skill = load_role_skill(agent_type, sub_type)
+        if role_skill:
+            sections.append(f"# Role: {sub_type or agent_type}\n\n{role_skill}")
+        elif agent_type in _BUILTIN_PROMPTS:
+            sections.append(_BUILTIN_PROMPTS[agent_type])
+        else:
+            sections.append(
+                f"You are an AI agent of type '{agent_type}'. "
+                "You have access to file, git, and bash tools. "
+                "Use them to complete the user's request."
+            )
 
     # 3. Task skill (defines task execution steps — Anthropic SKILL.md format)
     if task_skill_context:

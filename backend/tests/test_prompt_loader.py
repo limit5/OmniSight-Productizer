@@ -217,3 +217,134 @@ class TestMobileRoleSkills:
         content = load_role_skill("mobile", "kmp")
         assert "ios-arm64" in content or "iOS" in content
         assert "android-arm64" in content or "Android" in content
+
+
+class TestSkillLazyLoading:
+    """B15 (#350) — two-phase `build_system_prompt`:
+      * Phase 1 (lazy mode)  — metadata catalog replaces the full role body.
+      * Phase 2              — `build_skill_injection` pulls full bodies on
+                               demand via explicit `[LOAD_SKILL: …]` markers
+                               or keyword-matching against the CATC
+                               ``domain_context`` + user prompt.
+    """
+
+    def _env_with_mode(self, monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv("OMNISIGHT_SKILL_LOADING", raising=False)
+        else:
+            monkeypatch.setenv("OMNISIGHT_SKILL_LOADING", value)
+
+    def test_eager_mode_inlines_full_role_skill(self):
+        """Default (eager) mode still inlines the BSP body — back-compat."""
+        prompt = build_system_prompt(
+            agent_type="firmware", sub_type="bsp", mode="eager",
+        )
+        # Eager mode pulls full body, which contains detailed BSP content.
+        assert "Role: bsp" in prompt
+        assert "Available Skills (on-demand)" not in prompt
+
+    def test_lazy_mode_emits_catalog_instead_of_full_body(self):
+        lazy = build_system_prompt(
+            agent_type="firmware", sub_type="bsp", mode="lazy",
+        )
+        eager = build_system_prompt(
+            agent_type="firmware", sub_type="bsp", mode="eager",
+        )
+        # Lazy mode advertises the catalog marker; eager does not.
+        assert "Available Skills (on-demand)" in lazy
+        assert "[LOAD_SKILL:" in lazy
+        # Both prompts exist; the lazy prompt should still identify the role.
+        assert "lazy-loaded skills" in lazy
+        assert "Role: bsp" in eager
+
+    def test_lazy_mode_hint_surfaces_relevant_skill_names(self):
+        from backend.prompt_loader import build_system_prompt
+        lazy = build_system_prompt(
+            agent_type="mobile",
+            sub_type="android-kotlin",
+            mode="lazy",
+            domain_context="Android Kotlin Jetpack Compose app",
+        )
+        assert "Relevant skills for this task" in lazy
+        assert "android-kotlin" in lazy
+
+    def test_mode_resolves_from_env_var(self, monkeypatch):
+        from backend.prompt_loader import _resolve_skill_loading_mode
+        self._env_with_mode(monkeypatch, "lazy")
+        assert _resolve_skill_loading_mode(None) == "lazy"
+        self._env_with_mode(monkeypatch, "eager")
+        assert _resolve_skill_loading_mode(None) == "eager"
+        self._env_with_mode(monkeypatch, "garbage")
+        assert _resolve_skill_loading_mode(None) == "eager"
+        self._env_with_mode(monkeypatch, None)
+        assert _resolve_skill_loading_mode(None) == "eager"
+
+    def test_list_all_skills_metadata_finds_role_and_task_skills(self):
+        from backend.prompt_loader import list_all_skills_metadata
+        skills = list_all_skills_metadata()
+        kinds = {s.get("kind") for s in skills}
+        assert "role" in kinds, "expected role skills in catalog"
+        assert "task" in kinds, "expected task skills in catalog"
+        # Spot check: a known role skill is present.
+        names = {s.get("name") for s in skills}
+        assert "bsp" in names or "android-kotlin" in names
+
+    def test_build_skill_catalog_fits_budget(self):
+        from backend.prompt_loader import build_skill_catalog, _MAX_SKILL_CATALOG
+        cat = build_skill_catalog()
+        assert cat, "catalog should be non-empty"
+        assert len(cat) <= _MAX_SKILL_CATALOG + 200  # preamble tolerance
+        # Catalog must self-document the load protocol.
+        assert "[LOAD_SKILL:" in cat
+
+    def test_match_skills_for_context_scores_android(self):
+        from backend.prompt_loader import match_skills_for_context
+        matches = match_skills_for_context(
+            domain_context="Android Kotlin Jetpack Compose mobile",
+            user_prompt="fix login screen layout",
+            top_k=3,
+        )
+        names = [m.get("name") for m in matches]
+        # Top-3 must include an android-flavored skill.
+        assert any("android" in (n or "") for n in names), (
+            f"expected an android skill in top matches, got {names}"
+        )
+
+    def test_match_skills_empty_query_returns_nothing(self):
+        from backend.prompt_loader import match_skills_for_context
+        assert match_skills_for_context("", "") == []
+
+    def test_build_skill_injection_explicit_pulls_role_body(self):
+        from backend.prompt_loader import build_skill_injection
+        text = build_skill_injection(explicit_skills=["android-kotlin"])
+        assert text, "expected non-empty injection for android-kotlin"
+        assert "Skill: android-kotlin" in text
+        # Signature content from the android-kotlin skill.
+        assert "Jetpack Compose" in text or "Kotlin" in text
+
+    def test_build_skill_injection_matches_from_context(self):
+        from backend.prompt_loader import build_skill_injection
+        text = build_skill_injection(
+            domain_context="BSP kernel driver I2C sensor init",
+            user_prompt="",
+        )
+        assert text, "expected non-empty matched injection"
+        # One of the matches should be a firmware-family skill.
+        assert "## Skill:" in text
+
+    def test_extract_load_skill_requests_parses_markers(self):
+        from backend.prompt_loader import extract_load_skill_requests
+        text = (
+            "I'll load helpers first.\n"
+            "[LOAD_SKILL: android-kotlin]\n"
+            "Then also [LOAD_SKILL: mobile-a11y] for accessibility.\n"
+            "Duplicate: [LOAD_SKILL: android-kotlin] should dedupe.\n"
+        )
+        assert extract_load_skill_requests(text) == [
+            "android-kotlin", "mobile-a11y",
+        ]
+
+    def test_extract_load_skill_requests_empty(self):
+        from backend.prompt_loader import extract_load_skill_requests
+        assert extract_load_skill_requests("") == []
+        assert extract_load_skill_requests("no markers here") == []
