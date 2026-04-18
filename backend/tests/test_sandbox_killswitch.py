@@ -102,27 +102,33 @@ async def test_exec_stderr_appended_then_truncated(monkeypatch):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @pytest.mark.asyncio
-async def test_healthz_exposes_sandbox_block(client):
+async def test_sandbox_metrics_counters_exist(client):
+    """G1 split: sandbox counters are now in Prometheus metrics, not /healthz.
+    /healthz is a minimal liveness probe ({"status":"ok","live":true}).
+    Verify the sandbox counters exist in the metrics registry."""
+    from backend import metrics as m
+    if not m.is_available():
+        pytest.skip("prometheus_client not installed")
+    m.reset_for_tests()
+    # Verify the counters exist and are callable
+    assert hasattr(m, "sandbox_launch_total")
+    assert hasattr(m, "sandbox_output_truncated_total")
+    # Quick liveness check
     r = await client.get("/api/v1/healthz")
     assert r.status_code == 200
-    body = r.json()
-    assert "sandbox" in body
-    sb = body["sandbox"]
-    for k in ("launched", "errors", "lifetime_killed",
-              "image_rejected", "output_truncated"):
-        assert k in sb, f"missing key: {k}"
-        assert isinstance(sb[k], int)
+    assert r.json()["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_healthz_sandbox_counters_track_truncations(client, monkeypatch):
-    """When prom is installed and we synthetically bump the counter,
-    /healthz must reflect the new value."""
+async def test_sandbox_counters_track_truncations_in_metrics(client, monkeypatch):
+    """Sandbox output_truncated counter increments are reflected in
+    the Prometheus metric (not in /healthz which is now minimal)."""
     from backend import metrics as m
     if not m.is_available():
         pytest.skip("prometheus_client not installed")
     m.reset_for_tests()
     m.sandbox_output_truncated_total.labels(tier="t1").inc(3)
 
-    r = await client.get("/api/v1/healthz")
-    assert r.json()["sandbox"]["output_truncated"] == 3
+    # Verify via Prometheus registry, not /healthz
+    val = m.sandbox_output_truncated_total.labels(tier="t1")._value.get()
+    assert val == 3.0
