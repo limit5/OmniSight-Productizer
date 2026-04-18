@@ -228,7 +228,7 @@ Legend:
 - [x] 預估：**1.5 day**
 
 **Part D — Integration Settings 頁面分 tab**
-- [ ] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
+- [x] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
   - [ ] Tab 1「Git」：GitHub token + GitLab token/URL + SSH key + Multi-instance map
   - [ ] Tab 2「Gerrit」：Gerrit Code Review 全部設定 + Setup Wizard 入口
   - [ ] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示

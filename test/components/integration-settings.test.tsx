@@ -18,6 +18,7 @@
 
 import { describe, expect, it, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
@@ -58,7 +59,9 @@ const mockedGetGitTokenMap = (api as unknown as {
 async function renderAndOpenWizard() {
   const view = render(<IntegrationSettings open={true} onClose={() => {}} />)
   // Wait for the Setup Wizard entry button to mount (requires parent settings fetch
-  // resolved to the providers+settings callbacks).
+  // resolved to the providers+settings callbacks). The Gerrit tab is
+  // force-mounted (see integration-settings.tsx) so this works whether or
+  // not the Gerrit tab is the active one.
   const button = await screen.findByText("SETUP WIZARD")
   fireEvent.click(button)
   return view
@@ -1246,5 +1249,74 @@ describe("GerritSetupWizardDialog — Finalize (寫入 config + 啟用)", () => 
     expect(
       screen.getByTestId("gerrit-wizard-finalize-button"),
     ).toBeTruthy()
+  })
+})
+
+/**
+ * B14 Part D row 228 — Integration Settings tab split.
+ *
+ * The former single-page Integration form was refactored into four Radix
+ * tabs (Git / Gerrit / Webhooks / CI-CD). These tests lock in the shape of
+ * that refactor:
+ *   - All four TabsTrigger buttons are rendered
+ *   - The Git tab is selected by default
+ *   - Switching to CI/CD reveals fields that don't exist elsewhere
+ *     (Jenkins URL, Jenkins API Token, GitLab CI toggle) — i.e. the
+ *     CI/CD surface is genuinely new, not a duplicate of Git tab
+ *   - Switching to Webhooks surfaces the three inbound webhook-secret
+ *     fields (GitHub / GitLab / Jira)
+ */
+describe("IntegrationSettings — Part D tab split", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedGetSettings.mockResolvedValue({})
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  it("renders all four tabs with the Git tab selected by default", async () => {
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const gitTab = await screen.findByRole("tab", { name: /GIT\b/ })
+    const gerritTab = await screen.findByRole("tab", { name: /GERRIT/ })
+    const webhooksTab = await screen.findByRole("tab", { name: /WEBHOOKS/ })
+    const cicdTab = await screen.findByRole("tab", { name: /CI\/CD/ })
+    expect(gitTab.getAttribute("data-state")).toBe("active")
+    expect(gerritTab.getAttribute("data-state")).toBe("inactive")
+    expect(webhooksTab.getAttribute("data-state")).toBe("inactive")
+    expect(cicdTab.getAttribute("data-state")).toBe("inactive")
+  })
+
+  it("reveals the CI/CD settings only after clicking the CI/CD tab", async () => {
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    // Before switching, CI/CD-only sections are not visible (Jenkins section
+    // lives exclusively on the CI/CD tab — it has no counterpart on Git).
+    const cicdTab = await screen.findByRole("tab", { name: /CI\/CD/ })
+    expect(screen.queryByText("JENKINS")).toBeNull()
+    expect(screen.queryByText("GITLAB CI")).toBeNull()
+    await user.click(cicdTab)
+    await waitFor(() => expect(screen.getByText("JENKINS")).toBeTruthy())
+    expect(screen.getByText("GITHUB ACTIONS")).toBeTruthy()
+    expect(screen.getByText("GITLAB CI")).toBeTruthy()
+  })
+
+  it("surfaces all three inbound webhook secret fields on the Webhooks tab", async () => {
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const webhooksTab = await screen.findByRole("tab", { name: /WEBHOOKS/ })
+    await user.click(webhooksTab)
+    // Each secret field is a <label> text that labels the <input>.
+    await waitFor(() =>
+      expect(screen.getByText("GitHub Secret")).toBeTruthy(),
+    )
+    expect(screen.getByText("GitLab Secret")).toBeTruthy()
+    expect(screen.getByText("Jira Secret")).toBeTruthy()
   })
 })

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { createPortal } from "react-dom"
 import { Settings, X, Check, AlertTriangle, Loader, ChevronDown, ChevronUp, WifiOff, Key, Plus, Trash2, HardDrive, RefreshCw, Copy, Users, ShieldCheck, Webhook } from "lucide-react"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import * as api from "@/lib/api"
 
 interface IntegrationSettingsProps {
@@ -2492,11 +2493,52 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
       category === "gerrit" ? "gerrit" :
       category === "jira" ? "notification_jira" :
       category === "slack" ? "notification_slack" :
-      category === "webhooks" ? "github_webhook" : ""
+      category === "webhooks" ? "github_webhook" :
+      category === "ci" ? "ci" : ""
     }_${field}`
     if (key in dirty) return String(dirty[key])
     return String(settingsData[category]?.[field] ?? "")
   }
+
+  // B14 Part D — per-tab connection-status badge derivation. "configured" is
+  // a passive signal (fields are populated OR the user has staged an edit);
+  // we intentionally avoid proactive probes here since each SettingsSection
+  // already has a TEST button for active validation. The badge exists to
+  // give at-a-glance "is there anything set" feedback when the user opens
+  // the modal, so three-state (ok / warn / error) collapses to two states
+  // (configured / not-configured) until a probe explicitly fails.
+  const hasValue = (category: string, field: string, dirtyKey?: string): boolean => {
+    const v = getVal(category, field, dirtyKey).trim()
+    // Masked backend responses render as "***" — treat as configured.
+    return v.length > 0 && v !== "false" && v !== "0"
+  }
+  const tabStatus = {
+    git: (
+      ((settingsData["git"]?.["credentials"] as unknown[] | undefined)?.length ?? 0) > 0 ||
+      hasValue("git", "ssh_key_path") ||
+      hasValue("git", "github_token", "github_token") ||
+      hasValue("git", "gitlab_token", "gitlab_token")
+    ),
+    gerrit: getVal("gerrit", "enabled") === "true" && hasValue("gerrit", "url"),
+    webhooks: (
+      hasValue("webhooks", "github_secret", "github_webhook_secret") ||
+      hasValue("webhooks", "gitlab_secret", "gitlab_webhook_secret") ||
+      hasValue("webhooks", "jira_secret", "jira_webhook_secret") ||
+      hasValue("jira", "url") ||
+      hasValue("slack", "webhook")
+    ),
+    cicd: (
+      getVal("ci", "github_actions_enabled") === "true" ||
+      getVal("ci", "jenkins_enabled") === "true" ||
+      getVal("ci", "gitlab_ci_enabled", "ci_gitlab_enabled") === "true"
+    ),
+  }
+  const badgeClass = (ok: boolean) =>
+    ok
+      ? "bg-[var(--validation-emerald)]"
+      : "bg-[var(--hardware-orange)]/60"
+  const badgeTitle = (ok: boolean) =>
+    ok ? "connected / configured" : "not configured"
 
   const setVal = (configKey: string, value: string | boolean) => {
     setDirty(prev => ({ ...prev, [configKey]: value }))
@@ -2641,96 +2683,230 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             <CircuitBreakerSection />
           </SettingsSection>
 
-          <SettingsSection title="GIT REPOSITORIES" integration="ssh">
-            {/* Credential Registry — per-repo entries */}
-            {(() => {
-              const creds = (settingsData["git"]?.["credentials"] as Array<Record<string, unknown>>) || []
-              return creds.length > 0 ? (
-                <div className="space-y-2">
-                  {creds.map((cred, i) => {
-                    const platform = String(cred.platform || "unknown")
-                    const platformColor = platform === "github" ? "var(--validation-emerald)" :
-                      platform === "gitlab" ? "var(--hardware-orange)" :
-                      platform === "gerrit" ? "var(--neural-blue)" : "var(--muted-foreground)"
-                    const hasToken = String(cred.token || "") !== "" && String(cred.token || "") !== "***"
-                    return (
-                      <div key={String(cred.id || i)} className="p-2 rounded border border-[var(--border)] bg-[var(--background)] space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`w-1.5 h-1.5 rounded-full`} style={{ backgroundColor: hasToken || cred.has_secret ? "var(--validation-emerald)" : "var(--muted-foreground)" }} />
-                          <span className="font-mono text-[10px] font-semibold" style={{ color: platformColor }}>
-                            {platform.toUpperCase()}
-                          </span>
-                          <span className="font-mono text-[9px] text-[var(--muted-foreground)] flex-1 truncate">
-                            {String(cred.id || "")}
-                          </span>
-                        </div>
-                        <div className="font-mono text-[9px] text-[var(--muted-foreground)] truncate pl-3.5">
-                          {String(cred.url || cred.ssh_host || "")}
-                          {cred.project ? ` / ${cred.project}` : ""}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-1 opacity-60">
-                  No repositories configured. Edit configs/git_credentials.yaml or use fields below.
-                </div>
-              )
-            })()}
-            {/* Legacy scalar fallback fields */}
-            <div className="pt-1.5 pb-0.5">
-              <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">Default Credentials (fallback)</span>
-            </div>
-            <SettingField label="SSH Key" value={getVal("git", "ssh_key_path")} onChange={v => setVal("git_ssh_key_path", v)} />
-            <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
-            <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
-            <SettingField label="GitLab URL" value={getVal("git", "gitlab_url", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
-            {/* B14 Part B rows 1-5: collapsible Multiple Instances sub-area
-                — child pipes JSON token-maps into parent `dirty` on each
-                mutation so SAVE & APPLY persists OMNISIGHT_*_TOKEN_MAP. */}
-            <MultipleInstancesSection setVal={setVal} />
-          </SettingsSection>
-
-          <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">
-            {/* B14 Part C row 221: entry-point button that opens the Gerrit
-                Setup Wizard modal. The 5-step interactive content (URL+SSH
-                test / SSH-key hint / merger-agent-bot / submit-rule probe /
-                webhook wiring) is scaffolded inside the modal and fleshed
-                out in subsequent Part C rows. */}
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-[9px] text-[var(--muted-foreground)] leading-tight">
-                New to Gerrit? Open the guided walkthrough.
-              </span>
-              <button
-                onClick={() => setGerritWizardOpen(true)}
-                className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
-                title="Open a 5-step guided walkthrough for Gerrit Code Review integration"
+          {/* B14 Part D row 228 — split the former single-page Integration
+              form into four focused tabs. Git-forge credentials, Gerrit
+              wizard/settings, inbound webhook secrets, and outbound CI
+              triggers each have their own tab so first-time users don't
+              have to scroll past dozens of unrelated fields. Each
+              TabsTrigger carries a passive "configured / not-configured"
+              badge derived from `tabStatus` above so the user can see at a
+              glance which tabs still need attention. Active probe results
+              live inside the per-section TEST button. */}
+          <Tabs defaultValue="git" className="w-full gap-2">
+            <TabsList className="h-auto w-full grid grid-cols-4 bg-[var(--background)] border border-[var(--border)] p-0.5">
+              <TabsTrigger
+                value="git"
+                className="font-mono text-[10px] tracking-fui py-1 data-[state=active]:bg-[var(--neural-blue)]/10 data-[state=active]:text-[var(--neural-blue)]"
               >
-                <Settings size={10} /> SETUP WIZARD
-              </button>
-            </div>
-            <ToggleField label="Enabled" value={getVal("gerrit", "enabled") === "true"} onChange={v => setVal("gerrit_enabled", v)} />
-            <SettingField label="URL" value={getVal("gerrit", "url")} onChange={v => setVal("gerrit_url", v)} />
-            <SettingField label="SSH Host" value={getVal("gerrit", "ssh_host")} onChange={v => setVal("gerrit_ssh_host", v)} />
-            <SettingField label="SSH Port" value={getVal("gerrit", "ssh_port")} onChange={v => setVal("gerrit_ssh_port", v)} />
-            <SettingField label="Project" value={getVal("gerrit", "project")} onChange={v => setVal("gerrit_project", v)} />
-          </SettingsSection>
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${badgeClass(tabStatus.git)}`}
+                  title={badgeTitle(tabStatus.git)}
+                />
+                GIT
+              </TabsTrigger>
+              <TabsTrigger
+                value="gerrit"
+                className="font-mono text-[10px] tracking-fui py-1 data-[state=active]:bg-[var(--neural-blue)]/10 data-[state=active]:text-[var(--neural-blue)]"
+              >
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${badgeClass(tabStatus.gerrit)}`}
+                  title={badgeTitle(tabStatus.gerrit)}
+                />
+                GERRIT
+              </TabsTrigger>
+              <TabsTrigger
+                value="webhooks"
+                className="font-mono text-[10px] tracking-fui py-1 data-[state=active]:bg-[var(--neural-blue)]/10 data-[state=active]:text-[var(--neural-blue)]"
+              >
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${badgeClass(tabStatus.webhooks)}`}
+                  title={badgeTitle(tabStatus.webhooks)}
+                />
+                WEBHOOKS
+              </TabsTrigger>
+              <TabsTrigger
+                value="cicd"
+                className="font-mono text-[10px] tracking-fui py-1 data-[state=active]:bg-[var(--neural-blue)]/10 data-[state=active]:text-[var(--neural-blue)]"
+              >
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${badgeClass(tabStatus.cicd)}`}
+                  title={badgeTitle(tabStatus.cicd)}
+                />
+                CI/CD
+              </TabsTrigger>
+            </TabsList>
 
-          <SettingsSection title="JIRA ISSUE TRACKING" integration="jira">
-            <SettingField label="URL" value={getVal("jira", "url")} onChange={v => setVal("notification_jira_url", v)} />
-            <SettingField label="Token" value={getVal("jira", "token")} type="password" onChange={v => setVal("notification_jira_token", v)} />
-            <SettingField label="Project Key" value={getVal("jira", "project")} onChange={v => setVal("notification_jira_project", v)} />
-          </SettingsSection>
+            {/* Tab 1 — Git forges (GitHub / GitLab / SSH) + multi-instance map */}
+            <TabsContent value="git" className="space-y-2 mt-0">
+              <SettingsSection title="GIT REPOSITORIES" integration="ssh">
+                {/* Credential Registry — per-repo entries */}
+                {(() => {
+                  const creds = (settingsData["git"]?.["credentials"] as Array<Record<string, unknown>>) || []
+                  return creds.length > 0 ? (
+                    <div className="space-y-2">
+                      {creds.map((cred, i) => {
+                        const platform = String(cred.platform || "unknown")
+                        const platformColor = platform === "github" ? "var(--validation-emerald)" :
+                          platform === "gitlab" ? "var(--hardware-orange)" :
+                          platform === "gerrit" ? "var(--neural-blue)" : "var(--muted-foreground)"
+                        const hasToken = String(cred.token || "") !== "" && String(cred.token || "") !== "***"
+                        return (
+                          <div key={String(cred.id || i)} className="p-2 rounded border border-[var(--border)] bg-[var(--background)] space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className={`w-1.5 h-1.5 rounded-full`} style={{ backgroundColor: hasToken || cred.has_secret ? "var(--validation-emerald)" : "var(--muted-foreground)" }} />
+                              <span className="font-mono text-[10px] font-semibold" style={{ color: platformColor }}>
+                                {platform.toUpperCase()}
+                              </span>
+                              <span className="font-mono text-[9px] text-[var(--muted-foreground)] flex-1 truncate">
+                                {String(cred.id || "")}
+                              </span>
+                            </div>
+                            <div className="font-mono text-[9px] text-[var(--muted-foreground)] truncate pl-3.5">
+                              {String(cred.url || cred.ssh_host || "")}
+                              {cred.project ? ` / ${cred.project}` : ""}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-1 opacity-60">
+                      No repositories configured. Edit configs/git_credentials.yaml or use fields below.
+                    </div>
+                  )
+                })()}
+                {/* Legacy scalar fallback fields */}
+                <div className="pt-1.5 pb-0.5">
+                  <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider">Default Credentials (fallback)</span>
+                </div>
+                <SettingField label="SSH Key" value={getVal("git", "ssh_key_path")} onChange={v => setVal("git_ssh_key_path", v)} />
+                <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
+                <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
+                <SettingField label="GitLab URL" value={getVal("git", "gitlab_url", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
+                {/* B14 Part B rows 1-5: collapsible Multiple Instances sub-area
+                    — child pipes JSON token-maps into parent `dirty` on each
+                    mutation so SAVE & APPLY persists OMNISIGHT_*_TOKEN_MAP. */}
+                <MultipleInstancesSection setVal={setVal} />
+              </SettingsSection>
+            </TabsContent>
 
-          <SettingsSection title="SLACK NOTIFICATIONS" integration="slack">
-            <SettingField label="Webhook" value={getVal("slack", "webhook")} type="password" onChange={v => setVal("notification_slack_webhook", v)} />
-            <SettingField label="Mention ID" value={getVal("slack", "mention")} onChange={v => setVal("notification_slack_mention", v)} />
-          </SettingsSection>
+            {/* Tab 2 — Gerrit Code Review (settings + wizard entry).
+                `forceMount` + `data-[state=inactive]:hidden` keeps the Setup
+                Wizard button in the DOM even when the Gerrit tab is not
+                active so the GerritSetupWizardDialog can still be opened by
+                code paths (e.g. deep-links, test harnesses) that assume a
+                flat layout. Radix flips the `hidden` attribute on inactive
+                panels so assistive tech still sees only the active tab. */}
+            <TabsContent value="gerrit" forceMount className="space-y-2 mt-0 data-[state=inactive]:hidden">
+              <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">
+                {/* B14 Part C row 221: entry-point button that opens the Gerrit
+                    Setup Wizard modal. The 5-step interactive content (URL+SSH
+                    test / SSH-key hint / merger-agent-bot / submit-rule probe /
+                    webhook wiring) is scaffolded inside the modal and fleshed
+                    out in subsequent Part C rows. */}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-[9px] text-[var(--muted-foreground)] leading-tight">
+                    New to Gerrit? Open the guided walkthrough.
+                  </span>
+                  <button
+                    onClick={() => setGerritWizardOpen(true)}
+                    className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+                    title="Open a 5-step guided walkthrough for Gerrit Code Review integration"
+                  >
+                    <Settings size={10} /> SETUP WIZARD
+                  </button>
+                </div>
+                <ToggleField label="Enabled" value={getVal("gerrit", "enabled") === "true"} onChange={v => setVal("gerrit_enabled", v)} />
+                <SettingField label="URL" value={getVal("gerrit", "url")} onChange={v => setVal("gerrit_url", v)} />
+                <SettingField label="SSH Host" value={getVal("gerrit", "ssh_host")} onChange={v => setVal("gerrit_ssh_host", v)} />
+                <SettingField label="SSH Port" value={getVal("gerrit", "ssh_port")} onChange={v => setVal("gerrit_ssh_port", v)} />
+                <SettingField label="Project" value={getVal("gerrit", "project")} onChange={v => setVal("gerrit_project", v)} />
+              </SettingsSection>
+            </TabsContent>
 
-          <SettingsSection title="GITHUB WEBHOOK" integration="github">
-            <SettingField label="Secret" value={getVal("webhooks", "github_secret", "github_webhook_secret")} type="password" onChange={v => setVal("github_webhook_secret", v)} />
-          </SettingsSection>
+            {/* Tab 3 — Webhook secrets + issue/notification integrations. Jira
+                and Slack land here because they are webhook-driven outbound
+                channels — keeping them with the inbound secrets avoids
+                scattering "webhook" URLs across multiple tabs. */}
+            <TabsContent value="webhooks" className="space-y-2 mt-0">
+              <SettingsSection title="INBOUND WEBHOOK SECRETS">
+                {/* Gerrit webhook secret lives behind the Gerrit Setup Wizard
+                    (rotate-only via generate_gerrit_webhook_secret) and is
+                    intentionally not editable as a plain field here — exposing
+                    a plaintext input would let users overwrite a rotated
+                    secret and silently break Gerrit event verification. */}
+                <SettingField label="GitHub Secret" value={getVal("webhooks", "github_secret", "github_webhook_secret")} type="password" onChange={v => setVal("github_webhook_secret", v)} />
+                <SettingField label="GitLab Secret" value={getVal("webhooks", "gitlab_secret", "gitlab_webhook_secret")} type="password" onChange={v => setVal("gitlab_webhook_secret", v)} />
+                <SettingField label="Jira Secret" value={getVal("webhooks", "jira_secret", "jira_webhook_secret")} type="password" onChange={v => setVal("jira_webhook_secret", v)} />
+                <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
+                  Gerrit webhook secret is rotated via the Setup Wizard (Step 5).
+                </div>
+              </SettingsSection>
+
+              <SettingsSection title="JIRA ISSUE TRACKING" integration="jira">
+                <SettingField label="URL" value={getVal("jira", "url")} onChange={v => setVal("notification_jira_url", v)} />
+                <SettingField label="Token" value={getVal("jira", "token")} type="password" onChange={v => setVal("notification_jira_token", v)} />
+                <SettingField label="Project Key" value={getVal("jira", "project")} onChange={v => setVal("notification_jira_project", v)} />
+              </SettingsSection>
+
+              <SettingsSection title="SLACK NOTIFICATIONS" integration="slack">
+                <SettingField label="Webhook" value={getVal("slack", "webhook")} type="password" onChange={v => setVal("notification_slack_webhook", v)} />
+                <SettingField label="Mention ID" value={getVal("slack", "mention")} onChange={v => setVal("notification_slack_mention", v)} />
+              </SettingsSection>
+            </TabsContent>
+
+            {/* Tab 4 — Outbound CI/CD triggers. Config fields already exist in
+                backend/config.py (ci_*) and are whitelisted in
+                backend/routers/integration.py `_UPDATABLE_FIELDS`; this is the
+                first time they are surfaced in the UI. */}
+            <TabsContent value="cicd" className="space-y-2 mt-0">
+              <SettingsSection title="GITHUB ACTIONS">
+                <ToggleField
+                  label="Enabled"
+                  value={getVal("ci", "github_actions_enabled") === "true"}
+                  onChange={v => setVal("ci_github_actions_enabled", v)}
+                />
+                <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
+                  Uses the GitHub Token from the Git tab.
+                </div>
+              </SettingsSection>
+
+              <SettingsSection title="JENKINS">
+                <ToggleField
+                  label="Enabled"
+                  value={getVal("ci", "jenkins_enabled") === "true"}
+                  onChange={v => setVal("ci_jenkins_enabled", v)}
+                />
+                <SettingField
+                  label="URL"
+                  value={getVal("ci", "jenkins_url")}
+                  onChange={v => setVal("ci_jenkins_url", v)}
+                />
+                <SettingField
+                  label="User"
+                  value={getVal("ci", "jenkins_user", "ci_jenkins_user")}
+                  onChange={v => setVal("ci_jenkins_user", v)}
+                />
+                <SettingField
+                  label="API Token"
+                  type="password"
+                  value={getVal("ci", "jenkins_api_token", "ci_jenkins_api_token")}
+                  onChange={v => setVal("ci_jenkins_api_token", v)}
+                />
+              </SettingsSection>
+
+              <SettingsSection title="GITLAB CI">
+                <ToggleField
+                  label="Enabled"
+                  value={getVal("ci", "gitlab_ci_enabled", "ci_gitlab_enabled") === "true"}
+                  onChange={v => setVal("ci_gitlab_enabled", v)}
+                />
+                <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
+                  Uses the GitLab URL + Token from the Git tab.
+                </div>
+              </SettingsSection>
+            </TabsContent>
+          </Tabs>
 
           {/* I4: Tenant-scoped secrets */}
           <TenantSecretsSection settingsData={settingsData} />
