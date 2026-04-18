@@ -264,6 +264,36 @@ Legend:
 - [ ] Metrics：`skill_load_total{mode}` / `skill_token_saved_total` / `skill_load_latency_ms`
 - 預估：**1.5 day**
 
+### B16. Role Skill 強化 — Cherry-pick Agency-Agents + Pattern Upgrade（#353）— 🔴 優先
+
+> 背景：開源 [agency-agents](https://github.com/msitarzewski/agency-agents)（MIT License, 144+ agents）有 3 個 OmniSight 缺乏的設計 pattern（personality-driven / success metrics / per-role critical rules）和 5+ 個我們完全沒有的高價值 role。cherry-pick 補齊後，agent 行為一致性 + 產出品質 + 自我驗收能力都會提升。
+>
+> 不碰既有程式碼——只新增/修改 `configs/roles/*.md` skill 檔案。
+
+**Part A — Cherry-pick 高價值 Role Skills（缺失補齊）**
+- [ ] `configs/roles/security-engineer.md`：從 agency-agents 的 Security Engineer 轉換——自動 security review（XSS / injection / auth bypass / CSP 違規 / secret 洩漏偵測）。整合 S2 系列 + PEP Gateway 使用
+- [ ] `configs/roles/code-reviewer.md`：從 agency-agents 的 Code Reviewer 轉換——通用 code review（非只 merge conflict）。review checklist + 效能 / 可讀性 / 安全性 / 測試覆蓋 4 維度評分。搭配 O6 Merger Agent 作為 pre-review 階段
+- [ ] `configs/roles/software-architect.md`：架構決策框架——trade-off 分析模板 + ADR（Architecture Decision Record）自動生成 + 技術債評估
+- [ ] `configs/roles/sre.md`：Site Reliability Engineer——incident response SOP + runbook 自動生成 + SLO/SLI 定義 + post-mortem 模板。搭配 R0 PEP + R1 ChatOps
+- [ ] `configs/roles/technical-writer.md`：文件生成專家——API docs / user guide / changelog / migration guide 品質標準 + 多語言模板
+- [ ] `configs/roles/database-optimizer.md`：SQL 效能分析 + index 建議 + query plan 解讀 + slow query 偵測。搭配 G4 PostgreSQL
+- 預估：**0.5 day**（轉換 + 調整格式 + 加入 OmniSight-specific context）
+
+**Part B — 現有 19 個 Role Skills Pattern Upgrade**
+- [ ] 所有 role skill 加入 **Personality section**：從「指令式」（你是 X 專家，請做 Y）升級為「人格式」（你是 X，有 N 年經驗，你的核心信念是 Z，你絕不會做 W）。讓 agent 行為更一致、更少脫軌
+- [ ] 所有 role skill 加入 **Success Metrics section**：明確定義「什麼叫做成功完成」——例如 frontend-react：Lighthouse ≥ 90 + 0 a11y violation + 0 console error + bundle size ≤ budget
+- [ ] 所有 role skill 加入 **Critical Rules section**：per-role 不可違反規則（比 CLAUDE.md L1 更精確）——例如 backend-python：never return 500 without logging trace_id、never use f-string SQL
+- [ ] 所有 role skill 加入 **Trigger Condition**（搭配 B15 Lazy Loading）：定義何時該載入此 skill（例如 `trigger: "使用者提到 React / component / 前端 / UI"`)
+- 預估：**2 day**（19 個 role skills × ~1h each，可批次處理）
+
+**Part C — Accessibility Auditor 強化 W5**
+- [ ] 比對 agency-agents 的 Accessibility Auditor 和現有 `web-a11y.md`
+- [ ] 補齊缺失項：focus order 驗證流程 + screen reader 測試腳本 + 色彩對比自動計算 + 動態內容 ARIA live region 檢查
+- [ ] 將強化後的 a11y skill 同時適用於 W（Web）+ V（Visual workspace）+ P（Mobile a11y）
+- 預估：**0.5 day**
+
+**B16 總預估**：**3 day**
+
 ---
 
 ## 🅒 Priority C — L4 Layer A (shared infrastructure)
@@ -2646,6 +2676,6 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 | S2 (security hardening phase 2) | 8.5 day |
 | T (billing + payment gateway) | 25 day |
 | META | 4-8 day |
-| **Total** | **~574.5-745 day** |
+| **Total** | **~577.5-748 day** |
 
 3-person team parallelized: **~7-10 months wall-clock**.
