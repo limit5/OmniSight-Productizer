@@ -15,9 +15,9 @@ def _dag(dag_id: str, tasks: list[Task] | None = None) -> dict:
         Task(task_id="A", description="compile",
              required_tier="t1", toolchain="cmake",
              expected_output="build/a.bin"),
-        Task(task_id="B", description="flash",
-             required_tier="t3", toolchain="flash_board",
-             expected_output="logs/b.log",
+        Task(task_id="B", description="link",
+             required_tier="t1", toolchain="cmake",
+             expected_output="build/b.bin",
              inputs=["build/a.bin"], depends_on=["A"]),
     ])
     return d.model_dump()

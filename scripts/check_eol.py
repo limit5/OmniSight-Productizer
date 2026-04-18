@@ -252,7 +252,7 @@ def evaluate_products(
             continue
 
         eol_raw = matched.get("eol")
-        eol_date = _parse_eol(eol_raw)
+        eol_date = _parse_eol(eol_raw, today=today)
         # Determine latest patch on this cycle and latest across product.
         latest_in_cycle = matched.get("latest")
         latest_overall = None
@@ -315,7 +315,7 @@ def _find_cycle(cycles: list[dict[str, Any]], cycle_key: str) -> dict | None:
     return None
 
 
-def _parse_eol(raw: Any) -> date | None:
+def _parse_eol(raw: Any, today: date | None = None) -> date | None:
     """Parse the endoflife.date `eol` field.
 
     The field may be:
@@ -330,7 +330,9 @@ def _parse_eol(raw: Any) -> date | None:
         return None
     if raw is True:
         # Already EOL — represent as today to force the warning path.
-        return date.today()
+        # Use the caller-supplied `today` so tests with a pinned date
+        # get deterministic results (days_remaining = 0).
+        return today or date.today()
     if isinstance(raw, str):
         try:
             return datetime.strptime(raw, "%Y-%m-%d").date()
