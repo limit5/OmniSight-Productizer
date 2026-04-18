@@ -279,6 +279,65 @@ class TestSkillLazyLoading:
         self._env_with_mode(monkeypatch, None)
         assert _resolve_skill_loading_mode(None) == "eager"
 
+    def test_build_system_prompt_honors_env_flag_when_mode_unset(
+        self, monkeypatch
+    ):
+        """B15 #350 row 262 — the feature flag `OMNISIGHT_SKILL_LOADING`
+        must flip `build_system_prompt()` between eager and lazy when the
+        caller does NOT pass an explicit `mode=` (the common case for
+        nodes.py's specialist node)."""
+        self._env_with_mode(monkeypatch, "lazy")
+        lazy_prompt = build_system_prompt(
+            agent_type="firmware", sub_type="bsp",
+        )
+        assert "Available Skills (on-demand)" in lazy_prompt
+        assert "[LOAD_SKILL:" in lazy_prompt
+
+        self._env_with_mode(monkeypatch, "eager")
+        eager_prompt = build_system_prompt(
+            agent_type="firmware", sub_type="bsp",
+        )
+        assert "Available Skills (on-demand)" not in eager_prompt
+        assert "Role: bsp" in eager_prompt
+
+        # Unset env var → default is eager (back-compat).
+        self._env_with_mode(monkeypatch, None)
+        default_prompt = build_system_prompt(
+            agent_type="firmware", sub_type="bsp",
+        )
+        assert "Available Skills (on-demand)" not in default_prompt
+
+    def test_invalid_env_value_falls_back_to_eager_and_warns(
+        self, monkeypatch, caplog
+    ):
+        """Garbage env values (typos etc.) must not silently break the
+        agent — fall back to eager and log one WARNING."""
+        import logging
+        import backend.prompt_loader as _pl
+        from backend.prompt_loader import _resolve_skill_loading_mode
+
+        # Reset the once-only log sentinel so this test observes the warn.
+        monkeypatch.setattr(_pl, "_skill_mode_logged", False, raising=False)
+        self._env_with_mode(monkeypatch, "turbo")
+        with caplog.at_level(logging.WARNING, logger=_pl.logger.name):
+            assert _resolve_skill_loading_mode(None) == "eager"
+        assert any(
+            "OMNISIGHT_SKILL_LOADING" in r.message and "invalid" in r.message
+            for r in caplog.records
+        )
+
+    def test_explicit_mode_arg_overrides_env_var(self, monkeypatch):
+        """An explicit caller arg must win over the env flag — important
+        for tests and for any call-site that needs a deterministic mode
+        regardless of deploy config."""
+        self._env_with_mode(monkeypatch, "lazy")
+        # Explicit eager beats env=lazy.
+        prompt = build_system_prompt(
+            agent_type="firmware", sub_type="bsp", mode="eager",
+        )
+        assert "Available Skills (on-demand)" not in prompt
+        assert "Role: bsp" in prompt
+
     def test_list_all_skills_metadata_finds_role_and_task_skills(self):
         from backend.prompt_loader import list_all_skills_metadata
         skills = list_all_skills_metadata()

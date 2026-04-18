@@ -339,14 +339,50 @@ _SKILL_CATALOG_PREAMBLE = (
 )
 
 
+# Sentinel so the env-derived mode is logged exactly once per process —
+# operators need one startup line to verify `OMNISIGHT_SKILL_LOADING` took
+# effect, but we don't want a log line per prompt build.
+_skill_mode_logged: bool = False
+
+
 def _resolve_skill_loading_mode(requested: str | None) -> str:
     """Return ``"eager"`` or ``"lazy"``. Explicit caller arg wins; otherwise
     fall back to ``OMNISIGHT_SKILL_LOADING`` env var; otherwise ``"eager"``
-    for backward compatibility."""
+    for backward compatibility.
+
+    When the mode comes from the env var (i.e. ``requested is None``), the
+    first call in the process also logs the resolved mode + raw value at
+    INFO — this is the operator-visible handshake that the feature flag
+    was picked up. An invalid value (anything other than ``eager`` /
+    ``lazy``) falls back to ``eager`` and is logged at WARNING.
+    """
     if requested in ("eager", "lazy"):
         return requested
-    env = (os.environ.get("OMNISIGHT_SKILL_LOADING") or "").strip().lower()
-    return env if env in ("eager", "lazy") else "eager"
+    raw = (os.environ.get("OMNISIGHT_SKILL_LOADING") or "").strip().lower()
+    if raw in ("eager", "lazy"):
+        resolved = raw
+        invalid = False
+    else:
+        resolved = "eager"
+        invalid = bool(raw)  # empty == not set (don't warn); anything else == invalid
+
+    global _skill_mode_logged
+    if not _skill_mode_logged:
+        _skill_mode_logged = True
+        if invalid:
+            logger.warning(
+                "OMNISIGHT_SKILL_LOADING=%r is invalid (expected 'eager'|'lazy'); "
+                "falling back to 'eager' for backward compatibility",
+                raw,
+            )
+        else:
+            source = "env" if raw else "default"
+            logger.info(
+                "Skill loading mode resolved to %r (source=%s) — "
+                "flip via OMNISIGHT_SKILL_LOADING=eager|lazy",
+                resolved, source,
+            )
+    return resolved
 
 
 def list_all_skills_metadata() -> list[dict]:
