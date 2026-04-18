@@ -230,7 +230,7 @@ Legend:
 **Part D — Integration Settings 頁面分 tab**
 - [x] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
   - [x] Tab 1「Git」：GitHub token + GitLab token/URL + SSH key + Multi-instance map
-  - [ ] Tab 2「Gerrit」：Gerrit Code Review 全部設定 + Setup Wizard 入口
+  - [x] Tab 2「Gerrit」：Gerrit Code Review 全部設定 + Setup Wizard 入口
   - [ ] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示
   - [ ] Tab 4「CI/CD」：GitHub Actions / Jenkins / GitLab CI 開關 + 設定
 - [ ] 每個 tab 頂部顯示 connection status badge（✅ connected / ⚠️ not configured / ❌ error）
@@ -1512,7 +1512,7 @@ Legend:
 - [x] 超標時指數 backoff（cap 30s），不佔槽位；emit `sandbox.deferred` audit 事件（reason: `host_cpu_high` / `host_mem_high` / `container_cap`）
 - [x] Turbo 自動降級：`cpu_pct > 80` 持續 30s → 降到 supervised budget；恢復後可自動回升（需冷卻 2 min）
 - [x] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
-- [ ] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
+- [x] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
 - [ ] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
 - [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
 - 預估：**2 day**

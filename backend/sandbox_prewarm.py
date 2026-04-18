@@ -154,6 +154,86 @@ def pick_prewarm_candidates(dag: DAG, *, depth: int | None = None) -> list[Task]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H2 row 1515 — host pressure pause
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# When the host is high-pressure (CPU/mem/container threshold breached
+# OR WSL2 loadavg ratio above HIGH_PRESSURE_LOADAVG_RATIO) we MUST NOT
+# launch new pre-warm containers — speculative warmups during overload
+# only make the pressure worse. Already-warmed slots are preserved
+# untouched: they've already paid their start-up cost, can still be
+# consumed, and the H2 backoff in the acquire path provides the
+# ultimate gate before they actually run real work.
+#
+# Reason codes mirror the H2 sandbox.deferred contract for CPU / mem /
+# container, plus an extra ``host_loadavg_high`` for the WSL2-only
+# auxiliary signal documented on host_metrics.HIGH_PRESSURE_LOADAVG_RATIO.
+
+PREWARM_PAUSE_REASON_CPU = "host_cpu_high"
+PREWARM_PAUSE_REASON_MEM = "host_mem_high"
+PREWARM_PAUSE_REASON_CONTAINER = "container_cap"
+PREWARM_PAUSE_REASON_LOADAVG = "host_loadavg_high"
+
+
+def _check_host_pressure() -> Optional[str]:
+    """Return a reason code if the host is high-pressure, else None.
+
+    First consults the H2 CPU/mem/container precondition (same source
+    of truth as ``_ModeSlot.acquire()`` so prewarm pause and acquire
+    deferral never disagree about whether the host is hot). Then falls
+    back to the WSL2 loadavg ratio so a host where psutil reports clean
+    but the kernel run-queue is saturated still gates new warmups.
+
+    Failures importing either module return None (allow) — pre-warm is
+    an optimisation, never a correctness gate.
+    """
+    try:
+        from backend import decision_engine as _de
+        reason = _de._host_precondition_reason()
+        if reason:
+            return reason
+    except Exception as exc:
+        logger.debug("prewarm pressure check (decision_engine) failed: %s", exc)
+    try:
+        from backend import host_metrics as _hm
+        if _hm.is_host_high_pressure():
+            return PREWARM_PAUSE_REASON_LOADAVG
+    except Exception as exc:
+        logger.debug("prewarm pressure check (host_metrics) failed: %s", exc)
+    return None
+
+
+def _emit_prewarm_paused(
+    reason: str,
+    *,
+    dag_id: str,
+    tenant_id: Optional[str],
+    candidate_count: int,
+) -> None:
+    """Best-effort SSE + metrics emit for a prewarm pause decision.
+
+    Neither bus.publish nor metric bump failures should ever void the
+    pause — the precondition itself is the source of truth, the audit
+    trail is just observability.
+    """
+    try:
+        from backend import metrics as _m
+        _m.prewarm_paused_total.labels(reason=reason).inc()
+    except Exception as exc:
+        logger.debug("prewarm_paused metric bump failed: %s", exc)
+    try:
+        from backend.events import bus as _bus
+        _bus.publish("sandbox.prewarm_paused", {
+            "reason": reason,
+            "dag_id": dag_id,
+            "tenant_id": tenant_id or "",
+            "candidate_count": candidate_count,
+        }, tenant_id=tenant_id)
+    except Exception as exc:
+        logger.debug("sandbox.prewarm_paused SSE publish failed: %s", exc)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  prewarm_for — launch containers speculatively
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -178,18 +258,49 @@ async def prewarm_for(
     each tenant gets its own bucket (depth applies per bucket). Under
     ``shared``, every call lands in a single ``_shared`` bucket. Under
     ``disabled``, this function short-circuits immediately.
+
+    H2 row 1515: when the host is high-pressure (CPU/mem/container
+    thresholds breached or WSL2 loadavg ratio exceeded), this function
+    refuses to launch *new* warm-pool containers. Already-warmed slots
+    in ``_prewarmed_by_tenant`` are NOT touched — callers can still
+    consume what's already warm, and the H2 acquire-path backoff is the
+    final gate before the slot is handed off to a real task. Returns
+    only the subset of candidates that were already warmed (possibly
+    empty), and emits ``sandbox.prewarm_paused`` SSE + audit so ops can
+    correlate the warm-pool pause with the underlying pressure event.
     """
     policy = get_policy()
     if policy == "disabled":
         logger.debug("prewarm: policy=disabled — skipping prewarm_for(%s)", dag.dag_id)
         return []
 
-    if starter is None:
-        from backend.container import start_container as starter  # type: ignore
-
     bucket = _bucket_key(tenant_id)
     effective_tid = tenant_id or "t-default"
     candidates = pick_prewarm_candidates(dag, depth=depth)
+
+    pause_reason = _check_host_pressure()
+    if pause_reason is not None:
+        logger.info(
+            "prewarm: host high-pressure (reason=%s) — pausing new warm pool "
+            "for dag=%s tenant=%s; %d already-warmed slot(s) preserved",
+            pause_reason, dag.dag_id, effective_tid,
+            sum(1 for t in candidates
+                if t.task_id in _prewarmed_by_tenant.get(bucket, {})),
+        )
+        _emit_prewarm_paused(
+            pause_reason,
+            dag_id=dag.dag_id,
+            tenant_id=tenant_id,
+            candidate_count=len(candidates),
+        )
+        async with _lock:
+            tenant_slots = _prewarmed_by_tenant.get(bucket, {})
+            return [tenant_slots[t.task_id] for t in candidates
+                    if t.task_id in tenant_slots]
+
+    if starter is None:
+        from backend.container import start_container as starter  # type: ignore
+
     out: list[PrewarmSlot] = []
     # M5: mix the tenant id into the agent_id suffix so two tenants
     # prewarming the same DAG don't collide in container.py's
