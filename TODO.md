@@ -166,7 +166,7 @@ Legend:
 - [x] `middleware.ts`（或 `proxy.ts`）：未登入 + 503 bootstrap_required → redirect 到 `/setup-required`（不是 `/login`）
 
 **Part B — FUI 錯誤頁面（400/500 系列）**
-- [ ] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
+- [x] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
 - [ ] `app/error.tsx`（Client error boundary）：「發生錯誤」+ 重試按鈕 + 展開區：error.message + stack（prod 隱藏 stack）
 - [ ] `app/global-error.tsx`（Root layout crash）：最外層 fallback，minimal FUI 風格
 - [ ] `components/omnisight/error-page.tsx`：共用 FUI error 頁面元件，支援：
