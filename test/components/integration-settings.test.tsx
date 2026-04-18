@@ -1577,3 +1577,180 @@ describe("IntegrationSettings — Part D tab split", () => {
     expect(jenkinsDot.className).not.toContain("var(--validation-emerald)")
   })
 })
+
+/**
+ * B14 Part D row 236 — each tab shows a connection-status banner at the
+ * top of its content area with three states:
+ *   - ✅ connected       — at least one field populated AND no recent
+ *                          TEST probe returned a non-ok status
+ *   - ⚠️ not configured  — nothing populated yet (first-run / empty)
+ *   - ❌ error           — a recent TEST probe returned status !== "ok"
+ *
+ * The banner lives INSIDE the tab body (distinct from the 1.5px dot in
+ * the TabsTrigger header), so state transitions are tested by mounting
+ * the modal, resolving the mocked `testIntegration` response, and
+ * asserting on `data-status` of the `tab-status-badge-<tab>` element.
+ */
+const mockedTestIntegration = api.testIntegration as unknown as ReturnType<typeof vi.fn>
+
+describe("IntegrationSettings — tab connection status badge (row 236)", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedTestIntegration.mockReset()
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  it("renders the 'not configured' banner on every empty tab", async () => {
+    mockedGetSettings.mockResolvedValue({})
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+
+    const gitBadge = await screen.findByTestId("tab-status-badge-git")
+    expect(gitBadge.getAttribute("data-status")).toBe("not_configured")
+    expect(gitBadge.textContent).toContain("NOT CONFIGURED")
+
+    // Gerrit tab is force-mounted so its banner is in the DOM even while
+    // the Git tab is active. Asserting directly avoids the click dance.
+    const gerritBadge = screen.getByTestId("tab-status-badge-gerrit")
+    expect(gerritBadge.getAttribute("data-status")).toBe("not_configured")
+
+    await user.click(await screen.findByRole("tab", { name: /WEBHOOKS/ }))
+    const webhooksBadge = await screen.findByTestId("tab-status-badge-webhooks")
+    expect(webhooksBadge.getAttribute("data-status")).toBe("not_configured")
+
+    await user.click(await screen.findByRole("tab", { name: /CI\/CD/ }))
+    const cicdBadge = await screen.findByTestId("tab-status-badge-cicd")
+    expect(cicdBadge.getAttribute("data-status")).toBe("not_configured")
+  })
+
+  it("flips the Git tab banner to 'connected' when credentials exist", async () => {
+    mockedGetSettings.mockResolvedValue({
+      git: {
+        ssh_key_path: "/home/app/.ssh/id_rsa",
+        github_token: "***",
+        gitlab_token: "",
+        credentials: [],
+      },
+    })
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const badge = await screen.findByTestId("tab-status-badge-git")
+    expect(badge.getAttribute("data-status")).toBe("connected")
+    expect(badge.textContent).toContain("CONNECTED")
+  })
+
+  it("flips the CI/CD banner to 'connected' when any CI toggle is ON", async () => {
+    mockedGetSettings.mockResolvedValue({
+      ci: {
+        github_actions_enabled: true,
+        jenkins_enabled: false,
+        gitlab_ci_enabled: false,
+      },
+    })
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    await user.click(await screen.findByRole("tab", { name: /CI\/CD/ }))
+    const badge = await screen.findByTestId("tab-status-badge-cicd")
+    expect(badge.getAttribute("data-status")).toBe("connected")
+  })
+
+  it("flips the Gerrit banner to 'error' when the TEST probe reports status!=ok", async () => {
+    mockedGetSettings.mockResolvedValue({
+      gerrit: {
+        enabled: true,
+        url: "https://gerrit.example.com",
+      },
+    })
+    mockedTestIntegration.mockResolvedValueOnce({
+      status: "error",
+      message: "Permission denied (publickey).",
+    })
+
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    await user.click(await screen.findByRole("tab", { name: /GERRIT/ }))
+
+    // Before the probe: tabStatus.gerrit is true → banner starts connected.
+    const badge = await screen.findByTestId("tab-status-badge-gerrit")
+    expect(badge.getAttribute("data-status")).toBe("connected")
+
+    // GERRIT CODE REVIEW section carries the TEST button. SettingsSection
+    // header renders TEST inline next to the integration title.
+    const testButtons = screen.getAllByText("TEST")
+    await user.click(testButtons[0])
+
+    await waitFor(() => {
+      const after = screen.getByTestId("tab-status-badge-gerrit")
+      expect(after.getAttribute("data-status")).toBe("error")
+    })
+    expect(screen.getByTestId("tab-status-badge-gerrit").textContent).toContain(
+      "Permission denied (publickey).",
+    )
+  })
+
+  it("clears 'error' state when a subsequent probe returns ok", async () => {
+    mockedGetSettings.mockResolvedValue({
+      gerrit: { enabled: true, url: "https://gerrit.example.com" },
+    })
+    mockedTestIntegration
+      .mockResolvedValueOnce({ status: "error", message: "timeout" })
+      .mockResolvedValueOnce({ status: "ok", version: "3.8.1" })
+
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    await user.click(await screen.findByRole("tab", { name: /GERRIT/ }))
+
+    // SettingsSection hides the TEST button while a probe is in-flight
+    // (`integration && !testing && (...)`), so each click has to re-query
+    // the button from fresh DOM instead of reusing a stale reference.
+    const clickTest = async () => {
+      const btns = await screen.findAllByText("TEST")
+      await user.click(btns[0])
+    }
+
+    await clickTest()
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("tab-status-badge-gerrit").getAttribute("data-status"),
+      ).toBe("error"),
+    )
+
+    await clickTest()
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("tab-status-badge-gerrit").getAttribute("data-status"),
+      ).toBe("connected"),
+    )
+  })
+
+  it("treats probe status 'not_configured' as benign (does NOT flip to error)", async () => {
+    // A probe that reports "not_configured" back is equivalent to the
+    // field simply being empty. Historically the SettingsSection header
+    // renders a grey WifiOff in this case; the tab banner must match —
+    // a red "CONNECTION ERROR" banner here would mislead the operator.
+    mockedGetSettings.mockResolvedValue({})
+    mockedTestIntegration.mockResolvedValueOnce({
+      status: "not_configured",
+      message: "set GIT_SSH_KEY_PATH",
+    })
+
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+
+    const testButtons = screen.getAllByText("TEST")
+    await user.click(testButtons[0]) // Git section's SSH test
+
+    await waitFor(() => {
+      const badge = screen.getByTestId("tab-status-badge-git")
+      // Probe said not_configured + nothing populated → stays not_configured
+      expect(badge.getAttribute("data-status")).toBe("not_configured")
+    })
+  })
+})

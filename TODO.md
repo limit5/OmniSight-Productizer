@@ -233,7 +233,7 @@ Legend:
   - [x] Tab 2「Gerrit」：Gerrit Code Review 全部設定 + Setup Wizard 入口
   - [x] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示
   - [x] Tab 4「CI/CD」：GitHub Actions / Jenkins / GitLab CI 開關 + 設定
-- [ ] 每個 tab 頂部顯示 connection status badge（✅ connected / ⚠️ not configured / ❌ error）
+- [x] 每個 tab 頂部顯示 connection status badge（✅ connected / ⚠️ not configured / ❌ error）
 - [ ] 預估：**0.5 day**
 
 **Part E — Connection Test 按鈕**
@@ -1519,7 +1519,7 @@ Legend:
 
 ### H3. UI Host Load Panel + Coordinator 決策透明化
 - [x] 把 `components/omnisight/host-device-panel.tsx` placeholder 換成真 SSE 驅動（listen `host.metrics.tick`）<!-- 2026-04-18 H3 row 1521: 新增 `hooks/use-host-metrics-tick.ts`（60-pt ring buffer + highPressure flag + connected 狀態），`lib/api.ts` `SSEEvent` union / `SSE_EVENT_TYPES` 加入 `host.metrics.tick` 與 `HostMetricsTickEvent` 型別；`components/omnisight/host-device-panel.tsx` 以 `useHostMetricsTick()` 取代原 `defaultHostInfo` 佔位，SSE tick 到達即覆寫 cpuUsage / memoryUsed / memoryTotal，並以 SSE baseline 填補 cpu_model / cpu_cores / memoryTotal。SYSTEM INFO 卡片新增 `● SSE LIVE` / `○ SSE WAITING` 連線指示 pill（data-testid=`host-sse-status`）。`test/hooks/use-host-metrics-tick.test.tsx`（5 test：初始空 / 首 tick 填值 / 60-pt 環緩區滾動 / 忽略非 host 事件 / 卸載關訂閱）+ `test/components/host-device-panel.test.tsx`（2 test：waiting→live 流 / baseline fallback）共 7 test 全綠。 -->
-- [ ] 顯示：CPU% / mem%（含 available）/ disk% / loadavg 1m / running container 數 + 各項 60-pt sparkline
+- [x] 顯示：CPU% / mem%（含 available）/ disk% / loadavg 1m / running container 數 + 各項 60-pt sparkline<!-- 2026-04-18 H3 row 1522: `components/omnisight/host-device-panel.tsx` 新增 `MetricSparkline`（純 SVG 60×18 polyline，`domainMax` 提供 0..100% 共用 y 軸 / 可省略以自動配適 loadavg / container 不限值）+ `LiveMetricsSection`：CPU / Memory(含 `available 24.0 GB` 子行) / Disk / Load 1m / Containers 五張卡，每張右上掛上對應的 60-pt sparkline 並從 `useHostMetricsTick().history` ring buffer 取數據。SYSTEM INFO 區塊在 `HostInfoSection` 之後渲染 `LiveMetricsSection`。`test/components/metric-sparkline.test.tsx`（4 test：< 2 點顯示 dash placeholder / 3 點生 SVG polyline / 超過 domainMax 被 clamp 到頂端 / domainMax=null 時自動配適）+ `test/components/host-device-panel.test.tsx` 加 2 test（5 卡與 mem-available `24.0 GB` 行，3 連發 ticks 後 sparkline 變 SVG `data-points=3`）共新增 6 test。targeted vitest run（host-device-panel + metric-sparkline + use-host-metrics-tick）13/13 綠 1.03s。 -->
 - [ ] Baseline 顯示「16c / 64GB / 512GB」於 header（hardcode）
 - [ ] `ops-summary-panel.tsx` 加欄位：**queue depth**（等槽位任務數）/ **deferred count**（近 5min）/ **effective concurrency budget**（因 derate 可能 < 設定）
 - [ ] 過載 Badge：`Coordinator auto-derated to supervised`，hover tooltip 顯示原因（"CPU 87% > threshold"）

@@ -24,7 +24,7 @@ const STATUS_ICON = {
   testing: <Loader size={12} className="animate-spin text-[var(--neural-blue)]" />,
 }
 
-function SettingsSection({ title, integration, status, statusTestId, children }: {
+function SettingsSection({ title, integration, status, statusTestId, onTestResult, children }: {
   title: string
   integration?: string
   // B14 Part D row 235 — optional per-section status dot. Pass `true` to
@@ -34,6 +34,13 @@ function SettingsSection({ title, integration, status, statusTestId, children }:
   // noise. `statusTestId` provides a stable `data-testid` for vitest.
   status?: boolean
   statusTestId?: string
+  // B14 Part D row 236 — lift test outcomes up to the parent so the
+  // top-of-tab connection badge can flip from ⚠️ "not configured" /
+  // ✅ "connected" into ❌ "error" when an active probe (the TEST button)
+  // fails. The callback fires on every probe resolution — success and
+  // failure alike — so the parent maintains a persistent view of the
+  // last known state per integration even while the section is collapsed.
+  onTestResult?: (integration: string, result: TestResult) => void
   children: React.ReactNode
 }) {
   const [expanded, setExpanded] = useState(true)
@@ -47,12 +54,15 @@ function SettingsSection({ title, integration, status, statusTestId, children }:
     try {
       const result = await api.testIntegration(integration)
       setTestResult(result)
+      if (onTestResult) onTestResult(integration, result)
     } catch (e) {
-      setTestResult({ status: "error", message: String(e) })
+      const errResult: TestResult = { status: "error", message: String(e) }
+      setTestResult(errResult)
+      if (onTestResult) onTestResult(integration, errResult)
     } finally {
       setTesting(false)
     }
-  }, [integration])
+  }, [integration, onTestResult])
 
   return (
     <div className="border border-[var(--border)] rounded-md overflow-hidden">
@@ -2487,6 +2497,96 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
   )
 }
 
+// B14 Part D row 236 — three-state banner rendered at the TOP of every
+// Integration Settings tab. This is a distinct visual element from the
+// tiny 1.5px dots inside each TabsTrigger (those show a passive
+// "configured / not configured" hint inside the tab header). The banner
+// lives inside the tab body so it's unambiguous which integration family
+// the status refers to, and it surfaces a third `error` state that the
+// trigger dot can't express because it only gets 1.5px of pixel budget.
+//
+// Semantics:
+//   - `connected`      : at least one field in the tab is populated AND
+//                        no recorded probe (TEST button) has failed.
+//   - `not_configured` : nothing populated (and the user may not realise
+//                        yet — e.g. first-run opens the Git tab empty).
+//   - `error`          : a recent probe returned status !== "ok", which
+//                        is a stronger signal than "configured" alone
+//                        and therefore takes priority in the state
+//                        machine.
+type TabConnectionStatus = "connected" | "not_configured" | "error"
+
+const TAB_STATUS_CONFIG: Record<TabConnectionStatus, {
+  label: string
+  icon: React.ReactNode
+  // Tailwind/var() fragment — inlined here (vs. a `variants` util) so the
+  // one-off design-system tokens (validation-emerald / hardware-orange /
+  // critical-red) stay obvious during theme audits.
+  cls: string
+}> = {
+  connected: {
+    label: "CONNECTED",
+    icon: <Check size={12} />,
+    cls: "border-[var(--validation-emerald)]/40 bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)]",
+  },
+  not_configured: {
+    label: "NOT CONFIGURED",
+    icon: <AlertTriangle size={12} />,
+    cls: "border-[var(--hardware-orange)]/40 bg-[var(--hardware-orange)]/10 text-[var(--hardware-orange)]",
+  },
+  error: {
+    label: "CONNECTION ERROR",
+    icon: <X size={12} />,
+    cls: "border-[var(--critical-red)]/40 bg-[var(--critical-red)]/10 text-[var(--critical-red)]",
+  },
+}
+
+function TabStatusBadge({ status, testId, message }: {
+  status: TabConnectionStatus
+  testId: string
+  // When `status === "error"`, we surface the upstream probe message so
+  // the operator can tell WHY it failed without having to expand the
+  // individual section. Ignored for the other two states since they are
+  // self-explanatory.
+  message?: string
+}) {
+  const cfg = TAB_STATUS_CONFIG[status]
+  return (
+    <div
+      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border font-mono text-[9px] tracking-fui ${cfg.cls}`}
+      data-testid={testId}
+      data-status={status}
+      role="status"
+    >
+      <span className="shrink-0">{cfg.icon}</span>
+      <span className="font-semibold">{cfg.label}</span>
+      {status === "error" && message && (
+        <span
+          className="flex-1 truncate font-normal opacity-80"
+          title={message}
+          data-testid={`${testId}-message`}
+        >
+          — {message}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// Which backend integration probes belong to which Integration Settings
+// tab. The mapping is load-bearing: when a section's TEST button fires,
+// we use this table to route the result into the correct tab badge. CI/CD
+// has no entries today because the CI/CD sections don't expose a probe —
+// the CI trigger only fires during actual pipeline dispatches, not as a
+// standalone health check — so the CI/CD badge is driven purely by the
+// passive "configured" signal from `tabStatus.cicd`.
+const TAB_INTEGRATIONS: Record<"git" | "gerrit" | "webhooks" | "cicd", readonly string[]> = {
+  git: ["ssh"],
+  gerrit: ["gerrit"],
+  webhooks: ["jira", "slack"],
+  cicd: [],
+}
+
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
@@ -2572,6 +2672,43 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
       : "bg-[var(--hardware-orange)]/60"
   const badgeTitle = (ok: boolean) =>
     ok ? "connected / configured" : "not configured"
+
+  // B14 Part D row 236 — lifted from SettingsSection so the tab-level
+  // badge can reflect error state. Each SettingsSection still owns its
+  // own inline test result (the per-section green/red pill under the
+  // section body); what we collect here is just the LAST status string
+  // per integration, keyed by the `integration` prop name. That keeps
+  // the section component's local state untouched so the existing
+  // "TEST → expand → see result" interaction stays intact.
+  const [probeResults, setProbeResults] = useState<Record<string, TestResult>>({})
+  const recordProbeResult = useCallback((integration: string, result: TestResult) => {
+    setProbeResults(prev => ({ ...prev, [integration]: result }))
+  }, [])
+
+  const resolveTabStatus = (tab: keyof typeof tabStatus): TabConnectionStatus => {
+    // Error state is checked FIRST and wins over "configured": a stale
+    // green dot on a tab with a failing probe would mislead the operator.
+    // We treat any probe status !== "ok" as an error, which collapses
+    // three backend vocabularies ("error", "not_configured" return from
+    // an unconfigured integration, free-form "timeout", etc.) into the
+    // single red banner — except for "not_configured" specifically, which
+    // is expected when the user hasn't set anything up and should NOT
+    // surface as an error banner. "not_configured" from a probe is
+    // equivalent to tabStatus[tab] being false.
+    const hits = (TAB_INTEGRATIONS[tab] ?? [])
+      .map(i => probeResults[i])
+      .filter((r): r is TestResult => r !== undefined)
+    const firstError = hits.find(r => r.status !== "ok" && r.status !== "not_configured")
+    if (firstError) return "error"
+    return tabStatus[tab] ? "connected" : "not_configured"
+  }
+
+  const tabBadgeMessage = (tab: keyof typeof tabStatus): string | undefined => {
+    const err = (TAB_INTEGRATIONS[tab] ?? [])
+      .map(i => probeResults[i])
+      .find(r => r && r.status !== "ok" && r.status !== "not_configured")
+    return err?.message
+  }
 
   const setVal = (configKey: string, value: string | boolean) => {
     setDirty(prev => ({ ...prev, [configKey]: value }))
@@ -2771,7 +2908,12 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
             {/* Tab 1 — Git forges (GitHub / GitLab / SSH) + multi-instance map */}
             <TabsContent value="git" className="space-y-2 mt-0">
-              <SettingsSection title="GIT REPOSITORIES" integration="ssh">
+              <TabStatusBadge
+                status={resolveTabStatus("git")}
+                testId="tab-status-badge-git"
+                message={tabBadgeMessage("git")}
+              />
+              <SettingsSection title="GIT REPOSITORIES" integration="ssh" onTestResult={recordProbeResult}>
                 {/* Credential Registry — per-repo entries */}
                 {(() => {
                   const creds = (settingsData["git"]?.["credentials"] as Array<Record<string, unknown>>) || []
@@ -2831,7 +2973,12 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 flat layout. Radix flips the `hidden` attribute on inactive
                 panels so assistive tech still sees only the active tab. */}
             <TabsContent value="gerrit" forceMount className="space-y-2 mt-0 data-[state=inactive]:hidden">
-              <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">
+              <TabStatusBadge
+                status={resolveTabStatus("gerrit")}
+                testId="tab-status-badge-gerrit"
+                message={tabBadgeMessage("gerrit")}
+              />
+              <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit" onTestResult={recordProbeResult}>
                 {/* B14 Part C row 221: entry-point button that opens the Gerrit
                     Setup Wizard modal. The 5-step interactive content (URL+SSH
                     test / SSH-key hint / merger-agent-bot / submit-rule probe /
@@ -2881,6 +3028,11 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 overwrite a rotated secret and break Gerrit event signature
                 verification. */}
             <TabsContent value="webhooks" className="space-y-2 mt-0">
+              <TabStatusBadge
+                status={resolveTabStatus("webhooks")}
+                testId="tab-status-badge-webhooks"
+                message={tabBadgeMessage("webhooks")}
+              />
               <SettingsSection title="INBOUND WEBHOOK SECRETS">
                 {([
                   { label: "GitHub Secret", category: "webhooks", field: "github_secret", dirtyKey: "github_webhook_secret" },
@@ -2948,13 +3100,13 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 </div>
               </SettingsSection>
 
-              <SettingsSection title="JIRA ISSUE TRACKING" integration="jira">
+              <SettingsSection title="JIRA ISSUE TRACKING" integration="jira" onTestResult={recordProbeResult}>
                 <SettingField label="URL" value={getVal("jira", "url")} onChange={v => setVal("notification_jira_url", v)} />
                 <SettingField label="Token" value={getVal("jira", "token")} type="password" onChange={v => setVal("notification_jira_token", v)} />
                 <SettingField label="Project Key" value={getVal("jira", "project")} onChange={v => setVal("notification_jira_project", v)} />
               </SettingsSection>
 
-              <SettingsSection title="SLACK NOTIFICATIONS" integration="slack">
+              <SettingsSection title="SLACK NOTIFICATIONS" integration="slack" onTestResult={recordProbeResult}>
                 <SettingField label="Webhook" value={getVal("slack", "webhook")} type="password" onChange={v => setVal("notification_slack_webhook", v)} />
                 <SettingField label="Mention ID" value={getVal("slack", "mention")} onChange={v => setVal("notification_slack_mention", v)} />
               </SettingsSection>
@@ -2976,6 +3128,11 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 missing; a green dot on "enabled but URL empty" would lie
                 to the operator. */}
             <TabsContent value="cicd" className="space-y-2 mt-0">
+              <TabStatusBadge
+                status={resolveTabStatus("cicd")}
+                testId="tab-status-badge-cicd"
+                message={tabBadgeMessage("cicd")}
+              />
               <SettingsSection
                 title="GITHUB ACTIONS"
                 status={cicdSectionStatus.githubActions}
