@@ -1513,7 +1513,7 @@ Legend:
 - [x] Turbo 自動降級：`cpu_pct > 80` 持續 30s → 降到 supervised budget；恢復後可自動回升（需冷卻 2 min）
 - [x] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
 - [x] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留
-- [ ] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
+- [x] Audit 記錄所有 derate / recover 決策（Phase 53 hash-chain）
 - [ ] 測試：mock host_metrics 模擬高壓 → 驗證 acquire 被阻塞、derate 觸發、recover 冷卻
 - 預估：**2 day**
 

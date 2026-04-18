@@ -245,10 +245,14 @@ _turbo_derate_state = _TurboDerateState()
 
 
 def _emit_turbo_transition(event: str, payload: dict[str, Any]) -> None:
-    """Best-effort SSE emit for turbo_derate / turbo_recover transitions.
+    """Best-effort SSE emit + Phase-53 hash-chain audit for turbo_derate /
+    turbo_recover transitions.
 
-    Not audit-logged (that is row 1516). Logger.info keeps a paper
-    trail even when the SSE bus is unavailable (tests, cold start).
+    The SSE bus broadcast lights up the live coordinator panel; the audit
+    row gives operators an after-the-fact reconstruction of *why* a turbo
+    session was throttled (CPU sample, sustain elapsed, the budget swap)
+    — chained into the per-tenant Phase-53 audit log so any post-hoc
+    tampering breaks ``audit.verify_chain``.
     """
     logger.info("coordinator turbo transition: %s %s", event, payload)
     try:
@@ -256,6 +260,23 @@ def _emit_turbo_transition(event: str, payload: dict[str, Any]) -> None:
         _bus.publish(event, payload)
     except Exception as exc:
         logger.debug("%s SSE publish failed: %s", event, exc)
+
+    # Phase 53 hash-chain audit: every derate / recover decision is a
+    # state-changing operation worth persisting. Mirrors the
+    # `sandbox.deferred` audit pattern used by the H2 precondition path.
+    is_derate = event.endswith("turbo_derate")
+    direction = "engaged" if is_derate else "recovered"
+    try:
+        from backend import audit as _audit
+        _audit.log_sync(
+            action=event,
+            entity_kind="turbo_derate",
+            entity_id=direction,
+            before={"derate_active": not is_derate},
+            after={"derate_active": is_derate, **payload},
+        )
+    except Exception as exc:
+        logger.debug("%s audit log failed: %s", event, exc)
 
 
 def evaluate_turbo_derate(
