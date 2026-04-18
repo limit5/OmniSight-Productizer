@@ -193,7 +193,7 @@ Legend:
   - [x] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
   - [x] 網路斷線 → toast info「網路連線中斷，嘗試重新連線...」+ retry indicator
 
-- [x] 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
+- 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
 
 ### B14. UX 改善 — Bootstrap Wizard + Git Forge 設定 + Integration 頁面優化（#340）
 
@@ -206,7 +206,7 @@ Legend:
 - [x] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
 - [x] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
 - [x] 「跳過」不影響 bootstrap finalization（Git forge 非必要 gate）
-- [x] 預估：**1 day**（Step 3.5 slot 0.2d + 三-tab UI 0.2d + GitHub test 0.2d + GitLab test 0.1d + Gerrit SSH test 0.2d + skip-non-blocking 0.1d = 1d closed-loop）
+- 預估：**1 day**（Step 3.5 slot 0.2d + 三-tab UI 0.2d + GitHub test 0.2d + GitLab test 0.1d + Gerrit SSH test 0.2d + skip-non-blocking 0.1d = 1d closed-loop）
 
 **Part B — Multi-repo Token Map UI**
 - [x] Settings → Integration → Git 區塊新增「Multiple Instances」展開區
@@ -215,7 +215,7 @@ Legend:
 - [x] 列表顯示所有已設定的 instance + 每個有「Test」/「Remove」按鈕
 - [x] 儲存時寫入 `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`（JSON 格式）
 - [x] 後端 API：`GET/PUT /api/v1/settings/git/token-map` → 讀寫 token map（token 遮罩顯示）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 **Part C — Gerrit Setup Wizard（獨立引導）**
 - [x] Settings → Integration → Gerrit 區塊加「Setup Wizard」按鈕 → 開啟 modal 引導
@@ -225,7 +225,7 @@ Legend:
 - [x] Step 4：submit-rule 驗證（呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule）
 - [x] Step 5：webhook 設定引導（顯示 webhook URL + secret → 提示貼到 Gerrit）
 - [x] 完成後寫入 config + 顯示「Gerrit 整合已啟用」
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 **Part D — Integration Settings 頁面分 tab**
 - [x] 現行 Settings → Integration 所有欄位擠在一頁 → 改為分 tab：
@@ -234,7 +234,7 @@ Legend:
   - [x] Tab 3「Webhooks」：GitHub/GitLab/Gerrit/Jira webhook secrets + 狀態指示
   - [x] Tab 4「CI/CD」：GitHub Actions / Jenkins / GitLab CI 開關 + 設定
 - [x] 每個 tab 頂部顯示 connection status badge（✅ connected / ⚠️ not configured / ❌ error）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **Part E — Connection Test 按鈕**
 - [x] 每個 Git forge 設定區塊加「Test Connection」按鈕
@@ -243,7 +243,7 @@ Legend:
 - [ ] Gerrit：SSH `gerrit version` → 顯示版本
 - [ ] Jira：`GET /rest/api/2/serverInfo` → 顯示版本
 - [ ] 測試結果即時顯示在按鈕旁（✅ / ❌ + 錯誤訊息）
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **B14 總預估**：**4.5 day**
 
@@ -262,7 +262,7 @@ Legend:
 - [ ] Feature flag：`OMNISIGHT_SKILL_LOADING=eager|lazy`（預設 `eager` 保持向後相容，切 `lazy` 啟用新模式）
 - [ ] A/B test 驗證：同一 task 用 eager vs lazy 跑，比較完成率 + token 用量 + response 品質
 - [ ] Metrics：`skill_load_total{mode}` / `skill_token_saved_total` / `skill_load_latency_ms`
-- [ ] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ---
 
@@ -495,7 +495,7 @@ Legend:
 - [x] `current_user` 回傳值同時帶 `Session` 物件（或 `request.state.session` 注入），讓後續 audit 寫入可取 `session_id` 不需再查
 - [x] 所有 audit 寫入點統一經 helper `write_audit(action, actor, session_id=..., ...)` — session_id 自動從 request context 取
 - [x] 測試：sessions CRUD、revoke 後 cookie 失效、audit_log 正確帶 session_id、bearer token 寫入時 session_id=`bearer:<fingerprint>`
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ---
 
@@ -510,7 +510,7 @@ Legend:
 - [x] Docker `Dockerfile.backend` / compose prod：預設 env `OMNISIGHT_AUTH_MODE=strict`
 - [x] 文件 `docs/ops/security_baseline.md`：列出部署前 checklist（strict mode、改密碼、bearer token 僅限 CI 白名單 IP）
 - [x] 測試：啟動模式檢查、未改密碼時 API 拒絕 428、改完密碼後旗標清除
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### K2. 登入速率限制 + 帳號鎖定
 - [x] `backend/rate_limit.py`：in-process token bucket（未來 I 多 worker 時換 Redis）— 預設 `/auth/login` 每 IP 5/min、每 email 10/hour
@@ -518,14 +518,14 @@ Legend:
 - [x] 鎖定期間 `authenticate_password` 回 `None` 且不走 PBKDF2（省 CPU）
 - [x] 成功登入 reset counter；audit_log 記錄 `auth.login.fail` / `auth.lockout`
 - [x] 測試：rate limit 生效、lockout 釋放、時間衰減
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### K3. Cookie flags + CSP 驗證
 - [x] 驗所有 `Set-Cookie`：session → `HttpOnly + Secure + SameSite=Lax`；CSRF → `Secure + SameSite=Lax`（不可 HttpOnly，前端要讀）
 - [x] 加入 `secure.py` middleware（若無）設 CSP、`X-Frame-Options=DENY`、`Referrer-Policy=strict-origin`、`Permissions-Policy`
 - [x] CSP 嚴格模式（nonce-based）避免 inline script；前端 Next.js config 配合
 - [x] E2E 測試：`curl -I` 驗 response header；Playwright 驗 CSP 阻擋 inline eval
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **K-early 總預估**：**2 day**。完成即可對外部署不會被立刻打爆。
 
@@ -540,40 +540,40 @@ Legend:
 - [x] 前端 SSE client 比對當前 `session_id` 過濾（預設只看自己 session 觸發的 + user-level 通知）
 - [x] UI toggle：「顯示所有我的 session 事件」/「僅本 session」
 - [x] 測試：多 session fixture → 驗證過濾正確
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### J2. Workflow_run 樂觀鎖
 - [x] `workflow_runs` 加 `version INTEGER DEFAULT 0` + migration
 - [x] Retry / cancel / update endpoints：require `If-Match: <version>` header；version 不符回 409
 - [x] 前端按鈕按下時帶當前 version；409 → 提示「另一處已修改，請重新整理」
 - [x] 測試：並發 retry 只有一個成功
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### J3. Session management UI
 - [x] `components/omnisight/session-manager-panel.tsx`：列 S0 `/auth/sessions` 結果（device / IP / created / last_seen）
 - [x] 每列 Revoke 按鈕 + 「登出其他所有裝置」按鈕
 - [x] 當前 session 標記 "This device"
 - [x] E2E 測試：revoke 後該裝置下次 API call 得 401
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### J4. localStorage 多 tab 同步
 - [x] 所有 `omnisight:*` keys 加 `user_id` 前綴（從登入 context 取）
 - [x] `window.addEventListener('storage', ...)` 跨 tab 同步 spec / locale / wizard 狀態
 - [x] 首次載入 wizard 判斷改查 server-side `user_preferences` 表（共用電腦第二使用者不被跳過）
 - [x] 測試：Playwright 雙 tab scenario
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### J5. Per-session Operation Mode
 - [x] Operation Mode 從全域 config 搬到 `sessions.metadata.operation_mode`
 - [x] `_ModeSlot` 讀取改為 per-session（budget 仍是全域池，但 mode cap 個別計算）
 - [x] UI mode selector 只影響當前 session，tooltip 顯示「此設定僅影響本裝置」
 - [x] 測試：A session turbo + B session supervised 各自 mode cap 生效
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### J6. Audit UI 帶 session 過濾
 - [x] Audit 查詢頁加 session filter（列表 + 目前 session 快捷鈕）
 - [x] 顯示每筆 audit 的 device / IP（從 session 聯結）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **J 總預估**：**3.5 day**
 
@@ -585,7 +585,7 @@ Legend:
 - [x] 登入成功 / 密碼變更 / 權限升級 → 產新 token，舊 token 寫 `rotated_from` 指向新 token；舊 token grace 30s 允許 in-flight request，之後失效
 - [x] Session 綁 UA hash（非 IP，移動網路 IP 常變）；UA 變更記警告但不強制登出
 - [x] 測試：rotate 流程、grace window、UA 變更警告
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### K5. MFA (TOTP) + Passkey (WebAuthn) 骨架
 - [x] `user_mfa` 表：method (totp/webauthn)、secret/credential、created_at、last_used
@@ -595,7 +595,7 @@ Legend:
 - [x] Strict mode 可設 `require_mfa=True` 強制 admin / operator 啟用
 - [x] UI：Settings → MFA 管理頁
 - [x] 測試：TOTP drift 容忍、backup code 單次性
-- [x] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### K6. Bearer token per-key + 稽核
 - [x] 廢除單一 `OMNISIGHT_DECISION_BEARER` env；改 `api_keys` 表（id、name、hashed_key、scopes、created_by、last_used_ip、enabled）
@@ -603,7 +603,7 @@ Legend:
 - [x] Admin UI 建 / rotate / revoke key
 - [x] Migration 舊 env：啟動時偵測 → 自動建一筆 `legacy-bearer` key 並發警告要求盡快換
 - [x] 測試：scope 限制（只能呼叫白名單 endpoint）、revoke 即時生效
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### K7. 密碼政策 + Argon2id 升級路徑
 - [x] 密碼強度：最短 12 字、zxcvbn score ≥ 3
@@ -611,7 +611,7 @@ Legend:
 - [x] Hash 格式支援 `argon2id$...`；驗證時雙軌（舊 pbkdf2 驗成功後自動 rehash 成 argon2id）
 - [x] `argon2-cffi` 依賴加入
 - [x] 測試：升級路徑、舊 hash 仍可驗、下次登入自動升級
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **K-rest 總預估**：**5 day**
 
@@ -629,7 +629,7 @@ Legend:
 - [x] 所有業務表加 `tenant_id`：`workflow_runs` / `debug_findings` / `decisions` / `event_log` / `audit_log` / `spec_*` / `artifacts` / `user_preferences`
 - [x] Alembic 遷移 + 回填腳本（既有資料歸預設 tenant `t-default`）
 - [x] 測試：migration 幂等、回填正確
-- [x] 預估：**3 day**
+- 預估：**3 day**
 
 ### I2. Query layer RLS（SQLAlchemy global filter）
 - [x] `backend/db_context.py`：`current_tenant_id()` context var
@@ -637,20 +637,20 @@ Legend:
 - [x] INSERT 自動填 `tenant_id = current`
 - [x] Router 層 `require_tenant` dependency 從 user 取 tenant_id 塞進 context
 - [x] 測試：跨 tenant 查詢回空、INSERT 無法指定他 tenant
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### I3. SSE per-tenant + per-user filter（延伸 J1）
 - [x] Event envelope 加 `tenant_id`；subscriber 自動綁當前 tenant
 - [x] `broadcast_scope` ��充 `tenant` 選項
 - [x] 回歸測試：A tenant 監聽只收到 A 的事件
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### I4. Secrets per-tenant
 - [x] `git_credentials` / `provider_keys` / `cloudflare_tokens`（B12 產物）全改 tenant-scoped 表
 - [x] `backend/secrets.py` API 加 tenant_id 維度
 - [x] Migration：既有共用 credentials 分給 `t-default`
 - [x] UI：Settings 頁分 tenant 視圖
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### I5. Filesystem namespace
 - [x] `data/tenants/<tid>/{artifacts,ingest,backups,workflow_runs}/`
@@ -658,7 +658,7 @@ Legend:
 - [x] `_INGEST_ROOT` 改 `/tmp/omnisight_ingest/<tid>/`
 - [x] Migration 腳本搬既有檔案到 `t-default`
 - [x] 測試：跨 tenant 路徑隔離
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### I6. Sandbox fair-share（DRF per-tenant）
 - [x] H4a 的 token bucket 改 per-tenant；全域 CAPACITY_MAX 維持 12
@@ -666,32 +666,32 @@ Legend:
 - [x] 空閒時可超用他 tenant 未用額度，他 tenant 來時 30s 內讓出
 - [x] Turbo 加 per-tenant cap 防單 tenant 獨佔
 - [x] 測試：兩 tenant 負載模擬、餓死防護
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### I7. Frontend tenant-aware
 - [x] localStorage 前綴改 `omnisight:${tenantId}:${userId}:*`
 - [x] Tenant switcher UI（若 user 多 tenant）+ 切換時清當前 context
 - [x] 所有 API client 自動帶 `X-Tenant-Id` header（middleware 雙重驗）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### I8. Audit log per-tenant hash chain
 - [x] 每 tenant 獨立 genesis + chain（Phase 53 hash chain 改 per-tenant 分岔）
 - [x] 跨 tenant 查詢封鎖（admin 明確切 tenant 才能看）
 - [x] 驗證工具支援 per-tenant chain 完整性
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### I9. Rate limit per-user / per-tenant
 - [x] K2 的 rate limit 擴充維度：per-IP + per-user + per-tenant
 - [x] 換 Redis token bucket（為 I10 準備）
 - [x] Quota config：tenant.plan → limits
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### I10. Multi-worker uvicorn + shared state
 - [x] uvicorn `--workers N`（N = CPU_cores / 2，16 core → 8 worker）
 - [x] Shared state 搬 Redis：`_parallel_in_flight` / AIMD budget / SSE subscriber registry / rate limit
 - [x] Sticky session 若需要（SSE 連線要黏 worker）
 - [x] 測試：滾動重啟 worker 無事件遺失
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 **I 總預估**：**16.5 day**
 
@@ -711,7 +711,7 @@ Legend:
 - [x] Cgroup v2 `cpu.weight` 驗證：A tenant 4-token job + B tenant 1-token job 同核並跑 → CPU 時間 4:1（`backend/cgroup_verify.py` + 4:1 ratio acceptance test）
 - [x] OOM 偵測：container hit memory limit → audit_log 記錄 `sandbox.oom` + 回 sandbox_result with error，不影響其他 tenant（`_oom_watchdog` + `sandbox_oom_total{tenant_id,tier}` metric）
 - [x] 測試：並發 CPU 打滿實測、memory limit 精確性、權重公平性（21 tests in `test_container_tenant_budget.py` + `test_cgroup_verify.py`）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### M2. Per-tenant Disk Quota + LRU Cleanup
 - [x] `data/tenants/<tid>/` 加 `quota.yaml`：`soft=5GB / hard=10GB`（plan 驅動，`backend/tenant_quota.PLAN_DISK_QUOTAS` free/starter/pro/enterprise 四級）
@@ -720,7 +720,7 @@ Legend:
 - [x] `/tmp` 按 tenant namespace（沿用 I5 `tenant_ingest_root`）+ 每 sandbox 結束 `stop_container` 強制清理（`cleanup_tenant_tmp`）
 - [x] UI：Settings → Storage Quota 區塊（`integration-settings.tsx StorageQuotaSection`），雙 bar (soft/hard) + 子目錄 breakdown + 手動 LRU 按鈕
 - [x] 測試：28 項 — plan/quota.yaml/measure/check_hard/lru/cleanup_tmp/sweep/start_container gate/`/storage/*` REST
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### M3. Per-tenant-per-provider Circuit Breaker
 - [x] 現行 `provider_chain` 5min cooldown 改 key：`(tenant_id, provider, api_key_fingerprint)` → 獨立 circuit state（`backend/circuit_breaker.py`，COOLDOWN_SECONDS=300，LRU 1024 cap）
@@ -729,7 +729,7 @@ Legend:
 - [x] UI：Settings → LLM Providers 顯示各 key 當前 circuit 狀態（`integration-settings.tsx CircuitBreakerSection`，open/closed pill + per-row RESET + RESET ALL；10s auto-refresh）
 - [x] 測試：A key 故障 → A fallback、B 不受影響（27 cases in `test_circuit_breaker.py`：isolation、recovery、cooldown、SSE、audit、`/providers/circuits` REST、`get_llm` failover）
 - [x] 新增 REST：`GET /providers/circuits[?scope=all]`、`POST /providers/circuits/reset`；`/providers/health` 同步顯示 per-tenant cooldown
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### M4. Cgroup-based Per-tenant Metrics + UI 拆分
 - [x] `backend/host_metrics.py` 擴展：從 `/sys/fs/cgroup/<container>/cpu.stat` + `memory.current` 採集 per-container 用量（cgroup v2 reader + 5s sampling loop in lifespan）
@@ -739,7 +739,7 @@ Legend:
 - [x] AIMD 決策升級：`backend/tenant_aimd.py` `plan_derate()` — HOT+culprit → derate 單一禍首；HOT+no-outlier → flat；COOL → additive-increase；per-tenant multiplier state + `tenant_derate_total` Prom counter
 - [x] 計費基礎：`UsageAccumulator` 累積 `cpu_seconds_total` / `mem_gb_seconds_total`；`scripts/usage_report.py` 輸出 text/JSON/CSV（`--live` 走 in-process；HTTP 模式需 admin bearer）
 - [x] 測試：64 cases — 32 host_metrics、14 tenant_aimd、9 host_router、9 usage_report
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### M5. Prewarm Pool 多租戶安全
 - [x] Config `prewarm_policy`：`shared` / `per_tenant` / `disabled`；多租戶模式預設 `per_tenant`（`backend/config.py` `Settings.prewarm_policy` + `validate_startup_config` whitelist / shared-mode warning）
@@ -747,7 +747,7 @@ Legend:
 - [x] `disabled` 模式：徹底關 prewarm，犧牲 300ms 啟動延遲換乾淨（高安全需求客戶）（`prewarm_for` / `consume` / `_prewarm_enabled` 均 short-circuit）
 - [x] Launch 前強制 `/tmp` 清空（即使 shared 模式亦然）（`consume()` 每次 hit/miss 都呼叫 `tenant_quota.cleanup_tenant_tmp`；cleanup 失敗仍回傳 slot）
 - [x] 測試：A prewarm container 無法被 B 拿去用（per_tenant 模式）（23 cases in `test_prewarm_multi_tenant.py`：policy validation / isolation / cross-tenant consume rejection / cancel_all scope / starter signature shim / slot metadata）
-- [x] 預估：**0.25 day**
+- 預估：**0.25 day**
 
 ### M6. Per-tenant Egress Allowlist
 - [x] `tenant_egress_policies` 表：`tenant_id, allowed_hosts[], allowed_cidrs[], default_action`（alembic 0015 + `_SCHEMA` inline；FK to `tenants(id)`）
@@ -756,7 +756,7 @@ Legend:
 - [x] UI：Settings → Network Egress 頁面 + 申請審批流程（viewer/operator 申請、admin 核准）（`NetworkEgressSection` 在 `integration-settings.tsx`，含 host/cidr 申請、pending 列表、approve/reject 按鈕、recent decisions、justification 欄位）
 - [x] 相容舊 `configs/t1_egress_allow_hosts.yaml`（自動 migrate 到 `t-default`）（0015 upgrade 讀 `OMNISIGHT_T1_EGRESS_ALLOW_HOSTS` env CSV + 可選 yaml 檔案；`policy_for` 在 DB row 缺席時 fallback 到 legacy env）
 - [x] 測試：A 允許 `api.openai.com`、B 僅允許內網 → A/B sandbox 實際出向測試（45 cases in `test_tenant_egress.py`：validators / build_rule_plan / CRUD / request workflow / DNS cache / legacy fallback / sandbox_net 整合 / REST endpoint / audit）
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 **相依**：I6 + I4 + I5 + H1。I 全做完後可順接。
 
@@ -788,7 +788,7 @@ Legend:
 - [x] Python 全量鎖：導入 `pip-tools`（或 `uv`），`backend/requirements.in` 寫人讀範圍 → `backend/requirements.txt` 由 `pip-compile --generate-hashes` 生出含 transitive hash 的鎖檔
 - [x] Docker `Dockerfile.backend` 改為 `pip install --require-hashes -r requirements.txt`
 - [x] CI 新增 lockfile drift 檢查（若 `requirements.in` 或 `package.json` 變動但 lock 未更新 → fail）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N2. Renovate 自動 PR + group rules + 分層 auto-merge
 - [x] `renovate.json` 基本 config；排程 `every weekend` 降低雜訊
@@ -800,7 +800,7 @@ Legend:
 - [x] Security PR 優先級最高、立即開
 - [x] 文件 `docs/ops/renovate_policy.md`
 - [O] **Operator-blocked**：在 GitHub Repo Settings 安裝 Renovate App、開 `Allow auto-merge`、配置 branch protection（minor=1 reviewer / major=2 reviewers）— 詳見 `docs/ops/renovate_policy.md` "Bootstrap checklist (operator)"
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N3. OpenAPI 前後端合約測試 + 自動生前端 type
 - [x] CI 新 step：`python scripts/dump_openapi.py` → `openapi-typescript openapi.json > lib/generated/api-types.ts`（offline via `app.openapi()` — 不需啟 uvicorn）
@@ -808,7 +808,7 @@ Legend:
 - [x] `openapi.json` 納入 git + snapshot 比對；PR diff 顯示 API breaking change（`openapi-contract` job — `git status --porcelain` 為 CI gate）
 - [x] 合約測試：前端 mock 用 schema 自動生 fixture（`msw` + `openapi-msw`，`test/msw/` 下）
 - [x] 文件 `docs/ops/openapi_contract.md`
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N4. LangChain / LangGraph Adapter 防火牆層
 - [x] `backend/llm_adapter.py`：所有 `langchain*` / `langgraph*` import 集中此檔；其他模組一律只 import `llm_adapter` 的符號
@@ -816,7 +816,7 @@ Legend:
 - [x] 掃全專案：若 `backend/**` 除 `llm_adapter.py` 外仍有 `from langchain` → CI fail（`scripts/check_llm_adapter_firewall.py` + CI job `llm-adapter-firewall`）
 - [x] 升 LangChain 時只需改 adapter 層 + 跑 adapter 測試
 - [x] 單元測試覆蓋 adapter 所有公開方法（`backend/tests/test_llm_adapter.py` — 50 tests）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### N5. Nightly Upgrade-Preview CI
 - [x] `.github/workflows/upgrade-preview.yml`：cron nightly
@@ -825,7 +825,7 @@ Legend:
   - 在隔離 container 跑完整測試套件（含 E2E）
   - 結果 POST 成 issue（標 `dependency-preview`），包含：outdated 清單、試升 diff、測試結果、疑似 breaking 套件
 - [x] 不自動合，只提前警示「明天合 Renovate PR 會壞什麼」
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N6. 升級 Runbook + Rollback + CVE/EOL 監控
 - [x] `docs/ops/dependency_upgrade_runbook.md`：
@@ -835,7 +835,7 @@ Legend:
   - Rollback：`git revert` + `docker compose pull <prev-tag>` 步驟
 - [x] CVE 掃描：`osv-scanner` 或 Snyk 每日跑、嚴重 CVE 自動開 PR
 - [x] EOL 監控：`scripts/check_eol.py` 每月查 Python / Node / FastAPI / Next.js 官方 EOL schedule（endoflife.date API），剩 6 個月內發 warning
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N7. Multi-version CI Matrix
 - [x] Python matrix：3.12 + 3.13
@@ -843,14 +843,14 @@ Legend:
 - [x] FastAPI：current pinned + latest minor
 - [x] 分層：PR 上只跑 primary（快）；nightly 跑完整 matrix（廣）
 - [x] 新 deprecation warning 在 CI log 顯眼顯示
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N8. DB Engine Compatibility Matrix（與 G4 綁）
 - [x] CI matrix：SQLite 3.40 + 3.45；Postgres 15 + 16
 - [x] Alembic migration 雙軌驗證：每條 migration 對 SQLite 與 Postgres 各跑一次 upgrade/downgrade
 - [x] 標記 migration 中的 engine-specific 語法（警示 reviewer）
 - [x] 與 G4 共用：G4 完成後 N8 退役 SQLite，只留 Postgres matrix（15/16/17）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### N9. Framework Fallback Branches
 - [x] 長青分支 `compat/nextjs-15`：固定在 Next 15 最後穩定版、weekly rebase master（只取非 Next 相關 commit）
@@ -858,7 +858,7 @@ Legend:
 - [x] CI 每週對 fallback 分支跑 build + 核心測試，確保隨時可切
 - [x] 重大 major 升級（Next 17 / Pydantic v3）PR 合入前，fallback 分支必須 green
 - [x] Rollback 流程：若 production 升級爆炸 → 切 fallback 分支 tag → 重部
-- [x] 預估：**0.5 day** 建置 + 持續維護
+- 預估：**0.5 day** 建置 + 持續維護
 - [O] 首兩條目標：`compat/nextjs-15`（現處 Next 16，15 是最近 fallback）、`compat/pydantic-v2`（未雨綢繆）<!-- 2026-04-16 N9: 宣告/工作流程/腳本/SOP 全部就緒並 commit；本機分支由 `bash scripts/fallback_setup.sh` 一條指令建立（dry-run 已通過）。實際 `git push -u origin compat/{nextjs-15,pydantic-v2}` 需要 push credentials → Operator-blocked，所以這項標 [O]。Push 完成後 fallback-branches.yml 會自動接手 weekly cron。 -->
 
 ### N10. 升級流程強制走 G3 Blue-Green + 升級節奏政策
@@ -869,7 +869,7 @@ Legend:
   - 一個 PR 一個套件（或一組強相依），不混合；便於 single revert
 - [x] CI gate：major 版本號升級的 PR 自動加 `requires-blue-green` label，deploy workflow 檢查該 label 存在才允許上 prod<!-- 2026-04-16 N10: `.github/workflows/blue-green-gate.yml` + `scripts/bluegreen_label_decider.py` auto-label；`scripts/check_bluegreen_gate.py` 接到 `scripts/deploy.sh` prod-only；required status check 名稱 `N10 / blue-green-label`。 -->
 - [x] 記錄每次 major 升級的 rollback 次數，季度 review<!-- 2026-04-16 N10: `docs/ops/upgrade_rollback_ledger.md`（append-only，三表：Upgrades / Rollbacks / Quarterly Summaries；trigger vocabulary 已列出）。 -->
-- [x] 預估：**0.25 day**（純文件 + CI label gate）
+- 預估：**0.25 day**（純文件 + CI label gate）
 
 **相依**：N8 與 G4 綁、N10 與 G3 綁；其餘可獨立推進。
 
@@ -910,7 +910,7 @@ Legend:
 - [x] Round-trip 測試（dict ↔ dataclass ↔ JSON）
 - [x] impact_scope glob 語法（`src/camera/*`）解析器 + 單元測試
 - [x] 與 `backend/codeowners.py` 交集檢查 helper：`check_catc_against_codeowners(card, agent_type)`
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### O1. Redis 分散式檔案路徑互斥鎖 (#264)
 - [x] `backend/dist_lock.py`：`acquire_paths(task_id, paths, ttl_s)` / `release_paths(task_id)` / `extend_lease(task_id, ttl_s)`
@@ -921,7 +921,7 @@ Legend:
 - [x] Metrics：`dist_lock_wait_seconds` / `dist_lock_held_total` / `dist_lock_deadlock_kills_total`
 - [x] Preemption 政策：鎖超過 TTL × 2 可被更高 priority task 搶佔（搭 DRF）
 - [x] 整合測試：3 個 task 競爭 10 個 path + heartbeat 失敗 + 死鎖場景
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### O2. Message Queue 抽象層 (#265)
 - [x] `backend/queue_backend.py`：`QueueBackend` interface（push / pull / ack / nack / dlq）
@@ -933,7 +933,7 @@ Legend:
 - [x] DLQ：3 次失敗進 DLQ，附 root cause + stack + 原 CATC
 - [x] Metrics：`queue_depth{priority,state}` / `queue_claim_duration_seconds`
 - [x] 整合測試：push/pull/ack、visibility timeout、DLQ、priority 排序
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### O3. Stateless Agent Worker Pool (#266)
 - [x] `backend/worker.py`：`Worker` 進程入口——pull from queue → 拿 lock（O1）→ 起 sandbox container（已有 M1 cgroup）→ 執行 agent node → commit code → push to Gerrit → push result event → release lock
@@ -946,7 +946,7 @@ Legend:
 - [x] Sandbox runtime enforcement：bind-mount 只掛 `impact_scope.allowed` 路徑（延伸 I5 tenant namespace）— 超出範圍物理不可達
 - [x] Gerrit push：worker 完成任務後自動 `git review`（或等價 HTTP API）推 patchset；commit 訊息含 `Change-Id` + `CATC-Ticket:` trailer
 - [x] 整合測試：N workers pull 同一 queue、crash recovery、heartbeat loss、graceful shutdown、Gerrit push 失敗重試
-- [x] 預估：**3 day**
+- 預估：**3 day**
 
 ### O4. Orchestrator Gateway Service (#267)
 - [x] `backend/orchestrator_gateway.py`：獨立 FastAPI app（或現有 backend 內的 router）
@@ -960,7 +960,7 @@ Legend:
 - [x] LLM backend 可插拔：DAG 拆分可用 cheaper model（Haiku）、Merger 用 Opus
 - [x] Token budget gate：整個 intake 流程 token 用量超 budget → reject + SSE 告警
 - [x] 整合測試：假 Jira webhook → DAG 正確、impact_scope 衝突被擋、token 超標被擋
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### O5. JIRA Bidirectional Sync 深化 (#268)
 - [x] 抽 `IntentSource` interface：`fetch_story(ticket)` / `create_subtask(parent, payload)` / `update_status(ticket, status)` / `comment(ticket, body)`
@@ -969,7 +969,7 @@ Legend:
 - [x] Sub-task 欄位映射：CATC → JIRA custom field（impact_scope / acceptance_criteria / handoff_protocol）
 - [x] Status 雙向：JIRA `In Progress` → queue push；Worker Gerrit push → JIRA `Reviewing`；雙 +2 到齊 + Gerrit submit → JIRA `Done`
 - [x] Audit：所有 JIRA 外呼都進 audit_log（含 request/response hash）
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### O6. Merger Agent (#269) — 衝突解析器，Gerrit patchset 輸出 + AI +2 vote（**不自動合併**）
 - [x] `backend/merger_agent.py`：specialized LLM wrapper，system prompt 固定為「合併衝突解決專家，保留雙方邏輯意圖，不得新增任何原未出現於雙方 commit 的新邏輯」
@@ -989,7 +989,7 @@ Legend:
 - [x] 失敗次數 ≥ 3 該 change 停止自動重試，escalate human（沿用 CLAUDE.md rule）
 - [x] 整合測試：簡單 conflict（Merger +2 + mock human +2 → submit）、有歧義 conflict（Merger abstain）、security 檔案（Merger refuse）、test 失敗（Merger 不 push）、僅 Merger +2 無人工 +2（submit-rule 拒絕）、僅人工 +2 無 Merger +2（submit-rule 拒絕）
 - [x] **CLAUDE.md L1 更新**：Safety Rules「AI reviewer max score is +1」需補一條例外條款——「Merger Agent 於衝突解析 patchset 上可給 +2，但 scope 限衝突區塊正確性；最終 submit 仍需人工 +2 雙簽」；否則實作即違反 L1 immutable rule
-- [x] 預估：**2.5 day**（原 2d + 0.5d 用於 Gerrit REST 整合 + submit-rule 測試）
+- 預估：**2.5 day**（原 2d + 0.5d 用於 Gerrit REST 整合 + submit-rule 測試）
 
 ### O7. Gerrit Submit-Rule 雙簽閘 + CI/CD Merge 仲裁 Pipeline (#270)
 - [x] Gerrit `project.config` 更新 submit-rule（Prolog 或 Rules Engine）：要求同一 change 上至少一個 **Code-Review: +2 from human group (labeled `non-ai-reviewer`)** 且至少一個 **Code-Review: +2 from `merger-agent-bot` group**；**人工 +2 為 hard gate**——不論其他 AI reviewer 投多少 +2（Merger / lint-bot / security-bot / 未來新增的任何 AI reviewer），缺人工 +2 submit 永遠被拒絕（`.gerrit/rules.pl` + `.gerrit/project.config.example`；Python SSOT mirror `backend/submit_rule.py`）
@@ -1010,7 +1010,7 @@ Legend:
 - [x] 若 Merger abstain（O6 gate 未過）→ 建 JIRA ticket + assign 原 CATC owner + 等人工雙 +2 或 reject（`_handle_non_plus_two` + de-dupe 同一 change）
 - [x] GitHub Actions workflow 範本 `.github/workflows/merge-arbiter.yml`（for GitHub-native 客戶，無 Gerrit 時退化為 PR + 2 approver required，其中一個必須是 `merger-agent-bot` GitHub App）
 - [x] 完整 E2E 測試：兩 PR 同改一檔 → 第二個 merge conflict → Merger push 解析 patchset → Merger +2 → 通知人工 → 人工 +2 → submit → 雙方 commit 都留在 main（`test_merge_arbiter.py::test_e2e_happy_path_webhook_to_submit`）
-- [x] 預估：**1.5 day**（原 1d + 0.5d Gerrit submit-rule 配置與測試）
+- 預估：**1.5 day**（原 1d + 0.5d Gerrit submit-rule 配置與測試）
 
 ### O8. 遷移路徑：從單程序到分散式（Feature Flag + Dual-mode） (#271)
 - [x] `OMNISIGHT_ORCHESTRATION_MODE=monolith | distributed`（預設 monolith 保留既有行為）（`backend/config.py` + `backend/orchestration_mode.py::current_mode` — env > settings > default）
@@ -1019,14 +1019,14 @@ Legend:
 - [x] 雙模式 behavior parity 測試：同一 input 在兩種 mode 下產出相同 event sequence（`PARITY_EVENT_SEQUENCE` + `test_orchestration_mode.py::TestDualModeParity`，含 happy path + failure path）
 - [x] 灰度切換手冊 `docs/ops/orchestration_migration.md`（pre-flight, per-tenant 灰度, Prometheus invariants, SSE spot-check, troubleshooting）
 - [x] Rollback 劇本：切回 monolith 時如何處理 in-flight queue 任務（soft `wait` strategy + hard `redispatch_monolith` strategy，CLI：`python -m backend.orchestration_drain`）
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### O9. 觀測性：鎖 / 佇列 / Merger / 雙簽狀態可視化 (#272)
 - [x] Dashboard `components/omnisight/orchestration-panel.tsx`：queue depth by priority、held locks by task、**merger agent +2 rate / abstain rate / security refusal rate**、**待人工 +2 的 change 列表（含 merger confidence）**、worker pool capacity
 - [x] SSE events：`orchestration.queue.tick` / `orchestration.lock.acquired|released` / `orchestration.merger.voted` / `orchestration.change.awaiting_human_plus_two`
 - [x] Prometheus exporter：所有 O1/O2/O6 metrics 統一 `/metrics` 出口
 - [x] 告警規則：queue_depth > 100 持續 5min / dist_lock_wait_p99 > 60s / merger_plus_two_rate 異常偏高（可能 LLM 過度自信）/ 雙簽 pending > 24h
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### O10. 安全加固（queue / lock / JIRA token / Gerrit bot）(#273)
 - [x] Queue 傳輸 TLS + payload HMAC（防 worker 被偽造任務） — `backend/security_hardening.py::sign_envelope/verify_envelope/assert_production_queue_tls`；`backend/queue_backend.py::_sign_queue_message/verify_pulled_message` 在 push/pull 兩側自動掛；env `OMNISIGHT_QUEUE_HMAC_KEY` + `OMNISIGHT_QUEUE_HMAC_KEY_ID`
@@ -1036,7 +1036,7 @@ Legend:
 - [x] **Merger Agent Gerrit 帳號權限最小化**：`merger-agent-bot` 僅能 push to `refs/for/*` + Code-Review ±2；**不得**有 `Submit` / `Push Force` / `Delete Change` / 任何 project admin 權限 — `.gerrit/project.config.example` 加了 9 行 `deny` 規則；`backend/security_hardening.py::verify_merger_least_privilege` + CLI `verify-gerrit-config` 鎖 CI
 - [x] Merger Agent 投票 audit：每次 +2 / abstain / refuse 都寫入 hash-chain audit_log，附 change-id / patchset revision / confidence / rationale — `backend/security_hardening.py::MergerVoteAuditChain`；`backend/merger_agent.py::_default_audit` 雙 sink (backend.audit + O10 chain)
 - [x] 滲透測試案例：偽造 CATC、竊取鎖、注入 merger prompt、worker 偽裝、偽冒 `merger-agent-bot` 投票 — `backend/tests/test_o10_pentests.py`（5 TestScenario 類，23 條測試全綠）+ `backend/tests/test_security_hardening.py`（51 條單元測試）
-- [x] 預估：**1.5 day** — 完成於 2026-04-17（單次 session）
+- 預估：**1.5 day** — 完成於 2026-04-17（單次 session）
 
 **Priority O 總預估**：**20 day**（原 19d + Merger Agent Gerrit 整合與 submit-rule 配置 +1d）（solo ~4 週，2-person team ~2-3 週）。
 
@@ -1064,7 +1064,7 @@ Legend:
 - [x] 既有 aarch64/armv7/riscv64/vendor-example profile 補 `target_kind: embedded`
 - [x] `backend/platform.py` 的 `get_platform_config()` 依 `target_kind` 分派不同 build toolchain resolver
 - [x] 測試：既有 embedded profile behavior parity（零 regression）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### W1. Web platform profiles (#275)
 - [x] `configs/platforms/web-static.yaml` — 純靜態站（SSG）
@@ -1072,7 +1072,7 @@ Legend:
 - [x] `configs/platforms/web-edge-cloudflare.yaml` — Cloudflare Workers / Pages Functions
 - [x] `configs/platforms/web-vercel.yaml` — Vercel Serverless / Edge Runtime
 - [x] 每個 profile 宣告：runtime version / bundle size budget / memory limit / build cmd
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### W2. Web simulate track (#276)
 - [x] `scripts/simulate.sh` 新增 `web` track：Lighthouse CI（Performance / Accessibility / SEO / Best Practices）+ bundle size gate + a11y audit + SEO lint
@@ -1080,7 +1080,7 @@ Legend:
 - [x] Bundle budget per profile（web-static ≤ 500 KiB critical / web-ssr-node ≤ 5 MiB server bundle）
 - [x] Playwright E2E smoke（homepage → 關鍵互動 × 2）
 - [x] Visual regression（可選，Chromatic 或 Playwright screenshot baseline）
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### W3. Web role skills (#277)
 - [x] `configs/roles/web/frontend-react.skill.md`（命名對齊既有 `{category}/{role_id}.skill.md` 慣例，prompt_loader 自動 discover）
@@ -1090,7 +1090,7 @@ Legend:
 - [x] `configs/roles/web/seo.skill.md`
 - [x] `configs/roles/web/perf.skill.md`（Core Web Vitals：LCP / INP / CLS，INP 取代 FID）
 - [x] 每個 role 提供 domain-specific prompt + role-specific tool whitelist（非 `[all]`，frontend 12 工具 / 審查類 5 工具）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### W4. Deploy adapters (#278)
 - [x] `backend/deploy/vercel.py`（Vercel REST API：project create / env set / deploy）
@@ -1099,14 +1099,14 @@ Legend:
 - [x] `backend/deploy/docker_nginx.py`（靜態站 + nginx 配置生成）
 - [x] 統一 `WebDeployAdapter` interface：`provision()` / `deploy(build_artifact)` / `rollback()` / `get_url()`
 - [x] Secret：API token 沿用 `backend/secret_store.py` Fernet
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### W5. Compliance gates（WCAG / GDPR / SPDX license scan）(#279)
 - [x] WCAG 2.2 AA：axe-core 自動掃 + manual checklist（focus order / contrast / screen reader labels）
 - [x] GDPR：cookie banner / data retention policy / DPA template / right-to-be-forgotten endpoint 掃描
 - [x] SPDX license scan：`@npmcli/arborist` 列依賴樹 + 禁用 GPL/AGPL（可覆寫 allowlist）
 - [x] 整合 C18 compliance harness 作為 evidence bundle
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### W6. SKILL-NEXTJS (pilot, #280)
 - [x] Next.js 16 App Router 專案骨架 generator（含 `turbopack.root` 預設正確——避免 OmniSight 自身踩過的 Turbopack workspace-root panic）
@@ -1116,7 +1116,7 @@ Legend:
 - [x] Vercel + Cloudflare Pages 雙 target build
 - [x] Playwright E2E + vitest unit 骨架
 - [x] **First web skill — validates W0-W5 framework**（比照 D1 驗證 C5、D29 驗證 C26 的 pattern）
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### W7. SKILL-NUXT (#281)
 - [x] Nuxt 4 專案骨架 generator
@@ -1124,24 +1124,24 @@ Legend:
 - [x] Pinia state + Vue Router
 - [x] Vitest + Playwright
 - [x] **Cross-stack framework validation**（SKILL-NEXTJS 是 n=1 pilot，SKILL-NUXT 是 n=2 — 兩者共用同一套 ScaffoldOptions/render_project/pilot_report API，證明 W0-W5 是 framework 而非 pilot-plus-copy）
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### W8. SKILL-ASTRO（選配, #282）
 - [x] Astro 5 content-heavy 站骨架
 - [x] Islands architecture + MDX 支援
 - [x] Sanity/Contentful CMS 接口
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### W9. 共用 CMS adapters（Headless CMS 接口 library）(#283)
 - [x] Sanity / Strapi / Contentful / Directus adapters
 - [x] 統一 `CMSSource` interface：`fetch(query)` / `webhook_handler(payload)`
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### W10. Web 觀測性與監控 (#284)
 - [x] Sentry / Datadog RUM adapter
 - [x] Core Web Vitals 即時 dashboard
 - [x] Error tracking → JIRA ticket（透過 O5 IntentSource）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **Priority W 總預估**：**13.5 day**
 
@@ -1167,14 +1167,14 @@ Legend:
 - [x] `configs/platforms/android-arm64-v8a.yaml`
 - [x] `configs/platforms/android-armeabi-v7a.yaml`
 - [x] 每 profile 宣告：SDK version / min API level / toolchain path / emulator spec
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### P1. Mobile toolchains 整合 (#286)
 - [x] Docker image base：`ghcr.io/omnisight/mobile-build`（Xcode CLI 16 + Android SDK 35 + Gradle 8 + CocoaPods 1.15）
 - [x] **macOS 限制**：iOS build 需真實 macOS host（Linux 不可）；支援 `OMNISIGHT_MACOS_BUILDER=self-hosted|macstadium|cirrus-ci|github-macos-runner` 遠端委派
 - [x] Android build 可純 Linux Docker 跑
 - [x] Fastlane / gym / gradle wrapper 整合
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### P2. Mobile simulate track (#287)
 - [x] `scripts/simulate.sh` 新增 `mobile` track：iOS Simulator + Android Emulator 雙平台 smoke + UI test
@@ -1182,7 +1182,7 @@ Legend:
 - [x] Flutter/RN 走各自 test runner
 - [x] **Cloud device farm 整合**：Firebase Test Lab / AWS Device Farm / BrowserStack（真機覆蓋用）
 - [x] 螢幕截圖 matrix（多機型 × 多 locale）
-- [x] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### P3. 簽章鏈管理（extend secret_store）(#288)
 - [x] Apple certs：Developer ID Certificate + Provisioning Profile + App Store Distribution Certificate
@@ -1190,7 +1190,7 @@ Legend:
 - [x] HSM 整合（選配）：AWS KMS / GCP KMS / YubiHSM — 私鑰不出 HSM
 - [x] 簽章 audit：每次 sign 寫 hash-chain audit_log（who / when / what artifact / what cert）
 - [x] Cert 到期 alert（30d / 7d / 1d pre-expiry SSE 告警）
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### P4. Mobile role skills (#289)
 - [x] `configs/roles/mobile/ios-swift.skill.md`（SwiftUI / UIKit / Combine）
@@ -1199,21 +1199,21 @@ Legend:
 - [x] `configs/roles/mobile/react-native.skill.md`
 - [x] `configs/roles/mobile/kmp.skill.md`（Kotlin Multiplatform）
 - [x] `configs/roles/mobile/mobile-a11y.skill.md`（iOS VoiceOver + Android TalkBack）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### P5. Store 提交自動化 (#290)
 - [x] App Store Connect API 整合：create version / upload build / submit for review / screenshot upload
 - [x] Google Play Developer API：upload .aab / manage tracks（internal / alpha / beta / production）
 - [x] 提交流程走 O7 雙簽 +2：Merger Agent 驗技術正確性 + 人工終審（store guideline 合規）
 - [x] TestFlight / Firebase App Distribution 內部派發
-- [x] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### P6. Store 合規 gates (#291)
 - [x] App Store Review Guidelines 自動檢查（明顯違規 pattern：假付費、誤導性 copy、未宣告 private API）
 - [x] Google Play Policy 自動檢查（背景位置權限、SDK 版本、資料安全區塊填寫）
 - [x] Privacy nutrition label / Data Safety Form 自動生成（依 SDK 依賴推導）
 - [x] 整合 C18 compliance harness
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### P7. SKILL-IOS (pilot, #292)
 - [x] SwiftUI app 骨架 generator
@@ -1221,26 +1221,26 @@ Legend:
 - [x] Push notification（APNs）integration template
 - [x] StoreKit 2 購買 template
 - [x] **First mobile skill — validates P0-P6**
-- [x] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### P8. SKILL-ANDROID (pilot, #293)
 - [x] Jetpack Compose app 骨架
 - [x] Gradle 8 + Kotlin 2.0
 - [x] FCM push integration
 - [x] Play Billing template
-- [x] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### P9. SKILL-FLUTTER / SKILL-RN（跨平台, #294）
 - [x] Flutter 3.x app 骨架 + 共用 iOS/Android config
 - [x] React Native 0.76 app 骨架
 - [x] 選一主推 + 另一為對照
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### P10. Mobile observability (#295)
 - [x] Firebase Crashlytics / Sentry Mobile adapter
 - [x] ANR detection（Android）/ watchdog termination（iOS）
 - [x] 線上 UI metric（render time / frame drop）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### P11. Android CLI 整合 — Google 官方工具鏈取代自建 Gradle wrapper (#351)
 
@@ -1260,7 +1260,7 @@ Legend:
 - [ ] Fallback 機制：`shutil.which("android")` 偵測 → 有則用 CLI → 無則 fallback 到既有 Gradle wrapper
 - [ ] `configs/platforms/android-*.yaml` 新增 `android_cli_available: bool` 欄位
 - [ ] 測試：有/無 Android CLI 兩條路徑都能 build + deploy + emulator boot
-- [ ] 預估：**2 day**
+- 預估：**2 day**
 
 ### P12. Android Skills MCP Server 整合 (#352)
 
@@ -1270,7 +1270,7 @@ Legend:
 - [ ] `backend/agents/tools.py` 新增 `android_skill_search` tool：agent 可搜尋 + 取得 Android skill 內容注入 context
 - [ ] `configs/roles/android-kotlin.md` 更新：加入「優先使用 Android Skills 取得 best practice」指引
 - [ ] 測試：agent 搜尋 "navigation3" skill → 取得正確內容 → 可用於 code generation
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 **Priority P 總預估**：**22.5 day**（原 20d + P11 2d + P12 0.5d）
 
@@ -1299,14 +1299,14 @@ Legend:
 - [x] `configs/platforms/windows-msvc-x64.yaml`
 - [x] `configs/platforms/macos-arm64-native.yaml`（需 macOS builder，參考 P1）
 - [x] `configs/platforms/macos-x64-native.yaml`（Intel legacy）
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### X1. Software simulate track (#297)
 - [x] `scripts/simulate.sh` 新增 `software` track：語言-native test runner
 - [x] 多語言 dispatcher：`pytest` / `go test` / `cargo test` / `mvn test`（或 `gradle test`）/ `npm test` / `pnpm test` / `yarn test` / `dotnet test`
 - [x] Coverage gate：依 language 各自門檻（Python 80% / Go 70% / Rust 75% / Java 70% / Node 80% / C# 70%）
 - [x] Benchmark 回歸（可選，`--benchmark=on` opt-in + `test_assets/benchmarks/<module>.json` 基準）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### X2. Software role skills (#298)
 - [x] `configs/roles/software/backend-python.skill.md`（FastAPI / Django / Flask）
@@ -1316,7 +1316,7 @@ Legend:
 - [x] `configs/roles/software/backend-java.skill.md`（Spring Boot / Quarkus）
 - [x] `configs/roles/software/cli-tooling.skill.md`（Cobra / Clap / Commander / Typer / Picocli）
 - [x] `configs/roles/software/desktop-electron.skill.md` / `desktop-tauri.skill.md` / `desktop-qt.skill.md`
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### X3. Build & package adapters (#299)
 - [x] Docker image build + push（GHCR / Docker Hub / ECR）
@@ -1325,14 +1325,14 @@ Legend:
 - [x] .msi / NSIS installer（Windows）
 - [x] .dmg / .pkg（macOS）
 - [x] `cargo-dist` / `goreleaser` / `pyinstaller` / `electron-builder` 對應 skill hook
-- [x] 預估：**2 day**
+- 預估：**2 day**
 
 ### X4. License / dependency 合規 (#300)
 - [x] SPDX license scan（依語言 ecosystem：`cargo-license` / `go-licenses` / `pip-licenses` / `npm-license-checker`）
 - [x] 禁用 licenses allowlist（預設禁 GPL/AGPL，allowlist 可覆寫）
 - [x] CVE scan（`trivy` / `grype` / `osv-scanner`）
 - [x] 依賴圖 SBOM 輸出（CycloneDX / SPDX）
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### X5. SKILL-FASTAPI (pilot, #301)
 - [x] FastAPI service 骨架 + Alembic + Pydantic
@@ -1340,27 +1340,27 @@ Legend:
 - [x] pytest + httpx + coverage
 - [x] OpenAPI spec 自動生成（整合 N3 OpenAPI governance）
 - [x] **First software skill — validates X0-X4**
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### X6. SKILL-GO-SERVICE (#302)
 - [x] Gin/Fiber 微服務骨架
 - [x] goreleaser 多平台 binary build
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### X7. SKILL-RUST-CLI (#303)
 - [x] Clap + anyhow + tokio 骨架
 - [x] cargo-dist 多平台 release
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 ### X8. SKILL-DESKTOP-TAURI (#304)
 - [x] Tauri 2.x 骨架 + 前端整合（React/Vue 可選）
 - [x] 三平台 build（Windows/macOS/Linux）+ auto-update
-- [x] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### X9. SKILL-SPRING-BOOT（企業 Java, #305）
 - [x] Spring Boot 3 + Maven/Gradle
 - [x] Flyway migration + JUnit 5
-- [x] 預估：**1 day**
+- 預估：**1 day**
 
 **Priority X 總預估**：**12 day**（最輕量，工具鏈多但每條路徑成本低）
 
@@ -1386,7 +1386,7 @@ Legend:
 - [x] `bootstrap_state` 表：`step`, `completed_at`, `actor_user_id`, `metadata`；完成全部步驟後寫 `bootstrap_finalized=true` 進 app 設定
 - [x] `POST /api/v1/bootstrap/finalize` — 全 step 綠才讓過（admin 才能呼叫）
 - [x] 前端 `app/bootstrap/page.tsx` 多步 wizard 殼
-- [x] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### L2. Step 1 — 首次 admin 密碼設定
 - [x] 整合 K1 的 `must_change_password` 旗標；wizard Step 1 強制改預設 `omnisight-admin`
@@ -1444,7 +1444,7 @@ Legend:
 - [x] 冪等：重複執行不壞（.env 已存在跳過 / tunnel 已存在複用 / DNS CNAME 已存在 skip） *(done: full idempotency contract audited + hardened + pinned with 7 new tests. **Audit result** — 3 of the 3 explicit criteria were already implemented: `.env` skip at `scripts/quick-start.sh:291` (`if [ -f ".env" ]; then` → log 已存在，跳過生成), tunnel reuse at `scripts/quick-start.sh:520-528` (queries `tunnels?name=${TUNNEL_NAME}&is_deleted=false` + extracts `.result[0].id` + fetches token for existing tunnel via `/tunnels/${CF_TUNNEL_ID}/token` + announces "Tunnel 已存在: ${CF_TUNNEL_ID}，複用"), and DNS CNAME "already exists" skip via `grep -qi "already exists"` on the error path. **Hardening applied** — the CNAME path had a subtle silent-failure mode: if a prior run created a CNAME pointing at tunnel-A, then tunnel-A got deleted out-of-band (e.g. via CF dashboard) and re-running created tunnel-B, the POST would fail with "already exists", the script would log "跳過" — but the CNAME would still point at dead tunnel-A and the site would return 1016 forever. The only fix was a manual DNS edit. Rewrote `scripts/quick-start.sh:572-621` as a three-case state machine: (POST succeeds → log 已建立) / (POST fails + already exists + GET returns matching `.content` → log "已存在且指向當前 tunnel，跳過" as true no-op) / (POST fails + already exists + GET returns DIFFERENT `.content` → log "偵測到 CNAME 漂移：目前指向 X，更新為 Y" + PATCH the record by id → log "CNAME 已更新至當前 tunnel"). Drift-repair uses `/dns_records?type=CNAME&name=${HOSTNAME}` to fetch the existing record, `jq -r '.result[0].content // empty'` to extract content (empty fallback so set -u doesn't explode), and `curl -X PATCH /dns_records/${EXISTING_ID}` with identical body shape as the original POST. Defensive: if GET returns empty id (record gone between POST and GET — impossible in practice but set -e would crash without the guard), fall back to "無法查詢內容，保守跳過" and warn instead of attempting a PATCH with null id. **Other idempotent paths audited + confirmed safe** — Ingress uses `-X PUT` (replace-style; CF semantics → same body in = same state out, so re-runs are a no-op by API design) not POST; cloudflared `.deb` install gated by `if ! command -v cloudflared` with "cloudflared 已安裝" in the else branch; cloudflared systemd install uses `|| true` on the install step + `systemctl restart` to pick up new config; cloudflared nohup branch already hardened in the prior L9#4 task with `/tmp/omnisight-cloudflared.pid` + `ps -p $OLD_PID -o comm=` recycling check + `disown`. `docker compose up -d --build` is idempotent by design (won't create duplicates; will rebuild if config changed). Error-path banner at line 100 explicitly tells users "重新執行此腳本：問題修復後重跑即可（腳本支援冪等）" so they know a clean re-run is safe. **Tests** — 7 new source-level + behavioral tests in `tests/test_quick_start_script.py`: (1) `test_idempotency_env_skip_source_guard` — asserts the `.env` existence guard + "已存在，跳過生成" copy + crucially, that no `cp .env.example .env` appears BEFORE the guard (regression guard against accidentally clobbering a user's customized .env on re-run). (2) `test_idempotency_tunnel_reuse_source_guard` — asserts `is_deleted=false` in the probe URL (catches regressions that would reuse a soft-deleted tunnel), the `.result[0].id // empty` extraction, the "Tunnel 已存在" copy, the `/tunnels/${CF_TUNNEL_ID}/token` fetch for existing tunnels, and exactly 1 POST to `.../accounts/{id}/tunnels` (a regression adding a second POST URL would duplicate tunnel creation). (3) `test_idempotency_ingress_uses_put_not_post` — asserts `-X PUT` within the ingress block (slices between "設定 Tunnel ingress" and "DNS CNAME" markers so drift elsewhere doesn't pollute the assertion). (4) `test_idempotency_cname_already_exists_branch_source_guard` — asserts `grep -qi "already exists"` detection, the GET URL with `type=CNAME&name=${HOSTNAME}`, `EXISTING_CONTENT=` capture, `-X PATCH` drift-repair call, both success-skip copy ("已存在且指向當前 tunnel，跳過") and drift-detection breadcrumb ("偵測到 CNAME 漂移"). (5) `test_idempotency_cloudflared_install_skipped_if_present` — gates on `if ! command -v cloudflared` + "cloudflared 已安裝" else-branch copy. (6) `test_idempotency_full_rerun_announces_support_in_error_copy` — guards the "支援冪等" string in the error banner so users aren't left wondering if a failed run corrupted state. (7) `test_idempotency_cname_drift_repair_behavioral` — the crown-jewel behavioral test: extracts the CNAME loop, wraps it in a bash harness that stubs `curl` with scenario-driven canned responses (happy / already_match / drift), logs every curl invocation to a temp file, and asserts the exact (method, URL) sequence for each case. Scenario 1 (happy): 2 POSTs, 0 GETs, 0 PATCHes → logs "CNAME 已建立". Scenario 2 (already-match): 2 POSTs (fail) + 2 GETs (verify matching content), 0 PATCHes → logs "已存在且指向當前 tunnel，跳過" (critical: guards against a regression that would PATCH unnecessarily and churn DNS). Scenario 3 (drift): 2 POSTs (fail) + 2 GETs (detect drift) + 2 PATCHes (repair) → logs "偵測到 CNAME 漂移" AND "CNAME 已更新至當前 tunnel". Full `tests/test_quick_start_script.py` suite: 32 passed in 1.63s (25 prior + 7 new); `bash -n scripts/quick-start.sh` clean; `./scripts/quick-start.sh --dry-run` on WSL2+systemd host passes all preflight checks + announces "所有前置條件通過 ✓".)*
 - [x] 域名可設定：`OMNISIGHT_DOMAIN=sora-dev.app` env 或腳本內 default *(done: audited the existing `DOMAIN="${OMNISIGHT_DOMAIN:-sora-dev.app}"` baseline at `scripts/quick-start.sh:36` → extended to a full override+validation+banner contract across all three related knobs. **What was already working** — `DOMAIN` honored the `OMNISIGHT_DOMAIN` env with `sora-dev.app` default via the `:-` expansion, and the value propagated to every downstream consumer (CF zone lookup at line 483, ingress config at 557-558, CNAME loop at 584, NS probe at 759-767, GoDaddy walkthrough at 818-884, final summary at 922). **What was missing / added** — (1) **`API_SUBDOMAIN` + `TUNNEL_NAME` also env-overridable** — `API_SUBDOMAIN="${OMNISIGHT_API_SUBDOMAIN:-api}"` + `TUNNEL_NAME="${OMNISIGHT_TUNNEL_NAME:-omnisight-prod}"` so users running staging+prod on one CF account can pick distinct tunnel names without forking (`TUNNEL_NAME` collision in the previous implementation would silently reuse one account's tunnel from the other → classic "why is my staging traffic hitting prod?" footgun). (2) **`_strip_ws` helper** — `OMNISIGHT_DOMAIN=" sora-dev.app "` from a quoted .env value (common paste-error from dashboard snippets) now gets leading/trailing whitespace stripped before validation. Uses the POSIX `${s#"${s%%[![:space:]]*}"}` + `${s%"${s##*[![:space:]]}"}` idiom (bash 3.2 portable — no `[[ :-: ]]` extended globs). (3) **`_validate_domain`** — rejects (a) empty, (b) > 253 chars (RFC 1035 upper bound), (c) values containing `://`, `/`, or whitespace via `case` glob so `OMNISIGHT_DOMAIN=https://foo.com` (URL pasted by mistake) fails with a friendly message BEFORE any CF API call, (d) uppercase (CF would normalize but we reject for clarity — users should see the exact value they typed reflected back), (e) single-label hostnames like `localhost` via an RFC 1035-ish regex `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$` which requires at least one dot and per-label length 1-63. (4) **`_validate_api_subdomain`** — single DNS label, no dots (so `OMNISIGHT_API_SUBDOMAIN=foo.bar` which would create a weird `foo.bar.DOMAIN` nested host is rejected), 1-63 chars. (5) **`_validate_tunnel_name`** — 1-32 chars (mirrors CF dashboard UI limit; the API is more permissive but we mirror the UI so the tunnel name in CF dashboard doesn't look weird), `[a-zA-Z0-9_-]+`. Each validator emits a per-knob diagnostic that names WHICH env var is wrong + WHY + shows a valid example — generic "invalid config" was explicitly avoided because users reading it would blame the wrong variable. (6) **Placement matters** — the validation calls run AFTER `--help`/`--uninstall` CLI parsing (so `OMNISIGHT_DOMAIN=bogus ./script --help` still works) and AFTER `LOG_FILE` init (so `err()`'s `tee -a "$LOG_FILE"` has a real file to write to). Fails fast (exit 1) with no trap noise because validation runs before the `trap _cleanup_on_exit EXIT` is installed. (7) **Deployment banner** — echoes the three resolved values (`Domain:`, `API subdomain:`, `Tunnel name:`) right after validation so the operator sees the effective config before any side-effecting Docker/CF work; when all three are defaults, a trailing hint mentions how to override them — gives the "last chance to Ctrl-C" checkpoint that caught two footguns during local testing. (8) **`--help` extended** — from 3 lines to a 12-line block listing every env var with its default and a concrete combined-usage example `OMNISIGHT_DOMAIN=app.example.com OMNISIGHT_TUNNEL_NAME=omnisight-staging ./scripts/quick-start.sh`. **Tests** — 8 new tests in `tests/test_quick_start_script.py` (extends the L9 contract-pin pattern; counts are source+behavioral): (A) `test_domain_env_override_source_guard` — pins the `${VAR:-default}` expansion for all three knobs, catches regressions that hardcode the default. (B) `test_validators_exist_for_all_three_knobs` — asserts the 3 validator defs + their call sites + the 3 `_strip_ws` calls are all wired (catches half-done refactors). (C) `test_help_documents_env_vars` — runs `--help` end-to-end and greps for all 3 env vars, their defaults, and the usage-example form. (D) `test_deployment_banner_prints_resolved_values` — behavioral: runs `--dry-run` twice (once with defaults, once with overrides) and asserts the banner reflects both correctly + the "全部為預設值" hint fires only on the defaults path. (E) `test_invalid_env_values_rejected_with_clear_message` — 6-case parametrize exercising every rejection branch (URL paste, single-label host, uppercase, two-label subdomain, space in tunnel name, 33-char tunnel name) + asserts the per-knob diagnostic string fires. (F) `test_whitespace_stripped_from_env_values` — feeds `"  sora-dev.app  "` via env and asserts validation accepts + banner echoes the stripped form with no trailing spaces (regression guard). (G) `test_domain_propagates_to_all_downstream_consumers` — pins that `$DOMAIN` flows into the CF zones API URL + CNAME iterator + NS probe + final summary; also asserts no lingering literal `sora-dev.app` appears in any downstream consumer with an explicit allowlist for (i) the default-assignment line, (ii) `--help` copy, (iii) validator error-message example text. (H) `test_validators_accept_common_valid_domains` — sources the validator block into a harness and exercises each against a realistic positive set (`sora-dev.app`, `app.example.com`, `a.b.c.d`, `foo-bar.example.co.uk`, 60-char label; api/v2/app/a/x-y; omnisight-prod/omnisight_staging/abc123/32-char name) — catches regex-regression cases where source-grep passes but real input rejects. Full `tests/test_quick_start_script.py` suite: **45 passed in 4.26s** (32 prior + 13 new — note: 13 instead of 8 because the parametrize adds 6 cases counted individually); `bash -n scripts/quick-start.sh` clean; `./scripts/quick-start.sh --help` shows the new env-var section; `./scripts/quick-start.sh --dry-run` announces banner + preflight passes; 4 live negative-path dry-runs (`OMNISIGHT_DOMAIN=https://foo.com`, `localhost`, `OMNISIGHT_API_SUBDOMAIN=foo.bar`, `OMNISIGHT_TUNNEL_NAME='bad name'`) all reject with correct per-knob diagnostic; 1 live positive-path dry-run (`OMNISIGHT_DOMAIN=app.example.com OMNISIGHT_TUNNEL_NAME=omnisight-staging`) shows banner reflecting overrides without the "全部為預設值" hint.)*
 - [O] 測試：在乾淨 WSL2 上跑一次全流程 → 容器啟動 + health pass + CF tunnel active + 瀏覽器開啟 *(🅐 Operator-blocked — 最終四個 acceptance gate 都需要 operator-only credential/環境，無法僅靠 AI 驗證：(1) **容器啟動** 需要 real `ANTHROPIC_API_KEY`，backend 的 `validate_startup_config()` 在 `OMNISIGHT_ENV=production` 下會硬拒（`ConfigValidationError: Refusing to start — llm_provider='anthropic' but ANTHROPIC_API_KEY is empty`）；(2) **health pass** 被 #1 阻塞（backend 的 uvicorn 都沒起來）；(3) **CF tunnel active** 需要 real CF API token + real domain；(4) **瀏覽器開啟** 需要 Windows host 上的 `explorer.exe`（腳本 fallback 到 `xdg-open` 但 headless Linux/CI 沒這個 opener 也不會 crash — `command -v` guarded）。**本回合 AI 實際完成**（在此 sandbox WSL2 + systemd + Docker 29.4 上 live 驗證）：**L9 邊界情況找出並修復 3 個阻塞 bug**——(A) 專案根目錄**缺少 `.dockerignore`**：`Dockerfile.frontend:14` 的 `COPY . .` 會把 host 的 `node_modules` 覆蓋進 `/app/node_modules/`（剛 `pnpm install` 出來的），觸發 buildkit 的 `cannot copy to non-directory: /var/lib/docker/buildkit/containerd-overlayfs/cachemounts/buildkit*/app/node_modules/@eslint/config-array`，**build 整個炸掉**；新增 `.dockerignore`（~55 行、narrowly scoped：只 exclude `node_modules`/`.next`/`.pnpm-store`/`__pycache__`/`.git`/`data/*.db`/`test-results`/`.venv`/`.env*`/`.agent_workspaces` — 故意**不**排除 `CLAUDE.md` / `README.md`（backend Dockerfile line 20 顯式 `COPY CLAUDE.md ./`，我第一版 dockerignore 把它排掉 → 第二次 build 又炸、留下可觀察的錯誤鏈讓我縮小 exclusion scope）；`.env` 本身也排除，因為 compose 用 `env_file: .env` 掛進 container 而非 build-time COPY，留在 context 裡是潛在 secret leak）。(B) **`public/` 目錄不存在**：`Dockerfile.frontend:30` 的 `COPY --from=builder /app/public ./public`（Next.js standalone runner stage）會因為 builder stage 沒產出 `/app/public` 而 fail with `"/app/public": not found`；新增 `public/.gitkeep` 讓 git 追蹤 empty directory，Next.js build 就會把 empty `public/` 傳到 standalone stage（Next.js 本來就視 public 為選用，只是 Dockerfile 無條件 copy 所以必須存在）。(C) **`Dockerfile.backend:35` 的 `ENV OMNISIGHT_WORKERS=""`**：pydantic-settings 讀 `OMNISIGHT_*` env 時拿到空字串 → `ValidationError: Input should be a valid integer, unable to parse string as an integer [input_value='', input_type=str] for Settings.workers`，backend process 在 `import backend.main` 的第一行就 crash（`from backend.config import settings` → `settings = Settings()` → ValidationError 拋 exception 結束）；removal of the `ENV` line（保留 CMD 行的 `${OMNISIGHT_WORKERS:-$(python3 -c ...)}` default 因為 `${VAR:-default}` 對 unset/empty 都 fallback），改註解說明為什麼不 declare 這個 env。**Build 驗證** `docker image ls | grep omnisight` 確認 `omnisight-productizer-backend:latest`（1.34GB）+ `omnisight-productizer-frontend:latest`（272MB）**兩個 image 都成功建出**；backend container 也能 create + 起 uvicorn process（只是卡在 validate_startup_config 的 ANTHROPIC_API_KEY 必需性，這是 architectural gate 不是 bug）。**新增 6 個契約測試**（`tests/test_quick_start_script.py` 45→51 顆）——(1) `test_non_interactive_mode_auto_detected_from_non_tty`：pin `[ ! -t 0 ] || [ ! -t 1 ]` 雙向 TTY 檢測，擋 regression 改回只檢查 stdin 會讓 piped-stdout/TTY-stdin 組合漏過導致 CF prompt 吞掉 TTY 使用者輸入一個換行；(2) `test_non_interactive_skips_cf_tunnel_setup_cleanly`：pin `if [ "$NON_INTERACTIVE" = true ]; then cf_setup="N"` 分支 + warn copy「非互動模式：跳過 Cloudflare Tunnel 設定」（silent skip 是 footgun）；(3) `test_wait_for_health_is_resilient_to_transient_failures`（**行為測試**）：從腳本抽出 `_wait_for_health()`，stub `curl` 前 2 次 fail 第 3 次 success，assert 函式回 0 + 印「Backend 就緒（第 3/10 次檢查）」讓使用者看到「實際花了幾輪」debug 資訊 + sidecar counter file 驗證 curl 真被呼叫 3 次（不是 short-circuit 掉）；(4) `test_wait_for_health_times_out_with_actionable_error`：flip-side，curl 永遠 fail + retries=3、interval=0，assert 函式 return 1 + stdout 含「啟動超時（3 × 0s = 0s）」包數字讓使用者 debug + copy-pasteable 的「`docker compose -f ... logs backend`」提示；(5) `test_browser_open_falls_back_gracefully_on_no_desktop`：assert `command -v explorer.exe &>/dev/null` + `command -v xdg-open &>/dev/null` 雙 guard 都在 + browser-open block 內**沒有** `exit 1`（否則 headless Linux 會在最後一行失敗）+ 「✅ 部署完成」banner unconditionally 印在 block 外（line-prefix `\necho -e \"${GREEN}${BOLD}✅ 部署完成` 精確 match 擋未來 refactor 把 banner 縮進到 elif 裡）；(6) `test_end_to_end_non_interactive_reaches_success_banner`（**全流程 smoke test**）：在 `tempfile.TemporaryDirectory()` 裡 scaffold fake project（`.env.example` + `docker-compose.prod.yml` + pre-existing `.env`）、stub `docker` command（subcommand 都 fake-success，`compose ps --services --status=running` 印 `backend\\nfrontend` 讓 RUNNING_SVCS >= 2 通過、`compose up` 退 0）、stub `curl`（只有 `http://localhost:8000/api/v1/health` 和 `http://localhost:3000/` 回 0，其他都回 7 讓 CF preflight 進 warn 分支）、**故意不**提供 `explorer.exe` 或 `xdg-open`（驗證 headless fallback）、`PATH=$stubs:$PATH` + `stdin=subprocess.DEVNULL`（非 TTY → 觸發 `NON_INTERACTIVE=true`），跑完整腳本 assert exit 0 + 「所有前置條件通過」+「.env 已存在」+「容器已啟動」+「Backend 就緒」+「Frontend 就緒」+「非互動模式：跳過 Cloudflare Tunnel 設定」+「部署完成」+ docker invocation log 含「compose」和「up」—— 這是 L9 最終 checkbox 的 **automated contract**，未來任何 refactor 讓非互動路徑壞掉都會炸。51 passed in 6.82s（45 prior + 6 new，零 regression）。**Live WSL2 驗證** on this sandbox：Step 0 preflight 14 個 check 全綠（Docker 29.4.0 / Compose 5.1.2 / systemd PID 1 / ports 8000+3000 free / 863G disk / curl+openssl+jq 全部 OK / .env.example 存在 / WSL2+systemd 常駐提示）→ Step 1 `.env 已存在，跳過生成` 冪等 path 確認 → Step 2 docker build（兩個 image 都成功建出）→ error-path trap 在 backend unhealthy 時正確 fire diagnostic banner（含 `docker compose logs` 建議 + 「支援冪等，重跑即可」提示）+ exit code 1 → 每次失敗後 `docker compose down` 清乾淨 state + 立即重跑驗證冪等性 5 次沒有累積汙染。**真要端到端驗證剩下的 credentialed stages**：operator 需要在真 WSL2 + systemd 主機執行 `./scripts/quick-start.sh`、互動輸入 real LLM API key（Step 1）+ 真 CF API token（Step 4）+ 真 CF-hosted domain → backend `validate_startup_config()` 會過 → health check 會通 → CF tunnel 會 active → Windows host 的 explorer.exe 會開 `https://${DOMAIN}` → L1-01 runbook 收尾，看 HANDOFF.md 「L1-01 prod deploy runbook」 Step 1-4。)*
-- [x] 預估：**1 day**（腳本已寫好，需測試 + 修邊界情況）*(done: 本回合找出並修復 3 個邊界 bug — 缺 `.dockerignore` / 缺 `public/` / `ENV OMNISIGHT_WORKERS=""` pydantic validation crash — 加 6 個契約測試，docker build 在 clean WSL2 sandbox 上成功；剩餘的端到端 smoke 屬於 operator credentialed stage)*
+- 預估：**1 day**（腳本已寫好，需測試 + 修邊界情況）*(done: 本回合找出並修復 3 個邊界 bug — 缺 `.dockerignore` / 缺 `public/` / `ENV OMNISIGHT_WORKERS=""` pydantic validation crash — 加 6 個契約測試，docker build 在 clean WSL2 sandbox 上成功；剩餘的端到端 smoke 屬於 operator credentialed stage)*
 
 ### L10. Pre-built Docker Images on GHCR (#337)
 - [x] GitHub Actions workflow `.github/workflows/docker-publish.yml`：tag push 時自動 build + push `ghcr.io/your-org/omnisight-backend:latest` + `ghcr.io/your-org/omnisight-frontend:latest` *(done: 新增 `.github/workflows/docker-publish.yml` — trigger on `v*` tag push + `workflow_dispatch` 手動逃生口；`permissions: { contents: read, packages: write }` 最小權限（`packages: write` 是 GHCR push 的 load-bearing 權限，default `GITHUB_TOKEN` 是 read-only）；`jobs.publish` 以 matrix strategy 平行 build backend + frontend（`name`/`image`/`dockerfile` 三欄 matrix，`fail-fast: false` 讓單邊失敗不會 cancel 對手）；GHCR namespace 先用 shell `tr '[:upper:]' '[:lower:]'` 把 `github.repository_owner` 轉小寫（GHCR 拒絕大寫 namespace — 這是 mixed-case org handle 在 prod tag push 才會炸的 footgun）；`docker/login-action@v3` 以 `github.actor` + `secrets.GITHUB_TOKEN` 登入 `ghcr.io`（不需要 operator 管理 PAT）；`docker/build-push-action@v6` 同時 push 兩個 tag：`:latest`（浮動 — 每次 release 更新）+ `:${resolved-tag}`（immutable snapshot keyed off `GITHUB_REF_NAME` — 保留歷史版本可 pull）；OCI labels 寫入 `org.opencontainers.image.{source,revision,version}` 三欄以利溯源；GHA cache `type=gha,scope=${matrix.name}` 分 backend/frontend scope 避免互相 evict。**測試** 新增 12-case 契約測試 `backend/tests/test_docker_publish_workflow.py`：以 `yaml.safe_load` 解析 workflow YAML，pin 住下列 load-bearing invariants — (1) trigger on `push.tags: [v*]` + workflow_dispatch 逃生口存在，(2) `permissions.packages==write`，(3) `permissions.contents==read`（least-privilege），(4) matrix 同時覆蓋 backend+frontend，(5) 引用的 Dockerfile 實際存在於 repo，(6) `docker/login-action` 步驟存在 + registry 指向 ghcr.io（或 `env.REGISTRY` 引用）+ password 用 `GITHUB_TOKEN`（擋未來改成 operator-managed PAT），(7) `docker/build-push-action` 步驟存在 + `push: true`，(8) tags 同時包含 `:latest` 和版本引用，(9) image 名稱為 `omnisight-backend` + `omnisight-frontend`（pin public contract），(10) `env.REGISTRY == "ghcr.io"`，(11) workflow 有 lowercase owner 的 shell step（防漏網的 mixed-case footgun）。12 passed in 0.08s；`python3 -c "import yaml; yaml.safe_load(...)"` 確認 workflow 可正確 parse。**Scope note** — 此項目只做 workflow 本身；multi-arch / image size / docker-compose image-first 屬後續 L10 子項)
@@ -1452,7 +1452,7 @@ Legend:
 - [x] Multi-arch build（`linux/amd64` + `linux/arm64`）via `docker buildx` *(done: 將 `.github/workflows/docker-publish.yml` 從 single-arch amd64-only 升級為 OCI 多架構 image index publish — (1) 新增 `docker/setup-qemu-action@v3` step 於 buildx setup **之前**（順序 load-bearing：buildx initialize 時會 cache binfmt_misc capability matrix，若 QEMU 在 buildx 後才註冊，buildx 會 fall back 到 amd64-only 然後 arm64 build 在第一個 `RUN` 炸 `exec format error`），用 `with.platforms: linux/arm64` scope 只註冊 arm64 handler（amd64 在 ubuntu-latest runner 上 native 執行、不需 QEMU、縮小 attack surface）；(2) `docker/build-push-action@v6` 新增 `platforms: linux/amd64,linux/arm64` — buildx 會同時 build 兩個 layer 並 push 為 OCI image index（manifest list），operator 從 arm64 host（Raspberry Pi / Ampere / Apple-silicon CI）`docker pull ghcr.io/<owner>/<image>:<tag>` 會自動 resolve 到 arm64 layer、x86_64 host resolve 到 amd64 layer，**一個 tag 解一切架構**；(3) `timeout-minutes: 45 → 90` — QEMU-emulated arm64 build 比 native amd64 慢約 2×（frontend 的 `pnpm install --frozen-lockfile` + Next.js 15 build 是主要 CPU sink），45 min 會 flaky-timeout 但 build 本身健康；(4) header comment 從「multi-arch 未 scope」更新為實作說明 + QEMU rationale + wall-time 預期。**為什麼不換 `runs-on: ubuntu-24.04-arm`（native arm64 runner）避開 QEMU**：GitHub 在 2025 Q1 開始供應原生 arm64 runner，**但 free tier 的 public repo 目前僅對部分 org 開放**，用 `runs-on` matrix（amd64 runner build amd64 layer + arm64 runner build arm64 layer）會讓 workflow 對 repo owner 類型產生隱性耦合（private repo / non-whitelisted org 會 queue forever）。QEMU 路線對所有 ubuntu-latest runner 保證可跑，速度 trade-off 可接受（frontend ~8-12 min emulated arm64 vs ~4 min native）。**驗證** `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/docker-publish.yml'))"` 解析通過；printed resolution 確認 QEMU step 出現在 buildx 之前、`platforms: linux/amd64,linux/arm64` 正確寫入 build-push-action、`timeout-minutes: 90` 生效。**測試** 新增 **4 顆契約測試** 於 `backend/tests/test_docker_publish_workflow.py`（延續既有 yaml.safe_load + 結構性 assertion 模式）：(a) `test_qemu_action_present_for_arm64_emulation` — 找 `docker/setup-qemu-action@` step + assert `with.platforms` contains `arm64`（接受空 `with` 也 OK，action v3 default 註冊所有 handler）；(b) `test_qemu_runs_before_buildx` — 抓兩個 step 的 index、assert QEMU index < buildx index，擋「好心重排 step 順序」的 regression；(c) `test_build_push_publishes_amd64_and_arm64` — 讀 build-push-action 的 `with.platforms` 字串、分別 assert `linux/amd64` 和 `linux/arm64` 都在，擋 regression 只留 amd64 為「加速 CI」defeat L10 #337 契約；(d) `test_timeout_accommodates_emulated_arm64_build` — assert `timeout-minutes >= 60` 擋回退到 45，註解解釋「QEMU frontend build ~8-12 min、headroom 需要」。**結果** `backend/tests/test_docker_publish_workflow.py` 16 passed（12 既有 + 4 新）；同時跑 `test_compose_prod_image_first.py` 29 passed（16 publish workflow + 13 compose image-first，零 regression）；`tests/test_quick_start_script.py` 51 passed（完全不受此 workflow 改動影響，quick-start 走本地 `docker compose up` 不觸及 CI workflow）。**Scope 自律** — 只改 workflow；image size 優化 / 0.5 day 預估 checkbox 屬後續 L10 子項。**Operator 下一步** — 下次打 `v*` tag 時 workflow 會自動 build 兩個架構 image 並 push 為 OCI index；arm64 host 的 operator（例如 Raspberry Pi / ARM VPS）直接 `docker pull` 就能拿到正確 layer、不需手動指定 `--platform`。)
 - [x] Image size 優化：backend < 500 MB / frontend < 200 MB *(done: 原 `docker image ls` 顯示 backend 1.34 GB / frontend 272 MB → **backend 490 MB / frontend 169 MB**，兩邊都在預算內；compressed pull size（`docker image inspect .Size`，也就是 registry 真正交付的 bytes）更緊：**backend 103 MB / frontend 68 MB**，映射 L10 #337 下一個 bullet 的 "pull 30 秒" 承諾（50 Mbps * 30 s ≈ 180 MB 容量，兩邊 combined 171 MB 剛好吞得下）。**四大優化並用**：(1) **`.dockerignore` 遞迴 patterns** — 單一最大 bug：原檔用 bare `.venv` / `__pycache__` / `node_modules`，Docker 的 dockerignore 語意是 `.venv` 只匹配 `./.venv`，**不含** `./backend/.venv`（這個 dev venv 168 MB 的 duplicate site-packages 一直靜默洩漏進 backend image）；修正是把所有 cache/venv 類 pattern 改成 `**/pattern` 形式，新增 `**/.venv`、`**/__pycache__`、`**/node_modules`、`**/.pytest_cache`、`**/.mypy_cache`、`**/.pnpm-store` 等；`.dockerignore` 開頭註解寫清楚為什麼要 `**/` prefix 以免未來有人「清理」回 bare pattern 再炸。(2) **Dockerfile.backend 多階段化** — 原本單階段把 gcc/g++/git/openssh/curl 塞進 runtime（325 MB 編譯工具鏈永久駐留），改成 `builder` stage 跑 `pip install --require-hashes -r requirements.txt`（需要 gcc 編 uvloop/pillow/cryptography/argon2-cffi/hiredis 等 native wheel），然後 `runner` stage 只 `apt-get install` weasyprint 的執行期 libs（libpango-1.0-0 / libpangoft2-1.0-0 / libcairo2 / libgdk-pixbuf-2.0-0 / libffi8 / shared-mime-info / fonts-dejavu-core + curl），用 `COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages` 把已裝好的 Python packages 傳過去。**關鍵陷阱**：最初嘗試 `pip wheel --require-hashes` 先在 builder 編出 /wheels 再在 runner `pip install --no-index --find-links=/wheels` —— 失敗，因為 `pip wheel` 把 sdist 編成 wheel 時，該 wheel 的 hash 與 lockfile 記錄的 pypi wheel/sdist hash 不同，`--require-hashes` 直接拒收（`zxcvbn-python` 等純 sdist 套件炸），而**早期 RUN 鏈尾巴的 `|| true` 還把這個 failure 默默吞掉**導致 image 建出來但 site-packages 是空的（backend 啟動就 `ModuleNotFoundError: No module named 'fastapi'`）。改用「builder 直接 install 到 system site-packages，runner COPY 整份過來」模式，不碰 wheel 中間層，hash 契約保持完整。測試合約 `test_backend_does_not_use_pip_wheel_pattern` 把這個決定 pin 住，擋未來的 regression。(3) **Dropping test + bytecode + WOFF2 deadcode** — builder 內做三波 cleanup：`pip uninstall -y pytest pytest-asyncio pytest-cov coverage iniconfig pluggy`（~25 MB；已驗證 production code `grep -rln '^import pytest\|^from pytest' backend/` 排除 tests/ 空結果），`rm -rf site-packages/{pip,pip-*.dist-info,zstandard*,zopfli*}`（~40 MB —— zstandard 23 MB + zopfli 2.7 MB 是 fontTools[woff] 的 WOFF2 壓縮 extra，weasyprint 跑的是 PDF pipeline 不走 WOFF2，已用 `weasyprint.HTML(...).write_pdf()` smoke test 確認移除後 PDF 輸出 bytes-identical），`find -name '__pycache__' -exec rm -rf {} +`（bytecode cache，lazy regenerated）；runner 又追加一份 `rm -rf /usr/local/lib/python3.12/site-packages/{pip,pip-*.dist-info}` 打掉 python:3.12-slim base image 本身帶的 pip（builder 那次只清掉 builder 的 site-packages；runner base 是另一份 layer），plus `rm -rf /usr/share/doc /usr/share/man /usr/share/bash-completion`（3 MB 多的 debian docs）。app-level cleanup 再 `rm -rf ./backend/tests ./backend/.pytest_cache`（31 MB 測試碼 + pytest cache 不屬於 runtime contract）。(4) **Dockerfile.frontend 換 base** — 原本 runner 用 `node:20-alpine`（194 MB，含 node 97 MB + npm/yarn/corepack ~22 MB，**但 `node server.js` 從不呼叫 package manager**）；試過「加 RUN rm -rf npm corepack yarn」發現 Docker layer 是 additive、一個 layer 刪一個 layer 的檔案只產生 whiteout marker，image bytes 不會真的縮（layer tarball 裡前一層的 bytes 還在），**反而**切成「builder 用 `node:20-alpine` 跑 `pnpm run build`、runner 換成 `alpine:3.19` + `apk add nodejs libstdc++ ca-certificates`」才真的省 bytes —— alpine 3.19 的 nodejs apk 是精簡版 node 20.15.1（41.5 MB vs 97 MB 完整版），沒有 npm/yarn/corepack、純 runtime；builder 和 runner 都是 musl-based，Next.js 16.2 standalone bundle 直接搬過去跑 zero issue，已 `timeout 5 node server.js` smoke test 看到 "✓ Ready in 0ms"。**第二刀**：runner 追加 `rm -rf /app/node_modules/.pnpm/@img+sharp-libvips-*` + `sharp@*`（~33 MB）—— `next.config.mjs` 寫 `images: { unoptimized: true }` 已經明確關掉 sharp 路徑，但 Next 的 standalone tracer 還是保守 bundle 兩個架構的 libvips 二進制（linux-x64 glibc + linuxmusl-x64）做防禦，拆掉省 33 MB 不影響 runtime；`|| true` guard 防未來 Next 改 bundle 位置讓這個 rm 路徑失效但 image build 不炸。**契約測試** 新增 `backend/tests/test_dockerfile_image_size.py`（17 cases；15 靜態 + 2 live-opt-in）—— (a) **backend static**：`test_backend_is_multi_stage`（`FROM ... AS builder` + `FROM ... AS runner` 都在）、`test_backend_runner_has_no_compilers`（slice from "AS runner" 之後確認 `gcc` / `g++` / ` git ` 都不在 — 擋「好心合併 stage」的 regression）、`test_backend_runner_installs_weasyprint_runtime_libs`（libpango-1.0-0 / libcairo2 / libgdk-pixbuf-2.0-0 / fonts-dejavu-core — 擋「更激進 slim 再砍掉這些」導致 `from backend.report_generator` 在 prod crash 的 footgun）、`test_backend_strips_test_packages_in_builder`（pytest / pytest-asyncio / pytest-cov / coverage 都列在 uninstall list）、`test_backend_strips_unused_woff2_compressors`（zstandard + zopfli 都被顯式 rm — 附註 "smoke-tested weasyprint PDF output"）、`test_backend_strips_pip_from_runtime`（pip + pip-*.dist-info 都 rm）、`test_backend_excludes_tests_from_runtime`（用 regex 找 `rm -rf ./backend/tests`）、`test_backend_does_not_use_pip_wheel_pattern`（剝掉 `#` 註解行後 assert 找不到 `pip wheel` — 擋回到有 hash mismatch bug 的舊模式，附註解釋 `|| true` 如何吞掉 install failure 的 postmortem）。(b) **frontend static**：`test_frontend_is_multi_stage`、`test_frontend_runner_uses_alpine_base`（regex `FROM\s+alpine:3\.\d+\s+AS\s+runner` + `apk add` + `nodejs`）、`test_frontend_keeps_ca_certificates`（outbound HTTPS 沒 trust store 會 `unable to verify the first certificate`，operator debug 一小時系列）、`test_frontend_strips_unused_sharp_native`（`sharp-libvips` pattern 必須被 rm）。(c) **.dockerignore static**：`test_dockerignore_uses_recursive_venv_pattern`、`test_dockerignore_uses_recursive_pycache_pattern`、`test_dockerignore_uses_recursive_node_modules_pattern` —— 把 `**/` prefix pin 住，這三個是 L10 優化的最大單筆幫助，regress 就會再炸回 1.34 GB。(d) **live opt-in gates**：`test_backend_image_size_under_budget` + `test_frontend_image_size_under_budget`，預設 skip（`pytest.mark.skipif(OMNISIGHT_TEST_DOCKER_IMAGE_SIZE!=1)`；理由：多數 CI lane 沒 build image + 建一次 2-5 min），operator 用 `OMNISIGHT_TEST_DOCKER_IMAGE_SIZE=1 pytest backend/tests/test_dockerfile_image_size.py` 本地跑 —— 透過 `docker image inspect --format '{{.Size}}'` 拿 **compressed pull size**（實際 registry 交付 bytes），assert < 500 MiB / 200 MiB。**結果** `backend/tests/test_dockerfile_image_size.py`：**15 passed + 2 skipped**；加了 opt-in env var 再跑 **17 passed**（兩個 live gate 都過，backend 103 MB compressed / frontend 68 MB compressed）；sibling L10 測試零 regression：`test_docker_publish_workflow.py` + `test_compose_prod_image_first.py` + `test_dockerfile_image_size.py` 一起跑 **44 passed + 2 skipped**；quick-start sibling `tests/test_quick_start_script.py` **51 passed**（完全不受 Dockerfile 改動影響）。**Live runtime smoke**：`docker run ... python -c 'from backend.main import app; import weasyprint; weasyprint.HTML(...).write_pdf()'` 輸出 "FastAPI app: FastAPI | PDF bytes: 2814"；`docker run ... node server.js` 看到 Next.js "✓ Ready in 0ms"。**Scope note** — 只動 Dockerfile.backend / Dockerfile.frontend / .dockerignore / 新增一個 test；Python 應用碼、requirements.txt、compose 檔、workflow 都沒動）*
 - [x] 效果：首次部署從「本地 build 5-10 分鐘」→「pull 30 秒」 *(done: L10 #5 capstone — L10 #1-#4 各 pin 一個 precondition（workflow 發佈 / compose image-first / multi-arch / image size < budget），此項目 pin 住 **emergent effect**——給定四個 precondition 同時成立，首次部署的 wall time 由壓縮 layer 的網路傳輸主導，在 50 Mbps 下行（FCC 自 2015 起列為「broadband served」的 baseline）時 ≤ 30 秒。新增 `backend/tests/test_pull_30s_effect.py`（**5 靜態 + 1 live opt-in**）延續 L10 sibling 測試的 `yaml.safe_load + 結構性 assertion` 模式、<100ms、無網路無 Docker。**五個靜態測試**：(1) `test_pull_budget_arithmetic_is_internally_consistent` — pin `REFERENCE_BANDWIDTH_MBPS=50` × `PULL_BUDGET_SECONDS=30` = `PULL_BUDGET_BYTES≈187.5 MB` = `PULL_BUDGET_MIB≈178.8` 的 conversion chain；顯式區分 network decimal（Mbps / MB）vs storage binary（MiB）單位避免 4% 無聲 drift；sanity 斷言 envelope 落在 150-200 MiB 帶（若 decimal point 被搬移此處先炸）。(2) `test_combined_image_budgets_fit_the_30s_envelope` — **load-bearing 斷言**：`BACKEND_COMPRESSED_BUDGET_MIB=108` + `FRONTEND_COMPRESSED_BUDGET_MIB=70` = 178 MiB ≤ 178.8 MiB envelope，頭兩版寫 120+75=195 當場被測試抓到（正是契約測試該做的事 — 實測基線 103+68=171 MiB、envelope 只有 7.8 MiB slack，budget 要緊貼實測 + 小 headroom 否則承諾失效）；錯誤訊息明確指向「shrink image OR update 30秒 promise in TODO.md+HANDOFF.md」。(3) `test_pull_path_reachable_via_compose_image_first` — parse `docker-compose.prod.yml`、backend+frontend 都 assert `image:` 以 `ghcr.io/` 起頭 + `pull_policy: missing`（擋未來 drift 到 `always` 每次都強制 re-pull 或 `build` 完全繞開 pull path）。(4) `test_quickstart_does_not_force_build_on_compose_up` — 掃 `scripts/quick-start.sh` 每一行，過濾 `#` 註解行與 `echo` user-facing 提示行（line 1061 的「強制本地 build」逃生口 echo 合法提到 `--build`），assert 沒有真實的 `docker compose ... up --build` 呼叫；為與 L10 #2 測試 defence-in-depth 並存——因 `--build` 是最容易靜默 regression 30 秒承諾的單一 flag。(5) `test_workflow_actually_pushes_so_pull_is_possible` — parse workflow、逐個 job/step 找 `docker/build-push-action` 並 assert `with.push: true`（接受 boolean True 或 str "true"），擋「為了 test workflow 暫時關掉 publish」這類 CI-green-prod-broken regression。**Live opt-in**：`test_live_combined_pull_under_30s_at_50mbps` — 與 L10 #4 同 env gate（`OMNISIGHT_TEST_DOCKER_IMAGE_SIZE=1`）+ 同 helper（`docker image inspect --format '{{.Size}}'`），取 backend + frontend 實際 bytes / `BANDWIDTH_BYTES_PER_SEC` 得 wall-clock 秒數，assert ≤ 30 s；沒有 image 時 pytest.skip 不炸。**驗證**：`python3 -m pytest backend/tests/test_pull_30s_effect.py backend/tests/test_dockerfile_image_size.py backend/tests/test_compose_prod_image_first.py backend/tests/test_docker_publish_workflow.py -v` **49 passed + 3 skipped in 0.21s**（5 新 static + 44 prior static + 3 live opt-in，零 regression）；`tests/test_quick_start_script.py` **51 passed in 7.04s**（完全不受新測試影響）。**Scope 自律** — 只新增一個 test 檔；沒動 Dockerfile / compose / workflow / quick-start / .env.example / 任何應用碼 —— 「效果」本身已由 L10 #1-#4 交付，此項目的價值是**把四個 precondition 串成的 emergent contract 變成 automated**，讓任何一個 precondition 靜默 regression（例如 `pull_policy: always`、`push: false`、image 膨脹 20%、quick-start 加回 `--build`）都會在 CI 上炸。**實際效果展示** — operator 端到端測：打 `v*` tag → workflow 2-phase QEMU build 後 push ghcr.io/<lowercase-owner>/omnisight-{backend,frontend}:{latest,v*} 各一份 OCI manifest list（amd64+arm64）約 combined ~170 MiB 壓縮 bytes → 部署主機 `OMNISIGHT_GHCR_NAMESPACE=<owner> docker compose -f docker-compose.prod.yml up -d` 觸發 compose 的 image-first path 從 GHCR 拉取 combined 170 MiB 在 50 Mbps 下約 **27 s**（180 MiB/30 s × 170 MiB ÷ 180 MiB），對照 L10 #1 之前的「本地 build 5-10 分鐘」（Python wheels 編譯 + Next.js 15 build 是兩大 CPU sink）— 效果差 **~15×**）*
-- [x] 預估：**0.5 day** *(done: L10 #5 capstone 在此 day-budget 內完成 — 新增一個 ~260 行契約測試檔 pin 住 pull-30s emergent contract，零 Dockerfile/compose/workflow 動作，無網路無 Docker，<100ms 跑完)*
+- 預估：**0.5 day** *(done: L10 #5 capstone 在此 day-budget 內完成 — 新增一個 ~260 行契約測試檔 pin 住 pull-30s emergent contract，零 Dockerfile/compose/workflow 動作，無網路無 Docker，<100ms 跑完)*
 
 ### L11. 雲端一鍵佈署按鈕 (#338)
 - [x] DigitalOcean App Platform：`deploy/digitalocean/app.yaml` + README Deploy 按鈕 *(done: L11 #1 — `deploy/digitalocean/app.yaml` (192 行 DO App Platform spec) 交付完整雙服務 topology：**backend** 私有（`internal_ports: [8000]`、健康檢查 `/api/v1/health`、無 public `routes` — 強制所有外部流量走 Next.js /api 代理以保留 CSRF+CORS 語意）+ **frontend** 公開（`http_port: 3000`、`routes: [{path: /}]`、健康檢查 `/`）；inter-service wiring 用 DO 的 `${backend.PRIVATE_URL}` service-discovery placeholder + `RUN_AND_BUILD_TIME` scope（Next.js `next.config.mjs` 在 build 階段把 BACKEND_URL 烘進 rewrite target，runtime 再讀一次給 SSR fetch）+ `${APP_URL}` 給 `OMNISIGHT_FRONTEND_ORIGIN`（CORS）與 `NEXT_PUBLIC_API_URL`，兩個 token 都是 DO 在首次 deploy 後解析 —— 擋「hard-code 網址 → custom domain 後失效」這種 footgun；**secret hygiene**：`OMNISIGHT_ANTHROPIC_API_KEY` / `OMNISIGHT_OPENAI_API_KEY` / `OMNISIGHT_GOOGLE_API_KEY` / `OMNISIGHT_ADMIN_PASSWORD` 全部 `type: SECRET`（DO 加密存放），sentinel 值 `EV[1:PLACEHOLDER:REPLACE_AFTER_DEPLOY]` 讓首次部署故意壞（operator 必須手動填 → 擋「placeholder 忘記換」的上線事故）；**production safety**：`.env.example` 的 Internet-exposure-auth 區塊要求的三個 env 在 spec 中硬 pin — `OMNISIGHT_AUTH_MODE=strict` / `OMNISIGHT_DEBUG=false` / `OMNISIGHT_COOKIE_SECURE=true`，加上 K1 bootstrap admin 的 `OMNISIGHT_ADMIN_EMAIL` + `OMNISIGHT_ADMIN_PASSWORD`；**alerts** `DEPLOYMENT_FAILED` + `DOMAIN_FAILED` 讓 push-triggered deploy 壞掉時 operator 會收到通知；**databases** 區塊註解掉但留下 `engine: PG / size: db-s-dev-database` 的 scaffolding（附 code change note — SQLAlchemy URL 切換點），因 App Platform 檔案系統 ephemeral 會在 redeploy 時把 `/app/data/omnisight.db` 清掉；**README 主頁新增「One-click cloud deploy (L11 #338)」section**，嵌入官方 Deploy-to-DO badge SVG (`deploytodo.com/do-btn-blue.svg`) + 連結 `cloud.digitalocean.com/apps/new?repo=github.com/limit5/OmniSight-Productizer/tree/master`（spec 內 `github.repo` 同址；contract 測試會雙向 pin 這個一致性），加上指向 `deploy/digitalocean/app.yaml` 與 `deploy/digitalocean/README.md` 的審閱連結；**`deploy/digitalocean/README.md`** 68 行 post-deploy runbook — 服務表格、post-deploy 步驟（填 SECRET → 設 custom domain → 觸發第二次 deploy 讓 `${APP_URL}` resolve）、三大 caveats（**ephemeral filesystem** SQLite 每次 redeploy 被清、**no Docker-in-Docker** 讓 ContainerManager tool sandbox 路徑失效所以 App Platform 僅適合 single-tenant tool-less demo、**成本** 2× basic-xxs ≈ $10/mo 含 downsize 與 upsize 指引）、`doctl apps update --spec` 手動推 spec 的指令；**契約測試** `tests/test_digitalocean_app_spec.py` **27 passed in 0.05s** — 涵蓋 (a) file-level (檔案存在 + YAML 有效 + `name` + `region` + `DEPLOYMENT_FAILED` alert)、(b) topology (兩服務都在 + backend 私有 `internal_ports: [8000]` 且無 routes + frontend public `/` 且 `http_port: 3000`)、(c) health-check paths 與後端實際路由一致（`/api/v1/health` 而非過時的 `/health`）、(d) inter-service wiring (`BACKEND_URL` 必須引用 `${backend.PRIVATE_URL}` 且 scope 為 `RUN_AND_BUILD_TIME` — 擋 Next.js build-time rewrite 吃不到變數 → 生產環境 404 的 footgun)、(e) secret hygiene (4 個 credential env 都是 `type: SECRET` + spec 文字不得包含 `sk-ant-api` / `sk-proj-` / `AIzaSy` / `xai-` 這種真實 key 前綴 防止 paste 誤傷)、(f) production env 三項硬 pin (DEBUG=false / AUTH_MODE=strict / COOKIE_SECURE=true)、(g) admin bootstrap envs 存在、(h) `OMNISIGHT_FRONTEND_ORIGIN` 用 `${APP_URL}` placeholder、(i) Dockerfile paths 真實存在（`Dockerfile.backend` + `Dockerfile.frontend` 在 repo root）、(j) spec 的 `github.repo` + `github.branch` 與 README Deploy-button URL 的 `limit5/OmniSight-Productizer/tree/master` 雙向一致、(k) README 包含官方 badge SVG + DO apps/new URL + canonical repo、(l) companion README 非空 stub（>500 bytes + 提到 SECRET/REPLACE_AFTER_DEPLOY）；PyYAML 6.0.1 已在 backend/requirements.txt，零新 runtime 相依；**scope 自律** — 只新增 3 個檔案（app.yaml + companion README + 測試）+ 1 段 README 修改，沒動任何應用碼 / Dockerfile / compose / workflow / quick-start.sh / .env.example)*
@@ -1460,7 +1460,7 @@ Legend:
 - [x] Render：`deploy/render/render.yaml` + README Deploy 按鈕 *(done: L11 #3 — `deploy/render/render.yaml`（149 行 Render Blueprint）交付與 DO/Railway 三角對齊的 two-service topology，但攻下 Render 特有的三個 footgun：**(1) multi-service Blueprint schema** — 與 DO `services:` list 形狀相近但用 `type: pserv`（private service）標記 backend 而非 DO 的「有 routes 就公開、只有 internal_ports 就私有」暗示語意，`omnisight-backend` `type: pserv` + `omnisight-frontend` `type: web` 組合讓 FastAPI 只在 Blueprint 內網可達（契約測試 `test_backend_is_private_pserv` pin 死，翻成 `type: web` 會把 CSRF/CORS 中間件 bypass 掉形成安全退化）；**(2) env var 不支援跨 service string templating** — Render 的 `fromService` 只能取 sibling 的 `host` / `port` / `hostport`，**不能**組成 `http://host:port` 或 `https://host` 這樣的完整 URL（RailwAy 的 `${{frontend.RAILWAY_PUBLIC_DOMAIN}}` 可以在 template string 裡；DO 的 `${APP_URL}` 也可以；Render 不行）→ 解法：`BACKEND_URL=http://omnisight-backend:8000` 硬 pin（pserv 內部 hostname == service name 的 Render 服務發現契約），`OMNISIGHT_FRONTEND_ORIGIN` + `NEXT_PUBLIC_API_URL` 改用 `sync: false` 讓 Render Blueprint wizard 在 apply 時提示 operator 手填（並在 runbook 文件化 Stage 2 re-deploy 流程，因為 `NEXT_PUBLIC_*` 會在 build time 被 Next.js inline 到 client bundle，Stage 2 必須觸發 manual redeploy 才讓 URL 烘進去）；**(3) pserv 不會注入 $PORT** — 與 Railway 的 web service 不同，Render pserv 不會塞 `$PORT` env，所以 `dockerCommand` 保留 `--port 8000` 而不是 `${PORT:-8000}`（契約測試 `test_backend_docker_command_pins_port_and_workers` 三 assertion：uvicorn + backend.main:app / `--port 8000` / `OMNISIGHT_WORKERS` 都在），這和 frontend 的 web service (Next.js standalone 自己讀 `process.env.PORT`) 行為不對稱，需要在 runbook 明示。**secret hygiene 模式切換** — DO 用 `type: SECRET` + sentinel 字串 `EV[1:PLACEHOLDER:REPLACE_AFTER_DEPLOY]`（讓首次部署故意壞），Railway 零 config（env 全 dashboard-managed），Render 用 `sync: false`（Blueprint apply wizard 會 prompt operator，值從不進 git），四個 credential env（`OMNISIGHT_ANTHROPIC_API_KEY` / `OMNISIGHT_OPENAI_API_KEY` / `OMNISIGHT_GOOGLE_API_KEY` / `OMNISIGHT_ADMIN_PASSWORD`）+ 兩個 URL env (`OMNISIGHT_FRONTEND_ORIGIN` / `NEXT_PUBLIC_API_URL`) 全部 `sync: false`（`test_credential_envs_flagged_sync_false` 四 case + `test_cors_origin_is_operator_filled` pin 死，額外 assert `value` key 不能同時出現 — 防 cargo-cult 把 DO sentinel 抄過來）；**persistent storage** — Render 是 three-target 中唯一在 `starter` tier 就有 persistent disk 的平台（DO App Platform 檔案系統全 ephemeral、Railway 需 Volume addon），`disk:` block 掛 1 GB SSD 到 `/var/data` 並把 `OMNISIGHT_DATABASE_PATH` 對齊到 `/var/data/omnisight.db`（契約測試 `test_backend_database_path_on_persistent_disk` 驗 mountPath / sizeGB >=1 / db_path startswith mount+'/' 三條），解 SQLite 每 redeploy 被清的 demo-killer；**production safety**：三個 `.env.example` Internet-exposure hard-pin 在 spec 照抄（`OMNISIGHT_DEBUG=false` / `OMNISIGHT_AUTH_MODE=strict` / `OMNISIGHT_COOKIE_SECURE=true`）+ K1 bootstrap admin email/password + `OMNISIGHT_ENV=production` + `OMNISIGHT_WORKERS=2` 匹配 starter tier sizing；**region pin** — 兩 service 必須同 region（contract 測試 `test_both_services_pin_a_region` 驗 `len(regions) == 1`，因為 pserv 內部 DNS 只在同 region 解析），pin `oregon`；**`runtime: docker`** — 兩 service 明示宣告（Render 預設 auto-detect 會跳過 Dockerfile 直接猜 stack 重建 image，契約測試 `test_both_services_use_docker_runtime` pin）；**`deploy/render/README.md`**（166 行）完整交付 Render 特有的 **2-stage post-deploy runbook**：Stage 1 = Blueprint apply + 填 3 個 secrets（API key / admin password / 暫留空兩個 URL env），Stage 2 = 從 dashboard 抄 `*.onrender.com` URL → 設 `OMNISIGHT_FRONTEND_ORIGIN` + `NEXT_PUBLIC_API_URL` → manual redeploy（強調 frontend **必須** rebuild 因為 `NEXT_PUBLIC_*` 是 build-time inlined）；full env matrix（backend 13 + frontend 3，每列標 Source = spec/prompt + Why 欄）；custom domain 章節提醒改域名後要更新兩個 URL env 並 rebuild frontend；4 caveats（persistent disk paid-tier only + no Docker-in-Docker 讓 ContainerManager sandbox 失效 + free tier 15 min spin-down + Blueprint env var templating 限制追蹤）；`Manual Deploy → Deploy latest commit` + auto-sync 兩條 imperative update path。**README 主頁**：在 DO + Railway 按鈕列後新增 Render badge `![Deploy to Render](render.com/images/deploy-to-render-button.svg)` 連到 `render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer`（Render 官方 one-click Blueprint flow，URL 不需 encode 因為 Render 接受 raw github.com URL 做 query param），spec + runbook 連結加到 bullet list 替掉原本的 "button follows in subsequent L11 steps" placeholder。**契約測試** `tests/test_render_blueprint.py`（28 cases）**28 passed in 0.03s** — (a) file-level (存在 + YAML 有效 + `services` 是 list 且 >=2)、(b) topology (`omnisight-backend` type=pserv + `omnisight-frontend` type=web + 兩 service runtime=docker + 兩 service 同 region)、(c) health check (backend `/api/v1/health` + frontend `/`)、(d) dockerCommand pin (uvicorn + backend.main:app / `--port 8000` / OMNISIGHT_WORKERS)、(e) inter-service wiring (`BACKEND_URL` 精確 `http://omnisight-backend:8000`)、(f) secret hygiene (4 credential envs 都 `sync: false` 且無 `value` key + spec 文字不含真實 key 前綴 `sk-ant-api`/`sk-proj-`/`AIzaSy`/`xai-`)、(g) production envs 三項 hard pin + K1 admin bootstrap 存在、(h) persistent disk (mountPath=/var/data + sizeGB>=1 + DB path 在 disk 內)、(i) CORS origin `sync: false`、(j) Dockerfile paths 實際存在（含 `./` prefix 處理）、(k) Blueprint `repo:` 與 README button URL 雙向一致 `limit5/OmniSight-Productizer` + branch=master、(l) README badge SVG + deploy URL + canonical repo + spec file link + runbook link、(m) companion README >800 bytes + 14 關鍵字（含 `Stage 2` / `pserv` / `sync: false` / `onrender.com` / `BACKEND_URL` / 6 個 OMNISIGHT_* env 等 — 擋 runbook 被截成 stub）；三個 deploy 契約測試 sibling 同 session 跑 **71 passed (28+16+27) in 0.07s** 零 regression。**零新 runtime 相依** — PyYAML 已在 backend/requirements.txt，stdlib pathlib/pytest 夠用。**scope 自律** — 只新增 3 個檔案（`deploy/render/render.yaml` + `deploy/render/README.md` + `tests/test_render_blueprint.py`）+ 2 行 README 修改（換 placeholder + 新 Deploy badge），沒動任何應用碼 / Dockerfile / compose / workflow / quick-start.sh / .env.example / 現有 DO/Railway spec 或測試)*
 - [x] 每個平台定義 services（backend + frontend）+ env vars（from `.env.example`）+ build commands *(done: L11 #4 — cross-platform parity contract `tests/test_deploy_parity_across_platforms.py` (22 cases, **22 passed in 0.02 s**, 93 passed combined with three sibling L11 suites — 27 DO + 16 Railway + 28 Render + 22 parity) attacks the one invariant the per-platform suites **structurally cannot catch**: drift between the three platforms. Per-platform tests each see exactly one spec file, so if a future PR adds a new production-required env to DO + Render but silently forgets Railway's dashboard-managed README matrix (Railway's `railway.json` schema has no env block — env vars live exclusively in `deploy/railway/README.md`'s operator-facing table), every per-platform suite stays green while the Railway operator gets a broken first-boot config-validation failure. **Triple-dimension contract** mirrors the TODO text: **(1) services** — `test_digitalocean_declares_backend_and_frontend_services` + `test_render_declares_backend_and_frontend_services` parse the spec `services:` list and assert both service names are present (DO uses bare `backend`/`frontend`, Render uses `omnisight-backend`/`omnisight-frontend` for pserv DNS determinism); `test_railway_topology_documents_both_services` checks the README text for both service names + both Dockerfile paths (Railway's asymmetric `railway.json` only configures backend, so frontend topology lives in the README — this is the sibling `test_spec_does_not_embed_env_block` in the Railway suite's mirror at the parity layer). **(2) env vars from .env.example** — module-level constant `CRITICAL_BACKEND_ENVS` lists the 8 production-required envs sourced directly from `.env.example`'s Internet-exposure block (OMNISIGHT_DEBUG / AUTH_MODE / COOKIE_SECURE / ADMIN_EMAIL / ADMIN_PASSWORD / LLM_PROVIDER / ANTHROPIC_API_KEY / FRONTEND_ORIGIN) + `CRITICAL_FRONTEND_ENVS` (NODE_ENV + BACKEND_URL); `test_env_example_defines_the_critical_backend_envs` is a sanity gate that the list hasn't drifted from the source-of-truth; then per platform: DO + Render parse `envs:` / `envVars:` keys and `issubset` against the critical list (DO/Render); Railway scans `deploy/railway/README.md` text for each env name (README is Railway's only env matrix). **Symmetric frontend coverage** — `test_digitalocean_frontend_covers_critical_frontend_envs` / `test_railway_frontend_env_matrix_covers_critical_frontend_envs` / `test_render_frontend_covers_critical_frontend_envs` — catches the footgun "platform X defines BACKEND_URL but forgets Y" (Railway's frontend has NO JSON so README is the only place that can miss this). **(3) build commands** — `test_both_dockerfiles_exist_at_repo_root` pins the foundation (the entire tri-platform parity collapses if `Dockerfile.backend` / `Dockerfile.frontend` are renamed/deleted); then per platform: DO asserts `dockerfile_path == "Dockerfile.backend"` / `"Dockerfile.frontend"` (DO schema key); Railway asserts `build.builder == "DOCKERFILE"` (else NIXPACKS auto-detect rebuilds from source ignoring the Dockerfile) + `build.dockerfilePath == "Dockerfile.backend"` + README documents `Dockerfile.frontend` (Railway's frontend Dockerfile selection happens via dashboard); Render asserts both `dockerfilePath` values (with `lstrip("./")` to accept either `./Dockerfile.backend` or `Dockerfile.backend` — Render accepts both); `test_backend_start_commands_all_name_uvicorn_on_backend_main` parses Railway `deploy.startCommand` + Render `dockerCommand` and asserts both contain `uvicorn` + `backend.main:app` (DO inherits Dockerfile CMD verbatim, pinned by `test_dockerfile_image_size.py`). **Production hard-pin value parity** — `PRODUCTION_HARD_PIN_VALUES` dict maps the three `.env.example` Internet-exposure envs to their required values (DEBUG=false / AUTH_MODE=strict / COOKIE_SECURE=true), then **three symmetric tests** — `test_digitalocean_production_hard_pins_match_env_example` + `test_render_production_hard_pins_match_env_example` parse spec envs and compare values with `_normalize_env_value()` helper that handles YAML bool vs quoted-string ambiguity (Render allows `value: "false"` OR `value: false` — both load to different Python types; normalize to lowercase string); `test_railway_production_hard_pins_documented_with_values` scans the README with line-level regex (every line containing the env name must ALSO contain the expected value — catches "row drops the value cell while keeping the name"). **Meta discovery tests** — `test_all_three_platform_dirs_exist` (fails BEFORE any per-platform suite can fixture-skip — so deleting `deploy/<platform>/` is caught at the parity layer) + `test_all_three_deploy_buttons_present_in_root_readme` (checks `cloud.digitalocean.com/apps/new` / `railway.com/new/template` / `render.com/deploy` URLs all in main README — users land on README not the subdirs). **Cross-platform secret hygiene** — `test_no_live_api_keys_leaked_across_any_platform_spec` scans all 6 deploy files (3 specs + 3 READMEs) for real key prefixes (`sk-ant-api` / `sk-proj-` / `AIzaSy` / `xai-`) with context-aware filter: the README instructional string `"sk-ant-..."` passes (after-prefix char is `.`), `"sk-ant-apiabc123..."` fails (after-prefix first-non-dot char is alnum). Per-platform suites each have `test_no_plaintext_api_keys_in_spec` — this parity-layer check surfaces the violation with all-three paths in one error message for one-grep triage. **Module-level `CRITICAL_BACKEND_ENVS` list + `CRITICAL_FRONTEND_ENVS` list + `PRODUCTION_HARD_PIN_VALUES` dict** — these are the contract **surface area**: add a new env to `.env.example`'s Internet-exposure block and you update ONE list here; the three per-platform assertions then trigger and point each platform's owner at the diff. This replaces the alternative of "duplicate the env name in three per-platform suites" which would have immediate drift. **Zero new runtime dep** — PyYAML already in backend/requirements.txt + stdlib `json`/`pathlib`/`pytest`. **Scope 自律** — one new file `tests/test_deploy_parity_across_platforms.py` (344 行，包含 docstring、fixtures、20 個 assertion tests + 2 個 meta test + shared helpers `_do_service` / `_do_env_keys` / `_render_service` / `_render_env_keys` / `_normalize_env_value`)；沒動任何應用碼 / Dockerfile / compose / workflow / quick-start.sh / .env.example / 既有 DO/Railway/Render spec 或三份 README 或三份 sibling test — 純粹 add-only 的 parity 契約層。**Verification run**：`python3 -m pytest tests/test_deploy_parity_across_platforms.py tests/test_digitalocean_app_spec.py tests/test_railway_spec.py tests/test_render_blueprint.py -v` → **93 passed in 0.10 s**（22 new + 71 sibling），零 regression)*
 - [x] README.md 加 Deploy 按鈕 badges（one-click 跳轉到平台佈署頁） *(done: L11 #5 — badges themselves already landed incidentally during L11 #1/#2/#3 (each spec phase co-shipped its own button), but the **button UX was only pinned by a single presence-check assertion** in `test_deploy_parity_across_platforms.py::test_all_three_deploy_buttons_present_in_root_readme` that checks bare URL substrings — which passes even if someone reduces the rendered affordance to a text link, swaps to an off-brand badge mirror, drops alt text, or points the one-click URL at the wrong repo/branch. This step closes that coverage gap with a dedicated `tests/test_readme_deploy_buttons.py` (11 cases, **11 passed in 0.03 s**, 104 passed combined with 4 L11 siblings) focused **only on the button surface itself**, partitioned into 6 sections: (1) **dedicated section** — `test_deploy_section_is_near_top_of_readme` extracts the `### One-click cloud deploy` block with a single regex (`r"###\s+One-click cloud deploy.*?(?=\n##\s|\n###\s|\Z)"`) and asserts it starts before line 200 (currently at line 94; >200 lines means the section drifted into the appendix where first-time visitors won't see it), `test_only_one_deploy_section` asserts exactly 1 occurrence (prevents a future PR from duplicating the block into an appendix and splitting user attention); (2) **image-badge markdown** — `BADGE_MARKDOWN_RE = r"\[!\[(?P<alt>[^\]]+)\]\((?P<badge>https?://[^\s)]+)\)\]\((?P<href>https?://[^\s)]+)\)"` parses each `[![alt](badge.svg)](deploy-url)` triple and keys it by deploy-URL host (digitalocean.com / railway.com / render.com) — `test_all_three_platforms_have_image_badges` asserts all three platforms produce image-badge matches (catches the regression where someone "fixes" a rendering bug by converting `[![alt](svg)](url)` → `[text](url)` and loses the visual affordance entirely), `test_each_badge_has_non_empty_alt_text` asserts non-empty alt text ≥6 chars (accessibility + graceful SVG-404 fallback); (3) **official provider SVG hosts** — `EXPECTED_BADGE_HOSTS = {digitalocean: "www.deploytodo.com", railway: "railway.com", render: "render.com"}` — `test_badges_served_from_official_provider_hosts` asserts each badge URL contains the expected host AND ends with `.svg` (provider-rebrand survival: Render rebranded its badge in 2024 and Railway in 2025 — pointing at the provider's own URL auto-updates; img.shields.io approximations or third-party mirrors rot); (4) **canonical-repo URL targets** — three per-platform tests (`test_digitalocean_deploy_url_points_at_canonical_repo` / `test_railway_deploy_url_points_at_canonical_repo` / `test_render_deploy_url_points_at_canonical_repo`) each verify the URL shape specific to that provider: DO asserts `cloud.digitalocean.com/apps/new` prefix + `limit5/OmniSight-Productizer` slug + `tree/master` branch (matching `app.yaml`'s `github.repo`/`github.branch`), Railway asserts `railway.com/new/template` prefix + `template=` query + canonical slug accepting either raw or URL-encoded (`limit5%2FOmniSight-Productizer`), Render asserts `render.com/deploy` prefix + `repo=` query + canonical slug (no branch segment because Render reads the default branch from the Blueprint file itself — DO and Render have different URL shapes and this test encodes each); **why this matters** — a rename of the GitHub org (or a fork) would currently let the sibling parity test pass while silently routing clicks to the wrong repo; (5) **companion runbook + spec links** — `COMPANION_RUNBOOKS` + `COMPANION_SPECS` dicts map each platform to its `deploy/<platform>/README.md` + spec file (`app.yaml` / `railway.json` / `render.yaml`), then `test_deploy_section_links_to_every_companion_runbook` + `test_deploy_section_links_to_every_platform_spec` assert each path appears in the section text AND `.is_file()` on disk (closes the gap where a file rename passes every per-platform test — they read the file directly by its new path — but leaves a 404 in README); (6) **visual hierarchy** — `test_badges_appear_before_runbook_links_in_section` uses `.find("[![")` + `.find("\n- ")` and asserts the badge offset < bullet offset (primary CTA before reference material; reversing the order buries the one-click button below a wall of text). **Contract partition rationale** — `test_deploy_parity_across_platforms.py::test_all_three_deploy_buttons_present_in_root_readme` keeps the substring-level presence check (simple regression detector), this new file handles structural/UX/target-integrity concerns; the two files address different regression classes and neither is redundant. **Zero new runtime dep** — stdlib `re` + `pathlib` + `pytest`. **Scope 自律** — one new file `tests/test_readme_deploy_buttons.py` (277 行) + 0 changes to `README.md` (badges already present and pass all 11 assertions as-shipped from L11 #1/#2/#3, which is the ideal outcome — the section reached the target state before the coverage assertions landed, confirming the three earlier phases delivered the desired UX); 0 changes to any spec / runbook / application code. **Verification run**：`python3 -m pytest tests/test_readme_deploy_buttons.py tests/test_deploy_parity_across_platforms.py tests/test_digitalocean_app_spec.py tests/test_railway_spec.py tests/test_render_blueprint.py -v` → **104 passed in 0.11 s**（11 new + 93 sibling），零 regression)*
-- [x] 預估：**1 day** *(done: L11 #6 capstone — L11 #1-#5 各 pin 一個 precondition（DO spec / Railway spec / Render spec / cross-platform parity / README button UX），此項目 pin 住 **emergent budget + acceptance claim**——「L11 整體在 1-day budget 內交付且五個 sub-item 合力滿足驗收條件：點 Deploy 按鈕 → 填 env → 3 分鐘內 public URL + Bootstrap wizard」。新增 `tests/test_l11_budget_capstone.py`（27 cases，**27 passed in 0.08s**，合計 5 sibling 跑 **131 passed in 0.12s** 零 regression）延續 L10 #5 capstone 模式（emergent contract 架在 sibling precondition 之上），覆蓋 sibling 結構性無法觸及的 7 個層面：(1) **TODO.md 預算算術** — `test_l11_block_declares_one_day_budget` 用 `re.search(r"-\s+\[[ xO]\]\s+預估：\*\*1\s+day\*\*")` 接受 `[ ]` / `[x]` / `[O]` 三態（test 在 TODO.md 更新前/後都要過，所以不能 hard-pin checkbox 狀態，load-bearing claim 是 "1 day" 數字本身）；`test_total_budget_line_includes_l11_one_day` assert 字串 `"L11 (1)"` 出現；`test_total_estimate_sums_consistently` 用 substring pin 完整算術行 `"**總預估**：L1-L8 (4.5) + L9 (1) + L10 (0.5) + L11 (1) = **~7 day**"` — 任何 L11 budget 變動（如有人改成 2 day）但忘同步總預估會立刻炸；`test_l11_implementation_items_all_checked` parse L11 section 內 `- [ ]` 且不含 "預估：" 的行、assert list 為空（確保除 budget line 外沒遺漏未完成項目）。(2) **驗收文字保全** — `test_acceptance_lists_bootstrap_wizard_in_cloud_path` assert "Bootstrap wizard" 關鍵詞在 L11 block 出現，這是 K1 must_change_password 契約的文字錨點；`test_acceptance_pins_three_minute_cloud_sla` 用 `re.search(r"3\s*分鐘")` + 英文 fallback `\b3\s*minute` 雙形式接受，擋「有人在 review churn 中把 '3 分鐘' 悄悄改成 '5 分鐘' 或 'in minutes'」的 SLA 軟化；`test_acceptance_names_readme_deploy_button` assert "README" + "Deploy" 同出現。(3) **三平台 spec + runbook 完整性** — parametrize 跑 3 platforms × 2 assertions：`test_every_platform_ships_spec_and_runbook` 斷言 `deploy/<platform>/{spec, README.md}` 兩個檔案都在（spec 無 runbook 會讓 operator 在 post-deploy env prompt 前困住；runbook 無 spec 讓 Deploy button 沒東西 apply）；`test_every_runbook_is_non_stub` 斷言 runbook >500 bytes（現況 DO ~3.2KB / Railway ~4.1KB / Render ~7.3KB 都有充足 slack，500 B floor 擋「stub 化」regression）。(4) **Bootstrap wizard wiring 跨三平台** — parametrize 跑 3 platforms × 2 envs：`test_platform_wires_admin_bootstrap_envs` 斷言每平台 combined spec+runbook 文字都包含 `OMNISIGHT_ADMIN_EMAIL` + `OMNISIGHT_ADMIN_PASSWORD`（K1 first-boot seeder 需要這兩個 env 才能建 must_change_password 的初始 admin），**關鍵是接受「combined spec+runbook 任一處」** — Railway 的 `railway.json` schema 根本沒有 env block，env 只能住 `deploy/railway/README.md`，所以不能 assert per-spec，必須 assert combined surface；`test_at_least_one_runbook_explains_must_change_password` 弱形式斷言（三個 runbook 至少一份解釋）— 因為 DO runbook 設計上精簡並委派後端文檔，Render + Railway runbook 有解釋，weak-form assertion 降 churn 敏感度而不放過真的遺失。(5) **Sibling test file inventory** — `test_sibling_test_file_exists` parametrize 5 個 sibling 路徑分別斷 `.is_file()`（一個一個 assert 讓 error message 指出具體缺失的 sibling）；`test_sibling_suite_meets_baseline_function_count` 計 `^def test_` 總數 ≥ 94 baseline（實測 observed at close-out），**刻意區分**「pytest 收集的 104 cases」vs「實際 94 個 test function」— parametrize 展開時 collected count 會變動，但 function count 才是「真的有新 test 被加進來 vs 假裝 parametrize 多一個 value」的穩定度量，docstring + constant comment 把這區分寫死擋未來搞混（最初 capstone 寫成 104 當場被測試抓到 — 自己出 bug 自己 catch 正是契約測試該做的事）。(6) **Zero new runtime dep claim** — `test_l11_introduced_no_new_runtime_deps` 掃 5 sibling + capstone 自己的 import、collect 所有 top-level module name，減去 stdlib allowlist（re/json/pathlib/os/sys/typing/collections/itertools/functools/__future__）+ 第三方 allowlist（yaml/pytest），剩下 set 必須空；同時 sanity assert `pyyaml` 已在 `backend/requirements.txt`（擋 `PyYAML` 被從 requirements 摘掉後 3 個 YAML spec + 測試集體垮）。(7) **Emergent 3-min deploy chain** — `test_deploy_chain_is_buildable_from_repo_alone` assert `Dockerfile.backend` + `Dockerfile.frontend` 都在 repo root（所有 3 個 spec 都 reference 它們，no-source-build-only flow 才能達 3-min SLA，per-platform test 各自檢自己的 Dockerfile reference 但沒人同時檢兩個）；`test_both_multi_service_specs_declare_two_services` load DO app.yaml + Render render.yaml 並斷言 `services` list 長度 ≥2（Railway 被排除因 schema 是 single-service-per-file，該 schema 差異由 `test_railway_spec.py::test_spec_does_not_embed_env_block` 涵蓋）；`test_readme_deploy_section_contains_all_three_platforms` assert "DigitalOcean" / "Railway" / "Render" 名稱都在 README（L11 #5 已驗 deploy-URL host 字串，這層補充 user-readable platform name — 兩層防禦覆蓋不同 regression）。**契約分層 rationale** — L11 #1-#5 每個 sibling 各看自己的一角（single platform / UX surface），此 capstone **結構上不重複** sibling 的工作，只看 sibling **組合起來是否滿足驗收**：budget arithmetic / acceptance text preservation / 三平台對稱性 / K1 bootstrap wiring / sibling inventory / no new dep / emergent 3-min chain — 這 7 個維度沒有任何一個可以從 single sibling 導出。**Scope 自律** — 只新增 1 個檔案 `tests/test_l11_budget_capstone.py`（~420 行，27 assertion tests + 3 pytest.fixture + 2 module constant + 1 shared PLATFORMS table + 1 SIBLING_TEST_FILES list）；沒動任何應用碼 / Dockerfile / compose / workflow / quick-start.sh / .env.example / 3 個 spec / 3 個 runbook / 5 個 sibling test — 純粹 add-only 的 capstone 契約層。**Verification**：`python3 -m pytest tests/test_l11_budget_capstone.py tests/test_readme_deploy_buttons.py tests/test_deploy_parity_across_platforms.py tests/test_digitalocean_app_spec.py tests/test_railway_spec.py tests/test_render_blueprint.py` → **131 passed in 0.12 s**（27 capstone + 11 L11#5 + 22 parity + 27 DO + 16 Railway + 28 Render），零 regression)*
+- 預估：**1 day** *(done: L11 #6 capstone — L11 #1-#5 各 pin 一個 precondition（DO spec / Railway spec / Render spec / cross-platform parity / README button UX），此項目 pin 住 **emergent budget + acceptance claim**——「L11 整體在 1-day budget 內交付且五個 sub-item 合力滿足驗收條件：點 Deploy 按鈕 → 填 env → 3 分鐘內 public URL + Bootstrap wizard」。新增 `tests/test_l11_budget_capstone.py`（27 cases，**27 passed in 0.08s**，合計 5 sibling 跑 **131 passed in 0.12s** 零 regression）延續 L10 #5 capstone 模式（emergent contract 架在 sibling precondition 之上），覆蓋 sibling 結構性無法觸及的 7 個層面：(1) **TODO.md 預算算術** — `test_l11_block_declares_one_day_budget` 用 `re.search(r"-\s+\[[ xO]\]\s+預估：\*\*1\s+day\*\*")` 接受 `[ ]` / `[x]` / `[O]` 三態（test 在 TODO.md 更新前/後都要過，所以不能 hard-pin checkbox 狀態，load-bearing claim 是 "1 day" 數字本身）；`test_total_budget_line_includes_l11_one_day` assert 字串 `"L11 (1)"` 出現；`test_total_estimate_sums_consistently` 用 substring pin 完整算術行 `"**總預估**：L1-L8 (4.5) + L9 (1) + L10 (0.5) + L11 (1) = **~7 day**"` — 任何 L11 budget 變動（如有人改成 2 day）但忘同步總預估會立刻炸；`test_l11_implementation_items_all_checked` parse L11 section 內 `- [ ]` 且不含 "預估：" 的行、assert list 為空（確保除 budget line 外沒遺漏未完成項目）。(2) **驗收文字保全** — `test_acceptance_lists_bootstrap_wizard_in_cloud_path` assert "Bootstrap wizard" 關鍵詞在 L11 block 出現，這是 K1 must_change_password 契約的文字錨點；`test_acceptance_pins_three_minute_cloud_sla` 用 `re.search(r"3\s*分鐘")` + 英文 fallback `\b3\s*minute` 雙形式接受，擋「有人在 review churn 中把 '3 分鐘' 悄悄改成 '5 分鐘' 或 'in minutes'」的 SLA 軟化；`test_acceptance_names_readme_deploy_button` assert "README" + "Deploy" 同出現。(3) **三平台 spec + runbook 完整性** — parametrize 跑 3 platforms × 2 assertions：`test_every_platform_ships_spec_and_runbook` 斷言 `deploy/<platform>/{spec, README.md}` 兩個檔案都在（spec 無 runbook 會讓 operator 在 post-deploy env prompt 前困住；runbook 無 spec 讓 Deploy button 沒東西 apply）；`test_every_runbook_is_non_stub` 斷言 runbook >500 bytes（現況 DO ~3.2KB / Railway ~4.1KB / Render ~7.3KB 都有充足 slack，500 B floor 擋「stub 化」regression）。(4) **Bootstrap wizard wiring 跨三平台** — parametrize 跑 3 platforms × 2 envs：`test_platform_wires_admin_bootstrap_envs` 斷言每平台 combined spec+runbook 文字都包含 `OMNISIGHT_ADMIN_EMAIL` + `OMNISIGHT_ADMIN_PASSWORD`（K1 first-boot seeder 需要這兩個 env 才能建 must_change_password 的初始 admin），**關鍵是接受「combined spec+runbook 任一處」** — Railway 的 `railway.json` schema 根本沒有 env block，env 只能住 `deploy/railway/README.md`，所以不能 assert per-spec，必須 assert combined surface；`test_at_least_one_runbook_explains_must_change_password` 弱形式斷言（三個 runbook 至少一份解釋）— 因為 DO runbook 設計上精簡並委派後端文檔，Render + Railway runbook 有解釋，weak-form assertion 降 churn 敏感度而不放過真的遺失。(5) **Sibling test file inventory** — `test_sibling_test_file_exists` parametrize 5 個 sibling 路徑分別斷 `.is_file()`（一個一個 assert 讓 error message 指出具體缺失的 sibling）；`test_sibling_suite_meets_baseline_function_count` 計 `^def test_` 總數 ≥ 94 baseline（實測 observed at close-out），**刻意區分**「pytest 收集的 104 cases」vs「實際 94 個 test function」— parametrize 展開時 collected count 會變動，但 function count 才是「真的有新 test 被加進來 vs 假裝 parametrize 多一個 value」的穩定度量，docstring + constant comment 把這區分寫死擋未來搞混（最初 capstone 寫成 104 當場被測試抓到 — 自己出 bug 自己 catch 正是契約測試該做的事）。(6) **Zero new runtime dep claim** — `test_l11_introduced_no_new_runtime_deps` 掃 5 sibling + capstone 自己的 import、collect 所有 top-level module name，減去 stdlib allowlist（re/json/pathlib/os/sys/typing/collections/itertools/functools/__future__）+ 第三方 allowlist（yaml/pytest），剩下 set 必須空；同時 sanity assert `pyyaml` 已在 `backend/requirements.txt`（擋 `PyYAML` 被從 requirements 摘掉後 3 個 YAML spec + 測試集體垮）。(7) **Emergent 3-min deploy chain** — `test_deploy_chain_is_buildable_from_repo_alone` assert `Dockerfile.backend` + `Dockerfile.frontend` 都在 repo root（所有 3 個 spec 都 reference 它們，no-source-build-only flow 才能達 3-min SLA，per-platform test 各自檢自己的 Dockerfile reference 但沒人同時檢兩個）；`test_both_multi_service_specs_declare_two_services` load DO app.yaml + Render render.yaml 並斷言 `services` list 長度 ≥2（Railway 被排除因 schema 是 single-service-per-file，該 schema 差異由 `test_railway_spec.py::test_spec_does_not_embed_env_block` 涵蓋）；`test_readme_deploy_section_contains_all_three_platforms` assert "DigitalOcean" / "Railway" / "Render" 名稱都在 README（L11 #5 已驗 deploy-URL host 字串，這層補充 user-readable platform name — 兩層防禦覆蓋不同 regression）。**契約分層 rationale** — L11 #1-#5 每個 sibling 各看自己的一角（single platform / UX surface），此 capstone **結構上不重複** sibling 的工作，只看 sibling **組合起來是否滿足驗收**：budget arithmetic / acceptance text preservation / 三平台對稱性 / K1 bootstrap wiring / sibling inventory / no new dep / emergent 3-min chain — 這 7 個維度沒有任何一個可以從 single sibling 導出。**Scope 自律** — 只新增 1 個檔案 `tests/test_l11_budget_capstone.py`（~420 行，27 assertion tests + 3 pytest.fixture + 2 module constant + 1 shared PLATFORMS table + 1 SIBLING_TEST_FILES list）；沒動任何應用碼 / Dockerfile / compose / workflow / quick-start.sh / .env.example / 3 個 spec / 3 個 runbook / 5 個 sibling test — 純粹 add-only 的 capstone 契約層。**Verification**：`python3 -m pytest tests/test_l11_budget_capstone.py tests/test_readme_deploy_buttons.py tests/test_deploy_parity_across_platforms.py tests/test_digitalocean_app_spec.py tests/test_railway_spec.py tests/test_render_blueprint.py` → **131 passed in 0.12 s**（27 capstone + 11 L11#5 + 22 parity + 27 DO + 16 Railway + 28 Render），零 regression)*
 
 **總預估**：L1-L8 (4.5) + L9 (1) + L10 (0.5) + L11 (1) = **~7 day**
 
@@ -1766,7 +1766,7 @@ Legend:
 - [x] **UI — decision-dashboard 延伸**：PEP HELD 項目自動出現在 decision queue（kind=`pep_tool_intercept`，列掛 PEP chip）
 - [x] **UI — audit-panel 延伸**：新增 kind filter tabs（`All Actions | PEP | Decisions | Auth`），PEP 篩選過濾 `action.startsWith("pep.")`
 - [x] **UI — toast-center 延伸**：PEP HOLD 事件透過 DE 的 `decision_pending` 自動上浮（severity=risky/destructive），並顯示 PEP chip；approve 後 toast 自動消失
-- [x] 預估：**3.5 day**（backend 2d + UI 1.5d）**✅ AI completed 2026-04-17**
+- 預估：**3.5 day**（backend 2d + UI 1.5d）**✅ AI completed 2026-04-17**
 
 ### R1. ChatOps Interactive Integration（Discord / Teams / Line 雙向互動）(#307)
 - [x] `backend/chatops_bridge.py`：統一 ChatOps interface（`send_interactive(channel, message, buttons)` / `on_button_click(callback)` / `on_command(cmd, handler)`）
@@ -1789,7 +1789,7 @@ Legend:
   - [x] 歷史捲動 + 搜尋（最近 100 條 ChatOps 訊息快取在前端 state）
 - [x] **UI — notification-center 延伸**：P2 severity 通知裡加 inline text input 讓 operator 直接 inject hint 而不用切到 ChatOps Mirror
 - [x] 整合測試：mock Discord webhook → button click → PEP approve → agent resume；inject hint → agent picks up hint → audit recorded
-- [x] 預估：**4 day**（backend 2.5d + UI 1.5d）**✅ AI completed 2026-04-17**
+- 預估：**4 day**（backend 2.5d + UI 1.5d）**✅ AI completed 2026-04-17**
 
 ### R2. Semantic Entropy Monitor（語意熵值偵測）(#308)
 - [x] `backend/semantic_entropy.py`：每 N 輪（預設 3）對 agent 最近 output 做 embedding similarity 計算
@@ -1809,7 +1809,7 @@ Legend:
   - [x] 點擊 entropy sparkline 展開「最近 5 輪 output 摘要」popover（方便人工判斷是否真的卡住）
 - [x] **UI — ops-summary-panel 延伸**：加「Highest Entropy Agent」badge（即時顯示 entropy 最高的 agent 名 + 分數）
 - [x] 整合測試：mock 5 輪相似 output → entropy > threshold → deadlock event 發出 + UI sparkline 變紅
-- [x] 預估：**2.5 day**（backend 1.5d + UI 1d）**✅ AI completed 2026-04-17**
+- 預估：**2.5 day**（backend 1.5d + UI 1d）**✅ AI completed 2026-04-17**
 
 ### R3. Scratchpad Memory Offload + Auto-Continuation（心智卸載 + 自動續寫）(#309)
 - [x] `backend/scratchpad.py`：per-agent persistent scratchpad file（`data/agents/<agent_id>/scratchpad.md`）
@@ -1828,7 +1828,7 @@ Legend:
   - [x] 若 agent crash 且有 scratchpad → 卡片顯示「Recoverable ●」badge
 - [x] **UI — Auto-Continuation Indicator**：在 agent message stream 中，auto-continued 的訊息標注「↩ auto-continued」小 tag
 - [x] 整合測試：10 輪循環 → scratchpad 自動寫入；mock crash → reload scratchpad → agent 接續；max_tokens truncation → auto-continue → 拼接正確
-- [x] 預估：**3 day**（backend 2d + UI 1d）**✅ AI completed 2026-04-17**
+- 預估：**3 day**（backend 2d + UI 1d）**✅ AI completed 2026-04-17**
 
 ### R4. CATC State Snapshot 斷點續傳 (#310)
 - [ ] O0 `TaskCard` dataclass 擴充：新增 `state_snapshot: Optional[str]`（BASE64 encoded JSON，含 scratchpad + tool_call_history + partial_output + turn_counter）
@@ -1930,7 +1930,7 @@ Legend:
 - [ ] Caddy response headers 清理：移除 `X-Powered-By` / `Via` 等框架指紋
 - [ ] Error response 遮蔽：prod 只回 `{"error": "...", "trace_id": "..."}` 不含 stack trace / 內部 module path
 - [ ] 測試：prod mode 下 `/docs` → 404；`/api/v1/health` 不含 version；error response 不含 traceback
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### S2-1. Container Readonly Filesystem（不可變基建）(#342)
 - [ ] `docker-compose.prod.yml` 所有 app service 加 `read_only: true`
@@ -1938,14 +1938,14 @@ Legend:
 - [ ] Docker volumes（`omnisight-data` / `omnisight-artifacts` / `omnisight-sdks`）保持可寫
 - [ ] 驗證：container 啟動後 `touch /app/test` → `Read-only file system` error
 - [ ] 驗證：DB 讀寫正常（走 volume）、backend 正常運作
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### S2-2. Response Timing Jitter（防 Timing Side-channel）(#343)
 - [ ] `backend/main.py` 新增 middleware：每個 response 加 50-150ms random delay（`asyncio.sleep(random.uniform(0.05, 0.15))`）
 - [ ] 只在 `settings.env == "production"` 啟用（dev 不加 delay）
 - [ ] 排除 `/healthz` + `/readyz`（健康檢查需要即時回應）
 - [ ] 效果：attacker 無法透過 response time 差異推測「資源是否存在」或「查詢是否命中」
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### S2-3. API 行為指紋 + User Behavior Analytics (UBA)（#344）
 - [ ] `backend/uba.py`：Session-level API 呼叫序列追蹤器
@@ -1964,7 +1964,7 @@ Legend:
 - [ ] SSE event：`uba.anomaly`（session_id / deviation_score / triggered_rules / action_taken）
 - [ ] Metrics：`uba_anomaly_total{rule}` / `uba_block_total{level}` / `uba_false_positive_total`
 - [ ] Dashboard UI（`components/omnisight/uba-panel.tsx`）：即時顯示 top suspicious sessions + deviation score trend
-- [ ] 預估：**3 day**
+- 預估：**3 day**
 
 ### S2-4. Honeypot Endpoints（蜜罐端點）(#345)
 - [ ] `backend/routers/honeypot.py`：10 個「看起來脆弱」的 dummy endpoints
@@ -1981,7 +1981,7 @@ Legend:
 - [ ] 任何觸碰 honeypot 的 request → 自動觸發 UBA（S2-3）最高級別封鎖
 - [ ] 審計：所有 honeypot 觸碰進 hash-chain audit_log `honeypot.triggered`
 - [ ] 不影響正常使用者（這些路徑在正常操作中不會被訪問）
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### S2-5. Cloudflare WAF + Bot Management 配置 (#346)
 - [ ] `docs/ops/cloudflare_waf_setup.md`：WAF 設定 runbook
@@ -1996,7 +1996,7 @@ Legend:
     - [ ] Rule 5：block User-Agent 為空的 request
   - [ ] Bot Fight Mode：開啟（自動 challenge 已知 bot）
   - [ ] Security Level：Medium（正常）→ 遇攻擊時可臨時切 High / I'm Under Attack
-- [ ] 預估：**0.5 day**（主要是 Cloudflare Dashboard 設定 + 寫 runbook）
+- 預估：**0.5 day**（主要是 Cloudflare Dashboard 設定 + 寫 runbook）
 
 ### S2-6. HSTS Preload + Security.txt + 安全 headers 補齊 (#347)
 - [ ] HSTS header 加 `preload`：`Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`
@@ -2005,7 +2005,7 @@ Legend:
 - [ ] CSP 加 `report-uri` / `report-to`：CSP 違規時收到通知
 - [ ] `X-Permitted-Cross-Domain-Policies: none`（防 Flash/PDF cross-domain）
 - [ ] Caddy 加 `Cache-Control: no-store` 對 API responses（防 proxy cache 洩漏 sensitive data）
-- [ ] 預估：**0.5 day**
+- 預估：**0.5 day**
 
 ### S2-7. eBPF Runtime Monitoring（Falco / Tetragon）(#348)
 - [ ] `deploy/security/falco/falco_rules.yaml`：自訂規則
@@ -2016,7 +2016,7 @@ Legend:
   - [ ] 偵測 privilege escalation（capability change / setuid）
 - [ ] `docker-compose.prod.yml` 加 Falco sidecar（optional `--profile security`）
 - [ ] Falco alert → 寫入 audit_log + SSE `security.kernel_alert` + ChatOps L2 通知
-- [ ] 預估：**2 day**
+- 預估：**2 day**
 
 ### S2-8. GitHub Repo 安全 + Secret Scanning (#349)
 - [ ] 確認 GitHub repo 設為 Private（如果是 Public → 立即切 Private）
@@ -2024,7 +2024,7 @@ Legend:
 - [ ] 開啟 Dependabot alerts（與 N2 Renovate 互補，多一層）
 - [ ] Branch protection：main 需 PR + 至少 1 reviewer + status check pass
 - [ ] `.gitignore` 審計：確認所有 secret 檔案都被排除（`.env` / `*.pem` / `*.key` / `credentials*`）
-- [ ] 預估：**0.5 day**（主要是 GitHub Settings 操作）
+- 預估：**0.5 day**（主要是 GitHub Settings 操作）
 
 **Priority S2 總預估**：**8.5 day**（solo ~2 週，可與其他 Priority 並行）
 
@@ -2368,7 +2368,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 統一 error hierarchy：`PaymentError` / `CardDeclinedError` / `SubscriptionNotFoundError` / `WebhookVerificationError`
 - [ ] Billing event SSE：`billing.payment_succeeded` / `billing.payment_failed` / `billing.subscription_updated`
 - [ ] 測試：mock gateway 跑完整 lifecycle（create → subscribe → usage → invoice → cancel）
-- [ ] 預估：**1.5 day**
+- 預估：**1.5 day**
 
 ### T1. Stripe 整合（主要金流）(#327)
 - [ ] `backend/billing/stripe_gateway.py`：實作 `PaymentGateway` ABC 的所有方法
@@ -2381,7 +2381,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Stripe Customer Portal link：讓客戶自助管理訂閱 / 更換卡片 / 查看發票
 - [ ] Stripe Tax（選配）：自動依客戶地區計算稅額
 - [ ] 測試：mock Stripe API → checkout → 3DS → subscribe → usage report → invoice → webhook → portal
-- [ ] 預估：**3.5 day**
+- 預估：**3.5 day**
 
 ### T2. 綠界 ECPay 整合（備用一：台灣本地）(#328)
 - [ ] `backend/billing/ecpay_gateway.py`：實作 `PaymentGateway` ABC
@@ -2393,7 +2393,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Webhook（`OrderResultURL` POST）：驗證 `CheckMacValue` + 訂單狀態更新
 - [ ] 台灣發票整合（選配）：ECPay 電子發票 API（`E-Invoice`）
 - [ ] 測試：mock ECPay API → checkout redirect → 回傳 → 定期定額 → 用量補扣 → webhook 驗簽
-- [ ] 預估：**3 day**
+- 預估：**3 day**
 
 ### T3. PayPal 整合（備用二：國際）(#329)
 - [ ] `backend/billing/paypal_gateway.py`：實作 `PaymentGateway` ABC
@@ -2404,7 +2404,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Webhook（`PAYMENT.SALE.COMPLETED` / `BILLING.SUBSCRIPTION.*`）：驗簽 + 狀態同步
 - [ ] PayPal Disputes 處理：`CUSTOMER.DISPUTE.CREATED` → 自動回覆交易證據（agent 執行記錄 + token 用量明細）
 - [ ] 測試：mock PayPal API → checkout → 3DS redirect → subscribe → usage capture → webhook → dispute
-- [ ] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### T4. Token 用量追蹤 + Metered Billing 引擎 (#330)
 - [ ] `backend/billing/token_meter.py`：agent 執行完畢 → `record_usage(tenant_id, agent_id, task_id, input_tokens, output_tokens, model, cost_usd)`
@@ -2417,7 +2417,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] SSE event：`billing.usage.tick`（每 10 次 record 推一次 → 前端 dashboard 即時更新）
 - [ ] Metrics：`billing_tokens_total{tenant_id, model}` / `billing_revenue_usd_total{tenant_id, plan}`
 - [ ] 測試：record 100 次 usage → 累計正確 → Stripe usage_record 呼叫正確 → 配額檢查 soft/hard 正確
-- [ ] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### T5. 訂閱管理（方案 / 試用 / 升降級 / 取消）(#331)
 - [ ] `backend/billing/plans.py`：5 方案定義（Free / Starter / Pro / Business / Enterprise）+ 每方案 token 含量 + 超量單價 + 功能 feature flags
@@ -2432,7 +2432,7 @@ tests / HIL recipes / doc templates) per framework contract.
   - [ ] `GET /billing/usage` — 當月 token 用量明細
   - [ ] `GET /billing/invoices` — 歷史帳單
 - [ ] 測試：Free→Pro 升級 + proration 計算正確 + Pro→Starter 降級 + 取消 grace period
-- [ ] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### T6. Pricing Page + Checkout Flow UI (#332)
 - [ ] `app/pricing/page.tsx`：定價頁面——5 方案對比表 + 月/年切換 + 功能對照 + CTA 按鈕
@@ -2442,7 +2442,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 付款成功動畫 + 重導到 dashboard / workspace
 - [ ] 已訂閱使用者：CTA 變成「管理方案」→ 跳轉 T7 Customer Portal
 - [ ] Responsive：desktop + tablet + mobile 三版排版
-- [ ] 預估：**2 day**
+- 預估：**2 day**
 
 ### T7. Customer Portal（帳單管理 + 發票 + 用量明細）(#333)
 - [ ] `app/settings/billing/page.tsx`：Settings 內的帳單管理頁
@@ -2451,7 +2451,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 帳單歷史（`components/omnisight/invoice-history.tsx`）：每月 invoice 列表 + PDF 下載 + 付款狀態 badge
 - [ ] 付款方式管理：更換信用卡 / 查看到期日（Stripe Customer Portal link / ECPay 重新授權 / PayPal 管理）
 - [ ] 升降級入口：方案對比 + one-click 升級 / 確認降級
-- [ ] 預估：**2.5 day**
+- 預估：**2.5 day**
 
 ### T8. Webhook 處理 + 付款失敗重試 + Dunning (#334)
 - [ ] `backend/billing/webhook_handler.py`：統一 webhook 入口 → 驗簽 → 分派到 gateway adapter → 更新訂閱/付款狀態
@@ -2464,7 +2464,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] Dunning email 範本：3 封（首次失敗 / 7 天警告 / 14 天停權）
 - [ ] Webhook audit：所有 webhook event 進 hash-chain `audit_log`
 - [ ] 測試：mock payment_failed → 3 次重試 → 降級 → 停權 → 恢復付款 → 自動升回
-- [ ] 預估：**2 day**
+- 預估：**2 day**
 
 ### T9. 金流安全 + PCI DSS + Secret Resolver + 審計 (#335)
 - [ ] **Secret Resolver 多 backend 統一介面**（`backend/secret_resolver.py`）：
@@ -2491,7 +2491,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [ ] 金流切換 audit：切換 gateway 時寫 `audit_log`（`billing.gateway_switched`，含 from/to/operator）
 - [ ] 金流健康檢查：`GET /api/v1/billing/health` — 驗 gateway API 可達 + webhook endpoint 可達 + resolver health + 最近一次 webhook 時間
 - [ ] 滲透測試案例：重放 webhook / 偽造簽名 / 金額篡改 / 跨租戶訂閱操作 / resolver backend 偽造 / secret cache poisoning
-- [ ] 預估：**3 day**（原 1.5d + Secret Resolver 1.5d）
+- 預估：**3 day**（原 1.5d + Secret Resolver 1.5d）
 
 **Priority T 總預估**：**25 day**（原 23.5d + Secret Resolver 1.5d）（solo ~5 週，2-person team ~3 週）
 
