@@ -700,14 +700,10 @@ CREATE TABLE IF NOT EXISTS tenant_egress_requests (
 CREATE INDEX IF NOT EXISTS idx_egress_req_tenant ON tenant_egress_requests(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_egress_req_status ON tenant_egress_requests(status);
 
--- I1: tenant_id indexes on business tables
-CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_artifacts_tenant ON artifacts(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_event_log_tenant ON event_log(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_debug_findings_tenant ON debug_findings(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_decision_rules_tenant ON decision_rules(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant ON workflow_runs(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
+-- I1: tenant_id indexes on business tables are created in _migrate()
+-- (after ALTER TABLE ADD COLUMN tenant_id), NOT here in _SCHEMA.
+-- Placing them here would fail on existing DBs where the old tables
+-- lack the tenant_id column. See _migrate() L166-177.
 
 -- L1: bootstrap wizard step audit + finalize anchor
 -- Each row is one wizard step recorded as completed. `step` is the
