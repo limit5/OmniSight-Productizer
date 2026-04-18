@@ -320,21 +320,17 @@ class TestDashboardThresholdAlignment:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class TestScopeDisciplineSiblingRows:
-    def test_no_g7_bundle_closure_file(self) -> None:
-        # Row 1389 (bundle closure) is the last G7 row. It may carry a
-        # bundle aggregator doc OR a deploy manifest; do not pre-commit
-        # candidate names here with G7 #3.
-        candidates = (
-            PROJECT_ROOT / "docs" / "ops" / "observability_runbook.md",
-            PROJECT_ROOT / "deploy" / "observability" / "README.md",
-            PROJECT_ROOT / "deploy" / "observability" / "bundle.yml",
-        )
-        for cand in candidates:
-            assert not cand.exists(), (
-                f"G7 row 1389 owns bundle closure; saw unexpected "
-                f"{cand.relative_to(PROJECT_ROOT)} — do not pre-commit "
-                f"with G7 #3"
-            )
+    # NOTE: `test_no_g7_bundle_closure_file` was removed in the commit
+    # that landed G7 #4 (TODO row 1389) — `docs/ops/observability_runbook.md`
+    # and `deploy/observability/README.md` now own the G7 bundle
+    # closure surface. The G7 #4-side contract pinning lives in
+    # `backend/tests/test_ha_bundle_closure_g7_4.py`. Explicit-
+    # migration pattern, 12th continuation:
+    # G5 #3 → #4 → #5 → #6 → G6 #1 → #2 → #3 → #4 → G6 #5 → G7 #2
+    # → G7 #3 → G7 #4. (The third candidate path
+    # `deploy/observability/bundle.yml` was deliberately NOT shipped;
+    # G7 #4's `TestScopeFence::test_bundle_does_not_ship_yaml_manifest`
+    # re-pins that absence under the successor contract.)
 
     def test_alert_file_does_not_redefine_metrics(
         self, rules_doc: dict
