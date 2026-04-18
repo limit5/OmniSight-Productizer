@@ -546,14 +546,14 @@ class TestScopeDisciplineSiblingRows:
     #   contract-pinned. Next bucket: G7 (rows 1385–1388 —
     #   Prometheus + Grafana + alert rules).
 
-    def test_no_g7_grafana_dashboard(self) -> None:
-        # G7 ships the Grafana dashboard; must not appear with G6 #1.
-        assert not (
-            PROJECT_ROOT / "deploy" / "observability" / "grafana" / "ha.json"
-        ).exists(), (
-            "G7 (row 1387) owns deploy/observability/grafana/ha.json "
-            "— do not pre-commit it with G6 #1"
-        )
+    # NOTE: `test_no_g7_grafana_dashboard` was removed in the commit
+    # that landed G7 #2 (TODO row 1387) —
+    # `deploy/observability/grafana/ha.json` now owns the G7 HA-07
+    # dashboard surface. The G7 #2-side contract pinning lives in
+    # `backend/tests/test_ha_grafana_dashboard_g7_2.py`. Explicit-
+    # migration pattern, carried forward from
+    # G5 #3 → #4 → #5 → #6 → G6 #1 → #2 → #3 → #4 → G6 #5 → G7 #2
+    # (10th continuation).
 
     def test_workflow_does_not_reference_other_g_buckets(self) -> None:
         # Body of the workflow must not name G5 / G7 — those are
