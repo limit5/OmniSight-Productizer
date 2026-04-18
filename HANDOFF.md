@@ -12277,3 +12277,49 @@ Part C TODO 字面把 row 221（entry button）跟 row 222-226（Step 1-5 互動
 ### 下一步
 - V6 #5（TODO row 1552）：agent visual context injection（mobile）——每輪 ReAct 結束後觸發 V6 #2 `capture()` 拿 6 機型截圖 → 組 multimodal content block 塞進 Opus 4.7 prompt（`type: "image"` + `source: {type: "base64", media_type: "image/png", data: <bytes>}`）。Grid 本身 read-only 不 owned caller，V6 #5 要決定的是 orchestrator 側的 screenshot cache 策略（同 screenshotUrl 連續多 turn 不重傳、bytes TTL、差異 diff）。
 - V6 #6（TODO row 1553）：build error → auto-fix——V6 #1 `mobile_sandbox.py` 已有 `parse_build_error()` 抓 Gradle/Xcode 診斷；缺的是把它餵回 agent prompt 的 wiring 層。
+
+
+---
+
+## 2026-04-18 — V7 row 1732 (#323 first bullet): Mobile visual annotation → SwiftUI/Compose/Flutter/RN agent payload
+
+### 範圍（嚴格 row-level）
+- **僅** TODO 第 1732 列（V7 的第一個 checkbox）：在 device frame 截圖上畫框/點選 → 產出結構化 payload 給 agent 修改對應 SwiftUI / Jetpack Compose / Flutter / React Native 元件。
+- **沒**做：row 1733（mobile iteration timeline）、1734-1738（`app/workspace/mobile/page.tsx` 主頁面 + 三欄 layout）、1739（Build status panel）、1740（Store submission dashboard）。V7 其他 row 全部 pending。
+
+### 做了什麼（檔案 × 變更）
+1. **`components/omnisight/mobile-visual-annotator.tsx`**（+~610 行，新檔案）
+   - 新 component `<MobileVisualAnnotator />`：把 V6 #3 `DeviceFrame` 當底，overlay 只覆蓋**螢幕 cut-out 區**（不含 bezel）——這樣 pointer gesture 的 normalised 座標直接對應 iOS/Android 的 native screen buffer，不用再減掉外框。
+   - 重用 V3 #1 `visual-annotator.tsx` 的 pure helpers（`pointsToNormalizedBox` / `hitTestNormalizedBox` / `clampNormalized`）——零 gesture 邏輯重寫，只加入 mobile-specific 的 platform/framework/device triple。
+   - Mode toolbar（rect / click / select）、Clear、keyboard Delete、controlled+uncontrolled props 全部比照 V3 #1；新增的是 `componentHint` 欄位（SwiftUI `accessibilityIdentifier` / Compose `testTag` / Flutter `Key` / RN `testID`），placeholder 文字會跟著 `platform` 切換。
+   - Public helpers：`MOBILE_PLATFORM_TO_FRAMEWORK`、`FRAMEWORK_TO_FILE_EXT`、`resolveFramework`、`resolveFileExt`、`normalizedToNativePixels`、`toMobileAgentPayload`、`toMobileAgentPayloads`。`toMobileAgentPayload` 把一個 annotation 打包成 `{type, platform, framework, fileExt, device, screenWidth, screenHeight, boundingBox, nativePixelBox, componentHint, comment}` 的 wire-shape——agent 拿到就知道要改哪支原始檔（`.swift`/`.kt`/`.dart`/`.tsx`）。
+2. **`backend/mobile_annotation_context.py`**（+~560 行，新檔案）
+   - Server-side 消費者，對 V3 #2 `ui_annotation_context.py` 做 mobile twin（刻意**不**擴充 web module——web 用 cssSelector，mobile 用 native identifier vocabulary，混在一起會讓每個 entry 帶一堆 optional field）。
+   - 公開 API：`MobileAnnotationPayload`（frozen dataclass）、`MobileAnnotationBundle`（per-turn bundle）、`MobileAnnotationContextBuilder`（state holder）、`mobile_annotation_from_dict` / `mobile_annotations_from_list`（嚴格解析）、`render_mobile_annotation_entry` / `render_mobile_annotations_markdown`（byte-stable markdown）。
+   - **嚴格 cross-field 驗證**：`framework` 必須對應 `platform`、`fileExt` 必須對應 `framework`、`nativePixelBox` 不得超出 `screenWidth/Height`、click 必須 zero-size、rect 必須 non-zero；任一違反 → `MobileAnnotationContextError`（繼承 `ValueError`，FastAPI 自動回 422）。
+   - Multi-platform warning：同一 batch 若同時混了 ios + android 會 emit warning（建議 agent 對每個 framework 分別生 patch），但不拒收——operator 的跨平台「兩邊同步修」是合法操作。
+   - 事件命名空間 `ui_sandbox.mobile_annotation_context.{building,built,empty}`——跟 `ui_sandbox.annotation_context.*`（web）**完全 disjoint**（有測試 assert），SSE bus 可以按 prefix subscribe 不會串。
+3. **`test/components/mobile-visual-annotator.test.tsx`**（+~460 行，新檔案，31 個 test）
+   - Platform/framework 常數 contract、`normalizedToNativePixels` 邊界（NaN / 負值 / >1 clamp）、`toMobileAgentPayload` 對每個 platform 的 framework+fileExt 輸出、rect / click / tiny-drag-promotion、component hint editor（含 placeholder 切換）、Send button disable 邏輯 + payload 傳遞、Clear / keyboard Delete、controlled-mode 不 mutate internal state。
+4. **`backend/tests/test_mobile_annotation_context.py`**（+~440 行，新檔案，50 個 test）
+   - Schema version semver、platform/framework/fileExt 三 table 完整性、cross-field validation（framework 不匹配 / fileExt 不匹配 / nativePixelBox 超界 / out-of-range boundingBox）、rect vs click mutual exclusion、extra-key forward-compat、markdown 輸出 byte-stability、framework-specific hint label（`accessibilityIdentifier` / `Modifier.testTag` / `Widget Key` / `testID`）、Builder happy path + empty event + multi-platform warning + turn_counter monotonic、callback exception 不 leak、web/mobile event 命名空間 disjoint。
+5. **`TODO.md`** row 1732 `- [ ]` → `- [x]`。
+6. **本 HANDOFF 條目**。
+
+### 設計刻意保守
+- **不動 V3 #2 `ui_annotation_context.py`**：web 的 cssSelector vs mobile 的 native identifier vocabulary 是兩套世界觀，硬合會讓每個 entry 變成 optional-field 大雜燴 + 每個 render branch on platform。parallel module 保留各自 blast radius——web annotation 的 regression 沒辦法炸到 mobile channel。
+- **不動 `DeviceFrame` / `VisualAnnotator`**：新 component 純粹 compose 既有 primitives；V6 #3 DeviceFrame contract tests（53 個）+ V3 #1 VisualAnnotator 純函式 tests（46 個）都零 diff，零 regression。
+- **沒加新 npm package / pip 依賴**：`lucide-react` icon 全是既有 re-export，pydantic / langchain 都沒碰——零 bundle diff。
+- **沒掛 FastAPI router**：本 row 只交付「frontend 產 payload + backend 能消費 payload」兩端；POST endpoint（如 `/api/v1/mobile-annotation-context/build`）屬於 row 1734-1738 的 mobile workspace page 階段——等有 UI caller 再決定 URL shape、auth、SSE frame format，避免 premature freeze。
+- **Overlay pin 在螢幕 cut-out 而非外框**：iOS `XCUIElement.frame` / Android `UiObject2.getVisibleBounds` 都在 native screen 座標系，overlay 若覆蓋 bezel，operator 畫的框就要多減一次 bezel offset 才能跟 UI hierarchy dump 對齊——直接在 screen rect 範圍內 gesture 最省事。
+- **`componentHint` 全面可選 + 可為 null**：V7 還沒有 mobile element inspector（類似 web 的 V3 #3），hint 只能 operator 手動填；做成 required 會逼 operator 每次填假值，反而 degradation。agent 看到 `(none — infer from screenshot)` 知道要 fallback 去比對螢幕像素。
+
+### 驗證
+- `backend/.venv/bin/python -m pytest backend/tests/test_mobile_annotation_context.py backend/tests/test_ui_annotation_context.py -q` → **190 passed**（50 新 + 140 舊，web channel 零 regression）。
+- `pnpm exec vitest run test/components/mobile-visual-annotator.test.tsx test/components/visual-annotator.test.tsx test/components/device-frame.test.tsx` → **130 passed**（31 新 + 46 V3 #1 + 53 V6 #3，相關 sibling 零 regression）。
+- `pnpm exec tsc --noEmit --skipLibCheck` 零輸出（typecheck clean）。
+- `pnpm exec eslint components/omnisight/mobile-visual-annotator.tsx test/components/mobile-visual-annotator.test.tsx` 零輸出（lint clean）。
+
+### 下一步
+- V7 row 1733（mobile iteration timeline）：每次 annotation-driven agent iteration 存（emulator 截圖 + code diff + annotation bundle）→ 版本歷史。可以 reuse `components/omnisight/ui-iteration-timeline.tsx` 的既有 store shape，只加 `mobile_annotations` column + 多機型截圖 grid hook。
+- V7 row 1734（`app/workspace/mobile/page.tsx`）：把 `<MobileVisualAnnotator />` + `<DeviceGrid />` + workspace chat 組進三欄 layout（跟 `app/workspace/web/page.tsx` 同骨架）。那時才需要決定 API route 名稱與 SSE topic，把 `MobileAnnotationContextBuilder` 接進 agent loop。

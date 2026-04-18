@@ -1729,7 +1729,7 @@ Legend:
 - 預估：**6 day**
 
 ### V7. Mobile — 視覺迭代 + Workspace UI + 輸出 (#323)
-- [ ] Mobile visual annotation：在 device frame 截圖上畫框/點選 → agent 修改對應 SwiftUI/Compose/Flutter 元件
+- [x] Mobile visual annotation：在 device frame 截圖上畫框/點選 → agent 修改對應 SwiftUI/Compose/Flutter 元件
 - [ ] Mobile iteration timeline：每次修改存 emulator 截圖 + code diff → 版本歷史（含多機型截圖）
 - [ ] `app/workspace/mobile/page.tsx`：Mobile 工作區主頁面
   - [ ] 左 sidebar：project tree + platform selector (iOS/Android/Flutter/RN) + build config
