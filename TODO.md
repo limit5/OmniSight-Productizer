@@ -152,6 +152,49 @@ Legend:
 
 **預估**：~6 day（BE 2 + FE 1.5 + systemd 橋接 1 + audit/rollback/test/docs 1.5）
 
+### B13. FUI Error Pages + Bootstrap UX 優化（#339）— 🔴 優先
+
+> 背景：目前 400/500 系列錯誤頁面使用 Next.js 預設白底黑字，與 FUI 暗色掃描線風格完全不搭。Bootstrap 未完成時 API 回 503 JSON，工程師能看懂，但一般使用者看到「503 Service Unavailable」會以為系統壞了。需要**雙層 UX**：友善的人類訊息 + 可展開的技術詳情。
+
+**Part A — Bootstrap Required 專用頁面**
+- [ ] `app/setup-required/page.tsx`：全屏 FUI 風格「系統需要完成初始設定」頁面
+  - [ ] 友善訊息：「歡迎！這是您第一次使用 OmniSight，只需幾分鐘即可完成基礎配置。」
+  - [ ] CTA 按鈕：「▶ 開始設定」→ 導向 `/bootstrap`
+  - [ ] 可展開「技術詳情」區塊：顯示 503 JSON 內容 + backend 版本 + 各 gate 狀態（admin_password / llm_provider / cf_tunnel / smoke）
+  - [ ] FUI 風格：暗色背景 + 掃描線動畫 + neural-grid 元素 + Orbitron 標題字型
+- [ ] `lib/api.ts` 攔截器：API response `error === "bootstrap_required"` → 不走 error toast → `window.location = "/setup-required"`
+- [ ] `middleware.ts`（或 `proxy.ts`）：未登入 + 503 bootstrap_required → redirect 到 `/setup-required`（不是 `/login`）
+
+**Part B — FUI 錯誤頁面（400/500 系列）**
+- [ ] `app/not-found.tsx`（404）：「找不到此頁面」+ 回首頁按鈕 + 展開區：requested URL
+- [ ] `app/error.tsx`（Client error boundary）：「發生錯誤」+ 重試按鈕 + 展開區：error.message + stack（prod 隱藏 stack）
+- [ ] `app/global-error.tsx`（Root layout crash）：最外層 fallback，minimal FUI 風格
+- [ ] `components/omnisight/error-page.tsx`：共用 FUI error 頁面元件，支援：
+  - [ ] `code`（400/401/403/404/500/502/503）
+  - [ ] `friendlyMessage`（人類可讀的友善訊息）
+  - [ ] `technicalDetail`（工程師細節，預設折疊）
+  - [ ] `actions`（按鈕列表：回首頁 / 登入 / 重試 / 回報問題）
+  - [ ] FUI 風格：暗色 + 大號 error code + 掃描線 + 微弱脈衝動畫
+- [ ] 各 HTTP code 的友善訊息對照：
+  - [ ] 400：「請求格式有誤，請檢查輸入後重試」
+  - [ ] 401：「登入已過期，請重新登入」+ 登入按鈕
+  - [ ] 403：「您沒有此頁面的存取權限」+ 聯繫管理員提示
+  - [ ] 404：「此頁面不存在或已移除」+ 回首頁按鈕
+  - [ ] 500：「系統發生內部錯誤，我們已收到通知」+ error trace ID
+  - [ ] 502：「後端服務暫時不可用，請稍後重試」+ 自動重試 countdown
+  - [ ] 503：「系統維護中」或「設定未完成」（依 error.error 欄位區分）
+
+**Part C — API Error 統一攔截**
+- [ ] `lib/api.ts` 全域 error handler：
+  - [ ] 503 `bootstrap_required` → redirect `/setup-required`（不 toast）
+  - [ ] 401 → redirect `/login?next=<current_path>`（不 toast）
+  - [ ] 403 → toast warning「權限不足」
+  - [ ] 500 → toast error「系統錯誤」+ 展開區顯示 trace ID
+  - [ ] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
+  - [ ] 網路斷線 → toast info「網路連線中斷，嘗試重新連線...」+ retry indicator
+
+- [ ] 預估：**2 day**（Error page 元件 0.5d + 7 個 code 頁面 0.5d + API 攔截器 0.5d + Bootstrap UX 0.5d）
+
 ---
 
 ## 🅒 Priority C — L4 Layer A (shared infrastructure)
