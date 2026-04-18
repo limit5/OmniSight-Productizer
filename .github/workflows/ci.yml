@@ -202,6 +202,12 @@ jobs:
       - name: pytest ${{ matrix.shard.name }}
         env:
           OMNISIGHT_DATABASE_PATH: /tmp/ci-omnisight-${{ matrix.shard.name }}.db
+          # H6 audit (2026-04-19): per-shard COVERAGE_FILE so the .coverage
+          # binary data files don't overwrite each other when the
+          # combine job downloads all four artifacts into one directory.
+          # pytest-cov honours this env; the XML report still lands at
+          # the path below.
+          COVERAGE_FILE: .coverage.${{ matrix.shard.name }}
         # Run from repo root (not `cd backend`) so sys.path[0] is the
         # project root rather than `backend/`. The previous `cd backend`
         # put `backend/` on sys.path[0] and backend/platform.py (W0 #274
@@ -231,8 +237,72 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.shard.name }}
-          path: coverage-${{ matrix.shard.name }}.xml
+          # H6 audit: upload both the XML report (for humans / codecov)
+          # AND the raw .coverage data file (for the combine job). The
+          # XML is a one-way projection — you can't recombine XMLs into
+          # a merged report without parsing; the .coverage binary is the
+          # source of truth for `coverage combine`.
+          path: |
+            coverage-${{ matrix.shard.name }}.xml
+            .coverage.${{ matrix.shard.name }}
           retention-days: 7
+          if-no-files-found: warn
+
+  backend-coverage-combine:
+    # H6 audit (2026-04-19): enforces the *aggregate* coverage floor
+    # across all four shards. Per-shard thresholds are meaningless —
+    # decision's 7 tests can't exercise 85% of ~5,700 backend files.
+    # The rest shard runs everything, but its own --cov-fail-under=60
+    # doesn't count work the other three shards did.
+    # Combining the four .coverage data files gives the real full-suite
+    # percentage, which is what we actually want to gate on.
+    needs: backend-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Run even if one shard failed — we still want to know the aggregate
+    # coverage number for the shards that did run. A failed shard
+    # produces no .coverage file, and `coverage combine` skips missing
+    # inputs gracefully; the final `--fail-under` is lower accordingly,
+    # which is the correct signal (some tests didn't run, coverage
+    # report should reflect that).
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - name: install coverage
+        run: pip install "coverage[toml]==7.6.1"
+      - name: download per-shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: shard-cov/
+          merge-multiple: true
+      - name: combine + report
+        run: |
+          set -eu
+          # Move the per-shard .coverage.* files out of the download
+          # subdirs (merge-multiple flattened them, but guard anyway).
+          find shard-cov -name '.coverage.*' -exec cp -t . {} +
+          ls -la .coverage.* || {
+            echo "::warning::no per-shard .coverage files found — shards may have failed before writing data"
+            exit 0
+          }
+          python3 -m coverage combine .coverage.*
+          # 60 is the aggregate floor (H6 audit): `rest` shard alone hits
+          # this when run solo; combining all four should comfortably
+          # exceed it. If combined coverage drops below 60 something
+          # went very wrong — either a shard didn't run, or a large
+          # new module landed without any tests.
+          python3 -m coverage report --rcfile=backend/pytest.ini --fail-under=60
+          python3 -m coverage xml -o coverage-combined.xml --rcfile=backend/pytest.ini
+      - name: upload combined report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-combined
+          path: coverage-combined.xml
+          retention-days: 14
 
   backend-migrate:
     runs-on: ubuntu-latest
