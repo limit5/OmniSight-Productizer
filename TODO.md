@@ -209,7 +209,7 @@ Legend:
 - [x] 預估：**1 day**（Step 3.5 slot 0.2d + 三-tab UI 0.2d + GitHub test 0.2d + GitLab test 0.1d + Gerrit SSH test 0.2d + skip-non-blocking 0.1d = 1d closed-loop）
 
 **Part B — Multi-repo Token Map UI**
-- [ ] Settings → Integration → Git 區塊新增「Multiple Instances」展開區
+- [x] Settings → Integration → Git 區塊新增「Multiple Instances」展開區
 - [ ] 「Add GitHub Instance」按鈕 → 表單：hostname（如 `github.enterprise.com`）+ token
 - [ ] 「Add GitLab Instance」按鈕 → 表單：URL + token
 - [ ] 列表顯示所有已設定的 instance + 每個有「Test」/「Remove」按鈕

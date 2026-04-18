@@ -234,6 +234,45 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
   )
 }
 
+/** B14 Part B row 1 — collapsible "Multiple Instances" sub-area inside the
+ *  GIT REPOSITORIES block. This row delivers only the expandable scaffold;
+ *  the Add GitHub / Add GitLab forms, the instance list, the save-to-env
+ *  hookup, and the backend `/system/settings/git/token-map` API land in
+ *  the subsequent Part B rows and will replace the placeholder body. */
+function MultipleInstancesSection() {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="pt-2 border-t border-[var(--border)]/50 mt-1">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-1 py-1 rounded hover:bg-[var(--background)] transition-colors"
+      >
+        <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider flex-1 text-left">
+          Multiple Instances
+        </span>
+        <span className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60">
+          GitHub Enterprise · self-hosted GitLab
+        </span>
+        {expanded
+          ? <ChevronUp size={10} className="text-[var(--muted-foreground)]" />
+          : <ChevronDown size={10} className="text-[var(--muted-foreground)]" />}
+      </button>
+      {expanded && (
+        <div className="mt-1 px-1 py-1.5 space-y-1">
+          <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60">
+            No additional instances configured.
+          </div>
+          <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-50 leading-relaxed">
+            Map per-host tokens via OMNISIGHT_GITHUB_TOKEN_MAP /
+            OMNISIGHT_GITLAB_TOKEN_MAP. Add / Test / Remove controls
+            arrive in the next Part B rows.
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function formatBytes(n: number): string {
   if (n === 0) return "0 B"
   const units = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -970,6 +1009,8 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
             <SettingField label="GitHub Token" value={getVal("git", "github_token", "github_token")} type="password" onChange={v => setVal("github_token", v)} />
             <SettingField label="GitLab Token" value={getVal("git", "gitlab_token", "gitlab_token")} type="password" onChange={v => setVal("gitlab_token", v)} />
             <SettingField label="GitLab URL" value={getVal("git", "gitlab_url", "gitlab_url")} onChange={v => setVal("gitlab_url", v)} />
+            {/* B14 Part B row 1: collapsible Multiple Instances sub-area */}
+            <MultipleInstancesSection />
           </SettingsSection>
 
           <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit">
