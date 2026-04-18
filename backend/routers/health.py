@@ -188,8 +188,113 @@ async def _check_migrations() -> tuple[bool, str]:
     return True, f"current={current}"
 
 
+#: C3 — deep-check result cache. Maps ``(provider, key_suffix)`` →
+#: ``(ok, detail, expires_at)``. Keyed on the key suffix so a rotation
+#: invalidates the cache entry on the next probe. 60 s TTL is long
+#: enough to keep `/readyz` cheap under frequent probes (Caddy polls
+#: every 2 s during a rolling deploy → 30 cache hits per miss) but
+#: short enough that a newly-broken provider is caught within a minute.
+_DEEP_CHECK_CACHE: dict[tuple[str, str], tuple[bool, str, float]] = {}
+_DEEP_CHECK_TTL_S = 60.0
+#: Network timeout per provider probe. Shorter than the Caddy probe
+#: cycle so a hung provider can't inflate `/readyz` latency past the
+#: proxy timeout.
+_DEEP_CHECK_TIMEOUT_S = 3.0
+
+
+def _provider_probe_url(provider: str) -> str | None:
+    """Cheapest GET per provider. Authenticated list/models endpoints
+    that verify the key is *usable*, not just syntactically present.
+
+    Chosen to be:
+      * idempotent (safe to poll);
+      * <1 KB response (fast even on flaky links);
+      * rejected with 401 on invalid key (so we can distinguish
+        "network down" from "key revoked" from "quota exhausted").
+    """
+    return {
+        "anthropic": "https://api.anthropic.com/v1/models",
+        "openai": "https://api.openai.com/v1/models",
+        "google": "https://generativelanguage.googleapis.com/v1beta/models",
+        "openrouter": "https://openrouter.ai/api/v1/models",
+        "groq": "https://api.groq.com/openai/v1/models",
+        "deepseek": "https://api.deepseek.com/v1/models",
+        "xai": "https://api.x.ai/v1/models",
+        "together": "https://api.together.xyz/v1/models",
+    }.get(provider)
+
+
+def _probe_provider_deep(provider: str, key: str) -> tuple[bool, str]:
+    """Make one authenticated GET. Returns ``(ok, detail)``.
+
+    Cached in ``_DEEP_CHECK_CACHE`` on the ``(provider, key_tail)``
+    key so rotation invalidates naturally. All network errors are
+    treated as ``not_ok`` — if the provider is unreachable, we're
+    not ready to serve requests that depend on it.
+    """
+    import time as _time
+    import urllib.request, urllib.error
+
+    # key_tail = last 6 chars, opaque to logs but unique across rotations
+    key_tail = key[-6:] if key else ""
+    cache_key = (provider, key_tail)
+    cached = _DEEP_CHECK_CACHE.get(cache_key)
+    now = _time.time()
+    if cached and cached[2] > now:
+        return cached[0], cached[1] + ":cached"
+
+    url = _provider_probe_url(provider)
+    if url is None:
+        # Unknown provider — behave like a presence check did before.
+        ok = bool(key)
+        detail = "key_present" if ok else "no_key"
+        _DEEP_CHECK_CACHE[cache_key] = (ok, detail, now + _DEEP_CHECK_TTL_S)
+        return ok, detail
+
+    # Provider-specific auth header. Anthropic and Google use
+    # non-standard headers; everyone else uses Bearer.
+    if provider == "anthropic":
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif provider == "google":
+        # Google's API key rides in the query string, not a header.
+        url = f"{url}?key={key}"
+        headers = {}
+    else:
+        headers = {"Authorization": f"Bearer {key}"}
+
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=_DEEP_CHECK_TIMEOUT_S) as resp:
+            # Any 2xx is "key accepted". 200 covers all known providers.
+            ok = 200 <= resp.status < 300
+            detail = f"http_{resp.status}"
+    except urllib.error.HTTPError as exc:
+        # 401/403 = key rejected; 429 = quota; 5xx = provider-side. All
+        # of these mean "not usable right now".
+        ok = False
+        detail = f"http_{exc.code}"
+    except Exception as exc:
+        ok = False
+        # Truncate to stay log-safe; full exception lives in probe-level
+        # logger.debug when that's wired up.
+        detail = f"probe_error:{type(exc).__name__}"
+
+    _DEEP_CHECK_CACHE[cache_key] = (ok, detail, now + _DEEP_CHECK_TTL_S)
+    return ok, detail
+
+
 def _check_provider_chain() -> tuple[bool, str]:
-    """At least one provider in the fallback chain must be usable."""
+    """At least one provider in the fallback chain must be usable.
+
+    By default this is a shallow check — the presence of the API key
+    counts as "ready". Set ``OMNISIGHT_READYZ_DEEP_CHECK=1`` (C3 audit
+    2026-04-19) to escalate to a real authenticated GET against each
+    configured provider, cached for 60 s so frequent probes don't
+    hammer the upstream. Deep mode catches rotated/revoked keys that
+    the shallow check cannot — a scenario where ``/readyz`` would
+    otherwise stay green while every real request fails 401.
+    """
+    import os as _os
     from backend.config import settings
 
     chain = [p.strip() for p in settings.llm_fallback_chain.split(",") if p.strip()]
@@ -210,7 +315,10 @@ def _check_provider_chain() -> tuple[bool, str]:
         "openrouter": settings.openrouter_api_key,
     }
 
+    deep = _os.environ.get("OMNISIGHT_READYZ_DEEP_CHECK", "").strip().lower() in {"1", "true", "yes"}
+
     ready: list[str] = []
+    rejected: list[str] = []
     for prov in chain:
         if prov == "ollama":
             # Ollama is a local model runner — no credential needed; we
@@ -219,12 +327,23 @@ def _check_provider_chain() -> tuple[bool, str]:
             ready.append(prov)
             continue
         key = provider_key.get(prov, "")
-        if key:
+        if not key:
+            continue
+        if not deep:
             ready.append(prov)
+            continue
+        ok, detail = _probe_provider_deep(prov, key)
+        if ok:
+            ready.append(prov)
+        else:
+            rejected.append(f"{prov}:{detail}")
 
     if not ready:
+        if rejected:
+            return False, f"deep_check_all_failed: {','.join(rejected)}"
         return False, f"no_configured_provider_in_chain: {','.join(chain)}"
-    return True, f"ready={','.join(ready)}"
+    suffix = f" (deep)" if deep else ""
+    return True, f"ready={','.join(ready)}{suffix}"
 
 
 def _build_readyz_payload(checks: dict, ready: bool) -> dict:
