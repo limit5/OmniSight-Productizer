@@ -236,6 +236,147 @@ class GitForgeTokenTest(BaseModel):
     ssh_port: int = 29418  # Gerrit only — SSH port (Gerrit default 29418)
 
 
+# ─── B14 Part B row 217: masked read / PUT of the multi-instance token map ──
+#
+# Row 216 already lets the SAVE & APPLY flow serialise the instance list into
+# ``settings.github_token_map`` / ``settings.gitlab_token_map`` via the generic
+# ``PUT /system/settings`` endpoint — but the matching readback round-trips the
+# raw JSON (token-bearing), which is unsafe to surface to the UI. This endpoint
+# is the dedicated masked view: GET returns host-keyed entries with tokens
+# reduced to the same ``_mask()`` shape used elsewhere; PUT accepts a full host
+# → token list per-platform and writes the JSON form back to settings plus
+# invalidates the credential cache so subsequent operations see the new map.
+
+
+def _parse_token_map(raw: str) -> dict[str, str]:
+    """Tolerant parse of a settings JSON map → {host: token}. Non-dict and
+    invalid JSON both collapse to an empty map so callers never need to
+    distinguish "unset" from "malformed"."""
+    if not raw:
+        return {}
+    try:
+        import json
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        if isinstance(k, str) and isinstance(v, str) and k and v:
+            out[k] = v
+    return out
+
+
+def _masked_instance_list(raw: str, platform: str) -> list[dict]:
+    """Build the UI-friendly masked view of a {host: token} map. Stable
+    ordering makes the endpoint round-trip predictable in tests."""
+    entries = _parse_token_map(raw)
+    return [
+        {"platform": platform, "host": host, "token_masked": _mask(token)}
+        for host, token in sorted(entries.items())
+    ]
+
+
+class TokenMapInstance(BaseModel):
+    host: str
+    token: str = ""  # blank on a PUT means "keep existing token for this host"
+
+
+class TokenMapUpdate(BaseModel):
+    github: list[TokenMapInstance] = []
+    gitlab: list[TokenMapInstance] = []
+
+
+@router.get("/settings/git/token-map")
+async def get_git_token_map(_user=Depends(_au.require_operator)):
+    """Return the configured per-host token maps with tokens masked.
+
+    Shape::
+
+        {
+          "github": [{"platform": "github", "host": "...", "token_masked": "..."}],
+          "gitlab": [...],
+        }
+
+    Empty platforms surface as empty lists — never ``null`` — so the UI
+    can render "no additional instances configured" without branching on
+    presence.
+    """
+    return {
+        "github": _masked_instance_list(settings.github_token_map, "github"),
+        "gitlab": _masked_instance_list(settings.gitlab_token_map, "gitlab"),
+    }
+
+
+@router.put("/settings/git/token-map")
+async def update_git_token_map(
+    body: TokenMapUpdate, _user=Depends(_au.require_admin),
+):
+    """Replace the per-host token maps.
+
+    A blank ``token`` for a given host preserves the existing secret so the
+    UI can round-trip the masked list without re-prompting every token.
+    Removing a host just means omitting it from the PUT body — this
+    endpoint is a replace, not a patch.
+
+    Duplicate hosts in the payload are merged last-write-wins (the final
+    entry in the list). Empty host strings are ignored.
+    """
+    import json
+
+    def _merge(
+        new: list[TokenMapInstance], existing_raw: str,
+    ) -> tuple[str, int, int]:
+        existing = _parse_token_map(existing_raw)
+        merged: dict[str, str] = {}
+        preserved = 0
+        for inst in new:
+            host = (inst.host or "").strip()
+            if not host:
+                continue
+            token = inst.token
+            if not token:
+                # Blank token → keep whatever was already stored. If the
+                # caller never supplied a token for a brand-new host the
+                # entry is dropped rather than written as an empty string
+                # (an empty token would silently break every credential
+                # lookup for that host).
+                prior = existing.get(host, "")
+                if not prior:
+                    continue
+                token = prior
+                preserved += 1
+            merged[host] = token
+        serialised = json.dumps(merged) if merged else ""
+        return serialised, len(merged), preserved
+
+    gh_json, gh_count, gh_preserved = _merge(body.github, settings.github_token_map)
+    gl_json, gl_count, gl_preserved = _merge(body.gitlab, settings.gitlab_token_map)
+
+    settings.github_token_map = gh_json
+    settings.gitlab_token_map = gl_json
+
+    # Bust the credential registry cache so the new map is observed by
+    # `find_credential_for_url()` and friends without a process restart.
+    try:
+        from backend.git_credentials import clear_credential_cache
+        clear_credential_cache()
+    except Exception:  # pragma: no cover — defensive
+        pass
+
+    logger.info(
+        "Token map updated: github=%d (kept %d) gitlab=%d (kept %d)",
+        gh_count, gh_preserved, gl_count, gl_preserved,
+    )
+    return {
+        "status": "updated",
+        "github": _masked_instance_list(gh_json, "github"),
+        "gitlab": _masked_instance_list(gl_json, "gitlab"),
+        "note": "Changes are runtime-only and will reset on restart.",
+    }
+
+
 async def _probe_gerrit_ssh(ssh_host: str, ssh_port: int, url: str = "") -> dict:
     """Run ``ssh -p {port} {host} gerrit version`` against a *candidate*
     Gerrit SSH endpoint and return the parsed version. Never reads from

@@ -368,6 +368,245 @@ class TestGitForgeTokenProbe:
         assert "repo" in result["scopes"]
 
 
+class TestGitTokenMapEndpoint:
+    """B14 Part B row 217 — masked GET/PUT of the multi-instance token map."""
+
+    @pytest.mark.asyncio
+    async def test_get_returns_empty_lists_when_unset(self, client, monkeypatch):
+        from backend.config import settings
+        monkeypatch.setattr(settings, "github_token_map", "")
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+        resp = await client.get("/api/v1/system/settings/git/token-map")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"github": [], "gitlab": []}
+
+    @pytest.mark.asyncio
+    async def test_get_masks_tokens(self, client, monkeypatch):
+        import json
+        from backend.config import settings
+        monkeypatch.setattr(
+            settings, "github_token_map",
+            json.dumps({
+                "github.enterprise.com": "ghp_aaaaaaaaaaaaaaaaaaaaaa",
+                "github.acme.example": "ghp_bbbbbbbbbbbbbbbbbbbbbb",
+            }),
+        )
+        monkeypatch.setattr(
+            settings, "gitlab_token_map",
+            json.dumps({"https://gitlab.example.com": "glpat-xxxxxxxxxxxxxxxxxx"}),
+        )
+        resp = await client.get("/api/v1/system/settings/git/token-map")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Stable (sorted) ordering
+        assert [e["host"] for e in data["github"]] == [
+            "github.acme.example", "github.enterprise.com",
+        ]
+        for entry in data["github"] + data["gitlab"]:
+            token = entry["token_masked"]
+            assert token  # non-empty
+            # Raw secret must never appear in the masked field
+            assert not token.startswith("ghp_a"), token
+            assert not token.startswith("ghp_b"), token
+            assert "xxxxxxxx" not in token
+        # Shape is platform-tagged for UI grouping
+        assert all(e["platform"] == "github" for e in data["github"])
+        assert all(e["platform"] == "gitlab" for e in data["gitlab"])
+
+    @pytest.mark.asyncio
+    async def test_get_tolerates_malformed_json(self, client, monkeypatch):
+        """Corrupt JSON in settings should not 500 the endpoint — it just
+        surfaces an empty list so the operator can PUT a fresh map."""
+        from backend.config import settings
+        monkeypatch.setattr(settings, "github_token_map", "not-json{{")
+        monkeypatch.setattr(settings, "gitlab_token_map", "[1, 2, 3]")  # wrong shape
+        resp = await client.get("/api/v1/system/settings/git/token-map")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"github": [], "gitlab": []}
+
+    @pytest.mark.asyncio
+    async def test_put_writes_json_maps_and_masks_response(self, client, monkeypatch):
+        import json
+        from backend.config import settings
+        monkeypatch.setattr(settings, "github_token_map", "")
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+
+        resp = await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={
+                "github": [
+                    {"host": "github.enterprise.com", "token": "ghp_enterprise_secret_value_zzz"},
+                ],
+                "gitlab": [
+                    {"host": "https://gitlab.example.com", "token": "glpat-self-hosted-secret-zz"},
+                ],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "updated"
+        # Response body never contains the raw token
+        for platform in ("github", "gitlab"):
+            assert len(data[platform]) == 1
+            masked = data[platform][0]["token_masked"]
+            assert "enterprise_secret" not in masked
+            assert "self-hosted-secret" not in masked
+
+        # Settings now hold canonical JSON form
+        gh_parsed = json.loads(settings.github_token_map)
+        gl_parsed = json.loads(settings.gitlab_token_map)
+        assert gh_parsed == {
+            "github.enterprise.com": "ghp_enterprise_secret_value_zzz",
+        }
+        assert gl_parsed == {
+            "https://gitlab.example.com": "glpat-self-hosted-secret-zz",
+        }
+
+    @pytest.mark.asyncio
+    async def test_put_empty_lists_clears_both_maps(self, client, monkeypatch):
+        import json
+        from backend.config import settings
+        monkeypatch.setattr(
+            settings, "github_token_map",
+            json.dumps({"stale.example.com": "ghp_should_be_cleared_xxxxx"}),
+        )
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+
+        resp = await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={"github": [], "gitlab": []},
+        )
+        assert resp.status_code == 200
+        # Empty maps serialise to "" (the idiomatic unset value) — not "{}"
+        assert settings.github_token_map == ""
+        assert settings.gitlab_token_map == ""
+
+    @pytest.mark.asyncio
+    async def test_put_blank_token_preserves_existing(self, client, monkeypatch):
+        """The masked GET returns '***' instead of real tokens, so the UI
+        cannot round-trip the secret. A PUT with a blank token for a known
+        host must preserve the stored token rather than overwrite it with
+        the mask or an empty string."""
+        import json
+        from backend.config import settings
+        monkeypatch.setattr(
+            settings, "github_token_map",
+            json.dumps({"github.enterprise.com": "ghp_original_value_preserve_me_123"}),
+        )
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+
+        resp = await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={
+                "github": [{"host": "github.enterprise.com", "token": ""}],
+                "gitlab": [],
+            },
+        )
+        assert resp.status_code == 200
+        parsed = json.loads(settings.github_token_map)
+        assert parsed == {
+            "github.enterprise.com": "ghp_original_value_preserve_me_123",
+        }
+
+    @pytest.mark.asyncio
+    async def test_put_blank_token_drops_brand_new_host(self, client, monkeypatch):
+        """A brand-new host submitted with a blank token is silently
+        dropped rather than stored with an empty token (which would break
+        every credential lookup for that host)."""
+        from backend.config import settings
+        monkeypatch.setattr(settings, "github_token_map", "")
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+
+        resp = await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={
+                "github": [{"host": "brand.new.example", "token": ""}],
+                "gitlab": [],
+            },
+        )
+        assert resp.status_code == 200
+        assert settings.github_token_map == ""
+        assert resp.json()["github"] == []
+
+    @pytest.mark.asyncio
+    async def test_put_ignores_blank_host_entries(self, client, monkeypatch):
+        """A blank host in the payload must be skipped — otherwise an
+        empty-string key would collide with every JSON lookup keyed by
+        hostname (and the UI wouldn't render it anyway)."""
+        from backend.config import settings
+        monkeypatch.setattr(settings, "github_token_map", "")
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+
+        resp = await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={
+                "github": [
+                    {"host": "", "token": "ghp_orphan_should_be_dropped"},
+                    {"host": "   ", "token": "ghp_whitespace_also_dropped"},
+                ],
+                "gitlab": [],
+            },
+        )
+        assert resp.status_code == 200
+        assert settings.github_token_map == ""
+
+    @pytest.mark.asyncio
+    async def test_put_invalidates_credential_cache(self, client, monkeypatch):
+        """After a PUT, find_credential_for_url must see the new map
+        without a process restart."""
+        from backend.config import settings
+        from backend import git_credentials as gc
+
+        monkeypatch.setattr(settings, "github_token_map", "")
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+        monkeypatch.setattr(settings, "github_token", "")
+        monkeypatch.setattr(settings, "gitlab_token", "")
+        monkeypatch.setattr(settings, "git_credentials_file", "")
+        gc.clear_credential_cache()
+
+        # Seed the cache so the next read is cached
+        _ = gc.get_credential_registry()
+
+        await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={
+                "github": [
+                    {"host": "github.fresh.example", "token": "ghp_fresh_cache_bust_value"},
+                ],
+                "gitlab": [],
+            },
+        )
+        entry = gc.find_credential_for_url("https://github.fresh.example/foo/bar.git")
+        assert entry is not None
+        assert entry["token"] == "ghp_fresh_cache_bust_value"
+
+    @pytest.mark.asyncio
+    async def test_put_last_write_wins_on_duplicate_host(self, client, monkeypatch):
+        """Duplicate hosts in a single PUT body merge last-write-wins."""
+        import json
+        from backend.config import settings
+        monkeypatch.setattr(settings, "github_token_map", "")
+        monkeypatch.setattr(settings, "gitlab_token_map", "")
+
+        resp = await client.put(
+            "/api/v1/system/settings/git/token-map",
+            json={
+                "github": [
+                    {"host": "github.enterprise.com", "token": "ghp_first_entry_token_aaa"},
+                    {"host": "github.enterprise.com", "token": "ghp_second_entry_token_bbb"},
+                ],
+                "gitlab": [],
+            },
+        )
+        assert resp.status_code == 200
+        parsed = json.loads(settings.github_token_map)
+        assert parsed == {
+            "github.enterprise.com": "ghp_second_entry_token_bbb",
+        }
+
+
 class TestVendorSDKCRUD:
 
     @pytest.mark.asyncio
