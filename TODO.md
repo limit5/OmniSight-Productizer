@@ -273,7 +273,7 @@ Legend:
 **Part A — Cherry-pick 高價值 Role Skills（缺失補齊）**
 - [x] `configs/roles/security-engineer.md`：從 agency-agents 的 Security Engineer 轉換——自動 security review（XSS / injection / auth bypass / CSP 違規 / secret 洩漏偵測）。整合 S2 系列 + PEP Gateway 使用
 - [x] `configs/roles/code-reviewer.md`：從 agency-agents 的 Code Reviewer 轉換——通用 code review（非只 merge conflict）。review checklist + 效能 / 可讀性 / 安全性 / 測試覆蓋 4 維度評分。搭配 O6 Merger Agent 作為 pre-review 階段
-- [ ] `configs/roles/software-architect.md`：架構決策框架——trade-off 分析模板 + ADR（Architecture Decision Record）自動生成 + 技術債評估
+- [x] `configs/roles/software-architect.md`：架構決策框架——trade-off 分析模板 + ADR（Architecture Decision Record）自動生成 + 技術債評估
 - [ ] `configs/roles/sre.md`：Site Reliability Engineer——incident response SOP + runbook 自動生成 + SLO/SLI 定義 + post-mortem 模板。搭配 R0 PEP + R1 ChatOps
 - [ ] `configs/roles/technical-writer.md`：文件生成專家——API docs / user guide / changelog / migration guide 品質標準 + 多語言模板
 - [ ] `configs/roles/database-optimizer.md`：SQL 效能分析 + index 建議 + query plan 解讀 + slow query 偵測。搭配 G4 PostgreSQL
