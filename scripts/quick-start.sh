@@ -406,15 +406,55 @@ _sed_safe_replace() {
 }
 
 if [ -f ".env" ]; then
-    log ".env 已存在，跳過生成。"
-    echo "   如需重新設定，請刪除 .env 後重新執行。"
-elif [ "$NON_INTERACTIVE" = true ]; then
-    cp .env.example .env
-    warn "非互動模式：已複製 .env.example → .env（未填 API key）。"
-    warn "請在執行完畢後編輯 .env 填入 API key，或重新以互動 TTY 執行腳本。"
-else
-    cp .env.example .env
-    log "已從 .env.example 複製 .env"
+    # 偵測 dev 模式 .env — prod 部署不該用 DEBUG=true / 空 API key / open auth
+    _ENV_IS_DEV=false
+    _DEV_REASONS=""
+    if grep -q "OMNISIGHT_DEBUG=true" .env 2>/dev/null; then
+        _ENV_IS_DEV=true
+        _DEV_REASONS="${_DEV_REASONS}\n     - OMNISIGHT_DEBUG=true（dev 模式，config 驗證被降級為 warning）"
+    fi
+    if grep -qE "^OMNISIGHT_ANTHROPIC_API_KEY=$|^OMNISIGHT_OPENAI_API_KEY=$|^OMNISIGHT_GOOGLE_API_KEY=$" .env 2>/dev/null && \
+       grep -q "OMNISIGHT_LLM_PROVIDER=anthropic\|OMNISIGHT_LLM_PROVIDER=openai\|OMNISIGHT_LLM_PROVIDER=google" .env 2>/dev/null; then
+        _ENV_IS_DEV=true
+        _DEV_REASONS="${_DEV_REASONS}\n     - LLM API key 為空（agent 將以 rule-based fallback 運行，無 AI 推理）"
+    fi
+
+    if [ "$_ENV_IS_DEV" = true ]; then
+        echo "" | tee -a "$LOG_FILE"
+        warn "現有 .env 包含開發模式設定：" | tee -a "$LOG_FILE"
+        echo -e "$_DEV_REASONS" | tee -a "$LOG_FILE"
+        echo "" | tee -a "$LOG_FILE"
+        echo -e "${BOLD}正式部署建議使用 production 設定。${NC}" | tee -a "$LOG_FILE"
+
+        if [ "$NON_INTERACTIVE" = true ]; then
+            warn "非互動模式：保留現有 dev .env。請手動修改後重新啟動。"
+        else
+            read -rp "要重新生成 prod 版 .env 嗎？(dev 版會備份為 .env.dev.bak) [Y/n]: " _reset_env
+            _reset_env=${_reset_env:-Y}
+            if [[ "$_reset_env" =~ ^[Yy] ]]; then
+                mv .env .env.dev.bak
+                log "dev .env 已備份為 .env.dev.bak"
+                # Fall through to the .env generation block below
+            else
+                log ".env 保留不變（dev 模式部署）。"
+                echo "   隨時可切回 prod：rm .env && ./scripts/quick-start.sh"
+            fi
+        fi
+    else
+        log ".env 已存在（prod 模式），跳過生成。"
+        echo "   如需重新設定，請刪除 .env 後重新執行。"
+    fi
+fi
+
+# Generate .env if it doesn't exist (fresh install or dev→prod reset)
+if [ ! -f ".env" ]; then
+    if [ "$NON_INTERACTIVE" = true ]; then
+        cp .env.example .env
+        warn "非互動模式：已複製 .env.example → .env（未填 API key）。"
+        warn "請在執行完畢後編輯 .env 填入 API key，或重新以互動 TTY 執行腳本。"
+    else
+        cp .env.example .env
+        log "已從 .env.example 複製 .env"
 
     echo ""
     echo -e "${BOLD}選擇 LLM Provider：${NC}"
@@ -466,6 +506,7 @@ else
     esac
 
     log ".env 設定完成"
+    fi
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
