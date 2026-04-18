@@ -35,6 +35,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     verifyGerritSubmitRule: vi.fn(),
     getGerritWebhookInfo: vi.fn(),
     generateGerritWebhookSecret: vi.fn(),
+    finalizeGerritIntegration: vi.fn(),
   }
 })
 
@@ -49,6 +50,7 @@ const mockedVerifyGerritMergerBot = api.verifyGerritMergerBot as unknown as Retu
 const mockedVerifyGerritSubmitRule = api.verifyGerritSubmitRule as unknown as ReturnType<typeof vi.fn>
 const mockedGetGerritWebhookInfo = api.getGerritWebhookInfo as unknown as ReturnType<typeof vi.fn>
 const mockedGenerateGerritWebhookSecret = api.generateGerritWebhookSecret as unknown as ReturnType<typeof vi.fn>
+const mockedFinalizeGerritIntegration = api.finalizeGerritIntegration as unknown as ReturnType<typeof vi.fn>
 const mockedGetGitTokenMap = (api as unknown as {
   getGitTokenMap: ReturnType<typeof vi.fn>
 }).getGitTokenMap
@@ -1029,5 +1031,220 @@ describe("GerritSetupWizardDialog — Step 5 (webhook 設定)", () => {
     expect(snippet.textContent).toContain("event = patchset-created")
     expect(snippet.textContent).toContain("event = comment-added")
     expect(snippet.textContent).toContain("event = change-merged")
+  })
+})
+
+/**
+ * B14 Part C row 227 — Gerrit Setup Wizard Finalize (寫入 config + 啟用整合).
+ *
+ * Finalize is the wizard's closing pane: it gates on Step 5 ack DONE, then
+ * pipes the SSH endpoint / REST URL / project the operator already validated
+ * through Steps 1–5 into a single atomic POST that flips
+ * `settings.gerrit_enabled = true`. On success the panel renders the
+ * 「Gerrit 整合已啟用」banner so the operator knows the integration is now
+ * load-bearing — without it the wizard would leave a half-configured Gerrit
+ * (Step 5 secret persisted but the master switch never on).
+ *
+ * Covered:
+ *   - Gated until Step 5 acks DONE (button hidden, panel grey)
+ *   - Summary preview shows the values the operator entered
+ *   - Successful finalize renders the localised success banner + ENABLED
+ *     badge, and hides the Finalize button (the action is one-shot here)
+ *   - Backend error is surfaced and ENABLED banner does NOT render
+ *   - finalizeGerritIntegration is called with the values from Steps 1 + 4
+ */
+describe("GerritSetupWizardDialog — Finalize (寫入 config + 啟用)", () => {
+  beforeEach(() => {
+    mockedGetSettings.mockReset()
+    mockedGetProviders.mockReset()
+    mockedTestGitForgeToken.mockReset()
+    mockedVerifyGerritMergerBot.mockReset()
+    mockedVerifyGerritSubmitRule.mockReset()
+    mockedGetGerritWebhookInfo.mockReset()
+    mockedGenerateGerritWebhookSecret.mockReset()
+    mockedFinalizeGerritIntegration.mockReset()
+    mockedGetSettings.mockResolvedValue({})
+    mockedGetProviders.mockResolvedValue({ providers: [] })
+    if (mockedGetGitTokenMap) {
+      mockedGetGitTokenMap.mockReset()
+      mockedGetGitTokenMap.mockResolvedValue({
+        github: { instances: [] },
+        gitlab: { instances: [] },
+      })
+    }
+  })
+
+  async function passSteps1Through5(
+    host = "merger-agent-bot@gerrit.example.com",
+    port = 29418,
+    project = "project/omnisight-core",
+    restUrl = "https://gerrit.example.com",
+  ) {
+    mockedTestGitForgeToken.mockResolvedValueOnce({
+      status: "ok",
+      version: "3.8.1",
+      ssh_host: host,
+      ssh_port: port,
+    })
+    mockedVerifyGerritMergerBot.mockResolvedValueOnce({
+      status: "ok",
+      group: "merger-agent-bot",
+      member_count: 1,
+      members: [{ username: "merger-agent-bot" }],
+    })
+    mockedVerifyGerritSubmitRule.mockResolvedValueOnce({
+      status: "ok",
+      project,
+      checks: [
+        { id: "ai_reviewers_can_vote", ok: true },
+        { id: "humans_can_vote", ok: true },
+        { id: "submit_gated_to_humans", ok: true },
+      ],
+      missing: [],
+    })
+    mockedGetGerritWebhookInfo.mockResolvedValueOnce({
+      status: "ok",
+      webhook_url: "https://omnisight.example.com/api/v1/webhooks/gerrit",
+      secret_configured: true,
+      secret_masked: "abcd…wxyz",
+      signature_header: "X-Gerrit-Signature",
+      signature_algorithm: "hmac-sha256",
+    })
+    await renderAndOpenWizard()
+    fireEvent.change(screen.getByTestId("gerrit-wizard-url"), {
+      target: { value: restUrl },
+    })
+    fireEvent.change(screen.getByTestId("gerrit-wizard-ssh-host"), {
+      target: { value: host },
+    })
+    fireEvent.click(screen.getByTestId("gerrit-wizard-test"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-1-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+    fireEvent.click(await screen.findByTestId("gerrit-wizard-verify-bot"))
+    await screen.findByTestId("gerrit-wizard-bot-result")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-3-ack"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-3-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+    fireEvent.change(
+      screen.getByTestId("gerrit-wizard-submit-rule-project"),
+      { target: { value: project } },
+    )
+    fireEvent.click(screen.getByTestId("gerrit-wizard-verify-submit-rule"))
+    await screen.findByTestId("gerrit-wizard-submit-rule-result")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-4-ack"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-4-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-load-webhook-info"),
+    )
+    await screen.findByTestId("gerrit-wizard-webhook-secret-masked")
+    fireEvent.click(screen.getByTestId("gerrit-wizard-step-5-ack"))
+    await waitFor(() => {
+      expect(screen.getByTestId("gerrit-wizard-step-5-badge").textContent).toBe(
+        "DONE",
+      )
+    })
+  }
+
+  it("keeps Finalize gated until Step 5 acks DONE", async () => {
+    await renderAndOpenWizard()
+    expect(screen.getByTestId("gerrit-wizard-finalize-gated")).toBeTruthy()
+    expect(
+      screen.queryByTestId("gerrit-wizard-finalize-button"),
+    ).toBeNull()
+    expect(
+      screen.getByTestId("gerrit-wizard-finalize-badge").textContent,
+    ).toBe("PENDING")
+  })
+
+  it("shows the wizard inputs in the summary panel after Step 5 DONE", async () => {
+    await passSteps1Through5()
+    const summary = await screen.findByTestId(
+      "gerrit-wizard-finalize-summary",
+    )
+    // The summary shows what's about to be persisted — operator's last
+    // chance to spot a typo before flipping `gerrit_enabled = true`.
+    expect(summary.textContent).toContain("merger-agent-bot@gerrit.example.com")
+    expect(summary.textContent).toContain("29418")
+    expect(summary.textContent).toContain("https://gerrit.example.com")
+    expect(summary.textContent).toContain("project/omnisight-core")
+    expect(
+      screen.getByTestId("gerrit-wizard-finalize-badge").textContent,
+    ).toBe("READY")
+  })
+
+  it("posts the wizard inputs and renders 「Gerrit 整合已啟用」 on success", async () => {
+    mockedFinalizeGerritIntegration.mockResolvedValueOnce({
+      status: "ok",
+      enabled: true,
+      message: "Gerrit 整合已啟用",
+      config: {
+        url: "https://gerrit.example.com",
+        ssh_host: "merger-agent-bot@gerrit.example.com",
+        ssh_port: 29418,
+        project: "project/omnisight-core",
+        webhook_secret_configured: true,
+      },
+      note: "Settings persisted to runtime — write the matching OMNISIGHT_GERRIT_* env vars into your .env to survive restart.",
+    })
+    await passSteps1Through5()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-finalize-button"),
+    )
+    const banner = await screen.findByTestId(
+      "gerrit-wizard-finalize-success",
+    )
+    // The success copy is the load-bearing acknowledgement the user sees.
+    expect(banner.textContent).toContain("Gerrit 整合已啟用")
+    expect(
+      screen.getByTestId("gerrit-wizard-finalize-badge").textContent,
+    ).toBe("ENABLED")
+    // Finalize is one-shot here — once enabled, the button disappears so
+    // the operator doesn't keep re-posting the same payload.
+    expect(
+      screen.queryByTestId("gerrit-wizard-finalize-button"),
+    ).toBeNull()
+    // Verify the API was called with the values from Steps 1 + 4.
+    expect(mockedFinalizeGerritIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "https://gerrit.example.com",
+        ssh_host: "merger-agent-bot@gerrit.example.com",
+        ssh_port: 29418,
+        project: "project/omnisight-core",
+      }),
+    )
+  })
+
+  it("renders the backend error and keeps the integration disabled on failure", async () => {
+    mockedFinalizeGerritIntegration.mockRejectedValueOnce(
+      new Error("backend 500: write to settings failed"),
+    )
+    await passSteps1Through5()
+    fireEvent.click(
+      await screen.findByTestId("gerrit-wizard-finalize-button"),
+    )
+    const err = await screen.findByTestId("gerrit-wizard-finalize-error")
+    expect(err.textContent).toContain("backend 500")
+    // No success banner — the integration must NOT appear enabled on failure.
+    expect(
+      screen.queryByTestId("gerrit-wizard-finalize-success"),
+    ).toBeNull()
+    // Badge must NOT flip to ENABLED on failure — operator can retry.
+    expect(
+      screen.getByTestId("gerrit-wizard-finalize-badge").textContent,
+    ).toBe("READY")
+    // The button stays so the operator can retry after fixing the issue.
+    expect(
+      screen.getByTestId("gerrit-wizard-finalize-button"),
+    ).toBeTruthy()
   })
 })

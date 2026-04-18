@@ -1104,12 +1104,15 @@ function NetworkEgressSection() {
  * plain value is shown exactly once for copy-to-clipboard; subsequent
  * reads return only the masked preview. Rotate to recover.
  *
- * Steps 1–4 do not persist to `settings.gerrit_*`. Step 5 *does* mutate
- * one field (`settings.gerrit_webhook_secret`) via the rotate endpoint —
+ * Steps 1–4 do not persist to `settings.gerrit_*`. Step 5 mutates one
+ * field (`settings.gerrit_webhook_secret`) via the rotate endpoint —
  * that's intentional because the wizard is the only place this secret
- * is generated. A later row ties the wizard's "finalize" path to the
- * existing settings PUT so an unfinished wizard never leaves a
- * half-configured Gerrit endpoint in `settings.*`.
+ * is generated. Row 227 adds the Finalize pane (gated on Step 5 ack):
+ * a single atomic write into `settings.gerrit_url`, `gerrit_ssh_host`,
+ * `gerrit_ssh_port`, `gerrit_project`, `gerrit_replication_targets`,
+ * and `gerrit_enabled = true`. The success path renders the
+ * 「Gerrit 整合已啟用」banner so the operator knows the wizard's
+ * collected values are now load-bearing.
  *
  * Rendered via createPortal at z-[110] to sit above the parent IntegrationSettings
  * portal (z-[100]); backdrop click and X close.
@@ -1159,6 +1162,16 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
   const [webhookUrlCopied, setWebhookUrlCopied] = useState(false)
   const [webhookSecretCopied, setWebhookSecretCopied] = useState(false)
   const [step5Ackd, setStep5Ackd] = useState(false)
+  // B14 Part C row 227 — Finalize: write the wizard's collected
+  // SSH/REST/project values into `settings.gerrit_*` and flip
+  // `gerrit_enabled = true`. Steps 1–5 only mutate
+  // `gerrit_webhook_secret` (Step 5 generate); without finalize the
+  // operator would have to re-enter every value into the Settings form
+  // by hand to actually turn the integration on.
+  const [finalizing, setFinalizing] = useState(false)
+  const [finalizeResult, setFinalizeResult] =
+    useState<api.GerritFinalizeResult | null>(null)
+  const [finalizeError, setFinalizeError] = useState<string>("")
 
   const parsedPort = (() => {
     const trimmed = sshPort.trim()
@@ -1341,6 +1354,32 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }, [webhookSecretPlain])
 
+  const onFinalize = useCallback(async () => {
+    if (!sshHost.trim() || !portValid) return
+    setFinalizing(true)
+    setFinalizeError("")
+    setFinalizeResult(null)
+    try {
+      const res = await api.finalizeGerritIntegration({
+        url: url.trim(),
+        ssh_host: sshHost.trim(),
+        ssh_port: parsedPort as number,
+        project: submitRuleProject.trim(),
+      })
+      if (res.status === "ok" && res.enabled) {
+        setFinalizeResult(res)
+      } else {
+        setFinalizeError(res.message || "Failed to enable Gerrit integration")
+      }
+    } catch (err) {
+      setFinalizeError(
+        err instanceof Error ? err.message : "Failed to enable Gerrit integration",
+      )
+    } finally {
+      setFinalizing(false)
+    }
+  }, [sshHost, parsedPort, portValid, url, submitRuleProject])
+
   if (!open || typeof document === "undefined") return null
 
   const pubkeyReady = pubkey?.status === "ok" && !!pubkey.public_key
@@ -1431,7 +1470,7 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3">
           <p className="font-mono text-[10px] leading-relaxed text-[var(--foreground)]">
-            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟（Steps 1–5 全部就緒）。
+            引導你把 <strong>Gerrit Code Review</strong> 一步步接上 OmniSight 的 dual-sign merge 流程。共 5 個步驟 + Finalize（寫入 config 並啟用整合）。
           </p>
 
           <div
@@ -2281,6 +2320,134 @@ function GerritSetupWizardDialog({ open, onClose }: { open: boolean; onClose: ()
                       會立即作廢舊 secret，記得同步更新 Gerrit 端。
                     </div>
                   </>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div
+            data-testid="gerrit-wizard-finalize"
+            data-state={
+              finalizeResult?.enabled ? "done" : step5Ackd ? "ready" : "pending"
+            }
+            className={`p-3 rounded border space-y-2 ${
+              step5Ackd
+                ? "border-[var(--validation-emerald)]/50 bg-[var(--background)]"
+                : "border-[var(--border)] bg-[var(--background)] opacity-60"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] text-[9px] font-mono flex items-center justify-center font-semibold">
+                ✓
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-mono text-[10px] font-semibold text-[var(--foreground)]">
+                  Finalize — 寫入 config 並啟用 Gerrit
+                </div>
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed mt-0.5">
+                  把 Steps 1–5 收集到的 SSH endpoint / REST URL / project 寫入{" "}
+                  <code>settings.gerrit_*</code>，並把 <code>gerrit_enabled</code> 翻成 true。
+                </div>
+              </div>
+              <span
+                data-testid="gerrit-wizard-finalize-badge"
+                className={`flex-shrink-0 font-mono text-[8px] px-1.5 py-0.5 rounded self-start ${
+                  finalizeResult?.enabled
+                    ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                    : step5Ackd
+                      ? "bg-[var(--neural-blue)]/20 text-[var(--neural-blue)]"
+                      : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+                }`}
+              >
+                {finalizeResult?.enabled
+                  ? "ENABLED"
+                  : step5Ackd
+                    ? "READY"
+                    : "PENDING"}
+              </span>
+            </div>
+
+            {!step5Ackd ? (
+              <div
+                data-testid="gerrit-wizard-finalize-gated"
+                className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1"
+              >
+                完成 Step 5 (Webhook 已套用) 後解鎖。
+              </div>
+            ) : (
+              <div className="space-y-1.5 pt-1">
+                <div
+                  data-testid="gerrit-wizard-finalize-summary"
+                  className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed space-y-0.5 p-2 rounded bg-[var(--secondary)]"
+                >
+                  <div>
+                    SSH:{" "}
+                    <code className="text-[var(--foreground)]">
+                      {sshHost.trim() || "(not set)"}:{parsedPort}
+                    </code>
+                  </div>
+                  {url.trim() && (
+                    <div>
+                      REST URL:{" "}
+                      <code className="text-[var(--foreground)]">{url.trim()}</code>
+                    </div>
+                  )}
+                  {submitRuleProject.trim() && (
+                    <div>
+                      Project:{" "}
+                      <code className="text-[var(--foreground)]">
+                        {submitRuleProject.trim()}
+                      </code>
+                    </div>
+                  )}
+                </div>
+
+                {!finalizeResult?.enabled && (
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      data-testid="gerrit-wizard-finalize-button"
+                      onClick={onFinalize}
+                      disabled={finalizing || !sshHost.trim() || !portValid}
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded font-mono text-[10px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {finalizing ? (
+                        <Loader size={10} className="animate-spin" />
+                      ) : (
+                        <Check size={10} />
+                      )}
+                      {finalizing ? "Enabling…" : "啟用 Gerrit 整合"}
+                    </button>
+                  </div>
+                )}
+
+                {finalizeError && (
+                  <div
+                    data-testid="gerrit-wizard-finalize-error"
+                    className="font-mono text-[9px] px-2 py-1 rounded flex items-start gap-1.5 bg-[var(--critical-red)]/10 text-[var(--critical-red)]"
+                  >
+                    <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" />
+                    <span>{finalizeError}</span>
+                  </div>
+                )}
+
+                {finalizeResult?.enabled && (
+                  <div
+                    data-testid="gerrit-wizard-finalize-success"
+                    className="font-mono text-[10px] px-2 py-1.5 rounded flex items-start gap-1.5 bg-[var(--validation-emerald)]/15 text-[var(--validation-emerald)] border border-[var(--validation-emerald)]/40"
+                  >
+                    <Check size={12} className="mt-0.5 flex-shrink-0" />
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-semibold">
+                        {finalizeResult.message || "Gerrit 整合已啟用"}
+                      </span>
+                      {finalizeResult.note && (
+                        <span className="opacity-80 text-[9px]">
+                          {finalizeResult.note}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
             )}

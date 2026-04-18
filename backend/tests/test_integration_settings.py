@@ -1531,3 +1531,226 @@ class TestGerritWebhookInfo:
         url = _derive_webhook_url(req)
         assert url.endswith("/api/v1/webhooks/gerrit")
         assert "api.internal.example.com" in url
+
+
+@pytest.fixture
+def reset_rate_limiter():
+    """Reset the in-process rate-limit bucket before the test.
+
+    The IP-bucket persists across tests in the shared in-memory
+    ``InMemoryLimiter`` (singleton), so a long ``test_integration_settings``
+    session accumulates requests and starts returning 429 partway
+    through. Tests that fire several POSTs back-to-back use this to
+    flush the bucket and isolate themselves.
+    """
+    from backend.rate_limit import get_limiter
+    get_limiter().clear()
+    yield
+    get_limiter().clear()
+
+
+class TestGerritFinalize:
+    """B14 Part C row 227 — Gerrit Setup Wizard finalize endpoint.
+
+    ``POST /api/v1/system/git-forge/gerrit/finalize`` is the wizard's
+    closing act: it takes the SSH endpoint / REST URL / project values
+    the operator already validated through Steps 1–5 and writes them
+    atomically into ``settings.gerrit_*`` while flipping
+    ``gerrit_enabled = true``. Without this endpoint the wizard would
+    leave a half-configured Gerrit (webhook secret persisted by Step 5
+    but the master switch never on).
+
+    Tests cover (a) the happy path enables the integration and echoes
+    back the persisted config, (b) input validation rejects empty
+    ssh_host and out-of-range ports, (c) optional fields default to
+    empty strings, (d) the success message matches the wizard's
+    expected「Gerrit 整合已啟用」copy, (e) the response never echoes
+    the plain webhook secret (only configured/not).
+    """
+
+    @pytest.mark.asyncio
+    async def test_finalize_enables_and_persists(self, client, monkeypatch, reset_rate_limiter):
+        """Happy path: posting the wizard inputs flips
+        ``gerrit_enabled`` on, persists every gerrit_* field, and
+        returns ``status=ok`` + the localised success banner copy."""
+        from backend.config import settings as _s
+        # Reset to a known-disabled baseline so we can prove the flip.
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        monkeypatch.setattr(_s, "gerrit_url", "")
+        monkeypatch.setattr(_s, "gerrit_ssh_host", "")
+        monkeypatch.setattr(_s, "gerrit_ssh_port", 29418)
+        monkeypatch.setattr(_s, "gerrit_project", "")
+        monkeypatch.setattr(_s, "gerrit_replication_targets", "")
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={
+                "url": "https://gerrit.example.com",
+                "ssh_host": "merger-agent-bot@gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "project/omnisight-core",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["enabled"] is True
+        # Localised confirmation copy matches the UI banner verbatim —
+        # the frontend test asserts the same string is rendered.
+        assert data["message"] == "Gerrit 整合已啟用"
+        assert _s.gerrit_enabled is True
+        assert _s.gerrit_url == "https://gerrit.example.com"
+        assert _s.gerrit_ssh_host == "merger-agent-bot@gerrit.example.com"
+        assert _s.gerrit_ssh_port == 29418
+        assert _s.gerrit_project == "project/omnisight-core"
+        # Echo carries the post-write snapshot for the UI summary panel.
+        cfg = data["config"]
+        assert cfg["url"] == "https://gerrit.example.com"
+        assert cfg["ssh_host"] == "merger-agent-bot@gerrit.example.com"
+        assert cfg["ssh_port"] == 29418
+        assert cfg["project"] == "project/omnisight-core"
+        assert cfg["webhook_secret_configured"] is False
+
+    @pytest.mark.asyncio
+    async def test_finalize_trims_whitespace(self, client, monkeypatch, reset_rate_limiter):
+        """Trailing whitespace from copy-paste should not leak into
+        ``settings.*`` — the wizard inputs sometimes pick up trailing
+        newlines from the operator's clipboard."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        monkeypatch.setattr(_s, "gerrit_ssh_host", "")
+        monkeypatch.setattr(_s, "gerrit_url", "")
+        monkeypatch.setattr(_s, "gerrit_project", "")
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={
+                "url": "  https://gerrit.example.com\n",
+                "ssh_host": "  bot@gerrit.example.com  ",
+                "ssh_port": 29418,
+                "project": "  project/omnisight-core  ",
+            },
+        )
+        assert resp.status_code == 200
+        assert _s.gerrit_url == "https://gerrit.example.com"
+        assert _s.gerrit_ssh_host == "bot@gerrit.example.com"
+        assert _s.gerrit_project == "project/omnisight-core"
+
+    @pytest.mark.asyncio
+    async def test_finalize_rejects_empty_ssh_host(self, client, monkeypatch, reset_rate_limiter):
+        """ssh_host is the load-bearing field (Step 1 pivots on it).
+        An empty value would leave Gerrit unreachable even though
+        ``gerrit_enabled`` is true — refuse with HTTP 400 rather than
+        write a half-broken config."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={"ssh_host": "   ", "ssh_port": 29418},
+        )
+        assert resp.status_code == 400
+        # The integration must not have been enabled by a rejected call.
+        assert _s.gerrit_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_finalize_rejects_invalid_port(self, client, monkeypatch, reset_rate_limiter):
+        """Out-of-range SSH port is a config-day footgun (e.g. 0 or
+        99999 from a bad copy-paste). Refuse with HTTP 400 rather than
+        write garbage that would make every subsequent Gerrit call
+        fail with a confusing 'connection refused'."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        for bad_port in (0, -1, 65536, 99999):
+            resp = await client.post(
+                "/api/v1/system/git-forge/gerrit/finalize",
+                json={"ssh_host": "bot@gerrit.example.com", "ssh_port": bad_port},
+            )
+            assert resp.status_code == 400, f"port={bad_port} should be rejected"
+        assert _s.gerrit_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_finalize_optional_fields_default_to_empty(
+        self, client, monkeypatch, reset_rate_limiter
+    ):
+        """SSH-only Gerrit installs have no REST URL; single-instance
+        installs have no replication targets. Both are valid — only
+        ssh_host + ssh_port are mandatory."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        monkeypatch.setattr(_s, "gerrit_url", "preexisting")
+        monkeypatch.setattr(_s, "gerrit_project", "preexisting")
+        monkeypatch.setattr(_s, "gerrit_replication_targets", "preexisting")
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={"ssh_host": "bot@gerrit.example.com", "ssh_port": 29418},
+        )
+        assert resp.status_code == 200
+        # Missing fields collapse to empty strings (not None, not the
+        # prior value) — finalize is a replace, not a patch.
+        assert _s.gerrit_url == ""
+        assert _s.gerrit_project == ""
+        assert _s.gerrit_replication_targets == ""
+
+    @pytest.mark.asyncio
+    async def test_finalize_response_reports_webhook_secret_status(
+        self, client, monkeypatch, reset_rate_limiter
+    ):
+        """The config echo must report whether Step 5 already set a
+        webhook secret — the wizard uses this to surface a follow-up
+        nudge if the operator skipped the Generate button. Critically,
+        the plain secret is NEVER echoed (Step 5 generate is the
+        one-and-only reveal)."""
+        from backend.config import settings as _s
+        plain = "VERY_SECRET_TOKEN_DO_NOT_LEAK_1234567890"
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        monkeypatch.setattr(_s, "gerrit_webhook_secret", plain)
+
+        resp = await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={"ssh_host": "bot@gerrit.example.com", "ssh_port": 29418},
+        )
+        assert resp.status_code == 200
+        body = resp.text
+        # Belt + braces: the plain secret must NOT appear anywhere in
+        # the response — even masked. Re-revealing on every finalize
+        # would defeat Step 5's rotation surface.
+        assert plain not in body
+        assert resp.json()["config"]["webhook_secret_configured"] is True
+
+    @pytest.mark.asyncio
+    async def test_finalize_idempotent_overwrites(self, client, monkeypatch, reset_rate_limiter):
+        """Re-running finalize with new values overwrites — operators
+        will edit the wizard inputs and re-finalize when they realise
+        they typed the wrong project. No 409 / no merge — just replace."""
+        from backend.config import settings as _s
+        monkeypatch.setattr(_s, "gerrit_enabled", False)
+        monkeypatch.setattr(_s, "gerrit_ssh_port", 29418)
+
+        # First finalize with one set of values.
+        await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={
+                "ssh_host": "old@gerrit.example.com",
+                "ssh_port": 29418,
+                "project": "project/old",
+            },
+        )
+        assert _s.gerrit_ssh_host == "old@gerrit.example.com"
+        assert _s.gerrit_project == "project/old"
+
+        # Second finalize replaces.
+        resp2 = await client.post(
+            "/api/v1/system/git-forge/gerrit/finalize",
+            json={
+                "ssh_host": "new@gerrit.example.com",
+                "ssh_port": 29419,
+                "project": "project/new",
+            },
+        )
+        assert resp2.status_code == 200
+        assert _s.gerrit_ssh_host == "new@gerrit.example.com"
+        assert _s.gerrit_ssh_port == 29419
+        assert _s.gerrit_project == "project/new"
+        assert _s.gerrit_enabled is True

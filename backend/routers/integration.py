@@ -1151,6 +1151,93 @@ async def get_gerrit_webhook_info(
     }
 
 
+class GerritFinalizeBody(BaseModel):
+    """Wizard finalize payload — Steps 1-5 collected on the client side, this
+    is the single atomic write into ``settings.gerrit_*`` that flips the
+    integration ON. Fields mirror the wizard inputs:
+
+    * ``url`` — REST URL the operator entered in Step 1 (optional; some
+      shops only run SSH-only Gerrit and never enable the REST plugin).
+    * ``ssh_host`` / ``ssh_port`` — Step 1 SSH endpoint that already
+      passed the ``gerrit version`` probe.
+    * ``project`` — the project path validated by Step 4's submit-rule
+      probe (e.g. ``project/omnisight-core``).
+    * ``replication_targets`` — optional CSV of remote names; empty is
+      fine for most installs (single-Gerrit deploys).
+    """
+    url: str = ""
+    ssh_host: str
+    ssh_port: int = 29418
+    project: str = ""
+    replication_targets: str = ""
+
+
+@router.post("/git-forge/gerrit/finalize")
+async def finalize_gerrit_integration(
+    body: GerritFinalizeBody, _user=Depends(_au.require_admin)
+):
+    """Persist the wizard's collected Gerrit settings and flip
+    ``gerrit_enabled`` on — the closing act of the Setup Wizard.
+
+    Steps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).
+    Without this finalize step the operator would have to re-enter every
+    Step 1 value into the Settings form by hand to actually turn the
+    integration on, defeating the wizard. This endpoint is the single
+    atomic write that promotes wizard inputs into ``settings.gerrit_*``
+    and reports success so the UI can render the「Gerrit 整合已啟用」
+    confirmation banner.
+
+    Validation is intentionally narrow:
+      * ``ssh_host`` must be non-empty (Step 1 cannot have passed
+        otherwise; we double-check here so a hand-rolled curl can't
+        write garbage).
+      * ``ssh_port`` must be in [1, 65535].
+      * ``url`` and ``project`` are normalised (trim) but not
+        round-tripped to Gerrit again — Step 1 + Step 4 already proved
+        they work.
+
+    The webhook secret is *not* echoed back even masked — the Step 5
+    generate response was the one-and-only reveal.
+    """
+    ssh_host = (body.ssh_host or "").strip()
+    if not ssh_host:
+        raise HTTPException(400, "ssh_host is required (Step 1 must pass first)")
+    if not (1 <= body.ssh_port <= 65535):
+        raise HTTPException(400, f"ssh_port {body.ssh_port} out of range 1..65535")
+
+    settings.gerrit_enabled = True
+    settings.gerrit_url = (body.url or "").strip()
+    settings.gerrit_ssh_host = ssh_host
+    settings.gerrit_ssh_port = body.ssh_port
+    settings.gerrit_project = (body.project or "").strip()
+    settings.gerrit_replication_targets = (body.replication_targets or "").strip()
+
+    logger.info(
+        "Gerrit integration finalized by user=%s host=%s port=%d project=%s url=%s",
+        getattr(_user, "username", "?"),
+        ssh_host, body.ssh_port,
+        settings.gerrit_project or "(unset)",
+        settings.gerrit_url or "(unset)",
+    )
+    return {
+        "status": "ok",
+        "enabled": True,
+        "message": "Gerrit 整合已啟用",
+        "config": {
+            "url": settings.gerrit_url,
+            "ssh_host": settings.gerrit_ssh_host,
+            "ssh_port": settings.gerrit_ssh_port,
+            "project": settings.gerrit_project,
+            "replication_targets": settings.gerrit_replication_targets,
+            "webhook_secret_configured": bool(settings.gerrit_webhook_secret),
+        },
+        "note": (
+            "Settings persisted to runtime — write the matching "
+            "OMNISIGHT_GERRIT_* env vars into your .env to survive restart."
+        ),
+    }
+
+
 @router.post("/git-forge/gerrit/webhook-secret/generate")
 async def generate_gerrit_webhook_secret(
     request: Request, _user=Depends(_au.require_admin)

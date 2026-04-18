@@ -1498,6 +1498,50 @@ export async function generateGerritWebhookSecret(): Promise<GerritWebhookSecret
   )
 }
 
+// ─── B14 Part C row 227: Gerrit Setup Wizard finalize (write config + enable) ───
+//
+// After Steps 1–5 all surface DONE the wizard pipes the collected SSH
+// endpoint + project + REST URL into a single atomic write that flips
+// `settings.gerrit_enabled = true` and persists the rest of the
+// `gerrit_*` fields. The response carries the post-write settings echo
+// (webhook secret reported as configured/not, never plain) and the
+// localised confirmation message the UI renders as "Gerrit 整合已啟用".
+export interface GerritFinalizeConfig {
+  url?: string
+  ssh_host?: string
+  ssh_port?: number
+  project?: string
+  replication_targets?: string
+  webhook_secret_configured?: boolean
+}
+
+export interface GerritFinalizeResult {
+  status: "ok" | "error"
+  enabled?: boolean
+  message?: string
+  config?: GerritFinalizeConfig
+  note?: string
+}
+
+export async function finalizeGerritIntegration(args: {
+  url?: string
+  ssh_host: string
+  ssh_port?: number
+  project?: string
+  replication_targets?: string
+}): Promise<GerritFinalizeResult> {
+  return request<GerritFinalizeResult>("/system/git-forge/gerrit/finalize", {
+    method: "POST",
+    body: JSON.stringify({
+      url: args.url ?? "",
+      ssh_host: args.ssh_host,
+      ssh_port: args.ssh_port ?? 29418,
+      project: args.project ?? "",
+      replication_targets: args.replication_targets ?? "",
+    }),
+  })
+}
+
 // ─── Tenant Secrets (I4) ───
 
 export interface TenantSecret {
