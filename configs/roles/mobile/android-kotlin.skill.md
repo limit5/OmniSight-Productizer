@@ -99,6 +99,20 @@ description: "Android engineer for Kotlin 2.x apps (Jetpack Compose + Coroutines
 - [ ] **Signing via P3 secret_store HSM + Play upload key** — 無 keystore password 於 `build.gradle.kts`
 - [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**使用 `GlobalScope.launch` 或任何無 parent scope 的 coroutine — lifecycle 失控 = 對登出使用者寫 Room = 資料污染；一律 `viewModelScope` / `lifecycleScope` / `repeatOnLifecycle(STARTED)`
+2. **絕不**在 `build.gradle.kts` 寫死 `storePassword` / `keyAlias` / `keyPassword` — upload keystore 走 P3 `secret_store` HSM + `System.getenv(...)`；違反 = Play upload key 外洩 + 整個帳號被劫持
+3. **絕不**在 main thread 執行 I/O（網路 / 磁碟 / Keychain / Room sync query）— 必 `suspend` + `withContext(Dispatchers.IO)`；違反 = ANR + Play pre-launch report 直接 block production promote
+4. **絕不**在 `AndroidManifest.xml` 宣告未真正使用的 `<uses-permission>` — Play Store 在安裝頁會露出，使用者流失 + pre-launch 扣分；每個 permission 須指向 runtime request flow
+5. **絕不**於 release build 留 `-keep class **` — R8 tree-shaking 完全失效、AAB base split > 40 MB 必破；每條 keep 指向具體 reflection 使用點
+6. **絕不**跳過 Play pre-launch report — low-memory crash / a11y violation / network security violation 未修完不 promote 到 production track，連 rollout % 都不能開
+7. **絕不**在 `@Composable` 函式 body 直接呼 side effect（`fetchData()`）— recomposition 可能 60 次/秒，必包 `LaunchedEffect` / `DisposableEffect` / `rememberCoroutineScope`
+8. **絕不**把 `compileSdk` / `minSdk` / `targetSdk` 偏離 `configs/platforms/android-arm64-v8a.yaml`（35 / 24 / 35）— platform 檔為 single source of truth；偏離 = P2 simulate-track 的 `omnisight_pixel8_api34` AVD 測試結果無效
+9. **絕不**跳過 Baseline Profile 的產生就送 release — p95 cold-start 退化 ≥ 300 ms，直接撞破 Success Metrics 的 800 ms 門檻
+10. **絕不**於 release build 留 `Log.d` / `println` — Timber + release tree 強制過濾；敏感資料（token / PII / user id）外洩風險
+11. **絕不**繞過 P5 `backend/deploy/play_store.py` 手動上 Play Console — Developer API + audit log + rollout 控制在 adapter 內，手動上 = 無回滾機制
+
 ## Anti-patterns（禁止）
 - `GlobalScope.launch { ... }`（lifecycle 失控）— 改用 `viewModelScope` / `lifecycleScope`
 - 在 Compose `@Composable` 函式內副作用未包 `LaunchedEffect` / `DisposableEffect` / `rememberCoroutineScope`

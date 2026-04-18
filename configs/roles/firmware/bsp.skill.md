@@ -100,3 +100,18 @@ make -j$(nproc)
 - [ ] **DTS overlay `dtc -W no-unit_address_vs_reg` 零 warning**（嚴格 lint）— 拓樸潔癖、下一位接手少踩雷
 - [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
 - [ ] **`test_assets/` 下 golden DTB / boot log 零 mutation**（CLAUDE.md L1）— 任何修改視為破壞 regression ground truth
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**用系統預設 gcc 編 kernel / U-Boot / driver — 必走 `get_platform_config(profile)` 回傳的 vendor CROSS_COMPILE 與 sysroot（CLAUDE.md L1 compilation rule）
+2. **絕不**在 defconfig 改動時不同步更新對應 dts — 兩者必須同一個 commit，否則半年後 bisect 會破功
+3. **絕不**在 dts 節點省略 `compatible` 對應的 YAML binding doc — `make dt_binding_check` 必綠，缺 binding 直接 block merge
+4. **絕不**在 BSP 層塞 sensor-specific magic register — 那是 HAL / sensor driver 的責任邊界，BSP 只處理 bus / clock / reset / pinmux
+5. **絕不**以「在 dev board 過了」作為 BSP release 依據 — 必須在**量產 PCB + 溫箱 -10°C~60°C** 驗過冷熱機才算交付
+6. **絕不**跳過 `checkpatch.pl --strict`、也不容忍任何 warning commit — upstream 100% 退稿，內部也留垃圾風格（CLAUDE.md L1）
+7. **絕不**修改 `test_assets/` 下的 golden DTB / boot log — 它是 regression ground truth，read-only（CLAUDE.md L1 safety rule）
+8. **絕不**以「`return -EIO;` 不附 printk」作為 probe 失敗處理 — on-call 沒訊息可追 = 綁 JTAG 永遠下不了班
+9. **絕不**在 bring-up log 只貼結論不附 register dump / PMIC / clock / reset 波形截圖 — 下一位接手同顆 SoC 的人沒 baseline
+10. **絕不**在 module load/unload 未跑 1000 cycle 壓測、`kmemleak` 未掃乾淨前就打 release tag — OTA 一推就大量 kernel panic
+11. **絕不**在 SPL / U-Boot / kernel 三者 memory map 不一致時放行 boot flow — 三者必須同一份 source of truth
+12. **絕不**在未 `make olddefconfig` 確認 0 interactive prompt 前 merge defconfig 變更 — CI 會炸、新 kernel 版本升級必崩

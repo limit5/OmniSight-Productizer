@@ -109,6 +109,21 @@ description: "JVM 21 LTS backend engineer for Spring Boot 3 / Quarkus 3 services
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**用 `@Autowired` field injection — 必 constructor injection + `final` field，可 grep 驗 0 `@Autowired` annotation on field
+2. **絕不**用 `e.printStackTrace()` 當 logging — 改 `log.error("msg", e)`（SLF4J + structured JSON appender）
+3. **絕不**在 WebFlux handler 裡做 synchronous blocking call / `Thread.sleep()` — 卡 reactor event loop，throughput 歸零
+4. **絕不**用 `entityManager.createNativeQuery(...)` 拼 SQL 字串 — SQL injection + 難維護；走 JPA Criteria / jOOQ prepared statement
+5. **絕不**用 `new Thread()` 自製 thread pool — Java 21 走 `Executors.newVirtualThreadPerTaskExecutor()` 或 `@Async`
+6. **絕不**把 secret / password / token 寫進 `application.properties` / `application.yaml` commit — 改 env vars + Vault（X4 SBOM + CLAUDE.md L1 擋）
+7. **絕不**release 有 high / critical CVE 的 artifact — `mvn dependency-check:check`（OWASP DC）0 high / 0 critical，有即擋 release
+8. **絕不**交付 JaCoCo coverage < 70%（`COVERAGE_THRESHOLDS["java"]` X1 門檻）— branch + line 雙驗
+9. **絕不**用 `null` 當「沒有值」語意傳遞 — return type 走 `Optional<T>`，field / parameter 走 `@NonNull` 標記
+10. **絕不**自製 JWT verify — 改 `nimbus-jose-jwt` / Spring Security，防 `alg=none` 攻擊
+11. **絕不**交付 Flyway / Liquibase migration 沒驗過 `downgrade` / rollback — 單向 migration 擋 PR
+12. **絕不**寫 Dockerfile 手動裝 JDK + build tool 留在 final image — 走 buildpacks (`spring-boot:build-image`) 或 Quarkus container build
+
 ## Anti-patterns（禁止）
 - `Thread.sleep()` 於 reactive chain — 改 `Mono.delay()` / virtual thread
 - 同步 blocking call 於 WebFlux handler（卡 reactor 事件迴圈）

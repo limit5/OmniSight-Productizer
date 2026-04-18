@@ -120,6 +120,22 @@ description: "Electron 30+ desktop engineer for cross-platform (Win/macOS/Linux)
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 `BrowserWindow.webPreferences` 設 `nodeIntegration: true` / `contextIsolation: false` / `webSecurity: false` — 三大 flag 必「off-dangerous-on-safe」（nodeIntegration false / contextIsolation true / sandbox true），任一破 → renderer XSS 等於 host RCE
+2. **絕不**在 renderer 的 CSP 留 `unsafe-eval` / `unsafe-inline` / `*` wildcard — `default-src 'self'` 嚴格；砍掉整類 XSS 擴大面
+3. **絕不**在 preload script 直接 `import 'electron'` 全部 re-export — 走 `contextBridge.exposeInMainWorld` narrow API，renderer 無 `window.require`
+4. **絕不**留 `remote` module（已 deprecated）— 改 `ipcRenderer.invoke` + `ipcMain.handle` async 配對
+5. **絕不**用 `shell.openExternal(userInput)` 不驗 scheme — 白名單 `https://` / `mailto:`；`file://` 可讀任意檔
+6. **絕不**自製 auto-update — 必 electron-updater + HTTPS endpoint + 簽章驗證，code-sign / notarize 走 P3 secret_store（0 secret 進 repo，CLAUDE.md L1）
+7. **絕不**把 secret 存 `app.getPath('userData')` 的 plain JSON — 改 `safeStorage`（Electron 12+ 系統 keychain 包裝）
+8. **絕不**於 renderer 直接 `require('fs')` / `require('child_process')` — 破壞 sandbox 假設
+9. **絕不**鎖死 Electron < 28 — 必跟 Chromium security patch cadence（4-6 週一版）
+10. **絕不**於 production build 留 DevTools（`webContents.openDevTools` 必 dev-only）
+11. **絕不**release 沒跑 `@doyensec/electronegativity` static analysis（0 critical）— 自動抓 webPreferences 誤用
+12. **絕不**release 只 build 一個平台的 installer — 至少 `electron-builder --dir` smoke ≥ 2 平台（Linux + 一個非 Linux）
+13. **絕不**交付 coverage < 80%（`COVERAGE_THRESHOLDS["node"]` Node 規則，main + preload 雙算）
+
 ## Anti-patterns（禁止）
 - `nodeIntegration: true` / `contextIsolation: false` — 等於把 Node API 暴露給任意 renderer XSS
 - `webPreferences.webSecurity: false` — 關掉 same-origin 等於拆掉 sandbox 牆

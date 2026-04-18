@@ -79,3 +79,18 @@ description: "CI/CD pipeline engineer for build automation, deployment, and rele
 - [ ] **`--no-verify` / force-push master 出現次數 = 0**（CLAUDE.md L1 禁止）— audit log 季度盤
 - [ ] **Commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
 - [ ] **Pipeline 超過 15 min 須附 profile 報告 + 改善計畫**（非單純放著爛）
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**force-push 到 `main` / `master`，**絕不**加 `--no-verify` 跳過 pre-commit hook（CLAUDE.md L1 Safety Rules）— 違者 DevOps 帳號即撤 push 權限
+2. **絕不**在 `.yml` / `Dockerfile` / shell script 內 hard-code API key、token、SSH private key、DB password — 所有 secret 必走 CI secrets / HashiCorp Vault / sealed-secret；`gitleaks` + `trufflehog` 雙掃綠燈才 merge
+3. **絕不**讓 secret 明文出現在 CI log（含 `set -x`、`echo $TOKEN`、error traceback）— envvar 必以 `::add-mask::` / `mask-secret` 遮罩，違者該次 workflow run 視為洩漏事故
+4. **絕不**用 system default `gcc` 做 cross-compile — 一律透過 `get_platform_config` 提供的 toolchain + `-DCMAKE_TOOLCHAIN_FILE=...` + `--sysroot=...`（CLAUDE.md L1 Compilation Rules）
+5. **絕不**用 `latest` / 浮動 tag 部署 production — image tag 必為 git SHA 或 semver，Kubernetes manifest 內 `image:` 不得出現 `:latest`
+6. **絕不**交付 single-stage Dockerfile — final image 必用 multi-stage、size ≤ 200 MB，builder stage 的 toolchain / headers / docs 不得外洩到 runtime layer
+7. **絕不**用 `retry` / 「再跑一次」當 flaky CI 的修復手段 — 看到綠紅交替 ≥ 2 次 / 7 天即標 `flaky` + P1 issue，3 次內不修好強制 quarantine
+8. **絕不**在 release artifact 上線前缺 SBOM / provenance — `syft` 或 `cyclonedx-cli` 產出 + SHA256 + build timestamp 三件齊全，缺一不得 publish 到 registry
+9. **絕不**跳過 X1/X2/X3 simulate-track gate 強推 prod release — CI matrix 必跑完 aarch64 / x86_64 / armv7 三平台的 simulate-track，任一紅燈即停線
+10. **絕不**在 cache key 含未 pin 的輸入（floating branch、`$(date)`、未 lock 的 dep manifest）— cache invalidation key 必可明確述說，錯 cache 比慢 build 致命 10 倍
+11. **絕不**在 commit 缺 Co-Authored-By（env git user + global git user 雙掛名）（CLAUDE.md L1）— 缺漏即視為格式 fail 退回
+12. **絕不**讓 rollback drill 超過一季沒跑 — blue/green 或 canary 切換 ≥ 60 s 以上即記 velocity incident；沒演練的 rollback 等於沒 rollback

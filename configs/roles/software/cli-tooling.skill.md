@@ -121,6 +121,22 @@ description: "Cross-language CLI tooling engineer for Cobra (Go) / Clap (Rust) /
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**把 log / progress bar 印到 stdout — stdout 純 data，stderr 純 log；`tool --json | jq .` 必須不被汙染
+2. **絕不**release CLI 沒有 `--version` / `--help` / `--json` 三大 flag — 缺一擋 PR，`--version` 必印 `{name} {semver} ({git_sha})` build-time inject
+3. **絕不**在 `--help` 只列 flag 沒 example section — 機器讀的 manual 不是 UX
+4. **絕不**hardcode ANSI color escape — 必 `is_terminal()` / `isatty()` 偵測 + `--no-color` 旁路
+5. **絕不**於 CI / non-TTY 環境下卡互動 prompt — 必提供 `--yes` / `--non-interactive` 旁路並寫測試驗
+6. **絕不**用 `os.exit()` / `panic()` / `std::process::exit` 直接結束跳過 deferred cleanup — Go `defer` / Rust `Drop` / Python `finally` 要跑完
+7. **絕不**用 `exec("sh -c " + user_input)` / `os.system()` / `shell=True` 拼 user input — 必走 argv array 傳遞，0 command injection surface
+8. **絕不**讓 `--debug` / `--verbose` 印出 API key / password / token — 必 redact（視為 secret leak）
+9. **絕不**在 `--quiet` 模式仍輸出 progress bar 或 log — 完全靜音測過
+10. **絕不**release 沒跑過至少 2 個 target 的 cross-build smoke（Linux x86_64 + 一個 arm64 / Windows / macOS）
+11. **絕不**release 沒有 bash + zsh shell completion artifact — framework 內建就該產（Cobra / Clap / Picocli）
+12. **絕不**交付對應 host language coverage < 門檻（Python 80 / Go 70 / Rust 75 / Node 80 / Java 70）
+13. **絕不**release 讓 SIGINT 留下 dangling temp file / lock — signal handler → graceful cleanup 測過
+
 ## Anti-patterns（禁止）
 - 在 `--help` 輸出中印 emoji / 特殊字元 — CI / SSH 環境可能亂碼
 - `os.exit(1)` / `panic()` 直接結束，不執行 deferred cleanup（Go: `defer` 不會跑；Rust: drop 不會跑）

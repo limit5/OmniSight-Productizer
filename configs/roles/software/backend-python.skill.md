@@ -103,6 +103,22 @@ description: "Python 3.11+ backend engineer for FastAPI / Django / Flask service
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 async endpoint 呼叫 sync blocking I/O（`time.sleep` / `requests.get` / 同步 DB driver）— event loop 凍結；改 `asyncio.sleep` / `httpx.AsyncClient` / thread pool
+2. **絕不**return HTTP 5xx 不 log 含 `trace_id` / `request_id` 的 structured record — `logging.getLogger(__name__)` + JSON formatter，無 trace_id 無法排查
+3. **絕不**用 f-string / `%` / `.format()` 拼 SQL — 改 SQLAlchemy text binding / ORM query / prepared statement，0 string concat SQL
+4. **絕不**`from settings import *` / 散落 `os.environ[...]` — 改 `pydantic-settings` BaseSettings，啟動時一次驗完，少變數即 crash
+5. **絕不**用 `print()` 當 logging（production path grep 0 殘留）— 走 `logging.getLogger(__name__)` + JSON formatter
+6. **絕不**pin 死整版號 `fastapi==0.110.0` 或 sidestep lockfile — 改 `~=0.110.0` + `uv.lock` / `poetry.lock` commit，與 `pyproject.toml` 一致
+7. **絕不**用 `eval()` / `pickle.loads()` 處理 user-supplied 輸入 — RCE 直達，CLAUDE.md L1 安全規則明禁
+8. **絕不**自製 password hash — 改 `passlib[bcrypt]` 或 `argon2-cffi`
+9. **絕不**交付 coverage < 80%（`COVERAGE_THRESHOLDS["python"]` X1 門檻）— `pytest --cov-fail-under=80` 本地先跑
+10. **絕不**提交 Alembic migration 只有 `upgrade` 沒 `downgrade` — 單向 migration 擋 PR，必 `upgrade head` + `downgrade -1` 雙向驗過
+11. **絕不**省略 `httpx.AsyncClient(timeout=...)` / `requests.get(..., timeout=...)` — 無 timeout 的 HTTP call 是 cascading failure 起點
+12. **絕不**於 FastAPI route 內手動 `Session(engine)` 建連線 — 改 `Depends(get_db)` context manager
+13. **絕不**release 有 high / critical CVE 的 artifact（`pip-audit` / `safety` 0 high / 0 critical）
+
 ## Anti-patterns（禁止）
 - 同步 endpoint 直接呼叫 `time.sleep()` / blocking IO（async server 整個 event loop 卡住）— 改 `asyncio.sleep` 或丟 thread pool
 - 在 FastAPI route 內 `Session(engine)` 手動建立連線 — 改 `Depends(get_db)`

@@ -76,3 +76,18 @@ description: "Algorithm engineer for computer vision, signal processing, and edg
 - [ ] **演算法有論文 / 數學文件引用在 header comment 或 `docs/algo/`** — 半年後自己能看懂為什麼乘那常數
 - [ ] **Target SoC toolchain 走 `get_platform_config`**（CLAUDE.md L1 強制）— 絕不用系統 gcc
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**提交沒跑 Valgrind memcheck 的 C/C++ kernel — CLAUDE.md L1 algo simulate-track 強制零洩漏，「C library bug」不是藉口
+2. **絕不**交付 SIMD kernel 沒有對應 scalar reference 做 bit-exact 比對（差 1 LSB 即 fail）— NEON/SSE 跟 scalar 必每 kernel 一個 gtest case
+3. **絕不**在 `#ifdef __ARM_NEON` / `#ifdef __AVX2__` 外沒有可獨立編譯 + 通過同一組測試的 scalar fallback — CI runner 無 SIMD 直接掛掉
+4. **絕不**假設 runtime CPU 支援 AVX2 / NEON — 必須 `__builtin_cpu_supports` / HWCAP 偵測，舊 Xeon 不 SIGILL
+5. **絕不**在 hot loop 內做 malloc / heap allocation — memory churn 把 SIMD gain 全吃光（用 Valgrind massif / `perf record -e page-faults` 驗）
+6. **絕不**憑直覺改 loop order / tiling 不跑 profile — 必先 `perf stat` / `vtune` 看 cache miss / branch miss / IPC 再動手
+7. **絕不**信開發機 x86 數字當 target ARM Cortex-A 效能 — benchmark 必於 target 平台實機跑，數字存 `test_assets/benchmarks/`（append-only，不可改既有）
+8. **絕不**交付 benchmark regression > 5%（latency ms + throughput fps 雙軸 vs baseline commit）— 超過擋 PR
+9. **絕不**靠「應該會對齊」假設記憶體對齊 — 必 `aligned_alloc` / `posix_memalign` 顯式宣告，UBSan 跑過
+10. **絕不**提交演算法 kernel 沒有論文 / 數學文件引用在 header comment 或 `docs/algo/` — 半年後看不懂為什麼乘那常數
+11. **絕不**跳過 `checkpatch.pl --strict`（CLAUDE.md L1 強制）— commit 前本地跑一次，0 error / 0 warning
+12. **絕不**用系統 gcc 對 target SoC 做 cross-compile — 走 `get_platform_config` toolchain

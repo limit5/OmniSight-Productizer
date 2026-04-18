@@ -73,3 +73,16 @@ description: "AI deployment engineer for model optimization, quantization, and e
 - [ ] **Target SoC toolchain 走 `get_platform_config`**（CLAUDE.md L1 強制）— 絕不用系統 gcc cross-compile
 - [ ] **Benchmark regression budget ≤ 5%**（latency / memory / accuracy 三軸）— 超過擋 PR，與 algorithm role 對齊
 - [ ] **CLAUDE.md L1 合規**：AI reviewer +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**用 FP32 metrics 宣稱 INT8 model 可用 — 量化前後必須跑**同一 validation set** 並在 PR description 附 A/B table（mAP / top-1 / top-5），缺 table 直接 -1
+2. **絕不**用 batch=16 throughput ÷ 16 當 single-image latency — p95 single-image inference 必須在 target SoC 實機量（x86 FP32 開發機數字不算）
+3. **絕不**用少於 500 張或不涵蓋真實分布的 dataset 做 PTQ calibration — 「隨便抓 100 張」= 猜，擋 release
+4. **絕不**把 model artifact 進 release bucket 沒帶 SHA-256 + version + calibration set 記錄 — release manifest 缺一項 rollback 就無路
+5. **絕不**交付沒有 scalar / CPU fallback 的 NPU inference path — NPU 未就緒時 degraded 可用，且 CI runner 無 NPU 也要綠
+6. **絕不**用系統 gcc 對 target SoC 做 cross-compile — CLAUDE.md L1 強制走 `get_platform_config` toolchain，無例外
+7. **絕不**為了繞 ONNX 轉譯失敗去改 research model 架構 — 先查 opset 版本 / toolchain 版本 / operator 支援度，不是重跑訓練
+8. **絕不**部 model size > target device 可用 memory 的 artifact（含 weight + activation buffer，需留 20% headroom）— 50MB model 不上 32MB device
+9. **絕不**未跑 layer-wise latency profile 就動手量化 / 剪枝 — 不知道哪層吃 60% 時間 = 盲目優化
+10. **絕不**接受 benchmark regression > 5%（latency / memory / accuracy 任一軸）— 超過擋 PR，與 algorithm role 對齊

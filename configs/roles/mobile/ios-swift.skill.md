@@ -100,6 +100,22 @@ description: "iOS engineer for Swift 5.9+ apps (SwiftUI/UIKit/Combine) aligned w
 - [ ] **簽章材料走 P3 secret_store HSM** — `.p12` / `.mobileprovision` 不進 repo
 - [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**force unwrap `!`（除 `IBOutlet` / 單元測試斷言 / `try!` 於已驗證資源外）— production crash 的 #1 原因；一律 `guard let` / `if let` / `??`
+2. **絕不**在 main thread 同步呼叫 I/O（網路 / 磁碟 / Keychain / CloudKit）— iOS watchdog 在 main thread blocking > 20s 強制 kill；必 `@MainActor` 邊界 + `async` + `withTaskGroup`
+3. **絕不**於 `Info.plist` 或 `xcconfig` commit 明文 API key / provisioning profile UUID — App bundle 是公開的任何 jailbreak 使用者能解；走 P3 `secret_store` HSM + 伺服端交換；`.p12` / `.mobileprovision` 一律列 `.gitignore`
+4. **絕不**讓 `IPHONEOS_DEPLOYMENT_TARGET` 低於 `configs/platforms/ios-arm64.yaml` 的 `min_os_version`（16.0）— 使用者在 iOS 15 下載後 StoreKit 2 API crash；platform 檔為 single source of truth
+5. **絕不**送審前跳過 `PrivacyInfo.xcprivacy` 檢查 — Apple 2024 Privacy Manifest + Required Reason APIs 政策；缺 = TestFlight / App Store binary rejection，ship date 直接 +7 天
+6. **絕不**用 `UserDefaults` 存 token / PII — iTunes backup 可完整取走；一律 Keychain + `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`
+7. **絕不**在 SwiftUI `body` 內呼副作用（`fetchData()` 裸呼）— `body` 可能每秒執行數十次；必 `.task { ... }` / `.onChange(of:initial:)` / `.onAppear`
+8. **絕不**於 Release build 留 `print(...)` — 不 strip、敏感資料寫進 Console；改 `os.Logger` + `.private` / `.public` privacy level
+9. **絕不**混 Combine + async/await 於同一條 pipeline — 跨邊界才用 `.values` 橋接；混用 = cancellation 語意分裂 + debug 地獄
+10. **絕不**用 private API / `@_silgen_name` / `dlopen` 私有 framework — App Store Review 自動化偵測直接退件，歷史紀錄進 Apple Developer 帳號
+11. **絕不**繞過 P5 `backend/deploy/app_store.py` 手動 `notarytool` + App Store Connect — `notarytool submit` 結果與 TestFlight 派發都走 adapter，手動上 = 無 audit log + 無 rollback
+12. **絕不**在 Swift 6 strict concurrency 下新增 `@unchecked Sendable` 而不附 `// Why: <threat model>` — data race 來源；每個 `@unchecked` 需 reviewer 簽核
+13. **絕不**自畫 navigation primitive（`ZStack + opacity` 假裝 sheet）— VoiceOver focus 完全亂跳；用 `.sheet(isPresented:)` / `.fullScreenCover`，AT 使用者才能正常操作
+
 ## Anti-patterns（禁止）
 - 在 SwiftUI View 的 `body` 裡做副作用（`fetchData()` 直接呼叫）— 改用 `.task { ... }` 或 `@Observable` + 注入的 use-case
 - 強制展開 `!`（除 `IBOutlet`、單元測試斷言、`try!` 於已驗證資源以外的情境）

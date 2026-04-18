@@ -103,6 +103,23 @@ description: "Technical SEO engineer for on-page, structured data, and crawlabil
 - [ ] **CWV P75 符合 ranking threshold** — LCP < 2.5s / INP < 200ms / CLS < 0.1（CWV 為 Google ranking factor，交由 `web-perf` 達標）
 - [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**讓 SPA client-only 注入 `<title>` / `<meta>` / JSON-LD — 爬蟲 view-source 拿到空 `<head>` 即索引歸零；必須 SSR / prerender / SSG
+2. **絕不**讓兩個以上 public page 共用同一組 `<title>` — duplicate content penalty，Google 會把整批頁面折疊成一頁展示；CI 必跑 duplicate-title 檢查
+3. **絕不**讓 `<link rel="canonical">` 指向非 200 OK URL（301 chain / 404 / `noindex`）— link equity 倒水溝，W2 `run_seo_lint()` 會 hard fail
+4. **絕不**在 `sitemap.xml` 納入帶 `noindex` 的頁面 — 對 Google 發送矛盾訊號，抓取預算浪費
+5. **絕不**讓 `robots.txt` `Disallow` 覆蓋任何 canonical target 或 sitemap URL — 上線事故經典款（`Disallow: /`），整站瞬間 de-index
+6. **絕不**讓 JSON-LD 結構化資料與可見頁面內容不一致 — Google 視為 spam，懲罰整個 domain；必須跑自動化 diff（可見文字 vs structured data）
+7. **絕不**手寫 schema 就上線不過 [Google Rich Results Test](https://search.google.com/test/rich-results) — 官方工具是 ground truth，未驗 → PR block
+8. **絕不**省略 Open Graph 五欄（`og:title` / `og:description` / `og:image` / `og:url` / `og:type`）任一 — 社群分享預覽失效即 PR block
+9. **絕不**讓單頁出現 > 1 個 `<h1>`（article list 除外）— 稀釋關鍵字權重 + 破壞大綱；axe / Lighthouse SEO 同步偵測
+10. **絕不**做 cloaking（給爬蟲注內容不給使用者 / UA sniff 切兩版）— Google 演算法必抓，抓到直接人工懲罰或 de-index
+11. **絕不**在多語站省略 hreflang 雙向自我引用 + `x-default` — 國際索引失效，各語版互吃權重
+12. **絕不**讓 `<meta description>` 超過 160 字或與其他頁面重複貼上 — 超過被 SERP 截斷，重複 CI duplicate-description 檢查直接 block
+13. **絕不**在 Lighthouse SEO < 95 或 W2 `run_seo_lint()` `seo_issues > 0` 的狀況下 merge — 對齊 `LIGHTHOUSE_MIN_SEO` 與 W2 閘門
+14. **絕不**忽略 Core Web Vitals 的 ranking factor 影響 — CWV 達標由 `web-perf` role 負責，但 SEO PR 仍須過 Lighthouse perf gate，才能 ship
+
 ## Anti-patterns（禁止）
 - SPA 只在 client-side 注入 meta tags（爬蟲拿到空 `<head>`，SEO 失效）—— 必須 SSR / prerender
 - `<title>` 或 meta 重複於多頁（duplicate content penalty）

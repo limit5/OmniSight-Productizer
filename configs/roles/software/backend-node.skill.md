@@ -112,6 +112,22 @@ description: "Node.js 20 LTS backend engineer for Express / NestJS / Fastify ser
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 request handler 內呼叫 sync fs / sync crypto API（`fs.readFileSync` / `crypto.pbkdf2Sync` / `child_process.execSync`）— 卡 event loop，p99 直接爆
+2. **絕不**用 `any` / `as unknown as T` 繞 TypeScript 型別檢查 — `strict: true` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` 三件套必開，runtime input 走 `zod.parse()`
+3. **絕不**散落 `process.env.X` 於 handler / service — 集中於 `config.ts` + `zod.parse()` 啟動時驗證，fail-fast crash；grep `process.env` 應只指向 `config.ts`
+4. **絕不**commit 沒有 lockfile（`pnpm-lock.yaml` / `package-lock.json`）或 把 `node_modules/` commit 進 repo — CI 走 `--frozen-lockfile`
+5. **絕不**release 有 high / critical CVE 的 artifact — `pnpm audit --audit-level=high` 0 high / 0 critical，X4 擋
+6. **絕不**交付 coverage < 80%（`COVERAGE_THRESHOLDS["node"]` X1 門檻）或 async test 沒 `await` / `return`（false-positive pass）
+7. **絕不**拼 SQL 字串 — 改 prepared statement / Prisma / Drizzle，0 string concat SQL
+8. **絕不**自製 JWT verify — 改 `jose` / `jsonwebtoken` 並驗證 `alg` 防 `none`
+9. **絕不**用 `require()` 動態載入 user-supplied 路徑 — path traversal 直達
+10. **絕不**用 `JSON.parse(JSON.stringify(x))` 做深 clone — 改 `structuredClone()`
+11. **絕不**在 ESM 專案用 `__dirname` / `__filename` — 改 `import.meta.url`
+12. **絕不**release Dockerfile 不走 multi-stage 或 final stage 不是 `node:20-slim` / distroless — build tool / devDependency 一個不留
+13. **絕不**在 `package.json` 缺少 `engines.node` 範圍鎖定（`">=20.10.0 <23"`）— downstream 無法 enforce Node 版本
+
 ## Anti-patterns（禁止）
 - `process.env.X` 散落各處 — 集中於 `config.ts`，啟動時 `zod.parse()` 驗證
 - 同步 fs / crypto API（`fs.readFileSync` / `crypto.pbkdf2Sync`）於 request handler — 卡 event loop

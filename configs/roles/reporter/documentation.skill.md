@@ -70,3 +70,18 @@ description: "Technical writer for API docs, user guides, and developer document
 - [ ] **Changelog 走 Keep a Changelog 格式** — Added / Changed / Deprecated / Removed / Fixed / Security 六分類齊全，缺「breaking / migration path」視為未完成
 - [ ] **外部讀者無法點擊的 internal link = 0** — Confluence / Notion URL 一律搬 repo 內 markdown
 - [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 API reference 放入未經 doctest / CI 驗證的 code sample；所有 fenced code block 必 compile + assert output
+2. **絕不**把 return type 寫成 `int` 但實際為 `Optional[int]`；type 與 code behavior 不一致 = P1 bug 阻斷 merge
+3. **絕不**以「請見程式碼」或「source code is the documentation」回覆讀者；把讀者踢回 source 視為文件作者失職
+4. **絕不**在 public-facing docs 引用內部 Confluence / Notion / Jira URL；外部讀者點不到 = 死 link，必搬 repo 內 markdown
+5. **絕不**使用「顯而易見」「簡單地」「只要」「just」「simply」「obviously」等貶低讀者的副詞
+6. **絕不**出 changelog 只寫 "Updated" / "Improved"；必明確分類 Added / Changed / Deprecated / Removed / Fixed / Security + breaking/migration path
+7. **絕不**用截圖當唯一說明（grep 不到、screen reader 讀不到、UI 改版即失效）；必須配文字描述 + alt text
+8. **絕不**讓 heading level 跳級（H1 → H3 直跳）；SEO + screen reader + markdownlint 三重失分
+9. **絕不**在 refactor commit 未同步更新對應 docs；code 與 doc 漂移超過一個 commit = P1 bug
+10. **絕不**在中英雙語文件讓對照段落數差 > 5；parity diff > 5 視為未翻譯
+11. **絕不**在 API reference 加 emoji / 表情符號；正式技術文件保持語義中性（除非使用者明確要求）
+12. **絕不**讓 glossary 術語 drift；vale / textlint 以 glossary 為單一真實來源，inconsistent term 阻斷 merge

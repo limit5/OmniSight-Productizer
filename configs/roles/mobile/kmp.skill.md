@@ -110,6 +110,21 @@ description: "Kotlin Multiplatform engineer sharing business logic (optionally U
 - [ ] **Android host app + iOS host app 仍遵守各自 role skill** — 對齊 `android-kotlin.skill.md` / `ios-swift.skill.md` 條款
 - [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 `commonMain` `import java.*` / `import android.*` / `import platform.*` — 平台洩漏 = KMP 退化成「帶 ifdef 的 Android 專案」；CI 必 grep gate，違反 = 整 PR 退件
+2. **絕不**新增 `expect` 而不在所有宣告的 platform target（`iosArm64` + `iosSimulatorArm64` + `androidMain` + `jvmMain`）補 `actual` — 任一 target 缺 `actual` = build 失敗；CI 對稱性 grep 100% gate
+3. **絕不**把 Java-only API（`CompletableFuture` / RxJava / `java.util.concurrent.*`）引入 `shared` — KMP 犯規；純 coroutines + Flow + `kotlinx.datetime`
+4. **絕不**讓 iOS 側 Swift 看到 `KotlinArray<KotlinInt>` / `KotlinUnit` / raw completion-handler noise — Swift 側 ergonomic score ≥ 90% 硬門檻；必用 SKIE / KMP-NativeCoroutines 把 suspend fn 橋成 Swift `try await`
+5. **絕不**在 iOS 側用 `runBlocking` 呼 suspend fn — freeze UI thread + 違反 Kotlin/Native 新 memory model 假設；必走 SKIE / `KotlinNativeCoroutines` 橋接
+6. **絕不**在同一專案禁用 Kotlin/Native 新 memory model — K2 預設啟用，舊專案需 explicit 設定；關掉 = iOS 側 freezing crash 地獄，回不去
+7. **絕不**把 UI state（`StateFlow` / `MutableState`）放 `commonMain` 卻讓 iOS 側手工 subscribe 無 lifecycle wrapper — 必 Android 用 `collectAsStateWithLifecycle`、iOS 用 SKIE `@Observable` bridging
+8. **絕不**新增 KMP target 不 gate CI — `iosSimulatorArm64` + `android-arm64-v8a` + `jvm` 三 target 必跑 `:shared:allTests`；跳過 = K/N 特有 init order / freezing bug 放過
+9. **絕不**在單一 PR 新增依賴讓 `shared.xcframework` slice size delta > 2 MB — iOS app 最終 IPA size 直接吃；超過必附 justification + tree-shaking 驗證
+10. **絕不**把 `shared.xcframework` 的 `internal` symbol 標 `@PublishedApi internal` 公開給 iOS — iOS 側 API surface 必須最小，公開了就回不去 binary compatibility
+11. **絕不**讓 `actual` 兩側（iOS / Android）API 表面行為差距大 — 若真差異大，該抽成兩個 `expect` 分別 DI；API surface 一致、只換底層才是 KMP 正道
+12. **絕不**偏離 `android-arm64-v8a.yaml` + `ios-arm64.yaml` 的 SDK / min_os — `:shared:` Gradle 設定必須與平台 profile 對齊；否則 Android / iOS host app 測試結果互不通用
+
 ## Anti-patterns（禁止）
 - 在 `commonMain` 直接 `import java.util.Date`（改 `kotlinx.datetime.Instant`）
 - `actual` 實作兩側邏輯差太遠（應該 API 表面一致，只換底層）— 若行為真的差異大，該抽兩個 `expect`

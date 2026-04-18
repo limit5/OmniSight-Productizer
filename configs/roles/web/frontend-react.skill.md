@@ -88,6 +88,21 @@ description: "Frontend engineer for React / Next.js / Remix applications with W2
 - [ ] **LCP asset preloaded** — hero image / above-the-fold asset 必有 `<link rel="preload">` 或 `fetchpriority="high"`
 - [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 Server Component 裡 import `window` / `document` / `localStorage` / `sessionStorage` — SSR build time 直接炸；必須拆 `"use client"` leaf 或 `dynamic({ ssr: false })`
+2. **絕不**用 `useEffect` 做首屏 data fetching — 製造 LCP waterfall + loading-flash，改 Server Components / TanStack Query / `loader`
+3. **絕不**寫 `any` / `@ts-ignore` / `@ts-expect-error` 而不附 `// TODO(issue-url): <why>` 註解 — 否則 `tsc --noEmit` 雖綠但 code review hard reject
+4. **絕不**在 Client Component 樹裡 `"use client"` 往上污染超過必要深度 — `"use client"` 只能落在互動葉子，上污染一層 = bundle 稅 + RSC 邊界失效
+5. **絕不**省略 `useEffect` cleanup（subscription / setInterval / AbortController / event listener）— StrictMode 雙次渲染直接現形，記憶體洩漏 hard fail
+6. **絕不**用 `document.getElementById` / `querySelector` 繞過 React — Fiber reconciliation 下行為未定義；一律 `ref`
+7. **絕不**寫新的 Class Components — React 18 Concurrent Features 對 Class 支援受限，新程式碼必須是 Functional + Hooks
+8. **絕不**讓 props drill 超過 3 層 — 超過就抽 Context / Zustand slice，葉子元件不是 prop pipe
+9. **絕不**在 `useMemo` / `useCallback` 裡跑 side effect — 純計算才用 memo，I/O / subscription 一律 `useEffect` 或 event handler
+10. **絕不**把 Server-only secret / env var 在 Server Component 裡直接塞進回傳 JSX props（會 serialize 過 RSC payload 洩漏到 client）— secret 只能留在 server action / route handler
+11. **絕不**在 Lighthouse Perf < 80 或 bundle diff > +5 KiB 無 reviewer 核准的狀況下 merge — 對齊 `LIGHTHOUSE_MIN_PERF` 與 W2 bundle gate
+12. **絕不**在新 React 程式碼用 Redux 除非專案已有 Redux 且規模確實需要 — 預設 TanStack Query（server state）+ Zustand（client state）
+
 ## Anti-patterns（禁止）
 - 用 `useEffect` 做 data fetching（改用 Server Components / TanStack Query）
 - `any` 型別、`@ts-ignore` 而不附 TODO

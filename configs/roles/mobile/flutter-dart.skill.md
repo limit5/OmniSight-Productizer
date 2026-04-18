@@ -102,6 +102,21 @@ description: "Cross-platform engineer for Flutter 3.22+ / Dart 3.4+ apps targeti
 - [ ] **Signing via P3 secret_store（iOS 簽章 + Android keystore）** — `android/key.properties` 無明文
 - [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**跨 `async` gap 使用 `BuildContext` 不做 `if (!mounted) return` 檢查 — 在 dispose 後 `setState` = framework warning + 資料污染；是 Flutter 最常見 production crash 來源
+2. **絕不**用 `setState` 於 > 50 widget 的 subtree — 全子樹 rebuild = 60 fps 破功，中階 Android 掉到 30 fps；用 Riverpod `Provider` / `Consumer` / `Selector` 精準重建
+3. **絕不**把 API response `Map<String, dynamic>` 直接當 UI model — 後端欄位改名直接 runtime crash；一律走 `freezed` model + `fromJson` + 型別安全 sealed class
+4. **絕不**在 `pubspec.yaml` 以外的地方（`.env` / `android/key.properties` / `ios/Flutter/Secrets.plist`）commit 密鑰 — 走 `--dart-define-from-file=secrets.json` + P3 `secret_store` build-time 注入，`secrets.json` 列 `.gitignore`
+5. **絕不**只處理 `AsyncValue.data` 忽略 `loading` / `error` — 網路失敗 = 空白畫面 = 不可見 bug；三態必須都有明確 UI（loading spinner / error retry / data）
+6. **絕不**偏離 `configs/platforms/ios-arm64.yaml` / `android-arm64-v8a.yaml` 的 `min_os_version`（iOS 16.0 / Android minSdk 24）— `ios/Runner/Info.plist` + `android/app/build.gradle.kts` 必須對齊 single source of truth
+7. **絕不**用 `print()` 於 release build — Flutter release 不 strip `print`，敏感資料洩漏；改 `debugPrint`（debug only）或 `package:logging`
+8. **絕不**用 `TextStyle(fontSize: 16)` 寫死字級 — 不跟 `MediaQuery.textScalerOf` 縮放，Dynamic Type 下破版；用 `Theme.of(context).textTheme.*`
+9. **絕不**把 platform-specific 程式碼塞進 `lib/` 共用層 — 透過 `Platform.isIOS` / `kIsWeb` + abstraction 收邊；共用層必純
+10. **絕不**在同一專案同時維護純 RN / Expo Managed / Bare 三態 workflow — 鎖單一 workflow；混用 = pubspec / platform plugin 升級地獄（此處對齊 Flutter 的對等慣例：單 workflow）
+11. **絕不**繞過 `scripts/simulate.sh --type=mobile --module=<ios-arm64|android-arm64-v8a>` 送 CI — P2 simulate-track 是合規門檻，跳過 = `flutter drive` 結果不可信
+12. **絕不**用 Skia 舊 renderer 上 release 而不驗 Impeller — iOS 3.19+ 預設 Impeller；Android 3.22+ opt-in 必附 perf diff 佐證（jank 是否下降）
+
 ## Anti-patterns（禁止）
 - `setState` 於大型樹（> 50 widget 的 subtree）— 改用 Riverpod / Bloc 精準重建
 - `BuildContext` 跨 `async` gap 使用（先存 `mounted` 檢查 + `if (!mounted) return`）

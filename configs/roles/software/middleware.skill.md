@@ -71,3 +71,20 @@ description: "Middleware engineer for UVC/RTSP streaming, codec integration, and
 - [ ] **TLS 一律啟用**，內網也不例外（零信任）— 禁止 `--insecure` 進 production config
 - [ ] **P10 觀測性對齊**：connection metric / heartbeat RTT / reconnect count 上 Prometheus
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**部署長連線（TCP / WebSocket / MQTT / gRPC）沒 heartbeat / keepalive — 必有 TCP keepalive ≤ 60s / MQTT PINGREQ / gRPC keepalive 參數；middle-box 切連線你不知道 = user 看黑畫面
+2. **絕不**用單一 `isConnected` boolean 表示連線狀態 — 必顯式 state machine 枚舉 CONNECTING / CONNECTED / RECONNECTING / FAILED，transition 有 log + metric
+3. **絕不**retry 不 exponential backoff + jitter — 上游恢復瞬間被你打爆；reconnect P50 ≤ 5s / P99 ≤ 30s 為硬上限
+4. **絕不**發任何 HTTP / gRPC call 不設 timeout — ≤ 10s default，無 timeout = cascading failure 起點；加上至少一層 circuit breaker
+5. **絕不**用 TCP 跑 realtime streaming payload — head-of-line blocking；改 RTP over UDP / QUIC / WebRTC DataChannel
+6. **絕不**release wire format 沒 Protobuf `.proto` / JSON Schema 定義且未過 `buf lint` + `buf breaking` — 0 wire-incompatible 變更可進 main
+7. **絕不**hardcode IP / port — 改 service discovery / DNS SRV / environment-driven config
+8. **絕不**以「內網零信任不需要」為由 skip TLS — 內網也加密，禁止 `--insecure` / `InsecureSkipVerify: true` 進 production config
+9. **絕不**release 串流模組沒量 glass-to-glass latency breakdown（encode / network / jitter-buffer / decode 各段）— p95 ≤ 100ms local LAN
+10. **絕不**release goroutine / thread 有 leak（Go `goleak.VerifyNone` / tokio-console / pprof）— 每次 PR CI 跑
+11. **絕不**release 沒測 graceful shutdown（SIGTERM → drain in-flight → close conn，30s window 內 0 dropped request）
+12. **絕不**release 下游慢時上游 OOM — 必有 backpressure（bounded channel / semaphore / flow control）測過
+13. **絕不**每次 reconnect 重做完整 session key handshake — 設計 session resume，避免 reconnect 風暴時 KDF 拖死 CPU
+14. **絕不**release 沒把 connection metric / heartbeat RTT / reconnect count 接上 Prometheus（P10 觀測性對齊）

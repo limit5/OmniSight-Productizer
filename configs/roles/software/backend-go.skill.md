@@ -106,6 +106,21 @@ description: "Go 1.22+ backend engineer for gin / fiber / net/http / gRPC servic
 - [ ] **Cross-build smoke ≥ 2 target**（linux/amd64 + darwin/arm64 或 linux/arm64）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、SoC target 走 `get_platform_config` toolchain、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**用 `panic()` 當 library error handling — library code 一律回傳 `error`，panic 只留 `main` / `init` 不可恢復狀態
+2. **絕不**用 `_ = err` 吞 error（errcheck 會擋）— 真要忽略必附 `// why: <reason>` comment 說明
+3. **絕不**spawn 一個 goroutine 不傳 `context.Context` 作第一參數 — 無法 cancel = leak candidate，直接擋 PR
+4. **絕不**在 `.await` 等價的 I/O / blocking call 前持有 `sync.Mutex` — 走 scope 縮小或 `context.WithTimeout`，避免長 hold
+5. **絕不**把 `http.Client{}` 放 function scope（失去連線池 + TLS handshake 每次重來）— 改 package-level + 顯式 `Timeout`
+6. **絕不**用 `time.Sleep` 當同步原語 — 改 `sync.WaitGroup` / `chan` / `context.WithTimeout`
+7. **絕不**用 `interface{}` / `any` 取代 generics（1.18+ 後沒理由）— 走 type parameter
+8. **絕不**交付 coverage < 70%（`COVERAGE_THRESHOLDS["go"]` X1 門檻）或 `go test -race -count=1` 有 race report — race detector 沒開 = 沒測
+9. **絕不**commit `go.sum` 不跑 `go mod tidy`（lockfile 必乾淨、`go mod tidy` 後 0 diff）
+10. **絕不**release Docker image 不用 `scratch` / `distroless/static` 作 final stage — 多 stage build，build tool 一個不留
+11. **絕不**release binary 帶 GPL / AGPL dependency — `go-licenses report ./...` 0 禁用 license，預設禁
+12. **絕不**用系統 gcc 對 SoC target 做 cross-compile — 走 `get_platform_config` toolchain（CLAUDE.md L1）
+
 ## Anti-patterns（禁止）
 - `panic()` 當 error handling — 走 `error` 回傳（library code）；`panic` 只用於 main / init 不可恢復狀態
 - `_ = err` 吞 error — checkstyle errcheck 會擋

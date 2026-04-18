@@ -87,6 +87,21 @@ description: "Frontend engineer for Svelte 5 / SvelteKit applications with W2 si
 - [ ] **LCP asset preloaded** — hero image / above-the-fold asset 必有 `<link rel="preload">` 或 `fetchpriority="high"`
 - [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 Svelte 5 新程式碼寫 `export let` / `$:` reactive / `store.subscribe` — Runes 時代已明確棄用；違者破壞編譯器 reactivity graph
+2. **絕不**在 `+page.ts` / `+layout.ts`（universal load）讀取 server-only env / secret — 這些 module 會在 client 執行，一旦讀取即洩漏到 bundle；必須搬到 `+page.server.ts`
+3. **絕不**用 `{@html}` 不附 DOMPurify 或白名單消毒 — 直通 XSS 入口，未消毒 → hard fail
+4. **絕不**把 `adapter-auto` 留在 production build — 必須明確對齊 W1 profile：`adapter-static` / `adapter-node` / `adapter-cloudflare` / `adapter-vercel` 一一對應 `configs/platforms/web-*.yaml`
+5. **絕不**交出 Form Action 沒有 `<form method="POST" use:enhance>` — 漸進增強是 SvelteKit 哲學底線，JS 關閉必須仍能送出
+6. **絕不**忽略 dev console 的 hydration mismatch warning — mismatch = server/client DOM 分歧，zero tolerance，必修到紅字消失
+7. **絕不**在 SSR 執行階段存取 `window` / `document` / `localStorage` — 必須用 `browser` flag / `onMount` / `import.meta.client` 隔離
+8. **絕不**在 `<script>` 模組頂層直接 fetch — 阻塞 component instantiation 且 SSR 每次重跑；一律 `load` function
+9. **絕不**讓 `+page.server.ts` 的 load 回傳值不附 `satisfies PageServerLoad` — 斷掉 `$types` 生成，server→page 型別鏈失效
+10. **絕不**在 Lighthouse Perf < 80 / A11y < 90 / SEO < 95 的狀況下 merge — 三閘皆為 W2 simulate-track hard fail
+11. **絕不**用全域 `stores` 傳遞 server-side session / user 物件跨 request — SvelteKit SSR 是單 Node process 共享記憶體，會造成跨使用者資料洩漏；session 必走 `event.locals`
+12. **絕不**在 hook 或 endpoint 回傳含 `Set-Cookie` 的 response 忘記 `httpOnly` + `secure` + `sameSite=lax` — session cookie 缺這三件 = S2 Hardening 會被直接退
+
 ## Anti-patterns（禁止）
 - Svelte 5 新程式碼使用 `export let` / `$:` / `store.subscribe`（改用 Runes + Rune 相容 store）
 - 用 `{@html}` 不附消毒（XSS 風險）

@@ -89,3 +89,18 @@ description: "ISP & 3A tuning engineer for image signal processing pipeline and 
 - [ ] **交叉編譯走 `get_platform_config` + `CMAKE_TOOLCHAIN_FILE`**（CLAUDE.md L1 compilation rule）— host gcc 生 ISP binary 視為 toolchain 污染
 - [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
 - [ ] **`test_assets/` 下 golden raw / golden JPEG 零 mutation**（CLAUDE.md L1）— regression ground truth
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**以肉眼判色作為 color tuning 驗收 — 必拿 24-patch color checker + 燈箱量 ΔE，ΔE ≤ 3.0 under D65 為硬門檻
+2. **絕不**以 D65 單光源驗收就 release — 必跑 tungsten (3200K) / 螢光燈 (4000K with flicker) / 鈉燈 (2000K) / LED backlight 至少 5 種光源
+3. **絕不**打破 ISP pipeline 標準順序 BLC → LSC → Demosaic → CCM → Gamma → NR → EE → AWB — 為省 cycle 把 LSC 搬到 demosaic 後會拉爆 corner noise（ISP 血淚古訓）
+4. **絕不**只量 3A steady-state 品質、不量 convergence time — AE/AWB/AF 必須 ≤ 3 frame 收斂（30 fps 下 ≤ 100 ms），掉幀客戶不會原諒
+5. **絕不**把 tuning 參數 hard-code 進 C 程式碼 — 必以 YAML 綁 sensor model + lens model + module vendor，從 `hardware_manifest.yaml` 讀取
+6. **絕不**跳過 Valgrind 跑 algo-track simulation — 零 leak / 零 invalid read 是 CLAUDE.md L1 memory safety rule 的硬性要求
+7. **絕不**修改 `test_assets/` 下 golden raw / golden JPEG — 那是 IQ regression ground truth，read-only（CLAUDE.md L1）
+8. **絕不**用 host x86 gcc 生 ISP binary — 必走 `get_platform_config` + `CMAKE_TOOLCHAIN_FILE`，host toolchain 污染會讓 sensor timing 偏差
+9. **絕不**AWB gray-world 失效就先怪 sensor — 必先檢查 CCM → illuminant detection → scene classification 三層再往下追
+10. **絕不**在 HDR multi-exposure ghost region > 0.5%、50/60 Hz flicker fluctuation > 2% 的情況下放行 release — stitching 壞掉 / flicker 抑制失效直接影響安防場景
+11. **絕不**在未讀完 sensor datasheet 的 spectral response / CFA pattern / QE 曲線前開 tuning tool — 那是在亂拉 slider
+12. **絕不**交付 tuning release 缺漏「5 光源 × 3 亮度」驗證 log（ΔE / SNR / convergence time / MTF50）— 欄位不齊視為未驗收

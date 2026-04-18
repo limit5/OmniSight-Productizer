@@ -105,6 +105,22 @@ description: "Cross-platform engineer for React Native 0.75+ New Architecture ap
 - [ ] **Secrets via `react-native-config` + P3 secret_store** — JS bundle 內無硬編 key；grep `process.env\.` 於 bundle 應為 0
 - [ ] **CLAUDE.md L1 compliance 100%** — Co-Authored-By 雙 trailer、不改 `test_assets/`、連 3 錯升級人類
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在同一專案同時載入 legacy NativeModule + TurboModule — bridge 行為不可預測 + dev / release 表現不一致；鎖 New Architecture（Fabric + TurboModules）單一路徑；RN 0.76+ legacy bridge 逐步停支援
+2. **絕不**在 JS thread 執行 > 16 ms 計算 — 一 frame 掉幀 + Bridge crossing count 爆炸；移到 Reanimated 3 worklet（UI thread）或原生 TurboModule；animation 一律 worklet、手勢一律 Gesture Handler native
+3. **絕不**關掉 Hermes 回到 JSC — iOS + Android 雙平台都強制 Hermes；JSC 於低階 Android OOM + startup 慢 2x；`__HERMES__` global 必為 true，否則 CI fail
+4. **絕不**把密鑰硬寫進 JS bundle（`const API_KEY = "sk-..."`）— Metro bundle 是公開的任何人都能 `react-native-decompiler` 解；走 `react-native-config` + P3 `secret_store` build-time 注入
+5. **絕不**用已 deprecated 的 `AsyncStorage`（from `react-native` 主套件）— 已移出 core；改 `@react-native-async-storage/async-storage`；舊 import 即 fail
+6. **絕不**在啟動 path `require('./heavy-module')` — TTI 直接撞破 2.5 s 門檻；必 lazy import / `React.lazy` + `Suspense`
+7. **絕不**用 `console.log` 當 production logging — RN release build 不 strip、敏感資料進 Logcat / Console；改 `react-native-logs` + Flipper
+8. **絕不**在 `FlatList` `renderItem` 內建新 function / object / inline style — 整個 list re-render、StyleSheet 快取失效；必 `useCallback` / `useMemo` / `StyleSheet.create` 外提
+9. **絕不**用 `Alert.alert` 當流程控制（二次確認、表單進入下一步）— 打斷 navigation stack 無法深度連結 + AT focus 亂；用 navigation modal + state
+10. **絕不**在同一專案同時維護純 RN CLI + Expo Managed + Expo Bare 三態 workflow — 升級地獄（每次 upgrade 要補三種 assumption）；鎖單一 workflow
+11. **絕不**跳過 `npx react-native doctor` / `pod install` / `./gradlew :app:assembleRelease` 雙平台通過就 ship — RN 的賣點是跨平台，失敗也在跨平台；Detox smoke 必 iOS Simulator + Android AVD 雙綠
+12. **絕不**偏離 `ios/Podfile` 的 `platform :ios, '16.0'` 或 `android/build.gradle` 的 `minSdkVersion = 24` / `targetSdkVersion = 35` — 須與 `configs/platforms/*.yaml` 對齊；違反 = P2 simulate-track 測試結果無效
+13. **絕不**讓新增依賴讓 Hermes bytecode size delta > 1 MB 或 Metro bundle delta > 500 KB 不附 justification — CI 自動 diff；bundle bloat = TTI / update size 雙重爆炸
+
 ## Anti-patterns（禁止）
 - 同時載入 legacy NativeModule + TurboModule（同一專案二元開關要明確）
 - 在 JS thread 做重運算（> 16 ms）— 移到 Reanimated worklet 或原生 module

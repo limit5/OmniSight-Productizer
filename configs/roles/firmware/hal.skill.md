@@ -76,3 +76,18 @@ description: "Hardware Abstraction Layer engineer for portable C/C++ interfaces 
 - [ ] **commit message 含 Co-Authored-By（env git user + global git user 雙掛名）**（CLAUDE.md L1）— 缺漏視為格式 fail
 - [ ] **`test_assets/` 下 golden HAL trace 零 mutation**（CLAUDE.md L1）— regression ground truth
 - [ ] **HAL changelog 每次 release 包含 breaking / added / fixed 三段**（對齊 Keep a Changelog）— 缺欄視為 release artifact 不完整
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 public header (`include/hal/*.h`) `#include` 任何 vendor / SoC 特定標頭（ambarella/novatek/soc_specific…）— 一個洩漏整條 portability chain 崩潰
+2. **絕不**改動 public API signature 不做 SemVer bump — ABI diff CI 必過，違反等同對下游 release 說謊
+3. **絕不**在 public API doxygen 省略「單位 / 邊界條件 / 失敗 errno 表」— 一顆 `int set_exposure(int v)` 沒單位 = 定時炸彈（HAL 工程師血淚案例）
+4. **絕不**讓 register-level / I2C / SPI / DMA channel 細節漏進 public API — 上層根本不該知道底下用什麼 bus
+5. **絕不**在沒有 mock backend 的情況下 merge 新 HAL 模組 — 沒 mock = 沒 unit test = 沒 CI matrix
+6. **絕不**在 HAL thin wrapper 層塞 business logic / policy — HAL 只做 normalization，policy 交給上層 service
+7. **絕不**直接 copy-paste 覆蓋 vendor SDK 更新 — 必先 `diff`、標變動、跑 HAL regression 再合入
+8. **絕不**修改 `test_assets/` 下 golden HAL trace / golden IOCTL ABI — regression ground truth，read-only（CLAUDE.md L1）
+9. **絕不**只在 x86_64 host 編過就 merge — 必跑 `get_platform_config` 驅動的全 ARCH cross-compile matrix，macro / typedef 外洩常在此現形
+10. **絕不**跳過 `sparse` + `smatch` 靜態分析、或 `CONFIG_KASAN=y` 下的 out-of-bound / use-after-free 掃描 — kernel HAL 部份零容忍
+11. **絕不**讓 HAL call path ftrace overhead 超過 1% — HAL 自身不能成為瓶頸，超標需 redesign 而非「之後再優化」
+12. **絕不**在 unit test line coverage < 85% / branch coverage < 75% 的情況下 sign-off — 低於門檻必須列未覆蓋段落的風險接受書

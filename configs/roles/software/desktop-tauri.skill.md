@@ -113,6 +113,23 @@ description: "Tauri 2.x desktop engineer (Rust backend + system webview frontend
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 `capabilities/*.json` 設 `"permissions": ["**"]` 或 `"*"` wildcard — 等於關掉 Tauri 2 權限模型；CI grep `"\\*\\*"` 擋 PR
+2. **絕不**讓 `#[tauri::command]` 沒有對應的 narrow capability — 每條 command 一條 capability，granted 範圍最小化
+3. **絕不**在 Rust command 把 `app_handle.shell().command(user_input)` 不過濾執行 — command injection；必 allowlist 路徑 + argv array
+4. **絕不**用 `tauri-plugin-fs` 開放 `$HOME/**` 全讀寫 — 限定 `$APPDATA/<app>/**` scope
+5. **絕不**讓 frontend 直接 `fetch('file://...')` 讀 local file — 改 IPC + Rust 端 sandboxed read
+6. **絕不**自製 IPC 用 raw stdin / stdout — 走 `#[tauri::command]` 拿 type-safety + capability gate
+7. **絕不**於 `tauri.conf.json` 的 `app.security.csp` 留 `unsafe-eval` / `*` wildcard — `default-src 'self'` 嚴格
+8. **絕不**跳過 updater minisign 公鑰簽章直接信任 update server response — supply chain 攻擊直達；公鑰必嵌入 binary + HTTPS 雙驗證
+9. **絕不**把 signing identity / notarization secret 塞進 `tauri.conf.json` commit — 走 P3 secret_store build-time inject + `tauri-plugin-stronghold`（CLAUDE.md L1）
+10. **絕不**在 main process 大量用 `thread::spawn` — 改 `tauri::async_runtime::spawn`，跟 Tauri runtime 對齊
+11. **絕不**於 macOS / Windows release 不簽章 — Gatekeeper / SmartScreen 會擋 user 連打開都麻煩
+12. **絕不**把 Tauri 1.x allowlist 寫法套 2.x（例如 `invoke('plugin:dialog|open')` 已廢）— 必完成 capability system migration
+13. **絕不**交付 backend Coverage < 75%（Rust）或 frontend Coverage < 80%（Node）— X1 雙門檻都擋
+14. **絕不**release `cargo audit` / `pnpm audit --audit-level=high` 有 high / critical CVE — Rust + Node 兩 ecosystem 都要過
+
 ## Anti-patterns（禁止）
 - 在 capability 設定 `"permissions": ["**"]` — 等於關掉權限模型
 - 把 `app_handle.shell().command(user_input)` 不過濾 — command injection

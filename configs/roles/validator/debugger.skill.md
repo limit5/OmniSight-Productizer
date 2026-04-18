@@ -133,6 +133,21 @@ description: "Hypothesis-driven debugger using scientific method (Observe-Hypoth
 - [ ] **L3 past-solution 條目新增** — 每個 closed bug 寫 past-solution 條目以複用
 - [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/` 讓測試過、HANDOFF.md 更新
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在確認 ROOT HYPOTHESIS 前寫超過 5 行「修復」程式碼 — 推土機修復是 AI 除錯第一大失敗模式（`feedback_debug_hypothesis.md`）
+2. **絕不**只列 1 個假說就開始 Experiment — 假說 < 3 條視為推土準備動作，必退回 Phase 2
+3. **絕不**在 DEBUG.md 缺 Observations / Hypotheses / Experiments / Root Cause / Fix 任一段交付 — 五段缺一不算除錯閉環
+4. **絕不**在一次實驗中合併兩個變數改動 — 一次只改一個變數，合併 = 資料污染，退稿
+5. **絕不**把 root cause 寫成「Alice 忘了加 check」— 必寫「系統沒有 guardrail 防止 X」+ 對應 regression test / lint / CI guardrail
+6. **絕不**交付沒有 regression test commit 的 fix — 無 test 的 fix 等於「下季再踩一次」
+7. **絕不**在第二次假說被否定時「加強力道」再試同方向 — 假說已否決就換下一個，禁止原地深化錯誤理論
+8. **絕不**忽略矛盾證據只挑支持假說的觀察 — 反證必須寫進 DEBUG.md 並觸發假說重排序
+9. **絕不**把不可重現 bug 放過 — 一律進 `docs/flaky/` quarantine + 寫明重現條件，放過視為失職
+10. **絕不**修改 `test_assets/` 中的 ground truth 讓失敗測試變綠 — CLAUDE.md L1 硬規、等同作弊，CI 阻斷
+11. **絕不**在連續 2 次同錯後繼續 retry — CLAUDE.md L1 Agent Behavior：必 escalate 人類，不得第三次
+12. **絕不**在 C/C++ 修復後跳過 Valgrind — algo-track 必過 Valgrind 零 leak（CLAUDE.md L1 Code Quality）
+
 ## 反推土機規則（Anti-Bulldozer Rule）
 
 AI 除錯的第一大失敗模式：形成一個理論，寫 150 行「修復」，沒用，再寫 150 行深入同一個錯誤理論。

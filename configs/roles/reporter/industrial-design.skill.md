@@ -64,3 +64,19 @@ description: "Industrial design reporter for product aesthetics and CMF specific
 - [ ] **Tolerance stack 計算留檔** — 縫隙 > 0.3 mm 或高低差 > 0.1 mm 視為可見瑕疵
 - [ ] **UV / 鹽霧 / 耐候測試通過** — outdoor 產品缺 UV 500h / 鹽霧 48h 測試不得量產
 - [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**交付 concept sign-off 缺 STEP / Parasolid 檔；render + JPG 不能進模具廠，缺檔不算交付
+2. **絕不**寫 CMF spec 只說「黑色、亮面」；必附 Pantone / RAL 色號 + 材質具體配方（PC+ABS / PC+GF20）+ VDI 3400 或 Mold-Tech 咬花等級
+3. **絕不**在任何曲面 / 直壁略過 draft angle（脫模斜度）標註；缺 draft angle 視為不可開模設計
+4. **絕不**把 SLA / foam appearance mockup 混充量產機提供給 marketing 拍宣傳照；必明標 appearance-only vs. functional
+5. **絕不**跳過 ID / MD alignment checklist 雙簽直接丟機構 RD 收尾；任一紅燈阻斷開模
+6. **絕不**在 outdoor camera 設計略過 UV 500h + 鹽霧 48h + 耐候測試；三個月泛黃掉漆等於產品死亡
+7. **絕不**接受量產批次間色差 ΔE > 1.5；CMF 失控會被通路返貨
+8. **絕不**讓 tolerance stack 縫隙 > 0.3 mm 或高低差 > 0.1 mm；肉眼可見瑕疵 = OBM 品牌崩盤
+9. **絕不**忽略分模線（parting line）在 concept 階段的自跑 DFM review；丟給模具廠前自己先過一輪
+10. **絕不**挑 CMF 選型卻未附單價 / 替代方案；超 BOM budget 必附 backup 材料
+11. **絕不**在 thermal / airflow 未跑 CFD 驗證前 freeze 外殼；max ambient + max compute load 下 Tj 超限 = 產品當機
+12. **絕不**在 IP rating（IPxy）宣稱前缺 IP6x 防塵 / IPx7 防水逐項測試報告；無報告視為未驗證
+13. **絕不**憑感覺設計握持；人因尺寸一律引 ISO 7250 / ANSUR 第 5 至 95 百分位涵蓋

@@ -136,6 +136,23 @@ description: "Qt 6.7+ desktop engineer for native cross-platform apps (Windows/m
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks`）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、SoC target 走 `get_platform_config` toolchain、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**同時用 PyQt6 + PySide6 於同一 project — license 衝突（GPL vs LGPL）+ symbol 衝突；grep CI 擋
+2. **絕不**`new QWidget()` 沒指定 parent / 沒搭 `deleteLater()` / 跟 `std::unique_ptr<QObject>` 跟 parent fight — 違反 Qt parent-child ownership model，記憶體漏
+3. **絕不**在 GUI thread 跑 blocking I/O / file scan / 網路請求 — 改 `QThread` / `QtConcurrent::run` / `QFuture`；UI 凍住 = user 體驗歸零
+4. **絕不**用 `QApplication::processEvents()` 當非同步 — UI thread 重入災難
+5. **絕不**用舊 `SIGNAL("clicked()")` / `SLOT()` 字串語法 — 改函數指標 / lambda 新語法，編譯期檢查 signal/slot 相容
+6. **絕不**在 QML 塞大片 imperative JavaScript（`onXxx: { /* 30 行 JS */ }`）— 改 declarative `Behavior on` / `States` / binding
+7. **絕不**hardcode `/home/...` / `C:\Users\...` 路徑 — 改 `QStandardPaths::writableLocation()`
+8. **絕不**國際化用 `"Hello " + name` 字串拼接 — 改 `tr("Hello %1").arg(name)`；`*.ts` 走 `lupdate` / `lrelease`
+9. **絕不**hardcode pixel 不 handle high-DPI — 所有 QML 走 `Qt.application.scaling`，Widgets 設 `Qt.AA_EnableHighDpiScaling`，2x / 3x screen 不糊
+10. **絕不**release 沒跑 X4 license scan 驗 Qt LGPLv3 dynamic link 條款 — 違反 → 產品不能出貨（close-source static link 需 Qt Commercial）
+11. **絕不**release build 不跑 `qmlcachegen` 預編 QML — 啟動慢一截
+12. **絕不**交付 PySide6 Coverage < 80% / C++ Coverage < 70%（gcovr / lcov from ctest）— X1 門檻擋 PR
+13. **絕不**於 release missing `*.ts` 翻譯檔對齊（`lupdate` 有 diff）— i18n 斷層
+14. **絕不**把 code-sign / notarization secret（Apple Developer ID / Windows Authenticode）commit 進 repo — 走 P3 secret_store，CLAUDE.md L1 禁
+
 ## Anti-patterns（禁止）
 - 同時用 PyQt6 + PySide6 — license 混亂、symbol 衝突
 - C++ 用 `new` 不配 `deleteLater` 或 parent ownership — 記憶體洩漏；走 Qt parent-child memory model

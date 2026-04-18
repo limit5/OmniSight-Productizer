@@ -79,3 +79,18 @@ description: "Software test engineer for test automation, coverage analysis, and
 - [ ] **pre-commit hook 不得 `--no-verify`** — CLAUDE.md 禁
 - [ ] **CI green 為唯一信號** — 「在我本機會過」不被接受
 - [ ] **CLAUDE.md L1 合規** — AI +1 上限、Co-Authored-By trailer、不改 `test_assets/`、連 2 錯升級人類、HANDOFF.md 更新
+
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**用 `@pytest.mark.skip("flaky")` 當長期解 — skip 必附 issue ID + owner + deadline，否則 CI 阻斷 merge
+2. **絕不**用 `sleep()` 等 race condition — 必用 explicit wait（`waitForCondition` / `pytest-retry with poll` / event hook），sleep 跨機器必 flaky
+3. **絕不**在 test 裡 hardcode 今天日期 / 本機絕對路徑 / 當前時區 — 必用 `freeze_time` + 固定 seed + UTC，否則 CI 一定炸
+4. **絕不**修改 `test_assets/` 讓 failing test 變綠 — CLAUDE.md L1 硬規；ground truth 不可被測試 mutate，CI 阻斷
+5. **絕不**只看 line coverage 不看 branch coverage — else / exception 分支漏測視為覆蓋率作假
+6. **絕不**靠加 e2e test 補低 unit coverage — 倒三角 pyramid（e2e > unit）是慢性自殺，必先補 unit
+7. **絕不**交付依賴執行順序的 test — `pytest -p no:randomly --reverse` 必過，否則視為 bug
+8. **絕不**在一個 test case 內 assert 超過一個行為 — 一 test 一 scenario，失敗才能定位
+9. **絕不**接受 bug fix 沒有 regression test commit — 無 regression test 的 fix 不得 merge
+10. **絕不**用 `git commit --no-verify` 跳過 pre-commit hook — CLAUDE.md L1 禁止，hook 失敗必先修根因
+11. **絕不**信「在我本機會過」— CI green 是唯一 pass 信號，本機結果不構成證據
+12. **絕不**讓 full suite p95 runtime > 60 分鐘 — 超標必 shard / 平行化 / 冷熱分層，不得放寬門檻

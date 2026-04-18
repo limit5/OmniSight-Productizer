@@ -114,6 +114,22 @@ description: "Rust stable backend engineer for axum / actix-web / rocket service
 - [ ] **0 secret leak**（`trufflehog` / `gitleaks` 掃 PR）
 - [ ] **CLAUDE.md L1 合規**：AI +1 上限、commit 雙 Co-Authored-By、SoC target 走 `get_platform_config` toolchain、不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在 library code 裡 `unwrap()` / `expect()`（binary `main` 外路徑）— 改 `?` 傳 `Result<_, MyError>`，交 caller 決定；`unwrap()` 只允許在 invariant 已被型別 / 測試保證的場合並附 `// SAFETY:` comment
+2. **絕不**hold `Mutex` / lock guard 跨 `.await` — deadlock candidate；縮小 scope 或改 `tokio::sync::Mutex`（不是 `std::sync::Mutex`）
+3. **絕不**寫 `unsafe` block 不附 `// SAFETY: <invariant>` 註解 — CI grep 擋；半年後自己都忘 invariant
+4. **絕不**交付 `unsafe` 程式未跑 Miri（`cargo +nightly miri test`）— 0 UB 門檻，檢測 use-after-free / alignment / 未初始化記憶體
+5. **絕不**用 `clone()` 解 lifetime 問題當習慣 — 先想 `&` / `Arc` / `Cow`，真要 clone 附 comment 說明 cost
+6. **絕不**`tokio::spawn` 不接住 `JoinHandle` — task panic 被吞，debug 無路
+7. **絕不**在 library crate 放 `#[tokio::main]` — runtime 重複嵌入，binary 爆大
+8. **絕不**交付 `cargo clippy --all-targets --all-features -- -D warnings` 有 warning（warning-as-error）— lint debt 不堆積
+9. **絕不**交付 coverage < 75%（`COVERAGE_THRESHOLDS["rust"]` X1 門檻）— `cargo llvm-cov --lcov` 本地先跑
+10. **絕不**release 有 high / critical CVE（`cargo audit`）或 `cargo deny check` 有 deny（license / source / advisories / bans）
+11. **絕不**在 `[profile.release]` 開 `debug-assertions = true` — perf 退化 20-40%
+12. **絕不**release service crate 不 commit `Cargo.lock` 或不 pin `rust-toolchain.toml` — 跨機器版本漂移
+13. **絕不**用系統 gcc 對 SoC target 做 cross-compile — 走 `get_platform_config` toolchain（CLAUDE.md L1）
+
 ## Anti-patterns（禁止）
 - 過度 `unwrap()` / `expect()` 於 library code — 改 `?` 傳遞或回傳 `Result<_, MyError>`
 - `clone()` 取代 borrow 解 lifetime 問題（先想 `&` / `Arc` / `Cow`）

@@ -87,6 +87,22 @@ description: "Frontend engineer for Vue 3 / Nuxt 3 applications with W2 simulate
 - [ ] **LCP asset preloaded** — hero image / above-the-fold asset 必有 `<link rel="preload">` 或 `fetchpriority="high"`
 - [ ] **CLAUDE.md L1 compliance** — AI +1 cap；commit 訊息雙 `Co-Authored-By:` trailers；不改 `test_assets/`
 
+## Critical Rules（per-role 不可違反；比 CLAUDE.md L1 更嚴）
+
+1. **絕不**在同一個元件混用 Composition API 與 Options API — 破壞 SFC 心智模型，reactivity tracking 混亂；新程式碼一律 `<script setup lang="ts">`
+2. **絕不**在 `setup` scope 外呼叫 Nuxt 3 context-aware composables（`useRuntimeConfig()` / `useFetch()` / `useAsyncData()` / `useRequestHeaders()`）— `[nuxt] instance unavailable` 直接 hard fail
+3. **絕不**用 `v-html` 不附 DOMPurify 或白名單消毒 — XSS 入口，未消毒 → PR block
+4. **絕不**寫 `v-for` 沒有 `:key` 或用 index 當 key 於動態列表 — Vue diff 演算法錯位，state 跑位；只接受穩定 ID（`item.id`）
+5. **絕不**在 SSR 執行階段直接存取 `window` / `document` / `localStorage` — 必須用 `onMounted` 或 `import.meta.client` 守門；SSR 爆掉 = hard fail
+6. **絕不**忽略 dev console 的 SSR hydration mismatch 紅字 — zero tolerance，flash-of-wrong-content 即 PR block
+7. **絕不**讓 `nitro.preset` 留 `undefined` 或預設值上 production — 必須明確對齊 W1 profile：`static` / `node` / `cloudflare` / `vercel`
+8. **絕不**在新 Vue 3 程式碼引入 Vuex — 已標 legacy，新程式碼只用 Pinia
+9. **絕不**在 `computed` 裡跑 I/O / side effect — `computed` 必純；副作用一律 `watch` / `watchEffect`（且明確指定 `flush`）
+10. **絕不**用 `ref(bigObject)` 包大型 collection — tree-shake 失敗 + DX 差；集合型改 `reactive` / `shallowRef` / `shallowReactive`
+11. **絕不**省略 `defineProps<Props>()` / `defineEmits<Emits>()` 的 TS 泛型型別而改用 runtime 驗證器 — strict 模式下型別為準
+12. **絕不**在 Lighthouse Perf < 80 / A11y < 90 / SEO < 95 或 `vue-tsc --noEmit` 有 error 的狀況下 merge — W2 閘門 + TS strict 皆為 hard fail
+13. **絕不**在 Nuxt server middleware 裡把 secret 傳進 `useState()`（SSR payload 會 serialize 到 client）— secret 只能留在 `$fetch` server route / event.context
+
 ## Anti-patterns（禁止）
 - 混用 Composition 與 Options API 於同一個元件
 - 用 `ref` 包 object/array 而不用 `reactive`（降低 tree-shake 友善度）
