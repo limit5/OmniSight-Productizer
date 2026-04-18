@@ -1473,4 +1473,107 @@ describe("IntegrationSettings — Part D tab split", () => {
     expect(screen.getByText("Project")).toBeTruthy()
     expect(screen.getByText("Replication Targets")).toBeTruthy()
   })
+
+  /**
+   * B14 Part D row 235 — Tab 4 "CI/CD" must expose the three outbound
+   * pipeline integrations (GitHub Actions / Jenkins / GitLab CI) with
+   * every config scalar the backend whitelists:
+   *   - GitHub Actions: Enabled toggle (reuses the Git tab's GitHub token)
+   *   - Jenkins: Enabled toggle + URL + User + API Token
+   *   - GitLab CI: Enabled toggle (reuses the Git tab's GitLab URL + token)
+   * Each of the three sections also surfaces a status dot so an operator
+   * can tell at a glance which pipelines are wired up. GitHub Actions /
+   * GitLab CI are single-toggle (green = enabled). Jenkins requires toggle
+   * ON + URL + API Token all set — enabling Jenkins without URL would
+   * silent-fail the backend trigger, so a green dot on "enabled but URL
+   * empty" would be a lie. This lock-in test prevents future refactors
+   * from silently demoting any Jenkins field or from weakening the
+   * "Jenkins is green only when actually reachable" contract.
+   */
+  it("CI/CD tab exposes GitHub Actions / Jenkins / GitLab CI toggles + Jenkins settings (row 235)", async () => {
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const cicdTab = await screen.findByRole("tab", { name: /CI\/CD/ })
+    await user.click(cicdTab)
+    // All three section headers are on-tab.
+    await waitFor(() => expect(screen.getByText("GITHUB ACTIONS")).toBeTruthy())
+    expect(screen.getByText("JENKINS")).toBeTruthy()
+    expect(screen.getByText("GITLAB CI")).toBeTruthy()
+    // Jenkins-only scalars. The Gerrit tab is force-mounted so generic
+    // labels like "URL" exist in both Gerrit and Jenkins panels — scope
+    // the assertion to the CI/CD tab's content panel to avoid the
+    // false-positive. "User" / "API Token" are CI/CD-exclusive so they
+    // don't need scoping; "URL" does.
+    const cicdPanel = screen.getByRole("tabpanel", { name: /CI\/CD/ })
+    expect(cicdPanel).toBeTruthy()
+    expect(
+      Array.from(cicdPanel.querySelectorAll("label")).map(l => l.textContent),
+    ).toEqual(expect.arrayContaining(["Enabled", "URL", "User", "API Token"]))
+    // Each of the three sections has a status dot with a stable testid.
+    expect(screen.getByTestId("cicd-section-dot-github-actions")).toBeTruthy()
+    expect(screen.getByTestId("cicd-section-dot-jenkins")).toBeTruthy()
+    expect(screen.getByTestId("cicd-section-dot-gitlab-ci")).toBeTruthy()
+  })
+
+  /**
+   * B14 Part D row 235 — per-section status dots on the CI/CD tab must
+   * reflect the backend-reported config state. When backend reports
+   * `ci.github_actions_enabled=true` + a fully-wired Jenkins (toggle +
+   * URL + API Token) + `ci.gitlab_ci_enabled=false`, the three dots light
+   * up green / green / grey respectively. This pins the "Jenkins dot is
+   * only green when URL and API token are both present" invariant — a
+   * regression that flips green on toggle alone would silently mislead
+   * operators into thinking the pipeline will fire.
+   */
+  it("CI/CD section dots reflect per-pipeline configured state (row 235)", async () => {
+    mockedGetSettings.mockResolvedValue({
+      ci: {
+        github_actions_enabled: true,
+        jenkins_enabled: true,
+        jenkins_url: "https://jenkins.example.com",
+        jenkins_user: "ci-bot",
+        jenkins_api_token: "configured",
+        gitlab_ci_enabled: false,
+      },
+    })
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const cicdTab = await screen.findByRole("tab", { name: /CI\/CD/ })
+    await user.click(cicdTab)
+    await waitFor(() => expect(screen.getByText("GITHUB ACTIONS")).toBeTruthy())
+    const emerald = "var(--validation-emerald)"
+    const ghaDot = screen.getByTestId("cicd-section-dot-github-actions")
+    const jenkinsDot = screen.getByTestId("cicd-section-dot-jenkins")
+    const glciDot = screen.getByTestId("cicd-section-dot-gitlab-ci")
+    expect(ghaDot.className).toContain(emerald)
+    expect(jenkinsDot.className).toContain(emerald)
+    expect(glciDot.className).not.toContain(emerald)
+  })
+
+  /**
+   * B14 Part D row 235 — Jenkins "enabled but URL/token missing" must NOT
+   * flip the Jenkins section dot green. This isolates the partial-config
+   * regression: a future refactor that drops the URL/token guards would
+   * light up Jenkins as ready-to-fire even though the backend
+   * `_trigger_ci_pipelines` path silently no-ops when those are empty.
+   */
+  it("Jenkins section dot stays grey when toggle is ON but URL is empty (row 235)", async () => {
+    mockedGetSettings.mockResolvedValue({
+      ci: {
+        github_actions_enabled: false,
+        jenkins_enabled: true,
+        jenkins_url: "",
+        jenkins_user: "",
+        jenkins_api_token: "",
+        gitlab_ci_enabled: false,
+      },
+    })
+    const user = userEvent.setup()
+    render(<IntegrationSettings open={true} onClose={() => {}} />)
+    const cicdTab = await screen.findByRole("tab", { name: /CI\/CD/ })
+    await user.click(cicdTab)
+    await waitFor(() => expect(screen.getByText("JENKINS")).toBeTruthy())
+    const jenkinsDot = screen.getByTestId("cicd-section-dot-jenkins")
+    expect(jenkinsDot.className).not.toContain("var(--validation-emerald)")
+  })
 })

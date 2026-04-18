@@ -87,6 +87,74 @@ class TestSettingsEndpoint:
             assert "gh-secret" not in v
             assert "ger-secret" not in v
 
+    @pytest.mark.asyncio
+    async def test_ci_block_reports_jenkins_api_token_without_leaking(
+        self, client, monkeypatch
+    ):
+        """B14 Part D row 235 — the CI/CD tab drives the Jenkins section
+        status dot off the ``ci.jenkins_api_token`` key of ``GET
+        /system/settings``. Contract matches the webhooks block: a truthy
+        backend secret surfaces as "configured", empty surfaces as ""; the
+        plaintext must never leak (Jenkins API tokens are as sensitive as
+        webhook secrets — they authenticate pipeline trigger POSTs).
+
+        Jenkins URL + user are NOT secrets, so they remain plaintext (the
+        URL is the operator-facing base URL of the Jenkins server and the
+        user is just a username). `github_actions_enabled` /
+        `jenkins_enabled` / `gitlab_ci_enabled` remain booleans so the
+        front-end toggle reflects reality.
+        """
+        from backend import config as _cfg
+
+        monkeypatch.setattr(_cfg.settings, "ci_github_actions_enabled", True)
+        monkeypatch.setattr(_cfg.settings, "ci_jenkins_enabled", True)
+        monkeypatch.setattr(
+            _cfg.settings, "ci_jenkins_url", "https://jenkins.example.com"
+        )
+        monkeypatch.setattr(_cfg.settings, "ci_jenkins_user", "ci-bot")
+        monkeypatch.setattr(
+            _cfg.settings, "ci_jenkins_api_token", "jtok-do-not-leak"
+        )
+        monkeypatch.setattr(_cfg.settings, "ci_gitlab_enabled", False)
+        resp = await client.get("/api/v1/system/settings")
+        assert resp.status_code == 200
+        ci = resp.json()["ci"]
+        # All six keys that the Tab 4 UI reads are present.
+        assert set(ci.keys()) >= {
+            "github_actions_enabled", "jenkins_enabled", "jenkins_url",
+            "jenkins_user", "jenkins_api_token", "gitlab_ci_enabled",
+        }
+        # Booleans flow through untouched — operator UI mirrors reality.
+        assert ci["github_actions_enabled"] is True
+        assert ci["jenkins_enabled"] is True
+        assert ci["gitlab_ci_enabled"] is False
+        # URL + user are not secrets → plaintext.
+        assert ci["jenkins_url"] == "https://jenkins.example.com"
+        assert ci["jenkins_user"] == "ci-bot"
+        # API token collapses to the "configured"/"" contract — and the raw
+        # plaintext is never echoed back anywhere in the payload.
+        assert ci["jenkins_api_token"] == "configured"
+        for v in ci.values():
+            if isinstance(v, str):
+                assert "jtok-do-not-leak" not in v
+
+    @pytest.mark.asyncio
+    async def test_ci_jenkins_api_token_empty_surfaces_empty_string(
+        self, client, monkeypatch
+    ):
+        """B14 Part D row 235 — empty Jenkins API token must surface as ""
+        (not "configured"), otherwise the Tab 4 Jenkins status dot would
+        lie green on an un-wired pipeline. Isolates the empty-state
+        regression separate from the "configured" branch above.
+        """
+        from backend import config as _cfg
+
+        monkeypatch.setattr(_cfg.settings, "ci_jenkins_api_token", "")
+        resp = await client.get("/api/v1/system/settings")
+        assert resp.status_code == 200
+        ci = resp.json()["ci"]
+        assert ci["jenkins_api_token"] == ""
+
 
 class TestConnectionEndpoints:
 

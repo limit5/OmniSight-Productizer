@@ -24,9 +24,16 @@ const STATUS_ICON = {
   testing: <Loader size={12} className="animate-spin text-[var(--neural-blue)]" />,
 }
 
-function SettingsSection({ title, integration, children }: {
+function SettingsSection({ title, integration, status, statusTestId, children }: {
   title: string
   integration?: string
+  // B14 Part D row 235 — optional per-section status dot. Pass `true` to
+  // render a green dot (configured), `false` to render a grey dot (not
+  // configured), or omit entirely (no dot). Today only the CI/CD tab's
+  // three sections use this — other sections stay dotless to avoid visual
+  // noise. `statusTestId` provides a stable `data-testid` for vitest.
+  status?: boolean
+  statusTestId?: string
   children: React.ReactNode
 }) {
   const [expanded, setExpanded] = useState(true)
@@ -53,6 +60,17 @@ function SettingsSection({ title, integration, children }: {
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 py-2 bg-[var(--secondary)] hover:bg-[var(--secondary)]/80 transition-colors"
       >
+        {typeof status === "boolean" && (
+          <span
+            className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
+              status
+                ? "bg-[var(--validation-emerald)]"
+                : "bg-[var(--muted-foreground)]/30"
+            }`}
+            title={status ? "configured" : "not configured"}
+            data-testid={statusTestId}
+          />
+        )}
         <span className="font-mono text-[10px] font-bold text-[var(--neural-blue)] flex-1 text-left">{title}</span>
         {testResult && !testing && STATUS_ICON[testResult.status as keyof typeof STATUS_ICON]}
         {testing && STATUS_ICON.testing}
@@ -2534,6 +2552,20 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
       getVal("ci", "gitlab_ci_enabled", "ci_gitlab_enabled") === "true"
     ),
   }
+  // B14 Part D row 235 — per-section status for the CI/CD tab. Each
+  // integration is independent (a site may run Jenkins without enabling
+  // GitHub Actions), so the three sections each expose their own dot; the
+  // tab-level `tabStatus.cicd` above stays an OR over them so the TabsList
+  // badge lights up if ANY CI integration is configured.
+  const cicdSectionStatus = {
+    githubActions: getVal("ci", "github_actions_enabled") === "true",
+    jenkins: (
+      getVal("ci", "jenkins_enabled") === "true" &&
+      hasValue("ci", "jenkins_url") &&
+      hasValue("ci", "jenkins_api_token", "ci_jenkins_api_token")
+    ),
+    gitlabCi: getVal("ci", "gitlab_ci_enabled", "ci_gitlab_enabled") === "true",
+  }
   const badgeClass = (ok: boolean) =>
     ok
       ? "bg-[var(--validation-emerald)]"
@@ -2930,10 +2962,25 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
             {/* Tab 4 — Outbound CI/CD triggers. Config fields already exist in
                 backend/config.py (ci_*) and are whitelisted in
-                backend/routers/integration.py `_UPDATABLE_FIELDS`; this is the
-                first time they are surfaced in the UI. */}
+                backend/routers/integration.py `_UPDATABLE_FIELDS`.
+
+                B14 Part D row 235: each of the three sections (GitHub
+                Actions / Jenkins / GitLab CI) carries a per-section status
+                dot so an operator can tell at a glance which pipelines are
+                wired up. GitHub Actions + GitLab CI are single-toggle
+                (they reuse the Git tab's token), so "configured" === toggle
+                is ON. Jenkins needs toggle + URL + API token all set
+                (username is optional — many Jenkins deployments use
+                token-only auth) because the backend trigger in
+                `_trigger_ci_pipelines` silently no-ops if URL or token is
+                missing; a green dot on "enabled but URL empty" would lie
+                to the operator. */}
             <TabsContent value="cicd" className="space-y-2 mt-0">
-              <SettingsSection title="GITHUB ACTIONS">
+              <SettingsSection
+                title="GITHUB ACTIONS"
+                status={cicdSectionStatus.githubActions}
+                statusTestId="cicd-section-dot-github-actions"
+              >
                 <ToggleField
                   label="Enabled"
                   value={getVal("ci", "github_actions_enabled") === "true"}
@@ -2944,7 +2991,11 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 </div>
               </SettingsSection>
 
-              <SettingsSection title="JENKINS">
+              <SettingsSection
+                title="JENKINS"
+                status={cicdSectionStatus.jenkins}
+                statusTestId="cicd-section-dot-jenkins"
+              >
                 <ToggleField
                   label="Enabled"
                   value={getVal("ci", "jenkins_enabled") === "true"}
@@ -2968,7 +3019,11 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 />
               </SettingsSection>
 
-              <SettingsSection title="GITLAB CI">
+              <SettingsSection
+                title="GITLAB CI"
+                status={cicdSectionStatus.gitlabCi}
+                statusTestId="cicd-section-dot-gitlab-ci"
+              >
                 <ToggleField
                   label="Enabled"
                   value={getVal("ci", "gitlab_ci_enabled", "ci_gitlab_enabled") === "true"}

@@ -129,6 +129,14 @@ async def get_settings(_user=Depends(_au.require_operator)):
             "github_actions_enabled": settings.ci_github_actions_enabled,
             "jenkins_enabled": settings.ci_jenkins_enabled,
             "jenkins_url": settings.ci_jenkins_url,
+            "jenkins_user": settings.ci_jenkins_user,
+            # B14 Part D row 235 — per-field status indicator for the CI/CD
+            # tab needs a "is the Jenkins API token wired up" signal without
+            # leaking the plaintext secret. Same contract as the
+            # `webhooks.*_secret` keys: "configured" or "" — never the
+            # actual token. Jenkins URL + user stay plaintext (URL and
+            # username are not secrets).
+            "jenkins_api_token": "configured" if settings.ci_jenkins_api_token else "",
             "gitlab_ci_enabled": settings.ci_gitlab_enabled,
         },
         "docker": {
