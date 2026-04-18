@@ -264,6 +264,44 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # B15 #350: Skill Lazy Loading (Progressive Disclosure) ─────
+    # `skill_load_total` — every time the prompt layer assembles a
+    # skill payload for an agent turn, partitioned by the flag mode
+    # that produced it (`eager` inlines a full role body, `lazy`
+    # Phase-1 emits the catalog) and the phase that fired
+    # (`phase1_catalog`, `phase2_explicit`, `phase2_matched`,
+    # `phase2_miss`). The `result` label captures whether the skill
+    # body was actually injected (`loaded` | `empty` | `capped`).
+    skill_load_total = Counter(
+        "omnisight_skill_load_total",
+        "Skill-loading events partitioned by feature-flag mode + phase",
+        labelnames=("mode", "phase", "result"),
+        registry=REGISTRY,
+    )
+    # `skill_token_saved_total` — rough tokens saved by choosing lazy
+    # mode over eager. Increments on every lazy Phase-1 build by
+    # (eager_full_role_tokens − catalog_tokens) so operators can size
+    # the token budget impact in Grafana. Counter so the rate() over
+    # time shows cumulative savings.
+    skill_token_saved_total = Counter(
+        "omnisight_skill_token_saved_total",
+        "Cumulative input tokens saved by skill lazy loading vs eager baseline",
+        labelnames=("mode",),  # lazy | eager (eager always adds 0)
+        registry=REGISTRY,
+    )
+    # `skill_load_latency_ms` — wall-clock time each skill-loading
+    # call took. Buckets go up to 1s because the most expensive
+    # phase (scanning configs/roles/** for the catalog + reading
+    # skill bodies) should normally finish in <50ms; a 1s+ bucket
+    # is a red flag that filesystem I/O or YAML parsing has stalled.
+    skill_load_latency_ms = Histogram(
+        "omnisight_skill_load_latency_ms",
+        "Wall-clock milliseconds spent assembling a skill payload",
+        labelnames=("mode", "phase"),
+        buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000),
+        registry=REGISTRY,
+    )
+
     # Phase 63-A: Intelligence Immune System signal layer ───────
     intelligence_score = Gauge(
         "omnisight_intelligence_score",
@@ -669,6 +707,9 @@ else:
     host_container_count = _NoOp()  # type: ignore
     skill_extracted_total = _NoOp()  # type: ignore
     skill_promoted_total = _NoOp()  # type: ignore
+    skill_load_total = _NoOp()  # type: ignore
+    skill_token_saved_total = _NoOp()  # type: ignore
+    skill_load_latency_ms = _NoOp()  # type: ignore
     intelligence_score = _NoOp()  # type: ignore
     intelligence_alert_total = _NoOp()  # type: ignore
     prompt_outcome_total = _NoOp()  # type: ignore
@@ -747,6 +788,7 @@ def reset_for_tests() -> None:
     global host_cpu_percent, host_mem_percent, host_disk_percent
     global host_loadavg_1m, host_container_count
     global skill_extracted_total, skill_promoted_total
+    global skill_load_total, skill_token_saved_total, skill_load_latency_ms
     global intelligence_score, intelligence_alert_total
     global prompt_outcome_total, prompt_rolled_back_total
     global dag_validation_total, dag_validation_error_total, dag_mutation_total
@@ -910,6 +952,23 @@ def reset_for_tests() -> None:
     skill_promoted_total = Counter(
         "omnisight_skill_promoted_total",
         "Skill candidates promoted into live skills/",
+        registry=REGISTRY,
+    )
+    skill_load_total = Counter(
+        "omnisight_skill_load_total",
+        "Skill-loading events partitioned by mode + phase",
+        labelnames=("mode", "phase", "result"), registry=REGISTRY,
+    )
+    skill_token_saved_total = Counter(
+        "omnisight_skill_token_saved_total",
+        "Tokens saved by lazy loading vs eager baseline",
+        labelnames=("mode",), registry=REGISTRY,
+    )
+    skill_load_latency_ms = Histogram(
+        "omnisight_skill_load_latency_ms",
+        "Wall-clock ms spent assembling a skill payload",
+        labelnames=("mode", "phase"),
+        buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000),
         registry=REGISTRY,
     )
     intelligence_score = Gauge(

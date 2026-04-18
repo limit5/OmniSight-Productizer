@@ -261,7 +261,7 @@ Legend:
 - [x] `backend/agents/nodes.py` ReAct loop 加 skill-on-demand 邏輯：agent 輸出 `[LOAD_SKILL: skill_name]` → system 注入完整 skill → 繼續推理
 - [x] Feature flag：`OMNISIGHT_SKILL_LOADING=eager|lazy`（預設 `eager` 保持向後相容，切 `lazy` 啟用新模式）
 - [x] A/B test 驗證：同一 task 用 eager vs lazy 跑，比較完成率 + token 用量 + response 品質
-- [ ] Metrics：`skill_load_total{mode}` / `skill_token_saved_total` / `skill_load_latency_ms`
+- [x] Metrics：`skill_load_total{mode}` / `skill_token_saved_total` / `skill_load_latency_ms`
 - 預估：**1.5 day**
 
 ### B16. Role Skill 強化 — Cherry-pick Agency-Agents + Pattern Upgrade（#353）— 🔴 優先

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -581,6 +582,9 @@ def build_skill_injection(
     """
     from backend.prompt_registry import get_skill_full, get_skill_metadata
 
+    _phase2_started = time.perf_counter()
+    _phase = "phase2_explicit" if explicit_skills else "phase2_matched"
+
     selected: list[dict] = []
     if explicit_skills:
         # Build a by-name index across role + task skills so the agent
@@ -607,6 +611,12 @@ def build_skill_injection(
             top_k=top_k,
         )
     if not selected:
+        _record_skill_load(
+            mode="lazy",
+            phase=_phase,
+            result="miss",
+            elapsed_ms=(time.perf_counter() - _phase2_started) * 1000,
+        )
         return ""
 
     chunks: list[str] = []
@@ -628,11 +638,61 @@ def build_skill_injection(
         chunks.append(block)
         total += len(block)
 
-    return "\n\n---\n\n".join(chunks)
+    injected = "\n\n---\n\n".join(chunks)
+    _record_skill_load(
+        mode="lazy",
+        phase=_phase,
+        result="loaded" if injected else "empty",
+        elapsed_ms=(time.perf_counter() - _phase2_started) * 1000,
+    )
+    return injected
 
 
 # Regex for parsing [LOAD_SKILL: <name>] markers an agent emits during ReAct.
 _LOAD_SKILL_PATTERN = re.compile(r"\[LOAD_SKILL:\s*([^\]\n]+)\]")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  B15 #350 — Metrics helpers (Prometheus counters/histogram)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ~4 chars per token — same rule-of-thumb `prompt_registry._CHARS_PER_TOKEN`
+# uses so Grafana "tokens saved" lines up with the per-skill token_cost
+# shown in the catalog.
+_CHARS_PER_TOKEN_METRIC = 4
+
+
+def _record_skill_load(
+    mode: str,
+    phase: str,
+    result: str,
+    elapsed_ms: float,
+    tokens_saved: int = 0,
+) -> None:
+    """Emit the three B15 metrics for one skill-loading call.
+
+    * ``skill_load_total{mode,phase,result}`` — always incremented.
+    * ``skill_load_latency_ms{mode,phase}``    — always observed.
+    * ``skill_token_saved_total{mode}``        — incremented by
+      ``tokens_saved`` (only meaningful in lazy mode; eager always
+      adds 0 so the counter tracks cumulative savings).
+
+    Guarded with try/except so a metrics registry outage can never
+    break prompt assembly — skill loading is on the hot path of
+    every agent turn.
+    """
+    try:
+        from backend import metrics as _m
+        _m.skill_load_total.labels(
+            mode=mode, phase=phase, result=result,
+        ).inc()
+        _m.skill_load_latency_ms.labels(
+            mode=mode, phase=phase,
+        ).observe(elapsed_ms)
+        if tokens_saved > 0:
+            _m.skill_token_saved_total.labels(mode=mode).inc(tokens_saved)
+    except Exception:  # pragma: no cover — metrics must never break prompting
+        logger.debug("skill-load metrics emit failed", exc_info=True)
 
 
 def extract_load_skill_requests(agent_output: str) -> list[str]:
@@ -731,6 +791,7 @@ def build_system_prompt(
     """
     resolved_mode = _resolve_skill_loading_mode(mode)
     sections: list[str] = []
+    _phase1_started = time.perf_counter()
 
     # 0. L1 Core Rules (CLAUDE.md — immutable, always first)
     core_rules = load_core_rules()
@@ -756,6 +817,13 @@ def build_system_prompt(
         lazy_parts = [identity]
         if catalog:
             lazy_parts.append("\n## Available Skills (on-demand)\n\n" + catalog)
+        # Tokens saved = full-body eager payload the caller would
+        # otherwise have paid for, minus the compact catalog we
+        # actually injected. Negative values clip to 0 so the
+        # counter only ever climbs.
+        eager_body = load_role_skill(agent_type, sub_type)
+        saved_chars = max(0, len(eager_body) - len(catalog))
+        _tokens_saved = saved_chars // _CHARS_PER_TOKEN_METRIC
         # Phase-2 pre-load hint: if we already know the CATC domain_context,
         # surface the top matching skill names so the agent can emit
         # [LOAD_SKILL: …] on its very first turn rather than guessing.
@@ -777,6 +845,13 @@ def build_system_prompt(
             f"# Role: {sub_type or agent_type} (lazy-loaded skills)\n\n"
             + "\n".join(lazy_parts)
         )
+        _record_skill_load(
+            mode="lazy",
+            phase="phase1_catalog",
+            result="loaded" if catalog else "empty",
+            elapsed_ms=(time.perf_counter() - _phase1_started) * 1000,
+            tokens_saved=_tokens_saved,
+        )
     else:
         role_skill = load_role_skill(agent_type, sub_type)
         if role_skill:
@@ -789,6 +864,13 @@ def build_system_prompt(
                 "You have access to file, git, and bash tools. "
                 "Use them to complete the user's request."
             )
+        _record_skill_load(
+            mode="eager",
+            phase="inline_full",
+            result="loaded" if role_skill else "empty",
+            elapsed_ms=(time.perf_counter() - _phase1_started) * 1000,
+            tokens_saved=0,
+        )
 
     # 3. Task skill (defines task execution steps — Anthropic SKILL.md format)
     if task_skill_context:
