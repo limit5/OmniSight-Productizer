@@ -224,7 +224,7 @@ Legend:
 - [x] Step 3：`merger-agent-bot` 帳號設定引導（說明如何建 bot 帳號 + 設定 group）
 - [x] Step 4：submit-rule 驗證（呼叫 Gerrit API 檢查 project.config 是否含雙簽 +2 rule）
 - [x] Step 5：webhook 設定引導（顯示 webhook URL + secret → 提示貼到 Gerrit）
-- [ ] 完成後寫入 config + 顯示「Gerrit 整合已啟用」
+- [x] 完成後寫入 config + 顯示「Gerrit 整合已啟用」
 - [ ] 預估：**1.5 day**
 
 **Part D — Integration Settings 頁面分 tab**
@@ -1509,7 +1509,7 @@ Legend:
 
 ### H2. Coordinator 負載感知調度（precondition + backoff）
 - [x] `_ModeSlot.acquire()` 新增 precondition：`cpu_pct < 85 AND mem_pct < 85 AND container_count < K`
-- [ ] 超標時指數 backoff（cap 30s），不佔槽位；emit `sandbox.deferred` audit 事件（reason: `host_cpu_high` / `host_mem_high` / `container_cap`）
+- [x] 超標時指數 backoff（cap 30s），不佔槽位；emit `sandbox.deferred` audit 事件（reason: `host_cpu_high` / `host_mem_high` / `container_cap`）
 - [ ] Turbo 自動降級：`cpu_pct > 80` 持續 30s → 降到 supervised budget；恢復後可自動回升（需冷卻 2 min）
 - [ ] `auto_derate=true` 設定開關（`backend/config.py`），使用者可關閉（turbo 模式需手動 confirm）
 - [ ] Prewarm（`sandbox_prewarm.py`）在 high pressure 時暫停新建 warm pool；已 warm 的保留

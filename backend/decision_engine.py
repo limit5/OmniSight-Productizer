@@ -140,10 +140,13 @@ class CapacityExhausted(Exception):
 # coordinator would otherwise keep stacking new agents onto an already
 # saturated host and make the pressure worse.
 #
-# This is the *precondition* only; the exponential-backoff + audit
-# emit (`sandbox.deferred`) layer lives in a follow-up TODO (next
-# bullet under H2).  Until that lands, waiters just poll the
-# precondition at 1s cadence — simple, bounded, and easy to replace.
+# When the precondition is violated the waiter does NOT hold a slot —
+# _shared_parallel is untouched during the wait. Each failed attempt
+# emits a `sandbox.deferred` audit event + SSE with the breaching reason
+# code, then sleeps for an exponentially growing interval capped at
+# H2_BACKOFF_CAP_S (default 30s). The pattern is 1s, 2s, 4s, 8s, 16s,
+# 30s, 30s, … so a transient spike burns cheap retries while a
+# sustained high-pressure window doesn't spam the audit log.
 #
 # When no snapshot exists yet (cold-start grace window before the
 # sampler has produced its first tick) we treat the host as "unknown"
@@ -157,16 +160,89 @@ H2_MEM_HIGH_PCT: float = float(_os.environ.get("OMNISIGHT_H2_MEM_HIGH_PCT", "85.
 # saturated, not during normal multi-tenant operation.
 H2_CONTAINER_CAP: int = int(_os.environ.get("OMNISIGHT_H2_CONTAINER_CAP", "64"))
 
-# Reason codes surfaced to the (upcoming) sandbox.deferred emitter and
-# to tests that introspect *why* a precondition failed.
+# Reason codes surfaced on the sandbox.deferred audit event and to
+# tests that introspect *why* a precondition failed.
 H2_REASON_CPU = "host_cpu_high"
 H2_REASON_MEM = "host_mem_high"
 H2_REASON_CONTAINER = "container_cap"
 
-# Poll interval for the blocking-wait loop when the precondition is
-# violated. Deliberately small + non-configurable — the follow-up
-# exponential-backoff task replaces this wait entirely.
-_H2_PRECONDITION_POLL_S: float = 1.0
+# Exponential backoff schedule while the precondition is breached.
+# Starts at H2_BACKOFF_BASE_S, doubles on every failed attempt, caps
+# at H2_BACKOFF_CAP_S. Overridable via env for ops tuning + tests.
+H2_BACKOFF_BASE_S: float = float(_os.environ.get("OMNISIGHT_H2_BACKOFF_BASE_S", "1.0"))
+H2_BACKOFF_CAP_S: float = float(_os.environ.get("OMNISIGHT_H2_BACKOFF_CAP_S", "30.0"))
+
+
+def _h2_backoff_delay(attempt: int) -> float:
+    """Exponential backoff: base * 2^(attempt-1), capped at H2_BACKOFF_CAP_S.
+
+    Attempt numbers start at 1 (first defer). Returned value is always
+    ``>= 0``; callers may pass the attempt to ``asyncio.sleep``.
+    """
+    if attempt < 1:
+        return 0.0
+    delay = H2_BACKOFF_BASE_S * (2 ** (attempt - 1))
+    return min(delay, H2_BACKOFF_CAP_S)
+
+
+def _emit_sandbox_deferred(
+    reason: str,
+    *,
+    attempt: int,
+    delay_s: float,
+    tenant_id: str | None,
+    session_token: str | None,
+    snapshot_summary: dict[str, Any] | None,
+) -> None:
+    """Emit both the SSE `sandbox.deferred` event and an audit row.
+
+    Best-effort: neither failure prevents the caller from continuing
+    its backoff loop — the precondition itself is the source of truth
+    for whether to proceed, the audit is just the paper trail.
+    """
+    payload = {
+        "reason": reason,
+        "attempt": attempt,
+        "delay_s": delay_s,
+        "backoff_cap_s": H2_BACKOFF_CAP_S,
+        "tenant_id": tenant_id or "",
+        "session_id": session_token[:8] if session_token else "",
+        "host_snapshot": snapshot_summary or {},
+    }
+    try:
+        from backend.events import bus as _bus
+        _bus.publish("sandbox.deferred", payload, tenant_id=tenant_id)
+    except Exception as exc:
+        logger.debug("sandbox.deferred SSE publish failed: %s", exc)
+    try:
+        from backend import audit as _audit
+        _audit.log_sync(
+            action="sandbox.deferred",
+            entity_kind="sandbox_slot",
+            entity_id=reason,
+            before=None,
+            after=payload,
+            session_id=session_token,
+        )
+    except Exception as exc:
+        logger.debug("sandbox.deferred audit log failed: %s", exc)
+
+
+def _host_snapshot_summary() -> dict[str, Any] | None:
+    """Return a compact snapshot summary for inclusion in the deferred
+    event, or ``None`` if host_metrics is unavailable / empty."""
+    try:
+        from backend import host_metrics as _hm
+        snap = _hm.get_latest_host_snapshot()
+    except Exception:
+        return None
+    if snap is None:
+        return None
+    return {
+        "cpu_percent": snap.host.cpu_percent,
+        "mem_percent": snap.host.mem_percent,
+        "container_count": snap.docker.container_count,
+    }
 
 
 def _host_precondition_reason() -> str | None:
@@ -271,9 +347,26 @@ class _ModeSlot:
         # H2 precondition: don't grant a slot while the host is above
         # CPU/mem/container thresholds. Applies to BOTH the DRF and
         # the mode-cap path — host pressure is a property of the
-        # physical box, not of the tenant bucket.
-        while _host_precondition_reason() is not None:
-            await asyncio.sleep(_H2_PRECONDITION_POLL_S)
+        # physical box, not of the tenant bucket. Each breach emits a
+        # sandbox.deferred audit event + SSE and sleeps with exponential
+        # backoff (cap H2_BACKOFF_CAP_S). The slot counter is NOT
+        # incremented during the wait.
+        defer_attempt = 0
+        while True:
+            reason = _host_precondition_reason()
+            if reason is None:
+                break
+            defer_attempt += 1
+            delay = _h2_backoff_delay(defer_attempt)
+            _emit_sandbox_deferred(
+                reason,
+                attempt=defer_attempt,
+                delay_s=delay,
+                tenant_id=self._tenant_id,
+                session_token=self._session_token,
+                snapshot_summary=_host_snapshot_summary(),
+            )
+            await asyncio.sleep(delay)
 
         if self._tenant_id is not None:
             from backend import sandbox_capacity as _sc
