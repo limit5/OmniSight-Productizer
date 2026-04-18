@@ -468,20 +468,15 @@ class TestScopeDisciplineSiblingRows:
     # G5 #3 → #4 → #5 → #6 → G6 #1 → #2 → #3 → #4 → G6 #5 → G7 #2
     # (10th continuation).
 
-    def test_no_g7_alert_rules_yaml(self) -> None:
-        # G7 (row 1388) ships Prometheus alert rules. A separate
-        # alert-rules YAML landing here would be scope creep.
-        candidates = (
-            PROJECT_ROOT / "deploy" / "observability" / "prometheus"
-            / "alerts.yml",
-            PROJECT_ROOT / "deploy" / "observability" / "alerts.yml",
-            PROJECT_ROOT / "deploy" / "prometheus" / "ha-alerts.yml",
-        )
-        for cand in candidates:
-            assert not cand.exists(), (
-                f"G7 (row 1388) owns alert rules; saw unexpected "
-                f"{cand.relative_to(PROJECT_ROOT)}"
-            )
+    # NOTE: `test_no_g7_alert_rules_yaml` was removed in the commit
+    # that landed G7 #3 (TODO row 1388) —
+    # `deploy/observability/prometheus/alerts.yml` now owns the
+    # HA-07 Prometheus alert surface (replica lag > 10s / 5xx > 1%
+    # for 2min / instance down). The G7 #3-side contract pinning
+    # lives in `backend/tests/test_ha_alert_rules_g7_3.py`.
+    # Explicit-migration pattern, carried forward from
+    # G5 #3 → #4 → #5 → #6 → G6 #1 → #2 → #3 → #4 → G6 #5 → G7 #2
+    # → G7 #3 (11th continuation).
 
     def test_doc_does_not_pre_commit_dr_drill_sh(self) -> None:
         # The runbook may name `dr_drill.sh` as a future deliverable

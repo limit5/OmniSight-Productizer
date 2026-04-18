@@ -1,0 +1,90 @@
+# G7 #3 (TODO row 1388) — HA-07 Prometheus alert rules.
+#
+# Partner to:
+#   * G7 #1 backend/metrics.py + backend/ha_observability.py (metric source)
+#   * G7 #2 deploy/observability/grafana/ha.json (operator dashboard)
+#
+# The three alerts pinned in the TODO headline:
+#   * replica_lag > 10 s
+#   * 5xx rate > 1% for 2 min
+#   * instance down
+#
+# Threshold values are deliberately aligned with the Grafana dashboard
+# panel thresholds (G7 #2): an operator opening the dashboard after a
+# page must see WHY the alert fired without consulting a second source.
+# Any drift between the numbers here and panel thresholds in
+# deploy/observability/grafana/ha.json is a contract test failure.
+#
+# Load into Prometheus by adding this file to the top-level
+# `rule_files:` list. Alertmanager routes on the `severity` label.
+
+groups:
+  - name: omnisight_ha_07
+    interval: 30s
+    rules:
+      # Replica lag > 10 s — streaming replication is falling behind the
+      # primary past the RPO budget (G6 #2 docs/ops/dr_rto_rpo.md pins 5 min;
+      # 10 s gives early warning while still inside budget). Fires for 2 min
+      # to ride out transient replay bursts from large writes.
+      - alert: OmniSightReplicaLagHigh
+        expr: omnisight_replica_lag_seconds > 10
+        for: 2m
+        labels:
+          severity: warning
+          subsystem: ha_replication
+        annotations:
+          summary: "Postgres replica lag > 10 s for 2 min"
+          description: |
+            Streaming replication lag on replica {{ $labels.replica }} has
+            exceeded 10 seconds for over 2 minutes ({{ $value }} s).
+            A failover now would lose up to this many seconds of writes —
+            inside the 5-minute RPO budget, but trending toward breach.
+            Investigate replica I/O, network, or long-running transactions
+            on the primary. Cross-reference: docs/ops/dr_rto_rpo.md §3.
+          runbook_url: "https://internal.docs/omnisight/g7-replica-lag"
+
+      # 5xx rate > 1% for 2 min — rolling deploy is returning elevated
+      # server errors. The `omnisight_rolling_deploy_5xx_rate` gauge is
+      # an in-process 60 s ring-buffer convenience scalar (G7 #1
+      # backend/ha_observability.py). Firing for 2 min rides out
+      # single-request noise while still paging on sustained burn.
+      - alert: OmniSightRollingDeploy5xxRateHigh
+        expr: omnisight_rolling_deploy_5xx_rate > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          subsystem: ha_rolling_deploy
+        annotations:
+          summary: "5xx response rate > 1% for 2 min"
+          description: |
+            The rolling-deploy 5xx response rate has exceeded 1%
+            ({{ $value | humanizePercentage }}) for over 2 minutes on
+            instance {{ $labels.instance }}. Either the new revision is
+            regressing or an upstream dependency is unhealthy — check
+            the Grafana panel `deploy/observability/grafana/ha.json`
+            Row 2 status_class breakdown to see if 500s dominate or 502s.
+            Consider pausing the rolling deploy and rolling back.
+          runbook_url: "https://internal.docs/omnisight/g7-5xx-rate"
+
+      # Instance down — at least one backend replica has flipped its
+      # instance_up gauge to 0 (lifespan shutdown or draining).
+      # A single down instance may be normal during a rolling deploy,
+      # but staying down past the drain window is a stuck replica.
+      # 2 min is long enough to filter graceful-shutdown flaps, short
+      # enough that the pool capacity loss reaches oncall quickly.
+      - alert: OmniSightBackendInstanceDown
+        expr: omnisight_backend_instance_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          subsystem: ha_availability
+        annotations:
+          summary: "Backend replica down for 2 min"
+          description: |
+            Backend replica {{ $labels.instance_id }} has reported
+            instance_up == 0 for over 2 minutes. During a rolling deploy
+            this is expected transiently; persisting past the drain
+            window means the replica is stuck or crashed. Check the
+            reverse-proxy pool and the replica's /readyz latency panel
+            to decide whether to evict and replace.
+          runbook_url: "https://internal.docs/omnisight/g7-instance-down"

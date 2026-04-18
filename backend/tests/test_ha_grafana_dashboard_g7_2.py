@@ -404,22 +404,14 @@ class TestSiblingGuardMigration:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class TestScopeDisciplineSiblingRows:
-    def test_no_g7_alert_rules_yaml(self) -> None:
-        """Row 1388 (alert rules) is the next G7 deliverable — it MUST
-        NOT sneak in with row 1387 or scope has crept. The three
-        candidate paths follow the prior guards' discipline."""
-        candidates = (
-            PROJECT_ROOT / "deploy" / "observability" / "prometheus"
-            / "alerts.yml",
-            PROJECT_ROOT / "deploy" / "observability" / "alerts.yml",
-            PROJECT_ROOT / "deploy" / "prometheus" / "ha-alerts.yml",
-        )
-        for cand in candidates:
-            assert not cand.exists(), (
-                f"G7 row 1388 owns alert rules; saw unexpected "
-                f"{cand.relative_to(PROJECT_ROOT)} — do not pre-commit "
-                f"with G7 #2"
-            )
+    # NOTE: `test_no_g7_alert_rules_yaml` was removed in the commit
+    # that landed G7 #3 (TODO row 1388) —
+    # `deploy/observability/prometheus/alerts.yml` now owns the
+    # HA-07 Prometheus alert surface. The G7 #3-side contract
+    # pinning lives in `backend/tests/test_ha_alert_rules_g7_3.py`.
+    # Explicit-migration pattern, 11th continuation:
+    # G5 #3 → #4 → #5 → #6 → G6 #1 → #2 → #3 → #4 → G6 #5 → G7 #2
+    # → G7 #3.
 
     def test_dashboard_does_not_inline_prometheus_alert_rule_shape(
         self, dashboard: dict
