@@ -54,6 +54,9 @@ import {
   bootstrapStartServices,
   finalizeBootstrap,
   getBootstrapStatus,
+  testGitForgeToken,
+  updateSettings,
+  type GitForgeTokenTestResult,
   type BootstrapAdminPasswordKind,
   type BootstrapGates,
   type BootstrapHealthCheckResult,
@@ -1246,13 +1249,14 @@ function CfTunnelStep({
 // (`localGreen.git_forge`) rather than a backend gate flag.
 //
 // This row introduces the three-way tab shell (GitHub / GitLab /
-// Gerrit) + an explicit "Skip — configure later" button. The deeper
-// per-tab form controls (token inputs + Test Connection wired to
-// `POST /system/test/{github|gitlab|gerrit}`) land in the follow-up
-// B14 rows; each tab panel here renders a preview of the fields that
-// the operator will fill in next. Both the skip button and a future
-// "Test Connection succeeded" path flip `localGreen.git_forge=true`
-// so the auto-advance moves on.
+// Gerrit) + an explicit "Skip — configure later" button. The GitHub
+// tab wires a token input + Test Connection button against
+// `POST /system/test/git-forge-token` (a non-mutating probe — it does
+// NOT write the candidate token into `settings.github_token`; that
+// happens on explicit Save). GitLab / Gerrit remain placeholders
+// pending follow-up B14 rows. Both the skip button and a successful
+// GitHub Save flip `localGreen.git_forge=true` so the auto-advance
+// moves on.
 
 type GitForgeTab = "github" | "gitlab" | "gerrit"
 
@@ -1359,13 +1363,17 @@ function GitForgeStep({
         <p className="font-mono text-[11px] text-[var(--foreground)] leading-relaxed">
           {activeDef.hint}
         </p>
-        <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
-          The <strong>token / URL entry</strong> and{" "}
-          <strong>Test Connection</strong> controls for{" "}
-          {activeDef.label} land in the next B14 row. For now, switch
-          tabs to preview each provider, or skip below and configure
-          later from <strong>Settings → Integration</strong>.
-        </p>
+        {activeTab === "github" ? (
+          <GitHubTokenForm onSaved={onCompleted} />
+        ) : (
+          <p className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+            The <strong>token / URL entry</strong> and{" "}
+            <strong>Test Connection</strong> controls for{" "}
+            {activeDef.label} land in the next B14 row. For now, switch
+            tabs to preview each provider, or skip below and configure
+            later from <strong>Settings → Integration</strong>.
+          </p>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -1379,6 +1387,160 @@ function GitForgeStep({
           Skip — configure later in Settings → Integration
         </button>
       </div>
+    </div>
+  )
+}
+
+// ─── B14 Part A row 3: GitHub token input + Test Connection ──────────
+//
+// Lives inside the Step 3.5 "github" tab panel. The operator pastes a
+// Personal Access Token, hits "Test Connection", and the form calls
+// `testGitForgeToken` — a non-mutating probe against
+// `POST /system/git-forge/test-token` that hits GitHub's `/user` with
+// the candidate token and returns `{status, user, name, scopes}`.
+// Nothing is persisted until the operator explicitly clicks
+// "Save & Continue", which writes `github_token` via `updateSettings`
+// and flips `localGreen.git_forge=true` through `onSaved`.
+//
+// Keeping test and save as two distinct actions means a bad token can
+// never land in `settings.github_token` — a regression we'd pay for
+// later when the merge + review agents pick it up.
+
+function GitHubTokenForm({ onSaved }: { onSaved: () => void }) {
+  const [token, setToken] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [result, setResult] = useState<GitForgeTokenTestResult | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const onTest = useCallback(async () => {
+    const trimmed = token.trim()
+    if (!trimmed || busy) return
+    setBusy(true)
+    setResult(null)
+    setSaveError(null)
+    try {
+      const res = await testGitForgeToken({ provider: "github", token: trimmed })
+      setResult(res)
+    } catch (err) {
+      setResult({
+        status: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to reach the GitHub API probe",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }, [token, busy])
+
+  const onSave = useCallback(async () => {
+    if (saving || result?.status !== "ok") return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await updateSettings({ github_token: token.trim() })
+      onSaved()
+    } catch (err) {
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save the token",
+      )
+    } finally {
+      setSaving(false)
+    }
+  }, [token, saving, result, onSaved])
+
+  const canTest = token.trim().length > 0 && !busy
+  const ok = result?.status === "ok"
+
+  return (
+    <div className="flex flex-col gap-2" data-testid="bootstrap-git-forge-github-form">
+      <label
+        htmlFor="bootstrap-git-forge-github-token"
+        className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]"
+      >
+        PERSONAL ACCESS TOKEN
+      </label>
+      <input
+        id="bootstrap-git-forge-github-token"
+        data-testid="bootstrap-git-forge-github-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        value={token}
+        onChange={(e) => {
+          setToken(e.target.value)
+          setResult(null)
+          setSaveError(null)
+        }}
+        placeholder="ghp_... (classic) or github_pat_... (fine-grained)"
+        className="font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] focus:outline-none focus:border-[var(--artifact-purple)]"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="bootstrap-git-forge-github-test"
+          onClick={onTest}
+          disabled={!canTest}
+          className="flex items-center gap-2 px-3 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[11px] font-semibold hover:bg-[var(--muted)]/40 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Activity size={12} />}
+          {busy ? "Testing…" : "Test Connection"}
+        </button>
+        {ok && (
+          <button
+            type="button"
+            data-testid="bootstrap-git-forge-github-save"
+            onClick={onSave}
+            disabled={saving}
+            className="flex items-center gap-2 px-3 py-1.5 rounded bg-[var(--artifact-purple)] text-white font-mono text-[11px] font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {saving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            {saving ? "Saving…" : "Save & Continue"}
+          </button>
+        )}
+      </div>
+      {result && (
+        <div
+          data-testid="bootstrap-git-forge-github-result"
+          data-status={result.status}
+          className={`flex items-start gap-2 p-2 rounded border font-mono text-[11px] ${
+            ok
+              ? "border-[var(--status-green)] bg-[var(--status-green)]/10 text-[var(--status-green)]"
+              : "border-[var(--status-red)] bg-[var(--status-red)]/10 text-[var(--status-red)]"
+          }`}
+        >
+          {ok ? <Check size={12} className="mt-0.5" /> : <AlertCircle size={12} className="mt-0.5" />}
+          {ok ? (
+            <div className="flex flex-col gap-0.5">
+              <span>
+                Connected as{" "}
+                <strong data-testid="bootstrap-git-forge-github-user">
+                  {result.user}
+                </strong>
+                {result.name && result.name !== result.user ? ` (${result.name})` : ""}
+              </span>
+              {result.scopes ? (
+                <span className="text-[10px] opacity-80">
+                  Scopes: <code>{result.scopes}</code>
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <span>{result.message || "GitHub API rejected the token"}</span>
+          )}
+        </div>
+      )}
+      {saveError && (
+        <div
+          data-testid="bootstrap-git-forge-github-save-error"
+          className="flex items-start gap-2 p-2 rounded border border-[var(--status-red)] bg-[var(--status-red)]/10 font-mono text-[11px] text-[var(--status-red)]"
+        >
+          <AlertCircle size={12} className="mt-0.5" />
+          <span>{saveError}</span>
+        </div>
+      )}
     </div>
   )
 }

@@ -21,6 +21,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
     bootstrapParallelHealthCheck: vi.fn(),
     bootstrapSmokeSubset: vi.fn(),
     bootstrapStartServices: vi.fn(),
+    testGitForgeToken: vi.fn(),
+    updateSettings: vi.fn(),
   }
 })
 
@@ -56,6 +58,8 @@ const mockedCfSkip = api.bootstrapCfTunnelSkip as unknown as ReturnType<typeof v
 const mockedParallelHealth = api.bootstrapParallelHealthCheck as unknown as ReturnType<typeof vi.fn>
 const mockedSmokeSubset = api.bootstrapSmokeSubset as unknown as ReturnType<typeof vi.fn>
 const mockedStartServices = api.bootstrapStartServices as unknown as ReturnType<typeof vi.fn>
+const mockedTestGitForgeToken = api.testGitForgeToken as unknown as ReturnType<typeof vi.fn>
+const mockedUpdateSettings = api.updateSettings as unknown as ReturnType<typeof vi.fn>
 
 /**
  * A client-side-strong password that passes ``estimatePasswordStrength``
@@ -106,6 +110,8 @@ describe("BootstrapPage", () => {
     mockedCfSkip.mockReset()
     mockedSmokeSubset.mockReset()
     mockedStartServices.mockReset()
+    mockedTestGitForgeToken.mockReset()
+    mockedUpdateSettings.mockReset()
     mockedDetectOllama.mockResolvedValue({
       reachable: false,
       base_url: "http://localhost:11434",
@@ -1231,6 +1237,137 @@ describe("BootstrapPage", () => {
       // Skip is a client-only flip — it must not issue any backend calls
       // (no dedicated git-forge API exists; see localGreen.git_forge).
       expect(mockedFinalize).not.toHaveBeenCalled()
+    })
+
+    // ─── B14 Part A row 3 — GitHub tab token input + Test Connection ──
+    //
+    // Operator pastes a PAT → clicks Test Connection → backend probe
+    // hits GitHub `/user`. On success the user/org name surfaces so
+    // the operator can confirm they pasted the right token before
+    // Save & Continue persists it.
+
+    describe("GitHub tab token probe", () => {
+      it("Test Connection button is disabled until a token is typed", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        render(<BootstrapPage />)
+        await openGitForgeStep()
+
+        const btn = screen.getByTestId("bootstrap-git-forge-github-test")
+        expect(btn).toBeDisabled()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-github-token"),
+          { target: { value: "ghp_fake_token" } },
+        )
+        expect(btn).toBeEnabled()
+      })
+
+      it("successful probe renders the resolved GitHub user/org name", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          user: "octocat",
+          name: "The Octocat",
+          scopes: "repo, read:org",
+        })
+        render(<BootstrapPage />)
+        await openGitForgeStep()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-github-token"),
+          { target: { value: "ghp_real_looking_token_xxx" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-github-test"))
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-github-result"),
+          ).toHaveAttribute("data-status", "ok")
+        })
+        expect(mockedTestGitForgeToken).toHaveBeenCalledWith({
+          provider: "github",
+          token: "ghp_real_looking_token_xxx",
+        })
+        expect(
+          screen.getByTestId("bootstrap-git-forge-github-user"),
+        ).toHaveTextContent("octocat")
+        // Save & Continue only appears after a green probe.
+        expect(
+          screen.getByTestId("bootstrap-git-forge-github-save"),
+        ).toBeInTheDocument()
+      })
+
+      it("failed probe renders the backend error without showing Save", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "error",
+          message: "Bad credentials",
+        })
+        render(<BootstrapPage />)
+        await openGitForgeStep()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-github-token"),
+          { target: { value: "ghp_wrong" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-github-test"))
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-github-result"),
+          ).toHaveAttribute("data-status", "error")
+        })
+        expect(
+          screen.getByTestId("bootstrap-git-forge-github-result"),
+        ).toHaveTextContent(/Bad credentials/)
+        expect(
+          screen.queryByTestId("bootstrap-git-forge-github-save"),
+        ).toBeNull()
+      })
+
+      it("Save & Continue persists the token and flips the step to complete", async () => {
+        mockedGetStatus.mockResolvedValue(redStatus)
+        mockedTestGitForgeToken.mockResolvedValue({
+          status: "ok",
+          user: "octocat",
+          name: "The Octocat",
+          scopes: "repo",
+        })
+        mockedUpdateSettings.mockResolvedValue({
+          status: "updated",
+          applied: ["github_token"],
+          rejected: {},
+        })
+        render(<BootstrapPage />)
+        await openGitForgeStep()
+
+        fireEvent.change(
+          screen.getByTestId("bootstrap-git-forge-github-token"),
+          { target: { value: "ghp_good" } },
+        )
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-github-test"))
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-github-save"),
+          ).toBeInTheDocument()
+        })
+
+        fireEvent.click(screen.getByTestId("bootstrap-git-forge-github-save"))
+
+        await waitFor(() => {
+          expect(mockedUpdateSettings).toHaveBeenCalledWith({
+            github_token: "ghp_good",
+          })
+        })
+        await waitFor(() => {
+          expect(
+            screen.getByTestId("bootstrap-git-forge-step"),
+          ).toHaveAttribute("data-already-green", "true")
+        })
+        // Finalize must not have been called — saving a PAT is a local
+        // settings write, not a bootstrap gate flip.
+        expect(mockedFinalize).not.toHaveBeenCalled()
+      })
     })
   })
 

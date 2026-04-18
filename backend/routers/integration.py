@@ -215,6 +215,109 @@ async def test_integration(integration: str, _user=Depends(_au.require_admin)):
         return {"status": "error", "message": str(exc)}
 
 
+# ─── B14 Part A row 3: Git-forge token probe (Bootstrap Step 3.5) ──────
+#
+# Validates a *candidate* Git forge token supplied in the request body —
+# does NOT mutate ``settings.github_token`` / ``settings.gitlab_token``.
+# The Bootstrap wizard needs this because the operator is entering a
+# brand-new token they haven't saved yet: reusing ``/system/test/github``
+# would force a save-before-validate round-trip and leave a bad token
+# persisted if validation fails.
+#
+# The existing ``/system/test/{integration}`` endpoint still exercises
+# the currently-configured credential and is what Settings → Integration
+# uses after the token has been written.
+
+class GitForgeTokenTest(BaseModel):
+    provider: str  # "github" | "gitlab" | "gerrit"
+    token: str = ""
+    url: str = ""  # optional — for GitLab self-hosted instances
+
+
+async def _probe_github_token(token: str) -> dict:
+    """Call GitHub's ``GET /user`` with the supplied token and return
+    the resolved login + display name. Never reads from ``settings``."""
+    if not token:
+        return {"status": "error", "message": "Token is required"}
+    proc = await asyncio.create_subprocess_exec(
+        "curl", "-s", "-D", "-",
+        "-H", f"Authorization: token {token}",
+        "-H", "User-Agent: OmniSight-Bootstrap",
+        "https://api.github.com/user",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    raw = stdout.decode(errors="replace")
+    # Split headers from body on the blank line (curl -D - prepends them).
+    scopes = ""
+    body_start = 0
+    if "\r\n\r\n" in raw:
+        head, _, rest = raw.partition("\r\n\r\n")
+        # Follow any 100-continue / 3xx continuations if curl left extra
+        # header blocks — take the last one as the response headers.
+        while "\r\n\r\n" in rest and rest.lstrip().startswith("HTTP/"):
+            head, _, rest = rest.partition("\r\n\r\n")
+        for line in head.splitlines():
+            if line.lower().startswith("x-oauth-scopes:"):
+                scopes = line.split(":", 1)[1].strip()
+                break
+        body = rest
+        body_start = raw.find(body)
+    else:
+        body = raw
+    try:
+        import json
+        data = json.loads(body)
+    except Exception:
+        return {
+            "status": "error",
+            "message": "Invalid response from GitHub API",
+        }
+    if "login" in data:
+        return {
+            "status": "ok",
+            "user": data["login"],
+            "name": data.get("name") or data["login"],
+            "scopes": scopes,
+            "_body_offset": body_start,  # unused; retained for debugging
+        }
+    return {
+        "status": "error",
+        "message": data.get("message", "GitHub returned an unexpected response"),
+    }
+
+
+@router.post("/git-forge/test-token")
+async def test_git_forge_token(
+    body: GitForgeTokenTest, _user=Depends(_au.require_admin)
+):
+    """Validate a candidate Git forge token WITHOUT persisting it.
+
+    Used by the Bootstrap Step 3.5 Git Forge setup to let the operator
+    sanity-check their PAT before they commit it to settings. Only
+    ``github`` is implemented in this row; ``gitlab`` / ``gerrit`` come
+    in follow-up B14 rows.
+    """
+    provider = (body.provider or "").strip().lower()
+    if provider not in {"github", "gitlab", "gerrit"}:
+        raise HTTPException(400, f"Unknown provider: {body.provider}")
+    if provider != "github":
+        # Placeholder until GitLab / Gerrit rows land.
+        return {
+            "status": "error",
+            "message": f"{provider} token probe not yet implemented",
+        }
+    try:
+        result = await asyncio.wait_for(_probe_github_token(body.token), timeout=15)
+    except asyncio.TimeoutError:
+        return {"status": "error", "message": "Connection timed out (15s)"}
+    except Exception as exc:  # pragma: no cover — network-level failure
+        return {"status": "error", "message": str(exc)}
+    # Strip internal debug key before returning.
+    result.pop("_body_offset", None)
+    return result
+
+
 # ── Test functions ──
 
 async def _test_ssh() -> dict:

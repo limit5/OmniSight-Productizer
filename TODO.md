@@ -187,7 +187,7 @@ Legend:
 **Part C — API Error 統一攔截**
 - [x] `lib/api.ts` 全域 error handler：
   - [x] 503 `bootstrap_required` → redirect `/setup-required`（不 toast）
-  - [ ] 401 → redirect `/login?next=<current_path>`（不 toast）
+  - [x] 401 → redirect `/login?next=<current_path>`（不 toast）
   - [ ] 403 → toast warning「權限不足」
   - [ ] 500 → toast error「系統錯誤」+ 展開區顯示 trace ID
   - [ ] 502/503 其他 → toast warning「服務暫時不可用」+ 自動重試
@@ -202,7 +202,7 @@ Legend:
 **Part A — Bootstrap Wizard 加入 Git Forge 設定步驟（選填）**
 - [x] Bootstrap wizard 在 Step 3（CF Tunnel）後加 Step 3.5「Git Forge 設定（選填）」
 - [x] Step 3.5 UI：三選一 tab（GitHub / GitLab / Gerrit）+ 「跳過，稍後設定」按鈕
-- [ ] GitHub tab：token 輸入 + 「Test Connection」按鈕 → 呼叫 GitHub API 驗證 → 成功顯示 user/org name
+- [x] GitHub tab：token 輸入 + 「Test Connection」按鈕 → 呼叫 GitHub API 驗證 → 成功顯示 user/org name
 - [ ] GitLab tab：URL + token 輸入 + 「Test Connection」→ 顯示 GitLab instance version
 - [ ] Gerrit tab：URL + SSH host/port 輸入 + 「Test SSH」→ 驗證 SSH 連線 + Gerrit version
 - [ ] 「跳過」不影響 bootstrap finalization（Git forge 非必要 gate）

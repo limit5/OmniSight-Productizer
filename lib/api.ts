@@ -498,19 +498,25 @@ function _handleTerminalError(args: {
 
   if (args.skipGlobalHandler) return err
 
-  // 401 → redirect to /login?next=<current>. Skip if we're already on
-  // the login page (the form itself will surface the auth failure) or
-  // on /setup-required (bootstrap path — operator hasn't logged in yet).
+  // B13 Part C (#339): 401 → redirect to /login?next=<current> WITHOUT
+  // firing the onApiError bus, so the FUI toast layer stays silent
+  // during the unload (the toast would otherwise race the navigation
+  // and flash). Skip the redirect (and fall through to the emit) if
+  // we're already on the login page — the form itself surfaces the
+  // auth failure — or on /setup-required, where the operator hasn't
+  // logged in yet and we don't want to punt them to /login mid-boot.
   if (kind === "unauthorized" && typeof window !== "undefined") {
     const here = window.location.pathname
-    const skip =
+    const skipRedirect =
       here.startsWith("/login")
       || here === "/setup-required"
-    if (!skip) {
+    if (!skipRedirect) {
       const next = encodeURIComponent(
         window.location.pathname + window.location.search,
       )
       window.location.assign(`/login?next=${next}`)
+      // Short-circuit: page is unloading, no toast, no listeners.
+      return err
     }
   }
 
@@ -1315,7 +1321,7 @@ export async function testGitForgeToken(args: {
   token: string
   url?: string
 }): Promise<GitForgeTokenTestResult> {
-  return request<GitForgeTokenTestResult>("/system/test/git-forge-token", {
+  return request<GitForgeTokenTestResult>("/system/git-forge/test-token", {
     method: "POST",
     body: JSON.stringify({
       provider: args.provider,

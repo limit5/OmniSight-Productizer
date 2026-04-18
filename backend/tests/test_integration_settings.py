@@ -90,6 +90,81 @@ class TestConnectionEndpoints:
         assert resp.status_code == 400
 
 
+class TestGitForgeTokenProbe:
+    """B14 Part A row 3 — non-mutating probe for candidate Git-forge tokens."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_provider(self, client):
+        resp = await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={"provider": "bitbucket", "token": "whatever"},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_empty_token_returns_error(self, client):
+        resp = await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={"provider": "github", "token": ""},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "required" in data["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_does_not_mutate_settings_on_failure(self, client):
+        """Probing with a bad token must NOT overwrite settings.github_token."""
+        from backend.config import settings
+        before = settings.github_token
+        await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={"provider": "github", "token": "ghp_obviously_not_valid_xxx"},
+        )
+        assert settings.github_token == before
+
+    @pytest.mark.asyncio
+    async def test_gitlab_not_implemented_yet(self, client):
+        resp = await client.post(
+            "/api/v1/system/git-forge/test-token",
+            json={"provider": "gitlab", "token": "glpat-xxx"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert "not yet implemented" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_github_ok_path_parses_login(self, monkeypatch):
+        """With the curl subprocess mocked, the OK path surfaces login/name/scopes."""
+        from backend.routers import integration as ir
+
+        class _StubProc:
+            returncode = 0
+
+            async def communicate(self):
+                body = (
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"X-OAuth-Scopes: repo, read:org\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"\r\n"
+                    b'{"login": "octocat", "name": "The Octocat"}'
+                )
+                return body, b""
+
+        async def _fake_exec(*_args, **_kwargs):
+            return _StubProc()
+
+        monkeypatch.setattr(
+            ir.asyncio, "create_subprocess_exec", _fake_exec
+        )
+        result = await ir._probe_github_token("ghp_fake")
+        assert result["status"] == "ok"
+        assert result["user"] == "octocat"
+        assert result["name"] == "The Octocat"
+        assert "repo" in result["scopes"]
+
+
 class TestVendorSDKCRUD:
 
     @pytest.mark.asyncio
