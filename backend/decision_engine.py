@@ -130,6 +130,78 @@ class CapacityExhausted(Exception):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H2: host-load-aware precondition
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Before a _ModeSlot grants a slot we check the freshest host metrics
+# snapshot (populated by backend.host_metrics.run_host_sampling_loop at
+# 5s cadence). When CPU%, mem% or the whole-daemon running-container
+# count is at/above threshold we refuse to grant the slot — the
+# coordinator would otherwise keep stacking new agents onto an already
+# saturated host and make the pressure worse.
+#
+# This is the *precondition* only; the exponential-backoff + audit
+# emit (`sandbox.deferred`) layer lives in a follow-up TODO (next
+# bullet under H2).  Until that lands, waiters just poll the
+# precondition at 1s cadence — simple, bounded, and easy to replace.
+#
+# When no snapshot exists yet (cold-start grace window before the
+# sampler has produced its first tick) we treat the host as "unknown"
+# and allow the acquire to proceed, matching the convention already
+# used by host_metrics.is_host_high_pressure.
+
+H2_CPU_HIGH_PCT: float = float(_os.environ.get("OMNISIGHT_H2_CPU_HIGH_PCT", "85.0"))
+H2_MEM_HIGH_PCT: float = float(_os.environ.get("OMNISIGHT_H2_MEM_HIGH_PCT", "85.0"))
+# K — per-host running-container cap. Default 64 ≈ 4× the 16-core
+# baseline so the precondition only trips when Docker itself is
+# saturated, not during normal multi-tenant operation.
+H2_CONTAINER_CAP: int = int(_os.environ.get("OMNISIGHT_H2_CONTAINER_CAP", "64"))
+
+# Reason codes surfaced to the (upcoming) sandbox.deferred emitter and
+# to tests that introspect *why* a precondition failed.
+H2_REASON_CPU = "host_cpu_high"
+H2_REASON_MEM = "host_mem_high"
+H2_REASON_CONTAINER = "container_cap"
+
+# Poll interval for the blocking-wait loop when the precondition is
+# violated. Deliberately small + non-configurable — the follow-up
+# exponential-backoff task replaces this wait entirely.
+_H2_PRECONDITION_POLL_S: float = 1.0
+
+
+def _host_precondition_reason() -> str | None:
+    """Return None if the host has headroom, else a reason code.
+
+    Reads the latest ``HostSnapshot`` from ``backend.host_metrics``.
+    Returns ``None`` (allow acquire) when:
+      * no snapshot has landed yet (cold start), or
+      * the host_metrics module is unimportable (dev/test env without
+        psutil); failing open here avoids deadlocking fresh test
+        runners that never boot the sampling loop.
+
+    Returns one of ``H2_REASON_*`` when a threshold is breached.
+    CPU is checked first, then memory, then container count — the
+    order matches the TODO spec so reason-code precedence is stable
+    across callers.
+    """
+    try:
+        from backend import host_metrics as _hm
+        snap = _hm.get_latest_host_snapshot()
+    except Exception as exc:
+        logger.debug("H2 precondition: host_metrics unavailable: %s", exc)
+        return None
+    if snap is None:
+        return None
+    if snap.host.cpu_percent >= H2_CPU_HIGH_PCT:
+        return H2_REASON_CPU
+    if snap.host.mem_percent >= H2_MEM_HIGH_PCT:
+        return H2_REASON_MEM
+    if snap.docker.container_count >= H2_CONTAINER_CAP:
+        return H2_REASON_CONTAINER
+    return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Parallelism budget
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -195,6 +267,13 @@ class _ModeSlot:
         global _parallel_async_cond
         if _parallel_async_cond is None:
             _parallel_async_cond = asyncio.Condition()
+
+        # H2 precondition: don't grant a slot while the host is above
+        # CPU/mem/container thresholds. Applies to BOTH the DRF and
+        # the mode-cap path — host pressure is a property of the
+        # physical box, not of the tenant bucket.
+        while _host_precondition_reason() is not None:
+            await asyncio.sleep(_H2_PRECONDITION_POLL_S)
 
         if self._tenant_id is not None:
             from backend import sandbox_capacity as _sc
