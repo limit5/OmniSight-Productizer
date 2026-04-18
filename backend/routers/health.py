@@ -394,6 +394,14 @@ async def _readyz_handler() -> JSONResponse:
     # ── 3. Migrations ────────────────────────────────────────────────
     mig_ok, mig_detail = await _check_migrations()
     checks["migrations"] = {"ok": mig_ok, "detail": mig_detail}
+    # H2 audit (2026-04-19): expose migration mismatch as a Prometheus
+    # gauge so `OmniSightMigrationMismatch` can alert on a deploy that
+    # forgot `alembic upgrade head`. Previously the mismatch only
+    # surfaced in the /readyz JSON payload — invisible to Prometheus.
+    try:
+        _metrics.readyz_migrations_pending.set(0 if mig_ok else 1)
+    except Exception:
+        pass  # metrics are best-effort — never block readyz
 
     # ── 4. Provider chain ────────────────────────────────────────────
     prov_ok, prov_detail = _check_provider_chain()

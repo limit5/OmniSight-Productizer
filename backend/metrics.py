@@ -670,6 +670,18 @@ if _AVAILABLE:
         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
         registry=REGISTRY,
     )
+    # H2 audit (2026-04-19): gauge surface for the alembic mismatch
+    # detected inside /readyz's migration check. A deploy that forgets
+    # `alembic upgrade head` ships code that reads a stale schema; the
+    # readyz check does catch it but the signal only surfaces in the
+    # JSON payload, invisible to Prometheus. Exposing a numeric gauge
+    # lets `OmniSightMigrationMismatch` fire without custom exporters.
+    # 0 = aligned, 1 = mismatch (pending migrations).
+    readyz_migrations_pending = Gauge(
+        "omnisight_readyz_migrations_pending",
+        "1 if alembic head on disk > applied revision, 0 if aligned",
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -761,6 +773,7 @@ else:
     rolling_deploy_5xx_rate = _NoOp()  # type: ignore
     replica_lag_seconds = _NoOp()  # type: ignore
     readyz_latency_seconds = _NoOp()  # type: ignore
+    readyz_migrations_pending = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1187,6 +1200,7 @@ def reset_for_tests() -> None:
     # G7 (HA-07): observability for HA signals ─────────────────
     global backend_instance_up, rolling_deploy_responses_total
     global rolling_deploy_5xx_rate, replica_lag_seconds, readyz_latency_seconds
+    global readyz_migrations_pending
     backend_instance_up = Gauge(
         "omnisight_backend_instance_up",
         "1 when this backend replica is serving traffic, 0 when draining/down",
@@ -1212,5 +1226,10 @@ def reset_for_tests() -> None:
         "Wall-clock seconds to serve the /readyz probe",
         labelnames=("outcome",),
         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+        registry=REGISTRY,
+    )
+    readyz_migrations_pending = Gauge(
+        "omnisight_readyz_migrations_pending",
+        "1 if alembic head on disk > applied revision, 0 if aligned",
         registry=REGISTRY,
     )

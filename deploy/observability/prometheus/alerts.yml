@@ -88,3 +88,29 @@ groups:
             reverse-proxy pool and the replica's /readyz latency panel
             to decide whether to evict and replace.
           runbook_url: "https://internal.docs/omnisight/g7-instance-down"
+
+      # H2 audit (2026-04-19) — alembic migration mismatch. A deploy
+      # that forgot `alembic upgrade head` ships code against a stale
+      # schema. /readyz's _check_migrations already detects the gap;
+      # the gauge surfaces it to Prometheus. 5-min `for:` rides out the
+      # normal deploy window where new code reaches the replica seconds
+      # before the migration step lands.
+      - alert: OmniSightMigrationMismatch
+        expr: omnisight_readyz_migrations_pending > 0
+        for: 5m
+        labels:
+          severity: critical
+          subsystem: database
+        annotations:
+          summary: "Alembic head ahead of applied revision for 5 min"
+          description: |
+            Backend instance {{ $labels.instance }} reports
+            `readyz_migrations_pending=1` for over 5 minutes — the
+            on-disk alembic head is ahead of the applied revision in
+            `alembic_version`. A deploy forgot to run
+            `alembic upgrade head`, OR a rollback landed without a
+            matching downgrade. Runtime will hit "column does not
+            exist" errors in random handlers. Fix: run the upgrade from
+            the deploy host, OR rollback the code to the prior revision.
+            See docs/ops/database_migration_policy.md.
+          runbook_url: "https://internal.docs/omnisight/h2-migration-mismatch"
