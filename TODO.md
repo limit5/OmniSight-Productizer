@@ -1962,13 +1962,13 @@ Legend:
 - [ ] 測試：prod mode 下 `/docs` → 404；`/api/v1/health` 不含 version；error response 不含 traceback
 - 預估：**0.5 day**
 
-### S2-1. Container Readonly Filesystem（不可變基建）(#342)
-- [ ] `docker-compose.prod.yml` 所有 app service 加 `read_only: true`
-- [ ] `tmpfs` 掛載 `/tmp`（runtime 暫存需要可寫）：`tmpfs: ["/tmp:size=500M"]`
-- [ ] Docker volumes（`omnisight-data` / `omnisight-artifacts` / `omnisight-sdks`）保持可寫
-- [ ] 驗證：container 啟動後 `touch /app/test` → `Read-only file system` error
-- [ ] 驗證：DB 讀寫正常（走 volume）、backend 正常運作
-- 預估：**0.5 day**
+### S2-1. Container Readonly Filesystem（不可變基建）(#342) — ✅ DONE 2026-04-19
+- [x] `docker-compose.prod.yml` 所有 app service 加 `read_only: true` *(done in commit `d85c51ae` fix(H4-followup). backend-a/b/caddy/frontend hardened. docker-socket-proxy + cloudflared deliberately left mutable — see commit body for per-service rationale.)*
+- [x] `tmpfs` 掛載 `/tmp`（runtime 暫存需要可寫）：`tmpfs: ["/tmp"]` *(done on 4 hardened services; plus `/app/.agent_workspaces` on backends.)*
+- [x] Docker volumes（`omnisight-data` / `omnisight-artifacts` / `omnisight-sdks`）保持可寫 *(done — 3 named volumes stayed mutable, containers run uid 65532 via commit `2fb03dde`.)*
+- [x] 驗證：container 啟動後 `touch /app/test` → `Read-only file system` error *(done — live-tested on backend-a.)*
+- [x] 驗證：DB 讀寫正常（走 volume）、backend 正常運作 *(done — /readyz ready=true on both replicas + SQLite SELECT/BEGIN/ROLLBACK succeeded inside non-root container.)*
+- 預估：**0.5 day** *(actual: ~25 s downtime + 1 rebuild cycle.)*
 
 ### S2-2. Response Timing Jitter（防 Timing Side-channel）(#343)
 - [ ] `backend/main.py` 新增 middleware：每個 response 加 50-150ms random delay（`asyncio.sleep(random.uniform(0.05, 0.15))`）
@@ -2013,20 +2013,24 @@ Legend:
 - [ ] 不影響正常使用者（這些路徑在正常操作中不會被訪問）
 - 預估：**0.5 day**
 
-### S2-5. Cloudflare WAF + Bot Management 配置 (#346)
-- [ ] `docs/ops/cloudflare_waf_setup.md`：WAF 設定 runbook
-- [ ] Cloudflare Dashboard 設定：
-  - [ ] 開啟 OWASP Core Ruleset（Managed Rules）
-  - [ ] 開啟 Cloudflare Specials（已知攻擊 pattern）
-  - [ ] 設定 5 條自訂 WAF rules（Free plan 上限）：
-    - [ ] Rule 1：block `User-Agent` 含 `sqlmap` / `nikto` / `nmap` / `masscan`
-    - [ ] Rule 2：block request body 含 `<script>` / `javascript:` / `onerror=`
-    - [ ] Rule 3：challenge 每分鐘 > 30 requests 的 IP（JS challenge, 不直接 block）
-    - [ ] Rule 4：block 非 GET/POST/PUT/DELETE 的 HTTP method（TRACE / OPTIONS abuse）
-    - [ ] Rule 5：block User-Agent 為空的 request
-  - [ ] Bot Fight Mode：開啟（自動 challenge 已知 bot）
-  - [ ] Security Level：Medium（正常）→ 遇攻擊時可臨時切 High / I'm Under Attack
-- 預估：**0.5 day**（主要是 Cloudflare Dashboard 設定 + 寫 runbook）
+### S2-5. Cloudflare WAF + Bot Management 配置 (#346) — ⚠️ PARTIAL 2026-04-19
+- [x] `docs/ops/cloudflare_waf_setup.md`：WAF 設定 runbook *(done under a different filename: [`docs/ops/cloudflare_settings.md`](./docs/ops/cloudflare_settings.md) — more complete: covers all 10 dashboard sections with per-setting rationale + verify commands + 45-click restore checklist. Commit `f342cebd`.)*
+- [x] Cloudflare Dashboard 設定 — executed by operator per the runbook's §1-§10 checklist (commit `f342cebd`):
+  - [O] OWASP Core Ruleset **[Pro]** — deferred until account upgrade
+  - [x] Cloudflare Managed Ruleset enabled (Free-tier equivalent, active)
+  - [⚠️] 5 條自訂 WAF rules — **2/5 done, 3 deferred for Pro**:
+    - [x] Block `/api/v1/system/*` direct hits → Managed Challenge *(operator rule 5.1)*
+    - [x] Challenge empty User-Agent on `/api/v1/*` *(operator rule 5.2)*
+    - [O] Block UA `sqlmap` / `nikto` / `nmap` / `masscan` — Pro slot opens it
+    - [O] Block request body `<script>` / `javascript:` / `onerror=` — Pro
+    - [O] Block non-standard HTTP methods — Pro
+  - [x] Bot Fight Mode 開啟
+  - [x] Security Level Medium
+  - [x] Rate Limiting: `/api/v1/auth/login` 10/min per IP, block 10 min *(Free-tier limit = 1 rule; additional rate-limit rules deferred for Pro)*
+  - [x] HSTS (6 months, includeSubDomains, no preload) — operator chose no-preload intentionally; preload goes in S2-6
+  - [x] TLS 1.2 minimum, Full (strict) encryption, Always Use HTTPS
+  - [x] Zero Trust Access: email-OTP gate on `/api/v1/system/*` (belt-and-braces over H1 backend auth)
+- 預估：**0.5 day** *(actual: ~20 min dashboard clicking; Free-tier done, 3 WAF rules + OWASP + global rate-limit pending Pro.)*
 
 ### S2-6. HSTS Preload + Security.txt + 安全 headers 補齊 (#347)
 - [ ] HSTS header 加 `preload`：`Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`
@@ -2047,6 +2051,35 @@ Legend:
 - [ ] `docker-compose.prod.yml` 加 Falco sidecar（optional `--profile security`）
 - [ ] Falco alert → 寫入 audit_log + SSE `security.kernel_alert` + ChatOps L2 通知
 - 預估：**2 day**
+
+### S2-9. Secure-by-default auth middleware（全 router 「預設要登入」）(#354) — 🔴 優先
+> 背景（2026-04-19 發現）：修 `/invoke` endpoint 的 M4 rate-limit 時，意外發現該 endpoint **完全沒 auth**。擴大掃 `backend/routers/*.py` 全檔後，**24 個 router、237 個 endpoint 是匿名的**（佔全專案 ~40%）。其中部分是合理 public（`/healthz` / `/readyz` / `/metrics` / `/webhooks/*` / `/auth/login`），但多數不該是匿名——`agents`(7) / `tasks`(10) / `workflow`(7) / `workspaces`(11) / `projects`(5) / `tools`(2) / `artifacts`(4) / `providers`(8) / `enterprise_web_stack`(63) / `security_stack`(23) / `sensor_fusion`(24) / `ota_framework`(27) / `telemetry_backend`(28) … 都是用到沒人檢查。
+>
+> 根因：**沒有 secure-by-default pattern**。每個 `APIRouter()` 空蕩蕩 new，auth 是個別 handler 自行加 `Depends(require_role(...))`，新 router / 新 endpoint 預設 wide open 沒人擋。H1 commit `e2d981ff` 把 `/system/*` 升到 router-level `Depends(current_user)` 但範圍只有那一個 router。
+>
+> 風險：bootstrap wizard 完成後，前面那堆 endpoint 就開始公開。即使 UI 沒調到，攻擊者可以打 `POST /api/v1/tasks`、`POST /api/v1/workflow/runs/*/cancel`、`GET /api/v1/workspaces/*` 等等。
+
+- [ ] `backend/main.py` 中央 allowlist 定義「哪些 path prefix 可以匿名」：
+  ```python
+  _AUTH_EXEMPT_PREFIXES = (
+      "/api/v1/auth/login", "/api/v1/auth/bootstrap", "/api/v1/auth/reset",
+      "/api/v1/bootstrap/",          # pre-setup wizard flow
+      "/api/v1/webhooks/",           # external providers callbacks
+      "/api/v1/health", "/api/v1/livez", "/api/v1/readyz", "/api/v1/healthz",
+      "/metrics",                    # separately gated via M7 token when OMNISIGHT_METRICS_TOKEN set
+      "/api/v1/events/",             # SSE may use passive cookie; revisit per-path
+  )
+  ```
+- [ ] 全域 middleware：每個非 exempt path request → 若沒 session → 401 + WWW-Authenticate
+- [ ] 各 router 既有的 `Depends(require_role(...))` **保留**（middleware 是 baseline，router-level 是 RBAC）
+- [ ] 地毯式審計既有 237 個匿名 endpoint，按 `(router, path) → decision`：
+  - [ ] 合理 public（~30 個：healthchecks / auth flows / webhook 入口 / bootstrap 設定流程）→ 加進 allowlist
+  - [ ] 應該 authenticate（~200 個：tasks / workflow / workspaces / agents / projects / tools / artifacts / providers / enterprise_web_stack / security_stack / sensor_fusion / ota_framework / telemetry_backend / ...）→ middleware 自動保護，不用改 router
+  - [ ] 應該是 admin-only（少數：`providers` 寫入、`tenant_egress`、`integration` 等）→ 加 router-level `require_role("admin")`
+- [ ] CI gate：`scripts/check_auth_coverage.py` — parse `backend/routers/**/*.py`，assert 每個 `@router.<verb>` handler 都有 auth Depends **或** path 在 allowlist。新 endpoint 預設 fail 直到明確歸類。
+- [ ] 測試：匿名 `curl` 每個非 exempt endpoint → 401；allowlist endpoint → 原本行為
+- [ ] docs/ops/security_audit_<date>.md 紀錄 exempt allowlist 的 justification trail
+- 預估：**3 day**（2d middleware + 掃描 + allowlist 分類，1d CI gate + 測試 + docs）
 
 ### S2-8. GitHub Repo 安全 + Secret Scanning (#349)
 - [ ] 確認 GitHub repo 設為 Private（如果是 Public → 立即切 Private）
@@ -2437,17 +2470,31 @@ tests / HIL recipes / doc templates) per framework contract.
 - 預估：**2.5 day**
 
 ### T4. Token 用量追蹤 + Metered Billing 引擎 (#330)
+> **注**：M4 security audit（2026-04-19 commit `128ea461`）已在 `/invoke` 跟 `/chat` 上加了 per-user hourly LLM-call count 限制作為 interim 防線，擋「單一使用者刷爆全域預算」的實務攻擊。T4 是完整版（per-tenant dollar budget + Stripe-integrated 計價），interim 代碼可在 T4 上線後移除或保留當 secondary limit。
 - [ ] `backend/billing/token_meter.py`：agent 執行完畢 → `record_usage(tenant_id, agent_id, task_id, input_tokens, output_tokens, model, cost_usd)`
 - [ ] 儲存：`token_usage` 表（tenant_id / timestamp / model / input_tokens / output_tokens / cost_usd / task_id）
 - [ ] 即時累計：per-tenant 當月已用 tokens + 已用成本（Redis cached counter，每次 record 時 incr）
 - [ ] 方案配額檢查：`check_quota(tenant_id)` → 超量時回傳 `QuotaAction`（`allow_and_bill` / `warn_approaching` / `hard_stop`）
+- [ ] **Per-model cost rate-limit** — 比單純 per-tenant dollar 粒度更細：
+  - [ ] `backend/billing/model_rate_limit.py`：每 model × tenant 各自獨立 token bucket
+  - [ ] YAML-driven policy 範例：`configs/model_rate_limits.yaml`：
+    ```yaml
+    claude-sonnet-4:     { calls_per_hour: 30,  reason: "expensive" }
+    claude-haiku-4:      { calls_per_hour: 200, reason: "cheap" }
+    gpt-4o:              { calls_per_hour: 40 }
+    deepseek-chat:       { calls_per_hour: 500, reason: "cheap batch ok" }
+    ```
+  - [ ] Tenant plan 覆蓋：Enterprise tier 可獨立調整（stored in `tenant_model_override` table）
+  - [ ] 超量行為：回 429 + Retry-After，不 fallback（fallback 要明確的 `OMNISIGHT_MODEL_FALLBACK_CHAIN` opt-in 以免靜默降級）
+  - [ ] Metrics：`llm_model_rate_limit_blocked_total{tenant, model}` — ops 可觀察哪個 model cap 常被打到
 - [ ] Stripe 路徑：自動呼叫 `usage_records` API 回報（real-time）
 - [ ] ECPay / PayPal 路徑：累計到 `usage_ledger`，月底由 `T7 billing cycle` 結算
 - [ ] 混合模型成本計算：依 model ID 查 `_PRICING` 表（system.py）計算實際成本 → 乘以 markup → 帳單金額
 - [ ] SSE event：`billing.usage.tick`（每 10 次 record 推一次 → 前端 dashboard 即時更新）
 - [ ] Metrics：`billing_tokens_total{tenant_id, model}` / `billing_revenue_usd_total{tenant_id, plan}`
-- [ ] 測試：record 100 次 usage → 累計正確 → Stripe usage_record 呼叫正確 → 配額檢查 soft/hard 正確
-- 預估：**2.5 day**
+- [ ] `/api/v1/billing/usage` endpoint：使用者看自己的月用量 / 剩餘配額 / per-model 分布
+- [ ] 測試：record 100 次 usage → 累計正確 → Stripe usage_record 呼叫正確 → 配額檢查 soft/hard 正確 + per-model rate-limit 實測
+- 預估：**2.5 day** (原估) + **1 day** (per-model rate-limit 擴充) = **3.5 day**
 
 ### T5. 訂閱管理（方案 / 試用 / 升降級 / 取消）(#331)
 - [ ] `backend/billing/plans.py`：5 方案定義（Free / Starter / Pro / Business / Enterprise）+ 每方案 token 含量 + 超量單價 + 功能 feature flags
