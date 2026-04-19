@@ -170,6 +170,17 @@ class Settings(BaseSettings):
     t1_allow_egress: bool = False
     t1_egress_allow_hosts: str = ""  # CSV: "github.com,gerrit.internal:29418"
 
+    # H6 audit (2026-04-19): Tier-2 "networked" sandbox — operator gate.
+    # T2 gives a sandbox container bridge-network access via the
+    # omnisight-egress-t2 iptables ACL. It's still safer than host
+    # networking but widens the attack surface vs. Tier-1 `--network
+    # none`. Before this gate existed, any call site that asked for
+    # tier="networked" got the bridge with no env-level check; a
+    # compromised LLM / backend could therefore issue networked tasks
+    # without ops approval. Keep false in production; set to true only
+    # on deployments that have a written reason to need T2 egress.
+    t2_networked_tier_allowed: bool = False
+
     # Phase 64-A S3: image immutability check. CSV of acceptable
     # `sha256:...` digests for the agent docker image. Empty (default)
     # = no check, preserving today's behaviour. Set this in prod to

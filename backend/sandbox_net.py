@@ -171,9 +171,39 @@ async def ensure_t2_network(*, runner=None) -> str:
 
 
 async def resolve_t2_network_arg(*, runner=None) -> str:
-    """Always returns ``--network omnisight-egress-t2`` once the bridge
-    is up. T2 is opt-in at the *call site* (via start_networked_container);
-    there is no env double-gate here — the caller is the gate."""
+    """Resolve the ``--network`` flag for a Tier-2 (networked) sandbox.
+
+    T2 gives an agent container bridge-network egress through the
+    T2 iptables ruleset. It's still sandboxed (runsc + egress ACL),
+    but the audit boundary widens meaningfully vs. Tier-1's
+    `--network none`, so we want an **explicit operator opt-in**
+    on top of the call-site gate.
+
+    Audit H6 (2026-04-19): previously the function just "returned
+    --network $T2_NAME" whenever called, with no env-level check.
+    A legitimate caller was the only gate — but an attacker who
+    finds an injection path into the call site (prompt injection →
+    agent tool → `start_networked_container`) inherits that gate
+    with no ops backstop. We now require
+    ``OMNISIGHT_T2_NETWORKED_TIER_ALLOWED=true`` in the environment
+    before the bridge resolves, so a compromised caller still
+    can't widen the blast radius without an operator change.
+
+    Default: **deny**. The env var is absent in .env.example and
+    not set in docker-compose.prod.yml — opt-in by deliberate edit.
+    """
+    from backend.config import settings as _settings
+    if not getattr(_settings, "t2_networked_tier_allowed", False):
+        logger.warning(
+            "T2 networked tier requested but "
+            "OMNISIGHT_T2_NETWORKED_TIER_ALLOWED is not true — refusing. "
+            "Sandbox will stay on --network none unless the operator "
+            "explicitly opts in at the deployment level."
+        )
+        raise PermissionError(
+            "T2 networked tier disabled by policy "
+            "(OMNISIGHT_T2_NETWORKED_TIER_ALLOWED must be 'true' on the host)"
+        )
     try:
         await ensure_t2_network(runner=runner)
     except Exception as exc:
