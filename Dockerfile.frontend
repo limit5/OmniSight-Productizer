@@ -72,6 +72,27 @@ RUN rm -rf /app/node_modules/.pnpm/@img+sharp-libvips-linux-x64* \
            /app/node_modules/.pnpm/sharp@* \
     || true
 
+# H4 audit (2026-04-19): run Next.js as a dedicated non-root user.
+# Default Dockerfile / docker-compose runs uid 0 inside the container
+# — any RCE in Next.js SSR (e.g. in /api/chat or a future /api/*)
+# becomes root-in-container, which combined with the docker-socket
+# proxy's CONTAINERS+EXEC allow-list would still let an attacker exec
+# into other sandbox containers. Running as an unprivileged user
+# closes that downgrade path.
+#
+# No volume mounts on this service (see docker-compose.prod.yml
+# frontend block), so ownership transition isn't an issue.
+# Port 3000 is unprivileged so nobody/65532 can bind it.
+#
+# alpine's `nobody` user is uid 65534; we use 65532 to match the
+# convention in `distroless/*:nonroot` and avoid conflating with the
+# kernel's "nobody" placeholder in containerless NFS contexts.
+RUN addgroup -g 65532 -S app && \
+    adduser  -u 65532 -S -G app -H -h /app app && \
+    chown -R app:app /app
+
+USER app:app
+
 EXPOSE 3000
 
 CMD ["node", "server.js"]
