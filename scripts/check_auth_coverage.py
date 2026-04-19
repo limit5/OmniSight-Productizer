@@ -336,10 +336,41 @@ def render_text(audits: list[FileAudit]) -> str:
 
 # --- CLI -----------------------------------------------------------------
 
+def _collect_ungated_paths(audits: Iterable[FileAudit]) -> list[str]:
+    out: list[str] = []
+    for a in audits:
+        for h in a.handlers:
+            if h.category == "UNGATED":
+                out.append(f"{h.verb.upper()} {h.full_path}")
+    return sorted(out)
+
+
+def _load_baseline(path: Path) -> set[str]:
+    """Baseline file is one `VERB /full/path` per line. Lines starting
+    with `#` are comments. Blank lines ignored."""
+    out: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        out.add(s)
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--check", action="store_true",
-                   help="exit 1 if any UNGATED handlers exist (for CI)")
+                   help="exit 1 if any UNGATED handlers exist (strict; for "
+                        "a clean codebase). Prefer --check-baseline on "
+                        "legacy codebases.")
+    p.add_argument("--check-baseline", metavar="FILE",
+                   help="exit 1 if new UNGATED handlers appear that aren't "
+                        "on the baseline list. Passing when baseline = live "
+                        "or live is a strict subset. Fails when new UNGATED "
+                        "paths are introduced.")
+    p.add_argument("--update-baseline", metavar="FILE",
+                   help="overwrite the baseline file with the current "
+                        "UNGATED set (operator action after a cleanup pass).")
     p.add_argument("--md", metavar="OUT",
                    help="write markdown report to OUT")
     p.add_argument("--json", action="store_true",
@@ -347,6 +378,22 @@ def main() -> int:
     args = p.parse_args()
 
     audits = list(walk_routers())
+
+    if args.update_baseline:
+        paths = _collect_ungated_paths(audits)
+        header = (
+            "# Auth-coverage UNGATED baseline (S2-9 #354)\n"
+            "# Each line = VERB /full/path. CI fails if a PR introduces a "
+            "handler whose key is not on this list AND has no auth dep.\n"
+            "# Reducing this baseline (removing a line, adding the handler's "
+            "auth dep) is a welcome improvement — commit the new baseline.\n"
+            "#\n"
+            f"# Generated: {len(paths)} entries.\n"
+        )
+        body = "\n".join(paths) + "\n"
+        Path(args.update_baseline).write_text(header + body, encoding="utf-8")
+        print(f"wrote {args.update_baseline} ({len(paths)} entries)")
+        return 0
 
     if args.md:
         Path(args.md).write_text(render_markdown(audits), encoding="utf-8")
@@ -362,6 +409,30 @@ def main() -> int:
             print(f"\n[check] {ungated} UNGATED handlers — fail")
             return 1
         print("\n[check] OK — every handler has auth or is on the allowlist")
+
+    if args.check_baseline:
+        baseline = _load_baseline(Path(args.check_baseline))
+        live = set(_collect_ungated_paths(audits))
+        new = live - baseline
+        removed = baseline - live
+        if removed:
+            print(f"\n[check-baseline] {len(removed)} handler(s) moved off the "
+                  f"UNGATED list — consider refreshing the baseline:")
+            for r in sorted(removed):
+                print(f"  - {r}")
+            print("  run: scripts/check_auth_coverage.py --update-baseline",
+                  args.check_baseline)
+        if new:
+            print(f"\n[check-baseline] {len(new)} NEW UNGATED handler(s) — fail:")
+            for n in sorted(new):
+                print(f"  + {n}")
+            print("\nfix: add `Depends(...)` with an auth-function to the "
+                  "handler, OR add its path prefix to AUTH_BASELINE_ALLOWLIST "
+                  "in backend/auth_baseline.py (with a justification comment "
+                  "in the same commit).")
+            return 1
+        print(f"\n[check-baseline] OK — UNGATED set matches baseline "
+              f"({len(live)} entries).")
     return 0
 
 

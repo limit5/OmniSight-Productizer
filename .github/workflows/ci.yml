@@ -124,6 +124,33 @@ jobs:
       - name: validate renovate.json
         run: npx --yes --package renovate@39 -- renovate-config-validator --strict renovate.json
 
+  auth-coverage:
+    # S2-9 (#354) — secure-by-default auth baseline gate.
+    # Parses every FastAPI router handler (AST only, no imports
+    # so no DB / LLM / docker side effects), and fails the build
+    # if a PR introduces a new UNGATED endpoint (one without
+    # an auth Depends AND whose path is not on the allowlist
+    # AUTH_BASELINE_ALLOWLIST in backend/auth_baseline.py).
+    #
+    # A baseline of the 454 pre-existing UNGATED endpoints lives
+    # at docs/ops/auth_coverage_baseline.txt. That baseline is
+    # intentionally a regression gate — CI passes when the live
+    # UNGATED set equals or is a strict subset of it. Reducing
+    # the baseline (by adding `Depends(...)` to a handler or
+    # extending the allowlist with review) is the expected long-
+    # term direction.
+    #
+    # Runs in parallel with `lint` + `renovate-config` + the
+    # llm-adapter-firewall gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: check auth coverage against baseline
+        run: python3 scripts/check_auth_coverage.py --check-baseline docs/ops/auth_coverage_baseline.txt
+
   llm-adapter-firewall:
     # N4 — fail CI if any file under `backend/` (other than
     # `backend/llm_adapter.py`) imports from `langchain*` or
