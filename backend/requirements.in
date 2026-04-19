@@ -39,6 +39,22 @@ weasyprint>=63.0; sys_platform != 'win32'
 # --- Persistence / migrations -----------------------------------------
 aiosqlite==0.21.0
 alembic==1.14.0
+# G4 Phase-3 wire-up (2026-04-20): PostgreSQL drivers promoted from
+# CI-only to production. Earlier revisions kept these out of the
+# runtime image to save ~11 MB on wheels the backend-tests /
+# openapi-contract / renovate-config jobs didn't need; the cost of
+# that optimisation was that G4 [x] never meant "production can
+# actually talk to Postgres". ``asyncpg`` is the runtime driver
+# used by backend.db_connection::_PostgresAsyncConnection.
+# ``psycopg2-binary`` is the sync driver Alembic needs during
+# ``alembic upgrade head`` (SQLAlchemy sync engine required, asyncpg
+# not supported by Alembic's migration runner). Both stay optional
+# from a CODE perspective — backend.db_connection lazy-imports them
+# only when the target URL is a ``postgresql+*`` scheme; the plain
+# SQLite path keeps working on deployments that don't set
+# ``OMNISIGHT_DATABASE_URL``.
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
 
 # --- Observability ----------------------------------------------------
 prometheus-client==0.21.1
