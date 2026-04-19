@@ -92,9 +92,15 @@ def _viewer_override():
 
 @pytest.mark.asyncio
 async def test_finalize_happy_path_200_and_flag(client, _admin_override):
-    admin = _admin_override
+    """Finalize is a pre-login wizard endpoint (it matches the rest of
+    ``/bootstrap/*``'s posture), so this test doesn't actually exercise
+    the admin override — the endpoint reads the session cookie if one
+    is present but otherwise records ``actor_user_id=''`` +
+    ``actor='wizard'`` in the audit row. The override stays in the
+    fixture so the shared `client` keeps its existing shape; it's just
+    a no-op for finalize specifically."""
     for step in _boot.REQUIRED_STEPS:
-        await _boot.record_bootstrap_step(step, actor_user_id=admin.id)
+        await _boot.record_bootstrap_step(step)
 
     r = await client.post(
         "/api/v1/bootstrap/finalize",
@@ -104,7 +110,9 @@ async def test_finalize_happy_path_200_and_flag(client, _admin_override):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["finalized"] is True
-    assert body["actor_user_id"] == admin.id
+    # No session cookie on the test client → wizard-mode actor is
+    # recorded; actor_user_id is empty string (see docstring).
+    assert body["actor_user_id"] == ""
     assert body["status"] == {
         "admin_password_default": False,
         "llm_provider_configured": True,
@@ -114,7 +122,7 @@ async def test_finalize_happy_path_200_and_flag(client, _admin_override):
     assert _boot.is_bootstrap_finalized_flag() is True
     fin = await _boot.get_bootstrap_step(_boot.STEP_FINALIZED)
     assert fin is not None
-    assert fin["actor_user_id"] == admin.id
+    assert fin["actor_user_id"] is None
     assert fin["metadata"].get("reason") == "done"
 
 
@@ -247,13 +255,29 @@ async def test_finalize_409_when_required_step_missing(client, _admin_override):
 
 
 @pytest.mark.asyncio
-async def test_finalize_forbidden_for_non_admin(client, _viewer_override):
+async def test_finalize_public_matches_rest_of_bootstrap_family(
+    client, _viewer_override,
+):
+    """Finalize is not admin-gated any more — see the endpoint's
+    docstring for the rationale. This test used to assert 401/403 for
+    a non-admin caller; instead we now verify the endpoint is reachable
+    regardless of session state (the real security boundary is the
+    bootstrap_gate middleware, which exempts ``/bootstrap/*`` from the
+    503-if-not-finalized rule but gates every OTHER family; external
+    attackers have no non-wizard path to this endpoint pre-finalize)."""
+    # Pre-record the required steps so the live-gate check passes.
+    # Actor tracking still records "wizard" because the _viewer_override
+    # only overrides Depends(require_admin), not the session cookie.
+    for step in _boot.REQUIRED_STEPS:
+        await _boot.record_bootstrap_step(step)
+
     r = await client.post(
         "/api/v1/bootstrap/finalize",
         json={},
         follow_redirects=False,
     )
-    assert r.status_code in (401, 403)
+    assert r.status_code == 200, r.text
+    assert r.json()["finalized"] is True
 
 
 # ── status probe ────────────────────────────────────────────────

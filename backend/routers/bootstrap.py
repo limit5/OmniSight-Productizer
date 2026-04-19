@@ -20,7 +20,7 @@ import logging
 import os
 import shutil
 import time
-from typing import Literal
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Request
@@ -2429,10 +2429,38 @@ async def bootstrap_status() -> dict:
 
 @router.post("/finalize", response_model=FinalizeResponse)
 async def bootstrap_finalize(
+    request: Request,
     req: FinalizeRequest | None = None,
-    admin: _au.User = Depends(_au.require_admin),
 ):
-    """Close out the wizard — admin only, requires every gate green.
+    """Close out the wizard. No session is required — matches every
+    other ``/bootstrap/*`` endpoint's pre-login posture.
+
+    Auth posture history: an earlier revision required
+    ``Depends(require_admin)`` here, on the assumption the operator
+    had logged in by Step 7. In practice the wizard never surfaces
+    a login step — Step 1 just rotates the admin password without
+    creating a session — so finalize was permanently unreachable
+    from the UI flow (401 → global api-client redirect to ``/login``
+    → bootstrap_gate bounces back to ``/bootstrap`` → operator loop).
+    The bootstrap_gate middleware itself is the security boundary
+    for this whole family of endpoints:
+
+      * Pre-finalize: only the wizard and the wizard-exempt static
+        paths can reach ``/bootstrap/*`` (every other path returns
+        503 ``bootstrap_required``). External attackers have no
+        reachable non-wizard surface.
+      * Post-finalize: the gate stops mattering (finalized goes
+        sticky-green) but re-calling finalize is idempotent —
+        ``mark_bootstrap_finalized`` writes the same
+        ``bootstrap_finalized=true`` marker that already exists
+        and no new audit row carries privileged state.
+
+    We still try to identify the actor: if a session cookie is
+    present (admin logged in manually before running the wizard,
+    or a returning operator re-finalizing after a reset), we thread
+    their user id into ``bootstrap_state.actor_user_id`` + the audit
+    ``actor``. Otherwise we record ``wizard`` so the audit row isn't
+    anonymous.
 
     409 conditions (the wizard should keep the operator on the current
     step):
@@ -2445,16 +2473,37 @@ async def bootstrap_finalize(
     """
     metadata: dict = {"reason": (req.reason if req else None) or ""}
 
+    # Best-effort actor resolution — use the session if the operator
+    # happens to be logged in, otherwise record "wizard" so the audit
+    # trail still ties this row to the wizard flow rather than going
+    # anonymous. Any failure resolving the session is non-fatal
+    # (bootstrap predates the session layer in fresh installs).
+    actor_user_id: Optional[str] = None
+    actor_label = "wizard"
+    try:
+        cookie = request.cookies.get(_au.SESSION_COOKIE) or ""
+        if cookie:
+            sess = await _au.get_session(cookie)
+            if sess and sess.user_id:
+                user = await _au.get_user(sess.user_id)
+                if user:
+                    actor_user_id = user.id
+                    actor_label = user.email
+    except Exception as exc:
+        logger.debug(
+            "bootstrap: finalize session lookup failed (non-fatal): %s", exc,
+        )
+
     try:
         status = await _boot.mark_bootstrap_finalized(
-            actor_user_id=admin.id,
+            actor_user_id=actor_user_id,
             metadata=metadata,
         )
     except RuntimeError as exc:
         live_status = await _boot.get_bootstrap_status()
         missing = await _boot.missing_required_steps()
         logger.warning(
-            "bootstrap: finalize refused for admin=%s: %s", admin.email, exc,
+            "bootstrap: finalize refused for actor=%s: %s", actor_label, exc,
         )
         return JSONResponse(
             status_code=409,
@@ -2472,7 +2521,7 @@ async def bootstrap_finalize(
             entity_id=_boot.STEP_FINALIZED,
             before=None,
             after={"status": status.to_dict(), **metadata},
-            actor=admin.email,
+            actor=actor_label,
         )
     except Exception as exc:
         logger.debug("bootstrap: audit log failed (non-fatal): %s", exc)
@@ -2480,7 +2529,7 @@ async def bootstrap_finalize(
     return FinalizeResponse(
         finalized=True,
         status=status.to_dict(),
-        actor_user_id=admin.id,
+        actor_user_id=actor_user_id or "",
     )
 
 
