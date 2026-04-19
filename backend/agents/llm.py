@@ -154,7 +154,25 @@ def get_llm(
         return None
 
     provider = provider or settings.llm_provider
-    model = model or (settings.get_model_name() if provider == settings.llm_provider else None)
+    # Per-provider model resolution:
+    #   1. Explicit caller override wins.
+    #   2. Primary provider → ``settings.get_model_name()`` which honours
+    #      ``settings.llm_model`` (so Anthropic can be pinned to
+    #      ``claude-opus-4-7`` etc.).
+    #   3. Ollama as fallback → ``settings.ollama_model`` (when set);
+    #      otherwise let ``build_chat_model`` use its hardcoded
+    #      ``llama3.1`` default. This is the Phase-2 wire-up escape
+    #      hatch — ``llm_model`` is Anthropic-shaped and cannot be
+    #      reused for ollama without mis-routing.
+    #   4. Any other non-primary provider → ``None`` and the adapter
+    #      falls back to its own hardcoded default.
+    if model is None:
+        if provider == settings.llm_provider:
+            model = settings.get_model_name()
+        elif provider == "ollama":
+            ollama_default = (getattr(settings, "ollama_model", "") or "").strip()
+            if ollama_default:
+                model = ollama_default
 
     cache_key = f"{provider}:{model}:{id(bind_tools) if bind_tools else 'none'}"
     cached = _cache.get(cache_key)

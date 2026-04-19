@@ -60,6 +60,19 @@ class Settings(BaseSettings):
 
     # Ollama (local, no key needed)
     ollama_base_url: str = "http://localhost:11434"
+    # Default model for the ollama provider. Empty → the llm_adapter
+    # falls back to its hardcoded ``llama3.1`` literal, which is fine
+    # for dev boxes that preloaded that model but wrong for every
+    # ollama deployment that didn't (e.g. Path B production where
+    # the ``ai_engine`` container only carries ``gemma4:*`` +
+    # ``gemma2:*`` + ``nomic-embed-text``). Keeping this as a
+    # separate field (rather than reusing ``llm_model``) means
+    # ``llm_model`` can stay pinned to the primary provider's model
+    # (e.g. ``claude-opus-4-7`` for Anthropic) while the ollama
+    # fallback path still resolves to a model that's actually loaded.
+    # Consumed by ``backend.agents.llm::get_llm`` in the per-
+    # provider model resolution branch.
+    ollama_model: str = ""
 
     # LLM parameters
     llm_temperature: float = 0.3
