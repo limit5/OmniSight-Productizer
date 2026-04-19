@@ -931,8 +931,16 @@ async def exec_in_container(
     appends a one-line marker and bumps
     `omnisight_sandbox_output_truncated_total{tier}`.
     """
+    # C2 audit (2026-04-19): previous impl used bash -c "{command}" with
+    # only a manual replace('"', '\\"') upstream in tools.py. That stops
+    # literal double-quotes but lets `$(...)`, backticks, `$VAR`, and
+    # newlines escape the outer-shell layer and execute BEFORE docker exec
+    # sees the argument. shlex.quote single-quotes the whole command so
+    # the outer /bin/sh sees it as one argv slot; `bash -c` inside the
+    # container then unwraps the single-quoted literal.
+    import shlex as _shlex
     rc, out, err = await _run(
-        f'docker exec {container_id_or_name} bash -c "{command}"',
+        f'docker exec {container_id_or_name} bash -c {_shlex.quote(command)}',
         timeout=timeout,
     )
     combined = out

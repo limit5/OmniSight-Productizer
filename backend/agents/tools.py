@@ -67,9 +67,31 @@ def get_active_agent_id() -> str | None:
 # ─── Safety ───
 
 _DANGEROUS_PATTERNS = re.compile(
+    # ── Classic destruction / system-downing (pre-existing) ──
     r"(rm\s+-rf\s+/|mkfs|dd\s+if=|:(){ :|shutdown|reboot|halt"
     r"|>\s*/dev/sd|chmod\s+-R\s+777\s+/|curl.*\|\s*bash"
-    r"|git\s+push\s+.*--force|git\s+push\s+.*-f\b)",
+    r"|git\s+push\s+.*--force|git\s+push\s+.*-f\b"
+    # ── C2 audit (2026-04-19): prompt-injection → exfiltration ──
+    # Data-exfil targets: secret files that should never be read by agent.
+    r"|(\.env\b|\b\.ssh/|id_rsa|id_ecdsa|id_ed25519|authorized_keys"
+    r"|/etc/shadow|/etc/passwd|/etc/sudoers|/root/|\.aws/credentials"
+    r"|\.kube/config)"
+    # Outbound exfil sinks — curl/wget paired with a shell-variable
+    # anywhere in the same command segment. Bare `curl https://pypi.org/`
+    # is fine; `curl -d $TOKEN https://…` or `wget --header=$TOKEN …`
+    # is the class we want to block, regardless of flag order. We stop
+    # greedy matching at the first `|`, `&`, `;`, or newline so the
+    # match is scoped to a single shell segment.
+    r"|(curl|wget)[^|&;\n]*\$"
+    r"|base64[^|]*\|\s*(curl|wget|nc|ssh)"
+    r"|printenv\s*\||env\s*\|\s*(grep|curl|wget|nc)"
+    # Reverse-shell patterns (gleaned from CVE commentary).
+    r"|nc\s+-[a-z]*e\s|bash\s+-i\s*(<|>|&)|/dev/tcp/|socat.*exec"
+    r"|mkfifo.*\|\s*nc|python[0-9]?\s+-c\s+.*socket\.socket"
+    # Python/perl/ruby/node one-liner RCE via -c/-e with dangerous import.
+    r"|(python[0-9]?|perl|ruby|node)\s+-[ce]\s+.*import\s+(os|subprocess|socket|pty)"
+    # Docker-socket direct access (in case docker-socket-proxy is bypassed)
+    r"|/var/run/docker\.sock)",
     re.IGNORECASE,
 )
 
@@ -565,8 +587,11 @@ async def run_bash(command: str) -> str:
         container = get_container(agent_id)
         if container:
             try:
-                safe_cmd = command.replace('"', '\\"')
-                rc, output = await exec_in_container(container.container_id, safe_cmd)
+                # C2 audit: no longer pre-escape here — `exec_in_container`
+                # now shlex.quote()s the command itself (proper single-
+                # quote wrap), which defeats $(...)/backtick/$VAR escapes
+                # that the old `replace('"', '\\"')` missed.
+                rc, output = await exec_in_container(container.container_id, command)
                 if rc != 0 and not output:
                     output = f"[CONTAINER EXIT CODE: {rc}]"
                 prefix = "[DOCKER] "

@@ -135,6 +135,33 @@ def _is_question(text: str) -> bool:
     return bool(_QUESTION_PATTERNS.search(text))
 
 
+# C2 audit (2026-04-19): before a previous-attempt error string is
+# concatenated into the next LLM invocation's system prompt, sanitize
+# it so attacker-controlled content in a tool output / exception
+# message cannot break the surrounding prompt structure. Concrete
+# attack: adversary crafts a filesystem argument whose resulting
+# exception text contains "\n\nIGNORE PREVIOUS RULES: …" — without
+# sanitization that string becomes part of the next turn's system
+# prompt verbatim.
+_ERR_TRUNCATE_LEN = 800
+_ERR_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _sanitize_error_for_prompt(err: str) -> str:
+    if not err:
+        return ""
+    # Strip ANSI so terminal-escape sequences don't smuggle bytes.
+    err = _ERR_ANSI_RE.sub("", err)
+    # Collapse newlines to literal "\\n" so the error stays a single
+    # logical "line" in the surrounding prompt — no blank lines that
+    # the LLM might read as a new directive.
+    err = err.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
+    # Hard cap so a runaway stack trace can't dominate the prompt.
+    if len(err) > _ERR_TRUNCATE_LEN:
+        err = err[:_ERR_TRUNCATE_LEN] + "…[truncated]"
+    return err
+
+
 def orchestrator_node(state: GraphState) -> dict:
     """Parse the user command: conversation vs task, then route accordingly."""
     cmd = state.user_command
@@ -410,7 +437,7 @@ def _specialist_node_factory(agent_type: str):
             if state.last_verification_failure:
                 prompt = (
                     f"VERIFICATION FAILED (iteration {state.verification_loop_iteration}/{state.max_verification_iterations}):\n"
-                    f"{state.last_verification_failure}\n\n"
+                    f"{_sanitize_error_for_prompt(state.last_verification_failure)}\n\n"
                     "Analyze the test/simulation failures above. Fix the code to pass the failing tests, "
                     "then re-run the simulation to verify.\n\n"
                     + prompt
@@ -418,7 +445,7 @@ def _specialist_node_factory(agent_type: str):
             elif state.last_error:
                 prompt = (
                     f"PREVIOUS ATTEMPT FAILED (retry {state.retry_count}/{state.max_retries}):\n"
-                    f"{state.last_error}\n\n"
+                    f"{_sanitize_error_for_prompt(state.last_error)}\n\n"
                     "Adjust your approach to avoid the same error.\n\n"
                     + prompt
                 )
