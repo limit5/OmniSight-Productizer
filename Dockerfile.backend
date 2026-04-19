@@ -101,10 +101,26 @@ RUN rm -rf ./backend/tests ./backend/.pytest_cache
 # Data directory (mount as volume for persistence)
 RUN mkdir -p /app/data /app/.artifacts /app/.sdks
 
+# H4 audit (2026-04-19): non-root runtime. Matches Dockerfile.frontend's
+# uid 65532 (distroless/nonroot convention; avoids conflating with uid
+# 65534 "nobody"). Both services drop privilege → a hypothetical RCE in
+# uvicorn is uid 65532 inside the container, which (combined with the
+# C1 docker-socket-proxy's verb allow-list) can no longer pivot into
+# arbitrary host-level operations. /app is chown'd at image-build time
+# so fresh volume mounts inherit app:app; existing prod volumes (data /
+# artifacts / sdks) need a one-time `docker run ... chown` outside the
+# container because Docker doesn't retro-chown populated volumes on
+# mount. The migration is documented in the H4-backend commit.
+RUN groupadd -g 65532 app && \
+    useradd  -u 65532 -g 65532 -M -s /usr/sbin/nologin app && \
+    chown -R app:app /app
+
 ENV OMNISIGHT_WORKSPACE=/app \
     OMNISIGHT_DEBUG=false \
     OMNISIGHT_AUTH_MODE=strict \
     OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+
+USER app:app
 
 EXPOSE 8000
 
