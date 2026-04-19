@@ -317,7 +317,16 @@ services:
   #     `/api/v1/*` to caddy:8000 internally via BACKEND_URL env, so
   #     the backend pool stays reachable without exposing it.
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # H3 audit (2026-04-19): pinned to the exact digest of the
+    # cloudflare/cloudflared:latest tag at go-live time. `:latest` is a
+    # supply-chain risk — a compromised upstream could push a poisoned
+    # image that `docker compose up` would pull without noticing, and
+    # the TUNNEL_TOKEN would flow straight to the attacker's C2.
+    # Re-pin periodically: check CF release notes + re-run
+    #   docker pull cloudflare/cloudflared:latest
+    #   docker inspect --format='{{index .RepoDigests 0}}' cloudflare/cloudflared:latest
+    # then update the @sha256: part below.
+    image: cloudflare/cloudflared@sha256:6b599ca3e974349ead3286d178da61d291961182ec3fe9c505e1dd02c8ac31b0
     profiles: ["tunnel"]
     command: tunnel --no-autoupdate run
     environment:
