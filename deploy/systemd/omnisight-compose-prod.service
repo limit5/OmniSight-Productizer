@@ -1,0 +1,49 @@
+; systemd unit — OmniSight production compose stack auto-boot on WSL start.
+;
+; Purpose: belt-and-braces companion to the containers' own
+; `restart: always` policy. Docker's restart policy brings containers
+; back when dockerd restarts, but it CANNOT recover from an explicit
+; `docker compose down`. This unit runs `up -d` at boot so the stack
+; self-heals even after a manual teardown.
+;
+; Idempotent — `docker compose up -d` is safe on an already-running
+; stack (it verifies desired state and returns 0 immediately).
+;
+; Install:
+;   sudo sed -i "s|USER_HOME|$USER|g; s|USERNAME|$USER|g" \
+;     deploy/systemd/omnisight-compose-prod.service > /tmp/omnisight-compose-prod.service
+;   sudo install -m 644 /tmp/omnisight-compose-prod.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-compose-prod.service
+;
+; (Or: run `scripts/enable_autostart.sh` which does the same thing.)
+;
+; Companion: dockerd itself must be enabled (`sudo systemctl enable docker`)
+; so systemd actually runs it on WSL boot — without that, this unit waits
+; forever for docker.service.
+
+[Unit]
+Description=OmniSight production stack (docker compose up -d)
+Documentation=file:///home/USER_HOME/work/sora/OmniSight-Productizer/docs/ops/autostart_wsl.md
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=USERNAME
+Group=docker
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+; Timeout: first-ever boot pulls images (cloudflare/cloudflared ~120 MB) so
+; allow 5 min. Subsequent boots return in seconds (images cached).
+TimeoutStartSec=300
+TimeoutStopSec=60
+; `--profile tunnel` includes cloudflared so the public URL comes back too.
+; If you ever want to boot the stack *without* opening the tunnel, disable
+; this unit and bring it up manually without --profile tunnel.
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel down
+
+[Install]
+WantedBy=multi-user.target
