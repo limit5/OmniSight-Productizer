@@ -24,6 +24,65 @@ version: "3.9"
 #   docker compose -f docker-compose.prod.yml build
 #   docker compose -f docker-compose.prod.yml up -d --build
 services:
+  # C1 audit fix (2026-04-19) — Docker API allowlist proxy.
+  #
+  # Backend containers used to mount /var/run/docker.sock directly, which
+  # meant any RCE in the FastAPI app gave the attacker full daemon
+  # control (→ `docker run --privileged -v /:/host` = full host root).
+  # This sidecar sits in front of the socket and only forwards a minimal
+  # verb allowlist that the legitimate sandbox manager needs.
+  #
+  # The socket itself is mounted :ro on the proxy — Docker UNIX sockets
+  # don't actually enforce :ro (all API calls are "writes" from the FS
+  # POV), but the attribute is kept as a policy marker.
+  #
+  # NO `ports:` — this service is internal-only, reachable only via the
+  # compose `default` network as `docker-socket-proxy:2375`.
+  #
+  # Allowlist rationale:
+  #   CONTAINERS=1 — list / inspect / create / remove / start / stop
+  #                  (backend/container.py primitives for sandbox mgmt)
+  #   EXEC=1       — docker exec inside the sandbox containers
+  #   IMAGES=1     — sandbox image inspect + pull
+  #   POST=1       — required for any mutating endpoint (create/start/exec)
+  # Explicit denies (default but pinned for audit trail):
+  #   BUILD / AUTH / COMMIT / CONFIGS / DISTRIBUTION / EVENTS / NETWORKS
+  #   / NODES / PLUGINS / SERVICES / SESSION / SWARM / SYSTEM / TASKS
+  #   / VOLUMES / INFO — none of these are needed by the app today.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3
+    restart: always
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - EXEC=1
+      - POST=1
+      - BUILD=0
+      - AUTH=0
+      - COMMIT=0
+      - CONFIGS=0
+      - DISTRIBUTION=0
+      - EVENTS=0
+      - INFO=0
+      - NETWORKS=0
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=0
+      - SESSION=0
+      - SWARM=0
+      - SYSTEM=0
+      - TASKS=0
+      - VOLUMES=0
+      - LOG_LEVEL=warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "-T", "2", "http://127.0.0.1:2375/_ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   # G2 #2 — HA-02 dual backend replicas for rolling-restart + reverse-proxy HA.
   #
   # Topology (see deploy/reverse-proxy/Caddyfile G2 #1):
@@ -61,13 +120,24 @@ services:
       - omnisight-data:/app/data
       - omnisight-artifacts:/app/.artifacts
       - omnisight-sdks:/app/.sdks
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Audit C1 (2026-04-19): host socket mount REMOVED — was a Tier-0
+      # container-escape primitive (any Python RCE in backend could open
+      # /var/run/docker.sock and `docker run --privileged -v /:/host`).
+      # Backend now talks to the docker daemon through the allowlisted
+      # `docker-socket-proxy` sidecar via DOCKER_HOST env (see below +
+      # the proxy service definition). Historic mount for reference:
+      #   - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - OMNISIGHT_DEBUG=false
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=production
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
       - OMNISIGHT_INSTANCE_ID=backend-a
+      # C1 fix: route Docker-API traffic through the allowlisted proxy
+      # (see docker-socket-proxy service). The Python SDK in
+      # host_metrics.py honours DOCKER_HOST; if/when backend/container.py
+      # gets wired up in prod it does too (subprocess inherits env).
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
     env_file:
       - .env
     # Legacy `backend` DNS alias — preserves the single-replica scrape target
@@ -78,6 +148,9 @@ services:
       default:
         aliases:
           - backend
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/readyz"]
@@ -110,15 +183,25 @@ services:
       - omnisight-data:/app/data
       - omnisight-artifacts:/app/.artifacts
       - omnisight-sdks:/app/.sdks
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Audit C1 (2026-04-19): host socket mount REMOVED — was a Tier-0
+      # container-escape primitive (any Python RCE in backend could open
+      # /var/run/docker.sock and `docker run --privileged -v /:/host`).
+      # Backend now talks to the docker daemon through the allowlisted
+      # `docker-socket-proxy` sidecar via DOCKER_HOST env (see below +
+      # the proxy service definition). Historic mount for reference:
+      #   - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - OMNISIGHT_DEBUG=false
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=production
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
       - OMNISIGHT_INSTANCE_ID=backend-b
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
     env_file:
       - .env
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8001/readyz"]
