@@ -100,12 +100,75 @@ class TestScriptShape:
         # AUTOINCREMENT (or plain INTEGER PRIMARY KEY for event_log).
         # If this set drifts from schema, the sequence reset will be
         # wrong and new inserts on PG will collide. Lock it.
+        #
+        # 2026-04-20 Phase-3 pre-req F2: five freshly-covered tables
+        # (dag_plans / iq_runs / mfa_backup_codes / password_history /
+        # prompt_versions) added — each has INTEGER PRIMARY KEY in
+        # its alembic migration. bootstrap_state and user_mfa do NOT
+        # appear here because their PKs are TEXT.
         assert set(mig.TABLES_WITH_IDENTITY_ID) == {
             "event_log",
             "audit_log",
             "auto_decision_log",
             "github_installations",
+            "dag_plans",
+            "iq_runs",
+            "mfa_backup_codes",
+            "password_history",
+            "prompt_versions",
         }
+
+    # 2026-04-20 Phase-3 pre-req F2 — pin the seven tables that the
+    # migrator predated (schema drift caught by the Phase-3 Step-1
+    # audit) so a future alembic migration adding ANOTHER new table
+    # + forgetting to update this list explicitly breaks a test
+    # rather than silently losing data at cutover time.
+    def test_phase3_pre_req_tables_are_covered(self) -> None:
+        expected_new_coverage = {
+            "bootstrap_state",
+            "dag_plans",
+            "iq_runs",
+            "mfa_backup_codes",
+            "password_history",
+            "prompt_versions",
+            "user_mfa",
+        }
+        for t in expected_new_coverage:
+            assert t in mig.TABLES_IN_ORDER, (
+                f"{t} missing — Phase-3 F2 extension regressed. "
+                "Adding a new alembic table requires a matching "
+                "TABLES_IN_ORDER entry (and, for INTEGER PK tables, "
+                "TABLES_WITH_IDENTITY_ID too)."
+            )
+
+    def test_mfa_tables_come_after_users(self) -> None:
+        """FK contract: ``user_mfa``, ``mfa_backup_codes``, and
+        ``password_history`` all reference ``users.id``. On PG with
+        FK enforcement enabled, inserting them before their parent
+        rows raises ForeignKeyViolation. Lock the ordering so a
+        well-meaning alphabetical sort never silently breaks replay.
+        """
+        order = list(mig.TABLES_IN_ORDER)
+        users_idx = order.index("users")
+        for child in ("user_mfa", "mfa_backup_codes", "password_history"):
+            child_idx = order.index(child)
+            assert child_idx > users_idx, (
+                f"{child} must be AFTER users in TABLES_IN_ORDER "
+                f"(users at {users_idx}, {child} at {child_idx})"
+            )
+
+    def test_dag_plans_comes_after_workflow_runs(self) -> None:
+        """Same FK-replay discipline: dag_plans.run_id references
+        workflow_runs.id. The reference is soft-linked in SQLite
+        (no FK constraint on that column) but PG may have it per
+        the migration shim — play safe and order anyway."""
+        order = list(mig.TABLES_IN_ORDER)
+        wf_idx = order.index("workflow_runs")
+        dp_idx = order.index("dag_plans")
+        assert dp_idx > wf_idx, (
+            f"dag_plans must be AFTER workflow_runs (wf at {wf_idx}, "
+            f"dag_plans at {dp_idx})"
+        )
 
 
 # ---------------------------------------------------------------------------

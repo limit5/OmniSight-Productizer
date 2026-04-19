@@ -125,13 +125,32 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # Phase 52+ additions.
     "workflow_runs",
     "workflow_steps",
+    # Phase 56-DAG-B plan storage (FK-soft-link: dag_plans.run_id →
+    # workflow_runs.id). Placed after workflow_runs so the FK target
+    # exists when PG is enforcing constraints during replay.
+    "dag_plans",
     # Phase 53 audit log.
     "audit_log",
+    # L1 bootstrap wizard state. No FK, independent table. Load-
+    # bearing because its rows drive ``missing_required_steps`` on
+    # the finalize gate — losing this table forces operators through
+    # the wizard again on first login.
+    "bootstrap_state",
     # Phase 54 profiles + auto decision log.
     "decision_profiles",
     "auto_decision_log",
+    # Prompt versioning (no FK, independent).
+    "prompt_versions",
+    # IQ-gate runs (no FK; tracks model benchmark outcomes).
+    "iq_runs",
     # Phase 55 users/sessions/GitHub app.
     "users",
+    # MFA tables — all have FK ``user_id → users.id`` so they MUST
+    # come after users in the replay order.
+    "user_mfa",
+    "mfa_backup_codes",
+    # Password-history K-series — same FK parent as above.
+    "password_history",
     "sessions",
     "github_installations",
     # Project runs (alembic 0006).
@@ -149,11 +168,22 @@ TABLES_IN_ORDER: tuple[str, ...] = (
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY
 #: sequence on PG. After migrating these we reset the sequence so the
 #: next insert doesn't collide with a preserved id.
+#:
+#: bootstrap_state is NOT here — its PK is ``step`` (TEXT, e.g.
+#: 'admin_password_set'), not an integer IDENTITY.
+#: user_mfa is NOT here — its PK is ``id`` (TEXT, app-generated).
 TABLES_WITH_IDENTITY_ID: tuple[str, ...] = (
     "event_log",
     "audit_log",
     "auto_decision_log",
     "github_installations",
+    # 2026-04-20 Phase-3 pre-req F2 additions — five freshly-covered
+    # tables whose INTEGER PKs need sequence restart after replay.
+    "dag_plans",
+    "iq_runs",
+    "mfa_backup_codes",
+    "password_history",
+    "prompt_versions",
 )
 
 DEFAULT_BATCH_SIZE = 500
