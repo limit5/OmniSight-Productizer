@@ -97,7 +97,11 @@ async def _try_slash_command(message: str) -> OrchestratorMessage | None:
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(body: ChatRequest, _user=Depends(_au.require_operator)):
+async def chat(
+    body: ChatRequest,
+    _user=Depends(_au.require_operator),
+    _quota=Depends(_au.check_llm_quota),  # M4 per-user LLM rate limit
+):
     user_message = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
         role=MessageRole.user,
@@ -116,7 +120,11 @@ async def chat(body: ChatRequest, _user=Depends(_au.require_operator)):
 
 
 @router.post("/stream")
-async def chat_stream(body: ChatRequest, _user=Depends(_au.require_operator)):
+async def chat_stream(
+    body: ChatRequest,
+    _user=Depends(_au.require_operator),
+    _quota=Depends(_au.check_llm_quota),  # M4 per-user LLM rate limit
+):
     """SSE streaming — pipeline runs with real-time events pushed via event bus,
     then the final answer is streamed token-by-token here."""
     # Slash command interception

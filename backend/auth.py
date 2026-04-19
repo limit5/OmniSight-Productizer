@@ -841,6 +841,36 @@ def require_role(min_role: str):
     return _dep
 
 
+# M4 audit (2026-04-19): per-user LLM-call rate limit (interim).
+# Apply as a FastAPI dependency on every endpoint that triggers LLM
+# work (/invoke, /invoke/stream, /chat, /chat/stream). Uses the
+# existing I9 rate-limiter (Redis-backed in prod, in-memory fallback
+# per replica) so no new infra needed. Full per-tenant token-dollar
+# budget is a follow-up — this just stops "single user burns the
+# global budget" in practice.
+async def check_llm_quota(user: "User" = Depends(current_user)) -> "User":
+    from backend.config import settings as _settings
+    cap = int(getattr(_settings, "llm_calls_per_user_per_hour", 0) or 0)
+    if cap <= 0:
+        return user  # disabled
+    from backend.rate_limit import get_limiter
+    allowed, retry_after = get_limiter().allow(
+        key=f"llm:user:{user.id}",
+        capacity=cap,
+        window_seconds=3600.0,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"per-user LLM quota exceeded ({cap}/h); "
+                f"retry in {int(retry_after)}s"
+            ),
+            headers={"Retry-After": str(max(1, int(retry_after)))},
+        )
+    return user
+
+
 # Convenience dependencies — the most common shapes
 async def require_viewer(user: User = Depends(current_user)) -> User:
     return user

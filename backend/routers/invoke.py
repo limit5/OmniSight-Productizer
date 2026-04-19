@@ -11,9 +11,10 @@ import re
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sse_starlette.sse import EventSourceResponse
 
+from backend import auth as _auth
 from backend.models import InvokeHaltResponse
 
 from backend.agents.graph import run_graph
@@ -1117,7 +1118,10 @@ def _build_report(action: dict) -> str:
 # ─── Endpoint ───
 
 @router.post("/stream")
-async def invoke_stream(command: str | None = None):
+async def invoke_stream(
+    command: str | None = None,
+    _user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
+):
     """SSE streaming invoke — analyses state, plans, executes, reports.
 
     Query param `command` is optional; if provided, it takes priority
@@ -1235,7 +1239,10 @@ async def invoke_resume():
 
 
 @router.post("")
-async def invoke_sync(command: str | None = None):
+async def invoke_sync(
+    command: str | None = None,
+    _user=Depends(_auth.check_llm_quota),  # auth + M4 per-user LLM rate limit
+):
     """Synchronous invoke — analyses, plans, executes, returns full result."""
     from backend import decision_engine as _de
     sema = _de.parallel_slot()

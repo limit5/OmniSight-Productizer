@@ -170,6 +170,18 @@ class Settings(BaseSettings):
     t1_allow_egress: bool = False
     t1_egress_allow_hosts: str = ""  # CSV: "github.com,gerrit.internal:29418"
 
+    # M4 audit (2026-04-19): per-user LLM-call rate limit.
+    # Prevents a single authenticated user from exhausting the global
+    # token budget by spamming requests. This is the INTERIM fix —
+    # proper per-tenant daily $ budget enforcement (the audit's full
+    # ask) requires a schema migration + per-request usage logging
+    # and is tracked as a follow-up PR. This cap catches the abuse
+    # pattern that matters most in practice: "one user fires 1000
+    # expensive /invoke calls". Default 200/h is generous for real
+    # work (human-paced rarely exceeds 30/h) but hard-stops abuse.
+    # Set to 0 to disable.
+    llm_calls_per_user_per_hour: int = 200
+
     # M7 audit (2026-04-19): optional bearer token for /metrics.
     # Leave empty → endpoint is open (backwards compatible; Next.js
     # rewrites don't expose it to the internet anyway). Set to a
