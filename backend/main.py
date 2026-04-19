@@ -220,8 +220,24 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # M2 audit (2026-04-19): explicit method + header allowlist. With
+    # `allow_credentials=True` a `*` value silently fails spec compliance
+    # on some browsers AND lets an attacker pair stolen origins with
+    # forged X-Forwarded-For / X-Tenant-Id if the reverse proxy ever
+    # gets misconfigured. Listing only what legitimate UI + fetch calls
+    # need closes that gap without breaking the app. Extend if a new
+    # header ever becomes necessary — do NOT re-introduce `*`.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Authorization",
+        "Content-Type",
+        "Idempotency-Key",
+        "X-CSRF-Token",
+        "X-Requested-With",
+    ],
+    expose_headers=["X-CSRF-Token"],
 )
 
 # G7 (HA-07): register HTTP middleware that feeds the rolling 5xx

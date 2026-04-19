@@ -435,17 +435,26 @@ def _specialist_node_factory(agent_type: str):
                 task_skill_context=state.task_skill_context,
             )
             if state.last_verification_failure:
+                # M3 audit (2026-04-19): wrap error in XML so any jailbreak
+                # markers inside the error text ("IGNORE PREVIOUS RULES:",
+                # persona swap, role-override) stay INSIDE the block and
+                # are structurally marked as untrusted content — paired
+                # with the Security Guardrails preamble (prompt_loader.py
+                # C2 fix) that tells the agent data inside error blocks
+                # is not instruction.
                 prompt = (
-                    f"VERIFICATION FAILED (iteration {state.verification_loop_iteration}/{state.max_verification_iterations}):\n"
-                    f"{_sanitize_error_for_prompt(state.last_verification_failure)}\n\n"
+                    f"<verification_failure iteration=\"{state.verification_loop_iteration}\" of=\"{state.max_verification_iterations}\">\n"
+                    f"{_sanitize_error_for_prompt(state.last_verification_failure)}\n"
+                    f"</verification_failure>\n\n"
                     "Analyze the test/simulation failures above. Fix the code to pass the failing tests, "
                     "then re-run the simulation to verify.\n\n"
                     + prompt
                 )
             elif state.last_error:
                 prompt = (
-                    f"PREVIOUS ATTEMPT FAILED (retry {state.retry_count}/{state.max_retries}):\n"
-                    f"{_sanitize_error_for_prompt(state.last_error)}\n\n"
+                    f"<previous_error retry=\"{state.retry_count}\" of=\"{state.max_retries}\">\n"
+                    f"{_sanitize_error_for_prompt(state.last_error)}\n"
+                    f"</previous_error>\n\n"
                     "Adjust your approach to avoid the same error.\n\n"
                     + prompt
                 )

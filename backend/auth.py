@@ -87,6 +87,18 @@ def hash_password(plain: str) -> str:
     return _argon2_ph.hash(plain)
 
 
+# M1 audit (2026-04-19): constant-time sentinel for login-path
+# timing-oracle defence. Computed once at module import so
+# `authenticate_password` can feed it to verify_password on the
+# "user not found" branch — the argon2 verify burns roughly the
+# same wall-clock the valid-user path would, stopping an adversary
+# from enumerating live emails by response-time signal alone. The
+# plaintext never resolves to any real user (random token), so
+# even if a caller accidentally sends this hash to _verify_pbkdf2
+# it can't unlock anything.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+
+
 def _verify_pbkdf2(plain: str, stored: str) -> bool:
     try:
         _, iters_s, salt_hex, digest_hex = stored.split("$", 3)
@@ -415,17 +427,32 @@ async def authenticate_password(email: str, password: str) -> Optional[User]:
         "FROM users WHERE email=?", (email.lower().strip(),),
     ) as cur:
         r = await cur.fetchone()
-    if not r or not r["enabled"]:
+
+    # M1 audit (2026-04-19): ALWAYS run argon2 verify, even when the
+    # user doesn't exist / is disabled / is locked, so the login-
+    # response time is constant regardless of outcome. Three previous
+    # states leaked via timing:
+    #   • non-existent email    ~5 ms   (DB miss, no verify)
+    #   • valid-user + locked   ~5 ms   (lockout check, no verify)
+    #   • valid-user + wrong pw ~100 ms (argon2 verify)
+    # Attacker could enumerate emails + sniff lockout state.
+    # Now every path runs verify(dummy or real) before branching, so
+    # the wall-clock is argon2-bound uniformly. Keep this structure
+    # — do NOT reintroduce early returns above the verify call.
+    have_row = bool(r and r["enabled"])
+    target_hash = r["password_hash"] if have_row else _DUMMY_PASSWORD_HASH
+    password_ok = verify_password(password, target_hash)
+
+    if not have_row:
         return None
 
     locked_until = r["locked_until"]
     if locked_until is not None and locked_until > time.time():
         return None
-
     if locked_until is not None and locked_until <= time.time():
         await _reset_login_failures(conn, r["id"])
 
-    if not verify_password(password, r["password_hash"]):
+    if not password_ok:
         await _record_login_failure(conn, r["id"], r["failed_login_count"])
         return None
 
