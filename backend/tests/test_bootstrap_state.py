@@ -176,6 +176,35 @@ async def test_missing_required_steps_all_recorded(_bootstrap_db):
     assert await bootstrap.missing_required_steps() == []
 
 
+@pytest.mark.asyncio
+async def test_missing_required_steps_autobackfills_satisfied_gates(
+    _bootstrap_db, monkeypatch,
+):
+    """When a gate is green via a non-wizard path (e.g. CF tunnel via
+    ``OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN`` compose env), the step
+    shouldn't appear as "missing" even though no wizard sub-step
+    handler wrote a row. The call also back-fills the row so subsequent
+    polls hit the fast path.
+    """
+    _, bootstrap = _bootstrap_db
+    monkeypatch.setenv("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN", "eyJhIjoi.compose.token")
+
+    # Sanity: the gate probe sees the token
+    assert bootstrap._cf_tunnel_is_configured() is True
+
+    missing = await bootstrap.missing_required_steps()
+    assert bootstrap.STEP_CF_TUNNEL not in missing
+
+    # Auto-backfill wrote a row with the expected metadata marker.
+    row = await bootstrap.get_bootstrap_step(bootstrap.STEP_CF_TUNNEL)
+    assert row is not None
+    assert row["metadata"].get("source") == "auto_backfill"
+
+    # Second call is idempotent (no exception, row still there).
+    missing2 = await bootstrap.missing_required_steps()
+    assert bootstrap.STEP_CF_TUNNEL not in missing2
+
+
 # ── mark_bootstrap_finalized ───────────────────────────────────
 
 

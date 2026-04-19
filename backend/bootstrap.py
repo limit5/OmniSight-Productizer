@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -133,12 +134,23 @@ def _llm_provider_is_configured() -> bool:
 def _cf_tunnel_is_configured() -> bool:
     """True if a CF tunnel has been provisioned OR explicitly skipped.
 
-    Two sources are consulted:
+    Three sources are consulted:
 
     1. Explicit skip / provisioned marker in ``data/.bootstrap_state.json``
        (set by L4 "cf_tunnel_configured"/"cf_tunnel_skipped").
     2. Live router state — ``tunnel_id`` present in the CF tunnel router
        means a provision call has landed in this process.
+    3. Compose-managed tunnel (Path B deployment) — the operator wired
+       `cloudflared` via `docker-compose.prod.yml` + Zero Trust Dashboard
+       and set ``OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN``. This path is
+       documented in ``docs/ops/production_deploy.md`` and never touches
+       the wizard's ``/cloudflare-tunnel/provision`` API, so without
+       this signal the gate would stay red for a tunnel that is
+       actually up and serving external traffic (``curl
+       https://<public-host>/`` returns ``server: cloudflare`` +
+       ``cf-ray``). Presence of the token is a declarative intent
+       signal — the compose file guards with ``${...:?err}`` so the
+       container can't come up without it.
 
     The marker takes precedence so the signal survives process restarts.
     """
@@ -152,10 +164,15 @@ def _cf_tunnel_is_configured() -> bool:
         from backend.routers import cloudflare_tunnel as _cft
 
         state = _cft._get_state()
-        return bool(state.get("tunnel_id"))
+        if state.get("tunnel_id"):
+            return True
     except Exception as exc:
         logger.debug("bootstrap: CF tunnel router probe failed (%s)", exc)
-        return False
+
+    if (os.environ.get("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN") or "").strip():
+        return True
+
+    return False
 
 
 def _smoke_has_passed() -> bool:
@@ -416,8 +433,34 @@ async def missing_required_steps() -> list[str]:
 
     Used by ``POST /api/v1/bootstrap/finalize`` to gate the transition —
     finalize must refuse until every required step is on record.
+
+    Self-heal for ``cf_tunnel_configured``: Path B deployments wire
+    the tunnel via docker-compose ``cloudflared`` + Zero Trust
+    Dashboard and never hit the wizard's provision API, so no step
+    row gets written. When :func:`_cf_tunnel_is_configured` says the
+    gate is green, back-fill a row (idempotent via ON CONFLICT in
+    :func:`record_bootstrap_step`) so this function converges with
+    :func:`get_bootstrap_status`.
+
+    The self-heal is scoped to CF tunnel only. Other steps
+    (admin password, LLM provider, smoke) have their own semantics:
+    the admin probe returns False on a genuinely fresh install (no
+    users table rows yet), and smoke is wizard-owned by design.
     """
     recorded = await _recorded_step_names()
+    if STEP_CF_TUNNEL not in recorded and _cf_tunnel_is_configured():
+        try:
+            await record_bootstrap_step(
+                STEP_CF_TUNNEL, metadata={"source": "auto_backfill"},
+            )
+            recorded = recorded | {STEP_CF_TUNNEL}
+        except Exception as exc:
+            logger.debug(
+                "bootstrap: auto-backfill of %s failed (%s) — "
+                "still treating as satisfied",
+                STEP_CF_TUNNEL, exc,
+            )
+            recorded = recorded | {STEP_CF_TUNNEL}
     return [s for s in REQUIRED_STEPS if s not in recorded]
 
 

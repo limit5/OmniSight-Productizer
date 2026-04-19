@@ -208,6 +208,36 @@ def test_cf_tunnel_configured_via_router_state(tmp_path):
         _cft._reset_for_tests()
 
 
+def test_cf_tunnel_configured_via_compose_env_token(tmp_path, monkeypatch):
+    """Path B deployments wire the tunnel via ``docker-compose`` +
+    Zero Trust Dashboard, never touching the wizard's
+    ``/cloudflare-tunnel/provision`` endpoint. In that case the only
+    signal is ``OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN`` env presence; the
+    gate must recognise it as "configured"."""
+    from backend import bootstrap
+    from backend.routers import cloudflare_tunnel as _cft
+
+    bootstrap._reset_for_tests(tmp_path / "marker.json")
+    _cft._reset_for_tests()
+    monkeypatch.delenv("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN", raising=False)
+    try:
+        # No marker, no router state, no env → red
+        assert bootstrap._cf_tunnel_is_configured() is False
+
+        # Token present → green
+        monkeypatch.setenv("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN", "eyJhIjoi.fake.token")
+        assert bootstrap._cf_tunnel_is_configured() is True
+
+        # Empty / whitespace-only token doesn't count
+        monkeypatch.setenv("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN", "   ")
+        assert bootstrap._cf_tunnel_is_configured() is False
+
+        monkeypatch.setenv("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN", "")
+        assert bootstrap._cf_tunnel_is_configured() is False
+    finally:
+        _cft._reset_for_tests()
+
+
 # ── smoke_passed ────────────────────────────────────────────────
 
 
