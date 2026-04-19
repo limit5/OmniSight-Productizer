@@ -97,18 +97,23 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
         async with _chain_lock:
             prev = await _last_hash_for_tenant(tid)
             curr = _hash(prev, payload_canon + str(round(ts, 6)))
-            cur = await conn.execute(
+            # Phase-3 PG compat: use RETURNING instead of cur.lastrowid.
+            # asyncpg does not surface a lastrowid; RETURNING is dialect-
+            # neutral (SQLite 3.35+, Postgres) and avoids a second round
+            # trip for ``SELECT MAX(id)``.
+            async with conn.execute(
                 "INSERT INTO audit_log "
                 "(ts, actor, action, entity_kind, entity_id, before_json, after_json, "
                 "prev_hash, curr_hash, session_id, tenant_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 (ts, actor, action, entity_kind, entity_id or "",
                  json.dumps(before_d, ensure_ascii=False),
                  json.dumps(after_d, ensure_ascii=False),
                  prev, curr, session_id, tid),
-            )
+            ) as cur:
+                row = await cur.fetchone()
             await conn.commit()
-            new_id = cur.lastrowid
+            new_id = row[0] if row else None
         return new_id
     except Exception as exc:
         logger.warning("audit.log failed (%s on %s): %s", action, entity_kind, exc)

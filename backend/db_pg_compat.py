@@ -446,11 +446,28 @@ class PgCompatConnection:
         args = tuple(params) if params is not None else ()
 
         async with self._lock:
-            if _is_select_like(pg_sql):
-                # SELECT / WITH / RETURNING — fetch all rows eagerly.
+            upper = pg_sql.lstrip().upper()
+            is_dml_with_returning = (
+                " RETURNING " in f" {upper} "
+                and (upper.startswith("INSERT")
+                     or upper.startswith("UPDATE")
+                     or upper.startswith("DELETE"))
+            )
+            if is_dml_with_returning:
+                # INSERT/UPDATE/DELETE ... RETURNING — row-producing DML.
+                # Must run inside the lazy transaction so the write
+                # commits when ``.commit()`` lands (matches aiosqlite's
+                # auto-begin-on-first-DML behaviour that the non-
+                # returning branch below relies on).
+                await self._ensure_tx()
                 records = await self._conn.fetch(pg_sql, *args)
                 return _PgCursor(records=list(records))
-            # DML — starts a tx if one isn't open, returns status.
+            if _is_select_like(pg_sql):
+                # Pure SELECT / WITH / VALUES — read-only, no tx.
+                records = await self._conn.fetch(pg_sql, *args)
+                return _PgCursor(records=list(records))
+            # DML without RETURNING — starts a tx if one isn't open,
+            # returns status.
             await self._ensure_tx()
             status = await self._conn.execute(pg_sql, *args)
             return _PgCursor(status=status)

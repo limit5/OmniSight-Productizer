@@ -105,15 +105,18 @@ async def save_plan(dag: DAG, *,
         json.dumps([e.to_dict() for e in validation_errors])
         if validation_errors else None
     )
-    cur = await db._conn().execute(
+    # Phase-3 PG compat: RETURNING id (dialect-neutral) instead of
+    # aiosqlite's cur.lastrowid which asyncpg doesn't surface.
+    async with db._conn().execute(
         "INSERT INTO dag_plans "
         "(dag_id, run_id, parent_plan_id, json_body, status, "
         "mutation_round, validation_errors, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?) RETURNING id",
         (dag.dag_id, run_id, parent_plan_id,
          dag.model_dump_json(), status, mutation_round, err_json, now, now),
-    )
-    new_id = cur.lastrowid
+    ) as cur:
+        row = await cur.fetchone()
+    new_id = row[0] if row else None
     await db._conn().commit()
     logger.info("dag plan saved id=%s dag=%s status=%s round=%d",
                 new_id, dag.dag_id, status, mutation_round)

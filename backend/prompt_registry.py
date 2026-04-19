@@ -353,13 +353,15 @@ async def register_active(path: str, body: str) -> PromptVersion:
         )
 
     now = time.time()
-    cur = await conn.execute(
+    # Phase-3 PG compat: RETURNING id (dialect-neutral, SQLite 3.35+).
+    async with conn.execute(
         "INSERT INTO prompt_versions "
         "(path, version, role, body, body_sha256, created_at, promoted_at) "
-        "VALUES (?,?, 'active', ?,?,?,?)",
+        "VALUES (?,?, 'active', ?,?,?,?) RETURNING id",
         (rel, next_v, body, sha, now, now),
-    )
-    new_id = cur.lastrowid
+    ) as cur:
+        row = await cur.fetchone()
+    new_id = row[0] if row else None
     await conn.commit()
     return await get_by_id(new_id)
 
@@ -393,13 +395,15 @@ async def register_canary(path: str, body: str) -> PromptVersion:
     next_v = ((row["m"] or 0) + 1)
 
     now = time.time()
-    cur = await conn.execute(
+    # Phase-3 PG compat: RETURNING id (dialect-neutral, SQLite 3.35+).
+    async with conn.execute(
         "INSERT INTO prompt_versions "
         "(path, version, role, body, body_sha256, created_at) "
-        "VALUES (?,?, 'canary', ?,?,?)",
+        "VALUES (?,?, 'canary', ?,?,?) RETURNING id",
         (rel, next_v, body, sha, now),
-    )
-    new_id = cur.lastrowid
+    ) as cur:
+        row = await cur.fetchone()
+    new_id = row[0] if row else None
     await conn.commit()
     return await get_by_id(new_id)
 
