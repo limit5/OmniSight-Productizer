@@ -191,6 +191,12 @@ services:
         aliases:
           - backend
       ai_core: {}
+      # Phase-3 sub-phase 3-B (2026-04-20): attach to the pg-ha stack's
+      # network so DATABASE_URL ``postgresql+asyncpg://pg-primary/...``
+      # resolves to the HA primary. Declared ``external: true`` below
+      # so compose up/down on productizer never tears down the PG pair
+      # (that lifecycle is owned by deploy/postgres-ha/docker-compose.yml).
+      db_ha: {}
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -262,10 +268,12 @@ services:
       - .env
     # Dual-home same as backend-a — see backend-a's networks: block
     # for the Phase-1 rationale (ai-core shared-infra network carrying
-    # ai_cache + future Gemma4).
+    # ai_cache + future Gemma4) and Phase-3 3-B rationale (db_ha for
+    # DATABASE_URL → pg-primary cutover).
     networks:
       default: {}
       ai_core: {}
+      db_ha: {}
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -530,3 +538,12 @@ networks:
   ai_core:
     external: true
     name: omnisight-ai-core_omnisight_net
+  # Phase-3 sub-phase 3-B (2026-04-20) — the PostgreSQL HA pair lives
+  # in a separate compose project (deploy/postgres-ha/docker-compose.yml).
+  # ``external: true`` + pinned ``name`` so productizer lifecycle ops
+  # (up / down / rm) never touch the DB network that the pg-primary /
+  # pg-standby containers live on. The pg-ha network is created by
+  # ``docker compose -f deploy/postgres-ha/docker-compose.yml up``.
+  db_ha:
+    external: true
+    name: postgres-ha_pg-ha
