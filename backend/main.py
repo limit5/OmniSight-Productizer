@@ -240,6 +240,21 @@ app.add_middleware(
     expose_headers=["X-CSRF-Token"],
 )
 
+# S2-9 (#354): secure-by-default auth baseline. After this middleware
+# loads, every non-allowlisted path requires a valid session.
+# Defaults to MODE=log (advisory — just logs would-be-blocks). Flip
+# to enforce via `OMNISIGHT_AUTH_BASELINE_MODE=enforce` once the
+# allowlist has been validated against production traffic. The
+# allowlist lives in backend/auth_baseline.py next to the middleware
+# so one code review covers the whole policy.
+#
+# Registration order matters: added BEFORE ha_observability so the
+# 5xx-rate counter doesn't see spurious "no-session 401s" from
+# allowlist tuning. This middleware sits between CORSMiddleware
+# (above) and ha_observability + routers (below).
+from backend import auth_baseline as _auth_baseline
+_auth_baseline.install(app)
+
 # G7 (HA-07): register HTTP middleware that feeds the rolling 5xx
 # rate metric. Registered here so it wraps ALL other middleware +
 # routers — every response, including error responses produced by
