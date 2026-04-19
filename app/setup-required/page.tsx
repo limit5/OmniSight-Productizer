@@ -172,10 +172,10 @@ export default function SetupRequiredPage() {
               a dedicated English code-name keeps the Orbitron look front
               and center. */}
           <div
-            className="mb-2 text-center text-3xl md:text-4xl font-bold uppercase tracking-[0.2em] text-[var(--neural-blue)] text-glow-blue"
+            className="mb-2 text-center text-2xl sm:text-3xl md:text-4xl font-bold uppercase tracking-[0.1em] sm:tracking-[0.2em] text-[var(--neural-blue)] text-glow-blue break-words"
             style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
           >
-            BOOTSTRAP&nbsp;REQUIRED
+            BOOTSTRAP REQUIRED
           </div>
 
           {/* Friendly headline */}
