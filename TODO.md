@@ -2052,14 +2052,14 @@ Legend:
 - [ ] Falco alert → 寫入 audit_log + SSE `security.kernel_alert` + ChatOps L2 通知
 - 預估：**2 day**
 
-### S2-9. Secure-by-default auth middleware（全 router 「預設要登入」）(#354) — 🔴 優先
+### S2-9. Secure-by-default auth middleware（全 router 「預設要登入」）(#354) — ✅ 完成 2026-04-19
 > 背景（2026-04-19 發現）：修 `/invoke` endpoint 的 M4 rate-limit 時，意外發現該 endpoint **完全沒 auth**。擴大掃 `backend/routers/*.py` 全檔後，**24 個 router、237 個 endpoint 是匿名的**（佔全專案 ~40%）。其中部分是合理 public（`/healthz` / `/readyz` / `/metrics` / `/webhooks/*` / `/auth/login`），但多數不該是匿名——`agents`(7) / `tasks`(10) / `workflow`(7) / `workspaces`(11) / `projects`(5) / `tools`(2) / `artifacts`(4) / `providers`(8) / `enterprise_web_stack`(63) / `security_stack`(23) / `sensor_fusion`(24) / `ota_framework`(27) / `telemetry_backend`(28) … 都是用到沒人檢查。
 >
 > 根因：**沒有 secure-by-default pattern**。每個 `APIRouter()` 空蕩蕩 new，auth 是個別 handler 自行加 `Depends(require_role(...))`，新 router / 新 endpoint 預設 wide open 沒人擋。H1 commit `e2d981ff` 把 `/system/*` 升到 router-level `Depends(current_user)` 但範圍只有那一個 router。
 >
 > 風險：bootstrap wizard 完成後，前面那堆 endpoint 就開始公開。即使 UI 沒調到，攻擊者可以打 `POST /api/v1/tasks`、`POST /api/v1/workflow/runs/*/cancel`、`GET /api/v1/workspaces/*` 等等。
 
-- [ ] `backend/main.py` 中央 allowlist 定義「哪些 path prefix 可以匿名」：
+- [x] `backend/auth_baseline.py` 中央 allowlist 定義「哪些 path prefix 可以匿名」（26 個 prefix，每條 justification comment；`install(app)` 在 `backend/main.py:256` 註冊）：
   ```python
   _AUTH_EXEMPT_PREFIXES = (
       "/api/v1/auth/login", "/api/v1/auth/bootstrap", "/api/v1/auth/reset",
@@ -2070,16 +2070,14 @@ Legend:
       "/api/v1/events/",             # SSE may use passive cookie; revisit per-path
   )
   ```
-- [ ] 全域 middleware：每個非 exempt path request → 若沒 session → 401 + WWW-Authenticate
-- [ ] 各 router 既有的 `Depends(require_role(...))` **保留**（middleware 是 baseline，router-level 是 RBAC）
-- [ ] 地毯式審計既有 237 個匿名 endpoint，按 `(router, path) → decision`：
-  - [ ] 合理 public（~30 個：healthchecks / auth flows / webhook 入口 / bootstrap 設定流程）→ 加進 allowlist
-  - [ ] 應該 authenticate（~200 個：tasks / workflow / workspaces / agents / projects / tools / artifacts / providers / enterprise_web_stack / security_stack / sensor_fusion / ota_framework / telemetry_backend / ...）→ middleware 自動保護，不用改 router
-  - [ ] 應該是 admin-only（少數：`providers` 寫入、`tenant_egress`、`integration` 等）→ 加 router-level `require_role("admin")`
-- [ ] CI gate：`scripts/check_auth_coverage.py` — parse `backend/routers/**/*.py`，assert 每個 `@router.<verb>` handler 都有 auth Depends **或** path 在 allowlist。新 endpoint 預設 fail 直到明確歸類。
-- [ ] 測試：匿名 `curl` 每個非 exempt endpoint → 401；allowlist endpoint → 原本行為
-- [ ] docs/ops/security_audit_<date>.md 紀錄 exempt allowlist 的 justification trail
-- 預估：**3 day**（2d middleware + 掃描 + allowlist 分類，1d CI gate + 測試 + docs）
+- [x] 全域 middleware：非 exempt path 無 session → 401 + `WWW-Authenticate: Cookie`（`backend/auth_baseline.py:install()`，三 mode log/enforce/off via `OMNISIGHT_AUTH_BASELINE_MODE`；現 prod 跑 enforce）
+- [x] 各 router 既有 `Depends(require_role(...))` **保留**（middleware 是 baseline，router-level 是 RBAC——正交組合）
+- [x] CI gate：`scripts/check_auth_coverage.py --check-baseline docs/ops/auth_coverage_baseline.txt`，新 UNGATED endpoint 必須加 `Depends` 或 allowlist 才能合併（baseline 454 entry pin 歷史債）。`.github/workflows/ci.yml::auth-coverage` 3 分鐘 job。
+- [x] 測試：49 offline tests（`backend/tests/test_auth_baseline.py` 39 + `backend/tests/test_check_auth_coverage.py` 10）covering middleware modes / OPTIONS bypass / session-lookup-failure fail-closed / classifier / baseline round-trip，1.5s 全綠
+- [x] 部署：`.env` 設 `OMNISIGHT_AUTH_BASELINE_MODE=enforce` + prod stack 觀察無 spurious warning 後翻 enforce
+- [ ] **follow-up epic**：454 個 pre-existing UNGATED handler 分批（依 router 檔）加 `Depends(current_user)`，每批 PR 同時 refresh baseline；依 impact 排序先修 admin-ish router (`agents` / `system` / `tenants` / `workspaces` / `providers`)
+- [ ] **follow-up**：docs/ops/security_audit_2026-04.md 紀錄 allowlist 26 entry 的 justification trail（目前每條在 `backend/auth_baseline.py` 原始碼 inline comment；運維可能要更結構化的 audit doc）
+- 實際：**0.7 day**（SOP Step 1-7，7 commit，包含 middleware + 審計器 + allowlist 擴充 + prod 翻 enforce + CI gate + 49 unit test + Settings 欄位宣告 + HANDOFF / README / TODO 更新）
 
 ### S2-8. GitHub Repo 安全 + Secret Scanning (#349)
 - [ ] 確認 GitHub repo 設為 Private（如果是 Public → 立即切 Private）
