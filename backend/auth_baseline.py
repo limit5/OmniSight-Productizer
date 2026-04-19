@@ -120,6 +120,22 @@ AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
     # apply to machine-to-machine callbacks.
     "/api/v1/webhooks/",
 
+    # ChatOps webhooks — Discord / Teams / Line inbound. Each
+    # handler validates the request's HMAC / signature header
+    # using the platform-specific secret (see
+    # backend/chatops_verification.py). Sibling endpoints under
+    # /api/v1/chatops/ that are NOT /webhook/ (mirror, status)
+    # are authenticated and NOT on the allowlist.
+    "/api/v1/chatops/webhook/",
+
+    # OIDC callback URL — the browser arrives here after the
+    # external IdP redirects, BEFORE a session cookie is set.
+    # The handler establishes the session from the authorization
+    # code; after this one hit, the regular session cookie
+    # carries the auth. Scoped narrowly to /auth/oidc/ so other
+    # /auth/* paths (logout, change-password, etc.) stay gated.
+    "/api/v1/auth/oidc/",
+
     # ─── Server-Sent Events (SSE) ────────────────────────────
     # /events uses passive session-cookie auth at handler level
     # (the EventSourceResponse reads Cookie from scope). Browsers
