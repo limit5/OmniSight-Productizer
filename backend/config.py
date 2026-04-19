@@ -170,6 +170,13 @@ class Settings(BaseSettings):
     t1_allow_egress: bool = False
     t1_egress_allow_hosts: str = ""  # CSV: "github.com,gerrit.internal:29418"
 
+    # M7 audit (2026-04-19): optional bearer token for /metrics.
+    # Leave empty → endpoint is open (backwards compatible; Next.js
+    # rewrites don't expose it to the internet anyway). Set to a
+    # strong random secret → /metrics requires that token via
+    # `?token=<value>` or `Authorization: Bearer <value>`.
+    metrics_token: str = ""
+
     # H6 audit (2026-04-19): Tier-2 "networked" sandbox — operator gate.
     # T2 gives a sandbox container bridge-network access via the
     # omnisight-egress-t2 iptables ACL. It's still safer than host

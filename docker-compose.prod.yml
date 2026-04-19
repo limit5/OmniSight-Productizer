@@ -331,11 +331,18 @@ services:
       # 0.0.0.0 makes the server listen on every interface (container IP
       # AND loopback), so the healthcheck and `docker exec` smoke both work.
       - HOSTNAME=0.0.0.0
-      # Prevent OOM when backend is briefly unreachable during deploy:
-      # ECONNREFUSED errors pile up as JS objects → V8 heap grows →
-      # default 1.7 GB limit → OOM kill. 4 GB gives enough headroom
-      # for error bursts to be GC'd before hitting the ceiling.
-      - NODE_OPTIONS=--max-old-space-size=4096
+      # M6 audit (2026-04-19): heap cap tightened from 4 GB → 1 GB.
+      # 4 GB was chosen to tolerate error-burst GC pressure during
+      # a backend-unreachable window, but the real constraint isn't
+      # GC speed — it's DoS headroom. A malicious or buggy request
+      # that triggers a large JSON parse can now grow the heap from
+      # the V8 default (~1.7 GB) towards 4 GB before OOM kill; at
+      # 1000 concurrent requests an attacker could burn host RAM.
+      # 1 GB is plenty for legitimate SSR (measured steady-state
+      # ~200 MB) and cuts the worst-case x4. Paired with mem_limit
+      # 2 GB below as a hard ceiling the kernel enforces — so even
+      # if the V8 cap is evaded the container is capped.
+      - NODE_OPTIONS=--max-old-space-size=1024
     depends_on:
       caddy:
         condition: service_healthy
@@ -352,6 +359,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # M6 audit: hard host-level cap on memory. Complements the V8
+    # heap cap above — if something bypasses V8 (large buffers
+    # outside the heap) or if Node spawns a child, Linux OOM-
+    # killer stops runaway growth before it starves other services.
+    mem_limit: 2g
+    mem_reservation: 512m
     # Root `/` returns HTTP 307 (auth-gate → /setup-required or /login) which
     # makes `wget -qO-` exit non-zero even though the server is clearly up.
     # `--spider` accepts 2xx/3xx. Use `127.0.0.1` NOT `localhost` — busybox

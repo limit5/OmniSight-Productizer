@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import Response, JSONResponse
 
 from backend import metrics as _metrics
@@ -26,8 +26,37 @@ _HEALTHZ_TIMEOUT_S = 1.0
 _VERSION = "0.1.0"  # mirrors backend/main.py FastAPI version
 
 
+# M7 audit (2026-04-19): optional token gate on /metrics. Today Next.js
+# rewrites only proxy `/api/v1/*`, so /metrics is unreachable from the
+# public internet — but (a) that's a rewrite-rule accident of silence,
+# not a security property, and (b) enabling the `observability`
+# compose profile (Prometheus) would make /metrics reachable from the
+# Prometheus container — fine, but ALSO by anything else that lands on
+# the same compose network, including future sidecars.
+#
+# With OMNISIGHT_METRICS_TOKEN set, /metrics requires either a
+# `?token=<value>` query arg or an `Authorization: Bearer <value>`
+# header, matched in constant time. Unset → endpoint stays open (the
+# in-cluster-only default stays backwards-compatible for operators
+# who haven't noticed this knob).
+def _check_metrics_token(request: Request) -> None:
+    from backend.config import settings as _settings
+    import secrets as _sec
+    expected = getattr(_settings, "metrics_token", "") or ""
+    if not expected:
+        return  # unset → open, matches pre-M7 behaviour
+    got = request.query_params.get("token") or ""
+    if not got:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            got = auth[7:].strip()
+    if not _sec.compare_digest(got, expected):
+        raise HTTPException(status_code=401, detail="metrics token required")
+
+
 @router.get("/metrics")
-async def get_metrics() -> Response:
+async def get_metrics(request: Request) -> Response:
+    _check_metrics_token(request)
     body, ctype = _metrics.render_exposition()
     return Response(content=body, media_type=ctype)
 
