@@ -64,6 +64,22 @@ else
 fi
 log "Code 更新完成：$(git log --oneline -1)"
 
+# ── Step 1b: WAL-safe pre-deploy backup ──
+# H2 audit (2026-04-19): rolling deploys can still roll BACKWARDS in
+# data integrity if a migration blows up or a code change panics on
+# existing rows. The `scripts/backup_prod_db.sh` helper takes a WAL-
+# safe online snapshot + optional AES-256-GCM encryption (when
+# OMNISIGHT_BACKUP_PASSPHRASE is set). Skipped in --dry-run.
+if [ "$DRY_RUN" = false ]; then
+    step "Step 1b: Pre-deploy backup"
+    if [ -x scripts/backup_prod_db.sh ]; then
+        scripts/backup_prod_db.sh --label pre-deploy --prune 20 || \
+            err "pre-deploy backup failed — aborting to protect data. Re-run after investigating."
+    else
+        warn "scripts/backup_prod_db.sh missing — proceeding WITHOUT backup"
+    fi
+fi
+
 # ── Step 2: Build (optional) ──
 if [ "$SKIP_BUILD" = false ]; then
     step "Step 2: Build Docker images"
