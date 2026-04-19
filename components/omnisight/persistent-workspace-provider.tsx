@@ -39,7 +39,7 @@
 
 import * as React from "react"
 
-import type { WorkspaceType } from "@/app/workspace/[type]/layout"
+import type { WorkspaceType } from "@/app/workspace/[type]/types"
 import {
   WorkspaceProvider,
   useWorkspaceContext,

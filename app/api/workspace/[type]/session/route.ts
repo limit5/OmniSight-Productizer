@@ -41,7 +41,7 @@ import {
   isWorkspaceType,
   WORKSPACE_TYPES,
   type WorkspaceType,
-} from "@/app/workspace/[type]/layout"
+} from "@/app/workspace/[type]/types"
 
 const SCHEMA_VERSION = 1
 

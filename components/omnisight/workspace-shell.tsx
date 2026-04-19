@@ -27,7 +27,7 @@
 import * as React from "react"
 import { PanelLeft, PanelLeftClose } from "lucide-react"
 import { cn } from "@/lib/utils"
-import type { WorkspaceType } from "@/app/workspace/[type]/layout"
+import type { WorkspaceType } from "@/app/workspace/[type]/types"
 
 export interface WorkspaceShellProps {
   /** Workspace product line — drives default slot titles + data attrs. */

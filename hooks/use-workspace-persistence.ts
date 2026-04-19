@@ -31,7 +31,7 @@
  * returns `null`.  The same guard applies to the backend response.
  */
 
-import { WORKSPACE_TYPES, type WorkspaceType } from "@/app/workspace/[type]/layout"
+import { WORKSPACE_TYPES, type WorkspaceType } from "@/app/workspace/[type]/types"
 import type {
   WorkspaceAgentSessionState,
   WorkspacePreviewState,

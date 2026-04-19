@@ -51,7 +51,7 @@ import { cn } from "@/lib/utils"
 import {
   WORKSPACE_TYPES,
   type WorkspaceType,
-} from "@/app/workspace/[type]/layout"
+} from "@/app/workspace/[type]/types"
 import {
   DEFAULT_AGENT_SESSION_STATE,
   DEFAULT_PREVIEW_STATE,

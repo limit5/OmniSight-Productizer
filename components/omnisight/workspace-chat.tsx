@@ -57,7 +57,7 @@ import { Textarea } from "@/components/ui/textarea"
 import {
   isWorkspaceType,
   type WorkspaceType,
-} from "@/app/workspace/[type]/layout"
+} from "@/app/workspace/[type]/types"
 import { useOptionalWorkspaceType } from "@/components/omnisight/workspace-context"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────

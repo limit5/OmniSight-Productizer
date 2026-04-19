@@ -29,7 +29,7 @@
 "use client"
 
 import * as React from "react"
-import { isWorkspaceType, type WorkspaceType } from "@/app/workspace/[type]/layout"
+import { isWorkspaceType, type WorkspaceType } from "@/app/workspace/[type]/types"
 
 // ─── Shape of per-workspace state ──────────────────────────────────────────
 

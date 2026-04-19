@@ -53,7 +53,7 @@ import { Input } from "@/components/ui/input"
 import {
   isWorkspaceType,
   type WorkspaceType,
-} from "@/app/workspace/[type]/layout"
+} from "@/app/workspace/[type]/types"
 import { useOptionalWorkspaceType } from "@/components/omnisight/workspace-context"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────

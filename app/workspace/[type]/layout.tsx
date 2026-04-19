@@ -16,15 +16,11 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { PersistentWorkspaceProvider } from "@/components/omnisight/persistent-workspace-provider"
+import { WORKSPACE_TYPES, type WorkspaceType, isWorkspaceType } from "./types"
 
-export const WORKSPACE_TYPES = ["web", "mobile", "software"] as const
-export type WorkspaceType = (typeof WORKSPACE_TYPES)[number]
-
-const WORKSPACE_TYPE_SET: ReadonlySet<string> = new Set(WORKSPACE_TYPES)
-
-export function isWorkspaceType(value: string): value is WorkspaceType {
-  return WORKSPACE_TYPE_SET.has(value)
-}
+// Re-export so existing importers of layout.tsx keep working.
+export { WORKSPACE_TYPES, isWorkspaceType }
+export type { WorkspaceType }
 
 const WORKSPACE_META: Record<WorkspaceType, { title: string; description: string }> = {
   web: {
