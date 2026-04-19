@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import {
+  Activity,
   AlertTriangle,
   Check,
   ChevronDown,
@@ -23,27 +24,41 @@ import {
   FlaskConical,
   KeyRound,
   Loader2,
+  RadioTower,
   RefreshCw,
   Rocket,
   Shield,
   X,
+  Zap,
 } from "lucide-react"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
 import {
   getBootstrapStatus,
   getHealth,
+  getReadyz,
   type BootstrapGates,
   type BootstrapStatusResponse,
+  type ReadyzResponse,
 } from "@/lib/api"
 
 // ─── Gate meta table ──────────────────────────────────────────────────
 
 type GateKey = keyof BootstrapGates
 
+/** Whether the gate flips itself based on declarative system state
+ *  (`auto`) or requires the operator to press a button in the wizard
+ *  (`action`). Communicating this distinction up-front kills the
+ *  "is my system broken?" confusion when an `action` gate is red. */
+type GateNature = "auto" | "action"
+
 interface GateDef {
   key: GateKey
   label: string
   icon: React.ComponentType<{ size?: number; className?: string }>
+  nature: GateNature
+  /** Short explainer shown inline — "what this checks + rough
+   *  duration if the operator has to act". One line max. */
+  hint: string
   /** Returns true if the gate is satisfied (green). */
   isGreen: (g: BootstrapGates) => boolean
 }
@@ -53,6 +68,8 @@ const GATES: GateDef[] = [
     key: "admin_password_default",
     label: "Admin Password",
     icon: KeyRound,
+    nature: "auto",
+    hint: "偵測出廠預設密碼是否已輪替。登入後改密碼即綠。",
     // The flag means "still on shipping default" — inverted for green.
     isGreen: (g) => !g.admin_password_default,
   },
@@ -60,21 +77,187 @@ const GATES: GateDef[] = [
     key: "llm_provider_configured",
     label: "LLM Provider",
     icon: Shield,
+    nature: "auto",
+    hint: "偵測 API key 是否在環境變數或 wizard 中設妥。",
     isGreen: (g) => g.llm_provider_configured,
   },
   {
     key: "cf_tunnel_configured",
     label: "Cloudflare Tunnel",
     icon: Cloud,
+    nature: "auto",
+    hint: "偵測 wizard 提供的 tunnel、或 compose-managed tunnel token。",
     isGreen: (g) => g.cf_tunnel_configured,
   },
   {
     key: "smoke_passed",
     label: "Smoke Test",
     icon: FlaskConical,
+    nature: "action",
+    hint: "要你動手：進 wizard 跑兩個工具鏈 DAG (~2 分鐘) 驗工廠出貨。",
     isGreen: (g) => g.smoke_passed,
   },
 ]
+
+// ─── Telemetry ticker ───────────────────────────────────────────────
+//
+// Always-visible thin strip along the bottom of the viewport showing
+// live system telemetry. Probes /readyz every 5 s; measures latency as
+// the round-trip wall time of the fetch. Data is real — if you see
+// "CORE DEGRADED" here, the backend's /readyz is actually reporting at
+// least one check red. Styled like ship-bridge telemetry: low vertical
+// footprint, monospace, cyan/purple accents, status-green/red for
+// health.
+
+interface Telemetry {
+  uplink: string
+  latencyMs: number | null
+  ready: boolean | null
+  db: string
+  migrations: string
+  providers: string
+  core: "NOMINAL" | "DEGRADED" | "OFFLINE" | "PROBING"
+  timestamp: string
+  error: string | null
+}
+
+function _formatLatency(ms: number | null): string {
+  if (ms == null) return "—"
+  if (ms < 1) return "<1ms"
+  return `${Math.round(ms)}ms`
+}
+
+function _formatTimestamp(d: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, "0")
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function _deriveUplink(): string {
+  if (typeof window === "undefined") return "—"
+  // CF-Tunnel deploys land on a public host; localhost / 127.* means
+  // the operator is running the backend locally (smoke / dev). Both
+  // are valid — just label honestly.
+  return window.location.host || "—"
+}
+
+function TelemetryTicker() {
+  const [tel, setTel] = useState<Telemetry>({
+    uplink: "—",
+    latencyMs: null,
+    ready: null,
+    db: "…",
+    migrations: "…",
+    providers: "…",
+    core: "PROBING",
+    timestamp: "--:--:--",
+    error: null,
+  })
+
+  const probe = useCallback(async () => {
+    const uplink = _deriveUplink()
+    const t0 = performance.now()
+    try {
+      const r: ReadyzResponse = await getReadyz()
+      const dt = performance.now() - t0
+      const checks = r.checks || {}
+      const allOk = r.ready && Object.values(checks).every((c) => c.ok)
+      setTel({
+        uplink,
+        latencyMs: dt,
+        ready: r.ready,
+        db: checks.db?.detail ?? "—",
+        migrations: checks.migrations?.detail ?? "—",
+        providers: checks.provider_chain?.detail ?? "—",
+        core: allOk ? "NOMINAL" : r.ready ? "DEGRADED" : "DEGRADED",
+        timestamp: _formatTimestamp(new Date()),
+        error: null,
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setTel((prev) => ({
+        ...prev,
+        uplink,
+        latencyMs: null,
+        ready: false,
+        core: "OFFLINE",
+        timestamp: _formatTimestamp(new Date()),
+        error: msg,
+      }))
+    }
+  }, [])
+
+  useEffect(() => {
+    void probe()
+    const id = setInterval(() => void probe(), 5000)
+    return () => clearInterval(id)
+  }, [probe])
+
+  const coreColor =
+    tel.core === "NOMINAL"
+      ? "text-[var(--status-green)]"
+      : tel.core === "DEGRADED"
+        ? "text-[var(--critical-red)]"
+        : tel.core === "OFFLINE"
+          ? "text-[var(--critical-red)]"
+          : "text-[var(--muted-foreground)]"
+
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed bottom-0 left-0 right-0 z-20 border-t border-[var(--holo-glass-border)] bg-black/70 backdrop-blur-sm"
+    >
+      <div className="mx-auto flex max-w-7xl items-center gap-3 overflow-x-auto whitespace-nowrap px-4 py-1.5 font-mono text-[10px] uppercase tracking-wider">
+        <span className="inline-flex items-center gap-1 text-[var(--neural-blue)]">
+          <RadioTower size={10} className="animate-pulse" />
+          TELEMETRY
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span>
+          <span className="text-[var(--muted-foreground)]">UPLINK </span>
+          <span className="text-[var(--foreground)]">{tel.uplink}</span>
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span>
+          <span className="text-[var(--muted-foreground)]">LATENCY </span>
+          <span className="text-[var(--foreground)]">
+            {_formatLatency(tel.latencyMs)}
+          </span>
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span>
+          <span className="text-[var(--muted-foreground)]">DB </span>
+          <span className="text-[var(--foreground)]">{tel.db}</span>
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span>
+          <span className="text-[var(--muted-foreground)]">MIGR </span>
+          <span className="text-[var(--foreground)]">{tel.migrations}</span>
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span>
+          <span className="text-[var(--muted-foreground)]">LLM </span>
+          <span className="text-[var(--foreground)]">{tel.providers}</span>
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span className={`inline-flex items-center gap-1 ${coreColor}`}>
+          <Zap size={10} />
+          CORE {tel.core}
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span>
+          <span className="text-[var(--muted-foreground)]">SESSION </span>
+          <span className="text-[var(--artifact-purple)]">
+            AWAITING OPERATOR
+          </span>
+        </span>
+        <span className="text-[var(--muted-foreground)]">·</span>
+        <span className="text-[var(--muted-foreground)]">
+          T {tel.timestamp}
+        </span>
+      </div>
+    </div>
+  )
+}
 
 // ─── Page ─────────────────────────────────────────────────────────────
 
@@ -221,47 +404,93 @@ export default function SetupRequiredPage() {
 
           {/* Gate grid */}
           <div className="mt-8 border-t border-[var(--holo-glass-border)] pt-6">
-            <div className="mb-3 font-mono text-[10px] uppercase tracking-widest text-[var(--muted-foreground)]">
-              INSTALL GATES
+            <div className="mb-3 flex items-center justify-between">
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[var(--muted-foreground)]">
+                INSTALL GATES
+              </div>
+              <div className="flex items-center gap-3 font-mono text-[9px] uppercase tracking-wider">
+                <span className="inline-flex items-center gap-1 text-[var(--neural-blue)]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--neural-blue)]" />
+                  AUTO
+                </span>
+                <span className="inline-flex items-center gap-1 text-[var(--artifact-purple)]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--artifact-purple)] animate-pulse" />
+                  OPERATOR ACTION
+                </span>
+              </div>
             </div>
             <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {GATES.map((gate) => {
                 const green = status ? gate.isGreen(status.status) : false
                 const Icon = gate.icon
+                const isAction = gate.nature === "action"
+                // Action gates that are still red need to visually pull
+                // the operator's eye — they're the actionable items.
+                const pending = !green && status !== null
+                const actionBorder =
+                  isAction && pending
+                    ? "border-[var(--artifact-purple)]/60 shadow-[0_0_12px_rgba(192,132,252,0.15)]"
+                    : "border-[var(--holo-glass-border)]"
                 return (
                   <li
                     key={gate.key}
-                    className="flex items-center gap-3 rounded border border-[var(--holo-glass-border)] bg-black/30 px-3 py-2"
+                    className={`flex flex-col gap-1 rounded border bg-black/30 px-3 py-2 ${actionBorder}`}
                   >
-                    <Icon
-                      size={14}
-                      className={
-                        green
-                          ? "text-[var(--status-green)]"
-                          : "text-[var(--muted-foreground)]"
-                      }
-                    />
-                    <span className="flex-1 font-mono text-xs text-[var(--foreground)]">
-                      {gate.label}
-                    </span>
-                    {status ? (
-                      green ? (
-                        <Check
-                          size={14}
-                          className="text-[var(--status-green)]"
-                        />
-                      ) : (
-                        <X
-                          size={14}
-                          className="text-[var(--muted-foreground)]"
-                        />
-                      )
-                    ) : (
-                      <Loader2
-                        size={12}
-                        className="animate-spin text-[var(--muted-foreground)]"
+                    <div className="flex items-center gap-3">
+                      <Icon
+                        size={14}
+                        className={
+                          green
+                            ? "text-[var(--status-green)]"
+                            : isAction
+                              ? "text-[var(--artifact-purple)]"
+                              : "text-[var(--muted-foreground)]"
+                        }
                       />
-                    )}
+                      <span className="flex-1 font-mono text-xs text-[var(--foreground)]">
+                        {gate.label}
+                      </span>
+                      <span
+                        className={`font-mono text-[9px] uppercase tracking-wider ${
+                          isAction
+                            ? "text-[var(--artifact-purple)]"
+                            : "text-[var(--neural-blue)]"
+                        }`}
+                        title={
+                          isAction
+                            ? "This gate requires an operator action in the wizard."
+                            : "This gate flips automatically when its condition is satisfied."
+                        }
+                      >
+                        {isAction ? "ACTION" : "AUTO"}
+                      </span>
+                      {status ? (
+                        green ? (
+                          <Check
+                            size={14}
+                            className="text-[var(--status-green)]"
+                          />
+                        ) : isAction ? (
+                          <ChevronRight
+                            size={14}
+                            className="text-[var(--artifact-purple)]"
+                          />
+                        ) : (
+                          <X
+                            size={14}
+                            className="text-[var(--muted-foreground)]"
+                          />
+                        )
+                      ) : (
+                        <Loader2
+                          size={12}
+                          className="animate-spin text-[var(--muted-foreground)]"
+                        />
+                      )}
+                    </div>
+                    <div className="pl-[26px] font-mono text-[10px] leading-relaxed text-[var(--muted-foreground)]">
+                      {gate.hint}
+                    </div>
                   </li>
                 )
               })}
@@ -343,6 +572,13 @@ export default function SetupRequiredPage() {
           OmniSight Productizer · neural command center
         </p>
       </main>
+
+      {/* Spacer so the telemetry ticker never overlaps the footer copy
+          on short viewports. Height matches ~2 lines of the ticker
+          content plus its vertical padding. */}
+      <div aria-hidden="true" className="h-10" />
+
+      <TelemetryTicker />
     </div>
   )
 }

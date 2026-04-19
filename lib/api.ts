@@ -695,6 +695,23 @@ export async function getHealth() {
   return request<{ status: string; engine: string; version: string }>("/health")
 }
 
+export interface ReadyzCheck {
+  ok: boolean
+  detail: string
+}
+
+export interface ReadyzResponse {
+  status: "ready" | "not_ready"
+  ready: boolean
+  checks: Record<string, ReadyzCheck>
+  timestamp: number
+}
+
+/** /readyz — deep liveness used by the setup-required telemetry ticker. */
+export async function getReadyz() {
+  return request<ReadyzResponse>("/readyz")
+}
+
 // ─── Agents ───
 
 export interface ApiAgent {
