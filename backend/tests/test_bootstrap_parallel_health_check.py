@@ -264,54 +264,66 @@ async def test_parallel_health_check_cf_tunnel_red_when_connector_offline(
 
 
 @pytest.mark.asyncio
-async def test_parallel_health_check_backend_red_on_5xx(
+async def test_parallel_health_check_backend_red_when_healthz_not_live(
     client, monkeypatch, _marker_tmp,
 ):
-    """Backend /healthz returning 503 → backend red, aggregate still HTTP 200."""
+    """The backend probe is now an inline call to ``healthz`` — no HTTP
+    self-hit — because the previous design broke under compose HA
+    (replicas listen on different ports, caddy LB made
+    ``127.0.0.1:PORT`` a coin-flip). So the only way for the probe
+    to go red in-process is if ``healthz()`` itself returns a non-
+    live payload or raises. We monkeypatch it to exercise both
+    branches.
+    """
     _boot.mark_cf_tunnel(skipped=True)
     _patch_httpx(monkeypatch, {
-        "http://backend/healthz": 503,
+        # Frontend still HTTP-probed — leave stub in place.
         "http://frontend": 200,
     })
+    # Force the inline healthz to report not-live.
+    from backend.routers import health as _health_mod
+
+    async def _not_live():
+        return {"status": "error", "live": False}
+    monkeypatch.setattr(_health_mod, "healthz", _not_live)
 
     r = await client.post(
         "/api/v1/bootstrap/parallel-health-check",
-        json={
-            "backend_url": "http://backend/healthz",
-            "frontend_url": "http://frontend",
-        },
+        json={"frontend_url": "http://frontend"},
         follow_redirects=False,
     )
     assert r.status_code == 200
     body = r.json()
     assert body["backend"]["status"] == "red"
-    assert "503" in (body["backend"]["detail"] or "")
     assert body["all_green"] is False
 
 
 @pytest.mark.asyncio
-async def test_parallel_health_check_backend_red_on_transport_failure(
+async def test_parallel_health_check_backend_red_when_healthz_raises(
     client, monkeypatch, _marker_tmp,
 ):
-    """Backend connection refused → backend red with transport detail."""
+    """If the inline ``healthz`` raises at all (e.g. startup not
+    finished), the probe should surface red with the exception type
+    in ``detail`` — but never 500 the caller."""
     _boot.mark_cf_tunnel(skipped=True)
     _patch_httpx(monkeypatch, {
-        "http://backend/healthz": httpx.ConnectError("Connection refused"),
         "http://frontend": 200,
     })
+    from backend.routers import health as _health_mod
+
+    async def _explode():
+        raise RuntimeError("event loop wedged")
+    monkeypatch.setattr(_health_mod, "healthz", _explode)
 
     r = await client.post(
         "/api/v1/bootstrap/parallel-health-check",
-        json={
-            "backend_url": "http://backend/healthz",
-            "frontend_url": "http://frontend",
-        },
+        json={"frontend_url": "http://frontend"},
         follow_redirects=False,
     )
     assert r.status_code == 200
     body = r.json()
     assert body["backend"]["status"] == "red"
-    assert "ConnectError" in (body["backend"]["detail"] or "")
+    assert "RuntimeError" in (body["backend"]["detail"] or "")
     assert body["all_green"] is False
 
 

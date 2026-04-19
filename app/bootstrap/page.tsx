@@ -2012,14 +2012,27 @@ const SERVICE_HEALTH_POLL_MS = 3000
 function HealthRowItem({
   row,
   result,
+  redStreak = 0,
 }: {
   row: HealthRow
   result: BootstrapHealthCheckResult | undefined
+  /** Number of consecutive red probes for this row. When ``status``
+   *  is ``red`` and streak < HEALTH_ROW_RED_STRIKES, the row displays
+   *  green-but-verifying — a single transient failure never paints
+   *  the row red. */
+  redStreak?: number
 }) {
   const Icon = row.icon
   // Tri-state: undefined while we have no observation yet, then driven
   // by the latest probe. ``skipped`` counts as green (LAN-only).
-  const status = result?.status ?? "pending"
+  const rawStatus = result?.status ?? "pending"
+  // Hysteresis: if raw is red but the streak is below threshold, the
+  // effective display status stays "green" (treating the failure as
+  // transient until proven repeated). The verifying badge gives the
+  // operator visual evidence that a re-check is pending.
+  const isRawRed = rawStatus === "red"
+  const verifying = isRawRed && redStreak < HEALTH_ROW_RED_STRIKES
+  const status = verifying ? "green" : rawStatus
   const isGreen = status === "green" || status === "skipped"
   const isRed = status === "red"
 
@@ -2085,6 +2098,20 @@ function HealthRowItem({
       >
         {latencyText}
       </span>
+      {/* Verifying badge — shown when the raw probe returned red but
+          the hysteresis window is still absorbing it. Communicates
+          "we saw a blip, we're checking" without flipping the row
+          red in the user's face. */}
+      {verifying && (
+        <span
+          data-testid={`bootstrap-service-health-row-${row.id}-verifying`}
+          className="inline-flex items-center gap-1 rounded-sm border border-[var(--neural-blue)]/40 bg-[var(--neural-blue)]/5 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-[var(--neural-blue)] shrink-0"
+          title="One transient failure detected — re-checking."
+        >
+          <Loader2 size={9} className="animate-spin" />
+          verifying
+        </span>
+      )}
     </div>
   )
 }
@@ -2233,6 +2260,19 @@ function StartServicesPanel({
   )
 }
 
+// Hysteresis threshold — how many consecutive red probes a row must
+// accumulate before the UI actually flips it red. 2 means a single
+// transient red (CF edge hiccup, caddy LB temporarily landing on a
+// re-starting replica, etc.) is masked; the row stays visually green
+// but carries a subtle "verifying" badge so the operator knows a
+// re-check is in flight.
+const HEALTH_ROW_RED_STRIKES = 2
+// How many consecutive transport-level XHR failures are allowed
+// before the sidebar pill gets nudged red. Below this, we keep the
+// pill on its last known state — a blip should not roll the wizard
+// cursor backward.
+const HEALTH_XHR_ERROR_STRIKES = 3
+
 function ServiceHealthStep({
   onChanged,
 }: {
@@ -2246,6 +2286,17 @@ function ServiceHealthStep({
   // Tracks how many probes have come back at least once, so the UI can
   // show "probing…" on first paint instead of stale "all red".
   const [probeCount, setProbeCount] = useState(0)
+  // Per-row consecutive-red counter. Refs rather than state because
+  // updating them must NOT trigger a re-render on its own — the
+  // re-render is driven by setSnapshot below, and we read the final
+  // counter value during render via memo.
+  const redStreakRef = useRef<Record<string, number>>({})
+  const xhrErrorStreakRef = useRef<number>(0)
+  // Mirror ref → state only once per probe so the memo that renders
+  // the rows actually recomputes. Keeping the visible snapshot of
+  // the streak lets HealthRowItem show the "verifying" hint too.
+  const [redStreak, setRedStreak] = useState<Record<string, number>>({})
+  const [xhrErrorStreak, setXhrErrorStreak] = useState<number>(0)
 
   // Stable ref over ``onChanged`` so the polling effect doesn't get
   // torn down + restarted every parent re-render (which would consume
@@ -2261,13 +2312,44 @@ function ServiceHealthStep({
     setError(null)
     try {
       const next = await bootstrapParallelHealthCheck()
+      // Update per-row red-streak BEFORE deciding onChanged — that
+      // way a single red doesn't flip the sidebar pill to "missing".
+      const streak = { ...redStreakRef.current }
+      for (const row of HEALTH_ROWS) {
+        const s = next[row.id]?.status
+        if (s === "green" || s === "skipped") {
+          streak[row.id] = 0
+        } else if (s === "red") {
+          streak[row.id] = (streak[row.id] ?? 0) + 1
+        }
+      }
+      redStreakRef.current = streak
+      xhrErrorStreakRef.current = 0
       setSnapshot(next)
+      setRedStreak(streak)
+      setXhrErrorStreak(0)
       setProbeCount((n) => n + 1)
-      onChangedRef.current(next.all_green)
+      // onChanged reflects the *stabilized* view — a row only counts
+      // as red if its streak has crossed the threshold. This keeps
+      // the sidebar pill from flickering on single-shot failures.
+      const stableAllGreen = HEALTH_ROWS.every((row) => {
+        const s = next[row.id]?.status
+        if (s === "green" || s === "skipped") return true
+        // status=red: only count as red after N strikes
+        return (streak[row.id] ?? 0) < HEALTH_ROW_RED_STRIKES
+      })
+      onChangedRef.current(stableAllGreen)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setError(msg)
-      onChangedRef.current(false)
+      // Transport error = we have no new info; don't flip rows and
+      // don't nudge the sidebar pill until the error streak crosses
+      // threshold (signalling a real outage, not a CF jitter).
+      xhrErrorStreakRef.current += 1
+      setXhrErrorStreak(xhrErrorStreakRef.current)
+      if (xhrErrorStreakRef.current >= HEALTH_XHR_ERROR_STRIKES) {
+        onChangedRef.current(false)
+      }
     } finally {
       setBusy(false)
     }
@@ -2323,14 +2405,47 @@ function ServiceHealthStep({
             key={row.id}
             row={row}
             result={snapshot ? snapshot[row.id] : undefined}
+            redStreak={redStreak[row.id] ?? 0}
           />
         ))}
       </div>
 
+      {/* Link-quality telemetry — surfaces transient XHR failures to
+          the backend (CF edge hiccup, browser fetch abort, etc.)
+          without flipping any row red. Hidden when the line is
+          clean. Rendered as a muted hint rather than a hard error
+          because a couple of blips are routine on a mobile uplink. */}
+      {xhrErrorStreak > 0 && (
+        <div
+          data-testid="bootstrap-service-health-xhr-wobble"
+          className={`flex items-center gap-2 rounded px-2 py-1 font-mono text-[10px] ${
+            xhrErrorStreak >= HEALTH_XHR_ERROR_STRIKES
+              ? "border border-[var(--destructive)]/40 bg-[var(--destructive)]/5 text-[var(--destructive)]"
+              : "border border-[var(--neural-blue)]/30 bg-[var(--neural-blue)]/5 text-[var(--neural-blue)]"
+          }`}
+        >
+          <Loader2 size={10} className="animate-spin" />
+          <span>
+            link wobble: last probe failed ({xhrErrorStreak}/
+            {HEALTH_XHR_ERROR_STRIKES} before degraded) — keeping last
+            known state visible while we retry.
+          </span>
+        </div>
+      )}
+
       <StartServicesPanel
         anyRed={
+          // Apply the same hysteresis to the "start services" CTA:
+          // a row that's on a red streak below threshold is still
+          // considered "verifying" here, not "broken". Prevents the
+          // big purple "Start services" button from flashing in on
+          // one bad probe.
           snapshot != null &&
-          HEALTH_ROWS.some((row) => snapshot[row.id]?.status === "red")
+          HEALTH_ROWS.some(
+            (row) =>
+              snapshot[row.id]?.status === "red" &&
+              (redStreak[row.id] ?? 0) >= HEALTH_ROW_RED_STRIKES,
+          )
         }
         onStartResolved={() => void runProbe()}
       />

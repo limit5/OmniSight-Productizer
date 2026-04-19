@@ -1494,29 +1494,55 @@ class ParallelHealthCheckResponse(BaseModel):
 
 
 async def _check_backend_ready(url: str, timeout: float) -> CheckResult:
-    """HTTP GET the backend /healthz and grade the response.
+    """Probe the backend's own liveness — inline, no HTTP self-hit.
 
-    Green on 2xx. Observability's /healthz already wraps DB ping +
-    watchdog + SSE + sandbox counters, so a 2xx here means the backend
-    process is fully wired up — not just listening.
+    Historically this did an HTTP ``GET`` to ``url`` (default
+    ``http://127.0.0.1:8000/api/v1/healthz``). That worked in
+    single-replica dev but is actively broken in the compose HA
+    topology:
+
+      * backend-a listens on container port 8000 (``CMD`` default)
+      * backend-b listens on container port 8001 (``command:``
+        override in ``docker-compose.prod.yml`` §backend-b)
+
+    Caddy load-balances the *parallel-health-check* XHR itself, so
+    roughly half the calls land on backend-b, which then probed
+    ``127.0.0.1:8000`` — an empty socket in its own container →
+    ``ConnectionRefused`` → ``backend: red/8 ms``. The wizard UI
+    flapped red ↔ green with the LB coin-flip, confusing operators
+    into thinking the backend was unstable when nothing was wrong.
+
+    We don't need the HTTP hop. This coroutine runs inside the same
+    uvicorn worker as ``healthz``; if the event loop scheduled us,
+    the process is live. Call the handler inline, treat the dict
+    ``{"status":"ok","live":True}`` as green, and short-circuit the
+    HTTP self-probe that made the probe output a function of Caddy
+    routing rather than backend health.
+
+    Keeps the ``url`` + ``timeout`` parameters so callers + tests
+    don't have to change signatures; both are ignored here — the
+    underlying call is synchronous in spirit and latency_ms should
+    always round to <1 ms.
     """
+    # url / timeout intentionally unused — see docstring above for
+    # why the HTTP self-probe was retired.
+    del url, timeout
     started = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(url)
+        from backend.routers.health import healthz
+
+        payload = await healthz()
         elapsed = int((time.monotonic() - started) * 1000)
-        if 200 <= resp.status_code < 300:
-            return CheckResult(ok=True, status="green", latency_ms=elapsed)
+        if payload.get("live"):
+            return CheckResult(
+                ok=True, status="green",
+                detail="inline /healthz ok",
+                latency_ms=elapsed,
+            )
         return CheckResult(
             ok=False, status="red",
-            detail=f"HTTP {resp.status_code}",
+            detail=f"healthz returned {payload}",
             latency_ms=elapsed,
-        )
-    except httpx.HTTPError as exc:
-        return CheckResult(
-            ok=False, status="red",
-            detail=f"{type(exc).__name__}: {exc}"[:200],
-            latency_ms=int((time.monotonic() - started) * 1000),
         )
     except Exception as exc:  # pragma: no cover — defensive
         return CheckResult(
