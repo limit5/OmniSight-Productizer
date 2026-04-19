@@ -94,3 +94,98 @@ emit_debug_finding(
 - 更新.gitignore。
 - 執行git commit。
 - 重新啟動程式展示結果。
+
+---
+
+## Production Readiness Gate（2026-04-20 納入，由 Phase-3 預審發現的 G4 dev-green-but-not-prod-ready 漏洞確立）
+
+### 背景：為什麼加這個 gate
+
+G4（SQLite → PostgreSQL，#1532-1539 已全 `[x]`）shipped 時帶 712 顆 contract test 全綠、`pg-live-integration` CI job 硬 gate 過、`docs/ops/db_failover.md` 15 節 runbook 落地。從「code-level 完成度」看無可挑剔。但 Phase-3 預審時才發現兩個 production-breaking gap：
+
+- **PG 驅動 (asyncpg + psycopg2) 不在 production image**——當初為省 11 MB wheel 刻意 CI-only，結果從未在 prod image 驗過 `import asyncpg`。
+- **`migrate_sqlite_to_pg.py::TABLES_IN_ORDER` 落後 live schema 7 張表**——G4 landed 後兩週內 Alembic 加了 `bootstrap_state / dag_plans / iq_runs / mfa_backup_codes / password_history / prompt_versions / user_mfa`；migrator 無人跟進；直接 cutover 會靜默丟這 7 張表的資料。
+
+兩個 gap 都不是 code bug——是「**dev-green 不等於 prod-ready**」的結構性縫隙。現行 `[x]` checkbox 一旦打勾就視為完工，但完工的是「code + tests + docs 合進 main」、不是「production stack 真的能跑這條 code path」。這中間有幾段 last-mile 工作持續被遺漏：
+
+1. **Production image / runtime 依賴**：CI 跑的是一次性 ephemeral 環境、可以 install 額外 wheel；production Docker image 是 baked-in artifact、要重 build 才新增依賴。
+2. **Schema / data migration drift**：任何以「列舉當前 schema」為前提的 offline tool（migrator / dump script / backup catalog / schema diff test），每次有新 Alembic migration 都必須同步。沒有自動偵測手段時必漂。
+3. **Env knobs 實際套用**：code 支援 `OMNISIGHT_X` 不等於 operator 有 set 它；`.env` 是 gitignored 運維 artifact、commit 訊息不 cover。
+4. **Docker network / volume 實際 wiring**：compose 宣告 `external: true` network 不等於該 network 真存在；宣告 volume 不等於 mount 給了對的 service。
+5. **Runtime 實測**：有 unit test + CI integration test 不等於在 prod topology（雙 replica + Caddy LB + CF tunnel）下真跑過。
+
+### 強制補丁：Step 3 / Step 4 / Step 6 的補充 acceptance criteria
+
+以下檢查必須在 TODO row 打 `[x]` **之前**逐項過，任一未過即 row 不准打勾（或必須明確標註降級狀態、見下節 TODO 狀態分層）：
+
+#### Step 3 完成條件加入：
+- [ ] **Production image 實裝依賴驗收**：新增任何 Python / OS package 時，必須 (a) 加入 `backend/requirements.in`，(b) 重 run `pip-compile --generate-hashes`，(c) 重 build production image，(d) `docker run --rm <image> python3 -c "import <new_dep>"` 綠。
+- [ ] **Schema migration 新增表時同步**：若 Alembic migration 新增 table，必須在同一 PR 內更新所有「以表列舉為前提」的 offline artefacts——至少包含 `scripts/migrate_sqlite_to_pg.py::TABLES_IN_ORDER`、`TABLES_WITH_IDENTITY_ID`（若新表 INTEGER PK）、`scripts/scan_sqlite_isms.py` 的排除清單（若適用）。
+
+#### Step 4 單元測試加入一條「drift guard」族：
+- [ ] **任何「靜態列表 vs 實際資料源」的對齊關係必須有 test**。反例：migrator 的 `TABLES_IN_ORDER` vs live Alembic schema——Phase-3 F3 新增的 `backend/tests/test_migrator_schema_coverage.py` 就是該模式的範本。通用原則：「列表」+「資料源」配成對的地方，都加一個 diff test，差一個立刻 CI red。這類 test 可能以 auto-generate 形式出現（live DB introspect、manifest list scan、alembic metadata 讀取等），關鍵是「執行時動態」不是「commit 時寫死」。
+
+#### Step 6 狀態更新加入：
+- [ ] **Production status 必填**：HANDOFF entry 結尾新增 `**Production status:**` 一行，值為以下之一：
+  - `dev-only` — code 在 main，只在本地/CI 跑過
+  - `deployed-inactive` — production image + env knob 都準備好，但 feature flag / env var 關著（未啟用）
+  - `deployed-active` — production 實跑中、至少一次 live smoke 綠
+  - `deployed-observed` — production 實跑 ≥ 24h、無回歸 metric
+- [ ] TODO row 的 checkbox 反映 deployed status（見下節分層約定）。
+
+### TODO.md 狀態分層（2026-04-20 新約定）
+
+既有 `[x]` checkbox 含糊、不區分「code merged」vs「prod 跑起來」。改成四層：
+
+| 標記 | 含義 | 適用情境 |
+|---|---|---|
+| `[ ]` | Not started | 空盒子，未開始 |
+| `[~]` | In progress | 工作正在做、未合進 main |
+| `[x]` | Merged — **code 進 main + tests 綠 + CI 通過** | 典型「開發完」，**不保證 production 跑得起來** |
+| `[D]` | Deployed — **production image 重 build + env 實套用 + 至少一次 live smoke 綠** | 真正「上線」 |
+| `[V]` | Verified — **deployed ≥ 24h + 無 regression metric + 觀察窗過** | 真正「穩定」 |
+
+舊 `[x]` row 不強制回填 `[D]` / `[V]`——太多歷史資料、工作量不合理。但**新 row 從今日起必須使用新分層**。特別：G4 / I10 / I9 類型的 "multi-artefact" milestone row，建議 sub-bullet 各自標：
+
+```
+### G4. SQLite → PostgreSQL migration
+- [x] Runtime shim + dual-track CI  (code merged 2026-04-18)
+- [x] Connection abstraction          (code merged 2026-04-18)
+- [x] HA compose bundle               (code merged 2026-04-18)
+- [x] Data migration script           (code merged 2026-04-18)
+- [x] CI postgres matrix              (code merged 2026-04-18)
+- [x] Failover runbook                (code merged 2026-04-18)
+- [ ] → [D]: Production image ships asyncpg + psycopg2
+- [ ] → [D]: ``OMNISIGHT_DATABASE_URL`` wired + cutover executed
+- [ ] → [V]: 24h observation window after cutover clean
+```
+
+這讓 "**milestone is shipped**" 與 "**milestone is actually running in prod**" 兩個維度分開記錄、避免下一個 Phase-3-類型的驚喜。
+
+### HANDOFF.md 格式補強
+
+每次 entry 結尾新增固定欄位（放在「風險 / 已知問題」之後）：
+
+```
+**Production status: [dev-only|deployed-inactive|deployed-active|deployed-observed]**
+**Next gate:** ....（下一個要 flip 的狀態、需要做什麼、誰做、何時）
+```
+
+`Next gate` 是為了讓閱讀者立刻知道「這 milestone 現在缺哪一步到 production」。例子：
+
+> Production status: dev-only  
+> Next gate: deployed-inactive — 需要 (1) `pip-compile` 把 asyncpg + psycopg2 加進 production requirements.txt、(2) rebuild backend image。預估 30 min、不需 maintenance window。
+
+`Production status: deployed-observed` 之後這兩欄可以省略（milestone 已封閉）。
+
+### 給 AI 助手 / 未來自己的提醒
+
+**實作 SOP Step 1 深度分析時，除了 code / test / docs，必須問**：
+
+1. 這條 code path 現在 production image 真的跑得起來嗎？（`docker run --rm ... import X` 驗一下）
+2. 這條 code path 依賴的「靜態列表 / catalog / schema」跟 live 狀態對齊嗎？（特別是 data migration、backup tools、schema scanners）
+3. Env knob / feature flag 實際有 set 嗎？還是 code 支援但 `.env` 註解著？
+4. Docker network / external volume / compose dependency 真存在 / 真 mount / 真連通嗎？
+5. 有沒有 drift guard test 可以主動抓到 #2？沒有就開一個 task 補。
+
+前一輪自己打 `[x]` 的 row，不代表下一個 feature 可以直接 build on top——在把它當 "done" 的基石之前，先跑這 5 個問題的 sanity check。這是 `implement_phase_step.md` 已有的 Step 1「深度分析及評估」的具體展開。
