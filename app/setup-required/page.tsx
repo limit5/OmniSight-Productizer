@@ -15,7 +15,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import {
-  Activity,
   AlertTriangle,
   Check,
   ChevronDown,
@@ -98,6 +97,243 @@ const GATES: GateDef[] = [
     isGreen: (g) => g.smoke_passed,
   },
 ]
+
+// ─── Gate orbit (round 2-A) ─────────────────────────────────────────
+//
+// Replaces the 2×2 grid with a "star-chart" — a pulsing bootstrap core
+// in the middle, 4 gates riding a dashed orbit ring at the diagonals,
+// radial connection lines from core to each gate, and a comet that
+// slides around the ring to keep the scene alive without distracting.
+//
+// Gate state colors:
+//   * green (satisfied)     → green ring + sonar-ping pulse
+//   * action pending        → purple ring + purple attention pulse
+//   * auto pending          → muted cyan ring, no pulse (it'll flip
+//                             by itself when the backend detects the
+//                             condition; no operator action needed)
+//
+// Positions are the 45° diagonals of a circle centered at (180,180)
+// with r=115 — enough gap from the core halo (~r=28) that labels
+// never collide with it. Coordinates are % of the 360×360 viewBox so
+// the whole diagram scales responsively inside its aspect-ratio
+// container.
+
+const ORBIT_POSITIONS: Record<GateKey, { left: string; top: string }> = {
+  admin_password_default: { left: "27.4%", top: "27.4%" }, // top-left
+  llm_provider_configured: { left: "72.6%", top: "27.4%" }, // top-right
+  cf_tunnel_configured: { left: "72.6%", top: "72.6%" }, // bottom-right
+  smoke_passed: { left: "27.4%", top: "72.6%" }, // bottom-left
+}
+
+function GateOrbitTile({
+  gate,
+  green,
+  statusLoaded,
+}: {
+  gate: GateDef
+  green: boolean
+  statusLoaded: boolean
+}) {
+  const Icon = gate.icon
+  const isAction = gate.nature === "action"
+  const pending = !green && statusLoaded
+  const pos = ORBIT_POSITIONS[gate.key]
+
+  // Ring / icon color cascade. Green always wins; otherwise ACTION
+  // gets purple, AUTO gets muted cyan.
+  const ringClass = green
+    ? "border-[var(--status-green)] text-[var(--status-green)]"
+    : isAction
+      ? "border-[var(--artifact-purple)] text-[var(--artifact-purple)]"
+      : "border-[var(--neural-blue)]/40 text-[var(--neural-blue)]/70"
+
+  // Pulse animation cascade — the "noise" should be quietest for the
+  // steady-state AUTO gates and loudest for the one the operator
+  // still has to act on.
+  const pulseStyle: React.CSSProperties = green
+    ? {
+        animation:
+          "orbit-gate-pulse-green 2.4s cubic-bezier(0.4,0,0.6,1) infinite",
+      }
+    : isAction && pending
+      ? {
+          animation:
+            "orbit-gate-pulse-action 1.6s cubic-bezier(0.4,0,0.6,1) infinite",
+        }
+      : {}
+
+  return (
+    <div
+      className="absolute flex flex-col items-center gap-1"
+      style={{ left: pos.left, top: pos.top, transform: "translate(-50%, -50%)" }}
+    >
+      <div
+        className={`flex h-10 w-10 items-center justify-center rounded-full border-2 bg-black/60 backdrop-blur-sm ${ringClass}`}
+        style={pulseStyle}
+      >
+        <Icon size={16} />
+      </div>
+      <div className="flex flex-col items-center gap-0.5">
+        <span className="whitespace-nowrap font-mono text-[10px] uppercase tracking-wider text-[var(--foreground)]">
+          {gate.label}
+        </span>
+        <span
+          className={`font-mono text-[8px] uppercase tracking-wider ${
+            isAction
+              ? "text-[var(--artifact-purple)]"
+              : "text-[var(--neural-blue)]"
+          }`}
+        >
+          {statusLoaded
+            ? green
+              ? "✓ LOCKED"
+              : isAction
+                ? "▶ ACTION"
+                : "○ AUTO"
+            : "… PROBING"}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function GateOrbit({
+  gates,
+  status,
+}: {
+  gates: GateDef[]
+  status: BootstrapStatusResponse | null
+}) {
+  const statusLoaded = status !== null
+
+  return (
+    <div className="relative mx-auto aspect-square w-full max-w-[360px]">
+      <svg
+        viewBox="0 0 360 360"
+        className="absolute inset-0 h-full w-full"
+        aria-hidden="true"
+      >
+        {/* Radial connection lines from core to each gate.
+            Drawn first so the orbit ring + core layer on top. */}
+        {gates.map((gate) => {
+          const pos = ORBIT_POSITIONS[gate.key]
+          const x = (parseFloat(pos.left) / 100) * 360
+          const y = (parseFloat(pos.top) / 100) * 360
+          const green = status ? gate.isGreen(status.status) : false
+          const stroke = green
+            ? "var(--status-green)"
+            : gate.nature === "action"
+              ? "var(--artifact-purple)"
+              : "var(--neural-blue)"
+          return (
+            <line
+              key={gate.key}
+              x1={180}
+              y1={180}
+              x2={x}
+              y2={y}
+              stroke={stroke}
+              strokeWidth={0.8}
+              strokeDasharray="3 4"
+              opacity={0.35}
+            />
+          )
+        })}
+
+        {/* Orbit ring — dashed, slow rotation to feel alive. */}
+        <g
+          style={{
+            transformOrigin: "180px 180px",
+            animation: "orbit-ring-rotate 40s linear infinite",
+          }}
+        >
+          <circle
+            cx={180}
+            cy={180}
+            r={115}
+            fill="none"
+            stroke="var(--neural-blue)"
+            strokeWidth={0.8}
+            strokeDasharray="2 6"
+            opacity={0.45}
+          />
+        </g>
+
+        {/* Bootstrap core — pulsing. Halo first, then solid. */}
+        <g style={{ animation: "orbit-core-glow 3s ease-in-out infinite" }}>
+          <circle
+            cx={180}
+            cy={180}
+            r={28}
+            fill="var(--neural-blue)"
+            opacity={0.08}
+          />
+          <circle
+            cx={180}
+            cy={180}
+            r={18}
+            fill="none"
+            stroke="var(--neural-blue)"
+            strokeWidth={1.2}
+            opacity={0.6}
+          />
+          <circle
+            cx={180}
+            cy={180}
+            r={9}
+            fill="var(--neural-blue)"
+            opacity={0.9}
+          />
+        </g>
+
+        {/* Comet travelling the orbit — SMIL animation along a full
+            circle path. Bright dot with a short fading tail. */}
+        <circle r={3} fill="var(--neural-blue)" opacity={0.95}>
+          <animateMotion
+            dur="12s"
+            repeatCount="indefinite"
+            path="M 180,65 A 115,115 0 1,1 179.9,65 Z"
+            rotate="auto"
+          />
+        </circle>
+        <circle r={5} fill="var(--neural-blue)" opacity={0.25}>
+          <animateMotion
+            dur="12s"
+            repeatCount="indefinite"
+            path="M 180,65 A 115,115 0 1,1 179.9,65 Z"
+            rotate="auto"
+          />
+        </circle>
+
+        {/* CORE label in the center. */}
+        <text
+          x={180}
+          y={215}
+          textAnchor="middle"
+          fill="var(--muted-foreground)"
+          style={{
+            fontFamily: "var(--font-mono, monospace)",
+            fontSize: 8,
+            letterSpacing: "0.3em",
+            textTransform: "uppercase",
+          }}
+        >
+          core
+        </text>
+      </svg>
+
+      {/* Gate overlays — positioned in % so they track the SVG scale. */}
+      {gates.map((gate) => (
+        <GateOrbitTile
+          key={gate.key}
+          gate={gate}
+          green={status ? gate.isGreen(status.status) : false}
+          statusLoaded={statusLoaded}
+        />
+      ))}
+    </div>
+  )
+}
 
 // ─── Telemetry ticker ───────────────────────────────────────────────
 //
@@ -259,6 +495,137 @@ function TelemetryTicker() {
   )
 }
 
+// ─── Finalize cinematic transition (round 2-B) ──────────────────────
+//
+// When the backend reports ``finalized=true`` (the operator wrapped up
+// the wizard in another tab, or agent-hosted smoke just flipped the
+// last gate), we play a ~2s "boarding cutscene" before the redirect
+// to ``/`` instead of the previous hard ``window.location.replace``.
+//
+// The sequence reads as "core aligned → systems nominal → rocket
+// boost off → flash to white → new world loads":
+//
+//   0.0s   overlay fades in, backdrop blurs, text begins to ignite
+//   0.8s   ALL SYSTEMS NOMINAL is fully glowing
+//   1.0s   rocket lifts off, thrust streak elongates
+//   1.7s   rocket scales to a speck, fades
+//   1.7s   whip-flash to white
+//   2.0s   window.location.replace("/")
+//
+// If the user refreshes or aborts inside this window (unlikely — the
+// overlay is pointer-events-none on the redirect trigger, but the
+// back button still works), the side-effect on unmount cancels the
+// timer so nothing ghost-navigates.
+
+function FinalizeTransition({ onDone }: { onDone: () => void }) {
+  useEffect(() => {
+    const id = window.setTimeout(onDone, 2000)
+    return () => window.clearTimeout(id)
+  }, [onDone])
+
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      aria-label="bootstrap finalized — initializing command center"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xl"
+      style={{
+        animation:
+          "finalize-overlay-enter 400ms cubic-bezier(0.25,0.1,0.25,1) both",
+      }}
+    >
+      {/* Whip-flash overlay — transparent until the final 200 ms, then
+          washes everything to white right before we hand off to "/". */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0"
+        style={{
+          animation: "finalize-flash 2000ms cubic-bezier(0.6,0,0.3,1) forwards",
+        }}
+      />
+
+      {/* Main cinematic column. */}
+      <div className="relative z-10 flex flex-col items-center gap-8 px-6 text-center">
+        {/* Rocket — centered below the text line; boosts upward. */}
+        <div className="relative flex flex-col items-center">
+          {/* Thrust streak — a vertical gradient column beneath the
+              rocket that elongates as the rocket rises, sold as plasma
+              exhaust. */}
+          <div
+            aria-hidden="true"
+            className="absolute left-1/2 top-8 -translate-x-1/2 rounded-full"
+            style={{
+              width: "6px",
+              background:
+                "linear-gradient(to bottom, var(--neural-blue) 0%, transparent 100%)",
+              animation:
+                "finalize-thrust-streak 1600ms cubic-bezier(0.3,0,0.5,1) 400ms forwards",
+              transformOrigin: "top center",
+            }}
+          />
+          <div
+            style={{
+              animation:
+                "finalize-rocket-boost 1500ms cubic-bezier(0.4,0,0.2,1) 500ms forwards",
+            }}
+          >
+            <Rocket
+              size={52}
+              className="text-[var(--neural-blue)]"
+              strokeWidth={1.5}
+            />
+          </div>
+        </div>
+
+        {/* Headline — Orbitron glow that ignites into frame. */}
+        <div
+          className="font-bold uppercase text-[var(--neural-blue)]"
+          style={{
+            fontFamily: "var(--font-orbitron), sans-serif",
+            fontSize: "clamp(1.75rem, 5vw, 3rem)",
+            animation:
+              "finalize-text-ignite 800ms cubic-bezier(0.25,0.1,0.25,1) forwards",
+            opacity: 0,
+          }}
+        >
+          ALL&nbsp;SYSTEMS&nbsp;NOMINAL
+        </div>
+
+        {/* Subtitle — blinking dots to sell "still doing things, be
+            patient". Kept intentionally minimal so the hero text
+            breathes. */}
+        <div
+          className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.3em] text-[var(--neural-blue)]/80"
+          style={{
+            animation: "finalize-text-ignite 800ms 200ms forwards",
+            opacity: 0,
+          }}
+        >
+          <span>Initializing Command Center</span>
+          <span className="inline-flex gap-1">
+            <span
+              className="h-1 w-1 rounded-full bg-[var(--neural-blue)]"
+              style={{ animation: "blink 1.2s ease-in-out infinite" }}
+            />
+            <span
+              className="h-1 w-1 rounded-full bg-[var(--neural-blue)]"
+              style={{
+                animation: "blink 1.2s ease-in-out 200ms infinite",
+              }}
+            />
+            <span
+              className="h-1 w-1 rounded-full bg-[var(--neural-blue)]"
+              style={{
+                animation: "blink 1.2s ease-in-out 400ms infinite",
+              }}
+            />
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────
 
 export default function SetupRequiredPage() {
@@ -267,6 +634,11 @@ export default function SetupRequiredPage() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
+  // Round 2-B: once the backend reports finalized=true, flip into the
+  // cinematic transition state. The FinalizeTransition component
+  // self-terminates via an onDone callback after ~2 s, which then
+  // performs the actual route swap.
+  const [finalizing, setFinalizing] = useState(false)
 
   const probe = useCallback(async () => {
     setLoading(true)
@@ -290,13 +662,15 @@ export default function SetupRequiredPage() {
 
   // If the backend has since come out of the bootstrap-required state
   // (operator finished the wizard in another tab, or the agent-hosted
-  // smoke path finalized it), stop parking here — send them to the app
-  // shell so they're not stuck staring at this screen.
+  // smoke path finalized it), play the ~2s finalize cinematic then
+  // send them to the app shell. The redirect itself is owned by the
+  // FinalizeTransition's onDone callback so the timing never drifts
+  // from the animation duration.
   useEffect(() => {
-    if (status?.finalized) {
-      window.location.replace("/")
+    if (status?.finalized && !finalizing) {
+      setFinalizing(true)
     }
-  }, [status?.finalized])
+  }, [status?.finalized, finalizing])
 
   const rawJson = useMemo(() => {
     // The 503 body mirrors ``{"error": "bootstrap_required", "status": <gates>, "missing_steps": [...]}``;
@@ -419,78 +793,67 @@ export default function SetupRequiredPage() {
                 </span>
               </div>
             </div>
-            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {/* Round 2-A: orbital star-chart replacing the 2×2 grid.
+                Pulsing core + 4 gate satellites on a dashed ring + a
+                comet tracing the orbit. Purely visual candy — the
+                authoritative per-gate semantics live in the hint list
+                below so screen readers + low-motion users still get
+                everything. */}
+            <GateOrbit gates={GATES} status={status} />
+
+            {/* Compact hint list — kept below the orbit so the
+                information density from round 1 (AUTO/ACTION badge +
+                hint copy) is not lost to eye-candy. Flat layout, one
+                row per gate, aligned left. */}
+            <ul className="mt-6 flex flex-col gap-1.5">
               {GATES.map((gate) => {
                 const green = status ? gate.isGreen(status.status) : false
-                const Icon = gate.icon
                 const isAction = gate.nature === "action"
-                // Action gates that are still red need to visually pull
-                // the operator's eye — they're the actionable items.
                 const pending = !green && status !== null
-                const actionBorder =
-                  isAction && pending
-                    ? "border-[var(--artifact-purple)]/60 shadow-[0_0_12px_rgba(192,132,252,0.15)]"
-                    : "border-[var(--holo-glass-border)]"
                 return (
                   <li
                     key={gate.key}
-                    className={`flex flex-col gap-1 rounded border bg-black/30 px-3 py-2 ${actionBorder}`}
+                    className="flex items-start gap-3 font-mono text-[10px] leading-relaxed"
                   >
-                    <div className="flex items-center gap-3">
-                      <Icon
-                        size={14}
-                        className={
-                          green
-                            ? "text-[var(--status-green)]"
-                            : isAction
-                              ? "text-[var(--artifact-purple)]"
-                              : "text-[var(--muted-foreground)]"
-                        }
-                      />
-                      <span className="flex-1 font-mono text-xs text-[var(--foreground)]">
-                        {gate.label}
-                      </span>
-                      <span
-                        className={`font-mono text-[9px] uppercase tracking-wider ${
-                          isAction
+                    <span
+                      className={`mt-0.5 inline-flex h-4 w-10 items-center justify-center rounded-sm border text-[8px] uppercase tracking-wider ${
+                        isAction
+                          ? "border-[var(--artifact-purple)]/60 text-[var(--artifact-purple)]"
+                          : "border-[var(--neural-blue)]/60 text-[var(--neural-blue)]"
+                      }`}
+                    >
+                      {isAction ? "ACTION" : "AUTO"}
+                    </span>
+                    <span
+                      className={`mt-0.5 inline-flex h-4 w-4 items-center justify-center ${
+                        green
+                          ? "text-[var(--status-green)]"
+                          : isAction && pending
                             ? "text-[var(--artifact-purple)]"
-                            : "text-[var(--neural-blue)]"
-                        }`}
-                        title={
-                          isAction
-                            ? "This gate requires an operator action in the wizard."
-                            : "This gate flips automatically when its condition is satisfied."
-                        }
-                      >
-                        {isAction ? "ACTION" : "AUTO"}
-                      </span>
+                            : "text-[var(--muted-foreground)]"
+                      }`}
+                    >
                       {status ? (
                         green ? (
-                          <Check
-                            size={14}
-                            className="text-[var(--status-green)]"
-                          />
+                          <Check size={12} />
                         ) : isAction ? (
-                          <ChevronRight
-                            size={14}
-                            className="text-[var(--artifact-purple)]"
-                          />
+                          <ChevronRight size={12} />
                         ) : (
-                          <X
-                            size={14}
-                            className="text-[var(--muted-foreground)]"
-                          />
+                          <X size={12} />
                         )
                       ) : (
-                        <Loader2
-                          size={12}
-                          className="animate-spin text-[var(--muted-foreground)]"
-                        />
+                        <Loader2 size={10} className="animate-spin" />
                       )}
-                    </div>
-                    <div className="pl-[26px] font-mono text-[10px] leading-relaxed text-[var(--muted-foreground)]">
+                    </span>
+                    <span className="flex-1 text-[var(--muted-foreground)]">
+                      <span className="text-[var(--foreground)]">
+                        {gate.label}
+                      </span>
+                      <span className="mx-1.5 text-[var(--muted-foreground)]">
+                        ·
+                      </span>
                       {gate.hint}
-                    </div>
+                    </span>
                   </li>
                 )
               })}
@@ -579,6 +942,13 @@ export default function SetupRequiredPage() {
       <div aria-hidden="true" className="h-10" />
 
       <TelemetryTicker />
+
+      {/* Round 2-B: cinematic finalize overlay. Mounted only while
+          ``finalizing`` is true so the normal page stays identical
+          to round 1 until the backend actually reports finalized. */}
+      {finalizing && (
+        <FinalizeTransition onDone={() => window.location.replace("/")} />
+      )}
     </div>
   )
 }

@@ -1534,3 +1534,134 @@ html {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────
+ * Round 2 — setup-required orbit view + finalize cinematic transition
+ * Prefixed `orbit-` / `finalize-` to stay collision-free from the
+ * 55+ other keyframes above.
+ * ────────────────────────────────────────────────────────────────*/
+
+/* Central "bootstrap core" pulsing glow — gentle breathing, not
+ * aggressive. Drives both the core dot and its halo. */
+@keyframes orbit-core-glow {
+  0%, 100% {
+    filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.6));
+    opacity: 0.95;
+  }
+  50% {
+    filter: drop-shadow(0 0 24px rgba(56, 189, 248, 1));
+    opacity: 1;
+  }
+}
+
+/* Green gate satisfied — soft expanding ring, like a sonar ping. */
+@keyframes orbit-gate-pulse-green {
+  0% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(34, 197, 94, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+  }
+}
+
+/* Operator-action pending — purple pulse to beckon attention. */
+@keyframes orbit-gate-pulse-action {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(192, 132, 252, 0.5);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgba(192, 132, 252, 0);
+    transform: scale(1.06);
+  }
+}
+
+/* Slow revolution of the dashed orbit ring — keeps the whole
+ * diagram feeling alive without distracting. */
+@keyframes orbit-ring-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Finalize cinematic ─── */
+
+/* Full-screen overlay fade + flash-to-white at the end. */
+@keyframes finalize-overlay-enter {
+  from { opacity: 0; backdrop-filter: blur(0px); }
+  to { opacity: 1; backdrop-filter: blur(12px); }
+}
+
+/* "ALL SYSTEMS NOMINAL" text scales up + glows as it appears. */
+@keyframes finalize-text-ignite {
+  0% {
+    opacity: 0;
+    transform: scale(0.85);
+    letter-spacing: 0.4em;
+    text-shadow: 0 0 0 rgba(56, 189, 248, 0);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.02);
+    letter-spacing: 0.3em;
+    text-shadow:
+      0 0 30px rgba(56, 189, 248, 1),
+      0 0 60px rgba(56, 189, 248, 0.6);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    letter-spacing: 0.3em;
+    text-shadow:
+      0 0 20px rgba(56, 189, 248, 0.9),
+      0 0 40px rgba(56, 189, 248, 0.5);
+  }
+}
+
+/* Rocket boosts upward out of frame then scales to a speck. */
+@keyframes finalize-rocket-boost {
+  0% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+    filter: drop-shadow(0 0 12px rgba(56, 189, 248, 0.8));
+  }
+  40% {
+    transform: translate(0, -80px) scale(1.3);
+    opacity: 1;
+    filter: drop-shadow(0 -10px 20px rgba(56, 189, 248, 1));
+  }
+  100% {
+    transform: translate(0, -480px) scale(0.1);
+    opacity: 0;
+    filter: drop-shadow(0 -20px 40px rgba(56, 189, 248, 1));
+  }
+}
+
+/* Thrust streak trailing beneath the rocket — elongates as it rises. */
+@keyframes finalize-thrust-streak {
+  0% {
+    height: 0;
+    opacity: 0;
+  }
+  20% {
+    height: 40px;
+    opacity: 1;
+  }
+  80% {
+    height: 480px;
+    opacity: 0.8;
+  }
+  100% {
+    height: 600px;
+    opacity: 0;
+  }
+}
+
+/* Final whip-flash to pure white right before the redirect. */
+@keyframes finalize-flash {
+  0%, 70% { background-color: rgba(0, 0, 0, 0); }
+  88% { background-color: rgba(255, 255, 255, 0.85); }
+  100% { background-color: rgba(255, 255, 255, 1); }
+}
