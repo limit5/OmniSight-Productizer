@@ -113,3 +113,6 @@ _pg-live-junit.xml
 _migrate-dryrun.json
 deploy/blue-green/rollback_timestamp
 deploy/blue-green/*.tmp.*
+
+# Phase-3 cutover pre-flight SQLite snapshots (rollback safety net)
+backups/

@@ -250,6 +250,48 @@ def _parse_rowcount(status: str | None) -> int:
 # ── Cursor emulation ──────────────────────────────────────────────────────
 
 
+class _ExecuteResult:
+    """Dual-mode return object from ``PgCompatConnection.execute(...)``.
+
+    aiosqlite's ``execute()`` returns an object that is BOTH awaitable
+    (yielding a cursor) and an async context manager (entering yields
+    the same cursor, exiting closes it). db.py uses both call shapes:
+
+        cur = await _conn().execute(...)        # awaitable
+        async with _conn().execute(...) as cur: # context manager
+
+    We can't replicate this with a plain ``async def execute()`` — that
+    returns a coroutine which is NOT a context manager. Instead we
+    return this deferred-execution proxy: the actual asyncpg fetch/
+    execute runs inside ``__await__`` or ``__aenter__``, whichever the
+    caller uses first.
+
+    Why not ``contextlib.asynccontextmanager``? That yields an
+    async-context-manager but not an awaitable. We need both on the
+    same object.
+    """
+
+    __slots__ = ("_conn", "_sql", "_params", "_cursor")
+
+    def __init__(self, conn: "PgCompatConnection", sql: str, params: Any) -> None:
+        self._conn = conn
+        self._sql = sql
+        self._params = params
+        self._cursor: _PgCursor | None = None
+
+    def __await__(self):
+        return self._conn._do_execute(self._sql, self._params).__await__()
+
+    async def __aenter__(self) -> "_PgCursor":
+        self._cursor = await self._conn._do_execute(self._sql, self._params)
+        return self._cursor
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ARG002
+        if self._cursor is not None:
+            await self._cursor.close()
+            self._cursor = None
+
+
 class _PgCursor:
     """aiosqlite-cursor-like wrapper over a pre-materialised result set.
 
@@ -380,11 +422,21 @@ class PgCompatConnection:
                 self._tx = None
 
     # ── SQL execution ──
-    async def execute(
+    def execute(
         self, sql: str, params: Sequence[Any] | None = None,
+    ) -> _ExecuteResult:
+        """Return a dual-mode result that is BOTH awaitable AND a
+        valid ``async with ... as cur:`` target — matching aiosqlite's
+        ``execute()`` calling contract so db.py's 80 call sites work
+        unchanged. Actual SQL dispatch happens lazily inside
+        :meth:`_do_execute` when the caller awaits or enters."""
+        return _ExecuteResult(self, sql, params)
+
+    async def _do_execute(
+        self, sql: str, params: Sequence[Any] | None,
     ) -> _PgCursor:
-        """Dispatch to asyncpg.execute or asyncpg.fetch based on
-        statement shape and return an aiosqlite-cursor-like object."""
+        """The actual asyncpg dispatch. Called by ``_ExecuteResult``
+        in either ``__await__`` or ``__aenter__`` path."""
         # PRAGMA / VACUUM: silently no-op on PG. Returns an empty
         # cursor so ``async with ... as cur:`` still works.
         if _is_pragma_or_vacuum(sql):

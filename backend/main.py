@@ -12,10 +12,20 @@ from backend import lifecycle as _lifecycle
 
 async def _startup_cleanup(log):
     """Reset stuck states left over from a previous crash."""
-    # 1. Reset agents stuck in "running" for over 1 hour
+    # 1. Reset agents stuck in "running" for over 1 hour.
+    # created_at is stored as TEXT (ISO-8601-like "YYYY-MM-DD HH:MM:SS")
+    # in both SQLite and PG. Phase-3 cutover: rather than teaching the
+    # pg_compat shim to rewrite SQLite's 2-arg ``datetime('now','-1 hour')``
+    # + 1-arg ``datetime(col)`` forms (which are harder to disambiguate
+    # from column identifiers in a regex), we compute the cutoff string
+    # in Python and do a plain text comparison — deterministic for our
+    # insertion format and dialect-neutral.
+    from datetime import datetime as _dt, timedelta as _td
+    _cutoff = (_dt.utcnow() - _td(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     n = await db.execute_raw(
         "UPDATE agents SET status='idle', thought_chain='[RECOVERY] Reset on startup' "
-        "WHERE status='running' AND datetime(created_at) < datetime('now', '-1 hour')"
+        "WHERE status='running' AND created_at < ?",
+        (_cutoff,),
     )
     if n:
         log.warning("Startup cleanup: reset %d stuck agents to idle", n)

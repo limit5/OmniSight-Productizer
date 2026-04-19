@@ -137,14 +137,27 @@ async def _check_migrations() -> tuple[bool, str]:
     except Exception as exc:
         return False, f"db_unavailable: {exc}"
 
-    try:
-        async with conn.execute(
+    # Dialect-dispatch the "does alembic_version table exist" probe —
+    # ``sqlite_master`` is SQLite-only; PG uses ``information_schema``.
+    # Phase-3 cutover: reading _IS_PG keeps this healthcheck dialect-
+    # neutral without a second round trip to ask the connection for its
+    # dialect name.
+    _IS_PG = getattr(_db, "_IS_PG", False)
+    if _IS_PG:
+        probe_sql = (
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='public' AND table_name='alembic_version'"
+        )
+    else:
+        probe_sql = (
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name='alembic_version'"
-        ) as cur:
+        )
+    try:
+        async with conn.execute(probe_sql) as cur:
             row = await cur.fetchone()
     except Exception as exc:
-        return False, f"sqlite_master_failed: {exc}"
+        return False, f"alembic_probe_failed: {exc}"
 
     if row is None:
         # No alembic table — either alembic hasn't run yet, or this
