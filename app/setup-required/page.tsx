@@ -685,15 +685,22 @@ function BootSequence({ onDone }: { onDone: () => void }) {
     return () => window.clearTimeout(id)
   }, [done, onDone])
 
-  // Keyboard + pointer escape: let impatient operators skip.
+  // Keyboard + pointer escape: let impatient operators skip. The
+  // listeners are attached on a 350 ms delay so the tail of the
+  // click that toggled cinema mode ON doesn't bubble up into the
+  // freshly-mounted overlay and auto-dismiss it before the user
+  // sees a single character.
   useEffect(() => {
     const skip = () => setDone(true)
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" || e.key === "Enter" || e.key === " ") skip()
     }
-    window.addEventListener("keydown", onKey)
-    window.addEventListener("click", skip)
+    const armId = window.setTimeout(() => {
+      window.addEventListener("keydown", onKey)
+      window.addEventListener("click", skip)
+    }, 350)
     return () => {
+      window.clearTimeout(armId)
       window.removeEventListener("keydown", onKey)
       window.removeEventListener("click", skip)
     }
@@ -838,8 +845,15 @@ function MatrixRain() {
     <canvas
       ref={canvasRef}
       aria-hidden="true"
-      className="pointer-events-none fixed inset-0 z-0"
-      style={{ opacity: 0.18, mixBlendMode: "screen" }}
+      // z-[5] sits ABOVE the other z-0 backdrop layers (hex-pattern /
+      // data-stream / digital-noise / radial gradient / scanlines)
+      // but BELOW the z-10 main panel, so the rain is visibly
+      // layered over the static scenery without obscuring content.
+      // ``mix-blend-mode: screen`` keeps the black trail-wash from
+      // darkening the underlying decor while the cyan glyphs
+      // composite additively on top of it.
+      className="pointer-events-none fixed inset-0 z-[5]"
+      style={{ opacity: 0.55, mixBlendMode: "screen" }}
     />
   )
 }
@@ -969,10 +983,6 @@ export default function SetupRequiredPage() {
 
   return (
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[var(--deep-space-start)]">
-      {/* Matrix rain — deepest background layer, below the neural
-          grid. Cinema-only; fully pointer-events-none + aria-hidden. */}
-      {cinemaActive && <MatrixRain />}
-
       <NeuralGrid />
 
       {/* Static CRT scan-line grid — inline so we don't depend on the
@@ -990,6 +1000,12 @@ export default function SetupRequiredPage() {
       {/* Animated FUI scan-line sweep — a single bright bar travels
           top→bottom to sell the "probing system gates" feel. */}
       <div aria-hidden="true" className="fui-scan-sweep" />
+
+      {/* Matrix rain — cinema-only. Mounted AFTER every other
+          backdrop layer in DOM order so its z-[5] is never occluded
+          by a z-0 sibling drawn later. pointer-events-none +
+          aria-hidden. */}
+      {cinemaActive && <MatrixRain />}
 
       <main className="relative z-10 w-full max-w-2xl px-6 py-10">
         <div className="holo-glass-simple corner-brackets rounded-lg p-8 md:p-10">
