@@ -276,6 +276,71 @@ async def test_has_valid_session_catches_get_session_exception(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_has_valid_session_retries_once_on_sqlite_lock(monkeypatch):
+    """SQLite WAL contention under the Path B dual-replica topology
+    briefly raises ``OperationalError: database is locked`` on the
+    first session lookup of a dashboard burst. The middleware must
+    absorb that single blip by retrying once before failing closed —
+    otherwise one unlucky XHR per page-load kicks the operator back
+    to /login."""
+    from backend import auth as _auth
+
+    calls = {"n": 0}
+
+    async def _flaky(token):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # First attempt — raise the exact message auth_baseline
+            # uses to detect the transient case.
+            raise RuntimeError("database is locked")
+        # Second attempt — return a real-ish session object so
+        # `_has_valid_session` treats it as valid.
+        class _S:
+            pass
+        s = _S()
+        return s
+
+    monkeypatch.setattr(_auth, "get_session", _flaky)
+
+    from starlette.requests import Request
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/agents",
+        "headers": [(b"cookie", b"omnisight_session=abc")],
+    }
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is True
+    assert calls["n"] == 2  # exactly one retry
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_fails_closed_after_persistent_lock(monkeypatch):
+    """If the lock survives the retry window too, we fail closed so
+    a genuinely broken DB doesn't open the gate."""
+    from backend import auth as _auth
+
+    calls = {"n": 0}
+
+    async def _always_locked(token):
+        calls["n"] += 1
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(_auth, "get_session", _always_locked)
+
+    from starlette.requests import Request
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/agents",
+        "headers": [(b"cookie", b"omnisight_session=abc")],
+    }
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is False
+    assert calls["n"] == 2  # first attempt + one retry, no third try
+
+
+@pytest.mark.asyncio
 async def test_has_valid_session_no_cookie_returns_false():
     from starlette.requests import Request
 

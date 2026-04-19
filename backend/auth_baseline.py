@@ -189,7 +189,22 @@ def _path_allowed(path: str) -> bool:
 async def _has_valid_session(request: Request) -> bool:
     """Return True if the incoming request carries a valid session
     cookie. Imported lazily because backend.auth pulls in the whole
-    DB layer which is slower than we want in module load."""
+    DB layer which is slower than we want in module load.
+
+    Under the Path B HA topology (2 backend replicas on one SQLite
+    WAL + dashboard loads firing ~20 concurrent XHRs) the initial
+    burst can briefly trigger ``sqlite3.OperationalError: database
+    is locked`` even with ``PRAGMA busy_timeout=5000``. Treating
+    that specific transient failure as "no session" ejects legit
+    operators back to the login page; treating it as "session
+    unknown, let the handler decide" is equally wrong for a gate
+    whose whole job is to refuse when unsure. The compromise: retry
+    the lookup once with a tiny asyncio sleep, then fail-closed if
+    still locked. This absorbs the initial dashboard-load write
+    storm without opening any new window to attackers — they still
+    need a valid cookie, and a real locked DB for > few-hundred-ms
+    usually means something else is already broken.
+    """
     try:
         from backend.auth import SESSION_COOKIE, get_session
     except Exception as exc:
@@ -198,15 +213,37 @@ async def _has_valid_session(request: Request) -> bool:
     cookie = request.cookies.get(SESSION_COOKIE) or ""
     if not cookie:
         return False
+
+    # First attempt.
     try:
         sess = await get_session(cookie)
+        return sess is not None
     except Exception as exc:
-        # Don't let a session-lookup error open the gate — but also
-        # don't close it so hard that a DB blip logs everyone out.
-        # In log mode this logs + allows; in enforce mode it rejects.
-        logger.warning("auth_baseline: session lookup failed: %s", exc)
+        is_lock = "database is locked" in str(exc).lower()
+        if not is_lock:
+            # Non-lock exception → don't retry, fail closed.
+            logger.warning(
+                "auth_baseline: session lookup failed (non-transient): %s", exc,
+            )
+            return False
+        logger.info(
+            "auth_baseline: session lookup saw transient DB lock, "
+            "retrying once (token_tail=%s)",
+            cookie[-6:],
+        )
+
+    # One retry after a short sleep — enough for the competing writer
+    # to drain, not enough to meaningfully delay the request.
+    import asyncio
+    await asyncio.sleep(0.05)
+    try:
+        sess = await get_session(cookie)
+        return sess is not None
+    except Exception as exc:
+        logger.warning(
+            "auth_baseline: session lookup still failed after retry: %s", exc,
+        )
         return False
-    return sess is not None
 
 
 def install(app: ASGIApp) -> Callable:

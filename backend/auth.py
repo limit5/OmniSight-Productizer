@@ -500,6 +500,22 @@ async def create_session(user_id: str, ip: str = "", user_agent: str = "") -> Se
                    user_agent=ua, last_seen_at=now)
 
 
+# Minimum age (seconds) a ``last_seen_at`` value must have before
+# ``get_session`` bothers writing a fresh one. Every request on a
+# dashboard fires ~20 concurrent XHRs, every XHR lands in at least
+# two middlewares that call ``get_session`` for the cookie, and each
+# caddy replica forwards to one of two backends — so a naive
+# "update last_seen on every lookup" pattern issues ~40 UPDATEs per
+# page load per user, all against the same row, on the same WAL.
+# SQLite's single-writer lock can't keep up and returns ``database
+# is locked`` after ``PRAGMA busy_timeout=5000``, which the upstream
+# auth middleware then fail-closes on → spurious 401 → operator
+# bounced to /login. Throttling to once-per-minute-ish is plenty for
+# the "active sessions" UI at ``/auth/sessions`` (its precision is
+# human-scale anyway) and it eliminates the write storm.
+_SESSION_LAST_SEEN_MIN_AGE_S = 60.0
+
+
 async def get_session(token: str) -> Optional[Session]:
     if not token:
         return None
@@ -516,16 +532,34 @@ async def get_session(token: str) -> Optional[Session]:
         await delete_session(token)
         return None
     now = time.time()
-    await conn.execute(
-        "UPDATE sessions SET last_seen_at=? WHERE token=?",
-        (now, token),
-    )
-    await conn.commit()
+    stored_last_seen = r["last_seen_at"] or 0.0
+    effective_last_seen = stored_last_seen
+    # Skip the write when the stored value is recent — see the
+    # comment on _SESSION_LAST_SEEN_MIN_AGE_S above for why this
+    # matters under the multi-replica SQLite topology.
+    if now - stored_last_seen >= _SESSION_LAST_SEEN_MIN_AGE_S:
+        try:
+            await conn.execute(
+                "UPDATE sessions SET last_seen_at=? WHERE token=?",
+                (now, token),
+            )
+            await conn.commit()
+            effective_last_seen = now
+        except Exception as exc:
+            # Transient lock shouldn't break the session lookup —
+            # the read succeeded, the caller has a valid session, and
+            # ``last_seen_at`` is only ever consumed by the UI
+            # sessions list (non-security). Swallow + log.
+            logger.debug(
+                "auth.get_session: last_seen_at update skipped "
+                "(non-fatal) token_tail=%s err=%s",
+                token[-6:], exc,
+            )
     return Session(
         token=r["token"], user_id=r["user_id"], csrf_token=r["csrf_token"],
         created_at=r["created_at"], expires_at=r["expires_at"],
         ip=r["ip"] or "", user_agent=r["user_agent"] or "",
-        last_seen_at=now, metadata=r["metadata"] or "{}",
+        last_seen_at=effective_last_seen, metadata=r["metadata"] or "{}",
         mfa_verified=bool(r["mfa_verified"]),
         rotated_from=r["rotated_from"],
     )
