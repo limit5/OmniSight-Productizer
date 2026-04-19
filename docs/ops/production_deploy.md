@@ -508,4 +508,5 @@ scripts/restart.sh                 # brings everything back in order
 | Date | Operator | Action | Commit/tag |
 |---|---|---|---|
 | 2026-04-19 | user | first-time bootstrap via Path B (`scripts/bootstrap_prod.sh`); see [post-mortem](./deploy_postmortem_2026-04-19.md) | cc55200 |
+| 2026-04-19 | user | CF Tunnel ingress live: `ai.sora-dev.app` → `frontend:3000` (`docker compose --profile tunnel up -d cloudflared`) | HEAD |
 | YYYY-MM-DD | | (fill in per deploy) | |

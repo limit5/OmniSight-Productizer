@@ -140,6 +140,12 @@ services:
       - ./deploy/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
       - omnisight-caddy-data:/data
       - omnisight-caddy-config:/config
+    # Caddyfile site block expands `{$OMNISIGHT_PUBLIC_HOSTNAME:localhost}`
+    # — the tunnel-fronted Host header must match, or Caddy returns 404.
+    # Default `localhost` stays operative for direct-loopback smoke; prod
+    # `.env` sets this to the real public hostname (e.g. sora-dev.app).
+    environment:
+      - OMNISIGHT_PUBLIC_HOSTNAME=${OMNISIGHT_PUBLIC_HOSTNAME:-localhost}
     depends_on:
       backend-a:
         condition: service_healthy
@@ -205,6 +211,38 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # Cloudflare Tunnel — optional public-internet connector. Enable with
+  # `docker compose --profile tunnel up -d cloudflared`. CF edge
+  # terminates TLS; the tunnel forwards plain HTTP to an internal
+  # service inside this compose network.
+  #
+  # Token lives in `.env` as OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN; the
+  # tunnel itself + its ingress rules live in the Cloudflare Zero Trust
+  # dashboard (Networks → Tunnels → Public Hostnames).
+  #
+  # Ingress to configure in CF dashboard — one Public Hostname per
+  # subdomain you want to expose. Recommended default:
+  #   Subdomain: ai   Domain: <your-zone>   (e.g. ai.sora-dev.app)
+  #   Service — Type: HTTP
+  #   Service — URL:  frontend:3000
+  # Why `frontend:3000` (not `caddy:80` / `caddy:8000` / `caddy:443`):
+  #   - caddy:80 always 301s to https → redirect loop through the tunnel
+  #   - caddy:8000 + caddy:443 only reverse-proxy to the BACKEND pool,
+  #     which would 404 every non-API route (Next.js UI is on frontend)
+  #   - frontend:3000 is Next.js SSR; it serves the UI and SSR-proxies
+  #     `/api/v1/*` to caddy:8000 internally via BACKEND_URL env, so
+  #     the backend pool stays reachable without exposing it.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN:?set OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      caddy:
+        condition: service_healthy
+    restart: always
 
   # Phase 52 — Observability sidecars. Enable with `--profile observability`.
   prometheus:
