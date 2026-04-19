@@ -189,6 +189,14 @@ class Settings(BaseSettings):
     # `?token=<value>` or `Authorization: Bearer <value>`.
     metrics_token: str = ""
 
+    # S2-9 (#354) — auth-by-default baseline mode. Declared here so the
+    # pydantic Settings extra='forbid' gate doesn't reject the key when
+    # it's present in .env; the middleware itself reads os.environ
+    # directly so changing the mode at runtime stays a single env-var
+    # write without a Settings re-instantiation. Value is one of
+    # "log" | "enforce" | "off" — see backend/auth_baseline.py.
+    auth_baseline_mode: str = "log"
+
     # H6 audit (2026-04-19): Tier-2 "networked" sandbox — operator gate.
     # T2 gives a sandbox container bridge-network access via the
     # omnisight-egress-t2 iptables ACL. It's still safer than host
