@@ -106,6 +106,44 @@ async def _admin_password_is_default() -> bool:
     return bool(row and (row["n"] or 0) > 0)
 
 
+async def _admin_rotated_evidence() -> bool:
+    """True if at least one admin row exists with
+    ``must_change_password=0`` — a stronger "admin has rotated"
+    signal than :func:`_admin_password_is_default`.
+
+    :func:`_admin_password_is_default` returns False BOTH when an
+    admin exists and has rotated AND vacuously when no admin row
+    exists at all (fresh install before ``ensure_default_admin`` has
+    created one). For the auto-backfill path that writes
+    ``STEP_ADMIN_PASSWORD`` on behalf of out-of-band rotations (K6
+    bootstrap admin via ``OMNISIGHT_ADMIN_PASSWORD`` env, CLI
+    password resets, etc.) we need to distinguish those two cases so
+    we don't mark the step complete on a genuinely empty users table.
+    """
+    try:
+        from backend import db
+
+        conn = db._conn()
+    except Exception as exc:
+        logger.debug(
+            "bootstrap: db not initialised (%s) — no admin-rotated evidence",
+            exc,
+        )
+        return False
+
+    try:
+        async with conn.execute(
+            "SELECT COUNT(*) AS n FROM users "
+            "WHERE role='admin' AND enabled=1 AND must_change_password=0"
+        ) as cur:
+            row = await cur.fetchone()
+    except Exception as exc:
+        logger.warning("bootstrap: admin-rotated-evidence probe failed: %s", exc)
+        return False
+
+    return bool(row and (row["n"] or 0) > 0)
+
+
 def _llm_provider_is_configured() -> bool:
     """True if the selected LLM provider has a non-empty credential.
 
@@ -428,39 +466,96 @@ async def _recorded_step_names() -> set[str]:
     return {s["step"] for s in await list_bootstrap_steps()}
 
 
+async def _try_backfill(recorded: set[str], step: str, *, source: str) -> None:
+    """Insert a ``bootstrap_state`` row for *step* marked with
+    ``metadata.source = source``. Idempotent via the ON CONFLICT
+    handling in :func:`record_bootstrap_step`; exceptions are
+    swallowed after logging because the caller still wants to treat
+    the step as satisfied for the purposes of the filter it's about
+    to apply (the gate probe already returned green — dropping the
+    row write is a reduced audit trail, not a regressed gate).
+
+    Mutates *recorded* in place so the caller's filter at the bottom
+    of :func:`missing_required_steps` drops *step* regardless of
+    whether the INSERT actually landed.
+    """
+    try:
+        await record_bootstrap_step(step, metadata={"source": source})
+    except Exception as exc:
+        logger.debug(
+            "bootstrap: auto-backfill of %s (source=%s) failed (%s) — "
+            "still treating as satisfied",
+            step, source, exc,
+        )
+    recorded.add(step)
+
+
 async def missing_required_steps() -> list[str]:
     """Return required steps that have no row in ``bootstrap_state`` yet.
 
     Used by ``POST /api/v1/bootstrap/finalize`` to gate the transition —
     finalize must refuse until every required step is on record.
 
-    Self-heal for ``cf_tunnel_configured``: Path B deployments wire
-    the tunnel via docker-compose ``cloudflared`` + Zero Trust
-    Dashboard and never hit the wizard's provision API, so no step
-    row gets written. When :func:`_cf_tunnel_is_configured` says the
-    gate is green, back-fill a row (idempotent via ON CONFLICT in
-    :func:`record_bootstrap_step`) so this function converges with
-    :func:`get_bootstrap_status`.
+    Self-heal: for every required step, if the corresponding live
+    gate probe says the condition is satisfied but no step row
+    exists, back-fill the row so this function converges with
+    :func:`get_bootstrap_status`. Handles the Path B / operator-
+    tooling scenarios where the condition was met out-of-band:
 
-    The self-heal is scoped to CF tunnel only. Other steps
-    (admin password, LLM provider, smoke) have their own semantics:
-    the admin probe returns False on a genuinely fresh install (no
-    users table rows yet), and smoke is wizard-owned by design.
+      * ``admin_password_set`` — admin rotated via CLI, or the
+        ``OMNISIGHT_ADMIN_PASSWORD`` env injected by the K6
+        bootstrap flow during ``scripts/bootstrap_prod.sh``.
+        Gated on :func:`_admin_rotated_evidence` (at least one
+        admin row with ``must_change_password=0``) rather than the
+        raw ``admin_password_default`` probe — the raw probe
+        returns False vacuously on a fresh install with no user
+        rows, which would wrongly auto-satisfy the step.
+
+      * ``llm_provider_configured`` — provider + key set via
+        ``.env`` / environment rather than through the wizard's
+        provision handler. Probe already returns False on an
+        un-configured fresh install, so a straight re-use is safe.
+
+      * ``cf_tunnel_configured`` — compose-managed tunnel via
+        ``OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN`` + docker-compose
+        ``cloudflared`` service. Probe returns False on fresh.
+
+      * ``smoke_passed`` — covers the (rare) case where
+        :func:`mark_smoke_passed` wrote the marker file but the
+        ``record_bootstrap_step`` call failed right after. Probe
+        returns False on fresh. Defense-in-depth.
+
+    Every backfill path is evidence-gated so a fresh install still
+    reports all four steps as missing (see
+    ``test_missing_required_steps_fresh_install``).
     """
-    recorded = await _recorded_step_names()
+    recorded = set(await _recorded_step_names())
+
+    if STEP_ADMIN_PASSWORD not in recorded:
+        if await _admin_rotated_evidence():
+            await _try_backfill(
+                recorded, STEP_ADMIN_PASSWORD,
+                source="auto_backfill_admin_rotated",
+            )
+
+    if STEP_LLM_PROVIDER not in recorded and _llm_provider_is_configured():
+        await _try_backfill(
+            recorded, STEP_LLM_PROVIDER,
+            source="auto_backfill_llm_env",
+        )
+
     if STEP_CF_TUNNEL not in recorded and _cf_tunnel_is_configured():
-        try:
-            await record_bootstrap_step(
-                STEP_CF_TUNNEL, metadata={"source": "auto_backfill"},
-            )
-            recorded = recorded | {STEP_CF_TUNNEL}
-        except Exception as exc:
-            logger.debug(
-                "bootstrap: auto-backfill of %s failed (%s) — "
-                "still treating as satisfied",
-                STEP_CF_TUNNEL, exc,
-            )
-            recorded = recorded | {STEP_CF_TUNNEL}
+        await _try_backfill(
+            recorded, STEP_CF_TUNNEL,
+            source="auto_backfill_cf_tunnel",
+        )
+
+    if STEP_SMOKE not in recorded and _smoke_has_passed():
+        await _try_backfill(
+            recorded, STEP_SMOKE,
+            source="auto_backfill_smoke_marker",
+        )
+
     return [s for s in REQUIRED_STEPS if s not in recorded]
 
 

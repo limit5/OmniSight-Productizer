@@ -177,32 +177,127 @@ async def test_missing_required_steps_all_recorded(_bootstrap_db):
 
 
 @pytest.mark.asyncio
-async def test_missing_required_steps_autobackfills_satisfied_gates(
+async def test_missing_required_steps_autobackfills_cf_tunnel(
     _bootstrap_db, monkeypatch,
 ):
-    """When a gate is green via a non-wizard path (e.g. CF tunnel via
-    ``OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN`` compose env), the step
-    shouldn't appear as "missing" even though no wizard sub-step
-    handler wrote a row. The call also back-fills the row so subsequent
-    polls hit the fast path.
-    """
+    """CF tunnel configured via compose env (no wizard provision)
+    → the step should auto-backfill with the corresponding source
+    marker rather than remain "missing"."""
     _, bootstrap = _bootstrap_db
     monkeypatch.setenv("OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN", "eyJhIjoi.compose.token")
 
-    # Sanity: the gate probe sees the token
     assert bootstrap._cf_tunnel_is_configured() is True
 
     missing = await bootstrap.missing_required_steps()
     assert bootstrap.STEP_CF_TUNNEL not in missing
 
-    # Auto-backfill wrote a row with the expected metadata marker.
     row = await bootstrap.get_bootstrap_step(bootstrap.STEP_CF_TUNNEL)
     assert row is not None
-    assert row["metadata"].get("source") == "auto_backfill"
+    assert row["metadata"].get("source") == "auto_backfill_cf_tunnel"
 
-    # Second call is idempotent (no exception, row still there).
+    # Idempotent on re-poll.
     missing2 = await bootstrap.missing_required_steps()
     assert bootstrap.STEP_CF_TUNNEL not in missing2
+
+
+@pytest.mark.asyncio
+async def test_missing_required_steps_autobackfills_llm_provider(
+    _bootstrap_db, monkeypatch,
+):
+    """LLM provider configured via ``OMNISIGHT_ANTHROPIC_API_KEY`` +
+    provider selection in settings (the Path B baseline) → auto-
+    backfill STEP_LLM_PROVIDER so finalize can proceed even though
+    the wizard's provision handler was never called."""
+    _, bootstrap = _bootstrap_db
+    from backend import config as _cfg
+
+    _cfg.settings.llm_provider = "anthropic"
+    monkeypatch.setattr(_cfg.settings, "anthropic_api_key", "sk-ant-api03-fake")
+
+    assert bootstrap._llm_provider_is_configured() is True
+
+    missing = await bootstrap.missing_required_steps()
+    assert bootstrap.STEP_LLM_PROVIDER not in missing
+
+    row = await bootstrap.get_bootstrap_step(bootstrap.STEP_LLM_PROVIDER)
+    assert row is not None
+    assert row["metadata"].get("source") == "auto_backfill_llm_env"
+
+
+@pytest.mark.asyncio
+async def test_missing_required_steps_autobackfills_admin_password_rotated(
+    _bootstrap_db,
+):
+    """Admin rotated via a non-wizard path (K6 bootstrap admin via
+    ``OMNISIGHT_ADMIN_PASSWORD`` env, or a CLI reset) →
+    auto-backfill STEP_ADMIN_PASSWORD. Evidence is a users-table
+    row with ``must_change_password=0`` so a genuinely fresh
+    install (no users at all) does NOT trigger the backfill."""
+    db, bootstrap = _bootstrap_db
+    # Insert a rotated admin row directly (bypasses the wizard handler
+    # that would have written STEP_ADMIN_PASSWORD itself).
+    conn = db._conn()
+    await conn.execute(
+        "INSERT INTO users (id, email, name, role, enabled, "
+        "must_change_password, password_hash, created_at, tenant_id) "
+        "VALUES ('u-1', 'a@b', 'A', 'admin', 1, 0, 'hash', 0, 't-default')"
+    )
+    await conn.commit()
+
+    assert await bootstrap._admin_rotated_evidence() is True
+
+    missing = await bootstrap.missing_required_steps()
+    assert bootstrap.STEP_ADMIN_PASSWORD not in missing
+
+    row = await bootstrap.get_bootstrap_step(bootstrap.STEP_ADMIN_PASSWORD)
+    assert row is not None
+    assert row["metadata"].get("source") == "auto_backfill_admin_rotated"
+
+
+@pytest.mark.asyncio
+async def test_missing_required_steps_admin_no_backfill_without_evidence(
+    _bootstrap_db,
+):
+    """Guard rail: on a users-table that contains ONLY must_change_
+    password=1 admins (fresh install with a default admin seeded but
+    not yet rotated), the admin-rotated-evidence probe must return
+    False, and the backfill must NOT fire. Otherwise we'd silently
+    sign off on an un-rotated default admin."""
+    db, bootstrap = _bootstrap_db
+    conn = db._conn()
+    await conn.execute(
+        "INSERT INTO users (id, email, name, role, enabled, "
+        "must_change_password, password_hash, created_at, tenant_id) "
+        "VALUES ('u-0', 'default@admin', 'Default', 'admin', 1, 1, 'hash', 0, 't-default')"
+    )
+    await conn.commit()
+
+    assert await bootstrap._admin_password_is_default() is True
+    assert await bootstrap._admin_rotated_evidence() is False
+
+    missing = await bootstrap.missing_required_steps()
+    assert bootstrap.STEP_ADMIN_PASSWORD in missing
+
+    # No row written.
+    assert await bootstrap.get_bootstrap_step(bootstrap.STEP_ADMIN_PASSWORD) is None
+
+
+@pytest.mark.asyncio
+async def test_missing_required_steps_autobackfills_smoke_marker(_bootstrap_db):
+    """If the smoke-passed marker is set but the step row somehow
+    didn't land (rare — maybe record_bootstrap_step raised right
+    after mark_smoke_passed wrote the marker), auto-backfill brings
+    the two views in sync."""
+    _, bootstrap = _bootstrap_db
+    bootstrap.mark_smoke_passed(True)
+    assert bootstrap._smoke_has_passed() is True
+
+    missing = await bootstrap.missing_required_steps()
+    assert bootstrap.STEP_SMOKE not in missing
+
+    row = await bootstrap.get_bootstrap_step(bootstrap.STEP_SMOKE)
+    assert row is not None
+    assert row["metadata"].get("source") == "auto_backfill_smoke_marker"
 
 
 # ── mark_bootstrap_finalized ───────────────────────────────────
