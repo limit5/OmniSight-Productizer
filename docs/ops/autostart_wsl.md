@@ -29,9 +29,35 @@ WSL2 does **not** auto-start with Windows by default. It only starts when
 something (a shell, a file explorer path, a command) accesses it. We
 create a one-off Task Scheduler task that triggers `wsl.exe` at boot.
 
-### Option A — PowerShell one-liner (run as **Administrator** on Windows)
+### Option A — PowerShell script (recommended)
 
-Open **PowerShell (Admin)** and paste:
+From a **PowerShell window running as Administrator**:
+
+```powershell
+cd C:\path\to\OmniSight-Productizer   # adjust to your actual WSL-mounted path
+powershell -ExecutionPolicy Bypass -File deploy\windows\enable_autostart.ps1
+```
+
+That script is committed at `deploy/windows/enable_autostart.ps1` and does
+exactly the same work the manual recipe below describes, with these
+extras:
+- checks the distro actually exists before touching Task Scheduler
+- `-Test` flag fires the task immediately and verifies the distro reaches
+  Running state — skip the real reboot while still proving it works
+- `-Remove` flag cleanly unregisters the task
+- `-DistroName` / `-TaskName` parameters if you ever use this on a
+  different WSL distro or want a different label
+
+Example verification run:
+
+```powershell
+deploy\windows\enable_autostart.ps1 -Test
+```
+
+### Option B — Manual PowerShell recipe (audit trail for §A)
+
+If you prefer inline, or want to review what the script does before
+running it, paste this into **PowerShell (Admin)**:
 
 ```powershell
 $action = New-ScheduledTaskAction -Execute "wsl.exe" `
@@ -53,7 +79,7 @@ What it does:
 - Runs as SYSTEM so it fires before any user logs in.
 - `-AllowStartIfOnBatteries` so laptops don't skip it on battery.
 
-### Option B — GUI (Task Scheduler)
+### Option C — GUI (Task Scheduler)
 
 1. Start → type `Task Scheduler` → open
 2. Action: **Create Task…** (not "Basic Task" — we need more options)
@@ -170,8 +196,11 @@ sudo systemctl disable --now omnisight-compose-prod.service
 ```
 
 ```powershell
-# Windows side — disable or unregister the task
+# Windows side — one-shot via the committed script:
+deploy\windows\enable_autostart.ps1 -Remove
+
+# Or by hand (equivalent):
 Disable-ScheduledTask -TaskName OmniSight-WSL-Autostart
-# or
+# or hard-remove:
 Unregister-ScheduledTask -TaskName OmniSight-WSL-Autostart -Confirm:$false
 ```
