@@ -155,6 +155,15 @@ services:
       # host_metrics.py honours DOCKER_HOST; if/when backend/container.py
       # gets wired up in prod it does too (subprocess inherits env).
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      # Bootstrap Step-5 (parallel-health-check) frontend probe URL.
+      # Without this override the probe reads `settings.frontend_origin`
+      # which is the PUBLIC CF-tunnel URL (`https://ai.sora-dev.app`),
+      # so every 3s poll would leave the compose network, hit CF edge,
+      # and come back via the tunnel — adding ~280 ms baseline latency
+      # and occasional >3s timeout spikes that flipped the wizard row
+      # red→green→red. Internal docker DNS resolves `frontend` to the
+      # Next.js container directly, single-hop and <10 ms stable.
+      - OMNISIGHT_FRONTEND_URL=http://frontend:3000
     env_file:
       - .env
     # Legacy `backend` DNS alias — preserves the single-replica scrape target
@@ -229,6 +238,9 @@ services:
       - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
       - OMNISIGHT_INSTANCE_ID=backend-b
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      # See backend-a's note above — internal docker URL for Step-5
+      # parallel-health-check frontend probe, avoiding CF tunnel loop.
+      - OMNISIGHT_FRONTEND_URL=http://frontend:3000
     env_file:
       - .env
     depends_on:
