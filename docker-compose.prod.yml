@@ -146,11 +146,18 @@ services:
       backend-b:
         condition: service_healthy
     restart: always
+    # Probe Caddy's Docker-internal :8000 block — that path is a plain HTTP
+    # reverse proxy into the backend pool (no TLS, no redirect). Probing
+    # `:80/` fails because `:80` issues a 301 → `https://...` and wget
+    # inside the alpine image has no CA bundle for Caddy's self-signed
+    # `issuer internal` cert, so the follow-up TLS verify errors.
+    # `--spider` + `-q` returns 0 on any non-error response.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      test: ["CMD", "wget", "-q", "--spider", "-T", "2", "http://localhost:8000/readyz"]
       interval: 15s
-      timeout: 3s
+      timeout: 5s
       retries: 3
+      start_period: 10s
 
   frontend:
     image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
@@ -169,6 +176,13 @@ services:
       # SSR proxy → Caddy (health-aware) instead of backend-a (fragile)
       - BACKEND_URL=http://caddy:8000
       - NODE_ENV=production
+      # Next.js 13+ standalone server.js binds to $HOSTNAME. Docker sets
+      # HOSTNAME=<container-id>, which resolves to the container's private
+      # network IP — so `localhost:3000` inside the container has no
+      # listener and the compose `wget` healthcheck always fails. Forcing
+      # 0.0.0.0 makes the server listen on every interface (container IP
+      # AND loopback), so the healthcheck and `docker exec` smoke both work.
+      - HOSTNAME=0.0.0.0
       # Prevent OOM when backend is briefly unreachable during deploy:
       # ECONNREFUSED errors pile up as JS objects → V8 heap grows →
       # default 1.7 GB limit → OOM kill. 4 GB gives enough headroom
@@ -178,11 +192,19 @@ services:
       caddy:
         condition: service_healthy
     restart: always
+    # Root `/` returns HTTP 307 (auth-gate → /setup-required or /login) which
+    # makes `wget -qO-` exit non-zero even though the server is clearly up.
+    # `--spider` accepts 2xx/3xx. Use `127.0.0.1` NOT `localhost` — busybox
+    # wget prefers IPv6 (`::1`) and Next.js standalone binds `0.0.0.0`
+    # (IPv4 only) so localhost resolves to `::1` and connection is refused.
+    # Note: busybox wget only supports `-T SEC` for timeout (no `--timeout=`
+    # or `--tries=` — those get parsed as URLs).
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      test: ["CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
 
   # Phase 52 — Observability sidecars. Enable with `--profile observability`.
   prometheus:
