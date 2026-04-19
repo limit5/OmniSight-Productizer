@@ -95,9 +95,31 @@ primary_slot_name = '${REPLICATION_SLOT_NAME}'
 AUTO
 chmod 0600 "${PGDATA}/postgresql.auto.conf"
 
-# --- Hand off to postgres (pid 1) ---------------------------------------
-# Using `exec` so SIGTERM from docker stop lands directly on postgres
-# rather than this shell script.
+# --- Drop privileges before exec postgres -------------------------------
+# The container entrypoint runs as root so we can do `pg_basebackup` into
+# a bind-mount-owned directory, but the postgres server binary refuses
+# to execute as root (security guard baked into the server). Mirror the
+# upstream docker-entrypoint.sh pattern: chown PGDATA to the postgres
+# user + `exec gosu postgres postgres ...`.
+#
+# `gosu` is shipped inside `postgres:16-alpine` (same image used by the
+# primary) so no extra deps. `su-exec` would also work; we picked gosu
+# to stay consistent with Debian-based postgres images in case the base
+# image family changes.
+if [ "$(id -u)" = "0" ]; then
+    # pg_basebackup created files as root on first boot; subsequent
+    # restarts may still see root-owned files if a previous init-standby
+    # cycle crashed before drop. Idempotent chown is cheap.
+    chown -R postgres:postgres "${PGDATA}"
+    chmod 0700 "${PGDATA}"
+    echo "[init-standby] dropping privileges → postgres (standby mode, following ${PRIMARY_HOST})"
+    exec gosu postgres postgres \
+        -c config_file="${CONF_SRC}" \
+        -c hba_file="${HBA_SRC}"
+fi
+
+# Already running as non-root (e.g. if someone runs this script under
+# `user: postgres` in compose). Exec directly.
 echo "[init-standby] handing off to postgres (standby mode, following ${PRIMARY_HOST})"
 exec postgres \
     -c config_file="${CONF_SRC}" \
