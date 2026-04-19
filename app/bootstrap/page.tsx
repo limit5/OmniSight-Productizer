@@ -31,6 +31,7 @@ import {
   KeyRound,
   Cloud,
   FlaskConical,
+  Radio,
   Sparkles,
   Bot,
   Server,
@@ -76,6 +77,7 @@ import {
   PASSWORD_MIN_SCORE,
 } from "@/lib/password_strength"
 import CloudflareTunnelSetup from "@/components/omnisight/cloudflare-tunnel-setup"
+import { useCinemaMode } from "@/lib/use-cinema-mode"
 
 // ─── Step definitions ────────────────────────────────────────────────
 
@@ -2472,8 +2474,17 @@ function SmokeSubsetStep({
   const [result, setResult] = useState<BootstrapSmokeSubsetResponse | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Round 3-D: COMBAT DEPLOY gate. When cinema mode is ON the first
+  // click on "Run smoke subset" arms the sequence (shows an ARMED
+  // confirm overlay listing the DAGs + audit-chain checks); a second
+  // click on PROCEED actually fires. Cinema OFF → the old direct
+  // path. Keeps operator consent explicit and adds theatrical weight
+  // to the step without changing the API contract.
+  const cinema = useCinemaMode()
+  const [armed, setArmed] = useState(false)
 
   const run = useCallback(async () => {
+    setArmed(false)
     setBusy(true)
     setError(null)
     try {
@@ -2493,6 +2504,14 @@ function SmokeSubsetStep({
       setBusy(false)
     }
   }, [onPassed])
+
+  const onRunClick = useCallback(() => {
+    if (cinema.hydrated && cinema.enabled) {
+      setArmed(true)
+      return
+    }
+    void run()
+  }, [cinema.hydrated, cinema.enabled, run])
 
   const runs = result?.runs ?? []
   const auditOk = result?.audit_chain?.ok === true
@@ -2541,7 +2560,7 @@ function SmokeSubsetStep({
         <button
           type="button"
           data-testid="bootstrap-smoke-run-button"
-          onClick={() => void run()}
+          onClick={onRunClick}
           disabled={busy}
           className="flex items-center gap-1 px-3 py-1.5 rounded bg-[var(--artifact-purple)] text-white font-mono text-xs font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
         >
@@ -2784,6 +2803,82 @@ function SmokeSubsetStep({
             )}
             Finalize &amp; go to dashboard
           </button>
+        </div>
+      )}
+
+      {/* Round 3-D: COMBAT DEPLOY confirm. Cinema-mode only. Listing
+          the three artefacts the operator is about to engage so the
+          "press a button" moment feels consequential. */}
+      {armed && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="smoke sequence armed — confirm to proceed"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md"
+        >
+          <div className="relative w-full max-w-lg rounded-lg border-2 border-[var(--artifact-purple)] bg-black/90 p-6 shadow-[0_0_40px_rgba(192,132,252,0.4)]">
+            <div className="mb-3 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.3em] text-[var(--artifact-purple)]">
+              <Radio size={12} className="animate-pulse" />
+              INITIATING SMOKE DIAGNOSTIC
+            </div>
+            <div
+              className="mb-5 text-xl font-bold uppercase tracking-[0.15em] text-[var(--foreground)]"
+              style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
+            >
+              <span className="text-[var(--artifact-purple)]">⚠</span>{" "}
+              Arm sequence confirmed?
+            </div>
+            <ul className="mb-5 flex flex-col gap-2 font-mono text-[11px]">
+              <li className="flex items-center justify-between rounded border border-[var(--artifact-purple)]/40 bg-[var(--artifact-purple)]/5 px-3 py-2">
+                <span className="text-[var(--foreground)]">
+                  DAG #1 · compile-flash (host_native)
+                </span>
+                <span className="font-semibold uppercase tracking-wider text-[var(--artifact-purple)]">
+                  [ARMED]
+                </span>
+              </li>
+              <li className="flex items-center justify-between rounded border border-[var(--artifact-purple)]/40 bg-[var(--artifact-purple)]/5 px-3 py-2">
+                <span className="text-[var(--foreground)]">
+                  DAG #2 · cross-compile (aarch64)
+                </span>
+                <span className="font-semibold uppercase tracking-wider text-[var(--artifact-purple)]">
+                  [ARMED]
+                </span>
+              </li>
+              <li className="flex items-center justify-between rounded border border-[var(--artifact-purple)]/40 bg-[var(--artifact-purple)]/5 px-3 py-2">
+                <span className="text-[var(--foreground)]">
+                  Audit chain · Merkle verify
+                </span>
+                <span className="font-semibold uppercase tracking-wider text-[var(--artifact-purple)]">
+                  [ARMED]
+                </span>
+              </li>
+            </ul>
+            <p className="mb-5 font-mono text-[10px] leading-relaxed text-[var(--muted-foreground)]">
+              Estimated runtime ~2 minutes. Safe to abort — nothing
+              persists until both DAGs validate + submit AND the audit
+              chain re-verifies.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setArmed(false)}
+                data-testid="bootstrap-smoke-abort"
+                className="rounded border border-[var(--border)] bg-transparent px-4 py-2 font-mono text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] hover:border-[var(--foreground)] hover:text-[var(--foreground)]"
+              >
+                ABORT
+              </button>
+              <button
+                type="button"
+                onClick={() => void run()}
+                data-testid="bootstrap-smoke-proceed"
+                className="flex items-center gap-1.5 rounded border border-[var(--artifact-purple)] bg-[var(--artifact-purple)] px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-white hover:opacity-90 shadow-[0_0_20px_rgba(192,132,252,0.5)]"
+              >
+                <FlaskConical size={12} />
+                PROCEED
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -12,7 +12,7 @@
  * backend version, and each gate's green/red state.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import {
   AlertTriangle,
@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cloud,
+  Film,
   FlaskConical,
   KeyRound,
   Loader2,
@@ -39,6 +40,7 @@ import {
   type BootstrapStatusResponse,
   type ReadyzResponse,
 } from "@/lib/api"
+import { useCinemaMode } from "@/lib/use-cinema-mode"
 
 // ─── Gate meta table ──────────────────────────────────────────────────
 
@@ -626,6 +628,256 @@ function FinalizeTransition({ onDone }: { onDone: () => void }) {
   )
 }
 
+// ─── Typewriter boot sequence (round 3, cinema-mode) ───────────────
+//
+// Four-line terminal-style intro that plays once per session when
+// cinema mode is enabled, before the real UI fades in. Pure visual
+// theater — the sequence text has no semantic load and is hidden
+// from assistive tech (aria-hidden). Skippable via Escape or tap.
+//
+// Timing per line is ~350ms of typing + 200ms pause between lines,
+// so the full cutscene runs under ~3s. Once done, the parent fades
+// this overlay out and the normal UI takes over.
+
+const BOOT_LINES = [
+  { prefix: "> ", text: "INITIALIZING OMNISIGHT CORE", tail: " [OK]" },
+  { prefix: "> ", text: "LOADING NEURAL WEIGHTS.............", tail: " [OK]" },
+  { prefix: "> ", text: "PROBING GATE TELEMETRY..............", tail: " [OK]" },
+  {
+    prefix: "> ",
+    text: "OPERATOR SIGNATURE PENDING.......",
+    tail: " [AWAITING]",
+    tailColor: "text-[var(--artifact-purple)]",
+  },
+]
+
+function BootSequence({ onDone }: { onDone: () => void }) {
+  const [lineIdx, setLineIdx] = useState(0)
+  const [charIdx, setCharIdx] = useState(0)
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    if (done) return
+    if (lineIdx >= BOOT_LINES.length) {
+      // Full sequence played — hold for a breath then fade.
+      const id = window.setTimeout(() => setDone(true), 350)
+      return () => window.clearTimeout(id)
+    }
+    const line = BOOT_LINES[lineIdx]
+    const total = line.text.length + line.tail.length
+    if (charIdx >= total) {
+      // Line finished — pause, then advance.
+      const id = window.setTimeout(() => {
+        setLineIdx((l) => l + 1)
+        setCharIdx(0)
+      }, 200)
+      return () => window.clearTimeout(id)
+    }
+    const id = window.setTimeout(() => setCharIdx((c) => c + 1), 18)
+    return () => window.clearTimeout(id)
+  }, [lineIdx, charIdx, done])
+
+  // Parent-owned fade: once `done` flips true, we render a dark
+  // fading overlay for 350ms and then tell the parent to unmount.
+  useEffect(() => {
+    if (!done) return
+    const id = window.setTimeout(onDone, 350)
+    return () => window.clearTimeout(id)
+  }, [done, onDone])
+
+  // Keyboard + pointer escape: let impatient operators skip.
+  useEffect(() => {
+    const skip = () => setDone(true)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" || e.key === "Enter" || e.key === " ") skip()
+    }
+    window.addEventListener("keydown", onKey)
+    window.addEventListener("click", skip)
+    return () => {
+      window.removeEventListener("keydown", onKey)
+      window.removeEventListener("click", skip)
+    }
+  }, [])
+
+  return (
+    <div
+      aria-hidden="true"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black"
+      style={{
+        transition: "opacity 350ms ease-out",
+        opacity: done ? 0 : 1,
+        pointerEvents: done ? "none" : "auto",
+      }}
+    >
+      {/* Faint scanline overlay so the sequence reads as "terminal
+          output on a CRT" and the later UI fade feels like the
+          terminal dissolving into the hologram. */}
+      <div
+        className="pointer-events-none absolute inset-0 opacity-40"
+        style={{
+          background:
+            "repeating-linear-gradient(0deg, transparent 0px, transparent 2px, rgba(56,189,248,0.05) 2px, rgba(56,189,248,0.05) 3px)",
+        }}
+      />
+      <div
+        className="w-full max-w-2xl px-6 font-mono text-[12px] leading-relaxed text-[var(--neural-blue)] md:text-sm"
+        style={{ fontFamily: "var(--font-mono, monospace)" }}
+      >
+        {BOOT_LINES.map((line, i) => {
+          const isPrior = i < lineIdx
+          const isActive = i === lineIdx
+          const typed = isPrior
+            ? line.text + line.tail
+            : isActive
+              ? (line.text + line.tail).slice(0, charIdx)
+              : ""
+          if (!isPrior && !isActive) return null
+          const textLen = line.text.length
+          const mainText = typed.slice(0, Math.min(typed.length, textLen))
+          const tailText = typed.slice(textLen)
+          const tailColor = line.tailColor ?? "text-[var(--status-green)]"
+          return (
+            <div key={i} className="flex">
+              <span className="text-[var(--muted-foreground)]">
+                {line.prefix}
+              </span>
+              <span>{mainText}</span>
+              <span className={tailColor}>{tailText}</span>
+              {isActive && !done && (
+                <span
+                  className="ml-1 inline-block h-4 w-2 bg-[var(--neural-blue)]"
+                  style={{ animation: "cursor-blink 1s steps(2) infinite" }}
+                />
+              )}
+            </div>
+          )
+        })}
+        <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-[var(--muted-foreground)]/60">
+          (press any key to skip)
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Matrix rain (round 3, cinema-mode) ────────────────────────────
+//
+// Ambient katakana-plus-ASCII fall behind the neural grid. Canvas-
+// based so we don't balloon the DOM with hundreds of elements; single
+// requestAnimationFrame loop with a character pool + column state.
+// Opacity held below 10% so it layers cleanly under the neural grid
+// and corner brackets without fighting for attention.
+
+const MATRIX_GLYPHS =
+  "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ01"
+
+function MatrixRain() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    let rafId = 0
+    let width = 0
+    let height = 0
+    let columns: number[] = []
+    const fontSize = 14
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      width = canvas.clientWidth
+      height = canvas.clientHeight
+      canvas.width = Math.floor(width * dpr)
+      canvas.height = Math.floor(height * dpr)
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      const colCount = Math.floor(width / fontSize)
+      columns = new Array(colCount)
+        .fill(0)
+        .map(() => Math.floor(Math.random() * (height / fontSize)))
+    }
+    resize()
+    window.addEventListener("resize", resize)
+
+    let last = 0
+    const step = (now: number) => {
+      // Cap to ~20fps — matrix rain doesn't need 60.
+      if (now - last > 50) {
+        last = now
+        // Translucent black wash for a trailing fade.
+        ctx.fillStyle = "rgba(0, 0, 0, 0.08)"
+        ctx.fillRect(0, 0, width, height)
+        ctx.font = `${fontSize}px var(--font-mono, monospace)`
+        for (let i = 0; i < columns.length; i++) {
+          const y = columns[i]
+          const ch = MATRIX_GLYPHS.charAt(
+            Math.floor(Math.random() * MATRIX_GLYPHS.length),
+          )
+          // Head of the stream is slightly brighter, rest dim cyan.
+          ctx.fillStyle =
+            y % 9 === 0 ? "rgba(125,211,252,0.6)" : "rgba(56,189,248,0.35)"
+          ctx.fillText(ch, i * fontSize, y * fontSize)
+          if (y * fontSize > height && Math.random() > 0.975) {
+            columns[i] = 0
+          } else {
+            columns[i] = y + 1
+          }
+        }
+      }
+      rafId = requestAnimationFrame(step)
+    }
+    rafId = requestAnimationFrame(step)
+    return () => {
+      cancelAnimationFrame(rafId)
+      window.removeEventListener("resize", resize)
+    }
+  }, [])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden="true"
+      className="pointer-events-none fixed inset-0 z-0"
+      style={{ opacity: 0.18, mixBlendMode: "screen" }}
+    />
+  )
+}
+
+// ─── Cinema-mode toggle button ─────────────────────────────────────
+
+function CinemaModeToggle({
+  enabled,
+  onToggle,
+  hydrated,
+}: {
+  enabled: boolean
+  onToggle: () => void
+  hydrated: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={!hydrated}
+      aria-pressed={enabled}
+      title={
+        enabled
+          ? "Cinema mode ON — extra-dramatic effects layered on top. Click to quiet down."
+          : "Cinema mode OFF — click to crank the sci-fi up (typewriter boot + matrix rain + combat-deploy confirm)."
+      }
+      className={`fixed bottom-12 right-3 z-30 inline-flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[9px] uppercase tracking-wider backdrop-blur-sm transition-colors ${
+        enabled
+          ? "border-[var(--artifact-purple)] bg-[var(--artifact-purple)]/20 text-[var(--artifact-purple)] shadow-[0_0_12px_rgba(192,132,252,0.3)]"
+          : "border-[var(--holo-glass-border)] bg-black/40 text-[var(--muted-foreground)] hover:text-[var(--neural-blue)]"
+      }`}
+    >
+      <Film size={10} />
+      CINEMA {enabled ? "ON" : "OFF"}
+    </button>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────
 
 export default function SetupRequiredPage() {
@@ -639,6 +891,27 @@ export default function SetupRequiredPage() {
   // self-terminates via an onDone callback after ~2 s, which then
   // performs the actual route swap.
   const [finalizing, setFinalizing] = useState(false)
+  // Round 3: cinema-mode toggle + boot-sequence one-shot gate. The
+  // boot sequence should play at most once per tab session even when
+  // cinema mode stays ON — so we track a separate sessionStorage-
+  // backed "seen" flag and only mount BootSequence while it's unseen.
+  const cinema = useCinemaMode()
+  const [bootSeen, setBootSeen] = useState<boolean>(true)
+  useEffect(() => {
+    try {
+      setBootSeen(sessionStorage.getItem("omnisight:ui:boot-seen") === "1")
+    } catch {
+      setBootSeen(true) // fail-closed: don't replay boot if storage is flaky
+    }
+  }, [])
+  const markBootSeen = useCallback(() => {
+    try {
+      sessionStorage.setItem("omnisight:ui:boot-seen", "1")
+    } catch {
+      /* ignore */
+    }
+    setBootSeen(true)
+  }, [])
 
   const probe = useCallback(async () => {
     setLoading(true)
@@ -689,8 +962,17 @@ export default function SetupRequiredPage() {
     )
   }, [status])
 
+  // Cinema mode extras: only render once the hook has hydrated so we
+  // don't flash them on first paint when the user has opted out.
+  const cinemaActive = cinema.hydrated && cinema.enabled
+  const showBootSequence = cinemaActive && !bootSeen
+
   return (
     <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-[var(--deep-space-start)]">
+      {/* Matrix rain — deepest background layer, below the neural
+          grid. Cinema-only; fully pointer-events-none + aria-hidden. */}
+      {cinemaActive && <MatrixRain />}
+
       <NeuralGrid />
 
       {/* Static CRT scan-line grid — inline so we don't depend on the
@@ -942,6 +1224,19 @@ export default function SetupRequiredPage() {
       <div aria-hidden="true" className="h-10" />
 
       <TelemetryTicker />
+
+      {/* Round 3: cinema-mode toggle. Sits above the telemetry
+          ticker (bottom-12 vs ticker's bottom-0) so it never collides. */}
+      <CinemaModeToggle
+        enabled={cinema.enabled}
+        onToggle={cinema.toggle}
+        hydrated={cinema.hydrated}
+      />
+
+      {/* Round 3: typewriter boot sequence. Played once per tab
+          session when cinema mode is ON. Skippable via any key or
+          click (handled inside the component). */}
+      {showBootSequence && <BootSequence onDone={markBootSeen} />}
 
       {/* Round 2-B: cinematic finalize overlay. Mounted only while
           ``finalizing`` is true so the normal page stays identical
