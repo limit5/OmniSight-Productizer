@@ -170,10 +170,27 @@ services:
     # in configs/prometheus.yml (`backend:8000`) without touching files outside
     # this compose diff. A follow-up commit can teach prometheus.yml to scrape
     # both replicas (backend-a + backend-b) and drop this alias.
+    #
+    # Phase-1 wire-up (2026-04-20): backend is now dual-homed. ``default`` is
+    # still the productizer-internal network (talks to caddy / frontend /
+    # cloudflared / docker-socket-proxy). ``ai_core`` is the external network
+    # owned by the sibling ``omnisight-ai-core`` compose stack and carries
+    # two shared-infra services we now need as soft dependencies:
+    #
+    #   * ``ai_cache`` (redis:7-alpine) — backs I9 rate limiter + I10
+    #     shared_state (SSE fan-out, parallel_in_flight, AIMD budget,
+    #     etc.). Reaches it via DNS name ``ai_cache`` on port 6379.
+    #   * future: Gemma4 local LLM endpoint (phase 2).
+    #
+    # When ai-core is down, the backend falls back to in-memory state
+    # (rate_limit.py + shared_state.py both detect + log + degrade). So the
+    # dep is *soft* — production keeps serving, but quota is per-replica
+    # (halved) and SSE cross-worker delivery drops to local-only.
     networks:
       default:
         aliases:
           - backend
+      ai_core: {}
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -243,6 +260,12 @@ services:
       - OMNISIGHT_FRONTEND_URL=http://frontend:3000
     env_file:
       - .env
+    # Dual-home same as backend-a — see backend-a's networks: block
+    # for the Phase-1 rationale (ai-core shared-infra network carrying
+    # ai_cache + future Gemma4).
+    networks:
+      default: {}
+      ai_core: {}
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -493,3 +516,17 @@ volumes:
     driver: local
   omnisight-grafana:
     driver: local
+
+# ─── Networks ──────────────────────────────────────────────────────
+# Phase-1 wire-up: the backend replicas reach ai_cache (Redis) and — in
+# phase 2 — Gemma4 inference via the external ``omnisight-ai-core`` stack's
+# network. Declared ``external: true`` so this compose file does not
+# create or destroy the network; it only attaches. The implicit
+# ``default`` network (created by compose from the project name) stays
+# as-is for all other intra-stack wiring (caddy / frontend / cloudflared
+# / docker-socket-proxy); it is not declared here so compose keeps the
+# default behaviour (auto-create, project-scoped name).
+networks:
+  ai_core:
+    external: true
+    name: omnisight-ai-core_omnisight_net
