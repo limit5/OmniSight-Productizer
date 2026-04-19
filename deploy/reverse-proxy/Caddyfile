@@ -31,7 +31,11 @@
 	# Global options — kept explicit so `caddy validate` is deterministic in CI.
 	admin off
 	auto_https disable_redirects
-	email {$OMNISIGHT_ACME_EMAIL:}
+	# `email` requires a non-empty argument or Caddy refuses to parse the
+	# config. If OMNISIGHT_ACME_EMAIL is unset we fall through to
+	# `issuer internal` (self-signed CA), in which case this placeholder
+	# is never actually used by ACME.
+	email {$OMNISIGHT_ACME_EMAIL:admin@omnisight.invalid}
 	servers {
 		protocols h1 h2 h2c h3
 	}
@@ -75,17 +79,31 @@
 	}
 }
 
-# Main HTTPS listener. `{$OMNISIGHT_PUBLIC_HOSTNAME::443}` expands to the
-# configured hostname (ACME-issued cert) or falls back to `:443` (internal
-# cert via `tls internal` for dev/CI/air-gapped installs).
-{$OMNISIGHT_PUBLIC_HOSTNAME::443} {
-	# TLS — ACME if hostname is set, internal CA otherwise.
-	tls {
-		issuer acme {
-			email {$OMNISIGHT_ACME_EMAIL:}
-		}
-		issuer internal
-	}
+# Main HTTPS listener. Multi-name site so Caddy's internal CA pre-issues
+# a cert for EACH declared name — required because `tls internal` with
+# a bare `:443` catch-all won't mint certs for arbitrary SNIs and every
+# TLS handshake ends in `alert internal error`. Declared names cover:
+#   - $OMNISIGHT_PUBLIC_HOSTNAME (real hostname when set, e.g. sora-dev.app)
+#   - localhost / 127.0.0.1 (loopback curl smoke + Caddy healthcheck)
+{$OMNISIGHT_PUBLIC_HOSTNAME:localhost}, 127.0.0.1 {
+	# TLS — Caddy's internal CA (self-signed).
+	#
+	# Production architecture: Cloudflare Tunnel terminates real TLS at
+	# the CF edge, then forwards to this origin over the tunnel in plain
+	# HTTP (or opportunistic TLS that ignores origin-cert validity). So
+	# the origin `:443` cert only needs to exist, not be publicly trusted.
+	#
+	# Previous iteration used `tls { issuer acme; issuer internal }` as a
+	# fallback chain, but when OMNISIGHT_PUBLIC_HOSTNAME is empty the
+	# site address is `:443` (catch-all, no FQDN) and `issuer acme` has
+	# nothing to validate against → its failure state poisoned the TLS
+	# handshake with alert 80 `internal error`. Using `tls internal` only
+	# gives a clean self-signed cert for any SNI (including 127.0.0.1).
+	#
+	# If you later need real ACME certs on this origin (direct access
+	# bypassing CF), switch to `tls {$OMNISIGHT_ACME_EMAIL}` and set a
+	# real hostname in OMNISIGHT_PUBLIC_HOSTNAME.
+	tls internal
 
 	# Standard hardening — HSTS only after a host is pinned; on bare `:443`
 	# the preload list would be a footgun, so keep it off by default.
@@ -146,7 +164,9 @@
 		health_status 2xx
 		health_passes 1
 		health_fails 3
-		health_follow_redirects false
+		# Caddy defaults to NOT following redirects — dropped explicit
+		# `health_follow_redirects false` because it's a flag directive
+		# (presence = on), not a boolean-taking one.
 
 		# Passive eject — independent safety net for the case where a replica
 		# returns 5xx *without* failing the /readyz probe (e.g. DB blip mid
