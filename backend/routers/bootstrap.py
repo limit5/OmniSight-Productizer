@@ -1896,16 +1896,44 @@ async def bootstrap_parallel_health_check(
 #  L6 — Step 5 (run scripts/prod_smoke_test.py --subset dag1 in-process)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
-# The wizard's Step 5 proves the install actually works end-to-end by
-# running the compile-flash host_native DAG from
-# ``scripts/prod_smoke_test.py`` (DAG #1, the ~60s subset picked so a
-# fresh install doesn't also pay the aarch64 cross-compile cost). On
-# top of the DAG result we verify the audit-log hash chain — if the
-# chain is already corrupted this early, bootstrap is lying and the
-# operator must know before finalize.
+# The wizard's Step 5 proves the install is coherent end-to-end by
+# validating + persisting two fixed DAG payloads:
+#
+#   * DAG #1 ``smoke-compile-flash-host-native`` — 2 tasks
+#     (``compile`` t1/cmake + ``flash`` t3/python3). On host_native the
+#     t3 resolver picks LOCAL so the symbolic "flash" task is tier-
+#     legal; there's no physical board to write.
+#   * DAG #2 ``smoke-cross-compile-aarch64`` — validates the cross-
+#     compile DAG shape + runs the t3 resolver probe for aarch64; NO
+#     cross-compile actually runs.
+#
+# On top of the DAG results we verify the audit-log Merkle hash chain
+# per tenant — if the chain is already corrupted this early, bootstrap
+# is lying and the operator must know before finalize.
+#
+# Scope + runtime (IMPORTANT — historical comments overstated this):
+#
+#   What this does  : validate 2 DAGs through dag_validator (8
+#                     pure-CPU rules × 2 DAGs) + workflow.start for
+#                     each (INSERT workflow_run + INSERT dag_plan +
+#                     UPDATE status → "executing") + walk each
+#                     tenant's audit_log row-by-row to verify the
+#                     hash chain.
+#   What this is NOT: an execution of anything. ``set_status
+#                     (plan.id, "executing")`` is a DB-metadata
+#                     transition — no worker / agent picks up the
+#                     plan from this call. No gcc, no cmake, no
+#                     cross-toolchain, no I/O outside SQLite.
+#   Expected wall   : ~1-3 seconds on healthy SQLite + reasonable
+#                     audit_log size. Ballooning to minutes requires
+#                     audit_log > ~10 M rows; hours is not reachable
+#                     by any code path here. The "~60s" wording in
+#                     earlier revisions was aspirational/stale; it
+#                     does not reflect the shipped code and has been
+#                     removed.
 #
 # Two outcomes the wizard UI needs:
-#   * green — both the DAG validates + submits AND ``audit.verify_chain``
+#   * green — both DAGs validate + persist AND ``audit.verify_chain``
 #             is intact → mark ``smoke_passed=true`` + record ``STEP_SMOKE``
 #             so the fifth gate flips and finalize becomes reachable.
 #   * red   — return the validator errors / audit first-bad-id so the UI
@@ -1913,9 +1941,9 @@ async def bootstrap_parallel_health_check(
 #             to the appropriate earlier step.
 #
 # Implementation notes:
-#   * The DAG payload is the SAME ``DAG_1_COMPILE_FLASH_HOST_NATIVE``
-#     shape shipped in ``scripts/prod_smoke_test.py`` — single source of
-#     truth lives in the script so prod-UI smoke and wizard smoke can't
+#   * The DAG payloads are byte-identical to the ones in
+#     ``scripts/prod_smoke_test.py`` — single source of truth lives in
+#     ``_smoke_dag_catalogue`` so prod-UI smoke and wizard smoke can't
 #     drift.
 #   * We do NOT shell out to the script. During bootstrap the admin has
 #     not logged in yet, so the script's operator-gated ``POST /dag``
@@ -1930,26 +1958,31 @@ _SMOKE_DAG_ID_AARCH64 = "smoke-cross-compile-aarch64"
 class SmokeSubsetRequest(BaseModel):
     """Body for ``POST /bootstrap/smoke-subset``.
 
-    ``subset`` selects which DAG(s) to invoke:
-      * ``dag1`` (default) — the compile-flash host_native DAG, ~60s;
-        matches what L6 Step 5 locked in for the fast-path wizard run.
-      * ``dag2`` — the aarch64 cross-compile DAG, validation + plan
-        persistence only (no physical cross-compile runs in-process).
-      * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5 UI
-        can render a run summary for each DAG shipped in
+    ``subset`` selects which DAG(s) to invoke. Both DAGs are
+    validation + persistence only — no compile, no flash, no
+    cross-compile actually executes. Wall time is dominated by
+    the per-tenant audit-chain walk and clocks in at ~1-3s on a
+    healthy stack; see the section comment above for the full
+    scope breakdown.
+
+      * ``dag1`` (default) — the compile-flash host_native DAG.
+      * ``dag2`` — the aarch64 cross-compile DAG.
+      * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5
+        UI can render a run summary for each DAG shipped in
         ``scripts/prod_smoke_test.py``.
 
-    The wizard drives ``subset="both"`` so the operator sees the
-    "兩個 DAG 的 run summary" (Step 5 TODO); external callers / CLI
-    users can still pin to ``dag1`` for the 60-second fast path.
+    The wizard drives ``subset="both"`` so the operator sees a run
+    summary per DAG; external callers / CLI users can still pin to
+    ``dag1`` for a slightly quicker single-DAG signal.
     """
 
     subset: Literal["dag1", "dag2", "both"] = Field(
         default="dag1",
         description=(
             "Which DAG subset to run — ``dag1`` (compile-flash "
-            "host_native, ~60s fast path), ``dag2`` (aarch64 "
-            "cross-compile), or ``both`` (wizard default on Step 5)."
+            "host_native), ``dag2`` (aarch64 cross-compile), or "
+            "``both`` (wizard default on Step 5). All paths are "
+            "validate + persist only; no physical build runs in-process."
         ),
     )
 
