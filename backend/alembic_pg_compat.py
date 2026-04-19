@@ -123,6 +123,12 @@ _PRAGMA_TABLE_INFO_RE = re.compile(
     re.IGNORECASE,
 )
 _REAL_COL_RE = re.compile(r"\bREAL\b", re.IGNORECASE)
+# Guard: only rewrite REAL when the SQL statement is a DDL (CREATE TABLE /
+# ALTER TABLE / ADD COLUMN). That keeps the rewrite well clear of any
+# parameter strings / JSON bodies that may legitimately contain the token.
+_DDL_GUARD_RE = re.compile(
+    r"\b(CREATE\s+TABLE|ALTER\s+TABLE|ADD\s+COLUMN)\b", re.IGNORECASE
+)
 
 
 def _translate_autoincrement(sql: str) -> str:
@@ -210,6 +216,32 @@ def _translate_insert_or_replace(sql: str) -> str:
     )
 
 
+def _translate_real(sql: str) -> str:
+    """Rewrite ``REAL`` → ``DOUBLE PRECISION`` in DDL.
+
+    SQLite's ``REAL`` is IEEE-754 binary64 (8 bytes). PostgreSQL's
+    ``REAL`` is binary32 (4 bytes) — half the precision. The audit_log
+    hash chain depends on byte-exact round-tripping of ``ts`` (a
+    sub-second float stored with 6-digit precision); a REAL→REAL
+    migration truncates the fractional seconds and breaks the chain
+    on every row. PG's ``DOUBLE PRECISION`` is the byte-exact match
+    for SQLite's REAL.
+
+    Scoped to DDL statements (``CREATE TABLE`` / ``ALTER TABLE`` /
+    ``ADD COLUMN``) via the ``_DDL_GUARD_RE`` preflight so the
+    rewrite can't accidentally mangle JSON payloads or parameter
+    strings — neither of which reach this hook as DDL anyway, but the
+    belt-and-braces check costs nothing.
+
+    Phase-3 P1 root cause: ``audit_log.ts REAL NOT NULL`` became
+    ``REAL`` on PG too, truncating 1776547569.684335 → 1776547584.0
+    and breaking ``curr_hash`` verification on the first row.
+    """
+    if not _DDL_GUARD_RE.search(sql):
+        return sql
+    return _REAL_COL_RE.sub("DOUBLE PRECISION", sql)
+
+
 def _translate_pragma_table_info(sql: str) -> str:
     # The migrations call PRAGMA table_info(T) and read row[1] for the
     # column name. Postgres has no PRAGMA; we emit a SELECT that yields
@@ -274,6 +306,7 @@ def translate_sql(sql: str, dialect: str) -> str:
         return sql
     out = sql
     out = _translate_autoincrement(out)
+    out = _translate_real(out)
     out = _translate_datetime_now(out)
     out = _translate_strftime_epoch(out)
     out = _translate_insert_or_replace(out)
