@@ -12,6 +12,10 @@ Cross-references:
 * DR RTO/RPO → [`docs/ops/dr_rto_rpo.md`](./dr_rto_rpo.md)
 * Shutdown / restart scripts → [`docs/operations/shutdown-restart.md`](../operations/shutdown-restart.md)
 * Initial install (first-ever deploy) → [`docs/operations/deployment.md`](../operations/deployment.md)
+* **Cloudflare dashboard reference** (what was set + why) → [`docs/ops/cloudflare_settings.md`](./cloudflare_settings.md)
+* **Host reboot auto-recovery** (Windows Task Scheduler + systemd) → [`docs/ops/autostart_wsl.md`](./autostart_wsl.md)
+* **Dev + prod on the same WSL host** (transitional until Ubuntu-26.04 ships) → [`docs/ops/dev_prod_coexistence.md`](./dev_prod_coexistence.md)
+* **2026-04-19 first-time go-live post-mortem** (14 bugs + 3 audit issues) → [`docs/ops/deploy_postmortem_2026-04-19.md`](./deploy_postmortem_2026-04-19.md)
 
 ---
 

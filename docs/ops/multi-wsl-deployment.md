@@ -1,5 +1,10 @@
 # Multi-WSL 部署指南
 
+> ⚠️ **當前實際狀態（2026-04-19）**：Ubuntu-26.04 尚未 GA，**dev + prod
+> 目前暫時共用 Ubuntu-24.04**。這是過渡狀態，有一組特定的踩坑要避免
+> — 詳見 [`dev_prod_coexistence.md`](./dev_prod_coexistence.md)，那份
+> 文件會在 26.04 上線並完成遷移後退休。
+
 ## 架構總覽
 
 ```
