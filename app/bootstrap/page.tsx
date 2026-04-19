@@ -2942,12 +2942,18 @@ function StepBodyPlaceholder({ step }: { step: StepDef }) {
 
 function _emptyLocalGreen(): Record<StepId, boolean> {
   // Centralised so STEPS additions don't drift from the seed value.
+  // Every step starts red — the "Skip" affordance on optional steps
+  // (git_forge) + the probe result on local-only steps
+  // (services_ready) flip them to green. An earlier version seeded
+  // git_forge=true to keep the auto-advance cursor from stalling on
+  // it, but that had the awful side-effect of rendering the
+  // "Marked complete — skip applied" banner BEFORE the operator
+  // touched the step, AND making the Skip button a no-op (the
+  // setState bailed out because prev === next value). See the
+  // GitForgeStep's onCompleted callback on the page component for
+  // the replacement behaviour: explicit cursor advance on Skip/Save.
   const out = {} as Record<StepId, boolean>
   for (const s of STEPS) out[s.id] = false
-  // Optional (non-gate) steps seed-green so auto-advance doesn't stall
-  // on them and finalize is never blocked. Operators can still click
-  // the sidebar pill to open and configure these steps explicitly.
-  out.git_forge = true
   return out
 }
 
@@ -3176,7 +3182,25 @@ export default function BootstrapPage() {
               ) : activeStep.id === "git_forge" ? (
                 <GitForgeStep
                   alreadyGreen={localGreen.git_forge === true}
-                  onCompleted={() => setLocalGreenFor("git_forge", true)}
+                  onCompleted={() => {
+                    // Clicking Skip (or Save in a token form) is an
+                    // explicit "I'm done with this step" intent —
+                    // flip green AND advance the cursor, even when
+                    // userPinned is already true. Without the
+                    // advance, the UI gives no visible feedback
+                    // (the green banner is local + optional, not a
+                    // finalize gate) and the operator is stuck
+                    // thinking Skip is broken.
+                    setLocalGreenFor("git_forge", true)
+                    const idx = STEPS.findIndex(
+                      (s) => s.id === "git_forge",
+                    )
+                    const next = STEPS[idx + 1]
+                    if (next) {
+                      setUserPinned(true)
+                      setActiveId(next.id)
+                    }
+                  }}
                 />
               ) : activeStep.id === "services_ready" ? (
                 <ServiceHealthStep
