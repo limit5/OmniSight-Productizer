@@ -18,9 +18,10 @@ from backend.config import settings as _settings
 logger = logging.getLogger(__name__)
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from backend import auth as _auth
 from backend.routers import _pagination as _pg
 
 from backend.models import (
@@ -28,7 +29,22 @@ from backend.models import (
     DeployRequest,
 )
 
-router = APIRouter(prefix="/system", tags=["system"])
+# Router-level auth baseline: every /system/* route requires an
+# authenticated session. Individual write endpoints stack an
+# admin-role check on top via their own `dependencies=` list.
+#
+# Audit H1 (2026-04-19): this router previously had zero auth; the
+# CF WAF rule + Zero Trust Access at the edge are defence-in-depth,
+# but the application itself must not rely on edge mitigation. See
+# docs/ops/deploy_postmortem_2026-04-19.md security follow-ups.
+router = APIRouter(
+    prefix="/system",
+    tags=["system"],
+    dependencies=[Depends(_auth.current_user)],
+)
+
+# Reusable admin gate for mutating / privileged endpoints.
+_REQUIRE_ADMIN = [Depends(_auth.require_role("admin"))]
 
 _BASH_TIMEOUT = 5
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -293,11 +309,19 @@ async def get_evk_status():
     return results
 
 
-@router.post("/deploy")
+@router.post("/deploy", dependencies=_REQUIRE_ADMIN)
 async def trigger_deploy(body: DeployRequest):
-    """Trigger deployment to an EVK board."""
+    """Trigger deployment to an EVK board. Admin only."""
     from backend.agents.tools import deploy_to_evk
-    # Use module as binary path hint if binary_path not specified
+    # Audit H1: reject `..`-containing module / binary_path — without this
+    # an authenticated admin could still escape the `build/` prefix to
+    # deploy e.g. `/etc/passwd` or `~/.ssh/id_rsa` to attached hardware.
+    for name, value in (("module", body.module), ("binary_path", body.binary_path or "")):
+        if ".." in value or value.startswith("/"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid {name}: path traversal or absolute paths forbidden",
+            )
     binary_path = body.binary_path or f"build/{body.module}"
     result = await deploy_to_evk.ainvoke({
         "platform": body.platform,
@@ -323,16 +347,16 @@ async def get_pipeline_status_endpoint():
     return get_pipeline_status()
 
 
-@router.post("/pipeline/start")
+@router.post("/pipeline/start", dependencies=_REQUIRE_ADMIN)
 async def start_pipeline(body: PipelineStartRequest):
-    """Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs."""
+    """Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs. Admin only."""
     from backend.pipeline import run_pipeline
     return await run_pipeline(body.spec_context)
 
 
-@router.post("/pipeline/advance")
+@router.post("/pipeline/advance", dependencies=_REQUIRE_ADMIN)
 async def advance_pipeline_endpoint():
-    """Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed)."""
+    """Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed). Admin only."""
     from backend.pipeline import force_advance
     return await force_advance()
 
@@ -470,7 +494,7 @@ async def get_release_manifest(version: str = ""):
     return manifest
 
 
-@router.post("/release")
+@router.post("/release", dependencies=_REQUIRE_ADMIN)
 async def create_release(body: ReleaseRequest):
     """Create a release bundle and optionally upload to GitHub/GitLab.
 
@@ -523,7 +547,7 @@ async def create_release(body: ReleaseRequest):
 #  System Status (for header)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-@router.get("/debug")
+@router.get("/debug", dependencies=_REQUIRE_ADMIN)
 async def get_debug_state():
     """Comprehensive debug state: agent errors, blocked tasks, debug findings."""
     from backend import db
@@ -812,7 +836,7 @@ async def get_project_forecast(provider: str | None = None) -> dict:
     return f
 
 
-@router.post("/forecast/recompute")
+@router.post("/forecast/recompute", dependencies=_REQUIRE_ADMIN)
 async def recompute_project_forecast() -> dict:
     """Bust the 5-min cache and re-read the manifest."""
     global _FORECAST_CACHE
@@ -871,7 +895,7 @@ async def list_vendor_sdks():
     return results
 
 
-@router.put("/spec")
+@router.put("/spec", dependencies=_REQUIRE_ADMIN)
 async def update_spec_field(path: list[str], value: str | int | float | bool):
     """Update a single field in hardware_manifest.yaml."""
     manifest = _PROJECT_ROOT / "configs" / "hardware_manifest.yaml"
@@ -1276,7 +1300,7 @@ async def get_compression_stats():
     return stats
 
 
-@router.delete("/tokens")
+@router.delete("/tokens", dependencies=_REQUIRE_ADMIN)
 async def reset_token_usage():
     """Reset all token usage counters."""
     global token_frozen, _last_budget_level
@@ -1314,7 +1338,7 @@ async def get_token_budget():
     }
 
 
-@router.put("/token-budget")
+@router.put("/token-budget", dependencies=_REQUIRE_ADMIN)
 async def update_token_budget(
     budget: float | None = None,
     warn_threshold: float | None = None,
@@ -1340,7 +1364,7 @@ async def update_token_budget(
     return await get_token_budget()
 
 
-@router.post("/token-budget/reset")
+@router.post("/token-budget/reset", dependencies=_REQUIRE_ADMIN)
 async def reset_token_freeze():
     """Reset the token freeze state (human intervention)."""
     global token_frozen, _last_budget_level
