@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 from typing import Literal
 
@@ -689,6 +690,48 @@ async def bootstrap_start_services(
             logger.debug("bootstrap.start_services audit emit failed: %s", exc)
         return StartServicesResponse(
             status="already_running",
+            mode=mode,
+            command=[],
+            returncode=0,
+            stdout_tail="",
+            stderr_tail="",
+        )
+
+    # Path B — docker-compose HA hardened. The backend container does
+    # NOT ship the ``docker`` CLI (minimal image footprint + attack
+    # surface), so a subprocess ``docker compose up -d`` can't run
+    # from here. If the operator wired up the docker-socket-proxy
+    # side-car, we have Docker API reach via DOCKER_HOST — but the
+    # service lifecycle (docker compose ...) was initiated on the
+    # host and ``restart: always`` already re-spawns crashed
+    # containers. A Launch button click has no remediation value
+    # from this side of the wall.
+    #
+    # Detect this precisely — mode=docker-compose with no local
+    # docker CLI — and short-circuit with ``managed_externally``
+    # rather than attempting a subprocess that will fail with
+    # ``binary_missing`` and confuse the operator. The UX banner
+    # for this status tells the operator where the real control
+    # plane lives (host ``docker compose ps`` / ``restart: always``).
+    if mode == "docker-compose" and shutil.which("docker") is None:
+        logger.info(
+            "bootstrap: start-services skipped — mode=docker-compose "
+            "but no docker CLI in backend container (managed externally)"
+        )
+        try:
+            await audit.log(
+                action="bootstrap.start_services",
+                entity_kind="bootstrap",
+                entity_id="start_services",
+                before=None,
+                after={"mode": mode, "command": [], "returncode": 0,
+                       "status": "managed_externally"},
+                actor="wizard",
+            )
+        except Exception as exc:
+            logger.debug("bootstrap.start_services audit emit failed: %s", exc)
+        return StartServicesResponse(
+            status="managed_externally",
             mode=mode,
             command=[],
             returncode=0,

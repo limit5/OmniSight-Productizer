@@ -56,6 +56,15 @@ _CGROUP_PATH = Path("/proc/1/cgroup")
 _SYSTEMD_RUN_DIR = Path("/run/systemd/system")
 _DOCKER_SOCKET = Path("/var/run/docker.sock")
 
+# ``DOCKER_HOST`` env var — when set to a non-default value it means the
+# container is wired to a Docker API endpoint that isn't the local
+# /var/run/docker.sock (typically a TCP socket proxy, e.g. the
+# ``tecnativa/docker-socket-proxy`` side-car we use in docker-compose
+# HA hardening). Treat that as compose-reachable even if the socket
+# file is not mounted locally. See detect_deploy_mode() decision
+# table for how this interacts with in_docker.
+_DOCKER_HOST_ENV = "DOCKER_HOST"
+
 
 @dataclass(frozen=True)
 class DeployModeDetection:
@@ -149,18 +158,31 @@ def _has_systemd() -> tuple[bool, str]:
 
 
 def _has_docker_socket() -> tuple[bool, str]:
-    """True if ``/var/run/docker.sock`` is reachable as a socket.
+    """True if the Docker API is reachable — either via the local
+    ``/var/run/docker.sock`` OR via a non-default ``DOCKER_HOST`` env
+    override (e.g. the socket-proxy side-car we wire up in docker-
+    compose HA hardening, where the backend container never sees the
+    real socket but IS given ``DOCKER_HOST=tcp://docker-socket-proxy:2375``).
 
-    A plain ``exists()`` is not enough — the wizard only cares whether
-    compose can talk to a daemon. We check the path is a socket file;
-    permission errors are swallowed (common when the wizard process is
-    not in the ``docker`` group) and treated as "not reachable".
+    A plain ``exists()`` is not enough for the local socket — the
+    wizard only cares whether compose can talk to a daemon. We check
+    the path is a socket file; permission errors are swallowed
+    (common when the wizard process is not in the ``docker`` group)
+    and treated as "not reachable".
     """
     try:
         if _DOCKER_SOCKET.exists() and _DOCKER_SOCKET.is_socket():
             return True, f"{_DOCKER_SOCKET} is a socket"
     except (OSError, PermissionError) as exc:
         logger.debug("deploy_mode: docker socket probe failed (%s)", exc)
+    # DOCKER_HOST override path — the H4 hardening in
+    # docker-compose.prod.yml intentionally replaces the mounted
+    # socket with a TCP proxy. Accept that endpoint as a green signal
+    # so the wizard doesn't falsely conclude "dev mode" on a
+    # production compose stack.
+    host_override = (os.environ.get(_DOCKER_HOST_ENV) or "").strip()
+    if host_override and host_override not in ("", "unix:///var/run/docker.sock"):
+        return True, f"{_DOCKER_HOST_ENV}={host_override!r} (remote/proxy)"
     return False, "no docker socket at /var/run/docker.sock"
 
 
@@ -242,7 +264,12 @@ def detect_deploy_mode() -> DeployModeDetection:
 
     if in_docker and has_socket:
         mode: DeployMode = "docker-compose"
-        reason = "running inside container with /var/run/docker.sock mounted — compose-in-docker"
+        # Reason defers to the socket probe's evidence string so the
+        # wording stays accurate whether the signal came from the
+        # mounted /var/run/docker.sock or from the DOCKER_HOST proxy
+        # env — both count as "compose-reachable from inside a
+        # container" but have different remediation paths.
+        reason = f"running inside container + {socket_evidence} — compose-reachable"
     elif in_docker:
         mode = "dev"
         reason = "running inside container, no docker socket — services already up in this container"

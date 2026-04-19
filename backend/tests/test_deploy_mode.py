@@ -30,12 +30,18 @@ def _stub_host(
     systemd_run_dir: bool = False,
     docker_socket: bool = False,
     which_map: dict[str, str] | None = None,
+    docker_host_env: str | None = None,
 ) -> None:
     """Install a deterministic faux-host for :mod:`backend.deploy_mode`.
 
     Every filesystem probe points inside *tmp_path* so nothing from the
     real host leaks into the test. ``which_map`` controls the
     ``shutil.which`` lookups — absent keys return ``None``.
+
+    ``docker_host_env`` controls the ``DOCKER_HOST`` env var that the
+    socket probe also consults (for the socket-proxy / remote-daemon
+    path). Default ``None`` means the env is explicitly unset so tests
+    reproduce a clean host regardless of the pytest invoker's shell.
     """
     dockerenv = tmp_path / "dockerenv"
     cgroup = tmp_path / "cgroup"
@@ -61,6 +67,11 @@ def _stub_host(
     monkeypatch.setattr(_dm, "_CGROUP_PATH", cgroup)
     monkeypatch.setattr(_dm, "_SYSTEMD_RUN_DIR", systemd)
     monkeypatch.setattr(_dm, "_DOCKER_SOCKET", sock)
+
+    if docker_host_env is None:
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
+    else:
+        monkeypatch.setenv("DOCKER_HOST", docker_host_env)
 
     lookup = which_map or {}
     monkeypatch.setattr(_dm.shutil, "which", lambda name: lookup.get(name))
@@ -160,6 +171,45 @@ def test_has_docker_socket_rejects_regular_file(monkeypatch, tmp_path):
     assert detected is False
 
 
+def test_has_docker_socket_picks_up_docker_host_env(monkeypatch, tmp_path):
+    """Path B hardening removes the mounted ``/var/run/docker.sock`` and
+    gives backends ``DOCKER_HOST=tcp://docker-socket-proxy:2375`` instead.
+    The probe must treat that as a green signal so detect_deploy_mode()
+    returns docker-compose (not dev) on a real production stack."""
+    _stub_host(
+        monkeypatch, tmp_path,
+        docker_host_env="tcp://docker-socket-proxy:2375",
+    )
+    detected, evidence = _dm._has_docker_socket()
+    assert detected is True
+    assert "DOCKER_HOST" in evidence
+    assert "docker-socket-proxy" in evidence
+
+
+def test_has_docker_socket_ignores_default_unix_docker_host(
+    monkeypatch, tmp_path,
+):
+    """If DOCKER_HOST is set but points at the default unix socket path,
+    that's NOT an override — fall back to the filesystem check so a
+    typo like ``DOCKER_HOST=unix:///var/run/docker.sock`` on a host
+    without that socket doesn't falsely flip the detection."""
+    _stub_host(
+        monkeypatch, tmp_path,
+        docker_host_env="unix:///var/run/docker.sock",
+    )
+    detected, evidence = _dm._has_docker_socket()
+    assert detected is False
+    assert "no docker socket" in evidence
+
+
+def test_has_docker_socket_empty_docker_host_ignored(monkeypatch, tmp_path):
+    """Empty / whitespace-only DOCKER_HOST shouldn't falsely assert a
+    socket — env parsing must strip + treat as unset."""
+    _stub_host(monkeypatch, tmp_path, docker_host_env="   ")
+    detected, _ = _dm._has_docker_socket()
+    assert detected is False
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  detect_deploy_mode — decision table
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -200,7 +250,7 @@ def test_env_override_ignores_unknown_value(monkeypatch, tmp_path, caplog):
 
 
 def test_in_docker_with_socket_picks_compose(monkeypatch, tmp_path):
-    """Nested docker w/ mounted socket → compose-in-docker."""
+    """Nested docker w/ mounted socket → compose-reachable."""
     _stub_host(
         monkeypatch, tmp_path,
         in_docker_file=True, docker_socket=True,
@@ -211,7 +261,29 @@ def test_in_docker_with_socket_picks_compose(monkeypatch, tmp_path):
     assert result.mode == "docker-compose"
     assert result.in_docker is True
     assert result.has_docker_socket is True
-    assert "compose-in-docker" in result.reason
+    assert "compose-reachable" in result.reason
+    assert "docker.sock" in result.reason or "socket" in result.reason
+
+
+def test_in_docker_with_docker_host_env_picks_compose(monkeypatch, tmp_path):
+    """Path B hardened stack — ``DOCKER_HOST`` env points at the
+    socket-proxy side-car; no /var/run/docker.sock. Decision must
+    still land on docker-compose, not dev. Reason string should
+    reveal the env source so operators can trace how the detection
+    got there."""
+    _stub_host(
+        monkeypatch, tmp_path,
+        in_docker_file=True,
+        docker_host_env="tcp://docker-socket-proxy:2375",
+        which_map={},
+    )
+    monkeypatch.delenv("OMNISIGHT_DEPLOY_MODE", raising=False)
+    result = _dm.detect_deploy_mode()
+    assert result.mode == "docker-compose"
+    assert result.in_docker is True
+    assert result.has_docker_socket is True
+    assert "DOCKER_HOST" in result.reason
+    assert "docker-socket-proxy" in result.reason
 
 
 def test_in_docker_without_socket_picks_dev(monkeypatch, tmp_path):

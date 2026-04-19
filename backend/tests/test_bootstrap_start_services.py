@@ -78,6 +78,41 @@ async def test_start_services_dev_mode_is_noop(client, monkeypatch):
     assert captured == []  # nothing was exec'd
 
 
+@pytest.mark.asyncio
+async def test_start_services_docker_compose_without_cli_is_managed_externally(
+    client, monkeypatch,
+):
+    """Path B hardened deployment: mode=docker-compose, no docker CLI
+    in the backend container (minimal image + docker-socket-proxy
+    side-car). The handler must short-circuit with
+    ``managed_externally`` instead of exec'ing ``docker compose up -d``
+    — which would fail with ``binary_missing`` and scare the operator.
+    """
+    from backend.routers import bootstrap as _br
+
+    captured: list = []
+    _patch_exec(monkeypatch, captured)
+    # Force ``shutil.which("docker")`` to look empty regardless of the
+    # test runner's real PATH.
+    monkeypatch.setattr(
+        _br.shutil, "which",
+        lambda name: None if name == "docker" else "/usr/bin/" + name,
+    )
+
+    r = await client.post(
+        "/api/v1/bootstrap/start-services",
+        json={"mode": "docker-compose"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "managed_externally"
+    assert body["mode"] == "docker-compose"
+    assert body["command"] == []
+    assert body["returncode"] == 0
+    assert captured == []  # nothing was exec'd
+
+
 # ── systemd mode ──────────────────────────────────────────────────────
 
 

@@ -2157,6 +2157,35 @@ function StartServicesErrorBanner({
   )
 }
 
+// Human-readable one-liner per (status, mode) combo returned by
+// /bootstrap/start-services. Centralising here so the Step-5 UI
+// doesn't have to inline string conditionals + so future modes can
+// be added with a single-line addition. Null = "render the generic
+// launched/mode line".
+function _startServicesOkCopy(
+  status: string,
+  mode: string,
+): { label: string; tone: "green" | "info" } {
+  if (status === "managed_externally") {
+    return {
+      label:
+        "managed externally — host runs `docker compose up -d` + " +
+        "`restart: always` auto-recovers. This button is a no-op here.",
+      tone: "info",
+    }
+  }
+  if (status === "already_running") {
+    if (mode === "dev") {
+      return {
+        label: "already running — dev mode (uvicorn / next dev in-process)",
+        tone: "green",
+      }
+    }
+    return { label: `already running (${mode})`, tone: "green" }
+  }
+  return { label: `launched (${mode})`, tone: "green" }
+}
+
 function StartServicesPanel({
   anyRed,
   onStartResolved,
@@ -2200,6 +2229,32 @@ function StartServicesPanel({
     }
   }, [onStartResolved])
 
+  // Description varies by whether the operator actually needs this
+  // tool right now. All-green → it's a "kick the tyres" affordance;
+  // a row stuck red → it's the primary CTA to get past the step.
+  const description = anyRed
+    ? (
+      <>
+        A probe above is stuck red.{" "}
+        <strong className="text-[var(--foreground)]">
+          Try the launcher first
+        </strong>{" "}
+        — the backend auto-detects deploy mode (systemd /
+        docker-compose / dev). If the launcher can't act from here
+        (e.g. compose-managed stack), the banner explains where the
+        real control plane lives so you can fix it on the host.
+      </>
+    )
+    : (
+      <>
+        Everything's green. The launcher is idle here — press it only
+        if you want to force a re-kick of the services. In a
+        compose-managed deployment this button is a no-op (services
+        come up via the host's <code>docker compose up -d</code> and
+        <code className="ml-1">restart: always</code> recovers crashes).
+      </>
+    )
+
   return (
     <div
       data-testid="bootstrap-start-services-panel"
@@ -2211,42 +2266,56 @@ function StartServicesPanel({
         <code className="px-1.5 py-0.5 rounded bg-[var(--muted)]/50 text-[var(--foreground)]">
           POST /bootstrap/start-services
         </code>
+        {!anyRed && (
+          <span
+            data-testid="bootstrap-start-services-optional"
+            className="rounded border border-[var(--border)] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)]"
+          >
+            optional
+          </span>
+        )}
       </div>
       <p className="font-mono text-[11px] text-[var(--muted-foreground)] leading-relaxed">
-        If a probe above is stuck red, kick the launcher from here. The
-        backend auto-detects the deploy mode (systemd / docker-compose /
-        dev) — a systemctl failure surfaces the exact kind (missing
-        sudoers, unit not installed, binary not on PATH, timeout) with a
-        targeted remediation hint.
+        {description}
       </p>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <button
           type="button"
           data-testid="bootstrap-start-services-button"
           onClick={() => void run()}
           disabled={busy}
-          className="flex items-center gap-1 font-mono text-[11px] px-2 py-1 rounded border border-[var(--border)] hover:bg-[var(--muted)]/40 disabled:opacity-40"
+          className={`flex items-center gap-1 font-mono text-[11px] px-2 py-1 rounded border transition-colors disabled:opacity-40 ${
+            anyRed
+              ? "border-[var(--artifact-purple)] bg-[var(--artifact-purple)] text-white font-semibold hover:opacity-90"
+              : "border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]/40"
+          }`}
         >
           {busy ? (
             <Loader2 size={12} className="animate-spin" />
           ) : (
             <Rocket size={12} />
           )}
-          Launch services
+          {anyRed ? "Launch services" : "Relaunch (idle)"}
         </button>
-        {okResult && (
-          <span
-            data-testid="bootstrap-start-services-ok"
-            data-status={okResult.status}
-            data-mode={okResult.mode}
-            className="font-mono text-[11px] text-[var(--status-green)]"
-          >
-            <Check size={12} className="inline mr-1" />
-            {okResult.status === "already_running"
-              ? "already running (dev mode)"
-              : `launched (${okResult.mode}, rc=${okResult.returncode})`}
-          </span>
-        )}
+        {okResult && (() => {
+          const copy = _startServicesOkCopy(okResult.status, okResult.mode)
+          const toneClass =
+            copy.tone === "green"
+              ? "text-[var(--status-green)]"
+              : "text-[var(--neural-blue)]"
+          const Glyph = copy.tone === "green" ? Check : Activity
+          return (
+            <span
+              data-testid="bootstrap-start-services-ok"
+              data-status={okResult.status}
+              data-mode={okResult.mode}
+              className={`inline-flex items-center gap-1 font-mono text-[11px] ${toneClass}`}
+            >
+              <Glyph size={12} />
+              {copy.label}
+            </span>
+          )
+        })()}
       </div>
       {errKind && (
         <StartServicesErrorBanner
