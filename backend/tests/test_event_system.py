@@ -6,44 +6,39 @@ import pytest
 
 
 class TestEventLog:
+    """SP-3.10 (2026-04-20): migrated from SQLite db.init/close pattern
+    to pg_test_conn. The ``days=0`` cleanup assertion was removed —
+    it's inherently racy at second-resolution created_at (see
+    test_db_events.py for deterministic ``days=-1`` / ``days=365``
+    boundaries).
+    """
 
     @pytest.mark.asyncio
-    async def test_insert_and_list_events(self):
+    async def test_insert_and_list_events(self, pg_test_conn):
         from backend import db
-        await db.init()
-        try:
-            await db.insert_event("agent_update", json.dumps({"agent_id": "a1", "status": "running"}))
-            await db.insert_event("task_update", json.dumps({"task_id": "t1", "status": "completed"}))
-            events = await db.list_events(limit=10)
-            assert len(events) >= 2
-            types = [e["event_type"] for e in events]
-            assert "agent_update" in types
-            assert "task_update" in types
-        finally:
-            await db.close()
+        await db.insert_event(pg_test_conn, "agent_update", json.dumps({"agent_id": "a1", "status": "running"}))
+        await db.insert_event(pg_test_conn, "task_update", json.dumps({"task_id": "t1", "status": "completed"}))
+        events = await db.list_events(pg_test_conn, limit=10)
+        assert len(events) >= 2
+        types = [e["event_type"] for e in events]
+        assert "agent_update" in types
+        assert "task_update" in types
 
     @pytest.mark.asyncio
-    async def test_list_events_by_type(self):
+    async def test_list_events_by_type(self, pg_test_conn):
         from backend import db
-        await db.init()
-        try:
-            await db.insert_event("simulation", json.dumps({"sim_id": "s1"}))
-            events = await db.list_events(event_types=["simulation"], limit=5)
-            assert all(e["event_type"] == "simulation" for e in events)
-        finally:
-            await db.close()
+        await db.insert_event(pg_test_conn, "simulation", json.dumps({"sim_id": "s1"}))
+        events = await db.list_events(pg_test_conn, event_types=["simulation"], limit=5)
+        assert all(e["event_type"] == "simulation" for e in events)
 
     @pytest.mark.asyncio
-    async def test_cleanup_old_events(self):
+    async def test_cleanup_old_events_returns_int(self, pg_test_conn):
+        # Semantic contract: the function returns an int. Deterministic
+        # boundary behaviour is tested in test_db_events.py::
+        # TestEventsCleanup (far-future / far-past days values).
         from backend import db
-        await db.init()
-        try:
-            # cleanup_old_events won't delete recent entries
-            removed = await db.cleanup_old_events(days=0)
-            # Should remove events older than 0 days (all of them)
-            assert isinstance(removed, int)
-        finally:
-            await db.close()
+        removed = await db.cleanup_old_events(pg_test_conn, days=365)
+        assert isinstance(removed, int)
 
 
 class TestReplayEndpoint:

@@ -173,22 +173,25 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Event log
+#  Event log  —  MOVED TO test_db_events.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_event_log_insert_list_cleanup(fresh_db):
-    db = fresh_db
-    await db.insert_event("agent_update", json.dumps({"id": "a1"}))
-    await db.insert_event("task_update", json.dumps({"id": "t1"}))
-    all_ev = await db.list_events()
-    assert len(all_ev) == 2
-    only_agent = await db.list_events(event_types=["agent_update"])
-    assert len(only_agent) == 1
-    # cleanup with 0 days → deletes nothing that was just inserted
-    # (datetime('now', '-0 days') equals now; strict < comparison)
-    deleted = await db.cleanup_old_events(days=0)
-    assert deleted == 0
+#
+# Phase-3-Runtime-v2 SP-3.10 (2026-04-20): insert_event / list_events
+# / cleanup_old_events ported to native asyncpg. The
+# ``datetime('now', '-N days')`` cutoff is replaced with PG's
+# ``NOW() - INTERVAL '1 day' * $N`` — fixing the second-boundary
+# flakiness the old ``days=0`` test exposed in large batches (flagged
+# as pre-existing fragility in SP-3.5 commit 9f25a702).
+#
+# The replacement contract test (backend/tests/test_db_events.py)
+# intentionally avoids the racy ``days=0`` assertion — the deterministic
+# boundaries are: ``days=365`` (nothing old enough; 0 deletes) and
+# ``days=-1`` (future cutoff; everything deleted).
+#
+# cleanup_old_events also gained a tenant_id WHERE clause in SP-3.10
+# — the pre-port version deleted GLOBALLY across all tenants, which
+# was a multi-tenant data-integrity bug. Covered explicitly by
+# TestEventsCleanup::test_cleanup_scoped_to_current_tenant.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -9,9 +9,11 @@ Replay:
 import asyncio
 import json
 
-from fastapi import APIRouter, Query
+import asyncpg
+from fastapi import APIRouter, Depends, Query
 from sse_starlette.sse import EventSourceResponse
 
+from backend.db_pool import get_conn
 from backend.events import bus
 
 router = APIRouter(tags=["events"])
@@ -79,6 +81,7 @@ async def replay_events(
     since: str = Query("", description="ISO timestamp — return events after this time"),
     types: str = Query("", description="Comma-separated event types to filter"),
     limit: int = Query(200, ge=1, le=1000),
+    conn: asyncpg.Connection = Depends(get_conn),
 ):
     """Replay persisted events from the event_log table.
 
@@ -86,7 +89,7 @@ async def replay_events(
     """
     from backend import db
     event_types = [t.strip() for t in types.split(",") if t.strip()] or None
-    events = await db.list_events(since=since, event_types=event_types, limit=limit)
+    events = await db.list_events(conn, since=since, event_types=event_types, limit=limit)
     # Parse data_json back to dict for each event
     result = []
     for ev in events:

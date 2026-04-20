@@ -1646,44 +1646,78 @@ async def update_debug_finding(conn, finding_id: str, status: str) -> bool:
 #  Event Log (Persistence)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def insert_event(event_type: str, data_json: str) -> None:
-    await _conn().execute(
-        "INSERT INTO event_log (event_type, data_json, tenant_id) VALUES (?, ?, ?)",
-        (event_type, data_json, tenant_insert_value()),
+async def insert_event(conn, event_type: str, data_json: str) -> None:
+    # Phase-3-Runtime-v2 SP-3.10 (2026-04-20): ported to native asyncpg.
+    # tenant_id comes from context via tenant_insert_value() — same
+    # anti-forge guarantee as insert_artifact / insert_debug_finding.
+    await conn.execute(
+        "INSERT INTO event_log (event_type, data_json, tenant_id) "
+        "VALUES ($1, $2, $3)",
+        event_type, data_json, tenant_insert_value(),
     )
-    await _conn().commit()
 
 
 async def list_events(
-    since: str = "", event_types: list[str] | None = None, limit: int = 200,
+    conn,
+    since: str = "",
+    event_types: list[str] | None = None,
+    limit: int = 200,
 ) -> list[dict]:
-    query = "SELECT * FROM event_log"
     conditions: list[str] = []
     params: list = []
-    tenant_where(conditions, params)
+    tenant_where_pg(conditions, params)
     if since:
-        conditions.append("created_at >= ?")
+        conditions.append(f"created_at >= ${len(params) + 1}")
         params.append(since)
     if event_types:
-        placeholders = ",".join("?" * len(event_types))
+        # Dynamic IN placeholder count; event_types values are bound
+        # positionally so no injection risk from the list contents.
+        start_idx = len(params) + 1
+        placeholders = ",".join(
+            f"${start_idx + i}" for i in range(len(event_types))
+        )
         conditions.append(f"event_type IN ({placeholders})")
         params.extend(event_types)
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY id DESC LIMIT ?"
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    async with _conn().execute(query, params) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        "SELECT * FROM event_log"
+        + where
+        + f" ORDER BY id DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
     return [dict(r) for r in rows]
 
 
-async def cleanup_old_events(days: int = 7) -> int:
-    cur = await _conn().execute(
-        "DELETE FROM event_log WHERE created_at < datetime('now', ?)",
-        (f"-{days} days",),
+async def cleanup_old_events(conn, days: int = 7) -> int:
+    # SP-3.10: SQLite ``datetime('now', '-N days')`` replaced with PG's
+    # ``NOW() - INTERVAL '1 day' * $N``. The result is cast to the
+    # same ``YYYY-MM-DD HH24:MI:SS`` text format the column stores
+    # (via to_char) so the strict ``<`` text comparison is sortable.
+    #
+    # **Bug fix shipped alongside the port**: the old SQLite version
+    # had NO tenant filter — a cleanup sweep on Tenant A's schedule
+    # would delete Tenant B's events too. tenant_where_pg added so
+    # each tenant's cleanup only touches its own rows. Safe even when
+    # no tenant is set (cleanup defaults to t-default scope).
+    conditions: list[str] = []
+    params: list = []
+    tenant_where_pg(conditions, params)
+    # days is the LAST positional param so the tenant filter's $N is
+    # stable regardless of context state.
+    days_idx = len(params) + 1
+    params.append(days)
+    cutoff = (
+        f"to_char(NOW() - INTERVAL '1 day' * ${days_idx}, "
+        "'YYYY-MM-DD HH24:MI:SS')"
     )
-    await _conn().commit()
-    return cur.rowcount
+    conditions.append(f"created_at < {cutoff}")
+    sql = "DELETE FROM event_log WHERE " + " AND ".join(conditions)
+    status = await conn.execute(sql, *params)
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

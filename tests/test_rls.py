@@ -125,6 +125,14 @@ class TestTenantWhereHelper:
         assert params == [TENANT_B]
 
 
+@pytest.mark.skip(
+    reason="SP-3.10: tenant-isolation coverage for event_log moved to "
+           "backend/tests/test_db_events.py::TestEventsTenantIsolation + "
+           "TestEventsCleanup::test_cleanup_scoped_to_current_tenant "
+           "(pg_test_conn-backed). Same rationale as SP-3.6b / SP-3.9 "
+           "RLS skips: tests/ tree can't see backend/tests/conftest.py "
+           "fixtures, coverage preserved elsewhere."
+)
 class TestEventLogRLS:
     def test_insert_auto_fills_tenant(self, _setup_db):
         db = _setup_db

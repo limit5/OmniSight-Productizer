@@ -153,10 +153,15 @@ async def _persist_event(event_type: str, data_json: str) -> None:
 
     Failures are logged at debug level — DB unavailability must not break
     SSE delivery, but silent failure also shouldn't hide chronic outages.
+
+    SP-3.10 (2026-04-20): runs as ``asyncio.create_task`` from the
+    event bus — no request conn. Acquire pool conn inline.
     """
     try:
         from backend import db
-        await db.insert_event(event_type, data_json)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_event(_conn, event_type, data_json)
     except Exception as exc:  # pragma: no cover — DB-dependent
         logger.debug("event persist failed (%s): %s", event_type, exc)
 
