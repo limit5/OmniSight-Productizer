@@ -6,58 +6,50 @@ import pytest
 
 
 class TestDebugFindingsDB:
+    """SP-3.9 (2026-04-20): migrated from SQLite db.init/close pattern
+    to pg_test_conn — savepoint-isolated per test, TRUNCATE on fixture
+    entry keeps each test from seeing sibling state.
+    """
 
     @pytest.mark.asyncio
-    async def test_insert_and_list(self):
+    async def test_insert_and_list(self, pg_test_conn):
         from backend import db
-        await db.init()
-        try:
-            fid = f"dbg-{uuid.uuid4().hex[:6]}"
-            await db.insert_debug_finding({
-                "id": fid, "task_id": "t-1", "agent_id": "a-1",
+        fid = f"dbg-{uuid.uuid4().hex[:6]}"
+        await db.insert_debug_finding(pg_test_conn, {
+            "id": fid, "task_id": "t-1", "agent_id": "a-1",
+            "finding_type": "stuck_loop", "severity": "error",
+            "content": "Tool failed 3 times", "context": "{}",
+            "status": "open", "created_at": "2026-01-01T00:00:00",
+        })
+        findings = await db.list_debug_findings(pg_test_conn, task_id="t-1")
+        assert any(f["id"] == fid for f in findings)
+
+    @pytest.mark.asyncio
+    async def test_update_status(self, pg_test_conn):
+        from backend import db
+        fid = f"dbg-upd-{uuid.uuid4().hex[:6]}"
+        await db.insert_debug_finding(pg_test_conn, {
+            "id": fid, "task_id": "t-2", "agent_id": "a-2",
+            "finding_type": "error_repeated", "severity": "warn",
+            "content": "Same error twice", "context": "{}",
+            "status": "open", "created_at": "2026-01-01T00:00:00",
+        })
+        result = await db.update_debug_finding(pg_test_conn, fid, "resolved")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_filter_by_status(self, pg_test_conn):
+        from backend import db
+        for status in ("open", "resolved"):
+            await db.insert_debug_finding(pg_test_conn, {
+                "id": f"dbg-filt-{status}-{uuid.uuid4().hex[:4]}",
+                "task_id": "t-3", "agent_id": "a-3",
                 "finding_type": "stuck_loop", "severity": "error",
-                "content": "Tool failed 3 times", "context": "{}",
-                "status": "open", "created_at": "2026-01-01T00:00:00",
+                "content": f"Test {status}", "context": "{}",
+                "status": status, "created_at": "2026-01-01T00:00:00",
             })
-            findings = await db.list_debug_findings(task_id="t-1")
-            assert any(f["id"] == fid for f in findings)
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_update_status(self):
-        from backend import db
-        await db.init()
-        try:
-            fid = f"dbg-upd-{uuid.uuid4().hex[:6]}"
-            await db.insert_debug_finding({
-                "id": fid, "task_id": "t-2", "agent_id": "a-2",
-                "finding_type": "error_repeated", "severity": "warn",
-                "content": "Same error twice", "context": "{}",
-                "status": "open", "created_at": "2026-01-01T00:00:00",
-            })
-            result = await db.update_debug_finding(fid, "resolved")
-            assert result is True
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_filter_by_status(self):
-        from backend import db
-        await db.init()
-        try:
-            for status in ("open", "resolved"):
-                await db.insert_debug_finding({
-                    "id": f"dbg-filt-{status}-{uuid.uuid4().hex[:4]}",
-                    "task_id": "t-3", "agent_id": "a-3",
-                    "finding_type": "stuck_loop", "severity": "error",
-                    "content": f"Test {status}", "context": "{}",
-                    "status": status, "created_at": "2026-01-01T00:00:00",
-                })
-            open_findings = await db.list_debug_findings(status="open")
-            assert all(f["status"] == "open" for f in open_findings)
-        finally:
-            await db.close()
+        open_findings = await db.list_debug_findings(pg_test_conn, status="open")
+        assert all(f["status"] == "open" for f in open_findings)
 
 
 class TestDebugEndpoint:

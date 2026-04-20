@@ -95,8 +95,14 @@ async def _inspect(agent_id: str) -> str:
     if not agent_id:
         return "Usage: `/omnisight inspect <agent_id>`"
     from backend import db
+    from backend.db_pool import get_pool
+    # SP-3.9: ChatOps handler runs outside request scope — acquire
+    # pool conn inline for the single read.
     try:
-        findings = await db.list_debug_findings(agent_id=agent_id, limit=3)
+        async with get_pool().acquire() as _conn:
+            findings = await db.list_debug_findings(
+                _conn, agent_id=agent_id, limit=3,
+            )
     except Exception as exc:
         return f"⚠️ inspect lookup failed: {exc}"
     if not findings:

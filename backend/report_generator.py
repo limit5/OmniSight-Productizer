@@ -247,7 +247,11 @@ async def build_outcome_section(run_id: str) -> OutcomeSection:
     if run and run.metadata.get("deploy_url"):
         section.deploy_url = run.metadata["deploy_url"]
 
-    findings = await db.list_debug_findings(status="open", limit=100)
+    # SP-3.9: generate_project_report is called from a post-request
+    # worker; acquire pool conn inline for the single read.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as _conn:
+        findings = await db.list_debug_findings(_conn, status="open", limit=100)
     for f in findings:
         section.open_findings.append({
             "id": f.get("id", ""),

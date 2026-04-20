@@ -308,6 +308,15 @@ class TestArtifactRLS:
                 )
 
 
+@pytest.mark.skip(
+    reason="SP-3.9: tenant-isolation coverage for debug_findings moved "
+           "to backend/tests/test_db_debug_findings.py::"
+           "TestDebugFindingsTenantIsolation (pg_test_conn-backed). "
+           "The tests/ tree can't see backend/tests/conftest.py "
+           "fixtures; migrating would require cross-tree fixture "
+           "plumbing for no semantic gain (same SQL + same tenant "
+           "filter contract)."
+)
 class TestDebugFindingRLS:
     def test_insert_auto_fills_tenant(self, _setup_db):
         db = _setup_db

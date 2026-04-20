@@ -535,10 +535,17 @@ def emit_debug_finding(
 
 
 async def _persist_debug_finding(data: dict) -> None:
-    """Write debug finding to DB (best-effort, non-blocking)."""
+    """Write debug finding to DB (best-effort, non-blocking).
+
+    SP-3.9 (2026-04-20): runs as ``asyncio.create_task`` from the
+    event bus worker — no request conn. Acquire from pool per call;
+    the DB write is single-statement so no transaction needed.
+    """
     try:
         from backend import db
-        await db.insert_debug_finding(data)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_debug_finding(_conn, data)
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("Failed to persist debug finding: %s", exc)

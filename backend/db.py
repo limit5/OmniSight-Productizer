@@ -26,6 +26,7 @@ from backend.db_context import (
     current_tenant_id,
     tenant_insert_value,
     tenant_where,
+    tenant_where_pg,
 )
 
 logger = logging.getLogger(__name__)
@@ -1363,18 +1364,6 @@ async def list_failed_notifications(conn, limit: int = 50) -> list[dict]:
 #  Artifacts
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _append_tenant_pg(conditions: list[str], params: list) -> None:
-    """Inline helper for SP-3.6a artifact queries — PG ``$N`` style of
-    the existing ``tenant_where`` (which produces ``?`` for aiosqlite).
-    When a second tenant-scoped domain ports (SP-3.9 debug_findings),
-    promote this to a shared db_context.tenant_where_pg helper.
-    """
-    tid = current_tenant_id()
-    if tid is not None:
-        conditions.append(f"tenant_id = ${len(params) + 1}")
-        params.append(tid)
-
-
 async def insert_artifact(conn, data: dict) -> None:
     # Phase-3-Runtime-v2 SP-3.6a (2026-04-20): ported to native asyncpg.
     # tenant_id is auto-derived from request context via
@@ -1405,7 +1394,7 @@ async def list_artifacts(
 ) -> list[dict]:
     conditions: list[str] = []
     params: list = []
-    _append_tenant_pg(conditions, params)
+    tenant_where_pg(conditions, params)
     if task_id:
         conditions.append(f"task_id = ${len(params) + 1}")
         params.append(task_id)
@@ -1426,7 +1415,7 @@ async def list_artifacts(
 async def get_artifact(conn, artifact_id: str) -> dict | None:
     conditions = ["id = $1"]
     params: list = [artifact_id]
-    _append_tenant_pg(conditions, params)
+    tenant_where_pg(conditions, params)
     sql = "SELECT * FROM artifacts WHERE " + " AND ".join(conditions)
     row = await conn.fetchrow(sql, *params)
     return dict(row) if row else None
@@ -1435,7 +1424,7 @@ async def get_artifact(conn, artifact_id: str) -> dict | None:
 async def delete_artifact(conn, artifact_id: str) -> bool:
     conditions = ["id = $1"]
     params: list = [artifact_id]
-    _append_tenant_pg(conditions, params)
+    tenant_where_pg(conditions, params)
     sql = "DELETE FROM artifacts WHERE " + " AND ".join(conditions)
     status = await conn.execute(sql, *params)
     try:
@@ -1572,52 +1561,85 @@ async def update_simulation(conn, sim_id: str, data: dict) -> None:
 #  Debug Findings (Shared Blackboard)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def insert_debug_finding(data: dict) -> None:
-    d = {**data, "tenant_id": tenant_insert_value()}
-    await _conn().execute(
-        """INSERT OR IGNORE INTO debug_findings
-           (id, task_id, agent_id, finding_type, severity, content, context, status, created_at, tenant_id)
-           VALUES (:id, :task_id, :agent_id, :finding_type, :severity, :content, :context, :status, :created_at, :tenant_id)""",
-        d,
+async def insert_debug_finding(conn, data: dict) -> None:
+    # Phase-3-Runtime-v2 SP-3.9 (2026-04-20): ported to native asyncpg.
+    # INSERT OR IGNORE → ON CONFLICT (id) DO NOTHING preserves the
+    # duplicate-id-is-noop contract — the shared blackboard is
+    # append-only and agents may legitimately re-log the same finding
+    # id without failing their own flow.
+    # tenant_id ALWAYS comes from context (tenant_insert_value), never
+    # from the caller's data dict — anti-forge guarantee (same rule as
+    # insert_artifact, SP-3.6a).
+    await conn.execute(
+        """INSERT INTO debug_findings
+           (id, task_id, agent_id, finding_type, severity, content,
+            context, status, created_at, tenant_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (id) DO NOTHING""",
+        data["id"],
+        data["task_id"],
+        data["agent_id"],
+        data["finding_type"],
+        data.get("severity", "info"),
+        data["content"],
+        data.get("context", "{}"),
+        data.get("status", "open"),
+        data.get("created_at", ""),
+        tenant_insert_value(),
     )
-    await _conn().commit()
 
 
 async def list_debug_findings(
-    task_id: str = "", agent_id: str = "", status: str = "", limit: int = 50,
+    conn,
+    task_id: str = "", agent_id: str = "", status: str = "",
+    limit: int = 50,
 ) -> list[dict]:
-    query = "SELECT * FROM debug_findings"
     conditions: list[str] = []
     params: list = []
-    tenant_where(conditions, params)
+    tenant_where_pg(conditions, params)
     if task_id:
-        conditions.append("task_id = ?")
+        conditions.append(f"task_id = ${len(params) + 1}")
         params.append(task_id)
     if agent_id:
-        conditions.append("agent_id = ?")
+        conditions.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
     if status:
-        conditions.append("status = ?")
+        conditions.append(f"status = ${len(params) + 1}")
         params.append(status)
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC LIMIT ?"
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    async with _conn().execute(query, params) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        "SELECT * FROM debug_findings"
+        + where
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
     return [dict(r) for r in rows]
 
 
-async def update_debug_finding(finding_id: str, status: str) -> bool:
-    conditions = ["id = ?"]
+async def update_debug_finding(conn, finding_id: str, status: str) -> bool:
+    # WHERE clause MUST include the current tenant filter — otherwise
+    # a caller holding a known finding id from Tenant A could mutate
+    # Tenant B's finding. Tenant filter is applied BEFORE the SET
+    # value placeholder so the $N positions stay sequential.
+    # resolved_at uses clock_timestamp() (not now()) — advances within
+    # a single tx, matching the SP-3.3 handoffs fix.
+    conditions = ["id = $1"]
     params: list = [finding_id]
-    tenant_where(conditions, params)
-    sql = ("UPDATE debug_findings SET status = ?, resolved_at = datetime('now') WHERE "
-           + " AND ".join(conditions))
-    params_full = [status] + params
-    cur = await _conn().execute(sql, params_full)
-    await _conn().commit()
-    return cur.rowcount > 0
+    tenant_where_pg(conditions, params)
+    status_idx = len(params) + 1
+    sql = (
+        f"UPDATE debug_findings SET "
+        f"status = ${status_idx}, "
+        f"resolved_at = to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS') "
+        f"WHERE " + " AND ".join(conditions)
+    )
+    params.append(status)
+    exec_status = await conn.execute(sql, *params)
+    try:
+        return int(exec_status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

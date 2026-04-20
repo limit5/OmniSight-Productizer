@@ -453,36 +453,45 @@ async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
     Only saves if the change has associated debug findings (indicating it was a bug fix).
     This ensures L3 only contains verified, human-approved solutions (Gerrit +2).
     """
+    # SP-3.9: _save_merged_solution_to_l3 is a background task (spawned
+    # via asyncio.create_task from _on_change_merged) — no request
+    # conn. Acquire ONCE for the list + update loop since the read
+    # result drives the subsequent writes on the same logical unit of
+    # work. insert_episodic_memory is still pre-port (SP-3.12) so it
+    # still works via the compat wrapper.
     try:
         from backend import db
-        # Find debug findings linked to this change's task
-        findings = await db.list_debug_findings(status="open", limit=20)
-        # Match findings by looking for the change subject in task context
-        related = [f for f in findings if subject and (
-            subject.lower() in f.get("content", "").lower()
-            or change_id in f.get("context", "")
-        )]
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            findings = await db.list_debug_findings(
+                _conn, status="open", limit=20,
+            )
+            # Match findings by looking for the change subject in task context
+            related = [f for f in findings if subject and (
+                subject.lower() in f.get("content", "").lower()
+                or change_id in f.get("context", "")
+            )]
 
-        if not related:
-            return
+            if not related:
+                return
 
-        for finding in related[:3]:  # Max 3 memories per merge
-            memory_id = f"mem-{uuid.uuid4().hex[:12]}"
-            await db.insert_episodic_memory({
-                "id": memory_id,
-                "error_signature": finding.get("content", "")[:500],
-                "solution": f"Fix: {subject}",
-                "soc_vendor": "",  # Can be enriched from platform config
-                "sdk_version": "",
-                "gerrit_change_id": change_id,
-                "source_task_id": finding.get("task_id", ""),
-                "source_agent_id": finding.get("agent_id", ""),
-                "tags": [finding.get("finding_type", "fix")],
-                "quality_score": 1.0,  # Merged = verified
-            })
-            # Mark the finding as resolved
-            await db.update_debug_finding(finding["id"], "resolved")
-            logger.info("L3: Saved merged solution %s for finding %s", memory_id, finding["id"])
+            for finding in related[:3]:  # Max 3 memories per merge
+                memory_id = f"mem-{uuid.uuid4().hex[:12]}"
+                await db.insert_episodic_memory({
+                    "id": memory_id,
+                    "error_signature": finding.get("content", "")[:500],
+                    "solution": f"Fix: {subject}",
+                    "soc_vendor": "",  # Can be enriched from platform config
+                    "sdk_version": "",
+                    "gerrit_change_id": change_id,
+                    "source_task_id": finding.get("task_id", ""),
+                    "source_agent_id": finding.get("agent_id", ""),
+                    "tags": [finding.get("finding_type", "fix")],
+                    "quality_score": 1.0,  # Merged = verified
+                })
+                # Mark the finding as resolved
+                await db.update_debug_finding(_conn, finding["id"], "resolved")
+                logger.info("L3: Saved merged solution %s for finding %s", memory_id, finding["id"])
 
     except Exception as exc:
         logger.warning("L3 auto-save on merge failed (non-critical): %s", exc)

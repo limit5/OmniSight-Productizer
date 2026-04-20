@@ -561,7 +561,9 @@ async def create_release(body: ReleaseRequest):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @router.get("/debug", dependencies=_REQUIRE_ADMIN)
-async def get_debug_state():
+async def get_debug_state(
+    conn=Depends(_get_conn),
+):
     """Comprehensive debug state: agent errors, blocked tasks, debug findings."""
     from backend import db
     from backend.routers.agents import _agents
@@ -570,7 +572,7 @@ async def get_debug_state():
 
     agents = list(_agents.values())
     tasks = list(_tasks.values())
-    findings = await db.list_debug_findings(limit=50)
+    findings = await db.list_debug_findings(conn, limit=50)
 
     agent_errors = [
         {"id": a.id, "name": a.name, "status": a.status.value, "thought_chain": a.thought_chain[:200]}

@@ -160,31 +160,16 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Debug findings
+#  Debug findings  —  MOVED TO test_db_debug_findings.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_debug_finding_insert_update(fresh_db):
-    db = fresh_db
-    await db.insert_debug_finding({
-        "id": "f1", "task_id": "t1", "agent_id": "a1",
-        "finding_type": "error", "severity": "high",
-        "content": "null deref", "context": "{}",
-        "status": "open", "created_at": "2026-04-14T00:00:00",
-    })
-    rows = await db.list_debug_findings(status="open")
-    assert len(rows) == 1
-    assert await db.update_debug_finding("f1", "resolved") is True
-    assert len(await db.list_debug_findings(status="open")) == 0
-    assert len(await db.list_debug_findings(status="resolved")) == 1
-    # INSERT OR IGNORE — duplicate id is no-op
-    await db.insert_debug_finding({
-        "id": "f1", "task_id": "t1", "agent_id": "a1",
-        "finding_type": "error", "severity": "low",
-        "content": "dup", "context": "{}", "status": "open",
-        "created_at": "2026-04-14T00:00:01",
-    })
-    assert len(await db.list_debug_findings()) == 1
+#
+# Phase-3-Runtime-v2 SP-3.9 (2026-04-20): the 3 debug-finding
+# functions now require an explicit asyncpg.Connection. PG's
+# ``ON CONFLICT (id) DO NOTHING`` replaces SQLite's ``INSERT OR IGNORE``;
+# tenant filtering is via the promoted ``tenant_where_pg`` helper in
+# db_context.py. Per-function contract tests (including tenant
+# isolation for the update path) live in
+# ``test_db_debug_findings.py``.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
