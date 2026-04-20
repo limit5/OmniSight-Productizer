@@ -215,10 +215,21 @@ function LoginForm() {
   )
 }
 
+// Phase-3 P5 (2026-04-20) — remove the per-page ``<AuthProvider>``
+// wrap. ``app/layout.tsx`` already mounts ``<Providers>`` (which
+// includes ``<AuthProvider>``) around every route's children, so
+// re-wrapping here was creating a SECOND nested AuthProvider with
+// independent state. The nested one handled the login call and set
+// ``user = admin`` on its own state, but after
+// ``router.replace("/")`` the dashboard read the OUTER provider's
+// state — still ``user = null`` because the nested provider's
+// login setState never reached it. Dashboard's guard effect saw
+// ``!user``, redirected back to /login; /login re-mounted the inner
+// AuthProvider with fresh ``user = null``; operator retried login;
+// inner got it; navigation to / read outer (still null); redirect
+// back; loop. Dropping the nested wrapper makes login() + setUser
+// update the SAME AuthProvider instance that Home then reads, so
+// state is coherent across the route change.
 export default function LoginPage() {
-  return (
-    <AuthProvider>
-      <LoginForm />
-    </AuthProvider>
-  )
+  return <LoginForm />
 }

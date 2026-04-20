@@ -113,6 +113,13 @@ AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
     # of auth.
     "/api/v1/bootstrap/",
 
+    # Phase-3 P5 (2026-04-20) TEMPORARY diagnostic endpoint —
+    # the Home component in app/page.tsx POSTs its render counter here
+    # so we can see from server-side whether the browser is in a
+    # render loop (counter rises rapidly) or stable. Remove once the
+    # loop root cause is found and fixed.
+    "/api/v1/__diag_render_count",
+
     # ─── External webhook receivers ──────────────────────────
     # GitHub / GitLab / Jira / Gerrit / Stripe fire these with
     # their own authentication (HMAC signatures, bearer tokens)
@@ -289,9 +296,31 @@ def install(app: ASGIApp) -> Callable:
             return await call_next(request)
 
         # enforce mode
-        logger.info(
-            "auth_baseline[enforce]: rejected %s %s (no session)",
+        # Phase-3 P4 diagnostics (2026-04-20): operator reports 401
+        # cascade on authed endpoints. Instrument at WARN level so
+        # stdout captures it. Include: (a) whether any SESSION_COOKIE
+        # came in at all, (b) the cookie tail (last 6 chars — enough
+        # for identification, not enough for replay), (c) what the
+        # session lookup said — no cookie / no session / lookup raised.
+        try:
+            from backend.auth import SESSION_COOKIE
+            raw_cookie = request.cookies.get(SESSION_COOKIE) or ""
+        except Exception:
+            raw_cookie = ""
+        has_cookie = bool(raw_cookie)
+        cookie_tail = raw_cookie[-6:] if raw_cookie else "<none>"
+        all_cookies = list(request.cookies.keys())
+        origin = request.headers.get("origin", "<none>")
+        referer = request.headers.get("referer", "<none>")[:80]
+        sec_fetch_site = request.headers.get("sec-fetch-site", "<none>")
+        ua_len = len(request.headers.get("user-agent", ""))
+        logger.warning(
+            "auth_baseline[enforce]: rejected %s %s "
+            "has_cookie=%s cookie_tail=%s cookies=%s "
+            "origin=%s sec_fetch_site=%s referer=%s ua_len=%d",
             request.method, path,
+            has_cookie, cookie_tail, all_cookies,
+            origin, sec_fetch_site, referer, ua_len,
         )
         return JSONResponse(
             status_code=401,

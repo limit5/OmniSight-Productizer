@@ -65,7 +65,37 @@ function readPanelFromUrl(): PanelId | null {
   return null
 }
 
+// Phase-3 P5 diagnostic (2026-04-20): count Home renders + log to
+// backend on EVERY render so we can tell apart re-render (count rises
+// continuously within one module lifetime) from remount (count resets
+// to 1 per module load). TEMPORARY — strip once root cause is found.
+//
+// The counter is module-level (not useRef inside the component) on
+// purpose: module-level survives component re-mounts within the same
+// JS bundle load, so a remount-caused loop shows `count: 1, 1, 1, 1`
+// while a re-render-caused loop shows `count: 1, 2, 3, 4`.
+let __homeRenderCount = 0
+const __homeInstanceId = Math.random().toString(36).slice(2, 8)
+
 export default function Home() {
+  __homeRenderCount += 1
+  const thisCount = __homeRenderCount
+  if (typeof window !== "undefined") {
+    fetch("/api/v1/__diag_render_count", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        component: "Home",
+        count: thisCount,
+        instance: __homeInstanceId,
+        ts: Date.now(),
+        path: window.location.pathname + window.location.search,
+      }),
+    }).catch(() => {
+      /* best-effort diagnostic, ignore failures */
+    })
+  }
   // Internet-exposure gate: redirect to /login if the cookie isn't
   // good. In auth_mode=open the backend whoami returns a synthetic
   // admin user, so this check is a no-op for dev — exactly what we
@@ -353,6 +383,54 @@ export default function Home() {
       console.error("[Engine] Spec update failed:", e)
     }
   }, [engine])
+
+  // Phase-3 P5 root-cause gate (2026-04-20): DO NOT RENDER the dashboard
+  // body — which mounts 7 panels that each fire their own mount fetch
+  // via useEffect — until auth is resolved and the operator is
+  // confirmed logged in. Without this gate, the sequence on a private
+  // window / fresh session is:
+  //
+  //   1. Browser lands on `/?panel=orchestrator`
+  //   2. Home mounts → all 7 panels mount → 14 parallel XHRs fire
+  //   3. None of the XHRs carry a session cookie yet (not logged in)
+  //   4. All 14 return 401
+  //   5. lib/api.ts::_handleTerminalError on each 401 calls
+  //      window.location.assign("/login?next=...") → 14 parallel
+  //      full-page navigations (race, last wins) → browser flails
+  //   6. The useEffect at line 75–82 would redirect cleanly on its own,
+  //      but it runs AFTER the render that mounted the panels, so the
+  //      401 cascade has already fired by the time it runs
+  //
+  // The gate below short-circuits step 2 before the panels ever mount.
+  // The parallel useEffect at the top still handles the actual
+  // router.replace to /login — this just ensures we don't mount the
+  // children while waiting for it to run. In auth_mode=open the
+  // backend whoami returns a synthetic admin so this is a no-op for
+  // dev/single-user. Once the operator logs in, Home re-renders with
+  // auth.user populated, panels mount once, stable state.
+  if (auth.loading) {
+    return (
+      <div className="relative min-h-screen flex items-center justify-center">
+        <NeuralGrid />
+        <div className="relative z-10 text-sm text-[var(--neural-cyan,#67e8f9)] font-mono">
+          Resolving session…
+        </div>
+      </div>
+    )
+  }
+  if (!auth.user && auth.authMode !== "open") {
+    // The redirect useEffect above will navigate; render a minimal
+    // placeholder (NOT the 7-panel dashboard) so no child mounts its
+    // fetch.
+    return (
+      <div className="relative min-h-screen flex items-center justify-center">
+        <NeuralGrid />
+        <div className="relative z-10 text-sm text-[var(--neural-cyan,#67e8f9)] font-mono">
+          Redirecting to login…
+        </div>
+      </div>
+    )
+  }
 
   // Pre-map artifacts to avoid duplicating the mapping in renderPanel and desktop layout
   const mappedArtifacts = engine.artifacts.length > 0 ? engine.artifacts.map(a => ({

@@ -69,12 +69,50 @@ interface ToastItem {
 
 function _itemFor(err: ApiError): ToastItem | null {
   if (err.kind === "forbidden") {
+    // Phase-3 P5 diagnostic (2026-04-20): embed the actual request URL +
+    // method + response body in the description so the operator can tell
+    // from the on-screen toast WHICH endpoint 403'd. Server-side caddy
+    // + cloudflared + backend logs show NO 403 during the cascade the
+    // operator reports, so the source must be either a browser-side
+    // block (CSP, X-Frame-Options) surfaced as an ApiError, or a CF-
+    // edge-level deny that bypasses our origin. Logging the URL
+    // end-to-end narrows it in one operator screenshot.
+    //
+    // Also console.error the full ApiError for a copy-pastable log.
+    // eslint-disable-next-line no-console
+    console.error("[TOAST-403-DIAG] forbidden ApiError:", {
+      path: err.path,
+      method: err.method,
+      status: err.status,
+      body: err.body?.slice(0, 200),
+      traceId: err.traceId,
+    })
+    // Ship the same info to the backend diag endpoint so we can read
+    // it from server-side logs without asking the operator to screenshot
+    // the Console. Fire-and-forget, uses fetch directly to bypass the
+    // request() wrapper (which would retry this on 429 and add noise).
+    if (typeof window !== "undefined") {
+      fetch("/api/v1/__diag_render_count", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          component: "TOAST-403",
+          count: err.status,
+          ts: Date.now(),
+          path: `${err.method} ${err.path} :: ${(err.body || "").slice(0, 120)}`,
+          instance: err.traceId || "no-trace",
+        }),
+      }).catch(() => {
+        /* ignore */
+      })
+    }
     return {
       id: `forbidden-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: "forbidden",
       variant: "warning",
       title: "權限不足",
-      description: "您沒有此操作的存取權限，請聯繫系統管理員。",
+      description: `${err.method} ${err.path} — ${(err.body || "").slice(0, 120)}`,
       httpLabel: "HTTP 403",
       traceId: err.traceId,
       createdAt: Date.now(),
