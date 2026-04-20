@@ -547,24 +547,43 @@ async def authenticate_password(email: str, password: str) -> Optional[User]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-async def create_session(user_id: str, ip: str = "", user_agent: str = "") -> Session:
+async def _create_session_impl(
+    conn, user_id: str, ip: str, user_agent: str,
+) -> Session:
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(24)
     now = time.time()
     expires = now + SESSION_TTL_S
     ua = (user_agent or "")[:240]
     ua_h = compute_ua_hash(ua)
-    conn = await _conn()
     await conn.execute(
         "INSERT INTO sessions (token, user_id, csrf_token, created_at, "
         "expires_at, last_seen_at, ip, user_agent, ua_hash) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (token, user_id, csrf, now, expires, now, ip, ua, ua_h),
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        token, user_id, csrf, now, expires, now, ip, ua, ua_h,
     )
-    await conn.commit()
     return Session(token=token, user_id=user_id, csrf_token=csrf,
                    created_at=now, expires_at=expires, ip=ip,
                    user_agent=ua, last_seen_at=now)
+
+
+async def create_session(
+    user_id: str, ip: str = "", user_agent: str = "", conn=None,
+) -> Session:
+    """Issue a new session token for *user_id*.
+
+    Phase-3-Runtime-v2 SP-4.3a (2026-04-20): polymorphic ``conn`` —
+    login / refresh routes that already hold a ``Depends(get_conn)``
+    can share it; background / worker paths (rotate_session calls
+    this internally in SP-4.3b) pass nothing and borrow from pool.
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _create_session_impl(
+                owned_conn, user_id, ip, user_agent,
+            )
+    return await _create_session_impl(conn, user_id, ip, user_agent)
 
 
 # Minimum age (seconds) a ``last_seen_at`` value must have before
@@ -583,40 +602,38 @@ async def create_session(user_id: str, ip: str = "", user_agent: str = "") -> Se
 _SESSION_LAST_SEEN_MIN_AGE_S = 60.0
 
 
-async def get_session(token: str) -> Optional[Session]:
-    if not token:
-        return None
-    conn = await _conn()
-    async with conn.execute(
+async def _get_session_impl(conn, token: str) -> Optional[Session]:
+    r = await conn.fetchrow(
         "SELECT token, user_id, csrf_token, created_at, expires_at, "
-        "ip, user_agent, last_seen_at, metadata, mfa_verified, rotated_from "
-        "FROM sessions WHERE token=?", (token,),
-    ) as cur:
-        r = await cur.fetchone()
+        "ip, user_agent, last_seen_at, metadata, mfa_verified, "
+        "rotated_from FROM sessions WHERE token = $1",
+        token,
+    )
     if not r:
         return None
     if r["expires_at"] < time.time():
-        await delete_session(token)
+        # Expired → evict + treat as not-found. Reuse the conn we
+        # already hold; no separate DELETE tx needed.
+        await conn.execute(
+            "DELETE FROM sessions WHERE token = $1", token,
+        )
         return None
     now = time.time()
     stored_last_seen = r["last_seen_at"] or 0.0
     effective_last_seen = stored_last_seen
     # Skip the write when the stored value is recent — see the
-    # comment on _SESSION_LAST_SEEN_MIN_AGE_S above for why this
-    # matters under the multi-replica SQLite topology.
+    # _SESSION_LAST_SEEN_MIN_AGE_S comment above for why throttling
+    # matters (was SQLite WAL contention; on PG it still saves hot-row
+    # contention under dashboard fan-out).
     if now - stored_last_seen >= _SESSION_LAST_SEEN_MIN_AGE_S:
         try:
             await conn.execute(
-                "UPDATE sessions SET last_seen_at=? WHERE token=?",
-                (now, token),
+                "UPDATE sessions SET last_seen_at = $1 WHERE token = $2",
+                now, token,
             )
-            await conn.commit()
             effective_last_seen = now
         except Exception as exc:
-            # Transient lock shouldn't break the session lookup —
-            # the read succeeded, the caller has a valid session, and
-            # ``last_seen_at`` is only ever consumed by the UI
-            # sessions list (non-security). Swallow + log.
+            # last_seen_at is UI-only; swallow transient lock errors.
             logger.debug(
                 "auth.get_session: last_seen_at update skipped "
                 "(non-fatal) token_tail=%s err=%s",
@@ -630,6 +647,24 @@ async def get_session(token: str) -> Optional[Session]:
         mfa_verified=bool(r["mfa_verified"]),
         rotated_from=r["rotated_from"],
     )
+
+
+async def get_session(token: str, conn=None) -> Optional[Session]:
+    """Look up a session by token. Hottest function on the auth hot
+    path — every authenticated request goes through here.
+
+    SP-4.3a (2026-04-20): polymorphic ``conn``. Existing callers
+    (auth.current_user middleware, routers/auth.py, decision_engine,
+    auth_baseline) call without conn and this function borrows one
+    from the pool for the read + conditional last_seen_at UPDATE.
+    """
+    if not token:
+        return None
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _get_session_impl(owned_conn, token)
+    return await _get_session_impl(conn, token)
 
 
 def get_session_metadata(session: "Session") -> dict:
@@ -666,21 +701,36 @@ async def update_session_metadata(token: str, updates: dict) -> dict:
     return meta
 
 
-async def delete_session(token: str) -> None:
+async def delete_session(token: str, conn=None) -> None:
     if not token:
         return
-    conn = await _conn()
-    await conn.execute("DELETE FROM sessions WHERE token=?", (token,))
-    await conn.commit()
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            await owned_conn.execute(
+                "DELETE FROM sessions WHERE token = $1", token,
+            )
+        return
+    await conn.execute("DELETE FROM sessions WHERE token = $1", token)
 
 
-async def cleanup_expired_sessions() -> int:
-    conn = await _conn()
-    cur = await conn.execute(
-        "DELETE FROM sessions WHERE expires_at < ?", (time.time(),),
-    )
-    await conn.commit()
-    return cur.rowcount or 0
+async def cleanup_expired_sessions(conn=None) -> int:
+    cutoff = time.time()
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            status = await owned_conn.execute(
+                "DELETE FROM sessions WHERE expires_at < $1", cutoff,
+            )
+    else:
+        status = await conn.execute(
+            "DELETE FROM sessions WHERE expires_at < $1", cutoff,
+        )
+    # asyncpg returns "DELETE <n>" status string.
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
 
 
 async def rotate_session(old_token: str, ip: str = "",
@@ -1023,16 +1073,14 @@ def session_id_from_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
-async def list_sessions(user_id: str) -> list[dict]:
-    conn = await _conn()
-    async with conn.execute(
+async def _list_sessions_impl(conn, user_id: str) -> list[dict]:
+    rows = await conn.fetch(
         "SELECT token, user_id, created_at, expires_at, last_seen_at, "
         "ip, user_agent, metadata, mfa_verified "
-        "FROM sessions WHERE user_id=? AND expires_at > ? "
+        "FROM sessions WHERE user_id = $1 AND expires_at > $2 "
         "ORDER BY last_seen_at DESC",
-        (user_id, time.time()),
-    ) as cur:
-        rows = await cur.fetchall()
+        user_id, time.time(),
+    )
     return [
         {
             "token_hint": _mask_token(r["token"]),
@@ -1050,18 +1098,39 @@ async def list_sessions(user_id: str) -> list[dict]:
     ]
 
 
-async def revoke_session(token: str) -> bool:
-    conn = await _conn()
-    cur = await conn.execute("DELETE FROM sessions WHERE token=?", (token,))
-    await conn.commit()
-    return (cur.rowcount or 0) > 0
+async def list_sessions(user_id: str, conn=None) -> list[dict]:
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _list_sessions_impl(owned_conn, user_id)
+    return await _list_sessions_impl(conn, user_id)
 
 
-async def revoke_other_sessions(user_id: str, keep_token: str) -> int:
-    conn = await _conn()
-    cur = await conn.execute(
-        "DELETE FROM sessions WHERE user_id=? AND token!=?",
-        (user_id, keep_token),
-    )
-    await conn.commit()
-    return cur.rowcount or 0
+async def revoke_session(token: str, conn=None) -> bool:
+    sql = "DELETE FROM sessions WHERE token = $1"
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            status = await owned_conn.execute(sql, token)
+    else:
+        status = await conn.execute(sql, token)
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
+
+
+async def revoke_other_sessions(
+    user_id: str, keep_token: str, conn=None,
+) -> int:
+    sql = "DELETE FROM sessions WHERE user_id = $1 AND token != $2"
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            status = await owned_conn.execute(sql, user_id, keep_token)
+    else:
+        status = await conn.execute(sql, user_id, keep_token)
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0

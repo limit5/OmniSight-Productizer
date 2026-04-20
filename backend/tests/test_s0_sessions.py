@@ -1,39 +1,36 @@
-"""S0 tests — session CRUD, revocation, audit session_id, bearer fingerprint."""
+"""S0 tests — session CRUD, revocation, audit session_id, bearer fingerprint.
+
+Phase-3-Runtime-v2 SP-4.3a (2026-04-20): migrated from SQLite
+tempfile fixture to pg_test_pool. Session CRUD is now pool-backed;
+audit.log is too (SP-4.1). Direct ``db._conn().execute(...)``
+accesses are replaced with inline ``get_pool().acquire()`` + $N
+placeholders.
+"""
 
 from __future__ import annotations
 
 import hashlib
-import os
-import tempfile
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
 
 @pytest.fixture()
-async def _s0_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "s0.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        from backend import auth, audit
-        await db._conn().execute("DELETE FROM audit_log")
-        await db._conn().commit()
-        try:
-            yield db, auth, audit
-        finally:
-            await db.close()
+async def _s0_db(pg_test_pool, monkeypatch):
+    # Clean slate per test — SP-4.3a session tests commit via pool.
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE users, sessions, audit_log "
+            "RESTART IDENTITY CASCADE"
+        )
+    from backend import db, auth, audit
+    try:
+        yield db, auth, audit
+    finally:
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users, sessions, audit_log "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 # ── session listing ──────────────────────────────────────────────
@@ -57,13 +54,16 @@ async def test_list_sessions_returns_active(_s0_db):
 
 @pytest.mark.asyncio
 async def test_list_sessions_excludes_expired(_s0_db):
-    db_mod, auth, _ = _s0_db
+    _, auth, _ = _s0_db
     u = await auth.create_user("e@t.com", "E", role="viewer", password="pw")
     s1 = await auth.create_session(u.id)
-    await db_mod._conn().execute(
-        "UPDATE sessions SET expires_at=0 WHERE token=?", (s1.token,),
-    )
-    await db_mod._conn().commit()
+    # SP-4.3a: force-expire via the pool (direct sessions UPDATE).
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET expires_at = 0 WHERE token = $1",
+            s1.token,
+        )
     s2 = await auth.create_session(u.id)
     items = await auth.list_sessions(u.id)
     assert len(items) == 1
@@ -182,6 +182,10 @@ async def test_write_audit_no_session(_s0_db):
 # ── bearer token fingerprint ─────────────────────────────────────
 
 
+@pytest.mark.skip(
+    reason="Epic 5: api_keys.validate_bearer still uses db._conn(); "
+           "unstick when api_keys.py ports off the compat wrapper."
+)
 @pytest.mark.asyncio
 async def test_bearer_session_fingerprint(_s0_db, monkeypatch):
     _, auth, _ = _s0_db

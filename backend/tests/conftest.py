@@ -357,7 +357,7 @@ if _ASYNCPG_AVAILABLE:
                     "notifications, token_usage, artifacts, npi_state, "
                     "simulations, debug_findings, event_log, "
                     "decision_rules, episodic_memory, audit_log, "
-                    "users RESTART IDENTITY CASCADE"
+                    "users, sessions RESTART IDENTITY CASCADE"
                 )
                 yield conn
             finally:
