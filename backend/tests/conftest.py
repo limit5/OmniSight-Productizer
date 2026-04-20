@@ -346,14 +346,15 @@ if _ASYNCPG_AVAILABLE:
                 # pre-existing committed rows come back intact.
                 # Agents + tasks + task_comments + handoffs +
                 # notifications + token_usage + artifacts + npi_state
-                # + simulations + debug_findings + event_log are the
-                # tables Phase-3-Runtime-v2 has ported so far; extend
-                # this list as subsequent SP-3.x slices land.
+                # + simulations + debug_findings + event_log +
+                # decision_rules are the tables Phase-3-Runtime-v2
+                # has ported so far; extend this list as subsequent
+                # SP-3.x slices land.
                 await conn.execute(
                     "TRUNCATE agents, tasks, task_comments, handoffs, "
                     "notifications, token_usage, artifacts, npi_state, "
-                    "simulations, debug_findings, event_log "
-                    "RESTART IDENTITY CASCADE"
+                    "simulations, debug_findings, event_log, "
+                    "decision_rules RESTART IDENTITY CASCADE"
                 )
                 yield conn
             finally:

@@ -103,19 +103,29 @@ def replace_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def _persist(rules: list[dict[str, Any]]) -> None:
+    # Phase-3-Runtime-v2 SP-3.11 (2026-04-20): _persist is a
+    # fire-and-forget task (replace_rules schedules it with
+    # loop.create_task) — no request conn. Borrow from the pool; the
+    # DELETE+INSERT-all is wrapped in an explicit transaction inside
+    # db.replace_decision_rules so atomicity survives even across a
+    # single acquire.
     try:
         from backend import db
-        await db.replace_decision_rules(rules)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            await db.replace_decision_rules(conn, rules)
     except Exception as exc:
         logger.warning("decision_rules persist failed: %s", exc)
 
 
 async def load_from_db() -> int:
-    """Populate the in-memory rule list from SQLite. Called once at
-    backend startup. Returns the number of rules loaded."""
+    """Populate the in-memory rule list from the database. Called once
+    at backend startup. Returns the number of rules loaded."""
     try:
         from backend import db
-        rows = await db.load_decision_rules()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            rows = await db.load_decision_rules(conn)
     except Exception as exc:
         logger.warning("decision_rules load failed: %s", exc)
         return 0

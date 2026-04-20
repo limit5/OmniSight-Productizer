@@ -375,6 +375,13 @@ class TestDebugFindingRLS:
         _run(check())
 
 
+@pytest.mark.skip(
+    reason="SP-3.11: tenant-isolation coverage for decision_rules moved "
+           "to backend/tests/test_db_decision_rules.py::"
+           "TestDecisionRulesTenantIsolation (pg_test_conn-backed, also "
+           "covers replace-scoped-to-tenant + anti-forge insert). Same "
+           "cross-tree-fixture rationale as SP-3.6b / 3.9 / 3.10."
+)
 class TestDecisionRulesRLS:
     def test_load_rules_filtered(self, _setup_db):
         db = _setup_db

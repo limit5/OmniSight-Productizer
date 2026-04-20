@@ -219,40 +219,15 @@ async def test_episodic_memory_insert_get_delete(fresh_db):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Decision rules (Phase 50B)
+#  Decision rules (Phase 50B)  —  MOVED TO test_db_decision_rules.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_decision_rules_replace_load(fresh_db):
-    db = fresh_db
-    assert await db.load_decision_rules() == []
-    await db.replace_decision_rules([
-        {
-            "id": "r1", "kind_pattern": "git_push/*", "severity": "destructive",
-            "auto_in_modes": ["full_auto"], "default_option_id": "abort",
-            "priority": 10, "enabled": True, "note": "prod safety",
-        },
-        {
-            "id": "r2", "kind_pattern": "stuck/*", "severity": "risky",
-            "auto_in_modes": ["supervised", "full_auto"],
-            "default_option_id": "switch_model",
-            "priority": 100, "enabled": False, "note": "",
-        },
-    ])
-    rules = await db.load_decision_rules()
-    assert len(rules) == 2
-    ids = {r["id"] for r in rules}
-    assert ids == {"r1", "r2"}
-    r1 = next(r for r in rules if r["id"] == "r1")
-    assert r1["auto_in_modes"] == ["full_auto"]  # JSON round-trip
-    assert r1["enabled"] is True
-    # Replace atomically — old rules gone
-    await db.replace_decision_rules([
-        {
-            "id": "r3", "kind_pattern": "deploy/*", "severity": "destructive",
-            "auto_in_modes": [], "default_option_id": "abort",
-            "priority": 5, "enabled": True, "note": "",
-        },
-    ])
-    rules = await db.load_decision_rules()
-    assert len(rules) == 1 and rules[0]["id"] == "r3"
+#
+# Phase-3-Runtime-v2 SP-3.11 (2026-04-20): load_decision_rules /
+# replace_decision_rules now take explicit ``asyncpg.Connection``.
+# The old manual ``BEGIN IMMEDIATE`` / commit / rollback transaction
+# is replaced with ``async with conn.transaction()``; atomicity
+# (DELETE + bulk INSERT all-or-nothing) is preserved.
+#
+# Per-function contract tests — including the atomic-replace invariant
+# and tenant-scoped DELETE guard (cross-tenant rules must survive a
+# replace call) — live in ``test_db_decision_rules.py``.

@@ -851,18 +851,20 @@ CREATE TABLE IF NOT EXISTS bootstrap_state (
 #  Decision Rules persistence (Phase 50B-Fix / A1)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def load_decision_rules() -> list[dict]:
-    """Load all persisted decision rules. Returns list of dicts matching
-    the in-memory shape used by backend.decision_rules."""
-    sql = ("SELECT id, kind_pattern, severity, auto_in_modes, default_option_id, "
-           "priority, enabled, note FROM decision_rules")
+async def load_decision_rules(conn) -> list[dict]:
+    """Load all persisted decision rules for the current tenant. Returns
+    list of dicts matching the in-memory shape used by
+    backend.decision_rules."""
     conditions: list[str] = []
     params: list = []
-    tenant_where(conditions, params)
-    if conditions:
-        sql += " WHERE " + " AND ".join(conditions)
-    async with _conn().execute(sql, params) as cur:
-        rows = await cur.fetchall()
+    tenant_where_pg(conditions, params)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = (
+        "SELECT id, kind_pattern, severity, auto_in_modes, "
+        "default_option_id, priority, enabled, note FROM decision_rules"
+        + where
+    )
+    rows = await conn.fetch(sql, *params)
     out: list[dict] = []
     for r in rows:
         try:
@@ -882,42 +884,48 @@ async def load_decision_rules() -> list[dict]:
     return out
 
 
-async def replace_decision_rules(rules: list[dict]) -> None:
-    """Atomically swap the decision_rules table. Used when the editor PUTs
-    the whole list."""
+async def replace_decision_rules(conn, rules: list[dict]) -> None:
+    """Atomically swap the current tenant's decision_rules slice.
+
+    Phase-3-Runtime-v2 SP-3.11 (2026-04-20): ported to native asyncpg.
+    The old SQLite version used manual ``BEGIN IMMEDIATE`` / commit /
+    rollback; asyncpg uses ``async with conn.transaction()`` — implicit
+    COMMIT on block exit, implicit ROLLBACK on exception. This
+    preserves the all-or-nothing contract the caller (decision_rules
+    service) depends on: a partial INSERT loop failure cannot leave
+    the tenant's rule set in a mixed state.
+
+    Tenant scope: the DELETE uses ``tenant_where_pg`` so only the
+    current tenant's rows are wiped; other tenants' rules survive.
+    Every INSERT pins tenant_id to ``tenant_insert_value()`` (same
+    anti-forge rule as every other tenant-scoped port — the caller
+    cannot override).
+    """
     tid = tenant_insert_value()
-    db = _conn()
-    async with db.execute("BEGIN IMMEDIATE"):
-        pass
-    try:
+    async with conn.transaction():
         t_cond: list[str] = []
         t_params: list = []
-        tenant_where(t_cond, t_params)
+        tenant_where_pg(t_cond, t_params)
         del_sql = "DELETE FROM decision_rules"
         if t_cond:
             del_sql += " WHERE " + " AND ".join(t_cond)
-        await db.execute(del_sql, t_params)
+        await conn.execute(del_sql, *t_params)
         for r in rules:
-            await db.execute(
-                "INSERT INTO decision_rules (id, kind_pattern, severity, "
-                "auto_in_modes, default_option_id, priority, enabled, note, tenant_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    r["id"],
-                    r["kind_pattern"],
-                    r.get("severity"),
-                    json.dumps(r.get("auto_in_modes") or []),
-                    r.get("default_option_id"),
-                    int(r.get("priority", 100)),
-                    1 if r.get("enabled", True) else 0,
-                    (r.get("note") or "")[:240],
-                    tid,
-                ),
+            await conn.execute(
+                """INSERT INTO decision_rules (id, kind_pattern, severity,
+                     auto_in_modes, default_option_id, priority, enabled,
+                     note, tenant_id)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                r["id"],
+                r["kind_pattern"],
+                r.get("severity"),
+                json.dumps(r.get("auto_in_modes") or []),
+                r.get("default_option_id"),
+                int(r.get("priority", 100)),
+                1 if r.get("enabled", True) else 0,
+                (r.get("note") or "")[:240],
+                tid,
             )
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
