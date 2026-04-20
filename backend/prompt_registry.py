@@ -321,90 +321,147 @@ def _sha(body: str) -> str:
 #  Public API — register / lookup / outcome
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def register_active(path: str, body: str) -> PromptVersion:
-    """Register or replace the ``active`` row for `path`. If a prior
-    active version had different content, demote it to ``archive``.
-    Idempotent on identical body (returns the existing row)."""
-    rel = _normalise_path(path)
+async def _register_active_impl(conn, rel: str, body: str) -> int:
+    # Advisory lock keyed on (role, path) — serialises concurrent
+    # same-path writers across workers. Without it, two workers both
+    # see no existing row, both compute next_v=1, both INSERT, and
+    # the loser's UNIQUE(path, version) violation poisons the
+    # transaction. The lock is tx-scoped → released on COMMIT.
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"prompt-register-active-{rel}",
+    )
     sha = _sha(body)
-    from backend import db
-    conn = db._conn()
-
-    async with conn.execute(
-        "SELECT * FROM prompt_versions WHERE path=? ORDER BY version DESC LIMIT 1",
-        (rel,),
-    ) as cur:
-        last = await cur.fetchone()
-    next_v = (last["version"] + 1) if last else 1
 
     # Same body as current active → no-op, return existing row.
-    async with conn.execute(
-        "SELECT * FROM prompt_versions WHERE path=? AND role='active'",
-        (rel,),
-    ) as cur:
-        active = await cur.fetchone()
+    active = await conn.fetchrow(
+        "SELECT id, body_sha256 FROM prompt_versions "
+        "WHERE path = $1 AND role = 'active'",
+        rel,
+    )
     if active and active["body_sha256"] == sha:
-        return _row_to_version(active)
+        return active["id"]
+
+    last = await conn.fetchrow(
+        "SELECT version FROM prompt_versions WHERE path = $1 "
+        "ORDER BY version DESC LIMIT 1",
+        rel,
+    )
+    next_v = (last["version"] + 1) if last else 1
 
     if active:
         await conn.execute(
-            "UPDATE prompt_versions SET role='archive' WHERE id=?",
-            (active["id"],),
+            "UPDATE prompt_versions SET role = 'archive' WHERE id = $1",
+            active["id"],
         )
 
     now = time.time()
-    # Phase-3 PG compat: RETURNING id (dialect-neutral, SQLite 3.35+).
-    async with conn.execute(
+    row = await conn.fetchrow(
         "INSERT INTO prompt_versions "
         "(path, version, role, body, body_sha256, created_at, promoted_at) "
-        "VALUES (?,?, 'active', ?,?,?,?) RETURNING id",
-        (rel, next_v, body, sha, now, now),
-    ) as cur:
-        row = await cur.fetchone()
-    new_id = row[0] if row else None
-    await conn.commit()
+        "VALUES ($1, $2, 'active', $3, $4, $5, $6) RETURNING id",
+        rel, next_v, body, sha, now, now,
+    )
+    return row["id"]
+
+
+async def register_active(
+    path: str, body: str, conn=None,
+) -> PromptVersion:
+    """Register or replace the ``active`` row for `path`. If a prior
+    active version had different content, demote it to ``archive``.
+    Idempotent on identical body (returns the existing row).
+
+    Task #105 (2026-04-21): ported from the shared compat ``_conn()``
+    to a per-call pool acquire + tx wrap + ``pg_advisory_xact_lock``
+    on ``hashtext(prompt-register-active-<path>)``. Two regressions
+    this closes:
+
+    1. Check-then-insert race under multi-worker — two workers running
+       bootstrap_from_disk in parallel could both see an empty table,
+       both compute ``next_v=1``, and both INSERT, one failing on
+       UNIQUE(path, version). The advisory lock serialises them on
+       path, so the loser sees the winner's committed row and
+       short-circuits.
+    2. Failed INSERT poisons the shared compat connection's tx,
+       turning every subsequent ``db._conn().execute(...)`` from ANY
+       caller (/readyz's db_ping, alembic_probe, etc.) into
+       ``current transaction is aborted``. Moving to per-call pool
+       acquire + ``async with conn.transaction()`` means the conn
+       auto-rolls-back on exception and returns to the pool healthy.
+    """
+    rel = _normalise_path(path)
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                new_id = await _register_active_impl(owned, rel, body)
+    else:
+        async with conn.transaction():
+            new_id = await _register_active_impl(conn, rel, body)
     return await get_by_id(new_id)
 
 
-async def register_canary(path: str, body: str) -> PromptVersion:
-    """Register a canary candidate for `path`. Replaces any prior open
-    canary on the same path (demoted to archive with rollback reason)."""
-    rel = _normalise_path(path)
+async def _register_canary_impl(conn, rel: str, body: str) -> int:
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"prompt-register-canary-{rel}",
+    )
     sha = _sha(body)
-    from backend import db
-    conn = db._conn()
 
-    async with conn.execute(
-        "SELECT * FROM prompt_versions WHERE path=? AND role='canary'",
-        (rel,),
-    ) as cur:
-        prior = await cur.fetchone()
+    prior = await conn.fetchrow(
+        "SELECT id FROM prompt_versions "
+        "WHERE path = $1 AND role = 'canary'",
+        rel,
+    )
     if prior:
         await conn.execute(
-            "UPDATE prompt_versions SET role='archive', "
-            "rolled_back_at=?, rollback_reason='superseded by new canary' "
-            "WHERE id=?",
-            (time.time(), prior["id"]),
+            "UPDATE prompt_versions SET role = 'archive', "
+            "rolled_back_at = $1, "
+            "rollback_reason = 'superseded by new canary' "
+            "WHERE id = $2",
+            time.time(), prior["id"],
         )
 
-    async with conn.execute(
-        "SELECT MAX(version) AS m FROM prompt_versions WHERE path=?",
-        (rel,),
-    ) as cur:
-        row = await cur.fetchone()
+    row = await conn.fetchrow(
+        "SELECT MAX(version) AS m FROM prompt_versions WHERE path = $1",
+        rel,
+    )
     next_v = ((row["m"] or 0) + 1)
 
     now = time.time()
-    # Phase-3 PG compat: RETURNING id (dialect-neutral, SQLite 3.35+).
-    async with conn.execute(
+    row = await conn.fetchrow(
         "INSERT INTO prompt_versions "
         "(path, version, role, body, body_sha256, created_at) "
-        "VALUES (?,?, 'canary', ?,?,?) RETURNING id",
-        (rel, next_v, body, sha, now),
-    ) as cur:
-        row = await cur.fetchone()
-    new_id = row[0] if row else None
-    await conn.commit()
+        "VALUES ($1, $2, 'canary', $3, $4, $5) RETURNING id",
+        rel, next_v, body, sha, now,
+    )
+    return row["id"]
+
+
+async def register_canary(
+    path: str, body: str, conn=None,
+) -> PromptVersion:
+    """Register a canary candidate for `path`. Replaces any prior open
+    canary on the same path (demoted to archive with rollback reason).
+
+    Task #105 (2026-04-21): same port recipe as ``register_active``
+    above — pool + tx + advisory lock on
+    ``hashtext(prompt-register-canary-<path>)``. Uses a DIFFERENT
+    lock key than register_active so a canary registration isn't
+    blocked by an in-flight active registration on the same path
+    (the two operations share a table but touch disjoint rows:
+    canary never hits the active row's version-increment path).
+    """
+    rel = _normalise_path(path)
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                new_id = await _register_canary_impl(owned, rel, body)
+    else:
+        async with conn.transaction():
+            new_id = await _register_canary_impl(conn, rel, body)
     return await get_by_id(new_id)
 
 

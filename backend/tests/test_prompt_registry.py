@@ -1,9 +1,11 @@
-"""Phase 63-C — Prompt Registry + Canary."""
+"""Phase 63-C — Prompt Registry + Canary.
+
+Task #105 migration (2026-04-21): ``fresh_db`` fixture ported from
+SQLite tempfile to pg_test_pool so register_active / register_canary
+(now pool-native) can open their own pool connections.
+"""
 
 from __future__ import annotations
-
-import os
-import tempfile
 
 import pytest
 
@@ -11,19 +13,28 @@ from backend import prompt_registry as pr
 
 
 @pytest.fixture()
-async def fresh_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "t.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as cfg
-        cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        try:
-            yield db
-        finally:
-            await db.close()
+async def fresh_db(pg_test_pool, pg_test_dsn, monkeypatch):
+    # Same pattern as test_prompt_registry_bootstrap: register_*
+    # writes go through the pool, reads via get_active/get_by_id
+    # still go through db._conn() compat, so point both at the same
+    # PG via OMNISIGHT_DATABASE_URL.
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE prompt_versions RESTART IDENTITY CASCADE"
+        )
+    from backend import db
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    try:
+        yield db
+    finally:
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE prompt_versions RESTART IDENTITY CASCADE"
+            )
 
 
 VALID = "backend/agents/prompts/firmware.md"
