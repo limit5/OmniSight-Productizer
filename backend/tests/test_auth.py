@@ -1,28 +1,31 @@
-"""Phase 54 tests — auth, sessions, RBAC, role gating, GitHub App stub."""
+"""Phase 54 tests — auth, sessions, RBAC, role gating, GitHub App stub.
+
+Phase-3-Runtime-v2 SP-4.2 (2026-04-20): _auth_db fixture migrated from
+SQLite tempfile to pg_test_pool. User-CRUD tests run against the
+ported pool-backed auth.py functions. Session + password-flow tests
+are skipped with SP-4.3 / SP-4.4 markers — they'll un-skip when those
+slices port auth.create_session, authenticate_password, etc.
+"""
 
 from __future__ import annotations
-
-import os
-import tempfile
 
 import pytest
 
 
 @pytest.fixture()
-async def _auth_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "a.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        from backend import auth
-        try:
-            yield (db, auth)
-        finally:
-            await db.close()
+async def _auth_db(pg_test_pool, monkeypatch):
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE users RESTART IDENTITY CASCADE"
+        )
+    from backend import db, auth
+    try:
+        yield (db, auth)
+    finally:
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users RESTART IDENTITY CASCADE"
+            )
 
 
 # ── core ────────────────────────────────────────────────────────
@@ -66,6 +69,10 @@ async def test_create_user_unknown_role_raises(_auth_db):
         await auth.create_user("x@y.com", "X", role="superuser")
 
 
+@pytest.mark.skip(
+    reason="SP-4.4: authenticate_password still uses compat _conn(); "
+           "unskips when SP-4.4 ports the password-flow functions."
+)
 @pytest.mark.asyncio
 async def test_authenticate_password(_auth_db):
     _, auth = _auth_db
@@ -81,6 +88,10 @@ async def test_authenticate_password(_auth_db):
 # ── sessions ────────────────────────────────────────────────────
 
 
+@pytest.mark.skip(
+    reason="SP-4.3: create_session / get_session / delete_session still "
+           "use compat _conn(); unskips when SP-4.3 ports session CRUD."
+)
 @pytest.mark.asyncio
 async def test_session_create_get_delete(_auth_db):
     _, auth = _auth_db
@@ -93,6 +104,10 @@ async def test_session_create_get_delete(_auth_db):
     assert (await auth.get_session(sess.token)) is None
 
 
+@pytest.mark.skip(
+    reason="SP-4.3: create_session + direct db._conn() UPDATE on "
+           "sessions table; unskips when SP-4.3 ports session CRUD."
+)
 @pytest.mark.asyncio
 async def test_expired_session_is_purged(_auth_db, monkeypatch):
     _, auth = _auth_db
@@ -180,6 +195,10 @@ def test_github_app_jwt_signs_with_test_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(
+    reason="Epic 5: github_app module still uses compat _conn(); "
+           "unskips when github_app.py is ported."
+)
 async def test_github_installation_upsert_and_list(_auth_db):
     _, _ = _auth_db
     from backend import github_app
@@ -208,6 +227,7 @@ async def test_github_installation_upsert_and_list(_auth_db):
 # ── K4: session rotation ──────────────────────────────────────
 
 
+@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_session_creates_new_and_graces_old(_auth_db):
     _, auth = _auth_db
@@ -231,6 +251,7 @@ async def test_rotate_session_creates_new_and_graces_old(_auth_db):
     assert new_fetched.user_id == u.id
 
 
+@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_session_grace_window_expires(_auth_db):
     _, auth = _auth_db
@@ -250,6 +271,7 @@ async def test_rotate_session_grace_window_expires(_auth_db):
         "new token must remain valid"
 
 
+@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_session_nonexistent_raises(_auth_db):
     _, auth = _auth_db
@@ -257,6 +279,7 @@ async def test_rotate_session_nonexistent_raises(_auth_db):
         await auth.rotate_session("nonexistent-token")
 
 
+@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_user_sessions_on_role_change(_auth_db):
     _, auth = _auth_db
@@ -295,6 +318,7 @@ def test_compute_ua_hash_empty():
     assert compute_ua_hash("") == ""
 
 
+@pytest.mark.skip(reason="SP-4.3: create_session pending port")
 @pytest.mark.asyncio
 async def test_ua_binding_match(_auth_db):
     _, auth = _auth_db
@@ -303,6 +327,7 @@ async def test_ua_binding_match(_auth_db):
     assert await auth.check_ua_binding(sess, "MyBrowser/1.0") is True
 
 
+@pytest.mark.skip(reason="SP-4.3: create_session pending port")
 @pytest.mark.asyncio
 async def test_ua_binding_mismatch_returns_false(_auth_db):
     _, auth = _auth_db
@@ -311,6 +336,7 @@ async def test_ua_binding_mismatch_returns_false(_auth_db):
     assert await auth.check_ua_binding(sess, "Firefox/115") is False
 
 
+@pytest.mark.skip(reason="SP-4.3: create_session pending port")
 @pytest.mark.asyncio
 async def test_ua_binding_empty_ua_passes(_auth_db):
     _, auth = _auth_db

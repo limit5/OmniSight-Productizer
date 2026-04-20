@@ -211,37 +211,72 @@ async def _conn():
     return db._conn()
 
 
-async def get_user(user_id: str) -> Optional[User]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, email, name, role, enabled, must_change_password, tenant_id FROM users WHERE id=?",
-        (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return None
-    return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]),
-                must_change_password=bool(r["must_change_password"]),
-                tenant_id=r["tenant_id"])
+def _row_to_user(r) -> User:
+    """Map a users-table row to the User dataclass.
+
+    Phase-3-Runtime-v2 SP-4.2 (2026-04-20): extracted so the 4 user
+    reads share one mapping — previously each inlined the same
+    ``User(id=..., email=..., ...)`` construction with slightly
+    different formatting. Centralising prevents drift when a new
+    column lands.
+    """
+    return User(
+        id=r["id"],
+        email=r["email"],
+        name=r["name"],
+        role=r["role"],
+        enabled=bool(r["enabled"]),
+        must_change_password=bool(r["must_change_password"]),
+        tenant_id=r["tenant_id"],
+    )
 
 
-async def get_user_by_email(email: str) -> Optional[User]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, email, name, role, enabled, must_change_password, tenant_id FROM users WHERE email=?",
-        (email.lower().strip(),),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return None
-    return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]),
-                must_change_password=bool(r["must_change_password"]),
-                tenant_id=r["tenant_id"])
+_USER_COLS = (
+    "id, email, name, role, enabled, must_change_password, tenant_id"
+)
 
 
-async def find_admin_requiring_password_change() -> Optional[User]:
+async def _get_user_impl(conn, user_id: str) -> Optional[User]:
+    r = await conn.fetchrow(
+        f"SELECT {_USER_COLS} FROM users WHERE id = $1", user_id,
+    )
+    return _row_to_user(r) if r else None
+
+
+async def get_user(user_id: str, conn=None) -> Optional[User]:
+    """Look up a user by id. Returns None if not found.
+
+    Phase-3-Runtime-v2 SP-4.2 (2026-04-20): polymorphic ``conn`` — the
+    10+ existing callers (main.py lifespan, routers/bootstrap.py,
+    routers/mfa.py, tests) keep their call-sites unchanged; they
+    pass nothing and this function borrows a pool conn for the
+    single read. Request handlers that want to share a conn across
+    ``get_user`` + later writes can pass their Depends conn.
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _get_user_impl(owned_conn, user_id)
+    return await _get_user_impl(conn, user_id)
+
+
+async def _get_user_by_email_impl(conn, email: str) -> Optional[User]:
+    r = await conn.fetchrow(
+        f"SELECT {_USER_COLS} FROM users WHERE email = $1",
+        email.lower().strip(),
+    )
+    return _row_to_user(r) if r else None
+
+
+async def get_user_by_email(email: str, conn=None) -> Optional[User]:
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _get_user_by_email_impl(owned_conn, email)
+    return await _get_user_by_email_impl(conn, email)
+
+
+async def find_admin_requiring_password_change(conn=None) -> Optional[User]:
     """Return the single enabled admin still flagged must_change_password.
 
     Drives L2 Step 1 of the bootstrap wizard: the operator hasn't logged
@@ -250,43 +285,75 @@ async def find_admin_requiring_password_change() -> Optional[User]:
     client-supplied identity. If multiple admins share the flag we pick
     the oldest (first created) — practically only one exists during
     bootstrap since ``ensure_default_admin`` only runs on an empty table.
+
+    SP-4.2 (2026-04-20): SQLite's implicit ``rowid`` doesn't exist in
+    PG. Replaced ``ORDER BY rowid ASC`` with ``ORDER BY created_at ASC``
+    — the schema stores created_at as ``TEXT NOT NULL DEFAULT (datetime('now'))``
+    in ``YYYY-MM-DD HH:MM:SS`` format, which is lexicographically
+    chronological; oldest admin = smallest timestamp.
     """
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, email, name, role, enabled, must_change_password, tenant_id "
-        "FROM users WHERE role='admin' AND enabled=1 AND must_change_password=1 "
-        "ORDER BY rowid ASC LIMIT 1",
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return None
-    return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]),
-                must_change_password=bool(r["must_change_password"]),
-                tenant_id=r["tenant_id"])
+    sql = (
+        f"SELECT {_USER_COLS} FROM users "
+        "WHERE role = 'admin' AND enabled = 1 AND must_change_password = 1 "
+        "ORDER BY created_at ASC LIMIT 1"
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            r = await owned_conn.fetchrow(sql)
+    else:
+        r = await conn.fetchrow(sql)
+    return _row_to_user(r) if r else None
 
 
-async def create_user(email: str, name: str, role: str = "viewer",
-                      password: str | None = None,
-                      oidc_provider: str = "", oidc_subject: str = "",
-                      tenant_id: str = "") -> User:
-    if role not in ROLES:
-        raise ValueError(f"unknown role: {role}")
+async def _create_user_impl(
+    conn,
+    email: str,
+    name: str,
+    role: str,
+    password: str | None,
+    oidc_provider: str,
+    oidc_subject: str,
+    tenant_id: str,
+) -> User:
     from backend.db_context import tenant_insert_value
     tid = tenant_id or tenant_insert_value()
-    conn = await _conn()
     uid = f"u-{uuid.uuid4().hex[:10]}"
     pw_hash = hash_password(password) if password else ""
+    norm_email = email.lower().strip()
     await conn.execute(
         "INSERT INTO users (id, email, name, role, password_hash, "
-        "oidc_provider, oidc_subject, enabled, tenant_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
-        (uid, email.lower().strip(), name, role, pw_hash,
-         oidc_provider, oidc_subject, tid),
+        " oidc_provider, oidc_subject, enabled, tenant_id) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8)",
+        uid, norm_email, name, role, pw_hash,
+        oidc_provider, oidc_subject, tid,
     )
-    await conn.commit()
-    return User(id=uid, email=email.lower().strip(), name=name, role=role,
-                tenant_id=tid)
+    return User(id=uid, email=norm_email, name=name, role=role, tenant_id=tid)
+
+
+async def create_user(
+    email: str,
+    name: str,
+    role: str = "viewer",
+    password: str | None = None,
+    oidc_provider: str = "",
+    oidc_subject: str = "",
+    tenant_id: str = "",
+    conn=None,
+) -> User:
+    if role not in ROLES:
+        raise ValueError(f"unknown role: {role}")
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _create_user_impl(
+                owned_conn, email, name, role, password,
+                oidc_provider, oidc_subject, tenant_id,
+            )
+    return await _create_user_impl(
+        conn, email, name, role, password,
+        oidc_provider, oidc_subject, tenant_id,
+    )
 
 
 async def check_password_history(user_id: str, plain: str) -> bool:
@@ -679,26 +746,43 @@ async def check_ua_binding(session: Session, current_ua: str) -> bool:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-async def ensure_default_admin() -> Optional[User]:
+async def ensure_default_admin(conn=None) -> Optional[User]:
     """Create a default admin user if the users table is empty.
     Email + password come from env (or sensible dev defaults).
-    If the password is the well-known default, flag must_change_password."""
-    conn = await _conn()
-    async with conn.execute("SELECT COUNT(*) AS n FROM users") as cur:
-        r = await cur.fetchone()
-    if r and (r["n"] or 0) > 0:
+    If the password is the well-known default, flag must_change_password.
+
+    SP-4.2 (2026-04-20): polymorphic conn. The empty-check + create
+    + flag update all ride the same acquired conn when called without
+    one — so in single-worker boot there's no TOCTOU window. Under
+    multi-worker boot (uvicorn --workers N) two workers CAN both see
+    the count-zero result; the second's create_user will hit the
+    UNIQUE (email) constraint on the users table and raise, which
+    main.py's lifespan try/except catches — net result is still
+    exactly one admin row.
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _ensure_default_admin_impl(owned_conn)
+    return await _ensure_default_admin_impl(conn)
+
+
+async def _ensure_default_admin_impl(conn) -> Optional[User]:
+    n = await conn.fetchval("SELECT COUNT(*) FROM users")
+    if n and int(n) > 0:
         return None
     email = (os.environ.get("OMNISIGHT_ADMIN_EMAIL") or "admin@omnisight.local").strip()
     password = (os.environ.get("OMNISIGHT_ADMIN_PASSWORD") or "omnisight-admin").strip()
     is_default_pw = password == "omnisight-admin"
-    user = await create_user(
-        email=email, name="OmniSight Admin", role="admin", password=password,
+    user = await _create_user_impl(
+        conn, email=email, name="OmniSight Admin", role="admin",
+        password=password, oidc_provider="", oidc_subject="", tenant_id="",
     )
     if is_default_pw:
         await conn.execute(
-            "UPDATE users SET must_change_password=1 WHERE id=?", (user.id,),
+            "UPDATE users SET must_change_password = 1 WHERE id = $1",
+            user.id,
         )
-        await conn.commit()
         user.must_change_password = True
         logger.warning(
             "[AUTH] Default admin %s created with default password — "

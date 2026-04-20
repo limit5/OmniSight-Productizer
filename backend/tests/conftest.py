@@ -348,14 +348,16 @@ if _ASYNCPG_AVAILABLE:
                 # agents/tasks/task_comments/handoffs/notifications/
                 # token_usage/artifacts/npi_state/simulations/
                 # debug_findings/event_log/decision_rules/
-                # episodic_memory; Epic 4 adds ``audit_log`` in SP-4.1.
-                # Extend as subsequent SP-4.x / SP-5.x slices land.
+                # episodic_memory; Epic 4 adds ``audit_log`` in
+                # SP-4.1 and ``users`` in SP-4.2 (``sessions`` +
+                # ``password_history`` to follow in SP-4.3 / 4.4).
+                # CASCADE handles the user-referencing FKs.
                 await conn.execute(
                     "TRUNCATE agents, tasks, task_comments, handoffs, "
                     "notifications, token_usage, artifacts, npi_state, "
                     "simulations, debug_findings, event_log, "
-                    "decision_rules, episodic_memory, audit_log "
-                    "RESTART IDENTITY CASCADE"
+                    "decision_rules, episodic_memory, audit_log, "
+                    "users RESTART IDENTITY CASCADE"
                 )
                 yield conn
             finally:
