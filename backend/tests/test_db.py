@@ -135,17 +135,13 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  NPI state
+#  NPI state  —  MOVED TO test_db_npi_state.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_npi_state_roundtrip(fresh_db):
-    db = fresh_db
-    assert await db.get_npi_state() == {}
-    await db.save_npi_state({"phase": "MVP", "progress": 0.42})
-    assert (await db.get_npi_state())["phase"] == "MVP"
-    await db.save_npi_state({"phase": "GA"})  # overwrite
-    assert (await db.get_npi_state())["phase"] == "GA"
+#
+# Phase-3-Runtime-v2 SP-3.7 (2026-04-20): get_npi_state /
+# save_npi_state now require an asyncpg.Connection; SQLite fresh_db
+# can't exercise them. Per-function tests live in
+# ``test_db_npi_state.py`` with pg_test_conn.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

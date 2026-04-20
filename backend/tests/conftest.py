@@ -345,12 +345,12 @@ if _ASYNCPG_AVAILABLE:
                 # the savepoint and rolls back on teardown, so any
                 # pre-existing committed rows come back intact.
                 # Agents + tasks + task_comments + handoffs +
-                # notifications + token_usage + artifacts are the
-                # tables Phase-3-Runtime-v2 has ported so far; extend
-                # this list as subsequent SP-3.x slices land.
+                # notifications + token_usage + artifacts + npi_state
+                # are the tables Phase-3-Runtime-v2 has ported so far;
+                # extend this list as subsequent SP-3.x slices land.
                 await conn.execute(
                     "TRUNCATE agents, tasks, task_comments, handoffs, "
-                    "notifications, token_usage, artifacts "
+                    "notifications, token_usage, artifacts, npi_state "
                     "RESTART IDENTITY CASCADE"
                 )
                 yield conn

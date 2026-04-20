@@ -1448,21 +1448,27 @@ async def delete_artifact(conn, artifact_id: str) -> bool:
 #  NPI Lifecycle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def get_npi_state() -> dict:
-    async with _conn().execute("SELECT data FROM npi_state WHERE id = 'current'") as cur:
-        row = await cur.fetchone()
+async def get_npi_state(conn) -> dict:
+    row = await conn.fetchrow(
+        "SELECT data FROM npi_state WHERE id = 'current'",
+    )
     if row:
         return json.loads(row["data"])
     return {}
 
 
-async def save_npi_state(data: dict) -> None:
-    await _conn().execute(
-        """INSERT INTO npi_state (id, data) VALUES ('current', :data)
-           ON CONFLICT(id) DO UPDATE SET data=excluded.data""",
-        {"data": json.dumps(data)},
+async def save_npi_state(conn, data: dict) -> None:
+    # Phase-3-Runtime-v2 SP-3.7 (2026-04-20): ported to native asyncpg.
+    # Single-row table keyed on id='current'. $1 is bound once; the
+    # prior compat form used a named ``:data`` parameter referenced in
+    # both INSERT VALUES and implicit EXCLUDED — PG's ON CONFLICT DO
+    # UPDATE SET ``data = EXCLUDED.data`` reads the attempted-insert
+    # row automatically, so the binding is single-shot here.
+    await conn.execute(
+        """INSERT INTO npi_state (id, data) VALUES ('current', $1)
+           ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data""",
+        json.dumps(data),
     )
-    await _conn().commit()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

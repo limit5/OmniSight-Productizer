@@ -1466,10 +1466,12 @@ _NPI_CONFIG = Path(__file__).resolve().parent.parent.parent / "configs" / "npi_l
 
 
 @router.get("/npi")
-async def get_npi_state():
+async def get_npi_state(
+    conn=Depends(_get_conn),
+):
     """Return the current NPI lifecycle state."""
     from backend import db
-    state = await db.get_npi_state()
+    state = await db.get_npi_state(conn)
     if state:
         return state
     # First load: read from SSOT config file
@@ -1477,7 +1479,7 @@ async def get_npi_state():
         import json as _json
         try:
             data = _json.loads(_NPI_CONFIG.read_text(encoding="utf-8"))
-            await db.save_npi_state(data)
+            await db.save_npi_state(conn, data)
             return data
         except (ValueError, OSError) as exc:
             import logging
@@ -1489,17 +1491,18 @@ async def get_npi_state():
 async def update_npi_state(
     business_model: str | None = None,
     current_phase_id: str | None = None,
+    conn=Depends(_get_conn),
 ):
     """Update NPI project-level settings."""
     from backend import db
-    state = await db.get_npi_state()
+    state = await db.get_npi_state(conn)
     if not state:
         state = {"business_model": "odm", "phases": [], "current_phase_id": None}
     if business_model is not None:
         state["business_model"] = business_model
     if current_phase_id is not None:
         state["current_phase_id"] = current_phase_id
-    await db.save_npi_state(state)
+    await db.save_npi_state(conn, state)
     return state
 
 
@@ -1508,12 +1511,17 @@ _VALID_MILESTONE_STATUSES = {"pending", "in_progress", "completed", "blocked"}
 
 
 @router.patch("/npi/phases/{phase_id}")
-async def update_npi_phase(phase_id: str, status: str | None = None, target_date: str | None = None):
+async def update_npi_phase(
+    phase_id: str,
+    status: str | None = None,
+    target_date: str | None = None,
+    conn=Depends(_get_conn),
+):
     """Update a specific NPI phase."""
     if status is not None and status not in _VALID_PHASE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid phase status: {status}. Must be one of {_VALID_PHASE_STATUSES}")
     from backend import db
-    state = await db.get_npi_state()
+    state = await db.get_npi_state(conn)
     if not state:
         raise HTTPException(status_code=404, detail="NPI state not initialized")
     for phase in state.get("phases", []):
@@ -1522,18 +1530,23 @@ async def update_npi_phase(phase_id: str, status: str | None = None, target_date
                 phase["status"] = status
             if target_date is not None:
                 phase["target_date"] = target_date
-            await db.save_npi_state(state)
+            await db.save_npi_state(conn, state)
             return phase
     raise HTTPException(status_code=404, detail=f"Phase {phase_id} not found")
 
 
 @router.patch("/npi/milestones/{milestone_id}")
-async def update_npi_milestone(milestone_id: str, status: str | None = None, due_date: str | None = None):
+async def update_npi_milestone(
+    milestone_id: str,
+    status: str | None = None,
+    due_date: str | None = None,
+    conn=Depends(_get_conn),
+):
     """Update a specific NPI milestone."""
     if status is not None and status not in _VALID_MILESTONE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid milestone status: {status}. Must be one of {_VALID_MILESTONE_STATUSES}")
     from backend import db
-    state = await db.get_npi_state()
+    state = await db.get_npi_state(conn)
     if not state:
         raise HTTPException(status_code=404, detail="NPI state not initialized")
     for phase in state.get("phases", []):
@@ -1554,7 +1567,7 @@ async def update_npi_milestone(milestone_id: str, status: str | None = None, due
                         phase["status"] = "active"
                     else:
                         phase["status"] = "pending"
-                await db.save_npi_state(state)
+                await db.save_npi_state(conn, state)
                 return ms
     raise HTTPException(status_code=404, detail=f"Milestone {milestone_id} not found")
 

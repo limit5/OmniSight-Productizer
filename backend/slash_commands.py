@@ -164,7 +164,7 @@ async def _budget(conn: asyncpg.Connection, args: str) -> str:
 
 async def _npi(conn: asyncpg.Connection, args: str) -> str:
     from backend import db
-    state = await db.get_npi_state()
+    state = await db.get_npi_state(conn)
     if not state or not state.get("phases"):
         return "NPI data not loaded."
     phases = state["phases"]
