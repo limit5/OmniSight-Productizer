@@ -197,12 +197,92 @@ def _qmark_to_dollar(sql: str) -> str:
     return "".join(out)
 
 
+def _named_to_dollar(sql: str, params: dict) -> tuple[str, list]:
+    """Convert SQLite/aiosqlite ``:name`` placeholders to asyncpg ``$N``
+    and reorder ``params`` dict to a positional list matching the rewritten
+    SQL's $1..$N order.
+
+    Each ``:name`` occurrence gets its own $N slot (PG does not share
+    parameter slots the way some ORMs do), and the corresponding value
+    is looked up in ``params`` and repeated at each position — so a
+    query like ``... VALUES (:x, :y) ON CONFLICT DO UPDATE SET y=:y``
+    becomes ``... VALUES ($1, $2) ON CONFLICT DO UPDATE SET y=$3`` with
+    positional args ``[params['x'], params['y'], params['y']]``.
+
+    String-literal-aware (same single-quote scan as :func:`_qmark_to_dollar`)
+    so a literal ``':foo'`` inside a quoted string is left untouched.
+    An identifier is ``[A-Za-z_][A-Za-z0-9_]*``; a bare ``:`` followed by
+    anything else (e.g. PG's ``::cast`` syntax) is passed through.
+    Raises ``KeyError`` if a referenced ``:name`` is absent from
+    ``params`` — matches aiosqlite/sqlite3 semantics.
+    """
+    out: list[str] = []
+    order: list[str] = []
+    i = 0
+    n_chars = len(sql)
+    in_str = False
+    while i < n_chars:
+        c = sql[i]
+        if in_str:
+            out.append(c)
+            if c == "'":
+                if i + 1 < n_chars and sql[i + 1] == "'":
+                    out.append("'")
+                    i += 2
+                    continue
+                in_str = False
+            i += 1
+            continue
+        if c == "'":
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == ":":
+            # PG-style ``::cast`` — pass the double-colon through as-is.
+            if i + 1 < n_chars and sql[i + 1] == ":":
+                out.append("::")
+                i += 2
+                continue
+            # Scan an identifier after the single colon. An isolated
+            # colon with no identifier is left alone (unlikely in real
+            # SQL, but don't corrupt the source).
+            j = i + 1
+            if j < n_chars and (sql[j].isalpha() or sql[j] == "_"):
+                j += 1
+                while j < n_chars and (sql[j].isalnum() or sql[j] == "_"):
+                    j += 1
+                name = sql[i + 1:j]
+                order.append(name)
+                out.append(f"${len(order)}")
+                i = j
+                continue
+        out.append(c)
+        i += 1
+    new_sql = "".join(out)
+    try:
+        values = [params[name] for name in order]
+    except KeyError as exc:
+        missing = exc.args[0] if exc.args else "?"
+        raise KeyError(
+            f"db_pg_compat: :{missing} referenced in SQL "
+            f"but not provided in params dict (have keys: "
+            f"{sorted(params.keys())!r})"
+        ) from exc
+    return new_sql, values
+
+
 def translate_sql(sql: str) -> str:
     """Apply all SQLite → PG runtime rewrites in the right order.
 
     Order matters: placeholder conversion comes last because the earlier
     rewrites may inject literal ``?`` characters (they don't today, but
     keeping the order stable is cheap insurance).
+
+    This legacy entry point handles only qmark (``?``) placeholders.
+    Call sites that pass a dict of named params must go through
+    :func:`translate_sql_and_params` instead so the dict gets flattened
+    to positional args in the same pass that rewrites ``:name`` → ``$N``.
     """
     out = sql
     out = _translate_insert_or_replace(out)  # must precede ignore
@@ -211,6 +291,34 @@ def translate_sql(sql: str) -> str:
     out = _translate_strftime_epoch(out)
     out = _qmark_to_dollar(out)
     return out
+
+
+def translate_sql_and_params(
+    sql: str, params: object | None,
+) -> tuple[str, tuple]:
+    """Rewrite SQLite-ish SQL+params to asyncpg's positional ``$N`` form.
+
+    Accepts the three shapes aiosqlite lets callers mix:
+    - ``None`` / ``()`` — no params; returns empty tuple.
+    - ``tuple`` / ``list`` — positional ``?`` placeholders; order preserved.
+    - ``dict`` — named ``:name`` placeholders; dict is flattened to a
+      positional tuple that matches the ``$1..$N`` order produced by
+      :func:`_named_to_dollar`.
+
+    The SQLite-ism rewrites (INSERT OR REPLACE/IGNORE, datetime('now'),
+    strftime epoch) run before placeholder conversion so those rewrites
+    can't accidentally inject fresh ``?`` / ``:name`` tokens.
+    """
+    out = sql
+    out = _translate_insert_or_replace(out)  # must precede ignore
+    out = _translate_insert_or_ignore(out)
+    out = _translate_datetime_now(out)
+    out = _translate_strftime_epoch(out)
+    if isinstance(params, dict):
+        out, values = _named_to_dollar(out, params)
+        return out, tuple(values)
+    out = _qmark_to_dollar(out)
+    return out, tuple(params) if params is not None else ()
 
 
 def _is_select_like(sql: str) -> bool:
@@ -442,8 +550,7 @@ class PgCompatConnection:
         if _is_pragma_or_vacuum(sql):
             return _PgCursor(records=[])
 
-        pg_sql = translate_sql(sql)
-        args = tuple(params) if params is not None else ()
+        pg_sql, args = translate_sql_and_params(sql, params)
 
         async with self._lock:
             upper = pg_sql.lstrip().upper()
