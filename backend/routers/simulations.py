@@ -6,7 +6,9 @@ from backend import db
 from backend.models import SimulationRequest
 from backend.routers import _pagination as _pg
 
-router = APIRouter(prefix="/system/simulations", tags=["simulations"])
+# Phase-3 P6 (2026-04-20): prefix renamed /system/simulations →
+# /runtime/simulations — see backend/routers/system.py for rationale.
+router = APIRouter(prefix="/runtime/simulations", tags=["simulations"])
 
 
 @router.get("")

@@ -294,7 +294,7 @@ class TestReleaseEndpoints:
 
     @pytest.mark.asyncio
     async def test_get_version(self, client):
-        resp = await client.get("/api/v1/system/release/version")
+        resp = await client.get("/api/v1/runtime/release/version")
         assert resp.status_code == 200
         data = resp.json()
         assert "version" in data
@@ -302,7 +302,7 @@ class TestReleaseEndpoints:
 
     @pytest.mark.asyncio
     async def test_get_manifest(self, client):
-        resp = await client.get("/api/v1/system/release/manifest")
+        resp = await client.get("/api/v1/runtime/release/manifest")
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "OmniSight Productizer"
@@ -310,7 +310,7 @@ class TestReleaseEndpoints:
 
     @pytest.mark.asyncio
     async def test_create_release(self, client):
-        resp = await client.post("/api/v1/system/release", json={
+        resp = await client.post("/api/v1/runtime/release", json={
             "version": "0.0.4-api-test",
         })
         assert resp.status_code == 200

@@ -29,7 +29,7 @@ from backend.models import (
     DeployRequest,
 )
 
-# Router-level auth baseline: every /system/* route requires an
+# Router-level auth baseline: every /runtime/* route requires an
 # authenticated session. Individual write endpoints stack an
 # admin-role check on top via their own `dependencies=` list.
 #
@@ -37,9 +37,21 @@ from backend.models import (
 # CF WAF rule + Zero Trust Access at the edge are defence-in-depth,
 # but the application itself must not rely on edge mitigation. See
 # docs/ops/deploy_postmortem_2026-04-19.md security follow-ups.
+#
+# Phase-3 P6 (2026-04-20): prefix renamed ``/system`` → ``/runtime``
+# because the CF WAF custom rule documented in
+# ``docs/ops/cloudflare_settings.md`` (line 30) — originally added
+# as unauth-era defence-in-depth — was returning 403 "Just a
+# moment..." challenge pages for every dashboard load, since the
+# dashboard legitimately reads ``/system/info`` etc. on mount. The
+# application-layer auth here (``Depends(_auth.current_user)`` +
+# per-endpoint ``require_role("admin")``) is now load-bearing;
+# operators who want edge defence back should re-point the CF rule
+# at ``/api/v1/runtime/admin/`` (or a narrower mutation-only
+# sub-path) AFTER this rename lands, not the old ``/system/`` one.
 router = APIRouter(
-    prefix="/system",
-    tags=["system"],
+    prefix="/runtime",
+    tags=["runtime"],
     dependencies=[Depends(_auth.current_user)],
 )
 

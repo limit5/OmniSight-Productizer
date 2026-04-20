@@ -65,7 +65,7 @@ export function ForecastPanel() {
     setBusy(true)
     setError(null)
     try {
-      const path = recompute ? "/api/v1/system/forecast/recompute" : "/api/v1/system/forecast"
+      const path = recompute ? "/api/v1/runtime/forecast/recompute" : "/api/v1/runtime/forecast"
       const res = await fetch(path, { method: recompute ? "POST" : "GET", cache: "no-store" })
       if (!res.ok) throw new Error(`API ${res.status}`)
       const next = (await res.json()) as Forecast

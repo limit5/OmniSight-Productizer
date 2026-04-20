@@ -26932,7 +26932,7 @@
         ]
       }
     },
-    "/api/v1/system/compression": {
+    "/api/v1/runtime/compression": {
       "get": {
         "description": "Return RTK output compression statistics.",
         "operationId": "get_compression_stats_api_v1_system_compression_get",
@@ -26952,7 +26952,7 @@
         ]
       }
     },
-    "/api/v1/system/debug": {
+    "/api/v1/runtime/debug": {
       "get": {
         "description": "Comprehensive debug state: agent errors, blocked tasks, debug findings.",
         "operationId": "get_debug_state_api_v1_system_debug_get",
@@ -26972,7 +26972,7 @@
         ]
       }
     },
-    "/api/v1/system/deploy": {
+    "/api/v1/runtime/deploy": {
       "post": {
         "description": "Trigger deployment to an EVK board.",
         "operationId": "trigger_deploy_api_v1_system_deploy_post",
@@ -27012,7 +27012,7 @@
         ]
       }
     },
-    "/api/v1/system/devices": {
+    "/api/v1/runtime/devices": {
       "get": {
         "operationId": "get_devices_api_v1_system_devices_get",
         "responses": {
@@ -27031,7 +27031,7 @@
         ]
       }
     },
-    "/api/v1/system/evk": {
+    "/api/v1/runtime/evk": {
       "get": {
         "description": "Check EVK board reachability for all platforms with deploy config.",
         "operationId": "get_evk_status_api_v1_system_evk_get",
@@ -27051,7 +27051,7 @@
         ]
       }
     },
-    "/api/v1/system/forecast": {
+    "/api/v1/runtime/forecast": {
       "get": {
         "description": "Phase 60: project-level estimates (tasks / agents / hours /\ntokens / USD / confidence) computed from the active\nhardware_manifest.yaml. Template-based v0 — see backend/forecast.py\nfor the model evolution roadmap.",
         "operationId": "get_project_forecast_api_v1_system_forecast_get",
@@ -27103,7 +27103,7 @@
         ]
       }
     },
-    "/api/v1/system/forecast/recompute": {
+    "/api/v1/runtime/forecast/recompute": {
       "post": {
         "description": "Bust the 5-min cache and re-read the manifest.",
         "operationId": "recompute_project_forecast_api_v1_system_forecast_recompute_post",
@@ -27127,7 +27127,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/gerrit/finalize": {
+    "/api/v1/runtime/git-forge/gerrit/finalize": {
       "post": {
         "description": "Persist the wizard's collected Gerrit settings and flip\n``gerrit_enabled`` on — the closing act of the Setup Wizard.\n\nSteps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).\nWithout this finalize step the operator would have to re-enter every\nStep 1 value into the Settings form by hand to actually turn the\nintegration on, defeating the wizard. This endpoint is the single\natomic write that promotes wizard inputs into ``settings.gerrit_*``\nand reports success so the UI can render the「Gerrit 整合已啟用」\nconfirmation banner.\n\nValidation is intentionally narrow:\n  * ``ssh_host`` must be non-empty (Step 1 cannot have passed\n    otherwise; we double-check here so a hand-rolled curl can't\n    write garbage).\n  * ``ssh_port`` must be in [1, 65535].\n  * ``url`` and ``project`` are normalised (trim) but not\n    round-tripped to Gerrit again — Step 1 + Step 4 already proved\n    they work.\n\nThe webhook secret is *not* echoed back even masked — the Step 5\ngenerate response was the one-and-only reveal.",
         "operationId": "finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post",
@@ -27167,7 +27167,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/gerrit/verify-bot": {
+    "/api/v1/runtime/git-forge/gerrit/verify-bot": {
       "post": {
         "description": "Verify the ``merger-agent-bot`` Gerrit group exists and has members.\n\nB14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH\ntransport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit\nls-members`` instead of ``gerrit version`` so the probe only succeeds\nwhen the O7 dual-+2 group is properly seated. Never mutates Gerrit —\ngroup creation + member-add stay manual (they require admin rights\nper the runbook in docs/ops/gerrit_dual_two_rule.md §1).",
         "operationId": "verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post",
@@ -27207,7 +27207,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/gerrit/verify-submit-rule": {
+    "/api/v1/runtime/git-forge/gerrit/verify-submit-rule": {
       "post": {
         "description": "Verify the target Gerrit project carries the O7 dual-+2 submit rule.\n\nB14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:\nreads ``refs/meta/config:project.config`` over the Gerrit SSH\ntransport and pattern-matches the three ACL lines that encode the\ndual-+2 gate. Installation of the rule stays manual (it requires\n``Push`` on ``refs/meta/config`` which is an admin-only ref) per\ndocs/ops/gerrit_dual_two_rule.md §2.",
         "operationId": "verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post",
@@ -27247,7 +27247,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/gerrit/webhook-info": {
+    "/api/v1/runtime/git-forge/gerrit/webhook-info": {
       "get": {
         "description": "Return the inbound webhook URL + secret status the operator must\npaste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).\n\nNever returns the plain secret — only ``secret_configured`` plus a\n``secret_masked`` preview so the operator can confirm what's wired\nwithout re-revealing it. Use ``POST .../webhook-secret/generate`` to\nrotate (which returns the new plain value exactly once).",
         "operationId": "get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get",
@@ -27267,7 +27267,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/gerrit/webhook-secret/generate": {
+    "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate": {
       "post": {
         "description": "Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.\n\n32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with\n~256 bits of entropy, well above the 128-bit floor recommended for\nHMAC-SHA256 keys. The plain value is returned **only** in this\nresponse — the operator must capture it before closing the wizard;\nsubsequent ``webhook-info`` calls will surface only the masked\npreview. Rotating here invalidates whatever secret Gerrit currently\nholds, so the operator must re-paste the new value into Gerrit's\n``webhooks.config`` for events to keep verifying.",
         "operationId": "generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post",
@@ -27287,7 +27287,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/ssh-pubkey": {
+    "/api/v1/runtime/git-forge/ssh-pubkey": {
       "get": {
         "description": "Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.\n\nRead-only — never mutates settings, never exposes the private key.\nDrives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-\nGerrit flow) and is safe to surface to any operator-role session\nsince the public half of an SSH keypair is non-secret by design.",
         "operationId": "get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get",
@@ -27307,7 +27307,7 @@
         ]
       }
     },
-    "/api/v1/system/git-forge/test-token": {
+    "/api/v1/runtime/git-forge/test-token": {
       "post": {
         "description": "Validate a candidate Git forge credential WITHOUT persisting it.\n\nUsed by the Bootstrap Step 3.5 Git Forge setup to let the operator\nsanity-check their credential before they commit it to settings.\n``github`` / ``gitlab`` run a token probe against the respective\nREST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since\nGerrit's first-class transport is SSH, not HTTP.",
         "operationId": "test_git_forge_token_api_v1_system_git_forge_test_token_post",
@@ -27347,7 +27347,7 @@
         ]
       }
     },
-    "/api/v1/system/info": {
+    "/api/v1/runtime/info": {
       "get": {
         "operationId": "get_system_info_api_v1_system_info_get",
         "responses": {
@@ -27368,7 +27368,7 @@
         ]
       }
     },
-    "/api/v1/system/logs": {
+    "/api/v1/runtime/logs": {
       "get": {
         "description": "Return recent system logs.",
         "operationId": "get_logs_api_v1_system_logs_get",
@@ -27414,7 +27414,7 @@
         ]
       }
     },
-    "/api/v1/system/model-rules": {
+    "/api/v1/runtime/model-rules": {
       "get": {
         "description": "List all available model rule definitions from configs/models/.",
         "operationId": "get_available_model_rules_api_v1_system_model_rules_get",
@@ -27434,7 +27434,7 @@
         ]
       }
     },
-    "/api/v1/system/notifications": {
+    "/api/v1/runtime/notifications": {
       "get": {
         "description": "List notifications, optionally filtered by level.",
         "operationId": "get_notifications_api_v1_system_notifications_get",
@@ -27490,7 +27490,7 @@
         ]
       }
     },
-    "/api/v1/system/notifications/unread-count": {
+    "/api/v1/runtime/notifications/unread-count": {
       "get": {
         "description": "Count unread notifications (L2+).",
         "operationId": "unread_count_api_v1_system_notifications_unread_count_get",
@@ -27510,7 +27510,7 @@
         ]
       }
     },
-    "/api/v1/system/notifications/{notification_id}/read": {
+    "/api/v1/runtime/notifications/{notification_id}/read": {
       "post": {
         "description": "Mark a notification as read.",
         "operationId": "mark_read_api_v1_system_notifications__notification_id__read_post",
@@ -27551,7 +27551,7 @@
         ]
       }
     },
-    "/api/v1/system/npi": {
+    "/api/v1/runtime/npi": {
       "get": {
         "description": "Return the current NPI lifecycle state.",
         "operationId": "get_npi_state_api_v1_system_npi_get",
@@ -27633,7 +27633,7 @@
         ]
       }
     },
-    "/api/v1/system/npi/milestones/{milestone_id}": {
+    "/api/v1/runtime/npi/milestones/{milestone_id}": {
       "patch": {
         "description": "Update a specific NPI milestone.",
         "operationId": "update_npi_milestone_api_v1_system_npi_milestones__milestone_id__patch",
@@ -27706,7 +27706,7 @@
         ]
       }
     },
-    "/api/v1/system/npi/phases/{phase_id}": {
+    "/api/v1/runtime/npi/phases/{phase_id}": {
       "patch": {
         "description": "Update a specific NPI phase.",
         "operationId": "update_npi_phase_api_v1_system_npi_phases__phase_id__patch",
@@ -27779,7 +27779,7 @@
         ]
       }
     },
-    "/api/v1/system/pipeline/advance": {
+    "/api/v1/runtime/pipeline/advance": {
       "post": {
         "description": "Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed).",
         "operationId": "advance_pipeline_endpoint_api_v1_system_pipeline_advance_post",
@@ -27799,7 +27799,7 @@
         ]
       }
     },
-    "/api/v1/system/pipeline/start": {
+    "/api/v1/runtime/pipeline/start": {
       "post": {
         "description": "Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs.",
         "operationId": "start_pipeline_api_v1_system_pipeline_start_post",
@@ -27839,7 +27839,7 @@
         ]
       }
     },
-    "/api/v1/system/pipeline/status": {
+    "/api/v1/runtime/pipeline/status": {
       "get": {
         "description": "Get the current E2E pipeline run status.",
         "operationId": "get_pipeline_status_endpoint_api_v1_system_pipeline_status_get",
@@ -27859,7 +27859,7 @@
         ]
       }
     },
-    "/api/v1/system/pipeline/timeline": {
+    "/api/v1/runtime/pipeline/timeline": {
       "get": {
         "description": "Phase 50A — timeline with per-step timing + velocity rollup.\n\nReturns:\n  steps: [{ id, name, npi_phase, auto_advance, human_checkpoint,\n           planned_at, started_at, completed_at, deadline_at,\n           status: idle|active|done|overdue }]\n  velocity:\n    avg_step_seconds:  mean observed duration across completed steps\n    eta_completion:    ISO timestamp estimate for pipeline finish, or null\n    tasks_completed_7d: tasks the invoke-layer marked done in the last 7 d",
         "operationId": "get_pipeline_timeline_api_v1_system_pipeline_timeline_get",
@@ -27879,7 +27879,7 @@
         ]
       }
     },
-    "/api/v1/system/platform-status": {
+    "/api/v1/runtime/platform-status": {
       "get": {
         "description": "H1: surface host arch + active target arch + toolchain readiness so\nthe operator chip in the dashboard header can warn about\ncross-compile mismatch *before* a build starts.\n\nStatus values:\n  * `no_target`         — hardware_manifest.target_platform is empty\n  * `native`            — host arch == target arch (Phase 59 fast-path)\n  * `cross_ready`       — different arch + cross-compiler installed\n  * `toolchain_missing` — different arch + cross-compiler NOT on PATH\n  * `unknown_target`    — target_platform set but no matching profile yaml",
         "operationId": "get_platform_status_api_v1_system_platform_status_get",
@@ -27903,7 +27903,7 @@
         ]
       }
     },
-    "/api/v1/system/platforms/toolchains": {
+    "/api/v1/runtime/platforms/toolchains": {
       "get": {
         "description": "Return every known toolchain name, grouped by platform and tier.\n\nResponse shape:\n  all:          sorted unique list of all toolchain strings\n  by_platform:  { platform_name: default_toolchain }\n  by_tier:      { tier_id: [allowed_toolchains] }",
         "operationId": "list_toolchains_api_v1_system_platforms_toolchains_get",
@@ -27927,7 +27927,7 @@
         ]
       }
     },
-    "/api/v1/system/release": {
+    "/api/v1/runtime/release": {
       "post": {
         "description": "Create a release bundle and optionally upload to GitHub/GitLab.\n\nReturns bundle metadata, manifest, and upload results.",
         "operationId": "create_release_api_v1_system_release_post",
@@ -27967,7 +27967,7 @@
         ]
       }
     },
-    "/api/v1/system/release/manifest": {
+    "/api/v1/runtime/release/manifest": {
       "get": {
         "description": "Generate a release manifest (JSON) listing all artifacts.",
         "operationId": "get_release_manifest_api_v1_system_release_manifest_get",
@@ -28009,7 +28009,7 @@
         ]
       }
     },
-    "/api/v1/system/release/version": {
+    "/api/v1/runtime/release/version": {
       "get": {
         "description": "Get the current resolved version.",
         "operationId": "get_release_version_api_v1_system_release_version_get",
@@ -28029,7 +28029,7 @@
         ]
       }
     },
-    "/api/v1/system/repos": {
+    "/api/v1/runtime/repos": {
       "get": {
         "description": "List git repositories: main repo + credential registry + agent worktrees.",
         "operationId": "get_repos_api_v1_system_repos_get",
@@ -28049,7 +28049,7 @@
         ]
       }
     },
-    "/api/v1/system/roles": {
+    "/api/v1/runtime/roles": {
       "get": {
         "description": "List all available agent roles from configs/roles/.",
         "operationId": "get_available_roles_api_v1_system_roles_get",
@@ -28069,7 +28069,7 @@
         ]
       }
     },
-    "/api/v1/system/sandbox/capacity": {
+    "/api/v1/runtime/sandbox/capacity": {
       "get": {
         "description": "I6: DRF per-tenant sandbox capacity snapshot.",
         "operationId": "get_sandbox_capacity_api_v1_system_sandbox_capacity_get",
@@ -28089,7 +28089,7 @@
         ]
       }
     },
-    "/api/v1/system/sandbox/capacity/{tenant_id}": {
+    "/api/v1/runtime/sandbox/capacity/{tenant_id}": {
       "get": {
         "description": "I6: Per-tenant sandbox capacity usage.",
         "operationId": "get_tenant_capacity_api_v1_system_sandbox_capacity__tenant_id__get",
@@ -28130,7 +28130,7 @@
         ]
       }
     },
-    "/api/v1/system/settings": {
+    "/api/v1/runtime/settings": {
       "get": {
         "description": "Return all integration settings grouped by category. Tokens are masked.",
         "operationId": "get_settings_api_v1_system_settings_get",
@@ -28188,7 +28188,7 @@
         ]
       }
     },
-    "/api/v1/system/settings/git/token-map": {
+    "/api/v1/runtime/settings/git/token-map": {
       "get": {
         "description": "Return the configured per-host token maps with tokens masked.\n\nShape::\n\n    {\n      \"github\": [{\"platform\": \"github\", \"host\": \"...\", \"token_masked\": \"...\"}],\n      \"gitlab\": [...],\n    }\n\nEmpty platforms surface as empty lists — never ``null`` — so the UI\ncan render \"no additional instances configured\" without branching on\npresence.",
         "operationId": "get_git_token_map_api_v1_system_settings_git_token_map_get",
@@ -28246,7 +28246,7 @@
         ]
       }
     },
-    "/api/v1/system/simulations": {
+    "/api/v1/runtime/simulations": {
       "get": {
         "description": "List recent simulation runs with optional filters.",
         "operationId": "list_simulations_api_v1_system_simulations_get",
@@ -28360,7 +28360,7 @@
         ]
       }
     },
-    "/api/v1/system/simulations/{sim_id}": {
+    "/api/v1/runtime/simulations/{sim_id}": {
       "get": {
         "description": "Get a specific simulation result with full report.",
         "operationId": "get_simulation_api_v1_system_simulations__sim_id__get",
@@ -28401,7 +28401,7 @@
         ]
       }
     },
-    "/api/v1/system/spec": {
+    "/api/v1/runtime/spec": {
       "get": {
         "description": "Load spec from hardware_manifest.yaml (or return empty if not found).",
         "operationId": "get_spec_api_v1_system_spec_get",
@@ -28487,7 +28487,7 @@
         ]
       }
     },
-    "/api/v1/system/sse-schema": {
+    "/api/v1/runtime/sse-schema": {
       "get": {
         "description": "A4/C7: return JSON-Schema for every SSE event type keyed by event\nname, so the frontend can detect drift between the hand-maintained\nTS union in lib/api.ts and the backend Pydantic models. Shape matches\nthe `get_sse_schema_export()` helper — i.e. flat `{ event_name:\n{ description, schema } }` map.",
         "operationId": "get_sse_schema_api_v1_system_sse_schema_get",
@@ -28507,7 +28507,7 @@
         ]
       }
     },
-    "/api/v1/system/status": {
+    "/api/v1/runtime/status": {
       "get": {
         "operationId": "get_system_status_api_v1_system_status_get",
         "responses": {
@@ -28528,7 +28528,7 @@
         ]
       }
     },
-    "/api/v1/system/test/{integration}": {
+    "/api/v1/runtime/test/{integration}": {
       "post": {
         "description": "Test connectivity for an external integration.",
         "operationId": "test_integration_api_v1_system_test__integration__post",
@@ -28569,7 +28569,7 @@
         ]
       }
     },
-    "/api/v1/system/token-budget": {
+    "/api/v1/runtime/token-budget": {
       "get": {
         "description": "Return current budget settings, daily usage, and freeze status.",
         "operationId": "get_token_budget_api_v1_system_token_budget_get",
@@ -28717,7 +28717,7 @@
         ]
       }
     },
-    "/api/v1/system/token-budget/reset": {
+    "/api/v1/runtime/token-budget/reset": {
       "post": {
         "description": "Reset the token freeze state (human intervention).",
         "operationId": "reset_token_freeze_api_v1_system_token_budget_reset_post",
@@ -28737,7 +28737,7 @@
         ]
       }
     },
-    "/api/v1/system/tokens": {
+    "/api/v1/runtime/tokens": {
       "delete": {
         "description": "Reset all token usage counters.",
         "operationId": "reset_token_usage_api_v1_system_tokens_delete",
@@ -28775,7 +28775,7 @@
         ]
       }
     },
-    "/api/v1/system/vendor/sdks": {
+    "/api/v1/runtime/vendor/sdks": {
       "get": {
         "description": "List available vendor SDK platform profiles and their mount status.",
         "operationId": "list_vendor_sdks_api_v1_system_vendor_sdks_get",
@@ -28833,7 +28833,7 @@
         ]
       }
     },
-    "/api/v1/system/vendor/sdks/{platform}": {
+    "/api/v1/runtime/vendor/sdks/{platform}": {
       "delete": {
         "description": "Delete a vendor SDK platform profile.",
         "operationId": "delete_vendor_sdk_api_v1_system_vendor_sdks__platform__delete",
@@ -28874,7 +28874,7 @@
         ]
       }
     },
-    "/api/v1/system/vendor/sdks/{platform}/install": {
+    "/api/v1/runtime/vendor/sdks/{platform}/install": {
       "post": {
         "description": "Clone and provision the vendor SDK for a platform.\n\nReads sdk_git_url from the platform YAML, clones the repo,\nscans for toolchain/sysroot, and updates the platform profile.",
         "operationId": "install_vendor_sdk_api_v1_system_vendor_sdks__platform__install_post",
@@ -28915,7 +28915,7 @@
         ]
       }
     },
-    "/api/v1/system/vendor/sdks/{platform}/validate": {
+    "/api/v1/runtime/vendor/sdks/{platform}/validate": {
       "get": {
         "description": "Validate that SDK paths in a platform profile exist on disk.",
         "operationId": "validate_vendor_sdk_api_v1_system_vendor_sdks__platform__validate_get",

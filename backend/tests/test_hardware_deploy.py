@@ -164,7 +164,7 @@ class TestEVKEndpoint:
 
     @pytest.mark.asyncio
     async def test_evk_endpoint_returns_list(self, client):
-        resp = await client.get("/api/v1/system/evk")
+        resp = await client.get("/api/v1/runtime/evk")
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
@@ -174,7 +174,7 @@ class TestEVKEndpoint:
 
     @pytest.mark.asyncio
     async def test_evk_entry_has_fields(self, client):
-        resp = await client.get("/api/v1/system/evk")
+        resp = await client.get("/api/v1/runtime/evk")
         data = resp.json()
         vex = next((e for e in data if e["platform"] == "vendor-example"), None)
         assert vex is not None

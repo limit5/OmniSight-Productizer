@@ -94,7 +94,7 @@ class TestVendorSDKEndpoint:
 
     @pytest.mark.asyncio
     async def test_vendor_sdks_returns_list(self, client):
-        resp = await client.get("/api/v1/system/vendor/sdks")
+        resp = await client.get("/api/v1/runtime/vendor/sdks")
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
@@ -102,7 +102,7 @@ class TestVendorSDKEndpoint:
 
     @pytest.mark.asyncio
     async def test_vendor_sdks_has_required_fields(self, client):
-        resp = await client.get("/api/v1/system/vendor/sdks")
+        resp = await client.get("/api/v1/runtime/vendor/sdks")
         for sdk in resp.json():
             assert "platform" in sdk
             assert "vendor_id" in sdk
@@ -111,7 +111,7 @@ class TestVendorSDKEndpoint:
 
     @pytest.mark.asyncio
     async def test_generic_platform_always_ready(self, client):
-        resp = await client.get("/api/v1/system/vendor/sdks")
+        resp = await client.get("/api/v1/runtime/vendor/sdks")
         aarch64 = next((s for s in resp.json() if s["platform"] == "aarch64"), None)
         assert aarch64 is not None
         assert aarch64["status"] == "ready"
@@ -122,7 +122,7 @@ class TestVendorSDKEndpoint:
         in the vendor-SDK listing — they have no vendor_id / sysroot
         and would otherwise show as "ready" with empty data, polluting
         the operator UI."""
-        resp = await client.get("/api/v1/system/vendor/sdks")
+        resp = await client.get("/api/v1/runtime/vendor/sdks")
         ids = {s["platform"] for s in resp.json()}
         for web_profile in (
             "web-static",

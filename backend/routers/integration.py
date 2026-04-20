@@ -18,7 +18,10 @@ from backend.db_context import set_tenant_id
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/system", tags=["integration"])
+# Phase-3 P6 (2026-04-20): prefix renamed /system → /runtime — see
+# backend/routers/system.py for the full rationale. This router shares
+# the same prefix to keep the URL namespace coherent.
+router = APIRouter(prefix="/runtime", tags=["integration"])
 
 
 def _mask(value: str) -> str:

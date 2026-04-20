@@ -98,13 +98,13 @@ class TestSimulationAPI:
 
     @pytest.mark.asyncio
     async def test_list_endpoint(self, client):
-        resp = await client.get("/api/v1/system/simulations")
+        resp = await client.get("/api/v1/runtime/simulations")
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
     @pytest.mark.asyncio
     async def test_get_not_found(self, client):
-        resp = await client.get("/api/v1/system/simulations/nonexistent")
+        resp = await client.get("/api/v1/runtime/simulations/nonexistent")
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
@@ -119,7 +119,7 @@ class TestSimulationAPI:
             "report_json": json.dumps({"status": "pass"}),
             "artifact_id": None, "created_at": "2026-01-01T00:00:00",
         })
-        resp = await client.get(f"/api/v1/system/simulations/{sim_id}")
+        resp = await client.get(f"/api/v1/runtime/simulations/{sim_id}")
         assert resp.status_code == 200
         data = resp.json()
         assert data["track"] == "algo"

@@ -120,7 +120,7 @@ class TestSDKEndpoints:
 
     @pytest.mark.asyncio
     async def test_validate_endpoint(self, client):
-        resp = await client.get("/api/v1/system/vendor/sdks/vendor-example/validate")
+        resp = await client.get("/api/v1/runtime/vendor/sdks/vendor-example/validate")
         assert resp.status_code == 200
         data = resp.json()
         assert "valid" in data
@@ -128,7 +128,7 @@ class TestSDKEndpoints:
 
     @pytest.mark.asyncio
     async def test_validate_nonexistent(self, client):
-        resp = await client.get("/api/v1/system/vendor/sdks/nonexistent-xyz/validate")
+        resp = await client.get("/api/v1/runtime/vendor/sdks/nonexistent-xyz/validate")
         assert resp.status_code == 200
         data = resp.json()
         assert data["valid"] is False
@@ -136,7 +136,7 @@ class TestSDKEndpoints:
     @pytest.mark.asyncio
     async def test_install_no_sdk_url(self, client):
         """Install on vendor-example with empty sdk_git_url should skip."""
-        resp = await client.post("/api/v1/system/vendor/sdks/vendor-example/install")
+        resp = await client.post("/api/v1/runtime/vendor/sdks/vendor-example/install")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "skipped"

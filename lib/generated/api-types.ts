@@ -9293,7 +9293,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/compression": {
+    "/api/v1/runtime/compression": {
         parameters: {
             query?: never;
             header?: never;
@@ -9313,7 +9313,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/debug": {
+    "/api/v1/runtime/debug": {
         parameters: {
             query?: never;
             header?: never;
@@ -9333,7 +9333,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/deploy": {
+    "/api/v1/runtime/deploy": {
         parameters: {
             query?: never;
             header?: never;
@@ -9353,7 +9353,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/devices": {
+    "/api/v1/runtime/devices": {
         parameters: {
             query?: never;
             header?: never;
@@ -9370,7 +9370,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/evk": {
+    "/api/v1/runtime/evk": {
         parameters: {
             query?: never;
             header?: never;
@@ -9390,7 +9390,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/forecast": {
+    "/api/v1/runtime/forecast": {
         parameters: {
             query?: never;
             header?: never;
@@ -9413,7 +9413,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/forecast/recompute": {
+    "/api/v1/runtime/forecast/recompute": {
         parameters: {
             query?: never;
             header?: never;
@@ -9433,7 +9433,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/gerrit/finalize": {
+    "/api/v1/runtime/git-forge/gerrit/finalize": {
         parameters: {
             query?: never;
             header?: never;
@@ -9474,7 +9474,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/gerrit/verify-bot": {
+    "/api/v1/runtime/git-forge/gerrit/verify-bot": {
         parameters: {
             query?: never;
             header?: never;
@@ -9501,7 +9501,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/gerrit/verify-submit-rule": {
+    "/api/v1/runtime/git-forge/gerrit/verify-submit-rule": {
         parameters: {
             query?: never;
             header?: never;
@@ -9528,7 +9528,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/gerrit/webhook-info": {
+    "/api/v1/runtime/git-forge/gerrit/webhook-info": {
         parameters: {
             query?: never;
             header?: never;
@@ -9554,7 +9554,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/gerrit/webhook-secret/generate": {
+    "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate": {
         parameters: {
             query?: never;
             header?: never;
@@ -9583,7 +9583,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/ssh-pubkey": {
+    "/api/v1/runtime/git-forge/ssh-pubkey": {
         parameters: {
             query?: never;
             header?: never;
@@ -9608,7 +9608,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/git-forge/test-token": {
+    "/api/v1/runtime/git-forge/test-token": {
         parameters: {
             query?: never;
             header?: never;
@@ -9634,7 +9634,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/info": {
+    "/api/v1/runtime/info": {
         parameters: {
             query?: never;
             header?: never;
@@ -9651,7 +9651,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/logs": {
+    "/api/v1/runtime/logs": {
         parameters: {
             query?: never;
             header?: never;
@@ -9671,7 +9671,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/model-rules": {
+    "/api/v1/runtime/model-rules": {
         parameters: {
             query?: never;
             header?: never;
@@ -9691,7 +9691,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/notifications": {
+    "/api/v1/runtime/notifications": {
         parameters: {
             query?: never;
             header?: never;
@@ -9711,7 +9711,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/notifications/unread-count": {
+    "/api/v1/runtime/notifications/unread-count": {
         parameters: {
             query?: never;
             header?: never;
@@ -9731,7 +9731,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/notifications/{notification_id}/read": {
+    "/api/v1/runtime/notifications/{notification_id}/read": {
         parameters: {
             query?: never;
             header?: never;
@@ -9751,7 +9751,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/npi": {
+    "/api/v1/runtime/npi": {
         parameters: {
             query?: never;
             header?: never;
@@ -9775,7 +9775,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/npi/milestones/{milestone_id}": {
+    "/api/v1/runtime/npi/milestones/{milestone_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -9795,7 +9795,7 @@ export interface paths {
         patch: operations["update_npi_milestone_api_v1_system_npi_milestones__milestone_id__patch"];
         trace?: never;
     };
-    "/api/v1/system/npi/phases/{phase_id}": {
+    "/api/v1/runtime/npi/phases/{phase_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -9815,7 +9815,7 @@ export interface paths {
         patch: operations["update_npi_phase_api_v1_system_npi_phases__phase_id__patch"];
         trace?: never;
     };
-    "/api/v1/system/pipeline/advance": {
+    "/api/v1/runtime/pipeline/advance": {
         parameters: {
             query?: never;
             header?: never;
@@ -9835,7 +9835,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/pipeline/start": {
+    "/api/v1/runtime/pipeline/start": {
         parameters: {
             query?: never;
             header?: never;
@@ -9855,7 +9855,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/pipeline/status": {
+    "/api/v1/runtime/pipeline/status": {
         parameters: {
             query?: never;
             header?: never;
@@ -9875,7 +9875,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/pipeline/timeline": {
+    "/api/v1/runtime/pipeline/timeline": {
         parameters: {
             query?: never;
             header?: never;
@@ -9904,7 +9904,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/platform-status": {
+    "/api/v1/runtime/platform-status": {
         parameters: {
             query?: never;
             header?: never;
@@ -9933,7 +9933,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/platforms/toolchains": {
+    "/api/v1/runtime/platforms/toolchains": {
         parameters: {
             query?: never;
             header?: never;
@@ -9958,7 +9958,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/release": {
+    "/api/v1/runtime/release": {
         parameters: {
             query?: never;
             header?: never;
@@ -9980,7 +9980,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/release/manifest": {
+    "/api/v1/runtime/release/manifest": {
         parameters: {
             query?: never;
             header?: never;
@@ -10000,7 +10000,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/release/version": {
+    "/api/v1/runtime/release/version": {
         parameters: {
             query?: never;
             header?: never;
@@ -10020,7 +10020,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/repos": {
+    "/api/v1/runtime/repos": {
         parameters: {
             query?: never;
             header?: never;
@@ -10040,7 +10040,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/roles": {
+    "/api/v1/runtime/roles": {
         parameters: {
             query?: never;
             header?: never;
@@ -10060,7 +10060,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/sandbox/capacity": {
+    "/api/v1/runtime/sandbox/capacity": {
         parameters: {
             query?: never;
             header?: never;
@@ -10080,7 +10080,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/sandbox/capacity/{tenant_id}": {
+    "/api/v1/runtime/sandbox/capacity/{tenant_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -10100,7 +10100,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/settings": {
+    "/api/v1/runtime/settings": {
         parameters: {
             query?: never;
             header?: never;
@@ -10124,7 +10124,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/settings/git/token-map": {
+    "/api/v1/runtime/settings/git/token-map": {
         parameters: {
             query?: never;
             header?: never;
@@ -10167,7 +10167,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/simulations": {
+    "/api/v1/runtime/simulations": {
         parameters: {
             query?: never;
             header?: never;
@@ -10191,7 +10191,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/simulations/{sim_id}": {
+    "/api/v1/runtime/simulations/{sim_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -10211,7 +10211,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/spec": {
+    "/api/v1/runtime/spec": {
         parameters: {
             query?: never;
             header?: never;
@@ -10235,7 +10235,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/sse-schema": {
+    "/api/v1/runtime/sse-schema": {
         parameters: {
             query?: never;
             header?: never;
@@ -10259,7 +10259,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/status": {
+    "/api/v1/runtime/status": {
         parameters: {
             query?: never;
             header?: never;
@@ -10276,7 +10276,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/test/{integration}": {
+    "/api/v1/runtime/test/{integration}": {
         parameters: {
             query?: never;
             header?: never;
@@ -10296,7 +10296,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/token-budget": {
+    "/api/v1/runtime/token-budget": {
         parameters: {
             query?: never;
             header?: never;
@@ -10320,7 +10320,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/token-budget/reset": {
+    "/api/v1/runtime/token-budget/reset": {
         parameters: {
             query?: never;
             header?: never;
@@ -10340,7 +10340,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/tokens": {
+    "/api/v1/runtime/tokens": {
         parameters: {
             query?: never;
             header?: never;
@@ -10364,7 +10364,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/vendor/sdks": {
+    "/api/v1/runtime/vendor/sdks": {
         parameters: {
             query?: never;
             header?: never;
@@ -10388,7 +10388,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/vendor/sdks/{platform}": {
+    "/api/v1/runtime/vendor/sdks/{platform}": {
         parameters: {
             query?: never;
             header?: never;
@@ -10408,7 +10408,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/vendor/sdks/{platform}/install": {
+    "/api/v1/runtime/vendor/sdks/{platform}/install": {
         parameters: {
             query?: never;
             header?: never;
@@ -10431,7 +10431,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/system/vendor/sdks/{platform}/validate": {
+    "/api/v1/runtime/vendor/sdks/{platform}/validate": {
         parameters: {
             query?: never;
             header?: never;

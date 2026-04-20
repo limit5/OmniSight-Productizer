@@ -35,7 +35,7 @@ class TestSystemInfoResponse:
 
     @pytest.mark.asyncio
     async def test_info_matches_model(self, client):
-        resp = await client.get("/api/v1/system/info")
+        resp = await client.get("/api/v1/runtime/info")
         assert resp.status_code == 200
         data = resp.json()
         # All fields from SystemInfoResponse should be present
@@ -48,7 +48,7 @@ class TestSystemStatusResponse:
 
     @pytest.mark.asyncio
     async def test_status_has_cpu_summary(self, client):
-        resp = await client.get("/api/v1/system/status")
+        resp = await client.get("/api/v1/runtime/status")
         assert resp.status_code == 200
         data = resp.json()
         assert "cpu_summary" in data
@@ -61,7 +61,7 @@ class TestTokenBudgetResponse:
 
     @pytest.mark.asyncio
     async def test_budget_matches_model(self, client):
-        resp = await client.get("/api/v1/system/token-budget")
+        resp = await client.get("/api/v1/runtime/token-budget")
         assert resp.status_code == 200
         data = resp.json()
         for field in ("budget", "usage", "ratio", "frozen", "level"):
@@ -199,7 +199,7 @@ class TestSSESchemaExport:
 
     @pytest.mark.asyncio
     async def test_sse_schema_endpoint(self, client):
-        resp = await client.get("/api/v1/system/sse-schema")
+        resp = await client.get("/api/v1/runtime/sse-schema")
         assert resp.status_code == 200
         data = resp.json()
         assert "agent_update" in data

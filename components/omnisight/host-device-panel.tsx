@@ -63,7 +63,7 @@ interface HostInfo {
   uptime: string
 }
 
-// Seed shown before the first SSE `host.metrics.tick` / `/system/info`
+// Seed shown before the first SSE `host.metrics.tick` / `/runtime/info`
 // fetch lands. Fields are overwritten as soon as data arrives.
 const defaultHostInfo: HostInfo = {
   hostname: "loading...",
@@ -78,7 +78,7 @@ const defaultHostInfo: HostInfo = {
   uptime: "--"
 }
 
-// Empty — replaced by real data from backend GET /system/devices
+// Empty — replaced by real data from backend GET /runtime/devices
 const defaultDevices: Device[] = []
 
 function getDeviceIcon(type: Device["type"]) {
@@ -616,7 +616,7 @@ export function HostDevicePanel({
     connected: hostSseConnected,
   } = useHostMetricsTick()
 
-  // Merge: /system/info supplies static identity (hostname/os/kernel/arch/uptime +
+  // Merge: /runtime/info supplies static identity (hostname/os/kernel/arch/uptime +
   // cpu model/cores), SSE supplies live load. SSE wins whenever it has data.
   const mergedHost = useMemo<HostInfo>(() => {
     const base: HostInfo = { ...hostData }
@@ -626,7 +626,7 @@ export function HostDevicePanel({
       base.memoryUsed = hostTick.host.mem_used_gb * 1024
       base.memoryTotal = hostTick.host.mem_total_gb * 1024
     }
-    // Fill identity gaps from baseline when /system/info hasn't landed yet.
+    // Fill identity gaps from baseline when /runtime/info hasn't landed yet.
     if (hostBaseline) {
       if (!base.cpuModel || base.cpuModel === "Detecting...") {
         base.cpuModel = hostBaseline.cpu_model

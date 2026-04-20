@@ -7,7 +7,7 @@ class TestSettingsEndpoint:
 
     @pytest.mark.asyncio
     async def test_get_settings(self, client):
-        resp = await client.get("/api/v1/system/settings")
+        resp = await client.get("/api/v1/runtime/settings")
         assert resp.status_code == 200
         data = resp.json()
         assert "llm" in data
@@ -19,7 +19,7 @@ class TestSettingsEndpoint:
 
     @pytest.mark.asyncio
     async def test_settings_masks_tokens(self, client):
-        resp = await client.get("/api/v1/system/settings")
+        resp = await client.get("/api/v1/runtime/settings")
         data = resp.json()
         # Tokens should be masked or empty
         git_token = data["git"]["github_token"]
@@ -27,7 +27,7 @@ class TestSettingsEndpoint:
 
     @pytest.mark.asyncio
     async def test_update_settings_valid(self, client):
-        resp = await client.put("/api/v1/system/settings", json={
+        resp = await client.put("/api/v1/runtime/settings", json={
             "updates": {"llm_temperature": 0.5}
         })
         assert resp.status_code == 200
@@ -36,7 +36,7 @@ class TestSettingsEndpoint:
 
     @pytest.mark.asyncio
     async def test_update_settings_rejected(self, client):
-        resp = await client.put("/api/v1/system/settings", json={
+        resp = await client.put("/api/v1/runtime/settings", json={
             "updates": {"dangerous_field": "hack"}
         })
         assert resp.status_code == 200
@@ -45,7 +45,7 @@ class TestSettingsEndpoint:
 
     @pytest.mark.asyncio
     async def test_update_empty(self, client):
-        resp = await client.put("/api/v1/system/settings", json={
+        resp = await client.put("/api/v1/runtime/settings", json={
             "updates": {}
         })
         assert resp.status_code == 200
@@ -67,7 +67,7 @@ class TestSettingsEndpoint:
         monkeypatch.setattr(_cfg.settings, "gitlab_webhook_secret", "")
         monkeypatch.setattr(_cfg.settings, "gerrit_webhook_secret", "ger-secret")
         monkeypatch.setattr(_cfg.settings, "jira_webhook_secret", "")
-        resp = await client.get("/api/v1/system/settings")
+        resp = await client.get("/api/v1/runtime/settings")
         assert resp.status_code == 200
         webhooks = resp.json()["webhooks"]
         # All four keys present — contract for the Tab 3 status dots.
@@ -116,7 +116,7 @@ class TestSettingsEndpoint:
             _cfg.settings, "ci_jenkins_api_token", "jtok-do-not-leak"
         )
         monkeypatch.setattr(_cfg.settings, "ci_gitlab_enabled", False)
-        resp = await client.get("/api/v1/system/settings")
+        resp = await client.get("/api/v1/runtime/settings")
         assert resp.status_code == 200
         ci = resp.json()["ci"]
         # All six keys that the Tab 4 UI reads are present.
@@ -150,7 +150,7 @@ class TestSettingsEndpoint:
         from backend import config as _cfg
 
         monkeypatch.setattr(_cfg.settings, "ci_jenkins_api_token", "")
-        resp = await client.get("/api/v1/system/settings")
+        resp = await client.get("/api/v1/runtime/settings")
         assert resp.status_code == 200
         ci = resp.json()["ci"]
         assert ci["jenkins_api_token"] == ""
@@ -160,38 +160,38 @@ class TestConnectionEndpoints:
 
     @pytest.mark.asyncio
     async def test_test_ssh(self, client):
-        resp = await client.post("/api/v1/system/test/ssh")
+        resp = await client.post("/api/v1/runtime/test/ssh")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] in ("ok", "error", "not_configured")
 
     @pytest.mark.asyncio
     async def test_test_gerrit(self, client):
-        resp = await client.post("/api/v1/system/test/gerrit")
+        resp = await client.post("/api/v1/runtime/test/gerrit")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] in ("ok", "error", "not_configured")
 
     @pytest.mark.asyncio
     async def test_test_github(self, client):
-        resp = await client.post("/api/v1/system/test/github")
+        resp = await client.post("/api/v1/runtime/test/github")
         assert resp.status_code == 200
         # Without token: not_configured
         assert resp.json()["status"] in ("ok", "error", "not_configured")
 
     @pytest.mark.asyncio
     async def test_test_jira(self, client):
-        resp = await client.post("/api/v1/system/test/jira")
+        resp = await client.post("/api/v1/runtime/test/jira")
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_test_slack(self, client):
-        resp = await client.post("/api/v1/system/test/slack")
+        resp = await client.post("/api/v1/runtime/test/slack")
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_unknown_integration(self, client):
-        resp = await client.post("/api/v1/system/test/nonexistent")
+        resp = await client.post("/api/v1/runtime/test/nonexistent")
         assert resp.status_code == 400
 
 
@@ -201,7 +201,7 @@ class TestGitForgeTokenProbe:
     @pytest.mark.asyncio
     async def test_rejects_unknown_provider(self, client):
         resp = await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={"provider": "bitbucket", "token": "whatever"},
         )
         assert resp.status_code == 400
@@ -209,7 +209,7 @@ class TestGitForgeTokenProbe:
     @pytest.mark.asyncio
     async def test_empty_token_returns_error(self, client):
         resp = await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={"provider": "github", "token": ""},
         )
         assert resp.status_code == 200
@@ -223,7 +223,7 @@ class TestGitForgeTokenProbe:
         from backend.config import settings
         before = settings.github_token
         await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={"provider": "github", "token": "ghp_obviously_not_valid_xxx"},
         )
         assert settings.github_token == before
@@ -231,7 +231,7 @@ class TestGitForgeTokenProbe:
     @pytest.mark.asyncio
     async def test_gerrit_empty_ssh_host_returns_error(self, client):
         resp = await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={"provider": "gerrit", "ssh_host": "", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -260,7 +260,7 @@ class TestGitForgeTokenProbe:
         before_port = settings.gerrit_ssh_port
         before_url = settings.gerrit_url
         await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={
                 "provider": "gerrit",
                 "ssh_host": "nobody@gerrit.invalid.example",
@@ -347,7 +347,7 @@ class TestGitForgeTokenProbe:
     @pytest.mark.asyncio
     async def test_gitlab_empty_token_returns_error(self, client):
         resp = await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={"provider": "gitlab", "token": "", "url": ""},
         )
         assert resp.status_code == 200
@@ -371,7 +371,7 @@ class TestGitForgeTokenProbe:
         before_token = settings.gitlab_token
         before_url = settings.gitlab_url
         await client.post(
-            "/api/v1/system/git-forge/test-token",
+            "/api/v1/runtime/git-forge/test-token",
             json={
                 "provider": "gitlab",
                 "token": "glpat-obviously-not-valid",
@@ -506,7 +506,7 @@ class TestGitForgeSshPubkey:
         monkeypatch.setattr(settings, "git_ssh_key_path", str(key_path))
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
-        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        resp = await client.get("/api/v1/runtime/git-forge/ssh-pubkey")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -534,7 +534,7 @@ class TestGitForgeSshPubkey:
         monkeypatch.setattr(settings, "git_ssh_key_path", str(pub_path))
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _noop_keygen)
 
-        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        resp = await client.get("/api/v1/runtime/git-forge/ssh-pubkey")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -553,7 +553,7 @@ class TestGitForgeSshPubkey:
         missing = tmp_path / "no_such_key"
         monkeypatch.setattr(settings, "git_ssh_key_path", str(missing))
 
-        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        resp = await client.get("/api/v1/runtime/git-forge/ssh-pubkey")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "error"
@@ -566,7 +566,7 @@ class TestGitForgeSshPubkey:
         from backend.config import settings
         monkeypatch.setattr(settings, "git_ssh_key_path", "")
 
-        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        resp = await client.get("/api/v1/runtime/git-forge/ssh-pubkey")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "error"
@@ -599,7 +599,7 @@ class TestGitForgeSshPubkey:
         monkeypatch.setattr(settings, "git_ssh_key_path", str(key_path))
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
-        resp = await client.get("/api/v1/system/git-forge/ssh-pubkey")
+        resp = await client.get("/api/v1/runtime/git-forge/ssh-pubkey")
         assert resp.status_code == 200
         body = resp.text
         assert "DO-NOT-LEAK-ME" not in body
@@ -648,7 +648,7 @@ class TestGerritBotVerify:
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-bot",
+            "/api/v1/runtime/git-forge/gerrit/verify-bot",
             json={"ssh_host": "gerrit.example.com", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -685,7 +685,7 @@ class TestGerritBotVerify:
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-bot",
+            "/api/v1/runtime/git-forge/gerrit/verify-bot",
             json={"ssh_host": "gerrit.example.com", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -716,7 +716,7 @@ class TestGerritBotVerify:
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-bot",
+            "/api/v1/runtime/git-forge/gerrit/verify-bot",
             json={"ssh_host": "gerrit.example.com", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -748,7 +748,7 @@ class TestGerritBotVerify:
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-bot",
+            "/api/v1/runtime/git-forge/gerrit/verify-bot",
             json={"ssh_host": "", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -769,7 +769,7 @@ class TestGerritBotVerify:
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-bot",
+            "/api/v1/runtime/git-forge/gerrit/verify-bot",
             json={"ssh_host": "gerrit.example.com", "ssh_port": 99999},
         )
         assert resp.status_code == 200
@@ -804,7 +804,7 @@ class TestGerritBotVerify:
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", _fake_exec)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-bot",
+            "/api/v1/runtime/git-forge/gerrit/verify-bot",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -875,7 +875,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -910,7 +910,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -942,7 +942,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -967,7 +967,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -1001,7 +1001,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -1027,7 +1027,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "",
                 "ssh_port": 29418,
@@ -1054,7 +1054,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 29418,
@@ -1091,7 +1091,7 @@ class TestGerritSubmitRuleVerify:
             "project name with spaces",
         ):
             resp = await client.post(
-                "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+                "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
                 json={
                     "ssh_host": "gerrit.example.com",
                     "ssh_port": 29418,
@@ -1113,7 +1113,7 @@ class TestGerritSubmitRuleVerify:
         monkeypatch.setattr(ir, "_fetch_gerrit_project_config", _fake_fetch)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/verify-submit-rule",
+            "/api/v1/runtime/git-forge/gerrit/verify-submit-rule",
             json={
                 "ssh_host": "gerrit.example.com",
                 "ssh_port": 99999,
@@ -1133,7 +1133,7 @@ class TestGitTokenMapEndpoint:
         from backend.config import settings
         monkeypatch.setattr(settings, "github_token_map", "")
         monkeypatch.setattr(settings, "gitlab_token_map", "")
-        resp = await client.get("/api/v1/system/settings/git/token-map")
+        resp = await client.get("/api/v1/runtime/settings/git/token-map")
         assert resp.status_code == 200
         data = resp.json()
         assert data == {"github": [], "gitlab": []}
@@ -1153,7 +1153,7 @@ class TestGitTokenMapEndpoint:
             settings, "gitlab_token_map",
             json.dumps({"https://gitlab.example.com": "glpat-xxxxxxxxxxxxxxxxxx"}),
         )
-        resp = await client.get("/api/v1/system/settings/git/token-map")
+        resp = await client.get("/api/v1/runtime/settings/git/token-map")
         assert resp.status_code == 200
         data = resp.json()
         # Stable (sorted) ordering
@@ -1178,7 +1178,7 @@ class TestGitTokenMapEndpoint:
         from backend.config import settings
         monkeypatch.setattr(settings, "github_token_map", "not-json{{")
         monkeypatch.setattr(settings, "gitlab_token_map", "[1, 2, 3]")  # wrong shape
-        resp = await client.get("/api/v1/system/settings/git/token-map")
+        resp = await client.get("/api/v1/runtime/settings/git/token-map")
         assert resp.status_code == 200
         data = resp.json()
         assert data == {"github": [], "gitlab": []}
@@ -1191,7 +1191,7 @@ class TestGitTokenMapEndpoint:
         monkeypatch.setattr(settings, "gitlab_token_map", "")
 
         resp = await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={
                 "github": [
                     {"host": "github.enterprise.com", "token": "ghp_enterprise_secret_value_zzz"},
@@ -1232,7 +1232,7 @@ class TestGitTokenMapEndpoint:
         monkeypatch.setattr(settings, "gitlab_token_map", "")
 
         resp = await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={"github": [], "gitlab": []},
         )
         assert resp.status_code == 200
@@ -1255,7 +1255,7 @@ class TestGitTokenMapEndpoint:
         monkeypatch.setattr(settings, "gitlab_token_map", "")
 
         resp = await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={
                 "github": [{"host": "github.enterprise.com", "token": ""}],
                 "gitlab": [],
@@ -1277,7 +1277,7 @@ class TestGitTokenMapEndpoint:
         monkeypatch.setattr(settings, "gitlab_token_map", "")
 
         resp = await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={
                 "github": [{"host": "brand.new.example", "token": ""}],
                 "gitlab": [],
@@ -1297,7 +1297,7 @@ class TestGitTokenMapEndpoint:
         monkeypatch.setattr(settings, "gitlab_token_map", "")
 
         resp = await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={
                 "github": [
                     {"host": "", "token": "ghp_orphan_should_be_dropped"},
@@ -1327,7 +1327,7 @@ class TestGitTokenMapEndpoint:
         _ = gc.get_credential_registry()
 
         await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={
                 "github": [
                     {"host": "github.fresh.example", "token": "ghp_fresh_cache_bust_value"},
@@ -1348,7 +1348,7 @@ class TestGitTokenMapEndpoint:
         monkeypatch.setattr(settings, "gitlab_token_map", "")
 
         resp = await client.put(
-            "/api/v1/system/settings/git/token-map",
+            "/api/v1/runtime/settings/git/token-map",
             json={
                 "github": [
                     {"host": "github.enterprise.com", "token": "ghp_first_entry_token_aaa"},
@@ -1368,7 +1368,7 @@ class TestVendorSDKCRUD:
 
     @pytest.mark.asyncio
     async def test_create_vendor_sdk(self, client):
-        resp = await client.post("/api/v1/system/vendor/sdks", json={
+        resp = await client.post("/api/v1/runtime/vendor/sdks", json={
             "platform": "test-vendor-crud",
             "label": "Test Vendor",
             "vendor_id": "test-v",
@@ -1378,35 +1378,35 @@ class TestVendorSDKCRUD:
         assert resp.status_code == 200
         assert resp.json()["status"] == "created"
         # Cleanup
-        await client.delete("/api/v1/system/vendor/sdks/test-vendor-crud")
+        await client.delete("/api/v1/runtime/vendor/sdks/test-vendor-crud")
 
     @pytest.mark.asyncio
     async def test_create_duplicate_rejected(self, client):
-        await client.post("/api/v1/system/vendor/sdks", json={
+        await client.post("/api/v1/runtime/vendor/sdks", json={
             "platform": "test-dup", "label": "Dup", "vendor_id": "dup",
         })
-        resp = await client.post("/api/v1/system/vendor/sdks", json={
+        resp = await client.post("/api/v1/runtime/vendor/sdks", json={
             "platform": "test-dup", "label": "Dup2", "vendor_id": "dup2",
         })
         assert resp.status_code == 409
-        await client.delete("/api/v1/system/vendor/sdks/test-dup")
+        await client.delete("/api/v1/runtime/vendor/sdks/test-dup")
 
     @pytest.mark.asyncio
     async def test_delete_vendor_sdk(self, client):
-        await client.post("/api/v1/system/vendor/sdks", json={
+        await client.post("/api/v1/runtime/vendor/sdks", json={
             "platform": "test-del", "label": "Del", "vendor_id": "del",
         })
-        resp = await client.delete("/api/v1/system/vendor/sdks/test-del")
+        resp = await client.delete("/api/v1/runtime/vendor/sdks/test-del")
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_delete_builtin_blocked(self, client):
-        resp = await client.delete("/api/v1/system/vendor/sdks/aarch64")
+        resp = await client.delete("/api/v1/runtime/vendor/sdks/aarch64")
         assert resp.status_code == 403
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent(self, client):
-        resp = await client.delete("/api/v1/system/vendor/sdks/nonexistent-xyz")
+        resp = await client.delete("/api/v1/runtime/vendor/sdks/nonexistent-xyz")
         assert resp.status_code == 404
 
 
@@ -1448,9 +1448,9 @@ class TestGerritWebhookInfo:
     """B14 Part C row 226 — Gerrit Setup Wizard Step 5 (webhook 設定引導).
 
     Endpoints:
-      * ``GET  /api/v1/system/git-forge/gerrit/webhook-info`` — masked
+      * ``GET  /api/v1/runtime/git-forge/gerrit/webhook-info`` — masked
         view of the inbound webhook URL + secret status.
-      * ``POST /api/v1/system/git-forge/gerrit/webhook-secret/generate``
+      * ``POST /api/v1/runtime/git-forge/gerrit/webhook-secret/generate``
         — mints a fresh ``settings.gerrit_webhook_secret`` and returns
         the plain value exactly once.
 
@@ -1466,7 +1466,7 @@ class TestGerritWebhookInfo:
         and ``secret_masked=""`` so the wizard surfaces the Generate CTA."""
         from backend.config import settings as _s
         monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
-        resp = await client.get("/api/v1/system/git-forge/gerrit/webhook-info")
+        resp = await client.get("/api/v1/runtime/git-forge/gerrit/webhook-info")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -1491,7 +1491,7 @@ class TestGerritWebhookInfo:
         from backend.config import settings as _s
         plain = "abcdefghijklmnopqrstuvwxyz0123456789-_"
         monkeypatch.setattr(_s, "gerrit_webhook_secret", plain)
-        resp = await client.get("/api/v1/system/git-forge/gerrit/webhook-info")
+        resp = await client.get("/api/v1/runtime/git-forge/gerrit/webhook-info")
         data = resp.json()
         assert data["secret_configured"] is True
         assert data["secret_masked"] != plain
@@ -1512,7 +1512,7 @@ class TestGerritWebhookInfo:
         from backend.config import settings as _s
         monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
         resp = await client.get(
-            "/api/v1/system/git-forge/gerrit/webhook-info",
+            "/api/v1/runtime/git-forge/gerrit/webhook-info",
             headers={
                 "X-Forwarded-Proto": "https",
                 "X-Forwarded-Host": "omnisight.example.com",
@@ -1536,7 +1536,7 @@ class TestGerritWebhookInfo:
         from backend.config import settings as _s
         monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/webhook-secret/generate"
+            "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate"
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -1548,7 +1548,7 @@ class TestGerritWebhookInfo:
         # Persisted into settings — the webhook verifier reads from here.
         assert _s.gerrit_webhook_secret == secret
         # Subsequent GET masks it, never re-reveals.
-        info = await client.get("/api/v1/system/git-forge/gerrit/webhook-info")
+        info = await client.get("/api/v1/runtime/git-forge/gerrit/webhook-info")
         info_body = info.json()
         assert info_body["secret_configured"] is True
         assert info_body["secret_masked"] != secret
@@ -1561,10 +1561,10 @@ class TestGerritWebhookInfo:
         from backend.config import settings as _s
         monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
         first = await client.post(
-            "/api/v1/system/git-forge/gerrit/webhook-secret/generate"
+            "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate"
         )
         second = await client.post(
-            "/api/v1/system/git-forge/gerrit/webhook-secret/generate"
+            "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate"
         )
         assert first.json()["secret"] != second.json()["secret"]
         # Settings holds the *latest* — the older secret is invalidated.
@@ -1580,7 +1580,7 @@ class TestGerritWebhookInfo:
         from backend.config import settings as _s
         monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/webhook-secret/generate",
+            "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate",
             headers={
                 "X-Forwarded-Proto": "https",
                 "X-Forwarded-Host": "omnisight.example.com",
@@ -1627,7 +1627,7 @@ class TestGerritWebhookInfo:
             "method": "GET",
             "scheme": "http",
             "server": ("api.internal.example.com", 8000),
-            "path": "/api/v1/system/git-forge/gerrit/webhook-info",
+            "path": "/api/v1/runtime/git-forge/gerrit/webhook-info",
             "headers": [],
             "root_path": "",
             "query_string": b"",
@@ -1657,7 +1657,7 @@ def reset_rate_limiter():
 class TestGerritFinalize:
     """B14 Part C row 227 — Gerrit Setup Wizard finalize endpoint.
 
-    ``POST /api/v1/system/git-forge/gerrit/finalize`` is the wizard's
+    ``POST /api/v1/runtime/git-forge/gerrit/finalize`` is the wizard's
     closing act: it takes the SSH endpoint / REST URL / project values
     the operator already validated through Steps 1–5 and writes them
     atomically into ``settings.gerrit_*`` while flipping
@@ -1689,7 +1689,7 @@ class TestGerritFinalize:
         monkeypatch.setattr(_s, "gerrit_webhook_secret", "")
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={
                 "url": "https://gerrit.example.com",
                 "ssh_host": "merger-agent-bot@gerrit.example.com",
@@ -1729,7 +1729,7 @@ class TestGerritFinalize:
         monkeypatch.setattr(_s, "gerrit_project", "")
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={
                 "url": "  https://gerrit.example.com\n",
                 "ssh_host": "  bot@gerrit.example.com  ",
@@ -1751,7 +1751,7 @@ class TestGerritFinalize:
         from backend.config import settings as _s
         monkeypatch.setattr(_s, "gerrit_enabled", False)
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={"ssh_host": "   ", "ssh_port": 29418},
         )
         assert resp.status_code == 400
@@ -1768,7 +1768,7 @@ class TestGerritFinalize:
         monkeypatch.setattr(_s, "gerrit_enabled", False)
         for bad_port in (0, -1, 65536, 99999):
             resp = await client.post(
-                "/api/v1/system/git-forge/gerrit/finalize",
+                "/api/v1/runtime/git-forge/gerrit/finalize",
                 json={"ssh_host": "bot@gerrit.example.com", "ssh_port": bad_port},
             )
             assert resp.status_code == 400, f"port={bad_port} should be rejected"
@@ -1788,7 +1788,7 @@ class TestGerritFinalize:
         monkeypatch.setattr(_s, "gerrit_replication_targets", "preexisting")
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={"ssh_host": "bot@gerrit.example.com", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -1813,7 +1813,7 @@ class TestGerritFinalize:
         monkeypatch.setattr(_s, "gerrit_webhook_secret", plain)
 
         resp = await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={"ssh_host": "bot@gerrit.example.com", "ssh_port": 29418},
         )
         assert resp.status_code == 200
@@ -1835,7 +1835,7 @@ class TestGerritFinalize:
 
         # First finalize with one set of values.
         await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={
                 "ssh_host": "old@gerrit.example.com",
                 "ssh_port": 29418,
@@ -1847,7 +1847,7 @@ class TestGerritFinalize:
 
         # Second finalize replaces.
         resp2 = await client.post(
-            "/api/v1/system/git-forge/gerrit/finalize",
+            "/api/v1/runtime/git-forge/gerrit/finalize",
             json={
                 "ssh_host": "new@gerrit.example.com",
                 "ssh_port": 29419,
@@ -1905,7 +1905,7 @@ class TestConnectionResponseShape:
         monkeypatch.setattr(
             _i.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
         )
-        resp = await client.post("/api/v1/system/test/github")
+        resp = await client.post("/api/v1/runtime/test/github")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -1934,7 +1934,7 @@ class TestConnectionResponseShape:
         monkeypatch.setattr(
             _i.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
         )
-        resp = await client.post("/api/v1/system/test/gitlab")
+        resp = await client.post("/api/v1/runtime/test/gitlab")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -1971,7 +1971,7 @@ class TestConnectionResponseShape:
         monkeypatch.setattr(
             _i.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
         )
-        resp = await client.post("/api/v1/system/test/jira")
+        resp = await client.post("/api/v1/runtime/test/jira")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"

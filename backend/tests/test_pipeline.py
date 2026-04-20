@@ -191,7 +191,7 @@ class TestPipelineEndpoints:
     async def test_get_status(self, client):
         import backend.pipeline as p
         p._active_pipeline = None
-        resp = await client.get("/api/v1/system/pipeline/status")
+        resp = await client.get("/api/v1/runtime/pipeline/status")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "idle"
@@ -201,7 +201,7 @@ class TestPipelineEndpoints:
     async def test_start_pipeline(self, client):
         import backend.pipeline as p
         p._active_pipeline = None
-        resp = await client.post("/api/v1/system/pipeline/start", json={
+        resp = await client.post("/api/v1/runtime/pipeline/start", json={
             "spec_context": "AI UVC camera with face recognition",
         })
         assert resp.status_code == 200
@@ -214,8 +214,8 @@ class TestPipelineEndpoints:
     async def test_force_advance(self, client):
         import backend.pipeline as p
         p._active_pipeline = None
-        await client.post("/api/v1/system/pipeline/start", json={"spec_context": "test"})
-        resp = await client.post("/api/v1/system/pipeline/advance")
+        await client.post("/api/v1/runtime/pipeline/start", json={"spec_context": "test"})
+        resp = await client.post("/api/v1/runtime/pipeline/advance")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] in ("advanced", "completed", "error")

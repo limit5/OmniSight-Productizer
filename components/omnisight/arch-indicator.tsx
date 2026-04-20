@@ -62,7 +62,7 @@ export function ArchIndicator({ compact = false }: { compact?: boolean }) {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch("/api/v1/system/platform-status", { cache: "no-store" })
+      const res = await fetch("/api/v1/runtime/platform-status", { cache: "no-store" })
       if (!res.ok) return
       setStatus(await res.json())
     } catch {

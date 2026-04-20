@@ -1203,15 +1203,15 @@ export interface SystemStatus {
 }
 
 export async function getSystemInfo() {
-  return request<SystemInfo>("/system/info")
+  return request<SystemInfo>("/runtime/info")
 }
 
 export async function getDevices() {
-  return request<SystemDevice[]>("/system/devices")
+  return request<SystemDevice[]>("/runtime/devices")
 }
 
 export async function getSystemStatus() {
-  return request<SystemStatus>("/system/status")
+  return request<SystemStatus>("/runtime/status")
 }
 
 // ─── Spec ───
@@ -1227,11 +1227,11 @@ export interface SpecValue {
 }
 
 export async function getSpec() {
-  return request<SpecValue[]>("/system/spec")
+  return request<SpecValue[]>("/runtime/spec")
 }
 
 export async function updateSpec(path: string[], value: string | number | boolean) {
-  return request<{ status: string }>("/system/spec", {
+  return request<{ status: string }>("/runtime/spec", {
     method: "PUT",
     body: JSON.stringify({ path, value }),
   })
@@ -1255,7 +1255,7 @@ export interface RepoInfo {
 }
 
 export async function getRepos() {
-  return request<RepoInfo[]>("/system/repos")
+  return request<RepoInfo[]>("/runtime/repos")
 }
 
 // ─── Logs ───
@@ -1267,7 +1267,7 @@ export interface LogEntry {
 }
 
 export async function getLogs(limit: number = 50) {
-  return request<LogEntry[]>(`/system/logs?limit=${limit}`)
+  return request<LogEntry[]>(`/runtime/logs?limit=${limit}`)
 }
 
 // ─── Token Usage ───
@@ -1284,7 +1284,7 @@ export interface TokenUsage {
 }
 
 export async function getTokenUsage() {
-  return request<TokenUsage[]>("/system/tokens")
+  return request<TokenUsage[]>("/runtime/tokens")
 }
 
 export interface CompressionStats {
@@ -1297,7 +1297,7 @@ export interface CompressionStats {
 }
 
 export async function getCompressionStats() {
-  return request<CompressionStats>("/system/compression")
+  return request<CompressionStats>("/runtime/compression")
 }
 
 // ─── Simulations ───
@@ -1329,15 +1329,15 @@ export async function listSimulations(params?: { task_id?: string; status?: stri
   const qs = new URLSearchParams()
   if (params?.task_id) qs.set("task_id", params.task_id)
   if (params?.status) qs.set("status", params.status)
-  return request<SimulationItem[]>(`/system/simulations?${qs.toString()}`)
+  return request<SimulationItem[]>(`/runtime/simulations?${qs.toString()}`)
 }
 
 export async function getSimulation(simId: string): Promise<SimulationItem> {
-  return request<SimulationItem>(`/system/simulations/${simId}`)
+  return request<SimulationItem>(`/runtime/simulations/${simId}`)
 }
 
 export async function triggerSimulation(body: { track: string; module: string; input_data?: string; mock?: boolean; platform?: string }): Promise<{ result: string }> {
-  return request<{ result: string }>("/system/simulations", {
+  return request<{ result: string }>("/runtime/simulations", {
     method: "POST",
     body: JSON.stringify(body),
   })
@@ -1346,18 +1346,18 @@ export async function triggerSimulation(body: { track: string; module: string; i
 // ─── Integration Settings ───
 
 export async function getSettings(): Promise<Record<string, Record<string, unknown>>> {
-  return request<Record<string, Record<string, unknown>>>("/system/settings")
+  return request<Record<string, Record<string, unknown>>>("/runtime/settings")
 }
 
 export async function updateSettings(updates: Record<string, string | number | boolean>): Promise<{ status: string; applied: string[]; rejected: Record<string, string> }> {
-  return request<{ status: string; applied: string[]; rejected: Record<string, string> }>("/system/settings", {
+  return request<{ status: string; applied: string[]; rejected: Record<string, string> }>("/runtime/settings", {
     method: "PUT",
     body: JSON.stringify({ updates }),
   })
 }
 
 export async function testIntegration(type: string): Promise<{ status: string; message?: string; [key: string]: unknown }> {
-  return request<{ status: string; message?: string }>(`/system/test/${type}`, { method: "POST" })
+  return request<{ status: string; message?: string }>(`/runtime/test/${type}`, { method: "POST" })
 }
 
 // ─── B14 Part A row 3+: Probe a candidate Git-forge credential ───
@@ -1400,7 +1400,7 @@ export async function testGitForgeToken(args: {
     body.ssh_host = args.ssh_host ?? ""
     body.ssh_port = args.ssh_port ?? 29418
   }
-  return request<GitForgeTokenTestResult>("/system/git-forge/test-token", {
+  return request<GitForgeTokenTestResult>("/runtime/git-forge/test-token", {
     method: "POST",
     body: JSON.stringify(body),
   })
@@ -1424,7 +1424,7 @@ export interface GitForgeSshPubkey {
 }
 
 export async function getGitForgeSshPubkey(): Promise<GitForgeSshPubkey> {
-  return request<GitForgeSshPubkey>("/system/git-forge/ssh-pubkey")
+  return request<GitForgeSshPubkey>("/runtime/git-forge/ssh-pubkey")
 }
 
 // ─── B14 Part C row 224: Verify the merger-agent-bot Gerrit group ───
@@ -1458,7 +1458,7 @@ export async function verifyGerritMergerBot(args: {
   ssh_port?: number
   group?: string
 }): Promise<GerritBotVerifyResult> {
-  return request<GerritBotVerifyResult>("/system/git-forge/gerrit/verify-bot", {
+  return request<GerritBotVerifyResult>("/runtime/git-forge/gerrit/verify-bot", {
     method: "POST",
     body: JSON.stringify({
       ssh_host: args.ssh_host,
@@ -1500,7 +1500,7 @@ export async function verifyGerritSubmitRule(args: {
   project: string
 }): Promise<GerritSubmitRuleVerifyResult> {
   return request<GerritSubmitRuleVerifyResult>(
-    "/system/git-forge/gerrit/verify-submit-rule",
+    "/runtime/git-forge/gerrit/verify-submit-rule",
     {
       method: "POST",
       body: JSON.stringify({
@@ -1546,12 +1546,12 @@ export interface GerritWebhookSecretRotateResult {
 }
 
 export async function getGerritWebhookInfo(): Promise<GerritWebhookInfo> {
-  return request<GerritWebhookInfo>("/system/git-forge/gerrit/webhook-info")
+  return request<GerritWebhookInfo>("/runtime/git-forge/gerrit/webhook-info")
 }
 
 export async function generateGerritWebhookSecret(): Promise<GerritWebhookSecretRotateResult> {
   return request<GerritWebhookSecretRotateResult>(
-    "/system/git-forge/gerrit/webhook-secret/generate",
+    "/runtime/git-forge/gerrit/webhook-secret/generate",
     { method: "POST" },
   )
 }
@@ -1588,7 +1588,7 @@ export async function finalizeGerritIntegration(args: {
   project?: string
   replication_targets?: string
 }): Promise<GerritFinalizeResult> {
-  return request<GerritFinalizeResult>("/system/git-forge/gerrit/finalize", {
+  return request<GerritFinalizeResult>("/runtime/git-forge/gerrit/finalize", {
     method: "POST",
     body: JSON.stringify({
       url: args.url ?? "",
@@ -1682,14 +1682,14 @@ export async function triggerStorageCleanup(
 }
 
 export async function createVendorSDK(body: Record<string, unknown>): Promise<{ status: string; platform: string }> {
-  return request<{ status: string; platform: string }>("/system/vendor/sdks", {
+  return request<{ status: string; platform: string }>("/runtime/vendor/sdks", {
     method: "POST",
     body: JSON.stringify(body),
   })
 }
 
 export async function deleteVendorSDK(platform: string): Promise<{ status: string }> {
-  return request<{ status: string }>(`/system/vendor/sdks/${platform}`, { method: "DELETE" })
+  return request<{ status: string }>(`/runtime/vendor/sdks/${platform}`, { method: "DELETE" })
 }
 
 // ─── Event Replay ───
@@ -2355,7 +2355,7 @@ export interface DAGSubmitResponse {
 }
 
 export async function fetchToolchains(): Promise<ToolchainsResponse> {
-  return request<ToolchainsResponse>("/system/platforms/toolchains")
+  return request<ToolchainsResponse>("/runtime/platforms/toolchains")
 }
 
 export async function validateDag(
@@ -2423,7 +2423,7 @@ export interface NPIData {
 }
 
 export async function getNPIState() {
-  return request<NPIData>("/system/npi")
+  return request<NPIData>("/runtime/npi")
 }
 
 export async function updateNPIState(updates: { business_model?: string; current_phase_id?: string }) {
@@ -2431,11 +2431,11 @@ export async function updateNPIState(updates: { business_model?: string; current
   for (const [k, v] of Object.entries(updates)) {
     if (v !== undefined) params.set(k, v)
   }
-  return request<NPIData>(`/system/npi?${params.toString()}`, { method: "PUT" })
+  return request<NPIData>(`/runtime/npi?${params.toString()}`, { method: "PUT" })
 }
 
 export async function updateNPIMilestone(milestoneId: string, status: string) {
-  return request<NPIMilestone>(`/system/npi/milestones/${milestoneId}?status=${status}`, { method: "PATCH" })
+  return request<NPIMilestone>(`/runtime/npi/milestones/${milestoneId}?status=${status}`, { method: "PATCH" })
 }
 
 // ─── Token Budget ───
@@ -2454,7 +2454,7 @@ export interface TokenBudgetInfo {
 }
 
 export async function getTokenBudget() {
-  return request<TokenBudgetInfo>("/system/token-budget")
+  return request<TokenBudgetInfo>("/runtime/token-budget")
 }
 
 export async function updateTokenBudget(updates: {
@@ -2469,11 +2469,11 @@ export async function updateTokenBudget(updates: {
   for (const [key, val] of Object.entries(updates)) {
     if (val !== undefined) params.set(key, String(val))
   }
-  return request<TokenBudgetInfo>(`/system/token-budget?${params.toString()}`, { method: "PUT" })
+  return request<TokenBudgetInfo>(`/runtime/token-budget?${params.toString()}`, { method: "PUT" })
 }
 
 export async function resetTokenFreeze() {
-  return request<{ status: string }>("/system/token-budget/reset", { method: "POST" })
+  return request<{ status: string }>("/runtime/token-budget/reset", { method: "POST" })
 }
 
 // ─── Notifications ───
@@ -2493,15 +2493,15 @@ export interface NotificationItem {
 export async function getNotifications(limit: number = 50, level?: string) {
   const params = new URLSearchParams({ limit: String(limit) })
   if (level) params.set("level", level)
-  return request<NotificationItem[]>(`/system/notifications?${params.toString()}`)
+  return request<NotificationItem[]>(`/runtime/notifications?${params.toString()}`)
 }
 
 export async function markNotificationRead(id: string) {
-  return request<{ status: string }>(`/system/notifications/${id}/read`, { method: "POST" })
+  return request<{ status: string }>(`/runtime/notifications/${id}/read`, { method: "POST" })
 }
 
 export async function getUnreadCount() {
-  return request<{ count: number }>("/system/notifications/unread-count")
+  return request<{ count: number }>("/runtime/notifications/unread-count")
 }
 
 // ─── Invoke (Singularity Sync) ───
@@ -2930,7 +2930,7 @@ export interface PipelineTimeline {
 }
 
 export async function getPipelineTimeline() {
-  return request<PipelineTimeline>("/system/pipeline/timeline")
+  return request<PipelineTimeline>("/runtime/pipeline/timeline")
 }
 
 // ─── Phase 50B: Decision Rules Editor ───

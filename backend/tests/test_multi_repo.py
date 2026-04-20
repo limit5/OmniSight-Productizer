@@ -251,7 +251,7 @@ class TestSettingsCredentialList:
 
     @pytest.mark.asyncio
     async def test_settings_includes_credentials(self, client):
-        resp = await client.get("/api/v1/system/settings")
+        resp = await client.get("/api/v1/runtime/settings")
         assert resp.status_code == 200
         data = resp.json()
         assert "credentials" in data["git"]
@@ -267,7 +267,7 @@ class TestReposEndpoint:
 
     @pytest.mark.asyncio
     async def test_repos_has_platform_field(self, client):
-        resp = await client.get("/api/v1/system/repos")
+        resp = await client.get("/api/v1/runtime/repos")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) >= 1

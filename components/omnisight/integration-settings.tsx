@@ -308,7 +308,7 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
  *  the list into `github_token_map` / `gitlab_token_map` JSON (the
  *  in-memory settings fields whose env-var form is
  *  `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`). The
- *  dedicated masked `/system/settings/git/token-map` endpoint lands in
+ *  dedicated masked `/runtime/settings/git/token-map` endpoint lands in
  *  row 217 — until then, TEST short-circuits to a stub "not wired"
  *  probe. */
 interface TokenMapInstance {

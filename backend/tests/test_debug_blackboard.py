@@ -64,7 +64,7 @@ class TestDebugEndpoint:
 
     @pytest.mark.asyncio
     async def test_debug_state_endpoint(self, client):
-        resp = await client.get("/api/v1/system/debug")
+        resp = await client.get("/api/v1/runtime/debug")
         assert resp.status_code == 200
         data = resp.json()
         assert "agent_errors" in data
