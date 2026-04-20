@@ -349,17 +349,19 @@ if _ASYNCPG_AVAILABLE:
                 # token_usage/artifacts/npi_state/simulations/
                 # debug_findings/event_log/decision_rules/
                 # episodic_memory; Epic 4 covers ``audit_log``
-                # (SP-4.1), ``users`` (SP-4.2), ``sessions`` (SP-4.3)
-                # and the password-flow tables (SP-4.4 —
+                # (SP-4.1), ``users`` (SP-4.2), ``sessions`` (SP-4.3),
+                # the password-flow tables (SP-4.4 —
                 # ``password_history`` is cleared via CASCADE from
-                # ``users``, no explicit TRUNCATE needed).
-                # CASCADE handles the user-referencing FKs.
+                # ``users``, no explicit TRUNCATE needed), and
+                # ``tenant_secrets`` (SP-4.6). CASCADE handles the
+                # user-referencing FKs.
                 await conn.execute(
                     "TRUNCATE agents, tasks, task_comments, handoffs, "
                     "notifications, token_usage, artifacts, npi_state, "
                     "simulations, debug_findings, event_log, "
                     "decision_rules, episodic_memory, audit_log, "
-                    "users, sessions RESTART IDENTITY CASCADE"
+                    "users, sessions, tenant_secrets "
+                    "RESTART IDENTITY CASCADE"
                 )
                 yield conn
             finally:
