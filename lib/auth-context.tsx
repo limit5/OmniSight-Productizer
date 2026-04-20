@@ -7,6 +7,7 @@ import {
   logout as apiLogout,
   mfaChallenge as apiMfaChallenge,
   setCurrentSessionId,
+  ApiError,
   type AuthUser,
   type WhoamiResponse,
 } from "@/lib/api"
@@ -51,11 +52,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setCurrentSessionId(info.session_id ?? null)
       setError(null)
     } catch (exc) {
+      // Phase-3 P3 (2026-04-20): ONLY clear the user on a genuine 401.
+      // Previously we did ``setUser(null)`` on every catch, which meant a
+      // transient 429 (rate-limited), 5xx, or network blip flipped the
+      // client into a logged-out state. That caused a cascading
+      // redirect loop: transient error → user becomes null →
+      // ``app/page.tsx`` effect redirects to ``/login?next=...`` →
+      // ``/login`` page's AuthProvider re-runs whoami → 200 →
+      // ``setUser(admin)`` → ``/login`` redirects back to the
+      // dashboard → dashboard remounts its 7 panels → 14 fresh XHRs
+      // hit the rate bucket → next whoami 429 → loop at ~333 ms
+      // (matching the 6 batches-in-2-seconds pattern observed in
+      // caddy access logs after the PG cutover exposed it by making
+      // backend responses fast enough for the loop to close tightly).
+      //
+      // 401 is the ONLY status that MEANS "you are logged out" — keep
+      // the existing user state for every other error so transient
+      // failures surface as a banner, not a logout.
+      const status = exc instanceof ApiError ? exc.status : null
       const msg = exc instanceof Error ? exc.message : String(exc)
-      setUser(null)
-      if (msg.includes(" 401:") || msg.includes("401")) {
+      if (status === 401) {
+        setUser(null)
         setError(null)
       } else {
+        // Keep user as-is; surface the error so the UI can toast it
+        // but don't treat it as a logout event.
         setError(msg)
       }
     } finally {

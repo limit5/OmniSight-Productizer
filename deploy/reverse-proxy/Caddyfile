@@ -123,6 +123,18 @@
 # the service URL from `http://frontend:3000` → `http://caddy:8080`.
 # Rollback is the reverse — single dashboard setting, ~30 s.
 :8080 {
+	# Access log so we can diagnose CF-edge → cloudflared → caddy:8080
+	# request patterns (each line includes method / URI / status / dur /
+	# upstream). Phase-3 P2 follow-up after operator re-reported the
+	# cascade even after the CF tunnel flip — need full visibility on
+	# what the BROWSER sends vs what CADDY forwards to upstream, since
+	# curl tests work but browser paths fail.
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+
 	# API path handler — reverse_proxy to backend pool with the same
 	# upstream list, health checks, and failure semantics as :443. The
 	# ``flush_interval -1`` is what makes SSE work through this path:
