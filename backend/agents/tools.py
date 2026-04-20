@@ -1630,14 +1630,20 @@ async def search_past_solutions(
         limit: Max number of results to return.
     """
     from backend import db
+    from backend.db_pool import get_pool
 
+    # SP-3.12: agent-tool search is a worker context — acquire pool
+    # conn for the search call. The inner access-count UPDATEs ride
+    # the same conn, so a single acquire covers both read + write.
     try:
-        results = await db.search_episodic_memory(
-            query=error_signature,
-            soc_vendor=soc_vendor,
-            sdk_version=sdk_version,
-            limit=limit,
-        )
+        async with get_pool().acquire() as _conn:
+            results = await db.search_episodic_memory(
+                _conn,
+                query=error_signature,
+                soc_vendor=soc_vendor,
+                sdk_version=sdk_version,
+                limit=limit,
+            )
     except Exception as exc:
         return f"[ERROR] L3 search failed: {exc}"
 
@@ -1691,17 +1697,19 @@ async def save_solution(
 
     memory_id = f"mem-{uuid.uuid4().hex[:12]}"
     try:
-        await db.insert_episodic_memory({
-            "id": memory_id,
-            "error_signature": error_signature,
-            "solution": solution,
-            "soc_vendor": soc_vendor,
-            "sdk_version": sdk_version,
-            "hardware_rev": hardware_rev,
-            "gerrit_change_id": gerrit_change_id,
-            "tags": tags or [],
-            "quality_score": 1.0 if gerrit_change_id else 0.5,
-        })
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_episodic_memory(_conn, {
+                "id": memory_id,
+                "error_signature": error_signature,
+                "solution": solution,
+                "soc_vendor": soc_vendor,
+                "sdk_version": sdk_version,
+                "hardware_rev": hardware_rev,
+                "gerrit_change_id": gerrit_change_id,
+                "tags": tags or [],
+                "quality_score": 1.0 if gerrit_change_id else 0.5,
+            })
     except Exception as exc:
         return f"[ERROR] Failed to save to L3: {exc}"
 

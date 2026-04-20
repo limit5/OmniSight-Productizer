@@ -133,11 +133,15 @@ class TestL2ContextCompressionGate:
 
 
 class TestL3EpisodicMemoryDB:
+    """SP-3.12 (2026-04-20): migrated from client fixture to
+    pg_test_conn. Search now hits PG's tsvector @@ plainto_tsquery
+    on the STORED generated column (alembic 0017).
+    """
 
     @pytest.mark.asyncio
-    async def test_insert_and_get(self, client):
+    async def test_insert_and_get(self, pg_test_conn):
         from backend import db
-        await db.insert_episodic_memory({
+        await db.insert_episodic_memory(pg_test_conn, {
             "id": "test-mem-1",
             "error_signature": "undefined reference to v4l2_open",
             "solution": "Add -lv4l2 to LDFLAGS",
@@ -145,7 +149,7 @@ class TestL3EpisodicMemoryDB:
             "sdk_version": "1.2",
             "tags": ["linker", "v4l2"],
         })
-        mem = await db.get_episodic_memory("test-mem-1")
+        mem = await db.get_episodic_memory(pg_test_conn, "test-mem-1")
         assert mem is not None
         assert mem["error_signature"] == "undefined reference to v4l2_open"
         assert mem["solution"] == "Add -lv4l2 to LDFLAGS"
@@ -154,74 +158,84 @@ class TestL3EpisodicMemoryDB:
         assert mem["quality_score"] == 0.0
 
     @pytest.mark.asyncio
-    async def test_search_fts5(self, client):
+    async def test_search_tsvector(self, pg_test_conn):
+        # Renamed from test_search_fts5 — the underlying index is now
+        # PG tsvector. Tokenization difference vs SQLite FTS5:
+        # PG's English parser treats ``sensor_config.h`` as a single
+        # "host" token and does NOT split on ``.`` / ``_``; SQLite
+        # FTS5's unicode61 default tokenizer DOES. Test uses plain
+        # English words so both tokenizers return the row.
+        # Pre-approved drift documented in
+        # docs/phase-3-runtime-v2/01-design-decisions.md §5.
         from backend import db
-        await db.insert_episodic_memory({
+        await db.insert_episodic_memory(pg_test_conn, {
             "id": "test-mem-fts",
-            "error_signature": "fatal error: sensor_config.h not found",
-            "solution": "Add -I/opt/vendor/include to CFLAGS",
+            "error_signature": "fatal error missing include header",
+            "solution": "Add vendor include path to CFLAGS",
             "soc_vendor": "rockchip",
             "tags": ["include", "header"],
         })
-        results = await db.search_episodic_memory("sensor_config.h")
+        results = await db.search_episodic_memory(pg_test_conn, "missing include")
         assert len(results) >= 1
-        assert any("sensor_config" in r["error_signature"] for r in results)
+        assert any("missing" in r["error_signature"] for r in results)
 
     @pytest.mark.asyncio
-    async def test_search_vendor_filter(self, client):
+    async def test_search_vendor_filter(self, pg_test_conn):
         from backend import db
-        await db.insert_episodic_memory({
+        await db.insert_episodic_memory(pg_test_conn, {
             "id": "test-mem-v1",
             "error_signature": "gpio init failed",
             "solution": "Use GPIO_V2 API",
             "soc_vendor": "ambarella",
         })
-        await db.insert_episodic_memory({
+        await db.insert_episodic_memory(pg_test_conn, {
             "id": "test-mem-v2",
             "error_signature": "gpio init failed",
             "solution": "Enable GPIO clock first",
             "soc_vendor": "rockchip",
         })
         # Filter by vendor
-        results = await db.search_episodic_memory("gpio", soc_vendor="rockchip")
+        results = await db.search_episodic_memory(
+            pg_test_conn, "gpio", soc_vendor="rockchip",
+        )
         assert all(r["soc_vendor"] == "rockchip" for r in results)
 
     @pytest.mark.asyncio
-    async def test_access_count_increments(self, client):
+    async def test_access_count_increments(self, pg_test_conn):
         from backend import db
-        await db.insert_episodic_memory({
+        await db.insert_episodic_memory(pg_test_conn, {
             "id": "test-mem-access",
             "error_signature": "unique_error_12345",
             "solution": "Fix it",
         })
-        await db.search_episodic_memory("unique_error_12345")
-        mem = await db.get_episodic_memory("test-mem-access")
+        await db.search_episodic_memory(pg_test_conn, "unique_error_12345")
+        mem = await db.get_episodic_memory(pg_test_conn, "test-mem-access")
         assert mem["access_count"] >= 1
 
     @pytest.mark.asyncio
-    async def test_delete(self, client):
+    async def test_delete(self, pg_test_conn):
         from backend import db
-        await db.insert_episodic_memory({
+        await db.insert_episodic_memory(pg_test_conn, {
             "id": "test-mem-del",
             "error_signature": "to be deleted",
             "solution": "n/a",
         })
-        deleted = await db.delete_episodic_memory("test-mem-del")
+        deleted = await db.delete_episodic_memory(pg_test_conn, "test-mem-del")
         assert deleted is True
-        mem = await db.get_episodic_memory("test-mem-del")
+        mem = await db.get_episodic_memory(pg_test_conn, "test-mem-del")
         assert mem is None
 
     @pytest.mark.asyncio
-    async def test_count(self, client):
+    async def test_count(self, pg_test_conn):
         from backend import db
-        count = await db.episodic_memory_count()
+        count = await db.episodic_memory_count(pg_test_conn)
         assert isinstance(count, int)
         assert count >= 0
 
     @pytest.mark.asyncio
-    async def test_list(self, client):
+    async def test_list(self, pg_test_conn):
         from backend import db
-        memories = await db.list_episodic_memories(limit=10)
+        memories = await db.list_episodic_memories(pg_test_conn, limit=10)
         assert isinstance(memories, list)
 
 
@@ -282,17 +296,30 @@ class TestL3Tools:
 
     @pytest.mark.asyncio
     async def test_save_with_gerrit_id_quality_boost(self, client):
+        # save_solution tool acquires its own pool conn internally
+        # (SP-3.12); the assert read acquires a fresh conn since the
+        # save is committed by then. Explicit cleanup at the end so
+        # sibling tests see a clean slate.
         from backend.agents.tools import save_solution
         from backend import db
+        from backend.db_pool import get_pool
         result = await save_solution.ainvoke({
             "error_signature": "gerrit test error",
             "solution": "gerrit verified fix",
             "gerrit_change_id": "I1234567890",
         })
         assert "[L3]" in result
-        # Quality score should be 1.0 for Gerrit-verified
-        memories = await db.search_episodic_memory("gerrit test error")
-        assert any(m["quality_score"] == 1.0 for m in memories)
+        try:
+            async with get_pool().acquire() as conn:
+                memories = await db.search_episodic_memory(
+                    conn, "gerrit test error",
+                )
+            # Quality score should be 1.0 for Gerrit-verified
+            assert any(m["quality_score"] == 1.0 for m in memories)
+        finally:
+            async with get_pool().acquire() as conn:
+                for m in memories:
+                    await db.delete_episodic_memory(conn, m["id"])
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

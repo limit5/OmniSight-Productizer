@@ -195,27 +195,20 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Episodic memory (L3)
+#  Episodic memory (L3)  —  MOVED TO test_db_episodic_memory.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_episodic_memory_insert_get_delete(fresh_db):
-    db = fresh_db
-    await db.insert_episodic_memory({
-        "id": "mem1", "error_signature": "segfault in isp_init",
-        "solution": "init NPU before ISP", "soc_vendor": "rockchip",
-        "sdk_version": "1.2.3", "hardware_rev": "A1",
-        "source_task_id": "t1", "source_agent_id": "a1",
-        "gerrit_change_id": "I0001", "tags": "npu,isp",
-        "quality_score": 0.9,
-    })
-    got = await db.get_episodic_memory("mem1")
-    assert got is not None
-    assert got["error_signature"] == "segfault in isp_init"
-    rows = await db.list_episodic_memories()
-    assert len(rows) == 1
-    assert await db.delete_episodic_memory("mem1") is True
-    assert await db.get_episodic_memory("mem1") is None
+#
+# Phase-3-Runtime-v2 SP-3.12 (2026-04-20): all 7 episodic_memory
+# functions (insert / search / get / list / delete / count /
+# rebuild_fts) ported to native asyncpg. The SQLite FTS5 virtual
+# table sync logic is gone — alembic 0017 (SP-2.1) added a
+# ``tsv tsvector GENERATED ALWAYS AS (...) STORED`` column which
+# PG maintains automatically. Search uses
+# ``tsv @@ plainto_tsquery('english', ...)`` with ``ts_rank``
+# ordering (operator-approved drift from SQLite FTS5 BM25).
+#
+# Per-function contract tests + search equivalence tests live in
+# ``test_db_episodic_memory.py``.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

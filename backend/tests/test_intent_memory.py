@@ -19,10 +19,38 @@ import pytest
 from backend import intent_memory as _imem
 
 
+@pytest.fixture(autouse=True)
+async def _clean_episodic_memory(client):
+    """SP-3.12 (2026-04-20): before the port every test got its own
+    SQLite tempfile via a local fresh_db fixture, so cross-test state
+    leakage wasn't possible. Post-port the tests share the test PG,
+    and ``_imem.record_clarification_choice`` COMMITS rows — so we
+    need explicit isolation. TRUNCATE on both entry and exit matches
+    the pg_test_conn savepoint's semantics without the savepoint
+    machinery.
+    """
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "TRUNCATE episodic_memory RESTART IDENTITY CASCADE"
+        )
+    yield
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "TRUNCATE episodic_memory RESTART IDENTITY CASCADE"
+        )
+
+
 @pytest.mark.asyncio
 async def test_record_creates_episodic_row(client):
-    """The `client` fixture initialises the DB; tap it for its
-    side-effects then go direct."""
+    """The `client` fixture installs the module-global pool (SP-3.4)
+    which record_clarification_choice uses internally; we acquire
+    our own conn here for the verification read.
+
+    SP-3.12 (2026-04-20): db.get_episodic_memory now takes conn;
+    inline pool acquire for the verification. Cleanup at end keeps
+    the episodic_memory table from leaking into sibling tests.
+    """
     mid = await _imem.record_clarification_choice(
         raw_text="Next.js static site with local SQLite runtime query",
         conflict_id="static_with_runtime_db",
@@ -30,8 +58,11 @@ async def test_record_creates_episodic_row(client):
         operator_email="op@example.com",
     )
     assert mid is not None
+    # _clean_episodic_memory fixture handles cleanup; just verify.
     from backend import db
-    row = await db.get_episodic_memory(mid)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await db.get_episodic_memory(conn, mid)
     assert row is not None
     assert row["error_signature"].startswith("spec-conflict:static_with_runtime_db:")
     payload = json.loads(row["solution"])

@@ -1732,196 +1732,183 @@ async def cleanup_old_events(conn, days: int = 7) -> int:
 #  L3 Episodic Memory
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def insert_episodic_memory(data: dict) -> None:
-    """Insert a new episodic memory entry (L3)."""
-    # Phase 63-E: decayed_score initialises to quality_score so a
-    # fresh row competes on its own merit; the nightly worker decays
-    # it later when access stops.
-    await _conn().execute(
+async def insert_episodic_memory(conn, data: dict) -> None:
+    """Insert a new episodic memory entry (L3).
+
+    Phase-3-Runtime-v2 SP-3.12 (2026-04-20): ported to native asyncpg.
+    The FTS5 virtual-table sync that the SQLite version did after the
+    INSERT is **gone** — alembic 0017 (SP-2.1) added a ``tsv tsvector
+    GENERATED ALWAYS AS (...) STORED`` column that PG maintains
+    automatically on INSERT/UPDATE. The search function
+    (search_episodic_memory below) reads from ``tsv`` directly.
+
+    Phase 63-E: decayed_score initialises to quality_score so a fresh
+    row competes on its own merit; the nightly memory_decay worker
+    decays it later when access stops. created_at / updated_at use
+    clock_timestamp() — matches the SP-3.3 handoffs / SP-3.9
+    debug_findings pattern (advances within a single tx, consistent
+    YYYY-MM-DD HH:MM:SS text format).
+    """
+    q = float(data.get("quality_score", 0.0))
+    await conn.execute(
         """INSERT INTO episodic_memory
-           (id, error_signature, solution, soc_vendor, sdk_version, hardware_rev,
-            source_task_id, source_agent_id, gerrit_change_id, tags,
-            quality_score, decayed_score, created_at, updated_at)
-           VALUES (:id, :error_signature, :solution, :soc_vendor, :sdk_version, :hardware_rev,
-                   :source_task_id, :source_agent_id, :gerrit_change_id, :tags,
-                   :quality_score, :quality_score,
-                   datetime('now'), datetime('now'))""",
-        {
-            "id": data["id"],
-            "error_signature": data["error_signature"],
-            "solution": data["solution"],
-            "soc_vendor": data.get("soc_vendor", ""),
-            "sdk_version": data.get("sdk_version", ""),
-            "hardware_rev": data.get("hardware_rev", ""),
-            "source_task_id": data.get("source_task_id"),
-            "source_agent_id": data.get("source_agent_id"),
-            "gerrit_change_id": data.get("gerrit_change_id"),
-            "tags": json.dumps(data.get("tags", [])),
-            "quality_score": data.get("quality_score", 0.0),
-        },
+           (id, error_signature, solution, soc_vendor, sdk_version,
+            hardware_rev, source_task_id, source_agent_id,
+            gerrit_change_id, tags, quality_score, decayed_score,
+            created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5,
+                   $6, $7, $8,
+                   $9, $10, $11, $12,
+                   to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'),
+                   to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'))""",
+        data["id"],
+        data["error_signature"],
+        data["solution"],
+        data.get("soc_vendor", ""),
+        data.get("sdk_version", ""),
+        data.get("hardware_rev", ""),
+        data.get("source_task_id"),
+        data.get("source_agent_id"),
+        data.get("gerrit_change_id"),
+        json.dumps(data.get("tags", [])),
+        q,
+        q,  # decayed_score seeded from quality_score
     )
-    # Update FTS5 index (same transaction — committed together)
-    try:
-        await _conn().execute(
-            """INSERT INTO episodic_memory_fts(rowid, error_signature, solution, soc_vendor, tags)
-               SELECT rowid, error_signature, solution, soc_vendor, tags
-               FROM episodic_memory WHERE id = ?""",
-            (data["id"],),
-        )
-    except Exception as exc:
-        logger.warning("FTS5 index update failed for %s (search will use LIKE fallback): %s", data["id"], exc)
-    await _conn().commit()
 
 
-async def rebuild_episodic_fts() -> int:
-    """Rebuild the FTS5 index from the episodic_memory content table.
+async def rebuild_episodic_fts(conn) -> int:
+    """Reindex the episodic_memory GIN index on the tsvector column.
 
-    Call this if the FTS5 index becomes out of sync (e.g., after a crash).
-    Returns the number of rows reindexed.
+    SP-3.12: with the STORED generated tsv column, the *content* can't
+    drift from the base columns (PG regenerates it on any UPDATE that
+    touches the source expression). This function now exists only to
+    rebuild the GIN index itself — useful if ops sees GIN bloat or
+    has reason to believe the index is corrupted after hardware
+    failures. Returns the number of rows in the table afterwards,
+    matching the old function's return shape.
     """
     try:
-        # Drop and rebuild FTS content
-        await _conn().execute("DELETE FROM episodic_memory_fts")
-        await _conn().execute(
-            """INSERT INTO episodic_memory_fts(rowid, error_signature, solution, soc_vendor, tags)
-               SELECT rowid, error_signature, solution, soc_vendor, tags
-               FROM episodic_memory"""
-        )
-        await _conn().commit()
-        async with _conn().execute("SELECT COUNT(*) FROM episodic_memory") as cur:
-            row = await cur.fetchone()
-        count = row[0] if row else 0
-        logger.info("Rebuilt FTS5 index: %d entries", count)
+        # REINDEX is a single-statement operation; outside any explicit
+        # tx block asyncpg auto-commits it.
+        await conn.execute("REINDEX INDEX episodic_memory_tsv_gin")
+        n = await conn.fetchval("SELECT COUNT(*) FROM episodic_memory")
+        count = int(n) if n is not None else 0
+        logger.info("REINDEX episodic_memory_tsv_gin complete (%d rows)", count)
         return count
     except Exception as exc:
-        logger.error("FTS5 rebuild failed: %s", exc)
+        logger.error("REINDEX episodic_memory_tsv_gin failed: %s", exc)
         return 0
 
 
 async def search_episodic_memory(
+    conn,
     query: str, soc_vendor: str = "", sdk_version: str = "", limit: int = 5,
     min_quality: float | None = None,
 ) -> list[dict]:
-    """Search L3 episodic memory using FTS5 (with LIKE fallback).
+    """Search L3 episodic memory using PG full-text search.
 
-    Returns matching memories sorted by relevance, filtered by vendor/SDK if provided.
+    Returns matching memories sorted by ts_rank (relevance), filtered
+    by vendor/SDK/quality if provided.
+
+    SP-3.12 (2026-04-20): ported from SQLite FTS5 (``MATCH`` +
+    BM25 ordering + LIKE fallback) to PG's ``tsv @@ plainto_tsquery``
+    + ``ts_rank`` on the STORED tsvector column added in alembic 0017.
+
+    Ranking drift from BM25 to ts_rank was pre-approved by the
+    operator in the design doc (01-design-decisions.md §5). The
+    contract this function preserves is **result-set equivalence**:
+    the same rows match (modulo stop-word filtering by PG's English
+    dictionary), but within the match set the order may differ.
 
     Phase 67-E: `min_quality` pushes the similarity-proxy floor into
     SQL so callers that want cosine-style gating (the Tier-1 sandbox
-    path wants > 0.85) don't have to over-fetch then Python-filter.
-    None = no floor (matches pre-67-E behaviour).
+    path wants > 0.85) don't over-fetch and Python-filter.
     """
-    results: list[dict] = []
+    conditions: list[str] = ["tsv @@ plainto_tsquery('english', $1)"]
+    params: list = [query]
+    if soc_vendor:
+        conditions.append(f"soc_vendor = ${len(params) + 1}")
+        params.append(soc_vendor)
+    if sdk_version:
+        conditions.append(f"sdk_version = ${len(params) + 1}")
+        params.append(sdk_version)
+    if min_quality is not None:
+        conditions.append(f"quality_score >= ${len(params) + 1}")
+        params.append(min_quality)
+    # LIMIT bind is the final positional param.
+    params.append(limit)
+    sql = (
+        "SELECT *, ts_rank(tsv, plainto_tsquery('english', $1)) AS rank "
+        "FROM episodic_memory WHERE " + " AND ".join(conditions)
+        + f" ORDER BY rank DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
+    results = [_episodic_row_to_dict(r) for r in rows]
 
-    # Try FTS5 first
-    try:
-        fts_query = query.replace('"', '""')  # Escape quotes for FTS5
-        sql = """
-            SELECT em.*, rank
-            FROM episodic_memory_fts fts
-            JOIN episodic_memory em ON em.rowid = fts.rowid
-            WHERE episodic_memory_fts MATCH ?
-        """
-        params: list = [f'"{fts_query}"']
-        if soc_vendor:
-            sql += " AND em.soc_vendor = ?"
-            params.append(soc_vendor)
-        if sdk_version:
-            sql += " AND em.sdk_version = ?"
-            params.append(sdk_version)
-        if min_quality is not None:
-            sql += " AND em.quality_score >= ?"
-            params.append(min_quality)
-        sql += " ORDER BY rank LIMIT ?"
-        params.append(limit)
-        async with _conn().execute(sql, params) as cur:
-            rows = await cur.fetchall()
-        results = [_episodic_row_to_dict(r) for r in rows]
-    except Exception:
-        # FTS5 not available — use LIKE fallback
-        pass
-
-    if not results:
-        sql = "SELECT * FROM episodic_memory WHERE (error_signature LIKE ? OR solution LIKE ?)"
-        like_param = f"%{query}%"
-        params = [like_param, like_param]
-        if soc_vendor:
-            sql += " AND soc_vendor = ?"
-            params.append(soc_vendor)
-        if sdk_version:
-            sql += " AND sdk_version = ?"
-            params.append(sdk_version)
-        if min_quality is not None:
-            sql += " AND quality_score >= ?"
-            params.append(min_quality)
-        sql += " ORDER BY quality_score DESC, created_at DESC LIMIT ?"
-        params.append(limit)
-        async with _conn().execute(sql, params) as cur:
-            rows = await cur.fetchall()
-        results = [_episodic_row_to_dict(r) for r in rows]
-
-    # Increment access count for returned results
+    # Increment access count for returned rows (best-effort — a write
+    # failure here must not hide search hits from the caller).
     for r in results:
         try:
-            await _conn().execute(
-                "UPDATE episodic_memory SET access_count = access_count + 1 WHERE id = ?",
-                (r["id"],),
+            await conn.execute(
+                "UPDATE episodic_memory SET access_count = access_count + 1 "
+                "WHERE id = $1",
+                r["id"],
             )
         except Exception:
             pass
-    if results:
-        await _conn().commit()
-
     return results
 
 
-async def get_episodic_memory(memory_id: str) -> dict | None:
-    async with _conn().execute("SELECT * FROM episodic_memory WHERE id = ?", (memory_id,)) as cur:
-        row = await cur.fetchone()
+async def get_episodic_memory(conn, memory_id: str) -> dict | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM episodic_memory WHERE id = $1", memory_id,
+    )
     return _episodic_row_to_dict(row) if row else None
 
 
 async def list_episodic_memories(
-    soc_vendor: str = "", limit: int = 50,
+    conn, soc_vendor: str = "", limit: int = 50,
 ) -> list[dict]:
-    sql = "SELECT * FROM episodic_memory"
+    conditions: list[str] = []
     params: list = []
     if soc_vendor:
-        sql += " WHERE soc_vendor = ?"
+        conditions.append(f"soc_vendor = ${len(params) + 1}")
         params.append(soc_vendor)
-    sql += " ORDER BY created_at DESC LIMIT ?"
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    async with _conn().execute(sql, params) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        "SELECT * FROM episodic_memory"
+        + where
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
     return [_episodic_row_to_dict(r) for r in rows]
 
 
-async def delete_episodic_memory(memory_id: str) -> bool:
-    # Remove from FTS5 first
+async def delete_episodic_memory(conn, memory_id: str) -> bool:
+    # SP-3.12: no FTS5 virtual-table "magic delete" row needed — the
+    # STORED tsv column disappears with the row.
+    status = await conn.execute(
+        "DELETE FROM episodic_memory WHERE id = $1", memory_id,
+    )
     try:
-        await _conn().execute(
-            """INSERT INTO episodic_memory_fts(episodic_memory_fts, rowid, error_signature, solution, soc_vendor, tags)
-               SELECT 'delete', rowid, error_signature, solution, soc_vendor, tags
-               FROM episodic_memory WHERE id = ?""",
-            (memory_id,),
-        )
-    except Exception as exc:
-        logger.warning("FTS5 delete failed for %s: %s", memory_id, exc)
-    cur = await _conn().execute("DELETE FROM episodic_memory WHERE id = ?", (memory_id,))
-    await _conn().commit()
-    return cur.rowcount > 0
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
-async def episodic_memory_count() -> int:
-    async with _conn().execute("SELECT COUNT(*) FROM episodic_memory") as cur:
-        row = await cur.fetchone()
-    return row[0] if row else 0
+async def episodic_memory_count(conn) -> int:
+    n = await conn.fetchval("SELECT COUNT(*) FROM episodic_memory")
+    return int(n) if n is not None else 0
 
 
 def _episodic_row_to_dict(row) -> dict:
     d = dict(row)
     if isinstance(d.get("tags"), str):
         d["tags"] = json.loads(d["tags"])
-    # Remove FTS5 rank column if present
+    # Strip the tsv column (bytes/PG type — not JSON-serialisable
+    # and not part of the public API) and the ts_rank alias when
+    # present (only set by search_episodic_memory).
+    d.pop("tsv", None)
     d.pop("rank", None)
     return d

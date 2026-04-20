@@ -110,17 +110,22 @@ async def record_clarification_choice(
         "recorded_at": time.time(),
     })
     try:
-        await db.insert_episodic_memory({
-            "id": memory_id,
-            "error_signature": sig,
-            "solution": solution_blob,
-            "soc_vendor": "", "sdk_version": "", "hardware_rev": "",
-            "source_task_id": None,
-            "source_agent_id": None,
-            "gerrit_change_id": None,
-            "tags": [_TAG_PREFIX, f"conflict:{conflict_id}"],
-            "quality_score": max(0.0, min(1.0, quality)),
-        })
+        # SP-3.12: intent_memory.record_clarification_choice runs
+        # from the /intent/parse handler's post-response hook (worker
+        # context, no request conn held). Acquire pool conn inline.
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_episodic_memory(_conn, {
+                "id": memory_id,
+                "error_signature": sig,
+                "solution": solution_blob,
+                "soc_vendor": "", "sdk_version": "", "hardware_rev": "",
+                "source_task_id": None,
+                "source_agent_id": None,
+                "gerrit_change_id": None,
+                "tags": [_TAG_PREFIX, f"conflict:{conflict_id}"],
+                "quality_score": max(0.0, min(1.0, quality)),
+            })
     except Exception as exc:
         logger.warning(
             "intent_memory: record_clarification_choice failed "
@@ -172,9 +177,11 @@ async def lookup_prior_choice(
     query = query_sig
 
     try:
-        rows = await db.search_episodic_memory(
-            query, limit=top_k, min_quality=min_quality,
-        )
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            rows = await db.search_episodic_memory(
+                _conn, query, limit=top_k, min_quality=min_quality,
+            )
     except Exception as exc:
         logger.debug("intent_memory: search failed: %s", exc)
         return None

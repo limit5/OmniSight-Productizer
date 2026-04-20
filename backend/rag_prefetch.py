@@ -178,11 +178,15 @@ async def prefetch_for_error(
         return None
 
     try:
+        # SP-3.12: rag_prefetch runs in an async worker context —
+        # acquire pool conn for the search + access-count UPDATE.
         from backend import db
-        hits_raw = await db.search_episodic_memory(
-            sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
-            limit=_top_k() * 2,  # over-fetch, then apply confidence filter
-        )
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            hits_raw = await db.search_episodic_memory(
+                _conn, sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
+                limit=_top_k() * 2,  # over-fetch, then apply confidence filter
+            )
     except Exception as exc:
         logger.warning("rag_prefetch: episodic search failed: %s", exc)
         _bump("search_error")
@@ -299,10 +303,12 @@ async def prefetch_for_sandbox_error(
     min_cos = _min_cosine()
     try:
         from backend import db
-        hits_raw = await db.search_episodic_memory(
-            sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
-            limit=_top_k() * 2, min_quality=min_cos,
-        )
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            hits_raw = await db.search_episodic_memory(
+                _conn, sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
+                limit=_top_k() * 2, min_quality=min_cos,
+            )
     except Exception as exc:
         logger.warning("rag_prefetch(sandbox): episodic search failed: %s", exc)
         _bump("search_error")

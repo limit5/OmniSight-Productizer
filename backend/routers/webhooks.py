@@ -477,7 +477,9 @@ async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
 
             for finding in related[:3]:  # Max 3 memories per merge
                 memory_id = f"mem-{uuid.uuid4().hex[:12]}"
-                await db.insert_episodic_memory({
+                # SP-3.12: conn already acquired at the top of this
+                # try/except block (see SP-3.9 change) — reuse it.
+                await db.insert_episodic_memory(_conn, {
                     "id": memory_id,
                     "error_signature": finding.get("content", "")[:500],
                     "solution": f"Fix: {subject}",
