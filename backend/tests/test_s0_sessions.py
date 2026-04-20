@@ -238,3 +238,54 @@ def test_mask_token():
     from backend.auth import _mask_token
     assert _mask_token("abcdefghijklmnop") == "abcd***mnop"
     assert _mask_token("short") == "***"
+
+
+# ── SP-4.3b: concurrent-rotation contract test ──────────────────
+# Load-bearing regression guard for the pg_advisory_xact_lock in
+# _rotate_session_impl. Without the lock, two asyncio.gather-style
+# callers observing the same un-rotated old_token would both create
+# a new session; the winner's rotated_from pointer would overwrite
+# the other's, leaving a dangling new session and a double token
+# issue for one logical rotation. The test asserts exactly one
+# *distinct* new session results, with the other call returning the
+# same token via the already-rotated idempotency branch.
+
+
+@pytest.mark.asyncio
+async def test_rotate_session_concurrent_same_token_single_winner(_s0_db):
+    import asyncio
+    _, auth, _ = _s0_db
+    u = await auth.create_user(
+        "conc@t.com", "Conc", role="viewer", password="pw",
+    )
+    old = await auth.create_session(u.id, ip="1.1.1.1", user_agent="UA")
+
+    # Two concurrent rotations of the exact same old_token — under
+    # the advisory lock these serialise; the second sees rotated_from
+    # set and returns the first rotation's target.
+    results = await asyncio.gather(
+        auth.rotate_session(old.token, ip="1.1.1.1", user_agent="UA"),
+        auth.rotate_session(old.token, ip="1.1.1.1", user_agent="UA"),
+    )
+    new_tokens = {sess.token for sess, _ in results}
+    assert len(new_tokens) == 1, (
+        "concurrent rotate_session on same old_token must yield one "
+        f"new session (got {len(new_tokens)}: {new_tokens})"
+    )
+
+    # Exactly one fresh session row in the DB for this user besides
+    # the rotated-old one (the grace-window survivor).
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT token, rotated_from FROM sessions "
+            "WHERE user_id = $1 ORDER BY created_at ASC",
+            u.id,
+        )
+    # Expect: old (rotated_from=new), new (rotated_from=None).
+    assert len(rows) == 2, f"expected 2 rows, got {len(rows)}: {rows}"
+    winner_token = next(iter(new_tokens))
+    old_row = next(r for r in rows if r["token"] == old.token)
+    new_row = next(r for r in rows if r["token"] == winner_token)
+    assert old_row["rotated_from"] == winner_token
+    assert new_row["rotated_from"] is None

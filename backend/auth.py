@@ -676,16 +676,20 @@ def get_session_metadata(session: "Session") -> dict:
         return {}
 
 
-async def update_session_metadata(token: str, updates: dict) -> dict:
-    """Merge *updates* into the session's metadata JSON and persist."""
+async def _update_session_metadata_impl(
+    conn, token: str, updates: dict,
+) -> dict:
     import json
-    if not token:
-        return {}
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT metadata FROM sessions WHERE token=?", (token,),
-    ) as cur:
-        r = await cur.fetchone()
+    # SELECT FOR UPDATE holds a row-level lock for the duration of
+    # the tx — concurrent metadata updates on the same session
+    # serialise on the lock instead of racing on the read.
+    # Without it, two updates can both see the same baseline,
+    # compute different merged dicts, and the later UPDATE clobbers
+    # the earlier one.
+    r = await conn.fetchrow(
+        "SELECT metadata FROM sessions WHERE token = $1 FOR UPDATE",
+        token,
+    )
     if not r:
         return {}
     try:
@@ -695,10 +699,33 @@ async def update_session_metadata(token: str, updates: dict) -> dict:
     meta.update(updates)
     dumped = json.dumps(meta)
     await conn.execute(
-        "UPDATE sessions SET metadata=? WHERE token=?", (dumped, token),
+        "UPDATE sessions SET metadata = $1 WHERE token = $2",
+        dumped, token,
     )
-    await conn.commit()
     return meta
+
+
+async def update_session_metadata(
+    token: str, updates: dict, conn=None,
+) -> dict:
+    """Merge *updates* into the session's metadata JSON and persist.
+
+    SP-4.3b: SELECT FOR UPDATE + transaction prevents lost updates
+    under concurrent writes to the same session's metadata. The
+    ``last_write_wins`` semantic of the old code was acceptable under
+    SQLite (one writer at a time) but not under pool concurrency.
+    """
+    if not token:
+        return {}
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            async with owned_conn.transaction():
+                return await _update_session_metadata_impl(
+                    owned_conn, token, updates,
+                )
+    async with conn.transaction():
+        return await _update_session_metadata_impl(conn, token, updates)
 
 
 async def delete_session(token: str, conn=None) -> None:
@@ -733,50 +760,116 @@ async def cleanup_expired_sessions(conn=None) -> int:
         return 0
 
 
-async def rotate_session(old_token: str, ip: str = "",
-                         user_agent: str = "") -> tuple[Session, str]:
+async def _rotate_session_impl(
+    conn, old_token: str, ip: str, user_agent: str,
+) -> tuple[Session, str]:
+    # Advisory lock scoped to this token — prevents token-explosion
+    # race when two callers concurrently rotate the same old_token
+    # (without it, both would read the same row, both create_session,
+    # both mark rotated_from → two new sessions for one logical
+    # rotation). The lock is tx-scoped: released on COMMIT/ROLLBACK.
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"rotate-session-{old_token}",
+    )
+    # Re-read the old session INSIDE the lock so we see any prior
+    # rotation that won the race. get_session's throttled last_seen
+    # update is fine to piggy-back on.
+    old = await _get_session_impl(conn, old_token)
+    if not old:
+        raise ValueError("session not found or expired")
+    # If the old token already has rotated_from set, a prior rotation
+    # won — return that rotation's target instead of creating another.
+    if old.rotated_from:
+        existing = await _get_session_impl(conn, old.rotated_from)
+        if existing is not None:
+            return existing, old_token
+    new_sess = await _create_session_impl(conn, old.user_id, ip, user_agent)
+    grace_expires = time.time() + ROTATION_GRACE_S
+    await conn.execute(
+        "UPDATE sessions SET rotated_from = $1, expires_at = $2 "
+        "WHERE token = $3",
+        new_sess.token, grace_expires, old_token,
+    )
+    logger.info(
+        "[AUTH] Session rotated for user %s (grace %ds)",
+        old.user_id, ROTATION_GRACE_S,
+    )
+    return new_sess, old_token
+
+
+async def rotate_session(
+    old_token: str, ip: str = "", user_agent: str = "", conn=None,
+) -> tuple[Session, str]:
     """Create a new session for the same user, mark the old token as
     rotated (``rotated_from`` → new token) and let it live for a 30-s
     grace window so in-flight requests finish.
 
     Returns ``(new_session, old_token)``.
+
+    Phase-3-Runtime-v2 SP-4.3b (2026-04-20): ported to native asyncpg.
+    Now serialises concurrent rotations of the same ``old_token`` via
+    ``pg_advisory_xact_lock`` (same recipe as SP-4.1 audit.log's
+    per-tenant chain lock). Without this, two callers could both
+    observe the un-rotated old session and each create a new session
+    — the user ends up with two new tokens for one logical rotation,
+    and the winner's rotated_from pointer overwrites the other's.
     """
-    old = await get_session(old_token)
-    if not old:
-        raise ValueError("session not found or expired")
-    new_sess = await create_session(old.user_id, ip=ip, user_agent=user_agent)
-    conn = await _conn()
-    grace_expires = time.time() + ROTATION_GRACE_S
-    await conn.execute(
-        "UPDATE sessions SET rotated_from=?, expires_at=? WHERE token=?",
-        (new_sess.token, grace_expires, old_token),
-    )
-    await conn.commit()
-    logger.info("[AUTH] Session rotated for user %s (grace %ds)",
-                old.user_id, ROTATION_GRACE_S)
-    return new_sess, old_token
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            async with owned_conn.transaction():
+                return await _rotate_session_impl(
+                    owned_conn, old_token, ip, user_agent,
+                )
+    async with conn.transaction():
+        return await _rotate_session_impl(conn, old_token, ip, user_agent)
 
 
-async def rotate_user_sessions(user_id: str, exclude_token: str | None = None) -> int:
-    """Expire all sessions for *user_id* (except *exclude_token*) with
-    a 30-s grace window. Used when a user's role changes."""
-    conn = await _conn()
+async def _rotate_user_sessions_impl(
+    conn, user_id: str, exclude_token: str | None,
+) -> int:
     now = time.time()
     grace = now + ROTATION_GRACE_S
     if exclude_token:
-        cur = await conn.execute(
-            "UPDATE sessions SET expires_at=? "
-            "WHERE user_id=? AND token!=? AND expires_at>?",
-            (grace, user_id, exclude_token, now),
+        status = await conn.execute(
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE user_id = $2 AND token != $3 AND expires_at > $4",
+            grace, user_id, exclude_token, now,
         )
     else:
-        cur = await conn.execute(
-            "UPDATE sessions SET expires_at=? "
-            "WHERE user_id=? AND expires_at>?",
-            (grace, user_id, now),
+        status = await conn.execute(
+            "UPDATE sessions SET expires_at = $1 "
+            "WHERE user_id = $2 AND expires_at > $3",
+            grace, user_id, now,
         )
-    await conn.commit()
-    return cur.rowcount or 0
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
+
+
+async def rotate_user_sessions(
+    user_id: str, exclude_token: str | None = None, conn=None,
+) -> int:
+    """Expire all sessions for *user_id* (except *exclude_token*) with
+    a 30-s grace window. Used when a user's role changes.
+
+    SP-4.3b: the multi-row UPDATE does NOT advisory-lock — it's a
+    bulk operation where ordering across concurrent callers doesn't
+    matter (the resulting ``expires_at`` is always ``now + GRACE``,
+    idempotent-ish under concurrent calls). A session created mid-
+    rotation (between the SELECT inside UPDATE and COMMIT) may or
+    may not be caught; admin "logout everything" doesn't promise to
+    catch in-flight new sessions — documented.
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _rotate_user_sessions_impl(
+                owned_conn, user_id, exclude_token,
+            )
+    return await _rotate_user_sessions_impl(conn, user_id, exclude_token)
 
 
 async def check_ua_binding(session: Session, current_ua: str) -> bool:

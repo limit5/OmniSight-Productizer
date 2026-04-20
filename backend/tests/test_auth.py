@@ -88,10 +88,6 @@ async def test_authenticate_password(_auth_db):
 # ── sessions ────────────────────────────────────────────────────
 
 
-@pytest.mark.skip(
-    reason="SP-4.3: create_session / get_session / delete_session still "
-           "use compat _conn(); unskips when SP-4.3 ports session CRUD."
-)
 @pytest.mark.asyncio
 async def test_session_create_get_delete(_auth_db):
     _, auth = _auth_db
@@ -104,22 +100,20 @@ async def test_session_create_get_delete(_auth_db):
     assert (await auth.get_session(sess.token)) is None
 
 
-@pytest.mark.skip(
-    reason="SP-4.3: create_session + direct db._conn() UPDATE on "
-           "sessions table; unskips when SP-4.3 ports session CRUD."
-)
 @pytest.mark.asyncio
 async def test_expired_session_is_purged(_auth_db, monkeypatch):
+    # SP-4.3a (2026-04-20): port → use pool acquire for the direct
+    # UPDATE that forces expiry; get_session now takes the pool conn
+    # path polymorphically.
     _, auth = _auth_db
     u = await auth.create_user("a@b.com", "Alice", role="viewer", password="pw")
     sess = await auth.create_session(u.id)
-    # Force it to be expired by rewriting the row
-    from backend import db
-    await db._conn().execute(
-        "UPDATE sessions SET expires_at=? WHERE token=?",
-        (0.0, sess.token),
-    )
-    await db._conn().commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET expires_at = $1 WHERE token = $2",
+            0.0, sess.token,
+        )
     assert (await auth.get_session(sess.token)) is None
 
 
@@ -227,7 +221,6 @@ async def test_github_installation_upsert_and_list(_auth_db):
 # ── K4: session rotation ──────────────────────────────────────
 
 
-@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_session_creates_new_and_graces_old(_auth_db):
     _, auth = _auth_db
@@ -251,27 +244,27 @@ async def test_rotate_session_creates_new_and_graces_old(_auth_db):
     assert new_fetched.user_id == u.id
 
 
-@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_session_grace_window_expires(_auth_db):
+    # SP-4.3b (2026-04-20): migrated direct db._conn() UPDATE to pool
+    # acquire + $N placeholder.
     _, auth = _auth_db
-    from backend import db
     u = await auth.create_user("g@b.com", "Grace", role="viewer", password="pw")
     old_sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="UA")
     new_sess, _ = await auth.rotate_session(old_sess.token, ip="1.2.3.4", user_agent="UA")
 
-    await db._conn().execute(
-        "UPDATE sessions SET expires_at=? WHERE token=?",
-        (0.0, old_sess.token),
-    )
-    await db._conn().commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET expires_at = $1 WHERE token = $2",
+            0.0, old_sess.token,
+        )
     assert (await auth.get_session(old_sess.token)) is None, \
         "old token must expire after grace window"
     assert (await auth.get_session(new_sess.token)) is not None, \
         "new token must remain valid"
 
 
-@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_session_nonexistent_raises(_auth_db):
     _, auth = _auth_db
@@ -279,7 +272,6 @@ async def test_rotate_session_nonexistent_raises(_auth_db):
         await auth.rotate_session("nonexistent-token")
 
 
-@pytest.mark.skip(reason="SP-4.3: session rotate CRUD pending port")
 @pytest.mark.asyncio
 async def test_rotate_user_sessions_on_role_change(_auth_db):
     _, auth = _auth_db
@@ -318,7 +310,6 @@ def test_compute_ua_hash_empty():
     assert compute_ua_hash("") == ""
 
 
-@pytest.mark.skip(reason="SP-4.3: create_session pending port")
 @pytest.mark.asyncio
 async def test_ua_binding_match(_auth_db):
     _, auth = _auth_db
@@ -327,7 +318,6 @@ async def test_ua_binding_match(_auth_db):
     assert await auth.check_ua_binding(sess, "MyBrowser/1.0") is True
 
 
-@pytest.mark.skip(reason="SP-4.3: create_session pending port")
 @pytest.mark.asyncio
 async def test_ua_binding_mismatch_returns_false(_auth_db):
     _, auth = _auth_db
@@ -336,7 +326,6 @@ async def test_ua_binding_mismatch_returns_false(_auth_db):
     assert await auth.check_ua_binding(sess, "Firefox/115") is False
 
 
-@pytest.mark.skip(reason="SP-4.3: create_session pending port")
 @pytest.mark.asyncio
 async def test_ua_binding_empty_ua_passes(_auth_db):
     _, auth = _auth_db
