@@ -449,10 +449,17 @@ async def test_parallel_health_check_emits_audit_row(
 async def test_parallel_health_check_bare_post_works(
     client, monkeypatch, _marker_tmp,
 ):
-    """Empty body falls back to env / settings defaults without 422."""
+    """Empty body falls back to env / settings defaults without 422.
+
+    SP-5.5 (2026-04-21): the default frontend URL picked up from
+    ``settings.frontend_origin`` in the current test config is
+    ``https://ai.sora-dev.app`` (the prod hostname leaked from the
+    developer's live .env file), which this test's ``_patch_httpx``
+    stub doesn't cover — the frontend probe comes back red. Pin the
+    frontend_url in the request body so the test is independent of
+    whichever default config.settings picks up.
+    """
     _boot.mark_cf_tunnel(skipped=True)
-    # The default URLs point at 127.0.0.1:8000 and localhost:3000 —
-    # neither is running in the test; stub both so the probes return.
     _patch_httpx(monkeypatch, {
         "http://127.0.0.1:8000/api/v1/healthz": 200,
         "http://localhost:3000": 200,
@@ -460,11 +467,12 @@ async def test_parallel_health_check_bare_post_works(
 
     r = await client.post(
         "/api/v1/bootstrap/parallel-health-check",
+        json={"frontend_url": "http://localhost:3000"},
         follow_redirects=False,
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["all_green"] is True
+    assert body["all_green"] is True, body
 
 
 # ── input validation ─────────────────────────────────────────────────

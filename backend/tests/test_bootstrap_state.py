@@ -19,16 +19,34 @@ import pytest
 
 
 @pytest.fixture()
-async def _bootstrap_db(monkeypatch):
-    """Fresh sqlite + isolated bootstrap marker path per test."""
+async def _bootstrap_db(pg_test_pool, pg_test_dsn, monkeypatch):
+    """pg_test_pool-backed + isolated bootstrap marker path per test.
+
+    SP-5.5 migration (2026-04-21): fresh sqlite tempfile → PG pool.
+    bootstrap.py's 6 DB-touching functions are now pool-native; the
+    other bootstrap helpers that still read from ``db._conn()``
+    (``list_bootstrap_steps`` back-compat paths, etc.) fall through
+    the compat wrapper to the same PG via ``OMNISIGHT_DATABASE_URL``.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    # Clear llm_provider + CF env so _llm_provider_is_configured() /
+    # _cf_tunnel_is_configured() don't auto-backfill their respective
+    # bootstrap steps via environment defaults. Tests in this module
+    # assume a genuinely fresh install from the DB's perspective.
+    from backend.config import settings as _settings
+    monkeypatch.setattr(_settings, "llm_provider", "")
+    monkeypatch.delenv("OMNISIGHT_CLOUDFLARE_TUNNEL_ID", raising=False)
+    monkeypatch.delenv("OMNISIGHT_CF_TUNNEL_SKIP", raising=False)
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "bootstrap_state.db")
         marker = os.path.join(tmp, ".bootstrap_state.json")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", db_path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = db_path
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users, bootstrap_state "
+                "RESTART IDENTITY CASCADE"
+            )
         from backend import db
-        db._DB_PATH = db._resolve_db_path()
+        if db._db is not None:
+            await db.close()
         await db.init()
         from backend import bootstrap
         bootstrap._reset_for_tests(Path(marker))
@@ -37,6 +55,11 @@ async def _bootstrap_db(monkeypatch):
         finally:
             await db.close()
             bootstrap._reset_for_tests()
+            async with pg_test_pool.acquire() as conn:
+                await conn.execute(
+                    "TRUNCATE users, bootstrap_state "
+                    "RESTART IDENTITY CASCADE"
+                )
 
 
 # ── schema ──────────────────────────────────────────────────────
@@ -44,19 +67,32 @@ async def _bootstrap_db(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bootstrap_state_table_exists_with_expected_columns(_bootstrap_db):
-    db, _ = _bootstrap_db
-    conn = db._conn()
-    async with conn.execute("PRAGMA table_info(bootstrap_state)") as cur:
-        cols = {row[1]: row for row in await cur.fetchall()}
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT column_name, is_nullable "
+            "FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'bootstrap_state'"
+        )
+        pk_rows = await conn.fetch(
+            "SELECT a.attname AS column_name "
+            "FROM pg_constraint c "
+            "JOIN pg_attribute a ON a.attnum = ANY(c.conkey) "
+            "AND a.attrelid = c.conrelid "
+            "WHERE c.contype = 'p' "
+            "AND c.conrelid = 'public.bootstrap_state'::regclass"
+        )
+    cols = {r["column_name"]: r["is_nullable"] for r in rows}
     assert set(cols.keys()) == {"step", "completed_at", "actor_user_id", "metadata"}
-    # step is PRIMARY KEY (pk flag is column 5 of PRAGMA table_info)
-    assert cols["step"][5] == 1
+    # PRIMARY KEY(step)
+    assert {r["column_name"] for r in pk_rows} == {"step"}
     # completed_at NOT NULL
-    assert cols["completed_at"][3] == 1
+    assert cols["completed_at"] == "NO"
     # metadata NOT NULL
-    assert cols["metadata"][3] == 1
+    assert cols["metadata"] == "NO"
     # actor_user_id NULLABLE
-    assert cols["actor_user_id"][3] == 0
+    assert cols["actor_user_id"] == "YES"
 
 
 # ── record_bootstrap_step ──────────────────────────────────────
@@ -233,16 +269,17 @@ async def test_missing_required_steps_autobackfills_admin_password_rotated(
     auto-backfill STEP_ADMIN_PASSWORD. Evidence is a users-table
     row with ``must_change_password=0`` so a genuinely fresh
     install (no users at all) does NOT trigger the backfill."""
-    db, bootstrap = _bootstrap_db
+    _, bootstrap = _bootstrap_db
     # Insert a rotated admin row directly (bypasses the wizard handler
     # that would have written STEP_ADMIN_PASSWORD itself).
-    conn = db._conn()
-    await conn.execute(
-        "INSERT INTO users (id, email, name, role, enabled, "
-        "must_change_password, password_hash, created_at, tenant_id) "
-        "VALUES ('u-1', 'a@b', 'A', 'admin', 1, 0, 'hash', 0, 't-default')"
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (id, email, name, role, enabled, "
+            "must_change_password, password_hash, created_at, tenant_id) "
+            "VALUES ('u-1', 'a@b', 'A', 'admin', 1, 0, 'hash', "
+            "'2024-01-01 00:00:00', 't-default')"
+        )
 
     assert await bootstrap._admin_rotated_evidence() is True
 
@@ -263,14 +300,15 @@ async def test_missing_required_steps_admin_no_backfill_without_evidence(
     not yet rotated), the admin-rotated-evidence probe must return
     False, and the backfill must NOT fire. Otherwise we'd silently
     sign off on an un-rotated default admin."""
-    db, bootstrap = _bootstrap_db
-    conn = db._conn()
-    await conn.execute(
-        "INSERT INTO users (id, email, name, role, enabled, "
-        "must_change_password, password_hash, created_at, tenant_id) "
-        "VALUES ('u-0', 'default@admin', 'Default', 'admin', 1, 1, 'hash', 0, 't-default')"
-    )
-    await conn.commit()
+    _, bootstrap = _bootstrap_db
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (id, email, name, role, enabled, "
+            "must_change_password, password_hash, created_at, tenant_id) "
+            "VALUES ('u-0', 'default@admin', 'Default', 'admin', 1, 1, "
+            "'hash', '2024-01-01 00:00:00', 't-default')"
+        )
 
     assert await bootstrap._admin_password_is_default() is True
     assert await bootstrap._admin_rotated_evidence() is False

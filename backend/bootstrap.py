@@ -86,24 +86,21 @@ async def _admin_password_is_default() -> bool:
     yet".
     """
     try:
-        from backend import db
-
-        conn = db._conn()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            n = await conn.fetchval(
+                "SELECT COUNT(*) FROM users "
+                "WHERE role = 'admin' AND enabled = 1 "
+                "AND must_change_password = 1"
+            )
     except Exception as exc:
-        logger.debug("bootstrap: db not initialised (%s) — treating admin password as default", exc)
+        logger.warning(
+            "bootstrap: admin password probe failed (%s) — "
+            "fail-closed: treating as default",
+            exc,
+        )
         return True
-
-    try:
-        async with conn.execute(
-            "SELECT COUNT(*) AS n FROM users "
-            "WHERE role='admin' AND enabled=1 AND must_change_password=1"
-        ) as cur:
-            row = await cur.fetchone()
-    except Exception as exc:
-        logger.warning("bootstrap: admin password probe failed: %s", exc)
-        return True
-
-    return bool(row and (row["n"] or 0) > 0)
+    return bool(n and int(n) > 0)
 
 
 async def _admin_rotated_evidence() -> bool:
@@ -121,27 +118,19 @@ async def _admin_rotated_evidence() -> bool:
     we don't mark the step complete on a genuinely empty users table.
     """
     try:
-        from backend import db
-
-        conn = db._conn()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            n = await conn.fetchval(
+                "SELECT COUNT(*) FROM users "
+                "WHERE role = 'admin' AND enabled = 1 "
+                "AND must_change_password = 0"
+            )
     except Exception as exc:
-        logger.debug(
-            "bootstrap: db not initialised (%s) — no admin-rotated evidence",
-            exc,
+        logger.warning(
+            "bootstrap: admin-rotated-evidence probe failed: %s", exc,
         )
         return False
-
-    try:
-        async with conn.execute(
-            "SELECT COUNT(*) AS n FROM users "
-            "WHERE role='admin' AND enabled=1 AND must_change_password=0"
-        ) as cur:
-            row = await cur.fetchone()
-    except Exception as exc:
-        logger.warning("bootstrap: admin-rotated-evidence probe failed: %s", exc)
-        return False
-
-    return bool(row and (row["n"] or 0) > 0)
+    return bool(n and int(n) > 0)
 
 
 def _llm_provider_is_configured() -> bool:
@@ -290,24 +279,27 @@ async def reset_bootstrap_state_table() -> int:
     into the "missing" bucket so :func:`missing_required_steps` reports
     a fresh install. The ``bootstrap_state`` table itself stays so the
     next wizard run can upsert new rows without re-running the schema.
+
+    SP-5.5 (2026-04-21): count + delete now land inside a single tx
+    so the returned ``before`` count matches the row-set that was
+    actually removed (previously under compat the two statements were
+    on the same connection but not wrapped — a concurrent inserter
+    between COUNT and DELETE could've given a misleading "removed N"
+    return value).
     """
-    from backend import db
-
     try:
-        conn = db._conn()
-    except Exception as exc:
-        logger.warning("bootstrap: reset_bootstrap_state_table — db not ready (%s)", exc)
-        return 0
-
-    try:
-        async with conn.execute("SELECT COUNT(*) AS n FROM bootstrap_state") as cur:
-            row = await cur.fetchone()
-        before = int(row["n"] or 0) if row else 0
-        await conn.execute("DELETE FROM bootstrap_state")
-        await conn.commit()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            async with conn.transaction():
+                before = int(await conn.fetchval(
+                    "SELECT COUNT(*) FROM bootstrap_state"
+                ) or 0)
+                await conn.execute("DELETE FROM bootstrap_state")
         return before
     except Exception as exc:
-        logger.warning("bootstrap: reset_bootstrap_state_table failed: %s", exc)
+        logger.warning(
+            "bootstrap: reset_bootstrap_state_table failed: %s", exc,
+        )
         return 0
 
 
@@ -378,49 +370,42 @@ async def record_bootstrap_step(
     if not step:
         raise ValueError("bootstrap step name must be non-empty")
 
-    from backend import db
-
-    try:
-        conn = db._conn()
-    except Exception as exc:
-        logger.warning("bootstrap: cannot record step %s — db not ready (%s)", step, exc)
-        return
-
     payload = _serialise_metadata(metadata)
     try:
-        await conn.execute(
-            "INSERT INTO bootstrap_state (step, completed_at, actor_user_id, metadata) "
-            "VALUES (?, datetime('now'), ?, ?) "
-            "ON CONFLICT(step) DO UPDATE SET "
-            "  completed_at=excluded.completed_at, "
-            "  actor_user_id=excluded.actor_user_id, "
-            "  metadata=excluded.metadata",
-            (step, actor_user_id, payload),
-        )
-        await conn.commit()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            await conn.execute(
+                "INSERT INTO bootstrap_state "
+                "(step, completed_at, actor_user_id, metadata) "
+                "VALUES ($1, "
+                " to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'), "
+                " $2, $3) "
+                "ON CONFLICT (step) DO UPDATE SET "
+                "  completed_at = EXCLUDED.completed_at, "
+                "  actor_user_id = EXCLUDED.actor_user_id, "
+                "  metadata = EXCLUDED.metadata",
+                step, actor_user_id, payload,
+            )
     except Exception as exc:
-        logger.warning("bootstrap: record_bootstrap_step(%s) failed: %s", step, exc)
+        logger.warning(
+            "bootstrap: record_bootstrap_step(%s) failed: %s", step, exc,
+        )
 
 
 async def get_bootstrap_step(step: str) -> Optional[dict[str, Any]]:
     """Return the most recent record for *step*, or ``None`` if absent."""
-    from backend import db
-
     try:
-        conn = db._conn()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT step, completed_at, actor_user_id, metadata "
+                "FROM bootstrap_state WHERE step = $1",
+                step,
+            )
     except Exception as exc:
-        logger.debug("bootstrap: get_bootstrap_step db not ready (%s)", exc)
-        return None
-
-    try:
-        async with conn.execute(
-            "SELECT step, completed_at, actor_user_id, metadata "
-            "FROM bootstrap_state WHERE step=?",
-            (step,),
-        ) as cur:
-            row = await cur.fetchone()
-    except Exception as exc:
-        logger.warning("bootstrap: get_bootstrap_step(%s) failed: %s", step, exc)
+        logger.warning(
+            "bootstrap: get_bootstrap_step(%s) failed: %s", step, exc,
+        )
         return None
     if row is None:
         return None
@@ -434,20 +419,14 @@ async def get_bootstrap_step(step: str) -> Optional[dict[str, Any]]:
 
 async def list_bootstrap_steps() -> list[dict[str, Any]]:
     """Return all recorded wizard steps ordered by ``completed_at`` asc."""
-    from backend import db
-
     try:
-        conn = db._conn()
-    except Exception as exc:
-        logger.debug("bootstrap: list_bootstrap_steps db not ready (%s)", exc)
-        return []
-
-    try:
-        async with conn.execute(
-            "SELECT step, completed_at, actor_user_id, metadata "
-            "FROM bootstrap_state ORDER BY completed_at ASC, step ASC"
-        ) as cur:
-            rows = await cur.fetchall()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT step, completed_at, actor_user_id, metadata "
+                "FROM bootstrap_state "
+                "ORDER BY completed_at ASC, step ASC"
+            )
     except Exception as exc:
         logger.warning("bootstrap: list_bootstrap_steps failed: %s", exc)
         return []
