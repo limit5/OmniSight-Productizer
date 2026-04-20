@@ -31,11 +31,20 @@ async def notify(
     interactive: bool = False,
     interactive_buttons: list[dict] | None = None,
     interactive_channel: str = "*",
+    conn=None,
 ) -> Notification:
     """Create and route a notification through the tiered system.
 
     This is the single entry point — all notification-worthy events
     should call this function.
+
+    Phase-3-Runtime-v2 SP-3.4 (2026-04-20): ``conn`` is polymorphic —
+    request handlers that hold a ``Depends(get_conn)`` conn can pass
+    it through to share the request's pool-scoped connection with the
+    notification insert; workers (watchdog, webhooks, agent
+    orchestration) call without conn and the function borrows one
+    from the pool just for the insert. Matches the
+    routers/tasks.py::_persist pattern.
     """
     level_str = level.value if hasattr(level, "value") else level
     notif = Notification(
@@ -49,10 +58,18 @@ async def notify(
         action_label=action_label,
     )
 
-    # 1. Always persist to DB
+    # 1. Always persist to DB (best-effort — a failed DB write still
+    #    publishes to SSE and routes to external channels so the
+    #    operator sees the notification; durability recovery is Epic 7's
+    #    problem).
     from backend import db
     try:
-        await db.insert_notification(notif.model_dump())
+        if conn is None:
+            from backend.db_pool import get_pool
+            async with get_pool().acquire() as owned_conn:
+                await db.insert_notification(owned_conn, notif.model_dump())
+        else:
+            await db.insert_notification(conn, notif.model_dump())
     except Exception as exc:
         logger.warning("Failed to persist notification: %s", exc)
 
@@ -92,8 +109,16 @@ async def _dispatch_external(notif: Notification) -> None:
 
     Tracks dispatch status in DB. Failed dispatches are retried up to
     notification_max_retries with exponential backoff.
+
+    SP-3.4: always runs in a worker context (spawned via
+    ``asyncio.create_task`` from notify() after the request conn has
+    already been released), so we unconditionally borrow a pool-scoped
+    conn for the dispatch-status update. The network calls (slack /
+    jira / pagerduty) run OUTSIDE the acquire block so a slow webhook
+    doesn't pin a pool connection for the duration of the HTTP call.
     """
     from backend import db
+    from backend.db_pool import get_pool
     level = notif.level
     errors: list[str] = []
     any_required = False
@@ -122,7 +147,10 @@ async def _dispatch_external(notif: Notification) -> None:
     if not any_required:
         # No external channels configured for this level
         try:
-            await db.update_notification_dispatch(notif.id, "skipped")
+            async with get_pool().acquire() as _conn:
+                await db.update_notification_dispatch(
+                    _conn, notif.id, "skipped",
+                )
         except Exception as exc:
             # Fix-B B2/B6: persistence failure is non-fatal but observable.
             logger.warning("notifications: persist skipped status for %s failed: %s", notif.id, exc)
@@ -130,16 +158,20 @@ async def _dispatch_external(notif: Notification) -> None:
             _m.persist_failure_total.labels(module="notifications").inc()
         return
 
-    # Update dispatch status in DB
+    # Update dispatch status in DB (pool conn acquired AFTER network I/O
+    # completed, so we don't hold the conn during slack/jira latency).
     try:
-        if errors:
-            await db.update_notification_dispatch(
-                notif.id, "failed",
-                attempts=settings.notification_max_retries,
-                error=f"Failed channels: {', '.join(errors)}",
-            )
-        else:
-            await db.update_notification_dispatch(notif.id, "sent", attempts=1)
+        async with get_pool().acquire() as _conn:
+            if errors:
+                await db.update_notification_dispatch(
+                    _conn, notif.id, "failed",
+                    attempts=settings.notification_max_retries,
+                    error=f"Failed channels: {', '.join(errors)}",
+                )
+            else:
+                await db.update_notification_dispatch(
+                    _conn, notif.id, "sent", attempts=1,
+                )
     except Exception as exc:
         logger.warning("Failed to update dispatch status for %s: %s", notif.id, exc)
 
@@ -184,48 +216,72 @@ async def _dispatch_chatops(
 _DLQ_RUNNING = False
 
 
-async def retry_failed_notifications(limit: int = 50) -> dict[str, int]:
+async def retry_failed_notifications(
+    limit: int = 50, conn=None,
+) -> dict[str, int]:
     """Scan `dispatch_status='failed'` notifications and re-attempt dispatch.
 
     Exhausted rows (send_attempts >= max_retries) are marked `'dead'` so the
     next sweep skips them. Returns {retried, recovered, dead}.
+
+    SP-3.4: ``conn`` is polymorphic — called from ``run_dlq_loop``
+    (background worker) without conn (auto-acquire), and from tests
+    that want to pass ``pg_test_conn`` for savepoint isolation. The
+    acquired conn is only used for the scan + dead-mark; the
+    per-notification ``_dispatch_external`` call manages its own
+    conn so the outer DLQ sweep doesn't hold the pool while external
+    HTTP calls run.
     """
     from backend import db
-    rows = await db.list_failed_notifications(limit=limit)
-    retried = recovered = dead = 0
-    max_retries = settings.notification_max_retries
-    for row in rows:
-        attempts = int(row.get("send_attempts") or 0)
-        if attempts >= max_retries:
+    owned = False
+    if conn is None:
+        from backend.db_pool import get_pool
+        _owner_cm = get_pool().acquire()
+        conn = await _owner_cm.__aenter__()
+        owned = True
+    try:
+        rows = await db.list_failed_notifications(conn, limit=limit)
+        retried = recovered = dead = 0
+        max_retries = settings.notification_max_retries
+        for row in rows:
+            attempts = int(row.get("send_attempts") or 0)
+            if attempts >= max_retries:
+                try:
+                    await db.update_notification_dispatch(
+                        conn, row["id"], "dead", attempts=attempts,
+                        error=(row.get("last_error") or "exhausted"),
+                    )
+                except Exception as exc:
+                    logger.warning("DLQ: mark dead failed for %s: %s", row.get("id"), exc)
+                    from backend import metrics as _m
+                    _m.persist_failure_total.labels(module="notifications").inc()
+                dead += 1
+                continue
+            retried += 1
             try:
-                await db.update_notification_dispatch(
-                    row["id"], "dead", attempts=attempts,
-                    error=(row.get("last_error") or "exhausted"),
-                )
+                notif = Notification(**{k: row.get(k) for k in (
+                    "id", "level", "title", "message", "source", "timestamp",
+                    "action_url", "action_label",
+                ) if row.get(k) is not None})
             except Exception as exc:
-                logger.warning("DLQ: mark dead failed for %s: %s", row.get("id"), exc)
-                from backend import metrics as _m
-                _m.persist_failure_total.labels(module="notifications").inc()
-            dead += 1
-            continue
-        retried += 1
-        try:
-            notif = Notification(**{k: row.get(k) for k in (
-                "id", "level", "title", "message", "source", "timestamp",
-                "action_url", "action_label",
-            ) if row.get(k) is not None})
-        except Exception as exc:
-            logger.warning("DLQ: cannot rehydrate %s: %s", row.get("id"), exc)
-            continue
-        await _dispatch_external(notif)
-        # Re-check status; dispatched() may have set 'sent'
-        try:
-            fresh = await db.get_notification(notif.id) if hasattr(db, "get_notification") else None
-            if fresh and fresh.get("dispatch_status") == "sent":
-                recovered += 1
-        except Exception as exc:
-            logger.debug("DLQ: post-dispatch status check failed for %s: %s", notif.id, exc)
-    return {"retried": retried, "recovered": recovered, "dead": dead}
+                logger.warning("DLQ: cannot rehydrate %s: %s", row.get("id"), exc)
+                continue
+            await _dispatch_external(notif)
+            # Post-dispatch status check: a dedicated ``get_notification``
+            # helper doesn't exist yet (Epic-7 follow-up); skip the
+            # recovery counter gracefully so the sweep still reports
+            # retried / dead accurately.
+            if hasattr(db, "get_notification"):
+                try:
+                    fresh = await db.get_notification(conn, notif.id)
+                    if fresh and fresh.get("dispatch_status") == "sent":
+                        recovered += 1
+                except Exception as exc:
+                    logger.debug("DLQ: post-dispatch status check failed for %s: %s", notif.id, exc)
+        return {"retried": retried, "recovered": recovered, "dead": dead}
+    finally:
+        if owned:
+            await _owner_cm.__aexit__(None, None, None)
 
 
 async def run_dlq_loop() -> None:

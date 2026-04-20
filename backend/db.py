@@ -1245,25 +1245,23 @@ async def list_handoffs(conn) -> list[dict]:
 #  Notifications
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def insert_notification(data: dict) -> None:
-    await _conn().execute(
-        """INSERT INTO notifications (id, level, title, message, source, timestamp, read, action_url, action_label, auto_resolved)
-           VALUES (:id, :level, :title, :message, :source, :timestamp, :read, :action_url, :action_label, :auto_resolved)
+async def insert_notification(conn, data: dict) -> None:
+    await conn.execute(
+        """INSERT INTO notifications (id, level, title, message, source, timestamp,
+             read, action_url, action_label, auto_resolved)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         """,
-        {
-            "id": data["id"],
-            "level": data["level"],
-            "title": data["title"],
-            "message": data.get("message", ""),
-            "source": data.get("source", ""),
-            "timestamp": data.get("timestamp", ""),
-            "read": 1 if data.get("read") else 0,
-            "action_url": data.get("action_url"),
-            "action_label": data.get("action_label"),
-            "auto_resolved": 1 if data.get("auto_resolved") else 0,
-        },
+        data["id"],
+        data["level"],
+        data["title"],
+        data.get("message", ""),
+        data.get("source", ""),
+        data.get("timestamp", ""),
+        1 if data.get("read") else 0,
+        data.get("action_url"),
+        data.get("action_label"),
+        1 if data.get("auto_resolved") else 0,
     )
-    await _conn().commit()
 
 
 def _notification_row_to_dict(row) -> dict:
@@ -1273,54 +1271,73 @@ def _notification_row_to_dict(row) -> dict:
     return d
 
 
-async def list_notifications(limit: int = 50, level: str = "") -> list[dict]:
-    query = "SELECT * FROM notifications"
-    params: list = []
+async def list_notifications(
+    conn, limit: int = 50, level: str = "",
+) -> list[dict]:
     if level:
-        query += " WHERE level = ?"
-        params.append(level)
-    query += " ORDER BY timestamp DESC LIMIT ?"
-    params.append(limit)
-    async with _conn().execute(query, params) as cur:
-        rows = await cur.fetchall()
+        rows = await conn.fetch(
+            "SELECT * FROM notifications WHERE level = $1 "
+            "ORDER BY timestamp DESC LIMIT $2",
+            level, limit,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM notifications "
+            "ORDER BY timestamp DESC LIMIT $1",
+            limit,
+        )
     return [_notification_row_to_dict(r) for r in rows]
 
 
-async def mark_notification_read(notification_id: str) -> bool:
-    cur = await _conn().execute("UPDATE notifications SET read = 1 WHERE id = ?", (notification_id,))
-    await _conn().commit()
-    return cur.rowcount > 0
+async def mark_notification_read(conn, notification_id: str) -> bool:
+    status = await conn.execute(
+        "UPDATE notifications SET read = 1 WHERE id = $1",
+        notification_id,
+    )
+    # asyncpg status is "UPDATE <n>" — same pattern SP-3.1 / SP-3.2
+    # delete_agent / delete_task use to recover rowcount without
+    # depending on a .rowcount attribute.
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
-async def count_unread_notifications(min_level: str = "warning") -> int:
+async def count_unread_notifications(conn, min_level: str = "warning") -> int:
+    # level values come from a hardcoded dict — no user input reaches
+    # the SQL, so the placeholder-count f-string is injection-safe.
+    # We still bind via positional parameters because that is what
+    # asyncpg actually supports; the dynamic count just produces the
+    # right number of ``$N`` tokens for the IN list.
     levels = {"info": 0, "warning": 1, "action": 2, "critical": 3}
     min_rank = levels.get(min_level, 1)
     valid_levels = [l for l, r in levels.items() if r >= min_rank]
-    placeholders = ",".join("?" * len(valid_levels))
-    async with _conn().execute(
-        f"SELECT COUNT(*) FROM notifications WHERE read = 0 AND level IN ({placeholders})",
-        valid_levels,
-    ) as cur:
-        row = await cur.fetchone()
-    return row[0] if row else 0
+    placeholders = ",".join(f"${i + 1}" for i in range(len(valid_levels)))
+    n = await conn.fetchval(
+        f"SELECT COUNT(*) FROM notifications WHERE read = 0 "
+        f"AND level IN ({placeholders})",
+        *valid_levels,
+    )
+    return int(n) if n is not None else 0
 
 
 async def update_notification_dispatch(
-    notification_id: str, status: str, attempts: int = 0, error: str | None = None,
+    conn, notification_id: str, status: str,
+    attempts: int = 0, error: str | None = None,
 ) -> None:
-    await _conn().execute(
-        "UPDATE notifications SET dispatch_status = ?, send_attempts = ?, last_error = ? WHERE id = ?",
-        (status, attempts, error, notification_id),
+    await conn.execute(
+        "UPDATE notifications SET dispatch_status = $1, "
+        "send_attempts = $2, last_error = $3 WHERE id = $4",
+        status, attempts, error, notification_id,
     )
-    await _conn().commit()
 
 
-async def list_failed_notifications(limit: int = 50) -> list[dict]:
-    async with _conn().execute(
-        "SELECT * FROM notifications WHERE dispatch_status = 'failed' ORDER BY timestamp DESC LIMIT ?",
-        (limit,),
-    ) as cur:
-        rows = await cur.fetchall()
+async def list_failed_notifications(conn, limit: int = 50) -> list[dict]:
+    rows = await conn.fetch(
+        "SELECT * FROM notifications WHERE dispatch_status = 'failed' "
+        "ORDER BY timestamp DESC LIMIT $1",
+        limit,
+    )
     return [_notification_row_to_dict(r) for r in rows]
 
 

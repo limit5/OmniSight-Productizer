@@ -91,30 +91,23 @@ async def client(tmp_path, monkeypatch):
 
     await db.init()
 
-    # Phase-3-Runtime-v2 SP-3.1/3.2 (2026-04-20): routes and worker
-    # paths that need PG access go through two distinct doors:
-    #   * Request handlers use ``Depends(get_conn)`` — a dependency
-    #     override is enough to intercept those.
-    #   * Background/worker code (pipeline.py, invoke.py watchdog,
-    #     polymorphic _persist with conn=None, agents/tools.py) calls
-    #     ``db_pool.get_pool()`` directly and grabs its own conn. An
-    #     override can't intercept that path — the module-global pool
-    #     really has to be initialised.
-    # So when OMNI_TEST_PG_URL is set we run ``init_pool`` (matching
-    # the real lifespan) which installs the module global AND lets the
-    # Depends(get_conn) machinery use the same pool. No separate local
-    # pool, no divergence between request- and worker-scoped writes.
+    # Phase-3-Runtime-v2 SP-3.1/3.2/3.4 (2026-04-20): routes and worker
+    # paths that need PG access both go through the module-global
+    # ``db_pool``. SP-3.4 moved pool ownership to the ``pg_test_pool``
+    # fixture (below) so a single code path initialises it; we only
+    # need to init here for tests that use ``client`` WITHOUT
+    # depending on pg_test_pool. ``_reset_for_tests()`` + idempotent
+    # init covers both paths without double-init errors.
     _dsn = _omni_test_pg_dsn_normalised()
-    _pool_inited = False
+    _pool_inited_by_client = False
     if _dsn:
         from backend import db_pool as _db_pool
-        # Fresh process usually has _pool=None; defensive reset covers
-        # cases where a prior test crashed before its teardown.
-        _db_pool._reset_for_tests()
-        await _db_pool.init_pool(
-            _dsn, min_size=1, max_size=3, command_timeout=10.0,
-        )
-        _pool_inited = True
+        if _db_pool._pool is None:
+            await _db_pool.init_pool(
+                _dsn, min_size=1, max_size=3, command_timeout=10.0,
+                init=None,
+            )
+            _pool_inited_by_client = True
 
     try:
         transport = ASGITransport(app=app)
@@ -123,7 +116,7 @@ async def client(tmp_path, monkeypatch):
     finally:
         await db.close()
         _boot._gate_cache_reset()
-        if _pool_inited:
+        if _pool_inited_by_client:
             from backend import db_pool as _db_pool
             await _db_pool.close_pool()
 
@@ -294,18 +287,35 @@ if _ASYNCPG_AVAILABLE:
         Small pool (min=1, max=5) — tests exercise pool semantics at this
         scale; we're not load-testing here. If a test needs higher
         concurrency, it can override by creating its own pool inline.
+
+        Phase-3-Runtime-v2 SP-3.4 (2026-04-20): the pool is also
+        installed as the module-global via ``db_pool.init_pool`` so
+        polymorphic worker helpers (notifications.notify,
+        handoff.save_handoff, routers/{tasks,agents}._persist etc.)
+        that borrow a conn via ``get_pool().acquire()`` when called
+        without an explicit conn see the same pool this fixture
+        yields. Without this, worker-path code hit during a test that
+        uses pg_test_pool (but not the client fixture) would raise
+        ``RuntimeError: db_pool.get_pool called before init_pool``.
         """
-        pool = await asyncpg.create_pool(
+        from backend import db_pool as _db_pool
+        # Defensive reset in case a prior crashed test skipped
+        # close_pool() teardown.
+        _db_pool._reset_for_tests()
+        pool = await _db_pool.init_pool(
             pg_test_alembic_upgraded,
             min_size=1,
             max_size=5,
             command_timeout=10.0,
             statement_cache_size=256,
+            init=None,  # skip connection-level SET commands — they're
+                        # a production-safety concern, not a correctness
+                        # one, and skipping shaves test setup time.
         )
         try:
             yield pool
         finally:
-            await pool.close()
+            await _db_pool.close_pool()
 
 
     @pytest_asyncio.fixture
@@ -334,12 +344,13 @@ if _ASYNCPG_AVAILABLE:
                 # or crashed fixtures. The TRUNCATE itself is part of
                 # the savepoint and rolls back on teardown, so any
                 # pre-existing committed rows come back intact.
-                # Agents + tasks + task_comments + handoffs are the
-                # tables Phase-3-Runtime-v2 has ported so far; extend
-                # this list as subsequent SP-3.x slices land.
+                # Agents + tasks + task_comments + handoffs +
+                # notifications are the tables Phase-3-Runtime-v2 has
+                # ported so far; extend this list as subsequent SP-3.x
+                # slices land.
                 await conn.execute(
-                    "TRUNCATE agents, tasks, task_comments, handoffs "
-                    "RESTART IDENTITY CASCADE"
+                    "TRUNCATE agents, tasks, task_comments, handoffs, "
+                    "notifications RESTART IDENTITY CASCADE"
                 )
                 yield conn
             finally:

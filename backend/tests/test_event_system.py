@@ -72,27 +72,27 @@ class TestReplayEndpoint:
 class TestNotificationDLQ:
 
     @pytest.mark.asyncio
-    async def test_dispatch_status_columns_exist(self):
+    async def test_dispatch_status_columns_exist(self, pg_test_conn):
+        # SP-3.4 (2026-04-20): pg_test_conn savepoint-wraps the insert
+        # + update + SELECT so this column-presence smoke test never
+        # leaks rows into sibling tests.
         from backend import db
-        await db.init()
-        try:
-            # Insert a notification and check new columns are usable
-            import uuid
-            nid = f"notif-dlq-{uuid.uuid4().hex[:6]}"
-            await db.insert_notification({
-                "id": nid, "level": "warning", "title": "Test DLQ",
-                "message": "test", "source": "test", "timestamp": "2026-01-01T00:00:00",
-                "read": 0, "action_url": None, "action_label": None,
-                "auto_resolved": 0, "dispatch_status": "pending",
-                "send_attempts": 0, "last_error": None,
-            })
-            await db.update_notification_dispatch(nid, "failed", attempts=3, error="slack down")
-            failed = await db.list_failed_notifications(limit=5)
-            assert any(f["id"] == nid for f in failed)
-            match = next(f for f in failed if f["id"] == nid)
-            assert match["dispatch_status"] == "failed"
-        finally:
-            await db.close()
+        import uuid
+        nid = f"notif-dlq-{uuid.uuid4().hex[:6]}"
+        await db.insert_notification(pg_test_conn, {
+            "id": nid, "level": "warning", "title": "Test DLQ",
+            "message": "test", "source": "test", "timestamp": "2026-01-01T00:00:00",
+            "read": 0, "action_url": None, "action_label": None,
+            "auto_resolved": 0, "dispatch_status": "pending",
+            "send_attempts": 0, "last_error": None,
+        })
+        await db.update_notification_dispatch(
+            pg_test_conn, nid, "failed", attempts=3, error="slack down",
+        )
+        failed = await db.list_failed_notifications(pg_test_conn, limit=5)
+        assert any(f["id"] == nid for f in failed)
+        match = next(f for f in failed if f["id"] == nid)
+        assert match["dispatch_status"] == "failed"
 
 
 class TestEventBusQueueLimit:

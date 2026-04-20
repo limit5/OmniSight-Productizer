@@ -113,37 +113,19 @@ async def test_token_usage_upsert_list(fresh_db):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Notifications
+#  Notifications  —  MOVED TO test_db_notifications.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_notifications_full_lifecycle(fresh_db):
-    db = fresh_db
-    await db.insert_notification({
-        "id": "n1", "level": "warning", "title": "t", "message": "m",
-        "source": "test", "timestamp": "2026-04-14T00:00:00",
-    })
-    await db.insert_notification({
-        "id": "n2", "level": "critical", "title": "c", "message": "m",
-        "source": "test", "timestamp": "2026-04-14T00:00:01",
-    })
-    # list all
-    all_rows = await db.list_notifications()
-    assert len(all_rows) == 2
-    # filter by level
-    crit = await db.list_notifications(level="critical")
-    assert len(crit) == 1 and crit[0]["id"] == "n2"
-    # unread counts
-    assert await db.count_unread_notifications(min_level="warning") == 2
-    assert await db.count_unread_notifications(min_level="critical") == 1
-    assert await db.mark_notification_read("n1") is True
-    assert await db.count_unread_notifications(min_level="warning") == 1
-    # dispatch status + failed list
-    await db.update_notification_dispatch("n2", "failed", attempts=2, error="boom")
-    failed = await db.list_failed_notifications()
-    assert len(failed) == 1
-    assert failed[0]["id"] == "n2"
-    assert failed[0]["last_error"] == "boom"
+#
+# Phase-3-Runtime-v2 SP-3.4 (2026-04-20): the 6 notification functions
+# (insert_notification / list_notifications / mark_notification_read /
+# count_unread_notifications / update_notification_dispatch /
+# list_failed_notifications) were ported from compat-wrapper
+# SQLite-compatible signatures to native asyncpg with an explicit
+# ``conn: asyncpg.Connection`` first argument. The SQLite
+# ``fresh_db`` fixture in this file can no longer exercise them.
+#
+# The per-function contract tests live in
+# ``test_db_notifications.py`` (pg_test_conn-backed).
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

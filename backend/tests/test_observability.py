@@ -96,14 +96,17 @@ def test_structlog_bind_returns_usable_logger(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dlq_retry_marks_exhausted_as_dead(monkeypatch):
+async def test_dlq_retry_marks_exhausted_as_dead(monkeypatch, pg_test_pool):
+    # SP-3.4 (2026-04-20): migrated from SQLite db.init() to pg_test_pool;
+    # retry_failed_notifications() acquires its own pool-backed conn
+    # (polymorphic conn=None branch) so the test only needs to seed the
+    # row via an inline pool acquire.
     from backend import db, notifications as n
     from backend.config import settings
 
     nid = f"notif-dlq1-{uuid.uuid4().hex[:6]}"
-    await db.init()
-    try:
-        await db.insert_notification({
+    async with pg_test_pool.acquire() as conn:
+        await db.insert_notification(conn, {
             "id": nid,
             "level": "warning",
             "title": "t",
@@ -115,28 +118,36 @@ async def test_dlq_retry_marks_exhausted_as_dead(monkeypatch):
         })
         # Pre-mark as failed and exhausted
         await db.update_notification_dispatch(
-            nid, "failed",
+            conn, nid, "failed",
             attempts=settings.notification_max_retries,
             error="simulated",
         )
+    try:
         result = await n.retry_failed_notifications()
         assert result["dead"] >= 1
 
-        rows = await db.list_failed_notifications()
+        async with pg_test_pool.acquire() as conn:
+            rows = await db.list_failed_notifications(conn)
         assert all(r["id"] != nid for r in rows)
     finally:
-        await db.close()
+        # Committed row — clean up so the next test starts with no
+        # stray rows (pg_test_pool does not auto-rollback).
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM notifications WHERE id = $1", nid,
+            )
 
 
 @pytest.mark.asyncio
-async def test_dlq_retry_redispatches_when_attempts_remain(monkeypatch):
+async def test_dlq_retry_redispatches_when_attempts_remain(
+    monkeypatch, pg_test_pool,
+):
     from backend import db, notifications as n
     from backend.config import settings
 
     nid = f"notif-dlq2-{uuid.uuid4().hex[:6]}"
-    await db.init()
-    try:
-        await db.insert_notification({
+    async with pg_test_pool.acquire() as conn:
+        await db.insert_notification(conn, {
             "id": nid,
             "level": "warning",
             "title": "t",
@@ -147,14 +158,18 @@ async def test_dlq_retry_redispatches_when_attempts_remain(monkeypatch):
             "action_label": None,
         })
         await db.update_notification_dispatch(
-            nid, "failed", attempts=0, error="first attempt",
+            conn, nid, "failed", attempts=0, error="first attempt",
         )
-        # No webhooks configured → dispatch resolves as 'skipped'
-        monkeypatch.setattr(settings, "notification_slack_webhook", "", raising=False)
-        monkeypatch.setattr(settings, "notification_jira_url", "", raising=False)
-        monkeypatch.setattr(settings, "notification_pagerduty_key", "", raising=False)
+    # No webhooks configured → dispatch resolves as 'skipped'
+    monkeypatch.setattr(settings, "notification_slack_webhook", "", raising=False)
+    monkeypatch.setattr(settings, "notification_jira_url", "", raising=False)
+    monkeypatch.setattr(settings, "notification_pagerduty_key", "", raising=False)
 
+    try:
         result = await n.retry_failed_notifications()
         assert result["retried"] >= 1
     finally:
-        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM notifications WHERE id = $1", nid,
+            )

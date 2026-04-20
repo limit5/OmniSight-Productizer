@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend import auth as _auth
+from backend.db_pool import get_conn as _get_conn
 from backend.routers import _pagination as _pg
 
 from backend.models import (
@@ -1393,25 +1394,34 @@ async def reset_token_freeze():
 
 
 @router.get("/notifications/unread-count")
-async def unread_count():
+async def unread_count(
+    conn=Depends(_get_conn),
+):
     """Count unread notifications (L2+)."""
     from backend import db
-    count = await db.count_unread_notifications("warning")
+    count = await db.count_unread_notifications(conn, "warning")
     return {"count": count}
 
 
 @router.get("/notifications")
-async def get_notifications(limit: int = _pg.Limit(default=50, max_cap=200), level: str = ""):
+async def get_notifications(
+    limit: int = _pg.Limit(default=50, max_cap=200),
+    level: str = "",
+    conn=Depends(_get_conn),
+):
     """List notifications, optionally filtered by level."""
     from backend import db
-    return await db.list_notifications(limit=limit, level=level)
+    return await db.list_notifications(conn, limit=limit, level=level)
 
 
 @router.post("/notifications/{notification_id}/read")
-async def mark_read(notification_id: str):
+async def mark_read(
+    notification_id: str,
+    conn=Depends(_get_conn),
+):
     """Mark a notification as read."""
     from backend import db
-    ok = await db.mark_notification_read(notification_id)
+    ok = await db.mark_notification_read(conn, notification_id)
     return {"status": "ok" if ok else "not_found"}
 
 
