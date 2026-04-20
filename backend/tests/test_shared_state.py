@@ -150,6 +150,94 @@ class TestSharedTokenUsage:
         result = usage.get_all()
         assert "model-a" in result
 
+    # ─── P7 Fix B regression guards ───────────────────────────
+    # These lock in the canonical 8-field shape returned by
+    # ``/api/v1/runtime/tokens`` so the frontend TokenUsage interface
+    # (lib/api.ts) never again sees an undefined ``total_tokens`` /
+    # ``request_count`` / ``avg_latency`` / ``last_used`` — which is what
+    # caused the dashboard's TypeError cascade at P6.
+
+    _CANONICAL_FIELDS = {
+        "model", "input_tokens", "output_tokens", "total_tokens",
+        "cost", "request_count", "avg_latency", "last_used",
+    }
+
+    def test_track_returns_full_canonical_shape(self):
+        """Every field the frontend TokenUsage interface expects is
+        present — and the internal ``_total_latency`` bookkeeping is
+        stripped from the public projection."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        entry = usage.track("canonical-model", 100, 50, 200.0, 0.001)
+        assert self._CANONICAL_FIELDS.issubset(entry.keys())
+        assert "_total_latency" not in entry
+        assert entry["total_tokens"] == 150
+        assert entry["request_count"] == 1
+        assert entry["avg_latency"] == 200  # int ms
+        assert entry["last_used"]  # non-empty "HH:MM:SS"
+
+    def test_get_all_strips_internal_bookkeeping(self):
+        usage = SharedTokenUsage()
+        usage.clear()
+        usage.track("m", 100, 50, 200.0, 0.001)
+        for entry in usage.get_all().values():
+            assert "_total_latency" not in entry
+            assert self._CANONICAL_FIELDS.issubset(entry.keys())
+
+    def test_get_all_backfills_legacy_redis_payload(self):
+        """A Redis payload written by a pre-P7 worker uses the legacy
+        ``requests`` / ``avg_latency_ms`` names and has no
+        ``total_tokens`` / ``last_used``. ``get_all()`` must rewrite
+        those in place so the caller never sees the legacy shape."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        # Seed the in-memory store with a legacy-shaped entry as if it
+        # had been restored from Redis written by an old worker.
+        usage._local["legacy-model"] = {
+            "model": "legacy-model",
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "cost": 0.123,
+            "requests": 3,              # legacy key
+            "avg_latency_ms": 180.5,    # legacy key
+            "_total_latency": 541.5,
+            # NB: no total_tokens, no last_used
+        }
+        result = usage.get_all()["legacy-model"]
+        assert self._CANONICAL_FIELDS.issubset(result.keys())
+        assert "requests" not in result
+        assert "avg_latency_ms" not in result
+        assert "_total_latency" not in result
+        assert result["total_tokens"] == 1500  # synthesised
+        assert result["request_count"] == 3     # renamed
+        assert result["avg_latency"] == 180     # renamed + int-coerced
+        assert result["last_used"] == ""        # synthesised default
+
+    def test_track_after_legacy_read_produces_canonical(self):
+        """A track() call that finds a legacy-shaped entry in Redis
+        must upgrade it rather than mix the two schemas."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        usage._local["legacy-model"] = {
+            "model": "legacy-model",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cost": 0.01,
+            "requests": 1,
+            "avg_latency_ms": 200.0,
+            "_total_latency": 200.0,
+        }
+        entry = usage.track("legacy-model", 10, 5, 100.0, 0.001)
+        assert self._CANONICAL_FIELDS.issubset(entry.keys())
+        assert entry["input_tokens"] == 110
+        assert entry["output_tokens"] == 55
+        assert entry["total_tokens"] == 165
+        assert entry["request_count"] == 2
+        # Stored copy should also be canonical (no stale legacy keys).
+        stored = usage._local["legacy-model"]
+        assert "requests" not in stored
+        assert "avg_latency_ms" not in stored
+
 
 class TestSharedHourlyLedger:
     def test_record_and_total(self):
