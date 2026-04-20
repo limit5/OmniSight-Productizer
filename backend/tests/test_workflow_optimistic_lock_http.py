@@ -133,4 +133,19 @@ async def test_concurrent_retry_http_one_wins(client):
 
     r1, r2 = await asyncio.gather(attempt(), attempt())
     codes = sorted([r1.status_code, r2.status_code])
-    assert codes == [200, 409], f"expected one 200 and one 409, got {codes}"
+    # Winner lands 200. The loser's exact code depends on asyncio-
+    # scheduling order under the asyncpg pool: if its ``get_run``
+    # happens BEFORE the winner's retry commits, it sees status=
+    # failed and races on the version check → 409 (version conflict).
+    # If it happens AFTER the winner's commit, it sees status=
+    # running and fails the early "only failed/halted can be retried"
+    # guard → 400. Both signal "your retry did not apply"; the
+    # invariant we care about is that exactly ONE retry landed.
+    # SP-5.6a (2026-04-21): relaxed from ``[200, 409]`` after
+    # workflow.py's port to pool changed the conn-scheduling timing.
+    assert 200 in codes, f"one retry must land, got {codes}"
+    loser = next(c for c in codes if c != 200)
+    assert loser in (400, 409), (
+        f"loser must get 400 (early-guard) or 409 (version conflict), "
+        f"got {loser} (full: {codes})"
+    )

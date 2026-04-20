@@ -1,31 +1,37 @@
-"""J2 tests — workflow_run optimistic locking (version column + 409 conflict)."""
+"""J2 tests — workflow_run optimistic locking (version column + 409 conflict).
+
+SP-5.6a (2026-04-21): same pool-backed fixture migration as
+test_workflow.py.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 
 import pytest
 
 
 @pytest.fixture()
-async def _wf_db(monkeypatch):
-    """Fresh SQLite + workflow tables per test."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "wf.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        from backend import workflow as wf
-        await wf._reset_for_tests()
-        try:
-            yield wf
-        finally:
-            await db.close()
+async def _wf_db(pg_test_pool, pg_test_dsn, monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE workflow_steps, workflow_runs, dag_plans "
+            "RESTART IDENTITY CASCADE"
+        )
+    from backend import db, workflow as wf
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    try:
+        yield wf
+    finally:
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE workflow_steps, workflow_runs, dag_plans "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 @pytest.mark.asyncio

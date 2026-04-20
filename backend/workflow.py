@@ -42,7 +42,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from backend.db_context import tenant_insert_value, tenant_where
+from backend.db_context import tenant_insert_value, tenant_where_pg
 
 logger = logging.getLogger(__name__)
 
@@ -81,18 +81,22 @@ class StepRecord:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  DB helpers (raw aiosqlite via backend.db._conn())
+#  DB helpers — native asyncpg (SP-5.6a port)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+_RUN_COLS = (
+    "id, kind, started_at, completed_at, status, "
+    "last_step_id, metadata, version"
+)
+_STEP_COLS = (
+    "id, run_id, idempotency_key, started_at, completed_at, "
+    "output_json, error"
+)
 
 
 def _uid(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
-
-
-async def _conn():
-    """Lazy import to avoid circular dependency at module load."""
-    from backend import db
-    return db._conn()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -123,7 +127,6 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
 
     `parent_plan_id` + `mutation_round` chain mutation history.
     """
-    conn = await _conn()
     if run_id:
         existing = await get_run(run_id)
         if existing:
@@ -134,12 +137,15 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
         started_at=time.time(),
         metadata=metadata or {},
     )
-    await conn.execute(
-        "INSERT INTO workflow_runs (id, kind, started_at, status, metadata, tenant_id) "
-        "VALUES (?, ?, ?, 'running', ?, ?)",
-        (run.id, run.kind, run.started_at, json.dumps(run.metadata), tenant_insert_value()),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflow_runs "
+            "(id, kind, started_at, status, metadata, tenant_id) "
+            "VALUES ($1, $2, $3, 'running', $4, $5)",
+            run.id, run.kind, run.started_at,
+            json.dumps(run.metadata), tenant_insert_value(),
+        )
 
     # Phase 56-DAG-B: persist + validate + link the plan.
     if dag is not None:
@@ -197,72 +203,69 @@ async def mutate_workflow(old_run_id: str, new_dag: Any, *,
     return new_run
 
 
-async def get_run(run_id: str) -> Optional[WorkflowRun]:
-    conn = await _conn()
-    conditions = ["id = ?"]
-    params: list = [run_id]
-    tenant_where(conditions, params)
-    sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
-           "FROM workflow_runs WHERE " + " AND ".join(conditions))
-    async with conn.execute(sql, params) as cur:
-        row = await cur.fetchone()
-    if not row:
-        return None
+def _row_to_run(r) -> "WorkflowRun":
     return WorkflowRun(
-        id=row["id"], kind=row["kind"], started_at=row["started_at"],
-        completed_at=row["completed_at"], status=row["status"],
-        last_step_id=row["last_step_id"],
-        metadata=json.loads(row["metadata"] or "{}"),
-        version=row["version"],
+        id=r["id"], kind=r["kind"], started_at=r["started_at"],
+        completed_at=r["completed_at"], status=r["status"],
+        last_step_id=r["last_step_id"],
+        metadata=json.loads(r["metadata"] or "{}"),
+        version=r["version"],
     )
 
 
-async def list_runs(status: str | None = None, limit: int = 50) -> list[WorkflowRun]:
-    conn = await _conn()
+async def get_run(run_id: str) -> Optional[WorkflowRun]:
+    params: list = [run_id]
+    conditions = ["id = $1"]
+    tenant_where_pg(conditions, params)
+    sql = (
+        f"SELECT {_RUN_COLS} FROM workflow_runs "
+        f"WHERE {' AND '.join(conditions)}"
+    )
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(sql, *params)
+    return _row_to_run(row) if row else None
+
+
+async def list_runs(
+    status: str | None = None, limit: int = 50,
+) -> list[WorkflowRun]:
     conditions: list[str] = []
     p: list = []
-    tenant_where(conditions, p)
+    tenant_where_pg(conditions, p)
     if status:
-        conditions.append("status = ?")
         p.append(status)
-    sql = ("SELECT id, kind, started_at, completed_at, status, last_step_id, metadata, version "
-           "FROM workflow_runs")
+        conditions.append(f"status = ${len(p)}")
+    sql = f"SELECT {_RUN_COLS} FROM workflow_runs"
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY started_at DESC LIMIT ?"
     p.append(limit)
-    async with conn.execute(sql, p) as cur:
-        rows = await cur.fetchall()
-    return [
-        WorkflowRun(
-            id=r["id"], kind=r["kind"], started_at=r["started_at"],
-            completed_at=r["completed_at"], status=r["status"],
-            last_step_id=r["last_step_id"],
-            metadata=json.loads(r["metadata"] or "{}"),
-            version=r["version"],
-        )
-        for r in rows
-    ]
+    sql += f" ORDER BY started_at DESC LIMIT ${len(p)}"
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(sql, *p)
+    return [_row_to_run(r) for r in rows]
+
+
+def _row_to_step(r) -> "StepRecord":
+    return StepRecord(
+        id=r["id"], run_id=r["run_id"],
+        idempotency_key=r["idempotency_key"],
+        started_at=r["started_at"], completed_at=r["completed_at"],
+        output=json.loads(r["output_json"]) if r["output_json"] else None,
+        error=r["error"],
+    )
 
 
 async def list_steps(run_id: str) -> list[StepRecord]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, run_id, idempotency_key, started_at, completed_at, output_json, error "
-        "FROM workflow_steps WHERE run_id=? ORDER BY started_at",
-        (run_id,),
-    ) as cur:
-        rows = await cur.fetchall()
-    out: list[StepRecord] = []
-    for r in rows:
-        out.append(StepRecord(
-            id=r["id"], run_id=r["run_id"],
-            idempotency_key=r["idempotency_key"],
-            started_at=r["started_at"], completed_at=r["completed_at"],
-            output=json.loads(r["output_json"]) if r["output_json"] else None,
-            error=r["error"],
-        ))
-    return out
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {_STEP_COLS} FROM workflow_steps "
+            "WHERE run_id = $1 ORDER BY started_at",
+            run_id,
+        )
+    return [_row_to_step(r) for r in rows]
 
 
 class VersionConflict(Exception):
@@ -276,26 +279,36 @@ async def _bump_version(run_id: str, expected_version: int | None,
     Returns the new version.  Raises VersionConflict when the row's
     current version doesn't match `expected_version`.  When
     `expected_version` is None the check is skipped (internal callers).
+
+    SP-5.6a: now uses ``UPDATE ... RETURNING version`` so the
+    success/miss decision rides the same query (asyncpg doesn't
+    expose ``rowcount`` on Pool.execute the way the compat wrapper
+    did). RETURNING gives us the post-bump version directly, no
+    need to compute it from expected_version.
     """
-    conn = await _conn()
-    set_parts = [f"{col}=?" for col in updates]
-    set_parts.append("version=version+1")
-    params: list[Any] = list(updates.values())
+    set_parts: list[str] = []
+    params: list[Any] = []
+    for col, val in updates.items():
+        params.append(val)
+        set_parts.append(f"{col} = ${len(params)}")
+    set_parts.append("version = version + 1")
     if expected_version is not None:
-        where = "id=? AND version=?"
-        params += [run_id, expected_version]
+        params.append(run_id)
+        params.append(expected_version)
+        where = f"id = ${len(params) - 1} AND version = ${len(params)}"
     else:
-        where = "id=?"
-        params += [run_id]
-    cur = await conn.execute(
-        f"UPDATE workflow_runs SET {', '.join(set_parts)} WHERE {where}",
-        tuple(params),
+        params.append(run_id)
+        where = f"id = ${len(params)}"
+    sql = (
+        f"UPDATE workflow_runs SET {', '.join(set_parts)} "
+        f"WHERE {where} RETURNING version"
     )
-    if cur.rowcount == 0:
-        await conn.rollback()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(sql, *params)
+    if row is None:
         raise VersionConflict(run_id)
-    await conn.commit()
-    return (expected_version or 0) + 1
+    return int(row["version"])
 
 
 async def finish(run_id: str, status: RunStatus = "completed",
@@ -358,22 +371,14 @@ async def update_run_metadata(run_id: str, expected_version: int,
 
 
 async def _get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, run_id, idempotency_key, started_at, completed_at, output_json, error "
-        "FROM workflow_steps WHERE run_id=? AND idempotency_key=?",
-        (run_id, idempotency_key),
-    ) as cur:
-        row = await cur.fetchone()
-    if not row:
-        return None
-    return StepRecord(
-        id=row["id"], run_id=row["run_id"],
-        idempotency_key=row["idempotency_key"],
-        started_at=row["started_at"], completed_at=row["completed_at"],
-        output=json.loads(row["output_json"]) if row["output_json"] else None,
-        error=row["error"],
-    )
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            f"SELECT {_STEP_COLS} FROM workflow_steps "
+            "WHERE run_id = $1 AND idempotency_key = $2",
+            run_id, idempotency_key,
+        )
+    return _row_to_step(row) if row else None
 
 
 async def _record_step(run_id: str, idempotency_key: str,
@@ -381,33 +386,46 @@ async def _record_step(run_id: str, idempotency_key: str,
     """Atomically insert a finished step. UNIQUE constraint catches a
     race with another writer — in which case we read back the existing
     record and return that (last writer wins on raw run, but for
-    idempotency the cached output is what we want anyway)."""
-    conn = await _conn()
+    idempotency the cached output is what we want anyway).
+
+    SP-5.6a: INSERT + UPDATE now run inside a single tx so the
+    last_step_id bump on workflow_runs is committed with the
+    workflow_steps row (previously under compat a crash between
+    statements could leave the step recorded but last_step_id
+    pointing at a prior step — visible to replay() as an
+    inconsistency). On UNIQUE-violation we roll back explicitly via
+    the ``async with transaction()`` exception path and fall through
+    to the idempotency re-read.
+    """
     step = StepRecord(
         id=_uid("step"), run_id=run_id, idempotency_key=idempotency_key,
         started_at=time.time(), completed_at=time.time(),
         output=output, error=error,
     )
+    from backend.db_pool import get_pool
     try:
-        await conn.execute(
-            "INSERT INTO workflow_steps "
-            "(id, run_id, idempotency_key, started_at, completed_at, output_json, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (step.id, step.run_id, step.idempotency_key, step.started_at,
-             step.completed_at, json.dumps(output) if output is not None else None,
-             error),
-        )
-        await conn.execute(
-            "UPDATE workflow_runs SET last_step_id=? WHERE id=?",
-            (step.id, run_id),
-        )
-        await conn.commit()
+        async with get_pool().acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "INSERT INTO workflow_steps "
+                    "(id, run_id, idempotency_key, started_at, "
+                    " completed_at, output_json, error) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    step.id, step.run_id, step.idempotency_key,
+                    step.started_at, step.completed_at,
+                    json.dumps(output) if output is not None else None,
+                    error,
+                )
+                await conn.execute(
+                    "UPDATE workflow_runs SET last_step_id = $1 "
+                    "WHERE id = $2",
+                    step.id, run_id,
+                )
         return step
     except Exception as exc:
-        # Likely UNIQUE collision — re-read.
-        if "UNIQUE" not in str(exc):
+        # Likely UNIQUE collision — the tx already rolled back.
+        if "unique" not in str(exc).lower():
             logger.warning("workflow._record_step error: %s", exc)
-        await conn.rollback()
         existing = await _get_step(run_id, idempotency_key)
         if existing:
             return existing
@@ -484,7 +502,8 @@ async def list_in_flight_on_startup() -> list[WorkflowRun]:
 
 async def _reset_for_tests() -> None:
     """Clear both tables. NOT for production use."""
-    conn = await _conn()
-    await conn.execute("DELETE FROM workflow_steps")
-    await conn.execute("DELETE FROM workflow_runs")
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM workflow_steps")
+            await conn.execute("DELETE FROM workflow_runs")
