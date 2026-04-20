@@ -1,9 +1,12 @@
-"""Phase 56-DAG-B — dag_plans persistence + workflow integration."""
+"""Phase 56-DAG-B — dag_plans persistence + workflow integration.
+
+SP-5.1 migration (2026-04-21): ``fresh_db`` fixture ported from
+SQLite tempfile to pg_test_pool. dag_storage is pool-native;
+``backend.workflow`` is still on compat so ``OMNISIGHT_DATABASE_URL``
+is set so both end up on the same PG.
+"""
 
 from __future__ import annotations
-
-import os
-import tempfile
 
 import pytest
 
@@ -15,19 +18,26 @@ from backend.dag_schema import DAG, Task
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @pytest.fixture()
-async def fresh_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "t.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as cfg
-        cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        try:
-            yield db
-        finally:
-            await db.close()
+async def fresh_db(pg_test_pool, pg_test_dsn, monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE dag_plans, workflow_runs, workflow_steps "
+            "RESTART IDENTITY CASCADE"
+        )
+    from backend import db
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    try:
+        yield db
+    finally:
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE dag_plans, workflow_runs, workflow_steps "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 def _t(task_id="T1", required_tier="t1", toolchain="cmake",
@@ -191,7 +201,7 @@ async def test_workflow_start_with_invalid_dag_marks_failed(fresh_db):
 
 @pytest.mark.asyncio
 async def test_mutate_workflow_chains_runs_and_plans(fresh_db):
-    from backend import workflow as wf, dag_storage as ds, db
+    from backend import workflow as wf, dag_storage as ds
 
     dag1 = _bad_dag(dag_id="REQ-mut")
     run1 = await wf.start("invoke", dag=dag1)
@@ -212,11 +222,13 @@ async def test_mutate_workflow_chains_runs_and_plans(fresh_db):
     assert plan2.mutation_round == 1
     assert plan2.status == "executing"  # good DAG → validated → executing
 
-    # workflow_runs.successor_run_id link.
-    async with db._conn().execute(
-        "SELECT successor_run_id FROM workflow_runs WHERE id=?", (run1.id,),
-    ) as cur:
-        row = await cur.fetchone()
+    # workflow_runs.successor_run_id link — read through the pool.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT successor_run_id FROM workflow_runs WHERE id = $1",
+            run1.id,
+        )
     assert row["successor_run_id"] == run2.id
 
 
