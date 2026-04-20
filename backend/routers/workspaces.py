@@ -1,7 +1,10 @@
 """Workspace + Container management endpoints."""
 
-from fastapi import APIRouter, HTTPException
+import asyncpg
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from backend.db_pool import get_conn
 
 from backend.workspace import (
     provision,
@@ -134,10 +137,13 @@ async def create_pr_for_workspace(agent_id: str, body: CreatePRRequest):
 
 
 @router.get("/handoff/{task_id}")
-async def get_task_handoff(task_id: str):
+async def get_task_handoff(
+    task_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Retrieve the handoff document for a task."""
     from backend import db
-    content = await db.get_handoff(task_id)
+    content = await db.get_handoff(conn, task_id)
     if not content:
         raise HTTPException(status_code=404, detail="No handoff found for this task")
     return {"task_id": task_id, "content": content}

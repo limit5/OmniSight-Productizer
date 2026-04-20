@@ -252,17 +252,23 @@ async def add_task_comment(
 
 
 @router.get("/{task_id}/handoffs")
-async def get_task_handoffs(task_id: str):
+async def get_task_handoffs(
+    task_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Get handoff chain for a task — shows agent-to-agent transitions."""
-    all_handoffs = await db.list_handoffs()
+    all_handoffs = await db.list_handoffs(conn)
     chain = [h for h in all_handoffs if h.get("task_id") == task_id]
     return chain
 
 
 @router.get("/handoffs/recent")
-async def get_recent_handoffs(limit: int = _pg.Limit(default=20, max_cap=200)):
+async def get_recent_handoffs(
+    limit: int = _pg.Limit(default=20, max_cap=200),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Get recent handoffs across all tasks."""
-    handoffs = await db.list_handoffs()
+    handoffs = await db.list_handoffs(conn)
     return handoffs[:limit]
 
 

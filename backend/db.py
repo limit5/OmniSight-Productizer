@@ -1183,28 +1183,61 @@ async def clear_token_usage() -> None:
 #  Handoffs
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def upsert_handoff(task_id: str, agent_id: str, content: str) -> None:
-    await _conn().execute(
-        """INSERT INTO handoffs (task_id, agent_id, content)
-           VALUES (?, ?, ?)
-           ON CONFLICT(task_id) DO UPDATE SET
-             agent_id=excluded.agent_id, content=excluded.content,
-             created_at=datetime('now')
+async def upsert_handoff(
+    conn, task_id: str, agent_id: str, content: str,
+) -> None:
+    # Phase-3-Runtime-v2 SP-3.3 (2026-04-20): ported to native asyncpg.
+    # ``created_at`` on CONFLICT UPDATE uses the same text format the
+    # alembic-level ``alembic_pg_compat._translate_datetime_now`` rewrite
+    # produces for the column DEFAULT — keeps newly-INSERTED rows and
+    # updated-rows byte-identical in format, so ORDER BY created_at
+    # keeps working after an upsert.
+    #
+    # Uses ``clock_timestamp()`` rather than ``now()``: PG's ``now()``
+    # is ``transaction_timestamp()`` — fixed at tx start — which means
+    # multiple upserts within the same outer tx (a common shape in
+    # pg_test_conn savepoint fixtures, and also in any handler that
+    # wraps multiple writes in ``async with conn.transaction()``)
+    # collide on timestamp and break the "last-written-at" ordering
+    # semantics the handoffs timeline UI depends on. clock_timestamp()
+    # returns real wall-clock time regardless of tx state. Outside a
+    # tx (auto-commit path, which is how production handlers operate)
+    # the two are equivalent — so this change is strictly additive:
+    # stronger guarantee for tx callers, no regression for others.
+    #
+    # We explicitly provide ``created_at`` on the INSERT path too,
+    # rather than letting the column DEFAULT (``to_char(now(), ...)``)
+    # fire. Otherwise the INSERT path would still use tx-scoped now()
+    # while the UPDATE path uses clock_timestamp() — inconsistent
+    # between the two branches and still collision-prone on multiple
+    # fresh INSERTs in the same tx.
+    await conn.execute(
+        """INSERT INTO handoffs (task_id, agent_id, content, created_at)
+           VALUES (
+             $1, $2, $3,
+             to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS')
+           )
+           ON CONFLICT (task_id) DO UPDATE SET
+             agent_id = EXCLUDED.agent_id,
+             content = EXCLUDED.content,
+             created_at = to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS')
         """,
-        (task_id, agent_id, content),
+        task_id, agent_id, content,
     )
-    await _conn().commit()
 
 
-async def get_handoff(task_id: str) -> str:
-    async with _conn().execute("SELECT content FROM handoffs WHERE task_id = ?", (task_id,)) as cur:
-        row = await cur.fetchone()
+async def get_handoff(conn, task_id: str) -> str:
+    row = await conn.fetchrow(
+        "SELECT content FROM handoffs WHERE task_id = $1", task_id,
+    )
     return row["content"] if row else ""
 
 
-async def list_handoffs() -> list[dict]:
-    async with _conn().execute("SELECT task_id, agent_id, created_at FROM handoffs ORDER BY created_at DESC") as cur:
-        rows = await cur.fetchall()
+async def list_handoffs(conn) -> list[dict]:
+    rows = await conn.fetch(
+        "SELECT task_id, agent_id, created_at FROM handoffs "
+        "ORDER BY created_at DESC"
+    )
     return [dict(r) for r in rows]
 
 

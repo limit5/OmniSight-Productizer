@@ -97,21 +97,19 @@ async def test_token_usage_upsert_list(fresh_db):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Handoffs
+#  Handoffs  —  MOVED TO test_db_handoffs.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_handoff_upsert_get_list(fresh_db):
-    db = fresh_db
-    await db.upsert_handoff("t1", "agent-a", "handed off with notes")
-    assert await db.get_handoff("t1") == "handed off with notes"
-    # Upsert replaces
-    await db.upsert_handoff("t1", "agent-b", "revised")
-    assert await db.get_handoff("t1") == "revised"
-    rows = await db.list_handoffs()
-    assert len(rows) == 1
-    assert rows[0]["agent_id"] == "agent-b"
-    assert await db.get_handoff("missing") == ""
+#
+# Phase-3-Runtime-v2 SP-3.3 (2026-04-20): the 3 handoff functions
+# (upsert_handoff / get_handoff / list_handoffs) were ported from
+# compat-wrapper SQLite-compatible signatures to native asyncpg with
+# an explicit ``conn: asyncpg.Connection`` first argument. The SQLite
+# ``fresh_db`` fixture in this file can no longer exercise them —
+# they require a pool-borrowed connection.
+#
+# The per-function contract tests live in ``test_db_handoffs.py``,
+# which uses the ``pg_test_conn`` fixture from conftest.py (skips
+# cleanly when OMNI_TEST_PG_URL is unset).
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

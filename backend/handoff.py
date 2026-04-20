@@ -153,9 +153,19 @@ async def save_handoff(
     task_id: str,
     content: str,
     workspace_path: Path | None = None,
+    conn=None,
 ) -> None:
-    """Persist handoff to workspace file and database."""
-    # Write to workspace directory
+    """Persist handoff to workspace file and database.
+
+    Phase-3-Runtime-v2 SP-3.3 (2026-04-20): ``conn`` is polymorphic —
+    a request handler that owns a ``Depends(get_conn)`` conn passes it
+    through; the common worker callsite (``workspace.finalize()``) runs
+    outside a request scope and calls without conn, in which case we
+    acquire a pool-scoped connection just for the upsert. Matches the
+    routers/tasks.py::_persist and routers/agents.py::_persist pattern.
+    """
+    # Write to workspace directory (pre-DB so a DB failure still leaves
+    # the operator a local copy)
     if workspace_path and workspace_path.is_dir():
         handoff_path = workspace_path / "HANDOFF.md"
         handoff_path.write_text(content, encoding="utf-8")
@@ -164,15 +174,29 @@ async def save_handoff(
     # Persist to database
     from backend import db
     try:
-        await db.upsert_handoff(task_id, agent_id, content)
+        if conn is None:
+            from backend.db_pool import get_pool
+            async with get_pool().acquire() as owned_conn:
+                await db.upsert_handoff(owned_conn, task_id, agent_id, content)
+        else:
+            await db.upsert_handoff(conn, task_id, agent_id, content)
     except Exception as exc:
         logger.warning("Failed to persist handoff to DB: %s", exc)
 
 
-async def load_handoff_for_task(task_id: str) -> str:
-    """Load handoff content from DB for a given task."""
+async def load_handoff_for_task(task_id: str, conn=None) -> str:
+    """Load handoff content from DB for a given task.
+
+    Polymorphic on ``conn`` (see ``save_handoff`` docstring) — worker
+    callsites in routers/invoke.py pass no conn and this function
+    borrows one from the pool for the single read.
+    """
     from backend import db
     try:
-        return await db.get_handoff(task_id)
+        if conn is None:
+            from backend.db_pool import get_pool
+            async with get_pool().acquire() as owned_conn:
+                return await db.get_handoff(owned_conn, task_id)
+        return await db.get_handoff(conn, task_id)
     except Exception:
         return ""

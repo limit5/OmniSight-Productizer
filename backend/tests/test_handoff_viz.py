@@ -19,17 +19,28 @@ class TestHandoffChainEndpoint:
 
     @pytest.mark.asyncio
     async def test_handoff_after_upsert(self, client):
+        # SP-3.3 (2026-04-20): upsert_handoff now requires an explicit
+        # asyncpg.Connection. The client fixture owns the module-global
+        # pool (init_pool was called there), so acquire inline for the
+        # seed write. The write auto-commits (outside a tx block), so
+        # the subsequent GET — served by a handler with its own
+        # Depends(get_conn) — sees the row at READ COMMITTED.
+        # Cleanup is explicit (delete row) to keep sibling tests clean.
         from backend import db
-        await db.init()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            await db.upsert_handoff(conn, "task-viz-1", "agent-fw-1", "# Handoff\nTest content")
         try:
-            await db.upsert_handoff("task-viz-1", "agent-fw-1", "# Handoff\nTest content")
             resp = await client.get("/api/v1/tasks/task-viz-1/handoffs")
             assert resp.status_code == 200
             data = resp.json()
             assert len(data) >= 1
             assert data[0]["agent_id"] == "agent-fw-1"
         finally:
-            await db.close()
+            async with get_pool().acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM handoffs WHERE task_id = $1", "task-viz-1",
+                )
 
 
 class TestHandoffTimelineComponent:

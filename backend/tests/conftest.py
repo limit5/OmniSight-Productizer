@@ -334,11 +334,11 @@ if _ASYNCPG_AVAILABLE:
                 # or crashed fixtures. The TRUNCATE itself is part of
                 # the savepoint and rolls back on teardown, so any
                 # pre-existing committed rows come back intact.
-                # Agents + tasks + task_comments are the tables that
-                # Phase-3-Runtime-v2 has ported so far; extend this
-                # list as subsequent SP-3.x slices land.
+                # Agents + tasks + task_comments + handoffs are the
+                # tables Phase-3-Runtime-v2 has ported so far; extend
+                # this list as subsequent SP-3.x slices land.
                 await conn.execute(
-                    "TRUNCATE agents, tasks, task_comments "
+                    "TRUNCATE agents, tasks, task_comments, handoffs "
                     "RESTART IDENTITY CASCADE"
                 )
                 yield conn
