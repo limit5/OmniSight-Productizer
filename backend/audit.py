@@ -34,13 +34,19 @@ import logging
 import time
 from typing import Any, Optional
 
-from backend.db_context import tenant_insert_value, tenant_where
+from backend.db_context import tenant_insert_value, tenant_where_pg
 
 logger = logging.getLogger(__name__)
 
-# Single-process serialiser for the chain — a fan-in of concurrent
-# writers would race the prev_hash read otherwise. SQLite's BEGIN
-# IMMEDIATE provides the cross-process variant in CI.
+# Phase-3-Runtime-v2 SP-4.1 (2026-04-20): ported to native asyncpg +
+# pool. The asyncio.Lock below still serialises chain writes within
+# ONE event loop (protects against interleaving within a worker
+# process); the real cross-process / cross-connection serialisation
+# happens via PG's ``pg_advisory_xact_lock`` keyed on tenant_id
+# (see ``_log_impl`` below). Without that DB-level lock, two
+# simultaneously-scheduled ``audit.log`` calls on different pool
+# connections could both read the same prev_hash and insert two
+# chain-forks — silently breaking ``verify_chain``.
 _chain_lock = asyncio.Lock()
 
 
@@ -54,30 +60,38 @@ def _hash(prev_hash: str, payload_canon: str) -> str:
     return hashlib.sha256((prev_hash + payload_canon).encode("utf-8")).hexdigest()
 
 
-async def _conn():
-    from backend import db
-    return db._conn()
+async def _last_hash_for_tenant(conn, tenant_id: str) -> str:
+    """Get the last hash in a specific tenant's chain.
 
-
-async def _last_hash_for_tenant(tenant_id: str) -> str:
-    """Get the last hash in a specific tenant's chain."""
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT curr_hash FROM audit_log WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
-        (tenant_id,),
-    ) as cur:
-        row = await cur.fetchone()
+    Caller must be inside ``pg_advisory_xact_lock`` for the same
+    tenant (otherwise the read can be stale against a concurrent
+    writer). Used only from ``_log_impl`` which holds the lock.
+    """
+    row = await conn.fetchrow(
+        "SELECT curr_hash FROM audit_log WHERE tenant_id = $1 "
+        "ORDER BY id DESC LIMIT 1",
+        tenant_id,
+    )
     return row["curr_hash"] if row else ""
 
 
-async def log(action: str, entity_kind: str, entity_id: str | None,
-              before: dict[str, Any] | None = None,
-              after: dict[str, Any] | None = None,
-              actor: str = "system",
-              session_id: str | None = None) -> Optional[int]:
-    """Append a single row. Returns the new row id, or None on failure
-    (logged at warning, never raises). Chains the new row to the prior
-    one's curr_hash so any post-write tampering breaks `verify_chain`."""
+async def _log_impl(
+    conn,
+    action: str,
+    entity_kind: str,
+    entity_id: str | None,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    actor: str,
+    session_id: str | None,
+) -> Optional[int]:
+    """Core chain-write path. Must be called INSIDE ``conn.transaction()``.
+
+    Acquires a PG advisory lock scoped to the current tenant so concurrent
+    writers across different pool connections (and across multiple worker
+    processes) serialise on the chain append. The lock is
+    transaction-scoped — PG releases it automatically on COMMIT/ROLLBACK.
+    """
     before_d = before or {}
     after_d = after or {}
     payload = {
@@ -90,31 +104,69 @@ async def log(action: str, entity_kind: str, entity_id: str | None,
     }
     payload_canon = _canonical(payload)
     ts = time.time()
+    tid = tenant_insert_value()
 
+    # Advisory lock keyed on the tenant chain. hashtext returns int4;
+    # the key space is effectively per-tenant so concurrent chains
+    # (different tenants) still append in parallel.
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"audit-chain-{tid}",
+    )
+    prev = await _last_hash_for_tenant(conn, tid)
+    curr = _hash(prev, payload_canon + str(round(ts, 6)))
+    row = await conn.fetchrow(
+        "INSERT INTO audit_log "
+        "(ts, actor, action, entity_kind, entity_id, before_json, "
+        " after_json, prev_hash, curr_hash, session_id, tenant_id) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+        "RETURNING id",
+        ts, actor, action, entity_kind, entity_id or "",
+        json.dumps(before_d, ensure_ascii=False),
+        json.dumps(after_d, ensure_ascii=False),
+        prev, curr, session_id, tid,
+    )
+    return row["id"] if row else None
+
+
+async def log(
+    action: str,
+    entity_kind: str,
+    entity_id: str | None,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    actor: str = "system",
+    session_id: str | None = None,
+    conn=None,
+) -> Optional[int]:
+    """Append a single row. Returns the new row id, or None on failure
+    (logged at warning, never raises). Chains the new row to the prior
+    one's curr_hash so any post-write tampering breaks ``verify_chain``.
+
+    ``conn`` is polymorphic — request handlers pass their
+    ``Depends(get_conn)`` conn; background workers and the 18+ existing
+    callers call without conn and this function borrows one from the
+    pool. Either way, the append runs inside a fresh transaction with
+    a tenant-scoped advisory lock.
+    """
     try:
-        conn = await _conn()
-        tid = tenant_insert_value()
         async with _chain_lock:
-            prev = await _last_hash_for_tenant(tid)
-            curr = _hash(prev, payload_canon + str(round(ts, 6)))
-            # Phase-3 PG compat: use RETURNING instead of cur.lastrowid.
-            # asyncpg does not surface a lastrowid; RETURNING is dialect-
-            # neutral (SQLite 3.35+, Postgres) and avoids a second round
-            # trip for ``SELECT MAX(id)``.
-            async with conn.execute(
-                "INSERT INTO audit_log "
-                "(ts, actor, action, entity_kind, entity_id, before_json, after_json, "
-                "prev_hash, curr_hash, session_id, tenant_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-                (ts, actor, action, entity_kind, entity_id or "",
-                 json.dumps(before_d, ensure_ascii=False),
-                 json.dumps(after_d, ensure_ascii=False),
-                 prev, curr, session_id, tid),
-            ) as cur:
-                row = await cur.fetchone()
-            await conn.commit()
-            new_id = row[0] if row else None
-        return new_id
+            if conn is None:
+                from backend.db_pool import get_pool
+                async with get_pool().acquire() as owned_conn:
+                    async with owned_conn.transaction():
+                        return await _log_impl(
+                            owned_conn, action, entity_kind, entity_id,
+                            before, after, actor, session_id,
+                        )
+            else:
+                # Nested transaction → PG savepoint; advisory lock is
+                # still scoped to the outer tx (released on its commit).
+                async with conn.transaction():
+                    return await _log_impl(
+                        conn, action, entity_kind, entity_id,
+                        before, after, actor, session_id,
+                    )
     except Exception as exc:
         logger.warning("audit.log failed (%s on %s): %s", action, entity_kind, exc)
         return None
@@ -137,31 +189,41 @@ def log_sync(action: str, entity_kind: str, entity_id: str | None,
     loop.create_task(log(action, entity_kind, entity_id, before, after, actor, session_id))
 
 
-async def query(*, since: float | None = None, actor: str | None = None,
-                entity_kind: str | None = None, session_id: str | None = None,
-                limit: int = 200) -> list[dict[str, Any]]:
-    conn = await _conn()
+async def _query_impl(
+    conn,
+    *,
+    since: float | None = None,
+    actor: str | None = None,
+    entity_kind: str | None = None,
+    session_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
     where: list[str] = []
     params: list[Any] = []
-    tenant_where(where, params, table_alias="a")
+    tenant_where_pg(where, params, table_alias="a")
     if since is not None:
-        where.append("a.ts >= ?"); params.append(since)
+        where.append(f"a.ts >= ${len(params) + 1}")
+        params.append(since)
     if actor:
-        where.append("a.actor = ?"); params.append(actor)
+        where.append(f"a.actor = ${len(params) + 1}")
+        params.append(actor)
     if entity_kind:
-        where.append("a.entity_kind = ?"); params.append(entity_kind)
+        where.append(f"a.entity_kind = ${len(params) + 1}")
+        params.append(entity_kind)
     if session_id:
-        where.append("a.session_id = ?"); params.append(session_id)
-    sql = ("SELECT a.id, a.ts, a.actor, a.action, a.entity_kind, a.entity_id, "
-           "a.before_json, a.after_json, a.prev_hash, a.curr_hash, a.session_id, "
-           "s.ip AS session_ip, s.user_agent AS session_ua "
-           "FROM audit_log a LEFT JOIN sessions s ON a.session_id = s.token")
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY a.id DESC LIMIT ?"
+        where.append(f"a.session_id = ${len(params) + 1}")
+        params.append(session_id)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     params.append(int(limit))
-    async with conn.execute(sql, tuple(params)) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        "SELECT a.id, a.ts, a.actor, a.action, a.entity_kind, a.entity_id, "
+        "a.before_json, a.after_json, a.prev_hash, a.curr_hash, a.session_id, "
+        "s.ip AS session_ip, s.user_agent AS session_ua "
+        "FROM audit_log a LEFT JOIN sessions s ON a.session_id = s.token"
+        + where_sql
+        + f" ORDER BY a.id DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
     return [
         {
             "id": r["id"], "ts": r["ts"], "actor": r["actor"],
@@ -177,6 +239,29 @@ async def query(*, since: float | None = None, actor: str | None = None,
         }
         for r in rows
     ]
+
+
+async def query(
+    *,
+    since: float | None = None,
+    actor: str | None = None,
+    entity_kind: str | None = None,
+    session_id: str | None = None,
+    limit: int = 200,
+    conn=None,
+) -> list[dict[str, Any]]:
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _query_impl(
+                owned_conn, since=since, actor=actor,
+                entity_kind=entity_kind, session_id=session_id,
+                limit=limit,
+            )
+    return await _query_impl(
+        conn, since=since, actor=actor,
+        entity_kind=entity_kind, session_id=session_id, limit=limit,
+    )
 
 
 async def write_audit(request, action: str, entity_kind: str,
@@ -197,7 +282,38 @@ async def write_audit(request, action: str, entity_kind: str,
     return await log(action, entity_kind, entity_id, before, after, actor, session_id=sid)
 
 
-async def verify_chain(tenant_id: str | None = None) -> tuple[bool, Optional[int]]:
+async def _verify_chain_impl(
+    conn, tenant_id: str,
+) -> tuple[bool, Optional[int]]:
+    prev_hash = ""
+    rows = await conn.fetch(
+        "SELECT id, ts, actor, action, entity_kind, entity_id, "
+        "before_json, after_json, prev_hash, curr_hash "
+        "FROM audit_log WHERE tenant_id = $1 ORDER BY id ASC",
+        tenant_id,
+    )
+    for r in rows:
+        payload = {
+            "action": r["action"],
+            "entity_kind": r["entity_kind"],
+            "entity_id": r["entity_id"] or "",
+            "before": json.loads(r["before_json"] or "{}"),
+            "after": json.loads(r["after_json"] or "{}"),
+            "actor": r["actor"],
+        }
+        recomputed = _hash(
+            prev_hash,
+            _canonical(payload) + str(round(r["ts"], 6)),
+        )
+        if r["prev_hash"] != prev_hash or r["curr_hash"] != recomputed:
+            return (False, r["id"])
+        prev_hash = r["curr_hash"]
+    return (True, None)
+
+
+async def verify_chain(
+    tenant_id: str | None = None, conn=None,
+) -> tuple[bool, Optional[int]]:
     """Walk a single tenant's chain in id order. Returns (True, None)
     if intact, otherwise (False, first_bad_id).
 
@@ -205,41 +321,37 @@ async def verify_chain(tenant_id: str | None = None) -> tuple[bool, Optional[int
     to "t-default")."""
     from backend.db_context import current_tenant_id
     tid = tenant_id or current_tenant_id() or "t-default"
-    conn = await _conn()
-    prev_hash = ""
-    async with conn.execute(
-        "SELECT id, ts, actor, action, entity_kind, entity_id, "
-        "before_json, after_json, prev_hash, curr_hash "
-        "FROM audit_log WHERE tenant_id = ? ORDER BY id ASC",
-        (tid,),
-    ) as cur:
-        async for r in cur:
-            payload = {
-                "action": r["action"],
-                "entity_kind": r["entity_kind"],
-                "entity_id": r["entity_id"] or "",
-                "before": json.loads(r["before_json"] or "{}"),
-                "after": json.loads(r["after_json"] or "{}"),
-                "actor": r["actor"],
-            }
-            recomputed = _hash(prev_hash, _canonical(payload) + str(round(r["ts"], 6)))
-            if r["prev_hash"] != prev_hash or r["curr_hash"] != recomputed:
-                return (False, r["id"])
-            prev_hash = r["curr_hash"]
-    return (True, None)
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _verify_chain_impl(owned_conn, tid)
+    return await _verify_chain_impl(conn, tid)
 
 
-async def verify_all_chains() -> dict[str, tuple[bool, Optional[int]]]:
+async def verify_all_chains(conn=None) -> dict[str, tuple[bool, Optional[int]]]:
     """Verify every tenant's chain independently. Returns a dict mapping
     tenant_id → (ok, first_bad_id_or_None)."""
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT DISTINCT tenant_id FROM audit_log ORDER BY tenant_id"
-    ) as cur:
-        tenants = [r["tenant_id"] for r in await cur.fetchall()]
-    results: dict[str, tuple[bool, Optional[int]]] = {}
+    from backend.db_pool import get_pool
+    if conn is None:
+        async with get_pool().acquire() as owned_conn:
+            tenants = [
+                r["tenant_id"] for r in await owned_conn.fetch(
+                    "SELECT DISTINCT tenant_id FROM audit_log "
+                    "ORDER BY tenant_id"
+                )
+            ]
+            results: dict[str, tuple[bool, Optional[int]]] = {}
+            for tid in tenants:
+                results[tid] = await _verify_chain_impl(owned_conn, tid)
+            return results
+    tenants = [
+        r["tenant_id"] for r in await conn.fetch(
+            "SELECT DISTINCT tenant_id FROM audit_log ORDER BY tenant_id"
+        )
+    ]
+    results = {}
     for tid in tenants:
-        results[tid] = await verify_chain(tenant_id=tid)
+        results[tid] = await _verify_chain_impl(conn, tid)
     return results
 
 

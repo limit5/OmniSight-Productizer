@@ -344,17 +344,17 @@ if _ASYNCPG_AVAILABLE:
                 # or crashed fixtures. The TRUNCATE itself is part of
                 # the savepoint and rolls back on teardown, so any
                 # pre-existing committed rows come back intact.
-                # Agents + tasks + task_comments + handoffs +
-                # notifications + token_usage + artifacts + npi_state
-                # + simulations + debug_findings + event_log +
-                # decision_rules + episodic_memory are the tables
-                # Phase-3-Runtime-v2 has ported so far; extend this
-                # list as subsequent SP-3.x slices land.
+                # Phase-3-Runtime-v2 ported tables. Epic 3 covered
+                # agents/tasks/task_comments/handoffs/notifications/
+                # token_usage/artifacts/npi_state/simulations/
+                # debug_findings/event_log/decision_rules/
+                # episodic_memory; Epic 4 adds ``audit_log`` in SP-4.1.
+                # Extend as subsequent SP-4.x / SP-5.x slices land.
                 await conn.execute(
                     "TRUNCATE agents, tasks, task_comments, handoffs, "
                     "notifications, token_usage, artifacts, npi_state, "
                     "simulations, debug_findings, event_log, "
-                    "decision_rules, episodic_memory "
+                    "decision_rules, episodic_memory, audit_log "
                     "RESTART IDENTITY CASCADE"
                 )
                 yield conn
