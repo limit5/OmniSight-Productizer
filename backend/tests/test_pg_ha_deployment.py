@@ -186,6 +186,20 @@ class TestPrimaryConf:
         # Crucial for debugging standby hand-off / resync.
         assert conf.get("log_replication_commands", "").lower() == "on"
 
+    def test_max_connections_sized_for_pool(self, conf) -> None:
+        # Phase-3-Runtime-v2 SP-1.1: the asyncpg.Pool budget is:
+        #   2 replicas × 2 workers × pool max_size 20 = 80 app conns
+        #   + prewarm / admin / alembic / standby repl ≈ 15
+        #   + burst / failover margin ≈ 105
+        # → total budget 200. Accept >=200 so future bumps don't break
+        # the contract, but fail loudly if someone drops it back to 100.
+        v = conf.get("max_connections")
+        assert v is not None and v.isdigit() and int(v) >= 200, (
+            f"primary max_connections must be >=200 to fit the asyncpg.Pool "
+            f"budget (got {v!r}). Sizing math in postgresql.primary.conf "
+            f"header comment."
+        )
+
 
 # ---------------------------------------------------------------------------
 # (3) postgresql.standby.conf contract
@@ -238,6 +252,32 @@ class TestStandbyConf:
             "primary_conninfo must NOT be set as a value in the static "
             "standby conf — it contains the replication password and is "
             "written at runtime by init-standby.sh into postgresql.auto.conf"
+        )
+
+    def test_max_connections_matches_primary(self, conf) -> None:
+        # Replication invariant: standby.max_connections MUST be >=
+        # primary.max_connections. If standby is lower, WAL replay that
+        # touches a higher connection slot will pause replication — a
+        # silent production outage.
+        from pg_ha_verify import parse_pg_conf
+        primary_conf = parse_pg_conf(PRIMARY_CONF.read_text())
+        primary_mc = int(primary_conf.get("max_connections", "0"))
+        standby_mc = int(conf.get("max_connections", "0"))
+        assert standby_mc >= primary_mc, (
+            f"standby max_connections ({standby_mc}) must be >= "
+            f"primary max_connections ({primary_mc}) for replication safety. "
+            f"Keep them in lock-step — both SP-1.1 confs raised to 200."
+        )
+
+    def test_max_connections_at_least_200(self, conf) -> None:
+        # Same sizing floor as the primary (Phase-3-Runtime-v2 SP-1.1).
+        # This guards against a well-meaning drop of the standby alone
+        # that would later trip test_max_connections_matches_primary
+        # only after primary changes — catch it directly here.
+        v = conf.get("max_connections")
+        assert v is not None and v.isdigit() and int(v) >= 200, (
+            f"standby max_connections must be >=200 (got {v!r}); kept in "
+            f"lock-step with primary per SP-1.1."
         )
 
 
