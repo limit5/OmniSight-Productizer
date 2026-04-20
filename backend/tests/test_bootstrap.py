@@ -8,46 +8,51 @@ Covers the four gates surfaced by :func:`get_bootstrap_status`:
   * smoke_passed
 
 Each probe is exercised in isolation (no DB for provider/CF/smoke, and
-an isolated sqlite for the admin-password probe) so failures point at a
-specific signal rather than a mixture of them.
+an isolated PG schema for the admin-password probe) so failures point
+at a specific signal rather than a mixture of them.
+
+Task #97 migration (2026-04-21): fixture ported from SQLite tempfile
+to pg_test_pool. The bootstrap module's ``_admin_password_is_default``
+probe still uses ``db._conn()`` (the compat wrapper), so the fixture
+sets ``OMNISIGHT_DATABASE_URL`` so the wrapper reads the same PG as
+pg_test_pool.
 """
 
 from __future__ import annotations
 
 import os
-import tempfile
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
 
 @pytest.fixture()
-async def _bootstrap_db(monkeypatch):
-    """Fresh sqlite + isolated bootstrap marker path per test."""
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "bootstrap.db")
-        marker = os.path.join(tmp, ".bootstrap_state.json")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", db_path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = db_path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        from backend import bootstrap
-        from pathlib import Path
-        bootstrap._reset_for_tests(Path(marker))
-        try:
-            yield db, bootstrap
-        finally:
-            await db.close()
-            bootstrap._reset_for_tests()
+async def _bootstrap_db(pg_test_pool, pg_test_dsn, monkeypatch, tmp_path):
+    """Fresh PG + isolated bootstrap marker path per test."""
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    marker = tmp_path / ".bootstrap_state.json"
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE users, bootstrap_state RESTART IDENTITY CASCADE"
+        )
+
+    from backend import db
+    from backend import bootstrap
+    from pathlib import Path
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    bootstrap._reset_for_tests(Path(marker))
+    try:
+        yield db, bootstrap
+    finally:
+        await db.close()
+        bootstrap._reset_for_tests()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users, bootstrap_state RESTART IDENTITY CASCADE"
+            )
 
 
 # ── shape / dataclass ───────────────────────────────────────────

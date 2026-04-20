@@ -21,21 +21,19 @@ The reset route lives under ``/bootstrap/*`` so the global wizard gate
 middleware lets it through both before AND after finalize — it is the
 only post-finalize wizard endpoint, since the whole point is to undo
 finalize.
+
+Task #97 migration (2026-04-21): fixtures ported from SQLite tempfile
+to pg_test_pool. The HTTP client fixture replaces the conftest
+``client`` fixture with a pool-backed variant — auth.py, bootstrap
+helpers, and the reset route's db access all land on the same PG.
+Direct ``_au._conn().execute`` accesses replaced with inline
+``get_pool().acquire()`` + $N placeholders.
 """
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
@@ -72,6 +70,55 @@ def _dev_mode(monkeypatch):
     """
     monkeypatch.setenv("OMNISIGHT_DEPLOY_MODE", "dev")
     yield "dev"
+
+
+@pytest.fixture()
+async def _reset_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """Pool-backed HTTP client for the ``/bootstrap/reset`` endpoint.
+
+    Mirrors the conftest ``client`` fixture but points at the PG test
+    DB via ``OMNISIGHT_DATABASE_URL`` so the db._conn() compat wrapper
+    used by bootstrap helpers (and audit.log) reads/writes the same
+    rows that pg_test_pool's TRUNCATE targets.
+    """
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE users, bootstrap_state, audit_log "
+            "RESTART IDENTITY CASCADE"
+        )
+
+    from backend import db
+    from backend.main import app
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users, bootstrap_state, audit_log "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 @pytest.fixture()
@@ -123,28 +170,35 @@ def _viewer_override():
 
 
 @pytest.fixture()
-async def _isolated_db(monkeypatch):
-    """Fresh sqlite + isolated marker for helper-level integration tests.
+async def _isolated_db(pg_test_pool, pg_test_dsn, monkeypatch, tmp_path):
+    """Fresh PG + isolated marker for helper-level integration tests.
 
-    Used by tests that need direct DB access (not via the HTTP client) —
-    the shared ``client`` fixture already spins up a per-test DB but we
-    want a smaller setup that also seeds a couple of admin rows.
+    Used by tests that need direct DB access (not via the HTTP client).
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "reset_helper.db")
-        marker = os.path.join(tmp, ".bootstrap_state.json")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", db_path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = db_path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        _boot._reset_for_tests(Path(marker))
-        try:
-            yield {"db": db, "marker": marker}
-        finally:
-            await db.close()
-            _boot._reset_for_tests()
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    marker = tmp_path / ".bootstrap_state.json"
+
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE users, bootstrap_state, audit_log "
+            "RESTART IDENTITY CASCADE"
+        )
+
+    from backend import db
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    _boot._reset_for_tests(marker)
+    try:
+        yield {"db": db, "marker": str(marker)}
+    finally:
+        await db.close()
+        _boot._reset_for_tests()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users, bootstrap_state, audit_log "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 @pytest.mark.asyncio
@@ -190,9 +244,9 @@ async def test_flag_all_admins_must_change_password_skips_disabled(_isolated_db)
                                     password="viewer-pw-strong-12345")
 
     # Disable a2 — must NOT be re-flagged.
-    conn = await _au._conn()
-    await conn.execute("UPDATE users SET enabled=0 WHERE id=?", (a2.id,))
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute("UPDATE users SET enabled=0 WHERE id=$1", a2.id)
 
     flagged = await _au.flag_all_admins_must_change_password()
     flagged_emails = {row["email"] for row in flagged}
@@ -205,10 +259,10 @@ async def test_flag_all_admins_must_change_password_skips_disabled(_isolated_db)
     assert refreshed is not None and refreshed.must_change_password is True
 
     # Disabled admin untouched.
-    async with conn.execute(
-        "SELECT must_change_password FROM users WHERE id=?", (a2.id,),
-    ) as cur:
-        r = await cur.fetchone()
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT must_change_password FROM users WHERE id=$1", a2.id,
+        )
     assert r is not None and bool(r["must_change_password"]) is False
 
     # Viewer untouched.
@@ -222,7 +276,7 @@ async def test_flag_all_admins_must_change_password_skips_disabled(_isolated_db)
 
 
 @pytest.mark.asyncio
-async def test_reset_happy_path_in_dev_mode(client, _admin_override, _dev_mode):
+async def test_reset_happy_path_in_dev_mode(_reset_http_client, _admin_override, _dev_mode):
     """Dev mode + admin → wizard state wiped, response counts non-zero."""
     admin = _admin_override
     # Pre-load wizard state: every gate green + every step recorded so
@@ -239,7 +293,7 @@ async def test_reset_happy_path_in_dev_mode(client, _admin_override, _dev_mode):
         password="initial-pw-strong-12345",
     )
 
-    r = await client.post(
+    r = await _reset_http_client.post(
         "/api/v1/bootstrap/reset",
         json={"reason": "QA E2E rerun"},
         follow_redirects=False,
@@ -263,9 +317,9 @@ async def test_reset_happy_path_in_dev_mode(client, _admin_override, _dev_mode):
 
 
 @pytest.mark.asyncio
-async def test_reset_idempotent_on_already_clean_install(client, _admin_override, _dev_mode):
+async def test_reset_idempotent_on_already_clean_install(_reset_http_client, _admin_override, _dev_mode):
     """Replaying reset against a fresh install still 200s — counts → 0."""
-    r = await client.post(
+    r = await _reset_http_client.post(
         "/api/v1/bootstrap/reset",
         json={},
         follow_redirects=False,
@@ -279,7 +333,7 @@ async def test_reset_idempotent_on_already_clean_install(client, _admin_override
 
 
 @pytest.mark.asyncio
-async def test_reset_writes_audit_row(client, _admin_override, _dev_mode):
+async def test_reset_writes_audit_row(_reset_http_client, _admin_override, _dev_mode):
     """``bootstrap.reset`` audit row captures actor + reason + counts."""
     admin = _admin_override
     await _au.create_user(
@@ -287,7 +341,7 @@ async def test_reset_writes_audit_row(client, _admin_override, _dev_mode):
         password="initial-pw-strong-12345",
     )
 
-    r = await client.post(
+    r = await _reset_http_client.post(
         "/api/v1/bootstrap/reset",
         json={"reason": "playwright suite"},
         follow_redirects=False,
@@ -308,7 +362,7 @@ async def test_reset_writes_audit_row(client, _admin_override, _dev_mode):
 
 
 @pytest.mark.asyncio
-async def test_reset_403_when_not_dev_mode(client, _admin_override, monkeypatch):
+async def test_reset_403_when_not_dev_mode(_reset_http_client, _admin_override, monkeypatch):
     """Pinning OMNISIGHT_DEPLOY_MODE=systemd → 403, no mutation."""
     admin = _admin_override
     monkeypatch.setenv("OMNISIGHT_DEPLOY_MODE", "systemd")
@@ -321,7 +375,7 @@ async def test_reset_403_when_not_dev_mode(client, _admin_override, monkeypatch)
         password="initial-pw-strong-12345",
     )
 
-    r = await client.post(
+    r = await _reset_http_client.post(
         "/api/v1/bootstrap/reset",
         json={"reason": "should be denied"},
         follow_redirects=False,
@@ -340,9 +394,9 @@ async def test_reset_403_when_not_dev_mode(client, _admin_override, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_reset_403_for_non_admin(client, _viewer_override, _dev_mode):
+async def test_reset_403_for_non_admin(_reset_http_client, _viewer_override, _dev_mode):
     """Viewer caller → 401/403, even in dev mode (auth gate fires first)."""
-    r = await client.post(
+    r = await _reset_http_client.post(
         "/api/v1/bootstrap/reset",
         json={},
         follow_redirects=False,

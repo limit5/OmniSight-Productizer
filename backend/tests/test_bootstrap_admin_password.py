@@ -14,21 +14,16 @@ drives before any admin session exists:
     before any DB mutation
   * Helper — :func:`auth.find_admin_requiring_password_change` returns
     the sole flagged admin (or ``None`` once the flag clears)
+
+Task #97 migration (2026-04-21): fixtures ported from SQLite tempfile
+to pg_test_pool. HTTP client sets ``OMNISIGHT_DATABASE_URL`` so the
+bootstrap module's ``db._conn()`` compat wrapper reads/writes the same
+PG as pg_test_pool.
 """
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
@@ -42,34 +37,42 @@ from backend import bootstrap as _boot
 
 
 @pytest.fixture()
-async def _wizard_db(monkeypatch):
-    """Fresh sqlite + isolated bootstrap marker for Step 1 integration.
+async def _wizard_db(pg_test_pool, pg_test_dsn, monkeypatch, tmp_path):
+    """Fresh PG + isolated bootstrap marker for Step 1 integration.
 
-    Uses the shared `client` fixture's DB-per-test pattern directly so
-    :func:`auth.ensure_default_admin` lands the default admin row in a
-    scoped DB and the wizard marker never touches `data/`.
+    Seeds the default admin row via ``auth.ensure_default_admin`` so the
+    wizard endpoint has something to rotate.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "wizard_step1.db")
-        marker = os.path.join(tmp, ".bootstrap_state.json")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", db_path)
-        monkeypatch.setenv("OMNISIGHT_ADMIN_EMAIL", "admin@test.local")
-        monkeypatch.delenv("OMNISIGHT_ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    monkeypatch.setenv("OMNISIGHT_ADMIN_EMAIL", "admin@test.local")
+    monkeypatch.delenv("OMNISIGHT_ADMIN_PASSWORD", raising=False)
 
-        from backend import config as _cfg
-        _cfg.settings.database_path = db_path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        _boot._reset_for_tests(Path(marker))
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE users, bootstrap_state, audit_log "
+            "RESTART IDENTITY CASCADE"
+        )
 
-        user = await _au.ensure_default_admin()
-        assert user is not None and user.must_change_password is True
-        try:
-            yield {"db": db, "admin": user}
-        finally:
-            await db.close()
-            _boot._reset_for_tests()
+    from backend import db
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    marker = tmp_path / ".bootstrap_state.json"
+    _boot._reset_for_tests(Path(marker))
+
+    user = await _au.ensure_default_admin()
+    assert user is not None and user.must_change_password is True
+    try:
+        yield {"db": db, "admin": user}
+    finally:
+        await db.close()
+        _boot._reset_for_tests()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE users, bootstrap_state, audit_log "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 @pytest.fixture()

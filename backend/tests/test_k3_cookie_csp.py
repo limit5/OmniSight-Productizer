@@ -1,36 +1,45 @@
-"""K3 tests — cookie flags + CSP + security response headers."""
+"""K3 tests — cookie flags + CSP + security response headers.
+
+Task #97 migration (2026-04-21): fixture ported from SQLite tempfile
+to pg_test_pool. The HTTP client fixture sets
+``OMNISIGHT_DATABASE_URL`` so routes still on the ``db._conn()``
+compat wrapper (auth/login, auth/logout, health) read/write the
+same PG that pg_test_pool's TRUNCATE targets.
+"""
 
 from __future__ import annotations
-
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
 
 @pytest.fixture()
-async def _k3_client(monkeypatch, tmp_path):
-    db_path = tmp_path / "k3.db"
-    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
+async def _k3_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
     monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "strict")
     monkeypatch.setenv("OMNISIGHT_COOKIE_SECURE", "true")
     monkeypatch.setenv("OMNISIGHT_ADMIN_EMAIL", "admin@test.local")
     monkeypatch.setenv("OMNISIGHT_ADMIN_PASSWORD", "test-strong-password-123")
 
-    from backend import config as _cfg
-    _cfg.settings.database_path = str(db_path)
-    from backend import db
-    db._DB_PATH = db._resolve_db_path()
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
 
+    from backend import db
     from backend.main import app
+    from backend import bootstrap as _boot
     from httpx import ASGITransport, AsyncClient
 
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    if db._db is not None:
+        await db.close()
     await db.init()
     from backend import auth
     await auth.ensure_default_admin()
@@ -39,7 +48,10 @@ async def _k3_client(monkeypatch, tmp_path):
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
+        _boot._gate_cache_reset()
         await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
 
 
 def _parse_set_cookie(resp, cookie_name: str) -> dict:

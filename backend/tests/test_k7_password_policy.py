@@ -1,38 +1,30 @@
-"""K7 tests — password policy, Argon2id upgrade path, password history."""
+"""K7 tests — password policy, Argon2id upgrade path, password history.
+
+Task #97 migration (2026-04-21): fixture ported from SQLite tempfile
+to pg_test_pool. Direct ``db._conn().execute(...)`` accesses are
+replaced with inline ``get_pool().acquire()`` + $N placeholders.
+HTTP-driven tests set ``OMNISIGHT_DATABASE_URL`` so the db._conn()
+compat wrapper talks to the same PG as pg_test_pool.
+"""
 
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
-import tempfile
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
 
 @pytest.fixture()
-async def _auth_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "k7.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        from backend import auth
-        try:
-            yield (db, auth)
-        finally:
-            await db.close()
+async def _auth_db(pg_test_pool, monkeypatch):
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+    from backend import db, auth
+    try:
+        yield (db, auth)
+    finally:
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
 
 
 # ── Argon2id hashing ──────────────────────────────────────────
@@ -91,25 +83,26 @@ def test_garbage_hash_returns_false():
 
 @pytest.mark.asyncio
 async def test_login_auto_rehash_pbkdf2_to_argon2id(_auth_db):
-    db_mod, auth = _auth_db
+    _, auth = _auth_db
     pw = "legacy-password-12345!"
     pbkdf2_hash = _make_pbkdf2_hash(pw)
     u = await auth.create_user("legacy@test.com", "Legacy", role="viewer", password="placeholder123!")
-    conn = db_mod._conn()
-    await conn.execute(
-        "UPDATE users SET password_hash=? WHERE id=?",
-        (pbkdf2_hash, u.id),
-    )
-    await conn.commit()
+
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET password_hash=$1 WHERE id=$2",
+            pbkdf2_hash, u.id,
+        )
 
     user = await auth.authenticate_password("legacy@test.com", pw)
     assert user is not None
     assert user.email == "legacy@test.com"
 
-    async with conn.execute(
-        "SELECT password_hash FROM users WHERE id=?", (u.id,),
-    ) as cur:
-        r = await cur.fetchone()
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT password_hash FROM users WHERE id=$1", u.id,
+        )
     assert r["password_hash"].startswith("$argon2id$"), "hash should be upgraded"
     assert auth.verify_password(pw, r["password_hash"])
 
@@ -170,63 +163,89 @@ async def test_password_history_allows_old_enough(_auth_db):
 
 @pytest.mark.asyncio
 async def test_password_history_records_old_hash(_auth_db):
-    db_mod, auth = _auth_db
+    _, auth = _auth_db
     u = await auth.create_user("rec@test.com", "Rec", role="viewer", password="original-pass-123!")
     await auth.change_password(u.id, "new-pass-456-ok!")
 
-    conn = db_mod._conn()
-    async with conn.execute(
-        "SELECT COUNT(*) as n FROM password_history WHERE user_id=?", (u.id,),
-    ) as cur:
-        r = await cur.fetchone()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT COUNT(*) as n FROM password_history WHERE user_id=$1", u.id,
+        )
     assert r["n"] >= 1, "old hash should be recorded in password_history"
 
 
 # ── Integration: change-password endpoint ─────────────────────
 
 
-@pytest.mark.asyncio
-async def test_change_password_endpoint_rejects_weak(_auth_db, monkeypatch):
+@pytest.fixture()
+async def _k7_http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    """HTTP client for change-password endpoint tests — re-points db._conn()
+    compat wrapper at the same PG as pg_test_pool via OMNISIGHT_DATABASE_URL."""
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
     monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
-    from backend import auth
-    from backend.main import app
-    from httpx import AsyncClient, ASGITransport
 
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+    from backend import db
+    from backend.main import app
+    from backend import bootstrap as _boot
+    from httpx import ASGITransport, AsyncClient
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+    finally:
+        _boot._gate_cache_reset()
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+
+
+@pytest.mark.asyncio
+async def test_change_password_endpoint_rejects_weak(_k7_http_client):
+    from backend import auth
     u = await auth.create_user("ep@test.com", "EP", role="admin", password="strong-init-pass-1!")
     sess = await auth.create_session(u.id, ip="127.0.0.1", user_agent="test")
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        resp = await client.post(
-            "/api/v1/auth/change-password",
-            json={"current_password": "strong-init-pass-1!", "new_password": "password1234"},
-            cookies={"omnisight_session": sess.token},
-            headers={"X-CSRF-Token": sess.csrf_token},
-        )
+    resp = await _k7_http_client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "strong-init-pass-1!", "new_password": "password1234"},
+        cookies={"omnisight_session": sess.token},
+        headers={"X-CSRF-Token": sess.csrf_token},
+    )
     assert resp.status_code == 422
     assert "weak" in resp.json()["detail"].lower() or "too" in resp.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
-async def test_change_password_endpoint_rejects_reused(_auth_db, monkeypatch):
-    monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "session")
+async def test_change_password_endpoint_rejects_reused(_k7_http_client):
     from backend import auth
-    from backend.main import app
-    from httpx import AsyncClient, ASGITransport
-
     u = await auth.create_user("reuse@test.com", "Reuse", role="admin", password="original-strong-pw1!")
     await auth.change_password(u.id, "second-strong-pw-12!")
     sess = await auth.create_session(u.id, ip="127.0.0.1", user_agent="test")
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        resp = await client.post(
-            "/api/v1/auth/change-password",
-            json={"current_password": "second-strong-pw-12!", "new_password": "original-strong-pw1!"},
-            cookies={"omnisight_session": sess.token},
-            headers={"X-CSRF-Token": sess.csrf_token},
-        )
+    resp = await _k7_http_client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "second-strong-pw-12!", "new_password": "original-strong-pw1!"},
+        cookies={"omnisight_session": sess.token},
+        headers={"X-CSRF-Token": sess.csrf_token},
+    )
     assert resp.status_code == 422
     assert "reuse" in resp.json()["detail"].lower()
