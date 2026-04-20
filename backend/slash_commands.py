@@ -2,23 +2,35 @@
 
 Called from chat.py when message starts with /. Returns a formatted
 response string or None if the command should fall through to LLM.
+
+Phase-3-Runtime-v2 SP-3.1 (2026-04-20): the entry point + every
+handler now take a pool-backed ``asyncpg.Connection`` as the first
+parameter. Handlers that don't touch the DB (``/status``,
+``/help``, etc.) simply ignore it, but the uniform signature means
+future SP ports (``/assign``, ``/clear``, ``/release`` etc. that
+touch tasks / releases / etc.) can use it without re-signaturing
+the dispatch table.
 """
 
 from __future__ import annotations
 
 import logging
 
+import asyncpg
+
 logger = logging.getLogger(__name__)
 
 
-async def handle_slash_command(command: str, args: str) -> str | None:
+async def handle_slash_command(
+    conn: asyncpg.Connection, command: str, args: str,
+) -> str | None:
     """Handle a slash command. Returns response text or None for non-/ input."""
     if not command:
         return "Type `/help` to see available commands."
     handler = _HANDLERS.get(command)
     if handler:
         try:
-            return await handler(args)
+            return await handler(conn, args)
         except Exception as exc:
             logger.warning("Slash command /%s failed: %s", command, exc)
             return f"[ERROR] /{command} failed: {exc}"
@@ -27,7 +39,7 @@ async def handle_slash_command(command: str, args: str) -> str | None:
     return f"Unknown command: `/{command}`. Available: {known}... Type `/help` for full list."
 
 
-async def _status(args: str) -> str:
+async def _status(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import get_system_status
     data = await get_system_status()
     return (
@@ -41,7 +53,7 @@ async def _status(args: str) -> str:
     )
 
 
-async def _info(args: str) -> str:
+async def _info(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import get_system_info
     data = await get_system_info()
     return (
@@ -55,7 +67,7 @@ async def _info(args: str) -> str:
     )
 
 
-async def _debug(args: str) -> str:
+async def _debug(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import get_debug_state
     data = await get_debug_state()
     lines = [f"**Debug State** ({data['timestamp'][:19]})"]
@@ -77,7 +89,7 @@ async def _debug(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _logs(args: str) -> str:
+async def _logs(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import get_recent_logs
     limit = 10
     if args.strip().isdigit():
@@ -91,7 +103,7 @@ async def _logs(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _devices(args: str) -> str:
+async def _devices(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import get_devices
     data = await get_devices()
     if not data:
@@ -102,7 +114,7 @@ async def _devices(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _agents(args: str) -> str:
+async def _agents(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.agents import _agents
     agents = list(_agents.values())
     if not agents:
@@ -114,7 +126,7 @@ async def _agents(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _tasks(args: str) -> str:
+async def _tasks(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.tasks import _tasks
     tasks = list(_tasks.values())
     if not tasks:
@@ -126,7 +138,7 @@ async def _tasks(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _provider(args: str) -> str:
+async def _provider(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.providers import get_provider_health
     data = await get_provider_health()
     lines = ["**Provider Fallback Chain**"]
@@ -137,7 +149,7 @@ async def _provider(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _budget(args: str) -> str:
+async def _budget(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import get_token_budget
     data = await get_token_budget()
     return (
@@ -150,7 +162,7 @@ async def _budget(args: str) -> str:
     )
 
 
-async def _npi(args: str) -> str:
+async def _npi(conn: asyncpg.Connection, args: str) -> str:
     from backend import db
     state = await db.get_npi_state()
     if not state or not state.get("phases"):
@@ -166,7 +178,7 @@ async def _npi(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _sdks(args: str) -> str:
+async def _sdks(conn: asyncpg.Connection, args: str) -> str:
     from backend.routers.system import list_vendor_sdks
     data = await list_vendor_sdks()
     if not data:
@@ -179,14 +191,14 @@ async def _sdks(args: str) -> str:
     return "\n".join(lines)
 
 
-async def _platform(args: str) -> str:
+async def _platform(conn: asyncpg.Connection, args: str) -> str:
     from backend.agents.tools import get_platform_config
     platform = args.strip() or "aarch64"
     result = await get_platform_config.ainvoke({"platform": platform})
     return result
 
 
-async def _spawn(args: str) -> str:
+async def _spawn(conn: asyncpg.Connection, args: str) -> str:
     agent_type = args.strip().lower() or "general"
     from backend.routers.agents import _agents, _persist
     from backend.models import Agent, AgentType, AgentStatus
@@ -201,14 +213,16 @@ async def _spawn(args: str) -> str:
         status=AgentStatus.idle,
     )
     _agents[agent.id] = agent
-    try:
-        await _persist(agent)
-    except Exception:
-        pass
+    # SP-3.1: pass the request-scoped pool conn to the ported _persist.
+    # Do NOT swallow DB failures silently — if the persist fails, the
+    # in-memory _agents dict is ahead of the DB, which is only safe if
+    # the operator sees the error and re-tries (or restarts, which
+    # reloads from DB via seed_defaults_if_empty).
+    await _persist(conn, agent)
     return f"Agent spawned: **{agent.name}** (`{agent.id}`) — status: idle"
 
 
-async def _switch(args: str) -> str:
+async def _switch(conn: asyncpg.Connection, args: str) -> str:
     parts = args.strip().split()
     provider = parts[0] if parts else ""
     model = parts[1] if len(parts) > 1 else ""
@@ -222,49 +236,49 @@ async def _switch(args: str) -> str:
         return f"[ERROR] Switch failed: {exc}"
 
 
-async def _build(args: str) -> str:
+async def _build(conn: asyncpg.Connection, args: str) -> str:
     module = args.strip() or "firmware"
     return f"[ROUTE TO LLM] Build request for `{module}`. This command will be processed by the agent pipeline.\n\n_Tip: Use INVOKE to auto-dispatch build tasks._"
 
 
-async def _test(args: str) -> str:
+async def _test(conn: asyncpg.Connection, args: str) -> str:
     module = args.strip() or "all"
     return f"[ROUTE TO LLM] Test request for `{module}`. This command will be processed by the agent pipeline."
 
 
-async def _simulate(args: str) -> str:
+async def _simulate(conn: asyncpg.Connection, args: str) -> str:
     module = args.strip()
     if not module:
         return "[ERROR] Usage: /simulate [module_name]"
     return f"[ROUTE TO LLM] Simulation request for `{module}`. Agent will call run_simulation tool."
 
 
-async def _review(args: str) -> str:
+async def _review(conn: asyncpg.Connection, args: str) -> str:
     return "[ROUTE TO LLM] Code review request. Agent will use Gerrit tools to review pending changes."
 
 
-async def _assign(args: str) -> str:
+async def _assign(conn: asyncpg.Connection, args: str) -> str:
     if not args.strip():
         return "[ERROR] Usage: /assign [task_id or title] [agent_id or name]"
     return f"[ROUTE TO LLM] Assignment request: `{args.strip()}`. Orchestrator will match task to best agent."
 
 
-async def _clear(args: str) -> str:
+async def _clear(conn: asyncpg.Connection, args: str) -> str:
     return "[CLEAR] Chat history cleared."
 
 
-async def _refresh(args: str) -> str:
+async def _refresh(conn: asyncpg.Connection, args: str) -> str:
     return "[REFRESH] System data refresh requested. Frontend will reload all state."
 
 
-async def _invoke(args: str) -> str:
+async def _invoke(conn: asyncpg.Connection, args: str) -> str:
     cmd = args.strip()
     if cmd:
         return f"[INVOKE] Singularity sync with command: `{cmd}`. Press the INVOKE button or use the frontend."
     return "[INVOKE] Singularity sync requested. Press the ⚡ INVOKE button to execute."
 
 
-async def _deploy(args: str) -> str:
+async def _deploy(conn: asyncpg.Connection, args: str) -> str:
     """Deploy compiled artifacts to an EVK board."""
     if not args.strip():
         # Show EVK status
@@ -282,7 +296,7 @@ async def _deploy(args: str) -> str:
     return f"[ROUTE TO LLM] Deploy request: module=`{module}` to platform=`{platform}`. Agent will cross-compile and transfer."
 
 
-async def _evk(args: str) -> str:
+async def _evk(conn: asyncpg.Connection, args: str) -> str:
     """Check EVK board connectivity and status."""
     try:
         from backend.agents.tools import check_evk_connection
@@ -293,7 +307,7 @@ async def _evk(args: str) -> str:
         return f"[ERROR] EVK check failed: {exc}"
 
 
-async def _stream(args: str) -> str:
+async def _stream(conn: asyncpg.Connection, args: str) -> str:
     """List UVC camera devices and streaming capabilities."""
     try:
         from backend.agents.tools import list_uvc_devices
@@ -303,7 +317,7 @@ async def _stream(args: str) -> str:
         return f"[ERROR] UVC device scan failed: {exc}"
 
 
-async def _release(args: str) -> str:
+async def _release(conn: asyncpg.Connection, args: str) -> str:
     """Create a release bundle or show current version."""
     from backend.release import resolve_version
     version = await resolve_version()
@@ -349,7 +363,7 @@ async def _release(args: str) -> str:
     return f"[ERROR] Unknown release action: {action}. Use `create` or `upload`."
 
 
-async def _pipeline(args: str) -> str:
+async def _pipeline(conn: asyncpg.Connection, args: str) -> str:
     """E2E pipeline control — start, status, advance."""
     from backend.pipeline import get_pipeline_status, run_pipeline, force_advance
 
@@ -392,7 +406,7 @@ async def _pipeline(args: str) -> str:
     return f"[ERROR] Unknown pipeline action: {action}. Use `start`, `advance`."
 
 
-async def _help(args: str) -> str:
+async def _help(conn: asyncpg.Connection, args: str) -> str:
     categories = {
         "System": ["status", "info", "debug", "logs", "devices"],
         "Development": ["build", "test", "simulate", "review", "platform"],

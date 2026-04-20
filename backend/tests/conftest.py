@@ -90,6 +90,31 @@ async def client(tmp_path, monkeypatch):
     _boot._gate_cache_reset()
 
     await db.init()
+
+    # Phase-3-Runtime-v2 SP-3.1 (2026-04-20): routes that depend on the
+    # asyncpg pool (``Depends(get_conn)``) need a live pool OR a
+    # dependency override. When ``OMNI_TEST_PG_URL`` is available we
+    # spin up a tiny pool + override so ported routes work in this
+    # ``client`` fixture; when it's absent, ported routes raise
+    # RuntimeError from ``db_pool.get_pool()`` — the caller will see
+    # a clear "pool not initialised" message rather than a spooky
+    # failure, and can skip or set the env var.
+    _dsn = _omni_test_pg_dsn_normalised()
+    _pool_for_client = None
+    if _dsn:
+        import asyncpg as _asyncpg
+        _pool_for_client = await _asyncpg.create_pool(
+            _dsn, min_size=1, max_size=3, command_timeout=10.0,
+        )
+
+        from backend.db_pool import get_conn as _real_get_conn
+
+        async def _override_get_conn():
+            async with _pool_for_client.acquire() as _conn:
+                yield _conn
+
+        app.dependency_overrides[_real_get_conn] = _override_get_conn
+
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -97,6 +122,10 @@ async def client(tmp_path, monkeypatch):
     finally:
         await db.close()
         _boot._gate_cache_reset()
+        if _pool_for_client is not None:
+            from backend.db_pool import get_conn as _real_get_conn
+            app.dependency_overrides.pop(_real_get_conn, None)
+            await _pool_for_client.close()
 
 
 @pytest.fixture(autouse=True)

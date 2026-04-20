@@ -38,43 +38,19 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Agents
+#  Agents  —  MOVED TO test_db_agents.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_agent_upsert_get_list_delete(fresh_db):
-    db = fresh_db
-    assert await db.agent_count() == 0
-    await db.upsert_agent({
-        "id": "a1", "name": "Alpha", "type": "firmware",
-        "status": "idle", "thought_chain": "",
-        "progress": {"current": 0, "total": 5},
-        "sub_tasks": [], "workspace": {"root": "/tmp"},
-    })
-    assert await db.agent_count() == 1
-    got = await db.get_agent("a1")
-    assert got is not None
-    assert got["name"] == "Alpha"
-    assert got["progress"] == {"current": 0, "total": 5}  # JSON round-trip
-    # Upsert updates, not duplicates
-    await db.upsert_agent({
-        "id": "a1", "name": "Alpha-v2", "type": "firmware",
-        "status": "running", "thought_chain": "thinking",
-        "progress": {"current": 3, "total": 5},
-        "sub_tasks": ["t1"], "workspace": {},
-    })
-    assert await db.agent_count() == 1
-    updated = await db.get_agent("a1")
-    assert updated["name"] == "Alpha-v2"
-    assert updated["status"] == "running"
-    assert updated["sub_tasks"] == ["t1"]
-    # List
-    agents = await db.list_agents()
-    assert len(agents) == 1
-    # Delete
-    assert await db.delete_agent("a1") is True
-    assert await db.delete_agent("a1") is False  # idempotent
-    assert await db.get_agent("a1") is None
+#
+# Phase-3-Runtime-v2 SP-3.1 (2026-04-20): the 5 agent functions
+# (list_agents / get_agent / upsert_agent / delete_agent / agent_count)
+# were ported from compat-wrapper SQLite-compatible signatures to
+# native asyncpg with an explicit ``conn: asyncpg.Connection`` first
+# argument. The SQLite-backed ``fresh_db`` fixture in this file can no
+# longer exercise them — they require a pool-borrowed connection.
+#
+# The per-function contract tests live in ``test_db_agents.py``, which
+# uses the ``pg_test_conn`` fixture from conftest.py (skips cleanly
+# when OMNI_TEST_PG_URL is unset).
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

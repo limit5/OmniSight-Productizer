@@ -92,7 +92,22 @@ async def lifespan(app: FastAPI):
                 "OMNISIGHT_DATABASE_URL/DATABASE_URL (SQLite dev mode)"
             )
         await _startup_cleanup(_log)
-        await agents.seed_defaults_if_empty()
+        # SP-3.1 (2026-04-20): agents.seed_defaults_if_empty was ported
+        # to require a pool-backed asyncpg connection. In SQLite dev mode
+        # the pool is absent, so we skip seeding with a clear warning —
+        # the in-memory _agents dict starts empty; operator creates
+        # agents via the UI instead. Epic 7 removes this branch when
+        # the compat wrapper is deleted.
+        if _pg_dsn:
+            async with _db_pool.get_pool().acquire() as _seed_conn:
+                await agents.seed_defaults_if_empty(_seed_conn)
+        else:
+            _log.warning(
+                "[STARTUP] agents.seed_defaults_if_empty skipped — "
+                "SQLite dev mode lacks the pool-backed conn that SP-3.1 "
+                "requires. Default agents will NOT be pre-populated. "
+                "Set OMNISIGHT_DATABASE_URL to enable."
+            )
         await tasks.seed_defaults_if_empty()
         await system.load_token_usage_from_db()
         # A1: restore operator-defined decision rules (Phase 50B) from DB

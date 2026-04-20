@@ -919,61 +919,117 @@ async def replace_decision_rules(rules: list[dict]) -> None:
 #  Agent CRUD
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def list_agents() -> list[dict]:
-    async with _conn().execute("SELECT * FROM agents") as cur:
-        rows = await cur.fetchall()
+# ─── Agents domain (Phase-3-Runtime-v2 SP-3.1) ──────────────────────────
+#
+# Ported from compat-wrapper single-connection access to native asyncpg
+# + request-scoped pool connection. Every caller MUST pass an
+# asyncpg.Connection borrowed from backend.db_pool (typically via the
+# ``Depends(get_conn)`` dependency for router handlers, or
+# ``async with get_pool().acquire() as conn:`` for background/startup
+# code).
+#
+# Dialect scope:
+#   * Postgres: primary target; every statement runs natively.
+#   * SQLite: deliberately NOT supported by these functions. During
+#     Epics 3-6 SQLite dev mode is degraded for ported domains; Epic 7
+#     removes the compat wrapper and SQLite is gone for runtime.
+#     Callers on a SQLite dev box will see a clear error rather than
+#     silent data loss because the pool is gated on a Postgres DSN
+#     (``backend.main.lifespan`` gate + ``db_pool.get_pool()`` raises
+#     RuntimeError when uninit).
+#
+# Row factory:
+#   asyncpg.Record supports both ``row["col"]`` and ``row[0]`` so the
+#   helper ``_agent_row_to_dict`` below works unchanged across aiosqlite
+#   and asyncpg — it was defensive enough even before the port.
+
+
+async def list_agents(conn) -> list[dict]:
+    """List all agents. ``conn`` is an asyncpg.Connection from the pool."""
+    rows = await conn.fetch("SELECT * FROM agents")
     return [_agent_row_to_dict(r) for r in rows]
 
 
-async def get_agent(agent_id: str) -> dict | None:
-    async with _conn().execute("SELECT * FROM agents WHERE id = ?", (agent_id,)) as cur:
-        row = await cur.fetchone()
+async def get_agent(conn, agent_id: str) -> dict | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM agents WHERE id = $1", agent_id,
+    )
     return _agent_row_to_dict(row) if row else None
 
 
-async def upsert_agent(data: dict) -> None:
-    await _conn().execute(
-        """INSERT INTO agents (id, name, type, sub_type, status, progress, thought_chain, ai_model, sub_tasks, workspace)
-           VALUES (:id, :name, :type, :sub_type, :status, :progress, :thought_chain, :ai_model, :sub_tasks, :workspace)
-           ON CONFLICT(id) DO UPDATE SET
-             name=excluded.name, type=excluded.type, sub_type=excluded.sub_type, status=excluded.status,
-             progress=excluded.progress, thought_chain=excluded.thought_chain,
-             ai_model=excluded.ai_model, sub_tasks=excluded.sub_tasks, workspace=excluded.workspace
+async def upsert_agent(conn, data: dict) -> None:
+    """Insert or update an agent row. No explicit commit — asyncpg
+    auto-commits each statement when no outer ``conn.transaction()`` is
+    active. For atomic multi-statement flows, callers wrap the whole
+    block in ``async with conn.transaction():`` themselves.
+    """
+    await conn.execute(
+        """INSERT INTO agents
+               (id, name, type, sub_type, status, progress, thought_chain,
+                ai_model, sub_tasks, workspace)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (id) DO UPDATE SET
+               name          = EXCLUDED.name,
+               type          = EXCLUDED.type,
+               sub_type      = EXCLUDED.sub_type,
+               status        = EXCLUDED.status,
+               progress      = EXCLUDED.progress,
+               thought_chain = EXCLUDED.thought_chain,
+               ai_model      = EXCLUDED.ai_model,
+               sub_tasks     = EXCLUDED.sub_tasks,
+               workspace     = EXCLUDED.workspace
         """,
-        {
-            "id": data["id"],
-            "name": data["name"],
-            "type": data["type"],
-            "sub_type": data.get("sub_type", ""),
-            "status": data.get("status", "idle"),
-            "progress": json.dumps(data.get("progress", {"current": 0, "total": 0})),
-            "thought_chain": data.get("thought_chain", ""),
-            "ai_model": data.get("ai_model"),
-            "sub_tasks": json.dumps(data.get("sub_tasks", [])),
-            "workspace": json.dumps(data.get("workspace", {})),
-        },
+        data["id"],
+        data["name"],
+        data["type"],
+        data.get("sub_type", ""),
+        data.get("status", "idle"),
+        json.dumps(data.get("progress", {"current": 0, "total": 0})),
+        data.get("thought_chain", ""),
+        data.get("ai_model"),
+        json.dumps(data.get("sub_tasks", [])),
+        json.dumps(data.get("workspace", {})),
     )
-    await _conn().commit()
 
 
-async def delete_agent(agent_id: str) -> bool:
-    cur = await _conn().execute("DELETE FROM agents WHERE id = ?", (agent_id,))
-    await _conn().commit()
-    return cur.rowcount > 0
+async def delete_agent(conn, agent_id: str) -> bool:
+    """Delete an agent row. Returns True if a row was deleted, else False.
+
+    asyncpg returns a status string like ``"DELETE 1"`` / ``"DELETE 0"``
+    from ``conn.execute()``; we parse the trailing integer. Compare
+    with the compat wrapper's ``_PgCursor.rowcount`` emulation which
+    did the same parse — we're now inlining it here so the compat
+    wrapper can be deleted in Epic 7 without losing behaviour.
+    """
+    status = await conn.execute(
+        "DELETE FROM agents WHERE id = $1", agent_id,
+    )
+    # status: "DELETE <n>"; n is the row count.
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
-async def agent_count() -> int:
-    async with _conn().execute("SELECT COUNT(*) FROM agents") as cur:
-        row = await cur.fetchone()
-    return row[0] if row else 0
+async def agent_count(conn) -> int:
+    n = await conn.fetchval("SELECT COUNT(*) FROM agents")
+    return int(n) if n is not None else 0
 
 
 def _agent_row_to_dict(row) -> dict:
+    """Marshal a DB row (aiosqlite.Row legacy OR asyncpg.Record) into the
+    dict shape ``routers/agents.py::_row_to_agent`` expects.
+
+    Works on both row types because both support ``row["col"]`` lookup.
+    Kept as a plain def (not async) so unit tests can marshal synthetic
+    dicts too if needed.
+    """
+    keys = row.keys()
     return {
         "id": row["id"],
         "name": row["name"],
         "type": row["type"],
-        "sub_type": row["sub_type"] if "sub_type" in row.keys() else "",
+        "sub_type": row["sub_type"] if "sub_type" in keys else "",
         "status": row["status"],
         "progress": json.loads(row["progress"]),
         "thought_chain": row["thought_chain"],

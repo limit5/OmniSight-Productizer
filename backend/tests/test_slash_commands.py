@@ -8,54 +8,54 @@ class TestSlashCommandHandler:
     @pytest.mark.asyncio
     async def test_status_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("status", "")
+        result = await handle_slash_command(None, "status", "")
         assert result is not None
         assert "System Status" in result
 
     @pytest.mark.asyncio
     async def test_help_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("help", "")
+        result = await handle_slash_command(None, "help", "")
         assert result is not None
         assert "/status" in result
 
     @pytest.mark.asyncio
     async def test_logs_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("logs", "5")
+        result = await handle_slash_command(None, "logs", "5")
         assert result is not None
 
     @pytest.mark.asyncio
     async def test_agents_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("agents", "")
+        result = await handle_slash_command(None, "agents", "")
         assert result is not None
         assert "Agents" in result or "No agents" in result
 
     @pytest.mark.asyncio
     async def test_tasks_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("tasks", "")
+        result = await handle_slash_command(None, "tasks", "")
         assert result is not None
 
     @pytest.mark.asyncio
     async def test_sdks_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("sdks", "")
+        result = await handle_slash_command(None, "sdks", "")
         assert result is not None
         assert "SDK" in result or "platform" in result.lower()
 
     @pytest.mark.asyncio
     async def test_unknown_command_returns_error(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("nonexistent_xyz", "")
+        result = await handle_slash_command(None, "nonexistent_xyz", "")
         assert result is not None
         assert "Unknown command" in result
 
     @pytest.mark.asyncio
     async def test_empty_command_returns_help_hint(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("", "")
+        result = await handle_slash_command(None, "", "")
         assert result is not None
         assert "/help" in result
 

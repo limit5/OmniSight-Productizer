@@ -290,6 +290,48 @@ class Settings(BaseSettings):
     # controls bucketing + cleanup semantics.
     prewarm_policy: str = "per_tenant"
 
+    # ─── Declared-only-to-satisfy-extra=forbid fields ────────────────
+    # Phase-3-Runtime-v2 SP-3.1 (2026-04-20): these env vars are read
+    # elsewhere in the codebase via ``os.environ.get(...)`` directly
+    # (not through ``settings.X``) — either because the reading site
+    # predates this Settings class, or because the variable is re-read
+    # at runtime and a cached Settings value would be wrong. We still
+    # need them DECLARED here because pydantic-settings' default
+    # ``extra='forbid'`` gate rejects any env var (or .env line) that
+    # doesn't map to a Settings field.
+    #
+    # Matches the existing pattern documented at the ``auth_baseline_mode``
+    # declaration earlier in this class — see its header comment for the
+    # full rationale.
+    #
+    # Before SP-3.1: these env vars existed in operator ``.env`` files
+    # but weren't declared here, so anything that imported ``backend.db``
+    # (which instantiates Settings at module-load time via
+    # ``_resolve_db_path()``) crashed in test/dev environments that had
+    # the real .env on the path. Tests worked around it with
+    # ``monkeypatch.chdir(tmp_path)`` to hide the .env — a workaround
+    # that SP-3.1 replaces with this proper declaration.
+
+    # Used by: backend/config.py::validate_startup_config, auth_baseline
+    auth_mode: str = "open"
+    # Used by: backend/config.py::validate_startup_config (HTTPS gate)
+    cookie_secure: str = ""
+    # Used by: backend/routers/health.py (deep-probe gating, C3 audit)
+    readyz_deep_check: str = ""
+    # Used by: backend/auth.py::ensure_default_admin (bootstrap)
+    admin_email: str = ""
+    admin_password: str = ""
+    # Used by: backend/config.py::validate_startup_config (secret gate)
+    decision_bearer: str = ""
+    # Used by: CF tunnel ingress runbook (Caddy :8080 path routing)
+    public_hostname: str = ""
+    cloudflare_tunnel_token: str = ""
+    # Frontend-side env var that appears in the prod ``.env`` file
+    # because operators use ONE .env for both frontend and backend.
+    # Declared without OMNISIGHT_ prefix so pydantic-settings finds it
+    # in the raw .env line ``next_public_api_url=...``.
+    next_public_api_url: str = ""
+
     model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
 
     def get_model_name(self) -> str:

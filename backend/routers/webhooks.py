@@ -13,10 +13,12 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Request
+import asyncpg
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from backend.config import settings
+from backend.db_pool import get_conn, get_pool
 from backend.events import emit_invoke, emit_agent_update, emit_task_update
 from backend.models import (
     Agent, AgentProgress, AgentStatus,
@@ -29,11 +31,21 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
 @router.post("/gerrit")
-async def gerrit_webhook(request: Request):
+async def gerrit_webhook(
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Receive Gerrit events and trigger appropriate actions.
 
     Gerrit sends JSON events via its webhook plugin or stream-events.
     Supports optional HMAC-SHA256 signature via X-Gerrit-Signature header.
+
+    Phase-3-Runtime-v2 SP-3.1: handler takes a pool-backed
+    ``asyncpg.Connection`` so the agent-spawn code path inside
+    ``_on_patchset_created`` can persist the spawned reviewer via
+    the ported ``db.upsert_agent`` API. Background tasks started from
+    here (``_run_review``) acquire their OWN conn since the request
+    scope ends before they run.
     """
     if not settings.gerrit_enabled:
         return JSONResponse(status_code=503, content={"detail": "Gerrit integration disabled"})
@@ -95,7 +107,7 @@ async def gerrit_webhook(request: Request):
     logger.info("Gerrit webhook: type=%s", event_type)
 
     if event_type == "patchset-created":
-        await _on_patchset_created(body)
+        await _on_patchset_created(conn, body)
     elif event_type == "comment-added":
         await _on_comment_added(body)
     elif event_type == "change-merged":
@@ -106,7 +118,9 @@ async def gerrit_webhook(request: Request):
     return {"status": "ok", "event": event_type}
 
 
-async def _on_patchset_created(event: dict) -> None:
+async def _on_patchset_created(
+    conn: asyncpg.Connection, event: dict,
+) -> None:
     """A new patchset was pushed — spawn a reviewer agent to review it."""
     change = event.get("change", {})
     patchset = event.get("patchSet", {})
@@ -165,7 +179,7 @@ async def _on_patchset_created(event: dict) -> None:
             thought_chain="Spawned by Gerrit webhook.",
         )
         _agents[reviewer_id] = reviewer
-        await _persist_agent(reviewer)
+        await _persist_agent(conn, reviewer)
 
     # Assign and trigger
     task.status = TaskStatus.assigned
@@ -173,17 +187,25 @@ async def _on_patchset_created(event: dict) -> None:
     reviewer.status = AgentStatus.running
     reviewer.thought_chain = f"Reviewing change {change_id}: {change_subject}"
     await _persist_task(task)
-    await _persist_agent(reviewer)
+    await _persist_agent(conn, reviewer)
 
     emit_task_update(task_id, task.status, reviewer.id)
     emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
 
-    # Execute review in background (webhook must return fast)
+    # Execute review in background (webhook must return fast). _run_review
+    # acquires its OWN conn from the pool because the request-scoped conn
+    # is released when the webhook handler returns (asyncio.create_task
+    # runs after return).
     asyncio.create_task(_run_review(reviewer, change_id, commit, change_subject))
 
 
 async def _run_review(reviewer: Agent, change_id: str, commit: str, subject: str) -> None:
-    """Background task: run LangGraph review pipeline and update agent status."""
+    """Background task: run LangGraph review pipeline and update agent status.
+
+    Acquires its own pool-backed conn via ``async with pool.acquire()``
+    — the webhook's request-scoped conn is gone by the time this task
+    runs.
+    """
     from backend.routers.agents import _persist as _persist_agent
     try:
         from backend.agents.graph import run_graph
@@ -206,7 +228,10 @@ async def _run_review(reviewer: Agent, change_id: str, commit: str, subject: str
         reviewer.status = AgentStatus.error
         logger.error("Review failed: %s", exc)
 
-    await _persist_agent(reviewer)
+    # Pool-backed conn for the final persist — SP-3.1 requires all
+    # db.agent_* calls go through asyncpg.
+    async with get_pool().acquire() as _conn:
+        await _persist_agent(_conn, reviewer)
     emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
 
 
