@@ -50,7 +50,6 @@ import time
 import uuid
 from typing import Iterable, Sequence
 
-from backend.db import _conn
 from backend.db_context import current_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -62,6 +61,17 @@ _HOST_RE = re.compile(r"^[a-zA-Z0-9._-]{1,253}(:\d{1,5})?$")
 _TID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 _DNS_TTL_S = 300.0
 
+# Module-global DNS cache — **intentional per-worker drift** (SOP
+# Step 1 module-global audit, answer 3). Under ``uvicorn --workers N``
+# each worker has its own cache. Two workers resolving the same
+# hostname may land on slightly different IPs (DNS round-robin) and
+# their iptables rule plans diverge transiently. Accepted because:
+# (a) the plans refresh every 5 min via ``_DNS_TTL_S``, (b) the
+# downstream shell installer rewrites the whole rule chain each
+# time (not merged with existing), so divergence resolves on next
+# apply. Do NOT try to coordinate this through Redis/PG — the cost
+# of a round-trip to shared state on every getaddrinfo is not worth
+# the consistency we'd gain.
 _dns_cache: dict[tuple[str, int | None], tuple[list[str], float]] = {}
 _dns_lock = asyncio.Lock()
 
@@ -183,16 +193,28 @@ def _row_to_policy(row) -> EgressPolicy:
     )
 
 
-async def get_policy(tenant_id: str | None = None) -> EgressPolicy:
+_POLICY_COLS = (
+    "tenant_id, allowed_hosts, allowed_cidrs, default_action, "
+    "updated_at, updated_by"
+)
+
+
+async def get_policy(
+    tenant_id: str | None = None, conn=None,
+) -> EgressPolicy:
     """Return the policy for a tenant. Falls back to a deny-by-default
     empty policy when the row is missing (tenant not yet onboarded)."""
     tid = validate_tenant_id(tenant_id or current_tenant_id() or DEFAULT_TENANT_ID)
-    async with _conn().execute(
-        "SELECT tenant_id, allowed_hosts, allowed_cidrs, default_action, "
-        "updated_at, updated_by FROM tenant_egress_policies WHERE tenant_id=?",
-        (tid,),
-    ) as cur:
-        row = await cur.fetchone()
+    sql = (
+        f"SELECT {_POLICY_COLS} FROM tenant_egress_policies "
+        "WHERE tenant_id = $1"
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            row = await owned.fetchrow(sql, tid)
+    else:
+        row = await conn.fetchrow(sql, tid)
     if row is None:
         return EgressPolicy(
             tenant_id=tid, allowed_hosts=(), allowed_cidrs=(),
@@ -201,13 +223,17 @@ async def get_policy(tenant_id: str | None = None) -> EgressPolicy:
     return _row_to_policy(row)
 
 
-async def list_policies() -> list[EgressPolicy]:
-    async with _conn().execute(
-        "SELECT tenant_id, allowed_hosts, allowed_cidrs, default_action, "
-        "updated_at, updated_by FROM tenant_egress_policies "
+async def list_policies(conn=None) -> list[EgressPolicy]:
+    sql = (
+        f"SELECT {_POLICY_COLS} FROM tenant_egress_policies "
         "ORDER BY tenant_id"
-    ) as cur:
-        rows = await cur.fetchall()
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            rows = await owned.fetch(sql)
+    else:
+        rows = await conn.fetch(sql)
     return [_row_to_policy(r) for r in rows]
 
 
@@ -218,61 +244,83 @@ async def upsert_policy(
     allowed_cidrs: Sequence[str] | None = None,
     default_action: str | None = None,
     actor: str = "system",
+    conn=None,
 ) -> EgressPolicy:
     """Replace the policy for a tenant. Validates every entry; a single
-    bad value rejects the entire write to avoid partial state."""
+    bad value rejects the entire write to avoid partial state.
+
+    SP-5.3 (2026-04-21): the existing ON CONFLICT already makes the
+    single write atomic. We additionally wrap the read-merge-write
+    sequence in a tx so the ``current`` snapshot the caller sees in
+    the audit entry matches the row state that was in place at write
+    time — previously under compat's single shared conn this was
+    implicitly serialised, under pool it could race.
+    """
     tid = validate_tenant_id(tenant_id)
 
-    current = await get_policy(tid)
+    async def _impl(c):
+        current = await get_policy(tid, conn=c)
 
-    if allowed_hosts is None:
-        hosts: list[str] = list(current.allowed_hosts)
-    else:
-        hosts = []
-        seen: set[str] = set()
-        for h in allowed_hosts:
-            v = validate_host(h)
-            if v not in seen:
-                seen.add(v)
-                hosts.append(v)
+        if allowed_hosts is None:
+            hosts: list[str] = list(current.allowed_hosts)
+        else:
+            hosts = []
+            seen: set[str] = set()
+            for h in allowed_hosts:
+                v = validate_host(h)
+                if v not in seen:
+                    seen.add(v)
+                    hosts.append(v)
 
-    if allowed_cidrs is None:
-        cidrs: list[str] = list(current.allowed_cidrs)
-    else:
-        cidrs = []
-        seenc: set[str] = set()
-        for c in allowed_cidrs:
-            v = validate_cidr(c)
-            if v not in seenc:
-                seenc.add(v)
-                cidrs.append(v)
+        if allowed_cidrs is None:
+            cidrs: list[str] = list(current.allowed_cidrs)
+        else:
+            cidrs = []
+            seenc: set[str] = set()
+            for cidr in allowed_cidrs:
+                v = validate_cidr(cidr)
+                if v not in seenc:
+                    seenc.add(v)
+                    cidrs.append(v)
 
-    action = validate_default_action(default_action or current.default_action)
-    if action == "allow":
-        logger.warning(
-            "tenant_egress: tenant=%s set default_action=allow — bypasses "
-            "the M6 deny-by-default invariant. Operator confirmed via %s.",
-            tid, actor,
+        action = validate_default_action(default_action or current.default_action)
+        if action == "allow":
+            logger.warning(
+                "tenant_egress: tenant=%s set default_action=allow — bypasses "
+                "the M6 deny-by-default invariant. Operator confirmed via %s.",
+                tid, actor,
+            )
+
+        await c.execute(
+            "INSERT INTO tenant_egress_policies "
+            "(tenant_id, allowed_hosts, allowed_cidrs, default_action, "
+            " updated_at, updated_by) "
+            "VALUES ($1, $2, $3, $4, "
+            " to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'), $5) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET "
+            " allowed_hosts = EXCLUDED.allowed_hosts, "
+            " allowed_cidrs = EXCLUDED.allowed_cidrs, "
+            " default_action = EXCLUDED.default_action, "
+            " updated_at = EXCLUDED.updated_at, "
+            " updated_by = EXCLUDED.updated_by",
+            tid, json.dumps(hosts), json.dumps(cidrs), action, actor,
         )
+        new = await get_policy(tid, conn=c)
+        return current, new
 
-    db = _conn()
-    await db.execute(
-        "INSERT INTO tenant_egress_policies "
-        "(tenant_id, allowed_hosts, allowed_cidrs, default_action, "
-        " updated_at, updated_by) "
-        "VALUES (?, ?, ?, ?, datetime('now'), ?) "
-        "ON CONFLICT(tenant_id) DO UPDATE SET "
-        " allowed_hosts=excluded.allowed_hosts, "
-        " allowed_cidrs=excluded.allowed_cidrs, "
-        " default_action=excluded.default_action, "
-        " updated_at=excluded.updated_at, "
-        " updated_by=excluded.updated_by",
-        (tid, json.dumps(hosts), json.dumps(cidrs), action, actor),
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                current, new = await _impl(owned)
+    else:
+        async with conn.transaction():
+            current, new = await _impl(conn)
+
+    await _audit(
+        "tenant_egress.upsert", tid, actor,
+        before=current.to_dict(), after=new.to_dict(),
     )
-    await db.commit()
-
-    new = await get_policy(tid)
-    await _audit("tenant_egress.upsert", tid, actor, before=current.to_dict(), after=new.to_dict())
     return new
 
 
@@ -292,6 +340,12 @@ def _validate_request_value(kind: str, value: str) -> str:
     raise ValueError(f"invalid request kind: {kind!r}")
 
 
+_REQUEST_COLS = (
+    "id, tenant_id, requested_by, kind, value, justification, "
+    "status, decided_by, decided_at, decision_note, created_at"
+)
+
+
 async def submit_request(
     tenant_id: str,
     *,
@@ -299,76 +353,103 @@ async def submit_request(
     kind: str,
     value: str,
     justification: str = "",
+    conn=None,
 ) -> EgressRequest:
     """File a pending request. Idempotent — duplicate (tenant, kind, value,
-    pending) entries collapse to the existing one."""
+    pending) entries collapse to the existing one.
+
+    SP-5.3 (2026-04-21): the check-then-insert is now serialised on
+    ``pg_advisory_xact_lock(hashtext('egress-submit-<tid>-<kind>-<value>'))``
+    so two concurrent submits on the same tuple converge to the
+    winner's existing pending row instead of both inserting with
+    different uuids. No schema change (keeps the table's existing
+    lack of UNIQUE on the tuple — the lock enforces invariant at
+    write time).
+    """
     tid = validate_tenant_id(tenant_id)
     if kind not in VALID_REQUEST_KINDS:
         raise ValueError(f"kind must be one of {VALID_REQUEST_KINDS}")
     norm_value = _validate_request_value(kind, value)
 
-    db = _conn()
-    async with db.execute(
-        "SELECT id FROM tenant_egress_requests "
-        "WHERE tenant_id=? AND kind=? AND value=? AND status='pending'",
-        (tid, kind, norm_value),
-    ) as cur:
-        existing = await cur.fetchone()
-    if existing:
-        return await _get_request(existing["id"])
+    async def _impl(c):
+        await c.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            f"egress-submit-{tid}-{kind}-{norm_value}",
+        )
+        existing = await c.fetchrow(
+            "SELECT id FROM tenant_egress_requests "
+            "WHERE tenant_id = $1 AND kind = $2 AND value = $3 "
+            "AND status = 'pending'",
+            tid, kind, norm_value,
+        )
+        if existing:
+            return existing["id"], False  # not newly created
 
-    rid = f"egr-{uuid.uuid4().hex[:12]}"
-    await db.execute(
-        "INSERT INTO tenant_egress_requests "
-        "(id, tenant_id, requested_by, kind, value, justification, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-        (rid, tid, requested_by, kind, norm_value, justification or ""),
-    )
-    await db.commit()
+        rid = f"egr-{uuid.uuid4().hex[:12]}"
+        await c.execute(
+            "INSERT INTO tenant_egress_requests "
+            "(id, tenant_id, requested_by, kind, value, justification, status) "
+            "VALUES ($1, $2, $3, $4, $5, $6, 'pending')",
+            rid, tid, requested_by, kind, norm_value, justification or "",
+        )
+        return rid, True
 
-    req = await _get_request(rid)
-    await _audit(
-        "tenant_egress.request_submit", tid, requested_by,
-        after={"request_id": rid, "kind": kind, "value": norm_value,
-               "justification": justification or ""},
-    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                rid, created = await _impl(owned)
+    else:
+        async with conn.transaction():
+            rid, created = await _impl(conn)
+
+    req = await _get_request(rid, conn=conn)
+    if created:
+        await _audit(
+            "tenant_egress.request_submit", tid, requested_by,
+            after={"request_id": rid, "kind": kind, "value": norm_value,
+                   "justification": justification or ""},
+        )
     return req
 
 
 async def list_requests(
     *, tenant_id: str | None = None, status: str | None = None,
+    conn=None,
 ) -> list[EgressRequest]:
-    sql = (
-        "SELECT id, tenant_id, requested_by, kind, value, justification, "
-        "status, decided_by, decided_at, decision_note, created_at "
-        "FROM tenant_egress_requests"
-    )
+    sql = f"SELECT {_REQUEST_COLS} FROM tenant_egress_requests"
     conds: list[str] = []
     params: list = []
     if tenant_id:
-        conds.append("tenant_id=?")
         params.append(validate_tenant_id(tenant_id))
+        conds.append(f"tenant_id = ${len(params)}")
     if status:
         if status not in VALID_REQUEST_STATUSES:
             raise ValueError(f"status must be one of {VALID_REQUEST_STATUSES}")
-        conds.append("status=?")
         params.append(status)
+        conds.append(f"status = ${len(params)}")
     if conds:
         sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY created_at DESC"
-    async with _conn().execute(sql, params) as cur:
-        rows = await cur.fetchall()
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            rows = await owned.fetch(sql, *params)
+    else:
+        rows = await conn.fetch(sql, *params)
     return [_row_to_request(r) for r in rows]
 
 
-async def _get_request(request_id: str) -> EgressRequest:
-    async with _conn().execute(
-        "SELECT id, tenant_id, requested_by, kind, value, justification, "
-        "status, decided_by, decided_at, decision_note, created_at "
-        "FROM tenant_egress_requests WHERE id=?",
-        (request_id,),
-    ) as cur:
-        row = await cur.fetchone()
+async def _get_request(
+    request_id: str, conn=None,
+) -> EgressRequest:
+    sql = f"SELECT {_REQUEST_COLS} FROM tenant_egress_requests WHERE id = $1"
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            row = await owned.fetchrow(sql, request_id)
+    else:
+        row = await conn.fetchrow(sql, request_id)
     if row is None:
         raise KeyError(f"unknown egress request: {request_id}")
     return _row_to_request(row)
@@ -392,67 +473,122 @@ def _row_to_request(row) -> EgressRequest:
 
 async def approve_request(
     request_id: str, *, actor: str, note: str = "",
+    conn=None,
 ) -> tuple[EgressRequest, EgressPolicy]:
     """Approve and merge into the policy. Idempotent against re-approval
-    of the same id (raises if already decided)."""
-    req = await _get_request(request_id)
-    if req.status != "pending":
-        raise ValueError(f"request {request_id} already {req.status}")
+    of the same id (raises if already decided).
 
-    policy = await get_policy(req.tenant_id)
+    SP-5.3: advisory lock on request_id so two concurrent approvals
+    deterministically pick one winner. The loser sees the winner's
+    ``status='approved'`` via the FOR-UPDATE re-read and raises
+    ``request already approved``.
+    """
+    async def _impl(c):
+        await c.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            f"egress-decision-{request_id}",
+        )
+        row = await c.fetchrow(
+            "SELECT status FROM tenant_egress_requests "
+            "WHERE id = $1 FOR UPDATE",
+            request_id,
+        )
+        if row is None:
+            raise KeyError(f"unknown egress request: {request_id}")
+        if row["status"] != "pending":
+            raise ValueError(
+                f"request {request_id} already {row['status']}"
+            )
+        await c.execute(
+            "UPDATE tenant_egress_requests SET status = 'approved', "
+            "decided_by = $1, "
+            "decided_at = to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'), "
+            "decision_note = $2 WHERE id = $3",
+            actor, note or "", request_id,
+        )
+
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                await _impl(owned)
+    else:
+        async with conn.transaction():
+            await _impl(conn)
+
+    # Re-read the request (now approved) + merge into the policy.
+    # The policy merge runs in its own tx (via upsert_policy) so the
+    # advisory lock above doesn't span both ops — if it did, a slow
+    # upsert_policy under contention would starve other approvals
+    # on different request_ids.
+    req = await _get_request(request_id, conn=conn)
+    policy = await get_policy(req.tenant_id, conn=conn)
     if req.kind == "host":
         merged = list(policy.allowed_hosts)
         if req.value not in merged:
             merged.append(req.value)
         new_policy = await upsert_policy(
-            req.tenant_id, allowed_hosts=merged, actor=actor,
+            req.tenant_id, allowed_hosts=merged, actor=actor, conn=conn,
         )
     else:
         merged = list(policy.allowed_cidrs)
         if req.value not in merged:
             merged.append(req.value)
         new_policy = await upsert_policy(
-            req.tenant_id, allowed_cidrs=merged, actor=actor,
+            req.tenant_id, allowed_cidrs=merged, actor=actor, conn=conn,
         )
 
-    db = _conn()
-    await db.execute(
-        "UPDATE tenant_egress_requests SET status='approved', "
-        "decided_by=?, decided_at=datetime('now'), decision_note=? "
-        "WHERE id=?",
-        (actor, note or "", request_id),
-    )
-    await db.commit()
-
-    decided = await _get_request(request_id)
     await _audit(
         "tenant_egress.request_approve", req.tenant_id, actor,
         before={"request_id": request_id, "kind": req.kind, "value": req.value},
         after={"note": note or ""},
     )
-    return decided, new_policy
+    return req, new_policy
 
 
 async def reject_request(
     request_id: str, *, actor: str, note: str = "",
+    conn=None,
 ) -> EgressRequest:
-    req = await _get_request(request_id)
-    if req.status != "pending":
-        raise ValueError(f"request {request_id} already {req.status}")
+    async def _impl(c):
+        await c.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            f"egress-decision-{request_id}",
+        )
+        row = await c.fetchrow(
+            "SELECT tenant_id, kind, value, status "
+            "FROM tenant_egress_requests WHERE id = $1 FOR UPDATE",
+            request_id,
+        )
+        if row is None:
+            raise KeyError(f"unknown egress request: {request_id}")
+        if row["status"] != "pending":
+            raise ValueError(
+                f"request {request_id} already {row['status']}"
+            )
+        await c.execute(
+            "UPDATE tenant_egress_requests SET status = 'rejected', "
+            "decided_by = $1, "
+            "decided_at = to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'), "
+            "decision_note = $2 WHERE id = $3",
+            actor, note or "", request_id,
+        )
+        return dict(row)
 
-    db = _conn()
-    await db.execute(
-        "UPDATE tenant_egress_requests SET status='rejected', "
-        "decided_by=?, decided_at=datetime('now'), decision_note=? "
-        "WHERE id=?",
-        (actor, note or "", request_id),
-    )
-    await db.commit()
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                req_snapshot = await _impl(owned)
+    else:
+        async with conn.transaction():
+            req_snapshot = await _impl(conn)
 
-    decided = await _get_request(request_id)
+    decided = await _get_request(request_id, conn=conn)
     await _audit(
-        "tenant_egress.request_reject", req.tenant_id, actor,
-        before={"request_id": request_id, "kind": req.kind, "value": req.value},
+        "tenant_egress.request_reject", req_snapshot["tenant_id"], actor,
+        before={"request_id": request_id, "kind": req_snapshot["kind"],
+                "value": req_snapshot["value"]},
         after={"note": note or ""},
     )
     return decided

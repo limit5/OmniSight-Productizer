@@ -130,27 +130,38 @@ class TestRulePlan:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @pytest.fixture
-async def fresh_db(tmp_path, monkeypatch):
-    db_path = tmp_path / "egress.db"
-    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
-    from backend import config as _cfg
-    _cfg.settings.database_path = str(db_path)
-    from backend import db
-    db._DB_PATH = db._resolve_db_path()
+async def fresh_db(pg_test_pool, pg_test_dsn, monkeypatch):
+    # SP-5.3 (2026-04-21): migrated from SQLite tempfile to pg_test_pool.
+    # tenant_egress is fully pool-native post-port; _audit still calls
+    # through to backend.audit which is also pool-native. Reset DNS
+    # cache between tests so one test's resolved IPs don't leak.
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE tenant_egress_policies, tenant_egress_requests "
+            "RESTART IDENTITY CASCADE"
+        )
+        await conn.execute(
+            "INSERT INTO tenants (id, name, plan) VALUES "
+            "($1, $2, $3), ($4, $5, $6) ON CONFLICT (id) DO NOTHING",
+            "t-alpha", "Alpha", "free",
+            "t-beta", "Beta", "pro",
+        )
+    from backend import db, tenant_egress as _te
+    if db._db is not None:
+        await db.close()
     await db.init()
-    # Seed a couple of tenants so FK references resolve.
-    conn = db._conn()
-    await conn.execute(
-        "INSERT OR IGNORE INTO tenants (id, name, plan) VALUES (?, ?, ?)",
-        ("t-alpha", "Alpha", "free"),
-    )
-    await conn.execute(
-        "INSERT OR IGNORE INTO tenants (id, name, plan) VALUES (?, ?, ?)",
-        ("t-beta", "Beta", "pro"),
-    )
-    await conn.commit()
-    yield db
-    await db.close()
+    _te._reset_dns_cache_for_tests()
+    try:
+        yield db
+    finally:
+        await db.close()
+        _te._reset_dns_cache_for_tests()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE tenant_egress_policies, tenant_egress_requests "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 class TestPolicyCrud:
@@ -445,35 +456,54 @@ class TestSandboxNetIntegration:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @pytest.fixture
-async def http_client(tmp_path, monkeypatch):
-    db_path = tmp_path / "egress_http.db"
-    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
+async def http_client(pg_test_pool, pg_test_dsn, monkeypatch):
+    # SP-5.3 (2026-04-21): same migration pattern as fresh_db.
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
     monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "open")
-    from backend import config as _cfg
-    _cfg.settings.database_path = str(db_path)
-    from backend import db
-    db._DB_PATH = db._resolve_db_path()
-    from backend.main import app
-    await db.init()
-    conn = db._conn()
-    await conn.execute(
-        "INSERT OR IGNORE INTO tenants (id, name, plan) VALUES (?, ?, ?)",
-        ("t-alpha", "Alpha", "free"),
-    )
-    await conn.commit()
 
-    # Finalize bootstrap so the bootstrap gate middleware doesn't
-    # intercept API calls with 503 "bootstrap_required".
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE tenant_egress_policies, tenant_egress_requests "
+            "RESTART IDENTITY CASCADE"
+        )
+        await conn.execute(
+            "INSERT INTO tenants (id, name, plan) VALUES ($1, $2, $3) "
+            "ON CONFLICT (id) DO NOTHING",
+            "t-alpha", "Alpha", "free",
+        )
+
+    from backend import db, tenant_egress as _te
+    from backend.main import app
     from backend import bootstrap as _boot
-    _boot._gate_cache["finalized"] = True
+
+    async def _green():
+        return _boot.BootstrapStatus(
+            admin_password_default=False,
+            llm_provider_configured=True,
+            cf_tunnel_configured=True,
+            smoke_passed=True,
+        )
+    monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
+    _boot._gate_cache_reset()
+
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    _te._reset_dns_cache_for_tests()
 
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
-        _boot._gate_cache["finalized"] = False  # reset for other tests
+        _boot._gate_cache_reset()
         await db.close()
+        _te._reset_dns_cache_for_tests()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE tenant_egress_policies, tenant_egress_requests "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 class TestRestApi:
