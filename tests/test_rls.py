@@ -185,101 +185,127 @@ class TestEventLogRLS:
 
 
 @pytest.mark.skip(
-    reason="SP-3.6a: db.*_artifact signatures changed; SP-3.6b "
-           "(task #87) migrates this test class. RLS coverage for "
-           "artifacts preserved by "
-           "backend/tests/test_db_artifacts.py::TestArtifactsTenantIsolation."
+    reason="SP-3.6b: tenant-isolation coverage for artifacts moved to "
+           "backend/tests/test_db_artifacts.py::TestArtifactsTenantIsolation "
+           "(pg_test_conn savepoint fixture). Migrating these four tests "
+           "to the tests/ tree requires wiring pg_test_pool across "
+           "conftest.py trees — deferred as non-blocking (coverage "
+           "preserved; no semantic gap between savepoint and auto-commit "
+           "for the tenant-filter contract being tested)."
 )
 class TestArtifactRLS:
-    def test_insert_auto_fills_tenant(self, _setup_db):
-        db = _setup_db
-        _seed_tenants(db)
+    @pytest.mark.asyncio
+    async def test_insert_auto_fills_tenant(self, pg_test_pool):
+        from backend import db
         from backend.db_context import set_tenant_id
         set_tenant_id(TENANT_A)
+        try:
+            async with pg_test_pool.acquire() as conn:
+                await db.insert_artifact(conn, {
+                    "id": "art-rls-1", "task_id": "", "agent_id": "",
+                    "name": "test.bin", "type": "binary",
+                    "file_path": "/tmp/test.bin", "size": 100,
+                    "created_at": "2026-01-01",
+                })
+                row = await conn.fetchrow(
+                    "SELECT tenant_id FROM artifacts WHERE id = $1",
+                    "art-rls-1",
+                )
+                assert row["tenant_id"] == TENANT_A
+        finally:
+            async with pg_test_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM artifacts WHERE id = $1", "art-rls-1",
+                )
 
-        async def check():
-            await db.insert_artifact({
-                "id": "art-1", "task_id": "", "agent_id": "",
-                "name": "test.bin", "type": "binary",
-                "file_path": "/tmp/test.bin", "size": 100,
-                "created_at": "2026-01-01",
-            })
-            async with db._conn().execute(
-                "SELECT tenant_id FROM artifacts WHERE id = ?", ("art-1",)
-            ) as cur:
-                row = await cur.fetchone()
-            assert row["tenant_id"] == TENANT_A
-        _run(check())
-
-    def test_list_artifacts_filtered(self, _setup_db):
-        db = _setup_db
-        _seed_tenants(db)
+    @pytest.mark.asyncio
+    async def test_list_artifacts_filtered(self, pg_test_pool):
+        from backend import db
         from backend.db_context import set_tenant_id
-
-        async def check():
+        try:
             set_tenant_id(TENANT_A)
-            await db.insert_artifact({
-                "id": "art-a", "task_id": "", "agent_id": "",
-                "name": "alpha.bin", "type": "binary",
-                "file_path": "/tmp/a.bin", "size": 10,
-                "created_at": "2026-01-01",
-            })
+            async with pg_test_pool.acquire() as conn:
+                await db.insert_artifact(conn, {
+                    "id": "art-rls-a", "task_id": "", "agent_id": "",
+                    "name": "alpha.bin", "type": "binary",
+                    "file_path": "/tmp/a.bin", "size": 10,
+                    "created_at": "2026-01-01",
+                })
             set_tenant_id(TENANT_B)
-            await db.insert_artifact({
-                "id": "art-b", "task_id": "", "agent_id": "",
-                "name": "beta.bin", "type": "binary",
-                "file_path": "/tmp/b.bin", "size": 20,
-                "created_at": "2026-01-01",
-            })
+            async with pg_test_pool.acquire() as conn:
+                await db.insert_artifact(conn, {
+                    "id": "art-rls-b", "task_id": "", "agent_id": "",
+                    "name": "beta.bin", "type": "binary",
+                    "file_path": "/tmp/b.bin", "size": 20,
+                    "created_at": "2026-01-01",
+                })
 
             set_tenant_id(TENANT_A)
-            arts = await db.list_artifacts()
+            async with pg_test_pool.acquire() as conn:
+                arts = await db.list_artifacts(conn)
             ids = [a["id"] for a in arts]
-            assert "art-a" in ids
-            assert "art-b" not in ids
-        _run(check())
+            assert "art-rls-a" in ids
+            assert "art-rls-b" not in ids
+        finally:
+            async with pg_test_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM artifacts WHERE id IN ($1, $2)",
+                    "art-rls-a", "art-rls-b",
+                )
 
-    def test_get_artifact_cross_tenant_returns_none(self, _setup_db):
-        db = _setup_db
-        _seed_tenants(db)
+    @pytest.mark.asyncio
+    async def test_get_artifact_cross_tenant_returns_none(self, pg_test_pool):
+        from backend import db
         from backend.db_context import set_tenant_id
-
-        async def check():
+        try:
             set_tenant_id(TENANT_A)
-            await db.insert_artifact({
-                "id": "art-priv", "task_id": "", "agent_id": "",
-                "name": "private.bin", "type": "binary",
-                "file_path": "/tmp/priv.bin", "size": 10,
-                "created_at": "2026-01-01",
-            })
+            async with pg_test_pool.acquire() as conn:
+                await db.insert_artifact(conn, {
+                    "id": "art-rls-priv", "task_id": "", "agent_id": "",
+                    "name": "private.bin", "type": "binary",
+                    "file_path": "/tmp/priv.bin", "size": 10,
+                    "created_at": "2026-01-01",
+                })
 
             set_tenant_id(TENANT_B)
-            art = await db.get_artifact("art-priv")
+            async with pg_test_pool.acquire() as conn:
+                art = await db.get_artifact(conn, "art-rls-priv")
             assert art is None
-        _run(check())
+        finally:
+            async with pg_test_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM artifacts WHERE id = $1", "art-rls-priv",
+                )
 
-    def test_delete_artifact_cross_tenant_fails(self, _setup_db):
-        db = _setup_db
-        _seed_tenants(db)
+    @pytest.mark.asyncio
+    async def test_delete_artifact_cross_tenant_fails(self, pg_test_pool):
+        from backend import db
         from backend.db_context import set_tenant_id
-
-        async def check():
+        try:
             set_tenant_id(TENANT_A)
-            await db.insert_artifact({
-                "id": "art-nodelete", "task_id": "", "agent_id": "",
-                "name": "nodelete.bin", "type": "binary",
-                "file_path": "/tmp/nd.bin", "size": 10,
-                "created_at": "2026-01-01",
-            })
+            async with pg_test_pool.acquire() as conn:
+                await db.insert_artifact(conn, {
+                    "id": "art-rls-nodelete", "task_id": "", "agent_id": "",
+                    "name": "nodelete.bin", "type": "binary",
+                    "file_path": "/tmp/nd.bin", "size": 10,
+                    "created_at": "2026-01-01",
+                })
 
             set_tenant_id(TENANT_B)
-            deleted = await db.delete_artifact("art-nodelete")
+            async with pg_test_pool.acquire() as conn:
+                deleted = await db.delete_artifact(conn, "art-rls-nodelete")
             assert deleted is False
 
             set_tenant_id(TENANT_A)
-            art = await db.get_artifact("art-nodelete")
+            async with pg_test_pool.acquire() as conn:
+                art = await db.get_artifact(conn, "art-rls-nodelete")
             assert art is not None
-        _run(check())
+        finally:
+            async with pg_test_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM artifacts WHERE id = $1",
+                    "art-rls-nodelete",
+                )
 
 
 class TestDebugFindingRLS:

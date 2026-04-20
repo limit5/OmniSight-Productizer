@@ -9,19 +9,16 @@ Covers:
 - register_build_artifact tool
 - Download endpoint MIME types
 
-Phase-3-Runtime-v2 SP-3.6a (2026-04-20): module skipped pending
-SP-3.6b migration (task #87). All db.*_artifact calls use the
-pre-port single-arg signature — SP-3.6a changed to (conn, data) so
-they TypeError. Coverage gap filled by test_db_artifacts.py.
+Phase-3-Runtime-v2 SP-3.6b (2026-04-20): migrated from SQLite
+``client`` (compat-wrapped) fixture to explicit ``pg_test_conn`` /
+``pg_test_pool`` fixtures for direct db.* calls. The ``client``
+fixture itself still works for HTTP-only tests (SP-3.4 init_pool
+consolidation installs the module-global pool there).
 """
 
 from __future__ import annotations
 
 import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-3.6a: db.*_artifact signatures changed; SP-3.6b migrates"
-)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -75,9 +72,9 @@ class TestArtifactModel:
 class TestArtifactDB:
 
     @pytest.mark.asyncio
-    async def test_insert_with_version_checksum(self, client):
+    async def test_insert_with_version_checksum(self, pg_test_conn):
         from backend import db
-        await db.insert_artifact({
+        await db.insert_artifact(pg_test_conn, {
             "id": "art-test-v",
             "task_id": "t1",
             "agent_id": "fw-1",
@@ -89,16 +86,16 @@ class TestArtifactDB:
             "version": "2.1.0",
             "checksum": "abcdef1234567890",
         })
-        art = await db.get_artifact("art-test-v")
+        art = await db.get_artifact(pg_test_conn, "art-test-v")
         assert art is not None
         assert art["version"] == "2.1.0"
         assert art["checksum"] == "abcdef1234567890"
         assert art["type"] == "kernel_module"
 
     @pytest.mark.asyncio
-    async def test_insert_without_version_defaults(self, client):
+    async def test_insert_without_version_defaults(self, pg_test_conn):
         from backend import db
-        await db.insert_artifact({
+        await db.insert_artifact(pg_test_conn, {
             "id": "art-test-nv",
             "task_id": "",
             "agent_id": "",
@@ -108,7 +105,7 @@ class TestArtifactDB:
             "size": 100,
             "created_at": "2026-04-13T00:00:00",
         })
-        art = await db.get_artifact("art-test-nv")
+        art = await db.get_artifact(pg_test_conn, "art-test-nv")
         assert art["version"] == ""
         assert art["checksum"] == ""
 
@@ -162,7 +159,10 @@ class TestGuessArtifactType:
 class TestCollectBuildArtifacts:
 
     @pytest.mark.asyncio
-    async def test_collects_from_build_dir(self, client, tmp_path):
+    async def test_collects_from_build_dir(self, pg_test_pool, tmp_path):
+        # _collect_build_artifacts internally calls db.insert_artifact
+        # via get_pool().acquire() — pg_test_pool installs the module
+        # global so the acquire succeeds.
         from backend.workspace import _collect_build_artifacts
 
         # Create mock build outputs
@@ -180,8 +180,14 @@ class TestCollectBuildArtifacts:
         for a in collected:
             assert len(a["checksum"]) == 64  # SHA-256 hex
 
+        # Cleanup committed rows
+        from backend import db
+        async with pg_test_pool.acquire() as conn:
+            for a in collected:
+                await db.delete_artifact(conn, a["id"])
+
     @pytest.mark.asyncio
-    async def test_skips_tiny_files(self, client, tmp_path):
+    async def test_skips_tiny_files(self, pg_test_pool, tmp_path):
         from backend.workspace import _collect_build_artifacts
 
         build_dir = tmp_path / "build"
@@ -192,7 +198,7 @@ class TestCollectBuildArtifacts:
         assert len(collected) == 0
 
     @pytest.mark.asyncio
-    async def test_no_build_dir_returns_empty(self, client, tmp_path):
+    async def test_no_build_dir_returns_empty(self, pg_test_pool, tmp_path):
         from backend.workspace import _collect_build_artifacts
         collected = await _collect_build_artifacts(tmp_path, "agent-1", "task-1")
         assert collected == []
@@ -216,7 +222,7 @@ class TestRegisterBuildArtifactTool:
             assert "register_build_artifact" in tools, f"{agent_type} missing register_build_artifact"
 
     @pytest.mark.asyncio
-    async def test_register_file(self, workspace, client):
+    async def test_register_file(self, workspace, pg_test_pool):
         from backend.agents.tools import register_build_artifact
 
         # Create a file in workspace
@@ -234,6 +240,7 @@ class TestRegisterBuildArtifactTool:
 
     @pytest.mark.asyncio
     async def test_register_nonexistent_file(self, workspace):
+        # No DB write happens on error — no pool fixture needed.
         from backend.agents.tools import register_build_artifact
         result = await register_build_artifact.ainvoke({"file_path": "nonexistent.bin"})
         assert "[ERROR]" in result
@@ -273,8 +280,14 @@ class TestDownloadEndToEnd:
 
     @pytest.mark.asyncio
     async def test_create_and_download_artifact(self, client):
-        """Full cycle: create file → register in DB → download via API."""
+        """Full cycle: create file → register in DB → download via API.
+
+        Uses client fixture (which installs the module-global pool via
+        SP-3.4's init_pool consolidation) + inline pool.acquire for
+        the seed write.
+        """
         from backend import db
+        from backend.db_pool import get_pool
         from backend.routers.artifacts import get_artifacts_root
 
         # Create a real artifact file
@@ -285,29 +298,33 @@ class TestDownloadEndToEnd:
         content = b"\x00\x01\x02\x03OMNISIGHT_FIRMWARE" * 5
         test_file.write_bytes(content)
 
-        # Register in DB
-        await db.insert_artifact({
-            "id": "art-e2e-dl",
-            "task_id": "e2e-test",
-            "agent_id": "fw-1",
-            "name": "firmware.bin",
-            "type": "firmware",
-            "file_path": str(test_file),
-            "size": len(content),
-            "created_at": "2026-04-13T00:00:00",
-            "version": "1.0.0",
-            "checksum": "abc123",
-        })
+        # Register in DB (committed so the HTTP handler's own conn sees it)
+        async with get_pool().acquire() as conn:
+            await db.insert_artifact(conn, {
+                "id": "art-e2e-dl",
+                "task_id": "e2e-test",
+                "agent_id": "fw-1",
+                "name": "firmware.bin",
+                "type": "firmware",
+                "file_path": str(test_file),
+                "size": len(content),
+                "created_at": "2026-04-13T00:00:00",
+                "version": "1.0.0",
+                "checksum": "abc123",
+            })
 
-        # Download via API
-        resp = await client.get("/api/v1/artifacts/art-e2e-dl/download")
-        assert resp.status_code == 200
-        assert resp.content == content
-        assert "application/octet-stream" in resp.headers.get("content-type", "")
-
-        # Cleanup
-        test_file.unlink(missing_ok=True)
-        task_dir.rmdir()
+        try:
+            # Download via API
+            resp = await client.get("/api/v1/artifacts/art-e2e-dl/download")
+            assert resp.status_code == 200
+            assert resp.content == content
+            assert "application/octet-stream" in resp.headers.get("content-type", "")
+        finally:
+            async with get_pool().acquire() as conn:
+                await db.delete_artifact(conn, "art-e2e-dl")
+            test_file.unlink(missing_ok=True)
+            if task_dir.exists():
+                task_dir.rmdir()
 
     @pytest.mark.asyncio
     async def test_download_nonexistent_returns_404(self, client):
@@ -318,6 +335,7 @@ class TestDownloadEndToEnd:
     async def test_delete_removes_file_and_db(self, client):
         """Delete should remove both file and DB record."""
         from backend import db
+        from backend.db_pool import get_pool
         from backend.routers.artifacts import get_artifacts_root
 
         art_root = get_artifacts_root()
@@ -326,21 +344,23 @@ class TestDownloadEndToEnd:
         test_file = task_dir / "to_delete.bin"
         test_file.write_bytes(b"delete me")
 
-        await db.insert_artifact({
-            "id": "art-del-test",
-            "task_id": "del-test",
-            "agent_id": "",
-            "name": "to_delete.bin",
-            "type": "binary",
-            "file_path": str(test_file),
-            "size": 9,
-            "created_at": "2026-04-13T00:00:00",
-        })
+        async with get_pool().acquire() as conn:
+            await db.insert_artifact(conn, {
+                "id": "art-del-test",
+                "task_id": "del-test",
+                "agent_id": "",
+                "name": "to_delete.bin",
+                "type": "binary",
+                "file_path": str(test_file),
+                "size": 9,
+                "created_at": "2026-04-13T00:00:00",
+            })
 
         resp = await client.delete("/api/v1/artifacts/art-del-test")
         assert resp.status_code == 204
         assert not test_file.exists()
-        assert await db.get_artifact("art-del-test") is None
+        async with get_pool().acquire() as conn:
+            assert await db.get_artifact(conn, "art-del-test") is None
 
         # Cleanup dir
         if task_dir.exists():
@@ -355,7 +375,7 @@ class TestDownloadEndToEnd:
 class TestRegisterArtifactDBPersistence:
 
     @pytest.mark.asyncio
-    async def test_registered_artifact_persists_in_db(self, workspace, client):
+    async def test_registered_artifact_persists_in_db(self, workspace, pg_test_pool):
         """After register_build_artifact, artifact must exist in DB."""
         from backend.agents.tools import register_build_artifact
         from backend import db
@@ -378,11 +398,17 @@ class TestRegisterArtifactDBPersistence:
         assert match, f"Could not find artifact ID in: {result}"
         art_id = match.group(1)
 
-        # Verify DB persistence
-        art = await db.get_artifact(art_id)
-        assert art is not None
-        assert art["name"] == "driver.elf"
-        assert art["type"] == "binary"
-        assert art["version"] == "2.0.0"
-        assert len(art["checksum"]) == 64  # SHA-256
-        assert art["size"] > 0
+        try:
+            # Verify DB persistence — acquire a fresh conn (the tool's
+            # write was committed via its own pool-scoped acquire).
+            async with pg_test_pool.acquire() as conn:
+                art = await db.get_artifact(conn, art_id)
+            assert art is not None
+            assert art["name"] == "driver.elf"
+            assert art["type"] == "binary"
+            assert art["version"] == "2.0.0"
+            assert len(art["checksum"]) == 64  # SHA-256
+            assert art["size"] > 0
+        finally:
+            async with pg_test_pool.acquire() as conn:
+                await db.delete_artifact(conn, art_id)

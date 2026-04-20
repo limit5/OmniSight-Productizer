@@ -104,23 +104,28 @@ class TestArtifactPathTraversal:
         resp = await client.get("/api/v1/artifacts/nonexistent-id/download")
         assert resp.status_code == 404
 
-    @pytest.mark.skip(
-        reason="SP-3.6a: db.insert_artifact signature changed; "
-               "SP-3.6b (task #87) migrates this test to pg_test_conn. "
-               "Path-traversal guard coverage is indirectly exercised "
-               "by backend/routers/artifacts.py::_is_valid_artifact_path."
-    )
     @pytest.mark.asyncio
     async def test_path_traversal_blocked(self, client):
-        """Artifact with path outside .artifacts/ should be rejected."""
+        """Artifact with path outside .artifacts/ should be rejected.
+
+        SP-3.6b (2026-04-20): migrated from single-arg db.insert_artifact
+        to the pool-based signature; acquires conn inline because we
+        need the row committed for the subsequent HTTP GET to see it.
+        """
         from backend import db
+        from backend.db_pool import get_pool
         art_id = f"art-traversal-{uuid.uuid4().hex[:6]}"
         # Insert artifact with a traversal path
-        await db.insert_artifact({
-            "id": art_id, "task_id": "t-test", "agent_id": "a1",
-            "name": "evil.md", "type": "markdown",
-            "file_path": "/etc/passwd",
-            "size": 100, "created_at": "2026-01-01T00:00:00",
-        })
-        resp = await client.get(f"/api/v1/artifacts/{art_id}/download")
-        assert resp.status_code == 403
+        async with get_pool().acquire() as conn:
+            await db.insert_artifact(conn, {
+                "id": art_id, "task_id": "t-test", "agent_id": "a1",
+                "name": "evil.md", "type": "markdown",
+                "file_path": "/etc/passwd",
+                "size": 100, "created_at": "2026-01-01T00:00:00",
+            })
+        try:
+            resp = await client.get(f"/api/v1/artifacts/{art_id}/download")
+            assert resp.status_code == 403
+        finally:
+            async with get_pool().acquire() as conn:
+                await db.delete_artifact(conn, art_id)
