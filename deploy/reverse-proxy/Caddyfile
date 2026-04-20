@@ -52,6 +52,12 @@
 # directly to backend-a, so SSR survives rolling restart without OOM.
 # NOT exposed to host (only Docker network). Same upstream pool + health
 # checks as the :443 block.
+#
+# CAUTION: do NOT turn :8000 into a path-aware router — the container
+# healthcheck in docker-compose.prod.yml probes `caddy:8000/readyz`
+# and any catch-all fallback to frontend:3000 would break that probe
+# (frontend has no /readyz). A dedicated edge router lives on :8080
+# (see block below); :8000 stays pure "internal backend proxy".
 :8000 {
 	reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000} {$OMNISIGHT_UPSTREAM_B:backend-b:8001} {
 		lb_policy round_robin
@@ -76,6 +82,102 @@
 		header_up X-Forwarded-Proto {scheme}
 
 		flush_interval -1
+	}
+}
+
+# Edge path router :8080 — Phase-3 Runtime P2 (2026-04-20).
+#
+# Purpose: canonical edge-routing pattern (Kubernetes Ingress / AWS ALB /
+# Cloudflare Workers shape) that splits API traffic from UI traffic at
+# the reverse-proxy layer, NOT inside the Next.js app.
+#
+# Why this block exists: CF Tunnel previously pointed its Public Hostname
+# at `http://frontend:3000`, which made Next.js's `rewrites()` API the
+# API gateway for `/api/v1/*` traffic. Next.js rewrites are well-known to
+# buffer streaming responses (SSE, NDJSON, Transfer-Encoding: chunked) —
+# the Node.js HTTP proxy layer doesn't forward `flush_interval`-style
+# hints to the upstream fetch. Symptom: `/api/v1/events` SSE opens with
+# 200 + headers, then the browser sees 0 bytes for 60+ s, treats the
+# connection as dead, EventSource reconnects in a rapid loop, burns the
+# per-IP rate-limit quota, login endpoint 429s, operator bounces back
+# to /login. Same class of bug is documented across Next.js issue
+# trackers since 2022 — it is not a regression, it is an unsupported
+# use of `rewrites()`.
+#
+# The fix (this block): route /api/v1/* directly to the backend pool
+# without Next.js involvement; route everything else to frontend:3000
+# for SSR. Both handlers set `flush_interval -1` so streaming works
+# end-to-end.
+#
+# Topology (after CF Tunnel dashboard flip to http://caddy:8080):
+#
+#   browser → CF edge → cloudflared → caddy:8080
+#                                   ├── /api/v1/*  → backend-a/b
+#                                   └── /*         → frontend:3000
+#
+# NOT exposed to host — only the docker `default` network, reachable by
+# the cloudflared sidecar via DNS `caddy:8080`.
+#
+# Operator step required (one-time, outside code): in CF Zero Trust
+# dashboard → Networks → Tunnels → <tunnel> → Public Hostnames, change
+# the service URL from `http://frontend:3000` → `http://caddy:8080`.
+# Rollback is the reverse — single dashboard setting, ~30 s.
+:8080 {
+	# API path handler — reverse_proxy to backend pool with the same
+	# upstream list, health checks, and failure semantics as :443. The
+	# ``flush_interval -1`` is what makes SSE work through this path:
+	# it forces Caddy to write every byte received from the upstream
+	# to the downstream socket immediately, without accumulating a
+	# buffer. Without it, even a correctly-configured SSE producer
+	# appears buffered to the client.
+	handle /api/v1/* {
+		reverse_proxy {$OMNISIGHT_UPSTREAM_A:backend-a:8000} {$OMNISIGHT_UPSTREAM_B:backend-b:8001} {
+			lb_policy round_robin
+			lb_try_duration 5s
+			lb_try_interval 250ms
+
+			health_uri /readyz
+			health_port 0
+			health_method GET
+			health_interval 2s
+			health_timeout 2s
+			health_status 2xx
+			health_passes 1
+			health_fails 3
+
+			fail_duration 30s
+			max_fails 3
+			unhealthy_status 5xx
+
+			# Preserve original client identity for rate-limiter,
+			# audit_log, account-lockout — they key on these.
+			# cloudflared sets cf-connecting-ip; Caddy forwards it
+			# here via header_up so the backend rate limiter sees
+			# the real client IP, not the docker-internal addr.
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+
+			flush_interval -1
+		}
+	}
+
+	# UI / SSR handler — catch-all fallback. Next.js serves the dashboard
+	# pages, static assets, and any route outside /api/v1/*. SSR itself
+	# continues to reach the backend via ``BACKEND_URL=http://caddy:8000``
+	# (the dedicated internal block above), so this handle can stay a
+	# simple single-upstream proxy.
+	handle {
+		reverse_proxy frontend:3000 {
+			# Next.js can stream (React 18+ renderToPipeableStream);
+			# keep flushing hot so a future use of server-sent UI
+			# streams works out of the box.
+			flush_interval -1
+
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
 	}
 }
 

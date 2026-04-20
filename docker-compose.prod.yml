@@ -432,17 +432,54 @@ services:
   # dashboard (Networks → Tunnels → Public Hostnames).
   #
   # Ingress to configure in CF dashboard — one Public Hostname per
-  # subdomain you want to expose. Recommended default:
+  # subdomain you want to expose. CANONICAL default (Phase-3 P2,
+  # 2026-04-20):
   #   Subdomain: ai   Domain: <your-zone>   (e.g. ai.sora-dev.app)
   #   Service — Type: HTTP
-  #   Service — URL:  frontend:3000
-  # Why `frontend:3000` (not `caddy:80` / `caddy:8000` / `caddy:443`):
-  #   - caddy:80 always 301s to https → redirect loop through the tunnel
-  #   - caddy:8000 + caddy:443 only reverse-proxy to the BACKEND pool,
-  #     which would 404 every non-API route (Next.js UI is on frontend)
-  #   - frontend:3000 is Next.js SSR; it serves the UI and SSR-proxies
-  #     `/api/v1/*` to caddy:8000 internally via BACKEND_URL env, so
-  #     the backend pool stays reachable without exposing it.
+  #   Service — URL:  caddy:8080       ← NOT frontend:3000
+  #
+  # Why `caddy:8080` (edge path router — the canonical pattern):
+  #
+  #   Caddy's :8080 block (see deploy/reverse-proxy/Caddyfile) splits
+  #   traffic by path at the reverse-proxy layer:
+  #       /api/v1/*  → backend-a / backend-b (with flush_interval -1)
+  #       /*         → frontend:3000 (Next.js SSR)
+  #
+  #   This matches how Kubernetes Ingress, AWS ALB target-groups, and
+  #   Cloudflare Workers route split mixed-origin apps — the reverse-
+  #   proxy layer owns routing, not the app server.
+  #
+  # Why NOT `frontend:3000` any more (the Phase-3 P2 root cause):
+  #
+  #   Routing to frontend:3000 forced `/api/v1/*` through Next.js's
+  #   `rewrites()` API. Next.js's rewrite proxy buffers streaming
+  #   responses (SSE / NDJSON / chunked) — the Node HTTP client sitting
+  #   between rewrite matcher and the upstream doesn't honour
+  #   `flush_interval`-style hints, so Server-Sent Events on
+  #   `/api/v1/events` opened with 200 + headers but the body didn't
+  #   reach the browser for 60+ s. EventSource then treated the
+  #   connection as dead and reconnected in a rapid loop, burned the
+  #   per-IP rate-limit quota (free plan: 60/60s), tripped the login
+  #   endpoint into 429, and bounced the operator back to /login. The
+  #   bug is a documented Next.js limitation, not a regression.
+  #
+  # Why NOT `caddy:80` / `caddy:443`:
+  #   - :80 always 301s to https → redirect loop through the tunnel
+  #   - :443 presents an `internal`-CA cert the tunnel can accept but
+  #     is unnecessary overhead (TLS inside TLS inside QUIC) when the
+  #     tunnel already terminates the public HTTPS at CF edge
+  #
+  # Why NOT `caddy:8000`:
+  #   :8000 is the dedicated internal backend-proxy the frontend
+  #   container uses as `BACKEND_URL` for its SSR fetches. Repurposing
+  #   it as a path router would break Caddy's own container
+  #   healthcheck (`wget http://localhost:8000/readyz`) because the
+  #   catch-all fallback would send `/readyz` to frontend:3000.
+  #
+  # Rollback: change CF dashboard service URL back to
+  # `http://frontend:3000`. The broken-streaming symptom will return
+  # along with it — keep :8080 listed here so future operators know
+  # the canonical target.
   cloudflared:
     # H3 audit (2026-04-19): pinned to the exact digest of the
     # cloudflare/cloudflared:latest tag at go-live time. `:latest` is a
