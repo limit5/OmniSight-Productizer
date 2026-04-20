@@ -687,36 +687,6 @@ async def _security_headers(request, call_next):
     return response
 
 
-# Phase-3 P5 (2026-04-20) TEMPORARY diagnostic: receive render-count
-# telemetry from the browser so we can see from server-side if the
-# Home component (app/page.tsx) is in a render loop. Logs to backend
-# stdout at WARNING level. Strip once the loop is diagnosed + fixed.
-from fastapi import Request as _DiagRequest
-from starlette.responses import Response as _DiagResponse
-
-
-@app.post(f"{settings.api_prefix}/__diag_render_count")
-async def __diag_render_count(request: _DiagRequest) -> _DiagResponse:
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    import sys
-    print(
-        f"[DIAG-RENDER] component={body.get('component', '?')} "
-        f"count={body.get('count', '?')} "
-        f"instance={body.get('instance', '?')} "
-        f"path={body.get('path', '?')} "
-        f"client={request.headers.get('cf-connecting-ip', '?')}",
-        file=sys.stdout, flush=True,
-    )
-    # Use empty Response (not JSONResponse with content=None — that
-    # serialises as the literal "null" which is 4 bytes and conflicts
-    # with the 204 No-Content contract, triggering a starlette
-    # RuntimeError). Bare Response with status_code=204 sends no body.
-    return _DiagResponse(status_code=204)
-
-
 # Mount routers
 app.include_router(health.router, prefix=settings.api_prefix)
 # G1 #2 — `/healthz` (liveness) and `/readyz` (readiness) are mounted

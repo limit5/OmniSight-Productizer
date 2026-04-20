@@ -831,30 +831,6 @@ async def current_user(request: Request) -> User:
         request.state.session = None
         return _ANON_ADMIN
 
-    # Phase-3 P4 diagnostic — capture which code path produced the 401.
-    # Options: (a) no cookie at all, (b) cookie present but get_session
-    # returned None (session row missing / expired), (c) session found
-    # but user not found or disabled. Log the tail of the cookie so we
-    # can cross-reference against the sessions table.
-    try:
-        user_found = False
-        user_enabled_flag: int | None = None
-        if sess:
-            _u = await get_user(sess.user_id)
-            if _u:
-                user_found = True
-                user_enabled_flag = 1 if _u.enabled else 0
-        logger.warning(
-            "current_user: raising 401 — mode=%s method=%s path=%s "
-            "has_cookie=%s cookie_tail=%s session_found=%s "
-            "user_found=%s user_enabled=%s",
-            mode, request.method, request.url.path,
-            bool(cookie), cookie[-6:] if cookie else "<none>",
-            sess is not None, user_found, user_enabled_flag,
-        )
-    except Exception as _exc:
-        logger.warning("current_user: diagnostic log failed: %s", _exc)
-
     raise HTTPException(status_code=401, detail="Authentication required")
 
 
