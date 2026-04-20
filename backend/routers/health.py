@@ -296,6 +296,44 @@ def _probe_provider_deep(provider: str, key: str) -> tuple[bool, str]:
     return ok, detail
 
 
+def _check_db_pool() -> tuple[bool, str]:
+    """Phase-3-Runtime-v2 SP-1.5: observational probe of the asyncpg.Pool.
+
+    This probe is deliberately **stats-only** — it does not borrow a
+    connection from the pool. Reasoning:
+      * The existing ``_check_db()`` probe already hits PG via the
+        compat wrapper, so PG liveness is covered.
+      * This probe reports the pool's OWN state (initialised / sizing /
+        in-flight borrows), which is complementary.
+      * Borrowing on every /readyz call would add ~1 borrow/sec of
+        Caddy-driven load across the fleet — cheap individually, but
+        pointless when the compat probe already covers PG liveness.
+
+    Epic 7 (compat wrapper deletion) will replace the compat-based
+    ``_check_db()`` with a pool-borrowing probe. Until then, this
+    check is informational and never fails the /readyz gate — the
+    only way it returns ``ok=False`` is if ``get_pool_stats()`` itself
+    raises, which is a code-level bug (the helper is defensive and
+    returns a sentinel shape when the pool is uninit).
+    """
+    try:
+        from backend import db_pool as _db_pool
+        stats = _db_pool.get_pool_stats()
+    except Exception as exc:  # pragma: no cover — defence in depth
+        return False, f"pool_stats_failed: {type(exc).__name__}: {exc}"
+
+    if not stats.get("initialised"):
+        # Legitimate — SQLite dev mode, or app still starting up before
+        # lifespan init_pool has fired. Not a /readyz fail.
+        return True, "pool: not-initialised (SQLite dev mode or pre-startup)"
+
+    return True, (
+        f"pool: min={stats['min_size']} max={stats['max_size']} "
+        f"size={stats['size']} free={stats['free_size']} "
+        f"used={stats['used_size']}"
+    )
+
+
 def _check_provider_chain() -> tuple[bool, str]:
     """At least one provider in the fallback chain must be usable.
 
@@ -419,6 +457,14 @@ async def _readyz_handler() -> JSONResponse:
     # ── 4. Provider chain ────────────────────────────────────────────
     prov_ok, prov_detail = _check_provider_chain()
     checks["provider_chain"] = {"ok": prov_ok, "detail": prov_detail}
+
+    # ── 5. asyncpg.Pool (SP-1.5, observational) ──────────────────────
+    # Informational probe — see _check_db_pool docstring for why this
+    # is not part of the `ready` gate during Epics 1-6. Epic 7 swaps
+    # the compat-based _check_db() for a pool-borrowing probe at which
+    # point this one folds into the main db gate.
+    pool_ok, pool_detail = _check_db_pool()
+    checks["db_pool"] = {"ok": pool_ok, "detail": pool_detail}
 
     ready = db_ok and mig_ok and prov_ok
     payload = _build_readyz_payload(checks, ready=ready)
