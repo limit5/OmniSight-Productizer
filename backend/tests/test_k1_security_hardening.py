@@ -1,36 +1,27 @@
-"""K1 tests — startup self-check, default password enforcement, 428 gate."""
+"""K1 tests — startup self-check, default password enforcement, 428 gate.
+
+Task #97 migration (2026-04-21): fixtures ported from SQLite tempfile
+to pg_test_pool. The HTTP client fixture explicitly points
+``OMNISIGHT_DATABASE_URL`` at the test PG so routes still on
+``db._conn()`` (K1 428-gate middleware, /agents, /auth/login) read/
+write the same PG that pg_test_pool's TRUNCATE targets.
+"""
 
 from __future__ import annotations
-
-import os
-import tempfile
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-4.2 / SP-4.3 / SP-4.4: test fixture uses SQLite tempfile; "
-           "auth.py user CRUD now requires the asyncpg pool. Unsticks "
-           "when the adjacent session / password tests migrate."
-)
 
 import pytest
 
 
 @pytest.fixture()
-async def _auth_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "k1.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        from backend import auth
-        try:
-            yield (db, auth)
-        finally:
-            await db.close()
+async def _auth_db(pg_test_pool):
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+    from backend import db, auth
+    try:
+        yield (db, auth)
+    finally:
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
 
 
 # ── Startup self-check ──────────────────────────────────────────
@@ -133,18 +124,16 @@ async def test_change_password_clears_flag(_auth_db, monkeypatch):
 
 
 @pytest.fixture()
-async def client_with_default_admin(tmp_path, monkeypatch):
-    db_path = tmp_path / "k1_int.db"
-    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
+async def client_with_default_admin(pg_test_pool, pg_test_dsn, monkeypatch):
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
     monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "strict")
     monkeypatch.delenv("OMNISIGHT_ADMIN_PASSWORD", raising=False)
     monkeypatch.setenv("OMNISIGHT_ADMIN_EMAIL", "admin@test.local")
 
-    from backend import config as _cfg
-    _cfg.settings.database_path = str(db_path)
-    from backend import db
-    db._DB_PATH = db._resolve_db_path()
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
 
+    from backend import db
     from backend.main import app
     from httpx import ASGITransport, AsyncClient
     from backend import bootstrap as _boot
@@ -162,6 +151,8 @@ async def client_with_default_admin(tmp_path, monkeypatch):
     monkeypatch.setattr(_boot, "get_bootstrap_status", _green)
     _boot._gate_cache_reset()
 
+    if db._db is not None:
+        await db.close()
     await db.init()
     from backend import auth
     await auth.ensure_default_admin()
@@ -172,6 +163,8 @@ async def client_with_default_admin(tmp_path, monkeypatch):
     finally:
         await db.close()
         _boot._gate_cache_reset()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
 
 
 @pytest.mark.asyncio
