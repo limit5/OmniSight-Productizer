@@ -226,26 +226,52 @@ async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
 async def migrate_legacy_bearer() -> ApiKey | None:
     """Detect the old OMNISIGHT_DECISION_BEARER env var and migrate it
     to a hashed api_keys row named 'legacy-bearer'. Warns the operator
-    to rotate to a proper per-key setup."""
+    to rotate to a proper per-key setup.
+
+    Task #106 (2026-04-21): the row id is now DETERMINISTIC —
+    ``ak-legacy-<sha256(legacy_secret)[:12]>``. Previously the id was
+    a fresh ``uuid.uuid4().hex[:6]`` per call, so each uvicorn worker
+    running this on startup independently produced a different id and
+    created its own row (no UNIQUE collision → N rows for N workers).
+    The SP-4.6 close-out smoke with ``OMNISIGHT_WORKERS=2`` produced
+    two ``ak-legacy-*`` rows (``66956d`` + ``7fb016``), which was the
+    concrete finding that triggered this task.
+
+    The deterministic id + ``INSERT ... ON CONFLICT (id) DO NOTHING``
+    collapses concurrent migrations across workers to a single row.
+    Same bearer secret → same hash → same id → same row. Rotating
+    the bearer env produces a new id automatically (old rows can be
+    cleaned up by operators out-of-band).
+
+    Note: ``_conn()`` + ``?`` stays because api_keys.py is still on
+    the compat wrapper (SP-5.7 will port the whole module). The
+    check-then-insert race is the operational bug — the deterministic
+    id + ON CONFLICT fixes it without touching the pool migration.
+    """
     legacy = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if not legacy:
         return None
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id FROM api_keys WHERE name='legacy-bearer'"
-    ) as cur:
-        existing = await cur.fetchone()
-    if existing:
-        return None
-    key_id = f"ak-legacy-{uuid.uuid4().hex[:6]}"
     hashed = _hash_key(legacy)
+    key_id = f"ak-legacy-{hashed[:12]}"
     prefix = legacy[:KEY_PREFIX_LEN] if len(legacy) >= KEY_PREFIX_LEN else legacy
-    await conn.execute(
+    conn = await _conn()
+    # The RETURNING clause tells us whether we actually inserted or
+    # hit the conflict — the compat wrapper passes this through from
+    # asyncpg on PG (and SQLite ≥ 3.35 supports it too). On conflict
+    # no row is returned so fetchone() is None.
+    async with conn.execute(
         "INSERT INTO api_keys (id, name, key_hash, key_prefix, scopes, created_by, enabled) "
-        "VALUES (?, 'legacy-bearer', ?, ?, '[\"*\"]', 'system/migration', 1)",
+        "VALUES (?, 'legacy-bearer', ?, ?, '[\"*\"]', 'system/migration', 1) "
+        "ON CONFLICT (id) DO NOTHING "
+        "RETURNING id",
         (key_id, hashed, prefix),
-    )
+    ) as cur:
+        inserted = await cur.fetchone()
     await conn.commit()
+    if inserted is None:
+        # Another worker landed this exact row first; do not re-log
+        # the "migrated" warning (else every worker emits it).
+        return None
     key = ApiKey(id=key_id, name="legacy-bearer", key_prefix=prefix,
                  scopes=["*"], created_by="system/migration", enabled=True)
     logger.warning(
