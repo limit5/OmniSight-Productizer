@@ -6,6 +6,16 @@
 ## 步驟清單
 ### Step 1: 深度分析及評估
 - 執行深度分析，並評估該 Phase 的實作風險、衝擊、可能產生的副作用。
+- **強制問題：Module-global state 稽核**（2026-04-21 納入，由 Phase-3-Runtime-v2 Epic 4 盲區討論確立）
+  - 本次修改的函式 / 模組，是否讀 / 寫 module-level global、singleton、in-memory cache？
+  - 如果有，**跨 worker 進程**的一致性怎麼保證？prod 是 ``uvicorn --workers N`` 多 OS 進程——module-global 不共享。
+  - 三種合格答案：
+    1. **"不共享，因為每 worker 從同樣來源推導出同樣的值"**（例：``_DUMMY_PASSWORD_HASH`` 每 worker 自己算一份常數，本來就該一致）。
+    2. **"透過 PG / Redis 協調"**（例：audit chain 透過 ``pg_advisory_xact_lock`` 序列化；rate-limit 透過 Redis）。
+    3. **"故意每 worker 獨立"**（例：rate-limit in-memory fallback 註解寫了 per-replica bucket，是刻意的）。
+  - 任何**不在上述三種**的答案都要視為 **real bug**——要嘛補協調、要嘛開 follow-up task。
+  - 撰寫時以一句話記錄在 commit message 或函式 docstring，讓下一個讀者知道此處的決定。
+  - 背景：`backend.auth_baseline_mode` 的 cross-test pollution（task #90）、`secret_store._fernet` 的 first-boot 寫檔競爭（task #104）都是這個問題沒問就漏掉的實例。真正的 regression 保證請見 Step 4 的 multi-worker subprocess 測試（task #82）。
 
 ### Step 2: 拆分工作
 - 將 Phase 的工作拆分成數個子階段。
