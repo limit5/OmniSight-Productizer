@@ -137,11 +137,73 @@ log it here:
 
 | Date | Considered by | Trigger | Decision | Outcome |
 |---|---|---|---|---|
-| (none yet) | | | | |
+| 2026-04-20 | Agent (SP-1.6) | Planned escape-hatch drill | Execute Scenario A (local git rollback only) | **Drill passed** — rollback 21 ms, restore 12 ms, 159 tests green post-restore |
 
 Rule: even considering the rip-cord counts as a datum. If this table
 accumulates 3+ entries within the migration, that's a signal the plan
 needs revision regardless of whether we actually reverted.
+
+---
+
+## Drill log
+
+### SP-1.6 drill (2026-04-20)
+
+**Purpose**: exercise the rollback path end-to-end before it's needed
+in anger — proves the escape hatch works before Epic 3's domain-slice
+ports create real migration state that rollback would undo.
+
+**Scope**: Scenario A only (local git rollback). Did NOT rebuild or
+recreate docker containers because prod backend-a/b are still running
+the pre-v2 image — no prod state to roll back. Epic 11 post-deploy
+will drill Scenario B (with full image rebuild) against the real
+rolled-out v2 code.
+
+**Pre-drill state** — 5 commits on master after `phase-3-runtime-v2-start`:
+
+    ce72336f SP-1.5 /readyz observational probe
+    52884b1e SP-1.4 lifespan wiring
+    2b7f8330 SP-1.3 db_pool module
+    f9f7ad23 SP-1.2 test PG container + fixtures
+    21587d53 SP-1.1 PG max_connections 100 → 200
+
+**Steps executed**:
+
+    git branch phase-3-runtime-v2-epic1-preserve   # WIP safety branch
+    git reset --hard phase-3-runtime-v2-start       # ← rollback
+    # Verify: db_pool.py gone, test_db_pool*.py gone, main.py/health.py
+    # reverted, postgresql.primary.conf max_connections back to 100
+    git reset --hard phase-3-runtime-v2-epic1-preserve  # restore WIP
+    # Verify: files all present, HEAD back at ce72336f
+    git branch -D phase-3-runtime-v2-epic1-preserve
+
+**Measured timings**:
+
+| Phase | Elapsed |
+|---|---|
+| Rollback (git reset --hard → tag) | 21 ms |
+| Restore (git reset --hard → preserve branch) | 12 ms |
+| Full test regression (159 tests, 5 modules) post-restore | 2.39 s |
+| **Total drill** (excluding documentation) | **~3 s** |
+
+**Findings**:
+
+* Git reset is effectively instantaneous — rollback is an O(1)
+  ref-update, working-tree checkout of the diff is the only cost,
+  and for Epic 1 the diff is small (~8 files).
+* **No unexpected friction.** Every file that should have disappeared
+  did; every file that should have come back did. No merge conflicts,
+  no detached-HEAD confusion, no stale caches.
+* Test suite post-restore was byte-identical green (159 passed in 2.39 s)
+  — confirms the restore truly returns the working tree to the pre-
+  rollback state.
+* Pytest picked up the restored files without needing a cache reset
+  (``.pytest_cache`` survived unchanged, all tests re-discovered).
+
+**Conclusion**: escape hatch validated. Can be pulled at any point
+during Epics 2-10 with ~1 second of real work + whatever rebuild/redeploy
+time is needed for Scenario B (prod image recreate). Operator-side
+cost for Scenario B is ~5-15 minutes per runbook.
 
 ---
 
