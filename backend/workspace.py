@@ -552,8 +552,12 @@ async def _collect_build_artifacts(
             }
 
             try:
+                # SP-3.6a: worker context (agent finalize pipeline) —
+                # acquire pool conn for the single insert.
                 from backend import db
-                await db.insert_artifact(artifact_data)
+                from backend.db_pool import get_pool
+                async with get_pool().acquire() as _conn:
+                    await db.insert_artifact(_conn, artifact_data)
             except Exception as exc:
                 logger.warning("Failed to register artifact %s: %s", fpath.name, exc)
                 continue

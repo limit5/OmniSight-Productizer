@@ -326,7 +326,7 @@ async def _release(conn: asyncpg.Connection, args: str) -> str:
         # Show version + artifact count
         try:
             from backend import db
-            arts = await db.list_artifacts(limit=200)
+            arts = await db.list_artifacts(conn, limit=200)
             return (
                 f"**Release Info**\n\n"
                 f"  Version: `{version}`\n"

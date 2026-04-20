@@ -97,7 +97,12 @@ async def generate_report(
         "created_at": datetime.now().isoformat(),
     }
     try:
-        await db.insert_artifact(artifact_data)
+        # SP-3.6a: worker context (called from agent tool or /report
+        # endpoint's async post-processing). Acquire pool conn for
+        # the single write.
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_artifact(_conn, artifact_data)
     except Exception as exc:
         logger.warning("Failed to register artifact in DB: %s", exc)
 

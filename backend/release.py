@@ -79,7 +79,13 @@ async def generate_release_manifest(
     if not version:
         version = await resolve_version()
 
-    all_artifacts = await db.list_artifacts(limit=200)
+    # SP-3.6a: release bundle build is a worker operation (triggered
+    # from /release slash command or scheduled job). Acquire a pool
+    # conn for the list + subsequent gets; all rides a single
+    # connection for simplicity.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as _release_conn:
+        all_artifacts = await db.list_artifacts(_release_conn, limit=200)
     if artifact_ids:
         artifacts = [a for a in all_artifacts if a["id"] in set(artifact_ids)]
     else:
@@ -141,17 +147,22 @@ async def create_release_bundle(
         raise
 
     # Pre-fetch all artifact file paths before opening tarfile
+    # SP-3.6a: single pool conn acquire for the whole get loop; sync
+    # tarfile work below runs OUTSIDE the acquire block so we don't
+    # pin a connection during IO-bound (but non-async) archive build.
     import os
+    from backend.db_pool import get_pool
     artifact_files = []
-    for art_meta in manifest["artifacts"]:
-        art = await db.get_artifact(art_meta["id"])
-        if art and art.get("file_path"):
-            fpath = Path(art["file_path"]).resolve()
-            if not _is_valid_artifact_path(fpath):
-                continue
-            if fpath.exists():
-                safe_name = os.path.basename(art["name"])
-                artifact_files.append((fpath, safe_name))
+    async with get_pool().acquire() as _release_conn:
+        for art_meta in manifest["artifacts"]:
+            art = await db.get_artifact(_release_conn, art_meta["id"])
+            if art and art.get("file_path"):
+                fpath = Path(art["file_path"]).resolve()
+                if not _is_valid_artifact_path(fpath):
+                    continue
+                if fpath.exists():
+                    safe_name = os.path.basename(art["name"])
+                    artifact_files.append((fpath, safe_name))
 
     # Create tar.gz (pure sync — no await inside)
     with tarfile.open(bundle_path, "w:gz") as tar:
@@ -179,7 +190,10 @@ async def create_release_bundle(
         "checksum": sha.hexdigest(),
     }
 
-    await db.insert_artifact(bundle_data)
+    # SP-3.6a: second pool conn acquire for the bundle insert (the
+    # earlier one was released after the get loop).
+    async with get_pool().acquire() as _release_conn:
+        await db.insert_artifact(_release_conn, bundle_data)
 
     # Emit SSE
     try:

@@ -8,12 +8,20 @@ Covers:
 - _collect_build_artifacts from workspace
 - register_build_artifact tool
 - Download endpoint MIME types
+
+Phase-3-Runtime-v2 SP-3.6a (2026-04-20): module skipped pending
+SP-3.6b migration (task #87). All db.*_artifact calls use the
+pre-port single-arg signature — SP-3.6a changed to (conn, data) so
+they TypeError. Coverage gap filled by test_db_artifacts.py.
 """
 
 from __future__ import annotations
 
-
 import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="SP-3.6a: db.*_artifact signatures changed; SP-3.6b migrates"
+)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

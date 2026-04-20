@@ -1070,7 +1070,13 @@ async def register_build_artifact(
     }
 
     try:
-        await db.insert_artifact(artifact_data)
+        # SP-3.6a: tool runs in agent orchestrator worker context —
+        # no request conn in scope, acquire from pool for this single
+        # write. tenant_id is derived from the active request's
+        # contextvar inside db.insert_artifact().
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_artifact(_conn, artifact_data)
     except Exception as exc:
         # File already copied — clean up orphan on DB failure
         try:

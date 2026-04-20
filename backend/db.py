@@ -22,7 +22,11 @@ from typing import Any
 
 import aiosqlite
 
-from backend.db_context import tenant_insert_value, tenant_where
+from backend.db_context import (
+    current_tenant_id,
+    tenant_insert_value,
+    tenant_where,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1359,59 +1363,85 @@ async def list_failed_notifications(conn, limit: int = 50) -> list[dict]:
 #  Artifacts
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def insert_artifact(data: dict) -> None:
-    await _conn().execute(
-        """INSERT INTO artifacts (id, task_id, agent_id, name, type, file_path, size, created_at, version, checksum, tenant_id)
-           VALUES (:id, :task_id, :agent_id, :name, :type, :file_path, :size, :created_at,
-                   :version, :checksum, :tenant_id)""",
-        {
-            **data,
-            "version": data.get("version", ""),
-            "checksum": data.get("checksum", ""),
-            "tenant_id": tenant_insert_value(),
-        },
+def _append_tenant_pg(conditions: list[str], params: list) -> None:
+    """Inline helper for SP-3.6a artifact queries — PG ``$N`` style of
+    the existing ``tenant_where`` (which produces ``?`` for aiosqlite).
+    When a second tenant-scoped domain ports (SP-3.9 debug_findings),
+    promote this to a shared db_context.tenant_where_pg helper.
+    """
+    tid = current_tenant_id()
+    if tid is not None:
+        conditions.append(f"tenant_id = ${len(params) + 1}")
+        params.append(tid)
+
+
+async def insert_artifact(conn, data: dict) -> None:
+    # Phase-3-Runtime-v2 SP-3.6a (2026-04-20): ported to native asyncpg.
+    # tenant_id is auto-derived from request context via
+    # tenant_insert_value() — caller's ``data`` dict is OVERRIDDEN if
+    # it sets tenant_id, matching the pre-port behaviour. This is the
+    # core isolation guarantee: a malicious caller cannot forge a
+    # cross-tenant INSERT by supplying their own tenant_id.
+    await conn.execute(
+        """INSERT INTO artifacts (id, task_id, agent_id, name, type,
+             file_path, size, created_at, version, checksum, tenant_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
+        data["id"],
+        data.get("task_id", ""),
+        data.get("agent_id", ""),
+        data["name"],
+        data.get("type", ""),
+        data.get("file_path", ""),
+        int(data.get("size", 0)),
+        data.get("created_at", ""),
+        data.get("version", ""),
+        data.get("checksum", ""),
+        tenant_insert_value(),
     )
-    await _conn().commit()
 
 
-async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = 50) -> list[dict]:
-    query = "SELECT * FROM artifacts"
+async def list_artifacts(
+    conn, task_id: str = "", agent_id: str = "", limit: int = 50,
+) -> list[dict]:
     conditions: list[str] = []
     params: list = []
-    tenant_where(conditions, params)
+    _append_tenant_pg(conditions, params)
     if task_id:
-        conditions.append("task_id = ?")
+        conditions.append(f"task_id = ${len(params) + 1}")
         params.append(task_id)
     if agent_id:
-        conditions.append("agent_id = ?")
+        conditions.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC LIMIT ?"
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    async with _conn().execute(query, params) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        "SELECT * FROM artifacts"
+        + where
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
     return [dict(r) for r in rows]
 
 
-async def get_artifact(artifact_id: str) -> dict | None:
-    conditions = ["id = ?"]
+async def get_artifact(conn, artifact_id: str) -> dict | None:
+    conditions = ["id = $1"]
     params: list = [artifact_id]
-    tenant_where(conditions, params)
+    _append_tenant_pg(conditions, params)
     sql = "SELECT * FROM artifacts WHERE " + " AND ".join(conditions)
-    async with _conn().execute(sql, params) as cur:
-        row = await cur.fetchone()
+    row = await conn.fetchrow(sql, *params)
     return dict(row) if row else None
 
 
-async def delete_artifact(artifact_id: str) -> bool:
-    conditions = ["id = ?"]
+async def delete_artifact(conn, artifact_id: str) -> bool:
+    conditions = ["id = $1"]
     params: list = [artifact_id]
-    tenant_where(conditions, params)
+    _append_tenant_pg(conditions, params)
     sql = "DELETE FROM artifacts WHERE " + " AND ".join(conditions)
-    cur = await _conn().execute(sql, params)
-    await _conn().commit()
-    return cur.rowcount > 0
+    status = await conn.execute(sql, *params)
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

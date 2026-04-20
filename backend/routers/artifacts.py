@@ -3,12 +3,14 @@
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+import asyncpg
+from fastapi import APIRouter, Depends, HTTPException
 
 logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse
 
 from backend import db
+from backend.db_pool import get_conn
 from backend.routers import _pagination as _pg
 from backend.tenant_fs import tenant_artifacts_root, tenants_root
 
@@ -36,24 +38,35 @@ def _is_valid_artifact_path(file_path: Path) -> bool:
 
 
 @router.get("")
-async def list_artifacts(task_id: str = "", agent_id: str = "", limit: int = _pg.Limit(default=50, max_cap=200)):
+async def list_artifacts(
+    task_id: str = "",
+    agent_id: str = "",
+    limit: int = _pg.Limit(default=50, max_cap=200),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """List artifacts, optionally filtered by task or agent."""
-    return await db.list_artifacts(task_id=task_id, agent_id=agent_id, limit=limit)
+    return await db.list_artifacts(conn, task_id=task_id, agent_id=agent_id, limit=limit)
 
 
 @router.get("/{artifact_id}")
-async def get_artifact(artifact_id: str):
+async def get_artifact(
+    artifact_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Get artifact metadata."""
-    artifact = await db.get_artifact(artifact_id)
+    artifact = await db.get_artifact(conn, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return artifact
 
 
 @router.get("/{artifact_id}/download")
-async def download_artifact(artifact_id: str):
+async def download_artifact(
+    artifact_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Download artifact file."""
-    artifact = await db.get_artifact(artifact_id)
+    artifact = await db.get_artifact(conn, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
@@ -81,9 +94,12 @@ async def download_artifact(artifact_id: str):
 
 
 @router.delete("/{artifact_id}", status_code=204)
-async def delete_artifact(artifact_id: str):
+async def delete_artifact(
+    artifact_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Delete artifact metadata and file."""
-    artifact = await db.get_artifact(artifact_id)
+    artifact = await db.get_artifact(conn, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
@@ -94,4 +110,4 @@ async def delete_artifact(artifact_id: str):
     else:
         logger.warning("Artifact %s file_path outside artifacts root — skipping file deletion", artifact_id)
 
-    await db.delete_artifact(artifact_id)
+    await db.delete_artifact(conn, artifact_id)

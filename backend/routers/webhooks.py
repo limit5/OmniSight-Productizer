@@ -417,18 +417,22 @@ async def _package_merged_artifacts(change_id: str, subject: str) -> None:
                 sha.update(chunk)
 
         artifact_id = f"art-{_uuid.uuid4().hex[:8]}"
-        await db.insert_artifact({
-            "id": artifact_id,
-            "task_id": "",
-            "agent_id": "gerrit-merge",
-            "name": bundle_name,
-            "type": "archive",
-            "file_path": str(bundle_path),
-            "size": bundle_path.stat().st_size,
-            "created_at": datetime.now().isoformat(),
-            "version": change_id[:12],
-            "checksum": sha.hexdigest(),
-        })
+        # SP-3.6a: _package_merged_artifacts is a background worker
+        # (spawned via asyncio.create_task from _on_change_merged) —
+        # no request conn. Acquire from pool for the single insert.
+        async with get_pool().acquire() as _conn:
+            await db.insert_artifact(_conn, {
+                "id": artifact_id,
+                "task_id": "",
+                "agent_id": "gerrit-merge",
+                "name": bundle_name,
+                "type": "archive",
+                "file_path": str(bundle_path),
+                "size": bundle_path.stat().st_size,
+                "created_at": datetime.now().isoformat(),
+                "version": change_id[:12],
+                "checksum": sha.hexdigest(),
+            })
 
         from backend.events import bus
         bus.publish("artifact_created", {

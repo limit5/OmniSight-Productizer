@@ -116,25 +116,22 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Artifacts
+#  Artifacts  —  MOVED TO test_db_artifacts.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_artifacts_insert_filter_delete(fresh_db):
-    db = fresh_db
-    for i in range(3):
-        await db.insert_artifact({
-            "id": f"art{i}", "task_id": "t1" if i < 2 else "t2",
-            "agent_id": "a1", "name": f"file{i}.bin", "type": "firmware",
-            "file_path": f"/tmp/file{i}.bin", "size": 100 * i,
-            "created_at": f"2026-04-14T00:00:0{i}",
-        })
-    assert len(await db.list_artifacts()) == 3
-    assert len(await db.list_artifacts(task_id="t1")) == 2
-    assert len(await db.list_artifacts(agent_id="a1")) == 3
-    assert (await db.get_artifact("art0"))["name"] == "file0.bin"
-    assert await db.delete_artifact("art0") is True
-    assert await db.get_artifact("art0") is None
+#
+# Phase-3-Runtime-v2 SP-3.6a (2026-04-20): the 4 artifact functions
+# (insert_artifact / list_artifacts / get_artifact / delete_artifact)
+# were ported to native asyncpg with an explicit
+# ``conn: asyncpg.Connection`` first argument. The SQLite ``fresh_db``
+# fixture can no longer exercise them.
+#
+# Per-function contract tests (including tenant-isolation guards that
+# preserve the RLS coverage previously provided by tests/test_rls.py)
+# live in ``test_db_artifacts.py`` using pg_test_conn. Five ancillary
+# test files (test_artifacts.py, test_artifact_pipeline.py,
+# test_release.py, test_npi.py, tests/test_rls.py) remain on the old
+# signature and are SKIPPED with SP-3.6b markers; SP-3.6b migrates
+# them to pg_test_conn in a follow-up commit.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
