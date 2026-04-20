@@ -71,6 +71,26 @@ async def lifespan(app: FastAPI):
         raise
     try:
         await db.init()
+        # Phase-3-Runtime-v2 SP-1.4 (2026-04-20): bring up the asyncpg.Pool
+        # alongside the compat wrapper. During Epics 3-6 both code paths
+        # coexist: existing db.py call sites still go through the compat
+        # wrapper's single-connection lock; newly-ported code uses
+        # ``Depends(get_conn)`` against this pool. Epic 7 deletes the
+        # compat wrapper and makes the pool the sole PG entry point.
+        #
+        # Gated on ``_resolve_pg_dsn()`` so SQLite dev / test flows are
+        # unaffected — the pool only spins up when a PG URL is present.
+        from backend import db_pool as _db_pool
+        from backend.db import _resolve_pg_dsn as _r_pg
+        _pg_dsn = _r_pg()
+        if _pg_dsn:
+            await _db_pool.init_pool(_pg_dsn)
+            _log.info("db_pool: initialised against PG DSN")
+        else:
+            _log.info(
+                "db_pool: skipped — no Postgres DSN in "
+                "OMNISIGHT_DATABASE_URL/DATABASE_URL (SQLite dev mode)"
+            )
         await _startup_cleanup(_log)
         await agents.seed_defaults_if_empty()
         await tasks.seed_defaults_if_empty()
@@ -207,6 +227,17 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     await _ss.close()
+    # SP-1.4: close the asyncpg pool before the compat-wrapper DB handle.
+    # Order matters: any background task still writing via the pool must
+    # finish first (_lifecycle.graceful_shutdown above has already drained
+    # in-flight requests and background tasks were cancelled), then the
+    # pool releases its underlying TCP connections, then db.close() tears
+    # down the compat-wrapper's own connection.
+    try:
+        from backend import db_pool as _db_pool
+        await _db_pool.close_pool()
+    except Exception as exc:  # pragma: no cover — defence in depth
+        _log.warning("[lifecycle] db_pool.close_pool raised: %s", exc)
     await db.close()
 
 
