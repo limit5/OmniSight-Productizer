@@ -55,7 +55,33 @@ can coexist until Epic 11 deletes compat.
 
 ---
 
-## Epic 3: db.py Domain-Slice Ports
+## Epic 3: db.py Domain-Slice Ports — ✅ COMPLETE (2026-04-20)
+
+All 13 sub-phases landed. 48 domain CRUD functions ported to
+``conn: asyncpg.Connection`` + FastAPI-Depends propagation. The
+compat wrapper (``db._conn()``) is still alive — it now services
+**only** the 16+ files flagged for Epic 7 (audit.py, tenant_secrets.py,
+memory_decay.py, bootstrap.py, dag_storage.py, etc.) plus the one
+remaining direct caller inside db.py itself (``execute_raw``).
+
+**Completion summary** (from commits `2eeaa55d..a47de1d1`):
+
+| SP | Commit | Files | LoC net | Notes |
+|---|---|---|---|---|
+| 3.1 agents | 2eeaa55d | 11 | +614 | Pool foundation + agents CRUD |
+| 3.2 tasks | 90a759fd | 14 | +476 | + caught + fixed SP-3.1 invoke.py regression |
+| 3.3 handoffs | b435e8a0 | 8 | +267 | polymorphic wrapper + clock_timestamp fix |
+| 3.4 notifications | 194f8cc4 | 9 | +396 | pool-ownership consolidation in pg_test_pool |
+| 3.5 token_usage | 9f25a702 | 6 | +177 | first tight-scope slice under new calibration |
+| 3.6a artifacts runtime | d449885a | 16 | +360 | tenant-scoped port + split-commit pattern |
+| 3.6b artifacts tests | f6c7a9ed | 5 | +39 | ancillary test migrations |
+| 3.7 npi_state | 8e12cbcd | 6 | +125 | smallest slice |
+| 3.8 simulations | c15038a0 | 9 | +273 | whitelist-driven update SQL |
+| 3.9 debug_findings | f29ae97b | 12 | +327 | promoted tenant_where_pg helper |
+| 3.10 event_log | 5e1e0bc3 | 8 | +259 | fixed cleanup tenant-leak + SP-3.5 flake |
+| 3.11 decision_rules | c1cd15a1 | 6 | +236 | atomic-replace rollback contract locked |
+| 3.12 episodic_memory | a47de1d1 | 12 | +404 | FTS5 → tsvector search port |
+| 3.13 closing gate | (this commit) | 2 | +170 | test_db_startup + doc completion |
 
 Sessions 3-5. Each SP ports one domain's db.py functions + all callers +
 all tests in one commit. The function signatures change to `(conn, ...)`
@@ -82,9 +108,17 @@ services **other** domains not yet ported.
 | **3.12** | **Episodic memory + FTS5 port** (the big one) | `insert_episodic_memory`, `search_episodic_memory`, `rebuild_episodic_fts`, `get_episodic_memory`, `list_episodic_memories`, `delete_episodic_memory`, `episodic_memory_count` | `backend/memory_decay.py`, `backend/rag_prefetch.py`, `backend/agents/tools.py` | `test_db_episodic_memory.py` (existing, rewrite for tsvector) + `test_episodic_memory_search_equivalence.py` (new — SQLite FTS5 vs PG tsvector result-set equivalence per I10.3) | 600 | 3.11 | **Search result-set equivalence** (ranking may differ, row IDs identical); FTS5 code paths removed; LIKE fallback still works in dev SQLite |
 | **3.13** | Startup / init / close / migrate | `init`, `_migrate`, `close`, `execute_raw` | `backend/main.py`, `backend/bootstrap.py`, `backend/routers/health.py` | `test_db_startup.py` — init idempotent, close closes pool, _migrate no-op on PG (alembic owns) | 200 | 3.12 | App boot + shutdown clean; no dangling connections in PG `pg_stat_activity` |
 
-**Epic 3 commits: 13. Epic 3 exit criteria**: all 53 db.py functions ported.
-Compat wrapper still in place (used by un-ported auth/audit/tenant_secrets).
-Domain-level router endpoints still work via new pool path.
+**Epic 3 commits: 14** (13 domain slices + 3.6 split into 3.6a/3.6b).
+**Epic 3 exit criteria (verified)**: all 48 domain CRUD functions
+ported; lifecycle + helper functions unchanged; compat wrapper still
+in place (used by un-ported auth/audit/tenant_secrets/memory_decay
+etc.); domain-level router endpoints still work via the new pool
+path; new `test_db_startup.py` locks the init/close/execute_raw
+contracts so Epic 7's compat deletion has a regression guard.
+
+**Deferred follow-ups tracked as separate tasks:**
+- Task #90: `auth_baseline` cross-test pollution (surfaced SP-3.8).
+- Task #93: port `memory_decay.py` off compat wrapper (Epic 7 prep).
 
 ---
 
