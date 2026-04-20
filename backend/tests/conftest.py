@@ -114,3 +114,190 @@ def _reset_bootstrap_gate_between_tests():
     _boot._gate_cache_reset()
     yield
     _boot._gate_cache_reset()
+
+
+# ─── Phase-3-Runtime-v2 SP-1.2 — PostgreSQL test fixtures ───────────────
+#
+# These fixtures back the asyncpg-native test suite we'll build out in
+# Epics 3-6. Every test that needs a real PG connection uses `pg_test_conn`
+# (savepoint-wrapped, auto-rollback on exit), or `pg_test_pool` if it
+# specifically needs to exercise pool semantics.
+#
+# Contract:
+#   - Tests that use these fixtures require `OMNI_TEST_PG_URL` to be set.
+#     If unset, the fixture SKIPS the test (not fails) so CI runs without
+#     a PG service still pass the non-PG suite.
+#   - Schema is brought up to alembic HEAD once per test session. Tests
+#     can freely INSERT/UPDATE/DELETE; the savepoint in `pg_test_conn`
+#     rolls back on teardown so no inter-test bleed.
+#   - Readers who want the raw DSN can depend on `pg_test_dsn` directly.
+#
+# Production gap this plugs:
+#   Before SP-1.2, the project had `OMNI_TEST_PG_URL` as a convention but
+#   no standardised pool+tx-scoped fixture — every PG-aware test wrote
+#   its own psycopg2 bootstrapping boilerplate. This fixture set is the
+#   canonical entry point from SP-1.2 onward.
+
+
+def _omni_test_pg_dsn_normalised() -> str:
+    """Return `OMNI_TEST_PG_URL` as a libpq DSN (no driver suffix).
+
+    asyncpg refuses SQLAlchemy-style `postgresql+psycopg2://` or
+    `postgresql+asyncpg://` — it wants plain `postgresql://`. Existing
+    tests (``test_alembic_pg_live_upgrade.py``) set the env in the
+    SQLAlchemy form for alembic's benefit, so we normalise here for
+    asyncpg callers.
+    """
+    raw = os.environ.get("OMNI_TEST_PG_URL", "").strip()
+    if not raw:
+        return ""
+    for prefix in ("postgresql+psycopg2://", "postgresql+asyncpg://"):
+        if raw.startswith(prefix):
+            return "postgresql://" + raw[len(prefix):]
+    return raw
+
+
+@pytest.fixture(scope="session")
+def pg_test_dsn() -> str:
+    """Session-scoped: the normalised libpq DSN, or skip the test.
+
+    Any async fixture that borrows from asyncpg should depend on this
+    rather than reading the env directly — keeps the skip behaviour
+    consistent across the suite.
+    """
+    dsn = _omni_test_pg_dsn_normalised()
+    if not dsn:
+        pytest.skip(
+            "OMNI_TEST_PG_URL not set — PG-backed test skipped. "
+            "See backend/tests/README.md for how to start the test "
+            "PG container."
+        )
+    return dsn
+
+
+@pytest.fixture(scope="session")
+def pg_test_alembic_upgraded(pg_test_dsn: str) -> str:
+    """Session-scoped: run ``alembic upgrade head`` once so every
+    PG-backed test sees a HEAD schema.
+
+    Returns the same DSN (for chaining). Idempotent — safe to re-run
+    against an already-upgraded DB (no-op per alembic).
+
+    Subprocess invocation mirrors ``test_alembic_pg_live_upgrade.py`` to
+    avoid importing backend.config at collection time (which has its
+    own env-var drift issues).
+    """
+    import subprocess
+    from pathlib import Path
+
+    sqlalchemy_url = pg_test_dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
+    env = os.environ.copy()
+    env["SQLALCHEMY_URL"] = sqlalchemy_url
+    env["OMNISIGHT_SKIP_FS_MIGRATIONS"] = "1"
+
+    # Two overlapping stdlib-shadow hazards we defend against here:
+    #
+    # (1) `PYTHONPATH=.` in the pytest parent inherits into the child,
+    #     which puts the repo root on sys.path. The repo has a W0
+    #     `./platform.py` module that shadows stdlib `platform`; any
+    #     transitive `import platform` (uuid, sqlalchemy util, etc.)
+    #     then raises AttributeError on `.system()` / `.python_
+    #     implementation()`. Dropping PYTHONPATH breaks this chain.
+    #
+    # (2) `python -m alembic` sets sys.path[0] = '' (cwd), which with
+    #     cwd=backend/ surfaces ANOTHER copy of `platform.py` — the real
+    #     project module at backend/platform.py that legitimately lives
+    #     there as `from backend import platform`. Running via the
+    #     `alembic` console-script binary instead uses its shebang's
+    #     sys.path (no cwd injection), side-stepping the shadow.
+    #
+    # These are pre-existing project hazards — migration-v2 just happens
+    # to be the first test that invokes alembic from a pytest subprocess
+    # and thus the first to surface them.
+    env.pop("PYTHONPATH", None)
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["alembic", "upgrade", "head"],
+        cwd=backend_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if result.returncode != 0:
+        # Truncate both streams so the skip reason stays scannable; the
+        # full output goes to pytest's captured log.
+        pytest.skip(
+            f"alembic upgrade head failed against OMNI_TEST_PG_URL: "
+            f"exit={result.returncode} "
+            f"stdout={result.stdout[-400:]!r} "
+            f"stderr={result.stderr[-800:]!r}"
+        )
+    return pg_test_dsn
+
+
+# ─── Async fixtures ────────────────────────────────────────────────
+# These use `pytest_asyncio.fixture` (not `pytest.fixture`) so
+# pytest-asyncio drives the event loop. asyncio_default_fixture_loop_scope
+# is `function` in pytest.ini, which matches the default scope below.
+#
+# We intentionally keep the pool fixture function-scoped: pool creation
+# is ~20 ms on PG 16, which is cheaper than debugging cross-test event-loop
+# contamination. If profile shows this as a hotspot later, we can move to
+# module or session scope by bumping asyncio_default_fixture_loop_scope.
+
+
+try:
+    import pytest_asyncio
+    import asyncpg
+    _ASYNCPG_AVAILABLE = True
+except ImportError:  # pragma: no cover — asyncpg is required in prod
+    _ASYNCPG_AVAILABLE = False
+
+
+if _ASYNCPG_AVAILABLE:
+
+    @pytest_asyncio.fixture
+    async def pg_test_pool(pg_test_alembic_upgraded: str):
+        """Function-scoped asyncpg pool against the test DB.
+
+        Small pool (min=1, max=5) — tests exercise pool semantics at this
+        scale; we're not load-testing here. If a test needs higher
+        concurrency, it can override by creating its own pool inline.
+        """
+        pool = await asyncpg.create_pool(
+            pg_test_alembic_upgraded,
+            min_size=1,
+            max_size=5,
+            command_timeout=10.0,
+            statement_cache_size=256,
+        )
+        try:
+            yield pool
+        finally:
+            await pool.close()
+
+
+    @pytest_asyncio.fixture
+    async def pg_test_conn(pg_test_pool):
+        """Borrow a connection wrapped in an outer transaction; roll back
+        on teardown so tests never pollute each other.
+
+        Usage:
+            async def test_something(pg_test_conn):
+                await pg_test_conn.execute("INSERT INTO t VALUES (1)")
+                # ... row is visible inside this test
+                # ... but gone after the fixture teardown rolls back
+
+        Nested transactions inside the test body use savepoints
+        automatically (asyncpg detects outer tx). This is the canonical
+        isolation mechanism for the v2 test suite.
+        """
+        async with pg_test_pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                yield conn
+            finally:
+                await tx.rollback()

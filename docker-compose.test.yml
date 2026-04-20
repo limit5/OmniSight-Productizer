@@ -1,0 +1,79 @@
+# Phase-3-Runtime-v2 SP-1.2 — Standalone PostgreSQL container for the
+# async pytest suite (backend/tests/test_*.py with the `pg_test_conn`
+# fixture).
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   export OMNI_TEST_PG_URL="postgresql://omni_test:omni_test_pw@localhost:5434/omni_test"
+#   pytest backend/tests/
+#   docker compose -f docker-compose.test.yml down -v   # wipe volume when done
+#
+# Port choice (5434):
+#   - 5432 is the prod `pg-primary` host-port
+#   - 5433 is the prod `pg-standby` host-port
+#   - 5434 is deliberately outside that range so a dev running prod PG
+#     HA locally (unusual but possible) can also run the test PG at the
+#     same time without a port clash.
+#
+# Network + isolation:
+#   - Dedicated bridge network `pg_test_net` so the test container does
+#     not accidentally share a network with prod PG HA
+#   - Dedicated named volume `pg_test_data` — `docker compose down -v`
+#     wipes it cleanly; `docker compose down` keeps it for faster restarts
+#   - No `restart: always` policy — this is a dev/test artifact, should
+#     die with `docker compose down`
+#
+# Security posture:
+#   - Password `omni_test_pw` is **intentionally hard-coded in the repo**
+#     — this service is ONLY for local test runs, not prod. The password
+#     lives here and not in `.env` so CI pipelines can just `docker
+#     compose up` without needing to provision secrets
+#   - Bind is on `127.0.0.1:5434` (not `0.0.0.0:5434`) so the test DB is
+#     NEVER reachable from outside localhost
+#   - Data volume contains ephemeral test data only — no PII, no audit
+#     logs, no billing data
+
+services:
+  pg_test:
+    image: postgres:16-alpine
+    container_name: omnisight-pg-test
+    restart: "no"
+    ports:
+      - "127.0.0.1:5434:5432"
+    environment:
+      POSTGRES_USER: omni_test
+      POSTGRES_PASSWORD: omni_test_pw
+      POSTGRES_DB: omni_test
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omni_test -d omni_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - pg_test_net
+    # Reasonable defaults for a test DB: small shared_buffers so it
+    # boots fast, fewer max_connections than prod (test load never
+    # exceeds 20 parallel conns).
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_buffers=64MB"
+      - "-c"
+      - "log_statement=none"
+      - "-c"
+      - "log_min_duration_statement=2000"
+
+networks:
+  pg_test_net:
+    driver: bridge
+    name: omnisight_pg_test_net
+
+volumes:
+  pg_test_data:
+    name: omnisight_pg_test_data
