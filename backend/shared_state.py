@@ -17,6 +17,7 @@ import os
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -386,6 +387,74 @@ class SharedLogBuffer:
 #  Shared Token Usage (Redis hash of JSON)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# P7 Fix B (2026-04-20): canonical public shape for a token-usage entry —
+# must match ``_token_usage`` in backend/routers/system.py and the
+# ``TokenUsage`` interface in lib/api.ts. Pre-P7 Redis payloads used
+# ``requests`` / ``avg_latency_ms`` and were missing ``total_tokens`` /
+# ``last_used``; _normalize_entry below rewrites those in place so
+# track()/get_all() always emit the canonical shape regardless of what
+# earlier workers wrote to Redis.
+
+
+def _fresh_token_entry(model: str) -> dict:
+    return {
+        "model": model,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost": 0.0,
+        "request_count": 0,
+        "avg_latency": 0,
+        "last_used": "",
+        # Internal: sum of all observed latencies, used to recompute
+        # the avg on each track(). Stripped from the dict returned to
+        # callers by _strip_internal — see get_all().
+        "_total_latency": 0.0,
+    }
+
+
+def _normalize_token_entry(entry: dict) -> dict:
+    """Accept legacy + canonical field names, return canonical shape."""
+    if "request_count" not in entry and "requests" in entry:
+        entry["request_count"] = entry.pop("requests")
+    if "avg_latency" not in entry and "avg_latency_ms" in entry:
+        entry["avg_latency"] = int(entry.pop("avg_latency_ms"))
+    entry.setdefault("model", "")
+    entry.setdefault("input_tokens", 0)
+    entry.setdefault("output_tokens", 0)
+    entry.setdefault(
+        "total_tokens", entry["input_tokens"] + entry["output_tokens"],
+    )
+    entry.setdefault("cost", 0.0)
+    entry.setdefault("request_count", 0)
+    entry.setdefault("avg_latency", 0)
+    entry.setdefault("last_used", "")
+    entry.setdefault("_total_latency", 0.0)
+    return entry
+
+
+def _apply_token_delta(
+    entry: dict, inp: int, out: int, latency_ms: float, cost: float,
+    now_hms: str,
+) -> None:
+    entry["input_tokens"] += inp
+    entry["output_tokens"] += out
+    entry["total_tokens"] = entry["input_tokens"] + entry["output_tokens"]
+    entry["cost"] += cost
+    entry["request_count"] += 1
+    entry["_total_latency"] += latency_ms
+    entry["avg_latency"] = (
+        int(entry["_total_latency"] / entry["request_count"])
+        if entry["request_count"] else 0
+    )
+    entry["last_used"] = now_hms
+
+
+def _strip_internal(entry: dict) -> dict:
+    entry.pop("_total_latency", None)
+    return entry
+
+
 class SharedTokenUsage:
     """Per-model token usage counters backed by Redis hash."""
 
@@ -399,59 +468,52 @@ class SharedTokenUsage:
     def track(self, model: str, input_tokens: int, output_tokens: int,
               latency_ms: float, cost: float) -> dict:
         """Atomically update usage for a model. Returns new totals."""
+        now_hms = datetime.now().strftime("%H:%M:%S")
         r = get_sync_redis()
         if r:
             try:
-                r.pipeline()
                 field_key = self._rkey()
                 raw = r.hget(field_key, model)
-                entry = json.loads(raw) if raw else {
-                    "model": model, "input_tokens": 0, "output_tokens": 0,
-                    "cost": 0.0, "requests": 0, "avg_latency_ms": 0.0,
-                    "_total_latency": 0.0,
-                }
-                entry["input_tokens"] += input_tokens
-                entry["output_tokens"] += output_tokens
-                entry["cost"] += cost
-                entry["requests"] += 1
-                entry["_total_latency"] += latency_ms
-                entry["avg_latency_ms"] = (
-                    entry["_total_latency"] / entry["requests"]
-                    if entry["requests"] else 0
+                entry = (
+                    _normalize_token_entry(json.loads(raw))
+                    if raw else _fresh_token_entry(model)
+                )
+                _apply_token_delta(
+                    entry, input_tokens, output_tokens, latency_ms, cost,
+                    now_hms,
                 )
                 r.hset(field_key, model, json.dumps(entry))
-                return entry
+                return _strip_internal(dict(entry))
             except Exception:
                 pass
 
         with self._lock:
-            entry = self._local.get(model, {
-                "model": model, "input_tokens": 0, "output_tokens": 0,
-                "cost": 0.0, "requests": 0, "avg_latency_ms": 0.0,
-                "_total_latency": 0.0,
-            })
-            entry["input_tokens"] += input_tokens
-            entry["output_tokens"] += output_tokens
-            entry["cost"] += cost
-            entry["requests"] += 1
-            entry["_total_latency"] += latency_ms
-            entry["avg_latency_ms"] = (
-                entry["_total_latency"] / entry["requests"]
-                if entry["requests"] else 0
+            entry = (
+                _normalize_token_entry(self._local[model])
+                if model in self._local else _fresh_token_entry(model)
+            )
+            _apply_token_delta(
+                entry, input_tokens, output_tokens, latency_ms, cost, now_hms,
             )
             self._local[model] = entry
-            return dict(entry)
+            return _strip_internal(dict(entry))
 
     def get_all(self) -> dict[str, dict]:
         r = get_sync_redis()
         if r:
             try:
                 raw = r.hgetall(self._rkey())
-                return {k: json.loads(v) for k, v in raw.items()}
+                return {
+                    k: _strip_internal(_normalize_token_entry(json.loads(v)))
+                    for k, v in raw.items()
+                }
             except Exception:
                 pass
         with self._lock:
-            return {k: dict(v) for k, v in self._local.items()}
+            return {
+                k: _strip_internal(_normalize_token_entry(dict(v)))
+                for k, v in self._local.items()
+            }
 
     def total_cost(self) -> float:
         usage = self.get_all()

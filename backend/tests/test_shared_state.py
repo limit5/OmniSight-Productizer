@@ -121,7 +121,7 @@ class TestSharedTokenUsage:
         entry = usage.track("test-model", 100, 50, 200.0, 0.001)
         assert entry["input_tokens"] == 100
         assert entry["output_tokens"] == 50
-        assert entry["requests"] == 1
+        assert entry["request_count"] == 1
 
     def test_track_accumulates(self):
         usage = SharedTokenUsage()
@@ -130,7 +130,7 @@ class TestSharedTokenUsage:
         entry = usage.track("test-model2", 200, 100, 300.0, 0.002)
         assert entry["input_tokens"] == 300
         assert entry["output_tokens"] == 150
-        assert entry["requests"] == 2
+        assert entry["request_count"] == 2
 
     def test_total_cost(self):
         usage = SharedTokenUsage()
