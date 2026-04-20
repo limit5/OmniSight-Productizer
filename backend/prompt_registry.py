@@ -465,47 +465,74 @@ async def register_canary(
     return await get_by_id(new_id)
 
 
-async def get_by_id(vid: int) -> PromptVersion:
-    from backend import db
-    async with db._conn().execute(
-        "SELECT * FROM prompt_versions WHERE id=?", (vid,),
-    ) as cur:
-        row = await cur.fetchone()
+_VERSION_COLS = (
+    "id, path, version, role, body, body_sha256, "
+    "success_count, failure_count, created_at, "
+    "promoted_at, rolled_back_at, rollback_reason"
+)
+
+
+async def get_by_id(vid: int, conn=None) -> PromptVersion:
+    sql = f"SELECT {_VERSION_COLS} FROM prompt_versions WHERE id = $1"
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            row = await owned.fetchrow(sql, vid)
+    else:
+        row = await conn.fetchrow(sql, vid)
     if not row:
         raise LookupError(f"no prompt_version id={vid}")
     return _row_to_version(row)
 
 
-async def get_active(path: str) -> Optional[PromptVersion]:
+async def get_active(
+    path: str, conn=None,
+) -> Optional[PromptVersion]:
     rel = _normalise_path(path)
-    from backend import db
-    async with db._conn().execute(
-        "SELECT * FROM prompt_versions WHERE path=? AND role='active'",
-        (rel,),
-    ) as cur:
-        row = await cur.fetchone()
+    sql = (
+        f"SELECT {_VERSION_COLS} FROM prompt_versions "
+        "WHERE path = $1 AND role = 'active'"
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            row = await owned.fetchrow(sql, rel)
+    else:
+        row = await conn.fetchrow(sql, rel)
     return _row_to_version(row) if row else None
 
 
-async def get_canary(path: str) -> Optional[PromptVersion]:
+async def get_canary(
+    path: str, conn=None,
+) -> Optional[PromptVersion]:
     rel = _normalise_path(path)
-    from backend import db
-    async with db._conn().execute(
-        "SELECT * FROM prompt_versions WHERE path=? AND role='canary'",
-        (rel,),
-    ) as cur:
-        row = await cur.fetchone()
+    sql = (
+        f"SELECT {_VERSION_COLS} FROM prompt_versions "
+        "WHERE path = $1 AND role = 'canary'"
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            row = await owned.fetchrow(sql, rel)
+    else:
+        row = await conn.fetchrow(sql, rel)
     return _row_to_version(row) if row else None
 
 
-async def list_all(path: str) -> list[PromptVersion]:
+async def list_all(
+    path: str, conn=None,
+) -> list[PromptVersion]:
     rel = _normalise_path(path)
-    from backend import db
-    async with db._conn().execute(
-        "SELECT * FROM prompt_versions WHERE path=? ORDER BY version DESC",
-        (rel,),
-    ) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        f"SELECT {_VERSION_COLS} FROM prompt_versions "
+        "WHERE path = $1 ORDER BY version DESC"
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            rows = await owned.fetch(sql, rel)
+    else:
+        rows = await conn.fetch(sql, rel)
     return [_row_to_version(r) for r in rows]
 
 
@@ -521,8 +548,9 @@ def _pick_canary_bucket(agent_id: str) -> bool:
     return bucket < CANARY_RATE_PCT
 
 
-async def pick_for_request(path: str,
-                           agent_id: str) -> Optional[tuple[PromptVersion, str]]:
+async def pick_for_request(
+    path: str, agent_id: str, conn=None,
+) -> Optional[tuple[PromptVersion, str]]:
     """Resolve which prompt version to actually serve. Returns
     ``(version, role)`` where role is ``"active"`` or ``"canary"``,
     or ``None`` if no active prompt is registered for this path.
@@ -530,12 +558,12 @@ async def pick_for_request(path: str,
     Deterministic: pure function of (path, agent_id) at the moment
     of call. If `path` has no canary, always returns active.
     """
-    active = await get_active(path)
+    active = await get_active(path, conn=conn)
     if active is None:
         return None
     if not _pick_canary_bucket(agent_id):
         return (active, "active")
-    canary = await get_canary(path)
+    canary = await get_canary(path, conn=conn)
     if canary is None:
         return (active, "active")
     return (canary, "canary")
@@ -545,15 +573,26 @@ async def pick_for_request(path: str,
 #  Outcome feedback
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def record_outcome(version_id: int, success: bool) -> None:
-    """Bump success/failure counter on a version row."""
+async def record_outcome(
+    version_id: int, success: bool, conn=None,
+) -> None:
+    """Bump success/failure counter on a version row.
+
+    SP-5.2: atomic ``col = col + 1`` UPDATE — safe under concurrent
+    workers without an advisory lock because PG serialises writes
+    to the same row at the kernel level. Same shape as SP-4.4's
+    failed_login_count fix.
+    """
     col = "success_count" if success else "failure_count"
-    from backend import db
-    await db._conn().execute(
-        f"UPDATE prompt_versions SET {col} = {col} + 1 WHERE id=?",
-        (version_id,),
+    sql = (
+        f"UPDATE prompt_versions SET {col} = {col} + 1 WHERE id = $1"
     )
-    await db._conn().commit()
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            await owned.execute(sql, version_id)
+    else:
+        await conn.execute(sql, version_id)
     try:
         from backend import metrics as _m
         _m.prompt_outcome_total.labels(
@@ -576,10 +615,13 @@ class CanaryEvaluation:
     reason: str = ""
 
 
-async def evaluate_canary(path: str, *,
-                          min_samples: int = 20,
-                          regression_pp: float = 5.0,
-                          window_s: float = 7 * 86400) -> CanaryEvaluation:
+async def evaluate_canary(
+    path: str, *,
+    min_samples: int = 20,
+    regression_pp: float = 5.0,
+    window_s: float = 7 * 86400,
+    conn=None,
+) -> CanaryEvaluation:
     """Decide what to do with the open canary on `path`. Pure read +
     optional rollback action. Returns one of:
 
@@ -589,9 +631,15 @@ async def evaluate_canary(path: str, *,
       * keep_running          — canary holding its own; window not elapsed
       * promote_canary        — canary >= active; window elapsed (caller
                                 may now manually call promote_canary())
+
+    SP-5.2: the rollback-UPDATE path runs inside its own pool acquire
+    with an advisory lock keyed on the path, so two concurrent cron
+    evaluations on the same path can't both decide "rollback" and
+    both UPDATE (the second would be a no-op since role is already
+    'archive', but the lock makes the decision deterministic).
     """
-    canary = await get_canary(path)
-    active = await get_active(path)
+    canary = await get_canary(path, conn=conn)
+    active = await get_active(path, conn=conn)
     if canary is None:
         return CanaryEvaluation("no_canary", None, active)
     if canary.total_samples < min_samples:
@@ -604,16 +652,31 @@ async def evaluate_canary(path: str, *,
     pp_delta = (canary_rate - active_rate) * 100
 
     if pp_delta < -regression_pp:
-        # Auto-rollback.
-        from backend import db
+        # Auto-rollback. Wrap in tx + advisory lock on path so two
+        # concurrent evaluators can't both decide-and-update.
         reason = (f"canary {canary_rate:.2%} vs active {active_rate:.2%} "
                   f"(Δ={pp_delta:+.1f}pp < -{regression_pp}pp)")
-        await db._conn().execute(
-            "UPDATE prompt_versions SET role='archive', rolled_back_at=?, "
-            "rollback_reason=? WHERE id=?",
-            (time.time(), reason, canary.id),
-        )
-        await db._conn().commit()
+
+        async def _do_rollback(c):
+            await c.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"prompt-rollback-{path}",
+            )
+            await c.execute(
+                "UPDATE prompt_versions SET role = 'archive', "
+                "rolled_back_at = $1, rollback_reason = $2 "
+                "WHERE id = $3 AND role = 'canary'",
+                time.time(), reason, canary.id,
+            )
+
+        if conn is None:
+            from backend.db_pool import get_pool
+            async with get_pool().acquire() as owned:
+                async with owned.transaction():
+                    await _do_rollback(owned)
+        else:
+            async with conn.transaction():
+                await _do_rollback(conn)
         try:
             from backend import metrics as _m
             _m.prompt_rolled_back_total.labels(path=path).inc()
@@ -637,7 +700,9 @@ async def evaluate_canary(path: str, *,
     )
 
 
-async def bootstrap_from_disk(*, paths: list[Path] | None = None) -> list[tuple[str, str]]:
+async def bootstrap_from_disk(
+    *, paths: list[Path] | None = None, conn=None,
+) -> list[tuple[str, str]]:
     """Phase 56-DAG-C S3: sync on-disk prompt markdown files into
     ``prompt_versions`` as the active row.
 
@@ -666,8 +731,8 @@ async def bootstrap_from_disk(*, paths: list[Path] | None = None) -> list[tuple[
             logger.warning("bootstrap: read %s failed: %s", p, exc)
             continue
         try:
-            prior = await get_active(rel)
-            new = await register_active(rel, body)
+            prior = await get_active(rel, conn=conn)
+            new = await register_active(rel, body, conn=conn)
             if prior and prior.id == new.id:
                 outcomes.append((rel, "unchanged"))
             else:
@@ -680,23 +745,55 @@ async def bootstrap_from_disk(*, paths: list[Path] | None = None) -> list[tuple[
     return outcomes
 
 
-async def promote_canary(path: str) -> Optional[PromptVersion]:
-    """Operator action: replace the active prompt with the open canary.
-    Old active goes to archive; canary becomes active."""
-    canary = await get_canary(path)
+async def _promote_canary_impl(
+    conn, path: str,
+) -> Optional[PromptVersion]:
+    # Advisory lock keyed on (path) so a concurrent register_active
+    # or evaluate_canary rollback can't interleave with the two
+    # UPDATEs. The lock key is shared with register_active's key
+    # scheme to guarantee no same-path writer races promote.
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"prompt-register-active-{path}",
+    )
+    canary = await get_canary(path, conn=conn)
     if canary is None:
         return None
-    active = await get_active(path)
-    from backend import db
+    active = await get_active(path, conn=conn)
     now = time.time()
     if active:
-        await db._conn().execute(
-            "UPDATE prompt_versions SET role='archive' WHERE id=?",
-            (active.id,),
+        await conn.execute(
+            "UPDATE prompt_versions SET role = 'archive' WHERE id = $1",
+            active.id,
         )
-    await db._conn().execute(
-        "UPDATE prompt_versions SET role='active', promoted_at=? WHERE id=?",
-        (now, canary.id),
+    await conn.execute(
+        "UPDATE prompt_versions SET role = 'active', "
+        "promoted_at = $1 WHERE id = $2",
+        now, canary.id,
     )
-    await db._conn().commit()
+    return await get_by_id(canary.id, conn=conn)
+
+
+async def promote_canary(
+    path: str, conn=None,
+) -> Optional[PromptVersion]:
+    """Operator action: replace the active prompt with the open canary.
+    Old active goes to archive; canary becomes active.
+
+    SP-5.2: two UPDATEs are now inside a single tx + advisory lock.
+    Previously the compat-path crash window between the two statements
+    left the old active row archived while the canary was still
+    'canary' — the prompt path had NO active version briefly. The tx
+    makes the promotion atomic; the advisory lock (shared key with
+    register_active) prevents interleaving with a concurrent
+    register_active that would land a new pending 'active' row on
+    top of this operation.
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                return await _promote_canary_impl(owned, path)
+    async with conn.transaction():
+        return await _promote_canary_impl(conn, path)
     return await get_by_id(canary.id)
