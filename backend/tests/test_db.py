@@ -145,32 +145,18 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Simulations
+#  Simulations  —  MOVED TO test_db_simulations.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_simulation_insert_update_filter(fresh_db):
-    db = fresh_db
-    await db.insert_simulation({
-        "id": "sim1", "task_id": "t1", "agent_id": "a1",
-        "track": "algo", "module": "isp", "status": "running",
-        "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
-        "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
-        "report_json": "{}", "artifact_id": None, "created_at": "2026-04-14T00:00:00",
-    })
-    sim = await db.get_simulation("sim1")
-    assert sim and sim["status"] == "running"
-    # update — only whitelisted columns are written
-    await db.update_simulation("sim1", {
-        "status": "passed", "tests_passed": 10, "tests_failed": 0,
-        "bogus_column": "ignored",
-    })
-    sim = await db.get_simulation("sim1")
-    assert sim["status"] == "passed"
-    assert sim["tests_passed"] == 10
-    # filter
-    assert len(await db.list_simulations(task_id="t1")) == 1
-    assert len(await db.list_simulations(status="failed")) == 0
+#
+# Phase-3-Runtime-v2 SP-3.8 (2026-04-20): the 4 simulation functions
+# (insert_simulation / get_simulation / list_simulations /
+# update_simulation) were ported to native asyncpg with an explicit
+# ``conn: asyncpg.Connection`` first argument. update_simulation's
+# column whitelist (_SIMULATION_COLUMNS) is preserved; dynamic SET
+# clause now uses positional ``$N`` placeholders derived from the
+# whitelisted dict keys.
+#
+# Per-function contract tests live in ``test_db_simulations.py``.
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -64,29 +64,32 @@ class TestGraphTimeout:
 class TestStartupCleanup:
 
     @pytest.mark.asyncio
-    async def test_stuck_simulations_reset(self):
-        """Simulations stuck in 'running' should be reset to 'error' on startup."""
+    async def test_stuck_simulations_reset(self, pg_test_conn):
+        """Simulations stuck in 'running' should be reset to 'error' on startup.
+
+        SP-3.8 (2026-04-20): migrated to pg_test_conn. The prior
+        ``db.execute_raw`` call is replaced with direct
+        ``conn.execute`` on the same conn — same semantics (single
+        statement, auto-commits outside tx; here it runs inside
+        pg_test_conn's outer savepoint so rolls back on teardown).
+        """
         import uuid
         from backend import db
-        await db.init()
-        try:
-            sim_id = f"sim-stuck-{uuid.uuid4().hex[:6]}"
-            await db.insert_simulation({
-                "id": sim_id, "task_id": "", "agent_id": "",
-                "track": "algo", "module": "test", "status": "running",
-                "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
-                "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
-                "report_json": "{}", "artifact_id": None,
-                "created_at": "2026-01-01T00:00:00",
-            })
-            # Simulate startup cleanup
-            await db.execute_raw(
-                "UPDATE simulations SET status='error' WHERE status='running'"
-            )
-            sim = await db.get_simulation(sim_id)
-            assert sim["status"] == "error"
-        finally:
-            await db.close()
+        sim_id = f"sim-stuck-{uuid.uuid4().hex[:6]}"
+        await db.insert_simulation(pg_test_conn, {
+            "id": sim_id, "task_id": "", "agent_id": "",
+            "track": "algo", "module": "test", "status": "running",
+            "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
+            "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+            "report_json": "{}", "artifact_id": None,
+            "created_at": "2026-01-01T00:00:00",
+        })
+        # Simulate startup cleanup
+        await pg_test_conn.execute(
+            "UPDATE simulations SET status='error' WHERE status='running'"
+        )
+        sim = await db.get_simulation(pg_test_conn, sim_id)
+        assert sim["status"] == "error"
 
 
 class TestWatchdog:

@@ -1475,49 +1475,66 @@ async def save_npi_state(conn, data: dict) -> None:
 #  Simulations
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def insert_simulation(data: dict) -> None:
-    await _conn().execute(
+async def insert_simulation(conn, data: dict) -> None:
+    await conn.execute(
         """INSERT INTO simulations
            (id, task_id, agent_id, track, module, status,
             tests_total, tests_passed, tests_failed,
             coverage_pct, valgrind_errors, duration_ms,
             report_json, artifact_id, created_at)
-           VALUES (:id, :task_id, :agent_id, :track, :module, :status,
-                   :tests_total, :tests_passed, :tests_failed,
-                   :coverage_pct, :valgrind_errors, :duration_ms,
-                   :report_json, :artifact_id, :created_at)""",
-        data,
+           VALUES ($1, $2, $3, $4, $5, $6,
+                   $7, $8, $9,
+                   $10, $11, $12,
+                   $13, $14, $15)""",
+        data["id"],
+        data.get("task_id"),
+        data.get("agent_id"),
+        data["track"],
+        data["module"],
+        data.get("status", "running"),
+        int(data.get("tests_total", 0)),
+        int(data.get("tests_passed", 0)),
+        int(data.get("tests_failed", 0)),
+        float(data.get("coverage_pct", 0.0)),
+        int(data.get("valgrind_errors", 0)),
+        int(data.get("duration_ms", 0)),
+        data.get("report_json", "{}"),
+        data.get("artifact_id"),
+        data.get("created_at", ""),
     )
-    await _conn().commit()
 
 
-async def get_simulation(sim_id: str) -> dict | None:
-    async with _conn().execute("SELECT * FROM simulations WHERE id = ?", (sim_id,)) as cur:
-        row = await cur.fetchone()
+async def get_simulation(conn, sim_id: str) -> dict | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM simulations WHERE id = $1", sim_id,
+    )
     return dict(row) if row else None
 
 
 async def list_simulations(
-    task_id: str = "", agent_id: str = "", status: str = "", limit: int = 50,
+    conn,
+    task_id: str = "", agent_id: str = "", status: str = "",
+    limit: int = 50,
 ) -> list[dict]:
-    query = "SELECT * FROM simulations"
     conditions: list[str] = []
     params: list = []
     if task_id:
-        conditions.append("task_id = ?")
+        conditions.append(f"task_id = ${len(params) + 1}")
         params.append(task_id)
     if agent_id:
-        conditions.append("agent_id = ?")
+        conditions.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
     if status:
-        conditions.append("status = ?")
+        conditions.append(f"status = ${len(params) + 1}")
         params.append(status)
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY created_at DESC LIMIT ?"
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    async with _conn().execute(query, params) as cur:
-        rows = await cur.fetchall()
+    sql = (
+        "SELECT * FROM simulations"
+        + where
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
     return [dict(r) for r in rows]
 
 
@@ -1531,16 +1548,24 @@ _SIMULATION_COLUMNS = frozenset({
 })
 
 
-async def update_simulation(sim_id: str, data: dict) -> None:
+async def update_simulation(conn, sim_id: str, data: dict) -> None:
+    # Phase-3-Runtime-v2 SP-3.8 (2026-04-20): whitelist-driven SET
+    # clause built from _SIMULATION_COLUMNS. Column names are NEVER
+    # taken from untrusted input — only keys that pass the frozenset
+    # check become column tokens — so the f-string SET clause is
+    # injection-safe. Values bind via positional ``$N`` placeholders.
     if not data:
         return
     safe = {k: v for k, v in data.items() if k in _SIMULATION_COLUMNS}
     if not safe:
         return
-    sets = ", ".join(f"{k} = :{k}" for k in safe)
-    safe["_id"] = sim_id
-    await _conn().execute(f"UPDATE simulations SET {sets} WHERE id = :_id", safe)
-    await _conn().commit()
+    cols = list(safe.keys())
+    set_clause = ", ".join(
+        f"{c} = ${i + 1}" for i, c in enumerate(cols)
+    )
+    id_idx = len(cols) + 1
+    sql = f"UPDATE simulations SET {set_clause} WHERE id = ${id_idx}"
+    await conn.execute(sql, *safe.values(), sim_id)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

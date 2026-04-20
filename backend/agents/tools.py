@@ -1754,14 +1754,22 @@ async def run_simulation(
     now = _dt.now().isoformat()
 
     # Insert running record
+    # SP-3.8 (2026-04-20): tools run in agent orchestrator worker
+    # context — no request conn. Each DB op acquires briefly from the
+    # pool. The simulation state transitions (running → error/parse
+    # error/final) are independent writes, not a transaction, so per-
+    # op acquires are correct: a slow subprocess.run between updates
+    # doesn't pin a pool conn.
+    from backend.db_pool import get_pool
     try:
-        await db.insert_simulation({
-            "id": sim_id, "task_id": "", "agent_id": get_active_agent_id() or "",
-            "track": track, "module": module, "status": "running",
-            "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
-            "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
-            "report_json": "{}", "artifact_id": None, "created_at": now,
-        })
+        async with get_pool().acquire() as _conn:
+            await db.insert_simulation(_conn, {
+                "id": sim_id, "task_id": "", "agent_id": get_active_agent_id() or "",
+                "track": track, "module": module, "status": "running",
+                "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
+                "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+                "report_json": "{}", "artifact_id": None, "created_at": now,
+            })
     except Exception as exc:
         return f"[ERROR] Failed to initialize simulation record: {exc}"
     emit_simulation(sim_id, "start", f"{track}/{module} on {platform}")
@@ -1820,7 +1828,11 @@ async def run_simulation(
             )
             raw_output = stdout_s if stdout_s.strip() else stderr_s
     except asyncio.TimeoutError:
-        await db.update_simulation(sim_id, {"status": "error", "report_json": '{"errors":["Timeout"]}'})
+        async with get_pool().acquire() as _conn:
+            await db.update_simulation(_conn, sim_id, {
+                "status": "error",
+                "report_json": '{"errors":["Timeout"]}',
+            })
         emit_simulation(sim_id, "result", "Timeout", status="error")
         return f"[TIMEOUT] Simulation {sim_id} timed out after {SIMULATION_TIMEOUT}s"
 
@@ -1829,10 +1841,11 @@ async def run_simulation(
     try:
         report = _json.loads(raw_output.strip())
     except (ValueError, _json.JSONDecodeError):
-        await db.update_simulation(sim_id, {
-            "status": "error",
-            "report_json": _json.dumps({"errors": ["Failed to parse JSON output"], "raw": raw_output[:500]}),
-        })
+        async with get_pool().acquire() as _conn:
+            await db.update_simulation(_conn, sim_id, {
+                "status": "error",
+                "report_json": _json.dumps({"errors": ["Failed to parse JSON output"], "raw": raw_output[:500]}),
+            })
         emit_simulation(sim_id, "result", "JSON parse error", status="error")
         return f"[ERROR] Simulation {sim_id}: failed to parse JSON output. Raw: {raw_output[:300]}"
 
@@ -1862,7 +1875,8 @@ async def run_simulation(
             "model_size_kb": npu.get("model_size_kb", 0),
             "npu_framework": npu.get("framework", framework or ""),
         })
-    await db.update_simulation(sim_id, update_data)
+    async with get_pool().acquire() as _conn:
+        await db.update_simulation(_conn, sim_id, update_data)
 
     emit_simulation(sim_id, "result", f"{status}: {tests.get('passed', 0)}/{tests.get('total', 0)} tests",
                     status=status, track=track, module=module,

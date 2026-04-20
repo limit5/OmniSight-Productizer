@@ -89,9 +89,13 @@ class TestNPUSimulationDB:
         assert "npu_framework" in columns
 
     @pytest.mark.asyncio
-    async def test_npu_simulation_insert(self, client):
+    async def test_npu_simulation_insert(self, pg_test_conn):
+        # SP-3.8 (2026-04-20): migrated from client fixture to
+        # pg_test_conn savepoint fixture — the same conn covers the
+        # insert / update / get sequence, and the TRUNCATE on teardown
+        # keeps the table clean for sibling tests.
         from backend import db
-        await db.insert_simulation({
+        await db.insert_simulation(pg_test_conn, {
             "id": "sim-npu-test",
             "task_id": "",
             "agent_id": "",
@@ -108,14 +112,14 @@ class TestNPUSimulationDB:
             "artifact_id": None,
             "created_at": "2026-04-13T00:00:00",
         })
-        await db.update_simulation("sim-npu-test", {
+        await db.update_simulation(pg_test_conn, "sim-npu-test", {
             "npu_latency_ms": 12.3,
             "npu_throughput_fps": 81.3,
             "accuracy_delta": 0.015,
             "model_size_kb": 4096,
             "npu_framework": "rknn",
         })
-        sim = await db.get_simulation("sim-npu-test")
+        sim = await db.get_simulation(pg_test_conn, "sim-npu-test")
         assert sim is not None
         assert sim["track"] == "npu"
         assert sim["npu_framework"] == "rknn"

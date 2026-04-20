@@ -8,90 +8,78 @@ import pytest
 
 
 class TestSimulationDB:
+    """SP-3.8 (2026-04-20): migrated from SQLite db.init/close pattern
+    to pg_test_conn fixture — savepoint-isolated; each test starts
+    clean via the TRUNCATE-in-savepoint in conftest.
+    """
 
     @pytest.mark.asyncio
-    async def test_insert_and_list(self):
+    async def test_insert_and_list(self, pg_test_conn):
         from backend import db
-        await db.init()
-        try:
-            sim_id = f"sim-test-{uuid.uuid4().hex[:6]}"
-            await db.insert_simulation({
-                "id": sim_id, "task_id": "t-1", "agent_id": "a-1",
-                "track": "algo", "module": "core_algorithm", "status": "pass",
-                "tests_total": 5, "tests_passed": 5, "tests_failed": 0,
-                "coverage_pct": 100.0, "valgrind_errors": 0, "duration_ms": 1234,
-                "report_json": json.dumps({"status": "pass"}),
-                "artifact_id": None, "created_at": "2026-01-01T00:00:00",
-            })
-            sims = await db.list_simulations(task_id="t-1")
-            assert any(s["id"] == sim_id for s in sims)
-        finally:
-            await db.close()
+        sim_id = f"sim-test-{uuid.uuid4().hex[:6]}"
+        await db.insert_simulation(pg_test_conn, {
+            "id": sim_id, "task_id": "t-1", "agent_id": "a-1",
+            "track": "algo", "module": "core_algorithm", "status": "pass",
+            "tests_total": 5, "tests_passed": 5, "tests_failed": 0,
+            "coverage_pct": 100.0, "valgrind_errors": 0, "duration_ms": 1234,
+            "report_json": json.dumps({"status": "pass"}),
+            "artifact_id": None, "created_at": "2026-01-01T00:00:00",
+        })
+        sims = await db.list_simulations(pg_test_conn, task_id="t-1")
+        assert any(s["id"] == sim_id for s in sims)
 
     @pytest.mark.asyncio
-    async def test_get_simulation(self):
+    async def test_get_simulation(self, pg_test_conn):
         from backend import db
-        await db.init()
-        try:
-            sim_id = f"sim-get-{uuid.uuid4().hex[:6]}"
-            await db.insert_simulation({
-                "id": sim_id, "task_id": "", "agent_id": "",
-                "track": "hw", "module": "gpio_pwm", "status": "running",
-                "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
-                "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+        sim_id = f"sim-get-{uuid.uuid4().hex[:6]}"
+        await db.insert_simulation(pg_test_conn, {
+            "id": sim_id, "task_id": "", "agent_id": "",
+            "track": "hw", "module": "gpio_pwm", "status": "running",
+            "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
+            "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+            "report_json": "{}", "artifact_id": None,
+            "created_at": "2026-01-01T00:00:00",
+        })
+        sim = await db.get_simulation(pg_test_conn, sim_id)
+        assert sim is not None
+        assert sim["track"] == "hw"
+        assert sim["module"] == "gpio_pwm"
+
+    @pytest.mark.asyncio
+    async def test_update_simulation(self, pg_test_conn):
+        from backend import db
+        sim_id = f"sim-upd-{uuid.uuid4().hex[:6]}"
+        await db.insert_simulation(pg_test_conn, {
+            "id": sim_id, "task_id": "", "agent_id": "",
+            "track": "algo", "module": "test_mod", "status": "running",
+            "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
+            "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
+            "report_json": "{}", "artifact_id": None,
+            "created_at": "2026-01-01T00:00:00",
+        })
+        await db.update_simulation(pg_test_conn, sim_id, {
+            "status": "pass", "tests_total": 3, "tests_passed": 3,
+        })
+        sim = await db.get_simulation(pg_test_conn, sim_id)
+        assert sim["status"] == "pass"
+        assert sim["tests_total"] == 3
+
+    @pytest.mark.asyncio
+    async def test_list_filter_by_status(self, pg_test_conn):
+        from backend import db
+        for status in ("pass", "fail"):
+            await db.insert_simulation(pg_test_conn, {
+                "id": f"sim-filt-{status}-{uuid.uuid4().hex[:4]}",
+                "task_id": "", "agent_id": "",
+                "track": "algo", "module": "m", "status": status,
+                "tests_total": 1, "tests_passed": 1 if status == "pass" else 0,
+                "tests_failed": 0 if status == "pass" else 1,
+                "coverage_pct": 100.0, "valgrind_errors": 0, "duration_ms": 100,
                 "report_json": "{}", "artifact_id": None,
                 "created_at": "2026-01-01T00:00:00",
             })
-            sim = await db.get_simulation(sim_id)
-            assert sim is not None
-            assert sim["track"] == "hw"
-            assert sim["module"] == "gpio_pwm"
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_update_simulation(self):
-        from backend import db
-        await db.init()
-        try:
-            sim_id = f"sim-upd-{uuid.uuid4().hex[:6]}"
-            await db.insert_simulation({
-                "id": sim_id, "task_id": "", "agent_id": "",
-                "track": "algo", "module": "test_mod", "status": "running",
-                "tests_total": 0, "tests_passed": 0, "tests_failed": 0,
-                "coverage_pct": 0.0, "valgrind_errors": 0, "duration_ms": 0,
-                "report_json": "{}", "artifact_id": None,
-                "created_at": "2026-01-01T00:00:00",
-            })
-            await db.update_simulation(sim_id, {
-                "status": "pass", "tests_total": 3, "tests_passed": 3,
-            })
-            sim = await db.get_simulation(sim_id)
-            assert sim["status"] == "pass"
-            assert sim["tests_total"] == 3
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_list_filter_by_status(self):
-        from backend import db
-        await db.init()
-        try:
-            for status in ("pass", "fail"):
-                await db.insert_simulation({
-                    "id": f"sim-filt-{status}-{uuid.uuid4().hex[:4]}",
-                    "task_id": "", "agent_id": "",
-                    "track": "algo", "module": "m", "status": status,
-                    "tests_total": 1, "tests_passed": 1 if status == "pass" else 0,
-                    "tests_failed": 0 if status == "pass" else 1,
-                    "coverage_pct": 100.0, "valgrind_errors": 0, "duration_ms": 100,
-                    "report_json": "{}", "artifact_id": None,
-                    "created_at": "2026-01-01T00:00:00",
-                })
-            passed = await db.list_simulations(status="pass")
-            assert all(s["status"] == "pass" for s in passed)
-        finally:
-            await db.close()
+        passed = await db.list_simulations(pg_test_conn, status="pass")
+        assert all(s["status"] == "pass" for s in passed)
 
 
 class TestSimulationAPI:
@@ -109,21 +97,31 @@ class TestSimulationAPI:
 
     @pytest.mark.asyncio
     async def test_get_existing(self, client):
+        # Seed via inline pool acquire — the committed row is visible
+        # to the endpoint's own Depends(get_conn) (READ COMMITTED).
         from backend import db
+        from backend.db_pool import get_pool
         sim_id = f"sim-api-{uuid.uuid4().hex[:6]}"
-        await db.insert_simulation({
-            "id": sim_id, "task_id": "", "agent_id": "",
-            "track": "algo", "module": "test", "status": "pass",
-            "tests_total": 1, "tests_passed": 1, "tests_failed": 0,
-            "coverage_pct": 100.0, "valgrind_errors": 0, "duration_ms": 50,
-            "report_json": json.dumps({"status": "pass"}),
-            "artifact_id": None, "created_at": "2026-01-01T00:00:00",
-        })
-        resp = await client.get(f"/api/v1/runtime/simulations/{sim_id}")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["track"] == "algo"
-        assert data["status"] == "pass"
+        async with get_pool().acquire() as conn:
+            await db.insert_simulation(conn, {
+                "id": sim_id, "task_id": "", "agent_id": "",
+                "track": "algo", "module": "test", "status": "pass",
+                "tests_total": 1, "tests_passed": 1, "tests_failed": 0,
+                "coverage_pct": 100.0, "valgrind_errors": 0, "duration_ms": 50,
+                "report_json": json.dumps({"status": "pass"}),
+                "artifact_id": None, "created_at": "2026-01-01T00:00:00",
+            })
+        try:
+            resp = await client.get(f"/api/v1/runtime/simulations/{sim_id}")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["track"] == "algo"
+            assert data["status"] == "pass"
+        finally:
+            async with get_pool().acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM simulations WHERE id = $1", sim_id,
+                )
 
 
 class TestSimulationTool:

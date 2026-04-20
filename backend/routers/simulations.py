@@ -1,8 +1,10 @@
 """Simulation results REST API."""
 
-from fastapi import APIRouter, HTTPException
+import asyncpg
+from fastapi import APIRouter, Depends, HTTPException
 
 from backend import db
+from backend.db_pool import get_conn
 from backend.models import SimulationRequest
 from backend.routers import _pagination as _pg
 
@@ -17,17 +19,21 @@ async def list_simulations(
     agent_id: str = "",
     status: str = "",
     limit: int = _pg.Limit(default=50, max_cap=200),
+    conn: asyncpg.Connection = Depends(get_conn),
 ):
     """List recent simulation runs with optional filters."""
     return await db.list_simulations(
-        task_id=task_id, agent_id=agent_id, status=status, limit=limit
+        conn, task_id=task_id, agent_id=agent_id, status=status, limit=limit,
     )
 
 
 @router.get("/{sim_id}")
-async def get_simulation(sim_id: str):
+async def get_simulation(
+    sim_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Get a specific simulation result with full report."""
-    sim = await db.get_simulation(sim_id)
+    sim = await db.get_simulation(conn, sim_id)
     if not sim:
         raise HTTPException(status_code=404, detail="Simulation not found")
     return sim
