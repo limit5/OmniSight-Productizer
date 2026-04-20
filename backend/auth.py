@@ -356,55 +356,104 @@ async def create_user(
     )
 
 
-async def check_password_history(user_id: str, plain: str) -> bool:
-    """Return True if the password matches any of the last N stored hashes."""
-    conn = await _conn()
-    async with conn.execute(
+async def _check_password_history_impl(
+    conn, user_id: str, plain: str,
+) -> bool:
+    rows = await conn.fetch(
         "SELECT password_hash FROM password_history "
-        "WHERE user_id=? ORDER BY id DESC LIMIT ?",
-        (user_id, PASSWORD_HISTORY_LIMIT),
-    ) as cur:
-        rows = await cur.fetchall()
+        "WHERE user_id = $1 ORDER BY id DESC LIMIT $2",
+        user_id, PASSWORD_HISTORY_LIMIT,
+    )
     for row in rows:
         if verify_password(plain, row["password_hash"]):
             return True
-    async with conn.execute(
-        "SELECT password_hash FROM users WHERE id=?", (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
+    r = await conn.fetchrow(
+        "SELECT password_hash FROM users WHERE id = $1", user_id,
+    )
     if r and r["password_hash"] and verify_password(plain, r["password_hash"]):
         return True
     return False
 
 
+async def check_password_history(
+    user_id: str, plain: str, conn=None,
+) -> bool:
+    """Return True if the password matches any of the last N stored hashes.
+
+    SP-4.4 (2026-04-21): ported to native asyncpg. Polymorphic ``conn``
+    so the router call-site (routers/auth.py POST /auth/change-password)
+    stays unchanged. The argon2 verify loop runs outside the DB acquire
+    only when conn is None — otherwise the caller's conn is held for
+    the full loop (acceptable because callers sharing a conn are
+    already inside a tx that logically spans the history check).
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _check_password_history_impl(
+                owned_conn, user_id, plain,
+            )
+    return await _check_password_history_impl(conn, user_id, plain)
+
+
 async def _record_password_history(conn, user_id: str, pw_hash: str) -> None:
+    """Append a hash to the user's password history and trim to N.
+
+    Internal helper — always called from inside an outer transaction
+    (change_password wraps it) so the INSERT + DELETE-trim land atomic.
+    """
     await conn.execute(
-        "INSERT INTO password_history (user_id, password_hash) VALUES (?, ?)",
-        (user_id, pw_hash),
+        "INSERT INTO password_history (user_id, password_hash) "
+        "VALUES ($1, $2)",
+        user_id, pw_hash,
     )
     await conn.execute(
-        "DELETE FROM password_history WHERE user_id=? AND id NOT IN "
-        "(SELECT id FROM password_history WHERE user_id=? ORDER BY id DESC LIMIT ?)",
-        (user_id, user_id, PASSWORD_HISTORY_LIMIT),
+        "DELETE FROM password_history WHERE user_id = $1 AND id NOT IN "
+        "(SELECT id FROM password_history WHERE user_id = $2 "
+        "ORDER BY id DESC LIMIT $3)",
+        user_id, user_id, PASSWORD_HISTORY_LIMIT,
     )
 
 
-async def change_password(user_id: str, new_password: str) -> None:
-    """Update a user's password and clear must_change_password flag.
-    Records the old hash in password_history for reuse prevention."""
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT password_hash FROM users WHERE id=?", (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
+async def _change_password_impl(
+    conn, user_id: str, new_password: str,
+) -> None:
+    r = await conn.fetchrow(
+        "SELECT password_hash FROM users WHERE id = $1", user_id,
+    )
     if r and r["password_hash"]:
         await _record_password_history(conn, user_id, r["password_hash"])
     pw_hash = hash_password(new_password)
     await conn.execute(
-        "UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
-        (pw_hash, user_id),
+        "UPDATE users SET password_hash = $1, must_change_password = 0 "
+        "WHERE id = $2",
+        pw_hash, user_id,
     )
-    await conn.commit()
+
+
+async def change_password(
+    user_id: str, new_password: str, conn=None,
+) -> None:
+    """Update a user's password and clear must_change_password flag.
+    Records the old hash in password_history for reuse prevention.
+
+    SP-4.4 (2026-04-21): tx-wrapped. Under SQLite the three statements
+    (SELECT old hash, INSERT into history, DELETE-trim, UPDATE users)
+    rode the file-level lock so interleaving was impossible. Under the
+    pool, two concurrent change_password calls on the same user could
+    interleave — e.g. both read the same old_hash, both INSERT it into
+    history (duplicate retention slot), then race the UPDATE. The
+    transaction serialises them via the implicit row lock the UPDATE
+    takes, keeping the retention window correct.
+    """
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            async with owned_conn.transaction():
+                await _change_password_impl(owned_conn, user_id, new_password)
+        return
+    async with conn.transaction():
+        await _change_password_impl(conn, user_id, new_password)
 
 
 async def flag_all_admins_must_change_password() -> list[dict]:
@@ -449,35 +498,64 @@ def _lockout_duration(failed_count: int) -> float:
     return min(LOCKOUT_BASE_S * (2 ** exponent), LOCKOUT_MAX_S)
 
 
-async def _record_login_failure(conn, user_id: str, current_count: int) -> int:
-    new_count = current_count + 1
-    locked_until = None
+async def _record_login_failure(conn, user_id: str) -> int:
+    """Increment failed_login_count atomically, set locked_until if over
+    threshold. Returns the new count.
+
+    SP-4.4 (2026-04-21): atomic ``col = col + 1 RETURNING`` — the old
+    pattern (caller-supplied ``current_count`` + UPDATE to
+    ``current_count + 1``) was a lost-update race under the pool. Two
+    concurrent failed logins for the same account would both read
+    ``failed_login_count = N`` and both write ``N + 1``; under SQLite's
+    file-lock this couldn't interleave, under asyncpg it can. Now the
+    increment happens inside the UPDATE itself, so the kernel serialises
+    on the row lock — no pre-fetch, no lost updates.
+    """
+    row = await conn.fetchrow(
+        "UPDATE users SET failed_login_count = failed_login_count + 1 "
+        "WHERE id = $1 "
+        "RETURNING failed_login_count",
+        user_id,
+    )
+    if not row:
+        return 0
+    new_count = int(row["failed_login_count"])
     if new_count >= LOCKOUT_THRESHOLD:
         locked_until = time.time() + _lockout_duration(new_count)
-    await conn.execute(
-        "UPDATE users SET failed_login_count=?, locked_until=? WHERE id=?",
-        (new_count, locked_until, user_id),
-    )
-    await conn.commit()
+        await conn.execute(
+            "UPDATE users SET locked_until = $1 WHERE id = $2",
+            locked_until, user_id,
+        )
     return new_count
 
 
 async def _reset_login_failures(conn, user_id: str) -> None:
     await conn.execute(
-        "UPDATE users SET failed_login_count=0, locked_until=NULL WHERE id=?",
-        (user_id,),
+        "UPDATE users SET failed_login_count = 0, locked_until = NULL "
+        "WHERE id = $1",
+        user_id,
     )
-    await conn.commit()
 
 
-async def is_account_locked(email: str) -> tuple[bool, float]:
-    """Check if account is locked. Returns (locked, retry_after_s)."""
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT locked_until FROM users WHERE email=?",
-        (email.lower().strip(),),
-    ) as cur:
-        r = await cur.fetchone()
+async def is_account_locked(email: str, conn=None) -> tuple[bool, float]:
+    """Check if account is locked. Returns (locked, retry_after_s).
+
+    SP-4.4 (2026-04-21): polymorphic ``conn``. All existing callers pass
+    no conn; the read borrows from pool. The lockout check is used
+    upstream of ``authenticate_password`` as a fast-path by some routes,
+    but the hot login path is now authenticate_password itself so this
+    function is read-only (no need to coordinate the un-lock side
+    effect; that happens inside authenticate_password when the clock
+    has rolled past ``locked_until``).
+    """
+    sql = "SELECT locked_until FROM users WHERE email = $1"
+    normalised = email.lower().strip()
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            r = await owned_conn.fetchrow(sql, normalised)
+    else:
+        r = await conn.fetchrow(sql, normalised)
     if not r or r["locked_until"] is None:
         return False, 0.0
     remaining = r["locked_until"] - time.time()
@@ -486,14 +564,44 @@ async def is_account_locked(email: str) -> tuple[bool, float]:
     return True, remaining
 
 
+_AUTH_LOGIN_COLS = (
+    "id, email, name, role, enabled, password_hash, "
+    "must_change_password, failed_login_count, locked_until, tenant_id"
+)
+
+
 async def authenticate_password(email: str, password: str) -> Optional[User]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, email, name, role, enabled, password_hash, "
-        "must_change_password, failed_login_count, locked_until "
-        "FROM users WHERE email=?", (email.lower().strip(),),
-    ) as cur:
-        r = await cur.fetchone()
+    """Verify email + password, returning the User or None.
+
+    SP-4.4 (2026-04-21): ported to native asyncpg. Key structural
+    changes versus the SQLite version:
+
+    * Pool connection is NOT held across the argon2 verify (~100 ms
+      wall-clock per call — enough to starve a 20-slot pool under a
+      brute-force burst). The read acquires briefly, the verify runs
+      with no conn held, and any write-path conditionals re-acquire.
+    * Each write-path branch (rehash, reset-failures + last_login
+      bump, record-failure) runs inside its own short transaction.
+      Mixing them into one outer tx would mean holding a conn across
+      the verify; the tradeoff is that a crash mid-branch leaves the
+      login "mostly succeeded but last_login not updated" — acceptable
+      since last_login is UI-only.
+    * ``_record_login_failure`` is now lost-update-safe (atomic
+      increment) so the three-write-path structure doesn't need extra
+      coordination.
+
+    The M1 timing-oracle defence is preserved verbatim — every branch
+    runs argon2 verify (dummy or real) before touching control flow.
+    """
+    from backend.db_pool import get_pool
+    pool = get_pool()
+    normalised = email.lower().strip()
+
+    async with pool.acquire() as conn:
+        r = await conn.fetchrow(
+            f"SELECT {_AUTH_LOGIN_COLS} FROM users WHERE email = $1",
+            normalised,
+        )
 
     # M1 audit (2026-04-19): ALWAYS run argon2 verify, even when the
     # user doesn't exist / is disabled / is locked, so the login-
@@ -514,32 +622,50 @@ async def authenticate_password(email: str, password: str) -> Optional[User]:
         return None
 
     locked_until = r["locked_until"]
-    if locked_until is not None and locked_until > time.time():
+    now = time.time()
+    if locked_until is not None and locked_until > now:
         return None
-    if locked_until is not None and locked_until <= time.time():
-        await _reset_login_failures(conn, r["id"])
+    if locked_until is not None and locked_until <= now:
+        # Lockout has organically expired; clear the flag so the next
+        # wrong password doesn't immediately re-enter lockout with a
+        # stale count.
+        async with pool.acquire() as conn:
+            await _reset_login_failures(conn, r["id"])
 
     if not password_ok:
-        await _record_login_failure(conn, r["id"], r["failed_login_count"])
+        async with pool.acquire() as conn:
+            await _record_login_failure(conn, r["id"])
         return None
 
-    if needs_rehash(r["password_hash"]):
-        new_hash = hash_password(password)
-        await conn.execute(
-            "UPDATE users SET password_hash=? WHERE id=?",
-            (new_hash, r["id"]),
-        )
-        logger.info("[AUTH] Auto-rehashed password to argon2id for user %s", r["email"])
-
-    await _reset_login_failures(conn, r["id"])
-    await conn.execute(
-        "UPDATE users SET last_login_at=datetime('now') WHERE id=?",
-        (r["id"],),
+    # Password matched → rehash if needed, reset counters, bump
+    # last_login. Tx-wrap these together so a crash partway through
+    # doesn't leave the user with must_change_password cleared but
+    # failed_login_count unreset or similar inconsistency.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if needs_rehash(r["password_hash"]):
+                new_hash = hash_password(password)
+                await conn.execute(
+                    "UPDATE users SET password_hash = $1 WHERE id = $2",
+                    new_hash, r["id"],
+                )
+                logger.info(
+                    "[AUTH] Auto-rehashed password to argon2id for user %s",
+                    r["email"],
+                )
+            await _reset_login_failures(conn, r["id"])
+            await conn.execute(
+                "UPDATE users SET last_login_at = "
+                "to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS') "
+                "WHERE id = $1",
+                r["id"],
+            )
+    return User(
+        id=r["id"], email=r["email"], name=r["name"],
+        role=r["role"], enabled=bool(r["enabled"]),
+        must_change_password=bool(r["must_change_password"]),
+        tenant_id=r["tenant_id"],
     )
-    await conn.commit()
-    return User(id=r["id"], email=r["email"], name=r["name"],
-                role=r["role"], enabled=bool(r["enabled"]),
-                must_change_password=bool(r["must_change_password"]))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

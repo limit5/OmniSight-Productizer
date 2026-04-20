@@ -69,10 +69,6 @@ async def test_create_user_unknown_role_raises(_auth_db):
         await auth.create_user("x@y.com", "X", role="superuser")
 
 
-@pytest.mark.skip(
-    reason="SP-4.4: authenticate_password still uses compat _conn(); "
-           "unskips when SP-4.4 ports the password-flow functions."
-)
 @pytest.mark.asyncio
 async def test_authenticate_password(_auth_db):
     _, auth = _auth_db
@@ -333,3 +329,179 @@ async def test_ua_binding_empty_ua_passes(_auth_db):
     sess = await auth.create_session(u.id, ip="1.2.3.4", user_agent="")
     assert await auth.check_ua_binding(sess, "") is True
     assert await auth.check_ua_binding(sess, "SomeUA") is True
+
+
+# ── SP-4.4: password flow (ported 2026-04-21) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_change_password_records_history_and_trims(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "h@b.com", "Hist", role="viewer", password="original-pass",
+    )
+    # Walk the history past the retention limit to confirm trimming.
+    passwords = [f"rotated-{i}" for i in range(auth.PASSWORD_HISTORY_LIMIT + 3)]
+    for pw in passwords:
+        await auth.change_password(u.id, pw)
+    # The oldest passwords (including "original-pass") should no longer
+    # be in history; the most recent PASSWORD_HISTORY_LIMIT are blocked.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM password_history WHERE user_id = $1",
+            u.id,
+        )
+    assert count == auth.PASSWORD_HISTORY_LIMIT, (
+        f"password_history must be trimmed to {auth.PASSWORD_HISTORY_LIMIT}, "
+        f"got {count}"
+    )
+    # must_change_password flag cleared after change.
+    fetched = await auth.get_user(u.id)
+    assert fetched.must_change_password is False
+
+
+@pytest.mark.asyncio
+async def test_change_password_blocks_recent_reuse(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "r@b.com", "Reuse", role="viewer", password="first-password",
+    )
+    await auth.change_password(u.id, "second-password")
+    # The old "first-password" is now in history → check_password_history
+    # should flag it as a reuse.
+    assert await auth.check_password_history(u.id, "first-password") is True
+    # A fresh password is not in history.
+    assert await auth.check_password_history(u.id, "never-used-before") is False
+
+
+@pytest.mark.asyncio
+async def test_authenticate_password_wrong_password_increments_counter(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "f@b.com", "Fail", role="viewer", password="correct-password",
+    )
+    for _ in range(3):
+        assert await auth.authenticate_password("f@b.com", "wrong") is None
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT failed_login_count, locked_until FROM users WHERE id = $1",
+            u.id,
+        )
+    assert r["failed_login_count"] == 3
+    assert r["locked_until"] is None, (
+        "3 failures < LOCKOUT_THRESHOLD, must not be locked yet"
+    )
+
+
+@pytest.mark.asyncio
+async def test_authenticate_password_concurrent_failures_atomic(_auth_db):
+    """Load-bearing regression guard for SP-4.4 atomic increment.
+
+    Under SQLite's single-writer, the old read-compute-write pattern
+    couldn't interleave. Under the asyncpg pool, two concurrent wrong-
+    password attempts would both read ``failed_login_count = N``, both
+    compute ``N + 1``, and one would clobber the other — leaving the
+    counter at ``N + 1`` when it should be ``N + 2``. The atomic
+    ``UPDATE ... SET col = col + 1 RETURNING`` makes that impossible.
+    """
+    import asyncio
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "c@b.com", "Conc", role="viewer", password="correct",
+    )
+    # Fire 10 wrong-password attempts concurrently. After the race, the
+    # counter must be exactly 10 — not less (lost updates).
+    N = 10
+    results = await asyncio.gather(
+        *(auth.authenticate_password("c@b.com", "wrong") for _ in range(N))
+    )
+    assert all(r is None for r in results)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT failed_login_count FROM users WHERE id = $1", u.id,
+        )
+    assert count == N, (
+        f"atomic increment failed: expected {N} failures recorded, "
+        f"got {count} (lost updates under pool concurrency)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_authenticate_password_resets_counter_on_success(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "s@b.com", "Succ", role="viewer", password="correct",
+    )
+    # Poison the counter.
+    for _ in range(3):
+        await auth.authenticate_password("s@b.com", "wrong")
+    # Successful login resets.
+    ok = await auth.authenticate_password("s@b.com", "correct")
+    assert ok is not None
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT failed_login_count, locked_until, last_login_at "
+            "FROM users WHERE id = $1",
+            u.id,
+        )
+    assert r["failed_login_count"] == 0
+    assert r["locked_until"] is None
+    # last_login_at is a YYYY-MM-DD HH:MM:SS text timestamp.
+    assert r["last_login_at"] is not None
+    assert len(r["last_login_at"]) == 19
+
+
+@pytest.mark.asyncio
+async def test_authenticate_password_lockout_engages_at_threshold(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "l@b.com", "Lock", role="viewer", password="correct",
+    )
+    # Drive past the lockout threshold.
+    for _ in range(auth.LOCKOUT_THRESHOLD):
+        await auth.authenticate_password("l@b.com", "wrong")
+    locked, retry = await auth.is_account_locked("l@b.com")
+    assert locked is True, "account must be locked after threshold failures"
+    assert retry > 0
+    # Even the correct password is rejected while locked (defensive
+    # read in authenticate_password): it runs argon2 verify but returns
+    # None because locked_until > now.
+    import time as _t
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        locked_until = await conn.fetchval(
+            "SELECT locked_until FROM users WHERE id = $1", u.id,
+        )
+    assert locked_until is not None and locked_until > _t.time()
+    assert await auth.authenticate_password("l@b.com", "correct") is None
+
+
+@pytest.mark.asyncio
+async def test_is_account_locked_not_locked_returns_false(_auth_db):
+    _, auth = _auth_db
+    await auth.create_user("n@b.com", "Norm", role="viewer", password="pw")
+    locked, retry = await auth.is_account_locked("n@b.com")
+    assert locked is False
+    assert retry == 0.0
+    # Unknown email also returns not-locked (no timing signal).
+    locked, retry = await auth.is_account_locked("ghost@b.com")
+    assert locked is False
+
+
+@pytest.mark.asyncio
+async def test_authenticate_password_disabled_user_rejected(_auth_db):
+    _, auth = _auth_db
+    u = await auth.create_user(
+        "d@b.com", "Dis", role="viewer", password="correct",
+    )
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET enabled = 0 WHERE id = $1", u.id,
+        )
+    # Disabled user rejected even with right password.
+    assert await auth.authenticate_password("d@b.com", "correct") is None
