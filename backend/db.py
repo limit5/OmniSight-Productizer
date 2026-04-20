@@ -1051,96 +1051,102 @@ def _task_row_to_dict(row) -> dict:
     return d
 
 
-async def list_tasks() -> list[dict]:
-    async with _conn().execute("SELECT * FROM tasks") as cur:
-        rows = await cur.fetchall()
+async def list_tasks(conn) -> list[dict]:
+    rows = await conn.fetch("SELECT * FROM tasks")
     return [_task_row_to_dict(r) for r in rows]
 
 
-async def get_task(task_id: str) -> dict | None:
-    async with _conn().execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
-        row = await cur.fetchone()
+async def get_task(conn, task_id: str) -> dict | None:
+    row = await conn.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
     return _task_row_to_dict(row) if row else None
 
 
-async def upsert_task(data: dict) -> None:
-    await _conn().execute(
+async def upsert_task(conn, data: dict) -> None:
+    # Phase-3-Runtime-v2 SP-3.2: native asyncpg — 21 positional
+    # placeholders ($1..$21), ON CONFLICT DO UPDATE using EXCLUDED.*.
+    # Pool auto-commits each statement outside an explicit transaction
+    # block — no explicit commit needed.
+    await conn.execute(
         """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id,
              created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type,
              parent_task_id, child_task_ids, external_issue_id, issue_url, acceptance_criteria,
              labels, depends_on, external_issue_platform, last_external_sync_at, npi_phase_id)
-           VALUES (:id, :title, :description, :priority, :status, :assigned_agent_id,
-                   :created_at, :completed_at, :ai_analysis, :suggested_agent_type, :suggested_sub_type,
-                   :parent_task_id, :child_task_ids, :external_issue_id, :issue_url, :acceptance_criteria,
-                   :labels, :depends_on, :external_issue_platform, :last_external_sync_at, :npi_phase_id)
-           ON CONFLICT(id) DO UPDATE SET
-             title=excluded.title, description=excluded.description, priority=excluded.priority,
-             status=excluded.status, assigned_agent_id=excluded.assigned_agent_id,
-             completed_at=excluded.completed_at, ai_analysis=excluded.ai_analysis,
-             suggested_agent_type=excluded.suggested_agent_type, suggested_sub_type=excluded.suggested_sub_type,
-             parent_task_id=excluded.parent_task_id, child_task_ids=excluded.child_task_ids,
-             external_issue_id=excluded.external_issue_id, issue_url=excluded.issue_url,
-             acceptance_criteria=excluded.acceptance_criteria, labels=excluded.labels,
-             depends_on=excluded.depends_on, external_issue_platform=excluded.external_issue_platform,
-             last_external_sync_at=excluded.last_external_sync_at, npi_phase_id=excluded.npi_phase_id
+           VALUES ($1, $2, $3, $4, $5, $6,
+                   $7, $8, $9, $10, $11,
+                   $12, $13, $14, $15, $16,
+                   $17, $18, $19, $20, $21)
+           ON CONFLICT (id) DO UPDATE SET
+             title=EXCLUDED.title, description=EXCLUDED.description, priority=EXCLUDED.priority,
+             status=EXCLUDED.status, assigned_agent_id=EXCLUDED.assigned_agent_id,
+             completed_at=EXCLUDED.completed_at, ai_analysis=EXCLUDED.ai_analysis,
+             suggested_agent_type=EXCLUDED.suggested_agent_type, suggested_sub_type=EXCLUDED.suggested_sub_type,
+             parent_task_id=EXCLUDED.parent_task_id, child_task_ids=EXCLUDED.child_task_ids,
+             external_issue_id=EXCLUDED.external_issue_id, issue_url=EXCLUDED.issue_url,
+             acceptance_criteria=EXCLUDED.acceptance_criteria, labels=EXCLUDED.labels,
+             depends_on=EXCLUDED.depends_on, external_issue_platform=EXCLUDED.external_issue_platform,
+             last_external_sync_at=EXCLUDED.last_external_sync_at, npi_phase_id=EXCLUDED.npi_phase_id
         """,
-        {
-            "id": data["id"],
-            "title": data["title"],
-            "description": data.get("description"),
-            "priority": data.get("priority", "medium"),
-            "status": data.get("status", "backlog"),
-            "assigned_agent_id": data.get("assigned_agent_id"),
-            "created_at": data.get("created_at", ""),
-            "completed_at": data.get("completed_at"),
-            "ai_analysis": data.get("ai_analysis"),
-            "suggested_agent_type": data.get("suggested_agent_type"),
-            "suggested_sub_type": data.get("suggested_sub_type"),
-            "parent_task_id": data.get("parent_task_id"),
-            "child_task_ids": json.dumps(data.get("child_task_ids", [])),
-            "external_issue_id": data.get("external_issue_id"),
-            "issue_url": data.get("issue_url"),
-            "acceptance_criteria": data.get("acceptance_criteria"),
-            "labels": json.dumps(data.get("labels", [])),
-            "depends_on": json.dumps(data.get("depends_on", [])),
-            "external_issue_platform": data.get("external_issue_platform"),
-            "last_external_sync_at": data.get("last_external_sync_at"),
-            "npi_phase_id": data.get("npi_phase_id"),
-        },
+        data["id"],
+        data["title"],
+        data.get("description"),
+        data.get("priority", "medium"),
+        data.get("status", "backlog"),
+        data.get("assigned_agent_id"),
+        data.get("created_at", ""),
+        data.get("completed_at"),
+        data.get("ai_analysis"),
+        data.get("suggested_agent_type"),
+        data.get("suggested_sub_type"),
+        data.get("parent_task_id"),
+        json.dumps(data.get("child_task_ids", [])),
+        data.get("external_issue_id"),
+        data.get("issue_url"),
+        data.get("acceptance_criteria"),
+        json.dumps(data.get("labels", [])),
+        json.dumps(data.get("depends_on", [])),
+        data.get("external_issue_platform"),
+        data.get("last_external_sync_at"),
+        data.get("npi_phase_id"),
     )
-    await _conn().commit()
 
 
 # ── Task comments ──
 
-async def insert_task_comment(data: dict) -> None:
-    await _conn().execute(
+async def insert_task_comment(conn, data: dict) -> None:
+    await conn.execute(
         """INSERT INTO task_comments (id, task_id, author, content, timestamp)
-           VALUES (:id, :task_id, :author, :content, :timestamp)""",
-        data,
+           VALUES ($1, $2, $3, $4, $5)""",
+        data["id"],
+        data["task_id"],
+        data["author"],
+        data["content"],
+        data["timestamp"],
     )
-    await _conn().commit()
 
 
-async def list_task_comments(task_id: str, limit: int = 20) -> list[dict]:
-    async with _conn().execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY timestamp DESC LIMIT ?",
-        (task_id, limit),
-    ) as cur:
-        rows = await cur.fetchall()
+async def list_task_comments(conn, task_id: str, limit: int = 20) -> list[dict]:
+    rows = await conn.fetch(
+        "SELECT * FROM task_comments WHERE task_id = $1 ORDER BY timestamp DESC LIMIT $2",
+        task_id,
+        limit,
+    )
     return [dict(r) for r in rows]
 
 
-async def delete_task(task_id: str) -> bool:
-    cur = await _conn().execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    await _conn().commit()
-    return cur.rowcount > 0
+async def delete_task(conn, task_id: str) -> bool:
+    # asyncpg returns a status string like "DELETE 1"; parse the count.
+    # Matches the SP-3.1 delete_agent pattern — inlines what the compat
+    # wrapper's _PgCursor did so Epic 7 can delete the wrapper safely.
+    status = await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
-async def task_count() -> int:
-    async with _conn().execute("SELECT COUNT(*) FROM tasks") as cur:
-        row = await cur.fetchone()
-    return row[0] if row else 0
+async def task_count(conn) -> int:
+    n = await conn.fetchval("SELECT COUNT(*) FROM tasks")
+    return int(n) if n is not None else 0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

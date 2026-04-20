@@ -91,29 +91,30 @@ async def client(tmp_path, monkeypatch):
 
     await db.init()
 
-    # Phase-3-Runtime-v2 SP-3.1 (2026-04-20): routes that depend on the
-    # asyncpg pool (``Depends(get_conn)``) need a live pool OR a
-    # dependency override. When ``OMNI_TEST_PG_URL`` is available we
-    # spin up a tiny pool + override so ported routes work in this
-    # ``client`` fixture; when it's absent, ported routes raise
-    # RuntimeError from ``db_pool.get_pool()`` — the caller will see
-    # a clear "pool not initialised" message rather than a spooky
-    # failure, and can skip or set the env var.
+    # Phase-3-Runtime-v2 SP-3.1/3.2 (2026-04-20): routes and worker
+    # paths that need PG access go through two distinct doors:
+    #   * Request handlers use ``Depends(get_conn)`` — a dependency
+    #     override is enough to intercept those.
+    #   * Background/worker code (pipeline.py, invoke.py watchdog,
+    #     polymorphic _persist with conn=None, agents/tools.py) calls
+    #     ``db_pool.get_pool()`` directly and grabs its own conn. An
+    #     override can't intercept that path — the module-global pool
+    #     really has to be initialised.
+    # So when OMNI_TEST_PG_URL is set we run ``init_pool`` (matching
+    # the real lifespan) which installs the module global AND lets the
+    # Depends(get_conn) machinery use the same pool. No separate local
+    # pool, no divergence between request- and worker-scoped writes.
     _dsn = _omni_test_pg_dsn_normalised()
-    _pool_for_client = None
+    _pool_inited = False
     if _dsn:
-        import asyncpg as _asyncpg
-        _pool_for_client = await _asyncpg.create_pool(
+        from backend import db_pool as _db_pool
+        # Fresh process usually has _pool=None; defensive reset covers
+        # cases where a prior test crashed before its teardown.
+        _db_pool._reset_for_tests()
+        await _db_pool.init_pool(
             _dsn, min_size=1, max_size=3, command_timeout=10.0,
         )
-
-        from backend.db_pool import get_conn as _real_get_conn
-
-        async def _override_get_conn():
-            async with _pool_for_client.acquire() as _conn:
-                yield _conn
-
-        app.dependency_overrides[_real_get_conn] = _override_get_conn
+        _pool_inited = True
 
     try:
         transport = ASGITransport(app=app)
@@ -122,10 +123,9 @@ async def client(tmp_path, monkeypatch):
     finally:
         await db.close()
         _boot._gate_cache_reset()
-        if _pool_for_client is not None:
-            from backend.db_pool import get_conn as _real_get_conn
-            app.dependency_overrides.pop(_real_get_conn, None)
-            await _pool_for_client.close()
+        if _pool_inited:
+            from backend import db_pool as _db_pool
+            await _db_pool.close_pool()
 
 
 @pytest.fixture(autouse=True)
@@ -327,6 +327,20 @@ if _ASYNCPG_AVAILABLE:
             tx = conn.transaction()
             await tx.start()
             try:
+                # Phase-3-Runtime-v2 SP-3.2 (2026-04-20): TRUNCATE the
+                # ported-domain tables inside the outer tx so each test
+                # starts from an empty slate regardless of committed
+                # pollution from prior ``pg_test_pool`` (non-tx) tests
+                # or crashed fixtures. The TRUNCATE itself is part of
+                # the savepoint and rolls back on teardown, so any
+                # pre-existing committed rows come back intact.
+                # Agents + tasks + task_comments are the tables that
+                # Phase-3-Runtime-v2 has ported so far; extend this
+                # list as subsequent SP-3.x slices land.
+                await conn.execute(
+                    "TRUNCATE agents, tasks, task_comments "
+                    "RESTART IDENTITY CASCADE"
+                )
                 yield conn
             finally:
                 await tx.rollback()

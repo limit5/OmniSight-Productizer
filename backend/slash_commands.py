@@ -213,12 +213,12 @@ async def _spawn(conn: asyncpg.Connection, args: str) -> str:
         status=AgentStatus.idle,
     )
     _agents[agent.id] = agent
-    # SP-3.1: pass the request-scoped pool conn to the ported _persist.
-    # Do NOT swallow DB failures silently — if the persist fails, the
-    # in-memory _agents dict is ahead of the DB, which is only safe if
-    # the operator sees the error and re-tries (or restarts, which
-    # reloads from DB via seed_defaults_if_empty).
-    await _persist(conn, agent)
+    # SP-3.1/3.2: pass the request-scoped pool conn to the ported
+    # _persist. Do NOT swallow DB failures silently — if the persist
+    # fails, the in-memory _agents dict is ahead of the DB, which is
+    # only safe if the operator sees the error and re-tries (or
+    # restarts, which reloads from DB via seed_defaults_if_empty).
+    await _persist(agent, conn)
     return f"Agent spawned: **{agent.name}** (`{agent.id}`) — status: idle"
 
 

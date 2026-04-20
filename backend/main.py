@@ -101,14 +101,18 @@ async def lifespan(app: FastAPI):
         if _pg_dsn:
             async with _db_pool.get_pool().acquire() as _seed_conn:
                 await agents.seed_defaults_if_empty(_seed_conn)
+            # SP-3.2: tasks.seed_defaults_if_empty now requires a pool
+            # conn too. Share the acquire block with agents to keep
+            # startup pool usage bounded.
+            async with _db_pool.get_pool().acquire() as _seed_conn:
+                await tasks.seed_defaults_if_empty(_seed_conn)
         else:
             _log.warning(
-                "[STARTUP] agents.seed_defaults_if_empty skipped — "
-                "SQLite dev mode lacks the pool-backed conn that SP-3.1 "
-                "requires. Default agents will NOT be pre-populated. "
+                "[STARTUP] agents/tasks seed_defaults_if_empty skipped — "
+                "SQLite dev mode lacks the pool-backed conn that SP-3.1/3.2 "
+                "requires. Default agents/tasks will NOT be pre-populated. "
                 "Set OMNISIGHT_DATABASE_URL to enable."
             )
-        await tasks.seed_defaults_if_empty()
         await system.load_token_usage_from_db()
         # A1: restore operator-defined decision rules (Phase 50B) from DB
         from backend import decision_rules as _dr

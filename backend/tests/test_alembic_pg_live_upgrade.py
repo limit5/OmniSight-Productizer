@@ -136,8 +136,11 @@ class TestLiveAlembicPostgres:
         _alembic("upgrade", "head")
         proc = _alembic("current")
         assert proc.returncode == 0
-        # The head revision id appears somewhere in the stdout.
-        assert "0015" in proc.stdout
+        # The head revision id appears somewhere in the stdout. Drift
+        # guard: assert (head) marker is present rather than hardcoding
+        # the 4-digit id — Phase-3-Runtime-v2 SP-2.1 bumped head to
+        # 0017, and future phases will bump it again.
+        assert "(head)" in proc.stdout
 
     def test_decision_rules_negative_column_present(self):
         _alembic("upgrade", "head")

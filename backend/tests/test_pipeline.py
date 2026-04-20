@@ -142,14 +142,18 @@ class TestTaskPhaseLinkage:
         assert t.npi_phase_id is None
 
     @pytest.mark.asyncio
-    async def test_db_round_trip(self, client):
+    async def test_db_round_trip(self, pg_test_conn):
+        # SP-3.2 (2026-04-20): upsert_task / get_task now require an
+        # asyncpg.Connection as first argument. pg_test_conn is a
+        # pool-borrowed savepoint conn that rolls back on teardown —
+        # no schema pollution across tests.
         from backend import db
-        await db.upsert_task({
+        await db.upsert_task(pg_test_conn, {
             "id": "pipe-test-1",
             "title": "Pipeline test task",
             "npi_phase_id": "phase-3",
         })
-        row = await db.get_task("pipe-test-1")
+        row = await db.get_task(pg_test_conn, "pipe-test-1")
         assert row is not None
         assert row["npi_phase_id"] == "phase-3"
 
@@ -163,10 +167,13 @@ class TestPipelineSlashCommand:
 
     @pytest.mark.asyncio
     async def test_pipeline_no_args(self, client):
+        # SP-3.1 (2026-04-20): handle_slash_command signature is now
+        # (conn, command, args); the /pipeline handler reads state from
+        # memory only, so conn=None is safe.
         import backend.pipeline as p
         p._active_pipeline = None
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("pipeline", "")
+        result = await handle_slash_command(None, "pipeline", "")
         assert "Pipeline" in result
         assert "idle" in result.lower() or "Status" in result
 
@@ -175,7 +182,7 @@ class TestPipelineSlashCommand:
         import backend.pipeline as p
         p._active_pipeline = None
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("pipeline", "start Build AI camera")
+        result = await handle_slash_command(None, "pipeline", "start Build AI camera")
         assert "Started" in result or "Pipeline" in result
         p._active_pipeline = None
 

@@ -157,7 +157,9 @@ async def _on_patchset_created(
         suggested_agent_type="reviewer",
     )
     _tasks[task_id] = task
-    await _persist_task(task)
+    # SP-3.2: pass the request-scoped pool conn through to _persist so
+    # the webhook's atomic acquire is reused (no per-call pool churn).
+    await _persist_task(task, conn)
 
     # Find or create a reviewer agent
     from backend.routers.agents import _agents, _persist as _persist_agent
@@ -179,15 +181,15 @@ async def _on_patchset_created(
             thought_chain="Spawned by Gerrit webhook.",
         )
         _agents[reviewer_id] = reviewer
-        await _persist_agent(conn, reviewer)
+        await _persist_agent(reviewer, conn)
 
     # Assign and trigger
     task.status = TaskStatus.assigned
     task.assigned_agent_id = reviewer.id
     reviewer.status = AgentStatus.running
     reviewer.thought_chain = f"Reviewing change {change_id}: {change_subject}"
-    await _persist_task(task)
-    await _persist_agent(conn, reviewer)
+    await _persist_task(task, conn)
+    await _persist_agent(reviewer, conn)
 
     emit_task_update(task_id, task.status, reviewer.id)
     emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
@@ -228,10 +230,9 @@ async def _run_review(reviewer: Agent, change_id: str, commit: str, subject: str
         reviewer.status = AgentStatus.error
         logger.error("Review failed: %s", exc)
 
-    # Pool-backed conn for the final persist — SP-3.1 requires all
-    # db.agent_* calls go through asyncpg.
-    async with get_pool().acquire() as _conn:
-        await _persist_agent(_conn, reviewer)
+    # SP-3.2 (2026-04-20): _persist_agent is now polymorphic on conn —
+    # background context → call with None and it acquires from pool.
+    await _persist_agent(reviewer)
     emit_agent_update(reviewer.id, reviewer.status, reviewer.thought_chain)
 
 
@@ -254,8 +255,7 @@ async def _on_comment_added(event: dict) -> None:
             # Create a fix task for INVOKE to pick up
             import uuid
             from backend.models import Task, TaskPriority, TaskStatus
-            from backend.routers.tasks import _tasks
-            from backend import db
+            from backend.routers.tasks import _persist as _persist_task
 
             fix_task_id = f"fix-{uuid.uuid4().hex[:6]}"
             fix_task = Task(
@@ -272,9 +272,10 @@ async def _on_comment_added(event: dict) -> None:
                 labels=["gerrit-review-fix"],
                 external_issue_id=change_id,
             )
-            _tasks[fix_task_id] = fix_task
+            # SP-3.2: _persist is polymorphic — worker context (no conn)
+            # acquires its own pool-scoped connection for the write.
             try:
-                await db.upsert_task(fix_task.model_dump())
+                await _persist_task(fix_task)
             except Exception:
                 pass
 

@@ -1,13 +1,30 @@
-"""Task management endpoints — persisted to SQLite."""
+"""Task management endpoints.
+
+Phase-3-Runtime-v2 SP-3.2 (2026-04-20): ported to native asyncpg +
+``Depends(get_conn)`` pool-scoped connections. Request handlers carry
+a request-scoped ``asyncpg.Connection`` parameter that propagates to
+``_persist()`` and downstream ``db.*`` calls.
+
+``_persist()`` is deliberately polymorphic on ``conn`` — request
+handlers pass the Depends-injected conn; background workers
+(invoke.py watchdog, pipeline.py, asyncio.create_task side-tasks,
+agents/tools.py) that lack a request scope call it without a conn
+and ``_persist`` acquires its own from the pool. This is the proper
+use of the pool API for worker contexts where FastAPI's Depends isn't
+available; it is NOT a workaround for the A1 router-propagation rule,
+which still holds for every request handler.
+"""
 
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+import asyncpg
+from fastapi import APIRouter, Depends, HTTPException
 
 from backend.models import Task, TaskCreate, TaskStatus, TaskUpdate
 from backend.events import emit_task_update
 from backend import db
+from backend.db_pool import get_conn, get_pool
 from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -16,10 +33,17 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 _tasks: dict[str, Task] = {}
 
 
-async def seed_defaults_if_empty() -> None:
-    """Seed default tasks if the database is empty (called at startup)."""
-    if await db.task_count() > 0:
-        for row in await db.list_tasks():
+async def seed_defaults_if_empty(conn: asyncpg.Connection) -> None:
+    """Seed default tasks if the database is empty (called at startup).
+
+    Runs outside a request context — the lifespan handler acquires a
+    connection from ``db_pool`` explicitly via ``async with
+    get_pool().acquire() as conn:`` and passes it here. Skipping this
+    call in SQLite dev mode is the lifespan's responsibility (the
+    pool is only initialised when a Postgres DSN is configured).
+    """
+    if await db.task_count(conn) > 0:
+        for row in await db.list_tasks(conn):
             _tasks[row["id"]] = Task(**row)
         return
 
@@ -38,29 +62,53 @@ async def seed_defaults_if_empty() -> None:
             suggested_agent_type=agent_type,
         )
         _tasks[tid] = task
-        await db.upsert_task(task.model_dump())
+        await db.upsert_task(conn, task.model_dump())
 
 
-async def _persist(task: Task) -> None:
-    """Write task state to both memory and DB."""
+async def _persist(task: Task, conn: asyncpg.Connection | None = None) -> None:
+    """Write task state to both memory and DB.
+
+    Memory-first: the in-memory mirror is updated before the DB write so
+    a subsequent read (which hits memory, not DB) reflects the new state
+    immediately. If the DB write fails, memory is stale — acceptable
+    because ``seed_defaults_if_empty`` on next cold start re-syncs from
+    DB, and handlers should NOT catch+swallow DB exceptions.
+
+    Two call modes:
+      * Request scope: handler passes its ``Depends(get_conn)`` conn →
+        write rides the request's pool-scoped connection.
+      * Worker scope (no request): conn is None → acquire a fresh one
+        from the pool for the duration of this write, then release.
+        invoke.py watchdog + pipeline.py + agents/tools.py use this
+        path; they intentionally do NOT hold a long-lived conn.
+    """
     _tasks[task.id] = task
-    await db.upsert_task(task.model_dump())
+    if conn is None:
+        async with get_pool().acquire() as owned_conn:
+            await db.upsert_task(owned_conn, task.model_dump())
+    else:
+        await db.upsert_task(conn, task.model_dump())
 
 
 @router.get("", response_model=list[Task])
 async def list_tasks():
+    # Reads the in-memory mirror — no DB conn needed.
     return list(_tasks.values())
 
 
 @router.get("/{task_id}", response_model=Task)
 async def get_task(task_id: str):
+    # Reads the in-memory mirror — no DB conn needed.
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     return _tasks[task_id]
 
 
 @router.post("", response_model=Task, status_code=201)
-async def create_task(body: TaskCreate):
+async def create_task(
+    body: TaskCreate,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     task_id = f"task-{uuid.uuid4().hex[:6]}"
     task = Task(
         id=task_id,
@@ -75,7 +123,7 @@ async def create_task(body: TaskCreate):
         acceptance_criteria=body.acceptance_criteria,
         labels=body.labels,
     )
-    await _persist(task)
+    await _persist(task, conn)
     return task
 
 
@@ -92,7 +140,12 @@ async def get_transitions(task_id: str):
 
 
 @router.patch("/{task_id}", response_model=Task)
-async def update_task(task_id: str, body: TaskUpdate, force: bool = False):
+async def update_task(
+    task_id: str,
+    body: TaskUpdate,
+    force: bool = False,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Update a task. Status changes are validated against the state machine.
 
     Pass ``force=true`` to bypass transition validation (for system/human use).
@@ -133,7 +186,7 @@ async def update_task(task_id: str, body: TaskUpdate, force: bool = False):
 
     for field, value in update_data.items():
         setattr(task, field, value)
-    await _persist(task)
+    await _persist(task, conn)
     emit_task_update(task_id, task.status, task.assigned_agent_id)
 
     # Sync to external issue tracker (non-blocking, capture URL before async dispatch)
@@ -163,15 +216,24 @@ async def _sync_external_issue(issue_url: str, status: str, task_id: str) -> Non
 # ── Task Comments ──
 
 @router.get("/{task_id}/comments")
-async def get_task_comments(task_id: str, limit: int = _pg.Limit(default=20, max_cap=200)):
+async def get_task_comments(
+    task_id: str,
+    limit: int = _pg.Limit(default=20, max_cap=200),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Get comment thread for a task."""
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
-    return await db.list_task_comments(task_id, limit=limit)
+    return await db.list_task_comments(conn, task_id, limit=limit)
 
 
 @router.post("/{task_id}/comments")
-async def add_task_comment(task_id: str, author: str = "human", content: str = ""):
+async def add_task_comment(
+    task_id: str,
+    author: str = "human",
+    content: str = "",
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     """Add a comment to a task."""
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -185,7 +247,7 @@ async def add_task_comment(task_id: str, author: str = "human", content: str = "
         "content": content,
         "timestamp": datetime.now().isoformat(),
     }
-    await db.insert_task_comment(comment)
+    await db.insert_task_comment(conn, comment)
     return comment
 
 
@@ -205,8 +267,11 @@ async def get_recent_handoffs(limit: int = _pg.Limit(default=20, max_cap=200)):
 
 
 @router.delete("/{task_id}", status_code=204)
-async def delete_task(task_id: str):
+async def delete_task(
+    task_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+):
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     del _tasks[task_id]
-    await db.delete_task(task_id)
+    await db.delete_task(conn, task_id)

@@ -98,9 +98,14 @@ class TestProviderHealthResponse:
 
 
 class TestTaskUpsertRoundTrip:
+    """SP-3.2 (2026-04-20): upsert_task/get_task require an explicit
+    asyncpg.Connection argument. pg_test_conn is a pool-borrowed
+    savepoint conn — automatic rollback on teardown keeps these
+    round-trip tests isolated from each other.
+    """
 
     @pytest.mark.asyncio
-    async def test_depends_on_persisted(self, client):
+    async def test_depends_on_persisted(self, pg_test_conn):
         """depends_on should survive upsert round-trip."""
         from backend import db
         task_data = {
@@ -108,13 +113,13 @@ class TestTaskUpsertRoundTrip:
             "title": "Schema test task",
             "depends_on": ["task-a", "task-b"],
         }
-        await db.upsert_task(task_data)
-        row = await db.get_task("test-schema-dep")
+        await db.upsert_task(pg_test_conn, task_data)
+        row = await db.get_task(pg_test_conn, "test-schema-dep")
         assert row is not None
         assert row["depends_on"] == ["task-a", "task-b"]
 
     @pytest.mark.asyncio
-    async def test_external_issue_platform_persisted(self, client):
+    async def test_external_issue_platform_persisted(self, pg_test_conn):
         from backend import db
         task_data = {
             "id": "test-schema-ext",
@@ -122,22 +127,22 @@ class TestTaskUpsertRoundTrip:
             "external_issue_platform": "github",
             "last_external_sync_at": "2026-04-13T00:00:00",
         }
-        await db.upsert_task(task_data)
-        row = await db.get_task("test-schema-ext")
+        await db.upsert_task(pg_test_conn, task_data)
+        row = await db.get_task(pg_test_conn, "test-schema-ext")
         assert row is not None
         assert row["external_issue_platform"] == "github"
         assert row["last_external_sync_at"] == "2026-04-13T00:00:00"
 
     @pytest.mark.asyncio
-    async def test_labels_round_trip(self, client):
+    async def test_labels_round_trip(self, pg_test_conn):
         from backend import db
         task_data = {
             "id": "test-schema-labels",
             "title": "Labels test",
             "labels": ["bug", "firmware", "urgent"],
         }
-        await db.upsert_task(task_data)
-        row = await db.get_task("test-schema-labels")
+        await db.upsert_task(pg_test_conn, task_data)
+        row = await db.get_task(pg_test_conn, "test-schema-labels")
         assert row["labels"] == ["bug", "firmware", "urgent"]
 
 

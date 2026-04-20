@@ -139,8 +139,16 @@ class TestGerritHandlers:
         # Stub external side effects to keep the test isolated
         async def _noop_notify(*a, **kw): return None
         monkeypatch.setattr("backend.notifications.notify", _noop_notify)
-        async def _noop_db(_): return None
-        monkeypatch.setattr("backend.db.upsert_task", _noop_db)
+        # SP-3.2 (2026-04-20): _on_comment_added calls _persist_task
+        # (which updates memory then DB). Stub it to update ONLY the
+        # in-memory mirror — the assertions below only check memory
+        # state, and we don't want this unit test to require a live PG.
+        async def _mem_only_persist(task, conn=None):
+            from backend.routers.tasks import _tasks
+            _tasks[task.id] = task
+        monkeypatch.setattr(
+            "backend.routers.tasks._persist", _mem_only_persist,
+        )
 
         before = len(_tasks)
         await wh._on_comment_added({

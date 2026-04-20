@@ -87,7 +87,7 @@ def _agent_to_row(agent: Agent) -> dict:
     }
 
 
-async def _persist(conn: asyncpg.Connection, agent: Agent) -> None:
+async def _persist(agent: Agent, conn: asyncpg.Connection | None = None) -> None:
     """Write agent state to both memory and DB.
 
     Memory-first: the in-memory mirror is updated before the DB write so
@@ -95,9 +95,21 @@ async def _persist(conn: asyncpg.Connection, agent: Agent) -> None:
     immediately. If the DB write fails, memory is stale — acceptable
     because ``seed_defaults_if_empty`` on next cold start re-syncs from
     DB, and handlers should NOT catch+swallow DB exceptions.
+
+    Polymorphic on ``conn`` (symmetric with routers/tasks.py::_persist):
+    request handlers pass the Depends-injected conn; background workers
+    (invoke.py watchdog + stuck-remediation, etc.) call without conn and
+    this function acquires a pool-scoped one for the duration of the
+    single write. The worker path is required because FastAPI's Depends
+    is request-scoped and can't reach asyncio.create_task() children.
     """
     _agents[agent.id] = agent
-    await db.upsert_agent(conn, _agent_to_row(agent))
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            await db.upsert_agent(owned_conn, _agent_to_row(agent))
+    else:
+        await db.upsert_agent(conn, _agent_to_row(agent))
 
 
 @router.get("", response_model=list[Agent])
@@ -141,7 +153,7 @@ async def create_agent(
         thought_chain="Initializing..." + (f" ⚠ {validation['warning']}" if body.ai_model and not validation.get("valid", True) else ""),
         ai_model=body.ai_model,
     )
-    await _persist(conn, agent)
+    await _persist(agent, conn)
     emit_agent_update(agent_id, agent.status, agent.thought_chain)
     return agent
 
@@ -155,7 +167,7 @@ async def update_agent_status(
     if agent_id not in _agents:
         raise HTTPException(status_code=404, detail="Agent not found")
     _agents[agent_id].status = status
-    await _persist(conn, _agents[agent_id])
+    await _persist(_agents[agent_id], conn)
     emit_agent_update(agent_id, status, _agents[agent_id].thought_chain)
     return _agents[agent_id]
 
@@ -175,7 +187,7 @@ async def unfreeze_agent(
     agent = _agents[agent_id]
     agent.status = AgentStatus.idle
     agent.thought_chain = "Unfrozen by human maintainer. Ready for new tasks."
-    await _persist(conn, agent)
+    await _persist(agent, conn)
     emit_agent_update(agent_id, agent.status, agent.thought_chain)
     return agent
 
@@ -191,7 +203,7 @@ async def force_reset_agent(
     agent = _agents[agent_id]
     agent.status = AgentStatus.idle
     agent.thought_chain = "[RESET] Force reset by operator"
-    await _persist(conn, agent)
+    await _persist(agent, conn)
     emit_agent_update(agent_id, agent.status, agent.thought_chain)
     # Best-effort cleanup of workspace and container
     try:

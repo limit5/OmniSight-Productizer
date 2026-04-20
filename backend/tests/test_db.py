@@ -54,46 +54,20 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Tasks + comments
+#  Tasks + comments  —  MOVED TO test_db_tasks.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_task_upsert_get_list_delete(fresh_db):
-    db = fresh_db
-    assert await db.task_count() == 0
-    await db.upsert_task({
-        "id": "t1", "title": "Build driver", "description": "desc",
-        "priority": "high", "status": "backlog",
-        "created_at": "2026-04-14T00:00:00",
-        "labels": ["firmware", "urgent"], "depends_on": ["t0"],
-    })
-    got = await db.get_task("t1")
-    assert got is not None
-    assert got["title"] == "Build driver"
-    assert got["labels"] == ["firmware", "urgent"]  # JSON decoded
-    assert got["depends_on"] == ["t0"]
-    assert got["child_task_ids"] == []  # default
-    tasks = await db.list_tasks()
-    assert len(tasks) == 1
-    assert await db.delete_task("t1") is True
-    assert await db.delete_task("missing") is False
-
-
-@pytest.mark.asyncio
-async def test_task_comments_insert_list(fresh_db):
-    db = fresh_db
-    await db.upsert_task({
-        "id": "t1", "title": "T", "created_at": "2026-04-14T00:00:00",
-    })
-    for i in range(3):
-        await db.insert_task_comment({
-            "id": f"c{i}", "task_id": "t1", "author": "user",
-            "content": f"comment {i}", "timestamp": f"2026-04-14T00:00:0{i}",
-        })
-    rows = await db.list_task_comments("t1")
-    assert len(rows) == 3
-    # ORDER BY timestamp DESC
-    assert rows[0]["content"] == "comment 2"
+#
+# Phase-3-Runtime-v2 SP-3.2 (2026-04-20): the 7 tasks functions
+# (list_tasks / get_task / upsert_task / delete_task / task_count /
+# insert_task_comment / list_task_comments) were ported from
+# compat-wrapper SQLite-compatible signatures to native asyncpg with an
+# explicit ``conn: asyncpg.Connection`` first argument. The SQLite
+# ``fresh_db`` fixture in this file can no longer exercise them — they
+# require a pool-borrowed connection.
+#
+# The per-function contract tests live in ``test_db_tasks.py``, which
+# uses the ``pg_test_conn`` fixture from conftest.py (skips cleanly
+# when OMNI_TEST_PG_URL is unset).
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

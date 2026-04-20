@@ -857,8 +857,11 @@ async def get_next_task(label_filter: str = "") -> str:
         lines.append(f"Issue URL: {task.issue_url}")
 
     # Include up to 3 recent comments
+    # SP-3.2: worker context — acquire a pool-scoped conn just for this read.
     try:
-        comments = await db.list_task_comments(task.id, limit=3)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            comments = await db.list_task_comments(_conn, task.id, limit=3)
         if comments:
             lines.append("Recent Comments:")
             for c in comments:
@@ -937,8 +940,11 @@ async def add_task_comment(task_id: str, content: str) -> str:
         "content": content,
         "timestamp": __import__("datetime").datetime.now().isoformat(),
     }
+    # SP-3.2: worker context — acquire pool conn just for this write.
     try:
-        await db.insert_task_comment(comment)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as _conn:
+            await db.insert_task_comment(_conn, comment)
     except Exception as exc:
         return f"[ERROR] Failed to save comment: {exc}"
     return f"[OK] Comment added to task {task_id} by {author}"
