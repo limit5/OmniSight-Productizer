@@ -505,3 +505,63 @@ async def test_authenticate_password_disabled_user_rejected(_auth_db):
         )
     # Disabled user rejected even with right password.
     assert await auth.authenticate_password("d@b.com", "correct") is None
+
+
+# ── SP-4.5: flag_all_admins_must_change_password (ported 2026-04-21) ─
+
+
+@pytest.mark.asyncio
+async def test_flag_all_admins_must_change_password_atomic(_auth_db):
+    _, auth = _auth_db
+    a1 = await auth.create_user(
+        "adm1@b.com", "A1", role="admin", password="pw",
+    )
+    a2 = await auth.create_user(
+        "adm2@b.com", "A2", role="admin", password="pw",
+    )
+    v1 = await auth.create_user(
+        "v@b.com", "V", role="viewer", password="pw",
+    )
+    disabled_admin = await auth.create_user(
+        "dead@b.com", "D", role="admin", password="pw",
+    )
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        # Clear whatever must_change_password the create_user path set,
+        # plus disable one admin to prove the filter skips them.
+        await conn.execute(
+            "UPDATE users SET must_change_password = 0 "
+            "WHERE id = ANY($1::text[])",
+            [a1.id, a2.id, v1.id, disabled_admin.id],
+        )
+        await conn.execute(
+            "UPDATE users SET enabled = 0 WHERE id = $1",
+            disabled_admin.id,
+        )
+
+    flagged = await auth.flag_all_admins_must_change_password()
+    flagged_ids = {f["id"] for f in flagged}
+    assert flagged_ids == {a1.id, a2.id}, (
+        "only enabled admins should be flagged; viewer and disabled "
+        f"admin must be skipped (got {flagged_ids})"
+    )
+    # Verify the DB state matches the returned list.
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, must_change_password FROM users "
+            "WHERE id = ANY($1::text[]) ORDER BY id",
+            [a1.id, a2.id, v1.id, disabled_admin.id],
+        )
+    state = {r["id"]: bool(r["must_change_password"]) for r in rows}
+    assert state[a1.id] is True
+    assert state[a2.id] is True
+    assert state[v1.id] is False, "viewer must not be flagged"
+    assert state[disabled_admin.id] is False, "disabled admin must not be flagged"
+
+
+@pytest.mark.asyncio
+async def test_flag_all_admins_must_change_password_no_admins(_auth_db):
+    _, auth = _auth_db
+    await auth.create_user("v@b.com", "V", role="viewer", password="pw")
+    flagged = await auth.flag_all_admins_must_change_password()
+    assert flagged == []

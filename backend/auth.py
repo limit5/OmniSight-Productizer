@@ -456,7 +456,7 @@ async def change_password(
         await _change_password_impl(conn, user_id, new_password)
 
 
-async def flag_all_admins_must_change_password() -> list[dict]:
+async def flag_all_admins_must_change_password(conn=None) -> list[dict]:
     """Re-flag every enabled admin row with ``must_change_password=1``.
 
     Used by L8 ``POST /bootstrap/reset`` to put the install back into
@@ -469,22 +469,28 @@ async def flag_all_admins_must_change_password() -> list[dict]:
     the caller can include them in the audit row. Disabled admins are
     skipped — re-flagging a disabled row would force a password change
     on an account no one can log into.
+
+    SP-4.5 (2026-04-21): ported to native asyncpg. Also collapses the
+    old SELECT-then-UPDATE-per-row loop into a single
+    ``UPDATE ... RETURNING`` so the operation is atomic against a
+    concurrent ``users`` mutation (e.g. a simultaneous ``PATCH /users/
+    {id}`` that disables an admin between the SELECT and the UPDATE
+    would, under the old code, have left that admin flagged despite
+    being disabled at commit time). The filter reads the enabled-at-
+    UPDATE-time state, which is the invariant we want.
     """
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, email FROM users WHERE role='admin' AND enabled=1",
-    ) as cur:
-        rows = await cur.fetchall()
-    flagged: list[dict] = []
-    for r in rows:
-        await conn.execute(
-            "UPDATE users SET must_change_password=1 WHERE id=?",
-            (r["id"],),
-        )
-        flagged.append({"id": r["id"], "email": r["email"]})
-    if flagged:
-        await conn.commit()
-    return flagged
+    sql = (
+        "UPDATE users SET must_change_password = 1 "
+        "WHERE role = 'admin' AND enabled = 1 "
+        "RETURNING id, email"
+    )
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            rows = await owned_conn.fetch(sql)
+    else:
+        rows = await conn.fetch(sql)
+    return [{"id": r["id"], "email": r["email"]} for r in rows]
 
 
 LOCKOUT_BASE_S = 15 * 60
