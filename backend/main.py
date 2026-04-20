@@ -113,7 +113,15 @@ async def lifespan(app: FastAPI):
                 "requires. Default agents/tasks will NOT be pre-populated. "
                 "Set OMNISIGHT_DATABASE_URL to enable."
             )
-        await system.load_token_usage_from_db()
+        # SP-3.5: token_usage load also requires a pool-backed conn.
+        if _pg_dsn:
+            async with _db_pool.get_pool().acquire() as _tok_conn:
+                await system.load_token_usage_from_db(_tok_conn)
+        else:
+            _log.warning(
+                "[STARTUP] system.load_token_usage_from_db skipped — "
+                "SQLite dev mode (SP-3.5)."
+            )
         # A1: restore operator-defined decision rules (Phase 50B) from DB
         from backend import decision_rules as _dr
         loaded = await _dr.load_from_db()

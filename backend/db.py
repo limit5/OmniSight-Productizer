@@ -1153,30 +1153,44 @@ async def task_count(conn) -> int:
 #  Token usage
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def list_token_usage() -> list[dict]:
-    async with _conn().execute("SELECT * FROM token_usage") as cur:
-        rows = await cur.fetchall()
+async def list_token_usage(conn) -> list[dict]:
+    rows = await conn.fetch("SELECT * FROM token_usage")
     return [dict(r) for r in rows]
 
 
-async def upsert_token_usage(data: dict) -> None:
-    await _conn().execute(
-        """INSERT INTO token_usage (model, input_tokens, output_tokens, total_tokens, cost, request_count, avg_latency, last_used)
-           VALUES (:model, :input_tokens, :output_tokens, :total_tokens, :cost, :request_count, :avg_latency, :last_used)
-           ON CONFLICT(model) DO UPDATE SET
-             input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
-             total_tokens=excluded.total_tokens, cost=excluded.cost,
-             request_count=excluded.request_count, avg_latency=excluded.avg_latency,
-             last_used=excluded.last_used
+async def upsert_token_usage(conn, data: dict) -> None:
+    # Phase-3-Runtime-v2 SP-3.5 (2026-04-20): ported to native asyncpg.
+    # 8 positional placeholders; ON CONFLICT (model) DO UPDATE uses
+    # EXCLUDED.* per PG convention. Caller (routers/system.py
+    # _persist_token_usage) is fire-and-forget from the LLM callback —
+    # asyncpg auto-commits each statement outside a tx block, matching
+    # the prior compat-wrapper's explicit .commit().
+    await conn.execute(
+        """INSERT INTO token_usage (model, input_tokens, output_tokens,
+             total_tokens, cost, request_count, avg_latency, last_used)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (model) DO UPDATE SET
+             input_tokens = EXCLUDED.input_tokens,
+             output_tokens = EXCLUDED.output_tokens,
+             total_tokens = EXCLUDED.total_tokens,
+             cost = EXCLUDED.cost,
+             request_count = EXCLUDED.request_count,
+             avg_latency = EXCLUDED.avg_latency,
+             last_used = EXCLUDED.last_used
         """,
-        data,
+        data["model"],
+        int(data.get("input_tokens", 0)),
+        int(data.get("output_tokens", 0)),
+        int(data.get("total_tokens", 0)),
+        float(data.get("cost", 0.0)),
+        int(data.get("request_count", 0)),
+        int(data.get("avg_latency", 0)),
+        data.get("last_used", ""),
     )
-    await _conn().commit()
 
 
-async def clear_token_usage() -> None:
-    await _conn().execute("DELETE FROM token_usage")
-    await _conn().commit()
+async def clear_token_usage(conn) -> None:
+    await conn.execute("DELETE FROM token_usage")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

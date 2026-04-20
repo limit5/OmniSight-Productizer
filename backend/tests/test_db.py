@@ -71,29 +71,16 @@ async def fresh_db(monkeypatch):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Token usage
+#  Token usage  —  MOVED TO test_db_token_usage.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_token_usage_upsert_list(fresh_db):
-    db = fresh_db
-    await db.upsert_token_usage({
-        "model": "claude-opus-4-6", "input_tokens": 100, "output_tokens": 50,
-        "total_tokens": 150, "cost": 0.012, "request_count": 1,
-        "avg_latency": 1.2, "last_used": "2026-04-14T00:00:00",
-    })
-    rows = await db.list_token_usage()
-    assert len(rows) == 1
-    assert rows[0]["total_tokens"] == 150
-    # Upsert same model
-    await db.upsert_token_usage({
-        "model": "claude-opus-4-6", "input_tokens": 200, "output_tokens": 100,
-        "total_tokens": 300, "cost": 0.024, "request_count": 2,
-        "avg_latency": 1.1, "last_used": "2026-04-14T00:00:01",
-    })
-    rows = await db.list_token_usage()
-    assert len(rows) == 1
-    assert rows[0]["total_tokens"] == 300
+#
+# Phase-3-Runtime-v2 SP-3.5 (2026-04-20): the 3 token_usage functions
+# (list_token_usage / upsert_token_usage / clear_token_usage) were
+# ported to native asyncpg with an explicit ``conn: asyncpg.Connection``
+# first argument. SQLite ``fresh_db`` can no longer exercise them.
+#
+# Per-function contract tests live in ``test_db_token_usage.py`` using
+# the ``pg_test_conn`` fixture (savepoint + TRUNCATE isolation).
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

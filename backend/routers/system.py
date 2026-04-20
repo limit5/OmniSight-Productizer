@@ -1132,9 +1132,16 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
 
 
 async def _persist_token_usage(data: dict) -> None:
+    # SP-3.5 (2026-04-20): fire-and-forget from track_tokens's
+    # ``loop.create_task`` — no request conn in scope. Borrow one
+    # from the pool just for this single upsert. DB failures stay
+    # non-fatal (a missed persist causes memory/DB drift, recovered
+    # on next cold start via load_token_usage_from_db).
     from backend import db
+    from backend.db_pool import get_pool
     try:
-        await db.upsert_token_usage(data)
+        async with get_pool().acquire() as _conn:
+            await db.upsert_token_usage(_conn, data)
     except Exception as exc:
         logger.warning("Token usage DB persist failed: %s", exc)
 
@@ -1284,10 +1291,15 @@ async def _check_token_budget() -> None:
                       source="token_budget")
 
 
-async def load_token_usage_from_db() -> None:
-    """Load persisted token data into memory (called at startup)."""
+async def load_token_usage_from_db(conn) -> None:
+    """Load persisted token data into memory (called at startup).
+
+    SP-3.5 (2026-04-20): takes an explicit ``asyncpg.Connection`` —
+    mirrors the ``seed_defaults_if_empty(conn)`` shape for agents /
+    tasks. Lifespan acquires from the pool and passes conn here.
+    """
     from backend import db
-    for row in await db.list_token_usage():
+    for row in await db.list_token_usage(conn):
         _token_usage[row["model"]] = row
     if _token_usage:
         _token_usage_shared.set_all(_token_usage)
@@ -1314,7 +1326,9 @@ async def get_compression_stats():
 
 
 @router.delete("/tokens", dependencies=_REQUIRE_ADMIN)
-async def reset_token_usage():
+async def reset_token_usage(
+    conn=Depends(_get_conn),
+):
     """Reset all token usage counters."""
     global token_frozen, _last_budget_level
     _token_usage.clear()
@@ -1325,7 +1339,7 @@ async def reset_token_usage():
     _budget_flags.set("level", "normal")
     _hourly_ledger_shared.clear()
     from backend import db
-    await db.clear_token_usage()
+    await db.clear_token_usage(conn)
     from backend.events import emit_token_warning
     emit_token_warning("reset", "Token usage and freeze state cleared.")
     return {"status": "reset"}
