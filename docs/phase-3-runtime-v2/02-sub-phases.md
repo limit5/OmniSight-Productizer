@@ -423,3 +423,101 @@ SOP-acceptable answers" cluster).
 
 Tag `phase-3-runtime-v2-start` (commit `983985fc` per SP-1.6) is the
 pre-migration rollback point. Still valid.
+
+---
+
+## Post-Epic-5 reordering (2026-04-21, operator-approved)
+
+The original Epic 6-10 plan was written at Step-2 with estimates
+based on a mechanical "port then test-sweep" model. After Epic 5
+closed, a state-of-world audit turned up:
+
+  * **18 real test-file ``_conn().execute(...)`` callers** (not the
+    originally estimated 71 — domain tests migrated inline during
+    Epic 3/4/5 ports).
+  * **``decision_profiles.py``** — 2 unplanned compat calls; not
+    in the original Epic 5 plan.
+  * **``memory_decay.py``** (task #93) — originally labeled "Epic 7
+    prep"; it's now the only substantial backend module left on
+    compat.
+  * **Epic 6 prep cluster** (#90, #102, #104, #116) — 4 real
+    multi-worker bugs with xfail-failing regression tests already
+    in place (see ``05-epic6-prep.md``). Higher operational impact
+    than a mechanical test-file sweep. Two of them (#104 secret_
+    store race, #116 MFA challenges) are prod-path blockers under
+    ``uvicorn --workers N``.
+
+The rearranged execution order (forward-looking from Epic 5 close):
+
+### Step A — quick cleanup (2 commits)
+
+  1. Port ``backend/decision_profiles.py`` (unplanned discovery, 2
+     compat calls).
+  2. Port ``backend/memory_decay.py`` + ``backend/tests/
+     test_memory_decay.py`` (task #93, promoted from Epic 7 prep).
+
+### Step B — Epic 6 prep cluster (4 commits, dependency order)
+
+Each closes one ``xfail(strict=True)`` regression test in
+``backend/tests/test_epic6_prep_multi_worker_state.py`` — the fix
+commit MUST delete the xfail marker.
+
+  3. **#102** — refactor ``test_j5_per_session_mode.py`` off
+     ``auth._conn`` monkey-patch. Pure test work. Unblocks Epic 7's
+     compat wrapper deletion (``auth.py`` still carries a stub
+     ``_conn()`` helper that can't be removed until this lands).
+  4. **#90** — ``auth_baseline_mode`` → ``ContextVar``. Smallest
+     surface. Establishes the request-scoped-value pattern that
+     #116 will reuse.
+  5. **#104** — ``secret_store`` first-boot key-file race. Fix:
+     flock around read-or-generate-or-write, OR require
+     ``OMNISIGHT_SECRET_KEY`` env in prod (fail-closed on empty +
+     missing file). Decision at port time.
+  6. **#116** — MFA challenges (``_webauthn_challenges`` +
+     ``_pending_mfa``) → PG ephemeral challenge table. Biggest
+     surface: new PG table (Alembic migration), touches both
+     WebAuthn begin/complete AND MFA login begin/complete call
+     paths. Reuses #90's ContextVar pattern for user_id binding.
+
+### Step C — Epic 7 (compat deletion, ~2 commits)
+
+  7. Sweep the remaining ~18 test files off ``_conn()`` (most will
+     auto-resolve as Step B/A deletes the code their fixtures
+     depend on — expect ~5-10 real migrations).
+  8. ``git rm backend/db_pg_compat.py``, remove ``translate_sql_
+     and_params`` imports, remove ``auth.py``'s ``_conn()`` stub.
+
+### Step D — Epic 8+ (independent workstreams)
+
+  9. **#81** — rate-limit quota tuning.
+  10. **#83** — coverage-gate 95% sweep.
+  11. **#84** — HANDOFF.md update (has been cadence-lagging since
+      Epic 4).
+  12. **#85** / **#70** — prod-parity live verify / multi-user
+      deploy check. Requires operator-side ops work.
+
+### Shift from original plan
+
+The original plan's "Epic 6 = test-file sweep (4 SPs)" deflates to
+a ~5-10 file Step C residual. The reclaimed budget goes into Step B
+(real bugs with specs) and Step A (known-missing work). Net effect:
+more concurrency-correctness delivered per commit, mechanical
+work-items collapsed into smaller residuals.
+
+### Open follow-up tasks still on the board
+
+Unchanged from Epic-5-close snapshot:
+  * **#82** — multi-worker subprocess test harness (skeleton
+    landed; library expansion is ongoing through Step B).
+  * **#97** — closed (8 test files migrated in batches A + B during
+    Epic 5).
+
+### xfail-strict discipline
+
+Step B's 4 fixes each MUST remove the corresponding
+``@pytest.mark.xfail(strict=True, ...)`` marker in
+``backend/tests/test_epic6_prep_multi_worker_state.py``. If the
+fix lands but the marker stays, pytest's ``strict=True`` will
+convert ``XPASS`` to test-suite FAILURE — this is intentional,
+forcing the fix author to confirm "yes the bug is actually fixed
+and my marker removal reflects that".

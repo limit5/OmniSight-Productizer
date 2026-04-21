@@ -168,21 +168,42 @@ def set_profile(pid: ProfileId) -> Profile:
 
 
 async def _persist(pid: ProfileId) -> None:
+    """Persist the newly-active profile AND disable all others.
+
+    Phase-3 Step A.1 (2026-04-21): ported to pool + tx-wrapped. The
+    "disable everyone, enable one" pair is a read-modify-write on
+    the profile set — under compat a crash between the UPDATE and
+    INSERT would leave ALL profiles disabled (0 active), which
+    ``load_from_db`` would then treat as "no profile configured"
+    on next lifespan restart. The tx makes this all-or-nothing.
+    """
     try:
-        from backend import db
-        conn = db._conn()
-        await conn.execute("UPDATE decision_profiles SET enabled=0")
-        await conn.execute(
-            "INSERT OR REPLACE INTO decision_profiles "
-            "(id, threshold_risky, threshold_destructive, auto_critical, enabled, description, updated_at) "
-            "VALUES (?, ?, ?, ?, 1, ?, datetime('now'))",
-            (pid,
-             _BUILTIN[pid].threshold_risky,
-             _BUILTIN[pid].threshold_destructive,
-             1 if _BUILTIN[pid].auto_critical else 0,
-             _BUILTIN[pid].description),
-        )
-        await conn.commit()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE decision_profiles SET enabled = 0"
+                )
+                await conn.execute(
+                    "INSERT INTO decision_profiles "
+                    "(id, threshold_risky, threshold_destructive, "
+                    " auto_critical, enabled, description, updated_at) "
+                    "VALUES ($1, $2, $3, $4, 1, $5, "
+                    "        to_char(clock_timestamp(), "
+                    "                 'YYYY-MM-DD HH24:MI:SS')) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "  threshold_risky = EXCLUDED.threshold_risky, "
+                    "  threshold_destructive = EXCLUDED.threshold_destructive, "
+                    "  auto_critical = EXCLUDED.auto_critical, "
+                    "  enabled = 1, "
+                    "  description = EXCLUDED.description, "
+                    "  updated_at = EXCLUDED.updated_at",
+                    pid,
+                    _BUILTIN[pid].threshold_risky,
+                    _BUILTIN[pid].threshold_destructive,
+                    1 if _BUILTIN[pid].auto_critical else 0,
+                    _BUILTIN[pid].description,
+                )
     except Exception as exc:
         logger.warning("profile persist failed: %s", exc)
 
@@ -191,15 +212,16 @@ async def load_from_db() -> Optional[ProfileId]:
     """Restore the current profile from DB at lifespan startup."""
     global _current
     try:
-        from backend import db
-        async with db._conn().execute(
-            "SELECT id FROM decision_profiles WHERE enabled=1 LIMIT 1"
-        ) as cur:
-            row = await cur.fetchone()
-        if row and row["id"] in _BUILTIN:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            pid = await conn.fetchval(
+                "SELECT id FROM decision_profiles "
+                "WHERE enabled = 1 LIMIT 1"
+            )
+        if pid and pid in _BUILTIN:
             with _state_lock:
-                _current = row["id"]
-            return row["id"]
+                _current = pid
+            return pid
     except Exception as exc:
         logger.warning("decision_profiles load failed: %s", exc)
     return None
