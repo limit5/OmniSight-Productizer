@@ -131,58 +131,55 @@ def test_webauthn_challenge_survives_cross_worker(pg_test_dsn):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-async def _worker_read_baseline_mode(pool, worker_id: int, expected_mode: str):
-    """Each worker sets its env BEFORE importing auth_baseline to
-    see whether the mode follows env or freezes at first-import
-    global-value."""
+_BASELINE_MODE_BY_WORKER = ("enforce", "log", "off")
+
+
+async def _worker_read_baseline_mode(pool, worker_id: int):
+    """Each worker picks a DIFFERENT mode by worker_id, sets env,
+    calls ``auth_baseline_mode()`` — if the read is per-call env
+    (correct), each worker sees its own mode.  If the function
+    froze at module load (bug), all workers get whichever env was
+    set earliest.
+    """
     import os
-    os.environ["OMNISIGHT_AUTH_BASELINE_MODE"] = expected_mode
-    # Now import. If the module reads env lazily (per-call), both
-    # workers get their own mode. If it reads eagerly (module load
-    # time), both workers get whichever was set earliest.
+    expected = _BASELINE_MODE_BY_WORKER[worker_id]
+    os.environ["OMNISIGHT_AUTH_BASELINE_MODE"] = expected
     from backend import auth_baseline
     return {
-        "expected": expected_mode,
+        "expected": expected,
         "actual": auth_baseline.auth_baseline_mode(),
     }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "task #90: auth_baseline_mode is read eagerly at module "
-        "import or cached as module-level constant, so per-worker "
-        "env changes don't take effect per request. Fix: switch to "
-        "ContextVar or settings.auth_baseline_mode lookup each call. "
-        "When this test starts PASSING (XPASS), Epic 6 closed the fix."
-    ),
-)
 def test_auth_baseline_mode_respects_per_worker_env(pg_test_dsn):
-    """Spec: each worker sets a DIFFERENT baseline mode via env;
-    each worker's ``auth_baseline_mode()`` call must return its own
-    env, not whichever worker imported the module first.
+    """Spec: each of 3 workers sets a DIFFERENT baseline mode via
+    env; each worker's ``auth_baseline_mode()`` call must return
+    its own env.
 
-    Currently FAILS (xfail) — baseline mode is a module-global or
-    singleton that doesn't re-read env per call.
+    Task #90 / Step B.2 (2026-04-21): fix landed — ``_mode()``
+    promoted to public ``auth_baseline_mode()`` and confirmed to
+    read ``os.environ`` per call (the design was already correct;
+    the missing piece was the public API name). Test now asserts
+    all workers return their expected mode — xfail marker
+    removed.
     """
-    # Two workers, two different modes.
     results = run_workers(
         "backend.tests.test_epic6_prep_multi_worker_state",
         "_worker_read_baseline_mode",
-        n=2,
+        n=3,
         dsn=pg_test_dsn,
-        args=("enforce",),  # N.B. args is shared — see note
         timeout_s=30.0,
     )
-    # First assertion: each worker must see its own expected mode.
-    # (If I could pass different args to each worker, this test would
-    # be even cleaner; the harness currently broadcasts one args tuple.
-    # A simpler variant: both workers request "enforce" but one spawns
-    # AFTER setting env="log-only". For now we simply assert both
-    # return what they set — which they should if per-call env read.)
+    # Assert each worker saw its own env, not another's.
     for r in results:
         assert r["actual"] == r["expected"], (
-            f"worker set baseline mode to {r['expected']!r} but "
+            f"worker expected baseline mode {r['expected']!r} but "
             f"auth_baseline_mode() returned {r['actual']!r} — "
-            f"module-level cache or eager env read (task #90)"
+            f"this means the mode is frozen at module load, not "
+            f"read per-call from env (task #90 regression)"
         )
+    # Also confirm all 3 distinct modes showed up.
+    assert {r["actual"] for r in results} == set(_BASELINE_MODE_BY_WORKER), (
+        f"expected all 3 modes to appear across workers, got "
+        f"{[r['actual'] for r in results]}"
+    )

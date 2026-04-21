@@ -169,12 +169,36 @@ AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
 # Middleware
 # ═════════════════════════════════════════════════════════════════════
 
-def _mode() -> str:
+def auth_baseline_mode() -> str:
     """Read the current mode at request time so an operator can flip
     it without rebooting (env vars are read per-request in dev — prod
     is static, env baked at container start, but re-reading is cheap
-    enough)."""
+    enough).
+
+    Task #90 / Step B.2 (2026-04-21): promoted from private ``_mode``
+    to public. Callers who need the baseline mode should import
+    ``auth_baseline_mode`` from this module; the function re-reads
+    ``OMNISIGHT_AUTH_BASELINE_MODE`` every call so:
+
+      * Per-request mode flips work (existing intent).
+      * Per-worker env drift under ``uvicorn --workers N`` resolves
+        correctly — each worker's env is independent; each worker's
+        middleware picks up its own process's env on each call.
+
+    NOT wired through ``ContextVar`` — that would scope per-request
+    inside a single worker, but the existing per-call env read
+    already achieves the same per-request freshness without the
+    extra plumbing. A ContextVar would be redundant here (unlike
+    ``_active_workspace`` in agents/tools.py, which holds data that
+    shouldn't persist across requests at the worker level).
+    """
     return (os.environ.get("OMNISIGHT_AUTH_BASELINE_MODE") or "log").strip().lower()
+
+
+# Legacy alias kept because the middleware implementation below
+# (and a couple of older tests) still refer to ``_mode``. Cheap to
+# keep; renames at call sites can land in Epic 7 cleanup if desired.
+_mode = auth_baseline_mode
 
 
 def _path_allowed(path: str) -> bool:
