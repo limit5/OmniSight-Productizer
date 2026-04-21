@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 
 import pytest
@@ -38,20 +36,16 @@ class _FakeRun:
 
 
 @pytest.fixture()
-async def fresh_db(monkeypatch):
-    """Real sqlite for the bulk-export tests."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "t.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as cfg
-        cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        try:
-            yield db
-        finally:
-            await db.close()
+async def fresh_db(pg_test_pool):
+    """Phase-3 Step C.1 (2026-04-21): ported off the SQLite-file
+    setup onto the shared ``pg_test_pool``. Each test's first seed
+    call runs after a TRUNCATE so rows don't leak across tests.
+    """
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE workflow_runs, workflow_steps RESTART IDENTITY CASCADE"
+        )
+    yield pg_test_pool
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -161,34 +155,35 @@ def test_gate_no_decisions_passes():
 #  extract_for_run + bulk export — integration with real DB
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def _seed_run(db, run_id: str, *, kind: str = "build/firmware",
+async def _seed_run(pool, run_id: str, *, kind: str = "build/firmware",
                     status: str = "completed",
                     metadata: dict | None = None) -> None:
     md = json.dumps(metadata or {})
     import time as _t
-    await db._conn().execute(
-        "INSERT INTO workflow_runs (id, kind, started_at, completed_at, "
-        "status, last_step_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (run_id, kind, _t.time(), _t.time(), status, None, md),
-    )
-    await db._conn().commit()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflow_runs (id, kind, started_at, completed_at, "
+            "status, last_step_id, metadata) VALUES "
+            "($1, $2, $3, $4, $5, $6, $7)",
+            run_id, kind, _t.time(), _t.time(), status, None, md,
+        )
 
 
 _step_id_seq = [0]
 
 
-async def _seed_step(db, run_id: str, key: str, output=None, error=None):
+async def _seed_step(pool, run_id: str, key: str, output=None, error=None):
     output_json = json.dumps(output) if output is not None else None
     import time as _t
     _step_id_seq[0] += 1
     sid = f"step-{_step_id_seq[0]:08x}"
-    await db._conn().execute(
-        "INSERT INTO workflow_steps (id, run_id, idempotency_key, "
-        "started_at, completed_at, output_json, error) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?)",
-        (sid, run_id, key, _t.time(), _t.time(), output_json, error),
-    )
-    await db._conn().commit()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO workflow_steps (id, run_id, idempotency_key, "
+            "started_at, completed_at, output_json, error) VALUES "
+            "($1, $2, $3, $4, $5, $6, $7)",
+            sid, run_id, key, _t.time(), _t.time(), output_json, error,
+        )
 
 
 @pytest.mark.asyncio

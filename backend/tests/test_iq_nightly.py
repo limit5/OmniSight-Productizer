@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-
 import pytest
 
 from backend import iq_benchmark as ib
@@ -17,19 +14,13 @@ from backend import iq_runner as ir
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @pytest.fixture()
-async def fresh_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "t.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as cfg
-        cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        try:
-            yield db
-        finally:
-            await db.close()
+async def fresh_db(pg_test_pool):
+    """Phase-3 Step C.1 (2026-04-21): ported off the SQLite-file
+    setup onto ``pg_test_pool``. Each test TRUNCATEs ``iq_runs``
+    up front so rows don't leak across tests."""
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE iq_runs RESTART IDENTITY CASCADE")
+    yield pg_test_pool
 
 
 def _bench(name: str) -> ib.IQBenchmark:
@@ -240,9 +231,9 @@ async def test_nightly_notify_on_regression(fresh_db, monkeypatch):
         await iqn.persist_run([_report("m1", "s", score)],
                                ts=now + day_offset * iqn.SECONDS_PER_DAY)
     # Clear db rows for m1 so we don't have stale ones.
-    from backend import db
-    await db._conn().execute("DELETE FROM iq_runs WHERE model='m1'")
-    await db._conn().commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute("DELETE FROM iq_runs WHERE model='m1'")
 
     for i in range(-6, -1):
         await seed_day(0.95, i)
