@@ -189,31 +189,73 @@ class TestEVKEndpoint:
 
 
 class TestHardwareSlashCommands:
+    # 2026-04-22: SP-3.1 (#74) changed ``handle_slash_command`` signature
+    # from ``(command, args)`` to ``(conn, command, args)`` so handlers
+    # can write to the pool-backed DB without re-signaturing dispatch.
+    # These four tests were not migrated at the time — they were raising
+    # ``TypeError: missing 1 required positional argument: 'args'`` and
+    # silently red in CI. Fixed here while we're in-file fixing the
+    # adjacent ``[ROUTE TO LLM]`` misleading-text bug on ``/deploy``.
+    #
+    # ``/deploy`` / ``/evk`` / ``/stream`` handlers don't touch the
+    # ``conn`` parameter (they call agent tools that don't do DB work
+    # directly), so these tests pass ``None`` rather than acquiring a
+    # pool connection — keeps the tests lightweight + avoids the
+    # broader pool-lifespan-not-initialised failure mode that
+    # ``test_release.py::TestReleaseSlashCommand`` currently hits.
 
     @pytest.mark.asyncio
     async def test_deploy_no_args(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("deploy", "")
+        result = await handle_slash_command(None, "deploy", "")
         assert result is not None
         assert "EVK" in result or "ERROR" in result or "NOT_CONFIGURED" in result
 
     @pytest.mark.asyncio
     async def test_evk_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("evk", "")
+        result = await handle_slash_command(None, "evk", "")
         assert result is not None
         assert "EVK" in result or "ERROR" in result or "NOT_CONFIGURED" in result
 
     @pytest.mark.asyncio
     async def test_stream_command(self):
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("stream", "")
+        result = await handle_slash_command(None, "stream", "")
         assert result is not None
         assert "UVC" in result or "NOT_FOUND" in result
 
     @pytest.mark.asyncio
-    async def test_deploy_with_args(self):
+    async def test_deploy_with_args(self, monkeypatch):
+        # 2026-04-22: ``/deploy`` used to short-circuit with a
+        # ``"[ROUTE TO LLM] ..."`` lie — the old assertion literally
+        # validated that the handler misled the user. Now the handler
+        # actually dispatches to ``_run_pipeline`` (the agent graph),
+        # so we monkey-patch the pipeline helper to avoid hitting a
+        # live LLM from this unit test and assert the intent string
+        # was constructed + handed off correctly. End-to-end pipeline
+        # routing is verified separately in
+        # ``test_slash_commands.py::TestSlashPipelineDispatch``.
         from backend.slash_commands import handle_slash_command
-        result = await handle_slash_command("deploy", "vendor-example sensor")
-        assert result is not None
-        assert "ROUTE TO LLM" in result or "ERROR" in result
+        from backend.routers import chat as _chat_router
+        from backend.models import OrchestratorMessage, MessageRole
+
+        captured: dict[str, str] = {}
+
+        async def _fake_pipeline(msg: str) -> OrchestratorMessage:
+            captured["intent"] = msg
+            return OrchestratorMessage(
+                id="msg-test",
+                role=MessageRole.orchestrator,
+                content="[FAKE] deploy acknowledged",
+                timestamp="2026-04-22T00:00:00",
+            )
+
+        monkeypatch.setattr(_chat_router, "_run_pipeline", _fake_pipeline)
+
+        result = await handle_slash_command(None, "deploy", "vendor-example sensor")
+
+        assert result == "[FAKE] deploy acknowledged"
+        assert "vendor-example" in captured["intent"]
+        assert "sensor" in captured["intent"]
+        assert "Deploy" in captured["intent"] or "deploy" in captured["intent"]

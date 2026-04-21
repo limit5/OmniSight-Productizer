@@ -236,31 +236,106 @@ async def _switch(conn: asyncpg.Connection, args: str) -> str:
         return f"[ERROR] Switch failed: {exc}"
 
 
+# 2026-04-22: the seven pipeline-dispatch handlers (``/build``,
+# ``/test``, ``/simulate``, ``/review``, ``/assign``, ``/deploy``
+# with args, ``/release upload``) used to short-circuit with
+# ``"[ROUTE TO LLM] ..."`` strings whose text CLAIMED the agent
+# pipeline would process the request, but ``chat.py`` treats any
+# non-None handler return as the final reply and never actually
+# invokes ``_run_pipeline``. The UX result: operator typed /build,
+# saw a misleading confirmation, nothing happened. Fix: each
+# handler now composes a concrete intent string and awaits
+# ``_dispatch_to_pipeline`` — a thin wrapper around
+# ``_run_pipeline`` — so the LLM + tool graph really runs.
+#
+# Lazy import inside the wrapper avoids a circular load order
+# (``chat.py`` imports ``slash_commands`` inside its dispatcher —
+# the symmetric lazy import here keeps both sides correct). The
+# outer ``check_llm_quota`` dependency on the chat endpoint still
+# gates cost once per request, so routing through the pipeline
+# does not bypass quota enforcement.
+
+
+async def _dispatch_to_pipeline(intent: str) -> str:
+    """Hand ``intent`` to the agent graph and return the reply text.
+
+    Wraps ``backend.routers.chat._run_pipeline`` — which already
+    catches pipeline exceptions and returns a ``[ORCHESTRATOR] Pipeline
+    error: ...`` content string — so callers get a clean ``str`` with
+    the LLM + tool output, whether the run succeeded or surfaced an
+    error message. All seven intent-dispatch handlers (``/build``,
+    ``/test``, ``/simulate``, ``/review``, ``/assign``, ``/deploy``,
+    ``/release upload``) share this helper so a future change to the
+    pipeline contract lands in one place.
+    """
+    from backend.routers.chat import _run_pipeline
+    reply = await _run_pipeline(intent)
+    return reply.content
+
+
 async def _build(conn: asyncpg.Connection, args: str) -> str:
     module = args.strip() or "firmware"
-    return f"[ROUTE TO LLM] Build request for `{module}`. This command will be processed by the agent pipeline.\n\n_Tip: Use INVOKE to auto-dispatch build tasks._"
+    intent = (
+        f"Build the module '{module}'. Cross-compile for the active "
+        f"platform using the build tooling, package any firmware "
+        f"artifacts, and report the build output + artifact paths."
+    )
+    return await _dispatch_to_pipeline(intent)
 
 
 async def _test(conn: asyncpg.Connection, args: str) -> str:
     module = args.strip() or "all"
-    return f"[ROUTE TO LLM] Test request for `{module}`. This command will be processed by the agent pipeline."
+    scope = "the entire test suite" if module == "all" else f"the test suite for module '{module}'"
+    intent = (
+        f"Run {scope}. Execute unit + integration tests, collect "
+        f"pass / fail counts, and report any failing test names along "
+        f"with the last lines of their failure output."
+    )
+    return await _dispatch_to_pipeline(intent)
 
 
 async def _simulate(conn: asyncpg.Connection, args: str) -> str:
     module = args.strip()
     if not module:
         return "[ERROR] Usage: /simulate [module_name]"
-    return f"[ROUTE TO LLM] Simulation request for `{module}`. Agent will call run_simulation tool."
+    intent = (
+        f"Run the simulation pipeline for module '{module}' using the "
+        f"run_simulation tool. Report the simulation output, any "
+        f"generated traces, and their filesystem paths."
+    )
+    return await _dispatch_to_pipeline(intent)
 
 
 async def _review(conn: asyncpg.Connection, args: str) -> str:
-    return "[ROUTE TO LLM] Code review request. Agent will use Gerrit tools to review pending changes."
+    scope = args.strip()
+    if scope:
+        intent = (
+            f"Review Gerrit change '{scope}'. Use the Gerrit review "
+            f"tools to fetch its diff + metadata, analyse for code "
+            f"quality / style / potential bugs, and post review "
+            f"comments (score ±1) summarising findings."
+        )
+    else:
+        intent = (
+            "Review the pending Gerrit changes. Use the Gerrit review "
+            "tools to list open changes, fetch their diffs, and post "
+            "review comments on the most important quality / style / "
+            "bug findings. Do not submit any change — only comment."
+        )
+    return await _dispatch_to_pipeline(intent)
 
 
 async def _assign(conn: asyncpg.Connection, args: str) -> str:
-    if not args.strip():
+    raw = args.strip()
+    if not raw:
         return "[ERROR] Usage: /assign [task_id or title] [agent_id or name]"
-    return f"[ROUTE TO LLM] Assignment request: `{args.strip()}`. Orchestrator will match task to best agent."
+    intent = (
+        f"Assignment request: {raw}. Match the described task to the "
+        f"best-fit agent based on its declared skills + current "
+        f"workload, then dispatch the task to that agent and report "
+        f"the assignment result."
+    )
+    return await _dispatch_to_pipeline(intent)
 
 
 async def _clear(conn: asyncpg.Connection, args: str) -> str:
@@ -293,7 +368,14 @@ async def _deploy(conn: asyncpg.Connection, args: str) -> str:
     module = parts[1] if len(parts) >= 2 else ""
     if not module:
         return f"[ERROR] Usage: `/deploy {platform} [module]` — e.g. `/deploy vendor-example sensor`"
-    return f"[ROUTE TO LLM] Deploy request: module=`{module}` to platform=`{platform}`. Agent will cross-compile and transfer."
+    intent = (
+        f"Deploy module '{module}' to EVK platform '{platform}'. "
+        f"Cross-compile for {platform}, transfer the compiled "
+        f"artifacts to the connected EVK board, run a post-transfer "
+        f"smoke test if the platform config defines one, and report "
+        f"the deploy result + any diagnostic output."
+    )
+    return await _dispatch_to_pipeline(intent)
 
 
 async def _evk(conn: asyncpg.Connection, args: str) -> str:
@@ -358,7 +440,13 @@ async def _release(conn: asyncpg.Connection, args: str) -> str:
 
     if action == "upload":
         target = parts[1] if len(parts) > 1 else "github"
-        return f"[ROUTE TO LLM] Upload release {version} to {target}. Use POST /system/release with upload_{target}=true."
+        intent = (
+            f"Upload release bundle version {version} to {target}. "
+            f"Use the release upload tooling to authenticate against "
+            f"{target}, push the bundle, and report the published "
+            f"release URL + any upload diagnostics."
+        )
+        return await _dispatch_to_pipeline(intent)
 
     return f"[ERROR] Unknown release action: {action}. Use `create` or `upload`."
 
