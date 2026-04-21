@@ -253,3 +253,30 @@ async def test_upsert_secret_unique_per_tenant(_secrets_db):
     items_other = await sec.list_secrets()
     assert len(items_other) == 1
     assert await sec.get_secret_by_name("dup", "provider_key") == "c"
+
+
+# ── Encryption round-trip across edge-case payloads ───────────────
+#
+# Phase-3 Step C.1 (2026-04-21): absorbed from the deleted
+# ``tests/test_tenant_secrets.py::TestEncryptionRoundTrip``. The
+# long-string + special-char payloads specifically guard against
+# Fernet padding / base64-safe encoding regressions that the
+# CRUD-level tests above wouldn't necessarily surface.
+
+
+@pytest.mark.asyncio
+async def test_encryption_round_trip_edge_case_payloads(_secrets_db):
+    sec = _secrets_db
+    edge_cases = [
+        "simple-key",
+        "ghp_1234567890abcdef1234567890abcdef12345678",
+        "sk-ant-api03-xxxx",
+        "a" * 500,
+        "special!@#$%^&*()_+{}|:<>?",
+    ]
+    for i, val in enumerate(edge_cases):
+        sid = await sec.upsert_secret(
+            f"edge-{i}", val, "custom",
+        )
+        recovered = await sec.get_secret_value(sid)
+        assert recovered == val, f"round-trip failed for payload #{i}"
