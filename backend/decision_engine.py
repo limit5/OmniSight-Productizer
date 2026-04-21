@@ -1205,18 +1205,23 @@ async def _log_auto_decision(*, decision_id: str, kind: str, severity: str,
                              chosen_option: str, confidence: float, rationale: str,
                              profile_id: str, auto_executed_at: float) -> None:
     """Phase 58: write to auto_decision_log so the postmortem UI can
-    list / bulk-undo. Best-effort; failures logged at warning."""
+    list / bulk-undo. Best-effort; failures logged at warning.
+
+    SP-5.6b (2026-04-21): ported to pool. The insert is single-
+    statement so no tx wrap needed; asyncpg auto-commits on
+    statement exit.
+    """
     try:
-        from backend import db
-        await db._conn().execute(
-            "INSERT INTO auto_decision_log "
-            "(decision_id, kind, severity, chosen_option, confidence, rationale, "
-            " profile_id, auto_executed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (decision_id, kind, severity, chosen_option, confidence,
-             rationale[:240], profile_id, auto_executed_at),
-        )
-        await db._conn().commit()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            await conn.execute(
+                "INSERT INTO auto_decision_log "
+                "(decision_id, kind, severity, chosen_option, confidence, "
+                " rationale, profile_id, auto_executed_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                decision_id, kind, severity, chosen_option, confidence,
+                rationale[:240], profile_id, auto_executed_at,
+            )
     except Exception as exc:
         logger.warning("auto_decision_log insert failed for %s: %s", decision_id, exc)
 
