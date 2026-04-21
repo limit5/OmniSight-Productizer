@@ -147,13 +147,14 @@ async def _metrics_compare() -> tuple[list[MetricsCompare], dict]:
     rows: list[MetricsCompare] = []
     # actual tokens from token_usage
     try:
-        from backend import db
-        async with db._conn().execute(
-            "SELECT SUM(total_tokens) AS t, SUM(request_count) AS r FROM token_usage"
-        ) as cur:
-            row = await cur.fetchone()
-        actual_tokens = int(row["t"] or 0)
-        actual_requests = int(row["r"] or 0)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT SUM(total_tokens) AS t, SUM(request_count) AS r "
+                "FROM token_usage"
+            )
+        actual_tokens = int(row["t"] or 0) if row else 0
+        actual_requests = int(row["r"] or 0) if row else 0
     except Exception:
         actual_tokens, actual_requests = 0, 0
 
@@ -200,12 +201,13 @@ async def _audit_timeline(limit: int = 100) -> list[AuditEntry]:
 async def _lessons_learned(limit: int = 20) -> list[str]:
     """v0: pull top quality_score episodic_memory entries."""
     try:
-        from backend import db
-        async with db._conn().execute(
-            "SELECT error_signature, solution FROM episodic_memory "
-            "ORDER BY quality_score DESC, access_count DESC LIMIT ?", (limit,),
-        ) as cur:
-            rows = await cur.fetchall()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT error_signature, solution FROM episodic_memory "
+                "ORDER BY quality_score DESC, access_count DESC LIMIT $1",
+                limit,
+            )
         return [f"**{r['error_signature']}** — {r['solution']}" for r in rows]
     except Exception as exc:
         logger.debug("episodic_memory read failed: %s", exc)
@@ -214,12 +216,13 @@ async def _lessons_learned(limit: int = 20) -> list[str]:
 
 async def _artifact_catalog() -> list[ArtifactRow]:
     try:
-        from backend import db
-        async with db._conn().execute(
-            "SELECT id, name, type, size, COALESCE(checksum,'') AS checksum, created_at "
-            "FROM artifacts ORDER BY created_at DESC LIMIT 200"
-        ) as cur:
-            rows = await cur.fetchall()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, type, size, "
+                "COALESCE(checksum, '') AS checksum, created_at "
+                "FROM artifacts ORDER BY created_at DESC LIMIT 200"
+            )
         return [
             ArtifactRow(id=r["id"], name=r["name"], type=r["type"],
                         size=int(r["size"] or 0), checksum=r["checksum"],

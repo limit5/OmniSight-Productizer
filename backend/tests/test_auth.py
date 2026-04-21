@@ -185,10 +185,6 @@ def test_github_app_jwt_signs_with_test_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
-    reason="Epic 5: github_app module still uses compat _conn(); "
-           "unskips when github_app.py is ported."
-)
 async def test_github_installation_upsert_and_list(_auth_db):
     _, _ = _auth_db
     from backend import github_app

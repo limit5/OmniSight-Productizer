@@ -164,32 +164,35 @@ async def upsert_installation(installation_id: int, account_login: str,
                               account_type: str = "User",
                               repos: Optional[list[str]] = None,
                               permissions: Optional[dict] = None) -> None:
-    from backend import db
+    """SP-5.7c (2026-04-21): ported to pool. ON CONFLICT already
+    makes it atomic against concurrent same-id upserts."""
     repos_json = json.dumps(repos or [])
     perms_json = json.dumps(permissions or {})
-    conn = db._conn()
-    await conn.execute(
-        "INSERT INTO github_installations "
-        "(installation_id, account_login, account_type, repos_json, permissions_json) "
-        "VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(installation_id) DO UPDATE SET "
-        "  account_login=excluded.account_login, "
-        "  account_type=excluded.account_type, "
-        "  repos_json=excluded.repos_json, "
-        "  permissions_json=excluded.permissions_json",
-        (installation_id, account_login, account_type, repos_json, perms_json),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO github_installations "
+            "(installation_id, account_login, account_type, "
+            " repos_json, permissions_json) "
+            "VALUES ($1, $2, $3, $4, $5) "
+            "ON CONFLICT (installation_id) DO UPDATE SET "
+            "  account_login = EXCLUDED.account_login, "
+            "  account_type = EXCLUDED.account_type, "
+            "  repos_json = EXCLUDED.repos_json, "
+            "  permissions_json = EXCLUDED.permissions_json",
+            installation_id, account_login, account_type,
+            repos_json, perms_json,
+        )
 
 
 async def list_installations() -> list[dict]:
-    from backend import db
-    async with db._conn().execute(
-        "SELECT installation_id, account_login, account_type, repos_json, "
-        "permissions_json, created_at, suspended_at "
-        "FROM github_installations ORDER BY installation_id"
-    ) as cur:
-        rows = await cur.fetchall()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT installation_id, account_login, account_type, "
+            "repos_json, permissions_json, created_at, suspended_at "
+            "FROM github_installations ORDER BY installation_id"
+        )
     return [
         {
             "installation_id": r["installation_id"],

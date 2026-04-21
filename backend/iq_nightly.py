@@ -68,35 +68,45 @@ class IQRow:
 
 async def persist_run(reports: Sequence[ir.RunReport],
                       *, ts: float | None = None) -> int:
-    """Insert one row per report. Returns the number of rows written."""
+    """Insert one row per report. Returns the number of rows written.
+
+    SP-5.7c (2026-04-21): N INSERTs now run in one tx so a partial
+    crash doesn't leave half the nightly report committed — the
+    regression detector would treat a half-committed run as a real
+    benchmark regression.
+    """
     if not reports:
         return 0
-    from backend import db
     now = ts if ts is not None else time.time()
-    conn = db._conn()
-    for r in reports:
-        await conn.execute(
-            "INSERT INTO iq_runs (ts, model, benchmark, weighted_score, "
-            "pass_count, total_count, tokens_used, truncated_at_question) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (now, r.score.model, r.score.benchmark, r.score.weighted_score,
-             r.score.pass_count, r.score.total_count,
-             r.tokens_used, r.truncated_at_question),
-        )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            for r in reports:
+                await conn.execute(
+                    "INSERT INTO iq_runs (ts, model, benchmark, "
+                    " weighted_score, pass_count, total_count, "
+                    " tokens_used, truncated_at_question) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    now, r.score.model, r.score.benchmark,
+                    r.score.weighted_score,
+                    r.score.pass_count, r.score.total_count,
+                    r.tokens_used, r.truncated_at_question,
+                )
     return len(reports)
 
 
 async def recent_scores(model: str, *, days: int = DEFAULT_BASELINE_DAYS,
                         now: float | None = None) -> list[IQRow]:
     """Return rows for `model` within the last `days` days, newest first."""
-    from backend import db
     cutoff = (now if now is not None else time.time()) - days * SECONDS_PER_DAY
-    async with db._conn().execute(
-        "SELECT * FROM iq_runs WHERE model=? AND ts >= ? ORDER BY ts DESC",
-        (model, cutoff),
-    ) as cur:
-        rows = await cur.fetchall()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, ts, model, benchmark, weighted_score, "
+            "pass_count, total_count, tokens_used, truncated_at_question "
+            "FROM iq_runs WHERE model = $1 AND ts >= $2 ORDER BY ts DESC",
+            model, cutoff,
+        )
     return [
         IQRow(
             id=r["id"], ts=r["ts"], model=r["model"], benchmark=r["benchmark"],

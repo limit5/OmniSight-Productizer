@@ -133,12 +133,12 @@ async def _decisions_for_run(run_id: str) -> list[dict]:
     """Pull audit_log rows describing decisions resolved during this
     run. We use audit (not decision_engine in-memory state) so the
     export survives backend restarts."""
-    from backend import db
-    async with db._conn().execute(
-        "SELECT * FROM audit_log WHERE entity_kind='decision' "
-        "ORDER BY id ASC"
-    ) as cur:
-        rows = await cur.fetchall()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT actor, after_json FROM audit_log "
+            "WHERE entity_kind = 'decision' ORDER BY id ASC"
+        )
     out: list[dict] = []
     for r in rows:
         try:

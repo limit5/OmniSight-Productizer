@@ -333,13 +333,13 @@ def _list_tenants_on_disk() -> list[str]:
 async def _resolve_plan(tenant_id: str) -> str:
     """Best-effort lookup of tenants.plan. DB unavailable → ``free``."""
     try:
-        from backend.db import _conn
-        async with _conn().execute(
-            "SELECT plan FROM tenants WHERE id = ?", (tenant_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            if row and row[0]:
-                return row[0]
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            plan = await conn.fetchval(
+                "SELECT plan FROM tenants WHERE id = $1", tenant_id,
+            )
+        if plan:
+            return plan
     except Exception as exc:
         logger.debug("tenant plan lookup failed for %s: %s", tenant_id, exc)
     return DEFAULT_PLAN
