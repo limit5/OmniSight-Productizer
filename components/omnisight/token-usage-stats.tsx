@@ -365,19 +365,31 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                         : "bg-[var(--secondary)] hover:bg-[var(--secondary)]/80"
                   }`}
                 >
-                  {/* Row 1: Model Name + Provider + Cost */}
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
+                  {/* Row 1: Model Name + Provider + Cost
+                      2026-04-22: ``flex-wrap`` + ``gap-y-1`` so the
+                      cost badge wraps onto a second line ONLY when
+                      the model name is long enough to force it
+                      (e.g. OpenRouter's ``nvidia/llama-3.1-nemotron-
+                      ultra-253b``). Model name stays single-line
+                      by default — ``break-words`` only breaks when
+                      the word itself can't fit on one line, so
+                      short names still render inline with the cost.
+                      Cost has ``shrink-0`` + ``ml-auto`` so when
+                      it DOES stay on row 1 it's pinned to the
+                      right edge, and when it wraps to row 2 it
+                      sits flush-left under the model block. */}
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 mb-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       <div
                         className="w-3 h-3 rounded-full shrink-0"
                         style={{ backgroundColor: modelInfo.color }}
                       />
-                      <span className="font-mono text-xs font-medium text-[var(--foreground)]">
+                      <span className="font-mono text-xs font-medium text-[var(--foreground)] break-words">
                         {modelInfo.label}
                       </span>
                       {isPlaceholder && (
                         <span
-                          className="font-mono text-[8px] px-1 py-0.5 rounded border"
+                          className="font-mono text-[8px] px-1 py-0.5 rounded border shrink-0"
                           style={{
                             borderColor: `color-mix(in srgb, ${modelInfo.color} 40%, transparent)`,
                             color: modelInfo.color,
@@ -389,7 +401,7 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                       )}
                     </div>
                     <span
-                      className="font-mono text-xs font-semibold px-2 py-0.5 rounded"
+                      className="font-mono text-xs font-semibold px-2 py-0.5 rounded shrink-0"
                       style={{
                         backgroundColor: `color-mix(in srgb, ${modelInfo.color} 20%, transparent)`,
                         color: modelInfo.color
@@ -398,13 +410,16 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                       {formatCost(item.cost)}
                     </span>
                   </div>
-                  
-                  {/* Row 2: Provider + Usage Percentage */}
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+
+                  {/* Row 2: Provider + Usage Percentage — same
+                      flex-wrap treatment so "Provider: <name>" and
+                      "<n>% of total usage" can stack vertically on
+                      narrow cards. */}
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 mb-2">
+                    <span className="font-mono text-[10px] text-[var(--muted-foreground)] min-w-0 break-words">
                       Provider: {modelInfo.provider}
                     </span>
-                    <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                    <span className="font-mono text-[10px] text-[var(--muted-foreground)] shrink-0">
                       {usagePercent.toFixed(1)}% of total usage
                     </span>
                   </div>
@@ -420,16 +435,21 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                     />
                   </div>
                   
-                  {/* Row 4: Input/Output Tokens */}
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5">
+                  {/* Row 4: Input/Output Tokens — flex-wrap so the
+                      output cluster drops to a second line on
+                      narrow cards when token counts are big
+                      ("1.2M" vs "1,234,567"). Each cluster is
+                      ``shrink-0`` so its inner label + number
+                      never break mid-group. */}
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-2">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <ArrowDownRight size={12} className="text-[var(--validation-emerald)]" />
                       <span className="font-mono text-[11px] text-[var(--muted-foreground)]">Input Tokens:</span>
                       <span className="font-mono text-[11px] font-medium text-[var(--validation-emerald)]">
                         {formatTokens(item.inputTokens)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <ArrowUpRight size={12} className="text-[var(--neural-blue)]" />
                       <span className="font-mono text-[11px] text-[var(--muted-foreground)]">Output Tokens:</span>
                       <span className="font-mono text-[11px] font-medium text-[var(--neural-blue)]">
