@@ -182,10 +182,6 @@ async def test_write_audit_no_session(_s0_db):
 # ── bearer token fingerprint ─────────────────────────────────────
 
 
-@pytest.mark.skip(
-    reason="Epic 5: api_keys.validate_bearer still uses db._conn(); "
-           "unstick when api_keys.py ports off the compat wrapper."
-)
 @pytest.mark.asyncio
 async def test_bearer_session_fingerprint(_s0_db, monkeypatch):
     _, auth, _ = _s0_db

@@ -7,6 +7,17 @@ readability and validated via SHA-256 hash comparison.
 Key format: ``omni_<40-char-urlsafe-random>`` (total ~46 chars).
 Stored as ``sha256(<full_key>)``; only the 8-char prefix is kept in
 cleartext for log display.
+
+Phase-3-Runtime-v2 SP-5.7a (2026-04-21): ported from compat
+``db._conn()`` to native asyncpg pool. 9 public functions move to
+``get_pool().acquire() + $N placeholders``. Rowcount-based returns
+(``revoke_key`` / ``enable_key`` / ``delete_key`` / ``update_scopes``)
+swap to ``UPDATE ... RETURNING id`` so we can tell match vs miss
+(asyncpg's Pool.execute doesn't expose ``rowcount`` the way the
+compat wrapper did).
+
+Module-global audit (SOP Step 1): only state is ``KEY_PREFIX_LEN``
+constant + ``ApiKey`` dataclass — identical across workers, answer (1).
 """
 
 from __future__ import annotations
@@ -63,9 +74,26 @@ def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def _conn():
-    from backend import db
-    return db._conn()
+_LIST_COLS = (
+    "id, name, key_prefix, scopes, created_by, last_used_ip, "
+    "last_used_at, enabled, created_at"
+)
+
+
+def _row_to_key(r, *, override_ip: str | None = None,
+                override_last_used: float | None = None) -> ApiKey:
+    return ApiKey(
+        id=r["id"], name=r["name"], key_prefix=r["key_prefix"],
+        scopes=json.loads(r["scopes"] or '["*"]'),
+        created_by=r["created_by"],
+        last_used_ip=override_ip if override_ip is not None else r["last_used_ip"],
+        last_used_at=(
+            override_last_used if override_last_used is not None
+            else r["last_used_at"]
+        ),
+        enabled=bool(r["enabled"]),
+        created_at=r["created_at"] or "",
+    )
 
 
 async def create_key(name: str, scopes: list[str] | None = None,
@@ -79,13 +107,14 @@ async def create_key(name: str, scopes: list[str] | None = None,
     scope_list = scopes or ["*"]
     scope_json = json.dumps(scope_list)
 
-    conn = await _conn()
-    await conn.execute(
-        "INSERT INTO api_keys (id, name, key_hash, key_prefix, scopes, created_by, enabled) "
-        "VALUES (?, ?, ?, ?, ?, ?, 1)",
-        (key_id, name, hashed, prefix, scope_json, created_by),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO api_keys "
+            "(id, name, key_hash, key_prefix, scopes, created_by, enabled) "
+            "VALUES ($1, $2, $3, $4, $5, $6, 1)",
+            key_id, name, hashed, prefix, scope_json, created_by,
+        )
     key = ApiKey(id=key_id, name=name, key_prefix=prefix, scopes=scope_list,
                  created_by=created_by, enabled=True)
     logger.info("[API-KEY] Created key %s (%s) by %s", key_id, name, created_by)
@@ -95,22 +124,22 @@ async def create_key(name: str, scopes: list[str] | None = None,
 async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
     """Generate a new secret for an existing key. Returns (ApiKey, new_raw)
     or (None, '') if key not found."""
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, name, scopes, created_by, enabled, created_at FROM api_keys WHERE id=?",
-        (key_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return None, ""
-    raw = "omni_" + secrets.token_urlsafe(30)
-    hashed = _hash_key(raw)
-    prefix = raw[:KEY_PREFIX_LEN]
-    await conn.execute(
-        "UPDATE api_keys SET key_hash=?, key_prefix=? WHERE id=?",
-        (hashed, prefix, key_id),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT id, name, scopes, created_by, enabled, created_at "
+            "FROM api_keys WHERE id = $1",
+            key_id,
+        )
+        if not r:
+            return None, ""
+        raw = "omni_" + secrets.token_urlsafe(30)
+        hashed = _hash_key(raw)
+        prefix = raw[:KEY_PREFIX_LEN]
+        await conn.execute(
+            "UPDATE api_keys SET key_hash = $1, key_prefix = $2 WHERE id = $3",
+            hashed, prefix, key_id,
+        )
     scopes = json.loads(r["scopes"] or '["*"]')
     key = ApiKey(id=r["id"], name=r["name"], key_prefix=prefix, scopes=scopes,
                  created_by=r["created_by"], enabled=bool(r["enabled"]),
@@ -120,76 +149,58 @@ async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
 
 
 async def revoke_key(key_id: str) -> bool:
-    conn = await _conn()
-    cur = await conn.execute(
-        "UPDATE api_keys SET enabled=0 WHERE id=?", (key_id,),
-    )
-    await conn.commit()
-    revoked = (cur.rowcount or 0) > 0
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE api_keys SET enabled = 0 WHERE id = $1 RETURNING id",
+            key_id,
+        )
+    revoked = row is not None
     if revoked:
         logger.info("[API-KEY] Revoked key %s", key_id)
     return revoked
 
 
 async def enable_key(key_id: str) -> bool:
-    conn = await _conn()
-    cur = await conn.execute(
-        "UPDATE api_keys SET enabled=1 WHERE id=?", (key_id,),
-    )
-    await conn.commit()
-    return (cur.rowcount or 0) > 0
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE api_keys SET enabled = 1 WHERE id = $1 RETURNING id",
+            key_id,
+        )
+    return row is not None
 
 
 async def delete_key(key_id: str) -> bool:
-    conn = await _conn()
-    cur = await conn.execute("DELETE FROM api_keys WHERE id=?", (key_id,))
-    await conn.commit()
-    deleted = (cur.rowcount or 0) > 0
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM api_keys WHERE id = $1 RETURNING id",
+            key_id,
+        )
+    deleted = row is not None
     if deleted:
         logger.info("[API-KEY] Deleted key %s", key_id)
     return deleted
 
 
 async def list_keys() -> list[ApiKey]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, name, key_prefix, scopes, created_by, last_used_ip, "
-        "last_used_at, enabled, created_at FROM api_keys ORDER BY created_at DESC"
-    ) as cur:
-        rows = await cur.fetchall()
-    return [
-        ApiKey(
-            id=r["id"], name=r["name"], key_prefix=r["key_prefix"],
-            scopes=json.loads(r["scopes"] or '["*"]'),
-            created_by=r["created_by"],
-            last_used_ip=r["last_used_ip"],
-            last_used_at=r["last_used_at"],
-            enabled=bool(r["enabled"]),
-            created_at=r["created_at"] or "",
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {_LIST_COLS} FROM api_keys ORDER BY created_at DESC"
         )
-        for r in rows
-    ]
+    return [_row_to_key(r) for r in rows]
 
 
 async def get_key(key_id: str) -> ApiKey | None:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, name, key_prefix, scopes, created_by, last_used_ip, "
-        "last_used_at, enabled, created_at FROM api_keys WHERE id=?",
-        (key_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return None
-    return ApiKey(
-        id=r["id"], name=r["name"], key_prefix=r["key_prefix"],
-        scopes=json.loads(r["scopes"] or '["*"]'),
-        created_by=r["created_by"],
-        last_used_ip=r["last_used_ip"],
-        last_used_at=r["last_used_at"],
-        enabled=bool(r["enabled"]),
-        created_at=r["created_at"] or "",
-    )
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            f"SELECT {_LIST_COLS} FROM api_keys WHERE id = $1",
+            key_id,
+        )
+    return _row_to_key(r) if r else None
 
 
 async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
@@ -197,21 +208,21 @@ async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
     Updates last_used_ip and last_used_at on match. Returns None if
     no matching enabled key found."""
     hashed = _hash_key(raw_token)
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, name, key_prefix, scopes, created_by, enabled, created_at "
-        "FROM api_keys WHERE key_hash=? AND enabled=1",
-        (hashed,),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return None
-    now = time.time()
-    await conn.execute(
-        "UPDATE api_keys SET last_used_ip=?, last_used_at=? WHERE id=?",
-        (ip or None, now, r["id"]),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT id, name, key_prefix, scopes, created_by, enabled, created_at "
+            "FROM api_keys WHERE key_hash = $1 AND enabled = 1",
+            hashed,
+        )
+        if not r:
+            return None
+        now = time.time()
+        await conn.execute(
+            "UPDATE api_keys SET last_used_ip = $1, last_used_at = $2 "
+            "WHERE id = $3",
+            ip or None, now, r["id"],
+        )
     return ApiKey(
         id=r["id"], name=r["name"], key_prefix=r["key_prefix"],
         scopes=json.loads(r["scopes"] or '["*"]'),
@@ -228,25 +239,16 @@ async def migrate_legacy_bearer() -> ApiKey | None:
     to a hashed api_keys row named 'legacy-bearer'. Warns the operator
     to rotate to a proper per-key setup.
 
-    Task #106 (2026-04-21): the row id is now DETERMINISTIC —
-    ``ak-legacy-<sha256(legacy_secret)[:12]>``. Previously the id was
-    a fresh ``uuid.uuid4().hex[:6]`` per call, so each uvicorn worker
-    running this on startup independently produced a different id and
-    created its own row (no UNIQUE collision → N rows for N workers).
-    The SP-4.6 close-out smoke with ``OMNISIGHT_WORKERS=2`` produced
-    two ``ak-legacy-*`` rows (``66956d`` + ``7fb016``), which was the
-    concrete finding that triggered this task.
+    Task #106 (2026-04-21): deterministic id
+    ``ak-legacy-<sha256(legacy_secret)[:12]>`` + ``INSERT ... ON
+    CONFLICT (id) DO NOTHING`` collapses concurrent migrations across
+    uvicorn workers to a single row. Pre-fix each worker generated
+    its own uuid → N rows per secret. Smoke-verified post-fix.
 
-    The deterministic id + ``INSERT ... ON CONFLICT (id) DO NOTHING``
-    collapses concurrent migrations across workers to a single row.
-    Same bearer secret → same hash → same id → same row. Rotating
-    the bearer env produces a new id automatically (old rows can be
-    cleaned up by operators out-of-band).
-
-    Note: ``_conn()`` + ``?`` stays because api_keys.py is still on
-    the compat wrapper (SP-5.7 will port the whole module). The
-    check-then-insert race is the operational bug — the deterministic
-    id + ON CONFLICT fixes it without touching the pool migration.
+    SP-5.7a: ported off compat (with #106's ON-CONFLICT semantic
+    preserved). The RETURNING tells us whether we inserted (row) or
+    hit the conflict (None) — on conflict we skip the log line so
+    only one worker's startup surfaces the "migrated" warning.
     """
     legacy = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if not legacy:
@@ -254,23 +256,18 @@ async def migrate_legacy_bearer() -> ApiKey | None:
     hashed = _hash_key(legacy)
     key_id = f"ak-legacy-{hashed[:12]}"
     prefix = legacy[:KEY_PREFIX_LEN] if len(legacy) >= KEY_PREFIX_LEN else legacy
-    conn = await _conn()
-    # The RETURNING clause tells us whether we actually inserted or
-    # hit the conflict — the compat wrapper passes this through from
-    # asyncpg on PG (and SQLite ≥ 3.35 supports it too). On conflict
-    # no row is returned so fetchone() is None.
-    async with conn.execute(
-        "INSERT INTO api_keys (id, name, key_hash, key_prefix, scopes, created_by, enabled) "
-        "VALUES (?, 'legacy-bearer', ?, ?, '[\"*\"]', 'system/migration', 1) "
-        "ON CONFLICT (id) DO NOTHING "
-        "RETURNING id",
-        (key_id, hashed, prefix),
-    ) as cur:
-        inserted = await cur.fetchone()
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        inserted = await conn.fetchrow(
+            "INSERT INTO api_keys "
+            "(id, name, key_hash, key_prefix, scopes, created_by, enabled) "
+            "VALUES ($1, 'legacy-bearer', $2, $3, '[\"*\"]', "
+            "'system/migration', 1) "
+            "ON CONFLICT (id) DO NOTHING "
+            "RETURNING id",
+            key_id, hashed, prefix,
+        )
     if inserted is None:
-        # Another worker landed this exact row first; do not re-log
-        # the "migrated" warning (else every worker emits it).
         return None
     key = ApiKey(id=key_id, name="legacy-bearer", key_prefix=prefix,
                  scopes=["*"], created_by="system/migration", enabled=True)
@@ -283,10 +280,10 @@ async def migrate_legacy_bearer() -> ApiKey | None:
 
 
 async def update_scopes(key_id: str, scopes: list[str]) -> bool:
-    conn = await _conn()
-    cur = await conn.execute(
-        "UPDATE api_keys SET scopes=? WHERE id=?",
-        (json.dumps(scopes), key_id),
-    )
-    await conn.commit()
-    return (cur.rowcount or 0) > 0
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE api_keys SET scopes = $1 WHERE id = $2 RETURNING id",
+            json.dumps(scopes), key_id,
+        )
+    return row is not None
