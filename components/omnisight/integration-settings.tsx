@@ -2628,20 +2628,57 @@ const TAB_INTEGRATIONS: Record<"git" | "gerrit" | "webhooks" | "cicd", readonly 
   cicd: [],
 }
 
+// 2026-04-22: operator reported that pressing SAVE & APPLY
+// "seems to do nothing" after entering a Google API key. Root cause:
+//   * Save did succeed at the backend (``PUT /runtime/settings`` is
+//     wired + the value lands on ``settings.google_api_key``), but the
+//     modal's local ``providers`` state was only fetched on ``open``
+//     → the green "configured" dot stayed off after save so it looked
+//     like nothing happened.
+//   * No success / error toast meant a successful save left zero
+//     visible feedback past the button flicker.
+//   * Any rejected fields from the ``updates`` dict (e.g. a typo that
+//     doesn't match ``_UPDATABLE_FIELDS``) were silently swallowed.
+// Fix: post-save we refetch providers AND expose an inline feedback
+// banner at the top of the modal that reports applied count + any
+// rejected fields (with reason). Banner auto-dismisses after 4s.
+//
+// Known follow-up (not this fix): ``PUT /runtime/settings`` only
+// mutates the in-memory ``settings`` object — values reset on the
+// next backend restart. Persisting to ``.env`` / DB is a separate
+// design decision (secret_store for encryption, tenant scoping,
+// audit). Tracked in Phase 5 adjacent discussion (``git_accounts``
+// uses the same secret_store model).
+type SaveFeedback =
+  | { kind: "ok"; applied: string[]; rejected: Record<string, string> }
+  | { kind: "error"; message: string }
+  | null
+
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
   const [saving, setSaving] = useState(false)
+  const [saveFeedback, setSaveFeedback] = useState<SaveFeedback>(null)
   const [providers, setProviders] = useState<api.ProviderConfig[]>([])
   const [gerritWizardOpen, setGerritWizardOpen] = useState(false)
 
   useEffect(() => {
     if (open) {
       setDirty({})  // Clear unsaved changes on fresh open
+      setSaveFeedback(null)
       api.getSettings().then(setSettingsData).catch(() => {})
       api.getProviders().then(r => setProviders(r.providers)).catch(() => {})
     }
   }, [open])
+
+  // Auto-dismiss the save banner after 4s — long enough for the
+  // operator to read the applied / rejected roll-up but short enough
+  // that it doesn't linger past the next click.
+  useEffect(() => {
+    if (!saveFeedback) return
+    const t = setTimeout(() => setSaveFeedback(null), 4000)
+    return () => clearTimeout(t)
+  }, [saveFeedback])
 
   const getVal = (category: string, field: string, dirtyKey?: string): string => {
     // dirtyKey: the exact key used in setVal() — allows override for fields
@@ -2758,14 +2795,31 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
   const handleSave = async () => {
     if (Object.keys(dirty).length === 0) return
     setSaving(true)
+    setSaveFeedback(null)
     try {
-      await api.updateSettings(dirty)
+      const result = await api.updateSettings(dirty)
       setDirty({})
-      // Reload settings
-      const fresh = await api.getSettings()
+      // Refresh BOTH settings (for the masked key display) AND
+      // providers (so the green "configured" dot updates without
+      // the operator having to close+reopen the modal). Run in
+      // parallel — no ordering dependency.
+      const [fresh, refreshedProviders] = await Promise.all([
+        api.getSettings().catch(() => settingsData),
+        api.getProviders().catch(() => ({ providers })),
+      ])
       setSettingsData(fresh)
+      setProviders(refreshedProviders.providers)
+      setSaveFeedback({
+        kind: "ok",
+        applied: result.applied ?? [],
+        rejected: result.rejected ?? {},
+      })
     } catch (e) {
       console.error("Save failed:", e)
+      setSaveFeedback({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      })
     } finally {
       setSaving(false)
     }
@@ -2793,6 +2847,57 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2">
+
+          {/* Save feedback banner — ok / error / partially-accepted
+              states. Visible above the first settings section so the
+              operator doesn't miss it on narrow modals that require
+              scrolling. */}
+          {saveFeedback && saveFeedback.kind === "ok" && (
+            <div
+              className="rounded px-3 py-2 border text-[10px] font-mono"
+              style={{
+                borderColor: Object.keys(saveFeedback.rejected).length > 0
+                  ? "var(--hardware-orange)"
+                  : "var(--validation-emerald)",
+                backgroundColor: Object.keys(saveFeedback.rejected).length > 0
+                  ? "color-mix(in srgb, var(--hardware-orange) 12%, transparent)"
+                  : "color-mix(in srgb, var(--validation-emerald) 12%, transparent)",
+                color: Object.keys(saveFeedback.rejected).length > 0
+                  ? "var(--hardware-orange)"
+                  : "var(--validation-emerald)",
+              }}
+            >
+              <div className="font-semibold mb-0.5">
+                {Object.keys(saveFeedback.rejected).length === 0
+                  ? `✓ Saved ${saveFeedback.applied.length} field${saveFeedback.applied.length === 1 ? "" : "s"}`
+                  : `⚠ Partially saved — ${saveFeedback.applied.length} applied, ${Object.keys(saveFeedback.rejected).length} rejected`}
+              </div>
+              {saveFeedback.applied.length > 0 && (
+                <div className="opacity-80">applied: {saveFeedback.applied.join(", ")}</div>
+              )}
+              {Object.keys(saveFeedback.rejected).length > 0 && (
+                <div className="opacity-80">
+                  rejected: {Object.entries(saveFeedback.rejected).map(([k, v]) => `${k} (${v})`).join("; ")}
+                </div>
+              )}
+              <div className="opacity-50 mt-0.5">
+                note: changes are runtime-only and will reset on backend restart
+              </div>
+            </div>
+          )}
+          {saveFeedback && saveFeedback.kind === "error" && (
+            <div
+              className="rounded px-3 py-2 border text-[10px] font-mono"
+              style={{
+                borderColor: "var(--critical-red)",
+                backgroundColor: "color-mix(in srgb, var(--critical-red) 12%, transparent)",
+                color: "var(--critical-red)",
+              }}
+            >
+              <div className="font-semibold">✗ Save failed</div>
+              <div className="opacity-80 mt-0.5">{saveFeedback.message}</div>
+            </div>
+          )}
 
           <SettingsSection title="LLM PROVIDERS">
             {/* Active Provider — dropdown */}
