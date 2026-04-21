@@ -19,6 +19,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+# Operator's screenshot drop zone (used by Claude Code conversations
+# to pass images into context). Nothing in here is meant to be tracked.
+debug/
 
 # env files (keep .env.example + .env.test tracked — safe defaults only)
 .env*

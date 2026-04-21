@@ -334,3 +334,92 @@ After operator approves this sub-phase decomposition:
 1. Task #73 (Step 2) marked complete
 2. Step 3-1 execution begins — **SP-1.0 escape-hatch tag first**, no other code changes until tag + docs committed
 3. Each subsequent SP creates its own commit with 3 co-authors trailer
+
+---
+
+## Actual execution log (2026-04-21 snapshot)
+
+This section is the **reality** view — the estimates above are the
+at-Step-2 projections, this is what actually landed. Kept verbatim
+so we can retro: what was mis-estimated, what surfaced unexpectedly,
+what deferred.
+
+### Epic 3 — domain slices (✅ COMPLETE)
+
+| SP | Commit | Actual notes |
+|---|---|---|
+| 3.1 | `2eeaa55d` | agents — polymorphic `conn=None` pattern established here, reused everywhere after |
+| 3.2 | `90a759fd` | tasks + task_comments + regression hunt for 21 invoke.py callsites |
+| 3.3 | `b435e8a0` | handoffs — clock_timestamp() vs now() discovery |
+| 3.4 | `194f8cc4` | notifications — pool ownership consolidated into `pg_test_pool` fixture |
+| 3.5 | `9f25a702` | token_usage — Epic 2 alembic drift caught, test flake resolved in 3.10 |
+| 3.6a/b | `d449885a` / `f6c7a9ed` | artifacts split (port + test-migration) — first real a/b split |
+| 3.7 | `8e12cbcd` | npi_state |
+| 3.8 | `c15038a0` | simulations — auth_baseline_mode pollution surfaced (task #90) |
+| 3.9 | `f29ae97b` | debug_findings + `tenant_where_pg` helper promoted |
+| 3.10 | `5e1e0bc3` | event_log — cleanup tenant-leak fix + SP-3.5 flake eliminated |
+| 3.11 | `c1cd15a1` | decision_rules |
+| 3.12 | `a47de1d1` | episodic_memory + FTS5→tsvector — tokenisation drift caught |
+| 3.13 | `e33f4866` | closing gate — lifecycle contract tests |
+
+### Epic 4 — adjacent files (✅ COMPLETE)
+
+| SP | Commit | Actual notes |
+|---|---|---|
+| 4.1 | `448e70f1` | audit — `pg_advisory_xact_lock` recipe established (bonus bug #1) |
+| 4.2 | `7d1b681a` | users CRUD |
+| 4.3a | `2578e108` | simple session CRUD |
+| 4.3b | `5a54e863` | rotate + FOR UPDATE + advisory lock (bonus bug #2) |
+| 4.4 | `18a26cbe` | **password flow + atomic-increment fix (bonus bug #3 — lockout bypass)** |
+| 4.5 | `1fe4d063` | flag_all_admins + atomic UPDATE RETURNING |
+| 4.6 | `4e0c1ba8` | tenant_secrets + ON CONFLICT (bonus bug #4) |
+
+### Epic 5 — residual callers (🟢 IN PROGRESS — 7 of 10 slices)
+
+| SP | Commit | Planned LOC | Actual LOC | Notes |
+|---|---|---|---|---|
+| 5.1 | `9b7a6550` | 400 | 238 | dag_storage; workflow_runs link fixed |
+| 5.2 | `4c8ac004` | 400 | 165 | prompt_registry — promote_canary return-type latent bug fixed too |
+| 5.3 | `0a10fb6b` | 400 | 342 | tenant_egress — `_dns_cache` first "answer (3) drift" classification |
+| 5.4 | `a85b38da` | 350 | 0 | **no-op** — already pool-native from Epic 3 ports |
+| 5.5 | `413ab172` | 600 | 156 | events/notifications/lifecycle/main already pool; only bootstrap had 6 compat |
+| 5.6a | `33489790` | (split of 800) | 205 | workflow.py — optimistic lock via RETURNING (bonus bug #5 + timing note #6) |
+| 5.6b | `f8c833b8` | (split of 800) | 131 | decision_engine 1 fn + project_runs 6 fns (bonus bug #7) |
+| 5.7a | `40c36faf` | (split of 600) | 131 | api_keys — unsticks test_bearer_session_fingerprint |
+| 5.7b | `9ca9131e` | (split of 600) | 202 | mfa — atomic backup code (bonus bug #8) + generate tx (bonus bug #9); 2 module-globals flagged for #116 |
+| 5.7c | `5aaf0b4d` | (split of 600) | 88 | 5 small files; unsticks test_github_installation — **last Epic-5 skip cleared** |
+| 5.8 | (pending) | 500 | — | routers batch 1 |
+| 5.9 | (pending) | 600 | — | routers batch 2 |
+| 5.10 | (pending) | 150 | — | scripts |
+
+**Plan-vs-actual observations**:
+  * **Epic 5 is running ~40% under planned LOC**. Root cause: 5 of 9 SP-5.5
+    files + multiple SP-5.7 modules were already pool-native from Epic 3's
+    earlier domain ports. The plan estimated per-file without deducting
+    for cross-cutting dependencies Epic 3 consumed.
+  * **Blast radius split happened organically**: SP-5.6 split into 5.6a/b,
+    SP-5.7 into 5.7a/b/c — driven by the new SOP Step 2 rule (> 2 test
+    importers → default split).
+  * **Bonus bugs found** (see `04-bonus-bugs-found.md` for detail): 9
+    concurrency/correctness bugs uncovered during Epic 3+4+5 port, 2 of
+    them load-bearing for security (lockout bypass, backup-code double-
+    consumption).
+
+### Process improvements mid-execution
+
+  * `3b1bfa51` (2026-04-21) — SOP Step 1 module-global audit, Step 2
+    test-fixture blast-radius split, Step 3 compat-fingerprint grep +
+    runtime-smoke checklist, `.env.test` isolation infrastructure,
+    `client` fixture TRUNCATEs `bootstrap_state` between tests.
+  * Task #111 closed same commit.
+
+### Follow-up task cluster (Epic 6 prep)
+
+See `05-epic6-prep.md` for the failing-tests-as-spec for #90, #102,
+#104, #116 (the "multi-worker state that's not in one of the three
+SOP-acceptable answers" cluster).
+
+### Escape-hatch
+
+Tag `phase-3-runtime-v2-start` (commit `983985fc` per SP-1.6) is the
+pre-migration rollback point. Still valid.
