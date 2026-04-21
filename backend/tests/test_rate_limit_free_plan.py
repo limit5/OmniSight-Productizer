@@ -22,11 +22,15 @@ from backend.quota import PLAN_QUOTAS, quota_for_plan
 
 def test_free_per_ip_budget_matches_dashboard_burst():
     """The free tier's per-IP budget must accommodate a realistic
-    single-user dashboard cold load. 300 req/min is the operator-
-    approved floor (see ``docs/phase-3-runtime-v2/02-sub-phases.md``
-    Epic 8 SP-8.1)."""
+    single-user dashboard cold load PLUS 2-3 parallel tabs. 1200
+    req/min (20/sec avg) is the operator-approved floor, bumped
+    from the initial 300/60s after SP-8.1b (2026-04-21) when it
+    became clear CF Free's Rate Limiting (10 req/10s only) can't
+    usefully complement a lower backend cap — the backend is the
+    only per-IP gate, so it needs realistic headroom. See
+    ``docs/phase-3-runtime-v2/02-sub-phases.md`` Epic 8 SP-8.1."""
     free = quota_for_plan("free")
-    assert free.per_ip.capacity == 300
+    assert free.per_ip.capacity == 1200
     assert free.per_ip.window_seconds == 60.0
 
 
@@ -58,10 +62,12 @@ def test_plan_hierarchy_preserved_after_tuning():
 
 
 def test_all_tiers_per_ip_matches_spec():
-    """Post-SP-8.1 numbers — locked in so a future tweak that
-    changes free without touching the others (and breaks the
-    hierarchy) fails a test instead of a dashboard."""
-    assert PLAN_QUOTAS["free"].per_ip.capacity == 300
-    assert PLAN_QUOTAS["starter"].per_ip.capacity == 600
-    assert PLAN_QUOTAS["pro"].per_ip.capacity == 1500
-    assert PLAN_QUOTAS["enterprise"].per_ip.capacity == 3000
+    """Post-SP-8.1b (2026-04-21) numbers — locked in so a future
+    tweak that changes free without touching the others (and breaks
+    the hierarchy) fails a test instead of a dashboard. Scaled 4x
+    from the initial SP-8.1 set; see the module docstring in
+    ``backend/quota.py`` for the CF-Free-Rate-Limiting rationale."""
+    assert PLAN_QUOTAS["free"].per_ip.capacity == 1200
+    assert PLAN_QUOTAS["starter"].per_ip.capacity == 2400
+    assert PLAN_QUOTAS["pro"].per_ip.capacity == 6000
+    assert PLAN_QUOTAS["enterprise"].per_ip.capacity == 12000
