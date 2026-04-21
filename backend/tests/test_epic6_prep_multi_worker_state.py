@@ -22,6 +22,7 @@ re-import them in each child.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 
 import pytest
@@ -129,6 +130,131 @@ def test_webauthn_challenge_survives_cross_worker(pg_test_dsn):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  T1 — task #90: auth_baseline_mode per-worker drift
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  T3 — task #104: secret_store first-boot key-file race
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def _worker_secret_store_init(pool, worker_id: int, key_dir: str):
+    """Each worker points secret_store at a fresh (empty) key dir
+    and encrypts a unique plaintext. All workers race the first-
+    boot generate-or-read path concurrently.
+
+    Pre-fix (pre-Step-B.3): each worker generated its own key,
+    raced the disk write, last writer won — earlier workers'
+    ciphertexts become undecryptable after the file gets clobbered.
+
+    Post-fix: fcntl.flock serialises the generate path; the first
+    worker to acquire the lock writes the key; all later workers
+    read that key from disk. All encrypts use the same key → all
+    decrypts succeed.
+    """
+    import importlib
+    import os
+    # Point secret_store at the worker-owned empty dir. Must run
+    # BEFORE the module reads its _PROJECT_ROOT constant.
+    os.environ["OMNISIGHT_SECRET_KEY"] = ""  # force file-path
+    from backend import secret_store
+    # Reload the module to re-compute _KEY_PATH under the test-
+    # supplied key dir. Monkey-patch the constants directly — simpler
+    # than juggling OMNISIGHT_DATA_DIR env vars.
+    importlib.reload(secret_store)
+    from pathlib import Path as _P
+    secret_store._KEY_PATH = _P(key_dir) / ".secret_key"
+    secret_store._KEY_LOCK_PATH = _P(key_dir) / ".secret_key.lock"
+    secret_store._fernet = None
+
+    ciphertext = secret_store.encrypt(f"plaintext-from-worker-{worker_id}")
+    # Return the file's key hash so the harness can verify all
+    # workers ended up with the same key.
+    key_bytes = (_P(key_dir) / ".secret_key").read_bytes()
+    import hashlib as _h
+    return {
+        "worker_id": worker_id,
+        "ciphertext": ciphertext,
+        "key_sha": _h.sha256(key_bytes).hexdigest()[:16],
+    }
+
+
+async def _worker_secret_store_decrypt(
+    pool, worker_id: int, key_dir: str, ciphertext: str,
+):
+    """Fresh worker, same key_dir, tries to decrypt a ciphertext
+    written by another worker. Must succeed — proves the key file
+    on disk is the same key used by the encrypter."""
+    import importlib
+    import os
+    os.environ["OMNISIGHT_SECRET_KEY"] = ""
+    from backend import secret_store
+    importlib.reload(secret_store)
+    from pathlib import Path as _P
+    secret_store._KEY_PATH = _P(key_dir) / ".secret_key"
+    secret_store._KEY_LOCK_PATH = _P(key_dir) / ".secret_key.lock"
+    secret_store._fernet = None
+    try:
+        plaintext = secret_store.decrypt(ciphertext)
+        return {"ok": True, "plaintext": plaintext}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def test_secret_store_first_boot_key_coherent_across_workers(
+    pg_test_dsn, tmp_path,
+):
+    """Spec (task #104): 3 workers race the first-boot generate-or-
+    read path on an empty key dir. Afterwards:
+
+      1. All 3 workers must see the same key (same sha).
+      2. A 4th decryptor worker must be able to decrypt ALL 3
+         ciphertexts — proving the key landed on disk is the same
+         key every encryptor used in-memory.
+
+    Pre-fix this failed: encrypters each held their own key; at
+    most 1 of 3 ciphertexts decrypted cleanly (whichever worker's
+    key happened to win the disk-write race).
+
+    Step B.3 fix (732acc47 + this commit): fcntl.flock + double-
+    check + atomic rename in ``_get_key()``. Test PASSES post-fix.
+    """
+    key_dir = str(tmp_path / "secret_smoke")
+    os.makedirs(key_dir, exist_ok=True)
+
+    encrypt_results = run_workers(
+        "backend.tests.test_epic6_prep_multi_worker_state",
+        "_worker_secret_store_init",
+        n=3,
+        dsn=pg_test_dsn,
+        args=(key_dir,),
+        timeout_s=30.0,
+    )
+    # 1. All workers must see the same key sha.
+    key_shas = {r["key_sha"] for r in encrypt_results}
+    assert len(key_shas) == 1, (
+        f"workers saw DIFFERENT keys (race not serialised): "
+        f"{key_shas}. Expected exactly 1 unique key post-fix."
+    )
+
+    # 2. A fresh decryptor worker must decrypt every ciphertext.
+    for r in encrypt_results:
+        decrypt_result = run_workers(
+            "backend.tests.test_epic6_prep_multi_worker_state",
+            "_worker_secret_store_decrypt",
+            n=1,
+            dsn=pg_test_dsn,
+            args=(key_dir, r["ciphertext"]),
+            timeout_s=30.0,
+        )
+        assert decrypt_result[0]["ok"], (
+            f"worker {r['worker_id']}'s ciphertext failed to "
+            f"decrypt: {decrypt_result[0].get('error')}"
+        )
+        expected = f"plaintext-from-worker-{r['worker_id']}"
+        assert decrypt_result[0]["plaintext"] == expected, (
+            f"wrong plaintext: got {decrypt_result[0]['plaintext']!r}, "
+            f"expected {expected!r}"
+        )
 
 
 _BASELINE_MODE_BY_WORKER = ("enforce", "log", "off")
