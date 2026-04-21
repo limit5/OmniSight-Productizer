@@ -34,19 +34,15 @@ def _reset_rate():
 
 
 @pytest.fixture()
-async def _auth_db(tmp_path, monkeypatch):
-    """Isolated DB + auth module for unit-level lockout tests."""
-    db_path = tmp_path / "test.db"
-    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db_path))
-    from backend import config as _cfg
-    _cfg.settings.database_path = str(db_path)
+async def _auth_db(pg_test_pool):
+    """Phase-3 Step C.1 (2026-04-21): ported off the SQLite-file
+    setup onto ``pg_test_pool``. TRUNCATE ``users`` up front so each
+    test's create_user starts with a clean slate and email uniqueness
+    holds across sibling tests."""
     from backend import db
-    db._DB_PATH = db._resolve_db_path()
-    await db.init()
-    try:
-        yield db, auth
-    finally:
-        await db.close()
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
+    yield db, auth
 
 
 @pytest.mark.asyncio
@@ -79,12 +75,13 @@ async def test_successful_login_resets_counter(_auth_db):
     user = await auth_mod.authenticate_password("reset@test.com", "good-pass-1234")
     assert user is not None
 
-    conn = db_mod._conn()
-    async with conn.execute(
-        "SELECT failed_login_count, locked_until FROM users WHERE email=?",
-        ("reset@test.com",),
-    ) as cur:
-        row = await cur.fetchone()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT failed_login_count, locked_until "
+            "FROM users WHERE email = $1",
+            "reset@test.com",
+        )
     assert row["failed_login_count"] == 0
     assert row["locked_until"] is None
 
@@ -101,12 +98,12 @@ async def test_lockout_expires_after_time(_auth_db):
     locked, _ = await auth_mod.is_account_locked("expire@test.com")
     assert locked
 
-    conn = db_mod._conn()
-    await conn.execute(
-        "UPDATE users SET locked_until=? WHERE email=?",
-        (time.time() - 1, "expire@test.com"),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET locked_until = $1 WHERE email = $2",
+            time.time() - 1, "expire@test.com",
+        )
 
     locked, _ = await auth_mod.is_account_locked("expire@test.com")
     assert not locked
@@ -134,12 +131,13 @@ async def test_locked_account_skips_pbkdf2(_auth_db):
     await auth_mod.create_user(
         email="skip@test.com", name="Skip", role="viewer", password="skip-pass-1234",
     )
-    conn = db_mod._conn()
-    await conn.execute(
-        "UPDATE users SET failed_login_count=10, locked_until=? WHERE email=?",
-        (time.time() + 9999, "skip@test.com"),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET failed_login_count = 10, "
+            "locked_until = $1 WHERE email = $2",
+            time.time() + 9999, "skip@test.com",
+        )
 
     result = await auth_mod.authenticate_password("skip@test.com", "skip-pass-1234")
     assert result is None
@@ -205,7 +203,8 @@ async def test_lockout_audit_events(client, monkeypatch):
     monkeypatch.setenv("OMNISIGHT_LOGIN_EMAIL_RATE", "100")
     reset_limiters()
 
-    from backend import auth as auth_mod, db
+    from backend import auth as auth_mod
+    from backend.db_pool import get_pool
 
     await auth_mod.create_user(
         email="audit@test.com", name="Audit", role="viewer", password="audit-pass-123",
@@ -216,10 +215,12 @@ async def test_lockout_audit_events(client, monkeypatch):
         json={"email": "audit@test.com", "password": "wrong"},
     )
 
-    async with db._conn().execute(
-        "SELECT action FROM audit_log WHERE action='auth.login.fail' ORDER BY id DESC LIMIT 1"
-    ) as cur:
-        row = await cur.fetchone()
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT action FROM audit_log "
+            "WHERE action = 'auth.login.fail' "
+            "ORDER BY id DESC LIMIT 1"
+        )
     assert row is not None
 
     for _ in range(auth_mod.LOCKOUT_THRESHOLD - 1):
@@ -228,10 +229,12 @@ async def test_lockout_audit_events(client, monkeypatch):
             json={"email": "audit@test.com", "password": "wrong"},
         )
 
-    async with db._conn().execute(
-        "SELECT action FROM audit_log WHERE action='auth.lockout' ORDER BY id DESC LIMIT 1"
-    ) as cur:
-        row = await cur.fetchone()
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT action FROM audit_log "
+            "WHERE action = 'auth.lockout' "
+            "ORDER BY id DESC LIMIT 1"
+        )
     assert row is not None
 
     r = await client.post(

@@ -139,18 +139,19 @@ async def test_login_failure_writes_audit_row(client):
     """A failed login must emit a login_failed audit row with a
     masked email — full email would defeat the "can't tell which
     accounts exist" property of the masking."""
-    from backend import db
+    from backend.db_pool import get_pool
 
     await client.post(
         "/api/v1/auth/login",
         json={"email": "ghost@example.com", "password": "whatever"},
     )
 
-    async with db._conn().execute(
-        "SELECT action, entity_id FROM audit_log "
-        "WHERE action = 'auth.login.fail' ORDER BY id DESC LIMIT 1"
-    ) as cur:
-        row = await cur.fetchone()
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT action, entity_id FROM audit_log "
+            "WHERE action = 'auth.login.fail' "
+            "ORDER BY id DESC LIMIT 1"
+        )
     assert row is not None
     # Email must be masked: first 2 chars, '***', then the domain.
     entity_id = row["entity_id"]
