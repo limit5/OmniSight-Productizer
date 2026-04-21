@@ -26,12 +26,17 @@ async def test_health_exempt_from_rate_limit(client):
 async def test_ip_rate_limit_triggers(client):
     """After exhausting the per-IP budget, requests get 429.
 
-    SP-8.1 (2026-04-21): loop ceiling bumped from 200 → free-tier
-    per_ip + 20 because task #81 raised ``free.per_ip`` from 60 to
-    300. Fetching the current budget dynamically means the next
-    tuning round won't silently regress this test."""
+    SP-8.1 / 8.1c: loop ceiling reads the live per_ip budget and
+    scales 2× to absorb in-window refill. Token bucket refills at
+    ``capacity/window`` per second; a fast sequential test loop
+    drains tokens faster than they refill, but not so much faster
+    that a 1× ceiling is guaranteed to hit 429 — once per_ip got
+    bumped to 1200 (20/sec refill), a 1220-iteration loop that
+    takes ~6s only nets ~1100 drained tokens, leaving the bucket
+    non-empty and the test flaky. 2× is the safe absorption factor
+    across the tuning range."""
     from backend.quota import quota_for_plan
-    ceiling = quota_for_plan("free").per_ip.capacity + 20
+    ceiling = quota_for_plan("free").per_ip.capacity * 2 + 20
     got_429 = False
     for _ in range(ceiling):
         r = await client.get("/api/v1/agents")

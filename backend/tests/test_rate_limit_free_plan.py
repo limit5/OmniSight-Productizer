@@ -34,17 +34,24 @@ def test_free_per_ip_budget_matches_dashboard_burst():
     assert free.per_ip.window_seconds == 60.0
 
 
-def test_free_per_user_budget_unchanged():
-    """The per-IP tuning deliberately left per_user alone. Raising
-    per_user is a separate discussion (touches abuse-resistance on
-    shared IPs) and is out of scope for SP-8.1."""
+def test_free_per_user_budget_matches_dashboard_burst():
+    """SP-8.1c (2026-04-21): per_user was 120 — tripped by
+    ``useEngine``'s 11-endpoint × 5s = 132 req/min single-tab
+    burst. Bumped to match per_ip (1200/min) so a single operator
+    running 3 tabs still has headroom. See operator screenshot
+    2026-04-21 + ``backend/quota.py`` docstring for the full root
+    cause."""
     free = quota_for_plan("free")
-    assert free.per_user.capacity == 120
+    assert free.per_user.capacity == 1200
 
 
-def test_free_per_tenant_budget_unchanged():
+def test_free_per_tenant_budget_matches_multi_user_envelope():
+    """SP-8.1c (2026-04-21): per_tenant raised to 1500 — just above
+    per_user (1200) so any single user can't individually saturate
+    the tenant ceiling, but multi-user teams get a reasonable shared
+    cap."""
     free = quota_for_plan("free")
-    assert free.per_tenant.capacity == 300
+    assert free.per_tenant.capacity == 1500
 
 
 def test_plan_hierarchy_preserved_after_tuning():

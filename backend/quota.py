@@ -54,26 +54,49 @@ class PlanQuota:
 # the hard cap (which produces 503 via pool-timeout before real DB
 # damage). See docs/phase-3-runtime-v2/02-sub-phases.md for the
 # full rationale and the "CF free rate limiting off" decision.
+# SP-8.1c (2026-04-21): per_user + per_tenant were calibrated for a
+# much quieter dashboard than what actually ships. The real shape:
+#   * ``hooks/use-engine.ts`` fetches 11 endpoints via
+#     ``Promise.allSettled`` every 5s → 132 req/min per tab from this
+#     hook alone.
+#   * 4+ sidebar panels (ops_summary / orchestration / pipeline_timeline
+#     / audit / run_history / arch_indicator / host_devices)
+#     independently poll 5-15s → another ~30-60 req/min per tab.
+#   * A single logged-in operator cold-loading one tab generates
+#     150-200 req/min legitimately.
+# Old ``per_user=120/min`` tripped before the first ``useEngine``
+# round finished, producing 429 cascades on every panel whose most
+# recent request lost the rate-limit race. Operator debug screenshot
+# 2026-04-21 confirmed the 3 rightmost panels (OPS SUMMARY /
+# ORCHESTRATION / PIPELINE TIMELINE) all showed "API 429: ..." after
+# the SP-8.1b per-IP bump — per-IP was no longer the bottleneck;
+# per-user was. Scale per_user + per_tenant to match the per_ip
+# envelope so a single multi-tab operator never trips this.
+#
+# The long-term fix is dashboard-side: consolidate the 11
+# ``useEngine`` endpoints into one ``/dashboard/summary`` aggregator
+# and switch to SSE push for state that changes less than once per
+# poll window. Tracked as follow-up, not this commit's scope.
 PLAN_QUOTAS: dict[str, PlanQuota] = {
     "free": PlanQuota(
         per_ip=RateLimitBudget(capacity=1200, window_seconds=60.0),
-        per_user=RateLimitBudget(capacity=120, window_seconds=60.0),
-        per_tenant=RateLimitBudget(capacity=300, window_seconds=60.0),
+        per_user=RateLimitBudget(capacity=1200, window_seconds=60.0),
+        per_tenant=RateLimitBudget(capacity=1500, window_seconds=60.0),
     ),
     "starter": PlanQuota(
         per_ip=RateLimitBudget(capacity=2400, window_seconds=60.0),
-        per_user=RateLimitBudget(capacity=300, window_seconds=60.0),
-        per_tenant=RateLimitBudget(capacity=1000, window_seconds=60.0),
+        per_user=RateLimitBudget(capacity=2400, window_seconds=60.0),
+        per_tenant=RateLimitBudget(capacity=3000, window_seconds=60.0),
     ),
     "pro": PlanQuota(
         per_ip=RateLimitBudget(capacity=6000, window_seconds=60.0),
-        per_user=RateLimitBudget(capacity=600, window_seconds=60.0),
-        per_tenant=RateLimitBudget(capacity=3000, window_seconds=60.0),
+        per_user=RateLimitBudget(capacity=6000, window_seconds=60.0),
+        per_tenant=RateLimitBudget(capacity=10000, window_seconds=60.0),
     ),
     "enterprise": PlanQuota(
         per_ip=RateLimitBudget(capacity=12000, window_seconds=60.0),
-        per_user=RateLimitBudget(capacity=1200, window_seconds=60.0),
-        per_tenant=RateLimitBudget(capacity=10000, window_seconds=60.0),
+        per_user=RateLimitBudget(capacity=12000, window_seconds=60.0),
+        per_tenant=RateLimitBudget(capacity=30000, window_seconds=60.0),
     ),
 }
 
