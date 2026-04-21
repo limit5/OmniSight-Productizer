@@ -70,17 +70,23 @@ def is_enabled() -> bool:
 
 async def touch(memory_id: str, *, now: float | None = None) -> bool:
     """Caller hook: mark this memory as recently used. Resets the
-    decay timer (the next decay pass treats this row as 'fresh')."""
+    decay timer (the next decay pass treats this row as 'fresh').
+
+    Phase-3 Step A.2 (2026-04-21): ported to pool + RETURNING id to
+    detect matched-vs-missed (asyncpg Pool.execute doesn't expose
+    the rowcount the compat wrapper did).
+    """
     if not memory_id:
         return False
-    from backend import db
     now_iso = _ts_iso(now)
-    cur = await db._conn().execute(
-        "UPDATE episodic_memory SET last_used_at = ? WHERE id = ?",
-        (now_iso, memory_id),
-    )
-    await db._conn().commit()
-    return (cur.rowcount or 0) > 0
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE episodic_memory SET last_used_at = $1 "
+            "WHERE id = $2 RETURNING id",
+            now_iso, memory_id,
+        )
+    return row is not None
 
 
 def _ts_iso(now: float | None = None) -> str:
@@ -123,43 +129,50 @@ async def decay_unused(
     f = max(0.0, min(1.0, f))  # clamp; >1 would inflate forever
 
     cutoff_iso = _ts_iso((now if now is not None else time.time()) - ttl)
-    from backend import db
+    from backend.db_pool import get_pool
 
-    # Count fresh rows separately so `scanned` still reflects total table
-    # size (tests assert on it). The WHERE filters the decay loop to
-    # just stale / never-touched rows — index on last_used_at keeps this
-    # O(log n) instead of O(n) as the table grows.
-    async with db._conn().execute(
-        "SELECT COUNT(*) AS n FROM episodic_memory "
-        "WHERE last_used_at IS NOT NULL AND last_used_at >= ?",
-        (cutoff_iso,),
-    ) as cur:
-        fresh_row = await cur.fetchone()
-    fresh_n = int(fresh_row["n"] or 0) if fresh_row else 0
-
-    async with db._conn().execute(
-        "SELECT id, last_used_at, decayed_score, quality_score "
-        "FROM episodic_memory "
-        "WHERE last_used_at IS NULL OR last_used_at < ?",
-        (cutoff_iso,),
-    ) as cur:
-        rows = await cur.fetchall()
-
-    res = DecayResult(scanned=len(rows) + fresh_n, skipped_recent=fresh_n)
-    for r in rows:
-        # First-ever pass for a row migrated in: decayed_score may be
-        # 0 if the column was added before quality_score was copied.
-        # Initialise it from quality_score in that case.
-        current = r["decayed_score"] or 0.0
-        if current == 0.0:
-            current = r["quality_score"] or 0.0
-        new_score = current * f
-        await db._conn().execute(
-            "UPDATE episodic_memory SET decayed_score = ? WHERE id = ?",
-            (new_score, r["id"]),
-        )
-        res.decayed += 1
-    await db._conn().commit()
+    # Count fresh rows separately so ``scanned`` still reflects total
+    # table size (tests assert on it). The WHERE filters the decay
+    # loop to just stale / never-touched rows — index on last_used_at
+    # keeps this O(log n) instead of O(n) as the table grows.
+    #
+    # Phase-3 Step A.2 (2026-04-21): entire pipeline (count + scan +
+    # N× UPDATE) now runs under one pool acquire + tx. Previously a
+    # crash mid-loop left some rows decayed and others not, with the
+    # decay-total metric reporting a higher count than actually
+    # committed to the table. Tx wrap makes the "scanned this many,
+    # committed this many, metric reports this many" trio consistent.
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            fresh_n = int(await conn.fetchval(
+                "SELECT COUNT(*) FROM episodic_memory "
+                "WHERE last_used_at IS NOT NULL "
+                "AND last_used_at >= $1",
+                cutoff_iso,
+            ) or 0)
+            rows = await conn.fetch(
+                "SELECT id, last_used_at, decayed_score, quality_score "
+                "FROM episodic_memory "
+                "WHERE last_used_at IS NULL OR last_used_at < $1",
+                cutoff_iso,
+            )
+            res = DecayResult(scanned=len(rows) + fresh_n,
+                              skipped_recent=fresh_n)
+            for r in rows:
+                # First-ever pass for a row migrated in:
+                # decayed_score may be 0 if the column was added
+                # before quality_score was copied. Initialise it
+                # from quality_score in that case.
+                current = r["decayed_score"] or 0.0
+                if current == 0.0:
+                    current = r["quality_score"] or 0.0
+                new_score = current * f
+                await conn.execute(
+                    "UPDATE episodic_memory SET decayed_score = $1 "
+                    "WHERE id = $2",
+                    new_score, r["id"],
+                )
+                res.decayed += 1
 
     try:
         from backend import metrics as _m
@@ -184,22 +197,30 @@ async def decay_unused(
 
 async def restore(memory_id: str) -> Optional[float]:
     """Reset decayed_score back to quality_score AND mark touched.
-    Returns the restored score, or None if the row doesn't exist."""
-    from backend import db
-    async with db._conn().execute(
-        "SELECT quality_score FROM episodic_memory WHERE id = ?",
-        (memory_id,),
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    q = row["quality_score"] or 0.0
-    await db._conn().execute(
-        "UPDATE episodic_memory SET decayed_score = ?, "
-        "last_used_at = ? WHERE id = ?",
-        (q, _ts_iso(), memory_id),
-    )
-    await db._conn().commit()
+    Returns the restored score, or None if the row doesn't exist.
+
+    Phase-3 Step A.2: single pool acquire shared across the SELECT +
+    UPDATE so a concurrent writer can't modify quality_score between
+    our read and the restore-to-it write.
+    """
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        # fetchrow (not fetchval) — distinguishes "no row" from
+        # "row with quality_score IS NULL". Original semantics: row
+        # missing → return None; row present with NULL quality →
+        # restore to 0.0.
+        row = await conn.fetchrow(
+            "SELECT quality_score FROM episodic_memory WHERE id = $1",
+            memory_id,
+        )
+        if row is None:
+            return None
+        q = row["quality_score"] or 0.0
+        await conn.execute(
+            "UPDATE episodic_memory SET decayed_score = $1, "
+            "last_used_at = $2 WHERE id = $3",
+            q, _ts_iso(), memory_id,
+        )
     try:
         from backend import metrics as _m
         _m.memory_decay_total.labels(action="restored").inc()

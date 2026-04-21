@@ -1,71 +1,65 @@
 """Phase 63-E — episodic memory quality decay.
 
-Phase-3-Runtime-v2 SP-3.12 (2026-04-20): this suite is temporarily
-skipped. The memory_decay module itself uses ``db._conn()`` direct
-SQL (compat-wrapper), not ``db.*_episodic_memory`` functions — it's
-out of SP-3.12's direct chain. SP-3.12 ports the 7 episodic_memory
-functions + their 4 production callers (tools, rag_prefetch,
-intent_memory, webhooks); memory_decay's internals are deferred to
-a dedicated compat-removal commit (Epic 7).
-
-The _seed helper in this file used ``db.insert_episodic_memory(data)``
-which now requires an asyncpg.Connection — the half-migration
-(insert via pool, UPDATE via compat) is possible but complicates
-the fixture for zero quality gain during the deferred window.
-
-Coverage during skip: test_db_episodic_memory.py verifies the
-insert_episodic_memory contract; memory_decay's decay-math logic
-is unchanged by SP-3.12 and will be re-covered when Epic 7 ports
-memory_decay.py.
+Step A.2 (2026-04-21): memory_decay is now pool-native. Fixture
+migrated from SQLite tempfile + ``db.init()`` to pg_test_pool +
+TRUNCATE. ``_seed`` helper rewrites the raw ``last_used_at`` UPDATE
+via pool. Skip marker removed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 import time
 
 import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="SP-3.12: memory_decay tests deferred — memory_decay module "
-           "uses compat db._conn() direct SQL, not db.*_episodic_memory "
-           "functions. Tracked as Epic 7 compat-removal scope."
-)
 
 from backend import memory_decay as md
 
 
 @pytest.fixture()
-async def fresh_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "t.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as cfg
-        cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        try:
-            yield db
-        finally:
-            await db.close()
+async def fresh_db(pg_test_pool, pg_test_dsn, monkeypatch):
+    # Point compat path at PG too — some helpers (db.insert_episodic_
+    # memory, used by _seed) still route through the compat wrapper
+    # when called without an explicit conn; OMNISIGHT_DATABASE_URL
+    # makes ``db.init()`` open a PgCompatConnection against the same
+    # PG pool uses.
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE episodic_memory RESTART IDENTITY CASCADE"
+        )
+    from backend import db
+    if db._db is not None:
+        await db.close()
+    await db.init()
+    try:
+        yield db
+    finally:
+        await db.close()
+        async with pg_test_pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE episodic_memory RESTART IDENTITY CASCADE"
+            )
 
 
 async def _seed(db, mid: str, *, quality: float = 1.0, last_used: str | None = None):
-    await db.insert_episodic_memory({
-        "id": mid,
-        "error_signature": f"sig-{mid}",
-        "solution": "s",
-        "quality_score": quality,
-    })
-    if last_used is not None:
-        await db._conn().execute(
-            "UPDATE episodic_memory SET last_used_at = ? WHERE id = ?",
-            (last_used, mid),
-        )
-        await db._conn().commit()
+    # db.insert_episodic_memory is pool-native (takes a conn). Use
+    # the pool directly here too so the seed + update share the
+    # same code path as production memory_decay.touch does.
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await db.insert_episodic_memory(conn, {
+            "id": mid,
+            "error_signature": f"sig-{mid}",
+            "solution": "s",
+            "quality_score": quality,
+        })
+        if last_used is not None:
+            await conn.execute(
+                "UPDATE episodic_memory SET last_used_at = $1 "
+                "WHERE id = $2",
+                last_used, mid,
+            )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -95,10 +89,12 @@ async def test_touch_updates_last_used_at(fresh_db):
     await _seed(fresh_db, "m1")
     ok = await md.touch("m1")
     assert ok
-    async with fresh_db._conn().execute(
-        "SELECT last_used_at FROM episodic_memory WHERE id = ?", ("m1",),
-    ) as cur:
-        row = await cur.fetchone()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_used_at FROM episodic_memory WHERE id = $1",
+            "m1",
+        )
     assert row["last_used_at"] is not None
 
 
@@ -129,13 +125,15 @@ async def test_decay_skips_recent_and_decays_stale(fresh_db):
     assert res.decayed == 2
     assert res.skipped_recent == 1
 
-    async with fresh_db._conn().execute(
-        "SELECT id, decayed_score FROM episodic_memory ORDER BY id",
-    ) as cur:
-        rows = {r["id"]: r["decayed_score"] for r in await cur.fetchall()}
-    assert rows["fresh"] == pytest.approx(1.0)
-    assert rows["stale"] == pytest.approx(0.5)
-    assert rows["null1"] == pytest.approx(0.4)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, decayed_score FROM episodic_memory ORDER BY id"
+        )
+    by_id = {r["id"]: r["decayed_score"] for r in rows}
+    assert by_id["fresh"] == pytest.approx(1.0)
+    assert by_id["stale"] == pytest.approx(0.5)
+    assert by_id["null1"] == pytest.approx(0.4)
 
 
 @pytest.mark.asyncio
@@ -143,11 +141,13 @@ async def test_decay_factor_clamped(fresh_db):
     await _seed(fresh_db, "m1", quality=1.0)
     # factor > 1 → clamped to 1 (no inflation)
     await md.decay_unused(ttl_s=1.0, factor=5.0, now=time.time())
-    async with fresh_db._conn().execute(
-        "SELECT decayed_score FROM episodic_memory WHERE id = ?", ("m1",),
-    ) as cur:
-        row = await cur.fetchone()
-    assert row["decayed_score"] == pytest.approx(1.0)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        score = await conn.fetchval(
+            "SELECT decayed_score FROM episodic_memory WHERE id = $1",
+            "m1",
+        )
+    assert score == pytest.approx(1.0)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -160,11 +160,13 @@ async def test_restore_copies_quality_back(fresh_db):
     await md.decay_unused(ttl_s=1.0, factor=0.1, now=time.time())
     got = await md.restore("m1")
     assert got == pytest.approx(0.9)
-    async with fresh_db._conn().execute(
-        "SELECT decayed_score, last_used_at FROM episodic_memory WHERE id = ?",
-        ("m1",),
-    ) as cur:
-        row = await cur.fetchone()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT decayed_score, last_used_at FROM episodic_memory "
+            "WHERE id = $1",
+            "m1",
+        )
     assert row["decayed_score"] == pytest.approx(0.9)
     assert row["last_used_at"] is not None
 
