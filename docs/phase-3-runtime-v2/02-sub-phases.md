@@ -518,9 +518,14 @@ aggregate is the authoritative measurement.
 | ``backend.db_pool`` | **100%** | 95% | Already above gate |
 | ``backend.db_context`` | **100%** | 95% | Already above gate |
 | ``backend.tenant_secrets`` | 84% → **98%** | 95% | Filled 2026-04-21 (commit 3b672bde). Targeted 7 branches: decrypt/JSON fallback + polymorphic-conn arms + not-found exit. |
-| ``backend.audit`` | 56% | 95% | Next to tackle. Likely gaps in the hash-chain verify + the ``audit.query`` filter matrix. |
-| ``backend.auth`` | 65% | 95% | Largest gap. Covers session rotation, password reset, MFA challenge flow — most unhit branches are the error paths. |
-| ``backend.db`` | 53% | 95% | Post-Step-C.2 this is mostly legacy SQLite dev-mode helpers (``init()`` is a no-op on the PG path). Scope caveat: raising this to 95% requires tests against SQLite code paths that prod never executes. |
+| ``backend.audit`` | 56% → **99%** | 95% | Filled 2026-04-21 (commit 10b9e268). Two batches: (1) polymorphic-conn arms + log_sync + write_audit wrapper; (2) CLI dispatcher ``_cli_main`` via subprocess (pytest-cov auto-instruments children). |
+| ``backend.auth`` | 65% | 95% | **PENDING** — 558 stmts / 168 missing. Largest gap. Covers session rotation, password reset, MFA challenge flow — most unhit branches are error paths + cleanup functions. Too large for a tail-end commit in the current session; deferred to its own batch. |
+| ``backend.db`` | 55% | 95% | **PENDING** — 445 stmts / 196 missing. Post-Step-C.2 this is mostly legacy SQLite dev-mode helpers + domain CRUD helpers that each test file exercises a slice of; true coverage from CI's sharded 4-way aggregate is the honest number. Scope caveat: raising to 95% locally would require either full-suite measurement (60-180 min) or tests against SQLite code paths that prod never executes. |
+
+Aggregate after the 2026-04-21 batches: **71%** (up from 63%
+baseline). 4-of-6 modules at/above gate. #83 remains IN_PROGRESS
+until ``auth`` and ``db`` are either filled to 95% or scope-narrowed
+per option C.
 
 **Option A scope (operator-approved):** land the 95% gate as an
 opt-in CLI invocation in ``backend/pytest.ini`` (not an ``addopts``
