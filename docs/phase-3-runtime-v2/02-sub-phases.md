@@ -489,12 +489,48 @@ commit MUST delete the xfail marker.
 
 ### Step D — Epic 8+ (independent workstreams)
 
-  9. **#81** — rate-limit quota tuning.
-  10. **#83** — coverage-gate 95% sweep.
+  9. **#81** — rate-limit quota tuning. **CLOSED** 2026-04-21
+     (commit 1952e020) — `free.per_ip` 60→300 with proportional
+     scaling of starter/pro/enterprise to preserve the plan
+     hierarchy invariant.
+  10. **#83** — coverage-gate 95% sweep. **IN PROGRESS** 2026-04-21.
+      Operator chose option A (pragmatic). Baseline measurement +
+      strategy captured in "Coverage gate (#83) baseline snapshot"
+      below.
   11. **#84** — HANDOFF.md update (has been cadence-lagging since
       Epic 4).
   12. **#85** / **#70** — prod-parity live verify / multi-user
       deploy check. Requires operator-side ops work.
+
+### Coverage gate (#83) baseline snapshot — 2026-04-21
+
+Ran a 216-test targeted subset (14 test files covering db / pool /
+context / audit / auth / tenant_secrets integration tests) with
+``--cov --cov-branch`` against the six safety-critical modules
+named in ``01-design-decisions.md §8.1``. **This is a low-biased
+number** — the full suite (~14,672 tests) would raise every row
+meaningfully, but the full run takes 60-180 min per the project
+memory and doesn't fit in a single session. CI's sharded 4-way
+aggregate is the authoritative measurement.
+
+| Module | Baseline | Target | Notes |
+|---|---|---|---|
+| ``backend.db_pool`` | **100%** | 95% | Already above gate |
+| ``backend.db_context`` | **100%** | 95% | Already above gate |
+| ``backend.tenant_secrets`` | 84% → **98%** | 95% | Filled 2026-04-21 (commit 3b672bde). Targeted 7 branches: decrypt/JSON fallback + polymorphic-conn arms + not-found exit. |
+| ``backend.audit`` | 56% | 95% | Next to tackle. Likely gaps in the hash-chain verify + the ``audit.query`` filter matrix. |
+| ``backend.auth`` | 65% | 95% | Largest gap. Covers session rotation, password reset, MFA challenge flow — most unhit branches are the error paths. |
+| ``backend.db`` | 53% | 95% | Post-Step-C.2 this is mostly legacy SQLite dev-mode helpers (``init()`` is a no-op on the PG path). Scope caveat: raising this to 95% requires tests against SQLite code paths that prod never executes. |
+
+**Option A scope (operator-approved):** land the 95% gate as an
+opt-in CLI invocation in ``backend/pytest.ini`` (not an ``addopts``
+default — that would break individual-file pytest runs), fill the
+short gaps in ``tenant_secrets`` (done) plus the worst
+auth/audit gaps the subset exposed, and defer the full ``backend.db``
+fill to CI's sharded measurement or a follow-up session. Option B
+(rigorous full-suite iteration) and option C (carve ``backend.db``
+out of the 95% gate with a 75% guard rail) were considered and
+shelved.
 
 ### Shift from original plan
 
