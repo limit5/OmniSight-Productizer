@@ -206,11 +206,6 @@ def compute_ua_hash(user_agent: str) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-async def _conn():
-    from backend import db
-    return db._conn()
-
-
 def _row_to_user(r) -> User:
     """Map a users-table row to the User dataclass.
 
