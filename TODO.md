@@ -869,6 +869,67 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ---
 
+## 🅨-prep Priority Y-prep — Gerrit + JIRA Integration 收尾（Y 開工前的現網 hardening）
+
+> 背景（2026-04-22 operator audit）：Gerrit 在 commit `1ad3e69e` / `c9514ab2` 後已經 production-ready（5-step wizard 真 probe、入站 webhook 真 dispatch、雙 +2 submit rule 硬閘、replication fan-out 可用、4-worker 一致性已修）。JIRA 外送 + intent bridge 也可用。但 audit 找到 3 個小缺口，屬於**現網上線前該補、但沒大到要等 Priority Y 才做**的收尾項目——所以切出 Y-prep，放在 Priority Y 的第一顆前置工作。
+>
+> **Y-prep 的範圍紅線**：只補現有功能缺口，不擴張 scope。所有需要新 schema / 新租戶隔離 / 新 UI 的項目（例如 JIRA per-tenant 憑證、JIRA → agent automation 命令通道）都延到 Y 本體做。Y-prep 的每顆 step 都應該能在 1 人 1-2 天內獨立 ship，不等 Y1 的 schema migration。
+>
+> **相依**：無硬阻塞，可立即開工。完成後 Gerrit / JIRA 串接體驗就是「設完就生產可用」，為 operator 真實上線 Phase 26 鋪路。
+
+### Y-prep.1 Gerrit 入站 webhook 三事件 routing 測試 (#287)
+
+現在 `test_webhooks.py:9-25` 只驗 HMAC + gerrit_enabled 閘門，沒驗三個實際事件（`patchset-created` / `comment-added` / `change-merged`）有沒有 dispatch 到 `webhooks.py:175-363` 對應的 handler。Production 第一週靠 debug log 觀察是暫時方案，長期要有 regression test。
+
+- [ ] `test_webhooks.py::TestGerritEventRouting`：三個測試函式，每個 POST 一個合法 HMAC-signed payload，mock 掉下游（`_on_patchset_created` spawn agent / `_on_comment_added` file task / `_on_change_merged` push replication），assert mock 被呼叫過一次且參數正確。
+- [ ] 每個測試加 negative case：事件型別不 match 的 payload 必須 **不** 觸發 handler（e.g. `patchset-created` 的 payload 不該 trigger `_on_change_merged`）。
+- [ ] 邊界：`comment-added` 只在 `Code-Review: -1` 時 file task，`+1` 不該；`change-merged` 只在 `gerrit_replication_targets` 非空時 fan-out；空字串 / whitespace 必須跳過（不能誤觸發 `git push ""`）。
+- [ ] 測試 fixture 要用真的 HMAC-SHA256 簽名而非 mock，確保 `X-Gerrit-Signature` verifier 和 handler 同步驗過。
+- [ ] CI gate：這三個測試加到 `backend/pytest.ini` 的 p0 marker，不准 skip。
+
+預估：**0.5 day**
+
+### Y-prep.2 JIRA Webhook Secret Rotation API + UI 按鈕 (#288)
+
+Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integration.py:1518`）提供 one-time reveal 的 rotate 體驗，JIRA 沒有對應 endpoint。operator rotate `jira_webhook_secret` 目前只能走 flat PUT /settings，沒有「僅此一次顯示明文」的 UX，secret 洩漏時不容易快速輪替。
+
+- [ ] 後端：`POST /runtime/git-forge/jira/webhook-secret/generate`，require_admin。mint 32-byte token、`_apply_runtime_setting("jira_webhook_secret", new_secret)` 走 SharedKV 鏡射、回 `{secret, secret_masked, webhook_url, signature_header, signature_algorithm, note}` 同 Gerrit 結構。
+- [ ] 前端：`components/omnisight/integration-settings.tsx` JIRA Section（看起來還在 Notifications tab）加一顆「ROTATE WEBHOOK SECRET」按鈕；點下去 confirm dialog → 顯示 one-time modal（copy-to-clipboard）→ 關閉後只能看到 masked preview，對齊 Gerrit Wizard Step 5 UX。
+- [ ] `test_integration_settings.py` 加 `test_jira_webhook_secret_rotate_one_time_reveal` + `test_jira_webhook_secret_requires_admin`。
+- [ ] 旋轉後其他 worker 要能立即用新 secret 驗 HMAC——這塊靠現有 SharedKV overlay 已經 cover（`_SHARED_KV_STR_FIELDS` 有 `jira_webhook_secret`），測一下跨 worker 確認生效。
+
+預估：**0.5 day**
+
+### Y-prep.3 JIRA 入站 webhook 事件路由器 (#289)
+
+現在 `webhooks.py:705-731` 只 sync status 回 internal Task DB（若有 match 的話），沒有任何 automation trigger。operator 在 JIRA ticket 留 comment 想觸發 agent、status 轉 Done 想觸發 artifact 上傳、issue created 想做 intake——都沒辦法。這顆補一個可配置的事件 → action 路由。
+
+- [ ] 新 `backend/routers/webhooks.py::_on_jira_event()` dispatcher，解析 JIRA webhook payload 的 `webhookEvent` 欄位（`jira:issue_created` / `jira:issue_updated` / `comment_created` 等）。
+- [ ] 新 `backend/jira_event_router.py` 定義 event type → handler 映射。三個 MVP handler：
+  - `comment_created` 且 comment body 以 `/<command>` 開頭 → emit `jira_command` event 到 CATC（O5 IntentSource 已經吃這個 topic）。
+  - `jira:issue_updated` 且 `status.to` 變為特定值（config whitelist，default `["Done", "Closed"]`） → trigger artifact packaging（沿用 Gerrit change-merged 的 artifact pipeline）。
+  - `jira:issue_created` 若 issue 有特定 label（config `OMNISIGHT_JIRA_INTAKE_LABEL`，default `omnisight-intake`） → call intent_bridge 建立 CATC task。
+- [ ] 三個 handler 都走 audit event（`jira.command_received` / `jira.status_transitioned` / `jira.intake_triggered`），繼承當前 tenant context（`t-default` 暫時，Y4 後會走真 tenant）。
+- [ ] Config 加入 `_SHARED_KV_STR_FIELDS`：`jira_intake_label` / `jira_done_statuses`（CSV）。UI 在 Notifications tab JIRA section 加兩個 SettingField。
+- [ ] 測試 3 條：每個 handler 一個 positive + 一個 negative（wrong event type / missing label / non-whitelisted status 都不該觸發）。
+- [ ] 文件：`docs/integrations/jira-automation.md` 一頁，列出三個觸發條件 + 具體 JIRA payload 範例 + operator 怎麼設 JIRA 那端的 webhook filter（省頻寬 + 減少誤觸發）。
+
+預估：**1.5 day**
+
+**Y-prep 總預估**：**2.5 day**
+
+**上線後的 Gerrit / JIRA 使用矩陣**：
+
+| 情境 | Gerrit | JIRA |
+|---|---|---|
+| 單 tenant 串起來用 | ✅ 已可用 | ✅ 已可用（outbound + intake） |
+| 入站 webhook 觸發 agent | ✅ 已可用（`-1 comment` 自動 file fix task） | ✅ Y-prep.3 後可用（`/command` comment + label intake） |
+| 事件 routing regression test 覆蓋 | ✅ Y-prep.1 後閉環 | ✅ Y-prep.3 自帶 test |
+| Webhook secret one-time rotate UX | ✅ 原生 wizard 支援 | ✅ Y-prep.2 後對齊 |
+| 多 tenant 各自獨立 JIRA 實例 | N/A（Gerrit 本身不適合 SaaS 拆） | ❌ 要等 Y4+Phase 5b |
+
+---
+
 ## 🅨 Priority Y — Tenant Ops & Multi-Project Hierarchy（多用戶 / 多專案運營面板）
 
 > 背景（2026-04-22 operator audit）：Priority I 已把 tenant_id 打進 users / workflow_runs / audit / artifacts / RLS / SSE / sandbox / frontend / rate-limit / multi-worker state，**純 Schema + Runtime 層**是通的。但**管理面板 / API / 業務模型**缺口還很大——operator 想新增一個 tenant 目前唯一方法是直接 `INSERT INTO tenants`，沒有 UI、沒有 REST endpoint、沒有 invite flow、沒有 RBAC；`users` 表是 1:1 mapping 到 tenant，一人跨租戶情境（外包顧問 / MSP / 跨公司協作）完全沒支援；專案這層根本不存在——所有 workload 都直接掛 tenant，沒辦法做「同一 tenant 下多產品線 / 多專案 / 多分支」的資源分離與計費拆分。另外 `backend/workspace.py` 的 `.agent_workspaces/{agent_id}/` 是扁平路徑，沒 tenant 分組、沒 project 分組、沒自動 GC、沒 disk quota——1 人測試 OK 但 10 個產品線 × 20 專案 × 多 user 的 scale 會爛。
@@ -2959,7 +3020,8 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 → T2 + T3 (ECPay + PayPal 備用) — 按市場需求再開（5.5d）
 
 ### Phase 26 — Tenant Ops & Multi-Project Hierarchy（~5.5 week，需 I + G4 + S0 + K-early + H4a 前置，應在 Phase 25 Billing 正式計費前完成）
-Y0 (情境盤點 + 架構文件) — 進入 Y 前的紅線（2d）
+Y-prep (Gerrit webhook routing test + JIRA secret rotate + JIRA event router) — 2.5d 現網 hardening，Y0 之前可以先出貨
+→ Y0 (情境盤點 + 架構文件) — 進入 Y 前的紅線（2d）
 → Y1 (memberships + projects + invites + shares schema + 回填) — 資料模型基礎（3d）
 → Y2 + Y3 (tenant CRUD + membership/invite API) — 後端管理面可用（4.5d）
 → Y4 (project CRUD + product-line) — 多專案層落地（3d）
@@ -2992,7 +3054,8 @@ Y0 (情境盤點 + 架構文件) — 進入 Y 前的紅線（2d）
 | S2 (security hardening phase 2) | 8.5 day |
 | T (billing + payment gateway) | 25 day |
 | Y (tenant ops + multi-project) | 27 day |
+| Y-prep (Gerrit/JIRA integration hardening) | 2.5 day |
 | META | 4-8 day |
-| **Total** | **~604.5-775 day** |
+| **Total** | **~607-777.5 day** |
 
 3-person team parallelized: **~7.5-10.5 months wall-clock**.
