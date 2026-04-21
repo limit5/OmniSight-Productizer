@@ -13,6 +13,15 @@ router = APIRouter(prefix="/providers", tags=["providers"])
 @router.get("", response_model=ProvidersListResponse)
 async def get_providers():
     """List all supported LLM providers and their configuration status."""
+    # 2026-04-22: sync cross-worker runtime settings from Redis
+    # before reading ``settings.*_api_key`` in ``list_providers``.
+    # Without this, a Google key saved on worker-1 is invisible to
+    # worker-3's ``list_providers`` response and the operator sees
+    # the "configured" dot flip on/off based on which worker
+    # answered their poll. See ``backend/routers/integration.py``
+    # header comment for the full root-cause walk-through.
+    from backend.routers.integration import _overlay_runtime_settings
+    _overlay_runtime_settings()
     return {
         "active_provider": settings.llm_provider,
         "active_model": settings.get_model_name(),

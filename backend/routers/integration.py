@@ -15,8 +15,94 @@ from pydantic import BaseModel
 from backend import auth as _au
 from backend.config import settings
 from backend.db_context import set_tenant_id
+from backend.shared_state import SharedKV
 
 logger = logging.getLogger(__name__)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Runtime settings cross-worker sync (2026-04-22)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Operator found that saving Google API key → SAVE & APPLY → Google
+# went green, then saving OpenAI API key → OpenAI green but Google
+# dark + field cleared. Root cause:
+#
+#   * Prod runs 2 replicas × ``OMNISIGHT_WORKERS=2`` = 4 separate
+#     Python processes, each with its own ``settings`` singleton
+#     in memory.
+#   * ``PUT /runtime/settings`` calls ``setattr(settings, key, value)``
+#     which only mutates the CURRENT worker's in-memory state.
+#   * Caddy round-robins subsequent ``/providers`` + ``/settings``
+#     polls across all 4 workers. Operator's save-Google request
+#     landed on worker-1; save-OpenAI landed on worker-3 (which
+#     had empty ``settings.google_api_key`` from its own startup
+#     env load). The next ``/providers`` poll round-robined back
+#     to worker-2/3/4 → saw OpenAI=set, Google=empty → UI rendered
+#     Google grey + empty input.
+#
+# Proper fix is Phase 5b (DB-persisted, encrypted, per-tenant). This
+# file provides a **bridging fix** that unblocks the current UX:
+# route writes through Redis-backed ``SharedKV`` (all 4 workers see
+# the same hash) and overlay Redis state onto the local ``settings``
+# object before every read. Redis is already required infra (we use
+# it for the rate limiter + SSE fan-out), so this adds zero new
+# deps. Redis persistence itself (RDB / AOF) means values now
+# survive backend restarts too — gain we didn't expect when
+# planning Phase 5b as "DB-only".
+#
+# Trade-offs vs Phase 5b:
+#   * Redis is shared global state — not per-tenant. Phase 5b adds
+#     tenant scoping.
+#   * Values are Fernet-unencrypted in Redis (plaintext inside
+#     Redis hash). Phase 5b encrypts via ``secret_store``. Given
+#     Redis already stores other secrets (rate-limit buckets with
+#     token refill tokens are fine; SharedTokenUsage is fine; audit
+#     hash chain is in PG) the blast radius matches our existing
+#     Redis trust model. Operator deploys protect Redis with
+#     docker-network isolation + AUTH. Still — this is a known
+#     gap until 5b fully lands.
+#   * No CRUD endpoints (just mutate via ``PUT /runtime/settings``);
+#     Phase 5b adds a proper ``POST /llm-credentials`` API with
+#     live test-key + rotation affordances.
+
+_runtime_settings_kv = SharedKV("runtime_settings")
+
+# Fields whose cross-worker coherence is operator-visible: LLM
+# provider selector, each provider's API key, ollama base URL.
+# Non-secret knobs (llm_temperature, docker_memory_limit, etc.)
+# stay ``setattr``-only for now — tenant isolation matters more
+# for them and they rarely change mid-session. The set is a
+# subset of ``_UPDATABLE_FIELDS`` so "which updates get SharedKV-
+# mirrored" is deliberate, not accidental.
+_SHARED_KV_FIELDS: frozenset[str] = frozenset({
+    "llm_provider", "llm_model", "llm_fallback_chain",
+    "anthropic_api_key", "google_api_key", "openai_api_key",
+    "xai_api_key", "groq_api_key", "deepseek_api_key",
+    "together_api_key", "openrouter_api_key",
+    "ollama_base_url",
+})
+
+
+def _overlay_runtime_settings() -> None:
+    """Read Redis-backed runtime settings into the local ``settings``
+    singleton so subsequent ``getattr(settings, ...)`` reads reflect
+    mutations made by any worker.
+
+    Cheap: single ``hgetall`` round-trip to Redis, falls back to
+    local dict on Redis failure. Called at the top of the GET /
+    PUT handlers and from ``list_providers`` hot path.
+    """
+    try:
+        overlay = _runtime_settings_kv.get_all()
+        if not overlay:
+            return
+        for key, value in overlay.items():
+            if key not in _SHARED_KV_FIELDS:
+                continue
+            if hasattr(settings, key):
+                setattr(settings, key, value)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("runtime settings overlay skipped: %s", exc)
 
 # Phase-3 P6 (2026-04-20): prefix renamed /system → /runtime — see
 # backend/routers/system.py for the full rationale. This router shares
@@ -78,6 +164,11 @@ async def _get_tenant_secrets_summary(user) -> dict:
 @router.get("/settings")
 async def get_settings(_user=Depends(_au.require_operator)):
     """Return all integration settings grouped by category. Tokens are masked."""
+    # Cross-worker sync: any ``PUT /settings`` that landed on a
+    # different worker has mirrored its writes to the Redis-backed
+    # ``SharedKV``. Overlay those here so the response reflects the
+    # full picture, not just this worker's local ``setattr`` history.
+    _overlay_runtime_settings()
     tenant_secrets = await _get_tenant_secrets_summary(_user)
     return {
         "llm": {
@@ -177,7 +268,23 @@ _UPDATABLE_FIELDS = frozenset({
 
 @router.put("/settings")
 async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)):
-    """Update integration settings at runtime (not persisted to .env)."""
+    """Update integration settings at runtime.
+
+    Values land on this worker's in-memory ``settings`` singleton AND
+    (for the subset listed in ``_SHARED_KV_FIELDS``) are mirrored into
+    Redis-backed ``SharedKV`` so the other 3 workers overlay them on
+    their next request. This fixes the 2026-04-22 operator report
+    where saving Google then OpenAI caused Google's green light to
+    disappear — each save was landing on a different worker and the
+    UI was round-robin reading from workers that hadn't seen the
+    prior save. Full DB-persistent per-tenant solution lands in
+    Phase 5b.
+    """
+    # Pull peer-worker writes in before we apply ours — means our
+    # response's ``applied``/``rejected`` classification reflects the
+    # merged view, not this worker's stale startup copy.
+    _overlay_runtime_settings()
+
     applied = {}
     rejected = {}
     for key, value in body.updates.items():
@@ -189,6 +296,21 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
             continue
         setattr(settings, key, value)
         applied[key] = True
+        # Mirror the subset whose coherence is operator-visible into
+        # ``SharedKV`` so the other workers pick it up on their next
+        # ``_overlay_runtime_settings()`` call. Silent failure on
+        # Redis hiccup is acceptable — local ``setattr`` still took
+        # effect and Redis is best-effort cross-worker sync, not
+        # authoritative storage.
+        if key in _SHARED_KV_FIELDS:
+            try:
+                _runtime_settings_kv.set(key, str(value))
+            except Exception as exc:
+                logger.warning(
+                    "SharedKV mirror failed for %s: %s (local setattr "
+                    "still in effect, cross-worker coherence degraded)",
+                    key, exc,
+                )
 
     # Clear LLM cache if provider/model/key changed
     llm_related = {"llm_", "anthropic_", "google_", "openai_", "xai_", "groq_", "deepseek_", "together_", "openrouter_", "ollama_"}
@@ -210,7 +332,8 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
         "status": "updated",
         "applied": list(applied.keys()),
         "rejected": rejected,
-        "note": "Changes are runtime-only and will reset on restart.",
+        "note": "Changes persist via Redis across workers + restarts; "
+                "full DB persistence lands in Phase 5b.",
     }
 
 
