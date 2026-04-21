@@ -628,19 +628,46 @@ export function OrchestratorAI({
         </div>
       )}
 
-      {/* LLM Provider / Model Selector */}
+      {/* LLM Provider / Model Selector — grouped per provider with a
+          row label so the operator can distinguish e.g. ``Sonnet``
+          served DIRECTLY via Anthropic (using ``anthropic_api_key``)
+          from ``Sonnet`` served via OPENROUTER's aggregator (using
+          ``openrouter_api_key`` → OpenRouter proxy → Anthropic).
+          Previously all chips rendered in a single flat cluster with
+          only tight vertical spacing between provider groups — with
+          OpenRouter configured, the user saw "Claude" chips in two
+          different rows with no hint of which row was which
+          provider (reported 2026-04-22). */}
       {providers && providers.length > 0 && onSwitchProvider && (
         <div className="border-b border-[var(--border)] px-4 py-2">
           <p className="font-mono text-[10px] text-[var(--muted-foreground)] mb-1.5 uppercase tracking-wider flex items-center gap-1.5">
             <Sparkles size={10} className="text-[var(--neural-blue)]" />
             LLM MODEL
           </p>
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             {providers.filter(p => p.configured).map(p => {
               const isActive = p.id === activeProvider
               return (
                 <div key={p.id}>
-                  <div className="flex flex-wrap gap-1">
+                  {/* Row header: provider name + active-indicator
+                      dot. Compact (10px) so it doesn't dominate the
+                      chip row beneath it, but always visible so
+                      operator never has to guess which provider a
+                      chip was served by. */}
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span
+                      className={`w-1 h-1 rounded-full shrink-0 ${isActive ? "opacity-100" : "opacity-40"}`}
+                      style={{ backgroundColor: isActive ? "var(--validation-emerald)" : "var(--muted-foreground)" }}
+                    />
+                    <span className="font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)] shrink-0">
+                      {p.name}
+                    </span>
+                    <span
+                      className="h-px flex-1"
+                      style={{ backgroundColor: "color-mix(in srgb, var(--muted-foreground) 20%, transparent)" }}
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-1 pl-2.5">
                     {p.models.map(m => {
                       const isCurrent = isActive && m === activeModel
                       const info = getModelInfo(m)
@@ -648,6 +675,7 @@ export function OrchestratorAI({
                         <button
                           key={m}
                           onClick={() => onSwitchProvider(p.id, m)}
+                          title={info.label}
                           className={`px-1.5 py-0.5 rounded font-mono text-[9px] transition-all ${
                             isCurrent
                               ? "ring-1 ring-[var(--neural-blue)] text-[var(--foreground)]"

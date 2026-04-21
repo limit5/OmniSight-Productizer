@@ -96,6 +96,28 @@ function _suffixFromModelString(model: string, knownPrefix: string): string {
 export function getModelInfo(model: unknown): ModelDisplayInfo {
   if (!model || typeof model !== "string") return { label: "", shortLabel: "", provider: "", color: "#737373" }
   const lower = model.toLowerCase()
+
+  // 2026-04-22: OpenRouter + other aggregators use ``<namespace>/
+  // <model>`` convention (e.g. ``anthropic/claude-sonnet-4``,
+  // ``qwen/qwen3-235b-a22b``, ``nvidia/llama-3.1-nemotron-ultra-
+  // 253b``). The row in the LLM MODEL selector already tells the
+  // operator which provider the chip belongs to — so the chip
+  // itself should render the post-slash part, not double-qualify
+  // with ``Claude anthropic/claude-sonnet-4``. We strip the
+  // namespace here, then fall through to the normal prefix-match
+  // logic so the model body still gets the canonical shortLabel
+  // (``Sonnet`` instead of ``claude-sonnet-4``). The full model
+  // string stays in ``label`` for the tooltip.
+  const slashIdx = lower.indexOf("/")
+  if (slashIdx > 0 && slashIdx < lower.length - 1) {
+    const namespaced = model.slice(slashIdx + 1)
+    const inner = getModelInfo(namespaced)
+    // Preserve the full namespaced model as the clickable id /
+    // tooltip, but render just the resolved inner shortLabel so
+    // the chip stays compact.
+    return { ...inner, label: model }
+  }
+
   // Exact match — canonical shortLabel, no suffix needed.
   if (KNOWN_MODELS[lower]) return KNOWN_MODELS[lower]
   // Prefix match (e.g. ``claude-opus-4-7`` → ``claude-opus``). Longer
