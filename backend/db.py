@@ -318,10 +318,32 @@ async def close() -> None:
 
 
 async def execute_raw(sql: str, params: tuple = ()) -> int:
-    """Execute raw SQL and return rows affected. For startup cleanup."""
-    cur = await _conn().execute(sql, params)
-    await _conn().commit()
-    return cur.rowcount
+    """Execute raw SQL and return rows affected. For startup cleanup.
+
+    Phase-3 Step C.1 (2026-04-21): ported off the compat wrapper to
+    the asyncpg pool. The two production callers in ``backend.main``
+    still pass ``?``-style placeholders so we translate them to
+    asyncpg's ``$N`` here rather than forcing a change to the call
+    sites — positional translation is safe because the callers pass
+    a single positional tuple.
+
+    Returns the affected row count. asyncpg's ``execute`` returns
+    the command tag (e.g. ``'UPDATE 3'``); we parse the trailing int
+    out of it.
+    """
+    from backend.db_pool import get_pool
+    if "?" in sql:
+        parts = sql.split("?")
+        sql = "".join(
+            parts[i] + (f"${i+1}" if i < len(params) else "")
+            for i in range(len(parts))
+        )
+    async with get_pool().acquire() as conn:
+        tag = await conn.execute(sql, *params)
+    try:
+        return int(tag.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
 
 
 def _conn() -> Any:

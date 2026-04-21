@@ -124,33 +124,18 @@ class TestDbCloseIdempotent:
 
 class TestExecuteRawEscapeHatch:
     @pytest.mark.asyncio
-    async def test_execute_raw_runs_through_compat(
-        self, pg_test_dsn, monkeypatch,
-    ) -> None:
-        # execute_raw is the ONE remaining direct ``_conn()`` caller
-        # inside db.py. It is used from main.py's startup-cleanup
-        # (agents / simulations stuck-state recovery). Confirm it
-        # still works after SP-3.1 through 3.12 leaves the compat
-        # wrapper as the only user of _conn().
-        monkeypatch.setenv("OMNISIGHT_DATABASE_URL", pg_test_dsn)
-        monkeypatch.setattr(db, "_db", None)
-        monkeypatch.setattr(db, "_IS_PG", False)
-        try:
-            await db.init()
-            # Execute a harmless DML that should always succeed —
-            # UPDATE on a table that has no matching rows returns 0,
-            # a NO-OP is still a valid exercise of the compat code
-            # path.
-            rc = await db.execute_raw(
-                "UPDATE agents SET status = status WHERE id = ?",
-                ("__never_exists__",),
-            )
-            # execute_raw returns rowcount; 0 = no matching row, not
-            # an error.
-            assert isinstance(rc, int)
-            assert rc == 0
-        finally:
-            await db.close()
+    async def test_execute_raw_runs_through_pool(self, pg_test_pool) -> None:
+        """Phase-3 Step C.1 (2026-04-21): ``execute_raw`` was ported
+        from the compat wrapper to the asyncpg pool. Its two call
+        sites in ``backend.main`` still pass ``?``-style placeholders,
+        so this test exercises that translation path + confirms the
+        function returns an int rowcount (0 when nothing matches)."""
+        rc = await db.execute_raw(
+            "UPDATE agents SET status = status WHERE id = ?",
+            ("__never_exists__",),
+        )
+        assert isinstance(rc, int)
+        assert rc == 0
 
 
 class TestLifecycleCoexistsWithPool:

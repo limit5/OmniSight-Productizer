@@ -6,52 +6,34 @@ import pytest
 
 
 class TestDatabaseHardening:
+    """Phase-3 Step C.1 (2026-04-21): the original three PRAGMA
+    checks (``PRAGMA journal_mode = wal``, ``PRAGMA busy_timeout``,
+    ``PRAGMA quick_check``) were SQLite-specific and have been
+    deleted. PostgreSQL enforces durability + concurrency with a
+    different stack (WAL + autovacuum + ``synchronous_commit``);
+    equivalent guardrails live in ``db_pool._set_connection_defaults``
+    (``statement_timeout``, ``lock_timeout``,
+    ``idle_in_transaction_session_timeout``) which are covered by
+    dedicated pool tests. Keeping the SQLite PRAGMA asserts would
+    have been false-positive — they ran against the pg_compat
+    shim and returned nonsense.
+
+    Only ``execute_raw`` survives here; it gains a regression guard
+    that the startup-cleanup code path in ``backend.main`` keeps
+    working against the pool.
+    """
 
     @pytest.mark.asyncio
-    async def test_wal_mode_enabled(self):
+    async def test_execute_raw(self, pg_test_pool):
+        """``db.execute_raw`` is used by ``backend.main`` at startup
+        to reset stuck agents + simulations. Exercise it against the
+        test pool to confirm the pool-native path still returns an
+        int row-count."""
         from backend import db
-        await db.init()
-        try:
-            async with db._conn().execute("PRAGMA journal_mode") as cur:
-                row = await cur.fetchone()
-                assert row[0] == "wal"
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_busy_timeout_set(self):
-        from backend import db
-        await db.init()
-        try:
-            async with db._conn().execute("PRAGMA busy_timeout") as cur:
-                row = await cur.fetchone()
-                assert row[0] == 5000
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_integrity_check_passes(self):
-        from backend import db
-        await db.init()
-        try:
-            async with db._conn().execute("PRAGMA quick_check") as cur:
-                row = await cur.fetchone()
-                assert row[0] == "ok"
-        finally:
-            await db.close()
-
-    @pytest.mark.asyncio
-    async def test_execute_raw(self):
-        from backend import db
-        await db.init()
-        try:
-            # Insert a test row then clean up
-            n = await db.execute_raw(
-                "UPDATE agents SET status=status WHERE 1=0"
-            )
-            assert n == 0  # No rows affected
-        finally:
-            await db.close()
+        n = await db.execute_raw(
+            "UPDATE agents SET status=status WHERE 1=0"
+        )
+        assert n == 0  # no rows affected
 
 
 class TestGraphTimeout:
