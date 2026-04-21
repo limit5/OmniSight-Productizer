@@ -111,6 +111,30 @@ _SHARED_KV_FIELDS: frozenset[str] = frozenset({
 })
 
 
+def _apply_runtime_setting(key: str, value) -> None:
+    """Write a runtime setting to THIS worker's in-memory ``settings``
+    AND mirror string-typed values into the Redis-backed
+    ``SharedKV`` so peer workers see it on their next overlay.
+
+    Use this helper instead of a raw ``setattr(settings, key, value)``
+    anywhere a wizard / rotate / finalize flow mutates an integration
+    config outside the generic ``PUT /settings`` path. It keeps the
+    "what gets mirrored" decision centralised on ``_SHARED_KV_FIELDS``
+    and the bool/int exclusion policy applied in one place.
+    """
+    if hasattr(settings, key):
+        setattr(settings, key, value)
+    if key in _SHARED_KV_FIELDS:
+        try:
+            _runtime_settings_kv.set(key, str(value))
+        except Exception as exc:
+            logger.warning(
+                "SharedKV mirror failed for %s: %s (local setattr "
+                "still in effect, cross-worker coherence degraded)",
+                key, exc,
+            )
+
+
 def _overlay_runtime_settings() -> None:
     """Read Redis-backed runtime settings into the local ``settings``
     singleton so subsequent ``getattr(settings, ...)`` reads reflect
@@ -1368,12 +1392,33 @@ async def finalize_gerrit_integration(
     if not (1 <= body.ssh_port <= 65535):
         raise HTTPException(400, f"ssh_port {body.ssh_port} out of range 1..65535")
 
-    settings.gerrit_enabled = True
-    settings.gerrit_url = (body.url or "").strip()
-    settings.gerrit_ssh_host = ssh_host
-    settings.gerrit_ssh_port = body.ssh_port
-    settings.gerrit_project = (body.project or "").strip()
-    settings.gerrit_replication_targets = (body.replication_targets or "").strip()
+    # 2026-04-22: route every finalize write through
+    # ``_apply_runtime_setting`` so string-typed fields mirror into
+    # Redis-backed SharedKV + peer workers converge on the wizard's
+    # state. Previously this used raw ``setattr(settings, ...)``
+    # which only mutated THIS worker — the other 3 workers kept
+    # their ``.env`` startup defaults, so after finalize the
+    # Settings modal / ``/readyz`` / git ops route-dependent on
+    # which worker answered saw an inconsistent Gerrit state.
+    # ``gerrit_enabled`` + ``gerrit_ssh_port`` are bool/int —
+    # helper drops them from the SharedKV mirror by design
+    # (type-safety with the string-only store) but still applies
+    # ``setattr`` locally. They're re-sourced from ``.env`` on peer
+    # worker startup, so the inconsistency for those two narrow
+    # knobs is bounded: a wizard-enabled Gerrit still appears
+    # disabled on peers until they restart OR a subsequent
+    # ``PUT /settings`` passes through those fields. Full fix is
+    # per-type overlay (follow-up) or Phase 5's DB-persisted
+    # credentials model.
+    _apply_runtime_setting("gerrit_enabled", True)
+    _apply_runtime_setting("gerrit_url", (body.url or "").strip())
+    _apply_runtime_setting("gerrit_ssh_host", ssh_host)
+    _apply_runtime_setting("gerrit_ssh_port", body.ssh_port)
+    _apply_runtime_setting("gerrit_project", (body.project or "").strip())
+    _apply_runtime_setting(
+        "gerrit_replication_targets",
+        (body.replication_targets or "").strip(),
+    )
 
     logger.info(
         "Gerrit integration finalized by user=%s host=%s port=%d project=%s url=%s",
@@ -1395,8 +1440,12 @@ async def finalize_gerrit_integration(
             "webhook_secret_configured": bool(settings.gerrit_webhook_secret),
         },
         "note": (
-            "Settings persisted to runtime — write the matching "
-            "OMNISIGHT_GERRIT_* env vars into your .env to survive restart."
+            "String fields (url / ssh_host / project / replication) persist "
+            "via Redis across workers + backend restarts. gerrit_enabled + "
+            "ssh_port remain process-local until the next ``.env`` load or "
+            "a follow-up PUT /settings — consider writing them into .env "
+            "for multi-replica durability until Phase 5b's DB-persistent "
+            "credential table lands."
         ),
     }
 
@@ -1417,7 +1466,11 @@ async def generate_gerrit_webhook_secret(
     ``webhooks.config`` for events to keep verifying.
     """
     new_secret = _secrets.token_urlsafe(32)
-    settings.gerrit_webhook_secret = new_secret
+    # Route through the SharedKV mirror so peer workers pick up the
+    # rotated secret via Redis — otherwise the Gerrit webhook HMAC
+    # verifier running on another worker would keep comparing against
+    # the old secret and reject legitimate events.
+    _apply_runtime_setting("gerrit_webhook_secret", new_secret)
     logger.info(
         "gerrit_webhook_secret rotated by user=%s len=%d",
         getattr(_user, "username", "?"),

@@ -3249,7 +3249,51 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 testId="tab-status-badge-gerrit"
                 message={tabBadgeMessage("gerrit")}
               />
-              <SettingsSection title="GERRIT CODE REVIEW" integration="gerrit" onTestResult={recordProbeResult}>
+              <SettingsSection
+                title="GERRIT CODE REVIEW"
+                integration="gerrit"
+                onTestResult={recordProbeResult}
+                onTest={async () => {
+                  // 2026-04-22: same two-path TEST logic as GitHub /
+                  // GitLab above. If the operator has typed new
+                  // Gerrit fields (ssh_host / ssh_port / url) and
+                  // hasn't yet hit SAVE & APPLY, probe the candidate
+                  // via ``testGitForgeToken({provider:"gerrit", …})``
+                  // which accepts the values in the body and doesn't
+                  // depend on which worker answers. Otherwise fall
+                  // through to the saved-settings probe. Without
+                  // this, the TEST button would always return
+                  // "Gerrit is disabled" / "SSH host not set" when
+                  // the user types into the fields but clicks TEST
+                  // before saving — same UX footgun we fixed for the
+                  // git forges in commit 0f4f4215.
+                  const dirtyKeys = ["gerrit_ssh_host", "gerrit_ssh_port", "gerrit_url"] as const
+                  const hasDirty = dirtyKeys.some(k => k in dirty)
+                  if (hasDirty) {
+                    const sshHost = ("gerrit_ssh_host" in dirty
+                      ? String(dirty["gerrit_ssh_host"])
+                      : String(settingsData["gerrit"]?.["ssh_host"] ?? "")
+                    ).trim()
+                    const sshPortRaw = ("gerrit_ssh_port" in dirty
+                      ? String(dirty["gerrit_ssh_port"])
+                      : String(settingsData["gerrit"]?.["ssh_port"] ?? "")
+                    ).trim()
+                    const url = ("gerrit_url" in dirty
+                      ? String(dirty["gerrit_url"])
+                      : String(settingsData["gerrit"]?.["url"] ?? "")
+                    ).trim()
+                    if (!sshHost) {
+                      return { status: "not_configured", message: "Gerrit SSH host is empty — fill it before hitting TEST." }
+                    }
+                    const sshPort = parseInt(sshPortRaw, 10)
+                    if (!Number.isFinite(sshPort) || sshPort < 1 || sshPort > 65535) {
+                      return { status: "error", message: `Gerrit SSH port "${sshPortRaw}" is not in 1..65535.` }
+                    }
+                    return await api.testGitForgeToken({ provider: "gerrit", ssh_host: sshHost, ssh_port: sshPort, url })
+                  }
+                  return await api.testIntegration("gerrit")
+                }}
+              >
                 {/* B14 Part C row 221: entry-point button that opens the Gerrit
                     Setup Wizard modal. The 5-step interactive content (URL+SSH
                     test / SSH-key hint / merger-agent-bot / submit-rule probe /
