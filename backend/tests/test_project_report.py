@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -10,42 +9,42 @@ import pytest
 
 
 @pytest.fixture()
-async def _report_db(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "r.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        # seed minimal data
-        conn = db._conn()
+async def _report_db(pg_test_pool):
+    """Phase-3 Step C.1 (2026-04-21): ported off the SQLite-file
+    ``OMNISIGHT_DATABASE_PATH`` + ``db._conn()`` setup onto the
+    shared ``pg_test_pool`` + direct ``$N`` placeholders. The tables
+    aren't part of the conftest TRUNCATE set, so we wipe the three
+    seed tables explicitly before inserting.
+    """
+    from backend import audit, db
+    async with pg_test_pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO token_usage (model, total_tokens, request_count, last_used) "
-            "VALUES (?, ?, ?, '')", ("claude", 12345, 7),
+            "TRUNCATE token_usage, artifacts, episodic_memory, audit_log "
+            "RESTART IDENTITY CASCADE"
         )
         await conn.execute(
-            "INSERT INTO artifacts (id, name, type, file_path, size, created_at, version, checksum) "
-            "VALUES (?, ?, ?, ?, ?, datetime('now'), '', ?)",
-            ("art-1", "fw.bin", "firmware", "/tmp/fw.bin", 1024, "abc123def456"),
+            "INSERT INTO token_usage (model, total_tokens, request_count, "
+            "last_used) VALUES ($1, $2, $3, '')",
+            "claude", 12345, 7,
         )
         await conn.execute(
-            "INSERT INTO episodic_memory (id, error_signature, solution, quality_score, access_count) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("ep-1", "cmake not found", "apt install cmake", 0.92, 5),
+            "INSERT INTO artifacts (id, name, type, file_path, size, "
+            "created_at, version, checksum) VALUES "
+            "($1, $2, $3, $4, $5, "
+            "to_char(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS'), '', $6)",
+            "art-1", "fw.bin", "firmware", "/tmp/fw.bin", 1024, "abc123def456",
         )
-        await conn.commit()
-        from backend import audit
-        await audit.log("mode_change", "operation_mode", "global",
-                        before={"mode": "supervised"}, after={"mode": "full_auto"})
-        await audit.log("decision_resolve", "decision", "dec-x",
-                        before={"status": "pending"},
-                        after={"status": "approved", "chosen_option_id": "go"})
-        try:
-            yield (db, audit)
-        finally:
-            await db.close()
+        await conn.execute(
+            "INSERT INTO episodic_memory (id, error_signature, solution, "
+            "quality_score, access_count) VALUES ($1, $2, $3, $4, $5)",
+            "ep-1", "cmake not found", "apt install cmake", 0.92, 5,
+        )
+    await audit.log("mode_change", "operation_mode", "global",
+                    before={"mode": "supervised"}, after={"mode": "full_auto"})
+    await audit.log("decision_resolve", "decision", "dec-x",
+                    before={"status": "pending"},
+                    after={"status": "approved", "chosen_option_id": "go"})
+    yield (db, audit)
 
 
 @pytest.mark.asyncio

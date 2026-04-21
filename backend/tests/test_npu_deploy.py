@@ -75,13 +75,20 @@ class TestSimulationTrackEnum:
 class TestNPUSimulationDB:
 
     @pytest.mark.asyncio
-    async def test_npu_columns_exist(self, client):
-        """NPU columns should be added by migration."""
-        from backend import db
-        conn = db._conn()
-        async with conn.execute("PRAGMA table_info(simulations)") as cur:
-            rows = await cur.fetchall()
-        columns = {row[1] for row in rows}
+    async def test_npu_columns_exist(self, pg_test_pool):
+        """NPU columns should be added by migration.
+
+        Phase-3 Step C.1 (2026-04-21): swapped ``PRAGMA
+        table_info(simulations)`` (SQLite-only) for an
+        ``information_schema.columns`` query against the pool —
+        identical semantics, portable across dialects.
+        """
+        async with pg_test_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'simulations'"
+            )
+        columns = {row["column_name"] for row in rows}
         assert "npu_latency_ms" in columns
         assert "npu_throughput_fps" in columns
         assert "accuracy_delta" in columns

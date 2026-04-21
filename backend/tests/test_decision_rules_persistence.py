@@ -1,34 +1,19 @@
-"""A1 — decision rules survive restart via SQLite persistence."""
+"""A1 — decision rules survive restart via PG persistence.
+
+Phase-3 Step C.1 (2026-04-21): ported off the SQLite-file
+``tmp_db`` fixture + ``db._conn()`` compat wrapper onto
+``pg_test_pool`` + direct pool acquire. The conftest's
+``pg_test_conn`` auto-truncates ``decision_rules`` inside the
+test transaction so rules don't leak between tests.
+"""
 
 from __future__ import annotations
-
-import os
-import tempfile
 
 import pytest
 
 
-@pytest.fixture()
-async def tmp_db(monkeypatch):
-    """Fresh SQLite file per test so persisted rules don't leak."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "rules.db")
-        monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", path)
-        # Force the resolver to re-read the env var.
-        from backend import config as _cfg
-        _cfg.settings.database_path = path
-
-        from backend import db
-        db._DB_PATH = db._resolve_db_path()
-        await db.init()
-        try:
-            yield db
-        finally:
-            await db.close()
-
-
 @pytest.mark.asyncio
-async def test_replace_and_load(tmp_db):
+async def test_replace_and_load(pg_test_pool):
     from backend import decision_rules as dr
     dr.clear()
 
@@ -53,7 +38,7 @@ async def test_replace_and_load(tmp_db):
 
 
 @pytest.mark.asyncio
-async def test_replace_rejects_duplicate_ids(tmp_db):
+async def test_replace_rejects_duplicate_ids(pg_test_pool):
     from backend import decision_rules as dr
     dr.clear()
     with pytest.raises(ValueError, match="duplicate rule id"):
@@ -64,16 +49,22 @@ async def test_replace_rejects_duplicate_ids(tmp_db):
 
 
 @pytest.mark.asyncio
-async def test_load_skips_malformed_rows(tmp_db):
+async def test_load_skips_malformed_rows(pg_test_pool):
     """Legacy/partial rows must not poison the engine."""
-    from backend import db, decision_rules as dr
+    from backend import decision_rules as dr
     dr.clear()
-    # Write a bogus row directly.
-    await db._conn().execute(
-        "INSERT INTO decision_rules (id, kind_pattern, severity, auto_in_modes, "
-        "default_option_id, priority, enabled, note) VALUES (?,?,?,?,?,?,?,?)",
-        ("bad", "", None, "[]", None, 100, 1, ""),  # empty kind_pattern fails normalise
-    )
-    await db._conn().commit()
+    # ``pg_test_pool`` doesn't auto-truncate (only ``pg_test_conn``
+    # does), so wipe any prior-test rows first — we need the
+    # loaded-count assertion to measure just the bogus row.
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute("DELETE FROM decision_rules")
+        # Write a bogus row directly — empty ``kind_pattern`` fails
+        # the normaliser in ``load_from_db`` so the row gets dropped.
+        await conn.execute(
+            "INSERT INTO decision_rules (id, kind_pattern, severity, "
+            "auto_in_modes, default_option_id, priority, enabled, note) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "bad", "", None, "[]", None, 100, 1, "",
+        )
     loaded = await dr.load_from_db()
     assert loaded == 0
