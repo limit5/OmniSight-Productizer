@@ -2,6 +2,24 @@
 
 Handles TOTP enrollment/verification with pyotp, backup codes,
 and WebAuthn registration/authentication with py_webauthn.
+
+Phase-3-Runtime-v2 SP-5.7b (2026-04-21): ported from compat
+``db._conn()`` to native asyncpg pool. 14 DB-touching functions
+move to ``get_pool().acquire() + $N placeholders``. ``datetime
+('now')`` in UPDATE SETs (last_used, used_at) swapped for
+``to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS')``.
+
+Module-global audit (SOP Step 1):
+  * ``MFA_ISSUER``, ``TOTP_DRIFT_TOLERANCE``, ``BACKUP_CODE_COUNT``
+    — constants, answer (1) identical across workers.
+  * ``_webauthn_challenges: dict[user_id, bytes]`` — **broken under
+    uvicorn --workers N**. If begin_register lands on worker A and
+    complete_register lands on worker B, B's lookup returns None →
+    400. Not one of the SOP-acceptable answers; it's a real bug.
+    Tracked as task #116 for Epic 6 fix (move to PG ephemeral
+    challenge table or Redis). Single-worker dev keeps working.
+  * ``_pending_mfa: dict[token, {...}]`` — same class of bug as
+    above, same task #116.
 """
 
 from __future__ import annotations
@@ -26,15 +44,6 @@ MFA_ISSUER = "OmniSight"
 TOTP_DRIFT_TOLERANCE = 1  # allow +/- 1 time step (30s each)
 BACKUP_CODE_COUNT = 10
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  DB helpers
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-async def _conn():
-    from backend import db
-    return db._conn()
-
 
 def _hash_code(code: str) -> str:
     return hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
@@ -46,13 +55,13 @@ def _hash_code(code: str) -> str:
 
 
 async def get_user_mfa_methods(user_id: str) -> list[dict]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, method, name, verified, created_at, last_used "
-        "FROM user_mfa WHERE user_id=? ORDER BY created_at",
-        (user_id,),
-    ) as cur:
-        rows = await cur.fetchall()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, method, name, verified, created_at, last_used "
+            "FROM user_mfa WHERE user_id = $1 ORDER BY created_at",
+            user_id,
+        )
     return [
         {
             "id": r["id"],
@@ -67,13 +76,14 @@ async def get_user_mfa_methods(user_id: str) -> list[dict]:
 
 
 async def has_verified_mfa(user_id: str) -> bool:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT COUNT(*) AS n FROM user_mfa WHERE user_id=? AND verified=1",
-        (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    return bool(r and r["n"] > 0)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        n = await conn.fetchval(
+            "SELECT COUNT(*) FROM user_mfa "
+            "WHERE user_id = $1 AND verified = 1",
+            user_id,
+        )
+    return bool(n and int(n) > 0)
 
 
 async def require_mfa_for_user(user_id: str) -> bool:
@@ -96,7 +106,13 @@ async def require_mfa_for_user(user_id: str) -> bool:
 async def totp_begin_enroll(user_id: str, user_email: str) -> dict:
     """Generate a TOTP secret and provisioning URI. Returns secret + QR as
     base64 PNG. The method row is created with verified=0; call
-    totp_confirm_enroll() to activate."""
+    totp_confirm_enroll() to activate.
+
+    SP-5.7b: DELETE-stale-pending + INSERT-new now run in one tx so
+    a crash between them can't leave the user with both an abandoned
+    stale pending row AND a new fresh one (the UI would offer the
+    wrong secret).
+    """
     secret = pyotp.random_base32(32)
     totp = pyotp.TOTP(secret)
     uri = totp.provisioning_uri(name=user_email, issuer_name=MFA_ISSUER)
@@ -107,17 +123,20 @@ async def totp_begin_enroll(user_id: str, user_email: str) -> dict:
     qr_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
     mfa_id = f"mfa-{uuid.uuid4().hex[:12]}"
-    conn = await _conn()
-    await conn.execute(
-        "DELETE FROM user_mfa WHERE user_id=? AND method='totp' AND verified=0",
-        (user_id,),
-    )
-    await conn.execute(
-        "INSERT INTO user_mfa (id, user_id, method, secret, name, verified) "
-        "VALUES (?, ?, 'totp', ?, 'TOTP Authenticator', 0)",
-        (mfa_id, user_id, secret),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM user_mfa "
+                "WHERE user_id = $1 AND method = 'totp' AND verified = 0",
+                user_id,
+            )
+            await conn.execute(
+                "INSERT INTO user_mfa "
+                "(id, user_id, method, secret, name, verified) "
+                "VALUES ($1, $2, 'totp', $3, 'TOTP Authenticator', 0)",
+                mfa_id, user_id, secret,
+            )
     return {
         "mfa_id": mfa_id,
         "secret": secret,
@@ -128,22 +147,21 @@ async def totp_begin_enroll(user_id: str, user_email: str) -> dict:
 
 async def totp_confirm_enroll(user_id: str, code: str) -> bool:
     """Verify the code matches the pending TOTP secret and activate it."""
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, secret FROM user_mfa "
-        "WHERE user_id=? AND method='totp' AND verified=0",
-        (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return False
-    totp = pyotp.TOTP(r["secret"])
-    if not totp.verify(code.strip(), valid_window=TOTP_DRIFT_TOLERANCE):
-        return False
-    await conn.execute(
-        "UPDATE user_mfa SET verified=1 WHERE id=?", (r["id"],)
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT id, secret FROM user_mfa "
+            "WHERE user_id = $1 AND method = 'totp' AND verified = 0",
+            user_id,
+        )
+        if not r:
+            return False
+        totp = pyotp.TOTP(r["secret"])
+        if not totp.verify(code.strip(), valid_window=TOTP_DRIFT_TOLERANCE):
+            return False
+        await conn.execute(
+            "UPDATE user_mfa SET verified = 1 WHERE id = $1", r["id"],
+        )
     codes = await _generate_backup_codes(user_id)
     logger.info("[MFA] TOTP enrolled for user %s, %d backup codes generated",
                 user_id, len(codes))
@@ -151,16 +169,29 @@ async def totp_confirm_enroll(user_id: str, code: str) -> bool:
 
 
 async def totp_disable(user_id: str) -> bool:
-    conn = await _conn()
-    cur = await conn.execute(
-        "DELETE FROM user_mfa WHERE user_id=? AND method='totp'",
-        (user_id,),
-    )
-    await conn.execute(
-        "DELETE FROM mfa_backup_codes WHERE user_id=?", (user_id,),
-    )
-    await conn.commit()
-    return (cur.rowcount or 0) > 0
+    """Delete the user's TOTP method row AND clear their backup codes.
+
+    SP-5.7b: two DELETEs now run in one tx so a crash between them
+    can't leave backup codes dangling after the TOTP row is gone
+    (which would make the codes unverifiable — UI says 'no MFA' but
+    DB still has backup code rows).
+    """
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            status = await conn.execute(
+                "DELETE FROM user_mfa "
+                "WHERE user_id = $1 AND method = 'totp'",
+                user_id,
+            )
+            await conn.execute(
+                "DELETE FROM mfa_backup_codes WHERE user_id = $1",
+                user_id,
+            )
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -169,23 +200,24 @@ async def totp_disable(user_id: str) -> bool:
 
 
 async def verify_totp(user_id: str, code: str) -> bool:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, secret FROM user_mfa "
-        "WHERE user_id=? AND method='totp' AND verified=1",
-        (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
-        return False
-    totp = pyotp.TOTP(r["secret"])
-    if not totp.verify(code.strip(), valid_window=TOTP_DRIFT_TOLERANCE):
-        return False
-    await conn.execute(
-        "UPDATE user_mfa SET last_used=datetime('now') WHERE id=?",
-        (r["id"],),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT id, secret FROM user_mfa "
+            "WHERE user_id = $1 AND method = 'totp' AND verified = 1",
+            user_id,
+        )
+        if not r:
+            return False
+        totp = pyotp.TOTP(r["secret"])
+        if not totp.verify(code.strip(), valid_window=TOTP_DRIFT_TOLERANCE):
+            return False
+        await conn.execute(
+            "UPDATE user_mfa SET "
+            "last_used = to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS') "
+            "WHERE id = $1",
+            r["id"],
+        )
     return True
 
 
@@ -201,19 +233,24 @@ def _generate_code() -> str:
 
 
 async def _generate_backup_codes(user_id: str) -> list[str]:
-    conn = await _conn()
-    await conn.execute(
-        "DELETE FROM mfa_backup_codes WHERE user_id=?", (user_id,),
-    )
-    codes: list[str] = []
-    for _ in range(BACKUP_CODE_COUNT):
-        code = _generate_code()
-        codes.append(code)
-        await conn.execute(
-            "INSERT INTO mfa_backup_codes (user_id, code_hash) VALUES (?, ?)",
-            (user_id, _hash_code(code)),
-        )
-    await conn.commit()
+    """Regenerate the 10-code backup set. SP-5.7b: entire
+    DELETE-then-INSERT-N loop runs inside one tx so a crash mid-
+    loop can't leave the user with a half-regenerated code set
+    (would be worse than keeping the old set intact)."""
+    codes = [_generate_code() for _ in range(BACKUP_CODE_COUNT)]
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM mfa_backup_codes WHERE user_id = $1",
+                user_id,
+            )
+            for code in codes:
+                await conn.execute(
+                    "INSERT INTO mfa_backup_codes (user_id, code_hash) "
+                    "VALUES ($1, $2)",
+                    user_id, _hash_code(code),
+                )
     return codes
 
 
@@ -225,35 +262,41 @@ async def regenerate_backup_codes(user_id: str) -> list[str]:
 
 
 async def get_backup_codes_status(user_id: str) -> dict:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT COUNT(*) AS total, SUM(CASE WHEN used=0 THEN 1 ELSE 0 END) AS remaining "
-        "FROM mfa_backup_codes WHERE user_id=?",
-        (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        r = await conn.fetchrow(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN used = 0 THEN 1 ELSE 0 END) AS remaining "
+            "FROM mfa_backup_codes WHERE user_id = $1",
+            user_id,
+        )
     return {
-        "total": r["total"] if r else 0,
-        "remaining": r["remaining"] if r else 0,
+        "total": int(r["total"]) if r and r["total"] is not None else 0,
+        "remaining": int(r["remaining"]) if r and r["remaining"] is not None else 0,
     }
 
 
 async def verify_backup_code(user_id: str, code: str) -> bool:
+    """Consume a backup code. SP-5.7b: SELECT + UPDATE inside one
+    tx with a UPDATE ... WHERE ... AND used = 0 guard so two
+    concurrent ``verify_backup_code`` calls with the same code
+    can't both succeed — whoever commits second sees 0 rows
+    updated and returns False."""
     h = _hash_code(code)
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id FROM mfa_backup_codes "
-        "WHERE user_id=? AND code_hash=? AND used=0",
-        (user_id, h),
-    ) as cur:
-        r = await cur.fetchone()
-    if not r:
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE mfa_backup_codes SET "
+                "used = 1, "
+                "used_at = to_char(clock_timestamp(), "
+                "                   'YYYY-MM-DD HH24:MI:SS') "
+                "WHERE user_id = $1 AND code_hash = $2 AND used = 0 "
+                "RETURNING id",
+                user_id, h,
+            )
+    if row is None:
         return False
-    await conn.execute(
-        "UPDATE mfa_backup_codes SET used=1, used_at=datetime('now') WHERE id=?",
-        (r["id"],),
-    )
-    await conn.commit()
     logger.info("[MFA] Backup code consumed for user %s", user_id)
     return True
 
@@ -345,13 +388,15 @@ async def webauthn_complete_register(
     }
 
     mfa_id = f"mfa-{uuid.uuid4().hex[:12]}"
-    conn = await _conn()
-    await conn.execute(
-        "INSERT INTO user_mfa (id, user_id, method, credential, name, verified) "
-        "VALUES (?, ?, 'webauthn', ?, ?, 1)",
-        (mfa_id, user_id, json.dumps(cred_data), name or "Security Key"),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO user_mfa "
+            "(id, user_id, method, credential, name, verified) "
+            "VALUES ($1, $2, 'webauthn', $3, $4, 1)",
+            mfa_id, user_id, json.dumps(cred_data),
+            name or "Security Key",
+        )
 
     if not await _has_backup_codes(user_id):
         await _generate_backup_codes(user_id)
@@ -421,33 +466,37 @@ async def webauthn_complete_authenticate(user_id: str, credential_json: dict) ->
         logger.warning("[MFA] WebAuthn authentication failed: %s", exc)
         return False
 
-    conn = await _conn()
-    await conn.execute(
-        "UPDATE user_mfa SET last_used=datetime('now') WHERE id=?",
-        (matched["mfa_id"],),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE user_mfa SET "
+            "last_used = to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS') "
+            "WHERE id = $1",
+            matched["mfa_id"],
+        )
     return True
 
 
 async def webauthn_remove(user_id: str, mfa_id: str) -> bool:
-    conn = await _conn()
-    cur = await conn.execute(
-        "DELETE FROM user_mfa WHERE id=? AND user_id=? AND method='webauthn'",
-        (mfa_id, user_id),
-    )
-    await conn.commit()
-    return (cur.rowcount or 0) > 0
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM user_mfa "
+            "WHERE id = $1 AND user_id = $2 AND method = 'webauthn' "
+            "RETURNING id",
+            mfa_id, user_id,
+        )
+    return row is not None
 
 
 async def _get_webauthn_credentials(user_id: str) -> list[dict]:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT id, credential FROM user_mfa "
-        "WHERE user_id=? AND method='webauthn' AND verified=1",
-        (user_id,),
-    ) as cur:
-        rows = await cur.fetchall()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, credential FROM user_mfa "
+            "WHERE user_id = $1 AND method = 'webauthn' AND verified = 1",
+            user_id,
+        )
     result = []
     for r in rows:
         try:
@@ -460,13 +509,13 @@ async def _get_webauthn_credentials(user_id: str) -> list[dict]:
 
 
 async def _has_backup_codes(user_id: str) -> bool:
-    conn = await _conn()
-    async with conn.execute(
-        "SELECT COUNT(*) AS n FROM mfa_backup_codes WHERE user_id=?",
-        (user_id,),
-    ) as cur:
-        r = await cur.fetchone()
-    return bool(r and r["n"] > 0)
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        n = await conn.fetchval(
+            "SELECT COUNT(*) FROM mfa_backup_codes WHERE user_id = $1",
+            user_id,
+        )
+    return bool(n and int(n) > 0)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -516,8 +565,9 @@ def _cleanup_stale_challenges():
 
 
 async def mark_session_mfa_verified(token: str) -> None:
-    conn = await _conn()
-    await conn.execute(
-        "UPDATE sessions SET mfa_verified=1 WHERE token=?", (token,),
-    )
-    await conn.commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET mfa_verified = 1 WHERE token = $1",
+            token,
+        )
