@@ -68,20 +68,30 @@ logger = logging.getLogger(__name__)
 _runtime_settings_kv = SharedKV("runtime_settings")
 
 # Fields whose cross-worker coherence is operator-visible. Any
-# string-typed field that the SYSTEM INTEGRATIONS modal lets the
-# operator edit needs to be here — otherwise ``PUT /settings``
+# field the SYSTEM INTEGRATIONS modal (or a wizard / rotate flow)
+# mutates at runtime needs to be here — otherwise ``PUT /settings``
 # lands on one worker, ``GET /settings`` round-robins to another,
 # and the modal shows the token field blank after save (the exact
 # 2026-04-22 GitHub/GitLab "消失了" symptom).
 #
-# Bool / int / float fields are excluded — ``SharedKV`` stores
-# strings, and ``setattr(settings, "gerrit_enabled", "True")``
-# would set a string instead of a bool, and any downstream code
-# doing ``if settings.gerrit_enabled:`` keeps evaluating truthy
-# on both "True" and "False" (both non-empty strings). Those
-# knobs change rarely mid-session and staying setattr-only is
-# the safer default until we add per-type overlay handling.
-_SHARED_KV_FIELDS: frozenset[str] = frozenset({
+# Split by storage semantics:
+#   * ``_SHARED_KV_STR_FIELDS``  — stored verbatim in Redis, string type.
+#   * ``_SHARED_KV_TYPED_FIELDS`` — bool / int fields; stored as
+#     ``str(value)`` in Redis, coerced back to the native type on
+#     overlay via ``_coerce_kv_value``. Added 2026-04-22 after
+#     finalize_gerrit_integration exposed the gap: without typed
+#     mirroring, ``gerrit_enabled`` (bool) and ``gerrit_ssh_port``
+#     (int) stayed process-local — so wizard finalize on worker-A
+#     left the other 3 workers treating Gerrit as disabled, which
+#     caused intermittent 403s on inbound Gerrit webhooks and
+#     half-the-time-missing replication pushes.
+#
+# IMPORTANT: never add a bool to ``_SHARED_KV_STR_FIELDS`` —
+# ``setattr(settings, "gerrit_enabled", "False")`` writes a
+# non-empty string which ``if settings.gerrit_enabled:`` evaluates
+# truthy, the worst-case silent-bug corner. Put bools in
+# ``_SHARED_KV_TYPED_FIELDS`` with ``bool`` as the type.
+_SHARED_KV_STR_FIELDS: frozenset[str] = frozenset({
     # ── LLM (added 2026-04-22, commit 8d626489) ──
     "llm_provider", "llm_model", "llm_fallback_chain",
     "anthropic_api_key", "google_api_key", "openai_api_key",
@@ -110,17 +120,70 @@ _SHARED_KV_FIELDS: frozenset[str] = frozenset({
     "ci_jenkins_url", "ci_jenkins_user", "ci_jenkins_api_token",
 })
 
+_SHARED_KV_TYPED_FIELDS: dict[str, type] = {
+    # ── Gerrit bool/int (added 2026-04-22) ──
+    # Without these, finalize_gerrit_integration / wizard /
+    # flat PUT-settings only mutated the receiving worker and
+    # the other 3 kept ``gerrit_enabled=False`` from ``.env``.
+    "gerrit_enabled": bool,
+    "gerrit_ssh_port": int,
+    # ── CI enable toggles ──
+    # Same multi-worker shape as Gerrit — toggling Jenkins / GitHub
+    # Actions / GitLab-CI in the modal should converge without
+    # needing an ``.env`` rewrite + restart.
+    "ci_github_actions_enabled": bool,
+    "ci_jenkins_enabled": bool,
+    "ci_gitlab_enabled": bool,
+    # ── Docker sandbox toggle ──
+    "docker_enabled": bool,
+}
+
+# Backwards-compatible union membership test. Existing call sites
+# use ``if key in _SHARED_KV_FIELDS`` to decide "should I mirror"
+# — keep that idiom working against the merged field set.
+_SHARED_KV_FIELDS: frozenset[str] = (
+    _SHARED_KV_STR_FIELDS | frozenset(_SHARED_KV_TYPED_FIELDS.keys())
+)
+
+
+def _coerce_kv_value(key: str, raw: str):
+    """Coerce a Redis-stored string back to the native type declared
+    in ``_SHARED_KV_TYPED_FIELDS``. Returns ``_SENTINEL_SKIP`` if the
+    value can't be coerced — caller should leave the local setting
+    untouched rather than write a corrupted value.
+
+    Bool semantics match what operator-input dicts + Python's
+    ``str(True)``/``str(False)`` produce; anything else (including
+    an empty string or garbled Redis value) resolves to ``False``
+    conservatively rather than raising.
+    """
+    typ = _SHARED_KV_TYPED_FIELDS.get(key)
+    if typ is None:
+        return raw  # plain string field
+    if typ is bool:
+        return str(raw).strip().lower() in ("true", "1", "yes", "on")
+    if typ is int:
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            return _SENTINEL_SKIP
+    return raw
+
+
+_SENTINEL_SKIP = object()
+
 
 def _apply_runtime_setting(key: str, value) -> None:
     """Write a runtime setting to THIS worker's in-memory ``settings``
-    AND mirror string-typed values into the Redis-backed
-    ``SharedKV`` so peer workers see it on their next overlay.
+    AND mirror to Redis-backed ``SharedKV`` so peer workers see it
+    on their next overlay.
 
     Use this helper instead of a raw ``setattr(settings, key, value)``
     anywhere a wizard / rotate / finalize flow mutates an integration
-    config outside the generic ``PUT /settings`` path. It keeps the
-    "what gets mirrored" decision centralised on ``_SHARED_KV_FIELDS``
-    and the bool/int exclusion policy applied in one place.
+    config outside the generic ``PUT /settings`` path. Keeps the
+    mirroring policy and type-aware serialisation centralised.
+    Typed fields (bool / int) are stored as ``str(value)`` in Redis
+    and coerced back on overlay — see ``_coerce_kv_value``.
     """
     if hasattr(settings, key):
         setattr(settings, key, value)
@@ -142,17 +205,27 @@ def _overlay_runtime_settings() -> None:
 
     Cheap: single ``hgetall`` round-trip to Redis, falls back to
     local dict on Redis failure. Called at the top of the GET /
-    PUT handlers and from ``list_providers`` hot path.
+    PUT handlers and from ``list_providers`` hot path. Typed fields
+    (bool / int) are coerced from the Redis string back to their
+    native type before setattr.
     """
     try:
         overlay = _runtime_settings_kv.get_all()
         if not overlay:
             return
-        for key, value in overlay.items():
+        for key, raw in overlay.items():
             if key not in _SHARED_KV_FIELDS:
                 continue
-            if hasattr(settings, key):
-                setattr(settings, key, value)
+            if not hasattr(settings, key):
+                continue
+            coerced = _coerce_kv_value(key, raw)
+            if coerced is _SENTINEL_SKIP:
+                logger.debug(
+                    "overlay skipped: %s = %r (coercion failed)",
+                    key, raw,
+                )
+                continue
+            setattr(settings, key, coerced)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("runtime settings overlay skipped: %s", exc)
 
@@ -1393,23 +1466,15 @@ async def finalize_gerrit_integration(
         raise HTTPException(400, f"ssh_port {body.ssh_port} out of range 1..65535")
 
     # 2026-04-22: route every finalize write through
-    # ``_apply_runtime_setting`` so string-typed fields mirror into
+    # ``_apply_runtime_setting`` so all six fields mirror into
     # Redis-backed SharedKV + peer workers converge on the wizard's
     # state. Previously this used raw ``setattr(settings, ...)``
-    # which only mutated THIS worker — the other 3 workers kept
-    # their ``.env`` startup defaults, so after finalize the
-    # Settings modal / ``/readyz`` / git ops route-dependent on
-    # which worker answered saw an inconsistent Gerrit state.
-    # ``gerrit_enabled`` + ``gerrit_ssh_port`` are bool/int —
-    # helper drops them from the SharedKV mirror by design
-    # (type-safety with the string-only store) but still applies
-    # ``setattr`` locally. They're re-sourced from ``.env`` on peer
-    # worker startup, so the inconsistency for those two narrow
-    # knobs is bounded: a wizard-enabled Gerrit still appears
-    # disabled on peers until they restart OR a subsequent
-    # ``PUT /settings`` passes through those fields. Full fix is
-    # per-type overlay (follow-up) or Phase 5's DB-persisted
-    # credentials model.
+    # which only mutated THIS worker. After the same-day typed-KV
+    # follow-up landed ``gerrit_enabled`` (bool) and
+    # ``gerrit_ssh_port`` (int) are also mirrored — coerced back
+    # to their native types on overlay via ``_coerce_kv_value`` —
+    # so wizard finalize alone is now sufficient to enable Gerrit
+    # across all workers without an ``.env`` rewrite + restart.
     _apply_runtime_setting("gerrit_enabled", True)
     _apply_runtime_setting("gerrit_url", (body.url or "").strip())
     _apply_runtime_setting("gerrit_ssh_host", ssh_host)
@@ -1440,12 +1505,11 @@ async def finalize_gerrit_integration(
             "webhook_secret_configured": bool(settings.gerrit_webhook_secret),
         },
         "note": (
-            "String fields (url / ssh_host / project / replication) persist "
-            "via Redis across workers + backend restarts. gerrit_enabled + "
-            "ssh_port remain process-local until the next ``.env`` load or "
-            "a follow-up PUT /settings — consider writing them into .env "
-            "for multi-replica durability until Phase 5b's DB-persistent "
-            "credential table lands."
+            "All six fields (incl. gerrit_enabled + ssh_port) persist via "
+            "Redis across workers. Values survive backend restarts too "
+            "since Redis is the source of truth via overlay; the ``.env`` "
+            "values only matter on a cold Redis. Phase 5b will move "
+            "credentials into a DB-persistent per-tenant table."
         ),
     }
 

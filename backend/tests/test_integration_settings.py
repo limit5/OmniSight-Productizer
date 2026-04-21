@@ -1978,3 +1978,141 @@ class TestConnectionResponseShape:
         assert data["version"] == "9.12.5"
         assert called_url["url"].endswith("/rest/api/2/serverInfo")
         assert "/myself" not in called_url["url"]
+
+
+class TestSharedKVTypedMirror:
+    """2026-04-22: regression coverage for the bool/int cross-worker
+    fix. Without the typed SharedKV path, a finalize-gerrit flow on
+    worker-A leaves gerrit_enabled=False on worker-B/C/D, causing
+    intermittent 403s on inbound Gerrit webhooks (webhooks.py:50
+    gates on ``settings.gerrit_enabled``) and missing replication
+    pushes (agents/tools.py:730 ditto). See also
+    ``test_webhooks.py::test_gerrit_enabled_accepts_event`` which
+    asserts the webhook-handler contract on the consumer side.
+    """
+
+    def test_coerce_bool_true_variants(self):
+        from backend.routers.integration import _coerce_kv_value
+
+        for raw in ("True", "true", "1", "yes", "on", " TRUE "):
+            assert _coerce_kv_value("gerrit_enabled", raw) is True, raw
+
+    def test_coerce_bool_false_variants(self):
+        from backend.routers.integration import _coerce_kv_value
+
+        for raw in ("False", "false", "0", "", "no", "off", "garbage"):
+            assert _coerce_kv_value("gerrit_enabled", raw) is False, raw
+
+    def test_coerce_int_valid(self):
+        from backend.routers.integration import _coerce_kv_value
+
+        assert _coerce_kv_value("gerrit_ssh_port", "29418") == 29418
+        assert _coerce_kv_value("gerrit_ssh_port", " 22 ") == 22
+
+    def test_coerce_int_invalid_yields_sentinel(self):
+        from backend.routers.integration import (
+            _coerce_kv_value,
+            _SENTINEL_SKIP,
+        )
+
+        assert _coerce_kv_value("gerrit_ssh_port", "not-a-port") is _SENTINEL_SKIP
+        assert _coerce_kv_value("gerrit_ssh_port", "") is _SENTINEL_SKIP
+
+    def test_coerce_passthrough_string_fields(self):
+        from backend.routers.integration import _coerce_kv_value
+
+        assert _coerce_kv_value("gerrit_url", "https://g.example") == "https://g.example"
+        # Unknown key → treated as string (caller gates on membership first)
+        assert _coerce_kv_value("never_heard_of_you", "abc") == "abc"
+
+    def test_apply_runtime_setting_mirrors_bool_with_native_setattr(
+        self, monkeypatch,
+    ):
+        """``_apply_runtime_setting('gerrit_enabled', True)`` must leave
+        ``settings.gerrit_enabled`` as Python ``True`` locally AND push
+        ``"True"`` (string) into the SharedKV. Regression guard against
+        a future refactor accidentally storing the raw bool and breaking
+        ``get_all()`` round-trip via Redis HSET.
+        """
+        from backend.routers import integration as _i
+
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "set",
+            lambda key, value: captured.__setitem__(key, value),
+        )
+        monkeypatch.setattr(_i.settings, "gerrit_enabled", False)
+        _i._apply_runtime_setting("gerrit_enabled", True)
+
+        # Local: native bool preserved for ``if settings.gerrit_enabled``
+        assert _i.settings.gerrit_enabled is True
+        # Wire: stringified so Redis HSET is happy
+        assert captured["gerrit_enabled"] == "True"
+
+    def test_overlay_round_trips_bool_and_int(self, monkeypatch):
+        """Round-trip: set bool/int via ``_apply_runtime_setting``,
+        wipe the local settings, then run ``_overlay_runtime_settings``
+        and verify the native types reappear. Simulates worker-B
+        coming up fresh after worker-A did a finalize.
+        """
+        from backend.routers import integration as _i
+
+        wire: dict[str, str] = {}
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "set",
+            lambda key, value: wire.__setitem__(key, value),
+        )
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "get_all", lambda: dict(wire),
+        )
+        # Worker-A writes.
+        monkeypatch.setattr(_i.settings, "gerrit_enabled", False)
+        monkeypatch.setattr(_i.settings, "gerrit_ssh_port", 22)
+        _i._apply_runtime_setting("gerrit_enabled", True)
+        _i._apply_runtime_setting("gerrit_ssh_port", 29418)
+        # Worker-B wakes up with stale defaults, reads overlay.
+        monkeypatch.setattr(_i.settings, "gerrit_enabled", False)
+        monkeypatch.setattr(_i.settings, "gerrit_ssh_port", 22)
+        _i._overlay_runtime_settings()
+        assert _i.settings.gerrit_enabled is True
+        assert _i.settings.gerrit_ssh_port == 29418
+        assert isinstance(_i.settings.gerrit_ssh_port, int)
+
+    def test_overlay_skips_corrupted_int_value(self, monkeypatch):
+        """If Redis somehow holds a garbled int (e.g. concurrent
+        rewrite crash), overlay must NOT clobber the local setting
+        with a None or a raw string — skip the field entirely so the
+        ``.env`` default / previous-good local value wins.
+        """
+        from backend.routers import integration as _i
+
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "get_all",
+            lambda: {"gerrit_ssh_port": "not-an-int"},
+        )
+        monkeypatch.setattr(_i.settings, "gerrit_ssh_port", 29418)
+        _i._overlay_runtime_settings()
+        assert _i.settings.gerrit_ssh_port == 29418  # preserved
+
+    def test_typed_fields_included_in_union_membership(self):
+        """The union ``_SHARED_KV_FIELDS`` is what PUT /settings and
+        ``_apply_runtime_setting`` gate on. Guard against a future
+        refactor dropping typed fields from the union, which would
+        silently regress the cross-worker mirror.
+        """
+        from backend.routers.integration import (
+            _SHARED_KV_FIELDS,
+            _SHARED_KV_TYPED_FIELDS,
+        )
+
+        for key in _SHARED_KV_TYPED_FIELDS:
+            assert key in _SHARED_KV_FIELDS, (
+                f"{key} is typed but missing from _SHARED_KV_FIELDS union"
+            )
+        # Sanity: the six known typed fields must all be present.
+        expected = {
+            "gerrit_enabled", "gerrit_ssh_port",
+            "ci_github_actions_enabled", "ci_jenkins_enabled",
+            "ci_gitlab_enabled", "docker_enabled",
+        }
+        assert expected <= set(_SHARED_KV_TYPED_FIELDS.keys())
