@@ -38,16 +38,26 @@ from backend.db_context import tenant_insert_value, tenant_where_pg
 
 logger = logging.getLogger(__name__)
 
-# Phase-3-Runtime-v2 SP-4.1 (2026-04-20): ported to native asyncpg +
-# pool. The asyncio.Lock below still serialises chain writes within
-# ONE event loop (protects against interleaving within a worker
-# process); the real cross-process / cross-connection serialisation
-# happens via PG's ``pg_advisory_xact_lock`` keyed on tenant_id
-# (see ``_log_impl`` below). Without that DB-level lock, two
-# simultaneously-scheduled ``audit.log`` calls on different pool
-# connections could both read the same prev_hash and insert two
-# chain-forks — silently breaking ``verify_chain``.
-_chain_lock = asyncio.Lock()
+# Phase-3-Runtime-v2 SP-4.1 (2026-04-20): ported to native asyncpg
+# + pool. Chain write serialisation is handled ENTIRELY by PG's
+# ``pg_advisory_xact_lock(hashtext(tenant_id))`` inside ``_log_impl``
+# — that lock covers both cross-connection races (two pool borrows
+# reading the same prev_hash) and cross-process races (`uvicorn
+# --workers N`), which are the real concurrency hazards for a hash
+# chain.
+#
+# SP-9.2 (2026-04-21, task #82): the previous module-level
+# ``asyncio.Lock`` has been removed. It was redundant on top of the
+# PG advisory lock, AND it was a latent multi-event-loop bug — the
+# Lock binds to whichever event loop first touches it, so once
+# pytest-asyncio closes that loop (function-scoped) subsequent
+# tests on fresh loops hit ``RuntimeError: <Lock> is bound to a
+# different event loop``. This surfaced in the SP-9.2 multi-tenant
+# isolation suite where several ``audit.log`` calls in the second-
+# to-run test raised silently (swallowed by the outer ``except
+# Exception`` in ``log``) and lost audit rows. Removing the Lock
+# is safe because every call path into ``_log_impl`` is wrapped in
+# ``conn.transaction()`` + ``pg_advisory_xact_lock(...)`` already.
 
 
 def _canonical(row: dict[str, Any]) -> str:
@@ -150,23 +160,22 @@ async def log(
     a tenant-scoped advisory lock.
     """
     try:
-        async with _chain_lock:
-            if conn is None:
-                from backend.db_pool import get_pool
-                async with get_pool().acquire() as owned_conn:
-                    async with owned_conn.transaction():
-                        return await _log_impl(
-                            owned_conn, action, entity_kind, entity_id,
-                            before, after, actor, session_id,
-                        )
-            else:
-                # Nested transaction → PG savepoint; advisory lock is
-                # still scoped to the outer tx (released on its commit).
-                async with conn.transaction():
+        if conn is None:
+            from backend.db_pool import get_pool
+            async with get_pool().acquire() as owned_conn:
+                async with owned_conn.transaction():
                     return await _log_impl(
-                        conn, action, entity_kind, entity_id,
+                        owned_conn, action, entity_kind, entity_id,
                         before, after, actor, session_id,
                     )
+        else:
+            # Nested transaction → PG savepoint; advisory lock is
+            # still scoped to the outer tx (released on its commit).
+            async with conn.transaction():
+                return await _log_impl(
+                    conn, action, entity_kind, entity_id,
+                    before, after, actor, session_id,
+                )
     except Exception as exc:
         logger.warning("audit.log failed (%s on %s): %s", action, entity_kind, exc)
         return None
