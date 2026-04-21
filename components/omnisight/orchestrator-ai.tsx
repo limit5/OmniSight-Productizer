@@ -581,8 +581,18 @@ export function OrchestratorAI({
         )}
       </div>
       
-      {/* Token Usage Statistics */}
-      <TokenUsageStats externalUsage={tokenUsage} budgetInfo={tokenBudget} onResetFreeze={onResetFreeze} onUpdateBudget={onUpdateBudget} />
+      {/* Token Usage Statistics — passes ``providers`` so that any
+          configured-but-unused model (e.g. Anthropic wired via env
+          but no call has landed yet) shows a 0-count placeholder
+          card instead of being invisible. Addresses operator
+          2026-04-21 report: "API key 接上但卡片只顯示 gemma4:e4b". */}
+      <TokenUsageStats
+        externalUsage={tokenUsage}
+        configuredProviders={providers}
+        budgetInfo={tokenBudget}
+        onResetFreeze={onResetFreeze}
+        onUpdateBudget={onUpdateBudget}
+      />
 
       {/* RTK Compression Stats */}
       {compressionStats && compressionStats.compression_count > 0 && (

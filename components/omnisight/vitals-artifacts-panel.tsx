@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { FileText, Download, ExternalLink, Camera, Radio, ChevronDown, WifiOff, Plus, X, Grid2X2, Grid3X3, Maximize2, Minimize2, Cpu, Play, ToggleLeft, ToggleRight } from "lucide-react"
 import type { SimulationItem } from "@/lib/api"
 import { getArtifactDownloadUrl } from "@/lib/api"
@@ -288,6 +288,31 @@ function SimulationResults({
 }
 
 function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation }: { logs: LogEntry[]; artifacts: Artifact[]; simulations?: SimulationItem[]; onTriggerSimulation?: (track: string, module: string, mock: boolean) => void }) {
+  // Auto-scroll to bottom on new log entries, BUT only if the user is
+  // already at (or near) the bottom. If they scrolled up to read older
+  // logs, respect their position — nothing more annoying than getting
+  // yanked to the bottom while reading. ``stickToBottom`` tracks the
+  // "user is tailing" state; we flip it on every scroll event based
+  // on whether they're within 40px of the bottom, and on every log
+  // append we only scroll if that flag is true.
+  const logContainerRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
+
+  useEffect(() => {
+    const el = logContainerRef.current
+    if (!el) return
+    if (stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [logs])
+
+  const handleScroll = useCallback(() => {
+    const el = logContainerRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distanceFromBottom < 40
+  }, [])
+
   return (
     <div className="holo-glass-simple rounded flex-1 flex flex-col overflow-hidden">
       {/* Header */}
@@ -299,12 +324,16 @@ function ReporterVortex({ logs, artifacts, simulations = [], onTriggerSimulation
           <span className="font-sans text-xs font-semibold tracking-fui text-[var(--artifact-purple)]">REPORTER VORTEX</span>
         </div>
       </div>
-      
+
       {/* Simulation Results — above log stream so it's always visible */}
       <SimulationResults simulations={simulations} onTriggerSimulation={onTriggerSimulation} />
 
       {/* Log Stream */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-1 min-h-0">
+      <div
+        ref={logContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-1 min-h-0"
+      >
         {logs.map((log, i) => {
           // Tag-based color extraction
           const tagMatch = log.message.match(/^\[([A-Z]+)\]/)

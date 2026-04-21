@@ -67,12 +67,22 @@ export interface TokenBudgetInfo {
 interface TokenUsageStatsProps {
   className?: string
   externalUsage?: ModelTokenUsage[]
+  // 2026-04-21: when the operator has credentials wired for a
+  // provider (e.g. Anthropic API key set) but hasn't invoked it yet,
+  // ``externalUsage`` is empty for that model — previously the panel
+  // simply didn't render a card for it, which looked like the provider
+  // was missing entirely (``"I configured Anthropic but the stats only
+  // shows gemma4:e4b"``). Passing the configured-providers list lets
+  // us synthesise 0-count placeholder cards so every wired model is
+  // visible even before the first invocation. Once a call lands, the
+  // placeholder is replaced by the real usage row.
+  configuredProviders?: { id: string; name: string; models: string[]; configured: boolean }[]
   budgetInfo?: TokenBudgetInfo | null
   onResetFreeze?: () => void
   onUpdateBudget?: (updates: Record<string, number | string>) => void
 }
 
-export function TokenUsageStats({ className = "", externalUsage, budgetInfo, onResetFreeze, onUpdateBudget }: TokenUsageStatsProps) {
+export function TokenUsageStats({ className = "", externalUsage, configuredProviders, budgetInfo, onResetFreeze, onUpdateBudget }: TokenUsageStatsProps) {
   const [expanded, setExpanded] = useState(true)
   const [usageData, setUsageData] = useState<ModelTokenUsage[]>(externalUsage ?? emptyUsage())
   const [selectedModel, setSelectedModel] = useState<AIModel | null>(null)
@@ -96,7 +106,7 @@ export function TokenUsageStats({ className = "", externalUsage, budgetInfo, onR
     }
   }, [externalUsage])
   
-  // Calculate totals
+  // Calculate totals FROM REAL USAGE ONLY (exclude placeholder cards).
   const totals = usageData.reduce((acc, item) => ({
     inputTokens: acc.inputTokens + item.inputTokens,
     outputTokens: acc.outputTokens + item.outputTokens,
@@ -104,9 +114,36 @@ export function TokenUsageStats({ className = "", externalUsage, budgetInfo, onR
     cost: acc.cost + item.cost,
     requestCount: acc.requestCount + item.requestCount,
   }), { inputTokens: 0, outputTokens: 0, totalTokens: 0, cost: 0, requestCount: 0 })
-  
-  // Sort by total tokens descending
-  const sortedData = [...usageData].sort((a, b) => b.totalTokens - a.totalTokens)
+
+  // 2026-04-21: Merge configured-but-unused provider models as 0-count
+  // placeholder cards so the panel shows every wired credential, not
+  // just the ones that happen to have been invoked. Keyed by model
+  // string (dedup case-insensitively against the real usage rows).
+  const usedModels = new Set(usageData.map(u => u.model.toLowerCase()))
+  const placeholderRows: ModelTokenUsage[] = []
+  if (configuredProviders) {
+    for (const p of configuredProviders) {
+      if (!p.configured) continue
+      for (const m of p.models) {
+        if (!m || usedModels.has(m.toLowerCase())) continue
+        placeholderRows.push({
+          model: m,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          cost: 0,
+          requestCount: 0,
+          avgLatency: 0,
+          lastUsed: "",
+        })
+      }
+    }
+  }
+  // Sort real usage by total tokens DESC; placeholders grouped after.
+  const sortedData = [
+    ...[...usageData].sort((a, b) => b.totalTokens - a.totalTokens),
+    ...placeholderRows,
+  ]
 
   return (
     <div className={`border-b border-[var(--border)] ${className}`}>
@@ -309,34 +346,53 @@ export function TokenUsageStats({ className = "", externalUsage, budgetInfo, onR
             {sortedData.map(item => {
               const modelInfo = AI_MODEL_INFO[item.model]
               const isSelected = selectedModel === item.model
-              const usagePercent = (item.totalTokens / totals.totalTokens) * 100
-              
+              // Guard against 0/0 NaN for placeholder rows (configured
+              // provider, no usage yet). Treat no-usage as 0%.
+              const usagePercent = totals.totalTokens > 0
+                ? (item.totalTokens / totals.totalTokens) * 100
+                : 0
+              const isPlaceholder = item.requestCount === 0 && item.totalTokens === 0
+
               return (
                 <button
                   key={item.model}
                   onClick={() => setSelectedModel(isSelected ? null : item.model)}
                   className={`w-full text-left p-3 rounded-lg transition-all ${
-                    isSelected 
+                    isSelected
                       ? "bg-[var(--artifact-purple)]/20 ring-1 ring-[var(--artifact-purple)]"
-                      : "bg-[var(--secondary)] hover:bg-[var(--secondary)]/80"
+                      : isPlaceholder
+                        ? "bg-[var(--secondary)]/40 hover:bg-[var(--secondary)]/60 opacity-70"
+                        : "bg-[var(--secondary)] hover:bg-[var(--secondary)]/80"
                   }`}
                 >
                   {/* Row 1: Model Name + Provider + Cost */}
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <div 
+                      <div
                         className="w-3 h-3 rounded-full shrink-0"
                         style={{ backgroundColor: modelInfo.color }}
                       />
                       <span className="font-mono text-xs font-medium text-[var(--foreground)]">
                         {modelInfo.label}
                       </span>
+                      {isPlaceholder && (
+                        <span
+                          className="font-mono text-[8px] px-1 py-0.5 rounded border"
+                          style={{
+                            borderColor: `color-mix(in srgb, ${modelInfo.color} 40%, transparent)`,
+                            color: modelInfo.color,
+                          }}
+                          title="Provider is wired up but no request has landed yet"
+                        >
+                          READY
+                        </span>
+                      )}
                     </div>
-                    <span 
+                    <span
                       className="font-mono text-xs font-semibold px-2 py-0.5 rounded"
-                      style={{ 
+                      style={{
                         backgroundColor: `color-mix(in srgb, ${modelInfo.color} 20%, transparent)`,
-                        color: modelInfo.color 
+                        color: modelInfo.color
                       }}
                     >
                       {formatCost(item.cost)}

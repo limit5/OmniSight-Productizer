@@ -67,26 +67,72 @@ const KNOWN_MODELS: Record<string, ModelDisplayInfo> = {
   "ollama":        { label: "Ollama (Local)",  shortLabel: "Ollama",  provider: "Local",    color: "#a3a3a3" },
 }
 
+// 2026-04-21: helper that turns a model suffix (everything after the
+// matched prefix) into a compact display token. Earlier version
+// returned only the base shortLabel ("Opus") for any ``claude-opus-*``
+// which made ``claude-opus-4-6`` and ``claude-opus-4-7`` visually
+// identical in the LLM MODEL selector. Operator reported confusion
+// when 2× Opus or 3× Llama chips all shared the same label with no
+// way to pick between versions. We now surface the suffix so the two
+// Opus versions render as ``Opus 4.7`` / ``Opus 4.6`` and three
+// Llama variants stay distinct.
+function _suffixFromModelString(model: string, knownPrefix: string): string {
+  // ``claude-opus-4-7`` with prefix ``claude-opus`` → ``4-7`` → ``4.7``
+  // ``llama-3.3-70b`` with prefix ``llama-3`` → ``.3-70b`` → ``3.70b`` (ugly; see below)
+  // ``llama-3-70b`` with prefix ``llama-3`` → ``-70b`` → ``70b``
+  // Remove leading separators; replace hyphens between digits with dots
+  // (version-ish), but keep hyphens between letters (``-70b`` stays).
+  let s = model.slice(knownPrefix.length).replace(/^[-_:/.]+/, "")
+  if (!s) return ""
+  // Heuristic: if ALL hyphens are between digits, treat as version → dots.
+  // Otherwise (mix of digits + letters) leave hyphens alone.
+  if (/^[\d.-]+$/.test(s)) {
+    s = s.replace(/-/g, ".")
+  }
+  return s
+}
+
 /** Resolve display info for any model string — fuzzy matches known models, falls back to generic. */
 export function getModelInfo(model: unknown): ModelDisplayInfo {
   if (!model || typeof model !== "string") return { label: "", shortLabel: "", provider: "", color: "#737373" }
   const lower = model.toLowerCase()
-  // Exact match
+  // Exact match — canonical shortLabel, no suffix needed.
   if (KNOWN_MODELS[lower]) return KNOWN_MODELS[lower]
-  // Prefix match (e.g. "claude-sonnet-4-20250514" → "claude-sonnet")
+  // Prefix match (e.g. ``claude-opus-4-7`` → ``claude-opus``). Longer
+  // prefixes tried first so ``claude-opus`` beats ``claude``.
   const sorted = Object.keys(KNOWN_MODELS).sort((a, b) => b.length - a.length)
   for (const key of sorted) {
-    if (lower.startsWith(key)) return KNOWN_MODELS[key]
+    if (lower.startsWith(key)) {
+      const info = KNOWN_MODELS[key]
+      const suffix = _suffixFromModelString(lower, key)
+      if (!suffix) return info
+      // Preserve the full model string as ``label`` (tooltip / long form)
+      // while the chip renders ``shortLabel + ' ' + suffix``.
+      return { ...info, label: model, shortLabel: `${info.shortLabel} ${suffix}` }
+    }
   }
-  // Provider detection from string
-  if (lower.includes("claude")) return { label: model, shortLabel: "Claude", provider: "Anthropic", color: "#f59e0b" }
-  if (lower.includes("gpt")) return { label: model, shortLabel: "GPT", provider: "OpenAI", color: "#10b981" }
-  if (lower.includes("gemini")) return { label: model, shortLabel: "Gemini", provider: "Google", color: "#3b82f6" }
-  if (lower.includes("grok")) return { label: model, shortLabel: "Grok", provider: "xAI", color: "#ec4899" }
-  if (lower.includes("llama")) return { label: model, shortLabel: "Llama", provider: "Meta", color: "#8b5cf6" }
-  if (lower.includes("deepseek")) return { label: model, shortLabel: "DeepSeek", provider: "DeepSeek", color: "#06b6d4" }
-  // Unknown model — generic display
-  return { label: model, shortLabel: model.split("-")[0], provider: "", color: "#737373" }
+  // Provider detection from string — unknown vendor model. Fall through
+  // to the most-specific inference on the lower-cased string, then
+  // preserve enough of the original to disambiguate multiple variants.
+  const providerFallbacks: { match: string; shortLabel: string; provider: string; color: string }[] = [
+    { match: "claude",   shortLabel: "Claude",   provider: "Anthropic", color: "#f59e0b" },
+    { match: "gpt",      shortLabel: "GPT",      provider: "OpenAI",    color: "#10b981" },
+    { match: "gemini",   shortLabel: "Gemini",   provider: "Google",    color: "#3b82f6" },
+    { match: "grok",     shortLabel: "Grok",     provider: "xAI",       color: "#ec4899" },
+    { match: "llama",    shortLabel: "Llama",    provider: "Meta",      color: "#8b5cf6" },
+    { match: "deepseek", shortLabel: "DeepSeek", provider: "DeepSeek",  color: "#06b6d4" },
+    { match: "mistral",  shortLabel: "Mistral",  provider: "Mistral",   color: "#f97316" },
+    { match: "gemma",    shortLabel: "Gemma",    provider: "Google",    color: "#2563eb" },
+  ]
+  for (const fb of providerFallbacks) {
+    if (lower.includes(fb.match)) {
+      const suffix = _suffixFromModelString(lower, fb.match)
+      const shortLabel = suffix ? `${fb.shortLabel} ${suffix}` : fb.shortLabel
+      return { label: model, shortLabel, provider: fb.provider, color: fb.color }
+    }
+  }
+  // Unknown model — show the raw string so it's at least pickable.
+  return { label: model, shortLabel: model, provider: "", color: "#737373" }
 }
 
 // Backwards compat — old code references AI_MODEL_INFO[agent.aiModel]
