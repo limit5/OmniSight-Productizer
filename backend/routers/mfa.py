@@ -191,7 +191,7 @@ class MFAChallengeRequest(BaseModel):
 async def mfa_challenge(req: MFAChallengeRequest,
                         request: Request, response: Response) -> dict:
     """Verify TOTP or backup code after password auth returned mfa_required."""
-    challenge = mfa.get_mfa_challenge(req.mfa_token)
+    challenge = await mfa.get_mfa_challenge(req.mfa_token)
     if not challenge:
         raise HTTPException(status_code=401, detail="MFA challenge expired or invalid")
 
@@ -207,7 +207,7 @@ async def mfa_challenge(req: MFAChallengeRequest,
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid MFA code")
 
-    data = mfa.consume_mfa_challenge(req.mfa_token)
+    data = await mfa.consume_mfa_challenge(req.mfa_token)
     if not data:
         data = challenge
 
@@ -254,7 +254,7 @@ class WebAuthnChallengeBeginRequest(BaseModel):
 
 @router.post("/auth/mfa/webauthn/challenge/begin")
 async def webauthn_challenge_begin(req: WebAuthnChallengeBeginRequest) -> dict:
-    challenge = mfa.get_mfa_challenge(req.mfa_token)
+    challenge = await mfa.get_mfa_challenge(req.mfa_token)
     if not challenge:
         raise HTTPException(status_code=401, detail="MFA challenge expired or invalid")
     options = await mfa.webauthn_begin_authenticate(challenge["user_id"])
@@ -271,7 +271,7 @@ async def webauthn_challenge_complete(
     req: WebAuthnChallengeCompleteRequest,
     request: Request, response: Response,
 ) -> dict:
-    challenge = mfa.get_mfa_challenge(req.mfa_token)
+    challenge = await mfa.get_mfa_challenge(req.mfa_token)
     if not challenge:
         raise HTTPException(status_code=401, detail="MFA challenge expired or invalid")
 
@@ -280,7 +280,7 @@ async def webauthn_challenge_complete(
     if not ok:
         raise HTTPException(status_code=401, detail="WebAuthn authentication failed")
 
-    data = mfa.consume_mfa_challenge(req.mfa_token)
+    data = await mfa.consume_mfa_challenge(req.mfa_token)
     if not data:
         data = challenge
 

@@ -12,14 +12,13 @@ move to ``get_pool().acquire() + $N placeholders``. ``datetime
 Module-global audit (SOP Step 1):
   * ``MFA_ISSUER``, ``TOTP_DRIFT_TOLERANCE``, ``BACKUP_CODE_COUNT``
     — constants, answer (1) identical across workers.
-  * ``_webauthn_challenges: dict[user_id, bytes]`` — **broken under
-    uvicorn --workers N**. If begin_register lands on worker A and
-    complete_register lands on worker B, B's lookup returns None →
-    400. Not one of the SOP-acceptable answers; it's a real bug.
-    Tracked as task #116 for Epic 6 fix (move to PG ephemeral
-    challenge table or Redis). Single-worker dev keeps working.
-  * ``_pending_mfa: dict[token, {...}]`` — same class of bug as
-    above, same task #116.
+
+Task #116 / Step B.4 (2026-04-21): the previously-flagged
+per-worker dicts ``_webauthn_challenges`` + ``_pending_mfa``
+have been migrated to a shared PG table ``mfa_challenges``
+(alembic 0018). WebAuthn begin on worker A + complete on worker
+B now resolves correctly; same for MFA login challenge tokens.
+See ``_challenge_{put,get,pop}`` helpers below.
 """
 
 from __future__ import annotations
@@ -302,10 +301,91 @@ async def verify_backup_code(user_id: str, code: str) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Shared-challenge storage (PG, task #116)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Replaces the pre-B.4 per-worker dicts. Two kinds of challenge:
+#
+#   kind='webauthn'   — WebAuthn reg/auth challenge bytes, keyed by
+#                       user_id (one pending WebAuthn dance per user).
+#                       payload is base64-encoded raw challenge bytes.
+#   kind='mfa_pending' — MFA login challenge between password-OK and
+#                       MFA-code-OK. Keyed by challenge token.
+#                       payload is a JSON dict (user_id, ip, ua, ts).
+#
+# TTL: 300s for both (matches the original dict's cleanup cadence
+# for _pending_mfa and is a reasonable ceiling for WebAuthn). Stale
+# rows are filtered via ``WHERE created_at > NOW() - interval``
+# on every read, not by a background sweep.
+
+_CHALLENGE_TTL_S = 300
+
+
+async def _challenge_put(kind: str, key: str, payload: bytes | str) -> None:
+    """Upsert a challenge. Overwrites any prior entry for this key
+    (matches ``dict[key] = value`` semantics)."""
+    if isinstance(payload, bytes):
+        payload_str = base64.b64encode(payload).decode("ascii")
+    else:
+        payload_str = payload
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO mfa_challenges (id, kind, payload, created_at) "
+            "VALUES ($1, $2, $3, CURRENT_TIMESTAMP) "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "  kind = EXCLUDED.kind, "
+            "  payload = EXCLUDED.payload, "
+            "  created_at = EXCLUDED.created_at",
+            key, kind, payload_str,
+        )
+
+
+async def _challenge_pop(kind: str, key: str) -> bytes | None:
+    """Read-and-delete a challenge under TTL. Returns None if missing
+    or stale. Matches ``dict.pop(key, None)`` + TTL check."""
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM mfa_challenges "
+            "WHERE id = $1 AND kind = $2 "
+            "AND created_at > CURRENT_TIMESTAMP - "
+            f"    INTERVAL '{_CHALLENGE_TTL_S} seconds' "
+            "RETURNING payload",
+            key, kind,
+        )
+    if row is None:
+        return None
+    try:
+        return base64.b64decode(row["payload"])
+    except Exception:
+        # Caller passed JSON string (mfa_pending); decode handled there.
+        return row["payload"].encode("utf-8") if isinstance(row["payload"], str) else None
+
+
+async def _challenge_get_json(kind: str, key: str) -> dict | None:
+    """Read-without-delete for mfa_pending's get-then-maybe-consume
+    flow. Returns the JSON payload dict or None if missing/stale."""
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload FROM mfa_challenges "
+            "WHERE id = $1 AND kind = $2 "
+            "AND created_at > CURRENT_TIMESTAMP - "
+            f"    INTERVAL '{_CHALLENGE_TTL_S} seconds'",
+            key, kind,
+        )
+    if row is None:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  WebAuthn
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_webauthn_challenges: dict[str, bytes] = {}
 
 
 def _rp_id() -> str:
@@ -354,7 +434,7 @@ async def webauthn_begin_register(user_id: str, user_email: str, user_name: str)
         ),
     )
 
-    _webauthn_challenges[user_id] = options.challenge
+    await _challenge_put("webauthn", user_id, options.challenge)
     return json.loads(options_to_json(options))
 
 
@@ -363,7 +443,7 @@ async def webauthn_complete_register(
 ) -> bool:
     from webauthn import verify_registration_response
 
-    challenge = _webauthn_challenges.pop(user_id, None)
+    challenge = await _challenge_pop("webauthn", user_id)
     if not challenge:
         return False
 
@@ -424,14 +504,14 @@ async def webauthn_begin_authenticate(user_id: str) -> dict:
         user_verification=UserVerificationRequirement.PREFERRED,
     )
 
-    _webauthn_challenges[user_id] = options.challenge
+    await _challenge_put("webauthn", user_id, options.challenge)
     return json.loads(options_to_json(options))
 
 
 async def webauthn_complete_authenticate(user_id: str, credential_json: dict) -> bool:
     from webauthn import verify_authentication_response
 
-    challenge = _webauthn_challenges.pop(user_id, None)
+    challenge = await _challenge_pop("webauthn", user_id)
     if not challenge:
         return False
 
@@ -521,47 +601,71 @@ async def _has_backup_codes(user_id: str) -> bool:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  MFA challenge (unified entry point for login flow)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Step B.4 (2026-04-21): ``_pending_mfa`` per-worker dict → PG-
+# backed via ``mfa_challenges`` with kind='mfa_pending'. All three
+# public functions are now ``async def`` because they hit the pool.
+# Callers in routers/auth.py + routers/mfa.py + one repo-root test
+# updated to ``await``.
 
-_pending_mfa: dict[str, dict] = {}
 
+async def create_mfa_challenge(user_id: str, ip: str = "", user_agent: str = "") -> str:
+    """Create a temporary MFA challenge token after password OK.
 
-def create_mfa_challenge(user_id: str, ip: str = "", user_agent: str = "") -> str:
-    """Create a temporary MFA challenge token after password OK."""
+    Returns the token string; caller hands it to the client so the
+    MFA-code step can consume it via ``consume_mfa_challenge``.
+    """
     token = secrets.token_urlsafe(32)
-    _pending_mfa[token] = {
+    payload = json.dumps({
         "user_id": user_id,
         "ip": ip,
         "user_agent": user_agent,
         "created_at": time.time(),
-    }
-    _cleanup_stale_challenges()
+    })
+    await _challenge_put("mfa_pending", token, payload)
     return token
 
 
-def get_mfa_challenge(token: str) -> Optional[dict]:
-    data = _pending_mfa.get(token)
-    if not data:
-        return None
-    if time.time() - data["created_at"] > 300:
-        _pending_mfa.pop(token, None)
-        return None
-    return data
+async def get_mfa_challenge(token: str) -> Optional[dict]:
+    """Read-without-consume. Returns None if missing or stale."""
+    return await _challenge_get_json("mfa_pending", token)
 
 
-def consume_mfa_challenge(token: str) -> Optional[dict]:
-    data = _pending_mfa.pop(token, None)
-    if not data:
+async def consume_mfa_challenge(token: str) -> Optional[dict]:
+    """Read-and-delete under TTL. Returns None if missing or stale."""
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM mfa_challenges "
+            "WHERE id = $1 AND kind = 'mfa_pending' "
+            "AND created_at > CURRENT_TIMESTAMP - "
+            f"    INTERVAL '{_CHALLENGE_TTL_S} seconds' "
+            "RETURNING payload",
+            token,
+        )
+    if row is None:
         return None
-    if time.time() - data["created_at"] > 300:
+    try:
+        return json.loads(row["payload"])
+    except (json.JSONDecodeError, TypeError):
         return None
-    return data
 
 
-def _cleanup_stale_challenges():
-    cutoff = time.time() - 300
-    stale = [k for k, v in _pending_mfa.items() if v["created_at"] < cutoff]
-    for k in stale:
-        _pending_mfa.pop(k, None)
+async def cleanup_stale_mfa_challenges() -> int:
+    """Background-sweep helper: delete rows past the TTL. Not
+    strictly needed (every read-path has a TTL guard), but
+    callable from a nightly job to keep the table bounded."""
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        status = await conn.execute(
+            "DELETE FROM mfa_challenges "
+            "WHERE created_at < CURRENT_TIMESTAMP - "
+            f"    INTERVAL '{_CHALLENGE_TTL_S} seconds'"
+        )
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
 
 
 async def mark_session_mfa_verified(token: str) -> None:

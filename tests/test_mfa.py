@@ -146,26 +146,39 @@ class TestMFAChallenge:
     def test_create_and_consume_challenge(self, user_id):
         from backend import mfa
 
-        token = mfa.create_mfa_challenge(user_id, ip="127.0.0.1", user_agent="test")
+        token = _run(mfa.create_mfa_challenge(user_id, ip="127.0.0.1", user_agent="test"))
         assert token
 
-        data = mfa.get_mfa_challenge(token)
+        data = _run(mfa.get_mfa_challenge(token))
         assert data is not None
         assert data["user_id"] == user_id
 
-        consumed = mfa.consume_mfa_challenge(token)
+        consumed = _run(mfa.consume_mfa_challenge(token))
         assert consumed is not None
 
-        again = mfa.get_mfa_challenge(token)
+        again = _run(mfa.get_mfa_challenge(token))
         assert again is None
 
     def test_challenge_expires(self, user_id):
+        """Expiry is enforced by the TTL predicate in SQL, not by a
+        dict mutation. Backdate ``created_at`` directly on the
+        ``mfa_challenges`` row to simulate a stale challenge."""
         from backend import mfa
+        from backend.db_pool import get_pool
 
-        token = mfa.create_mfa_challenge(user_id)
-        mfa._pending_mfa[token]["created_at"] = time.time() - 400
+        token = _run(mfa.create_mfa_challenge(user_id))
 
-        data = mfa.get_mfa_challenge(token)
+        async def _age_out():
+            async with get_pool().acquire() as conn:
+                await conn.execute(
+                    "UPDATE mfa_challenges SET created_at = "
+                    "CURRENT_TIMESTAMP - INTERVAL '400 seconds' "
+                    "WHERE id = $1",
+                    token,
+                )
+        _run(_age_out())
+
+        data = _run(mfa.get_mfa_challenge(token))
         assert data is None
 
 

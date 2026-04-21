@@ -35,93 +35,79 @@ from backend.tests.multi_worker import run_workers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-async def _worker_webauthn_begin(pool, worker_id: int, user_id: str):
-    """Spawn begin_register on this worker, which writes the
-    challenge into ``_webauthn_challenges`` dict THIS WORKER holds.
-    Under multi-worker prod, another worker running complete_register
-    will find no challenge for this user_id."""
-    import os
-    # Seed the user first (FK required for any downstream session write
-    # if it hits — here we don't even get that far because the
-    # challenge lookup fails first).
-    import asyncpg
-    dsn = os.environ.get("OMNISIGHT_DATABASE_URL", "")
-    if dsn:
-        c = await asyncpg.connect(dsn)
-        await c.execute(
-            "INSERT INTO users (id, email, name, role, enabled, "
-            "password_hash, tenant_id, created_at) "
-            "VALUES ($1, $2, 'T4', 'admin', 1, 'hash', 't-default', "
-            "'2024-01-01 00:00:00') "
-            "ON CONFLICT (id) DO NOTHING",
-            user_id, f"{user_id}@t4.test",
+async def _worker_webauthn_begin(pool, worker_id: int, user_id: str, dsn: str):
+    """Worker A: init the process-global db_pool (mfa.py reads it via
+    get_pool()), seed the user, call webauthn_begin_register which
+    writes the challenge row to the shared ``mfa_challenges`` table.
+    Post-fix the row is visible to any other worker pointed at the
+    same DSN; pre-fix it lived in a per-worker module-global dict."""
+    from backend import db_pool
+    await db_pool.init_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with db_pool.get_pool().acquire() as c:
+            await c.execute(
+                "INSERT INTO users (id, email, name, role, enabled, "
+                "password_hash, tenant_id, created_at) "
+                "VALUES ($1, $2, 'T4', 'admin', 1, 'hash', 't-default', "
+                "'2024-01-01 00:00:00') "
+                "ON CONFLICT (id) DO NOTHING",
+                user_id, f"{user_id}@t4.test",
+            )
+        from backend import mfa
+        await mfa.webauthn_begin_register(
+            user_id, f"{user_id}@t4.test", "T4",
         )
-        await c.close()
-
-    from backend import mfa
-    opts = await mfa.webauthn_begin_register(
-        user_id, f"{user_id}@t4.test", "T4",
-    )
-    # Return the challenge dict — complete_register would normally
-    # POST it back after the browser signs it. For test purposes the
-    # harness doesn't run a real WebAuthn ceremony; we assert on the
-    # "did worker A's dict persist to worker B" question, which
-    # short-circuits at ``_webauthn_challenges.pop`` inside
-    # complete_register.
-    return {"has_challenge_in_worker": user_id in mfa._webauthn_challenges}
+    finally:
+        await db_pool.close_pool()
+    return {"begun": True}
 
 
-async def _worker_webauthn_lookup(pool, worker_id: int, user_id: str):
-    """On a DIFFERENT worker, check whether the challenge dict holds
-    ``user_id``. Under the per-worker-dict implementation this will
-    return False — the bug we want to make visible."""
-    from backend import mfa
-    return {"has_challenge_in_worker": user_id in mfa._webauthn_challenges}
+async def _worker_webauthn_challenge_visible(pool, worker_id: int, user_id: str):
+    """Worker B: query PG directly (via the harness-supplied per-worker
+    pool) for the challenge row. Returns True iff the row landed and
+    is within TTL. Pre-fix this would return False — worker A's dict
+    wasn't visible here. Post-fix it returns True because the row sits
+    in the shared ``mfa_challenges`` table."""
+    async with pool.acquire() as c:
+        row = await c.fetchrow(
+            "SELECT id FROM mfa_challenges "
+            "WHERE id = $1 AND kind = 'webauthn' "
+            "AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 minutes'",
+            user_id,
+        )
+    return {"visible": row is not None}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "task #116: _webauthn_challenges is a per-worker dict. "
-        "Begin on worker A + lookup on worker B sees empty dict. "
-        "Fix: move to PG ephemeral challenge table or Redis. When "
-        "this test starts PASSING (XPASS), Epic 6 closed the fix."
-    ),
-)
 def test_webauthn_challenge_survives_cross_worker(pg_test_dsn):
-    """Spec: begin_register on worker A MUST be visible to
-    complete_register-equivalent lookup on worker B.
+    """Spec (task #116): begin_register on worker A MUST be visible
+    to a lookup from a different worker process.
 
-    Currently FAILS (xfail): worker A's dict is not worker B's dict.
-    Post-fix: PG-backed challenge store gives both workers a shared
-    view.
+    Pre-fix failed: worker A's dict wasn't worker B's dict.
+    Post-fix passes: PG-backed ``mfa_challenges`` table is shared.
     """
     user_id = f"u-t4-{uuid.uuid4().hex[:8]}"
-    # Worker A writes the challenge.
+    # Worker A writes the challenge. Pass the DSN so the child can
+    # call db_pool.init_pool (mfa.py reads get_pool() internally).
     begin_results = run_workers(
         "backend.tests.test_epic6_prep_multi_worker_state",
         "_worker_webauthn_begin",
         n=1,
         dsn=pg_test_dsn,
-        args=(user_id,),
+        args=(user_id, pg_test_dsn),
         timeout_s=30.0,
     )
-    assert begin_results[0]["has_challenge_in_worker"] is True, (
-        "sanity: worker A should see its own challenge post-begin"
-    )
+    assert begin_results[0]["begun"] is True
 
-    # Worker B looks up — same user_id, different process.
+    # Worker B (different process) queries PG for the challenge row.
     lookup_results = run_workers(
         "backend.tests.test_epic6_prep_multi_worker_state",
-        "_worker_webauthn_lookup",
+        "_worker_webauthn_challenge_visible",
         n=1,
         dsn=pg_test_dsn,
         args=(user_id,),
         timeout_s=30.0,
     )
-    # **The assertion that currently fails**: worker B must see the
-    # challenge worker A stored.
-    assert lookup_results[0]["has_challenge_in_worker"] is True, (
+    assert lookup_results[0]["visible"] is True, (
         "cross-worker challenge visibility broken (task #116): "
         f"worker B cannot see challenge stored by worker A for {user_id}"
     )

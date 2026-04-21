@@ -205,7 +205,7 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
     from backend import mfa as _mfa
     has_mfa = await _mfa.has_verified_mfa(user.id)
     if has_mfa:
-        mfa_token = _mfa.create_mfa_challenge(
+        mfa_token = await _mfa.create_mfa_challenge(
             user.id, ip=client_ip,
             user_agent=request.headers.get("user-agent", ""),
         )
