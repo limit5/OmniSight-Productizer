@@ -67,19 +67,47 @@ logger = logging.getLogger(__name__)
 
 _runtime_settings_kv = SharedKV("runtime_settings")
 
-# Fields whose cross-worker coherence is operator-visible: LLM
-# provider selector, each provider's API key, ollama base URL.
-# Non-secret knobs (llm_temperature, docker_memory_limit, etc.)
-# stay ``setattr``-only for now — tenant isolation matters more
-# for them and they rarely change mid-session. The set is a
-# subset of ``_UPDATABLE_FIELDS`` so "which updates get SharedKV-
-# mirrored" is deliberate, not accidental.
+# Fields whose cross-worker coherence is operator-visible. Any
+# string-typed field that the SYSTEM INTEGRATIONS modal lets the
+# operator edit needs to be here — otherwise ``PUT /settings``
+# lands on one worker, ``GET /settings`` round-robins to another,
+# and the modal shows the token field blank after save (the exact
+# 2026-04-22 GitHub/GitLab "消失了" symptom).
+#
+# Bool / int / float fields are excluded — ``SharedKV`` stores
+# strings, and ``setattr(settings, "gerrit_enabled", "True")``
+# would set a string instead of a bool, and any downstream code
+# doing ``if settings.gerrit_enabled:`` keeps evaluating truthy
+# on both "True" and "False" (both non-empty strings). Those
+# knobs change rarely mid-session and staying setattr-only is
+# the safer default until we add per-type overlay handling.
 _SHARED_KV_FIELDS: frozenset[str] = frozenset({
+    # ── LLM (added 2026-04-22, commit 8d626489) ──
     "llm_provider", "llm_model", "llm_fallback_chain",
     "anthropic_api_key", "google_api_key", "openai_api_key",
     "xai_api_key", "groq_api_key", "deepseek_api_key",
     "together_api_key", "openrouter_api_key",
     "ollama_base_url",
+    # ── Git forges (added 2026-04-22, same-day follow-up) ──
+    # Root cause of operator's "GitHub/GitLab token 消失了"
+    # report: save on worker-A, next getSettings round-robins
+    # to worker-B, returns ``{github_token: ""}``, input goes
+    # blank even though worker-A has the real token.
+    "github_token", "gitlab_token", "gitlab_url",
+    "git_ssh_key_path",
+    # ── Gerrit ──
+    "gerrit_url", "gerrit_ssh_host", "gerrit_project",
+    "gerrit_replication_targets", "gerrit_webhook_secret",
+    # ── JIRA / Slack / PagerDuty ──
+    "notification_jira_url", "notification_jira_token",
+    "notification_jira_project",
+    "notification_slack_webhook", "notification_slack_mention",
+    "notification_pagerduty_key",
+    # ── Inbound webhook HMAC secrets ──
+    "github_webhook_secret", "gitlab_webhook_secret",
+    "jira_webhook_secret",
+    # ── CI/CD ──
+    "ci_jenkins_url", "ci_jenkins_user", "ci_jenkins_api_token",
 })
 
 
