@@ -869,6 +869,198 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ---
 
+## 🅨 Priority Y — Tenant Ops & Multi-Project Hierarchy（多用戶 / 多專案運營面板）
+
+> 背景（2026-04-22 operator audit）：Priority I 已把 tenant_id 打進 users / workflow_runs / audit / artifacts / RLS / SSE / sandbox / frontend / rate-limit / multi-worker state，**純 Schema + Runtime 層**是通的。但**管理面板 / API / 業務模型**缺口還很大——operator 想新增一個 tenant 目前唯一方法是直接 `INSERT INTO tenants`，沒有 UI、沒有 REST endpoint、沒有 invite flow、沒有 RBAC；`users` 表是 1:1 mapping 到 tenant，一人跨租戶情境（外包顧問 / MSP / 跨公司協作）完全沒支援；專案這層根本不存在——所有 workload 都直接掛 tenant，沒辦法做「同一 tenant 下多產品線 / 多專案 / 多分支」的資源分離與計費拆分。另外 `backend/workspace.py` 的 `.agent_workspaces/{agent_id}/` 是扁平路徑，沒 tenant 分組、沒 project 分組、沒自動 GC、沒 disk quota——1 人測試 OK 但 10 個產品線 × 20 專案 × 多 user 的 scale 會爛。
+>
+> **核心設計抉擇**：承認 `user ↔ tenant` 是多對多（membership 模型），承認 `tenant → product_line → project → branch` 四層階層，承認 workspace 要納入 `tenant_quota` 預算。這裡把 I 系列的「機房級」多租戶隔離升級成「運營級」多租戶平台。
+>
+> **相依**：I1-I10 全部 ✅ done、G4 Postgres ✅ done、K MFA/session ✅ done、S0 shared foundation ✅ done、H4a sandbox DRF ✅ done。無硬阻塞——只要決定開工就能做。
+>
+> **關鍵不變量**：
+> - *租戶防火牆*：tenant A 的任何 user / project / artifact / workspace / audit-chain / event / secret 都必須證明 tenant B 拿不到（繼承自 I 的紅線，Y 不能弱化）。
+> - *最小驚訝原則*：既有 `t-default` tenant 下的所有資料不可因為 Y 的架構變更而遺失或重新路由——migration 必須是加性的，shard 成多 tenant 是 operator 主動動作。
+> - *計費可追溯*：每個 project / user 的資源消耗（disk / LLM tokens / sandbox / bandwidth）都要能在 T 系列 billing 計量時精確歸因，不能出現「這筆用量我算不清楚是哪個 project」。
+> - *角色權限分離*：super-admin（平台方）/ tenant-owner / tenant-admin / project-owner / project-member / project-viewer 六層，不是 role flag 而是 membership × resource 的 RBAC 矩陣。
+
+### Y0. Multi-user × Multi-project 情境盤點 + 架構文件 (#276)
+
+先把所有要處理的真實情境寫下來，避開「先做了才發現漏」的陷阱。產出 `docs/priority-y/00-scenarios.md` 涵蓋：
+
+- [ ] **單租戶多用戶** — 一家公司多個工程師共享一個 tenant、同一個 LLM quota pool，RBAC 控制誰能改 secrets / 誰能開 project / 誰只能讀。
+- [ ] **多租戶單用戶** — MSP / 顧問同時服務三家客戶，需要在 UI 切換 tenant，API 自動 scope 當前 tenant。（I7 已有 `X-Tenant-Id` middleware，但沒 membership 後端支撐）
+- [ ] **跨租戶協作** — tenant A 邀請 tenant B 的 user 作為 guest 看他們某個 project（唯讀 / 可評論），但不能看 tenant A 其他 project。
+- [ ] **多產品線** — 一個 tenant 下「相機 IPCam / 門鈴 Doorbell / 對講機 Intercom」三條獨立產品線，各自有 LLM 預算 / 各自有 git 整合目標 / 各自有 on-call。
+- [ ] **多專案同產品線** — Doorbell 下「V1 客戶 A 量產」「V2 客戶 B POC」「V3 內部 R&D」三專案，分開計費但共用 Doorbell 的 SOP / skill pack。
+- [ ] **多分支同專案** — 一個專案下 `main / staging / v2.1-hotfix / customer-x-fork` 四 branch 並行開發，workspace 要能同時保有。
+- [ ] **消失用戶回收** — user 離職 / tenant 退訂 / project 封存時的 graceful offboarding：migrate ownership、保留 audit、釋放 quota。
+- [ ] **熱點撞牆** — 單 project 打爆 tenant quota → 其他 project 被餓死還是 project 間 DRF 公平分配？
+- [ ] **遺留相容** — 所有 `t-default` 現存資料怎麼對應到新階層（預設 product_line="default" / project="default"）。
+
+產出還要覆蓋：ER diagram（users / tenants / memberships / projects / project_members / invites / shares）、權限矩陣表、migration 策略。
+
+預估：**2 day**
+
+### Y1. Schema: memberships + projects + invites + shares (#277)
+
+把「1 user = 1 tenant」改成「membership 集合 = N tenant × M role」；新增 project 層 + 跨租戶 share 的能力。
+
+- [ ] 新表 `user_tenant_memberships`：`(user_id, tenant_id, role, status, created_at, last_active_at)` + UNIQUE `(user_id, tenant_id)`。role ∈ `owner / admin / member / viewer`。status ∈ `active / suspended`. 保留 `users.tenant_id` 作為「主 tenant / 最近登入 tenant」的快取欄位，不再是權威來源。
+- [ ] 新表 `projects`：`(id, tenant_id, product_line, name, slug, parent_id, plan_override, disk_budget_bytes, llm_budget_tokens, created_by, archived_at)` + UNIQUE `(tenant_id, product_line, slug)`。plan_override / disk_budget 為 NULL 時繼承 tenant。
+- [ ] 新表 `project_members`：`(user_id, project_id, role, created_at)`。role ∈ `owner / contributor / viewer`。缺少 row 時 tenant-level role 作為預設（tenant admin 預設對所有 project 有 contributor 權限）。
+- [ ] 新表 `tenant_invites`：`(id, tenant_id, email, role, invited_by, token_hash, expires_at, status)`. status ∈ `pending / accepted / revoked / expired`. token 原文僅在建立時回傳一次。
+- [ ] 新表 `project_shares`：`(project_id, guest_tenant_id, role, granted_by, created_at, expires_at)`. 讓 tenant A 分享 project 給 tenant B 以 guest 身份進入。
+- [ ] Alembic 0019 migration：新建上述 5 表 + 索引；回填 `user_tenant_memberships` 從既有 `users.tenant_id` 生成（role = `owner` 若 user.role = `admin`，否則 `member`）；回填 `projects` 建立 `(tenant_id=t-*, product_line='default', slug='default')` 單一預設 project 並把現有 workload 對應過去（via 新欄位 `workflow_runs.project_id` 等等的二次回填 script）。
+- [ ] 所有既有業務表加 `project_id` 欄位：workflow_runs / debug_findings / decisions / event_log / artifacts / spec_* / user_preferences（類似 I1 的 tenant_id 回填策略）。NULL 暫時允許，回填完 1 個 release 後加 NOT NULL。
+- [ ] 測試：migration 在 seed 了多 tenant × 多 user × 既有 workflow 的 PG 上冪等、回填後每 row 都有有效的 `(tenant_id, project_id)` tuple、`project_id` 必然指向同 tenant 的 project（外鍵 + CHECK 約束）。
+
+預估：**3 day**
+
+### Y2. Admin REST API — Tenant CRUD + 使用度量 (#278)
+
+第一條可用的管理 API，replace 現在「直接 INSERT DB」的 hack workflow。
+
+- [ ] `POST /api/v1/admin/tenants` — super-admin only。body: `{id, name, plan, enabled}`. id pattern enforced `^t-[a-z0-9][a-z0-9-]{2,62}$`（和 `t-default` 共存）。
+- [ ] `GET /api/v1/admin/tenants` — super-admin only，回列表 + 每 tenant 的 aggregated usage：user_count / project_count / disk_used_bytes / llm_tokens_30d / rate_limit_hits_7d / last_activity_at。用 aggregated query（tenant_quota.py 的 `PLAN_DISK_QUOTAS` + `tenant_quotas` 表的 `used_bytes` 已有）。
+- [ ] `GET /api/v1/admin/tenants/{id}` — 單 tenant 詳細：plan、quota 使用率、members 列表、projects 列表、最近 audit events。
+- [ ] `PATCH /api/v1/admin/tenants/{id}` — 改 plan / enable / disable / rename。plan 降級時若當前 disk_used > 新 hard_bytes 必須先 error（不做強制刪資料）。
+- [ ] `DELETE /api/v1/admin/tenants/{id}` — 需要 `?confirm=<tenant_id>` query param 二次確認；cascade delete 所有 project / membership / workspace / artifact（背景執行，發 SSE progress）。`t-default` 不可刪。
+- [ ] 權限：新 `require_super_admin` dependency，role = `super_admin` 的 user 才可用（Y3 定義）。
+- [ ] 測試：所有 CRUD 的 tenant-scope 不可越權寫（tenant admin 呼叫會被 403）、plan 降級 + quota 超限的保護、id 格式 validator、`t-default` 保護。
+
+預估：**2 day**
+
+### Y3. Admin REST API — User / Membership / Invite 生命週期 (#279)
+
+multi-user 的管理面：邀請進 tenant、調整 role、踢人、跨 tenant membership。
+
+- [ ] `POST /api/v1/tenants/{tid}/invites` — tenant admin 以上。body: `{email, role}`. 產生 one-time token 並寄 email（先接 `notification_*` 既有通道 / 後續可切 SMTP）。回 `{invite_id, token_plaintext, expires_at}`（token_plaintext 僅此一次）。
+- [ ] `GET /api/v1/tenants/{tid}/invites?status=pending` — 列當前待接受。
+- [ ] `DELETE /api/v1/tenants/{tid}/invites/{id}` — 撤銷邀請。
+- [ ] `POST /api/v1/invites/{id}/accept` — 未登入 / 已登入皆可呼叫。未登入時同時建 user + 加 membership；已登入時只加 membership（one user → N memberships）。
+- [ ] `POST /api/v1/admin/super-admins` + `DELETE /.../{user_id}` — 平台維運團隊提升 / 撤銷 super-admin（僅 existing super-admin 可做；首任 super-admin 由 bootstrap wizard 指定）。
+- [ ] `GET /api/v1/tenants/{tid}/members` + `PATCH /.../{user_id}` + `DELETE /.../{user_id}` — 管理 tenant 內的 membership；role 變更、suspend、移除（`DELETE` 實際是把 membership.status 設為 `suspended`，保留 audit 足跡；硬刪只在 tenant 被刪時 cascade）。
+- [ ] Rate limit: invite 一個 email 每 tenant 每小時不超過 5 次、accept 失敗每 token 每分鐘不超過 10 次（防爆破）。
+- [ ] 測試：完整邀請 → accept → 雙 membership → switch tenant → 卸任 user → audit 鏈驗證；過期 invite 不可 accept；revoked invite 不可 accept；email 大小寫規整化；token 長度 / 熵驗證。
+
+預估：**2.5 day**
+
+### Y4. Admin REST API — Project + Product Line CRUD (#280)
+
+把 tenant 下的工作負載拆成「產品線 / 專案 / 成員」三層，對應 L4 skill pack 的 D / W / P / X 分類。
+
+- [ ] `POST /api/v1/tenants/{tid}/projects` — tenant admin 以上。body: `{product_line, name, slug, plan_override?, disk_budget_bytes?, parent_id?}`. slug 在 `(tenant_id, product_line)` 下 unique。product_line 字串 whitelist：`embedded / web / mobile / software / custom`（對應 D/W/P/X + custom）。
+- [ ] `GET /api/v1/tenants/{tid}/projects?product_line=&archived=` — 列當前 tenant 的 projects。user 只能看到自己有 membership 的 project + 本 tenant 公開的（依 `project_members` + tenant-level role 綜合判斷）。
+- [ ] `PATCH /api/v1/tenants/{tid}/projects/{pid}` — 改 name / plan_override / budget / parent_id（做 sub-project 樹）。
+- [ ] `POST /.../projects/{pid}/archive` + `POST /.../projects/{pid}/restore` — soft-archive；archived 後 workspace / agent / cron 全部停工但資料保留 90 天（config 可調）。90 天後背景 GC 正式刪除，emit 一個 billing 事件。
+- [ ] `POST /.../projects/{pid}/members` + `PATCH /.../{user_id}` + `DELETE /.../{user_id}` — project-level 成員管理，role ∈ `owner / contributor / viewer`.
+- [ ] `POST /.../projects/{pid}/shares` — 跨 tenant 分享給另一 tenant 的 guest。body: `{guest_tenant_id, role, expires_at?}`. 記錄在 `project_shares`。被分享的 tenant 在自己的 project list 裡看到「Guest」tab。
+- [ ] Per-project quota override：`disk_budget_bytes` / `llm_budget_tokens` 為 NULL 時繼承 tenant 的 PLAN quota；非 NULL 時 tenant 要先確認「Σ(非 NULL project budgets) ≤ tenant 總額」防超售。
+- [ ] 測試：project CRUD、成員權限矩陣（viewer 不能 modify artifact 、contributor 可以 push 但不能改 secrets）、archive/restore 的效果、跨 tenant share 的 RBAC（guest tenant 的 admin 不能看 host tenant 的其他 project）、budget 超售拒絕。
+
+預估：**3 day**
+
+### Y5. Query layer: ContextVar expansion + authorisation middleware (#281)
+
+把 I2 的 `current_tenant_id()` context var 擴充成 `(tenant_id, project_id, user_role)` 三元，讓 RLS + RBAC 自動生效。
+
+- [ ] `backend/db_context.py`：加 `current_project_id()` / `current_user_role()` 兩個 ContextVar。
+- [ ] 新 dependency `require_project_member(project_id, min_role="viewer")`：路由從 URL path 取 project_id，驗 user 對 project 的有效 role（project_members 直接查 + tenant membership fallback）。
+- [ ] SQLAlchemy event listener（沿 I2 擴充）：所有 SELECT 自動注入 `WHERE tenant_id = :current AND (project_id = :current OR project_id IS NULL)`；INSERT 自動填 `(tenant_id, project_id) = (current, current)`.
+- [ ] Frontend middleware：API client 除了 `X-Tenant-Id` 再加 `X-Project-Id`。和 I7 一樣後端中介層雙重驗證。
+- [ ] 測試：project A 的 user 查不到 project B 的 artifact（即使同 tenant）、super-admin 不受 project 隔離影響（用 `X-Admin-Cross-Project: 1` + 必須 log 到 audit）、NULL project_id 的舊資料仍可讀（回填前的相容期）。
+
+預估：**2 day**
+
+### Y6. Workspace Hierarchy Refactor + GC + Quota (#282)
+
+把前面 audit 列出來的所有 workspace 坑（扁平路徑、無 tenant 分組、無 GC、無 quota、同名 collision）一次收掉。
+
+- [ ] 新路徑：`{OMNISIGHT_WORKSPACE_ROOT}/{tenant_id}/{product_line}/{project_id}/{agent_id}/{repo_url_hash}/` 五層階層。`repo_url_hash = sha256(remote_url)[:16]` 防同 agent clone 多個同名 repo 互相覆蓋。
+- [ ] `backend/config.py` 新增：`OMNISIGHT_WORKSPACE_ROOT`（預設 `./data/workspaces`）/ `OMNISIGHT_WORKSPACE_QUOTA_MB_DEFAULT`.
+- [ ] `backend/workspace.py` 改 `provision()` 接受 `tenant_id / product_line / project_id / agent_id / remote_url` 五個參數，從 ContextVar 預設讀取。舊 callsite 相容 shim 標記 deprecated 並記 log（下個 release 刪）。
+- [ ] Migration script：把現有 `.agent_workspaces/{agent_id}/` 都搬到 `data/workspaces/t-default/default/default/{agent_id}/legacy-hash/`；保留 symlink 一個 release，之後移除。
+- [ ] 納入 tenant_quota：`backend/tenant_quota.py` 的 `check_hard_quota()` 把 `data/workspaces/{tid}/**` 計入 `used_bytes`；workspace 寫入時自動 enforce。
+- [ ] 背景 GC reaper：新 `backend/workspace_gc.py` async task（lifespan 啟動），每 1 小時跑一次：
+  - 找 `mtime > keep_recent_workspaces_stale_days`（config 預設 30）且對應 agent 已結束的 workspace，移到 `_trash/` 暫存 7 天後硬刪。
+  - 尊重 `.git/index.lock` + active agent registry，進行中的不刪。
+  - 遇 tenant hard quota 超標時，優先刪舊的 workspace（per-project LRU）而非新的。
+  - emit SSE `workspace_gc` 事件 + audit 記錄。
+- [ ] 同名 repo collision：clone 前算 `url_hash`，不同 url 走不同 sub-dir；避免 repo-name 相同時互相覆蓋（audit 找到的 bug）。
+- [ ] 測試：clone 兩個同 repo-name 不同 URL → 各自 sub-dir 不互相覆蓋；tenant A 的 workspace 永遠算在 tenant A 的 quota 不會算到 tenant B；超 quota 時 GC 會先刪 project 內 LRU 的舊 workspace；agent 進行中 GC 不會碰；env `OMNISIGHT_WORKSPACE_ROOT` 有效。
+
+預估：**3 day**
+
+### Y7. Bootstrap Wizard — Tenant 初始化步驟 + super-admin 指定 (#283)
+
+讓初次部署時直接走向「Production multi-tenant」狀態，不再停在 `t-default` 孤兒。
+
+- [ ] `/bootstrap` wizard 加 Step 2.5「Initialize your organization」：輸入 tenant display name（id 自動 slug 化）+ plan 選擇（預設 free，enterprise 需要 license key）+ 首任 super-admin email / 密碼。
+- [ ] 完成後自動建：tenant row（id = `t-{slug}`）/ super-admin user（`role=super_admin`, tenant_id = 新 tenant）/ `user_tenant_memberships` / 預設 project `(product_line='default', slug='default')` / `.env` 中寫入 `OMNISIGHT_PRIMARY_TENANT_ID={新 tenant.id}`。
+- [ ] 若 operator 跳過此步驟 → 繼續使用 `t-default` + 既有 admin（和現狀相容）。
+- [ ] 測試：wizard 完成後 `GET /api/v1/admin/tenants` 回兩個 tenant（新的 + `t-default`）、新的 super-admin 可以登入並管理新 tenant、舊的 admin 還在 `t-default` 裡管理 `t-default`（不會被誤刪）。
+
+預估：**1 day**
+
+### Y8. Frontend — Tenant switcher + Project switcher + Admin UI (#284)
+
+I7 已經有 `X-Tenant-Id` header + localStorage prefix。Y8 把 UI 真的兜上來。
+
+- [ ] `components/omnisight/tenant-switcher.tsx`：dashboard header 下拉選單列出當前 user 有 membership 的 tenants；切換時 `set_tenant_id(tid)` + 清 frontend cache + 重新拉 provider list / workflow list。
+- [ ] `components/omnisight/project-switcher.tsx`：tenant 下再一層 project 下拉；隨 tenant 切換連動更新。
+- [ ] 新 `/admin/tenants` 頁（super-admin only）：列出所有 tenant + 建立按鈕、plan 調整、enable/disable。
+- [ ] 新 `/tenants/{tid}/settings` 頁（tenant admin only）：Members / Invites / Projects / Quotas 四分頁。
+- [ ] 新 `/projects/{pid}/settings` 頁（project owner only）：Members / Budget / Shares 三分頁。
+- [ ] Integration Settings 頁加「（本 tenant / 本 project）」標註讓 operator 清楚當前 scope。
+- [ ] Invite accept 頁 `/invite/{token}`：未登入走註冊流 + 登入走加 membership。
+- [ ] 測試：Playwright E2E 走完邀請 → accept → switch tenant → switch project → 看 project artifact → switch 回另一 tenant → 確認看不到前一 tenant 的資料。
+
+預估：**4 day**
+
+### Y9. Audit / Observability / Billing 整合 (#285)
+
+把 Y 新引入的所有操作鉤進 I8 audit chain + T 系列 billing 計量，不留灰色地帶。
+
+- [ ] 新 audit event types：`tenant.created` / `tenant.plan_changed` / `tenant.disabled` / `invite.sent` / `invite.accepted` / `membership.role_changed` / `project.created` / `project.archived` / `project_share.granted` / `workspace.gc_executed`. 每條 event 的 `tenant_id` 嚴格取自當前 context（跨租戶 share 事件記在 host 的 chain + guest 的 chain 各一條）。
+- [ ] `/api/v1/admin/audit/tenants/{tid}` — super-admin 可跨 tenant 查；tenant admin 只能查自己；log 記 who-queried-which。
+- [ ] T 系列 billing 計量：每個 workflow_run / LLM call / workspace-GB-hour 都帶 `(tenant_id, project_id)` tuple 送去 T4 用量追蹤；T6 pricing page 支援 per-project breakdown。
+- [ ] Observability：Prometheus metrics 加 `tenant_id` / `project_id` / `product_line` label（基數控制：tenant 封頂 1000、project 封頂 10k，超過走 "other" bucket）。
+- [ ] 測試：audit chain 驗證器（I8 產出）對 Y 新 event 不會 false-positive；billing 用量聚合與 workflow_run 對齊不會漏掉 project_id IS NULL 的舊資料（走 "default" project 歸因）。
+
+預估：**2 day**
+
+### Y10. Concurrency + Cross-tenant leak + Migration 測試 (#286)
+
+和 Priority I 的「安全大考」對應的運營面考試。
+
+- [ ] 多租戶 + 多 project + 多 user 並發壓力：10 tenant × 20 project × 5 user × 同時跑 workflow_run → 無 cross-talk / 無 deadlock / 無 quota mis-attribution。
+- [ ] Cross-tenant leak 專項：tenant A 的 admin 明確試著越權存取 tenant B 的 project / artifact / audit / workspace → 全部 403；tenant A 的 super-admin 透過 admin endpoint 可以看但記 audit。
+- [ ] Migration idempotency：既有 `t-default` + 5 個 tenant（I1 的 seed）→ 跑 Y1 migration → 資料完全對得上（每 user 一個 membership、每 workload 一個 project_id、每 workspace 搬到新路徑 symlink 正確）。回滾測試：Y1 migration 的 `downgrade` 能把資料搬回去。
+- [ ] Guest tenant share：tenant A share project 給 tenant B → tenant B 的 user 能看到、tenant B 的 admin 能設 role、tenant B 的其他 user 看不到 tenant B 自己的其他 project（cross-tenant 權限不該污染）。
+- [ ] Workspace GC race：agent 正在 clone 時 GC reaper 被觸發 → clone 完成、GC 跳過、audit 記錄「skipped-live」。
+- [ ] Invite 耗時 / 爆破 / 過期場景：24h 後 invite 自動轉 expired、accept 失敗 10 次後 lockout 1 分鐘。
+
+預估：**2.5 day**
+
+**Y 總預估**：**27 day（~5.5 week）**
+
+**相依**：I1-I10 ✅ / G4 ✅ / S0 + K-early ✅ / H4a ✅。無硬阻塞。
+
+**和其他 Priority 的介面**：
+- **T（Billing）**：Y9 提供 `(tenant_id, project_id)` 維度給 T4 用量追蹤；T 的 plan 定義由 Y1 的 `tenants.plan` / `projects.plan_override` 讀取。
+- **L（Bootstrap Wizard）**：Y7 插一個新 wizard step；不需要重做 L1-L11，只是在 L6 finalize 前加入 Y7。
+- **V（Workspace Architecture）**：V0-V8 的 workspace route 要接 Y8 的 project switcher；每個 workspace run 都要帶 `(tenant_id, project_id)` tag。
+- **M（Resource Hard Isolation）**：M4 的 per-tenant 計費升級成 per-project 計費；M2 disk quota 直接用 Y6 的 workspace GC。
+- **S2（Security Hardening）**：S2-3 UBA 行為分析在 Y5 的 project 維度上可以看出「同一 user 在不同 project 的行為異常」。
+
+**Non-goals（明確排除，不在 Y 範圍）**：
+- ❌ SaaS-level white-label：每 tenant 獨立 domain / 自訂品牌 / 客製 SMTP sender domain—留給後續 Priority Z 或獨立 vertical 做。
+- ❌ Fine-grained ABAC（屬性級權限）：Y 做到 role-based 就停，不做「某 artifact 只 Alice 能看」這種 row-level ACL。
+- ❌ Tenant-to-tenant billing settlement：guest share 的用量計在 host tenant 帳上（一方付費模型），不做 revenue-share 拆帳。
+- ❌ Git server / Gerrit server 的多租戶 provisioning：仍是 tenant 帶自己的 git 憑證連出去，不做 OmniSight 自營的 git hosting。
+
+---
+
 ## 🅝 Priority N — Dependency Governance（相依套件治理）
 
 > 背景：Python deps (`backend/requirements.txt`) 大部分 `==` 硬鎖，但 transitive 未鎖；Node deps (`package.json`) 多為 caret `^`，minor/patch 自動漂；`package-lock.json` 與 `pnpm-lock.yaml` 並存易分歧；`engines` 欄位未設 → 不同開發者不同 Node 版本。高風險子系統：**LangChain / LangGraph**（近年每週一次 minor、import path 常搬家）、**Next.js 16**（App Router API 近三個 major 每次都 breaking）、**Pydantic**（v1→v2 已痛過，v3 出現會再痛）、**FastAPI + Starlette + anyio** 三角關係。此 Phase 建立從「鎖定 → 自動 PR → 合約測試 → fallback 分支 → 升級 runbook」的完整堤壩。
@@ -2766,6 +2958,22 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 → T8 + T9 (Webhook + Dunning + PCI DSS) — production-ready（3.5d）
 → T2 + T3 (ECPay + PayPal 備用) — 按市場需求再開（5.5d）
 
+### Phase 26 — Tenant Ops & Multi-Project Hierarchy（~5.5 week，需 I + G4 + S0 + K-early + H4a 前置，應在 Phase 25 Billing 正式計費前完成）
+Y0 (情境盤點 + 架構文件) — 進入 Y 前的紅線（2d）
+→ Y1 (memberships + projects + invites + shares schema + 回填) — 資料模型基礎（3d）
+→ Y2 + Y3 (tenant CRUD + membership/invite API) — 後端管理面可用（4.5d）
+→ Y4 (project CRUD + product-line) — 多專案層落地（3d）
+→ Y5 (ContextVar + RBAC middleware) — 寫入路徑自動 scope（2d）
+→ Y6 (workspace 五層階層 + GC + quota) — 收掉 `.agent_workspaces/` 扁平路徑 debt（3d）
+→ Y7 (bootstrap wizard tenant 初始化) — 初次部署直接 production-shape（1d）
+→ Y8 (前端 tenant/project switcher + admin UI) — operator 手感（4d）
+→ Y9 (audit + billing 整合) — T 系列計費先決（2d）
+→ Y10 (並發 + cross-tenant leak + migration 測試) — gate 上線（2.5d）
+
+**相依鏈**：Y0 必先、Y1 必在 Y2/Y3/Y4/Y5/Y6 之前、Y2/Y3/Y4 可並行（一組後端 API）、Y5 依 Y1+Y4、Y6 依 Y1+Y5（要能讀 project ContextVar）、Y7 依 Y2、Y8 依全部後端 API、Y9 依 Y2-Y7 的新事件、Y10 必最後。
+
+**和 Phase 25 Billing 的順序**：Y9 的 `(tenant_id, project_id)` 計量是 T4 用量追蹤的先決；若要先上 Billing 而 Y 還沒做完，至少要把 Y1（schema）+ Y5（ContextVar）+ Y9（billing event 發射）先完成，T4 才有正確維度的用量資料可用。
+
 ---
 
 ## Totals
@@ -2783,7 +2991,8 @@ T0 + T4 + T5 (統一介面 + 用量追蹤 + 方案管理) — billing 骨架（6
 | V (visual design loop + workspace) | 48 day |
 | S2 (security hardening phase 2) | 8.5 day |
 | T (billing + payment gateway) | 25 day |
+| Y (tenant ops + multi-project) | 27 day |
 | META | 4-8 day |
-| **Total** | **~577.5-748 day** |
+| **Total** | **~604.5-775 day** |
 
-3-person team parallelized: **~7-10 months wall-clock**.
+3-person team parallelized: **~7.5-10.5 months wall-clock**.
