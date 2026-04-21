@@ -20,9 +20,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (keep .env.example tracked)
+# env files (keep .env.example + .env.test tracked — safe defaults only)
 .env*
 !.env.example
+!.env.test
 
 # python
 backend/.venv/

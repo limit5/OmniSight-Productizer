@@ -16,11 +16,24 @@
   - 任何**不在上述三種**的答案都要視為 **real bug**——要嘛補協調、要嘛開 follow-up task。
   - 撰寫時以一句話記錄在 commit message 或函式 docstring，讓下一個讀者知道此處的決定。
   - 背景：`backend.auth_baseline_mode` 的 cross-test pollution（task #90）、`secret_store._fernet` 的 first-boot 寫檔競爭（task #104）都是這個問題沒問就漏掉的實例。真正的 regression 保證請見 Step 4 的 multi-worker subprocess 測試（task #82）。
+- **強制問題：Read-after-write timing-visible downstream tests**（2026-04-21 納入，由 Phase-3-Runtime-v2 SP-5.6a 的 [200,409]→[200,400] 行為變化確立）
+  - 本次修改如果把「被串行執行」的操作改成「可能平行」（例：compat 單連線 → 連線池、file lock → row lock、module-global dict → Redis），是否有下游測試**假設了舊的 serialisation timing**？
+  - 具體要問：「**A write → B read 立刻看到 A 的結果**」的測試——在舊 timing 下因為 single-writer-conn 所以總是成立；在新 timing 下可能 B 先 commit、A 後 commit，B 的 read 先跑，看不到對方的寫入。
+  - 常見模式：`asyncio.gather(a, b)` 加 `HTTP POST` 加 optimistic-lock 409 → 新 timing 下 loser 的 GET 晚於 winner 的 commit，早一步看到新 state，走進另一個 error branch（例 SP-5.6a 的 router 早期 guard 400）。
+  - **不是 bug，是 timing 可見的行為變化**。但 commit message 要明確記錄：「測試期望值從 X 放寬到 X or Y，因為 pool 的 asyncio scheduling 和 compat 單連線不同」，這樣後面讀者知道為什麼放寬。Epic 7 拆掉 compat 之後這個對比就沒了，相關 inline note 屆時一併清掉。
 
 ### Step 2: 拆分工作
 - 將 Phase 的工作拆分成數個子階段。
 - 同時評估每個子階段實作的困難度、影響範圍、可能產生的副作用。
 - 列出所有子階段工作。
+- **強制拆分規則：Test-fixture blast radius**（2026-04-21 納入，由 SP-5.5 / SP-5.6a 的 test-檔膨脹確立）
+  - 如果一個 SP 要 port 的檔案**有超過 2 個 test 檔直接 import 它**，**預設拆成兩個 commit**：
+    - `<SP>a`：prod 檔 port + 1 個主 test 檔（通常是最核心的 contract test）
+    - `<SP>b`：剩下的 test 檔 fixture migration
+  - 檢查方式：`grep -rln "from backend import <module>" backend/tests/ | wc -l`
+  - **為什麼**：prod 檔 port + N 個 test fixture 擠在同一個 commit 時，blast radius 大、回滾困難、commit message 要塞兩件事、code review 變難。拆開後每個 commit 單一職責，異常時可精確定位。
+  - **例外**：如果 N 個 test 檔全是「同一 fixture 模板 × N 份 copy/paste」，可以考慮一起改（但 commit message 要點出「N 個 fixture 同構遷移」）。
+  - 歷史案例：SP-5.6a 應該拆成 a1(workflow.py + test_workflow.py) + a2(test_workflow_optimistic_lock*.py 兩個檔)。實際沒拆，commit 比預期臃腫。
 
 ### Step 3: 執行每個子階段實作(每個子階段重複執行)
 - 依照規劃逐一實作子階段。
@@ -31,6 +44,19 @@
 - 確認修正後可以正常執行。
 - 清理工作路徑。
 - 更新.gitignore。
+- **強制檢查：Pre-commit compat-fingerprint grep**（2026-04-21 納入，由 SP-5.6a 的 `_reset_for_tests` 殘留 `await conn.commit()` 確立）
+  - 在 `git commit` **之前**，對本次 port 的每個檔案跑一次 fingerprint grep：
+    ```
+    grep -nE "_conn\(\)|await conn\.commit\(\)|datetime\('now'\)|VALUES.*\?[,)]" <file>
+    ```
+  - 4 個 fingerprint 代表 4 種最常見的 compat 舊碼殘留：
+    1. `_conn()` — 舊的 compat-wrapper 入口
+    2. `await conn.commit()` — asyncpg pool 不需要，殘留會在 pool conn 上引發 AttributeError
+    3. `datetime('now')` — SQLite 語法，PG 需要 `to_char(clock_timestamp(), ...)`
+    4. `VALUES (?, ?, ...)` — 舊的 SQLite `?` 占位符，PG 需要 `$1, $2, ...`
+  - **任何一個 fingerprint 有命中都暫停 commit**、排查、修正、重跑 grep 直到都清。
+  - 然後跑至少一個實際函式呼叫（不只是 `python -c "import ..."`，要真的 exercise ported code），確認沒有 runtime 爆 — 因為 import 不會抓到 function-body 內的 NoneType.commit() 這類殘留。
+  - 為什麼不靠 lint：這些殘留在 Python 層面是合法語法（`conn.commit()` 只是方法呼叫），lint 看不到；型別也通不過因為 asyncpg 的 Connection 沒有 `commit` attr — 但這要到 runtime 才爆。
 - 執行git commit。
 - 確認新問題全數修正完成。
 - 確認可以正常執行。

@@ -19,6 +19,47 @@ from pathlib import Path
 
 import pytest
 
+# ─── 2026-04-21: .env.test isolation (before ANY backend import) ─────
+#
+# Pydantic-settings' ``.env`` loader bled developer workstation
+# credentials into pytest — a workstation with real
+# ``OMNISIGHT_ANTHROPIC_API_KEY`` in ``.env`` made "fresh install"
+# assertions (``_llm_provider_is_configured() == False``) fail
+# non-deterministically based on where the test ran. Fix: point
+# pydantic-settings at ``.env.test`` (safe defaults only) AND unset
+# the live env vars the real ``.env`` may have already pushed into
+# os.environ before pytest started.
+#
+# This block MUST run before any ``from backend import ...`` in this
+# file or in test-module imports — Settings is instantiated at
+# backend.config class-definition time, which fires on first import.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+os.environ["OMNISIGHT_DOTENV_FILE"] = str(_REPO_ROOT / ".env.test")
+for _leaky in (
+    # LLM provider + API keys — real values in .env break
+    # _llm_provider_is_configured() / wizard "not configured" gates.
+    "OMNISIGHT_LLM_PROVIDER",
+    "OMNISIGHT_ANTHROPIC_API_KEY",
+    "OMNISIGHT_GOOGLE_API_KEY",
+    "OMNISIGHT_OPENAI_API_KEY",
+    "OMNISIGHT_XAI_API_KEY",
+    "OMNISIGHT_GROQ_API_KEY",
+    "OMNISIGHT_DEEPSEEK_API_KEY",
+    "OMNISIGHT_TOGETHER_API_KEY",
+    "OMNISIGHT_OPENROUTER_API_KEY",
+    # CF tunnel — real token in .env makes wizard think install is done.
+    "OMNISIGHT_CLOUDFLARE_TUNNEL_TOKEN",
+    "OMNISIGHT_PUBLIC_HOSTNAME",
+    "OMNISIGHT_CF_TUNNEL_SKIP",
+    # Frontend origin — real prod hostname breaks health-check URL stubs.
+    "OMNISIGHT_FRONTEND_ORIGIN",
+    "OMNISIGHT_NEXT_PUBLIC_API_URL",
+    # Strict-mode gates — real admin pw / bearer leak through.
+    "OMNISIGHT_ADMIN_PASSWORD",
+    "OMNISIGHT_DECISION_BEARER",
+):
+    os.environ.pop(_leaky, None)
+
 # Ensure workspace root points to a temp directory for all tool tests
 _tmp = tempfile.mkdtemp(prefix="omnisight_test_")
 os.environ["OMNISIGHT_WORKSPACE"] = _tmp
@@ -109,6 +150,22 @@ async def client(tmp_path, monkeypatch):
             )
             _pool_inited_by_client = True
 
+    # 2026-04-21: TRUNCATE bootstrap_state between tests that share
+    # the shared ``client`` fixture. Pre-fix, a test that recorded
+    # steps leaked into the next test's "fresh install" probe —
+    # missing_required_steps() saw the prior test's rows and
+    # auto-backfilled, which made finalize succeed instead of the
+    # expected 409. Scoped narrow to bootstrap_state because the
+    # other shared tables either have their own per-test TRUNCATE
+    # via pg_test_conn / pg_test_pool flow or are intentionally
+    # shared (tenants seed row).
+    if _dsn:
+        from backend import db_pool as _db_pool
+        async with _db_pool.get_pool().acquire() as _clean_conn:
+            await _clean_conn.execute(
+                "TRUNCATE bootstrap_state RESTART IDENTITY CASCADE"
+            )
+
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -116,6 +173,12 @@ async def client(tmp_path, monkeypatch):
     finally:
         await db.close()
         _boot._gate_cache_reset()
+        if _dsn:
+            from backend import db_pool as _db_pool
+            async with _db_pool.get_pool().acquire() as _clean_conn:
+                await _clean_conn.execute(
+                    "TRUNCATE bootstrap_state RESTART IDENTITY CASCADE"
+                )
         if _pool_inited_by_client:
             from backend import db_pool as _db_pool
             await _db_pool.close_pool()

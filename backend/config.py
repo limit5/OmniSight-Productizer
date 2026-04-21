@@ -332,7 +332,16 @@ class Settings(BaseSettings):
     # in the raw .env line ``next_public_api_url=...``.
     next_public_api_url: str = ""
 
-    model_config = {"env_file": ".env", "env_prefix": "OMNISIGHT_"}
+    # Test harness sets OMNISIGHT_DOTENV_FILE=".env.test" (see
+    # backend/tests/conftest.py) so pytest runs get the safe-default
+    # credentials instead of the developer's real ``.env``. Prod /
+    # dev / runtime leave the env var unset and fall back to ``.env``.
+    # Resolved at class-definition time; pytest's conftest.py sets the
+    # env var at module-load, before ANY ``from backend.config import ..``.
+    model_config = {
+        "env_file": os.environ.get("OMNISIGHT_DOTENV_FILE", ".env"),
+        "env_prefix": "OMNISIGHT_",
+    }
 
     def get_model_name(self) -> str:
         """Return the model name, using provider-specific defaults if not set."""
