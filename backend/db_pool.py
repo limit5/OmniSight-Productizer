@@ -1,10 +1,10 @@
 """Phase-3-Runtime-v2 SP-1.3 — asyncpg.Pool wrapper.
 
 This module owns the single process-global ``asyncpg.Pool`` that the
-rest of the backend will use from SP-1.4 onward. It replaces the
-single-connection-plus-asyncio-Lock architecture of
-``backend.db_pg_compat.PgCompatConnection`` — the latter is kept alive
-through Epic 6 and deleted in Epic 7.
+rest of the backend uses for all PG access. It replaced the original
+single-connection-plus-asyncio-Lock architecture of the compat shim
+(``backend.db_pg_compat.PgCompatConnection``) that was retired in
+Phase-3 Step C.2 (2026-04-21).
 
 Lifecycle contract
 ------------------

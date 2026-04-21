@@ -71,15 +71,13 @@ async def lifespan(app: FastAPI):
         raise
     try:
         await db.init()
-        # Phase-3-Runtime-v2 SP-1.4 (2026-04-20): bring up the asyncpg.Pool
-        # alongside the compat wrapper. During Epics 3-6 both code paths
-        # coexist: existing db.py call sites still go through the compat
-        # wrapper's single-connection lock; newly-ported code uses
-        # ``Depends(get_conn)`` against this pool. Epic 7 deletes the
-        # compat wrapper and makes the pool the sole PG entry point.
-        #
-        # Gated on ``_resolve_pg_dsn()`` so SQLite dev / test flows are
-        # unaffected — the pool only spins up when a PG URL is present.
+        # Phase-3 Step C.2 (2026-04-21): the PG compat wrapper that
+        # used to coexist with the pool has been retired. On the PG
+        # path ``db.init()`` above is a no-op; the pool is the sole
+        # entry point. Gated on ``_resolve_pg_dsn()`` so SQLite dev /
+        # test flows (no DSN set) skip pool init and fall back to
+        # ``db._db`` for the handful of callers that still reach
+        # for aiosqlite directly.
         from backend import db_pool as _db_pool
         from backend.db import _resolve_pg_dsn as _r_pg
         _pg_dsn = _r_pg()
@@ -254,12 +252,13 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     await _ss.close()
-    # SP-1.4: close the asyncpg pool before the compat-wrapper DB handle.
+    # Close the asyncpg pool before the SQLite dev handle.
     # Order matters: any background task still writing via the pool must
     # finish first (_lifecycle.graceful_shutdown above has already drained
     # in-flight requests and background tasks were cancelled), then the
-    # pool releases its underlying TCP connections, then db.close() tears
-    # down the compat-wrapper's own connection.
+    # pool releases its underlying TCP connections, then ``db.close()``
+    # tears down the aiosqlite WAL (no-op on the PG path since
+    # ``db.init()`` is a no-op there post-Step-C.2).
     try:
         from backend import db_pool as _db_pool
         await _db_pool.close_pool()

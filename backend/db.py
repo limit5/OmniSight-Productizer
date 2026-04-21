@@ -1,16 +1,17 @@
 """Database persistence layer.
 
-Originally SQLite-only via aiosqlite; Phase-3 Runtime (2026-04-20) adds
-PostgreSQL support via an aiosqlite-compatible wrapper
-(:mod:`backend.db_pg_compat`) so the 80+ ``_conn().execute(...)`` call
-sites elsewhere in this file — and in ``tenant_secrets`` / ``audit`` /
-``bootstrap`` / the dozen other modules that reach through ``_conn()``
-— don't need to change. The wrapper translates SQLite-isms
-(``INSERT OR IGNORE``, ``datetime('now')``, ``?`` placeholders) at
-execute time on the PG path; SQLite connections are unchanged.
+SQLite path via aiosqlite for the legacy dev flow (no
+``OMNISIGHT_DATABASE_URL`` set). Production runs against PostgreSQL
+through :mod:`backend.db_pool` — every domain helper in this module
+takes an explicit ``conn`` argument so pool-acquired connections and
+SQLite connections share the same call surface.
 
-Dispatch on ``OMNISIGHT_DATABASE_URL``: empty / ``sqlite://`` →
-aiosqlite.Connection; ``postgresql+asyncpg://...`` → PgCompatConnection.
+Phase-3 Step C.2 (2026-04-21): the PG-path compat shim
+``backend.db_pg_compat.PgCompatConnection`` has been retired. The
+prod entry point is now the lifespan-managed ``db_pool.init_pool``;
+``db.init()`` below only opens the SQLite dev DB. If a
+``OMNISIGHT_DATABASE_URL`` is set, callers are expected to be
+pool-native (all domain helpers are), and ``db.init()`` short-circuits.
 """
 
 from __future__ import annotations
@@ -68,44 +69,38 @@ def _resolve_pg_dsn() -> str:
 
 
 _DB_PATH = _resolve_db_path()
-# Typed as ``Any`` because it can hold either aiosqlite.Connection or
-# PgCompatConnection depending on the runtime dispatch. The public
-# surface ``_conn()`` + the 80 call sites are identical either way.
+# Holds the aiosqlite connection for the dev-mode path (no PG DSN).
+# Production code does NOT read ``_db`` — it goes through
+# ``db_pool.get_pool()``. See Phase-3 Step C.2.
 _db: Any = None
-_IS_PG = False
 
 
 async def init() -> None:
-    """Open the database and create tables if they don't exist.
+    """Open the SQLite dev DB and create tables if they don't exist.
 
-    On SQLite (default): create tables via CREATE TABLE IF NOT EXISTS,
-    run ALTER TABLE ADD COLUMN migrations in ``_migrate()``, set WAL
-    pragmas. This is the canonical schema path — alembic only catches
-    up PG via migrations.
+    On SQLite (default, no ``OMNISIGHT_DATABASE_URL``): create tables
+    via CREATE TABLE IF NOT EXISTS, run ALTER TABLE ADD COLUMN
+    migrations in ``_migrate()``, set WAL pragmas.
 
-    On Postgres: the schema is owned by alembic. ``alembic upgrade
-    head`` must have been run before this function fires. We skip all
-    DDL (CREATE TABLE / _migrate() / FTS5 CREATE VIRTUAL TABLE / PRAGMA
-    set) because (a) alembic already created it, (b) SQLite-specific
-    statements wouldn't make sense on PG anyway.
+    On Postgres (any ``OMNISIGHT_DATABASE_URL`` pointing at PG): this
+    function is a no-op. The PG schema is owned by alembic
+    (``alembic upgrade head`` runs at deploy time) and the pool is
+    opened by the lifespan handler via ``db_pool.init_pool``. The
+    Phase-3 Step C.2 cleanup retired the in-process compat wrapper
+    that previously coexisted with the pool on the PG path.
     """
-    global _db, _IS_PG
+    global _db
     pg_dsn = _resolve_pg_dsn()
     if pg_dsn:
-        _IS_PG = True
-        from backend.db_pg_compat import PgCompatConnection
-        _db = await PgCompatConnection.open(pg_dsn)
-        # Schema is alembic-managed on PG. We do NOT re-run CREATE TABLE
-        # or _migrate here — the alembic upgrade_head that ran at deploy
-        # time owns the schema. A sanity ping confirms reachability.
-        async with await _db.execute("SELECT 1") as cur:
-            row = await cur.fetchone()
-            if not row:
-                raise RuntimeError("PG connection opened but SELECT 1 returned no row")
-        logger.info("Database ready (PostgreSQL via asyncpg compat wrapper)")
+        # Production path: schema + pool are owned elsewhere. Nothing
+        # to do here — leave ``_db`` as None so anyone who still
+        # reaches for it fails fast with the "not initialized" error.
+        logger.info(
+            "db.init() no-op on PG path — pool lifecycle owned by "
+            "db_pool.init_pool, schema owned by alembic."
+        )
         return
 
-    _IS_PG = False
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _db = await aiosqlite.connect(str(_DB_PATH))
     _db.row_factory = aiosqlite.Row
@@ -294,25 +289,23 @@ async def close() -> None:
     """
     global _db
     if _db:
-        # WAL checkpoint is SQLite-specific. PgCompatConnection handles
-        # PRAGMA statements as no-ops so this loop is safe either way,
-        # but we short-circuit on PG to skip the redundant PASSIVE
-        # retry + the misleading "wal_checkpoint failed" log line.
-        if not _IS_PG:
-            for mode in ("RESTART", "PASSIVE"):
-                try:
-                    async with _db.execute(f"PRAGMA wal_checkpoint({mode})") as cur:
-                        row = await cur.fetchone()
-                    if row is not None:
-                        # row = (busy, log, checkpointed). busy=0 means clean.
-                        logger.debug(
-                            "[db] wal_checkpoint(%s) busy=%s log=%s checkpointed=%s",
-                            mode, row[0], row[1], row[2],
-                        )
-                    if row is None or row[0] == 0:
-                        break  # clean checkpoint → stop; no need for PASSIVE fallback
-                except Exception as exc:
-                    logger.warning("[db] wal_checkpoint(%s) failed: %s", mode, exc)
+        # WAL checkpoint is SQLite-specific. Phase-3 Step C.2 retired
+        # the compat wrapper; ``_db`` now only holds aiosqlite
+        # connections, so this loop always applies when ``_db`` is set.
+        for mode in ("RESTART", "PASSIVE"):
+            try:
+                async with _db.execute(f"PRAGMA wal_checkpoint({mode})") as cur:
+                    row = await cur.fetchone()
+                if row is not None:
+                    # row = (busy, log, checkpointed). busy=0 means clean.
+                    logger.debug(
+                        "[db] wal_checkpoint(%s) busy=%s log=%s checkpointed=%s",
+                        mode, row[0], row[1], row[2],
+                    )
+                if row is None or row[0] == 0:
+                    break  # clean checkpoint → stop; no need for PASSIVE fallback
+            except Exception as exc:
+                logger.warning("[db] wal_checkpoint(%s) failed: %s", mode, exc)
         await _db.close()
         _db = None
 
@@ -347,15 +340,17 @@ async def execute_raw(sql: str, params: tuple = ()) -> int:
 
 
 def _conn() -> Any:
-    """Return the open connection.
+    """Return the open aiosqlite connection (SQLite dev-mode only).
 
-    Typed as ``Any`` because the return value is either
-    ``aiosqlite.Connection`` (SQLite path) or
-    ``PgCompatConnection`` (PG path). Both expose the same surface
-    the rest of this module + the downstream modules
-    (``tenant_secrets``, ``audit``, ``bootstrap``, ``dag_storage``,
-    etc.) use: ``async with conn.execute(...) as cur``, ``commit()``,
-    ``executescript()``.
+    Phase-3 Step C.2 (2026-04-21): after the compat wrapper retirement
+    this only returns ``aiosqlite.Connection``. On the PG path
+    ``db.init()`` is a no-op and ``_db`` stays None, so calling this
+    here will raise — which is the intended behaviour: pool-native
+    callers should go through ``db_pool.get_pool().acquire()``, not
+    ``db._conn()``. The remaining ``_conn()`` callers are limited to
+    ``backend/tests/test_migrator_schema_coverage.py`` (SQLite
+    drift-guard by design, kept pointed at a tempfile SQLite DB
+    that's the whole point of that test).
     """
     if _db is None:
         raise RuntimeError("Database not initialized — call db.init() first")
