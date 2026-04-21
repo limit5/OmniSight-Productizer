@@ -76,31 +76,38 @@ async def update_secret(
 
     if body.value is not None:
         from backend.secret_store import encrypt
-        from backend.db import _conn
-        conn = _conn()
+        from backend.db_pool import get_pool
+        import json
         enc = encrypt(body.value)
-        meta_sql = ""
-        params: list = [enc]
         if body.metadata is not None:
-            import json
-            meta_sql = ", metadata = ?"
-            params.append(json.dumps(body.metadata))
-        params.append(secret_id)
-        await conn.execute(
-            f"UPDATE tenant_secrets SET encrypted_value = ?, "
-            f"updated_at = datetime('now'){meta_sql} WHERE id = ?",
-            params,
-        )
-        await conn.commit()
+            sql = (
+                "UPDATE tenant_secrets SET encrypted_value = $1, "
+                "updated_at = to_char(clock_timestamp(), "
+                "                       'YYYY-MM-DD HH24:MI:SS'), "
+                "metadata = $2 WHERE id = $3"
+            )
+            params = (enc, json.dumps(body.metadata), secret_id)
+        else:
+            sql = (
+                "UPDATE tenant_secrets SET encrypted_value = $1, "
+                "updated_at = to_char(clock_timestamp(), "
+                "                       'YYYY-MM-DD HH24:MI:SS') "
+                "WHERE id = $2"
+            )
+            params = (enc, secret_id)
+        async with get_pool().acquire() as conn:
+            await conn.execute(sql, *params)
     elif body.metadata is not None:
         import json
-        from backend.db import _conn
-        conn = _conn()
-        await conn.execute(
-            "UPDATE tenant_secrets SET metadata = ?, updated_at = datetime('now') WHERE id = ?",
-            (json.dumps(body.metadata), secret_id),
-        )
-        await conn.commit()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            await conn.execute(
+                "UPDATE tenant_secrets SET metadata = $1, "
+                "updated_at = to_char(clock_timestamp(), "
+                "                       'YYYY-MM-DD HH24:MI:SS') "
+                "WHERE id = $2",
+                json.dumps(body.metadata), secret_id,
+            )
 
     return {"id": secret_id, "status": "updated"}
 

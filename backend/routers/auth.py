@@ -284,22 +284,26 @@ async def user_tenants(user: auth.User = Depends(auth.current_user)) -> list[dic
 
     Admin users get all tenants; regular users get only their own.
     """
-    from backend.db import _conn
-    conn = _conn()
-    if user.role == "admin":
-        async with conn.execute(
-            "SELECT id, name, plan, enabled FROM tenants ORDER BY name",
-        ) as cur:
-            rows = await cur.fetchall()
-            return [{"id": r[0], "name": r[1], "plan": r[2], "enabled": bool(r[3])} for r in rows]
-    async with conn.execute(
-        "SELECT id, name, plan, enabled FROM tenants WHERE id = ?",
-        (user.tenant_id,),
-    ) as cur:
-        r = await cur.fetchone()
-        if r:
-            return [{"id": r[0], "name": r[1], "plan": r[2], "enabled": bool(r[3])}]
-    return [{"id": user.tenant_id, "name": user.tenant_id, "plan": "free", "enabled": True}]
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        if user.role == "admin":
+            rows = await conn.fetch(
+                "SELECT id, name, plan, enabled FROM tenants ORDER BY name"
+            )
+            return [
+                {"id": r["id"], "name": r["name"], "plan": r["plan"],
+                 "enabled": bool(r["enabled"])}
+                for r in rows
+            ]
+        r = await conn.fetchrow(
+            "SELECT id, name, plan, enabled FROM tenants WHERE id = $1",
+            user.tenant_id,
+        )
+    if r:
+        return [{"id": r["id"], "name": r["name"], "plan": r["plan"],
+                 "enabled": bool(r["enabled"])}]
+    return [{"id": user.tenant_id, "name": user.tenant_id,
+             "plan": "free", "enabled": True}]
 
 
 class ChangePasswordRequest(BaseModel):
@@ -411,12 +415,13 @@ class PatchUserRequest(BaseModel):
 
 @router.get("/users")
 async def list_users(_: auth.User = Depends(auth.require_admin)) -> dict:
-    from backend import db
-    async with db._conn().execute(
-        "SELECT id, email, name, role, enabled, created_at, last_login_at "
-        "FROM users ORDER BY created_at DESC"
-    ) as cur:
-        rows = await cur.fetchall()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, email, name, role, enabled, "
+            "created_at, last_login_at "
+            "FROM users ORDER BY created_at DESC"
+        )
     return {"items": [
         {"id": r["id"], "email": r["email"], "name": r["name"],
          "role": r["role"], "enabled": bool(r["enabled"]),
@@ -453,22 +458,23 @@ async def patch_user(user_id: str, req: PatchUserRequest,
     if req.role is not None:
         if req.role not in auth.ROLES:
             return JSONResponse(status_code=422, content={"detail": f"unknown role: {req.role}"})
-        sets.append("role=?")
         params.append(req.role)
+        sets.append(f"role = ${len(params)}")
     if req.enabled is not None:
-        sets.append("enabled=?")
         params.append(1 if req.enabled else 0)
+        sets.append(f"enabled = ${len(params)}")
     if req.name is not None:
-        sets.append("name=?")
         params.append(req.name)
+        sets.append(f"name = ${len(params)}")
     if not sets:
         return user.to_dict()
     params.append(user_id)
-    from backend import db
-    await db._conn().execute(
-        f"UPDATE users SET {', '.join(sets)} WHERE id=?", tuple(params),
-    )
-    await db._conn().commit()
+    from backend.db_pool import get_pool
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            f"UPDATE users SET {', '.join(sets)} WHERE id = ${len(params)}",
+            *params,
+        )
 
     if req.role is not None and req.role != old_role:
         count = await auth.rotate_user_sessions(user_id)
@@ -524,15 +530,14 @@ async def revoke_session(token_hint: str, request: Request,
             target_user_id = s["user_id"]
             break
     if not target_token and is_admin:
-        from backend import db
-        async with db._conn().execute(
-            "SELECT token, user_id FROM sessions"
-        ) as cur:
-            async for row in cur:
-                if auth._mask_token(row["token"]) == token_hint:
-                    target_token = row["token"]
-                    target_user_id = row["user_id"]
-                    break
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch("SELECT token, user_id FROM sessions")
+        for row in rows:
+            if auth._mask_token(row["token"]) == token_hint:
+                target_token = row["token"]
+                target_user_id = row["user_id"]
+                break
     if not target_token:
         raise HTTPException(status_code=404, detail="session not found")
     if target_user_id != user.id and not is_admin:
