@@ -65,10 +65,10 @@ async def _probe_db() -> dict:
     """Try a 1-statement query against the active DB."""
     started = time.perf_counter()
     try:
-        from backend import db
-        async with db._conn().execute("SELECT 1") as cur:
-            row = await cur.fetchone()
-        ok = bool(row and (row[0] if not hasattr(row, "keys") else row[0]) == 1)
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            result = await conn.fetchval("SELECT 1")
+        ok = result == 1
     except Exception as exc:
         return {"ok": False, "latency_ms": int((time.perf_counter() - started) * 1000),
                 "error": f"{type(exc).__name__}: {exc!s}"[:200]}

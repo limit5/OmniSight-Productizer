@@ -77,24 +77,27 @@ async def list_auto_decisions(
     limit: int = _pg.Limit(default=200, max_cap=500),
 ) -> dict:
     """Postmortem feed."""
-    from backend import db
+    from backend.db_pool import get_pool
     where = []
     params: list = []
     if since is not None:
-        where.append("auto_executed_at >= ?"); params.append(since)
+        params.append(since)
+        where.append(f"auto_executed_at >= ${len(params)}")
     if undone is True:
         where.append("undone_at IS NOT NULL")
     elif undone is False:
         where.append("undone_at IS NULL")
-    sql = ("SELECT id, decision_id, kind, severity, chosen_option, confidence, "
-           "rationale, profile_id, auto_executed_at, undone_at, undone_by "
-           "FROM auto_decision_log")
+    sql = (
+        "SELECT id, decision_id, kind, severity, chosen_option, "
+        "confidence, rationale, profile_id, auto_executed_at, "
+        "undone_at, undone_by FROM auto_decision_log"
+    )
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY auto_executed_at DESC LIMIT ?"
     params.append(int(limit))
-    async with db._conn().execute(sql, tuple(params)) as cur:
-        rows = await cur.fetchall()
+    sql += f" ORDER BY auto_executed_at DESC LIMIT ${len(params)}"
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(sql, *params)
     return {"items": [
         {
             "id": r["id"], "decision_id": r["decision_id"],
@@ -122,24 +125,34 @@ async def bulk_undo(req: BulkUndoRequest, _auth: None = Depends(_require_token),
     record was already evicted by the 500-row history cap)."""
     if not req.ids:
         return {"undone": 0}
-    from backend import db, decision_engine as _de
+    from backend import decision_engine as _de
+    from backend.db_pool import get_pool
     undone_at = time.time()
-    placeholders = ",".join("?" * len(req.ids))
-    async with db._conn().execute(
-        f"SELECT id, decision_id FROM auto_decision_log WHERE id IN ({placeholders}) "
-        "AND undone_at IS NULL",
-        tuple(req.ids),
-    ) as cur:
-        targets = await cur.fetchall()
-    if not targets:
-        return {"undone": 0}
-    decision_ids = [r["decision_id"] for r in targets]
-    await db._conn().execute(
-        f"UPDATE auto_decision_log SET undone_at=?, undone_by=? "
-        f"WHERE id IN ({placeholders}) AND undone_at IS NULL",
-        (undone_at, req.actor, *req.ids),
-    )
-    await db._conn().commit()
+    # SP-5.9 (2026-04-21): SELECT-then-UPDATE now runs in one tx so
+    # the set of ids we REPORT as undone matches the set we ACTUALLY
+    # flip. Under pool, a concurrent writer could land ``undone_at``
+    # on one of our targets between the SELECT and the UPDATE — our
+    # UPDATE's ``WHERE undone_at IS NULL`` guard would exclude it,
+    # but our report's ``decision_ids`` list would include it as
+    # "flipped by us". Tx + FOR UPDATE on the SELECT eliminates the
+    # race.
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            targets = await conn.fetch(
+                "SELECT id, decision_id FROM auto_decision_log "
+                "WHERE id = ANY($1::int[]) AND undone_at IS NULL "
+                "FOR UPDATE",
+                req.ids,
+            )
+            if not targets:
+                return {"undone": 0}
+            decision_ids = [r["decision_id"] for r in targets]
+            await conn.execute(
+                "UPDATE auto_decision_log SET undone_at = $1, "
+                "undone_by = $2 "
+                "WHERE id = ANY($3::int[]) AND undone_at IS NULL",
+                undone_at, req.actor, req.ids,
+            )
     flipped = 0
     for did in decision_ids:
         try:

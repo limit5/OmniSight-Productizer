@@ -1647,19 +1647,36 @@ _DB_MIGRATION_REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
 
 
 async def _check_db_migration() -> CheckResult:
-    """Verify the load-bearing migration invariants against PRAGMA.
+    """Verify the load-bearing migration invariants.
 
     We don't use Alembic for application schema (``backend.db._migrate``
     runs at startup with ALTER/CREATE IF NOT EXISTS). The ready signal
     is therefore "do the columns that the runtime hard-depends on
     exist" — lifted from ``db._migrate``'s own ``REQUIRED`` set plus a
     couple of columns every wizard step touches.
+
+    SP-5.9 (2026-04-21): ``PRAGMA table_info(...)`` swapped for PG's
+    ``information_schema.columns`` probe. Queries all required
+    (table, column) pairs in a single SELECT instead of N separate
+    PRAGMA calls — one pool acquire, one round-trip.
     """
     started = time.monotonic()
     try:
-        from backend import db as _db
-
-        conn = _db._conn()
+        from backend.db_pool import get_pool
+        # Build the probe: fetch all (table, column) pairs that exist
+        # in public schema, then compare against required set in-memory.
+        required_tables = {t for t, _ in _DB_MIGRATION_REQUIRED_COLUMNS}
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT table_name, column_name "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = ANY($1::text[])",
+                list(required_tables),
+            )
+        present: set[tuple[str, str]] = {
+            (r["table_name"], r["column_name"]) for r in rows
+        }
     except Exception as exc:
         return CheckResult(
             ok=False, status="red",
@@ -1667,20 +1684,11 @@ async def _check_db_migration() -> CheckResult:
             latency_ms=int((time.monotonic() - started) * 1000),
         )
 
-    missing: list[str] = []
-    for table, column in _DB_MIGRATION_REQUIRED_COLUMNS:
-        try:
-            cur = await conn.execute(f"PRAGMA table_info({table})")
-            cols = {row[1] for row in await cur.fetchall()}
-        except Exception as exc:
-            return CheckResult(
-                ok=False, status="red",
-                detail=f"PRAGMA {table} failed: {type(exc).__name__}: {exc}"[:200],
-                latency_ms=int((time.monotonic() - started) * 1000),
-            )
-        if column not in cols:
-            missing.append(f"{table}.{column}")
-
+    missing = [
+        f"{table}.{column}"
+        for table, column in _DB_MIGRATION_REQUIRED_COLUMNS
+        if (table, column) not in present
+    ]
     elapsed = int((time.monotonic() - started) * 1000)
     if missing:
         return CheckResult(

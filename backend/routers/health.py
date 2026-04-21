@@ -105,18 +105,14 @@ async def livez_prefixed() -> dict:
 async def _check_db() -> tuple[bool, str]:
     """Returns (ok, detail). Detail is a short human-readable string."""
     try:
-        from backend import db as _db
-        conn = _db._conn()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            result = await conn.fetchval("SELECT 1")
+        if result != 1:
+            return False, "db_ping_no_row"
+        return True, "ok"
     except RuntimeError as exc:
         return False, f"db_not_initialized: {exc}"
-    except Exception as exc:
-        return False, f"db_connection_error: {exc}"
-    try:
-        async with conn.execute("SELECT 1") as cur:
-            row = await cur.fetchone()
-            if row is None:
-                return False, "db_ping_no_row"
-        return True, "ok"
     except Exception as exc:
         return False, f"db_ping_failed: {exc}"
 
@@ -130,49 +126,30 @@ async def _check_migrations() -> tuple[bool, str]:
     file on disk.  Returns (ok, detail).  If the alembic table doesn't
     exist yet (fresh install), we treat that as *not* ready — a newly
     booted process should run migrations before serving traffic.
+
+    SP-5.9 (2026-04-21): SQLite-vs-PG dialect dispatch removed
+    (runtime is PG-only now). Always uses ``information_schema.tables``
+    for the "does alembic_version exist?" probe. If a future rollback
+    needs the SQLite path, it'll come back through the compat wrapper
+    or a fresh dialect check.
     """
     try:
-        from backend import db as _db
-        conn = _db._conn()
-    except Exception as exc:
-        return False, f"db_unavailable: {exc}"
-
-    # Dialect-dispatch the "does alembic_version table exist" probe —
-    # ``sqlite_master`` is SQLite-only; PG uses ``information_schema``.
-    # Phase-3 cutover: reading _IS_PG keeps this healthcheck dialect-
-    # neutral without a second round trip to ask the connection for its
-    # dialect name.
-    _IS_PG = getattr(_db, "_IS_PG", False)
-    if _IS_PG:
-        probe_sql = (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema='public' AND table_name='alembic_version'"
-        )
-    else:
-        probe_sql = (
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='alembic_version'"
-        )
-    try:
-        async with conn.execute(probe_sql) as cur:
-            row = await cur.fetchone()
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            table_exists = await conn.fetchval(
+                "SELECT EXISTS("
+                "  SELECT 1 FROM information_schema.tables "
+                "  WHERE table_schema = 'public' "
+                "  AND table_name = 'alembic_version'"
+                ")"
+            )
+            if not table_exists:
+                return True, "alembic_not_applied_legacy_schema"
+            current = await conn.fetchval(
+                "SELECT version_num FROM alembic_version"
+            )
     except Exception as exc:
         return False, f"alembic_probe_failed: {exc}"
-
-    if row is None:
-        # No alembic table — either alembic hasn't run yet, or this
-        # deploy uses the legacy bare schema in db.py.  We allow the
-        # legacy path (main.py calls db.init() which creates the raw
-        # schema) so return ok with a descriptive note.
-        return True, "alembic_not_applied_legacy_schema"
-
-    try:
-        async with conn.execute("SELECT version_num FROM alembic_version") as cur:
-            ver_row = await cur.fetchone()
-    except Exception as exc:
-        return False, f"alembic_version_read_failed: {exc}"
-
-    current = ver_row[0] if ver_row else None
     if not current:
         return False, "alembic_version_empty"
 
