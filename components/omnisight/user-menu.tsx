@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { Key, LogOut, Monitor, Shield, User as UserIcon } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/auth-context"
@@ -121,7 +122,20 @@ export function UserMenu() {
         </div>
       )}
 
-      {showSessions && (
+      {/* SP-8.1d (2026-04-21): the three modals below (Sessions / MFA
+          / API Keys) render via ``createPortal(..., document.body)``
+          because the dashboard header sits inside a ``.holo-glass-
+          simple`` ancestor with ``backdrop-filter: blur(10px)`` — and
+          CSS spec says any element with ``backdrop-filter`` (or
+          ``filter``/``transform``/``will-change``/``perspective``)
+          becomes the containing block for ``position: fixed``
+          descendants. Without the portal, ``fixed inset-0`` was
+          resolving against the header's holo-glass box (which sits
+          near the top of the viewport), so the modal's flex-centered
+          content drifted off-screen upward. Portal to ``body``
+          bypasses the containment and restores viewport-centering.
+          Same pattern as ``task-backlog.tsx`` Add-Task modal. */}
+      {showSessions && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setShowSessions(false)}>
           <div className="absolute inset-0 bg-black/40" />
           <div
@@ -139,9 +153,10 @@ export function UserMenu() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
-      {showMfa && (
+      {showMfa && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setShowMfa(false)}>
           <div className="absolute inset-0 bg-black/40" />
           <div
@@ -159,9 +174,10 @@ export function UserMenu() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
-      {showApiKeys && (
+      {showApiKeys && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setShowApiKeys(false)}>
           <div className="absolute inset-0 bg-black/40" />
           <div
@@ -179,7 +195,8 @@ export function UserMenu() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

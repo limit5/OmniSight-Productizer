@@ -179,13 +179,22 @@ async def get_system_info():
     uptime_str = _parse_uptime(float(uptime_raw)) if uptime_raw else "unknown"
 
     kernel = await _sh("uname -r")
-    hostname = await _sh("hostname")
+    # Dashboard hostname: prefer the operator-facing public hostname
+    # (``OMNISIGHT_PUBLIC_HOSTNAME`` — e.g. ``ai.sora-dev.app``) over
+    # the backend container's random docker ID (``3ffe5d490f84``),
+    # which is what the raw ``hostname`` command returns inside the
+    # container and isn't useful to an operator looking at the
+    # SYSTEM INFO card. Falls back through: env var → container
+    # hostname → Python ``platform.node()``.
+    hostname_env = os.environ.get("OMNISIGHT_PUBLIC_HOSTNAME", "").strip()
+    hostname_raw = await _sh("hostname")
+    display_hostname = hostname_env or hostname_raw or platform.node()
     os_info = await _sh("grep PRETTY_NAME /etc/os-release | cut -d'\"' -f2")
     if kernel and "microsoft" in kernel.lower() and "WSL" not in (os_info or ""):
         os_info = f"{os_info} (WSL2)"
 
     return {
-        "hostname": hostname or platform.node(),
+        "hostname": display_hostname,
         "os": os_info or f"{platform.system()} {platform.release()}",
         "kernel": kernel or platform.release(),
         "arch": platform.machine(),

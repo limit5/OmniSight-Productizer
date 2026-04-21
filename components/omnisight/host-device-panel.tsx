@@ -219,6 +219,7 @@ export function MetricSparkline({
   domainMax = null,
   width = 96,
   height = 18,
+  fluid = false,
   testId,
 }: {
   values: number[]
@@ -226,6 +227,14 @@ export function MetricSparkline({
   domainMax?: number | null
   width?: number
   height?: number
+  // SP-8.1d (2026-04-21): when ``fluid`` is true, the sparkline's
+  // rendered width scales to fill its parent container via SVG
+  // ``width="100%" viewBox preserveAspectRatio="none"``. Internal
+  // coordinate math still uses the ``width`` prop as its virtual
+  // canvas, so the curve shape is identical at any rendered width.
+  // Used by ``LiveMetricsSection`` to avoid the narrow-column
+  // overflow the operator surfaced 2026-04-21.
+  fluid?: boolean
   testId?: string
 }) {
   if (values.length < 2) {
@@ -234,7 +243,7 @@ export function MetricSparkline({
         data-testid={testId}
         data-empty="true"
         className="opacity-30 font-mono text-[9px] flex items-center justify-end"
-        style={{ width, height }}
+        style={{ width: fluid ? "100%" : width, height }}
       >
         —
       </div>
@@ -255,9 +264,11 @@ export function MetricSparkline({
     <svg
       data-testid={testId}
       data-points={values.length}
-      width={width}
+      width={fluid ? "100%" : width}
       height={height}
-      className="shrink-0"
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio={fluid ? "none" : "xMidYMid meet"}
+      className={fluid ? "block" : "shrink-0"}
       aria-hidden
     >
       <polyline fill="none" stroke={color} strokeWidth={1.2} points={pts} />
@@ -303,24 +314,35 @@ function LiveMetricsSection({
   const fmt = (v: number, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : "—")
   return (
     <div className="space-y-2">
+      {/* SP-8.1d (2026-04-21): each metric card restructured from
+          single-row (label + sparkline + number jammed side-by-side)
+          to two-row (label + number on top; sparkline full-width on
+          its own row below). Operator reported the sparkline was
+          overflowing the narrow SYSTEM INFO column — the
+          horizontal-cram layout assumed ~300px card width but the
+          actual left-column in the dashboard is ~220px. Two-row
+          lets the sparkline fluidly fill the card, and the number
+          stays readable on the right of the header. */}
+
       {/* CPU */}
       <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-cpu">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-1.5 min-w-0">
             <Cpu size={12} className="text-[var(--hardware-orange)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">CPU</span>
           </div>
-          <div className="flex items-center gap-2">
-            <MetricSparkline
-              values={cpuValues}
-              color="var(--hardware-orange)"
-              domainMax={100}
-              testId="sparkline-cpu"
-            />
-            <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums" style={{ minWidth: 56 }}>
-              {tick ? `${fmt(tick.cpuUsage)}%` : "—"}
-            </span>
-          </div>
+          <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums">
+            {tick ? `${fmt(tick.cpuUsage)}%` : "—"}
+          </span>
+        </div>
+        <div className="mb-1">
+          <MetricSparkline
+            values={cpuValues}
+            color="var(--hardware-orange)"
+            domainMax={100}
+            fluid
+            testId="sparkline-cpu"
+          />
         </div>
         <div className="font-mono text-xs text-[var(--foreground)] break-words" title={cpuModel}>{cpuModel}</div>
         <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5">{cpuCores}C / {arch}</div>
@@ -328,22 +350,23 @@ function LiveMetricsSection({
 
       {/* Memory — % + used/total + available */}
       <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-mem">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-1.5 min-w-0">
             <MemoryStick size={12} className="text-[var(--artifact-purple)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Memory</span>
           </div>
-          <div className="flex items-center gap-2">
-            <MetricSparkline
-              values={memValues}
-              color="var(--artifact-purple)"
-              domainMax={100}
-              testId="sparkline-mem"
-            />
-            <span className="font-mono text-xs font-medium text-[var(--artifact-purple)] tabular-nums" style={{ minWidth: 56 }}>
-              {tick ? `${fmt(tick.memPercent, 0)}%` : "—"}
-            </span>
-          </div>
+          <span className="font-mono text-xs font-medium text-[var(--artifact-purple)] tabular-nums">
+            {tick ? `${fmt(tick.memPercent, 0)}%` : "—"}
+          </span>
+        </div>
+        <div className="mb-1">
+          <MetricSparkline
+            values={memValues}
+            color="var(--artifact-purple)"
+            domainMax={100}
+            fluid
+            testId="sparkline-mem"
+          />
         </div>
         <div className="font-mono text-xs text-[var(--foreground)] tabular-nums">
           {tick ? `${fmt(tick.memUsedGb, 1)} GB / ${fmt(tick.memTotalGb, 0)} GB` : "—"}
@@ -355,22 +378,23 @@ function LiveMetricsSection({
 
       {/* Disk */}
       <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-disk">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-1.5 min-w-0">
             <HardDrive size={12} className="text-[var(--validation-emerald)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Disk</span>
           </div>
-          <div className="flex items-center gap-2">
-            <MetricSparkline
-              values={diskValues}
-              color="var(--validation-emerald)"
-              domainMax={100}
-              testId="sparkline-disk"
-            />
-            <span className="font-mono text-xs font-medium text-[var(--validation-emerald)] tabular-nums" style={{ minWidth: 56 }}>
-              {tick ? `${fmt(tick.diskPercent, 0)}%` : "—"}
-            </span>
-          </div>
+          <span className="font-mono text-xs font-medium text-[var(--validation-emerald)] tabular-nums">
+            {tick ? `${fmt(tick.diskPercent, 0)}%` : "—"}
+          </span>
+        </div>
+        <div className="mb-1">
+          <MetricSparkline
+            values={diskValues}
+            color="var(--validation-emerald)"
+            domainMax={100}
+            fluid
+            testId="sparkline-disk"
+          />
         </div>
         <div className="font-mono text-xs text-[var(--foreground)] tabular-nums">
           {tick ? `${fmt(tick.diskUsedGb, 0)} GB / ${fmt(tick.diskTotalGb, 0)} GB` : "—"}
@@ -379,21 +403,22 @@ function LiveMetricsSection({
 
       {/* Load avg 1m */}
       <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-loadavg">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-1.5 min-w-0">
             <Activity size={12} className="text-[var(--neural-blue)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Load 1m</span>
           </div>
-          <div className="flex items-center gap-2">
-            <MetricSparkline
-              values={loadValues}
-              color="var(--neural-blue)"
-              testId="sparkline-loadavg"
-            />
-            <span className="font-mono text-xs font-medium text-[var(--neural-blue)] tabular-nums" style={{ minWidth: 56 }}>
-              {tick ? fmt(tick.loadavg1m) : "—"}
-            </span>
-          </div>
+          <span className="font-mono text-xs font-medium text-[var(--neural-blue)] tabular-nums">
+            {tick ? fmt(tick.loadavg1m) : "—"}
+          </span>
+        </div>
+        <div className="mb-1">
+          <MetricSparkline
+            values={loadValues}
+            color="var(--neural-blue)"
+            fluid
+            testId="sparkline-loadavg"
+          />
         </div>
         <div className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">
           {cpuCores > 0 && tick ? `${fmt(tick.loadavg1m / cpuCores * 100, 0)}% of ${cpuCores}C` : ""}
@@ -402,21 +427,22 @@ function LiveMetricsSection({
 
       {/* Running containers */}
       <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-containers">
-        <div className="flex items-center justify-between mb-1.5">
-          <div className="flex items-center gap-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-1.5 min-w-0">
             <Boxes size={12} className="text-[var(--fui-orange,var(--hardware-orange))] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Containers</span>
           </div>
-          <div className="flex items-center gap-2">
-            <MetricSparkline
-              values={containerValues}
-              color="var(--fui-orange,var(--hardware-orange))"
-              testId="sparkline-containers"
-            />
-            <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums" style={{ minWidth: 56 }}>
-              {tick ? `${tick.containerCount}` : "—"}
-            </span>
-          </div>
+          <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums">
+            {tick ? `${tick.containerCount}` : "—"}
+          </span>
+        </div>
+        <div className="mb-1">
+          <MetricSparkline
+            values={containerValues}
+            color="var(--fui-orange,var(--hardware-orange))"
+            fluid
+            testId="sparkline-containers"
+          />
         </div>
         <div className="font-mono text-[10px] text-[var(--muted-foreground)]">running</div>
       </div>
