@@ -255,6 +255,97 @@ async def test_upsert_secret_unique_per_tenant(_secrets_db):
     assert await sec.get_secret_by_name("dup", "provider_key") == "c"
 
 
+# ── Coverage gap-fill (task #83, 2026-04-21) ─────────────────────
+#
+# The module-level baseline was 84%; the seven uncovered branches
+# were the decrypt/JSON-parse fallbacks inside ``_list_secrets_impl``,
+# the ``conn is not None`` arms of the polymorphic public helpers,
+# the not-found path of ``get_secret_by_name``, and the
+# status-string parse fallback in ``delete_secret``. Each fill is
+# a targeted test rather than a generic increase.
+
+
+@pytest.mark.asyncio
+async def test_list_secrets_fingerprints_unreadable_ciphertext_as_masked(
+    _secrets_db, pg_test_pool,
+):
+    """Covers the ``except Exception: fp = "****"`` arm in
+    ``_list_secrets_impl``. Hand-seed a row whose ``encrypted_value``
+    is NOT valid Fernet output so ``decrypt`` raises; the list call
+    must still return the row with a masked fingerprint instead of
+    propagating the exception."""
+    sec = _secrets_db
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tenant_secrets "
+            "(id, tenant_id, secret_type, key_name, encrypted_value) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            "sec-corrupt", DEFAULT_TENANT, "custom", "broken",
+            "this-is-not-valid-fernet-ciphertext",
+        )
+    items = await sec.list_secrets()
+    broken = [r for r in items if r["key_name"] == "broken"]
+    assert broken and broken[0]["fingerprint"] == "****"
+
+
+@pytest.mark.asyncio
+async def test_list_secrets_swallows_corrupt_metadata_json(
+    _secrets_db, pg_test_pool,
+):
+    """Covers the ``except Exception: pass`` arm on the metadata JSON
+    decode. A legacy row with malformed ``metadata`` must surface as
+    an empty dict, not blow up the list call."""
+    from backend.secret_store import encrypt
+    sec = _secrets_db
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tenant_secrets "
+            "(id, tenant_id, secret_type, key_name, "
+            "encrypted_value, metadata) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            "sec-badmeta", DEFAULT_TENANT, "custom", "badmeta",
+            encrypt("val"), "::: not valid json :::",
+        )
+    items = await sec.list_secrets()
+    badmeta = [r for r in items if r["key_name"] == "badmeta"]
+    assert badmeta and badmeta[0]["metadata"] == {}
+
+
+@pytest.mark.asyncio
+async def test_public_helpers_accept_explicit_conn(_secrets_db, pg_test_pool):
+    """Covers the ``conn is not None`` arms of ``list_secrets``,
+    ``get_secret_value``, ``get_secret_by_name``, ``upsert_secret``,
+    and ``delete_secret``. These are the polymorphic-conn pattern
+    branches that production call sites use to share a caller-owned
+    pool connection (e.g. inside a multi-statement transaction)."""
+    sec = _secrets_db
+    async with pg_test_pool.acquire() as conn:
+        sid = await sec.upsert_secret(
+            "explicit-conn", "v", "custom", conn=conn,
+        )
+        val = await sec.get_secret_value(sid, conn=conn)
+        assert val == "v"
+        by_name = await sec.get_secret_by_name(
+            "explicit-conn", "custom", conn=conn,
+        )
+        assert by_name == "v"
+        items = await sec.list_secrets(conn=conn)
+        assert any(i["id"] == sid for i in items)
+        assert await sec.delete_secret(sid, conn=conn) is True
+
+
+@pytest.mark.asyncio
+async def test_get_secret_by_name_returns_none_when_missing(_secrets_db):
+    """Covers the ``if not row: return None`` exit. The no-secret_type
+    branch is the one the current happy-path test doesn't exercise —
+    grep confirms line 149 was uncovered before this test landed."""
+    sec = _secrets_db
+    assert await sec.get_secret_by_name("does-not-exist") is None
+    assert await sec.get_secret_by_name(
+        "does-not-exist", "custom",
+    ) is None
+
+
 # ── Encryption round-trip across edge-case payloads ───────────────
 #
 # Phase-3 Step C.1 (2026-04-21): absorbed from the deleted
