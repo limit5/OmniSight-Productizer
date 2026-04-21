@@ -24,7 +24,7 @@ const STATUS_ICON = {
   testing: <Loader size={12} className="animate-spin text-[var(--neural-blue)]" />,
 }
 
-function SettingsSection({ title, integration, status, statusTestId, onTestResult, children }: {
+function SettingsSection({ title, integration, status, statusTestId, onTestResult, onTest, children }: {
   title: string
   integration?: string
   // B14 Part D row 235 — optional per-section status dot. Pass `true` to
@@ -41,6 +41,19 @@ function SettingsSection({ title, integration, status, statusTestId, onTestResul
   // failure alike — so the parent maintains a persistent view of the
   // last known state per integration even while the section is collapsed.
   onTestResult?: (integration: string, result: TestResult) => void
+  // 2026-04-22: optional probe override. Default TEST behaviour calls
+  // ``api.testIntegration(integration)`` which reads from
+  // ``settings.*`` on the backend — meaning a token typed into the
+  // form but NOT YET SAVED fails with "<provider> token not set"
+  // because the backend doesn't know about your unsaved dirty value.
+  // Call sites that want TEST to probe the currently-typed candidate
+  // (GitHub / GitLab / Gerrit sections) override ``onTest`` to call
+  // ``testGitForgeToken({provider, token, url})`` instead — that
+  // endpoint accepts the candidate in the request body and never
+  // touches ``settings``. Sections whose TEST legitimately depends
+  // on saved config (Slack webhook, JIRA URL + token as a pair)
+  // leave this unset and get the legacy settings-read behaviour.
+  onTest?: () => Promise<TestResult>
   children: React.ReactNode
 }) {
   const [expanded, setExpanded] = useState(true)
@@ -52,7 +65,9 @@ function SettingsSection({ title, integration, status, statusTestId, onTestResul
     setTesting(true)
     setTestResult(null)
     try {
-      const result = await api.testIntegration(integration)
+      const result = onTest
+        ? await onTest()
+        : await api.testIntegration(integration)
       setTestResult(result)
       if (onTestResult) onTestResult(integration, result)
     } catch (e) {
@@ -62,7 +77,7 @@ function SettingsSection({ title, integration, status, statusTestId, onTestResul
     } finally {
       setTesting(false)
     }
-  }, [integration, onTestResult])
+  }, [integration, onTest, onTestResult])
 
   return (
     <div className="border border-[var(--border)] rounded-md overflow-hidden">
@@ -3115,7 +3130,38 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                   SSH key — so a working GitHub token + a missing SSH key
                   would render a misleading red dot, and a broken token
                   could hide behind a green dot. Splitting fixes both. */}
-              <SettingsSection title="GITHUB" integration="github" onTestResult={recordProbeResult}>
+              <SettingsSection
+                title="GITHUB"
+                integration="github"
+                onTestResult={recordProbeResult}
+                onTest={async () => {
+                  // 2026-04-22: two-path TEST logic.
+                  // (a) If the operator has typed a NEW token
+                  //     (``"github_token" in dirty``), probe THAT
+                  //     candidate via ``testGitForgeToken`` which
+                  //     accepts a token in the request body — no
+                  //     save required, no dependency on
+                  //     ``settings.github_token`` being populated
+                  //     on whichever worker answers the request.
+                  // (b) Otherwise (modal re-opened on a saved
+                  //     deploy, operator hits TEST to re-validate
+                  //     the stored token), fall through to
+                  //     ``testIntegration("github")`` — that reads
+                  //     the real ``settings.github_token`` on the
+                  //     backend. Can't use the masked string from
+                  //     ``settingsData`` as the candidate because
+                  //     the mask contains literal asterisks that
+                  //     GitHub would reject.
+                  if ("github_token" in dirty) {
+                    const token = String(dirty["github_token"]).trim()
+                    if (!token) {
+                      return { status: "not_configured", message: "GitHub token field is empty — type a token before hitting TEST." }
+                    }
+                    return await api.testGitForgeToken({ provider: "github", token })
+                  }
+                  return await api.testIntegration("github")
+                }}
+              >
                 <SettingField
                   label="Token"
                   value={getVal("git", "github_token", "github_token")}
@@ -3131,7 +3177,36 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                   calls `GET /api/v4/version` against the configured base URL
                   and surfaces the GitLab instance version (the canonical
                   reachability + auth probe for self-managed deployments). */}
-              <SettingsSection title="GITLAB" integration="gitlab" onTestResult={recordProbeResult}>
+              <SettingsSection
+                title="GITLAB"
+                integration="gitlab"
+                onTestResult={recordProbeResult}
+                onTest={async () => {
+                  // Same two-path logic as the GitHub section —
+                  // probe the dirty candidate if present, else
+                  // hit the legacy settings-reading endpoint.
+                  // GitLab's probe also needs the URL (for self-
+                  // hosted instances).
+                  if ("gitlab_token" in dirty || "gitlab_url" in dirty) {
+                    const token = ("gitlab_token" in dirty
+                      ? String(dirty["gitlab_token"])
+                      : String(settingsData["git"]?.["gitlab_token"] ?? "")
+                    ).trim()
+                    // URL legitimately may be blank (defaults to
+                    // gitlab.com server-side) so don't pre-gate
+                    // on that — only require a token.
+                    const url = ("gitlab_url" in dirty
+                      ? String(dirty["gitlab_url"])
+                      : String(settingsData["git"]?.["gitlab_url"] ?? "")
+                    ).trim()
+                    if (!token) {
+                      return { status: "not_configured", message: "GitLab token field is empty — type a token before hitting TEST." }
+                    }
+                    return await api.testGitForgeToken({ provider: "gitlab", token, url })
+                  }
+                  return await api.testIntegration("gitlab")
+                }}
+              >
                 <SettingField
                   label="URL"
                   value={getVal("git", "gitlab_url", "gitlab_url")}
