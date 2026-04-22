@@ -344,6 +344,7 @@ async def change_password(req: ChangePasswordRequest, request: Request,
 
     old_token = request.cookies.get(auth.SESSION_COOKIE) or ""
     new_csrf = None
+    new_current_token: str | None = None
     if old_token:
         try:
             new_sess, _ = await auth.rotate_session(
@@ -351,6 +352,7 @@ async def change_password(req: ChangePasswordRequest, request: Request,
                 ip=_client_key(request),
                 user_agent=request.headers.get("user-agent", ""),
             )
+            new_current_token = new_sess.token
             secure = _cookie_secure()
             response.set_cookie(
                 key=auth.SESSION_COOKIE, value=new_sess.token,
@@ -376,6 +378,39 @@ async def change_password(req: ChangePasswordRequest, request: Request,
                 pass
         except ValueError:
             pass
+
+    # Q.1 2026-04-22 security red line: kick every OTHER active session
+    # belonging to this user. Without this, a compromised laptop still
+    # has up to SESSION_TTL_S (8h) of authorised access after the
+    # victim changes the password from a safe device. The exclude
+    # argument is the NEWLY rotated current-device token — so the
+    # device that just changed password stays logged in. Uses the same
+    # 30s grace window as the individual rotation path (K4) so in-
+    # flight requests from the other devices don't 401-storm. A
+    # audit event (reason=user_security_event) separates these from
+    # idle / user-initiated / admin-initiated revokes.
+    try:
+        revoked_count = await auth.rotate_user_sessions(
+            user.id, exclude_token=new_current_token,
+        )
+        if revoked_count > 0:
+            from backend import audit as _audit
+            await _audit.log(
+                action="session_rotated", entity_kind="session",
+                entity_id=user.id,
+                before={"reason": "user_security_event",
+                        "trigger": "password_change"},
+                after={"rotated_count": revoked_count,
+                       "grace_s": auth.ROTATION_GRACE_S},
+                actor=user.email,
+            )
+    except Exception as exc:
+        logger.warning(
+            "peer-session rotation after password_change failed for "
+            "user=%s: %s (current device session rotated OK; peer "
+            "devices may retain access up to session TTL)",
+            user.email, exc,
+        )
 
     result: dict = {"status": "password_changed", "must_change_password": False}
     if new_csrf:
@@ -483,8 +518,31 @@ async def patch_user(user_id: str, req: PatchUserRequest,
             await _audit.log(
                 action="session_rotated", entity_kind="session",
                 entity_id=user_id,
-                before={"reason": "role_change", "old_role": old_role},
+                before={"reason": "user_security_event",
+                        "trigger": "role_change",
+                        "old_role": old_role},
                 after={"new_role": req.role, "rotated_count": count,
+                       "grace_s": auth.ROTATION_GRACE_S},
+                actor=admin_user.email,
+            )
+        except Exception:
+            pass
+
+    # Q.1 2026-04-22: admin disabling a user must kick every active
+    # session. Without this, a disabled account retains access up to
+    # SESSION_TTL_S — defeating the point of the disable action.
+    # Transitioning to ``enabled=False`` is the security event; turning
+    # the account back on does NOT need to rotate (no stale token).
+    if req.enabled is False and user.enabled:
+        count = await auth.rotate_user_sessions(user_id)
+        try:
+            from backend import audit as _audit
+            await _audit.log(
+                action="session_rotated", entity_kind="session",
+                entity_id=user_id,
+                before={"reason": "user_security_event",
+                        "trigger": "account_disabled"},
+                after={"rotated_count": count,
                        "grace_s": auth.ROTATION_GRACE_S},
                 actor=admin_user.email,
             )

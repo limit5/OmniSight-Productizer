@@ -736,17 +736,17 @@ rows from 2026-04-20 onwards should use the layered convention:
 >
 > **和其他 Priority 的關係**：Q 是 Priority J 的「產品向」延伸（J 解 7 類技術 bug、Q 解 8 類 UX/security gap）；Q.1 是 K4 checklist 的 gap-fill（K4 勾選但行為不完整）；Q.3-Q.4 跨 Priority 盤點；Q.7 延伸 J2 樂觀鎖；Q.8 為 multi-device acceptance test harness。
 
-### Q.1 ⚠️ 改密碼 / MFA 變更 / 權限升降 → 踢其他所有 session (#295)
+### Q.1 ⚠️ 改密碼 / MFA 變更 / 權限升降 → 踢其他所有 session (#295) ✅ DONE 2026-04-22
 
 **安全紅線**：本顆必須 ship，不可延。其他顆可按需求排。
 
-- [ ] `backend/routers/auth.py::change_password` 呼叫 `rotate_session(current)` 後**再呼叫** `rotate_user_sessions(user_id, except_token=new_current)` 清其他所有 session。`rotate_user_sessions` 已存在（SP-4.3b #99）只是沒被這條路徑 trigger。
-- [ ] 同樣處理：`enable_mfa` / `disable_mfa` / `regenerate_mfa_backup_codes`（`backend/routers/mfa.py` / `backend/routers/auth.py` 對應 handler）+ 任何 admin-initiated role change（升 admin / 降 operator / disable user）。
-- [ ] 被踢的 session audit 寫入 reason = `user_security_event`（區別於 idle timeout / user-initiated revoke / admin-initiated revoke）。
-- [ ] UI：當前裝置完成改密碼後不要跳 error；其他裝置下次 request 得 401 + 引導頁「因為密碼變更，請重新登入」而非泛用 401。
-- [ ] 測試：`test_password_change_invalidates_other_sessions` / `test_mfa_disable_invalidates_other_sessions` / `test_role_downgrade_invalidates_other_sessions`（設定兩個 session → 對一個做 security-sensitive action → 驗另一個已失效）。
+- [x] `backend/routers/auth.py::change_password` 呼叫 `rotate_session(current)` 後**再呼叫** `rotate_user_sessions(user_id, except_token=new_current)` 清其他所有 session。
+- [x] 同樣處理：`totp_confirm` / `totp_disable` / `backup_codes_regenerate` / `webauthn_register_complete` / `webauthn_remove`（共享 `_rotate_peer_sessions` helper in `backend/routers/mfa.py`）+ admin `patch_user` 的 `enabled=False` 分支（role_change 分支先前已有）。
+- [x] 被踢的 session audit 寫入 reason = `user_security_event` + `trigger=password_change / totp_enrolled / ... / role_change / account_disabled`。
+- [ ] UI：當前裝置完成改密碼後不要跳 error；其他裝置下次 request 得 401 + 引導頁「因為密碼變更，請重新登入」而非泛用 401。**Deferred 給 Q 系列 UI 項目**。
+- [x] 測試：`backend/tests/test_q1_peer_session_rotation.py` 7 顆（password change × 3 + totp disable + backup codes regen + admin disable + admin re-enable contract）全綠。
 
-預估：**0.5 day**
+預估：**0.5 day** ✅
 
 ### Q.2 新裝置登入通知 (#296)
 

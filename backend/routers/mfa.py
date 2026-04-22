@@ -39,6 +39,47 @@ def _client_key(request: Request) -> str:
     return (request.client.host if request.client else "") or "unknown"
 
 
+async def _rotate_peer_sessions(
+    user: auth.User, request: Request, trigger: str,
+) -> None:
+    """Q.1 (2026-04-22): kick every OTHER active session of ``user``
+    after a security-sensitive MFA change.
+
+    ``trigger`` names the concrete MFA action (``totp_enrolled`` /
+    ``totp_disabled`` / ``webauthn_registered`` / ``webauthn_removed``
+    / ``backup_codes_regenerated``) so the audit chain records what
+    tipped the rotation. The current device's session is excluded via
+    its cookie token, matching the password-change flow — so operator
+    workflow is "complete MFA change → stay on this device → other
+    devices 401 within 30s grace". The ``SESSION_TTL_S`` absolute cap
+    would otherwise let a compromised peer device ride the old MFA
+    posture for up to 8 hours.
+    """
+    current_token = request.cookies.get(auth.SESSION_COOKIE) or None
+    try:
+        revoked = await auth.rotate_user_sessions(
+            user.id, exclude_token=current_token,
+        )
+        if revoked <= 0:
+            return
+        from backend import audit as _audit
+        await _audit.log(
+            action="session_rotated", entity_kind="session",
+            entity_id=user.id,
+            before={"reason": "user_security_event", "trigger": trigger},
+            after={"rotated_count": revoked,
+                   "grace_s": auth.ROTATION_GRACE_S},
+            actor=user.email,
+        )
+    except Exception as exc:
+        logger.warning(
+            "peer-session rotation after %s failed for user=%s: %s "
+            "(current device unaffected; peer devices may retain "
+            "access up to session TTL)",
+            trigger, user.email, exc,
+        )
+
+
 # ── MFA status ──
 
 @router.get("/auth/mfa/status")
@@ -67,6 +108,7 @@ class TOTPConfirmRequest(BaseModel):
 
 @router.post("/auth/mfa/totp/confirm")
 async def totp_confirm(req: TOTPConfirmRequest,
+                       request: Request,
                        user: auth.User = Depends(auth.current_user)) -> dict:
     ok = await mfa.totp_confirm_enroll(user.id, req.code)
     if not ok:
@@ -80,11 +122,13 @@ async def totp_confirm(req: TOTPConfirmRequest,
         )
     except Exception:
         pass
+    await _rotate_peer_sessions(user, request, "totp_enrolled")
     return {"status": "enrolled", "backup_codes": codes}
 
 
 @router.post("/auth/mfa/totp/disable")
-async def totp_disable(user: auth.User = Depends(auth.current_user)) -> dict:
+async def totp_disable(request: Request,
+                       user: auth.User = Depends(auth.current_user)) -> dict:
     ok = await mfa.totp_disable(user.id)
     if not ok:
         raise HTTPException(status_code=404, detail="TOTP not enrolled")
@@ -96,6 +140,7 @@ async def totp_disable(user: auth.User = Depends(auth.current_user)) -> dict:
         )
     except Exception:
         pass
+    await _rotate_peer_sessions(user, request, "totp_disabled")
     return {"status": "disabled"}
 
 
@@ -107,7 +152,8 @@ async def backup_codes_status(user: auth.User = Depends(auth.current_user)) -> d
 
 
 @router.post("/auth/mfa/backup-codes/regenerate")
-async def backup_codes_regenerate(user: auth.User = Depends(auth.current_user)) -> dict:
+async def backup_codes_regenerate(request: Request,
+                                  user: auth.User = Depends(auth.current_user)) -> dict:
     codes = await mfa.regenerate_backup_codes(user.id)
     if not codes:
         raise HTTPException(status_code=400, detail="No MFA enrolled — cannot generate backup codes")
@@ -119,6 +165,7 @@ async def backup_codes_regenerate(user: auth.User = Depends(auth.current_user)) 
         )
     except Exception:
         pass
+    await _rotate_peer_sessions(user, request, "backup_codes_regenerated")
     return {"codes": codes, "count": len(codes)}
 
 
@@ -145,6 +192,7 @@ class WebAuthnRegisterCompleteRequest(BaseModel):
 @router.post("/auth/mfa/webauthn/register/complete")
 async def webauthn_register_complete(
     req: WebAuthnRegisterCompleteRequest,
+    request: Request,
     user: auth.User = Depends(auth.current_user),
 ) -> dict:
     ok = await mfa.webauthn_complete_register(user.id, req.credential, req.name)
@@ -159,11 +207,13 @@ async def webauthn_register_complete(
         )
     except Exception:
         pass
+    await _rotate_peer_sessions(user, request, "webauthn_registered")
     return {"status": "registered"}
 
 
 @router.delete("/auth/mfa/webauthn/{mfa_id}")
 async def webauthn_remove(mfa_id: str,
+                          request: Request,
                           user: auth.User = Depends(auth.current_user)) -> dict:
     ok = await mfa.webauthn_remove(user.id, mfa_id)
     if not ok:
@@ -177,6 +227,7 @@ async def webauthn_remove(mfa_id: str,
         )
     except Exception:
         pass
+    await _rotate_peer_sessions(user, request, "webauthn_removed")
     return {"status": "removed"}
 
 
