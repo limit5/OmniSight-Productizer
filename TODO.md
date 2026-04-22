@@ -712,6 +712,150 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ---
 
+## 🅠 Priority Q — Multi-Device Parity（社群平台級多裝置體驗）
+
+> 背景（2026-04-22 operator audit）：Priority S + J + K-early + K-rest 已把「多 session 可以並存」「session 可被列表 / 踢掉」「per-session SSE filter」「UA hash binding」「workflow_run 樂觀鎖」這些**機房級**多 session 基礎打穩，但從**產品級**來看還差一截——operator 的期望是「同一帳號在筆電 / 手機 / 辦公室瀏覽器同時登入，三台都能看到一樣的狀態、做一樣的操作、得到一樣的回應，就像 Facebook / Linear / Slack / Notion」。audit 比對後 8 個缺口：
+>
+> 1. **改密碼只 rotate 當前 session**（K4 的範圍 gap）——手機被偷 → 筆電改密碼 → 手機 session 還活 8 小時。業界一致做法是 rotate 所有 non-current session。
+> 2. **新裝置登入沒 signal**——使用者不知道有新裝置上線，帳號被盜時錯過第一時間警覺（Google / Facebook / Apple 都做）。
+> 3. **Cross-device state sync 未系統性盤點**——SharedKV (I10) + SSE broadcast 已覆蓋「LLM keys / integration settings / workflow_runs」，但 chat history / INVOKE 輸入草稿 / 個人化偏好（locale / theme）等其他路徑未逐一驗過哪些走得通、哪些走不通。
+> 4. **SSE event scope 預設未 policy-review**——J1 讓每個 event 可宣告 `broadcast_scope: session|user|global`，但每個 emit point 的實際選擇沒有集中 doc，有些應該 `user` 的可能掛 `session`、有些應該 `session` 的可能掛 `global`。
+> 5. **Active device presence indicator 缺**——UI 上看不到「你目前在幾個裝置上線」的集合性感知（Slack / Linear 的綠燈 + count）。
+> 6. **Draft persistence across devices 缺**——INVOKE 面板 / chat 輸入打了一半換裝置會消失（Google Docs / Slack 都是半自動同步）。
+> 7. **Optimistic concurrency 只覆蓋 workflow_runs**（J2 範圍）——Tasks / Tenant secrets / Project settings 等其他 mutation endpoint 兩裝置同時改可能後寫覆蓋前寫（last-write-wins），沒有 409 warning。
+> 8. **Multi-device E2E test 缺**——J 系列每個 item 有單項測試，但「筆電 + 手機兩個 Playwright tab 並開」這種端到端 scenario 從未跑過。
+>
+> **設計原則**：要對齊的是**Linear / Slack / Notion 這類 SaaS 工具級的多裝置 UX**，不是銀行級的「新裝置必須重新 MFA」那種嚴格門。具體規則：
+> - 新裝置登入 → 通知、但不擋（security signal 優先於 security friction）。
+> - 狀態變更（settings / task / workflow）→ 所有裝置實時同步，任一裝置可接力。
+> - 私有事件（某 session 的 INVOKE stream / 本機 log）→ 只推給原裝置。
+> - 衝突編輯 → 用 optimistic lock 409 提示，而非單方面 last-write-wins。
+> - 改密碼 / MFA 撤銷 / 權限降級 → 立即踢其他所有 session（安全紅線，不協商）。
+>
+> **相依**：Priority S ✅ / J1-J6 ✅ / K4 session rotation infra ✅ / I10 cross-worker Redis ✅。硬相依零。Q 是在上述 foundation 上補**產品完整度**的一層，可立即開工。
+>
+> **和其他 Priority 的關係**：Q 是 Priority J 的「產品向」延伸（J 解 7 類技術 bug、Q 解 8 類 UX/security gap）；Q.1 是 K4 checklist 的 gap-fill（K4 勾選但行為不完整）；Q.3-Q.4 跨 Priority 盤點；Q.7 延伸 J2 樂觀鎖；Q.8 為 multi-device acceptance test harness。
+
+### Q.1 ⚠️ 改密碼 / MFA 變更 / 權限升降 → 踢其他所有 session (#295)
+
+**安全紅線**：本顆必須 ship，不可延。其他顆可按需求排。
+
+- [ ] `backend/routers/auth.py::change_password` 呼叫 `rotate_session(current)` 後**再呼叫** `rotate_user_sessions(user_id, except_token=new_current)` 清其他所有 session。`rotate_user_sessions` 已存在（SP-4.3b #99）只是沒被這條路徑 trigger。
+- [ ] 同樣處理：`enable_mfa` / `disable_mfa` / `regenerate_mfa_backup_codes`（`backend/routers/mfa.py` / `backend/routers/auth.py` 對應 handler）+ 任何 admin-initiated role change（升 admin / 降 operator / disable user）。
+- [ ] 被踢的 session audit 寫入 reason = `user_security_event`（區別於 idle timeout / user-initiated revoke / admin-initiated revoke）。
+- [ ] UI：當前裝置完成改密碼後不要跳 error；其他裝置下次 request 得 401 + 引導頁「因為密碼變更，請重新登入」而非泛用 401。
+- [ ] 測試：`test_password_change_invalidates_other_sessions` / `test_mfa_disable_invalidates_other_sessions` / `test_role_downgrade_invalidates_other_sessions`（設定兩個 session → 對一個做 security-sensitive action → 驗另一個已失效）。
+
+預估：**0.5 day**
+
+### Q.2 新裝置登入通知 (#296)
+
+- [ ] `create_session()` 呼叫完加 fingerprint 檢查：`(user_id, ua_hash, ip_subnet_/24)` tuple 是否過去 30 天出現過（查 sessions + revoked_sessions 歷史，不只 active）。
+- [ ] 未見過 → 發通知：(a) email（走 `backend/notifications.py` 既有 SMTP / Jira / Slack channel 選一個 default）；(b) SSE event `security.new_device_login` 推給 user 所有現存 session（scope=user），前端 bell 圖示 + toast「新裝置從 Taipei 登入 | 是你嗎？ | 這不是我 → 踢掉」按鈕。
+- [ ] 「這不是我」→ 呼叫 `DELETE /auth/sessions/{that_token}` + 觸發 Q.1 路徑（全 rotate 所有 session、強制重新登入）+ prompt 改密碼。
+- [ ] Rate limit：同 user 每分鐘最多發一則新裝置通知（防 spam）；同一 IP subnet 24h 內視為同裝置（容忍 DHCP 抽換）。
+- [ ] 可關閉：`POST /user/preferences { new_device_alerts: false }`；preferences 已存在 table（SP-5.8）。
+- [ ] 測試：第二裝置登入觸發 alert / 同裝置重登不再 alert（去重）/ 關閉偏好後不 alert / 通知 rate limit。
+
+預估：**1 day**
+
+### Q.3 Cross-device state sync 盤點 + 補洞 (#297)
+
+產出 `docs/design/multi-device-state-sync.md`：逐一盤點每條「mutation → 其他裝置看到」的路徑，標記狀態 + 補 missing。
+
+- [ ] **盤點 8 條 mutation 路徑**（每條驗：(a) SharedKV 或 DB 寫入 OK？(b) SSE broadcast OK？(c) 前端 listener 會 re-render？）：
+  1. LLM provider keys（✅ SharedKV + `provider_switch` event，已驗 commit `8d626489`）
+  2. Integration settings（Gerrit / JIRA / GitHub）（✅ SharedKV + `/settings` GET re-fetch，已驗 commit `c9514ab2`）
+  3. Workflow_run state（✅ I2 RLS + SSE `workflow_updated` + J2 optimistic lock）
+  4. Task CRUD（⚠️ DB OK 但 SSE 事件不一定齊全，要驗）
+  5. **Chat history**（⚠️ 目前 `_history` in-memory deque at `chat.py:30`——**跨 worker 不共享、跨 session 不同步**。本路徑最大 gap，需評估搬 DB 或 Redis）
+  6. **INVOKE 指令結果**（⚠️ SSE stream 綁 originating session，其他裝置看不到。原則上應該只推 originator，但「已完成的 invocation 摘要」應該進 user-scope history）
+  7. User preferences（locale / theme / wizard state，J4 已覆蓋）（✅）
+  8. Notifications 已讀狀態（⚠️ 要驗：A 裝置標已讀，B 裝置 bell 圖示有 decrement？）
+- [ ] 對每個 ⚠️ 項開子 task，必要時補 migration（e.g. chat history 搬 `chat_messages` 表 + 跨 worker broadcast）。
+- [ ] Chat history 搬 DB 是**最大子任務**：新 `chat_messages` 表（`id, user_id, session_id, role, content, timestamp`）；`POST /chat` 寫 DB + emit SSE `chat.message` scope=user；其他裝置 SSE 收 → 追加到本地 UI。Session-scope 的細節如 streaming token-by-token 仍綁 originator。
+
+預估：**1.5 day**（實際取決於 chat history migration 的細節）
+
+### Q.4 SSE event scope policy 審視 + 強制宣告 (#298)
+
+- [ ] 列出所有 `emit_*()` call site（約 30-40 個估算）做 scope 表：
+  ```
+  | Event                     | Current scope | Target scope | Rationale         |
+  | chat.message              | (unset)       | user         | 跨裝置同步對話 |
+  | invoke.stream             | session       | session      | streaming 私有 |
+  | workflow.updated          | (unset)       | user         | 跨裝置看狀態 |
+  | provider_switch           | global        | user         | 不應洩漏到他 user |
+  | security.new_device_login | n/a           | user         | 同上 |
+  | agent.thinking            | session       | session      | 本機 debug |
+  | system.log                | global        | tenant       | admin 才全看 |
+  | ...                       |               |              |                   |
+  ```
+- [ ] 改 `emit_*` helper 強制帶 scope 參數（預設 None 時退回舊行為 + warning log，一個 release 後改預設 raise）。
+- [ ] 整理成 `docs/design/sse-event-scope-policy.md`：scope 選擇的 4 條 rubric（私有 debug → session / 使用者 UI 狀態 → user / tenant admin → tenant / 系統健康 → global）。
+- [ ] 測試：`test_event_scope_declared`（掃 source，`emit_*` 無 scope 參數 → test fail）；`test_user_scope_does_not_leak_across_users`（A user event 不推到 B user 的 SSE）。
+
+預估：**1 day**
+
+### Q.5 Active device presence indicator (#299)
+
+- [ ] `backend/shared_state.py` 新 `SessionPresence(SharedKV)`：每 session 心跳（SSE 連線時 + 每 30s ping）更新 `(user_id, session_id) → last_heartbeat_at`。
+- [ ] `GET /auth/sessions/presence` 回當前 user 的活躍裝置數（last_heartbeat 60s 內）+ 每裝置簡略 metadata（device name from UA hash, last action, idle / active）。
+- [ ] UI：dashboard header 右上角新增 presence badge「3 台裝置在線」，hover 顯示 mini list（reuse `session-manager-panel.tsx` component，縮小版）。
+- [ ] 測試：開 3 個 headless session、驗 presence endpoint 回 3、停 1 個 60s 後回 2。
+
+預估：**0.5 day**
+
+### Q.6 Draft persistence across devices (#300)
+
+- [ ] 目標路徑：(a) INVOKE 指令輸入框、(b) chat 輸入框。打字 500ms debounce 後寫 `user_drafts` 表 `(user_id, slot_key, content, updated_at)`，slot_key = `invoke:main` / `chat:main`（未來擴：`chat:<thread_id>`）。
+- [ ] `GET /user/drafts/{slot_key}` 回目前儲存值；新裝置打開頁面時呼叫一次 restore draft。
+- [ ] Server-side TTL：24h 自動 GC（或送出後清）。
+- [ ] 衝突策略：同 slot 兩裝置同時打字 → 後寫贏（draft 本來就是 ephemeral，不上樂觀鎖）。僅在 restore 時檢查時間戳，若遠端 > 本地 local storage 則採用遠端並 toast「從他裝置同步了草稿」。
+- [ ] 測試：兩 headless browser + puppet 打字 → 驗跨 restore 行為正確。
+
+預估：**1 day**
+
+### Q.7 Optimistic concurrency coverage expansion (#301)
+
+- [ ] 擴延 J2 pattern 到其他主要 mutation endpoint：`PATCH /tasks/{id}` / `PUT /runtime/settings` / `PATCH /tenant-secrets/{id}` / `PATCH /projects/{id}`（Y4 後）。
+- [ ] Schema：以上 table 都加 `version INTEGER NOT NULL DEFAULT 0`，UPDATE 必 increment + `WHERE version = :old_version`。
+- [ ] Handler 驗 `If-Match: <version>` header，不符回 409 + body 帶 `{current_version, your_version, hint}`。
+- [ ] 前端通用 `use409Conflict` hook：收 409 → toast「另一裝置已修改，請重載」+ 給「覆蓋 / 重載 / 合併」三按鈕（預設重載，符合社群平台多數做法）。
+- [ ] 測試：並發 PATCH 只一個贏、loser 收 409 clean error；前端 409 handler 行為。
+
+預估：**1 day**
+
+### Q.8 Multi-device parity E2E test harness (#302)
+
+- [ ] Playwright scenario `test/e2e/multi-device-parity.spec.ts`：兩個 browser context 同 user 登入、跑 6 個劇本：
+  1. A 改 LLM provider → B 同步看到綠燈（Q.3 驗證）
+  2. A 新增 task → B 的 dashboard 即時看到（SSE broadcast 驗證）
+  3. A 改密碼 → B 下次 request 得 401 + 引導頁（Q.1 驗證）
+  4. A 登入 + B 新裝置登入 → A 收到「新裝置」toast（Q.2 驗證）
+  5. A 同時改 task + B 改同一 task → 後動作方 409（Q.7 驗證）
+  6. A 打字到 draft + 立刻切 B → B restore 看到 draft（Q.6 驗證）
+- [ ] CI gate：multi-device scenario 加入 nightly 跑（不塞主 PR pipeline，避免單 PR 時間膨脹）。
+- [ ] 失敗時截圖 + trace 存成 CI artifact，operator 可按 PR URL 直接看 trace。
+
+預估：**0.5 day**
+
+**Q 總預估**：**6.5-7 day**
+
+**出貨節奏建議**：
+- **Wave 1（必做，0.5 day）**：Q.1 改密碼踢其他裝置 — 是安全紅線，單顆可獨立 ship 不等其他 Q 項。
+- **Wave 2（產品完整度，~2.5 day）**：Q.2 新裝置通知 + Q.5 presence indicator + Q.8 E2E harness — 對 operator 而言感受最明顯的三顆。
+- **Wave 3（底層 hardening，~3-4 day）**：Q.3 state sync 盤點 + Q.4 SSE scope policy + Q.6 draft + Q.7 optimistic lock 擴張 — 不急但遲早要做，等 Priority Y / Z / Y-prep 出完可以排進來。
+
+**Non-goals**（明確不做，避免 scope 擴張）：
+- ❌ 裝置間 handoff 接力（iOS Handoff 等級的 UX，過度 engineering）
+- ❌ Presence 顯示別的 user 在線（跨 user 的「誰在線」—屬 chat app 特性，OmniSight 不是）
+- ❌ 聲音 / 震動通知（native app 層，Web push 獨立 priority）
+- ❌ CRDT / OT 雙向 merge（draft 用 last-write-wins 夠）
+- ❌ 銀行級嚴格 MFA（新裝置必重 MFA / 敏感操作 step-up MFA）——對齊 Linear / Slack 的較鬆門，想加再開新 priority
+
+---
+
 ## 🅘 Priority I — Multi-tenancy Foundation（緊接路線 C 之後）
 
 > 背景：完成路線 C 後，auth + session + audit 基礎 hardened，才適合把「單人多 session」擴成「多租戶多 user」。此 phase 是正式多人上線的 gate。相依：**G4（Postgres）** 必須完成（SQLite 無 RLS）、**H1-H4a（host-aware）** 必須完成（I6 才有 token bucket 可拆 per-tenant）、**S0 + K-early** 必須完成（auth baseline）。
@@ -3170,6 +3314,15 @@ Z.1 (rate-limit header 擷取 + SharedKV) — 0.5d，當天收集到所有 provi
 → Z.4 (UI: ProviderStatusBadge + per-provider roll-up + 60s polling) — 1d
 → Z.5 (tests + 支援度矩陣文件 + HANDOFF) — 0.5d
 
+### Phase 28 — Multi-Device Parity（~6.5-7 day，零阻塞，建議 Wave 1 立即、Wave 2-3 按需）
+**Wave 1 — 安全紅線（必做，可今天做）**：Q.1 改密碼 / MFA / 權限變更 → 踢其他所有 session — 0.5d
+**Wave 2 — 產品完整度**：Q.2 新裝置登入通知 — 1d → Q.5 active device presence indicator — 0.5d → Q.8 multi-device E2E harness — 0.5d（合計 ~2d）
+**Wave 3 — 底層 hardening**：Q.3 cross-device state sync 盤點（含 chat history DB 化）— 1.5d → Q.4 SSE event scope policy 審視 — 1d → Q.6 draft persistence — 1d → Q.7 optimistic lock 擴張 — 1d（合計 ~4.5d）
+
+**相依**：Priority S ✅ / J1-J6 ✅ / K4 session rotation infra ✅ / I10 cross-worker Redis ✅。零硬阻塞。
+
+**順序建議**：Q.1 不能拖，應在下次改密碼事件前出貨（安全紅線）；Q.2-Q.5-Q.8 是「operator 能直接感受到」的三顆，搭配 Priority Z / Y-prep 的 wave 一起 ship；Q.3-Q.4 是底層整理，適合隨下次 Priority I / Y 擴張時一併 audit。
+
 **相依**：無。`SharedKV` / `TokenTrackingCallback` / `/providers` / `token-usage-stats.tsx` 全部已存在，Z 只是擴充。
 
 **為什麼排到 Phase 27 但在 execution 上優先於 Phase 26**：Priority 編號是主題群組（Y = multi-tenant，Z = observability），不是執行順序。Z 的五個 step 零阻塞 + 每日可見 + 3.5 day 就能完成，應在 Y-prep 之前或並行出貨。若一個工程師排 2 週 sprint：建議「Z.1-Z.4 → Y-prep.1-3 → Z.5 → Y0」的交錯，每兩天有一個 operator 能感受到的改善點。
@@ -3209,7 +3362,8 @@ Z.1 (rate-limit header 擷取 + SharedKV) — 0.5d，當天收集到所有 provi
 | Y (tenant ops + multi-project) | 27 day |
 | Y-prep (Gerrit/JIRA integration hardening) | 2.5 day |
 | Z (LLM provider observability) | 3.5 day |
+| Q (multi-device parity) | 6.5-7 day |
 | META | 4-8 day |
-| **Total** | **~610.5-781 day** |
+| **Total** | **~617-788 day** |
 
 3-person team parallelized: **~7.5-10.5 months wall-clock**.
