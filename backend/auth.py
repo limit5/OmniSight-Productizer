@@ -868,6 +868,62 @@ async def create_session(
     return await _create_session_impl(conn, user_id, ip, user_agent)
 
 
+async def notify_new_device_login(
+    user: "User", sess: Session, ip: str, user_agent: str,
+) -> None:
+    """Q.2 (#296): fire the new-device-login alert pipeline if applicable.
+
+    No-op when ``sess.is_new_device`` is ``False`` — the upstream
+    ``_record_session_fingerprint`` decision is the single source of
+    truth, so the de-dup story matches the fingerprint table exactly
+    (no parallel state to drift). When the flag is set we emit the SSE
+    event ``security.new_device_login`` (scope=user) and dispatch a
+    ``warning``-level notification through ``backend.notifications``,
+    which routes to the configured default IM channel (Slack at L2,
+    falling back to silent persist if no channel is wired).
+
+    The notification module's external dispatch already runs as
+    ``asyncio.create_task`` so the login route doesn't pay the webhook
+    latency. Both branches are wrapped — a failed alert must NEVER
+    fail the login itself; a fingerprint write that succeeded but a
+    flaky Slack webhook must not lock the user out.
+
+    Rate-limit + user-preference gates are intentionally NOT applied
+    here — those are the next two Q.2 checklist items (#296). When
+    they land, this helper is the central choke point to retrofit.
+    """
+    if not getattr(sess, "is_new_device", False):
+        return
+    try:
+        from backend.events import emit_new_device_login as _emit
+        token_hint = _mask_token(sess.token)
+        _emit(
+            user_id=user.id,
+            token_hint=token_hint,
+            ip=ip or "",
+            user_agent=user_agent or "",
+            session_id=session_id_from_token(sess.token),
+        )
+    except Exception as exc:
+        logger.warning("notify_new_device_login: SSE emit failed: %s", exc)
+    try:
+        from backend.notifications import notify as _notify
+        await _notify(
+            level="warning",
+            title="新裝置登入",
+            message=(
+                f"偵測到 {user.email} 從新裝置登入（IP {ip or '未知'}，"
+                f"User-Agent {user_agent[:120] or '未知'}）。如非本人操作，"
+                f"請至安全中心結束該裝置 session 並更換密碼。"
+            ),
+            source="auth.security",
+            action_label="管理裝置",
+            action_url="/settings/security",
+        )
+    except Exception as exc:
+        logger.warning("notify_new_device_login: notify dispatch failed: %s", exc)
+
+
 # Minimum age (seconds) a ``last_seen_at`` value must have before
 # ``get_session`` bothers writing a fresh one. Every request on a
 # dashboard fires ~20 concurrent XHRs, every XHR lands in at least

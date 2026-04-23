@@ -229,10 +229,11 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
             "user": {"email": user.email},
         }
 
+    ua_header = request.headers.get("user-agent", "")
     sess = await auth.create_session(
         user.id,
         ip=client_ip,
-        user_agent=request.headers.get("user-agent", ""),
+        user_agent=ua_header,
     )
     try:
         from backend import audit as _audit
@@ -244,6 +245,7 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         )
     except Exception as exc:
         logger.debug("login_ok audit emit failed: %s", exc)
+    await auth.notify_new_device_login(user, sess, client_ip, ua_header)
     secure = _cookie_secure()
     response.set_cookie(
         key=auth.SESSION_COOKIE, value=sess.token,

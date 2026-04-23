@@ -113,6 +113,17 @@ export type SSEEvent =
   | { event: "agent.token_continuation"; data: { agent_id: string; continuation_round: number; timestamp: string } }
   // ─── H1 / H3: whole-host metrics tick (5s cadence) ───
   | { event: "host.metrics.tick"; data: HostMetricsTickEvent }
+  // ─── Q.2 (#296) new device login alert (broadcast_scope=user) ───
+  | {
+      event: "security.new_device_login"
+      data: {
+        user_id: string
+        token_hint: string
+        ip: string
+        user_agent: string
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number

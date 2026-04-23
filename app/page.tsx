@@ -26,6 +26,7 @@ import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
 import { useAuth } from "@/lib/auth-context"
 import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
+import { SecurityAlertsCenter } from "@/components/omnisight/security-alerts-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
 import { NewProjectWizard } from "@/components/omnisight/new-project-wizard"
 import { CommandPalette } from "@/components/omnisight/command-palette"
@@ -600,6 +601,8 @@ export default function Home() {
 
       {/* Phase 50C: overlay toasts for risky/destructive decisions. */}
       <ToastCenter />
+      {/* Q.2 (#296): overlay toast for new-device login alerts. */}
+      <SecurityAlertsCenter />
       <FirstRunTour />
       <NewProjectWizard />
       <CommandPalette

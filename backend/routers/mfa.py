@@ -263,8 +263,10 @@ async def mfa_challenge(req: MFAChallengeRequest,
     if not data:
         data = challenge
 
+    challenge_ip = data.get("ip", "")
+    challenge_ua = data.get("user_agent", "")
     sess = await auth.create_session(
-        user_id, ip=data.get("ip", ""), user_agent=data.get("user_agent", ""),
+        user_id, ip=challenge_ip, user_agent=challenge_ua,
     )
     await mfa.mark_session_mfa_verified(sess.token)
 
@@ -290,6 +292,8 @@ async def mfa_challenge(req: MFAChallengeRequest,
         )
     except Exception:
         pass
+    if user is not None:
+        await auth.notify_new_device_login(user, sess, challenge_ip, challenge_ua)
 
     return {
         "user": user.to_dict() if user else {},
@@ -336,8 +340,10 @@ async def webauthn_challenge_complete(
     if not data:
         data = challenge
 
+    challenge_ip = data.get("ip", "")
+    challenge_ua = data.get("user_agent", "")
     sess = await auth.create_session(
-        user_id, ip=data.get("ip", ""), user_agent=data.get("user_agent", ""),
+        user_id, ip=challenge_ip, user_agent=challenge_ua,
     )
     await mfa.mark_session_mfa_verified(sess.token)
 
@@ -362,6 +368,8 @@ async def webauthn_challenge_complete(
         )
     except Exception:
         pass
+    if user is not None:
+        await auth.notify_new_device_login(user, sess, challenge_ip, challenge_ua)
 
     return {
         "user": user.to_dict() if user else {},

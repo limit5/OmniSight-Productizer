@@ -554,3 +554,36 @@ async def _persist_debug_finding(data: dict) -> None:
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("Failed to persist debug finding: %s", exc)
+
+
+def emit_new_device_login(
+    user_id: str,
+    token_hint: str,
+    ip: str,
+    user_agent: str,
+    *,
+    session_id: str | None = None,
+    tenant_id: str | None = None,
+) -> None:
+    """Q.2 (#296): broadcast a new-device-login alert to the user's UIs.
+
+    The event is tagged ``broadcast_scope="user"`` and carries ``user_id``
+    in the payload — the EventBus only enforces ``tenant`` scope today
+    (Q.4 #298 will tighten this), so the frontend must additionally
+    filter on ``data.user_id == currentUser.id`` before showing the
+    toast. We pass ``token_hint`` (mask of the new session's token) so
+    the "這不是我 → 踢掉" button can target ``DELETE /auth/sessions/
+    {token_hint}`` without ever exposing the raw session cookie to the
+    rendered UI.
+    """
+    bus.publish("security.new_device_login", {
+        "user_id": user_id,
+        "token_hint": token_hint,
+        "ip": ip,
+        "user_agent": user_agent,
+    }, session_id=session_id, broadcast_scope="user",
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[SECURITY] new device login user={user_id} ip={ip} ua={user_agent[:60]}",
+        "warn",
+    )

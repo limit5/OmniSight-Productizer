@@ -331,6 +331,14 @@ export function useEngine() {
               // hints the provider's max_tokens ceiling is too tight.
               logMsg = `[CONTINUE] ${d.agent_id} round=${d.continuation_round}/${d.total_rounds} +${d.appended_chars}c`
               logLevel = "warn"
+            } else if (event.event === "security.new_device_login") {
+              // Q.2 (#296): mirror the security event into REPORTER VORTEX
+              // for the audit trail. The accompanying notify() emits a
+              // separate "notification" event that updates the bell badge,
+              // and SecurityAlertsCenter renders the actionable toast —
+              // we do not duplicate either of those here.
+              logMsg = `[SECURITY] new device login user=${d.user_id} ip=${d.ip}`
+              logLevel = "warn"
             }
 
             if (logMsg) {
