@@ -112,6 +112,50 @@ The frontend attaches a single shared `EventSource` (`frontend/lib/api.ts:334+`,
 | (c) Frontend listener | `frontend/hooks/use-engine.ts:218+` logs and routes `provider_switch` on the `invoke` channel. | ✅ for `provider_switch`; other `action_type`s are logged only. |
 | **Verdict** | **PARTIAL — scope-mismatch, not gap.** The TODO line assumed "SSE stream tied to originator session, other devices can't see it." In reality events are emitted at scope `"global"`, so *every* connected client sees them — the opposite of the stated concern. The correct design (per TODO's own rationale "only push to originator for in-flight streaming, but completed invocation summaries belong to user-scope history") is to split the `action_type`s: in-flight streaming → `scope="session"`, completion summaries (e.g. `task_complete`, `halt`, `resume`) → `scope="user"`. This sequencing belongs in Q.4 (#298 event-scope policy) and the checkbox-2 sub-task list. | |
 
+#### Q.3-SUB-7 close-out (2026-04-24) — defer-to-Q.4 decision is **ratified, not implemented**
+
+Per the TODO directive (`Q.3-SUB-7 (P2 — INVOKE scope split, defer to Q.4 #298)` — "**不獨立 land**"), this audit row is closed by **transferring the implementation spec to Q.4 (#298)**, not by editing `emit_invoke` here. Doing the split in isolation would be churned: Q.4 must declare `scope` on every emitter via a single repo-wide policy file (`docs/design/sse-event-scope-policy.md`) and a `test_event_scope_declared` lint-style test (TODO.md:802). A pre-emptive partial fix on `invoke` channel only would (a) be re-touched once Q.4 lands, (b) not ship the actual security boundary because `EventBus._deliver_local` (`events.py:81-105`) still doesn't enforce `user`/`session` scope (see §1.2 above) — Q.4 lifts both at once.
+
+**Implementation spec carried to Q.4 #298 (full call-site inventory, all 24 sites — verified 2026-04-24)**:
+
+| File:line | `action_type` | Trigger context | Target scope (Q.4) | Why |
+|---|---|---|---|---|
+| `backend/routers/invoke.py:316` | `stuck_switch_model` | Stuck-agent recovery: model downgraded | `user` | Operator should see across all their devices |
+| `backend/routers/invoke.py:322` | `stuck_spawn_alt` | Stuck-agent recovery: no source task | `user` | Operator alert |
+| `backend/routers/invoke.py:337` | `stuck_spawn_alt` | Stuck-agent recovery: alt task spawned | `user` | Operator alert |
+| `backend/routers/invoke.py:379` | `stuck_hibernate` | Stuck-agent recovery: container paused | `user` | Operator alert |
+| `backend/routers/invoke.py:585` | `gerrit_push` | Agent pushed change for review | `user` | Cross-device dashboard refresh |
+| `backend/routers/invoke.py:612` | `task_complete` | Agent finished task | `user` | Cross-device dashboard refresh |
+| `backend/routers/invoke.py:897` | `start` | INVOKE batch begin | `user` | Operator-initiated lifecycle |
+| `backend/routers/invoke.py:1221` | `halt` | INVOKE batch halt | `user` | Operator-initiated lifecycle |
+| `backend/routers/invoke.py:1237` | `resume` | INVOKE batch resume | `user` | Operator-initiated lifecycle |
+| `backend/routers/webhooks.py:282` | `review_rejected` | Gerrit -1 received → fix task | `user` | Owner of the change |
+| `backend/routers/webhooks.py:302` | `merged` | Gerrit change merged | `user` | Owner of the change |
+| `backend/routers/webhooks.py:340` | `replicated` | Git push to mirror | `user` | Owner of the repo |
+| `backend/routers/webhooks.py:512` | `ci_triggered` | GitHub Actions kicked | `user` | Owner of the project |
+| `backend/routers/webhooks.py:539` | `ci_triggered` | Jenkins build kicked | `user` | Owner of the project |
+| `backend/routers/webhooks.py:576` | `ci_triggered` | GitLab CI kicked | `user` | Owner of the project |
+| `backend/routers/integration.py:452` | `provider_switch` | LLM provider/model swap (Q.3-SUB-5 already wired user-scope on the **non-LLM sibling channel** `integration.settings.updated`; this LLM-only one inherits same target) | `user` | Cross-device "active model" indicator |
+| `backend/routers/providers.py:66` | `provider_switch` | Direct `/providers/switch` API | `user` | Same as above |
+| `backend/pipeline.py:171` | `pipeline` | E2E pipeline start | `user` | Cross-device pipeline dashboard |
+| `backend/pipeline.py:231` | `pipeline` | E2E pipeline complete | `user` | Cross-device pipeline dashboard |
+| `backend/intent_bridge.py:371` | `intent_bridge:{kind}` | Intent translation event | `user` | Operator visibility |
+| `backend/intent_bridge.py:382` | `intent_bridge:error` | Intent translation failure | `user` | Operator alert |
+| `backend/orchestrator_gateway.py:982` | `orchestrator_intake:{event}` | Orchestrator session lifecycle | `user` | Operator visibility |
+| `backend/orchestration_mode.py:165` | `{mode}:{event}` | Mode change (auto/manual) | `user` | Operator-initiated, cross-device |
+| `backend/merger_agent.py:1134` | `merger.{outcome}` | Merger agent +2 outcome | `user` | Owner of the change |
+| `backend/merge_arbiter.py:277` | `orchestration.{kind}` | Merge arbiter ruling | `user` | Owner of the change |
+
+**Audit-vs-reality correction** (carried to Q.4 #298 as a "watch-out"): the Q.3 TODO line and the Path 6 Verdict above hypothesised `scope="session"` for "in-flight streaming (`stream_chunk` / `agent_thinking`)" call sites. **Empirically those `action_type`s do not exist on the `invoke` channel today** — chat-stream tokens flow through `EventSourceResponse` (HTTP body, originator-bound by transport, never `bus.publish`). The whole `invoke` channel is operator-facing summary/lifecycle telemetry; the right Q.4 policy for it is uniform `scope="user"` (24 of 24 sites). If a future feature adds true streaming-via-bus on this channel, **only then** introduce `scope="session"` — the policy file should make that the explicit fork rule.
+
+**Q.4 #298 acceptance for the INVOKE slice**:
+1. All 24 sites above pass `broadcast_scope="user"` after sweep, `payload._broadcast_scope == "user"` (matches the Q.3-SUB-1 / -3 / -4 / -5 / -6 family pattern so `EventBus` doesn't need a payload schema migration when the filter switches from advisory → enforced).
+2. `test_event_scope_declared` (TODO.md:802) catches any regression where `emit_invoke` is called without `broadcast_scope=`.
+3. Frontend `use-engine.ts:218+` invoke-channel dispatcher self-filters on `data.user_id === currentUser.id` (already harmless under current `"global"`; under `"user"` becomes redundant once `EventBus._deliver_local` enforces — leave the self-filter in as defense-in-depth).
+4. No code change on `events.py::emit_invoke` itself — the helper already accepts `broadcast_scope` (`events.py:316`); Q.4 only changes call sites + the helper's default (or removes the default and forces explicit declaration).
+
+**Q.3 status**: this row is `[x]` because the audit + decision + spec-transfer is the deliverable. The line `emit_invoke("...", broadcast_scope="user")` rewrites land in Q.4 #298, not here.
+
 ### Path 7 — User preferences (locale / theme / wizard)
 
 | Layer | Evidence | Status |
@@ -158,7 +202,7 @@ Remediation opens as follow-up child tasks. Ordered by LOC / risk:
 | P1 | **Task CRUD — emit on create + delete** | ≈ 1 h | Two lines in `backend/routers/tasks.py`: `emit_task_update(task.id, action="created", …)` after insert `:127`; `emit_task_update(task.id, action="deleted")` before DELETE return `:283`. Frontend switch on `action`. |
 | P1 | **Notifications read-state broadcast** | ≈ 1 h | `bus.publish("notification.read", {id, user_id}, broadcast_scope="user")` in `system.py:1442-1450` + `use-engine.ts` handler decrements `unreadCount`. |
 | P1 | **User preferences SSE push** | ≈ 1 h | `emit_preferences_updated(pref_key, value, scope="user")` in `preferences.py` PUT + cross-device subscriber in `storage-bridge.tsx` / `use-engine.ts`. |
-| P2 | **INVOKE scope split** | defer to Q.4 | Don't attempt in isolation — Q.4 (#298) will sweep all `emit_*` call sites and declare scope per `action_type`. This audit documents the mis-scoping; fix lands with the policy file. |
+| P2 | **INVOKE scope split** (Q.3-SUB-7) | defer to Q.4 | Don't attempt in isolation — Q.4 (#298) will sweep all `emit_*` call sites and declare scope per `action_type`. This audit documents the mis-scoping; fix lands with the policy file. **Closed-out 2026-04-24** with full 24-site routing-rule spec under §Path 6 → "Q.3-SUB-7 close-out" (target = uniform `scope="user"` across the whole `invoke` channel — no streaming sites exist today). |
 | P2 | **Integration-settings SSE** | ≈ 1 h (after Q.4) | Add `emit_integration_settings_updated(fields_changed, scope="user")` at `integration.py:432+`; frontend refetches `/settings` on receipt. Depends on Q.4 for scope declaration pattern. |
 
 **Total remediation estimate:** ~1 day + ~5 hours for P0+P1 (≈ 1.5 days aggregate, matching the TODO estimate).
