@@ -135,6 +135,15 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── Q.3-SUB-3 (#297) notification read-state sync (broadcast_scope=user) ───
+  | {
+      event: "notification.read"
+      data: {
+        id: string
+        user_id: string
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -218,6 +227,8 @@ const SSE_EVENT_TYPES = [
   "host.metrics.tick",
   // ─── Q.3-SUB-1 (#297) workflow_run state sync ───
   "workflow_updated",
+  // ─── Q.3-SUB-3 (#297) notification read-state sync ───
+  "notification.read",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"

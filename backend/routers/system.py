@@ -1443,10 +1443,29 @@ async def get_notifications(
 async def mark_read(
     notification_id: str,
     conn=Depends(_get_conn),
+    user: _auth.User = Depends(_auth.current_user),
 ):
-    """Mark a notification as read."""
+    """Mark a notification as read.
+
+    Q.3-SUB-3 (#297): on a successful flip, emit ``notification.read``
+    on the event bus so other devices owned by the same user can
+    decrement their bell badge and drop the row from their local list
+    without waiting for the next ``/notifications/unread-count`` poll.
+    Emit is best-effort (``broadcast_scope='user'``, advisory until
+    Q.4 #298) and is swallowed on failure — the PG row is the
+    source of truth, the SSE push is latency-optimisation only.
+    """
     from backend import db
     ok = await db.mark_notification_read(conn, notification_id)
+    if ok:
+        try:
+            from backend.events import emit_notification_read
+            emit_notification_read(notification_id, user.id)
+        except Exception as exc:
+            logger.debug(
+                "emit_notification_read failed for %s: %s",
+                notification_id, exc,
+            )
     return {"status": "ok" if ok else "not_found"}
 
 

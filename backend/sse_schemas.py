@@ -326,6 +326,21 @@ class SSEDockerSamplePayload(BaseModel):
     sampled_at: float
 
 
+class SSENotificationRead(BaseModel):
+    """notification.read — Q.3-SUB-3 (#297) cross-device read-state flip.
+
+    Emitted by :mod:`backend.routers.system` after every successful
+    ``mark_notification_read``. Carries the notification ``id`` + the
+    owning ``user_id`` so the frontend can (a) decrement its unread
+    counter (b) drop the row from its local list. ``broadcast_scope=
+    'user'`` — see Q.4 (#298) for the scope-enforcement roadmap;
+    until then consumers must self-filter on user identity.
+    """
+    id: str
+    user_id: str
+    timestamp: str = ""
+
+
 class SSEWorkflowUpdated(BaseModel):
     """workflow_updated — Q.3-SUB-1 (#297) cross-device workflow_run push.
 
@@ -396,6 +411,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "host.metrics.tick": SSEHostMetricsTick,
     # Q.3-SUB-1 (#297): cross-device workflow_run state push
     "workflow_updated": SSEWorkflowUpdated,
+    # Q.3-SUB-3 (#297): cross-device notification read-state push
+    "notification.read": SSENotificationRead,
 }
 
 

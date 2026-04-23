@@ -314,3 +314,155 @@ describe("useEngine — task_update dispatcher action switch", () => {
     })
   })
 })
+
+
+/**
+ * Q.3-SUB-3 (#297) — notification.read SSE dispatcher.
+ *
+ * Device A marks a notification read → device B must decrement its
+ * unread counter and flip the matching row in its local notifications
+ * list to ``read=true``. The counter is clamped at 0 so a replay or
+ * cross-user misfire can't drive the badge negative, and the list
+ * patch is guarded so a duplicate event leaves an already-flipped row
+ * untouched.
+ */
+describe("useEngine — notification.read dispatcher", () => {
+  function goOnline(tasks: unknown[] = []): void {
+    ;(api.listAgents as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+    ;(api.listTasks as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve(tasks))
+  }
+
+  it("decrements unread count and marks the list row as read", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    // Seed one unread notification + a pretend unread counter of 3
+    // (the bell badge is fed by a tenant-scoped DB COUNT, not the
+    // bounded in-memory list — so the counter can legitimately be
+    // larger than the list length).
+    act(() => {
+      result.current.setUnreadCount(3)
+    })
+    // Push a prior notification event so the list has something to
+    // flip — useEngine populates the list via the SSE "notification"
+    // branch, there is no direct setter.
+    act(() => {
+      sse.emit({
+        event: "notification",
+        data: {
+          id: "n-ui-1",
+          level: "warning",
+          title: "disk",
+          message: "almost full",
+          source: "system",
+          timestamp: "2026-04-24T00:00:00",
+        },
+      })
+    })
+    await waitFor(() => {
+      expect(result.current.notifications.some(n => n.id === "n-ui-1")).toBe(true)
+    })
+    // The notification emit also bumps unread by 1 → 4.
+    await waitFor(() => expect(result.current.unreadCount).toBe(4))
+
+    act(() => {
+      sse.emit({
+        event: "notification.read",
+        data: {
+          id: "n-ui-1",
+          user_id: "user-xyz",
+          timestamp: "2026-04-24T00:00:01",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const row = result.current.notifications.find(n => n.id === "n-ui-1")
+      expect(row?.read).toBe(true)
+      expect(result.current.unreadCount).toBe(3)
+    })
+  })
+
+  it("clamps unread count at 0 when already zero", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    // Counter starts at 0 (mocked getUnreadCount rejects).
+    expect(result.current.unreadCount).toBe(0)
+
+    act(() => {
+      sse.emit({
+        event: "notification.read",
+        data: {
+          id: "n-never-seen",
+          user_id: "user-xyz",
+          timestamp: "2026-04-24T00:00:02",
+        },
+      })
+    })
+
+    // Math.max(0, prev - 1) floor prevents the badge going negative
+    // on replay / missed-notification races.
+    await waitFor(() => {
+      expect(result.current.unreadCount).toBe(0)
+    })
+  })
+
+  it("leaves the list untouched when the notification is unknown locally", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      result.current.setUnreadCount(2)
+    })
+    act(() => {
+      sse.emit({
+        event: "notification",
+        data: {
+          id: "n-keep",
+          level: "info",
+          title: "something else",
+          message: "",
+          source: "system",
+          timestamp: "2026-04-24T00:00:00",
+        },
+      })
+    })
+    await waitFor(() => {
+      expect(result.current.notifications.some(n => n.id === "n-keep")).toBe(true)
+    })
+
+    const beforeList = result.current.notifications.map(n => ({
+      id: n.id, read: n.read,
+    }))
+
+    // Mark-read event targeting a notification the bell list never
+    // saw — unread counter still decrements (truth is the DB COUNT),
+    // but the local list must be left alone so ``n-keep``'s read
+    // state isn't accidentally flipped.
+    act(() => {
+      sse.emit({
+        event: "notification.read",
+        data: {
+          id: "n-missing",
+          user_id: "user-xyz",
+          timestamp: "2026-04-24T00:00:03",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(result.current.unreadCount).toBeLessThan(3)
+    })
+    expect(result.current.notifications.map(n => ({ id: n.id, read: n.read })))
+      .toEqual(beforeList)
+  })
+})

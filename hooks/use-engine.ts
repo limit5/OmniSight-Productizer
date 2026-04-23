@@ -255,6 +255,33 @@ export function useEngine() {
                 action_label: d.action_label as string | undefined,
               }, ...prev.slice(0, 49)])
               setUnreadCount(prev => prev + 1)
+            } else if (event.event === "notification.read") {
+              // Q.3-SUB-3 (#297): device A marked a notification read →
+              // device B decrements its bell badge and flips the row's
+              // ``read`` flag in its local list. REST is still the
+              // source of truth; the next /notifications/unread-count
+              // poll catches stragglers if the SSE push is missed.
+              // ``broadcast_scope='user'`` is advisory until Q.4 (#298)
+              // enforces per-user fan-out — until then we decrement
+              // unconditionally but only patch list rows that are
+              // actually present + currently unread, so a replayed
+              // event can't double-flip state.
+              logMsg = `[NOTIFY] ${d.id} → READ`
+              logLevel = "info"
+              let patched = false
+              setNotifications(prev => {
+                const hit = prev.some(n => n.id === d.id && !n.read)
+                if (!hit) return prev
+                patched = true
+                return prev.map(n => n.id === d.id ? { ...n, read: true } : n)
+              })
+              // Always decrement — the unread counter is the
+              // tenant-scoped COUNT from DB, not derived from the
+              // bounded local list (only last 50 entries are cached).
+              // Clamp at 0 so a replay / cross-user misfire cannot
+              // drive the badge negative.
+              void patched
+              setUnreadCount(prev => Math.max(0, prev - 1))
             } else if (event.event === "token_warning") {
               const level = d.level as string
               logMsg = `[TOKEN] ${level.toUpperCase()}: ${d.message}`

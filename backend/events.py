@@ -589,6 +589,35 @@ def emit_workflow_updated(
     )
 
 
+def emit_notification_read(
+    notification_id: str,
+    user_id: str,
+    *,
+    session_id: str | None = None,
+    broadcast_scope: str = "user",
+    tenant_id: str | None = None,
+) -> None:
+    """Q.3-SUB-3 (#297): broadcast a notification read-state flip to the user's UIs.
+
+    Fires after ``db.mark_notification_read`` returns True so that a
+    second device showing the bell badge can decrement its unread
+    counter and drop the notification from its local list without
+    waiting for the next ``/notifications/unread-count`` poll.
+
+    ``broadcast_scope='user'`` is advisory — the EventBus only enforces
+    the ``tenant`` scope today (Q.4 #298 will tighten this), so the
+    frontend must additionally self-filter on ``data.user_id`` before
+    applying the patch. Mirrors the user-scope pattern of
+    :func:`emit_new_device_login` / :func:`emit_workflow_updated`.
+    """
+    bus.publish("notification.read", {
+        "id": notification_id,
+        "user_id": user_id,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(f"[NOTIFY] {notification_id} → READ (user={user_id})")
+
+
 def emit_new_device_login(
     user_id: str,
     token_hint: str,
