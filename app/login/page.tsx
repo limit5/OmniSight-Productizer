@@ -31,6 +31,12 @@ const SESSION_REVOCATION_TRIGGER_COPY: Record<string, string> = {
     "Your account role was changed by an administrator. Please sign in again.",
   account_disabled:
     "Your account was disabled by an administrator. Contact your administrator for access.",
+  // Q.2 (#296) 「這不是我」cascade — the user marked a new-device login
+  // as suspicious from the security alerts toast. Every session was
+  // rotated and ``must_change_password=1`` is flipped, so after sign-in
+  // the 428 gate will force them onto the change-password flow.
+  not_me_cascade:
+    "You flagged a new-device login as suspicious. Every session was signed out and you will be required to change your password after signing in again.",
 }
 
 function getSessionRevocationCopy(

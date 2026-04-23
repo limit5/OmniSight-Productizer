@@ -586,7 +586,39 @@ async def list_sessions(request: Request,
 
 @router.delete("/auth/sessions/{token_hint}")
 async def revoke_session(token_hint: str, request: Request,
+                         response: Response,
+                         cascade: str | None = None,
                          user: auth.User = Depends(auth.current_user)) -> dict:
+    """Revoke a single session by opaque token hint.
+
+    Default (no ``cascade`` query param): delete the matching session
+    row only. Unchanged legacy behaviour — used by the ``/settings/
+    security`` panel and `/auth/sessions` UI.
+
+    Q.2 (#296) 「這不是我」 cascade: ``?cascade=not_me`` escalates the
+    operation into a full account-compromise response. When the new-
+    device toast renders and the user decides the login wasn't them:
+
+      1. Revoke the flagged session (same as default path).
+      2. Rotate every OTHER session belonging to the user via the
+         Q.1 path (``auth.rotate_user_sessions`` with reason=
+         ``user_security_event``, trigger=``not_me_cascade``) — this
+         kicks the calling device too, so on the next request it
+         401s and lib/api.ts redirects to ``/login?reason=...``.
+      3. Flip ``users.must_change_password = 1`` so the K1 428 gate
+         forces a password change before any other API call succeeds
+         after re-login.
+      4. Clear the caller's own session + CSRF cookies so the browser
+         doesn't hold onto a dead token.
+
+    The cascade is idempotent-safe: if the target session was already
+    gone (double-click race) we still run steps 2-4, because the
+    caller's intent is "kick everyone, force password change" — not
+    "just delete this one row". A 404 on the target session returns
+    an empty cascade result rather than silently succeeding.
+    """
+    want_cascade = (cascade or "").strip().lower() == "not_me"
+
     target_user_id = user.id
     is_admin = auth.role_at_least(user.role, "admin")
     sessions = await auth.list_sessions(user.id)
@@ -609,16 +641,89 @@ async def revoke_session(token_hint: str, request: Request,
         raise HTTPException(status_code=404, detail="session not found")
     if target_user_id != user.id and not is_admin:
         raise HTTPException(status_code=403, detail="cannot revoke another user's session")
+
+    # Q.2 (#296) cascade=not_me must not let an admin blast another
+    # user's account by revoking one of their sessions — cascade is a
+    # self-service security red line. Admins can still revoke a single
+    # peer session without cascade (the legacy path).
+    if want_cascade and target_user_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="cascade=not_me is self-service only; use /users/{id} "
+                   "to disable another user's account",
+        )
+
     await auth.revoke_session(target_token)
     try:
         from backend import audit as _audit
         await _audit.write_audit(
             request, action="session_revoke", entity_kind="session",
             entity_id=token_hint, actor=user.email,
+            after={"cascade": "not_me"} if want_cascade else None,
         )
     except Exception:
         pass
-    return {"status": "revoked", "token_hint": token_hint}
+
+    if not want_cascade:
+        return {"status": "revoked", "token_hint": token_hint}
+
+    # Cascade: rotate every remaining session for this user (including
+    # the caller — no exclude_token) and flip must_change_password.
+    rotated_count = 0
+    try:
+        rotated_count = await auth.rotate_user_sessions(
+            user.id, exclude_token=None,
+            reason="user_security_event", trigger="not_me_cascade",
+        )
+    except Exception as exc:
+        logger.warning(
+            "not_me cascade: rotate_user_sessions failed for user=%s: %s "
+            "(target session %s already revoked; peer devices may retain "
+            "access up to session TTL). Continuing with must_change_password flip.",
+            user.email, exc, token_hint,
+        )
+
+    pwflag_ok = False
+    try:
+        pwflag_ok = await auth.flag_user_must_change_password(user.id)
+    except Exception as exc:
+        logger.warning(
+            "not_me cascade: flag_user_must_change_password failed for "
+            "user=%s: %s (sessions rotated OK, but next login may not be "
+            "forced to change password)",
+            user.email, exc,
+        )
+
+    try:
+        from backend import audit as _audit
+        await _audit.log(
+            action="session_rotated", entity_kind="session",
+            entity_id=user.id,
+            before={"reason": "user_security_event",
+                    "trigger": "not_me_cascade",
+                    "revoked_token_hint": token_hint},
+            after={"rotated_count": rotated_count,
+                   "must_change_password": pwflag_ok,
+                   "grace_s": auth.ROTATION_GRACE_S},
+            actor=user.email,
+        )
+    except Exception:
+        pass
+
+    # Clear the caller's own cookies — their session was just rotated
+    # into the grace window and we want the browser to drop the cookie
+    # immediately so the next request 401s and the /login redirect
+    # kicks in with the ``trigger=not_me_cascade`` banner.
+    response.delete_cookie(auth.SESSION_COOKIE)
+    response.delete_cookie(auth.CSRF_COOKIE)
+
+    return {
+        "status": "revoked",
+        "token_hint": token_hint,
+        "cascade": "not_me",
+        "rotated_count": rotated_count,
+        "must_change_password": pwflag_ok,
+    }
 
 
 @router.delete("/auth/sessions")

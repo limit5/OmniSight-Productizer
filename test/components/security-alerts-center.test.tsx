@@ -11,14 +11,18 @@
  * Covered:
  *   1. Matching user_id → toast appears with IP + UA + buttons.
  *   2. Mismatched user_id → no toast (frontend scope guard).
- *   3. "這不是我 → 踢掉" → calls ``revokeSession(token_hint)``.
+ *   3. "這不是我 → 踢掉" → calls ``revokeSession(token_hint, {cascade: "not_me"})``
+ *      and, on cascade success, navigates to ``/login`` with the
+ *      ``reason=user_security_event&trigger=not_me_cascade`` banner.
  *   4. "是我" → dismisses without API call.
  *   5. Duplicate event (same token_hint + timestamp) → no second toast.
  *   6. No logged-in user → component is silent (defensive, doesn't
  *      subscribe before identity is known).
+ *   7. Cascade failure → toast is still dismissed and we do NOT
+ *      navigate, so the user can retry from /settings/security.
  */
 
-import { describe, expect, it, vi, beforeEach } from "vitest"
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, act } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
@@ -72,9 +76,33 @@ function newDeviceEvent(overrides: Partial<{
 }
 
 describe("SecurityAlertsCenter — Q.2 new device login toast", () => {
+  const originalLocation = window.location
+  let assignSpy: ReturnType<typeof vi.fn>
+
   beforeEach(() => {
     vi.clearAllMocks()
     authState.user = { id: "u-self", email: "self@example.com" }
+    assignSpy = vi.fn()
+    // Replace window.location with a spy-backed double so the cascade
+    // path's full-page navigation is observable without JSDOM throwing
+    // "not implemented: navigation". ``originalLocation`` is restored
+    // in afterEach.
+    Object.defineProperty(window, "location", {
+      value: {
+        ...originalLocation,
+        pathname: "/",
+        search: "",
+        assign: assignSpy,
+      },
+      writable: true,
+    })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      value: originalLocation,
+      writable: true,
+    })
   })
 
   it("renders a toast for a new-device-login event matching the current user", () => {
@@ -96,18 +124,51 @@ describe("SecurityAlertsCenter — Q.2 new device login toast", () => {
     expect(screen.queryByTestId("security-alerts-center")).toBeNull()
   })
 
-  it("'這不是我 → 踢掉' calls revokeSession with the token_hint and dismisses the toast", async () => {
+  it("'這不是我 → 踢掉' triggers the cascade path, dismisses the toast, and navigates to /login with the banner trigger", async () => {
     const user = userEvent.setup()
-    ;(api.revokeSession as ReturnType<typeof vi.fn>).mockResolvedValue({ status: "revoked" })
+    ;(api.revokeSession as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "revoked",
+      token_hint: "qwer***1234",
+      cascade: "not_me",
+      rotated_count: 2,
+      must_change_password: true,
+    })
     const sse = primeSSE()
     render(<SecurityAlertsCenter />)
     act(() => { sse.emit(newDeviceEvent({ token_hint: "qwer***1234" })) })
     await user.click(screen.getByTestId("security-alert-qwer***1234-not-me"))
-    expect(api.revokeSession).toHaveBeenCalledWith("qwer***1234")
+    // Cascade opt-in is required — without ``{cascade: "not_me"}`` the
+    // backend would only delete the single row, skipping the must-
+    // change-password flip + peer rotation.
+    expect(api.revokeSession).toHaveBeenCalledWith(
+      "qwer***1234", { cascade: "not_me" },
+    )
     expect(screen.queryByTestId("security-alert-qwer***1234")).toBeNull()
+    expect(assignSpy).toHaveBeenCalledTimes(1)
+    const dest = assignSpy.mock.calls[0][0] as string
+    expect(dest.startsWith("/login")).toBe(true)
+    expect(dest).toContain("reason=user_security_event")
+    expect(dest).toContain("trigger=not_me_cascade")
   })
 
-  it("'是我' dismisses without calling the API", async () => {
+  it("cascade network / API failure dismisses the toast but does NOT navigate (user can retry from /settings/security)", async () => {
+    const user = userEvent.setup()
+    ;(api.revokeSession as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("network down"),
+    )
+    const sse = primeSSE()
+    render(<SecurityAlertsCenter />)
+    act(() => { sse.emit(newDeviceEvent({ token_hint: "fail***1234" })) })
+    await user.click(screen.getByTestId("security-alert-fail***1234-not-me"))
+    // Toast still clears so the user isn't stuck with a zombie alert
+    // after the network blip.
+    expect(screen.queryByTestId("security-alert-fail***1234")).toBeNull()
+    // But we do NOT force-navigate — the server didn't confirm the
+    // cascade so the tab is probably still validly logged in.
+    expect(assignSpy).not.toHaveBeenCalled()
+  })
+
+  it("'是我' dismisses without calling the API or navigating", async () => {
     const user = userEvent.setup()
     const sse = primeSSE()
     render(<SecurityAlertsCenter />)
@@ -115,6 +176,7 @@ describe("SecurityAlertsCenter — Q.2 new device login toast", () => {
     await user.click(screen.getByTestId("security-alert-asdf***qwer-its-me"))
     expect(api.revokeSession).not.toHaveBeenCalled()
     expect(screen.queryByTestId("security-alert-asdf***qwer")).toBeNull()
+    expect(assignSpy).not.toHaveBeenCalled()
   })
 
   it("dedupes a duplicate event with the same token_hint + timestamp", () => {

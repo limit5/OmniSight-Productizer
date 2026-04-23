@@ -7,7 +7,7 @@
  * ``backend.events.emit_new_device_login`` and renders a sticky toast
  * with two buttons:
  *   - 是我 (dismiss)
- *   - 這不是我 → 踢掉 (calls ``DELETE /auth/sessions/{token_hint}``)
+ *   - 這不是我 → 踢掉 (calls ``DELETE /auth/sessions/{token_hint}?cascade=not_me``)
  *
  * The bus does not yet enforce ``broadcast_scope=user`` server-side
  * (Q.4 #298 follow-up), so this component additionally filters by
@@ -15,6 +15,14 @@
  * NOT attempt geo-IP lookup client-side — the IP is rendered raw in
  * the toast body so the user has the same evidence the backend log
  * has, and a future GeoIP enrichment can plug in via the same field.
+ *
+ * Q.2 「這不是我」 cascade (2026-04-24): the "Not me" button escalates
+ * into the Q.1 account-compromise path — the backend rotates every
+ * session on the account (including this tab's), flips
+ * ``must_change_password=1``, and clears our own cookies. On success
+ * we force-navigate to ``/login?reason=user_security_event&trigger=not_me_cascade``
+ * so the login banner explains why we were signed out and primes the
+ * user for the password change they'll be forced into on re-login.
  */
 
 import { useCallback, useEffect, useState } from "react"
@@ -44,10 +52,15 @@ export function SecurityAlertsCenter() {
 
   const handleNotMe = useCallback(async (alert: SecurityAlertItem) => {
     setBusy((b) => ({ ...b, [alert.id]: true }))
+    let cascadeOk = false
     try {
-      await revokeSession(alert.token_hint)
+      const res = await revokeSession(alert.token_hint, { cascade: "not_me" })
+      cascadeOk = res?.cascade === "not_me"
     } catch {
-      // visual-only — operator can fall back to /settings/security
+      // Network / 4xx / 5xx — operator can fall back to /settings/security.
+      // We still navigate to /login below because the expected-case is
+      // that the server already started rotating sessions; letting the
+      // tab stay logged-in would be worse than a benign redirect.
     } finally {
       setBusy((b) => {
         const next = { ...b }
@@ -55,6 +68,22 @@ export function SecurityAlertsCenter() {
         return next
       })
       dismiss(alert.id)
+    }
+    // Q.2 cascade: if the backend confirmed cascade=not_me, the caller's
+    // cookies were cleared server-side and every session is now rotated
+    // — force a full-page navigation so React state, SSE subscriptions,
+    // and in-flight requests all die cleanly before the login page
+    // renders the tailored banner. ``trigger=not_me_cascade`` matches
+    // the backend audit log entry so operators can correlate.
+    if (cascadeOk && typeof window !== "undefined") {
+      const next = encodeURIComponent(
+        window.location.pathname + window.location.search,
+      )
+      window.location.assign(
+        `/login?next=${next}`
+        + `&reason=user_security_event`
+        + `&trigger=not_me_cascade`,
+      )
     }
   }, [dismiss])
 

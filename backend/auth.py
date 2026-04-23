@@ -512,6 +512,38 @@ async def change_password(
         await _change_password_impl(conn, user_id, new_password)
 
 
+async def flag_user_must_change_password(
+    user_id: str, conn=None,
+) -> bool:
+    """Q.2 (#296) 「這不是我」cascade: set ``must_change_password=1`` for
+    a single user so the K1 428 gate forces them onto the change-password
+    flow on their next authenticated request.
+
+    Separate from ``flag_all_admins_must_change_password`` (which is the
+    bootstrap L8 reset path scoped to admins) because:
+      * this is per-user, not role-scoped, and
+      * the caller is a regular user invoking cascade on their own
+        account — we must NOT restrict to role='admin'.
+
+    Returns True iff exactly one row was updated (the target user
+    existed and was enabled). A silent no-op on an unknown / disabled
+    user mirrors the rest of the auth helpers (they treat a missing
+    target as a non-error), and the cascade router already returns a
+    404 before this is called for the unknown case.
+    """
+    sql = "UPDATE users SET must_change_password = 1 WHERE id = $1"
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            status = await owned_conn.execute(sql, user_id)
+    else:
+        status = await conn.execute(sql, user_id)
+    try:
+        return int(status.rsplit(" ", 1)[-1]) > 0
+    except (ValueError, AttributeError):
+        return False
+
+
 async def flag_all_admins_must_change_password(conn=None) -> list[dict]:
     """Re-flag every enabled admin row with ``must_change_password=1``.
 

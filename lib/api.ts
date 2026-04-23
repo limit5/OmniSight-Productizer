@@ -1848,10 +1848,42 @@ export async function listSessions(): Promise<{ items: SessionItem[]; count: num
   return request<{ items: SessionItem[]; count: number }>("/auth/sessions")
 }
 
-export async function revokeSession(tokenHint: string): Promise<{ status: string }> {
-  return request<{ status: string }>(`/auth/sessions/${encodeURIComponent(tokenHint)}`, {
-    method: "DELETE",
-  })
+export interface RevokeSessionOptions {
+  /**
+   * Q.2 (#296) 「這不是我」 cascade. When set to ``"not_me"`` the backend
+   * treats the call as an account-compromise response:
+   *   - revoke the flagged session (same as default path)
+   *   - rotate every other session on this account (including the caller's)
+   *   - flip ``must_change_password=1`` so the 428 gate forces a
+   *     password change after re-login
+   *   - clear the caller's own session + CSRF cookies
+   *
+   * Caller MUST treat a resolved promise as "you are now signed out on
+   * this device" — a full-page navigation to ``/login?reason=user_security_event&trigger=not_me_cascade``
+   * is the expected follow-up so the banner copy + re-login flow can
+   * drive the password change.
+   */
+  cascade?: "not_me"
+}
+
+export interface RevokeSessionResponse {
+  status: string
+  token_hint?: string
+  cascade?: "not_me"
+  rotated_count?: number
+  must_change_password?: boolean
+}
+
+export async function revokeSession(
+  tokenHint: string, options?: RevokeSessionOptions,
+): Promise<RevokeSessionResponse> {
+  const qs = options?.cascade
+    ? `?cascade=${encodeURIComponent(options.cascade)}`
+    : ""
+  return request<RevokeSessionResponse>(
+    `/auth/sessions/${encodeURIComponent(tokenHint)}${qs}`,
+    { method: "DELETE" },
+  )
 }
 
 export async function revokeAllOtherSessions(): Promise<{ status: string; revoked_count: number }> {
