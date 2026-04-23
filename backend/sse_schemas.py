@@ -376,6 +376,26 @@ class SSEPreferencesUpdated(BaseModel):
     timestamp: str = ""
 
 
+class SSEIntegrationSettingsUpdated(BaseModel):
+    """integration.settings.updated — Q.3-SUB-5 (#297) cross-device
+    non-LLM integration-settings push.
+
+    Emitted by :mod:`backend.routers.integration` after a successful
+    ``PUT /runtime/settings`` that touched any field outside the LLM
+    family (Gerrit / JIRA / GitHub / GitLab / Slack / PagerDuty /
+    webhooks / CI / Docker). The LLM subset still piggy-backs on the
+    existing ``invoke('provider_switch')`` event — they were already
+    wired and working. ``fields_changed`` is the raw applied key list
+    from the PUT handler; the frontend matches it against its own
+    per-tab key map so the backend doesn't have to second-guess which
+    modal tab to repaint. ``broadcast_scope='user'`` — see Q.4 (#298)
+    for the scope-enforcement roadmap; until then consumers must
+    self-filter on user identity.
+    """
+    fields_changed: list[str] = Field(default_factory=list)
+    timestamp: str = ""
+
+
 class SSEHostMetricsTick(BaseModel):
     """host.metrics.tick — H1 5s whole-host sampling push.
 
@@ -432,6 +452,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "notification.read": SSENotificationRead,
     # Q.3-SUB-4 (#297): cross-device user-preferences push
     "preferences.updated": SSEPreferencesUpdated,
+    # Q.3-SUB-5 (#297): cross-device non-LLM integration-settings push
+    "integration.settings.updated": SSEIntegrationSettingsUpdated,
 }
 
 

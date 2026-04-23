@@ -2677,14 +2677,47 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
   const [providers, setProviders] = useState<api.ProviderConfig[]>([])
   const [gerritWizardOpen, setGerritWizardOpen] = useState(false)
 
+  // Pulled out of the open-only effect so the SSE listener below can
+  // reuse it without re-declaring the fetch pair inline.
+  const refetchAll = useCallback(() => {
+    api.getSettings().then(setSettingsData).catch(() => {})
+    api.getProviders().then(r => setProviders(r.providers)).catch(() => {})
+  }, [])
+
   useEffect(() => {
     if (open) {
       setDirty({})  // Clear unsaved changes on fresh open
       setSaveFeedback(null)
-      api.getSettings().then(setSettingsData).catch(() => {})
-      api.getProviders().then(r => setProviders(r.providers)).catch(() => {})
+      refetchAll()
     }
-  }, [open])
+  }, [open, refetchAll])
+
+  // Q.3-SUB-5 (#297) — cross-device non-LLM integration-settings SSE push.
+  //
+  // Before this subscription the modal only pulled fresh data on its
+  // open transition (above). If the operator already had the modal
+  // open on device A and device B's save landed on a different worker,
+  // the SharedKV mirror kept values coherent across workers but the
+  // UI on device A still showed the pre-save snapshot until a manual
+  // close/re-open. This listener bridges the gap: any authoritative
+  // change to the non-LLM subset published by the backend triggers a
+  // fresh ``getSettings()`` + ``getProviders()`` pair so the modal
+  // re-renders with the merged value. The listener is only active
+  // while the modal is open — subscribeEvents shares one EventSource
+  // across the app so this is effectively zero-cost when closed.
+  //
+  // Dirty-field preservation: ``setSettingsData`` replaces the saved
+  // snapshot, but ``dirty`` stays untouched so an operator typing
+  // into a field while an unrelated tab got overwritten from device
+  // B doesn't lose their in-flight edit.
+  useEffect(() => {
+    if (!open) return
+    const handle = api.subscribeEvents((ev) => {
+      if (ev.event !== "integration.settings.updated") return
+      refetchAll()
+    })
+    return () => { handle.close() }
+  }, [open, refetchAll])
 
   // Auto-dismiss the save banner after 4s — long enough for the
   // operator to read the applied / rejected roll-up but short enough

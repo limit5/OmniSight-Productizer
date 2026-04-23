@@ -439,7 +439,8 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
 
     # Clear LLM cache if provider/model/key changed
     llm_related = {"llm_", "anthropic_", "google_", "openai_", "xai_", "groq_", "deepseek_", "together_", "openrouter_", "ollama_"}
-    if any(any(k.startswith(p) for p in llm_related) for k in applied):
+    llm_keys = [k for k in applied if any(k.startswith(p) for p in llm_related)]
+    if llm_keys:
         try:
             from backend.agents.llm import _cache
             _cache.clear()
@@ -451,6 +452,28 @@ async def update_settings(body: SettingsUpdate, _user=Depends(_au.require_admin)
             emit_invoke("provider_switch", f"{settings.llm_provider}/{settings.get_model_name()}")
         except Exception:
             pass
+
+    # Q.3-SUB-5 (#297): cross-device push for the *non-LLM* subset
+    # (Gerrit / JIRA / GitHub / GitLab / Slack / PagerDuty / webhooks
+    # / CI / Docker). The LLM subset already owns the
+    # ``invoke('provider_switch')`` emit above — splitting the two
+    # keeps a pure-LLM save from double-firing. Previously the
+    # SYSTEM INTEGRATIONS modal on a second device only refreshed on
+    # modal re-open (``integration-settings.tsx:2680-2687``); this
+    # push lets a passively-open modal repaint without the manual
+    # close/reopen dance.  Best-effort — a flaky Redis / bus must not
+    # fail the HTTP mutation (SharedKV still mirrored, cross-device
+    # sync degrades to the old modal-open refetch).
+    non_llm_applied = [k for k in applied if k not in llm_keys]
+    if non_llm_applied:
+        try:
+            from backend.events import emit_integration_settings_updated
+            emit_integration_settings_updated(non_llm_applied, scope="user")
+        except Exception as exc:
+            logger.debug(
+                "emit_integration_settings_updated failed for %s: %s",
+                non_llm_applied, exc,
+            )
 
     logger.info("Settings updated: %s", list(applied.keys()))
     return {

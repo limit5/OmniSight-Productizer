@@ -401,6 +401,19 @@ export function useEngine() {
               logLevel = st === "failed" ? "error"
                 : st === "halted" ? "warn"
                 : "info"
+            } else if (event.event === "integration.settings.updated") {
+              // Q.3-SUB-5 (#297): mirror non-LLM integration-settings
+              // changes into REPORTER VORTEX. The actual modal repaint
+              // is owned by `integration-settings.tsx` which subscribes
+              // separately and re-fetches ``getSettings()`` +
+              // ``getProviders()`` when the modal is open — we do not
+              // duplicate that here. ``broadcast_scope='user'`` is
+              // advisory until Q.4 (#298); the modal self-filtering is
+              // currently a simple "I'm open, refetch" (the key list
+              // is tenant-agnostic system config, not per-user data).
+              const fields = (d.fields_changed as string[]) || []
+              logMsg = `[INTEGRATION] settings updated: ${fields.slice(0, 5).join(", ")}`
+              logLevel = "info"
             }
 
             if (logMsg) {

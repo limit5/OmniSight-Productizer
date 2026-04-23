@@ -652,6 +652,43 @@ def emit_preferences_updated(
     _log(f"[PREFS] {pref_key}={value[:40]} (user={user_id})")
 
 
+def emit_integration_settings_updated(
+    fields_changed: list[str],
+    *,
+    scope: str = "user",
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+) -> None:
+    """Q.3-SUB-5 (#297): broadcast a non-LLM integration-settings change.
+
+    Fires from ``PUT /runtime/settings`` after the SharedKV mirror write
+    whenever the updated field set contains *any* key outside the LLM
+    family (Gerrit / JIRA / GitHub / GitLab / Slack / PagerDuty /
+    webhooks / CI / Docker). The LLM subset already owns a dedicated
+    ``invoke('provider_switch')`` emit at the same call site — this
+    helper covers the remaining integrations so the SYSTEM INTEGRATIONS
+    modal on a second device stops waiting for a modal-open refetch to
+    discover the change.
+
+    ``scope`` is the caller-facing alias; keep the payload key
+    ``_broadcast_scope='user'`` in lock-step with the rest of the Q.3
+    emit family so Q.4 (#298) can flip enforcement without a payload
+    rewrite. ``fields_changed`` is the raw applied-key list — the
+    frontend matches it against the non-LLM prefix set itself rather
+    than having the backend second-guess which tab to repaint.
+    """
+    if broadcast_scope is None:
+        broadcast_scope = scope
+    bus.publish("integration.settings.updated", {
+        "fields_changed": list(fields_changed),
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[INTEGRATION] settings updated: {','.join(fields_changed)[:80]}"
+    )
+
+
 def emit_new_device_login(
     user_id: str,
     token_hint: str,

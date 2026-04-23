@@ -154,6 +154,14 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── Q.3-SUB-5 (#297) integration-settings non-LLM sync (broadcast_scope=user) ───
+  | {
+      event: "integration.settings.updated"
+      data: {
+        fields_changed: string[]
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -241,6 +249,8 @@ const SSE_EVENT_TYPES = [
   "notification.read",
   // ─── Q.3-SUB-4 (#297) user preferences cross-device sync ───
   "preferences.updated",
+  // ─── Q.3-SUB-5 (#297) integration-settings cross-device sync (non-LLM) ───
+  "integration.settings.updated",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"

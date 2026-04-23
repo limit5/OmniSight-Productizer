@@ -551,3 +551,79 @@ describe("useEngine — preferences.updated dispatcher", () => {
     expect(result.current.unreadCount).toBe(beforeUnread)
   })
 })
+
+
+/**
+ * Q.3-SUB-5 (#297) — integration.settings.updated SSE dispatcher (log-only).
+ *
+ * The REPORTER VORTEX log line is the only thing the engine hook does for
+ * ``integration.settings.updated`` — the modal refetch is owned by
+ * ``components/omnisight/integration-settings.tsx`` which subscribes
+ * separately and re-calls ``getSettings()`` + ``getProviders()`` on push.
+ * This test locks the log-only contract on the engine side.
+ */
+describe("useEngine — integration.settings.updated dispatcher", () => {
+  function goOnline(): void {
+    ;(api.listAgents as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+    ;(api.listTasks as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+  }
+
+  it("appends a REPORTER VORTEX log line on integration.settings.updated", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      sse.emit({
+        event: "integration.settings.updated",
+        data: {
+          fields_changed: ["gerrit_url", "gerrit_project"],
+          timestamp: "2026-04-24T00:00:07",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const hit = result.current.logs.find(
+        l => l.message.includes("[INTEGRATION]") && l.message.includes("gerrit_url"),
+      )
+      expect(hit).toBeTruthy()
+      expect(hit?.level).toBe("info")
+    })
+  })
+
+  it("does not patch tasks/agents/notifications (scope is log-only)", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    const beforeTasks = [...result.current.tasks]
+    const beforeAgents = [...result.current.agents]
+    const beforeNotifs = [...result.current.notifications]
+    const beforeUnread = result.current.unreadCount
+
+    act(() => {
+      sse.emit({
+        event: "integration.settings.updated",
+        data: {
+          fields_changed: ["notification_jira_url"],
+          timestamp: "2026-04-24T00:00:08",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(
+        result.current.logs.some(l => l.message.includes("[INTEGRATION]")),
+      ).toBe(true)
+    })
+    expect(result.current.tasks).toEqual(beforeTasks)
+    expect(result.current.agents).toEqual(beforeAgents)
+    expect(result.current.notifications).toEqual(beforeNotifs)
+    expect(result.current.unreadCount).toBe(beforeUnread)
+  })
+})
