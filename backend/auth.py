@@ -217,6 +217,34 @@ def compute_ua_hash(user_agent: str) -> str:
 FINGERPRINT_LOOKBACK_S = 30 * 24 * 3600.0
 
 
+# Q.2 new-device-alert gates (2026-04-24):
+#
+# `NEW_DEVICE_ALERT_USER_WINDOW_S` — per-user anti-spam. After a user
+# receives a new-device alert, they won't receive another for this
+# many seconds even if the second login is from a different subnet.
+# Bounds burst from an attacker probing many IPs / UAs in quick
+# succession. Spec: "同 user 每分鐘最多發一則新裝置通知（防 spam）".
+#
+# `NEW_DEVICE_ALERT_SUBNET_WINDOW_S` — per-(user, subnet) DHCP-tolerance
+# dedup. After a user is alerted about logging in from a given /24
+# (IPv4) or /64 (IPv6), any further first-sightings from the same
+# subnet within this window are silently swallowed — the user has
+# effectively already been alerted about that physical network, and
+# the UA-hash churn that triggered ``is_new_device=True`` a second
+# time (e.g. browser update, Firefox → Chrome on same laptop) is not
+# worth a second push. Spec: "同一 IP subnet 24h 內視為同裝置（容忍
+# DHCP 抽換）".
+#
+# Both gates use the shared `backend.rate_limit` token-bucket primitive
+# (capacity=1, window=<this constant>). Redis-backed in prod (shared
+# across workers), in-memory fallback in dev. Single-shot semantics:
+# ``get_limiter().allow()`` consumes one token and is an atomic
+# check-and-consume — no peek API exists, so see the helper docstring
+# for the gate-ordering rationale (per-user first, per-subnet second).
+NEW_DEVICE_ALERT_USER_WINDOW_S = 60.0
+NEW_DEVICE_ALERT_SUBNET_WINDOW_S = 24 * 3600.0
+
+
 def compute_ip_subnet(ip: str) -> str:
     """Collapse *ip* to the coarser network it belongs to.
 
@@ -900,6 +928,65 @@ async def create_session(
     return await _create_session_impl(conn, user_id, ip, user_agent)
 
 
+def _new_device_alert_should_fire(
+    user_id: str, ip_subnet: str,
+) -> tuple[bool, str]:
+    """Q.2 rate-limit + DHCP-tolerance gate for ``notify_new_device_login``.
+
+    Returns ``(should_fire, reason)``:
+
+    * ``(True, "")`` — alert is allowed through.
+    * ``(False, "rate_limited_user")`` — same user already received a
+      new-device alert within ``NEW_DEVICE_ALERT_USER_WINDOW_S``.
+    * ``(False, "rate_limited_subnet")`` — same user already received
+      a new-device alert for this ``ip_subnet`` within
+      ``NEW_DEVICE_ALERT_SUBNET_WINDOW_S``.
+
+    Gate ordering — **per-user first, per-subnet second** — is
+    deliberate. The per-user gate's 60-second window is the tighter
+    constraint; if we're already inside that window we want to drop
+    fast without touching the subnet bucket. Consuming a subnet token
+    only on ``should_fire=True`` preserves the invariant "one subnet
+    token == one delivered alert"; this avoids the pathological case
+    where a rate-limit drop burns a subnet token, so the user never
+    actually learns about the new subnet before its 24h window elapses.
+
+    Edge case documented here so future readers don't "fix" it into a
+    bug: when the per-user gate blocks a burst of mixed-subnet logins,
+    every subnet after the first is silently dropped. This is
+    intentional — the spec says "最多發一則新裝置通知" per minute, so
+    merging concurrent new-subnet alerts into the first one matches
+    user intent (a reasonable human reads the first alert and takes
+    action; sending 5 more in the same minute just trains them to
+    ignore the channel).
+
+    Empty ``ip_subnet`` (unparseable IP) skips the subnet gate — we
+    still run the user gate so we don't spam on a series of
+    unparseable IPs, but we don't partition the dedup key by a
+    fingerprint that's effectively "everyone's unknown IP" (which
+    would collapse every user's unknown-IP alerts into one bucket).
+    """
+    from backend.rate_limit import get_limiter
+    limiter = get_limiter()
+    user_ok, _ = limiter.allow(
+        f"new_device_alert:user:{user_id}",
+        capacity=1,
+        window_seconds=NEW_DEVICE_ALERT_USER_WINDOW_S,
+    )
+    if not user_ok:
+        return (False, "rate_limited_user")
+    if not ip_subnet:
+        return (True, "")
+    subnet_ok, _ = limiter.allow(
+        f"new_device_alert:subnet:{user_id}:{ip_subnet}",
+        capacity=1,
+        window_seconds=NEW_DEVICE_ALERT_SUBNET_WINDOW_S,
+    )
+    if not subnet_ok:
+        return (False, "rate_limited_subnet")
+    return (True, "")
+
+
 async def notify_new_device_login(
     user: "User", sess: Session, ip: str, user_agent: str,
 ) -> None:
@@ -920,11 +1007,34 @@ async def notify_new_device_login(
     fail the login itself; a fingerprint write that succeeded but a
     flaky Slack webhook must not lock the user out.
 
-    Rate-limit + user-preference gates are intentionally NOT applied
-    here — those are the next two Q.2 checklist items (#296). When
-    they land, this helper is the central choke point to retrofit.
+    Rate-limit gates layer on top of the fingerprint primitive via
+    ``_new_device_alert_should_fire``:
+
+    * per-user 1/min cap (``NEW_DEVICE_ALERT_USER_WINDOW_S``) — anti-
+      spam against bursty attacker probes.
+    * per-(user, subnet) 24h dedup (``NEW_DEVICE_ALERT_SUBNET_WINDOW_S``)
+      — DHCP tolerance on the same physical network. Complements the
+      fingerprint table's (user, ua_hash, subnet) dedup by catching
+      the second-order case where the UA hash shifts (e.g. browser
+      update) but the subnet did not.
+
+    Both gates use the shared ``backend.rate_limit`` limiter, so they
+    coordinate across uvicorn workers when Redis is wired (which it
+    is in prod, Phase 1 of A3.3 — see TODO.md A3 for the wire-up).
+    The next Q.2 checklist item — user preference ``new_device_alerts``
+    — retrofits here via a single early ``return`` before the gate
+    block; the choke point stays centralised.
     """
     if not getattr(sess, "is_new_device", False):
+        return
+    should_fire, reason = _new_device_alert_should_fire(
+        user.id, compute_ip_subnet(ip),
+    )
+    if not should_fire:
+        logger.info(
+            "notify_new_device_login: suppressed user=%s reason=%s",
+            user.id, reason,
+        )
         return
     try:
         from backend.events import emit_new_device_login as _emit

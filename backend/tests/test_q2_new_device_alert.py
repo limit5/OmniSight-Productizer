@@ -37,6 +37,13 @@ async def _q2_alert_env(pg_test_pool, monkeypatch):
         await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
         await conn.execute("TRUNCATE session_fingerprints")
 
+    # Q.2 rate-limit gates (per-user 60s + per-subnet 24h) share a
+    # module-singleton limiter with the rest of the backend. Clear it
+    # so state from a prior test doesn't suppress the alert this test
+    # is trying to verify.
+    from backend.rate_limit import reset_limiters
+    reset_limiters()
+
     from backend import auth, events as _events, notifications
 
     captured_emits: list[dict] = []
@@ -86,6 +93,7 @@ async def _q2_alert_env(pg_test_pool, monkeypatch):
         async with pg_test_pool.acquire() as conn:
             await conn.execute("TRUNCATE users RESTART IDENTITY CASCADE")
             await conn.execute("TRUNCATE session_fingerprints")
+        reset_limiters()
 
 
 @pytest.mark.asyncio
