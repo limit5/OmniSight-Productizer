@@ -763,15 +763,15 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 產出 `docs/design/multi-device-state-sync.md`：逐一盤點每條「mutation → 其他裝置看到」的路徑，標記狀態 + 補 missing。
 
-- [ ] **盤點 8 條 mutation 路徑**（每條驗：(a) SharedKV 或 DB 寫入 OK？(b) SSE broadcast OK？(c) 前端 listener 會 re-render？）：
+- [x] **盤點 8 條 mutation 路徑**（每條驗：(a) SharedKV 或 DB 寫入 OK？(b) SSE broadcast OK？(c) 前端 listener 會 re-render？）：**Done 2026-04-24** — 稽核結果產出 `docs/design/multi-device-state-sync.md`，對每條路徑給 file:line 證據 + 三層狀態 (persistence / SSE / frontend) + 單行 verdict。結論顛覆原本假設：`1 OK · 3 PARTIAL · 4 GAP`（原稿估 `3 ✅ · 5 ⚠`），關鍵 downgrade：**#3 workflow_run ✅ → GAP**（repo-wide grep `workflow_updated` 只在 TODO.md 命中，`backend/workflow.py` 零個 `emit_`/`bus.publish`，原 `✅ SSE` 主張無碼可依）；**#7 user preferences ✅ → GAP**（`backend/routers/preferences.py` 無 `emit_*`，J4 覆蓋的 `storage-bridge.tsx:37-46` `window.addEventListener("storage", …)` 只是 same-browser cross-tab，不是 cross-device，e2e 的 `j4-storage-sync.spec.ts` 也確認只 dispatch 本地 `StorageEvent`）。其他重新校準：**#4 Task CRUD** — `PATCH /tasks/{id}` 於 `tasks.py:190` emit，但 `POST` (`:107-127`) + `DELETE` (`:275-283`) 都無 emit（漏掉 create/delete 兩個動作）；**#5 Chat history** — 實際是 `list` 不是 deque（`chat.py:30` `_history: list[OrchestratorMessage] = []`），同問題但 unbounded growth；且 `getChatHistory()` 已在 `lib/api.ts:959-961` 導出但無 `.tsx` 消費、是 orphan endpoint；**#6 INVOKE** — TODO 原假設「scope=session 只推 originator」但實測 10 個 `emit_invoke` call site (`invoke.py:316,322,337,379,585,612,897,1221,1237`) 全無 `session_id` / `broadcast_scope` 參數 → 預設 `"global"` → 每個連線 client 都收得到（反向 gap：不是綁得太緊、是綁得太鬆）。**基礎架構觀察** (docs §1.2)：`EventBus._deliver_local` (`events.py:81-105`) 的 scope filter 只 enforce `"tenant"`，`"user"` / `"session"` scope 純宣告性質——payload 有寫但 fan-out 不過濾，frontend 要自己 self-filter on `data.user_id`；這是 `events.py:568-577` 明確的設計決定，但意味著 `broadcast_scope="user"` 現在只是 hint、不是 security boundary（留給 Q.4 #298 收斂）。**Follow-up 子任務排序**（docs §4）：P0 chat history 搬 DB（checkbox #3 本來就有）+ P0 workflow_run SSE wiring（2h）；P1 task CRUD emit 補 create/delete（1h）+ notifications read broadcast（1h）+ user prefs SSE push（1h）；P2 INVOKE scope split 與 integration settings SSE 留給 Q.4 #298 policy sweep 一起做避免重工。合計 P0+P1 ≈ 1.5 day，對得上原估。SOP Step 1 module-global audit：本次是「純稽核 + docs 寫入」無新 code/state 變動，但 audit 本身正是在找別人的 module-global state 問題——#5 的 `_history` list 就是最典型的第三種不合格答案（既沒 PG 也沒 Redis，也不是「刻意 per-worker」，純粹 historical accident），已列 P0 由 checkbox #3 migration 處理。
   1. LLM provider keys（✅ SharedKV + `provider_switch` event，已驗 commit `8d626489`）
-  2. Integration settings（Gerrit / JIRA / GitHub）（✅ SharedKV + `/settings` GET re-fetch，已驗 commit `c9514ab2`）
-  3. Workflow_run state（✅ I2 RLS + SSE `workflow_updated` + J2 optimistic lock）
-  4. Task CRUD（⚠️ DB OK 但 SSE 事件不一定齊全，要驗）
-  5. **Chat history**（⚠️ 目前 `_history` in-memory deque at `chat.py:30`——**跨 worker 不共享、跨 session 不同步**。本路徑最大 gap，需評估搬 DB 或 Redis）
-  6. **INVOKE 指令結果**（⚠️ SSE stream 綁 originating session，其他裝置看不到。原則上應該只推 originator，但「已完成的 invocation 摘要」應該進 user-scope history）
-  7. User preferences（locale / theme / wizard state，J4 已覆蓋）（✅）
-  8. Notifications 已讀狀態（⚠️ 要驗：A 裝置標已讀，B 裝置 bell 圖示有 decrement？）
+  2. Integration settings（Gerrit / JIRA / GitHub）（⚠ PARTIAL：SharedKV 寫入穩，但只有 LLM 子集觸發 `provider_switch` emit、Gerrit/JIRA/GitHub-only 編輯無 SSE；frontend 只靠開 modal 時 refetch，不是即時）
+  3. Workflow_run state（❌ GAP：I2 RLS + J2 optimistic lock 存在，但 `workflow_updated` event 整個 repo 不存在、原稿 ✅ 標記需下修）
+  4. Task CRUD（⚠ PARTIAL：`PATCH` emit `task_update`，但 `POST` / `DELETE` 無 emit）
+  5. **Chat history**（❌ GAP：`_history` 是 module-global **list**（非 deque）at `chat.py:30`，跨 worker 不共享、無 SSE、frontend 無消費者——三層全 missing；最大 remediation 項，搬 DB 見 checkbox #3）
+  6. **INVOKE 指令結果**（⚠ PARTIAL：實測 `emit_invoke` 全部走 `"global"` scope 預設，不是綁 session；需要按 action_type 分 session (streaming) vs user (summary)；留給 Q.4 #298）
+  7. User preferences（❌ GAP：PG 寫入 OK，但無 SSE emit；J4 `storage-bridge.tsx` 的 `storage` event 是 same-browser cross-tab、不是 cross-device；原稿 ✅ 標記需下修）
+  8. Notifications 已讀狀態（❌ GAP 已確認：`POST /notifications/{id}/read` (`system.py:1442-1450`) 無 emit；A 裝置標已讀後 B 裝置 bell 需等下次 poll 才 decrement）
 - [ ] 對每個 ⚠️ 項開子 task，必要時補 migration（e.g. chat history 搬 `chat_messages` 表 + 跨 worker broadcast）。
 - [ ] Chat history 搬 DB 是**最大子任務**：新 `chat_messages` 表（`id, user_id, session_id, role, content, timestamp`）；`POST /chat` 寫 DB + emit SSE `chat.message` scope=user；其他裝置 SSE 收 → 追加到本地 UI。Session-scope 的細節如 streaming token-by-token 仍綁 originator。
 
