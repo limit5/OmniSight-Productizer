@@ -392,6 +392,7 @@ async def change_password(req: ChangePasswordRequest, request: Request,
     try:
         revoked_count = await auth.rotate_user_sessions(
             user.id, exclude_token=new_current_token,
+            reason="user_security_event", trigger="password_change",
         )
         if revoked_count > 0:
             from backend import audit as _audit
@@ -512,7 +513,10 @@ async def patch_user(user_id: str, req: PatchUserRequest,
         )
 
     if req.role is not None and req.role != old_role:
-        count = await auth.rotate_user_sessions(user_id)
+        count = await auth.rotate_user_sessions(
+            user_id,
+            reason="user_security_event", trigger="role_change",
+        )
         try:
             from backend import audit as _audit
             await _audit.log(
@@ -534,7 +538,10 @@ async def patch_user(user_id: str, req: PatchUserRequest,
     # Transitioning to ``enabled=False`` is the security event; turning
     # the account back on does NOT need to rotate (no stale token).
     if req.enabled is False and user.enabled:
-        count = await auth.rotate_user_sessions(user_id)
+        count = await auth.rotate_user_sessions(
+            user_id,
+            reason="user_security_event", trigger="account_disabled",
+        )
         try:
             from backend import audit as _audit
             await _audit.log(

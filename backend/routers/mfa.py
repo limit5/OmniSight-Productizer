@@ -59,6 +59,7 @@ async def _rotate_peer_sessions(
     try:
         revoked = await auth.rotate_user_sessions(
             user.id, exclude_token=current_token,
+            reason="user_security_event", trigger=trigger,
         )
         if revoked <= 0:
             return

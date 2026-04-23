@@ -2,8 +2,47 @@
 
 import { useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { Lock, Mail, AlertCircle, Loader2, Shield, ArrowLeft } from "lucide-react"
+import { Lock, Mail, AlertCircle, Loader2, Shield, ArrowLeft, KeyRound } from "lucide-react"
 import { AuthProvider, useAuth } from "@/lib/auth-context"
+
+// Q.1 UI follow-up (2026-04-24): canonical copy for the "your session
+// was ended because a security event happened on another device"
+// banner. Backend ``/auth/change-password`` and the MFA routes set the
+// ``trigger`` when they log the peer-session revocation; ``lib/api.ts``
+// forwards it to ``/login?reason=user_security_event&trigger=<t>``.
+// The banner's ``message`` query param (also set by the API layer)
+// takes precedence so backend copy wins — this map is the fallback
+// when ``message`` is absent (direct navigation, older cached API
+// bundle, etc.).
+const SESSION_REVOCATION_TRIGGER_COPY: Record<string, string> = {
+  password_change:
+    "Your password was changed on another device. Please sign in again.",
+  totp_enrolled:
+    "Two-factor authentication was enabled on another device. Please sign in again.",
+  totp_disabled:
+    "Two-factor authentication was disabled on another device. Please sign in again.",
+  backup_codes_regenerated:
+    "Your MFA backup codes were regenerated on another device. Please sign in again.",
+  webauthn_registered:
+    "A new security key was registered on your account. Please sign in again.",
+  webauthn_removed:
+    "A security key was removed from your account. Please sign in again.",
+  role_change:
+    "Your account role was changed by an administrator. Please sign in again.",
+  account_disabled:
+    "Your account was disabled by an administrator. Contact your administrator for access.",
+}
+
+function getSessionRevocationCopy(
+  reason: string | null, trigger: string | null, message: string | null,
+): string | null {
+  if (reason !== "user_security_event") return null
+  if (message && message.length > 0) return message
+  if (trigger && SESSION_REVOCATION_TRIGGER_COPY[trigger]) {
+    return SESSION_REVOCATION_TRIGGER_COPY[trigger]
+  }
+  return "Your session was ended for security reasons. Please sign in again."
+}
 
 function MfaChallengeForm() {
   const router = useRouter()
@@ -111,6 +150,19 @@ function LoginForm() {
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
 
+  // Q.1 UI follow-up (2026-04-24): parse the security-event reason the
+  // API layer appended to the /login URL when a peer-session rotation
+  // kicked this device. Renders a dedicated banner above the form so
+  // the operator understands *why* they were logged out (password
+  // changed on another device / TOTP change / admin disable) rather
+  // than seeing a bare form with no context.
+  const revokedReason = search.get("reason")
+  const revokedTrigger = search.get("trigger")
+  const revokedMessage = search.get("message")
+  const revocationCopy = getSessionRevocationCopy(
+    revokedReason, revokedTrigger, revokedMessage,
+  )
+
   useEffect(() => {
     if (!auth.loading && auth.user) router.replace(next)
   }, [auth.loading, auth.user, next, router])
@@ -149,6 +201,23 @@ function LoginForm() {
             Sign in to continue
           </p>
         </div>
+
+        {revocationCopy && (
+          <div
+            role="status"
+            data-testid="login-session-revoked-banner"
+            data-trigger={revokedTrigger || ""}
+            className="flex items-start gap-2 p-3 rounded border border-[var(--artifact-purple)] bg-[var(--artifact-purple)]/10 text-[var(--foreground)] font-mono text-xs leading-relaxed"
+          >
+            <KeyRound size={14} className="shrink-0 mt-0.5 text-[var(--artifact-purple)]" />
+            <div className="flex flex-col gap-1">
+              <span className="font-semibold tracking-wider text-[10px] text-[var(--artifact-purple)]">
+                SESSION ENDED
+              </span>
+              <span>{revocationCopy}</span>
+            </div>
+          </div>
+        )}
 
         <label className="flex flex-col gap-1">
           <span className="font-mono text-[10px] tracking-wider text-[var(--muted-foreground)]">

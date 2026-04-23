@@ -955,9 +955,42 @@ async def rotate_session(
 
 async def _rotate_user_sessions_impl(
     conn, user_id: str, exclude_token: str | None,
+    reason: str | None = None, trigger: str | None = None,
 ) -> int:
     now = time.time()
     grace = now + ROTATION_GRACE_S
+    # Q.1 UI follow-up (2026-04-24): when this rotation was triggered
+    # by a security event (password_change / totp_disabled / ...), log
+    # the reason per-peer-token into ``session_revocations`` BEFORE the
+    # UPDATE shrinks their expires_at. After the grace window the row
+    # is evicted by ``_get_session_impl`` → the peer device's next
+    # request lands in ``current_user`` with an empty session lookup,
+    # and we need a side-channel to explain *why* it's 401-ing. That
+    # side-channel is this log.
+    if reason:
+        if exclude_token:
+            rows = await conn.fetch(
+                "SELECT token FROM sessions "
+                "WHERE user_id = $1 AND token != $2 AND expires_at > $3",
+                user_id, exclude_token, now,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT token FROM sessions "
+                "WHERE user_id = $1 AND expires_at > $2",
+                user_id, now,
+            )
+        for r in rows:
+            await conn.execute(
+                "INSERT INTO session_revocations "
+                "(token, user_id, reason, trigger, revoked_at) "
+                "VALUES ($1, $2, $3, $4, $5) "
+                "ON CONFLICT (token) DO UPDATE SET "
+                "reason = EXCLUDED.reason, "
+                "trigger = EXCLUDED.trigger, "
+                "revoked_at = EXCLUDED.revoked_at",
+                r["token"], user_id, reason, trigger or "", now,
+            )
     if exclude_token:
         status = await conn.execute(
             "UPDATE sessions SET expires_at = $1 "
@@ -978,6 +1011,7 @@ async def _rotate_user_sessions_impl(
 
 async def rotate_user_sessions(
     user_id: str, exclude_token: str | None = None, conn=None,
+    reason: str | None = None, trigger: str | None = None,
 ) -> int:
     """Expire all sessions for *user_id* (except *exclude_token*) with
     a 30-s grace window. Used when a user's role changes.
@@ -989,14 +1023,77 @@ async def rotate_user_sessions(
     rotation (between the SELECT inside UPDATE and COMMIT) may or
     may not be caught; admin "logout everything" doesn't promise to
     catch in-flight new sessions — documented.
+
+    Q.1 UI follow-up (2026-04-24): when ``reason`` is set, each
+    affected peer token is logged into ``session_revocations`` with
+    ``(reason, trigger)``. This lets the peer device's next-request
+    401 carry a tailored detail ("please sign in again because your
+    password was changed on another device") instead of the generic
+    "Authentication required".
     """
     if conn is None:
         from backend.db_pool import get_pool
         async with get_pool().acquire() as owned_conn:
             return await _rotate_user_sessions_impl(
-                owned_conn, user_id, exclude_token,
+                owned_conn, user_id, exclude_token, reason, trigger,
             )
-    return await _rotate_user_sessions_impl(conn, user_id, exclude_token)
+    return await _rotate_user_sessions_impl(
+        conn, user_id, exclude_token, reason, trigger,
+    )
+
+
+# Q.1 UI follow-up (2026-04-24): window during which a revoked-session
+# log entry is reported to the peer device. After this window the row
+# is still queried but intentionally returns None — by then the user
+# has had plenty of time to notice they were logged out, and surfacing
+# "your password was changed 9 days ago" would be noise rather than a
+# useful hint. The value is generous on purpose; the table is small
+# (one row per peer session per rotation) so retention cost is cheap.
+SESSION_REVOCATION_REPORT_WINDOW_S = 7 * 24 * 3600.0
+
+
+async def _get_session_revocation_impl(conn, token: str) -> Optional[dict]:
+    r = await conn.fetchrow(
+        "SELECT token, user_id, reason, trigger, revoked_at "
+        "FROM session_revocations WHERE token = $1",
+        token,
+    )
+    if not r:
+        return None
+    revoked_at = float(r["revoked_at"] or 0.0)
+    if revoked_at <= 0 or (time.time() - revoked_at) > SESSION_REVOCATION_REPORT_WINDOW_S:
+        return None
+    return {
+        "token": r["token"],
+        "user_id": r["user_id"],
+        "reason": r["reason"] or "",
+        "trigger": r["trigger"] or "",
+        "revoked_at": revoked_at,
+    }
+
+
+async def get_session_revocation(token: str, conn=None) -> Optional[dict]:
+    """Look up the most recent revocation record for a session token.
+
+    Returns ``{token, user_id, reason, trigger, revoked_at}`` if the
+    token was rotated by a security event within the report window;
+    ``None`` otherwise (including "token was never known", "rotation
+    happened but not security-flagged", or "record is older than the
+    report window").
+
+    Used by ``current_user`` on the 401 path — when the session
+    cookie resolves to no live session, this probe tells us whether
+    the device is 401-ing because of a security event (→ tailored
+    message) or just because the session aged out naturally (→
+    generic "please sign in again").
+    """
+    if not token:
+        return None
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            return await _get_session_revocation_impl(owned_conn, token)
+    return await _get_session_revocation_impl(conn, token)
 
 
 async def check_ua_binding(session: Session, current_ua: str) -> bool:
@@ -1071,6 +1168,44 @@ async def _ensure_default_admin_impl(conn) -> Optional[User]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  FastAPI dependencies
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+# Q.1 UI follow-up (2026-04-24): human-readable 401 message keyed off
+# the ``trigger`` recorded in ``session_revocations``. Kept short —
+# the UI renders it as a banner; it should read the same whether the
+# user sees it inline on /login or popped into a toast.
+_SESSION_REVOCATION_MESSAGES: dict[str, str] = {
+    "password_change":
+        "Your password was changed on another device. Please sign in again.",
+    "totp_enrolled":
+        "Two-factor authentication was enabled on another device. "
+        "Please sign in again.",
+    "totp_disabled":
+        "Two-factor authentication was disabled on another device. "
+        "Please sign in again.",
+    "backup_codes_regenerated":
+        "Your MFA backup codes were regenerated on another device. "
+        "Please sign in again.",
+    "webauthn_registered":
+        "A new security key was registered on your account. "
+        "Please sign in again.",
+    "webauthn_removed":
+        "A security key was removed from your account. "
+        "Please sign in again.",
+    "role_change":
+        "Your account role was changed by an administrator. "
+        "Please sign in again.",
+    "account_disabled":
+        "Your account was disabled by an administrator. "
+        "Contact your administrator for access.",
+}
+
+
+def _session_revocation_message(trigger: str) -> str:
+    return _SESSION_REVOCATION_MESSAGES.get(
+        trigger or "",
+        "Your session was ended for security reasons. Please sign in again.",
+    )
 
 
 def _extract_bearer(req: Request) -> str:
@@ -1185,7 +1320,30 @@ async def current_user(request: Request) -> User:
         request.state.session = None
         return _ANON_ADMIN
 
-    raise HTTPException(status_code=401, detail="Authentication required")
+    # Q.1 UI follow-up (2026-04-24): if the cookie points at a token
+    # we revoked for a security event (password change / MFA toggle /
+    # admin disable / role_change), surface that reason in the 401
+    # detail so the UI can route to a "because your credentials were
+    # changed, please sign in again" banner instead of a generic toast.
+    detail: dict | str = "Authentication required"
+    if cookie:
+        try:
+            rev = await get_session_revocation(cookie)
+        except Exception as exc:
+            logger.debug(
+                "get_session_revocation probe failed on 401 path "
+                "(non-fatal): %s", exc,
+            )
+            rev = None
+        if rev:
+            detail = {
+                "reason": rev.get("reason") or "user_security_event",
+                "trigger": rev.get("trigger") or "",
+                "message": _session_revocation_message(
+                    rev.get("trigger") or "",
+                ),
+            }
+    raise HTTPException(status_code=401, detail=detail)
 
 
 def csrf_check(request: Request, session: Session | None) -> None:

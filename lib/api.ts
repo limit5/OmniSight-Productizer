@@ -463,6 +463,32 @@ function _parseJsonSafe(body: string): Record<string, unknown> | null {
   } catch { return null }
 }
 
+/**
+ * Q.1 UI follow-up (2026-04-24): parse the structured 401 detail that
+ * ``backend/auth.py::current_user`` attaches when it detects a recent
+ * peer-session revocation. Returns ``{ reason, trigger, message }``
+ * when the body matches ``{"detail": {"reason": "user_security_event",
+ * "trigger": "password_change" | ..., "message": "..."}}``. Returns
+ * ``null`` for every other 401 shape (plain strings, bearer-token
+ * failures, unrelated validation errors) so the caller falls through
+ * to the generic /login redirect.
+ */
+function _extractSessionRevocation(
+  parsed: Record<string, unknown> | null,
+): { reason: string; trigger: string; message: string } | null {
+  if (!parsed) return null
+  const detail = parsed.detail
+  if (!detail || typeof detail !== "object") return null
+  const d = detail as Record<string, unknown>
+  const reason = typeof d.reason === "string" ? d.reason : ""
+  if (reason !== "user_security_event") return null
+  return {
+    reason,
+    trigger: typeof d.trigger === "string" ? d.trigger : "",
+    message: typeof d.message === "string" ? d.message : "",
+  }
+}
+
 function _extractTraceId(
   res: Response | null,
   parsed: Record<string, unknown> | null,
@@ -546,6 +572,16 @@ function _handleTerminalError(args: {
   // we're already on the login page — the form itself surfaces the
   // auth failure — or on /setup-required, where the operator hasn't
   // logged in yet and we don't want to punt them to /login mid-boot.
+  //
+  // Q.1 UI follow-up (2026-04-24): when the 401 body carries a
+  // ``detail.reason`` of ``"user_security_event"`` (peer-session
+  // rotation after password change / MFA change / admin role change
+  // / account disable), append ``&reason=<reason>&trigger=<trigger>``
+  // to the /login URL so the login page renders a tailored banner
+  // ("your password was changed on another device — please sign in
+  // again") instead of a bare login form. The body's ``detail.message``
+  // is also forwarded so the backend is the single source of truth
+  // for the copy.
   if (kind === "unauthorized" && typeof window !== "undefined") {
     const here = window.location.pathname
     const skipRedirect =
@@ -555,7 +591,15 @@ function _handleTerminalError(args: {
       const next = encodeURIComponent(
         window.location.pathname + window.location.search,
       )
-      window.location.assign(`/login?next=${next}`)
+      const rev = _extractSessionRevocation(args.parsed)
+      const extra = rev
+        ? `&reason=${encodeURIComponent(rev.reason)}`
+          + `&trigger=${encodeURIComponent(rev.trigger)}`
+          + (rev.message
+              ? `&message=${encodeURIComponent(rev.message)}`
+              : "")
+        : ""
+      window.location.assign(`/login?next=${next}${extra}`)
       // Short-circuit: page is unloading, no toast, no listeners.
       return err
     }
@@ -1803,6 +1847,46 @@ export async function revokeAllOtherSessions(): Promise<{ status: string; revoke
   return request<{ status: string; revoked_count: number }>("/auth/sessions", {
     method: "DELETE",
   })
+}
+
+// ─── Self-service password change ───────────────────────────
+
+export interface ChangePasswordResponse {
+  status: string
+  must_change_password: boolean
+  csrf_token?: string
+}
+
+/**
+ * Call ``POST /auth/change-password``. Rotates the current device's
+ * session + kicks every peer session (Q.1 security red line). On
+ * success, the backend sets the new session + CSRF cookies and
+ * returns ``{status: "password_changed", ...}``.
+ *
+ * Q.1 UI follow-up (2026-04-24): callers MUST treat a resolved
+ * promise as success — the caller's own session was refreshed
+ * via ``Set-Cookie`` in the same response, so no re-login flow is
+ * needed on the device that initiated the change. Only *peer*
+ * devices get 401'd on their next request (handled by the global
+ * /login redirect with a ``reason=user_security_event`` query
+ * param that renders a dedicated banner — see ``_handleTerminalError``
+ * above and ``app/login/page.tsx``).
+ *
+ * Rejection maps to the standard ``ApiError`` — 401 "current
+ * password is incorrect", 422 password-strength / history-reuse,
+ * etc. Those surface on the caller's own form, NOT on the global
+ * toast center.
+ */
+export async function changePassword(
+  currentPassword: string, newPassword: string,
+): Promise<ChangePasswordResponse> {
+  return request<ChangePasswordResponse>("/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  }, { skipGlobalErrorHandler: true })
 }
 
 // ─── MFA (K5) ───────────────────────────────────────────────
