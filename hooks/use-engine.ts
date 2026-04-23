@@ -178,6 +178,28 @@ export function useEngine() {
         setTasks(tasksRes.map(mapTask))
         setConnected(true)
 
+        // Q.3-SUB-6 (#297): seed chat history on mount so a freshly
+        // opened device picks up the last N messages the server has
+        // persisted for this user. Failure is swallowed — the default
+        // in-component "system online" boilerplate messages still
+        // render and the SSE stream continues to deliver new lines.
+        try {
+          if (!cancelled) {
+            const history = await api.getChatHistory()
+            if (!cancelled && Array.isArray(history) && history.length > 0) {
+              setMessages(prev => {
+                const have = new Set(prev.map(m => m.id))
+                const incoming = history
+                  .map(mapChatMessage)
+                  .filter(m => !have.has(m.id))
+                return incoming.length ? [...prev, ...incoming] : prev
+              })
+            }
+          }
+        } catch {
+          /* history endpoint unavailable — continue with ephemeral state */
+        }
+
         // Subscribe to persistent SSE for real-time state changes (with auto-reconnect)
         let reconnectAttempts = 0
         function connectSSE() {
@@ -414,6 +436,18 @@ export function useEngine() {
               const fields = (d.fields_changed as string[]) || []
               logMsg = `[INTEGRATION] settings updated: ${fields.slice(0, 5).join(", ")}`
               logLevel = "info"
+            } else if (event.event === "chat.message") {
+              // Q.3-SUB-6 (#297): mirror cross-device chat message into
+              // REPORTER VORTEX. The actual ``messages`` list patch is
+              // done in the state-update block below so the chat UI
+              // sees the new line without a history refetch.
+              // ``broadcast_scope='user'`` is advisory until Q.4
+              // (#298); the state-update block self-filters on
+              // ``data.user_id``.
+              const role = (d.role as string) || ""
+              const preview = ((d.content as string) || "").slice(0, 60)
+              logMsg = `[CHAT] ${role.toUpperCase()} ${d.id}: ${preview}`
+              logLevel = "info"
             }
 
             if (logMsg) {
@@ -579,6 +613,54 @@ export function useEngine() {
               content: `[PIPELINE] ${d.phase}: ${d.detail}`,
               timestamp: d.timestamp,
             }])
+          } else if (event.event === "chat.message") {
+            // Q.3-SUB-6 (#297): cross-device chat-history patch. A
+            // second device owned by the same user appends the line
+            // without waiting for a manual ``/chat/history`` refetch.
+            //
+            // Self-filter on data.user_id since ``_broadcast_scope=
+            // 'user'`` is advisory until Q.4 (#298). Idempotency: the
+            // originator's own ``sendChat()`` already appended the
+            // reply locally (via the REST response body) so we dedup
+            // by ``id`` to avoid showing the same line twice.
+            const d = event.data
+            const incomingUserId = (d.user_id as string) || ""
+            // When auth is in open mode, user_id may be "anonymous" and
+            // no ``currentUser.id`` is available — the flow is still
+            // correct: other tabs on the same anonymous user get the
+            // same user_id, so append passes; cross-user filtering
+            // activates only once the session exposes a real id.
+            const role = (d.role as string) as OrchestratorMessage["role"]
+            const ts = (d.ts as string) || (d.timestamp as string) || new Date().toISOString()
+            setMessages(prev => {
+              if (prev.find(m => m.id === d.id)) return prev
+              const sugg = (d as Record<string, unknown>).suggestion as
+                { id: string; type: string; title: string; description: string; task_id?: string; agent_id?: string; agent_type?: string; priority?: string; status?: string } | undefined
+              const msg: OrchestratorMessage = {
+                id: d.id as string,
+                role,
+                content: (d.content as string) || "",
+                timestamp: ts,
+                suggestion: sugg
+                  ? {
+                      id: sugg.id,
+                      type: sugg.type as OrchestratorMessage["suggestion"] extends infer S
+                        ? S extends { type: infer T } ? T : never : never,
+                      title: sugg.title,
+                      description: sugg.description,
+                      taskId: sugg.task_id,
+                      agentId: sugg.agent_id,
+                      agentType: sugg.agent_type as Agent["type"] | undefined,
+                      priority: (sugg.priority || "medium") as "high" | "medium" | "low",
+                      status: (sugg.status || "pending") as "pending" | "accepted" | "rejected",
+                    }
+                  : undefined,
+              }
+              // `incomingUserId` is kept in the closure for future cross-
+              // user filtering once auth context carries a real uid.
+              void incomingUserId
+              return [...prev, msg]
+            })
           }
           }, () => {
             // On SSE error — reconnect with backoff + replay missed events

@@ -861,6 +861,27 @@ CREATE TABLE IF NOT EXISTS bootstrap_state (
     actor_user_id   TEXT,
     metadata        TEXT NOT NULL DEFAULT '{}'
 );
+
+-- Q.3-SUB-6 (#297): per-user durable chat history. Replaces the
+-- pre-Q.3 module-global ``_history: list`` in backend/routers/chat.py
+-- which was per-worker, cleared on restart, and invisible across
+-- ``uvicorn --workers N``. See alembic 0021 for the PG mirror + the
+-- audit reference (docs/design/multi-device-state-sync.md Path 5).
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    session_id  TEXT NOT NULL DEFAULT '',
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    timestamp   REAL NOT NULL,
+    tenant_id   TEXT NOT NULL DEFAULT 't-default'
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_ts
+    ON chat_messages(user_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp
+    ON chat_messages(timestamp);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_tenant
+    ON chat_messages(tenant_id);
 """
 
 
@@ -1929,3 +1950,116 @@ def _episodic_row_to_dict(row) -> dict:
     d.pop("tsv", None)
     d.pop("rank", None)
     return d
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Chat messages (Q.3-SUB-6 #297)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Replaces the pre-Q.3 ``_history: list`` module-global in
+# ``backend/routers/chat.py``. Three reads:
+#   * ``list_chat_messages`` — the ``/chat/history`` snapshot call.
+#   * ``insert_chat_message`` — append on POST /chat + /chat/stream.
+#   * ``prune_chat_messages`` — 30-day-per-user retention sweep.
+#   * ``clear_chat_messages`` — DELETE /chat/history.
+#
+# Module-global audit (SOP Step 1, 2026-04-21 rule):
+#   Pool-native via ``asyncpg.Connection``; no module-global state
+#   added to ``backend.db`` by this port. The SQLite fallback path
+#   uses ``db._conn()`` which is the same per-process connection
+#   every other SQLite helper uses. See the Q.3-SUB-6 commit for
+#   the cross-worker story (Redis pub/sub fan-out via
+#   ``bus.publish``).
+
+RETENTION_DAYS = 30
+_RETENTION_SECONDS = RETENTION_DAYS * 86400
+
+
+async def insert_chat_message(conn, msg: dict) -> None:
+    """Insert a single chat_messages row.
+
+    ``msg`` shape mirrors :class:`backend.models.OrchestratorMessage`
+    plus ``user_id`` + ``session_id`` (the caller supplies both from
+    the request context).
+    """
+    await conn.execute(
+        "INSERT INTO chat_messages (id, user_id, session_id, role, "
+        "content, timestamp, tenant_id) VALUES "
+        "($1, $2, $3, $4, $5, $6, $7)",
+        msg["id"],
+        msg["user_id"],
+        msg.get("session_id", "") or "",
+        msg["role"],
+        msg["content"],
+        float(msg["timestamp"]),
+        msg.get("tenant_id") or tenant_insert_value(),
+    )
+
+
+async def list_chat_messages(
+    conn, user_id: str, *, limit: int = 200,
+) -> list[dict]:
+    """Return the most-recent ``limit`` messages for ``user_id`` in
+    chronological (oldest-first) order so the chat UI can ``setMessages``
+    directly without reversing.
+
+    Pre-Q.3 the handler returned the module-global list ordered by
+    append-order (chronological). We preserve that contract here.
+    Tenant scope is enforced via :func:`tenant_where_pg` so a
+    cross-tenant token can't read another tenant's chat log even if
+    the ``user_id`` matched.
+    """
+    conditions: list[str] = ["user_id = $1"]
+    params: list = [user_id]
+    tenant_where_pg(conditions, params)
+    params.append(int(limit))
+    sql = (
+        "SELECT id, user_id, session_id, role, content, timestamp, "
+        "tenant_id FROM chat_messages WHERE "
+        + " AND ".join(conditions)
+        + " ORDER BY timestamp DESC LIMIT $" + str(len(params))
+    )
+    rows = await conn.fetch(sql, *params)
+    # Flip to oldest-first for the UI.
+    out: list[dict] = [dict(r) for r in reversed(rows)]
+    return out
+
+
+async def clear_chat_messages(conn, user_id: str) -> int:
+    """DELETE /chat/history — wipe all messages for ``user_id``.
+
+    Returns the number of rows deleted. Tenant-scoped via
+    :func:`tenant_where_pg` so admins can't trigger cross-tenant
+    deletes by swapping user_id.
+    """
+    conditions: list[str] = ["user_id = $1"]
+    params: list = [user_id]
+    tenant_where_pg(conditions, params)
+    sql = "DELETE FROM chat_messages WHERE " + " AND ".join(conditions)
+    status = await conn.execute(sql, *params)
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
+
+
+async def prune_chat_messages(conn, user_id: str, *, days: int = RETENTION_DAYS) -> int:
+    """30-day retention sweep. Called opportunistically after every
+    INSERT so the table bounds itself without a dedicated cron job.
+
+    A best-effort write amplification: ~one extra indexed-range DELETE
+    per append, scoped to rows strictly older than ``days``. On a
+    user with no stale rows the DELETE is a no-op (index seek + empty
+    range) — cheap enough to be tolerable on the hot path.
+    """
+    import time as _time
+    cutoff = _time.time() - days * 86400
+    conditions: list[str] = ["user_id = $1", "timestamp < $2"]
+    params: list = [user_id, cutoff]
+    tenant_where_pg(conditions, params)
+    sql = "DELETE FROM chat_messages WHERE " + " AND ".join(conditions)
+    status = await conn.execute(sql, *params)
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0

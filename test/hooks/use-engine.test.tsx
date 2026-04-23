@@ -42,6 +42,11 @@ vi.mock("@/lib/api", () => {
     sendChatMessage: vi.fn(),
     invoke: vi.fn(),
     subscribeEvents: vi.fn(() => ({ close: () => {}, readyState: 1 })),
+    // Q.3-SUB-6 (#297): init() awaits getChatHistory to seed the
+    // messages list. Reject by default so the offline suite above
+    // keeps its empty-messages invariant; the chat.message tests
+    // override this via mockImplementation.
+    getChatHistory: vi.fn(() => Promise.reject(new Error("offline-mock"))),
   }
 })
 
@@ -625,5 +630,169 @@ describe("useEngine — integration.settings.updated dispatcher", () => {
     expect(result.current.agents).toEqual(beforeAgents)
     expect(result.current.notifications).toEqual(beforeNotifs)
     expect(result.current.unreadCount).toBe(beforeUnread)
+  })
+})
+
+
+/**
+ * Q.3-SUB-6 (#297) — chat.message SSE dispatcher + history seeding.
+ *
+ * Before Q.3-SUB-6, chat history lived in a per-worker module-global
+ * list — other devices never saw messages typed elsewhere and the
+ * ``getChatHistory()`` endpoint was an orphan consumer.
+ *
+ * These tests lock the new contract:
+ *   - ``chat.message`` appends to ``messages`` (deduped by id).
+ *   - A second ``chat.message`` with an id already present is a no-op.
+ *   - ``init()`` seeds from ``getChatHistory()`` on successful fetch.
+ *   - REPORTER VORTEX gets a ``[CHAT]`` log line on each event.
+ */
+describe("useEngine — chat.message dispatcher + history seeding", () => {
+  function goOnline(): void {
+    ;(api.listAgents as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+    ;(api.listTasks as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+  }
+
+  it("appends a new message from SSE (role + content + id)", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      sse.emit({
+        event: "chat.message",
+        data: {
+          id: "msg-abc123",
+          user_id: "anonymous",
+          role: "user" as const,
+          content: "hello from device A",
+          ts: "2026-04-24T00:00:09",
+          timestamp: "2026-04-24T00:00:09",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const hit = result.current.messages.find(m => m.id === "msg-abc123")
+      expect(hit).toBeTruthy()
+      expect(hit?.content).toBe("hello from device A")
+      expect(hit?.role).toBe("user")
+    })
+  })
+
+  it("dedupes repeat events by id (idempotent apply)", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    const payload = {
+      event: "chat.message" as const,
+      data: {
+        id: "msg-dedupe-1",
+        user_id: "anonymous",
+        role: "orchestrator" as const,
+        content: "reply",
+        ts: "2026-04-24T00:00:10",
+        timestamp: "2026-04-24T00:00:10",
+      },
+    }
+    act(() => { sse.emit(payload) })
+    act(() => { sse.emit(payload) })
+    act(() => { sse.emit(payload) })
+
+    await waitFor(() => {
+      const hits = result.current.messages.filter(m => m.id === "msg-dedupe-1")
+      expect(hits).toHaveLength(1)
+    })
+  })
+
+  it("writes a [CHAT] log line on every event", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      sse.emit({
+        event: "chat.message",
+        data: {
+          id: "msg-log-1",
+          user_id: "anonymous",
+          role: "user" as const,
+          content: "a short message to log",
+          ts: "2026-04-24T00:00:11",
+          timestamp: "2026-04-24T00:00:11",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const hit = result.current.logs.find(
+        l => l.message.includes("[CHAT]") && l.message.includes("msg-log-1"),
+      )
+      expect(hit).toBeTruthy()
+    })
+  })
+
+  it("seeds messages from getChatHistory on mount", async () => {
+    goOnline()
+    // Override the default-rejecting mock to deliver two persisted rows.
+    ;(api.getChatHistory as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([
+        {
+          id: "msg-seed-1", role: "user",
+          content: "persisted hello", timestamp: "2026-04-24T00:00:00",
+        },
+        {
+          id: "msg-seed-2", role: "orchestrator",
+          content: "persisted reply", timestamp: "2026-04-24T00:00:01",
+        },
+      ]),
+    )
+    primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    await waitFor(() => {
+      const ids = result.current.messages.map(m => m.id)
+      expect(ids).toContain("msg-seed-1")
+      expect(ids).toContain("msg-seed-2")
+    })
+  })
+
+  it("does not patch tasks/agents (scope is messages + log only)", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    const beforeTasks = [...result.current.tasks]
+    const beforeAgents = [...result.current.agents]
+
+    act(() => {
+      sse.emit({
+        event: "chat.message",
+        data: {
+          id: "msg-isolate-1",
+          user_id: "anonymous",
+          role: "user" as const,
+          content: "does not affect tasks",
+          ts: "2026-04-24T00:00:12",
+          timestamp: "2026-04-24T00:00:12",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(
+        result.current.messages.some(m => m.id === "msg-isolate-1"),
+      ).toBe(true)
+    })
+    expect(result.current.tasks).toEqual(beforeTasks)
+    expect(result.current.agents).toEqual(beforeAgents)
   })
 })

@@ -689,6 +689,55 @@ def emit_integration_settings_updated(
     )
 
 
+def emit_chat_message(
+    message_id: str,
+    user_id: str,
+    role: str,
+    content: str,
+    timestamp: str,
+    *,
+    session_id: str | None = None,
+    broadcast_scope: str = "user",
+    tenant_id: str | None = None,
+    suggestion: dict | None = None,
+) -> None:
+    """Q.3-SUB-6 (#297): broadcast a persisted chat message to the user's UIs.
+
+    Fires from ``backend.routers.chat`` after every successful
+    ``chat_messages`` INSERT so a second device logged into the same
+    user account can append the line without waiting for a manual
+    ``/chat/history`` refetch. Token-by-token streaming to the
+    originator is a separate concern (owned by the ``chat/stream``
+    SSE response body); this helper only publishes the **finalised**
+    message payload, not partial chunks.
+
+    ``broadcast_scope='user'`` is advisory — :class:`EventBus` only
+    enforces the ``tenant`` scope today (Q.4 #298 will tighten this),
+    so the frontend must additionally self-filter on ``data.user_id``
+    before appending. Mirrors the user-scope pattern of the other
+    Q.3 sub-tasks (workflow / notification.read / preferences /
+    integration.settings).
+
+    ``suggestion`` is the optional AISuggestion attached to orchestrator
+    replies (dispatch hints, etc.); when present we pass it through to
+    the payload so the target device renders the same affordance the
+    originator sees.
+    """
+    payload: dict[str, Any] = {
+        "id": message_id,
+        "user_id": user_id,
+        "role": role,
+        "content": content,
+        "ts": timestamp,
+    }
+    if suggestion:
+        payload["suggestion"] = suggestion
+    bus.publish("chat.message", payload,
+                session_id=session_id, broadcast_scope=broadcast_scope,
+                tenant_id=_auto_tenant(tenant_id))
+    _log(f"[CHAT] {role} {message_id} (user={user_id})")
+
+
 def emit_new_device_login(
     user_id: str,
     token_hint: str,

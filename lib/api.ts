@@ -162,6 +162,29 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── Q.3-SUB-6 (#297) chat-history cross-device sync (broadcast_scope=user) ───
+  | {
+      event: "chat.message"
+      data: {
+        id: string
+        user_id: string
+        role: "user" | "orchestrator" | "system"
+        content: string
+        ts: string
+        suggestion?: {
+          id: string
+          type: string
+          title: string
+          description: string
+          task_id?: string
+          agent_id?: string
+          agent_type?: string
+          priority?: string
+          status?: string
+        }
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -251,6 +274,8 @@ const SSE_EVENT_TYPES = [
   "preferences.updated",
   // ─── Q.3-SUB-5 (#297) integration-settings cross-device sync (non-LLM) ───
   "integration.settings.updated",
+  // ─── Q.3-SUB-6 (#297) chat-history cross-device sync ───
+  "chat.message",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"

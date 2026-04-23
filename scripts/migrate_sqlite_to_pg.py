@@ -163,6 +163,10 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "tenant_secrets",
     "tenant_egress_policies",
     "tenant_egress_requests",
+    # Q.3-SUB-6 (#297, alembic 0021): per-user chat history. No FK but
+    # logically owned by ``users.id`` — keep near the user-scoped
+    # tables for deterministic replay ordering.
+    "chat_messages",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

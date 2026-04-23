@@ -376,6 +376,48 @@ class SSEPreferencesUpdated(BaseModel):
     timestamp: str = ""
 
 
+class SSEChatMessageSuggestion(BaseModel):
+    """Nested AISuggestion payload for chat.message events.
+
+    Shape mirrors :class:`backend.models.AISuggestion` but stays
+    optional on the SSE event (most messages have no suggestion).
+    """
+    id: str
+    type: str
+    title: str
+    description: str
+    task_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_type: Optional[str] = None
+    priority: str = "medium"
+    status: str = "pending"
+
+
+class SSEChatMessage(BaseModel):
+    """chat.message — Q.3-SUB-6 (#297) cross-device chat-history push.
+
+    Emitted by :mod:`backend.routers.chat` after each successful
+    ``chat_messages`` INSERT. Carries the persisted id / role /
+    content / user_id so a second device owned by the same user
+    appends the line immediately; the on-mount ``GET /chat/history``
+    fetch continues to seed the initial snapshot.
+
+    ``broadcast_scope='user'`` — see Q.4 (#298) for the scope-
+    enforcement roadmap; until then consumers must self-filter on
+    ``user_id``. Streaming token-by-token stays bound to the
+    originator session and does NOT use this event type (it rides
+    the ``/chat/stream`` HTTP-body SSE directly; this helper only
+    publishes the finalised message).
+    """
+    id: str
+    user_id: str
+    role: str  # "user" | "orchestrator" | "system"
+    content: str
+    ts: str = ""
+    suggestion: Optional[SSEChatMessageSuggestion] = None
+    timestamp: str = ""
+
+
 class SSEIntegrationSettingsUpdated(BaseModel):
     """integration.settings.updated — Q.3-SUB-5 (#297) cross-device
     non-LLM integration-settings push.
@@ -454,6 +496,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "preferences.updated": SSEPreferencesUpdated,
     # Q.3-SUB-5 (#297): cross-device non-LLM integration-settings push
     "integration.settings.updated": SSEIntegrationSettingsUpdated,
+    # Q.3-SUB-6 (#297): cross-device chat-history push
+    "chat.message": SSEChatMessage,
 }
 
 
