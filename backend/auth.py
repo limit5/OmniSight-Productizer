@@ -245,6 +245,27 @@ NEW_DEVICE_ALERT_USER_WINDOW_S = 60.0
 NEW_DEVICE_ALERT_SUBNET_WINDOW_S = 24 * 3600.0
 
 
+# Q.2 opt-out preference key (2026-04-24):
+#
+# `user_preferences.new_device_alerts` — per-user toggle that lets a
+# user silence the new-device-login alert pipeline entirely. The table
+# is SP-5.8; this is just a well-known key under it. Written via the
+# existing ``PUT /user-preferences/new_device_alerts`` endpoint. Read
+# fresh from PG on every alert dispatch — no module-local cache — so a
+# user hitting the toggle from /settings/security sees the setting take
+# effect on the very next login, matching security-UX expectations.
+#
+# Value convention: a lowercase-stripped value in
+# ``NEW_DEVICE_ALERTS_FALSY_VALUES`` means "alerts OFF". Any other
+# value (including the common "1" / "true" / "on", a present-but-empty
+# string, or a missing row) means "alerts ON". This is deliberately
+# opt-out — a flaky write or UI bug must NOT accidentally disable a
+# security alert, and the fail-open philosophy mirrors the rest of
+# ``notify_new_device_login`` (SSE / IM dispatch errors also fail open).
+NEW_DEVICE_ALERTS_PREF_KEY = "new_device_alerts"
+NEW_DEVICE_ALERTS_FALSY_VALUES = frozenset({"0", "false", "off", "no"})
+
+
 def compute_ip_subnet(ip: str) -> str:
     """Collapse *ip* to the coarser network it belongs to.
 
@@ -928,6 +949,44 @@ async def create_session(
     return await _create_session_impl(conn, user_id, ip, user_agent)
 
 
+async def _new_device_alerts_enabled(user_id: str) -> bool:
+    """Read the Q.2 per-user opt-out preference from PG.
+
+    Returns ``True`` (alerts enabled) when the row is missing, the value
+    is not in ``NEW_DEVICE_ALERTS_FALSY_VALUES``, or the read itself
+    fails. The fail-open branch is intentional: a transient DB hiccup
+    (pool exhaustion, PG restart mid-login) must NOT silently suppress
+    a security alert — a missed "someone else is logging in" message
+    is strictly worse than an extra one. The warning log line makes the
+    suppression path observable so ops can spot systemic failures.
+
+    No caching — the preferences table is small, the key is read on the
+    already-rate-limited new-device alert path (≤ 1/min per user), and
+    a stale cache would mean a user hitting the "disable alerts" toggle
+    from /settings/security would NOT see it take effect until the TTL
+    expired. Freshness is cheaper than cache invalidation here.
+    """
+    try:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM user_preferences "
+                "WHERE user_id = $1 AND pref_key = $2",
+                user_id, NEW_DEVICE_ALERTS_PREF_KEY,
+            )
+    except Exception as exc:
+        logger.warning(
+            "new_device_alerts pref read failed user=%s err=%s "
+            "— failing open (alert will fire)",
+            user_id, exc,
+        )
+        return True
+    if row is None:
+        return True
+    value = (row["value"] or "").strip().lower()
+    return value not in NEW_DEVICE_ALERTS_FALSY_VALUES
+
+
 def _new_device_alert_should_fire(
     user_id: str, ip_subnet: str,
 ) -> tuple[bool, str]:
@@ -1021,11 +1080,22 @@ async def notify_new_device_login(
     Both gates use the shared ``backend.rate_limit`` limiter, so they
     coordinate across uvicorn workers when Redis is wired (which it
     is in prod, Phase 1 of A3.3 — see TODO.md A3 for the wire-up).
-    The next Q.2 checklist item — user preference ``new_device_alerts``
-    — retrofits here via a single early ``return`` before the gate
-    block; the choke point stays centralised.
+
+    Per-user opt-out (``user_preferences.new_device_alerts``) is the
+    first gate below the ``is_new_device`` fast path — a user who has
+    explicitly disabled this alert receives nothing, regardless of
+    what the fingerprint / rate-limit primitives decide. The choke
+    point stays centralised: every alert fan-out goes through this
+    single function, so the toggle applies everywhere (password login,
+    MFA verify, WebAuthn complete — all three call sites).
     """
     if not getattr(sess, "is_new_device", False):
+        return
+    if not await _new_device_alerts_enabled(user.id):
+        logger.info(
+            "notify_new_device_login: suppressed user=%s reason=pref_disabled",
+            user.id,
+        )
         return
     should_fire, reason = _new_device_alert_should_fire(
         user.id, compute_ip_subnet(ip),
