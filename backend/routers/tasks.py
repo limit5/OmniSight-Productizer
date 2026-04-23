@@ -124,6 +124,16 @@ async def create_task(
         labels=body.labels,
     )
     await _persist(task, conn)
+    # Q.3-SUB-2 (#297): broadcast create so other devices append without
+    # polling. Pre-Q.3-SUB-2 only PATCH emitted — create+delete were
+    # invisible cross-device. ``action`` discriminates the mutation kind
+    # so the frontend dispatcher can append vs patch vs remove; the
+    # existing ``task_update`` channel is reused to keep the event-type
+    # surface narrow (Q.4 #298 scope policy sweep can re-scope later).
+    emit_task_update(
+        task.id, task.status, task.assigned_agent_id,
+        action="created",
+    )
     return task
 
 
@@ -281,3 +291,11 @@ async def delete_task(
         raise HTTPException(status_code=404, detail="Task not found")
     del _tasks[task_id]
     await db.delete_task(conn, task_id)
+    # Q.3-SUB-2 (#297): broadcast delete so other devices drop the row
+    # without polling. Fires AFTER the DB delete so a subscriber who
+    # re-fetches on receipt (belt + braces) already sees the row gone.
+    # ``status='deleted'`` is an out-of-band sentinel for the action
+    # channel — the frontend dispatcher switches on ``action``, not
+    # on status, but we pass status for the log line and to keep the
+    # payload shape consistent with other task_update events.
+    emit_task_update(task_id, "deleted", action="deleted")

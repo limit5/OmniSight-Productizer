@@ -16,8 +16,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 vi.mock("@/lib/api", () => {
   const reject = () => Promise.reject(new Error("offline-mock"))
   return {
-    listAgents: reject,
-    listTasks: reject,
+    // vi.fn() for listAgents/listTasks/subscribeEvents so per-test
+    // mockImplementation() can flip them online for the dispatcher
+    // suite below.
+    listAgents: vi.fn(() => Promise.reject(new Error("offline-mock"))),
+    listTasks: vi.fn(() => Promise.reject(new Error("offline-mock"))),
     getSystemStatus: reject,
     getSystemInfo: reject,
     getDevices: reject,
@@ -38,11 +41,15 @@ vi.mock("@/lib/api", () => {
     forceAssign: vi.fn(),
     sendChatMessage: vi.fn(),
     invoke: vi.fn(),
-    subscribeEvents: () => ({ close: () => {}, readyState: 1 }),
+    subscribeEvents: vi.fn(() => ({ close: () => {}, readyState: 1 })),
   }
 })
 
+import * as api from "@/lib/api"
+import { primeSSE as _primeSSE } from "../helpers/sse"
 import { useEngine } from "@/hooks/use-engine"
+
+const primeSSE = () => _primeSSE(api)
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -150,5 +157,160 @@ describe("useEngine — offline addAgent fallback", () => {
     const agent = result.current.agents.find(a => a.name === "TEST_AGENT")!
     expect(agent.status).toBe("booting")
     expect(agent.type).toBe("firmware")
+  })
+})
+
+
+/**
+ * Q.3-SUB-2 (#297) — task_update SSE dispatcher switches on ``action``.
+ *
+ * Before Q.3-SUB-2 the dispatcher only patched status on known task_id.
+ * With create+delete emits now wired (tasks.py POST/DELETE), the
+ * dispatcher must route on ``action``:
+ *   - ``deleted``  → filter out of tasks list
+ *   - ``created``  → refetch via api.listTasks (SSE payload lacks full row)
+ *   - (missing / updated) → patch status + assignedAgentId in place
+ */
+describe("useEngine — task_update dispatcher action switch", () => {
+  /**
+   * The SSE subscribe is only wired after ``Promise.all([listAgents,
+   * listTasks])`` resolves in the hook's mount-time init. The top-level
+   * mock rejects both so the default suite goes offline; these tests
+   * flip them back to resolved stubs via mockImplementation so the hook
+   * reaches connectSSE() and primeSSE() can capture the listener.
+   */
+  function goOnline(tasks: unknown[] = []): ReturnType<typeof vi.fn> {
+    ;(api.listAgents as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+    const listTasks = api.listTasks as ReturnType<typeof vi.fn>
+    listTasks.mockImplementation(() => Promise.resolve(tasks))
+    return listTasks
+  }
+
+  it("removes the task on action='deleted'", async () => {
+    goOnline([])
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      result.current.setTasks([
+        { id: "t1", title: "Keep me", status: "backlog", priority: "low",
+          createdAt: "2026-04-24T00:00:00" } as never,
+        { id: "t2", title: "Drop me", status: "backlog", priority: "low",
+          createdAt: "2026-04-24T00:00:00" } as never,
+      ])
+    })
+
+    act(() => {
+      sse.emit({
+        event: "task_update",
+        data: {
+          task_id: "t2",
+          status: "deleted",
+          assigned_agent_id: null,
+          action: "deleted",
+          timestamp: "2026-04-24T00:00:01",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(result.current.tasks.map(t => t.id)).toEqual(["t1"])
+    })
+  })
+
+  it("refetches the full task list on action='created'", async () => {
+    const listTasks = goOnline([])
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    // Drop the mount-time listTasks call so the assertion targets only
+    // the dispatcher-driven refetch.
+    listTasks.mockClear()
+    // The dispatcher refetch must return the new row.
+    listTasks.mockImplementation(() =>
+      Promise.resolve([
+        {
+          id: "t-new", title: "Created on another device",
+          description: null, priority: "medium", status: "backlog",
+          assigned_agent_id: null, created_at: "2026-04-24T00:00:02",
+          completed_at: null, ai_analysis: null,
+          suggested_agent_type: null, external_issue_id: null,
+          issue_url: null, acceptance_criteria: null, labels: [],
+        },
+      ]),
+    )
+
+    act(() => {
+      sse.emit({
+        event: "task_update",
+        data: {
+          task_id: "t-new",
+          status: "backlog",
+          assigned_agent_id: null,
+          action: "created",
+          timestamp: "2026-04-24T00:00:02",
+        },
+      })
+    })
+
+    await waitFor(() => expect(listTasks).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      expect(result.current.tasks.find(t => t.id === "t-new")).toBeTruthy()
+    })
+  })
+
+  it("patches status + assignedAgentId on action='updated' (and on missing action)", async () => {
+    goOnline([])
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      result.current.setTasks([
+        { id: "t1", title: "Work", status: "backlog", priority: "low",
+          createdAt: "2026-04-24T00:00:00" } as never,
+      ])
+    })
+
+    // Missing action = legacy update path.
+    act(() => {
+      sse.emit({
+        event: "task_update",
+        data: {
+          task_id: "t1",
+          status: "in_progress",
+          assigned_agent_id: "agent-1",
+          timestamp: "2026-04-24T00:00:03",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const t = result.current.tasks.find(x => x.id === "t1")
+      expect(t?.status).toBe("in_progress")
+      expect(t?.assignedAgentId).toBe("agent-1")
+    })
+
+    // Explicit action='updated' — same patch semantics.
+    act(() => {
+      sse.emit({
+        event: "task_update",
+        data: {
+          task_id: "t1",
+          status: "in_review",
+          assigned_agent_id: "agent-1",
+          action: "updated",
+          timestamp: "2026-04-24T00:00:04",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const t = result.current.tasks.find(x => x.id === "t1")
+      expect(t?.status).toBe("in_review")
+    })
   })
 })

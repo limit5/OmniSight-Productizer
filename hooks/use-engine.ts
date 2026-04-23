@@ -199,7 +199,18 @@ export function useEngine() {
               if (d.thought_chain) logMsg += `: ${(d.thought_chain as string).slice(0, 80)}`
               logLevel = status === "error" ? "error" : status === "warning" ? "warn" : "info"
             } else if (event.event === "task_update") {
-              logMsg = `[TASK] ${d.task_id} → ${(d.status as string)?.toUpperCase()}`
+              // Q.3-SUB-2 (#297): ``action`` discriminates
+              // created / updated / deleted so other devices can patch
+              // their list without polling. Pre-Q.3-SUB-2 only updates
+              // emitted, so a missing ``action`` means "updated".
+              const action = d.action as string | undefined
+              if (action === "deleted") {
+                logMsg = `[TASK] ${d.task_id} → DELETED`
+              } else if (action === "created") {
+                logMsg = `[TASK] ${d.task_id} → CREATED (${(d.status as string)?.toUpperCase()})`
+              } else {
+                logMsg = `[TASK] ${d.task_id} → ${(d.status as string)?.toUpperCase()}`
+              }
               if (d.assigned_agent_id) logMsg += ` (agent: ${d.assigned_agent_id})`
             } else if (event.event === "tool_progress") {
               const phase = d.phase as string
@@ -466,12 +477,31 @@ export function useEngine() {
               }
             }))
           } else if (event.event === "task_update") {
+            // Q.3-SUB-2 (#297): created → append, updated → patch,
+            // deleted → remove. The SSE payload for "created" carries
+            // only task_id / status / assigned_agent_id, not the full
+            // task row, so we refetch the list rather than synthesise
+            // a partial entry that would miss title / description /
+            // labels / acceptance_criteria. listTasks() failure is
+            // non-fatal — the next periodic refresh catches up.
             const d = event.data
-            setTasks(prev => prev.map(t =>
-              t.id === d.task_id
-                ? { ...t, status: d.status as Task["status"], assignedAgentId: d.assigned_agent_id ?? t.assignedAgentId }
-                : t
-            ))
+            const action = (d as Record<string, unknown>).action as string | undefined
+            if (action === "deleted") {
+              setTasks(prev => prev.filter(t => t.id !== d.task_id))
+            } else if (action === "created") {
+              api.listTasks()
+                .then(list => {
+                  if (cancelled) return
+                  setTasks(list.map(mapTask))
+                })
+                .catch(() => { /* best-effort — next poll catches up */ })
+            } else {
+              setTasks(prev => prev.map(t =>
+                t.id === d.task_id
+                  ? { ...t, status: d.status as Task["status"], assignedAgentId: d.assigned_agent_id ?? t.assignedAgentId }
+                  : t
+              ))
+            }
           } else if (event.event === "tool_progress") {
             const d = event.data
             const label = d.phase === "start" ? `⟳ ${d.tool_name}...` : d.phase === "done" ? `✓ ${d.tool_name}` : `✗ ${d.tool_name}`
