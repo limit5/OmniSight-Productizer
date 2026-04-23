@@ -584,6 +584,137 @@ async def list_sessions(request: Request,
     return {"items": items, "count": len(items)}
 
 
+# Q.5 #299 — active-device presence indicator.
+#
+# The heartbeat producer lives in ``backend/routers/events.py::event_stream``
+# (writes via ``session_presence.record_heartbeat`` on SSE connect + every
+# 15 s heartbeat tick). This endpoint is the consumer — it answers the
+# dashboard badge's "how many of my devices are online right now?" with
+# per-device metadata for the hover mini-list.
+#
+# Window: 60 s (Q.5 spec). ``status`` classifies within that window as
+# ``active`` (< ``_PRESENCE_IDLE_THRESHOLD_S``) or ``idle`` (older, but
+# still inside the window — the SSE stream is alive, the user is AFK).
+# Anything older than the 60 s window is considered offline and excluded.
+#
+# SOP Step 1 module-global audit: reads the ``session_presence`` SharedKV
+# singleton (Redis-backed across workers, in-memory per-worker in dev —
+# rubric #2/#3 mixed, documented in shared_state.py) and PG ``sessions``
+# table via the pool. No new module-global state introduced.
+_PRESENCE_WINDOW_S = 60.0
+_PRESENCE_IDLE_THRESHOLD_S = 30.0
+
+
+def _label_ua(user_agent: str) -> str:
+    """Mirror of ``components/omnisight/session-manager-panel.tsx::parseUA``.
+
+    Same lookup order on both sides of the wire so the presence badge's
+    device label stays visually identical to the session manager panel.
+    """
+    ua = user_agent or ""
+    if not ua:
+        return "Unknown device"
+    if "Firefox" in ua:
+        browser = "Firefox"
+    elif "Edg" in ua:
+        browser = "Edge"
+    elif "Chrome" in ua:
+        browser = "Chrome"
+    elif "Safari" in ua:
+        browser = "Safari"
+    else:
+        browser = "Browser"
+    if "Windows" in ua:
+        os_name = "Windows"
+    elif "Mac OS" in ua:
+        os_name = "macOS"
+    elif "Android" in ua:
+        os_name = "Android"
+    elif "iPhone" in ua or "iPad" in ua:
+        os_name = "iOS"
+    elif "Linux" in ua:
+        os_name = "Linux"
+    else:
+        os_name = "OS"
+    return f"{browser} on {os_name}"
+
+
+@router.get("/auth/sessions/presence")
+async def sessions_presence(
+    request: Request,
+    user: auth.User = Depends(auth.current_user),
+) -> dict:
+    """Return the count + brief metadata for the caller's active devices.
+
+    Active = heartbeat recorded by the SSE stream within the last
+    ``_PRESENCE_WINDOW_S`` seconds. Devices inside the window but quieter
+    than ``_PRESENCE_IDLE_THRESHOLD_S`` are flagged ``status="idle"``;
+    fresher ones ``status="active"``.
+    """
+    from backend.shared_state import session_presence
+
+    now = time.time()
+    active = session_presence.active_sessions(
+        user.id, window_seconds=_PRESENCE_WINDOW_S, now=now,
+    )
+
+    # Resolve UA + token_hint by crosswalking the PG sessions table — the
+    # presence hash only keys (user_id, session_id_hash). Sessions
+    # revoked mid-window may no longer resolve; keep them in the reply
+    # with minimal metadata so the count matches what the SSE stream
+    # reported, but mark the device name as unknown.
+    sessions = await auth.list_sessions(user.id)
+    by_session: dict[str, dict] = {
+        auth.session_id_from_token(s["token"]): s for s in sessions
+    }
+
+    current_token = request.cookies.get(auth.SESSION_COOKIE) or ""
+    current_sid = (
+        auth.session_id_from_token(current_token) if current_token else ""
+    )
+
+    devices: list[dict] = []
+    for session_id, ts in active:
+        idle = max(0.0, now - ts)
+        status = (
+            "active" if idle < _PRESENCE_IDLE_THRESHOLD_S else "idle"
+        )
+        meta = by_session.get(session_id)
+        if meta:
+            ua = meta.get("user_agent") or ""
+            token_hint = meta.get("token_hint") or ""
+        else:
+            ua = ""
+            token_hint = ""
+        devices.append({
+            "session_id": session_id,
+            "token_hint": token_hint,
+            "device_name": _label_ua(ua),
+            "ua_hash": auth.compute_ua_hash(ua),
+            "last_heartbeat_at": ts,
+            "idle_seconds": round(idle, 3),
+            "status": status,
+            "is_current": bool(current_sid) and session_id == current_sid,
+        })
+
+    # Opportunistic GC — safe inside the request path since the hash is
+    # small (one field per device). Uses the same 60 s window so nothing
+    # we just returned will be pruned.
+    try:
+        session_presence.prune_expired(
+            window_seconds=_PRESENCE_WINDOW_S, now=now,
+        )
+    except Exception:
+        logger.debug("presence: prune_expired swallowed", exc_info=True)
+
+    return {
+        "active_count": len(devices),
+        "window_seconds": _PRESENCE_WINDOW_S,
+        "now": now,
+        "devices": devices,
+    }
+
+
 @router.delete("/auth/sessions/{token_hint}")
 async def revoke_session(token_hint: str, request: Request,
                          response: Response,
