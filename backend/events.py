@@ -47,6 +47,79 @@ _PERSIST_EVENT_TYPES = frozenset({
 })
 
 
+# Q.4 #298 checkbox 2 (2026-04-24): force callers to declare SSE scope.
+#
+# Every ``emit_*`` helper now defaults ``broadcast_scope`` to ``None``.
+# When the resolved value is ``None`` the helper logs a deprecation
+# warning and falls back to the per-helper *legacy default* (whatever
+# the helper used to return before this change — ``"global"`` / ``"user"``
+# / ``"session"`` / ``"tenant"`` depending on the event type; see
+# ``docs/design/multi-device-state-sync.md`` §6.1).  The next release
+# will flip this to ``raise TypeError`` so callers must pass scope
+# explicitly (completes the "強制宣告" part of the Q.4 TODO row).
+#
+# When ``OMNISIGHT_SSE_SCOPE_STRICT=1`` is set the helper raises *today*
+# instead of warning — operators / CI can opt in to the post-next-release
+# behaviour to surface missing scopes early.
+
+_SCOPE_STRICT_ENV = "OMNISIGHT_SSE_SCOPE_STRICT"
+
+# Track which (helper, legacy_default) pairs have already emitted the
+# warning this process so we don't drown the log with duplicates when
+# a helper is called on every tick. ``logger.warning`` is cheap but
+# tests / ops prefer one "please migrate" line per call site family.
+_SCOPE_WARNED: set[tuple[str, str]] = set()
+_SCOPE_WARNED_LOCK = _threading_log.Lock()
+
+
+def _scope_strict_enabled() -> bool:
+    import os
+    return os.environ.get(_SCOPE_STRICT_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _resolve_scope(helper_name: str, scope: str | None,
+                   legacy_default: str) -> str:
+    """Resolve an ``emit_*`` helper's ``broadcast_scope`` kwarg.
+
+    Q.4 #298 checkbox 2: callers must pass ``broadcast_scope=`` explicitly.
+    During the current grace release ``scope is None`` falls back to the
+    helper's historical default and logs a warning (once per helper).
+    The next release flips to ``raise TypeError`` — ops can preview the
+    final behaviour today by setting ``OMNISIGHT_SSE_SCOPE_STRICT=1``.
+    """
+    if scope is not None:
+        return scope
+    if _scope_strict_enabled():
+        raise TypeError(
+            f"{helper_name}() requires broadcast_scope= (SSE scope policy, "
+            "Q.4 #298). See docs/design/multi-device-state-sync.md §6.1 "
+            "for the per-event scope table and §6.4 for the 4-rule rubric."
+        )
+    key = (helper_name, legacy_default)
+    should_log = False
+    with _SCOPE_WARNED_LOCK:
+        if key not in _SCOPE_WARNED:
+            _SCOPE_WARNED.add(key)
+            should_log = True
+    if should_log:
+        logger.warning(
+            "%s() called without explicit broadcast_scope; falling back to "
+            "legacy default %r. This will raise TypeError in the next "
+            "release — pass broadcast_scope= explicitly (Q.4 #298). See "
+            "docs/design/multi-device-state-sync.md §6 for the scope table.",
+            helper_name, legacy_default,
+        )
+    return legacy_default
+
+
+def _reset_scope_warned_for_tests() -> None:
+    """Test helper — clear the one-shot warning cache between cases."""
+    with _SCOPE_WARNED_LOCK:
+        _SCOPE_WARNED.clear()
+
+
 class EventBus:
     """Pub/sub for SSE events with optional persistence.
 
@@ -208,8 +281,9 @@ def _auto_tenant(tenant_id: str | None) -> str | None:
 
 def emit_agent_update(agent_id: str, status: str, thought_chain: str = "",
                       session_id: str | None = None,
-                      broadcast_scope: str = "global",
+                      broadcast_scope: str | None = None,
                       tenant_id: str | None = None, **extra: Any) -> None:
+    broadcast_scope = _resolve_scope("emit_agent_update", broadcast_scope, "global")
     bus.publish("agent_update", {
         "agent_id": agent_id,
         "status": status,
@@ -234,8 +308,9 @@ def emit_agent_update(agent_id: str, status: str, thought_chain: str = "",
 
 def emit_task_update(task_id: str, status: str, assigned_agent_id: str | None = None,
                      session_id: str | None = None,
-                     broadcast_scope: str = "global",
+                     broadcast_scope: str | None = None,
                      tenant_id: str | None = None, **extra: Any) -> None:
+    broadcast_scope = _resolve_scope("emit_task_update", broadcast_scope, "global")
     bus.publish("task_update", {
         "task_id": task_id,
         "status": status,
@@ -248,9 +323,10 @@ def emit_task_update(task_id: str, status: str, assigned_agent_id: str | None = 
 
 def emit_tool_progress(tool_name: str, phase: str, output: str = "",
                        session_id: str | None = None,
-                       broadcast_scope: str = "global",
+                       broadcast_scope: str | None = None,
                        tenant_id: str | None = None, **extra: Any) -> None:
     """phase: 'start' | 'done' | 'error'"""
+    broadcast_scope = _resolve_scope("emit_tool_progress", broadcast_scope, "global")
     bus.publish("tool_progress", {
         "tool_name": tool_name,
         "phase": phase,
@@ -269,8 +345,9 @@ def emit_tool_progress(tool_name: str, phase: str, output: str = "",
 
 def emit_pipeline_phase(phase: str, detail: str = "",
                         session_id: str | None = None,
-                        broadcast_scope: str = "global",
+                        broadcast_scope: str | None = None,
                         tenant_id: str | None = None, **extra: Any) -> None:
+    broadcast_scope = _resolve_scope("emit_pipeline_phase", broadcast_scope, "global")
     bus.publish("pipeline", {
         "phase": phase,
         "detail": detail,
@@ -283,9 +360,10 @@ def emit_pipeline_phase(phase: str, detail: str = "",
 
 def emit_workspace(agent_id: str, action: str, detail: str = "",
                    session_id: str | None = None,
-                   broadcast_scope: str = "global",
+                   broadcast_scope: str | None = None,
                    tenant_id: str | None = None, **extra: Any) -> None:
     """Workspace lifecycle events."""
+    broadcast_scope = _resolve_scope("emit_workspace", broadcast_scope, "global")
     bus.publish("workspace", {
         "agent_id": agent_id,
         "action": action,
@@ -298,9 +376,10 @@ def emit_workspace(agent_id: str, action: str, detail: str = "",
 
 def emit_container(agent_id: str, action: str, detail: str = "",
                    session_id: str | None = None,
-                   broadcast_scope: str = "global",
+                   broadcast_scope: str | None = None,
                    tenant_id: str | None = None, **extra: Any) -> None:
     """Docker container events."""
+    broadcast_scope = _resolve_scope("emit_container", broadcast_scope, "global")
     bus.publish("container", {
         "agent_id": agent_id,
         "action": action,
@@ -313,9 +392,10 @@ def emit_container(agent_id: str, action: str, detail: str = "",
 
 def emit_invoke(action_type: str, detail: str = "",
                 session_id: str | None = None,
-                broadcast_scope: str = "global",
+                broadcast_scope: str | None = None,
                 tenant_id: str | None = None, **extra: Any) -> None:
     """INVOKE action events."""
+    broadcast_scope = _resolve_scope("emit_invoke", broadcast_scope, "global")
     bus.publish("invoke", {
         "action_type": action_type,
         "detail": detail,
@@ -328,12 +408,13 @@ def emit_invoke(action_type: str, detail: str = "",
 
 def emit_token_warning(level: str, message: str, usage: float = 0, budget: float = 0,
                        session_id: str | None = None,
-                       broadcast_scope: str = "user",
+                       broadcast_scope: str | None = None,
                        tenant_id: str | None = None, **extra: Any) -> None:
     """Token budget warning events.
 
     Levels: ``warn`` (80%), ``downgrade`` (90%), ``frozen`` (100%), ``reset``, ``all_providers_failed``.
     """
+    broadcast_scope = _resolve_scope("emit_token_warning", broadcast_scope, "user")
     bus.publish("token_warning", {
         "level": level,
         "message": message,
@@ -348,9 +429,10 @@ def emit_token_warning(level: str, message: str, usage: float = 0, budget: float
 
 def emit_simulation(sim_id: str, action: str, detail: str = "",
                     session_id: str | None = None,
-                    broadcast_scope: str = "global",
+                    broadcast_scope: str | None = None,
                     tenant_id: str | None = None, **extra: Any) -> None:
     """Simulation lifecycle events: start, progress, result."""
+    broadcast_scope = _resolve_scope("emit_simulation", broadcast_scope, "global")
     bus.publish("simulation", {
         "sim_id": sim_id,
         "action": action,
@@ -371,7 +453,7 @@ def emit_agent_entropy(agent_id: str, entropy_score: float,
                        round_idx: int | None = None,
                        task_id: str | None = None,
                        session_id: str | None = None,
-                       broadcast_scope: str = "global",
+                       broadcast_scope: str | None = None,
                        tenant_id: str | None = None, **extra: Any) -> None:
     """R2 (#308): per-agent semantic-entropy measurement.
 
@@ -379,6 +461,7 @@ def emit_agent_entropy(agent_id: str, entropy_score: float,
     should also trigger an ``emit_debug_finding`` of type
     ``cognitive_deadlock``; the entropy module already does that.
     """
+    broadcast_scope = _resolve_scope("emit_agent_entropy", broadcast_scope, "global")
     # Caller may forward the raw monitor payload which uses ``round`` as
     # the key — accept both names.
     if round_idx is None:
@@ -415,7 +498,7 @@ def emit_agent_scratchpad_saved(
     trigger: str = "turn_interval",
     task_id: str | None = None,
     session_id: str | None = None,
-    broadcast_scope: str = "global",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None, **extra: Any,
 ) -> None:
     """R3 (#309): scratchpad flush event.
@@ -426,6 +509,7 @@ def emit_agent_scratchpad_saved(
     ciphertext length on disk, not the plaintext size — callers should
     not try to derive plaintext memory pressure from it.
     """
+    broadcast_scope = _resolve_scope("emit_agent_scratchpad_saved", broadcast_scope, "global")
     bus.publish("agent.scratchpad.saved", {
         "agent_id": agent_id,
         "task_id": task_id,
@@ -452,7 +536,7 @@ def emit_agent_token_continuation(
     total_rounds: int = 1,
     appended_chars: int = 0,
     session_id: str | None = None,
-    broadcast_scope: str = "global",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None, **extra: Any,
 ) -> None:
     """R3 (#309): emitted when the adapter auto-continues after max_tokens.
@@ -461,6 +545,7 @@ def emit_agent_token_continuation(
     in the agent stream. ``continuation_round`` is 1-based and counts
     only the continuations (the original truncated turn is not round 0).
     """
+    broadcast_scope = _resolve_scope("emit_agent_token_continuation", broadcast_scope, "global")
     bus.publish("agent.token_continuation", {
         "agent_id": agent_id,
         "task_id": task_id,
@@ -482,13 +567,14 @@ def emit_debug_finding(
     task_id: str, agent_id: str, finding_type: str, severity: str, message: str,
     context: dict | None = None,
     session_id: str | None = None,
-    broadcast_scope: str = "global",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None, **extra: Any,
 ) -> None:
     """Debug discovery events: stuck loops, repeated errors, loop breaker triggers.
 
     Publishes SSE event AND persists to DB asynchronously.
     """
+    broadcast_scope = _resolve_scope("emit_debug_finding", broadcast_scope, "global")
     import json as _json
     import uuid as _uuid
 
@@ -563,7 +649,7 @@ def emit_workflow_updated(
     *,
     kind: str | None = None,
     session_id: str | None = None,
-    broadcast_scope: str = "user",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None,
 ) -> None:
     """Q.3-SUB-1 (#297): broadcast a workflow_run state change to the user's UIs.
@@ -577,6 +663,7 @@ def emit_workflow_updated(
     additionally self-filter on ``data._session_id`` / user identity
     before applying the patch.
     """
+    broadcast_scope = _resolve_scope("emit_workflow_updated", broadcast_scope, "user")
     bus.publish("workflow_updated", {
         "run_id": run_id,
         "status": status,
@@ -594,7 +681,7 @@ def emit_notification_read(
     user_id: str,
     *,
     session_id: str | None = None,
-    broadcast_scope: str = "user",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None,
 ) -> None:
     """Q.3-SUB-3 (#297): broadcast a notification read-state flip to the user's UIs.
@@ -610,6 +697,7 @@ def emit_notification_read(
     applying the patch. Mirrors the user-scope pattern of
     :func:`emit_new_device_login` / :func:`emit_workflow_updated`.
     """
+    broadcast_scope = _resolve_scope("emit_notification_read", broadcast_scope, "user")
     bus.publish("notification.read", {
         "id": notification_id,
         "user_id": user_id,
@@ -624,7 +712,7 @@ def emit_preferences_updated(
     user_id: str,
     *,
     session_id: str | None = None,
-    broadcast_scope: str = "user",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None,
 ) -> None:
     """Q.3-SUB-4 (#297): broadcast a user-preferences change to the user's UIs.
@@ -643,6 +731,7 @@ def emit_preferences_updated(
     before applying the patch. Mirrors the user-scope pattern of
     :func:`emit_new_device_login` / :func:`emit_notification_read`.
     """
+    broadcast_scope = _resolve_scope("emit_preferences_updated", broadcast_scope, "user")
     bus.publish("preferences.updated", {
         "pref_key": pref_key,
         "value": value,
@@ -655,7 +744,7 @@ def emit_preferences_updated(
 def emit_integration_settings_updated(
     fields_changed: list[str],
     *,
-    scope: str = "user",
+    scope: str | None = None,
     session_id: str | None = None,
     broadcast_scope: str | None = None,
     tenant_id: str | None = None,
@@ -680,6 +769,9 @@ def emit_integration_settings_updated(
     """
     if broadcast_scope is None:
         broadcast_scope = scope
+    broadcast_scope = _resolve_scope(
+        "emit_integration_settings_updated", broadcast_scope, "user",
+    )
     bus.publish("integration.settings.updated", {
         "fields_changed": list(fields_changed),
     }, session_id=session_id, broadcast_scope=broadcast_scope,
@@ -697,7 +789,7 @@ def emit_chat_message(
     timestamp: str,
     *,
     session_id: str | None = None,
-    broadcast_scope: str = "user",
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None,
     suggestion: dict | None = None,
 ) -> None:
@@ -723,6 +815,7 @@ def emit_chat_message(
     the payload so the target device renders the same affordance the
     originator sees.
     """
+    broadcast_scope = _resolve_scope("emit_chat_message", broadcast_scope, "user")
     payload: dict[str, Any] = {
         "id": message_id,
         "user_id": user_id,
@@ -745,6 +838,7 @@ def emit_new_device_login(
     user_agent: str,
     *,
     session_id: str | None = None,
+    broadcast_scope: str | None = None,
     tenant_id: str | None = None,
 ) -> None:
     """Q.2 (#296): broadcast a new-device-login alert to the user's UIs.
@@ -757,13 +851,19 @@ def emit_new_device_login(
     the "這不是我 → 踢掉" button can target ``DELETE /auth/sessions/
     {token_hint}`` without ever exposing the raw session cookie to the
     rendered UI.
+
+    Q.4 #298 checkbox 2: ``broadcast_scope`` is now an explicit kwarg
+    (default ``None`` → legacy ``"user"`` + deprecation warning). Pass
+    ``broadcast_scope="user"`` explicitly from the caller to silence
+    the warning.
     """
+    broadcast_scope = _resolve_scope("emit_new_device_login", broadcast_scope, "user")
     bus.publish("security.new_device_login", {
         "user_id": user_id,
         "token_hint": token_hint,
         "ip": ip,
         "user_agent": user_agent,
-    }, session_id=session_id, broadcast_scope="user",
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
        tenant_id=_auto_tenant(tenant_id))
     _log(
         f"[SECURITY] new device login user={user_id} ip={ip} ua={user_agent[:60]}",

@@ -595,10 +595,23 @@ class BusEventPublisher:
     Lazily imports the bus at first ``publish()`` so unit tests that
     don't need SSE can construct the bridge without paying the import
     cost / without triggering ``backend.events`` side effects.
+
+    Q.4 #298 checkbox 2: ``broadcast_scope`` defaults to ``None`` so
+    :func:`backend.events._resolve_scope` can apply the grace-period
+    warning and ``OMNISIGHT_SSE_SCOPE_STRICT`` opt-in. Explicit
+    construction with ``BusEventPublisher(broadcast_scope="session")``
+    silences the warning (the per-event scope table in
+    ``docs/design/multi-device-state-sync.md`` §6.1 rows 25/26 assigns
+    ``session`` to both ``ui_sandbox.*`` events).
     """
 
-    broadcast_scope: str = "global"
+    broadcast_scope: str | None = None
     tenant_id: str | None = None
+    #: Legacy default applied if ``broadcast_scope`` is ``None`` at
+    #: publish time. Per §6.1 rows 25/26 the policy target is
+    #: ``session``; keep ``global`` as the historical default so
+    #: pre-Q.4 callers see no behaviour change until the caller updates.
+    legacy_default_scope: str = "global"
 
     def publish(
         self,
@@ -607,12 +620,17 @@ class BusEventPublisher:
         *,
         session_id: str | None = None,
     ) -> None:
-        from backend.events import bus  # lazy import — avoid at startup
+        from backend.events import _resolve_scope, bus  # lazy
+        scope = _resolve_scope(
+            "ui_sandbox_sse.BusEventPublisher.publish",
+            self.broadcast_scope,
+            self.legacy_default_scope,
+        )
         bus.publish(
             event_type,
             dict(payload),
             session_id=session_id,
-            broadcast_scope=self.broadcast_scope,
+            broadcast_scope=scope,
             tenant_id=self.tenant_id,
         )
 
@@ -904,10 +922,17 @@ def emit_ui_sandbox_screenshot_event(
     image_url_template: str = DEFAULT_IMAGE_URL_TEMPLATE,
     capture_bytes: bytes | None = None,
     now: float | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
 ) -> dict[str, Any]:
     """One-shot: shape + publish a single ``ui_sandbox.screenshot`` event.
 
     Returns the frame that was published so the caller can log / assert.
+
+    Q.4 #298 checkbox 2: pass ``broadcast_scope="session"`` (per §6.1
+    row 25 of ``docs/design/multi-device-state-sync.md``) to silence
+    the deprecation warning. ``None`` falls back to the bus legacy
+    default ``"global"`` for one release.
     """
 
     frame = build_screenshot_event_payload(
@@ -917,7 +942,9 @@ def emit_ui_sandbox_screenshot_event(
         capture_bytes=capture_bytes,
         now=now,
     )
-    pub = publisher or BusEventPublisher()
+    pub = publisher or BusEventPublisher(
+        broadcast_scope=broadcast_scope, tenant_id=tenant_id,
+    )
     try:
         pub.publish(SSE_EVENT_SCREENSHOT, frame, session_id=frame.get("session_id"))
     except Exception as exc:
@@ -931,17 +958,25 @@ def emit_ui_sandbox_error_event(
     phase: str = ERROR_PHASE_DETECTED,
     publisher: EventPublisher | None = None,
     now: float | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
 ) -> dict[str, Any]:
     """One-shot: shape + publish a single ``ui_sandbox.error`` event.
 
     Returns the frame that was published.
+
+    Q.4 #298 checkbox 2: pass ``broadcast_scope="session"`` (per §6.1
+    row 26 of ``docs/design/multi-device-state-sync.md``) to silence
+    the deprecation warning.
     """
 
     if phase == ERROR_PHASE_CLEARED:
         frame = build_error_cleared_payload(internal_payload, now=now)
     else:
         frame = build_error_event_payload(internal_payload, phase=phase, now=now)
-    pub = publisher or BusEventPublisher()
+    pub = publisher or BusEventPublisher(
+        broadcast_scope=broadcast_scope, tenant_id=tenant_id,
+    )
     try:
         pub.publish(SSE_EVENT_ERROR, frame, session_id=frame.get("session_id"))
     except Exception as exc:

@@ -368,20 +368,46 @@ ORCHESTRATION_EVENT_TYPES: tuple[str, ...] = (
 )
 
 
-def _publish(event: str, payload: dict[str, Any]) -> None:
+def _publish(
+    event: str,
+    payload: dict[str, Any],
+    *,
+    helper_name: str,
+    broadcast_scope: str | None,
+    legacy_default: str = "tenant",
+    tenant_id: str | None = None,
+) -> None:
     """Best-effort publish via the global event bus.
 
     Failures are demoted to debug — observability emits must never break
     the hot path of the orchestrator / lock manager / merger.
+
+    Q.4 #298 checkbox 2: threads ``broadcast_scope`` through
+    :func:`backend.events._resolve_scope` so the same grace-period
+    warning + env-driven strict raise applies to every
+    orchestration.* emitter.
     """
     try:
-        from backend.events import bus
-        bus.publish(event, dict(payload))
+        from backend.events import _resolve_scope, bus
+        scope = _resolve_scope(helper_name, broadcast_scope, legacy_default)
+        bus.publish(
+            event,
+            dict(payload),
+            broadcast_scope=scope,
+            tenant_id=tenant_id,
+        )
+    except TypeError:
+        # Strict mode: re-raise so the test / ops signal surfaces.
+        raise
     except Exception as exc:  # pragma: no cover — bus shouldn't fail
         logger.debug("orchestration emit(%s) failed: %s", event, exc)
 
 
-def emit_queue_tick() -> None:
+def emit_queue_tick(
+    *,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+) -> None:
     """Take a queue depth snapshot and broadcast it.
 
     Called by the orchestrator's housekeeping loop (and by tests
@@ -392,7 +418,12 @@ def emit_queue_tick() -> None:
         "queue": _snapshot_queue(),
         "workers": _snapshot_workers(),
     }
-    _publish("orchestration.queue.tick", payload)
+    _publish(
+        "orchestration.queue.tick", payload,
+        helper_name="emit_queue_tick",
+        broadcast_scope=broadcast_scope,
+        tenant_id=tenant_id,
+    )
 
 
 def emit_lock_acquired(
@@ -402,6 +433,8 @@ def emit_lock_acquired(
     priority: int,
     wait_seconds: float,
     expires_at: float,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     _publish("orchestration.lock.acquired", {
         "task_id": task_id,
@@ -409,18 +442,24 @@ def emit_lock_acquired(
         "priority": int(priority),
         "wait_seconds": round(float(wait_seconds), 4),
         "expires_at": float(expires_at),
-    })
+    }, helper_name="emit_lock_acquired",
+       broadcast_scope=broadcast_scope,
+       tenant_id=tenant_id)
 
 
 def emit_lock_released(
     *,
     task_id: str,
     released_count: int,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     _publish("orchestration.lock.released", {
         "task_id": task_id,
         "released_count": int(released_count),
-    })
+    }, helper_name="emit_lock_released",
+       broadcast_scope=broadcast_scope,
+       tenant_id=tenant_id)
 
 
 def emit_merger_voted(
@@ -432,6 +471,8 @@ def emit_merger_voted(
     confidence: float,
     push_sha: str = "",
     review_url: str = "",
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     _publish("orchestration.merger.voted", {
         "change_id": change_id,
@@ -441,7 +482,9 @@ def emit_merger_voted(
         "confidence": round(float(confidence), 4),
         "push_sha": push_sha,
         "review_url": review_url,
-    })
+    }, helper_name="emit_merger_voted",
+       broadcast_scope=broadcast_scope,
+       tenant_id=tenant_id)
 
 
 def emit_change_awaiting_human(
@@ -454,6 +497,8 @@ def emit_change_awaiting_human(
     push_sha: str = "",
     awaiting_since: float | None = None,
     jira_ticket: str = "",
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     _publish("orchestration.change.awaiting_human_plus_two", {
         "change_id": change_id,
@@ -464,7 +509,9 @@ def emit_change_awaiting_human(
         "push_sha": push_sha,
         "awaiting_since": float(awaiting_since) if awaiting_since else time.time(),
         "jira_ticket": jira_ticket,
-    })
+    }, helper_name="emit_change_awaiting_human",
+       broadcast_scope=broadcast_scope,
+       tenant_id=tenant_id)
 
 
 __all__ = [
