@@ -787,18 +787,7 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 > **Carried-in spec from Q.3-SUB-7 (close-out 2026-04-24)** — `invoke` channel routing rule is **uniform `scope="user"` across all 24 `emit_invoke()` call sites** (9 in `invoke.py` + 5 in `webhooks.py` + 2 in `pipeline.py` + 2 in `intent_bridge.py` + 1 each in `integration.py`/`providers.py`/`orchestrator_gateway.py`/`orchestration_mode.py`/`merger_agent.py`/`merge_arbiter.py`). Audit hypothesised a session-vs-user split keyed by `action_type` ("`stream_chunk`/`agent_thinking` → session"), but **no streaming-style action_type exists on the `invoke` channel today** — chat tokens flow via `EventSourceResponse` (HTTP body), not bus. Full call-site table + per-row rationale + acceptance criteria live in `docs/design/multi-device-state-sync.md` Path 6 → "Q.3-SUB-7 close-out". Q.4 sweep should consume that table verbatim for the invoke slice.
 
-- [ ] 列出所有 `emit_*()` call site（約 30-40 個估算）做 scope 表：
-  ```
-  | Event                     | Current scope | Target scope | Rationale         |
-  | chat.message              | (unset)       | user         | 跨裝置同步對話 |
-  | invoke.stream             | session       | session      | streaming 私有 |
-  | workflow.updated          | (unset)       | user         | 跨裝置看狀態 |
-  | provider_switch           | global        | user         | 不應洩漏到他 user |
-  | security.new_device_login | n/a           | user         | 同上 |
-  | agent.thinking            | session       | session      | 本機 debug |
-  | system.log                | global        | tenant       | admin 才全看 |
-  | ...                       |               |              |                   |
-  ```
+- [x] 列出所有 `emit_*()` call site（約 30-40 個估算）做 scope 表：**Done 2026-04-24** — 完整 scope 審計落在 `docs/design/multi-device-state-sync.md` §6 "Q.4 Pre-sweep scope table (#298, 2026-04-24)"。盤點結果：`grep -nE "\bemit_\w+\(" backend/ --include='*.py'` 排除 tests / `def emit_*` / `loop.create_task` / 文件 reference 後，得到 **166 個 production call site × 24 個 emit_* helper × 26 個 distinct SSE event type**（19 via `backend/events.py` + 5 via `backend/orchestration_observability.py` + 2 via `backend/ui_sandbox_sse.py`）。TODO 原文「約 30-40 個」是 event-type 粒度的估算，aggregated-by-event 是 **26 rows**（fit）；per-call-site 粒度到 166 會被 `invoke` 家族 25 sites + `pipeline` 62 sites 膨脹到 150+，對 decision 沒額外價值，所以 §6.1 走 event-type aggregate + 指回 §Path 6 查 invoke 逐 site 表。每行 4 欄如 TODO 範本所列（Event / Current scope / Target scope / Rationale）並加 File:line + call-site 數對照、§6.2 補 16 個直接 `bus.publish()` 非 emit_* call site（Q.4 secondary sweep scope）、§6.3 寫 Q.4 sweep acceptance 5 條、§6.4 pre-draft scope-choice rubric 4 條（checkbox 3 的輸入）。結論：**11 已正確**（token_warning + Q.3 整個家族 workflow/notification.read/preferences/integration.settings/chat.message + Q.2 new_device_login + ui_sandbox × 2 — 這些只需鎖 helper default），**15 待 sweep**（pipeline×62 / invoke×25 / agent_update×16 / task_update×7 / container×6 / debug_finding×6 / tool_progress×5 / simulation×4 / workspace×3 / 5× orchestration.* / 3× agent.* diagnostics 各 1 — aggregate **141 sites** 要加 `broadcast_scope=`）。SOP Step 1 module-global audit：本 row 0 行 code 改動（純 docs + TODO.md 狀態翻一個 checkbox）、不新增也不改任何 module-global state。Pre-commit fingerprint grep (`_conn()` / `await conn.commit()` / `datetime('now')` / `VALUES (?, ...)`) 對本次改動檔（`docs/design/multi-device-state-sync.md` / `TODO.md` / `HANDOFF.md`）N/A（純 docs）。Audit 證據：`docs/design/multi-device-state-sync.md` §6.
 - [ ] 改 `emit_*` helper 強制帶 scope 參數（預設 None 時退回舊行為 + warning log，一個 release 後改預設 raise）。
 - [ ] 整理成 `docs/design/sse-event-scope-policy.md`：scope 選擇的 4 條 rubric（私有 debug → session / 使用者 UI 狀態 → user / tenant admin → tenant / 系統健康 → global）。
 - [ ] 測試：`test_event_scope_declared`（掃 source，`emit_*` 無 scope 參數 → test fail）；`test_user_scope_does_not_leak_across_users`（A user event 不推到 B user 的 SSE）。

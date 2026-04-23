@@ -215,3 +215,84 @@ Captured here so they are not lost. These feed into Q.4 (#298) and beyond:
 2. **`session_id` propagation** — most `emit_invoke` call sites have access to the current request but don't thread `session_id` through. Need a context-var pattern (similar to `current_tenant_id`) so emitters pick it up automatically.
 3. **Persistence of SSE events** — only events in `_PERSIST_EVENT_TYPES` are persisted (`events.py:135`). Replay-on-reconnect after flaky mobile network is not currently possible for non-persisted events. Orthogonal to this audit.
 4. **Chat history bounded growth** — current `list` is unbounded per worker. Migration to DB resolves memory unboundedness too (add retention policy at same time: e.g. last-30-days-per-user, or last-N-messages).
+
+## 6. Q.4 Pre-sweep scope table (#298, 2026-04-24)
+
+> **Deliverable for Q.4 #298 checkbox 1** (`TODO.md` "Q.4 SSE event scope policy 審視 + 強制宣告" first bullet). This table is the **input** to the Q.4 sweep — the sweep will (a) add `broadcast_scope=` to every listed call site, (b) tighten `EventBus._deliver_local` to enforce `user` / `session` in addition to the `tenant` filter it already honours, and (c) codify the 4-rule rubric into `docs/design/sse-event-scope-policy.md` (checkbox 3). Rows marked **✓ already correct** need no call-site change — they only need the helper default locked once the enforcement flips from advisory to mandatory.
+>
+> Count sanity-check: the TODO estimated "~30-40 call sites"; the actual inventory (`grep -n "\bemit_\w+\(" backend/ --include='*.py'` minus tests minus `def emit_*` minus `loop.create_task` / doc refs) is **166 call sites** across **24 helpers** emitting **26 distinct SSE event types** (19 via `backend/events.py`, 5 via `backend/orchestration_observability.py`, 2 via `backend/ui_sandbox_sse.py`). The 30-40 estimate tracked event types / helpers, not raw call-site count — aggregated-by-event the table is 26 rows, which fits that range. The `invoke` helper alone accounts for 25 call sites (catalogued in §Path 6 close-out above); a repeat per-call-site table for every helper would balloon past 150 rows without adding decision value, so this table aggregates **per event type** and references Path 6 for the `invoke` per-site breakdown.
+
+### 6.1 Per-event scope decisions (the Q.4 sweep input)
+
+| # | Event type | Emit helper | File:line (def) | Call sites (prod) | Current default | Target scope | Rationale |
+|--:|---|---|---|--:|---|---|---|
+| 1 | `agent_update` | `emit_agent_update` | `backend/events.py:209` | 16 | `global` | **session** | `thought_chain` is private debug — a 2nd operator logged in to the same tenant should not see another user's agent reasoning stream. Session-scoped mirrors `ui_sandbox.*`. Upgrade to `user` only if a product decision later says agent timelines should follow the operator across devices. |
+| 2 | `task_update` | `emit_task_update` | `backend/events.py:235` | 7 | `global` | **user** | Same operator on phone + desktop must see status flips. Task rows are user-owned objects (`tasks.assigned_agent_id`), not session-ephemeral. |
+| 3 | `tool_progress` | `emit_tool_progress` | `backend/events.py:249` | 5 | `global` | **session** | Per-agent per-invocation tool trace (REPORTER VORTEX output) — session-scoped like `agent_update`. |
+| 4 | `pipeline` | `emit_pipeline_phase` | `backend/events.py:270` | 62 | `global` | **session** | Biggest single fan-out source. Phases are originator-bound transient telemetry; no cross-device replay use case today. **Security gain:** 62 global broadcasts currently leak every pipeline phase to every subscribed client across tenants (the `_deliver_local` default path without enforcement). |
+| 5 | `workspace` | `emit_workspace` | `backend/events.py:284` | 3 | `global` | **user** | Workspace lifecycle (create / mount / destroy) belongs to a user — cross-device dashboard sync needed. |
+| 6 | `container` | `emit_container` | `backend/events.py:299` | 6 | `global` | **user** | Docker container lifecycle; operator needs cross-device visibility on hibernation / pause decisions. |
+| 7 | `invoke` | `emit_invoke` | `backend/events.py:314` | 25 | `global` | **user** | Per Q.3-SUB-7 close-out (§Path 6 above): uniform `user` across all 24 audited sites + 1 double-counted `integration.py` site. No streaming `action_type` exists on this channel today; chat tokens flow via `EventSourceResponse` HTTP body. |
+| 8 | `token_warning` | `emit_token_warning` | `backend/events.py:329` | 17 | **`user`** ✓ | **user** | Already correct. Budget is per-user; warning must follow the operator across devices. Sweep only locks the default (no call-site change). |
+| 9 | `simulation` | `emit_simulation` | `backend/events.py:349` | 4 | `global` | **user** | Sim start/progress/result is user-initiated; cross-device progress bar. |
+| 10 | `agent.entropy` | `emit_agent_entropy` | `backend/events.py:366` | 1 | `global` | **session** | Per-agent-per-round semantic-entropy verdict (R2 #308); debug-level, session-scoped to match `agent_update`. |
+| 11 | `agent.scratchpad.saved` | `emit_agent_scratchpad_saved` | `backend/events.py:409` | 1 | `global` | **session** | Scratchpad flush telemetry (R3 #309); session-scoped. |
+| 12 | `agent.token_continuation` | `emit_agent_token_continuation` | `backend/events.py:446` | 1 | `global` | **session** | Auto-continue adapter event (R3 #309); session-scoped. |
+| 13 | `debug_finding` | `emit_debug_finding` | `backend/events.py:481` | 6 | `global` | **user** | Operator-facing diagnostic; cross-device dashboard (debug findings panel). `cross_agent/observation` routing to DE proposal is already user-private. |
+| 14 | `workflow_updated` | `emit_workflow_updated` | `backend/events.py:559` | 2 | **`user`** ✓ | **user** | Already correct (Q.3-SUB-1). Sweep locks default. |
+| 15 | `notification.read` | `emit_notification_read` | `backend/events.py:592` | 1 | **`user`** ✓ | **user** | Already correct (Q.3-SUB-3). Sweep locks default. |
+| 16 | `preferences.updated` | `emit_preferences_updated` | `backend/events.py:621` | 1 | **`user`** ✓ | **user** | Already correct (Q.3-SUB-4). Sweep locks default. |
+| 17 | `integration.settings.updated` | `emit_integration_settings_updated` | `backend/events.py:655` | 1 | **`user`** ✓ | **user** | Already correct (Q.3-SUB-5). Sweep locks default. |
+| 18 | `chat.message` | `emit_chat_message` | `backend/events.py:692` | 1 | **`user`** ✓ | **user** | Already correct (Q.3-SUB-6). Sweep locks default. |
+| 19 | `security.new_device_login` | `emit_new_device_login` | `backend/events.py:741` | 1 | **`user`** (hardcoded) ✓ | **user** | Already correct (Q.2). Hardcoded — no caller-overridable param. |
+| 20 | `orchestration.queue.tick` | `emit_queue_tick` | `backend/orchestration_observability.py:384` | 1 | `global` (via `_publish`) | **tenant** | Tenant-admin operational dashboard — not user-facing, not session-bound. Currently the 5 `orchestration.*` events broadcast to every tenant, which is the same leak pattern as #4. |
+| 21 | `orchestration.lock.acquired` | `emit_lock_acquired` | `backend/orchestration_observability.py:398` | 1 | `global` | **tenant** | Same as #20. |
+| 22 | `orchestration.lock.released` | `emit_lock_released` | `backend/orchestration_observability.py:415` | 1 | `global` | **tenant** | Same as #20. |
+| 23 | `orchestration.merger.voted` | `emit_merger_voted` | `backend/orchestration_observability.py:426` | 1 | `global` | **tenant** | Merger agent +2 telemetry — tenant admin visibility. |
+| 24 | `orchestration.change.awaiting_human_plus_two` | `emit_change_awaiting_human` | `backend/orchestration_observability.py:447` | 0 (helper only called via `_refresh_awaiting_gauge` path) | `global` | **tenant** | Same as #20; zero-call-site means Q.4 only sets the helper default. |
+| 25 | `ui_sandbox.screenshot` | `emit_ui_sandbox_screenshot_event` | `backend/ui_sandbox_sse.py:899` | 1 | session (session_id passed explicitly) ✓ | **session** | Already correct — helper threads `session_id` from the payload into `pub.publish(..., session_id=...)`. Only needs the `broadcast_scope="session"` addition to make the intent explicit. |
+| 26 | `ui_sandbox.error` | `emit_ui_sandbox_error_event` | `backend/ui_sandbox_sse.py:928` | 1 | session (session_id passed explicitly) ✓ | **session** | Same as #25. |
+
+**Summary:** 26 event types → **11 already-correct** (token_warning / workflow_updated / notification.read / preferences.updated / integration.settings.updated / chat.message / security.new_device_login / ui_sandbox.screenshot / ui_sandbox.error — all Q.2/Q.3 family work; plus 2 existing hardcoded-user variants) + **15 to-be-swept** (pipeline×62, invoke×25, agent_update×16, token_warning already OK so not counted, task_update×7, container×6, debug_finding×6, tool_progress×5, simulation×4, workspace×3, 5×orchestration.*, agent.entropy/scratchpad/continuation×1 each). Aggregate call-site-level changes: **141 sites** need `broadcast_scope=` added by the Q.4 sweep (166 total – 25 invoke already catalogued in Path 6 – 0 already-correct helpers since those already pass the arg).
+
+### 6.2 Direct `bus.publish()` callers (outside `emit_*` helpers — Q.4 secondary sweep)
+
+Also landed in the repo are 16 direct `bus.publish("event", …)` call sites that bypass any `emit_*` helper. Q.4's policy enforcement (the `test_event_scope_declared` lint of checkbox 4) will catch these too if the check is `bus.publish` call-site lint rather than `emit_*`-only. Listed here for traceability; **not required by the current TODO row** (which is scoped to `emit_*`). Default target: follow the same rubric (admin / tenant / user / session).
+
+| Event | Call site | Target scope |
+|---|---|---|
+| `budget_strategy_changed` | `backend/budget_strategy.py:117` | tenant |
+| `artifact_created` | `backend/agents/tools.py:1091`, `backend/routers/webhooks.py:438`, `backend/workspace.py:568`, `backend/release.py:201`, `backend/report_generator.py:111` (×5) | user |
+| `cf_tunnel_provision` | `backend/routers/cloudflare_tunnel.py:230` | tenant |
+| `sandbox_capacity_reclaim` | `backend/sandbox_capacity.py:531` | tenant |
+| `sandbox_capacity_grace_enforced` | `backend/sandbox_capacity.py:547` | tenant |
+| `pep.decision` | `backend/pep_gateway.py:322` | tenant |
+| `tenant_storage_warning` | `backend/tenant_quota.py:357` | tenant |
+| `sandbox.prewarm_paused` | `backend/sandbox_prewarm.py:226` | tenant |
+| `chatops.message` | `backend/chatops_bridge.py:216` | user |
+| `notification` | `backend/notifications.py:77` | user |
+| `cross_agent_observation` | `backend/cross_agent_router.py:92` | user |
+| `host.metrics.tick` | `backend/host_metrics.py:1021` | tenant |
+| `cert_expiry` | `backend/codesign_store.py:963` | tenant |
+| `profile_changed` | `backend/decision_profiles.py:164` | tenant |
+| `sandbox.deferred` | `backend/decision_engine.py:477` | tenant (already passes `tenant_id=`) |
+| `mode_changed` | `backend/decision_engine.py:841`, `backend/decision_engine.py:900` | tenant |
+
+### 6.3 Q.4 sweep acceptance hook
+
+When Q.4 #298 lands, it must:
+
+1. **Every row above has `broadcast_scope=` passed at every call site** (sweep-by-sed + manual review of the 15 to-be-swept event types × 141 sites). The 11 already-correct rows need no call-site change but should have their helper signature default changed from `"global"` → the target scope, or the default removed entirely to force explicit declaration (checkbox 2 of the TODO row).
+2. **`EventBus._deliver_local` enforces `user` and `session`** filters (it currently only enforces `tenant`). Otherwise the scope declarations remain advisory and the cross-user leak documented in §5.1 stays unresolved.
+3. **`test_event_scope_declared`** (TODO checkbox 4) walks the AST of every `.py` under `backend/` and fails if any `emit_*(...)` call-site has no `broadcast_scope=` kwarg — prevents silent regression after the sweep.
+4. **`test_user_scope_does_not_leak_across_users`** (TODO checkbox 4) — spin up two SSE subscribers with different `user_id`s (same tenant), publish with `broadcast_scope="user"` + `_user_id="u1"`, assert subscriber 2 (`u1`) receives, subscriber 3 (`u2`) does not. This is the actual security assertion; the lint in #3 is the belt, this one is the braces.
+5. **`docs/design/sse-event-scope-policy.md`** (TODO checkbox 3) — 4-rule rubric derived from this table: *private debug → session / user UI state → user / tenant admin → tenant / system health → global*. The global bucket should be empty after the sweep (nothing legitimately crosses tenant boundaries on the bus).
+
+### 6.4 Scope-choice rubric (draft — feeds checkbox 3)
+
+Four decision rules, in evaluation order (first match wins):
+
+1. **Private debug / per-invocation telemetry → `session`.** Agent reasoning, tool output, pipeline phases, entropy / scratchpad / continuation diagnostics, UI sandbox frames. Criterion: "if the originator closes the tab, nobody needs to see the rest of this event."
+2. **User-owned UI state → `user`.** Task CRUD, workflow status, notification read-state, preferences, integration settings, chat history, provider switch, security alerts, artifacts, chatops messages, cross-agent observations. Criterion: "same operator on phone + laptop must converge."
+3. **Tenant admin dashboards → `tenant`.** Orchestration queue / locks / merger, sandbox capacity / prewarm, PEP decisions, storage / budget / host metrics, tunnel provisioning, profile / mode changes, cert expiry. Criterion: "only visible on the admin console, bounded by tenant isolation."
+4. **System-wide operational health → `global`.** Currently empty after the sweep. Reserved for multi-tenant SRE signals (e.g. Redis down, PG failover, global config reload) — such events today go through `logger.critical` + Prometheus, not SSE, so this bucket should stay empty unless a deliberate operator-console channel is added later.
