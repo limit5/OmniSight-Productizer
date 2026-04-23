@@ -186,6 +186,12 @@ class Session:
     metadata: str = "{}"
     mfa_verified: bool = False
     rotated_from: str | None = None
+    # Q.2 (2026-04-24): only meaningful on the Session instance returned
+    # by ``create_session`` / ``rotate_session`` — i.e. the exact moment
+    # of issuance. Not persisted in the ``sessions`` table (it's a
+    # boundary decision, not a row property) and always defaults to
+    # False for sessions reconstructed from the DB by ``get_session``.
+    is_new_device: bool = False
 
 
 SESSION_TTL_S = 8 * 60 * 60          # 8 hours
@@ -199,6 +205,61 @@ def compute_ua_hash(user_agent: str) -> str:
     if not user_agent:
         return ""
     return hashlib.sha256(user_agent.encode("utf-8", errors="replace")).hexdigest()[:32]
+
+
+# Q.2 device-fingerprint lookback (2026-04-24): a (user_id, ua_hash,
+# ip_subnet) tuple that has not been observed within this window is
+# treated as a "new device" by ``_create_session_impl`` — the returned
+# Session carries ``is_new_device=True`` so the Q.2 downstream alert
+# pipeline (email + SSE ``security.new_device_login``) can fire.
+# 30 days chosen to align with the Q.2 spec ("is the tuple seen in the
+# past 30 days"); kept as a module constant so tests can monkeypatch.
+FINGERPRINT_LOOKBACK_S = 30 * 24 * 3600.0
+
+
+def compute_ip_subnet(ip: str) -> str:
+    """Collapse *ip* to the coarser network it belongs to.
+
+    IPv4 → the ``/24`` network prefix as a dotted string (``"1.2.3"``).
+    IPv6 → the ``/64`` prefix as a colon-separated hex string.
+    Empty / malformed input → ``""``.
+
+    The goal (per Q.2 spec) is to tolerate DHCP lease churn on the same
+    physical network: a laptop whose ISP rotates its IP within the same
+    /24 should NOT re-trigger the new-device alert. IPv6 uses /64
+    because that's the canonical subnet unit under SLAAC — the
+    interface-identifier low 64 bits change freely even on one NIC.
+
+    Host-port inputs (``"1.2.3.4:5678"``) are tolerated — we strip the
+    port before parsing. Bracketed IPv6 (``"[::1]:8080"``) is tolerated
+    the same way. Anything we can't parse as an IP (hostname,
+    connection-level empty) returns ``""``; all such sessions collapse
+    into the same empty-subnet bucket, which is the conservative
+    choice — we'd rather under-alert than spam on unparseable IPs.
+    """
+    if not ip:
+        return ""
+    import ipaddress
+    s = ip.strip()
+    # Strip port if present. IPv6 form uses brackets; IPv4 uses a
+    # single colon.
+    if s.startswith("["):
+        end = s.find("]")
+        if end > 0:
+            s = s[1:end]
+    elif s.count(":") == 1:
+        s = s.split(":", 1)[0]
+    try:
+        addr = ipaddress.ip_address(s)
+    except ValueError:
+        return ""
+    if isinstance(addr, ipaddress.IPv4Address):
+        # "1.2.3.4" → "1.2.3" (first 3 octets = /24 prefix).
+        return ".".join(str(addr).split(".")[:3])
+    # IPv6: take the first 4 16-bit groups in exploded form (/64).
+    exploded = addr.exploded  # e.g. "2001:0db8:85a3:0000:...:0001"
+    groups = exploded.split(":")[:4]
+    return ":".join(groups)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -689,9 +750,103 @@ async def _create_session_impl(
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         token, user_id, csrf, now, expires, now, ip, ua, ua_h,
     )
+    is_new_device = await _record_session_fingerprint(
+        conn, user_id, ua_h, compute_ip_subnet(ip), now,
+    )
     return Session(token=token, user_id=user_id, csrf_token=csrf,
                    created_at=now, expires_at=expires, ip=ip,
-                   user_agent=ua, last_seen_at=now)
+                   user_agent=ua, last_seen_at=now,
+                   is_new_device=is_new_device)
+
+
+async def _record_session_fingerprint(
+    conn, user_id: str, ua_hash: str, ip_subnet: str, now: float,
+) -> bool:
+    """Check whether ``(user_id, ua_hash, ip_subnet)`` was observed in
+    the past ``FINGERPRINT_LOOKBACK_S`` and upsert the history row.
+
+    Returns True iff the tuple is "new" — i.e. the history table has
+    no row for it, or the existing row's ``last_seen_at`` is stale
+    (older than the lookback window). A stale row is treated as new
+    so that a device that last logged in 31 days ago re-triggers the
+    Q.2 alert flow — matches the spec's 30-day semantics.
+
+    The upsert runs in the same transaction as the parent
+    ``INSERT INTO sessions`` (we ride the caller's ``conn``), so from
+    the fingerprint table's perspective the session row and its
+    history entry land atomically — there's no window where a session
+    exists without its fingerprint counterpart.
+
+    Why a dedicated history table rather than scanning ``sessions`` +
+    ``session_revocations`` (the Q.2 spec literally reads "查
+    sessions + revoked_sessions 歷史"):
+
+    * ``sessions`` rows are garbage-collected by
+      ``cleanup_expired_sessions`` on cold boot and by
+      ``_get_session_impl`` on expired-token probes. Anything older
+      than the session TTL + cold-boot is gone, so a 30-day history
+      scan on ``sessions`` would under-report.
+    * ``session_revocations`` is keyed by token and carries no ip /
+      ua_hash columns (it drives the Q.1 401-banner lookup and has
+      no reason to). Adding them to piggy-back on Q.1 would pollute
+      a table with a different lifecycle.
+
+    The ``session_fingerprints`` table (alembic 0020) is the canonical
+    store going forward: append-on-first-sight, upsert-on-every-hit.
+    """
+    row = await conn.fetchrow(
+        "SELECT last_seen_at FROM session_fingerprints "
+        "WHERE user_id = $1 AND ua_hash = $2 AND ip_subnet = $3",
+        user_id, ua_hash, ip_subnet,
+    )
+    last_seen = float(row["last_seen_at"]) if row else 0.0
+    is_new_device = (row is None) or (now - last_seen > FINGERPRINT_LOOKBACK_S)
+    await conn.execute(
+        "INSERT INTO session_fingerprints "
+        "(user_id, ua_hash, ip_subnet, first_seen_at, "
+        "last_seen_at, session_count) "
+        "VALUES ($1, $2, $3, $4, $4, 1) "
+        "ON CONFLICT (user_id, ua_hash, ip_subnet) DO UPDATE SET "
+        "last_seen_at = EXCLUDED.last_seen_at, "
+        "session_count = session_fingerprints.session_count + 1",
+        user_id, ua_hash, ip_subnet, now,
+    )
+    return is_new_device
+
+
+async def fingerprint_seen_before(
+    user_id: str, ua_hash: str, ip_subnet: str,
+    lookback_s: float | None = None, conn=None,
+) -> bool:
+    """Public probe: has ``(user_id, ua_hash, ip_subnet)`` been seen
+    in the past ``lookback_s`` (default ``FINGERPRINT_LOOKBACK_S``)?
+
+    Read-only helper split out for downstream Q.2 code (notification
+    dispatcher, SSE emitter, tests) that needs the check without
+    going through a full ``create_session``. Returns True if a
+    matching row exists with ``last_seen_at`` inside the window;
+    False otherwise (no row, or row too old).
+    """
+    window = lookback_s if lookback_s is not None else FINGERPRINT_LOOKBACK_S
+    import time as _time
+    cutoff = _time.time() - window
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned_conn:
+            row = await owned_conn.fetchrow(
+                "SELECT 1 FROM session_fingerprints "
+                "WHERE user_id = $1 AND ua_hash = $2 AND ip_subnet = $3 "
+                "AND last_seen_at >= $4",
+                user_id, ua_hash, ip_subnet, cutoff,
+            )
+    else:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM session_fingerprints "
+            "WHERE user_id = $1 AND ua_hash = $2 AND ip_subnet = $3 "
+            "AND last_seen_at >= $4",
+            user_id, ua_hash, ip_subnet, cutoff,
+        )
+    return row is not None
 
 
 async def create_session(
