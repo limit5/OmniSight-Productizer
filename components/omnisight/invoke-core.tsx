@@ -3,20 +3,47 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { Send, Zap } from "lucide-react"
 import { matchCommands, CATEGORY_COLORS, type SlashCommand } from "@/lib/slash-commands"
+import { useDraftPersistence } from "@/hooks/use-draft-persistence"
 
 interface InvokeCoreProps {
   onInvoke?: () => void
   onCommand?: (command: string) => void
   onCommandChange?: (command: string) => void
+  /**
+   * Q.6 (#300, checkbox 1) — when true, every keystroke is
+   * persisted to ``PUT /user/drafts/{draftSlotKey}`` after a 500 ms
+   * debounce so an accidental refresh / device switch does not lose
+   * the half-typed command. Defaults to true; set false in tests
+   * that don't want to mock the network.
+   */
+  draftPersistenceEnabled?: boolean
+  /** Override the slot key — defaults to ``invoke:main`` per Q.6 spec. */
+  draftSlotKey?: string
 }
 
-export function InvokeCore({ onInvoke, onCommand, onCommandChange }: InvokeCoreProps) {
+export function InvokeCore({
+  onInvoke,
+  onCommand,
+  onCommandChange,
+  draftPersistenceEnabled = true,
+  draftSlotKey = "invoke:main",
+}: InvokeCoreProps) {
   const [command, setCommand] = useState("")
   const [isInvoking, setIsInvoking] = useState(false)
   const [showBeams, setShowBeams] = useState(false)
   const [suggestions, setSuggestions] = useState<SlashCommand[]>([])
   const [selectedIdx, setSelectedIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // Q.6 (#300, checkbox 1) — debounced server-side draft persistence.
+  // Watches ``command`` so an accidental tab close does not lose
+  // half-typed slash commands; the restore-on-new-device flow lands
+  // in checkbox 2.
+  useDraftPersistence({
+    slotKey: draftSlotKey,
+    value: command,
+    enabled: draftPersistenceEnabled,
+  })
 
   const handleInvoke = () => {
     setIsInvoking(true)

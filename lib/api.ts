@@ -1991,6 +1991,38 @@ export async function getSessionsPresence(): Promise<PresenceResponse> {
   return request<PresenceResponse>("/auth/sessions/presence")
 }
 
+// ─── Q.6 (#300) Per-user draft composer slots ───────────────
+
+export interface DraftResponse {
+  slot_key: string
+  content: string
+  updated_at: number
+}
+
+/**
+ * Q.6 (#300, checkbox 1) — write a draft slot. Called by the INVOKE
+ * command bar (`invoke:main`) and the workspace chat composer
+ * (`chat:main`) on every change after a 500 ms debounce.
+ *
+ * The call is `skipGlobalErrorHandler: true` because the operator is
+ * actively typing — we must not pop a toast on a transient 5xx /
+ * offline; the next debounce tick will retry naturally and the GET
+ * /user/drafts/{slot_key} restore on the next page load will fix any
+ * lost ticks.
+ *
+ * Returns the server-committed `updated_at` so the caller can echo
+ * it into local storage for the Q.6 conflict-detection check on
+ * restore (checkbox 4).
+ */
+export async function putUserDraft(
+  slotKey: string, content: string,
+): Promise<DraftResponse> {
+  return request<DraftResponse>(`/user/drafts/${encodeURIComponent(slotKey)}`, {
+    method: "PUT",
+    body: JSON.stringify({ content }),
+  }, { skipGlobalErrorHandler: true })
+}
+
 // ─── Self-service password change ───────────────────────────
 
 export interface ChangePasswordResponse {

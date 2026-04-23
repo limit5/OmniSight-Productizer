@@ -59,6 +59,7 @@ import {
   type WorkspaceType,
 } from "@/app/workspace/[type]/types"
 import { useOptionalWorkspaceType } from "@/components/omnisight/workspace-context"
+import { useDraftPersistence } from "@/hooks/use-draft-persistence"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────
 
@@ -136,6 +137,16 @@ export interface WorkspaceChatProps {
   nowIso?: () => string
   /** Injected for test assertions around drag-and-drop. */
   readAttachmentsFromFiles?: (files: File[]) => WorkspaceChatAttachment[]
+  /**
+   * Q.6 (#300, checkbox 1) — when true, every keystroke in the
+   * composer is persisted to ``PUT /user/drafts/{draftSlotKey}``
+   * after a 500 ms debounce so an accidental refresh / device
+   * switch does not lose the half-typed prompt. Defaults to true;
+   * set false in tests that don't want to mock the network.
+   */
+  draftPersistenceEnabled?: boolean
+  /** Override the slot key — defaults to ``chat:main`` per Q.6 spec. */
+  draftSlotKey?: string
   className?: string
 }
 
@@ -230,6 +241,8 @@ export function WorkspaceChat({
   idFactory = defaultChatIdFactory,
   nowIso = defaultNowIso,
   readAttachmentsFromFiles,
+  draftPersistenceEnabled = true,
+  draftSlotKey = "chat:main",
   className,
 }: WorkspaceChatProps) {
   const resolvedType = useResolvedWorkspaceType(workspaceType)
@@ -243,6 +256,15 @@ export function WorkspaceChat({
   )
 
   const [draftText, setDraftText] = React.useState<string>("")
+  // Q.6 (#300, checkbox 1) — debounced server-side draft persistence.
+  // Watches ``draftText`` so an accidental tab close does not lose
+  // the half-typed prompt; the restore-on-new-device flow lands in
+  // checkbox 2.
+  useDraftPersistence({
+    slotKey: draftSlotKey,
+    value: draftText,
+    enabled: draftPersistenceEnabled,
+  })
   const [pendingAttachments, setPendingAttachments] = React.useState<WorkspaceChatAttachment[]>(
     [],
   )

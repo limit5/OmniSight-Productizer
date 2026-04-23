@@ -167,6 +167,11 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # logically owned by ``users.id`` — keep near the user-scoped
     # tables for deterministic replay ordering.
     "chat_messages",
+    # Q.6 (#300, alembic 0022): per-user composer drafts (INVOKE bar
+    # + workspace chat). 24 h GC sweep; PK is (user_id, slot_key).
+    # No FK by design (matches ``chat_messages`` precedent — see
+    # migration 0022's docstring for the rationale).
+    "user_drafts",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

@@ -882,6 +882,24 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp
     ON chat_messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tenant
     ON chat_messages(tenant_id);
+
+-- Q.6 #300 (alembic 0022): per-user draft slots. Backs the 500 ms
+-- debounce write from the INVOKE command bar and the workspace chat
+-- composer so an accidental refresh / device switch does not lose
+-- in-flight typing. PK is (user_id, slot_key); PUT is upsert. The
+-- 24 h GC sweep (Q.6 checkbox 3) prunes by ``updated_at``.
+CREATE TABLE IF NOT EXISTS user_drafts (
+    user_id     TEXT NOT NULL,
+    slot_key    TEXT NOT NULL,
+    content     TEXT NOT NULL DEFAULT '',
+    updated_at  REAL NOT NULL,
+    tenant_id   TEXT NOT NULL DEFAULT 't-default',
+    PRIMARY KEY (user_id, slot_key)
+);
+CREATE INDEX IF NOT EXISTS idx_user_drafts_updated_at
+    ON user_drafts(updated_at);
+CREATE INDEX IF NOT EXISTS idx_user_drafts_tenant
+    ON user_drafts(tenant_id);
 """
 
 
@@ -2059,6 +2077,121 @@ async def prune_chat_messages(conn, user_id: str, *, days: int = RETENTION_DAYS)
     tenant_where_pg(conditions, params)
     sql = "DELETE FROM chat_messages WHERE " + " AND ".join(conditions)
     status = await conn.execute(sql, *params)
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        return 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  User drafts (Q.6 #300, checkbox 1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Backs the 500 ms debounce write from the INVOKE command bar
+# (``components/omnisight/invoke-core.tsx``) and the workspace chat
+# composer (``components/omnisight/workspace-chat.tsx``). Three
+# helpers cover the lifecycle:
+#
+#   * ``upsert_user_draft`` — PUT /user/drafts/{slot_key} write path,
+#     idempotent ON CONFLICT. Last-writer-wins per the Q.6 conflict
+#     spec ("draft is ephemeral, no optimistic lock").
+#   * ``get_user_draft`` — GET /user/drafts/{slot_key} read path
+#     (Q.6 checkbox 2). Returns ``None`` on miss instead of raising
+#     so the new-device restore flow handles the empty case
+#     branch-free.
+#   * ``prune_user_drafts`` — 24 h retention sweep (Q.6 checkbox 3).
+#     Called opportunistically after every PUT, same pattern as
+#     ``prune_chat_messages`` so we don't need a dedicated cron.
+#
+# Module-global audit (SOP Step 1, 2026-04-21 rule): pool-native via
+# ``asyncpg.Connection``; no module-global state added. Cross-worker
+# safety is whatever PG gives us — UPSERT under read-committed
+# isolation. The ephemeral / last-writer-wins contract makes a
+# cross-tab race deliberately tolerated (acceptable answer #3 below
+# the audit's three valid patterns: rate-limit-ish state intentionally
+# cheap, with PG as the only durable source of truth).
+
+DRAFT_RETENTION_SECONDS = 24 * 3600
+
+
+async def upsert_user_draft(
+    conn,
+    user_id: str,
+    slot_key: str,
+    content: str,
+    *,
+    now: float | None = None,
+) -> float:
+    """Write (insert-or-replace) a draft slot. Returns the
+    ``updated_at`` timestamp committed for the row so the caller can
+    echo it back to the client (Q.6 checkbox 4 conflict-detection
+    relies on the timestamp on restore).
+
+    Tenant scope is captured via :func:`tenant_insert_value` on
+    insert; updates do not touch ``tenant_id`` so a token swap
+    cannot rebind an existing row to another tenant.
+    """
+    import time as _time
+    ts = float(now if now is not None else _time.time())
+    await conn.execute(
+        "INSERT INTO user_drafts (user_id, slot_key, content, "
+        "updated_at, tenant_id) VALUES ($1, $2, $3, $4, $5) "
+        "ON CONFLICT (user_id, slot_key) DO UPDATE SET "
+        "  content = EXCLUDED.content, "
+        "  updated_at = EXCLUDED.updated_at",
+        user_id, slot_key, content, ts, tenant_insert_value(),
+    )
+    return ts
+
+
+async def get_user_draft(
+    conn,
+    user_id: str,
+    slot_key: str,
+) -> dict | None:
+    """Return ``{slot_key, content, updated_at}`` or ``None`` if
+    no row exists for the (user, slot) pair.
+
+    Tenant-scoped via :func:`tenant_where_pg` so a cross-tenant token
+    cannot read another tenant's draft even if the ``user_id``
+    happened to match (paranoid: the PK is (user_id, slot_key) so
+    same-id-cross-tenant collision is theoretical, but the rest of
+    the per-user helpers in this module enforce tenant scoping
+    uniformly and we follow the convention).
+    """
+    conditions: list[str] = ["user_id = $1", "slot_key = $2"]
+    params: list = [user_id, slot_key]
+    tenant_where_pg(conditions, params)
+    sql = (
+        "SELECT slot_key, content, updated_at FROM user_drafts WHERE "
+        + " AND ".join(conditions)
+    )
+    row = await conn.fetchrow(sql, *params)
+    if row is None:
+        return None
+    return {
+        "slot_key": row["slot_key"],
+        "content": row["content"],
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+async def prune_user_drafts(
+    conn,
+    *,
+    older_than_seconds: int = DRAFT_RETENTION_SECONDS,
+    now: float | None = None,
+) -> int:
+    """24 h retention sweep — drop rows whose ``updated_at`` is
+    strictly older than ``older_than_seconds``. Called opportunistically
+    after every PUT so the table bounds itself without a dedicated
+    cron job. Same pattern as :func:`prune_chat_messages` — cheap
+    indexed-range DELETE that is a no-op on a clean table.
+    """
+    import time as _time
+    cutoff = float(now if now is not None else _time.time()) - older_than_seconds
+    sql = "DELETE FROM user_drafts WHERE updated_at < $1"
+    status = await conn.execute(sql, cutoff)
     try:
         return int(status.rsplit(" ", 1)[-1])
     except (ValueError, AttributeError):
