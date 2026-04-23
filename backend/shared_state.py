@@ -203,6 +203,149 @@ class SharedKV:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Session Presence (Q.5 #299 — active device indicator)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# SOP Step 1 module-global audit: ``session_presence`` is a module-level
+# singleton of :class:`SessionPresence` (a :class:`SharedKV` subclass
+# namespaced ``session_presence``). Cross-worker consistency is the
+# SharedKV contract — Redis-backed when ``OMNISIGHT_REDIS_URL`` is set
+# (fits rubric #2 "coordinate via Redis") so every uvicorn worker +
+# replica sees the same presence hash; in-memory fallback is per-worker
+# (rubric #3 "deliberately per-worker" for single-worker dev). No new
+# shared-mutable state is introduced beyond what ``SharedKV`` already
+# guarantees.
+
+_PRESENCE_FIELD_SEP = "|"
+_PRESENCE_DEFAULT_WINDOW_SECONDS = 60.0
+
+
+class SessionPresence(SharedKV):
+    """Per-session heartbeat tracker for the "active devices" indicator.
+
+    Records ``(user_id, session_id) → last_heartbeat_at`` so that the
+    presence endpoint (Q.5 follow-up) can answer "how many of this
+    user's devices are currently online?" and surface a mini list.
+
+    Field key: ``f"{user_id}|{session_id}"`` — ``|`` rather than ``:``
+    because ``user_id`` may itself contain ``:`` for API-key users
+    (``"apikey:<id>"`` — see ``backend/auth.py::current_user``).
+    Session ids are SHA-256 hex prefixes from
+    ``auth.session_id_from_token`` and never contain ``|``.
+
+    Field value: ``f"{ts:.3f}"`` (unix epoch seconds, float formatted).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("session_presence")
+
+    @staticmethod
+    def _field(user_id: str, session_id: str) -> str:
+        return f"{user_id}{_PRESENCE_FIELD_SEP}{session_id}"
+
+    @staticmethod
+    def _split_field(field: str) -> tuple[str, str] | None:
+        sep_idx = field.rfind(_PRESENCE_FIELD_SEP)
+        if sep_idx <= 0 or sep_idx == len(field) - 1:
+            return None
+        return field[:sep_idx], field[sep_idx + 1:]
+
+    def record_heartbeat(
+        self, user_id: str, session_id: str,
+        *, ts: float | None = None,
+    ) -> float:
+        """Write the heartbeat timestamp. Returns the ts actually stored."""
+        if not user_id or not session_id:
+            return 0.0
+        now = ts if ts is not None else time.time()
+        self.set(self._field(user_id, session_id), f"{now:.3f}")
+        return now
+
+    def drop(self, user_id: str, session_id: str) -> None:
+        """Forget a session — called on SSE disconnect / logout."""
+        if not user_id or not session_id:
+            return
+        self.delete(self._field(user_id, session_id))
+
+    def last_seen(self, user_id: str, session_id: str) -> float | None:
+        raw = self.get(self._field(user_id, session_id))
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def active_sessions(
+        self, user_id: str, *, window_seconds: float | None = None,
+        now: float | None = None,
+    ) -> list[tuple[str, float]]:
+        """Return ``[(session_id, last_heartbeat_ts), ...]`` for the user
+        whose heartbeat is within ``window_seconds`` of ``now`` (default
+        60 s). Sorted by heartbeat desc (freshest first)."""
+        cutoff_now = now if now is not None else time.time()
+        window = (
+            window_seconds if window_seconds is not None
+            else _PRESENCE_DEFAULT_WINDOW_SECONDS
+        )
+        out: list[tuple[str, float]] = []
+        for key, raw in self.get_all().items():
+            split = self._split_field(key)
+            if split is None:
+                continue
+            uid, sid = split
+            if uid != user_id:
+                continue
+            try:
+                ts = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if cutoff_now - ts <= window:
+                out.append((sid, ts))
+        out.sort(key=lambda entry: entry[1], reverse=True)
+        return out
+
+    def active_count(
+        self, user_id: str, *, window_seconds: float | None = None,
+        now: float | None = None,
+    ) -> int:
+        return len(
+            self.active_sessions(
+                user_id, window_seconds=window_seconds, now=now,
+            ),
+        )
+
+    def prune_expired(
+        self, *, window_seconds: float | None = None,
+        now: float | None = None,
+    ) -> int:
+        """Delete entries older than ``window_seconds`` (default 60 s).
+        Opportunistic housekeeping — safe to call from the presence
+        endpoint since the hash is small (one field per device)."""
+        cutoff_now = now if now is not None else time.time()
+        window = (
+            window_seconds if window_seconds is not None
+            else _PRESENCE_DEFAULT_WINDOW_SECONDS
+        )
+        pruned = 0
+        for key, raw in list(self.get_all().items()):
+            try:
+                ts = float(raw)
+            except (TypeError, ValueError):
+                self.delete(key)
+                pruned += 1
+                continue
+            if cutoff_now - ts > window:
+                self.delete(key)
+                pruned += 1
+        return pruned
+
+
+# Singleton — one per worker; Redis coordinates across workers/replicas.
+session_presence = SessionPresence()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Shared Flag (boolean)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -685,3 +828,11 @@ def reset_for_tests() -> None:
     _redis_async_client = None
     _pubsub_listener_started = False
     _pubsub_callbacks.clear()
+    try:
+        # Drop in-memory presence entries so per-test reset is clean.
+        # No Redis call — reset_for_tests is also the path that nulls
+        # the Redis clients above, so any residual Redis state will be
+        # re-read from the new connection on next access.
+        session_presence._local.clear()
+    except Exception:
+        pass

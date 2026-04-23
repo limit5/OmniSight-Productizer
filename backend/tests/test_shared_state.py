@@ -5,6 +5,7 @@ Tests run without Redis (in-memory fallback) by default.
 
 import pytest
 from backend.shared_state import (
+    SessionPresence,
     SharedCounter,
     SharedFlag,
     SharedHaltFlag,
@@ -14,6 +15,7 @@ from backend.shared_state import (
     SharedTokenUsage,
     publish_cross_worker,
     register_cross_worker_callback,
+    session_presence,
 )
 
 
@@ -384,3 +386,128 @@ class TestMultiWorkerConfig:
     def test_default_workers_zero(self):
         from backend.config import settings
         assert settings.workers == 0
+
+
+class TestSessionPresence:
+    """Q.5 #299: SessionPresence heartbeat tracker for the active-device
+    indicator. Verifies the ``SharedKV``-backed primitive in isolation —
+    the SSE-endpoint wiring + ``/auth/sessions/presence`` endpoint + UI
+    integration are exercised by later checkboxes of the Q.5 item."""
+
+    def _fresh(self) -> SessionPresence:
+        presence = SessionPresence()
+        presence._local.clear()
+        return presence
+
+    def test_record_and_last_seen_roundtrip(self):
+        presence = self._fresh()
+        ts = presence.record_heartbeat("u-alice", "sess-abc", ts=1000.0)
+        assert ts == 1000.0
+        assert presence.last_seen("u-alice", "sess-abc") == pytest.approx(1000.0)
+
+    def test_empty_user_or_session_is_noop(self):
+        presence = self._fresh()
+        assert presence.record_heartbeat("", "sid") == 0.0
+        assert presence.record_heartbeat("u", "") == 0.0
+        assert presence.last_seen("", "sid") is None
+        assert presence.last_seen("u", "") is None
+
+    def test_default_clock_uses_time_time(self):
+        import time as _time
+        presence = self._fresh()
+        before = _time.time()
+        stored = presence.record_heartbeat("u-clock", "sid-clock")
+        after = _time.time()
+        assert before - 0.1 <= stored <= after + 0.1
+        got = presence.last_seen("u-clock", "sid-clock")
+        assert got is not None
+        assert before - 0.1 <= got <= after + 0.1
+
+    def test_active_sessions_within_window(self):
+        presence = self._fresh()
+        # Three sessions: two fresh, one stale (> 60 s old).
+        presence.record_heartbeat("u-bob", "fresh-a", ts=1000.0)
+        presence.record_heartbeat("u-bob", "fresh-b", ts=995.0)
+        presence.record_heartbeat("u-bob", "stale", ts=900.0)
+        active = presence.active_sessions("u-bob", now=1010.0)
+        sids = [sid for sid, _ts in active]
+        assert sids == ["fresh-a", "fresh-b"]
+        # Count helper stays consistent with active_sessions.
+        assert presence.active_count("u-bob", now=1010.0) == 2
+
+    def test_active_sessions_sorted_by_recency_desc(self):
+        presence = self._fresh()
+        presence.record_heartbeat("u-carol", "older", ts=1000.0)
+        presence.record_heartbeat("u-carol", "newer", ts=1030.0)
+        presence.record_heartbeat("u-carol", "newest", ts=1055.0)
+        active = presence.active_sessions("u-carol", now=1060.0)
+        sids = [sid for sid, _ts in active]
+        assert sids == ["newest", "newer", "older"]
+
+    def test_active_sessions_user_isolation(self):
+        presence = self._fresh()
+        presence.record_heartbeat("u-a", "s1", ts=1000.0)
+        presence.record_heartbeat("u-b", "s2", ts=1000.0)
+        assert [sid for sid, _ in presence.active_sessions("u-a", now=1000.0)] == ["s1"]
+        assert [sid for sid, _ in presence.active_sessions("u-b", now=1000.0)] == ["s2"]
+
+    def test_active_sessions_custom_window(self):
+        presence = self._fresh()
+        presence.record_heartbeat("u-win", "sid", ts=1000.0)
+        # Tight 5 s window — record at 1000, "now" at 1010 → stale.
+        assert presence.active_count("u-win", window_seconds=5.0, now=1010.0) == 0
+        # Widen window to 120 s → fresh.
+        assert presence.active_count("u-win", window_seconds=120.0, now=1010.0) == 1
+
+    def test_drop_removes_entry(self):
+        presence = self._fresh()
+        presence.record_heartbeat("u-drop", "sid-drop", ts=1000.0)
+        assert presence.last_seen("u-drop", "sid-drop") == pytest.approx(1000.0)
+        presence.drop("u-drop", "sid-drop")
+        assert presence.last_seen("u-drop", "sid-drop") is None
+        assert presence.active_count("u-drop", now=1000.0) == 0
+
+    def test_prune_expired_removes_stale_and_preserves_fresh(self):
+        presence = self._fresh()
+        presence.record_heartbeat("u-x", "fresh", ts=1000.0)
+        presence.record_heartbeat("u-x", "stale", ts=900.0)
+        pruned = presence.prune_expired(now=1010.0, window_seconds=60.0)
+        assert pruned == 1
+        active = presence.active_sessions("u-x", now=1010.0, window_seconds=60.0)
+        assert [sid for sid, _ in active] == ["fresh"]
+
+    def test_prune_expired_drops_malformed_values(self):
+        presence = self._fresh()
+        # Simulate a corrupt entry (non-numeric ts).
+        presence.set(SessionPresence._field("u-mal", "bad"), "not-a-float")
+        presence.record_heartbeat("u-mal", "good", ts=1000.0)
+        pruned = presence.prune_expired(now=1000.0, window_seconds=60.0)
+        assert pruned == 1
+        assert presence.active_count("u-mal", now=1000.0) == 1
+
+    def test_field_delimiter_survives_colon_in_user_id(self):
+        """API-key user ids are ``apikey:<id>`` — ``|`` rather than ``:``
+        is used as the ``(user_id, session_id)`` delimiter so the split
+        stays unambiguous."""
+        presence = self._fresh()
+        uid = "apikey:abc123"
+        sid = "deadbeefcafef00d"
+        presence.record_heartbeat(uid, sid, ts=1000.0)
+        active = presence.active_sessions(uid, now=1000.0)
+        assert [s for s, _ in active] == [sid]
+        # Nothing bleeds into a different user id that shares a prefix.
+        assert presence.active_count("apikey", now=1000.0) == 0
+
+    def test_record_overwrites_timestamp(self):
+        presence = self._fresh()
+        presence.record_heartbeat("u-over", "sid", ts=1000.0)
+        presence.record_heartbeat("u-over", "sid", ts=1030.0)
+        assert presence.last_seen("u-over", "sid") == pytest.approx(1030.0)
+        # Same session remains 1 — overwrite, not duplicate.
+        assert presence.active_count("u-over", now=1030.0) == 1
+
+    def test_singleton_is_session_presence_instance(self):
+        from backend.shared_state import session_presence as singleton
+        assert isinstance(singleton, SessionPresence)
+        # Same object identity as the imported singleton at module top.
+        assert singleton is session_presence

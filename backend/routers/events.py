@@ -10,7 +10,7 @@ import asyncio
 import json
 
 import asyncpg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from backend.db_pool import get_conn
@@ -30,8 +30,32 @@ def _get_tenant_id() -> str | None:
         return None
 
 
+async def _resolve_presence(request: Request) -> tuple[str, str] | None:
+    """Resolve ``(user_id, session_id)`` from the request's session cookie.
+
+    Q.5 #299: the active-device indicator needs a stable pair for every
+    SSE connection. Anonymous / open-mode / bearer-only requests have
+    no cookie-backed session — skip presence for them. Runs best-effort
+    inside the SSE handler; any DB hiccup must not break the stream.
+    """
+    try:
+        from backend.auth import SESSION_COOKIE, get_session, session_id_from_token
+    except Exception:
+        return None
+    token = request.cookies.get(SESSION_COOKIE) or ""
+    if not token:
+        return None
+    try:
+        sess = await get_session(token)
+    except Exception:
+        return None
+    if sess is None:
+        return None
+    return sess.user_id, session_id_from_token(token)
+
+
 @router.get("/events")
-async def event_stream():
+async def event_stream(request: Request):
     """Persistent SSE connection. Pushes all real-time events to the frontend.
 
     Phase-3 follow-up (2026-04-20): emit an immediate ``open`` event as
@@ -49,6 +73,17 @@ async def event_stream():
     tenant_id = _get_tenant_id()
     queue = bus.subscribe(tenant_id=tenant_id)
 
+    # Q.5 #299: record heartbeat on SSE connect + every heartbeat tick
+    # so the presence endpoint can surface the user's active devices.
+    # Best-effort — any failure here must not disrupt the stream.
+    presence = await _resolve_presence(request)
+    if presence is not None:
+        try:
+            from backend.shared_state import session_presence
+            session_presence.record_heartbeat(*presence)
+        except Exception:
+            pass
+
     async def generator():
         try:
             # Immediate ``open`` event — kept single + small; the bigger
@@ -64,6 +99,12 @@ async def event_stream():
                     msg = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
                     yield msg
                 except asyncio.TimeoutError:
+                    if presence is not None:
+                        try:
+                            from backend.shared_state import session_presence
+                            session_presence.record_heartbeat(*presence)
+                        except Exception:
+                            pass
                     yield {
                         "event": "heartbeat",
                         "data": json.dumps({"subscribers": bus.subscriber_count}),
@@ -72,6 +113,12 @@ async def event_stream():
             pass
         finally:
             bus.unsubscribe(queue)
+            if presence is not None:
+                try:
+                    from backend.shared_state import session_presence
+                    session_presence.drop(*presence)
+                except Exception:
+                    pass
 
     return EventSourceResponse(generator())
 
