@@ -17,11 +17,12 @@ import {
   RotateCcw, Ban,
 } from "lucide-react"
 import {
-  listWorkflowRuns, getWorkflowRun, listProjectRuns,
+  getWorkflowRun, listProjectRuns,
   retryWorkflowRun, cancelWorkflowRun,
   type WorkflowRunSummary, type WorkflowStepDetail,
   type ProjectRun,
 } from "@/lib/api"
+import { useWorkflows } from "@/hooks/use-workflows"
 
 const POLL_MS = 15_000
 
@@ -61,9 +62,21 @@ function durationString(started: number | null, completed: number | null): strin
 
 export function RunHistoryPanel({ projectId }: { projectId?: string }) {
   const [filter, setFilter] = useState<StatusFilter>("all")
-  const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null)
+  // Q.3-SUB-1 (#297): workflow_runs state + SSE patch lives in
+  // useWorkflows; the panel keeps only the project_run aggregation
+  // state here (separate endpoint, unaffected by workflow_updated).
+  const {
+    runs,
+    error: runsError,
+    refresh: refreshRuns,
+  } = useWorkflows({
+    status: filter === "all" ? undefined : filter,
+    limit: 50,
+    pollMs: POLL_MS,
+  })
   const [projectRuns, setProjectRuns] = useState<ProjectRun[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [localError, setError] = useState<string | null>(null)
+  const error = localError ?? runsError
   const mountedRef = useRef(true)
   const [openId, setOpenId] = useState<string | null>(null)
   const [openParentId, setOpenParentId] = useState<string | null>(null)
@@ -73,19 +86,7 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
   } | { error: string } | "loading">>({})
 
   const refresh = useCallback(async () => {
-    try {
-      const list = await listWorkflowRuns({
-        status: filter === "all" ? undefined : filter,
-        limit: 50,
-      })
-      if (!mountedRef.current) return
-      setRuns(list)
-      setError(null)
-    } catch (exc) {
-      if (!mountedRef.current) return
-      setError(exc instanceof Error ? exc.message : String(exc))
-    }
-
+    await refreshRuns()
     if (projectId) {
       try {
         const prs = await listProjectRuns(projectId)
@@ -95,17 +96,36 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
         // Non-fatal: fall back to flat list
       }
     }
-  }, [filter, projectId])
+  }, [refreshRuns, projectId])
 
   useEffect(() => {
     mountedRef.current = true
-    void refresh()
-    const t = setInterval(() => void refresh(), POLL_MS)
+    // useWorkflows owns the flat-list refresh + SSE subscription;
+    // we only need to drive project_runs polling here.
+    if (!projectId) {
+      return () => { mountedRef.current = false }
+    }
+    void (async () => {
+      try {
+        const prs = await listProjectRuns(projectId)
+        if (!mountedRef.current) return
+        setProjectRuns(prs)
+      } catch { /* non-fatal */ }
+    })()
+    const t = setInterval(() => {
+      void (async () => {
+        try {
+          const prs = await listProjectRuns(projectId)
+          if (!mountedRef.current) return
+          setProjectRuns(prs)
+        } catch { /* non-fatal */ }
+      })()
+    }, POLL_MS)
     return () => {
       mountedRef.current = false
       clearInterval(t)
     }
-  }, [refresh])
+  }, [projectId])
 
   const toggleRun = useCallback(async (runId: string) => {
     if (openId === runId) {

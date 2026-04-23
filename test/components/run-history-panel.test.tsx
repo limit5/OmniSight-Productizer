@@ -20,6 +20,9 @@ vi.mock("@/lib/api", () => ({
   listWorkflowRuns: vi.fn(),
   getWorkflowRun: vi.fn(),
   listProjectRuns: vi.fn(),
+  // Q.3-SUB-1 (#297): useWorkflows subscribes to SSE; the mock must
+  // return a handle so close() is callable on unmount.
+  subscribeEvents: vi.fn(() => ({ close: vi.fn(), readyState: 1 })),
 }))
 
 import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"

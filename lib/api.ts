@@ -124,6 +124,17 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── Q.3-SUB-1 (#297) workflow_run state sync (broadcast_scope=user) ───
+  | {
+      event: "workflow_updated"
+      data: {
+        run_id: string
+        status: string
+        version: number
+        kind: string | null
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -205,6 +216,8 @@ const SSE_EVENT_TYPES = [
   "chatops.message",
   // ─── H1 / H3 whole-host metrics tick ───
   "host.metrics.tick",
+  // ─── Q.3-SUB-1 (#297) workflow_run state sync ───
+  "workflow_updated",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"

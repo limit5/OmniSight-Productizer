@@ -556,6 +556,39 @@ async def _persist_debug_finding(data: dict) -> None:
         logging.getLogger(__name__).warning("Failed to persist debug finding: %s", exc)
 
 
+def emit_workflow_updated(
+    run_id: str,
+    status: str,
+    version: int,
+    *,
+    kind: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str = "user",
+    tenant_id: str | None = None,
+) -> None:
+    """Q.3-SUB-1 (#297): broadcast a workflow_run state change to the user's UIs.
+
+    Fires after every successful workflow_runs INSERT / UPDATE so a
+    device watching the RunHistory panel sees status+version changes
+    without waiting for the 15 s poll tick. Mirrors the user-scope
+    pattern of :func:`emit_new_device_login`: ``broadcast_scope='user'``
+    is advisory — the EventBus only enforces the ``tenant`` scope today
+    (Q.4 #298 will tighten this), so the frontend is expected to
+    additionally self-filter on ``data._session_id`` / user identity
+    before applying the patch.
+    """
+    bus.publish("workflow_updated", {
+        "run_id": run_id,
+        "status": status,
+        "version": version,
+        "kind": kind,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[WORKFLOW] {run_id} → {status.upper()} (v{version})",
+    )
+
+
 def emit_new_device_login(
     user_id: str,
     token_hint: str,

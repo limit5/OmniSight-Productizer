@@ -24,6 +24,13 @@ from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
+# Q.3-SUB-1 (#297): cross-device SSE push for workflow_run state
+# changes is fired inside ``backend.workflow`` itself (finish /
+# cancel_run / retry_run / update_run_metadata all call
+# ``_emit_workflow_updated_safe`` after a successful version bump).
+# The HTTP handlers below therefore intentionally do NOT emit a
+# second time — doing so would double-fire every user-driven path.
+
 
 def _parse_if_match(if_match: str | None) -> int:
     if if_match is None:

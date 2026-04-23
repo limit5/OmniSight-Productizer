@@ -326,6 +326,24 @@ class SSEDockerSamplePayload(BaseModel):
     sampled_at: float
 
 
+class SSEWorkflowUpdated(BaseModel):
+    """workflow_updated — Q.3-SUB-1 (#297) cross-device workflow_run push.
+
+    Emitted by :mod:`backend.workflow` after every successful
+    ``workflow_runs`` INSERT / UPDATE. ``version`` is the post-bump
+    value and matches the ``ETag`` returned from the REST handlers,
+    so the frontend can reconcile optimistic-lock state without a
+    follow-up ``GET``.  ``broadcast_scope='user'`` — see Q.4 (#298)
+    for the scope-enforcement roadmap; until then consumers must
+    self-filter on user identity.
+    """
+    run_id: str
+    status: str
+    version: int
+    kind: Optional[str] = None
+    timestamp: str = ""
+
+
 class SSEHostMetricsTick(BaseModel):
     """host.metrics.tick — H1 5s whole-host sampling push.
 
@@ -376,6 +394,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "agent.token_continuation": SSEAgentTokenContinuation,
     # H1: whole-host metrics sampling tick (5 s cadence)
     "host.metrics.tick": SSEHostMetricsTick,
+    # Q.3-SUB-1 (#297): cross-device workflow_run state push
+    "workflow_updated": SSEWorkflowUpdated,
 }
 
 

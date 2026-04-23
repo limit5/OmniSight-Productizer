@@ -147,6 +147,15 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
             json.dumps(run.metadata), tenant_insert_value(),
         )
 
+    # Q.3-SUB-1 (#297): cross-device SSE broadcast. Best-effort —
+    # the workflow row is already committed, a flaky bus must not
+    # fail start().
+    try:
+        from backend.events import emit_workflow_updated
+        emit_workflow_updated(run.id, run.status, run.version, kind=run.kind)
+    except Exception as exc:
+        logger.debug("emit_workflow_updated on start failed: %s", exc)
+
     # Phase 56-DAG-B: persist + validate + link the plan.
     if dag is not None:
         try:
@@ -272,6 +281,24 @@ class VersionConflict(Exception):
     """Raised when an optimistic-lock version check fails (HTTP 409)."""
 
 
+def _emit_workflow_updated_safe(run_id: str, status: str, version: int,
+                                kind: str | None = None) -> None:
+    """Q.3-SUB-1 (#297): fire emit_workflow_updated, swallowing errors.
+
+    Used by every workflow_runs UPDATE path (finish / cancel_run /
+    retry_run / update_run_metadata). A flaky SSE bus / Redis
+    outage must NEVER fail a committed workflow mutation — the
+    emit runs AFTER the version bump returned successfully, so
+    by this point the truth is in PG and the SSE push is purely a
+    UI-latency optimisation.
+    """
+    try:
+        from backend.events import emit_workflow_updated
+        emit_workflow_updated(run_id, status, version, kind=kind)
+    except Exception as exc:
+        logger.debug("emit_workflow_updated failed for %s: %s", run_id, exc)
+
+
 async def _bump_version(run_id: str, expected_version: int | None,
                         updates: dict[str, Any]) -> int:
     """Apply column updates to a workflow_run with optimistic locking.
@@ -313,10 +340,11 @@ async def _bump_version(run_id: str, expected_version: int | None,
 
 async def finish(run_id: str, status: RunStatus = "completed",
                  expected_version: int | None = None) -> None:
-    await _bump_version(run_id, expected_version, {
+    new_version = await _bump_version(run_id, expected_version, {
         "status": status,
         "completed_at": time.time(),
     })
+    _emit_workflow_updated_safe(run_id, status, new_version)
 
     # Phase 62 hook: when a long / hard-fought run completes successfully
     # and OMNISIGHT_SELF_IMPROVE_LEVEL includes L1, distil it into a
@@ -340,10 +368,12 @@ async def finish(run_id: str, status: RunStatus = "completed",
 
 async def cancel_run(run_id: str, expected_version: int) -> int:
     """Cancel a running workflow. Returns the new version."""
-    return await _bump_version(run_id, expected_version, {
+    new_version = await _bump_version(run_id, expected_version, {
         "status": "halted",
         "completed_at": time.time(),
     })
+    _emit_workflow_updated_safe(run_id, "halted", new_version)
+    return new_version
 
 
 async def retry_run(run_id: str, expected_version: int) -> WorkflowRun:
@@ -355,6 +385,7 @@ async def retry_run(run_id: str, expected_version: int) -> WorkflowRun:
     })
     run = await get_run(run_id)
     assert run is not None
+    _emit_workflow_updated_safe(run.id, run.status, run.version, kind=run.kind)
     return run
 
 
@@ -365,9 +396,14 @@ async def update_run_metadata(run_id: str, expected_version: int,
     if not existing:
         raise ValueError(f"run {run_id} not found")
     merged = {**existing.metadata, **metadata}
-    return await _bump_version(run_id, expected_version, {
+    new_version = await _bump_version(run_id, expected_version, {
         "metadata": json.dumps(merged),
     })
+    # Status is unchanged for metadata-only patches — emit so other
+    # devices still see the version bump (etag refresh).
+    _emit_workflow_updated_safe(run_id, existing.status, new_version,
+                                kind=existing.kind)
+    return new_version
 
 
 async def _get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
