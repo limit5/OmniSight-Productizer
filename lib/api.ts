@@ -144,6 +144,16 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── Q.3-SUB-4 (#297) user preferences sync (broadcast_scope=user) ───
+  | {
+      event: "preferences.updated"
+      data: {
+        pref_key: string
+        value: string
+        user_id: string
+        timestamp: string
+      }
+    }
 
 export interface HostMetricsTickSample {
   cpu_percent: number
@@ -229,6 +239,8 @@ const SSE_EVENT_TYPES = [
   "workflow_updated",
   // ─── Q.3-SUB-3 (#297) notification read-state sync ───
   "notification.read",
+  // ─── Q.3-SUB-4 (#297) user preferences cross-device sync ───
+  "preferences.updated",
 ] as const
 
 export type BroadcastScope = "session" | "user" | "global" | "tenant"

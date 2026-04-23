@@ -377,6 +377,19 @@ export function useEngine() {
               // we do not duplicate either of those here.
               logMsg = `[SECURITY] new device login user=${d.user_id} ip=${d.ip}`
               logLevel = "warn"
+            } else if (event.event === "preferences.updated") {
+              // Q.3-SUB-4 (#297): mirror user-preference changes into
+              // REPORTER VORTEX. Storage side-effects (localStorage
+              // write + in-tab `onStorageChange` notify so the I18n
+              // context and other consumers rehydrate) are handled
+              // by `storage-bridge.tsx` — we do not duplicate the
+              // patch here. ``broadcast_scope='user'`` is advisory
+              // until Q.4 (#298); the bridge self-filters on
+              // ``user_id``.
+              const prefKey = (d.pref_key as string) || ""
+              const value = (d.value as string) || ""
+              logMsg = `[PREFS] ${prefKey}=${value.slice(0, 40)}`
+              logLevel = "info"
             } else if (event.event === "workflow_updated") {
               // Q.3-SUB-1 (#297): mirror workflow_run state changes into
               // REPORTER VORTEX. List-state patching is handled by the

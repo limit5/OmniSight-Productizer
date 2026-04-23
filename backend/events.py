@@ -618,6 +618,40 @@ def emit_notification_read(
     _log(f"[NOTIFY] {notification_id} → READ (user={user_id})")
 
 
+def emit_preferences_updated(
+    pref_key: str,
+    value: str,
+    user_id: str,
+    *,
+    session_id: str | None = None,
+    broadcast_scope: str = "user",
+    tenant_id: str | None = None,
+) -> None:
+    """Q.3-SUB-4 (#297): broadcast a user-preferences change to the user's UIs.
+
+    Fires after ``PUT /user-preferences/{key}`` writes the PG row so a
+    second device (different browser / phone) can patch its cached
+    prefs without waiting for the next poll or full-page reload. The
+    same-browser cross-tab path (``storage-bridge.tsx`` + J4
+    ``StorageEvent``) continues to work in parallel — the SSE handler
+    dispatches a synthetic ``StorageEvent`` so tabs in the originator's
+    browser don't need to double-subscribe.
+
+    ``broadcast_scope='user'`` is advisory — :class:`EventBus` only
+    enforces the ``tenant`` scope today (Q.4 #298 will tighten this),
+    so the frontend must additionally self-filter on ``data.user_id``
+    before applying the patch. Mirrors the user-scope pattern of
+    :func:`emit_new_device_login` / :func:`emit_notification_read`.
+    """
+    bus.publish("preferences.updated", {
+        "pref_key": pref_key,
+        "value": value,
+        "user_id": user_id,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(f"[PREFS] {pref_key}={value[:40]} (user={user_id})")
+
+
 def emit_new_device_login(
     user_id: str,
     token_hint: str,

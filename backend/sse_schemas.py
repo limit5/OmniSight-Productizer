@@ -359,6 +359,23 @@ class SSEWorkflowUpdated(BaseModel):
     timestamp: str = ""
 
 
+class SSEPreferencesUpdated(BaseModel):
+    """preferences.updated — Q.3-SUB-4 (#297) cross-device user-prefs push.
+
+    Emitted by :mod:`backend.routers.preferences` after a successful
+    ``PUT /user-preferences/{key}`` upsert. Carries ``pref_key`` +
+    ``value`` + owning ``user_id`` so the frontend can patch the
+    matching entry in its cached prefs map without waiting for a
+    follow-up poll. ``broadcast_scope='user'`` — see Q.4 (#298) for
+    the scope-enforcement roadmap; until then consumers must
+    self-filter on user identity.
+    """
+    pref_key: str
+    value: str
+    user_id: str
+    timestamp: str = ""
+
+
 class SSEHostMetricsTick(BaseModel):
     """host.metrics.tick — H1 5s whole-host sampling push.
 
@@ -413,6 +430,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "workflow_updated": SSEWorkflowUpdated,
     # Q.3-SUB-3 (#297): cross-device notification read-state push
     "notification.read": SSENotificationRead,
+    # Q.3-SUB-4 (#297): cross-device user-preferences push
+    "preferences.updated": SSEPreferencesUpdated,
 }
 
 

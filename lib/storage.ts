@@ -89,6 +89,28 @@ export function onStorageChange(cb: StorageChangeCallback): () => void {
   return () => { listeners.delete(cb) }
 }
 
+/**
+ * Q.3-SUB-4 (#297): fan a synthetic change out to in-tab
+ * `onStorageChange` listeners without touching `localStorage`.
+ *
+ * The browser only fires native `storage` events in OTHER tabs on a
+ * real `localStorage.setItem`, so `storage-bridge.tsx`'s cross-device
+ * SSE handler has to notify its own tab manually after writing the
+ * pref — otherwise the originator's sibling contexts (I18n / pref
+ * consumers) would wait for a re-read. Callers should invoke this
+ * AFTER `localStorage.setItem` so cross-tab browsers still get the
+ * native event for free; this helper only covers the local tab.
+ */
+export function notifyLocalStorageChange(key: string, newValue: string | null): void {
+  for (const cb of listeners) {
+    try {
+      cb(key, newValue)
+    } catch {
+      /* callback errors must not break sibling listeners */
+    }
+  }
+}
+
 export function useUserStorage(key: string): [string | null, (v: string | null) => void] {
   const { user } = useAuth()
   const { currentTenantId } = useTenant()

@@ -466,3 +466,88 @@ describe("useEngine — notification.read dispatcher", () => {
       .toEqual(beforeList)
   })
 })
+
+
+/**
+ * Q.3-SUB-4 (#297) — preferences.updated SSE dispatcher (log-only).
+ *
+ * The REPORTER VORTEX log line is the only thing the engine hook does
+ * for ``preferences.updated`` — the actual localStorage patch + in-tab
+ * notification fan-out is handled by ``storage-bridge.tsx`` so
+ * ``useEngine`` stays auth-context-free. This test locks the contract:
+ * an event arriving on the SSE stream produces a single ``[PREFS]``
+ * log line so operators can trace cross-device pref sync activity.
+ */
+describe("useEngine — preferences.updated dispatcher", () => {
+  function goOnline(): void {
+    ;(api.listAgents as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+    ;(api.listTasks as ReturnType<typeof vi.fn>).mockImplementation(
+      () => Promise.resolve([]))
+  }
+
+  it("appends a REPORTER VORTEX log line on preferences.updated", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    act(() => {
+      sse.emit({
+        event: "preferences.updated",
+        data: {
+          pref_key: "locale",
+          value: "ja",
+          user_id: "user-xyz",
+          timestamp: "2026-04-24T00:00:05",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      const hit = result.current.logs.find(
+        l => l.message.includes("[PREFS]") && l.message.includes("locale"),
+      )
+      expect(hit).toBeTruthy()
+      expect(hit?.message).toContain("ja")
+      expect(hit?.level).toBe("info")
+    })
+  })
+
+  it("does not patch tasks/agents/notifications (scope is log-only)", async () => {
+    goOnline()
+    const sse = primeSSE()
+    const { result } = renderHook(() => useEngine())
+    await waitFor(() => expect(api.subscribeEvents).toHaveBeenCalled())
+
+    // Snapshot content, not array identity — setLogs triggers a
+    // re-render that allocates fresh empty arrays for unchanged
+    // slices under StrictMode, so referential equality is the wrong
+    // assertion here. The contract is that NO state change is driven
+    // by ``preferences.updated`` other than appending a log line.
+    const beforeTasks = [...result.current.tasks]
+    const beforeAgents = [...result.current.agents]
+    const beforeNotifs = [...result.current.notifications]
+    const beforeUnread = result.current.unreadCount
+
+    act(() => {
+      sse.emit({
+        event: "preferences.updated",
+        data: {
+          pref_key: "tour_seen",
+          value: "1",
+          user_id: "user-xyz",
+          timestamp: "2026-04-24T00:00:06",
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(result.current.logs.some(l => l.message.includes("[PREFS]"))).toBe(true)
+    })
+    expect(result.current.tasks).toEqual(beforeTasks)
+    expect(result.current.agents).toEqual(beforeAgents)
+    expect(result.current.notifications).toEqual(beforeNotifs)
+    expect(result.current.unreadCount).toBe(beforeUnread)
+  })
+})
