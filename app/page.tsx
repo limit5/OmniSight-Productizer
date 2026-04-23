@@ -23,6 +23,7 @@ import { ChatOpsMirror } from "@/components/omnisight/chatops-mirror"
 import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
+import { PresenceBadge } from "@/components/omnisight/presence-badge"
 import { useAuth } from "@/lib/auth-context"
 import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
@@ -628,6 +629,7 @@ export default function Home() {
           onToggleNotifications={() => setShowNotifications(prev => !prev)}
           settingsButton={
             <span className="inline-flex items-center gap-1">
+              <PresenceBadge />
               <TenantSwitcher />
               <UserMenu />
               <SettingsButton onClick={() => setShowSettings(true)} />

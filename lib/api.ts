@@ -1963,6 +1963,34 @@ export async function revokeAllOtherSessions(): Promise<{ status: string; revoke
   })
 }
 
+// ─── Q.5 (#299) Active device presence ──────────────────────
+//
+// Read-side counterpart to the SSE heartbeat written by
+// `backend/routers/events.py::event_stream`. Powers the dashboard
+// header presence badge and its hover mini-list.
+
+export interface PresenceDevice {
+  session_id: string
+  token_hint: string
+  device_name: string
+  ua_hash: string
+  last_heartbeat_at: number
+  idle_seconds: number
+  status: "active" | "idle"
+  is_current: boolean
+}
+
+export interface PresenceResponse {
+  active_count: number
+  window_seconds: number
+  now: number
+  devices: PresenceDevice[]
+}
+
+export async function getSessionsPresence(): Promise<PresenceResponse> {
+  return request<PresenceResponse>("/auth/sessions/presence")
+}
+
 // ─── Self-service password change ───────────────────────────
 
 export interface ChangePasswordResponse {
