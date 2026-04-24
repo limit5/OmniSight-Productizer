@@ -20,7 +20,8 @@ import {
   ChevronDown,
   ChevronUp,
   Crown,
-  Shield
+  Shield,
+  History
 } from "lucide-react"
 import type { Agent, AgentStatus } from "./agent-matrix-wall"
 import type { Task } from "./task-backlog"
@@ -29,6 +30,7 @@ import { HandoffTimeline } from "./handoff-timeline"
 import { matchCommands as slashMatchCommands, CATEGORY_COLORS as slashCategoryColors, type SlashCommand } from "@/lib/slash-commands"
 import { TokenUsageStats } from "./token-usage-stats"
 import { TurnTimeline } from "./turn-timeline"
+import { PromptVersionDrawer } from "./prompt-version-drawer"
 
 // Orchestrator message types
 export interface OrchestratorMessage {
@@ -185,6 +187,11 @@ export function OrchestratorAI({
   const [slashSuggestions, setSlashSuggestions] = useState<SlashCommand[]>([])
   const [slashSelectedIdx, setSlashSelectedIdx] = useState(0)
   const [showAgentGrid, setShowAgentGrid] = useState(true)
+  // ZZ.C1 #305-1 checkbox 3 (2026-04-24): system-prompt version drawer
+  // — opens from the LLM MODEL section as a "System Prompt Versions"
+  // button. Drawer is portal-positioned (fixed inset-0), so it overlays
+  // the rest of the panel without disturbing scroll state.
+  const [showPromptDrawer, setShowPromptDrawer] = useState(false)
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -708,6 +715,30 @@ export function OrchestratorAI({
         </div>
       )}
 
+      {/* ZZ.C1 #305-1 checkbox 3 (2026-04-24): "System Prompt Versions"
+          launcher. Mounted directly under the LLM MODEL block because
+          the prompt body is the other half of the model selection — what
+          the LLM sees on every call. Operator picks an agent subtype,
+          scrolls the timeline of captured snapshots, and picks two rows
+          for a side-by-side diff (additions green / deletions red).
+          Lives outside the LLM MODEL conditional so the launcher remains
+          accessible even before any provider is configured (the drawer
+          itself only needs ``GET /runtime/prompts`` which is unrelated
+          to provider state). */}
+      <div className="border-b border-[var(--border)] px-3 py-2">
+        <button
+          type="button"
+          data-testid="prompt-version-drawer-launcher"
+          onClick={() => setShowPromptDrawer(true)}
+          className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)] bg-[var(--secondary)]/40 hover:bg-[var(--secondary)] border border-[var(--border)]/60 transition-colors"
+          title="Open the system-prompt version drawer"
+        >
+          <History size={10} />
+          System Prompt Versions
+          <ChevronDown size={8} className="opacity-50" />
+        </button>
+      </div>
+
       {/* Fallback Chain + Health Status */}
       {providerHealth && providerHealth.health.length > 0 && (
         <div className="border-b border-[var(--border)] px-3 py-2">
@@ -976,6 +1007,16 @@ export function OrchestratorAI({
           </form>
         </div>
       </div>
+
+      {/* ZZ.C1 #305-1 checkbox 3: System Prompt Versions drawer.
+          ``fixed inset-0`` so it overlays the panel without disturbing
+          its scroll state; mounted at the panel root so React doesn't
+          unmount it when the operator scrolls the LLM MODEL block off-
+          screen mid-edit. */}
+      <PromptVersionDrawer
+        open={showPromptDrawer}
+        onClose={() => setShowPromptDrawer(false)}
+      />
     </div>
   )
 }

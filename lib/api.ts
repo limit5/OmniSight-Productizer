@@ -1578,6 +1578,68 @@ export async function getCompressionStats() {
   return request<CompressionStats>("/runtime/compression")
 }
 
+/**
+ * ZZ.C1 #305-1 checkbox 3 — prompt-version timeline + diff endpoints.
+ *
+ * Mirrors the Pydantic envelopes in ``backend/models.py``
+ * (``PromptVersionEntry`` / ``PromptVersionsListResponse`` /
+ * ``PromptDiffResponse``). The backend is the source of truth for the
+ * field contract; this declaration just keeps the drawer's TS strict.
+ */
+export interface PromptVersionEntry {
+  id: number
+  agent_type: string
+  content_hash: string
+  content: string
+  content_preview: string
+  created_at: string
+  supersedes_id: number | null
+  version: number
+  role: string
+}
+
+export interface PromptVersionsListResponse {
+  agent_type: string
+  path: string
+  limit: number
+  versions: PromptVersionEntry[]
+}
+
+export interface PromptDiffResponse {
+  from_id: number
+  to_id: number
+  agent_type: string
+  from_hash: string
+  to_hash: string
+  from_version: number
+  to_version: number
+  from_created_at: string
+  to_created_at: string
+  diff: string
+}
+
+export async function fetchPromptVersions(
+  agentType: string,
+  limit = 20,
+): Promise<PromptVersionsListResponse> {
+  const qs = new URLSearchParams({
+    agent_type: agentType,
+    limit: String(limit),
+  })
+  return request<PromptVersionsListResponse>(`/runtime/prompts?${qs.toString()}`)
+}
+
+export async function fetchPromptDiff(
+  fromId: number,
+  toId: number,
+): Promise<PromptDiffResponse> {
+  const qs = new URLSearchParams({
+    from: String(fromId),
+    to: String(toId),
+  })
+  return request<PromptDiffResponse>(`/runtime/prompts/diff?${qs.toString()}`)
+}
+
 // ─── Simulations ───
 
 export interface SimulationItem {
