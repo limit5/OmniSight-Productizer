@@ -127,6 +127,12 @@ export function useEngine() {
       // failures don't take down the rest — demux per-subkey here and
       // only write state when ``ok === true`` so stale panel state is
       // preserved through a sub-query blip.
+      // Phase 4-3 (#dashboard-summary): cadence widened from 5s → 10s.
+      // Real-time state changes (agents / tasks / events / logs /
+      // notifications / artifacts / simulations / tokens) all ride the
+      // SSE stream below and are unaffected; this interval now only
+      // catches state that has no push channel (e.g. /devices, /repos,
+      // /spec, /runtime/info, host-level system metrics).
       try {
         const summary = await api.getDashboardSummary()
         if (cancelled) return
@@ -165,7 +171,7 @@ export function useEngine() {
     async function init() {
       // Always fetch system data regardless of agent/task status
       fetchSystemData()
-      sysInterval = setInterval(fetchSystemData, 5000)
+      sysInterval = setInterval(fetchSystemData, 10000)
 
       try {
         const [agentsRes, tasksRes] = await Promise.all([
