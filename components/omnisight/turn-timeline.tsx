@@ -34,7 +34,7 @@ import {
   CheckCircle2,
   Wrench,
 } from "lucide-react"
-import { subscribeEvents } from "@/lib/api"
+import { subscribeEvents, fetchTurnHistory, type TurnCompletePayload } from "@/lib/api"
 import { getModelInfo } from "./agent-matrix-wall"
 
 const RING_BUFFER_SIZE = 100
@@ -76,6 +76,13 @@ export interface TurnToolCallDetail {
 
 export interface TurnCardData {
   turnNumber: number
+  /** ZZ.B1 checkbox 3 (2026-04-24): backend-assigned unique id carried
+   *  by the ``turn.complete`` SSE event / ``GET /runtime/turns`` rows.
+   *  Used to match an incoming ``turn.complete`` to an existing ring-
+   *  buffer entry so the drawer upgrades in place instead of creating
+   *  a duplicate card. ``null`` when the turn was materialised from
+   *  ``turn_metrics`` alone (turn.complete hasn't landed for it yet). */
+  turnId: string | null
   timestamp: string
   tsMs: number
   model: string
@@ -169,6 +176,67 @@ function formatCost(c: number | null): string {
   return "$0"
 }
 
+/**
+ * ZZ.B1 checkbox 3 (2026-04-24): synthesise a fresh ``TurnCardData``
+ * from a ``turn.complete`` payload. Used in two paths:
+ *   (a) mount-time backfill from ``GET /runtime/turns`` — we don't have
+ *       prior ``turn_metrics`` for historical turns, so the complete
+ *       payload is the only source of truth and must materialise the
+ *       full card on its own.
+ *   (b) live SSE when ``turn_metrics`` never landed for this turn
+ *       (reconnect mid-turn / dropped event / ring-buffer eviction).
+ */
+function turnFromCompletePayload(
+  d: TurnCompletePayload,
+  turnNumber: number,
+): TurnCardData {
+  const parsed = d.timestamp ? Date.parse(d.timestamp) : NaN
+  const tsMs = Number.isFinite(parsed) ? parsed : Date.now()
+  const cacheRead = d.cache_read_tokens ?? null
+  const cacheCreate = d.cache_create_tokens ?? null
+  const denom = (d.input_tokens || 0) + (cacheRead ?? 0) + (cacheCreate ?? 0)
+  const cacheHitRatio = (cacheRead !== null && denom > 0) ? cacheRead / denom : null
+  return {
+    turnNumber,
+    turnId: d.turn_id,
+    timestamp: d.timestamp || new Date(tsMs).toISOString(),
+    tsMs,
+    model: d.model,
+    provider: d.provider ?? null,
+    agentSubtype: d.agent_type ?? null,
+    inputTokens: d.input_tokens,
+    outputTokens: d.output_tokens,
+    tokensUsed: d.tokens_used,
+    cacheReadTokens: cacheRead,
+    cacheCreateTokens: cacheCreate,
+    cacheHitRatio,
+    contextLimit: d.context_limit,
+    contextUsagePct: d.context_usage_pct,
+    latencyMs: d.latency_ms ?? 0,
+    toolCallCount: d.tool_call_count,
+    toolFailureCount: d.tool_failure_count,
+    failedTools: (d.tool_calls ?? [])
+      .filter(tc => !tc.success)
+      .map(tc => tc.name),
+    gapMs: null,
+    costUsd: d.cost_usd,
+    summary: d.summary ?? null,
+    messages: (d.messages ?? []).map(m => ({
+      role: m.role,
+      content: m.content,
+      tokens: m.tokens ?? null,
+      toolName: m.tool_name ?? null,
+    })),
+    toolCallDetails: (d.tool_calls ?? []).map(tc => ({
+      name: tc.name,
+      success: tc.success,
+      args: tc.args ?? null,
+      result: tc.result ?? null,
+      durationMs: tc.duration_ms ?? null,
+    })),
+  }
+}
+
 export type TurnTimelineLayout = "horizontal" | "vertical"
 
 interface TurnTimelineProps {
@@ -215,6 +283,27 @@ export function TurnTimeline({
       setTurns(externalTurns) // eslint-disable-line react-hooks/set-state-in-effect -- sync controlled prop to local state
       return
     }
+
+    // ZZ.B1 checkbox 3: seed ring buffer from persisted turn.complete
+    // rows so a fresh mount (page reload, tab switch) doesn't have to
+    // wait for the next live emit to show anything. "cancelled"
+    // guards against the unmount-before-fetch-resolves race — without
+    // it the old component's setTurns fires after unmount, which (a)
+    // React logs a warning about and (b) briefly shows stale history
+    // behind the next mount. Best-effort: a fetch failure leaves the
+    // empty state visible (the live SSE below will still populate).
+    let cancelled = false
+    fetchTurnHistory({ limit: Math.min(maxTurns, 50) })
+      .then(resp => {
+        if (cancelled) return
+        const backfilled = resp.turns
+          .slice()
+          .reverse() // endpoint returns newest-first; ring buffer wants oldest-first
+          .map(p => turnFromCompletePayload(p, ++turnCounterRef.current))
+        if (backfilled.length > 0) setTurns(backfilled)
+      })
+      .catch(() => { /* swallow — not fatal to live SSE */ })
+
     const handle = subscribeEvents((event) => {
       if (event.event === "turn_metrics") {
         const d = event.data
@@ -237,6 +326,7 @@ export function TurnTimeline({
           turnCounterRef.current += 1
           const newCard: TurnCardData = {
             turnNumber: turnCounterRef.current,
+            turnId: null,
             timestamp: d.timestamp || new Date(tsMs).toISOString(),
             tsMs,
             model: d.model,
@@ -277,9 +367,80 @@ export function TurnTimeline({
             },
           ]
         })
+      } else if (event.event === "turn.complete") {
+        // ZZ.B1 checkbox 3: terminal per-turn event. Upgrade the card
+        // materialised by the earlier turn_metrics emit in place
+        // (match by turn_id first — the backend assigns a unique one —
+        // falling back to "the latest card for this model" for the
+        // narrow window where turn_metrics has landed but turn.complete
+        // lost its turn_id on the wire). If no matching card exists
+        // (ring buffer evicted it, or reconnect mid-turn) append a
+        // fresh card synthesised from the turn.complete payload so
+        // the drawer still has something to open.
+        const d = event.data
+        if (!d.model) return
+        setTurns(prev => {
+          const matchByIdIdx = d.turn_id
+            ? prev.findIndex(t => t.turnId === d.turn_id)
+            : -1
+          const matchByModelIdx = matchByIdIdx >= 0
+            ? matchByIdIdx
+            : (() => {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  if (prev[i].turnId === null
+                      && prev[i].model.toLowerCase() === d.model.toLowerCase()) {
+                    return i
+                  }
+                }
+                return -1
+              })()
+
+          if (matchByModelIdx >= 0) {
+            const existing = prev[matchByModelIdx]
+            const merged: TurnCardData = {
+              ...existing,
+              turnId: d.turn_id,
+              // turn.complete is backend-authoritative — prefer its
+              // cost / summary / messages / tool_calls over frontend
+              // estimates carried on the pre-complete card.
+              costUsd: d.cost_usd ?? existing.costUsd,
+              summary: d.summary ?? existing.summary,
+              agentSubtype: existing.agentSubtype ?? d.agent_type ?? null,
+              messages: (d.messages ?? []).map(m => ({
+                role: m.role,
+                content: m.content,
+                tokens: m.tokens ?? null,
+                toolName: m.tool_name ?? null,
+              })),
+              toolCallDetails: (d.tool_calls ?? []).map(tc => ({
+                name: tc.name,
+                success: tc.success,
+                args: tc.args ?? null,
+                result: tc.result ?? null,
+                durationMs: tc.duration_ms ?? null,
+              })),
+              // Don't clobber toolCallCount if turn_tool_stats already
+              // landed — that event carries the graph-level tally
+              // including retries; turn.complete carries only the
+              // detail list which may be a subset today.
+              toolCallCount: existing.toolCallCount ?? d.tool_call_count ?? null,
+              toolFailureCount: existing.toolFailureCount ?? d.tool_failure_count ?? null,
+            }
+            return [...prev.slice(0, matchByModelIdx), merged, ...prev.slice(matchByModelIdx + 1)]
+          }
+
+          // No match — synthesise a brand-new card from turn.complete.
+          turnCounterRef.current += 1
+          const fresh = turnFromCompletePayload(d, turnCounterRef.current)
+          const next = [...prev, fresh]
+          return next.length > maxTurns ? next.slice(next.length - maxTurns) : next
+        })
       }
     })
-    return () => handle.close()
+    return () => {
+      cancelled = true
+      handle.close()
+    }
   }, [externalTurns, maxTurns])
 
   const anchorMs = turns.length > 0 ? turns[0].tsMs : 0

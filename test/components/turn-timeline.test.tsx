@@ -25,6 +25,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     subscribeEvents: vi.fn(),
+    // ZZ.B1 checkbox 3 (2026-04-24): TurnTimeline now calls
+    // fetchTurnHistory on mount to seed the ring buffer. Stub here so
+    // the tests don't blow up on the real fetch pipeline being absent.
+    fetchTurnHistory: vi.fn(),
   }
 })
 

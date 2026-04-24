@@ -44,6 +44,9 @@ _PERSIST_EVENT_TYPES = frozenset({
     # Phase 47: persist audit-relevant decision events
     "decision_pending", "decision_resolved", "decision_auto_executed",
     "decision_undone", "mode_changed",
+    # ZZ.B1 #304-1 checkbox 3: persist per-turn records so
+    # ``GET /runtime/turns`` can backfill ring-buffer history.
+    "turn.complete",
 })
 
 
@@ -521,6 +524,143 @@ def emit_turn_tool_stats(
         f"[TURN-TOOLS] {agent_type} tools={tool_call_count} failed={tool_failure_count}"
         + (f" ({','.join(failed)[:60]})" if failed else ""),
         "warn" if tool_failure_count > 0 else "info",
+    )
+
+
+# ZZ.B1 #304-1 checkbox 3 (2026-04-24): public per-1M-token pricing
+# used to derive authoritative cost for ``turn.complete`` events.
+# Matches the frontend fuzzy-match table in ``components/omnisight/
+# turn-timeline.tsx`` so UI estimates and backend values agree once
+# the event lands. Keys are lowercase prefixes matched against the
+# normalised model id (anything after the last ``/`` for slash-routed
+# OpenRouter-style identifiers). Missing keys → ``None`` cost (the
+# NULL-vs-genuine-zero contract — UI renders ``$—`` rather than $0).
+_MODEL_PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-opus": (15.0, 75.0),
+    "claude-sonnet": (3.0, 15.0),
+    "claude-haiku": (0.8, 4.0),
+    "gpt-5": (5.0, 15.0),
+    "gpt-4o": (2.5, 10.0),
+    "gemini-3": (1.25, 5.0),
+    "gemini-1.5": (1.25, 5.0),
+    "deepseek": (0.27, 1.1),
+    "grok": (3.0, 15.0),
+    "mistral": (2.0, 6.0),
+    "llama": (0.0, 0.0),
+    "ollama": (0.0, 0.0),
+    "gemma": (0.0, 0.0),
+}
+
+
+def _estimate_turn_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Fuzzy-match model prefix → per-1M-token pricing → USD cost.
+
+    Intentionally a simple prefix / substring match: a provider bump
+    (opus-4-7 → opus-4-8) keeps working without a table edit. Unknown
+    models return ``None`` — the frontend shows ``$—`` and the event
+    payload carries ``null`` to distinguish "no pricing data" from
+    "this turn cost zero" (a legitimate case for Ollama/local models).
+    """
+    if not model:
+        return None
+    lower = model.lower()
+    slash_idx = lower.rfind("/")
+    normalized = lower[slash_idx + 1:] if slash_idx >= 0 else lower
+    keys = sorted(_MODEL_PRICING_PER_MTOK.keys(), key=len, reverse=True)
+    for key in keys:
+        if normalized.startswith(key) or key in normalized:
+            in_rate, out_rate = _MODEL_PRICING_PER_MTOK[key]
+            return round(
+                (int(input_tokens or 0) / 1_000_000) * in_rate
+                + (int(output_tokens or 0) / 1_000_000) * out_rate,
+                6,
+            )
+    return None
+
+
+def emit_turn_complete(
+    turn_id: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: int,
+    *,
+    provider: str | None = None,
+    context_limit: int | None = None,
+    cache_read_tokens: int = 0,
+    cache_create_tokens: int = 0,
+    messages: list[dict] | None = None,
+    tool_calls: list[dict] | None = None,
+    agent_type: str | None = None,
+    task_id: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    summary: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """ZZ.B1 #304-1 checkbox 3: per-turn terminal event.
+
+    Emitted once per LLM turn after :func:`emit_turn_metrics`, carrying
+    the richer payload the :class:`TurnDetailDrawer` needs:
+
+    * ``messages`` — ordered ``[{role, content, tokens?, tool_name?}]``
+      capturing the prompt (system/user/tool) + the assistant response.
+    * ``tool_calls`` — ordered ``[{name, success, args?, result?,
+      duration_ms?}]`` for the just-completed turn. The existing
+      ``turn_tool_stats`` event keeps the summary shape; this carries
+      the detail.
+    * ``cost_usd`` — authoritative cost derived from the provider
+      pricing table (``None`` for unknown models, preserving the
+      NULL-vs-genuine-zero contract so the UI renders ``$—`` instead
+      of fabricating a free turn).
+    * ``context_usage_pct`` — mirrors :func:`emit_turn_metrics`.
+
+    Persisted to ``event_log`` (``_PERSIST_EVENT_TYPES`` includes
+    ``turn.complete``) so ``GET /runtime/turns?limit=50&session_id=``
+    can backfill the frontend's ring buffer after a reconnect.
+    """
+    broadcast_scope = _resolve_scope("emit_turn_complete", broadcast_scope, "global")
+    tokens_used = int(input_tokens) + int(output_tokens)
+    context_usage_pct: float | None = None
+    if context_limit is not None and context_limit > 0:
+        context_usage_pct = round(tokens_used / context_limit * 100, 2)
+    cost_usd = _estimate_turn_cost_usd(model, input_tokens, output_tokens)
+
+    safe_messages = [dict(m) for m in (messages or []) if isinstance(m, dict)]
+    safe_tool_calls = [dict(t) for t in (tool_calls or []) if isinstance(t, dict)]
+
+    bus.publish("turn.complete", {
+        "turn_id": turn_id,
+        "provider": provider,
+        "model": model,
+        "agent_type": agent_type,
+        "task_id": task_id,
+        "input_tokens": int(input_tokens),
+        "output_tokens": int(output_tokens),
+        "tokens_used": tokens_used,
+        "context_limit": context_limit,
+        "context_usage_pct": context_usage_pct,
+        "latency_ms": int(latency_ms),
+        "cache_read_tokens": int(cache_read_tokens),
+        "cache_create_tokens": int(cache_create_tokens),
+        "cost_usd": cost_usd,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "summary": summary,
+        "messages": safe_messages,
+        "tool_calls": safe_tool_calls,
+        "tool_call_count": len(safe_tool_calls),
+        "tool_failure_count": sum(1 for t in safe_tool_calls if not t.get("success", True)),
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[TURN-COMPLETE] {model} tokens={tokens_used} "
+        f"cost={cost_usd if cost_usd is not None else '—'} "
+        f"tools={len(safe_tool_calls)}",
     )
 
 

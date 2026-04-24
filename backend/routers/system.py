@@ -1406,6 +1406,62 @@ async def get_token_usage():
     return list(_token_usage.values())
 
 
+@router.get("/turns")
+async def get_turn_history(
+    limit: int = 50,
+    session_id: str | None = None,
+    conn=Depends(_get_conn),
+):
+    """Return the most recent ``turn.complete`` records, newest first.
+
+    ZZ.B1 #304-1 checkbox 3 (2026-04-24): frontends mount
+    ``<TurnTimeline>`` with an empty ring buffer and depend on live
+    ``turn.complete`` SSE events to populate it. When a session
+    reconnects (page reload, worker restart, operator switching tabs),
+    the SSE stream carries only *future* events — history is lost.
+    This endpoint backfills by reading persisted rows from
+    ``event_log`` (see ``_PERSIST_EVENT_TYPES`` for the allow-list)
+    and handing the frontend the last ``limit`` turns (capped to 100
+    to match the ring-buffer size).
+
+    ``session_id`` filters the result in-memory on the payload's
+    ``_session_id`` field — a full jsonb index would be premature;
+    turn volume is low (< a few hundred per session) and the natural
+    ORDER BY id DESC LIMIT N already caps the scan.
+    """
+    import json as _json
+    from backend import db
+
+    # Clamp to the ring-buffer size so a misconfigured client can't
+    # request a huge batch. Minimum 1 so a pathological ``limit=0``
+    # doesn't silently return an empty list that looks like no history.
+    if limit <= 0:
+        limit = 1
+    limit = min(limit, 100)
+
+    # Over-fetch when filtering by session_id so the post-filter
+    # result still has a reasonable chance of reaching ``limit``.
+    fetch_limit = limit * 5 if session_id else limit
+
+    rows = await db.list_events(
+        conn,
+        event_types=["turn.complete"],
+        limit=fetch_limit,
+    )
+    turns: list[dict] = []
+    for row in rows:
+        try:
+            payload = _json.loads(row.get("data_json") or "{}")
+        except (ValueError, TypeError):
+            continue
+        if session_id and payload.get("_session_id", "") != session_id:
+            continue
+        turns.append(payload)
+        if len(turns) >= limit:
+            break
+    return {"turns": turns, "count": len(turns)}
+
+
 @router.get("/compression")
 async def get_compression_stats():
     """Return RTK output compression statistics."""

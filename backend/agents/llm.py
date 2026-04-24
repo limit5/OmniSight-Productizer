@@ -30,6 +30,55 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ZZ.B1 #304-1 checkbox 3 (2026-04-24): LangChain message → turn.complete
+# dict. Runs inside the adapter firewall's boundary (``llm.py`` is
+# permitted to import from ``langchain`` indirectly via the wire up in
+# llm_adapter.py). Kept as a module-level function so tests can pass
+# synthetic dict-shaped objects with ``.type`` / ``.content`` attrs
+# without instantiating a real BaseMessage.
+_CHAT_ROLE_MAP = {
+    "system": "system",
+    "human": "user",
+    "user": "user",
+    "ai": "assistant",
+    "assistant": "assistant",
+    "tool": "tool",
+    "function": "tool",
+}
+
+
+def _serialize_message(msg) -> dict:  # noqa: ANN001
+    """Convert a LangChain message (or duck-typed shim) to the
+    ``{role, content, tool_name?}`` shape the ``turn.complete`` event
+    carries. Unknown message types degrade to ``role="user"`` with the
+    repr so the payload still lands — the UI shows the raw line rather
+    than silently dropping it.
+    """
+    raw_type = getattr(msg, "type", None) or getattr(msg, "role", None) or ""
+    role = _CHAT_ROLE_MAP.get(str(raw_type).lower(), "user")
+    content = getattr(msg, "content", "")
+    # LangChain occasionally hands back structured content (list of
+    # dict blocks). Stringify for the SSE payload — the drawer only
+    # displays text today.
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content") or ""
+                if text:
+                    parts.append(str(text))
+            else:
+                parts.append(str(block))
+        content = "\n".join(parts)
+    elif not isinstance(content, str):
+        content = str(content)
+    tool_name = getattr(msg, "name", None)
+    out: dict = {"role": role, "content": content}
+    if tool_name:
+        out["tool_name"] = tool_name
+    return out
+
+
 class TokenTrackingCallback(BaseCallbackHandler):
     """LangChain callback that feeds token usage into the system tracker.
 
@@ -70,10 +119,44 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._start_ts_utc: str = ""
         self.last_cache_read: int = 0
         self.last_cache_create: int = 0
+        # ZZ.B1 #304-1 checkbox 3 (2026-04-24): prompt messages captured
+        # at on_chat_model_start so the ``turn.complete`` emit in
+        # on_llm_end can surface the full system / user / tool chain
+        # to the TurnDetailDrawer. Stored as already-serialised dicts
+        # so emit_turn_complete doesn't have to know about LangChain
+        # message classes (the adapter firewall).
+        self._prompt_messages: list[dict] = []
+
+    def on_chat_model_start(  # noqa: ANN001
+        self,
+        serialized,
+        messages,
+        *args,
+        **kwargs,
+    ) -> None:
+        """Capture prompt messages for the ``turn.complete`` payload.
+
+        ZZ.B1 #304-1 checkbox 3: chat models give us the full prompt
+        here (``messages: list[list[BaseMessage]]``). We flatten the
+        first batch into ``{role, content, tool_name?}`` dicts and
+        stash them on the instance; ``on_llm_end`` reads the stash and
+        appends the assistant response before emitting.
+        """
+        self._start = time.time()
+        self._start_ts_utc = datetime.now(timezone.utc).isoformat()
+        try:
+            flat = messages[0] if messages else []
+        except (IndexError, TypeError):
+            flat = []
+        self._prompt_messages = [_serialize_message(m) for m in flat]
 
     def on_llm_start(self, *args, **kwargs) -> None:  # noqa: ANN002
         self._start = time.time()
         self._start_ts_utc = datetime.now(timezone.utc).isoformat()
+        # Non-chat / completion models don't invoke on_chat_model_start;
+        # clear the stash so a stale prompt from a prior chat turn
+        # does not leak into a subsequent non-chat ``turn.complete``.
+        self._prompt_messages = []
 
     @staticmethod
     def _extract_cache_tokens(usage: dict) -> tuple[int, int]:
@@ -172,6 +255,7 @@ class TokenTrackingCallback(BaseCallbackHandler):
             # ``context_usage_pct=None`` so the UI renders "—" rather than
             # a fabricated zero. Best-effort: an emit failure must not
             # abort the LLM turn.
+            context_limit: int | None = None
             try:
                 from backend.context_limits import get_context_limit
                 from backend.events import emit_turn_metrics
@@ -190,6 +274,59 @@ class TokenTrackingCallback(BaseCallbackHandler):
                 )
             except Exception as exc:
                 logger.debug("turn_metrics emit skipped: %s", exc)
+
+            # ZZ.B1 #304-1 checkbox 3 (2026-04-24): terminal ``turn.complete``
+            # event with the rich payload the TurnDetailDrawer needs
+            # (prompt + assistant messages, backend-authoritative cost).
+            # Fires *after* emit_turn_metrics so the frontend's ring
+            # buffer has already materialised the bare turn by the time
+            # the drawer-worthy details arrive; turn.complete then
+            # upgrades the existing card in place.
+            try:
+                import uuid as _uuid
+                from backend.events import emit_turn_complete
+
+                # Extract the assistant response from the first
+                # generation. ``AIMessage`` serialises to
+                # ``{role:"assistant", content:...}``; if the provider
+                # handed back plain text we synthesise the same shape.
+                assistant_msg: dict | None = None
+                summary_text: str | None = None
+                try:
+                    gen = response.generations[0][0]
+                    a_msg = getattr(gen, "message", None)
+                    if a_msg is not None:
+                        assistant_msg = _serialize_message(a_msg)
+                    elif getattr(gen, "text", None):
+                        assistant_msg = {"role": "assistant", "content": gen.text}
+                except (AttributeError, IndexError, TypeError):
+                    assistant_msg = None
+
+                all_messages = list(self._prompt_messages)
+                if assistant_msg is not None:
+                    all_messages.append(assistant_msg)
+                    if isinstance(assistant_msg.get("content"), str):
+                        summary_text = assistant_msg["content"][:200]
+
+                emit_turn_complete(
+                    turn_id=f"turn-{_uuid.uuid4().hex[:12]}",
+                    model=self.model_name,
+                    input_tokens=int(input_tokens or 0),
+                    output_tokens=int(output_tokens or 0),
+                    latency_ms=latency_ms,
+                    provider=self.provider,
+                    context_limit=context_limit,
+                    cache_read_tokens=cache_read,
+                    cache_create_tokens=cache_create,
+                    messages=all_messages,
+                    tool_calls=[],
+                    started_at=self._start_ts_utc or None,
+                    ended_at=turn_ended_at,
+                    summary=summary_text,
+                    broadcast_scope="global",
+                )
+            except Exception as exc:
+                logger.debug("turn.complete emit skipped: %s", exc)
         except Exception as exc:
             logger.warning("Token tracking failed for %s: %s", self.model_name, exc)
 

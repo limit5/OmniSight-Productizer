@@ -156,6 +156,50 @@ export type SSEEvent =
         timestamp: string
       }
     }
+  // ─── ZZ.B1 (#304-1) per-turn terminal event — full messages + tools + cost ───
+  // Emitted once per LLM turn from the backend TokenTrackingCallback
+  // after ``turn_metrics``. Carries the richer payload the
+  // <TurnDetailDrawer> needs (prompt + assistant messages, per-tool-
+  // call detail, backend-authoritative cost). Persisted to event_log
+  // so ``GET /runtime/turns`` can backfill the ring buffer on reconnect.
+  | {
+      event: "turn.complete"
+      data: {
+        turn_id: string
+        provider: string | null
+        model: string
+        agent_type: string | null
+        task_id: string | null
+        input_tokens: number
+        output_tokens: number
+        tokens_used: number
+        context_limit: number | null
+        context_usage_pct: number | null
+        latency_ms: number
+        cache_read_tokens: number
+        cache_create_tokens: number
+        cost_usd: number | null
+        started_at: string | null
+        ended_at: string | null
+        summary: string | null
+        messages: Array<{
+          role: "system" | "user" | "assistant" | "tool"
+          content: string
+          tokens?: number | null
+          tool_name?: string | null
+        }>
+        tool_calls: Array<{
+          name: string
+          success: boolean
+          args?: Record<string, unknown> | null
+          result?: string | null
+          duration_ms?: number | null
+        }>
+        tool_call_count: number
+        tool_failure_count: number
+        timestamp: string
+      }
+    }
   // ─── Q.2 (#296) new device login alert (broadcast_scope=user) ───
   | {
       event: "security.new_device_login"
@@ -313,6 +357,8 @@ const SSE_EVENT_TYPES = [
   "turn_metrics",
   // ─── ZZ.A3 (#303-3) per-turn tool-execution summary for TokenUsageStats card ───
   "turn_tool_stats",
+  // ─── ZZ.B1 (#304-1) per-turn terminal event carrying messages + tool detail + cost ───
+  "turn.complete",
   // ─── Q.3-SUB-1 (#297) workflow_run state sync ───
   "workflow_updated",
   // ─── Q.3-SUB-3 (#297) notification read-state sync ───
@@ -2704,6 +2750,69 @@ export interface DAGSubmitResponse {
 
 export async function fetchToolchains(): Promise<ToolchainsResponse> {
   return request<ToolchainsResponse>("/runtime/platforms/toolchains")
+}
+
+// ─── ZZ.B1 (#304-1) checkbox 3 — turn.complete history backfill ───
+
+export interface TurnCompletePayload {
+  turn_id: string
+  provider: string | null
+  model: string
+  agent_type: string | null
+  task_id: string | null
+  input_tokens: number
+  output_tokens: number
+  tokens_used: number
+  context_limit: number | null
+  context_usage_pct: number | null
+  latency_ms: number
+  cache_read_tokens: number
+  cache_create_tokens: number
+  cost_usd: number | null
+  started_at: string | null
+  ended_at: string | null
+  summary: string | null
+  messages: Array<{
+    role: "system" | "user" | "assistant" | "tool"
+    content: string
+    tokens?: number | null
+    tool_name?: string | null
+  }>
+  tool_calls: Array<{
+    name: string
+    success: boolean
+    args?: Record<string, unknown> | null
+    result?: string | null
+    duration_ms?: number | null
+  }>
+  tool_call_count: number
+  tool_failure_count: number
+  timestamp: string
+}
+
+export interface TurnHistoryResponse {
+  turns: TurnCompletePayload[]
+  count: number
+}
+
+/**
+ * ZZ.B1 #304-1 checkbox 3: fetch persisted `turn.complete` records so
+ * a freshly-mounted `<TurnTimeline>` can seed its ring buffer without
+ * waiting for the next live SSE emit. ``limit`` is clamped server-side
+ * to [1, 100]. ``sessionId`` narrows to events with matching
+ * ``_session_id`` on the persisted payload; omit to get the last N
+ * turns across all sessions for the current tenant.
+ */
+export async function fetchTurnHistory(
+  opts: { limit?: number; sessionId?: string } = {},
+): Promise<TurnHistoryResponse> {
+  const params = new URLSearchParams()
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit))
+  if (opts.sessionId) params.set("session_id", opts.sessionId)
+  const qs = params.toString()
+  return request<TurnHistoryResponse>(
+    `/runtime/turns${qs ? `?${qs}` : ""}`,
+  )
 }
 
 export async function validateDag(

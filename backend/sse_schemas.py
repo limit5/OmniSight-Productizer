@@ -490,6 +490,74 @@ class SSETurnMetrics(BaseModel):
     timestamp: str = ""
 
 
+class SSETurnMessagePart(BaseModel):
+    """One LLM message inside a ``turn.complete`` payload.
+
+    ZZ.B1 #304-1 checkbox 3: the prompt (system / user / tool) + the
+    assistant response captured at the end of an LLM turn. ``tokens``
+    is the per-message prompt-token contribution when the provider
+    exposes it; ``None`` when unattributable so the UI can distinguish
+    "zero tokens" from "don't know".
+    """
+    role: str  # "system" | "user" | "assistant" | "tool"
+    content: str = ""
+    tokens: Optional[int] = None
+    tool_name: Optional[str] = None
+
+
+class SSETurnToolCall(BaseModel):
+    """One tool invocation inside a ``turn.complete`` payload.
+
+    ZZ.B1 #304-1 checkbox 3: args / result / duration_ms are optional
+    because the summarizer path only knows ``{tool_name, success}``
+    today. Populated when the tool executor carries the extra metadata.
+    """
+    name: str
+    success: bool = True
+    args: Optional[dict] = None
+    result: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+class SSETurnComplete(BaseModel):
+    """turn.complete — ZZ.B1 #304-1 checkbox 3 per-turn terminal event.
+
+    Emitted once per LLM turn from
+    :class:`backend.agents.llm.TokenTrackingCallback` after
+    :func:`emit_turn_metrics`. Carries the richer payload the
+    ``<TurnDetailDrawer>`` needs (messages, per-tool-call detail,
+    backend-authoritative cost) so the frontend can replace its
+    interim frontend-estimated cost + "Waiting for turn.complete"
+    placeholders.
+
+    Persisted to ``event_log`` so ``GET /runtime/turns`` can hand
+    the last N turns to a newly-connected client instead of waiting
+    for the next live emit to populate the ring buffer.
+    """
+    turn_id: str
+    provider: Optional[str] = None
+    model: str
+    agent_type: Optional[str] = None
+    task_id: Optional[str] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_used: int = 0
+    context_limit: Optional[int] = None
+    context_usage_pct: Optional[float] = None
+    latency_ms: int = 0
+    cache_read_tokens: int = 0
+    cache_create_tokens: int = 0
+    cost_usd: Optional[float] = None
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    summary: Optional[str] = None
+    messages: list[SSETurnMessagePart] = Field(default_factory=list)
+    tool_calls: list[SSETurnToolCall] = Field(default_factory=list)
+    tool_call_count: int = 0
+    tool_failure_count: int = 0
+    timestamp: str = ""
+
+
 class SSEHostMetricsTick(BaseModel):
     """host.metrics.tick — H1 5s whole-host sampling push.
 
@@ -544,6 +612,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "turn_metrics": SSETurnMetrics,
     # ZZ.A3 #303-3: per-turn tool-execution summary for TokenUsageStats card
     "turn_tool_stats": SSETurnToolStats,
+    # ZZ.B1 #304-1 checkbox 3: per-turn terminal event (messages + tools + cost)
+    "turn.complete": SSETurnComplete,
     # Q.3-SUB-1 (#297): cross-device workflow_run state push
     "workflow_updated": SSEWorkflowUpdated,
     # Q.3-SUB-3 (#297): cross-device notification read-state push

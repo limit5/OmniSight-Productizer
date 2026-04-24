@@ -28,6 +28,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     subscribeEvents: vi.fn(),
+    fetchTurnHistory: vi.fn(),
   }
 })
 
@@ -47,6 +48,7 @@ beforeEach(() => {
 function makeTurn(overrides: Partial<TurnCardData> = {}): TurnCardData {
   const base: TurnCardData = {
     turnNumber: 1,
+    turnId: null,
     timestamp: "2026-04-24T00:00:00.000Z",
     tsMs: Date.parse("2026-04-24T00:00:00.000Z"),
     model: "claude-opus-4-7",
