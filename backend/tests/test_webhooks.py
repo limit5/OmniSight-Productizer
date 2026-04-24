@@ -198,15 +198,30 @@ class TestGerritEventRouting:
 
     Covers Y-prep.1 (#287). See the block comment above for the full
     rationale.
+
+    All three tests carry the ``p0`` marker (Y-prep.1 #287 fifth
+    sub-bullet — "CI gate：這三個測試加到 pytest.ini 的 p0 marker，
+    不准 skip"). The no-skip enforcement is wired in
+    ``backend/tests/conftest.py`` — see the docstring on
+    ``pytest_collection_modifyitems`` / ``pytest_runtest_makereport``
+    there for the exact contract.
     """
 
+    @pytest.mark.p0
     @pytest.mark.asyncio
     async def test_patchset_created_dispatches_to_on_patchset_created(
         self, client, monkeypatch,
     ):
         """`patchset-created` payload → `_on_patchset_created(conn, body)`
         called exactly once with the parsed event; sibling handlers
-        must not fire."""
+        must not fire.
+
+        Y-prep.1 #287 CI gate — this test is part of the ``p0`` marker
+        set. The conftest enforcement hook fails collection if a
+        ``@pytest.mark.skip`` / ``@pytest.mark.skipif(True, ...)`` lands
+        on this test, and converts an inline ``pytest.skip()`` outcome
+        into a failure. Do not skip this test locally to silence a
+        flake — fix the root cause or talk to the team instead."""
         from backend.routers import webhooks
 
         mock_patchset = AsyncMock()
@@ -251,13 +266,18 @@ class TestGerritEventRouting:
         mock_comment.assert_not_called()
         mock_merged.assert_not_called()
 
+    @pytest.mark.p0
     @pytest.mark.asyncio
     async def test_comment_added_dispatches_to_on_comment_added(
         self, client, monkeypatch,
     ):
         """`comment-added` payload → `_on_comment_added(body)` called
         exactly once with the parsed event; sibling handlers must not
-        fire."""
+        fire.
+
+        Y-prep.1 #287 CI gate — see
+        ``test_patchset_created_dispatches_to_on_patchset_created`` for
+        the p0-no-skip policy."""
         from backend.routers import webhooks
 
         mock_patchset = AsyncMock()
@@ -299,13 +319,18 @@ class TestGerritEventRouting:
         mock_patchset.assert_not_called()
         mock_merged.assert_not_called()
 
+    @pytest.mark.p0
     @pytest.mark.asyncio
     async def test_change_merged_dispatches_to_on_change_merged(
         self, client, monkeypatch,
     ):
         """`change-merged` payload → `_on_change_merged(body)` called
         exactly once with the parsed event; sibling handlers must not
-        fire."""
+        fire.
+
+        Y-prep.1 #287 CI gate — see
+        ``test_patchset_created_dispatches_to_on_patchset_created`` for
+        the p0-no-skip policy."""
         from backend.routers import webhooks
 
         mock_patchset = AsyncMock()

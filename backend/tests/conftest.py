@@ -70,6 +70,137 @@ def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_tmp, ignore_errors=True)
 
 
+# ─── Y-prep.1 #287 — ``p0`` CI gate: cannot be skipped ──────────────────
+#
+# The ``p0`` marker (registered in ``backend/pytest.ini``) tags a small
+# set of production-critical contract tests — currently the three
+# Gerrit dispatcher routing tests in
+# ``backend/tests/test_webhooks.py::TestGerritEventRouting``. The policy
+# bullet says "不准 skip" (must not be skipped). Two enforcement hooks:
+#
+# 1. ``pytest_collection_modifyitems`` — fails collection if a p0 test
+#    is declared with a static skip marker. Covers:
+#      - ``@pytest.mark.skip`` (unconditional skip — always a mistake on
+#        a CI gate),
+#      - ``@pytest.mark.skipif(True, ...)`` or ``@pytest.mark.skipif(
+#        constant_truthy, ...)`` (condition that is provably true at
+#        collection time).
+#    ``@pytest.mark.skipif(False, ...)`` is benign and stays allowed —
+#    pytest will execute the test normally; we only reject skips that
+#    actually skip.
+#
+# 2. ``pytest_runtest_makereport`` — if a p0 test triggers a runtime
+#    ``pytest.skip()`` / ``pytest.importorskip()`` during the ``call``
+#    phase (i.e. the body skips instead of running), converts the
+#    ``Skipped`` outcome into ``Failed``. Setup / teardown skips are
+#    left alone — that is usually a legitimate fixture-level environment
+#    gate (e.g. ``pg_test_dsn`` skipping when ``OMNI_TEST_PG_URL`` is
+#    unset), and retrofitting a "no-skip" policy onto the setup path
+#    would require a broader refactor than this CI-gate bullet asks
+#    for. The authoritative signal is what the test body decides once
+#    pytest actually starts running it.
+#
+# The policy is intentionally conservative — if somebody really, truly
+# needs to silence a p0 test for an emergency, removing the marker is
+# a single-line change that is visible in the diff and forces a
+# discussion.
+
+
+def _p0_marker_selects_skip(marker) -> tuple[bool, str]:
+    """Return ``(should_reject, reason)`` for a skip-family marker on a
+    p0 test.
+
+    ``@pytest.mark.skip`` is always rejected.
+    ``@pytest.mark.skipif(cond, ...)`` is rejected only if ``cond`` is
+    a truthy literal at collection time. ``skipif(False, ...)`` /
+    ``skipif(0, ...)`` / ``skipif(None, ...)`` are treated as no-ops and
+    left alone — they do not actually cause a skip.
+    """
+    if marker.name == "skip":
+        return True, "@pytest.mark.skip"
+    if marker.name == "skipif":
+        # skipif's first positional arg is the condition. Runtime-evaluated
+        # expressions (``skipif(platform.system() == 'Windows', ...)``)
+        # do reach here as whatever the expression evaluated to at
+        # collection time — pytest has already resolved it before this
+        # hook runs. A truthy value means the test would be skipped;
+        # that is the case we reject.
+        if marker.args and marker.args[0]:
+            reason = marker.kwargs.get("reason") or repr(marker.args[0])
+            return True, f"@pytest.mark.skipif({reason!r})"
+        return False, ""
+    return False, ""
+
+
+def pytest_collection_modifyitems(config, items):
+    """Fail collection if a ``p0`` test carries a static skip marker.
+
+    Y-prep.1 #287 CI gate — see the block comment at the top of this
+    section for the full policy rationale.
+    """
+    import pytest
+
+    offenders = []
+    for item in items:
+        if item.get_closest_marker("p0") is None:
+            continue
+        for marker in item.iter_markers():
+            rejected, reason = _p0_marker_selects_skip(marker)
+            if rejected:
+                offenders.append(f"{item.nodeid} ← {reason}")
+                break
+    if offenders:
+        # Use UsageError so pytest exits with code 4 (usage error) not 1
+        # (test failure) — the signal to CI is "test config broken", not
+        # "code broken". The message lists every offender so the author
+        # doesn't have to re-run to find the next one.
+        raise pytest.UsageError(
+            "p0 CI-gate violation: the following tests are marked "
+            "``@pytest.mark.p0`` but ALSO carry a skip directive. "
+            "p0 tests must not be skipped (Y-prep.1 #287). Remove "
+            "the skip decorator, or remove the p0 marker if the test "
+            "truly belongs in a different tier.\n  "
+            + "\n  ".join(offenders)
+        )
+
+
+try:
+    import pytest as _pytest
+
+    @_pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_runtest_makereport(item, call):
+        """Convert a runtime ``pytest.skip()`` in a p0 test's body into a
+        failure.
+
+        Only intercepts the ``call`` phase — a setup-phase skip (e.g.
+        ``pg_test_dsn`` fixture skipping when the test DB is unavailable)
+        is a legitimate environment gate and is left alone. The body
+        skip is the case we care about: once the test is actually
+        running, a ``pytest.skip("todo")`` is a silent CI-gate hole.
+        """
+        outcome = yield
+        report = outcome.get_result()
+        if report.when != "call":
+            return
+        if item.get_closest_marker("p0") is None:
+            return
+        if not report.skipped:
+            return
+        # Flip Skipped → Failed and surface a scannable reason. Keep the
+        # original longrepr around as a breadcrumb — usually that is the
+        # ``pytest.skip()`` message.
+        original_longrepr = report.longrepr
+        report.outcome = "failed"
+        report.longrepr = (
+            f"p0 CI-gate violation: {item.nodeid} called pytest.skip() "
+            "during the test body. p0 tests must not be skipped "
+            "(Y-prep.1 #287). Original skip reason: "
+            f"{original_longrepr!r}"
+        )
+except ImportError:  # pragma: no cover — pytest is always available in tests
+    pass
+
+
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
     """Provide a fresh temporary workspace and activate it for tools."""
