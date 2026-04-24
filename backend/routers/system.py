@@ -1091,16 +1091,15 @@ _budget_flags = _SharedKV("token_budget")
 _token_frozen_shared = _SharedFlag("token_frozen")
 _hourly_ledger_shared = _SharedHourlyLedger(window_seconds=3600.0)
 
-_PRICING = {
-    "claude-opus-4-7": (5.0, 25.0),
-    "claude-sonnet-4-20250514": (3.0, 15.0),
-    "claude-opus-4-20250514": (15.0, 75.0),
-    "gpt-4o": (5.0, 15.0),
-    "gemini-1.5-pro": (0.5, 1.5),
-    "grok-3-mini": (2.0, 10.0),
-    "llama-3.3-70b-versatile": (0.6, 0.6),
-    "deepseek-chat": (0.14, 0.28),
-}
+# Z.3 (#292) checkbox 2: pricing rates moved to config/llm_pricing.yaml +
+# backend/pricing.py::get_pricing. The hard-coded dict that lived here
+# pre-Z.3 is preserved verbatim inside `backend.pricing._HARD_CODED_FALLBACK`
+# so a missing/corrupt YAML at boot still bills at the historical rates.
+# `provider=None` triggers a model-only scan across all provider tables;
+# `track_tokens()` callers (LLM callback at backend/agents/llm.py:675 and
+# tests) only know the model id, so this preserves the legacy call site
+# shape while routing every lookup through the YAML-backed loader.
+from backend.pricing import get_pricing as _get_pricing
 
 
 def track_tokens(model: str, input_tokens: int, output_tokens: int,
@@ -1165,7 +1164,7 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int,
     u["request_count"] += 1
     u["avg_latency"] = int((u["avg_latency"] * (u["request_count"] - 1) + latency_ms) / u["request_count"])
     u["last_used"] = datetime.now().strftime("%H:%M:%S")
-    inp_rate, out_rate = _PRICING.get(model, (1.0, 3.0))
+    inp_rate, out_rate = _get_pricing(None, model)
     u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
     cost_delta = u["cost"] - prev_cost
     _record_hourly(cost_delta)
