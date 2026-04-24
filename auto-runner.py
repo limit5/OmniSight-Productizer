@@ -208,20 +208,26 @@ def run_claude_item(section_title, item_line, section_context):
 9. 完成後，直接輸出「✅ 項目完成」並結束。
 """
 
-    command = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+    # prompt 走 stdin 而不是 argv，避開 Linux MAX_ARG_STRLEN (128 KiB) 上限。
+    # 某些 section（例如 A3）整塊超過 128 KB，直接當 argv 傳會在 execve 階段被內核
+    # 以 E2BIG (Errno 7) 拒絕，連 claude 進程都起不來。
+    command = ["claude", "-p", "--dangerously-skip-permissions"]
 
     start_time = time.time()
+    process = None
     try:
         # start_new_session=True 讓 Claude 子程序不會收到父程序的 SIGINT，
         # 這樣 Ctrl+C 只影響 auto-runner，Claude 可以自然完成當前工作。
         process = subprocess.Popen(
             command,
+            stdin=subprocess.PIPE,
             stdout=sys.stdout,
             stderr=sys.stderr,
             text=True,
             start_new_session=True,
         )
-        exit_code = process.wait(timeout=TASK_TIMEOUT_S)
+        process.communicate(input=prompt, timeout=TASK_TIMEOUT_S)
+        exit_code = process.returncode
         elapsed = time.time() - start_time
 
         if exit_code == 0:
@@ -237,9 +243,14 @@ def run_claude_item(section_title, item_line, section_context):
         elapsed = time.time() - start_time
         print(f"\n⏰ [超時] 項目執行超過 {TASK_TIMEOUT_S}s，強制終止。")
         print(f"⏱️ [耗時] {_fmt_duration(elapsed)}")
-        # 終止整個子程序 session group
+        # 終止整個子程序 session group，然後 communicate() 收乾 stdin/stdout
+        # pipe，避免殭屍程序與 FD 洩漏。
         os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        process.wait()
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            process.communicate()
         return False
     except Exception as e:
         elapsed = time.time() - start_time
