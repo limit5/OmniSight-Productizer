@@ -526,6 +526,76 @@ class TokenBurnRateResponse(BaseModel):
     points: list[TokenBurnRatePoint] = Field(default_factory=list)
 
 
+class PromptVersionEntry(BaseModel):
+    """ZZ.C1 #305-1 checkbox 1: one row in the prompt-version timeline.
+
+    The TODO row phrases the schema as ``(id, agent_type, content_hash,
+    content, created_at, supersedes_id)`` but the shipped table is
+    ``prompt_versions(id, path, version, role, body, body_sha256,
+    created_at, …)`` (see SP-5.2 + ``backend/prompt_registry.py``). We
+    project the real columns onto the spec's field names:
+
+      * ``agent_type``    ← basename of ``path`` without ``.md`` (e.g.
+                            ``backend/agents/prompts/orchestrator.md``
+                            → ``orchestrator``)
+      * ``content``       ← ``body``
+      * ``content_hash``  ← ``body_sha256`` (truncated-friendly SHA-256)
+      * ``supersedes_id`` ← id of the next-older distinct-hash row for
+                            the same path, derived at query time from
+                            the dedupe cursor. Null for the bottom of
+                            the timeline.
+
+    ``version`` + ``role`` are also surfaced so the drawer UI can show
+    "v7 (active)" / "v6 (archive)" without an extra round-trip.
+    """
+
+    id: int
+    agent_type: str
+    content_hash: str
+    content: str
+    content_preview: str = ""
+    created_at: str = ""
+    supersedes_id: Optional[int] = None
+    version: int = 0
+    role: str = ""
+
+
+class PromptVersionsListResponse(BaseModel):
+    """ZZ.C1 envelope for ``GET /runtime/prompts``.
+
+    Echoes the request params (``agent_type`` + resolved ``path``) so
+    the frontend drawer can cache per-agent lists without reparsing the
+    URL, and exposes the raw ``limit`` that was applied after clamping.
+    """
+
+    agent_type: str = ""
+    path: str = ""
+    limit: int = 20
+    versions: list[PromptVersionEntry] = Field(default_factory=list)
+
+
+class PromptDiffResponse(BaseModel):
+    """ZZ.C1 envelope for ``GET /runtime/prompts/diff``.
+
+    The TODO spec phrases the response as "unified diff text" — we keep
+    that literal shape under ``diff`` while also surfacing the two row
+    endpoints' metadata so the drawer can label both sides without a
+    second fetch (``from`` / ``to`` carry agent_type, version, hash,
+    created_at; ``content`` bodies are omitted to keep the payload slim).
+    """
+
+    from_id: int = 0
+    to_id: int = 0
+    agent_type: str = ""
+    from_hash: str = ""
+    to_hash: str = ""
+    from_version: int = 0
+    to_version: int = 0
+    from_created_at: str = ""
+    to_created_at: str = ""
+    diff: str = ""
+
+
 class ProviderInfo(BaseModel):
     id: str
     name: str

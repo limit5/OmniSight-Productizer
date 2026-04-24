@@ -18,7 +18,7 @@ from backend.config import settings as _settings
 logger = logging.getLogger(__name__)
 
 import yaml
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend import auth as _auth
@@ -28,6 +28,7 @@ from backend.routers import _pagination as _pg
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse, TokenUsageEntry,
     TokenBurnRatePoint, TokenBurnRateResponse,
+    PromptVersionEntry, PromptVersionsListResponse, PromptDiffResponse,
     DeployRequest,
 )
 
@@ -1600,6 +1601,267 @@ async def get_compression_stats():
     stats["estimated_tokens_saved"] = stats.get("total_original_bytes", 0) - stats.get("total_compressed_bytes", 0)
     stats["estimated_tokens_saved"] //= 4
     return stats
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  ZZ.C1 #305-1 checkbox 1 — prompt-version timeline + diff
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Clamp for ``GET /runtime/prompts?limit=…``. The row spec names 20 as
+# the default; we hard-cap at 200 so a misconfigured drawer can't pull
+# a year of archive rows onto a single page render.
+_PROMPT_LIMIT_DEFAULT = 20
+_PROMPT_LIMIT_MAX = 200
+
+# Fence for the ``agent_type`` query param. The shipped
+# ``prompt_versions.path`` values are all
+# ``backend/agents/prompts/<slug>.md`` (see
+# ``backend/prompt_registry.py::_normalise_path``). Rejecting anything
+# outside ``[a-z0-9_-]+`` before it reaches the DB means a crafted
+# ``agent_type=../../etc/passwd`` can't sneak through even though the
+# column is the authoritative store — defence-in-depth.
+_AGENT_TYPE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _path_for_agent_type(agent_type: str) -> str:
+    """Resolve the ``agent_type`` query param to the canonical
+    ``prompt_versions.path`` value.
+
+    The shipped registry writes rows with
+    ``backend/agents/prompts/<agent_type>.md`` — we recompose the same
+    string here so the WHERE clause is an exact match (no LIKE, no
+    regex). Raises :class:`fastapi.HTTPException(400)` on a malformed
+    slug.
+    """
+    if not agent_type or not _AGENT_TYPE_RE.match(agent_type):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "agent_type must match [A-Za-z0-9_-]+ (got "
+                f"{agent_type!r}); e.g. 'orchestrator', 'firmware'."
+            ),
+        )
+    return f"backend/agents/prompts/{agent_type}.md"
+
+
+def _agent_type_from_path(path: str) -> str:
+    """Inverse of :func:`_path_for_agent_type` — strip prefix + ``.md``.
+
+    Resilient to ``prompt_versions`` rows that might eventually live
+    outside ``backend/agents/prompts/`` (falls back to the file stem).
+    """
+    stem = path.rsplit("/", 1)[-1]
+    if stem.endswith(".md"):
+        stem = stem[:-3]
+    return stem
+
+
+def _preview(body: str) -> str:
+    """First two non-empty lines of ``body``, joined with ``\\n``.
+
+    Row spec: "timeline list 每版顯示 created_at + hash prefix + content
+    頭兩行". Keeps the preview bounded (~500 chars) so a 40 KB prompt
+    doesn't inflate the list response."""
+    lines: list[str] = []
+    for raw in body.splitlines():
+        stripped = raw.rstrip()
+        if stripped:
+            lines.append(stripped)
+        if len(lines) == 2:
+            break
+    preview = "\n".join(lines)
+    return preview[:500] + ("…" if len(preview) > 500 else "")
+
+
+def _format_prompt_created_at(raw) -> str:
+    """Normalise the ``prompt_versions.created_at`` storage format to an
+    ISO-8601 UTC string for the JSON response.
+
+    The column is ``REAL`` (epoch seconds) in the shipped schema — see
+    ``0016_pg_schema_sync.py``. Returning epoch numerically would force
+    every client to know the Unix-epoch convention; emitting ``…Z`` is
+    immediately human-readable in the drawer and matches the shape of
+    ``/runtime/tokens/burn-rate``'s ``timestamp`` field.
+    """
+    if raw is None:
+        return ""
+    try:
+        from datetime import timezone as _tz
+        return datetime.fromtimestamp(float(raw), tz=_tz.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except (TypeError, ValueError, OverflowError, OSError):
+        # Future-proof: if a migration moves the column to TEXT, pass
+        # the value through verbatim rather than raising.
+        return str(raw)
+
+
+@router.get("/prompts", response_model=PromptVersionsListResponse)
+async def list_prompt_versions(
+    agent_type: str,
+    limit: int = _PROMPT_LIMIT_DEFAULT,
+    conn=Depends(_get_conn),
+):
+    """ZZ.C1 #305-1: return the prompt-version timeline for one agent.
+
+    Deduped by ``content_hash`` (``body_sha256``) — if the same body was
+    re-registered across multiple ``version`` rows (e.g. an
+    ``active → archive → active`` flap that re-emits the same content),
+    only the most recent copy shows in the list. The ``supersedes_id``
+    field on each entry points at the id of the next-older distinct-
+    hash row, so the drawer can anchor "v7 replaced v5 at HH:MM" lines
+    without a second request.
+
+    Module-global audit (SOP Step 1): ``_PROMPT_LIMIT_DEFAULT`` /
+    ``_PROMPT_LIMIT_MAX`` / ``_AGENT_TYPE_RE`` are module-const literals
+    — every uvicorn worker derives the same values from source (SOP
+    acceptable answer #1).
+    """
+    path = _path_for_agent_type(agent_type)
+
+    # Clamp the limit. Negative / zero caps at 1 so the frontend drawer
+    # always gets at least the head version if any row exists; oversize
+    # values fall back to the hard cap. We deliberately avoid ``limit
+    # or default`` here because Python treats 0 as falsy — a client
+    # asking for limit=0 must clamp to 1, not silently jump to 20.
+    effective_limit = max(1, min(int(limit), _PROMPT_LIMIT_MAX))
+
+    # Fetch more than the target so dedupe-by-hash can still return up
+    # to ``effective_limit`` distinct hashes in the pathological case
+    # where every other row collides. 4× is plenty in practice — a
+    # prompt file that flaps 4× on average per ship would itself be a
+    # finding — and hard-capped at ``_PROMPT_LIMIT_MAX × 4`` so we
+    # never scan the entire archive even on a crafted query.
+    overfetch = min(effective_limit * 4, _PROMPT_LIMIT_MAX * 4)
+
+    rows = await conn.fetch(
+        """
+        SELECT id, path, version, role, body, body_sha256,
+               created_at, promoted_at, rolled_back_at, rollback_reason
+        FROM prompt_versions
+        WHERE path = $1
+        ORDER BY version DESC
+        LIMIT $2
+        """,
+        path,
+        overfetch,
+    )
+
+    # Dedupe by hash while preserving the newest-first order. Since
+    # rows are ORDER BY version DESC, the first occurrence of a hash
+    # IS the most recent copy.
+    seen_hashes: set[str] = set()
+    entries: list[PromptVersionEntry] = []
+    for row in rows:
+        h = row["body_sha256"]
+        if h in seen_hashes:
+            continue
+        seen_hashes.add(h)
+        entries.append(PromptVersionEntry(
+            id=int(row["id"]),
+            agent_type=agent_type,
+            content_hash=h,
+            content=row["body"] or "",
+            content_preview=_preview(row["body"] or ""),
+            created_at=_format_prompt_created_at(row["created_at"]),
+            supersedes_id=None,  # filled in below
+            version=int(row["version"]),
+            role=row["role"] or "",
+        ))
+        if len(entries) >= effective_limit:
+            break
+
+    # Populate supersedes_id: each entry (newer) supersedes the next
+    # entry in the deduped list (older). Bottom of the timeline → None.
+    for i, entry in enumerate(entries):
+        if i + 1 < len(entries):
+            entry.supersedes_id = entries[i + 1].id
+
+    return PromptVersionsListResponse(
+        agent_type=agent_type,
+        path=path,
+        limit=effective_limit,
+        versions=entries,
+    )
+
+
+@router.get("/prompts/diff", response_model=PromptDiffResponse)
+async def get_prompt_diff(
+    from_: int = Query(..., alias="from", ge=1),
+    to: int = Query(..., ge=1),
+    conn=Depends(_get_conn),
+):
+    """ZZ.C1 #305-1: unified diff between two prompt_versions rows.
+
+    Row spec: "回 unified diff text". We return a Pydantic envelope so
+    the same endpoint can carry both sides' metadata (hash prefix,
+    version, created_at) without forcing the drawer to fetch the list
+    again — the ``diff`` field itself is the verbatim ``difflib.
+    unified_diff`` output (context=3 lines, matching git's default +
+    the "unfold context 預設 3 行" line in the row spec).
+
+    Both ids must resolve to rows sharing the same ``path``; a
+    cross-agent diff is meaningless and rejected with 400 so a
+    misconfigured drawer fails loudly instead of rendering a giant
+    add-everything/remove-everything hunk. Missing ids → 404.
+    """
+    import difflib
+
+    # Sequential fetchrows on the same connection: asyncpg forbids
+    # concurrent operations on a single connection (serialised via
+    # `_stmt_exclusive_section`) so ``asyncio.gather`` would raise
+    # ``InterfaceError: another operation is in progress``.
+    row_from = await conn.fetchrow(
+        "SELECT id, path, version, body, body_sha256, created_at "
+        "FROM prompt_versions WHERE id = $1",
+        from_,
+    )
+    row_to = await conn.fetchrow(
+        "SELECT id, path, version, body, body_sha256, created_at "
+        "FROM prompt_versions WHERE id = $1",
+        to,
+    )
+    if row_from is None:
+        raise HTTPException(status_code=404, detail=f"no prompt_versions id={from_}")
+    if row_to is None:
+        raise HTTPException(status_code=404, detail=f"no prompt_versions id={to}")
+    if row_from["path"] != row_to["path"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"cross-agent diff rejected: from.path={row_from['path']!r} "
+                f"vs to.path={row_to['path']!r}"
+            ),
+        )
+
+    agent_type = _agent_type_from_path(row_from["path"])
+    from_label = f"{agent_type}@v{row_from['version']}"
+    to_label = f"{agent_type}@v{row_to['version']}"
+
+    # ``splitlines(keepends=True)`` keeps trailing newlines so the diff
+    # includes "\\ No newline at end of file" markers when present —
+    # matches `git diff` behaviour operators expect.
+    diff_lines = difflib.unified_diff(
+        (row_from["body"] or "").splitlines(keepends=True),
+        (row_to["body"] or "").splitlines(keepends=True),
+        fromfile=from_label,
+        tofile=to_label,
+        n=3,
+    )
+    diff_text = "".join(diff_lines)
+
+    return PromptDiffResponse(
+        from_id=int(row_from["id"]),
+        to_id=int(row_to["id"]),
+        agent_type=agent_type,
+        from_hash=row_from["body_sha256"],
+        to_hash=row_to["body_sha256"],
+        from_version=int(row_from["version"]),
+        to_version=int(row_to["version"]),
+        from_created_at=_format_prompt_created_at(row_from["created_at"]),
+        to_created_at=_format_prompt_created_at(row_to["created_at"]),
+        diff=diff_text,
+    )
 
 
 @router.delete("/tokens", dependencies=_REQUIRE_ADMIN)
