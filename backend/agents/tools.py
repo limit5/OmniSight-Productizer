@@ -1913,6 +1913,229 @@ async def run_simulation(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  12. MCP (Model Context Protocol) tools — external skill catalogues
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Path to the OmniSight MCP server registry. Not routed through
+# `get_active_workspace()` because the registry lives with project config,
+# not inside agent-isolated workspaces.
+_MCP_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "configs" / "mcp_servers.json"
+_MCP_CALL_TIMEOUT = int(os.environ.get("OMNISIGHT_MCP_CALL_TIMEOUT", "60"))
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+
+
+def _load_mcp_server_spec(name: str) -> dict | None:
+    """Read the MCP registry JSON and return the named server spec, or None."""
+    import json as _json
+    if not _MCP_REGISTRY_PATH.is_file():
+        return None
+    try:
+        data = _json.loads(_MCP_REGISTRY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    servers = data.get("mcpServers") or {}
+    spec = servers.get(name)
+    if not isinstance(spec, dict):
+        return None
+    return spec
+
+
+async def _call_mcp_tool(
+    server_name: str,
+    tool_name: str,
+    arguments: dict,
+    *,
+    timeout: int = _MCP_CALL_TIMEOUT,
+) -> tuple[bool, str]:
+    """Invoke a single MCP tool over stdio JSON-RPC. Returns (ok, text).
+
+    Spawns the server subprocess from the spec in `configs/mcp_servers.json`,
+    performs the MCP `initialize` → `notifications/initialized` → `tools/call`
+    handshake, and returns the flattened text content of the result.
+
+    Module-global state audit (SOP Step 1): none — each invocation is a
+    self-contained subprocess + local asyncio.StreamReader/Writer pair; no
+    module-level caches, pools, or singletons. Safe under
+    `uvicorn --workers N`: every worker spawns its own subprocess.
+
+    Why subprocess-per-call rather than a persistent connection: MCP servers
+    are intentionally cheap to start (stdio + JSON-RPC); holding a persistent
+    Node process per worker would complicate shutdown/cleanup with no latency
+    win for a tool the agent calls on-demand, not in hot path.
+    """
+    import json as _json
+
+    spec = _load_mcp_server_spec(server_name)
+    if spec is None:
+        return False, f"MCP server {server_name!r} not found in {_MCP_REGISTRY_PATH}"
+    command = spec.get("command")
+    args = list(spec.get("args") or [])
+    env_overrides = spec.get("env") or {}
+    if not command:
+        return False, f"MCP server {server_name!r} missing 'command' in registry"
+
+    env = os.environ.copy()
+    env.update({k: str(v) for k, v in env_overrides.items()})
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            command,
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError:
+        return False, (
+            f"MCP launcher {command!r} not found on PATH — install Node/npm "
+            f"or adjust configs/mcp_servers.json for {server_name!r}"
+        )
+    except Exception as exc:
+        return False, f"Failed to spawn MCP server {server_name!r}: {exc}"
+
+    async def _send(payload: dict) -> None:
+        line = (_json.dumps(payload) + "\n").encode("utf-8")
+        proc.stdin.write(line)
+        await proc.stdin.drain()
+
+    async def _recv_response(req_id: int) -> dict:
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                raise RuntimeError("MCP server closed stdout before responding")
+            try:
+                msg = _json.loads(raw.decode("utf-8").strip())
+            except Exception:
+                continue
+            if msg.get("id") == req_id:
+                return msg
+
+    try:
+        async def _do_call() -> dict:
+            await _send({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": _MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "omnisight", "version": "1.0"},
+                },
+            })
+            init_resp = await _recv_response(1)
+            if "error" in init_resp:
+                raise RuntimeError(f"initialize failed: {init_resp['error']}")
+            await _send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            await _send({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+            })
+            return await _recv_response(2)
+
+        response = await asyncio.wait_for(_do_call(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, f"MCP call timed out after {timeout}s ({server_name}/{tool_name})"
+    except Exception as exc:
+        proc.kill()
+        await proc.wait()
+        return False, f"MCP call failed ({server_name}/{tool_name}): {exc}"
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+    if "error" in response:
+        err = response["error"]
+        return False, f"MCP error: {err.get('message', err)}"
+
+    result = response.get("result") or {}
+    if result.get("isError"):
+        pieces = [
+            item.get("text", "") for item in (result.get("content") or [])
+            if item.get("type") == "text"
+        ]
+        return False, "MCP tool reported error: " + "\n".join(pieces).strip()
+
+    content = result.get("content") or []
+    texts = [item.get("text", "") for item in content if item.get("type") == "text"]
+    return True, "\n".join(t for t in texts if t).strip()
+
+
+@tool
+async def android_skill_search(
+    action: str = "search",
+    query: str = "",
+    skill_id: str = "",
+    limit: int = 5,
+) -> str:
+    """Search or fetch Android Skills via the android-skills MCP server.
+
+    Wraps the official skydoves/android-skills-mcp server (registered in
+    `configs/mcp_servers.json`), which exposes Google's Android skill
+    catalogue (Navigation 3 setup, AGP 9 migration, R8 config, ...). Use
+    this before writing Kotlin/Compose/Gradle to pull authoritative
+    best-practice guidance into the agent's context window.
+
+    Args:
+        action: "search" to find skills matching `query`,
+                "list" to enumerate all available skills,
+                "get" to retrieve the full body of a single skill.
+        query: Free-text query for `action="search"` (e.g. "navigation3",
+               "agp 9 migration"). Ignored for list/get.
+        skill_id: Required for `action="get"`. The skill identifier (as
+                  returned by `list`/`search`).
+        limit: Max results to surface for `action="search"` (1–20).
+    """
+    action = (action or "search").strip().lower()
+    if action not in {"search", "list", "get"}:
+        return (
+            f"[ERROR] android_skill_search: unknown action {action!r}. "
+            f"Use 'search', 'list', or 'get'."
+        )
+
+    if action == "search":
+        if not query.strip():
+            return "[ERROR] android_skill_search: 'query' is required for action='search'."
+        safe_limit = max(1, min(int(limit) if limit else 5, 20))
+        tool_name = "search_skills"
+        arguments: dict = {"query": query.strip(), "limit": safe_limit}
+    elif action == "list":
+        tool_name = "list_skills"
+        arguments = {}
+    else:  # "get"
+        if not skill_id.strip():
+            return "[ERROR] android_skill_search: 'skill_id' is required for action='get'."
+        tool_name = "get_skill"
+        arguments = {"skill_id": skill_id.strip()}
+
+    ok, payload = await _call_mcp_tool("android-skills", tool_name, arguments)
+    if not ok:
+        return f"[ERROR] android-skills MCP: {payload}"
+    if not payload:
+        return f"[OK] android-skills/{tool_name}: (empty response)"
+
+    max_chars = 20_000
+    if len(payload) > max_chars:
+        payload = payload[:max_chars] + f"\n... [truncated, {len(payload) - max_chars} more chars]"
+    return f"[OK] android-skills/{tool_name}\n{payload}"
+
+
+MCP_TOOLS = [android_skill_search]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Tool registry
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1928,16 +2151,16 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS}
 
 AGENT_TOOLS: dict[str, list] = {
     "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS,
+    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS,
     "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
     "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
     "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
-    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
-    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
+    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS,
+    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS,
     "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
     "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
     "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
