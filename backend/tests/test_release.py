@@ -245,7 +245,14 @@ class TestUploadFunctions:
 
     @pytest.mark.asyncio
     async def test_github_upload_success_mock(self):
-        """M7: Test GitHub upload with mocked token + subprocess."""
+        """M7: Test GitHub upload with mocked token + subprocess.
+
+        Phase 5-6 (#multi-account-forge): the GitHub token resolution
+        now flows through :func:`backend.git_credentials.pick_default`
+        so this test patches the resolver rather than reaching into
+        ``settings.github_token`` directly — reflecting the
+        operational contract where tokens live in ``git_accounts``.
+        """
         from unittest.mock import patch, AsyncMock
         from backend.release import upload_to_github
 
@@ -253,9 +260,12 @@ class TestUploadFunctions:
         mock_proc.communicate = AsyncMock(return_value=(b"https://github.com/owner/repo/releases/v1.0.0\n", b""))
         mock_proc.returncode = 0
 
+        async def _fake_pick_default(platform, **_kw):
+            return {"token": "ghp_fake_token"} if platform == "github" else None
+
         with patch("backend.config.settings") as mock_settings, \
+             patch("backend.git_credentials.pick_default", side_effect=_fake_pick_default), \
              patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            mock_settings.github_token = "ghp_fake_token"
             mock_settings.github_repo = "owner/repo"
             mock_settings.release_draft = False
             result = await upload_to_github("/tmp/bundle.tar.gz", "1.0.0", {"artifact_count": 3})
@@ -273,9 +283,12 @@ class TestUploadFunctions:
         mock_proc.communicate = AsyncMock(return_value=(b"", b"Not Found"))
         mock_proc.returncode = 1
 
+        async def _fake_pick_default(platform, **_kw):
+            return {"token": "ghp_fake"} if platform == "github" else None
+
         with patch("backend.config.settings") as mock_settings, \
+             patch("backend.git_credentials.pick_default", side_effect=_fake_pick_default), \
              patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            mock_settings.github_token = "ghp_fake"
             mock_settings.github_repo = "owner/repo"
             mock_settings.release_draft = True
             result = await upload_to_github("/tmp/bundle.tar.gz", "1.0.0", {})

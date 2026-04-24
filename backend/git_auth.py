@@ -115,18 +115,25 @@ def get_gitlab_api_url(remote_url: str) -> str:
 def _get_token_for_url(url: str) -> str:
     """Return the appropriate token for a given remote URL.
 
-    Uses the credential registry (per-host) with scalar fallback.
+    Uses the credential registry (per-host) via the sync shim. Phase
+    5-6 (#multi-account-forge): the legacy scalar fallback on the
+    except branch is gone because
+    :func:`backend.git_credentials.get_token_for_url` already drives
+    through :func:`_build_registry`, which synthesises ``default-
+    github`` / ``default-gitlab`` virtual rows from ``settings`` —
+    a duplicate direct read here would just hide failures.
+
+    This is the **sync** entry point used by :func:`get_auth_env` for
+    git subprocess env setup. Async call sites should prefer
+    :func:`pick_account_for_url` / :func:`pick_default` directly to
+    honour operator-added ``git_accounts`` rows; the sync path only
+    sees them once row 5-5's auto-migration moves legacy values into
+    the table and the shim's scalar branch no longer fires.
     """
     try:
         from backend.git_credentials import get_token_for_url
         return get_token_for_url(url)
     except Exception:
-        # Fallback to legacy scalar lookup
-        platform = detect_platform(url)
-        if platform == "github" and settings.github_token:
-            return settings.github_token
-        if platform == "gitlab" and settings.gitlab_token:
-            return settings.gitlab_token
         return ""
 
 

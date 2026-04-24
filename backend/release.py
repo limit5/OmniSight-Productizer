@@ -223,14 +223,25 @@ async def upload_to_github(bundle_path: str, version: str, manifest: dict) -> di
     """Upload release bundle to GitHub Releases.
 
     Creates a release (draft by default) and uploads the bundle as an asset.
+
+    Phase 5-6 (#multi-account-forge): the GitHub token is resolved via
+    :func:`backend.git_credentials.pick_default` so operator-configured
+    ``git_accounts`` rows are honoured; the resolver's internal shim
+    falls back to ``settings.github_token`` when the table is empty,
+    preserving legacy behaviour during the rollout ramp.
     """
     from backend.config import settings
+    from backend.git_credentials import pick_default
 
-    if not settings.github_token or not settings.github_repo:
+    if not settings.github_repo:
+        return {"status": "skipped", "reason": "github_token or github_repo not configured"}
+
+    account = await pick_default("github")
+    token = (account or {}).get("token") or ""
+    if not token:
         return {"status": "skipped", "reason": "github_token or github_repo not configured"}
 
     repo = settings.github_repo
-    token = settings.github_token
     tag = f"v{version}" if not version.startswith("v") else version
     draft = settings.release_draft
 
@@ -262,15 +273,29 @@ async def upload_to_github(bundle_path: str, version: str, manifest: dict) -> di
 
 
 async def upload_to_gitlab(bundle_path: str, version: str, manifest: dict) -> dict:
-    """Upload release bundle to GitLab Releases."""
-    from backend.config import settings
+    """Upload release bundle to GitLab Releases.
 
-    if not settings.gitlab_token or not settings.gitlab_project_id:
+    Phase 5-6 (#multi-account-forge): the GitLab token + base URL are
+    resolved via :func:`backend.git_credentials.pick_default` so self-
+    hosted instances tracked as ``git_accounts`` rows are honoured
+    (the row's ``instance_url`` takes precedence over the legacy
+    ``settings.gitlab_url``). The resolver's internal shim falls back
+    to ``settings.gitlab_token`` + ``settings.gitlab_url`` when the
+    table is empty.
+    """
+    from backend.config import settings
+    from backend.git_credentials import pick_default
+
+    if not settings.gitlab_project_id:
+        return {"status": "skipped", "reason": "gitlab_token or gitlab_project_id not configured"}
+
+    account = await pick_default("gitlab")
+    token = (account or {}).get("token") or ""
+    if not token:
         return {"status": "skipped", "reason": "gitlab_token or gitlab_project_id not configured"}
 
     project = settings.gitlab_project_id
-    token = settings.gitlab_token
-    base_url = settings.gitlab_url or "https://gitlab.com"
+    base_url = (account or {}).get("instance_url") or settings.gitlab_url or "https://gitlab.com"
     tag = f"v{version}" if not version.startswith("v") else version
 
     try:

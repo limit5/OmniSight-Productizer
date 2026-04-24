@@ -14,6 +14,7 @@ from urllib.parse import quote_plus
 
 from backend.config import settings
 from backend.git_auth import detect_platform, parse_repo_path, get_gitlab_api_url
+from backend.git_credentials import pick_account_for_url, pick_default
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +72,21 @@ async def _create_github_pr(
     """Create a GitHub Pull Request using the ``gh`` CLI."""
     repo_slug = parse_repo_path(remote_url)
 
-    # Build env with GitHub token
+    # Build env with GitHub token — Phase 5-6 (#multi-account-forge):
+    # resolve via ``pick_account_for_url`` so a ``url_patterns`` match
+    # on the remote URL wins over the platform default, and so
+    # operator-added ``git_accounts`` rows are honoured. Legacy
+    # ``settings.github_token`` flows in through the resolver's
+    # internal ``_build_registry`` fallback when ``git_accounts`` is
+    # empty — no separate fallback branch is needed here.
     import os
     env = {**os.environ}
-    if settings.github_token:
-        env["GITHUB_TOKEN"] = settings.github_token
+    account = await pick_account_for_url(remote_url)
+    if account is None:
+        account = await pick_default("github")
+    token = (account or {}).get("token") or ""
+    if token:
+        env["GITHUB_TOKEN"] = token
 
     proc = await asyncio.create_subprocess_exec(
         "gh", "pr", "create",
@@ -122,7 +133,17 @@ async def _create_gitlab_mr(
     description: str,
 ) -> dict:
     """Create a GitLab Merge Request using the REST API."""
-    token = settings.gitlab_token
+    # Phase 5-6 (#multi-account-forge): prefer a ``url_patterns``
+    # match on the remote URL over the platform default so self-
+    # hosted instances with custom org/user accounts are picked
+    # correctly. The resolver falls back to the legacy shim (which
+    # reads ``settings.gitlab_token``) when ``git_accounts`` has no
+    # matching row, preserving backward-compatible behaviour during
+    # the rollout ramp.
+    account = await pick_account_for_url(remote_url)
+    if account is None:
+        account = await pick_default("gitlab")
+    token = (account or {}).get("token") or ""
     if not token:
         return {"error": "No OMNISIGHT_GITLAB_TOKEN configured"}
 

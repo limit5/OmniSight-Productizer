@@ -624,19 +624,19 @@ def find_credential_for_url(url: str) -> dict | None:
 def get_token_for_url(url: str) -> str:
     """Get the authentication token for a URL from the registry (SYNC).
 
-    Falls back to scalar config if no registry match.
+    Phase 5-6 (#multi-account-forge): the legacy scalar fallback is
+    gone — :func:`_build_registry` already synthesises ``default-
+    github`` / ``default-gitlab`` virtual rows from
+    ``settings.github_token`` / ``settings.gitlab_token``, so a
+    platform-agnostic duplicate fallback here only hid the real
+    "no credential for this host" signal (and, worse, silently
+    leaked the github.com token to a ghe.mycompany.com clone).
+    Returning ``""`` when :func:`find_credential_for_url` can't match
+    surfaces the missing-credential state to callers cleanly.
     """
     cred = find_credential_for_url(url)
     if cred and cred.get("token"):
         return cred["token"]
-
-    # Legacy fallback
-    from backend.git_auth import detect_platform
-    platform = detect_platform(url)
-    if platform == "github" and settings.github_token:
-        return settings.github_token
-    if platform == "gitlab" and settings.gitlab_token:
-        return settings.gitlab_token
     return ""
 
 

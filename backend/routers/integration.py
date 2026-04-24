@@ -1685,11 +1685,19 @@ async def _test_github() -> dict:
     # ride on the `X-OAuth-Scopes` response header, so we include `-D -` to
     # capture headers and split on the blank line. Header parsing mirrors
     # `_probe_github_token` so the two paths stay consistent.
-    if not settings.github_token:
+    #
+    # Phase 5-6 (#multi-account-forge): the token is resolved via
+    # ``pick_default("github")`` so operator-configured ``git_accounts``
+    # rows are honoured; resolver's legacy shim falls back to
+    # ``settings.github_token`` when the table is empty.
+    from backend.git_credentials import pick_default
+    account = await pick_default("github")
+    token = (account or {}).get("token") or ""
+    if not token:
         return {"status": "not_configured", "message": "GitHub token not set"}
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", "-D", "-",
-        "-H", f"Authorization: token {settings.github_token}",
+        "-H", f"Authorization: token {token}",
         "https://api.github.com/user",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
@@ -1722,11 +1730,24 @@ async def _test_gitlab() -> dict:
     # token valid" probe (it requires authentication on self-managed
     # instances), and it returns the instance version which is more useful
     # for diagnostics than the bare username.
-    if not settings.gitlab_token:
+    #
+    # Phase 5-6 (#multi-account-forge): the token and self-hosted base
+    # URL are resolved via ``pick_default("gitlab")``. The registry row's
+    # ``instance_url`` takes precedence over the legacy
+    # ``settings.gitlab_url`` scalar so multi-instance deployments pick
+    # the right base automatically; the legacy shim supplies both when
+    # ``git_accounts`` is empty.
+    from backend.git_credentials import pick_default
+    account = await pick_default("gitlab")
+    token = (account or {}).get("token") or ""
+    if not token:
         return {"status": "not_configured", "message": "GitLab token not set"}
-    base = (settings.gitlab_url or "https://gitlab.com").rstrip("/")
+    base = (
+        ((account or {}).get("instance_url") or settings.gitlab_url or "https://gitlab.com")
+        .rstrip("/")
+    )
     proc = await asyncio.create_subprocess_exec(
-        "curl", "-s", "-H", f"PRIVATE-TOKEN: {settings.gitlab_token}",
+        "curl", "-s", "-H", f"PRIVATE-TOKEN: {token}",
         f"{base}/api/v4/version",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )

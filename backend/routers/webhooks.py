@@ -500,12 +500,25 @@ async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
 
 
 async def _trigger_ci_pipelines() -> None:
-    """Trigger configured CI/CD pipelines after a Gerrit merge."""
-    if settings.ci_github_actions_enabled and settings.github_token:
+    """Trigger configured CI/CD pipelines after a Gerrit merge.
+
+    Phase 5-6 (#multi-account-forge): GitHub + GitLab token + URL reads
+    run through :func:`backend.git_credentials.pick_default` so operator-
+    added ``git_accounts`` rows are honoured. Resolver falls back to the
+    legacy shim (``settings.github_token`` / ``settings.gitlab_token`` /
+    ``settings.gitlab_url``) when the table is empty.
+    """
+    from backend.git_credentials import pick_default
+    gh_account = await pick_default("github") if settings.ci_github_actions_enabled else None
+    gh_token = (gh_account or {}).get("token") or ""
+    if settings.ci_github_actions_enabled and gh_token:
         try:
+            import os as _os
+            gh_env = {**_os.environ, "GH_TOKEN": gh_token}
             proc = await asyncio.create_subprocess_exec(
                 "gh", "workflow", "run", "ci.yml", "-r", "main",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=gh_env,
             )
             await asyncio.wait_for(proc.communicate(), timeout=15)
             if proc.returncode == 0:
@@ -553,18 +566,21 @@ async def _trigger_ci_pipelines() -> None:
                     from backend import metrics as _m
                     _m.subprocess_orphan_total.labels(target="jenkins").inc()
 
-    if settings.ci_gitlab_enabled and settings.gitlab_token:
+    gl_account = await pick_default("gitlab") if settings.ci_gitlab_enabled else None
+    gl_token = (gl_account or {}).get("token") or ""
+    gl_base = (gl_account or {}).get("instance_url") or settings.gitlab_url or "https://gitlab.com"
+    if settings.ci_gitlab_enabled and gl_token:
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl", "-s", "-X", "POST",
-                f"{settings.gitlab_url}/api/v4/projects/{settings.gerrit_project.replace('/', '%2F')}/pipeline",
+                f"{gl_base}/api/v4/projects/{settings.gerrit_project.replace('/', '%2F')}/pipeline",
                 "-K", "-",
                 "-d", "ref=main",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            tok = (settings.gitlab_token or "").replace('"', '\\"')
+            tok = gl_token.replace('"', '\\"')
             cfg = f'header = "PRIVATE-TOKEN: {tok}"\n'.encode()
             try:
                 await asyncio.wait_for(proc.communicate(input=cfg), timeout=15)

@@ -125,14 +125,22 @@ def _parse_github_issue_url(url: str) -> tuple[str, str]:
 
 async def _sync_github(issue_url: str, status: str, comment: str) -> dict:
     import os
+    from backend.git_credentials import pick_account_for_url, pick_default
     repo, number = _parse_github_issue_url(issue_url)
     if not repo or not number:
         return {"status": "error", "message": f"Cannot parse GitHub issue URL: {issue_url}"}
 
     gh_state = _STATUS_MAP_GITHUB.get(status, "open")
     env = {**os.environ}
-    if settings.github_token:
-        env["GITHUB_TOKEN"] = settings.github_token
+    # Phase 5-6 (#multi-account-forge): resolve GitHub token via the
+    # multi-account registry (url_patterns match → platform default →
+    # legacy shim fallback to ``settings.github_token``).
+    account = await pick_account_for_url(issue_url)
+    if account is None:
+        account = await pick_default("github")
+    token = (account or {}).get("token") or ""
+    if token:
+        env["GITHUB_TOKEN"] = token
 
     # Update state
     proc = await asyncio.create_subprocess_exec(
@@ -163,13 +171,19 @@ async def _sync_github(issue_url: str, status: str, comment: str) -> dict:
 
 async def _comment_github(issue_url: str, comment: str) -> dict:
     import os
+    from backend.git_credentials import pick_account_for_url, pick_default
     repo, number = _parse_github_issue_url(issue_url)
     if not repo or not number:
         return {"status": "error", "message": "Cannot parse GitHub issue URL"}
 
     env = {**os.environ}
-    if settings.github_token:
-        env["GITHUB_TOKEN"] = settings.github_token
+    # Phase 5-6: same resolver path as ``_sync_github``.
+    account = await pick_account_for_url(issue_url)
+    if account is None:
+        account = await pick_default("github")
+    token = (account or {}).get("token") or ""
+    if token:
+        env["GITHUB_TOKEN"] = token
 
     proc = await asyncio.create_subprocess_exec(
         "gh", "issue", "comment", number, "--repo", repo, "--body", comment,
@@ -202,11 +216,17 @@ def _parse_gitlab_issue_url(url: str) -> tuple[str, str, str]:
 
 
 async def _sync_gitlab(issue_url: str, status: str, comment: str) -> dict:
+    from backend.git_credentials import pick_account_for_url, pick_default
     api_base, project_enc, iid = _parse_gitlab_issue_url(issue_url)
     if not project_enc or not iid:
         return {"status": "error", "message": f"Cannot parse GitLab issue URL: {issue_url}"}
 
-    token = settings.gitlab_token
+    # Phase 5-6: ``url_patterns`` match → platform default → legacy
+    # shim (``settings.gitlab_token``).
+    account = await pick_account_for_url(issue_url)
+    if account is None:
+        account = await pick_default("gitlab")
+    token = (account or {}).get("token") or ""
     if not token:
         return {"status": "error", "message": "No GitLab token configured"}
 
@@ -230,11 +250,16 @@ async def _sync_gitlab(issue_url: str, status: str, comment: str) -> dict:
 
 
 async def _comment_gitlab(issue_url: str, comment: str) -> dict:
+    from backend.git_credentials import pick_account_for_url, pick_default
     api_base, project_enc, iid = _parse_gitlab_issue_url(issue_url)
     if not project_enc or not iid:
         return {"status": "error"}
 
-    token = settings.gitlab_token
+    # Phase 5-6: same resolver path as ``_sync_gitlab``.
+    account = await pick_account_for_url(issue_url)
+    if account is None:
+        account = await pick_default("gitlab")
+    token = (account or {}).get("token") or ""
     if not token:
         return {"status": "error", "message": "No GitLab token"}
 
