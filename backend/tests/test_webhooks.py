@@ -104,8 +104,92 @@ def _gerrit_enabled_with_secret(secret: str):
 
 
 def _sign(secret: str, raw: bytes) -> str:
-    """Compute the X-Gerrit-Signature header value for a raw body."""
+    """Compute the X-Gerrit-Signature header value for a raw body.
+
+    Uses the same HMAC-SHA256 construction as ``backend/routers/webhooks.py:67``
+    — keeping the test path and the prod verifier on the same primitive
+    is the whole point of "verifier and handler validated in sync"
+    (Y-prep.1 #287, fourth sub-bullet). Any drift between this helper
+    and the verifier (e.g. someone swaps the prod side to SHA512 or
+    base64 hex-encoding) shows up as a 401 here, not a silently-skipped
+    verifier. Don't replace with a Mock — the assertion that this is
+    the real primitive is what gives ``gerrit_sign`` fixture its
+    contract value.
+    """
     return hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+
+
+@pytest.fixture
+def gerrit_sign():
+    """pytest fixture wrapping the real HMAC-SHA256 signer.
+
+    Y-prep.1 #287 fourth sub-bullet — promote the signing helper to a
+    first-class pytest fixture so test code expresses intent at the
+    call site (``signed = gerrit_sign(secret, raw)``) and so the
+    "tests sign with REAL HMAC, never with a Mock" contract is visible
+    in the fixture surface, not buried in a module helper. The
+    underlying ``_sign`` stays in place for the existing test classes
+    above so this row is purely additive.
+    """
+    return _sign
+
+
+@pytest.fixture
+def gerrit_signed_post(client, gerrit_sign):
+    """High-level fixture: POST a JSON body to /webhooks/gerrit with a
+    correctly-signed ``X-Gerrit-Signature`` header.
+
+    Returns an ``async`` callable ``(secret, body, *, signature=None,
+    enable=True)`` that:
+
+      - Serialises ``body`` to JSON, computes the real HMAC-SHA256
+        digest with ``secret`` (or accepts an override ``signature``
+        for negative-path tests that want a tampered/missing/wrong
+        signature),
+      - Pins ``settings.gerrit_enabled = True`` and
+        ``settings.gerrit_webhook_secret = secret`` for the duration of
+        the call (when ``enable`` is True),
+      - Returns the response object so the caller can assert status
+        + body shape.
+
+    Why a fixture and not just a helper: the verifier and handler must
+    be validated in lock-step (Y-prep.1 #287 fourth sub-bullet). Tests
+    that go through this fixture cannot accidentally bypass the
+    verifier — every POST exercises the
+    ``webhooks.py:66-104`` signature path before hitting the dispatcher
+    at ``webhooks.py:109-118``. Having a single fixture surface also
+    makes it visible at code-review time which tests are signed
+    correctly vs. which are deliberately exercising the failure
+    modes.
+    """
+    async def _post(
+        secret: str,
+        body: dict,
+        *,
+        signature: str | None = None,
+        enable: bool = True,
+        omit_signature: bool = False,
+    ):
+        raw = json.dumps(body).encode()
+        headers = {"Content-Type": "application/json"}
+        if not omit_signature:
+            headers["X-Gerrit-Signature"] = (
+                signature if signature is not None
+                else gerrit_sign(secret, raw)
+            )
+        if enable:
+            with _gerrit_enabled_with_secret(secret):
+                return await client.post(
+                    "/api/v1/webhooks/gerrit",
+                    content=raw,
+                    headers=headers,
+                )
+        return await client.post(
+            "/api/v1/webhooks/gerrit",
+            content=raw,
+            headers=headers,
+        )
+    return _post
 
 
 class TestGerritEventRouting:
@@ -760,3 +844,214 @@ class TestGerritChangeMergedReplicationTargetsBoundary:
         for cmd in all_cmds:
             assert 'git push ""' not in cmd
             assert "git push ''" not in cmd
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Y-prep.1 (#287) — verifier ↔ handler synchronisation contract
+# ──────────────────────────────────────────────────────────────────────
+#
+# The four test classes above all exercise the dispatcher / handler
+# layer through a real HMAC-SHA256 signature, but none of them PROVE
+# that the verifier is doing its job — every payload they post carries
+# a CORRECT signature, so a regression that makes the verifier always
+# return True (e.g. a stray ``scalar_ok = True`` early-out, a flipped
+# polarity at ``webhooks.py:103``, or someone who "speeds up tests" by
+# deleting the ``compare_digest`` call) would still leave the existing
+# 27 tests green.
+#
+# That is exactly the "verifier and handler validated in sync"
+# (``X-Gerrit-Signature verifier 和 handler 同步驗過``) failure mode
+# called out by the fourth Y-prep.1 sub-bullet. To close the gap:
+#
+#   - We sign every test in this file with REAL HMAC-SHA256 (already
+#     covered by ``_sign`` and the new ``gerrit_sign`` /
+#     ``gerrit_signed_post`` fixtures); AND
+#   - We add an explicit verifier-rejection test class that locks the
+#     401-on-bad-signature contract. The two together prove that
+#     when a test sees "200 + handler called", it's because the
+#     verifier accepted the real HMAC, not because the verifier was
+#     bypassed.
+#
+# Concrete failure-mode coverage:
+#   1. ``test_invalid_signature_rejected_no_dispatch`` — posts a
+#      well-formed event with a deliberately-wrong hex signature.
+#      Verifier MUST reject (401) and dispatcher MUST NOT fire. If
+#      this regresses to 200, the verifier code path is broken or
+#      bypassed.
+#   2. ``test_missing_signature_rejected_when_secret_configured`` —
+#      posts with no ``X-Gerrit-Signature`` header at all. The
+#      verifier compares against ``""`` and must reject (401).
+#      Catches the "header is optional when configured" anti-pattern
+#      regression.
+#   3. ``test_tampered_body_rejected_no_dispatch`` — signs body A,
+#      posts body B (same shape, different change.id). Verifier must
+#      detect the body/signature mismatch and reject.
+#   4. ``test_correct_signature_accepted_handler_dispatched`` —
+#      positive control through the SAME ``gerrit_signed_post``
+#      fixture path used by the negative tests. Locks that the
+#      "verifier accepted" branch is observable end-to-end so a flat
+#      "always-401" regression can't sneak in either.
+
+
+class TestGerritWebhookSignatureVerifier:
+    """Lock the ``X-Gerrit-Signature`` HMAC verifier ↔ dispatcher
+    handoff: any signature that fails verification MUST short-circuit
+    with 401 BEFORE any of the three event handlers is called.
+
+    Covers Y-prep.1 (#287) fourth sub-bullet — "測試 fixture 要用真的
+    HMAC-SHA256 簽名而非 mock，確保 X-Gerrit-Signature verifier 和
+    handler 同步驗過". See the block comment above for the full
+    rationale.
+    """
+
+    @staticmethod
+    def _install_handler_mocks(monkeypatch):
+        """Mock all three event handlers and return the trio so each
+        test can assert ``assert_not_called`` (or, for the positive
+        control, ``assert_called_once``).
+
+        Mocking even on the negative path is important: if the verifier
+        regresses and lets a bad signature through, the dispatcher will
+        invoke the real handler, which would do real DB writes /
+        background spawns and corrupt the next test. The mocks turn that
+        into a clean assertion failure instead.
+        """
+        from backend.routers import webhooks
+        mock_patchset = AsyncMock()
+        mock_comment = AsyncMock()
+        mock_merged = AsyncMock()
+        monkeypatch.setattr(webhooks, "_on_patchset_created", mock_patchset)
+        monkeypatch.setattr(webhooks, "_on_comment_added", mock_comment)
+        monkeypatch.setattr(webhooks, "_on_change_merged", mock_merged)
+        return mock_patchset, mock_comment, mock_merged
+
+    @staticmethod
+    def _well_formed_payload(change_id: str = "Iverifier-01") -> dict:
+        """A well-formed ``patchset-created`` event used as the carrier
+        for the verifier tests. The event TYPE doesn't matter to the
+        verifier — it runs before the dispatcher branches — but using
+        a real type lets us tell "rejected by verifier" (401) apart
+        from "rejected by validator" (400) cleanly."""
+        return {
+            "type": "patchset-created",
+            "change": {"id": change_id, "subject": "verifier sync test"},
+            "patchSet": {
+                "revision": "0011223344556677",
+                "uploader": {"name": "verifier-tester"},
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_rejected_no_dispatch(
+        self, monkeypatch, gerrit_signed_post,
+    ):
+        """A deliberately-wrong hex signature MUST be rejected with 401
+        and MUST NOT reach any handler."""
+        mock_patchset, mock_comment, mock_merged = self._install_handler_mocks(monkeypatch)
+
+        secret = "verifier-secret-invalid-sig"
+        body = self._well_formed_payload(change_id="Iverifier-bad-sig")
+        # Same length + character set as a real SHA-256 hex digest, so
+        # the verifier reaches ``compare_digest`` rather than failing
+        # an upstream length check. 64 hex chars of ``deadbeef``.
+        bogus_sig = "deadbeef" * 8
+        assert len(bogus_sig) == 64
+
+        res = await gerrit_signed_post(secret, body, signature=bogus_sig)
+
+        # Verifier must short-circuit at webhooks.py:103-104.
+        assert res.status_code == 401
+        assert res.json() == {"detail": "Invalid signature"}
+        # And critically — the dispatcher must NOT have run. If a
+        # handler was called here, the verifier was bypassed.
+        mock_patchset.assert_not_called()
+        mock_comment.assert_not_called()
+        mock_merged.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_signature_rejected_when_secret_configured(
+        self, monkeypatch, gerrit_signed_post,
+    ):
+        """If a secret is configured but the request omits the
+        ``X-Gerrit-Signature`` header, the verifier compares against
+        ``""`` (the default at webhooks.py:65) and MUST reject."""
+        mock_patchset, mock_comment, mock_merged = self._install_handler_mocks(monkeypatch)
+
+        secret = "verifier-secret-no-header"
+        body = self._well_formed_payload(change_id="Iverifier-no-header")
+
+        res = await gerrit_signed_post(secret, body, omit_signature=True)
+
+        assert res.status_code == 401
+        assert res.json() == {"detail": "Invalid signature"}
+        mock_patchset.assert_not_called()
+        mock_comment.assert_not_called()
+        mock_merged.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tampered_body_rejected_no_dispatch(
+        self, client, monkeypatch, gerrit_sign,
+    ):
+        """Sign body A, POST body B. The verifier digests the wire
+        body, so the signature/body mismatch MUST be caught and
+        rejected. This is the exact failure mode the HMAC primitive
+        is supposed to catch — locking it in proves the verifier is
+        truly digesting the request body, not (e.g.) a cached or
+        empty buffer."""
+        mock_patchset, mock_comment, mock_merged = self._install_handler_mocks(monkeypatch)
+
+        secret = "verifier-secret-tamper"
+        signed_body = self._well_formed_payload(change_id="Iverifier-signed")
+        # Same shape, different change id — flipping a single field is
+        # enough to invalidate the digest. We sign signed_body but POST
+        # tampered_body.
+        tampered_body = self._well_formed_payload(change_id="Iverifier-tampered")
+        assert signed_body != tampered_body, (
+            "test bug: signed_body and tampered_body must differ"
+        )
+
+        signed_raw = json.dumps(signed_body).encode()
+        tampered_raw = json.dumps(tampered_body).encode()
+        sig_for_signed_body = gerrit_sign(secret, signed_raw)
+
+        with _gerrit_enabled_with_secret(secret):
+            res = await client.post(
+                "/api/v1/webhooks/gerrit",
+                content=tampered_raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gerrit-Signature": sig_for_signed_body,
+                },
+            )
+
+        assert res.status_code == 401
+        assert res.json() == {"detail": "Invalid signature"}
+        mock_patchset.assert_not_called()
+        mock_comment.assert_not_called()
+        mock_merged.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_correct_signature_accepted_handler_dispatched(
+        self, monkeypatch, gerrit_signed_post,
+    ):
+        """Positive control through the SAME ``gerrit_signed_post``
+        fixture path the negative tests use. Without this, an
+        always-401 verifier regression would leave all three negative
+        tests green AND silently break production. Pairing the
+        positive and negative through one fixture surface guarantees
+        verifier acceptance + dispatcher invocation are both
+        observable."""
+        mock_patchset, mock_comment, mock_merged = self._install_handler_mocks(monkeypatch)
+
+        secret = "verifier-secret-positive-control"
+        body = self._well_formed_payload(change_id="Iverifier-positive")
+
+        # No signature override — fixture computes the real HMAC.
+        res = await gerrit_signed_post(secret, body)
+
+        assert res.status_code == 200
+        assert res.json() == {"status": "ok", "event": "patchset-created"}
+        # Exactly the matching handler ran; siblings did not.
+        mock_patchset.assert_called_once()
+        mock_comment.assert_not_called()
+        mock_merged.assert_not_called()
