@@ -20,6 +20,7 @@ import { render, fireEvent, act, waitFor } from "@testing-library/react"
 import {
   SessionHeatmap,
   SESSION_HEATMAP_WINDOWS,
+  SESSION_HEATMAP_ALL_MODELS,
   bucketsToLocalGrid,
   buildDayAxis,
   localDayKey,
@@ -35,8 +36,10 @@ import type {
 function makeResponse(
   cells: TokenHeatmapCell[],
   window: TokenHeatmapWindow = "7d",
+  available_models: string[] = [],
+  model: string | null = null,
 ): TokenHeatmapResponse {
-  return { window, cells }
+  return { window, cells, available_models, model }
 }
 
 describe("SESSION_HEATMAP_WINDOWS", () => {
@@ -201,7 +204,7 @@ describe("<SessionHeatmap>", () => {
       />,
     )
     expect(view.getByTestId("session-heatmap")).toBeInTheDocument()
-    await waitFor(() => expect(fetcher).toHaveBeenCalledWith("7d"))
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith("7d", null))
     await waitFor(() => view.getByTestId("session-heatmap-grid"))
     // 7 day rows synthesised (even though only 1 cell came back).
     expect(view.getAllByTestId("session-heatmap-row")).toHaveLength(7)
@@ -214,10 +217,10 @@ describe("<SessionHeatmap>", () => {
     const view = render(
       <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
     )
-    await waitFor(() => expect(fetcher).toHaveBeenCalledWith("7d"))
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith("7d", null))
     const tab30 = view.getByTestId("session-heatmap-window-30d")
     act(() => { fireEvent.click(tab30) })
-    await waitFor(() => expect(fetcher).toHaveBeenCalledWith("30d"))
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith("30d", null))
     await waitFor(() => expect(view.getAllByTestId("session-heatmap-row")).toHaveLength(30))
   })
 
@@ -322,5 +325,217 @@ describe("<SessionHeatmap>", () => {
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
     act(() => { fireEvent.click(view.getByTestId("session-heatmap-refresh")) })
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+  })
+})
+
+/**
+ * ZZ.C2 (#305-2, 2026-04-24) checkbox 4 — per-model filter tests.
+ *
+ * Locks the UX contract for the dropdown that sits between the window
+ * tabs and the refresh button:
+ *   - default selection is "All models" (empty sentinel) so the initial
+ *     GET omits the ``model`` param (backward-compatible with the
+ *     pre-checkbox-4 backend shape)
+ *   - ``available_models`` from the response populates the dropdown
+ *   - selecting a slug triggers a re-fetch with that slug passed to
+ *     ``fetchTokenHeatmap``
+ *   - selecting "All models" again clears the filter
+ *   - the selected model silently resets to "All models" when the
+ *     response stops listing it (e.g. after a window switch)
+ *   - malformed / missing ``available_models`` degrades to just the
+ *     "All models" option
+ */
+describe("<SessionHeatmap> — per-model filter (checkbox 4)", () => {
+  it("exports the 'all models' sentinel as an empty string", () => {
+    // Locked because the value is spec in three places: (a) frontend
+    // dropdown sentinel, (b) URLSearchParams omission condition, (c)
+    // backend "empty string means all" path in the 400 guard.
+    expect(SESSION_HEATMAP_ALL_MODELS).toBe("")
+  })
+
+  it("defaults the dropdown to 'All models' and omits the filter on mount", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      makeResponse([], "7d", ["claude-opus-4-7", "gpt-4o"]),
+    )
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    // First call must omit / null the model arg (backward compat).
+    expect(fetcher.mock.calls[0][0]).toBe("7d")
+    expect(fetcher.mock.calls[0][1] ?? null).toBeNull()
+    // Dropdown exists, default value is the empty sentinel.
+    const select = view.getByTestId(
+      "session-heatmap-model-filter",
+    ) as HTMLSelectElement
+    expect(select.value).toBe(SESSION_HEATMAP_ALL_MODELS)
+  })
+
+  it("populates the dropdown from the response's available_models", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      makeResponse(
+        [{ day: "2026-04-24", hour: 12, token_total: 100, cost_total: 0.01 }],
+        "7d",
+        ["claude-opus-4-7", "gemini-2.5-pro", "gpt-4o"],
+      ),
+    )
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() =>
+      view.getByTestId("session-heatmap-model-option-claude-opus-4-7"),
+    )
+    // All three slugs + the "All models" sentinel option.
+    expect(
+      view.getByTestId("session-heatmap-model-option-all"),
+    ).toBeInTheDocument()
+    expect(
+      view.getByTestId("session-heatmap-model-option-gemini-2.5-pro"),
+    ).toBeInTheDocument()
+    expect(
+      view.getByTestId("session-heatmap-model-option-gpt-4o"),
+    ).toBeInTheDocument()
+  })
+
+  it("re-fetches with the chosen slug when a model is picked", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      makeResponse([], "7d", ["claude-opus-4-7", "gpt-4o"]),
+    )
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    const select = view.getByTestId(
+      "session-heatmap-model-filter",
+    ) as HTMLSelectElement
+    act(() => {
+      fireEvent.change(select, { target: { value: "claude-opus-4-7" } })
+    })
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+    // The second call must carry the chosen slug as the model arg.
+    expect(fetcher.mock.calls[1][0]).toBe("7d")
+    expect(fetcher.mock.calls[1][1]).toBe("claude-opus-4-7")
+    expect(select.value).toBe("claude-opus-4-7")
+  })
+
+  it("re-fetches with a null model when 'All models' is re-selected", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      makeResponse([], "7d", ["claude-opus-4-7", "gpt-4o"]),
+    )
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    const select = view.getByTestId(
+      "session-heatmap-model-filter",
+    ) as HTMLSelectElement
+    // Pick a slug, then switch back to the sentinel.
+    act(() => {
+      fireEvent.change(select, { target: { value: "gpt-4o" } })
+    })
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+    act(() => {
+      fireEvent.change(select, {
+        target: { value: SESSION_HEATMAP_ALL_MODELS },
+      })
+    })
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3))
+    // Last call must have null/undefined model again.
+    expect(fetcher.mock.calls[2][0]).toBe("7d")
+    expect(fetcher.mock.calls[2][1] ?? null).toBeNull()
+  })
+
+  it("keeps the dropdown populated even when a filter is active", async () => {
+    // Backend contract (checkbox 4) is that ``available_models`` stays
+    // complete even when a filter is applied. The frontend must trust
+    // that and not prune the list based on the selection.
+    const fetcher = vi.fn().mockImplementation(
+      (_w: TokenHeatmapWindow, _m?: string | null) =>
+        Promise.resolve(
+          makeResponse([], "7d", ["claude-opus-4-7", "gpt-4o"]),
+        ),
+    )
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    act(() => {
+      fireEvent.change(view.getByTestId("session-heatmap-model-filter"), {
+        target: { value: "claude-opus-4-7" },
+      })
+    })
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+    // Both slugs still selectable after the filter landed.
+    expect(
+      view.getByTestId("session-heatmap-model-option-gpt-4o"),
+    ).toBeInTheDocument()
+    expect(
+      view.getByTestId("session-heatmap-model-option-claude-opus-4-7"),
+    ).toBeInTheDocument()
+  })
+
+  it("falls back to 'All models' when the selected slug disappears from the response", async () => {
+    // Seed response order: first fetch lists the slug, second fetch
+    // (e.g. after a window switch) no longer does. The dropdown must
+    // auto-reset to the sentinel instead of dangling at a dead option.
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(makeResponse([], "7d", ["claude-opus-4-7"]))
+      .mockResolvedValueOnce(makeResponse([], "7d", ["claude-opus-4-7"]))
+      .mockResolvedValueOnce(makeResponse([], "30d", ["gpt-4o"]))
+      .mockResolvedValueOnce(makeResponse([], "30d", ["gpt-4o"]))
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    const select = view.getByTestId(
+      "session-heatmap-model-filter",
+    ) as HTMLSelectElement
+    act(() => {
+      fireEvent.change(select, { target: { value: "claude-opus-4-7" } })
+    })
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2))
+    expect(select.value).toBe("claude-opus-4-7")
+    // Switch to 30d — the new response drops claude-opus-4-7. The
+    // effect auto-resets the selection and triggers one more fetch
+    // under the sentinel.
+    act(() => {
+      fireEvent.click(view.getByTestId("session-heatmap-window-30d"))
+    })
+    await waitFor(() =>
+      expect(select.value).toBe(SESSION_HEATMAP_ALL_MODELS),
+    )
+    // The final fetch for the window switch completed under the
+    // sentinel — confirms the reset actually took effect on the
+    // next fetch.
+    await waitFor(() => {
+      const lastCall = fetcher.mock.calls[fetcher.mock.calls.length - 1]
+      expect(lastCall[1] ?? null).toBeNull()
+    })
+  })
+
+  it("degrades gracefully when the backend omits available_models", async () => {
+    // Legacy / pre-checkbox-4 backends return a response without
+    // ``available_models``. The dropdown should still render with
+    // just the sentinel — no crash on ``undefined.map``.
+    const fetcher = vi.fn().mockResolvedValue({
+      window: "7d" as TokenHeatmapWindow,
+      cells: [],
+    } as TokenHeatmapResponse)
+    const view = render(
+      <SessionHeatmap fetchHeatmap={fetcher} refreshIntervalMs={0} />,
+    )
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+    const select = view.getByTestId(
+      "session-heatmap-model-filter",
+    ) as HTMLSelectElement
+    expect(select).toBeInTheDocument()
+    // Only the sentinel option exists; no per-model options.
+    expect(
+      view.getByTestId("session-heatmap-model-option-all"),
+    ).toBeInTheDocument()
+    expect(
+      view.queryByTestId("session-heatmap-model-option-claude-opus-4-7"),
+    ).toBeNull()
   })
 })

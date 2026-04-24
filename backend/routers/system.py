@@ -1547,10 +1547,23 @@ _HEATMAP_WINDOWS: dict[str, int] = {
     "30d": 30 * 24 * 60 * 60,
 }
 
+# ZZ.C2 #305-2 checkbox 4 (2026-04-24): per-model filter slug fence.
+# Model names are sent as a query param and interpolated as ``$N``
+# into parameterised SQL — parameterisation already neutralises SQL
+# injection, but we still reject obviously-malformed input (shell
+# metachars, spaces, empty string) so the endpoint returns a clean
+# 400 instead of passing garbage through to ``event_log`` where it
+# would always miss. Matches the slug shape Anthropic / OpenAI /
+# Google emit (``claude-opus-4-7``, ``gpt-4o``, ``gemini-2.5-pro``).
+import re as _re  # noqa: E402 — local alias keeps other imports stable
+_HEATMAP_MODEL_RE = _re.compile(r"^[A-Za-z0-9_.\-]+$")
+_HEATMAP_MODEL_MAX_LEN = 120
+
 
 @router.get("/tokens/heatmap", response_model=TokenHeatmapResponse)
 async def get_token_heatmap(
     window: str = "7d",
+    model: str | None = None,
     conn=Depends(_get_conn),
 ):
     """Return a ``(day, hour)``-bucketed token + cost matrix.
@@ -1593,12 +1606,24 @@ async def get_token_heatmap(
     caller's tenant so one tenant's nightly-batch burst doesn't
     light up a neighbour's heatmap.
 
+    **Per-model filter** (ZZ.C2 checkbox 4, 2026-04-24): optional
+    ``model`` query param restricts cells to rows whose
+    ``data_json->>'model'`` matches the slug exactly. ``None`` /
+    empty string means "all models" (backward-compatible with
+    checkbox 1/2/3 callers who never pass the param). The response
+    always carries ``available_models`` — the distinct model slugs
+    observed across the *unfiltered* window + tenant + event-type
+    fence — so the frontend dropdown can render every choice even
+    after a filter is applied.
+
     Module-global audit (SOP Step 1): ``_HEATMAP_WINDOWS`` is a
-    module-const literal dict — every uvicorn worker derives the
-    same mapping from the same source code, matching SOP
-    acceptable answer #1 ("不共享,因為每 worker 從同樣來源推導
-    出同樣的值"). The endpoint handler is pure-read request-scoped
-    — no caches, queues, or counters are mutated.
+    module-const literal dict and ``_HEATMAP_MODEL_RE`` +
+    ``_HEATMAP_MODEL_MAX_LEN`` are module-level literals — every
+    uvicorn worker derives the same values from the same source
+    code, matching SOP acceptable answer #1 ("不共享,因為每
+    worker 從同樣來源推導出同樣的值"). The endpoint handler is
+    pure-read request-scoped — no caches, queues, or counters are
+    mutated.
 
     Read-after-write timing audit (SOP Step 1): pure-read path
     over ``event_log``; writers are ``emit_turn_complete`` via
@@ -1620,18 +1645,74 @@ async def get_token_heatmap(
             ),
         )
 
+    # ZZ.C2 #305-2 checkbox 4 (2026-04-24): per-model filter.
+    # ``model`` is optional; ``None`` / empty means "all models"
+    # (backward-compatible with checkbox 1/2/3 callers). When
+    # provided, the slug must match ``_HEATMAP_MODEL_RE`` to reject
+    # shell metachars and control whitespace early — the real SQL
+    # injection defence is the parameterised query below, but
+    # pre-filtering garbage gives the frontend a clean 400 instead
+    # of a silently-empty result set from a bogus slug that never
+    # matches any row.
+    model_filter: str | None = None
+    if model is not None:
+        stripped = model.strip()
+        if stripped != "":
+            if (
+                len(stripped) > _HEATMAP_MODEL_MAX_LEN
+                or not _HEATMAP_MODEL_RE.match(stripped)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Invalid model slug '{model}'. "
+                        "Expected alphanumeric + '-_.' only, "
+                        f"≤{_HEATMAP_MODEL_MAX_LEN} chars."
+                    ),
+                )
+            model_filter = stripped
+
     # Reserve $1 for window_seconds BEFORE calling tenant_where_pg so
     # placeholder indices stay stable regardless of whether a tenant
     # is set — same ordering discipline as burn-rate.
-    conditions: list[str] = ["event_type = 'turn.complete'"]
-    params: list = [window_seconds]
-    conditions.append(
+    base_conditions: list[str] = ["event_type = 'turn.complete'"]
+    base_params: list = [window_seconds]
+    base_conditions.append(
         "to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS') "
         ">= NOW() - make_interval(secs => $1)"
     )
-    tenant_where_pg(conditions, params)
+    tenant_where_pg(base_conditions, base_params)
 
-    where_sql = " AND ".join(conditions)
+    # available_models: distinct model slugs under the SAME window +
+    # tenant + event-type fence BUT without the model filter applied,
+    # so the frontend dropdown always shows every option — otherwise
+    # selecting ``claude-opus-4-7`` would hide every other choice the
+    # next time the drawer mounts.
+    models_where_sql = " AND ".join(base_conditions)
+    models_sql = f"""
+        SELECT DISTINCT data_json::jsonb->>'model' AS model
+        FROM event_log
+        WHERE {models_where_sql}
+          AND data_json::jsonb->>'model' IS NOT NULL
+          AND (data_json::jsonb->>'model') <> ''
+        ORDER BY model ASC
+    """
+    available_rows = await conn.fetch(models_sql, *base_params)
+    available_models = [r["model"] for r in available_rows if r["model"]]
+
+    # Cells query: copies base_conditions + base_params and tacks on
+    # the optional model filter. Keeping ``base_*`` immutable means
+    # the available_models query above stays invariant regardless of
+    # the caller's filter choice.
+    cell_conditions = list(base_conditions)
+    cell_params = list(base_params)
+    if model_filter is not None:
+        cell_params.append(model_filter)
+        cell_conditions.append(
+            f"data_json::jsonb->>'model' = ${len(cell_params)}"
+        )
+    where_sql = " AND ".join(cell_conditions)
+
     # UTC-anchored bucket keys: ``AT TIME ZONE 'UTC'`` pins the
     # date/hour boundary regardless of the PG session timezone so
     # two replicas in different regions produce identical cells.
@@ -1663,7 +1744,7 @@ async def get_token_heatmap(
         ORDER BY day ASC, hour ASC
     """
 
-    rows = await conn.fetch(sql, *params)
+    rows = await conn.fetch(sql, *cell_params)
 
     cells: list[dict] = []
     for row in rows:
@@ -1677,6 +1758,8 @@ async def get_token_heatmap(
     return {
         "window": window,
         "cells": cells,
+        "available_models": available_models,
+        "model": model_filter,
     }
 
 

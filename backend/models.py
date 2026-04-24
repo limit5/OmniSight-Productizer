@@ -577,10 +577,22 @@ class TokenHeatmapResponse(BaseModel):
     as genuine zero activity — this matches operator intuition
     (empty slot = no work happened) and keeps the payload bounded
     by real traffic rather than by window size.
+
+    ZZ.C2 #305-2 checkbox 4 (2026-04-24): ``available_models`` carries
+    the distinct ``model`` slugs observed across the unfiltered
+    window so the frontend can render a per-model dropdown without
+    a second round-trip. The list is intentionally derived *before*
+    applying the ``model`` filter so operators can still pick a
+    different model after selecting one — otherwise filtering by
+    ``claude-opus-4-7`` would hide every other option. ``model``
+    echoes the applied filter (or ``None`` for "All models") so the
+    frontend can reconcile the select state after a remount.
     """
 
     window: str = ""
     cells: list[TokenHeatmapCell] = Field(default_factory=list)
+    available_models: list[str] = Field(default_factory=list)
+    model: str | None = None
 
 
 class PromptVersionEntry(BaseModel):

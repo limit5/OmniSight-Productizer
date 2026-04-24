@@ -191,13 +191,23 @@ function formatHourRange(hour: number): string {
   return `${pad(hour)}:00–${pad(next)}:00`
 }
 
+/** ZZ.C2 #305-2 checkbox 4 (2026-04-24): sentinel for the "All models"
+ *  dropdown row. Kept as an empty string so it round-trips naturally
+ *  through ``URLSearchParams`` / form submit handlers (no surprising
+ *  serialisation differences from ``null`` / ``undefined``). */
+export const SESSION_HEATMAP_ALL_MODELS = ""
+
 export interface SessionHeatmapProps {
   className?: string
   defaultWindow?: TokenHeatmapWindow
   /** Test seam: swap in a fake fetcher to drive the component without
    *  mocking the @/lib/api module. Signature mirrors
-   *  ``fetchTokenHeatmap``. */
-  fetchHeatmap?: (window: TokenHeatmapWindow) => Promise<TokenHeatmapResponse>
+   *  ``fetchTokenHeatmap`` — signature widened in checkbox 4 to carry
+   *  the optional per-model filter slug. */
+  fetchHeatmap?: (
+    window: TokenHeatmapWindow,
+    model?: string | null,
+  ) => Promise<TokenHeatmapResponse>
   /** Auto-refresh cadence. Pass ``0`` to disable polling (tests). */
   refreshIntervalMs?: number
 }
@@ -214,6 +224,14 @@ export function SessionHeatmap({
   const [error, setError] = useState<string | null>(null)
   const [hoverKey, setHoverKey] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
+  // ZZ.C2 #305-2 checkbox 4 (2026-04-24): per-model filter.
+  // Empty string == ``SESSION_HEATMAP_ALL_MODELS`` means "all models"
+  // and is explicitly *not* sent to the backend (URL omits the param
+  // entirely) — the sentinel is a local UI concept only.
+  const [selectedModel, setSelectedModel] = useState<string>(
+    SESSION_HEATMAP_ALL_MODELS,
+  )
+  const [availableModels, setAvailableModels] = useState<string[]>([])
   const fetchFn = fetchHeatmap ?? fetchTokenHeatmap
 
   useEffect(() => {
@@ -222,9 +240,31 @@ export function SessionHeatmap({
       setLoading(true)
       setError(null)
       try {
-        const resp = await fetchFn(window)
+        const modelArg =
+          selectedModel === SESSION_HEATMAP_ALL_MODELS ? null : selectedModel
+        const resp = await fetchFn(window, modelArg)
         if (cancelled) return
         setCells(Array.isArray(resp.cells) ? resp.cells : [])
+        // ``available_models`` is populated by checkbox-4 backends but
+        // older backends may omit it — fall through to empty list so
+        // the dropdown degrades to just "All models" rather than
+        // crashing on ``undefined.map``.
+        const models = Array.isArray(resp.available_models)
+          ? resp.available_models.filter(
+              (m): m is string => typeof m === "string" && m !== "",
+            )
+          : []
+        setAvailableModels(models)
+        // If the currently-selected model has disappeared from the
+        // window (no more turns under that slug), silently fall back
+        // to "All models" so the dropdown doesn't dangle at an option
+        // that no longer exists.
+        if (
+          selectedModel !== SESSION_HEATMAP_ALL_MODELS &&
+          !models.includes(selectedModel)
+        ) {
+          setSelectedModel(SESSION_HEATMAP_ALL_MODELS)
+        }
       } catch (err) {
         if (cancelled) return
         const message = err instanceof Error ? err.message : String(err)
@@ -243,7 +283,7 @@ export function SessionHeatmap({
       cancelled = true
       if (interval) clearInterval(interval)
     }
-  }, [window, fetchFn, refreshIntervalMs, nonce])
+  }, [window, fetchFn, refreshIntervalMs, nonce, selectedModel])
 
   const { grid, maxTokens } = useMemo(
     () => bucketsToLocalGrid(cells),
@@ -282,6 +322,35 @@ export function SessionHeatmap({
           <span>SESSION HEATMAP</span>
         </div>
         <div className="flex items-center gap-2">
+          {/* ZZ.C2 #305-2 checkbox 4 (2026-04-24): per-model filter.
+              ``<select>`` is deliberately a native element rather than
+              a styled popover — screen readers + keyboard-only
+              operators get expected semantics for free, and the
+              10-ish option set a tenant usually has doesn't need
+              type-ahead / virtual-scroll sugar. */}
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="px-1.5 py-0.5 rounded font-mono text-[10px] bg-[var(--secondary)] border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] max-w-[160px]"
+            aria-label="Filter heatmap by model"
+            data-testid="session-heatmap-model-filter"
+          >
+            <option
+              value={SESSION_HEATMAP_ALL_MODELS}
+              data-testid="session-heatmap-model-option-all"
+            >
+              All models
+            </option>
+            {availableModels.map((m) => (
+              <option
+                key={m}
+                value={m}
+                data-testid={`session-heatmap-model-option-${m}`}
+              >
+                {m}
+              </option>
+            ))}
+          </select>
           <div
             className="flex items-center gap-1 p-0.5 rounded bg-[var(--secondary)] border border-[var(--border)]"
             data-testid="session-heatmap-window-tabs"

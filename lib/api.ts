@@ -1582,6 +1582,15 @@ export interface TokenHeatmapCell {
 export interface TokenHeatmapResponse {
   window: TokenHeatmapWindow
   cells: TokenHeatmapCell[]
+  /** ZZ.C2 #305-2 checkbox 4 (2026-04-24): distinct ``model`` slugs
+   *  observed across the unfiltered window so the per-model dropdown
+   *  can render every choice without a second round-trip. Backend
+   *  populates this regardless of whether a filter was applied. */
+  available_models?: string[]
+  /** Echoes the applied filter (``null`` when "All models" is
+   *  selected). Lets the frontend reconcile dropdown state after a
+   *  remount or URL-driven load. */
+  model?: string | null
 }
 
 export type TokenHeatmapWindow = "7d" | "30d"
@@ -1591,12 +1600,23 @@ export type TokenHeatmapWindow = "7d" | "30d"
  * that feeds the calendar-style heatmap under ``<TokenUsageStats>``.
  * ``window`` whitelist is enforced server-side (400 on anything outside
  * ``7d|30d``).
+ *
+ * ZZ.C2 #305-2 checkbox 4 (2026-04-24): optional ``model`` slug
+ * restricts the aggregate to one model (e.g. ``claude-opus-4-7``).
+ * ``null`` / ``undefined`` / empty string means "all models" — the
+ * param is omitted from the URL entirely so backend stays backward
+ * compatible with callers that don't know about the filter.
  */
 export async function fetchTokenHeatmap(
   window: TokenHeatmapWindow = "7d",
+  model?: string | null,
 ): Promise<TokenHeatmapResponse> {
+  const params = new URLSearchParams({ window })
+  if (model != null && model !== "") {
+    params.set("model", model)
+  }
   return request<TokenHeatmapResponse>(
-    `/runtime/tokens/heatmap?window=${encodeURIComponent(window)}`,
+    `/runtime/tokens/heatmap?${params.toString()}`,
   )
 }
 

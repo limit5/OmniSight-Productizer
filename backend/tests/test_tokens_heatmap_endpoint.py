@@ -61,6 +61,7 @@ def _turn_payload(
     turn_id: str = "t-1",
     tokens_used: int = 150,
     cost_usd: float | None = 0.01,
+    model: str = "claude-opus-4-7",
 ) -> str:
     """Mirror the ``emit_turn_complete`` on-the-wire payload shape.
 
@@ -68,10 +69,14 @@ def _turn_payload(
     contract documented in ``_estimate_turn_cost_usd`` — serialised as
     JSON ``null`` so the endpoint's ``COALESCE(...::numeric, 0)`` path
     gets exercised.
+
+    ``model`` drives ZZ.C2 #305-2 checkbox 4 — the per-model filter
+    reads ``data_json->>'model'`` so tests need a handle to seed rows
+    with different model slugs.
     """
     return json.dumps({
         "turn_id": turn_id,
-        "model": "claude-opus-4-7",
+        "model": model,
         "provider": "anthropic",
         "input_tokens": 100,
         "output_tokens": 50,
@@ -93,6 +98,7 @@ async def _seed_turn_complete(
     cost_usd: float | None = 0.01,
     turn_id: str = "t-1",
     tenant_id: str = "t-alpha",
+    model: str = "claude-opus-4-7",
 ) -> None:
     """INSERT a ``turn.complete`` row with a caller-controlled timestamp.
 
@@ -107,7 +113,12 @@ async def _seed_turn_complete(
         "INSERT INTO event_log (event_type, data_json, created_at, tenant_id) "
         "VALUES ($1, $2, $3, $4)",
         "turn.complete",
-        _turn_payload(turn_id=turn_id, tokens_used=tokens_used, cost_usd=cost_usd),
+        _turn_payload(
+            turn_id=turn_id,
+            tokens_used=tokens_used,
+            cost_usd=cost_usd,
+            model=model,
+        ),
         created_at,
         tenant_id,
     )
@@ -419,6 +430,206 @@ class TestHeatmapCellShape:
         assert 0 <= cell["hour"] <= 23
         assert isinstance(cell["token_total"], int)
         assert isinstance(cell["cost_total"], float)
+
+
+class TestHeatmapModelFilter:
+    """ZZ.C2 #305-2 checkbox 4 (2026-04-24): per-model filter.
+
+    Locks six sub-contracts that the per-model dropdown depends on:
+
+    1. **``available_models`` surfaces distinct slugs** across the
+       unfiltered window, sorted ASC so the frontend dropdown has a
+       stable ordering (no need to resort client-side).
+    2. **Applying a filter narrows cells** to rows with that exact
+       ``model`` slug — sum of cells reflects only the chosen model.
+    3. **Applying a filter does NOT narrow ``available_models``** —
+       every option is still listed so operators can switch to a
+       different model without losing the dropdown.
+    4. **``None`` / empty ``model`` is "all models"** — backward
+       compatible with checkbox-1/2/3 callers that never knew about
+       the param.
+    5. **Malformed model slugs → 400** so a misconfigured frontend
+       gets a clean error rather than a silently-empty result set.
+    6. **Tenant isolation still wins** — Tenant A's model list must
+       not leak Tenant B's slugs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_available_models_lists_distinct_slugs_sorted(
+        self, pg_test_conn,
+    ):
+        set_tenant_id("t-alpha")
+        stamp = await _now_minus_hours_text(pg_test_conn, 2)
+        # Seed three distinct slugs and one duplicate — ``DISTINCT``
+        # should collapse the dupe to a single entry and ASC-sort
+        # the result.
+        for slug in (
+            "gpt-4o", "claude-opus-4-7", "gemini-2.5-pro", "claude-opus-4-7",
+        ):
+            await _seed_turn_complete(
+                pg_test_conn, created_at=stamp, model=slug, turn_id=f"t-{slug}",
+            )
+
+        resp = await get_token_heatmap(window="7d", conn=pg_test_conn)
+        assert resp["available_models"] == [
+            "claude-opus-4-7", "gemini-2.5-pro", "gpt-4o",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_filter_narrows_cells_to_one_model(self, pg_test_conn):
+        set_tenant_id("t-alpha")
+        stamp = await _now_minus_hours_text(pg_test_conn, 2)
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="claude-opus-4-7",
+            tokens_used=100, cost_usd=0.02, turn_id="t-opus",
+        )
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="gpt-4o",
+            tokens_used=500, cost_usd=0.05, turn_id="t-gpt",
+        )
+
+        resp = await get_token_heatmap(
+            window="7d", model="claude-opus-4-7", conn=pg_test_conn,
+        )
+        # Only the opus row shows up in cells — total 100 tokens, not 600.
+        total_tokens = sum(c["token_total"] for c in resp["cells"])
+        assert total_tokens == 100
+        # Echo back the applied filter so the frontend can reconcile.
+        assert resp["model"] == "claude-opus-4-7"
+
+    @pytest.mark.asyncio
+    async def test_filter_does_not_narrow_available_models(
+        self, pg_test_conn,
+    ):
+        """The dropdown must keep showing every slug even when a
+        filter is active — otherwise operators get trapped on one
+        model and can't switch without clearing the filter first."""
+        set_tenant_id("t-alpha")
+        stamp = await _now_minus_hours_text(pg_test_conn, 2)
+        for slug in ("gpt-4o", "claude-opus-4-7", "gemini-2.5-pro"):
+            await _seed_turn_complete(
+                pg_test_conn, created_at=stamp, model=slug,
+                turn_id=f"t-{slug}",
+            )
+
+        resp = await get_token_heatmap(
+            window="7d", model="claude-opus-4-7", conn=pg_test_conn,
+        )
+        assert set(resp["available_models"]) == {
+            "gpt-4o", "claude-opus-4-7", "gemini-2.5-pro",
+        }
+
+    @pytest.mark.asyncio
+    async def test_none_model_means_all_models_sum(self, pg_test_conn):
+        """Backward compatibility: callers that omit ``model`` (all
+        checkbox-1/2/3 callers) must get the unfiltered sum."""
+        set_tenant_id("t-alpha")
+        stamp = await _now_minus_hours_text(pg_test_conn, 2)
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="claude-opus-4-7",
+            tokens_used=100, turn_id="t-opus",
+        )
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="gpt-4o",
+            tokens_used=500, turn_id="t-gpt",
+        )
+
+        # Default call (no model param) — should sum both slugs.
+        resp = await get_token_heatmap(window="7d", conn=pg_test_conn)
+        total = sum(c["token_total"] for c in resp["cells"])
+        assert total == 600
+        assert resp["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_empty_string_model_means_all_models(self, pg_test_conn):
+        """The frontend ``SESSION_HEATMAP_ALL_MODELS`` sentinel is an
+        empty string; if it ever leaks into the URL the backend
+        should treat it identically to "omit the param"."""
+        set_tenant_id("t-alpha")
+        stamp = await _now_minus_hours_text(pg_test_conn, 2)
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="claude-opus-4-7",
+            tokens_used=100, turn_id="t-opus",
+        )
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="gpt-4o",
+            tokens_used=500, turn_id="t-gpt",
+        )
+
+        resp = await get_token_heatmap(
+            window="7d", model="", conn=pg_test_conn,
+        )
+        total = sum(c["token_total"] for c in resp["cells"])
+        assert total == 600
+        assert resp["model"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_slug",
+        [
+            "claude opus",   # whitespace
+            "claude;drop",   # shell metachar
+            "model/etc",     # path traversal shape
+            "x" * 200,       # over length cap
+        ],
+    )
+    async def test_malformed_model_slug_raises_400(
+        self, pg_test_conn, bad_slug,
+    ):
+        set_tenant_id("t-alpha")
+        with pytest.raises(HTTPException) as exc:
+            await get_token_heatmap(
+                window="7d", model=bad_slug, conn=pg_test_conn,
+            )
+        assert exc.value.status_code == 400
+        # Detail mentions the invalid slug so the frontend can log it.
+        assert "model" in str(exc.value.detail).lower()
+
+    @pytest.mark.asyncio
+    async def test_tenant_isolation_on_available_models(self, pg_test_conn):
+        """``available_models`` must be tenant-scoped — a neighbour's
+        exotic model slug must not appear in the operator's
+        dropdown."""
+        set_tenant_id("t-alpha")
+        stamp = await _now_minus_hours_text(pg_test_conn, 2)
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="claude-opus-4-7",
+            tenant_id="t-alpha", turn_id="t-alpha-opus",
+        )
+        await _seed_turn_complete(
+            pg_test_conn, created_at=stamp, model="exotic-model-9000",
+            tenant_id="t-beta", turn_id="t-beta-exotic",
+        )
+
+        resp_alpha = await get_token_heatmap(window="7d", conn=pg_test_conn)
+        assert resp_alpha["available_models"] == ["claude-opus-4-7"]
+        assert "exotic-model-9000" not in resp_alpha["available_models"]
+
+    @pytest.mark.asyncio
+    async def test_model_filter_plus_window_filter_compose(self, pg_test_conn):
+        """Filter composition: ``model`` narrows cells in addition to
+        (not instead of) ``window`` — rows outside the window are
+        excluded regardless of model."""
+        set_tenant_id("t-alpha")
+        recent = await _now_minus_hours_text(pg_test_conn, 2 * 24)
+        old = await _now_minus_hours_text(pg_test_conn, 14 * 24)
+        await _seed_turn_complete(
+            pg_test_conn, created_at=recent, model="claude-opus-4-7",
+            tokens_used=100, turn_id="t-recent",
+        )
+        await _seed_turn_complete(
+            pg_test_conn, created_at=old, model="claude-opus-4-7",
+            tokens_used=9_999, turn_id="t-old",
+        )
+
+        resp_7d = await get_token_heatmap(
+            window="7d", model="claude-opus-4-7", conn=pg_test_conn,
+        )
+        resp_30d = await get_token_heatmap(
+            window="30d", model="claude-opus-4-7", conn=pg_test_conn,
+        )
+        assert sum(c["token_total"] for c in resp_7d["cells"]) == 100
+        assert sum(c["token_total"] for c in resp_30d["cells"]) == 10_099
 
 
 class TestHeatmapSparsePayload:

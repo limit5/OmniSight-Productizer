@@ -151,9 +151,11 @@ describe("TokenUsageStats — Session Heatmap section (ZZ.C2 checkbox 3)", () =>
     })
 
     // Heatmap endpoint fired exactly once, and for the default "7d"
-    // window.
+    // window. The second positional arg is the checkbox-4 per-model
+    // filter — ``null`` means "All models" and is the default on
+    // mount so pre-checkbox-4 behaviour is preserved.
     expect(api.fetchTokenHeatmap).toHaveBeenCalledTimes(1)
-    expect(api.fetchTokenHeatmap).toHaveBeenCalledWith("7d")
+    expect(api.fetchTokenHeatmap).toHaveBeenCalledWith("7d", null)
   })
 
   it("clicking the toggle a second time collapses + unmounts the SessionHeatmap", async () => {
