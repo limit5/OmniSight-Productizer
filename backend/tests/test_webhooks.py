@@ -262,3 +262,158 @@ class TestGerritEventRouting:
 
         mock_patchset.assert_not_called()
         mock_comment.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Y-prep.1 (#287) — Explicit negative-case coverage for the dispatcher
+# ──────────────────────────────────────────────────────────────────────
+#
+# The positive tests in TestGerritEventRouting above already assert
+# that sibling handlers are NOT called when a given event type fires
+# ("each test doubles as a negative case for the other two events").
+# That embedded coverage is fragile: a future refactor that, say,
+# extracts the dispatcher into a registry and drops the ``assert_not_called``
+# lines while updating the positive assertions would silently lose the
+# mismatch contract.
+#
+# These tests promote the negative contract to first-class, parametrised
+# tests so the intent is self-evident and survives refactors:
+#
+#   - For every (posted_event_type, forbidden_handler) pair where
+#     ``posted_event_type`` is NOT the one that should route to
+#     ``forbidden_handler``, assert the handler is not called. 6 pairs
+#     total: 3 event types × 2 non-matching handlers each.
+#   - Additionally, unknown event types (e.g. ``ref-updated``) must
+#     accept the request (200) but fire NO handler — the else-branch
+#     at webhooks.py:115-116 is logged-and-dropped, and we lock that
+#     contract here.
+
+
+_EVENT_PAYLOADS = {
+    "patchset-created": {
+        "type": "patchset-created",
+        "change": {"id": "Ineg01", "subject": "neg patchset"},
+        "patchSet": {"revision": "deadbeefcafef00d",
+                     "uploader": {"name": "bob"}},
+    },
+    "comment-added": {
+        "type": "comment-added",
+        "change": {"id": "Ineg02", "subject": "neg comment"},
+        "approvals": [{"type": "Code-Review", "value": "-1"}],
+        "comment": "negative-case body",
+    },
+    "change-merged": {
+        "type": "change-merged",
+        "change": {"id": "Ineg03", "subject": "neg merged"},
+    },
+}
+
+# (posted_event_type, forbidden_handler_attr) — every pair where the
+# posted event type must NOT route to the named handler.
+_MISMATCH_PAIRS = [
+    ("patchset-created", "_on_comment_added"),
+    ("patchset-created", "_on_change_merged"),
+    ("comment-added",    "_on_patchset_created"),
+    ("comment-added",    "_on_change_merged"),
+    ("change-merged",    "_on_patchset_created"),
+    ("change-merged",    "_on_comment_added"),
+]
+
+
+class TestGerritEventRoutingNegativeCases:
+    """Explicit negative-case contract: a payload of event type X must
+    NOT trigger a handler registered for a different event type Y.
+
+    Covers Y-prep.1 (#287). See the block comment above for rationale.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "posted_event,forbidden_handler",
+        _MISMATCH_PAIRS,
+        ids=[f"{p}->not_{h}" for p, h in _MISMATCH_PAIRS],
+    )
+    async def test_mismatched_event_does_not_trigger_handler(
+        self, client, monkeypatch, posted_event, forbidden_handler,
+    ):
+        """Post ``posted_event``; assert ``forbidden_handler`` is NOT
+        called. All three handlers are mocked so the forbidden one is
+        observable even if production code were to fan out a matching
+        event to multiple handlers."""
+        from backend.routers import webhooks
+
+        mock_patchset = AsyncMock()
+        mock_comment = AsyncMock()
+        mock_merged = AsyncMock()
+        monkeypatch.setattr(webhooks, "_on_patchset_created", mock_patchset)
+        monkeypatch.setattr(webhooks, "_on_comment_added", mock_comment)
+        monkeypatch.setattr(webhooks, "_on_change_merged", mock_merged)
+
+        handler_mocks = {
+            "_on_patchset_created": mock_patchset,
+            "_on_comment_added": mock_comment,
+            "_on_change_merged": mock_merged,
+        }
+
+        secret = f"test-secret-neg-{posted_event}-{forbidden_handler}"
+        body = _EVENT_PAYLOADS[posted_event]
+        raw = json.dumps(body).encode()
+
+        with _gerrit_enabled_with_secret(secret):
+            res = await client.post(
+                "/api/v1/webhooks/gerrit",
+                content=raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gerrit-Signature": _sign(secret, raw),
+                },
+            )
+
+        assert res.status_code == 200
+        assert res.json() == {"status": "ok", "event": posted_event}
+        # The negative assertion — the whole point of this test.
+        handler_mocks[forbidden_handler].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_event_triggers_no_handler(
+        self, client, monkeypatch,
+    ):
+        """An unknown event type (e.g. ``ref-updated``) must accept the
+        request but fire none of the three handlers — locks the
+        else-branch at webhooks.py:115-116."""
+        from backend.routers import webhooks
+
+        mock_patchset = AsyncMock()
+        mock_comment = AsyncMock()
+        mock_merged = AsyncMock()
+        monkeypatch.setattr(webhooks, "_on_patchset_created", mock_patchset)
+        monkeypatch.setattr(webhooks, "_on_comment_added", mock_comment)
+        monkeypatch.setattr(webhooks, "_on_change_merged", mock_merged)
+
+        secret = "test-secret-neg-unknown-event"
+        body = {
+            "type": "ref-updated",
+            "refUpdate": {
+                "oldRev": "0" * 40,
+                "newRev": "a" * 40,
+                "refName": "refs/heads/main",
+                "project": "omnisight",
+            },
+        }
+        raw = json.dumps(body).encode()
+
+        with _gerrit_enabled_with_secret(secret):
+            res = await client.post(
+                "/api/v1/webhooks/gerrit",
+                content=raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Gerrit-Signature": _sign(secret, raw),
+                },
+            )
+
+        assert res.status_code == 200
+        assert res.json() == {"status": "ok", "event": "ref-updated"}
+        mock_patchset.assert_not_called()
+        mock_comment.assert_not_called()
+        mock_merged.assert_not_called()
