@@ -113,6 +113,29 @@ export type SSEEvent =
   | { event: "agent.token_continuation"; data: { agent_id: string; continuation_round: number; timestamp: string } }
   // ─── H1 / H3: whole-host metrics tick (5s cadence) ───
   | { event: "host.metrics.tick"; data: HostMetricsTickEvent }
+  // ─── ZZ.A2 (#303-2) per-turn context-usage snapshot ───
+  // Emitted by ``backend/agents/llm.py::TokenTrackingCallback.on_llm_end``
+  // at the end of every LLM turn. ``context_limit`` / ``context_usage_pct``
+  // are nullable when the YAML has no entry for the provider/model pair
+  // (Ollama local, OpenRouter pass-through, unknown providers) — UI must
+  // render "—" for nulls instead of a fake 0% (NULL-vs-genuine-zero
+  // contract from ZZ.A1).
+  | {
+      event: "turn_metrics"
+      data: {
+        provider: string | null
+        model: string
+        input_tokens: number
+        output_tokens: number
+        tokens_used: number
+        context_limit: number | null
+        context_usage_pct: number | null
+        latency_ms: number
+        cache_read_tokens: number
+        cache_create_tokens: number
+        timestamp: string
+      }
+    }
   // ─── Q.2 (#296) new device login alert (broadcast_scope=user) ───
   | {
       event: "security.new_device_login"
@@ -266,6 +289,8 @@ const SSE_EVENT_TYPES = [
   "chatops.message",
   // ─── H1 / H3 whole-host metrics tick ───
   "host.metrics.tick",
+  // ─── ZZ.A2 (#303-2) per-turn context-usage snapshot for TokenUsageStats card ───
+  "turn_metrics",
   // ─── Q.3-SUB-1 (#297) workflow_run state sync ───
   "workflow_updated",
   // ─── Q.3-SUB-3 (#297) notification read-state sync ───

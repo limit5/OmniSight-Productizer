@@ -1,11 +1,11 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { 
-  ChevronDown, 
-  ChevronUp, 
-  Coins, 
-  TrendingUp, 
+import {
+  ChevronDown,
+  ChevronUp,
+  Coins,
+  TrendingUp,
   BarChart3,
   Zap,
   DollarSign,
@@ -14,6 +14,23 @@ import {
   ArrowDownRight
 } from "lucide-react"
 import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
+import { subscribeEvents } from "@/lib/api"
+
+// ZZ.A2 (#303-2, 2026-04-24): per-model snapshot of the *latest* turn's
+// context-window usage. Backend emits ``turn_metrics`` SSE at the end of
+// every LLM turn (``backend/agents/llm.py::TokenTrackingCallback``); we
+// keep only the last value per model so the per-card Row 3a progress bar
+// reflects the most recent turn (lifetime totals would balloon as the
+// agent keeps talking and lose the "is this turn near the cap" signal).
+// ``contextLimit`` / ``contextUsagePct`` are ``null`` when the YAML has
+// no entry for the provider/model pair (Ollama local, OpenRouter pass-
+// through, unknown provider) — UI renders "—" for nulls per the same
+// NULL-vs-genuine-zero contract ZZ.A1 established for cache fields.
+interface ContextSnapshot {
+  tokensUsed: number
+  contextLimit: number | null
+  contextUsagePct: number | null
+}
 
 // Token usage data per model
 export interface ModelTokenUsage {
@@ -112,6 +129,30 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
       setUsageData(externalUsage)
     }
   }, [externalUsage])
+
+  // ZZ.A2 (#303-2, 2026-04-24): subscribe to ``turn_metrics`` SSE so the
+  // per-card Row 3a context-window bar reflects the *latest* turn's
+  // ``tokens_used / context_limit`` for that model. Keyed by lowercased
+  // model id to match the dedup convention used elsewhere in this file
+  // (``usedModels`` set, line ~137). Self-contained — no use-engine
+  // wiring needed; the shared ``EventSource`` deduplicates underneath.
+  const [contextByModel, setContextByModel] = useState<Record<string, ContextSnapshot>>({})
+  useEffect(() => {
+    const handle = subscribeEvents((event) => {
+      if (event.event !== "turn_metrics") return
+      const d = event.data
+      if (!d.model) return
+      setContextByModel(prev => ({
+        ...prev,
+        [d.model.toLowerCase()]: {
+          tokensUsed: d.tokens_used,
+          contextLimit: d.context_limit,
+          contextUsagePct: d.context_usage_pct,
+        },
+      }))
+    })
+    return () => handle.close()
+  }, [])
   
   // Calculate totals FROM REAL USAGE ONLY (exclude placeholder cards).
   const totals = usageData.reduce((acc, item) => ({
@@ -447,6 +488,83 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                       }}
                     />
                   </div>
+
+                  {/* Row 3a (context window): per-turn ``tokens_used /
+                      context_limit`` progress bar. ZZ.A2 #303-2 (2026-
+                      04-24). Bands per spec: <50 green / 50-75 yellow /
+                      75-90 orange / >90 red+pulse. Boundary semantics:
+                      strict ``<`` upper / inclusive ``>=`` lower so 50.0
+                      lands on yellow, 75.0 on orange, 90.0 on red — same
+                      "right edge moves you up a band" reading the cache
+                      bar uses. Data source is the latest ``turn_metrics``
+                      SSE for this model (snapshot, not lifetime — a long
+                      conversation otherwise saturates the bar trivially
+                      and loses the "is THIS turn near the cap" signal).
+                      NULL degradation: no SSE seen yet, or backend YAML
+                      has no entry for the provider/model pair (Ollama,
+                      OpenRouter, unknown) → render "—" + empty rail in
+                      muted-foreground, distinct from a real 0%. */}
+                  {(() => {
+                    const ctx = contextByModel[item.model.toLowerCase()]
+                    const hasCtx = !!ctx && ctx.contextUsagePct !== null && ctx.contextUsagePct !== undefined
+                    const hasLimit = !!ctx && ctx.contextLimit !== null && ctx.contextLimit !== undefined
+                    const pct = hasCtx ? (ctx!.contextUsagePct as number) : 0
+                    const tokensUsed = ctx?.tokensUsed ?? 0
+                    const limit = hasLimit ? (ctx!.contextLimit as number) : 0
+                    const ctxColor = !hasCtx
+                      ? "var(--muted-foreground)"
+                      : pct < 50
+                        ? "var(--validation-emerald)"
+                        : pct < 75
+                          ? "#eab308"
+                          : pct < 90
+                            ? "var(--hardware-orange)"
+                            : "var(--critical-red)"
+                    const isCritical = hasCtx && pct >= 90
+                    // Hover tooltip — "123k / 200k tokens" per spec.
+                    // ``hasLimit`` may be true with ``hasCtx`` true (the
+                    // common ZZ.A2 happy path); when ``hasLimit`` is
+                    // false we still want to show the raw token count
+                    // for the latest turn so operators see the model
+                    // is at least talking. ``no context data`` only
+                    // fires when no turn_metrics SSE has landed yet
+                    // (or this card is a configured-provider placeholder).
+                    const ctxTooltip = !ctx
+                      ? "no context data — no turn_metrics seen yet"
+                      : hasLimit
+                        ? `${formatTokens(tokensUsed)} / ${formatTokens(limit)} tokens`
+                        : `${formatTokens(tokensUsed)} tokens used (context limit unknown for this provider/model)`
+                    return (
+                      <div className="mb-3" data-testid="context-usage-section">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-mono text-[10px] text-[var(--muted-foreground)] tracking-wider">
+                            CONTEXT
+                          </span>
+                          <span
+                            className="font-mono text-[10px] font-semibold"
+                            style={{ color: ctxColor }}
+                            data-testid="context-usage-pct"
+                          >
+                            {hasCtx ? `${pct.toFixed(0)}%` : "—"}
+                          </span>
+                        </div>
+                        <div
+                          className="h-1.5 rounded-full bg-[var(--border)] overflow-hidden"
+                          title={ctxTooltip}
+                          data-testid="context-usage-bar-rail"
+                        >
+                          <div
+                            className={`h-full rounded-full transition-all duration-500${isCritical ? " animate-pulse" : ""}`}
+                            style={{
+                              width: hasCtx ? `${Math.min(pct, 100)}%` : "0%",
+                              backgroundColor: ctxColor,
+                            }}
+                            data-testid="context-usage-bar"
+                          />
+                        </div>
+                      </div>
+                    )
+                  })()}
 
                   {/* Row 3b (cache): CACHE HIT ratio + CACHE WRITE bars.
                       ZZ.A1 #303-1 (2026-04-24): prompt-cache observability.
