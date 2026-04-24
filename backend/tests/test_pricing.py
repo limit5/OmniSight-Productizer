@@ -1,14 +1,17 @@
-"""Z.3 (#292) checkbox 3 + checkbox 4 — fallback-strategy, throttled
-warning, and `POST /runtime/pricing/reload` tests.
+"""Z.3 (#292) checkbox 3 + 4 + 5 + 6 — fallback, reload endpoint, snapshot
+endpoint, and YAML-corrupt boot-resilience / cross-worker reload tests.
 
 Scope is the behaviour added by Z.3:
     - checkbox 3: fallback chain + throttled WARNING emission per arm.
     - checkbox 4: `POST /runtime/pricing/reload` endpoint + the
       cross-worker `pricing_reload` event callback that clears each
       peer worker's local cache.
-
-Z.3 checkbox 6 (YAML-corrupt boot resilience + cross-worker reload
-under live Redis) will extend this file further.
+    - checkbox 5: `GET /runtime/pricing` read-only snapshot helper.
+    - checkbox 6: corrupt / malformed YAML does not crash startup or
+      reload (falls back to the pre-Z.3 hard-coded dict); POST reload
+      invokes `publish_cross_worker` with the documented payload and
+      the Redis-pubsub dispatch path clears peer-worker caches
+      end-to-end.
 """
 
 from __future__ import annotations
@@ -500,3 +503,346 @@ class TestPricingSnapshotEndpoint:
         # in `_REQUIRE_ADMIN`; the GET endpoint must NOT carry it.
         assert "current_user" in dep_names
         assert "_dep" not in dep_names
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.3 checkbox 6 (#292) — YAML-corrupt boot resilience +
+#                          cross-worker reload integration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Three-part contract:
+#
+#   1. YAML 格式錯 → 啟動時不 crash 退回硬寫 dict
+#      A malformed config/llm_pricing.yaml must never bring the worker
+#      down. `_load_pricing()` catches every YAML/OS error and falls
+#      back to `_HARD_CODED_FALLBACK` (bit-identical to the pre-Z.3
+#      dict that lived at routers/system.py:1094-1103) so the 8 legacy
+#      models keep billing at their historical rates. Anything else
+#      gets `_HARD_CODED_GLOBAL_DEFAULT = (1.0, 3.0)`.
+#
+#   2. Reload endpoint correctness under corrupt YAML
+#      `POST /api/v1/runtime/pricing/reload` must return 200 with
+#      `loaded_from_yaml: False` and `providers: []` when the YAML on
+#      disk is unparseable, and the next `get_pricing()` call must
+#      still resolve to a hard-coded rate.
+#
+#   3. 跨 worker reload 同步 (Redis pub/sub end-to-end)
+#      POST reload must invoke `publish_cross_worker(PRICING_RELOAD_EVENT,
+#      {"origin_worker": str(pid)})`. The dispatch path matching
+#      shared_state.start_pubsub_listener — JSON decode of the pubsub
+#      payload, for-loop over `_pubsub_callbacks` — must deliver the
+#      event to `_on_pricing_reload_event` and clear the local cache.
+
+
+class TestYamlCorruptBootResilience:
+    """Z.3 checkbox 6, part 1.
+
+    Corrupt / malformed YAML must not crash the worker at boot OR at
+    reload time. The hard-coded fallback dict keeps billing alive for
+    the 8 pre-Z.3 models and the global default keeps unknown-model
+    billing visible in dashboards rather than silently charging zero.
+    """
+
+    @pytest.mark.parametrize(
+        "label,body",
+        [
+            # yaml.ScannerError — embedded tab in block scope is a
+            # classic operator typo when hand-editing indentation.
+            ("scanner_error_tab_indent",
+             "providers:\n\tanthropic: bad-tab"),
+            # yaml.ParserError — unclosed flow mapping.
+            ("parser_error_unclosed_brace",
+             "providers: {anthropic: {input: 5, output: 25"),
+            # yaml.ScannerError — garbage tokens that fail the tokenizer.
+            ("scanner_error_garbage",
+             "@@@ !!! ???\nnot: : valid"),
+            # Root is a scalar, not a dict — load succeeds but shape is
+            # wrong. The loader must reject rather than IndexError on
+            # subsequent `.get()` calls.
+            ("root_is_scalar",
+             "just a pricing string"),
+            # Root is a list, not a dict. Same as above.
+            ("root_is_list",
+             "- claude-opus-4-7\n- claude-sonnet-4"),
+            # `providers` is a list, not a mapping. Individual model
+            # rows can't be coerced; coerce-step must skip silently.
+            ("providers_is_list",
+             "providers:\n  - anthropic\n  - openai"),
+            # Rate pair values are strings — `_coerce_rate_pair` must
+            # reject without propagating a ValueError up the stack.
+            ("rate_values_are_strings",
+             "providers:\n  anthropic:\n    claude-opus-4-7:\n"
+             "      input: 'five'\n      output: 'twenty-five'\n"),
+            # Empty file → yaml.safe_load returns None → loader sees
+            # a non-dict root.
+            ("empty_file", ""),
+            # Truncated mid-mapping.
+            ("truncated",
+             "providers:\n  anthropic:\n    claude-opus-4-7:\n"
+             "      input: 5\n      output:"),
+        ],
+    )
+    def test_corrupt_yaml_does_not_crash_and_falls_back_to_hardcoded_dict(
+        self, label, body, tmp_path, monkeypatch, caplog,
+    ):
+        # Simulate the "startup" path: patch the YAML path to a corrupt
+        # file, then make the first `get_pricing()` call. This mirrors
+        # what each uvicorn worker would do on cold start if someone
+        # shipped a broken config.
+        broken = tmp_path / f"broken_{label}.yaml"
+        broken.write_bytes(body.encode("utf-8"))
+        monkeypatch.setattr(pricing, "_PRICING_PATH", broken)
+        reset_cache_for_tests()
+
+        caplog.set_level(logging.WARNING, logger="backend.pricing")
+
+        # Every pre-Z.3 model must still bill at its historical rate.
+        for model, expected in TestPriceNeutralityAcrossFallbacks.EXPECT.items():
+            assert get_pricing(None, model) == expected, (
+                f"{label}: model {model} did not bit-identically resolve "
+                f"through _HARD_CODED_FALLBACK after corrupt YAML"
+            )
+
+        # An unknown model under an unknown provider falls through to
+        # the hard-coded global default, not zero-zero.
+        assert get_pricing("no-such-vendor", "no-such-model") == (1.0, 3.0)
+        # provider=None + unknown model: same fallback.
+        assert get_pricing(None, "no-such-model-either") == (1.0, 3.0)
+
+    def test_corrupt_yaml_leaves_loaded_from_yaml_false(
+        self, tmp_path, monkeypatch,
+    ):
+        broken = tmp_path / "broken.yaml"
+        broken.write_text(
+            "providers: {anthropic: {input: 5, output: 25",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing, "_PRICING_PATH", broken)
+        reset_cache_for_tests()
+        table = pricing.get_pricing_table()
+        # Degraded state must be observable on the snapshot so a
+        # dashboard can flag it instead of silently rendering the
+        # hard-coded 8-model fallback.
+        assert table["loaded_from_yaml"] is False
+        assert table["providers"] == {}
+        assert table["defaults"] == {"input": 1.0, "output": 3.0}
+
+    def test_corrupt_yaml_load_does_not_raise(
+        self, tmp_path, monkeypatch,
+    ):
+        # Explicit negative: `_load_pricing` must return cleanly rather
+        # than letting a yaml.YAMLError or AttributeError bubble up
+        # (either would crash the first `track_tokens` call on boot).
+        broken = tmp_path / "broken.yaml"
+        broken.write_text("@@@ !!! ???\nnot: : valid", encoding="utf-8")
+        monkeypatch.setattr(pricing, "_PRICING_PATH", broken)
+        reset_cache_for_tests()
+        # Would raise on master before checkbox 2's defensive load.
+        cache = pricing._load_pricing()
+        assert cache["_loaded_from_yaml"] is False
+        assert cache["providers"] == {}
+        # Loader also logs a WARNING describing the failure so an
+        # operator scraping logs knows the YAML needs fixing.
+
+    @pytest.mark.asyncio
+    async def test_reload_endpoint_survives_corrupt_yaml(
+        self, client, tmp_path, monkeypatch,
+    ):
+        # Existing `test_endpoint_survives_yaml_missing_at_reload` covers
+        # MISSING; this covers CORRUPT (operator ssh'd in, typo'd the
+        # YAML, now POSTs reload). Must return 200 with the degraded
+        # status instead of 500-ing out.
+        broken = tmp_path / "broken.yaml"
+        broken.write_text(
+            "providers:\n\tanthropic: bad-tab",  # embedded tab → ScannerError
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing, "_PRICING_PATH", broken)
+
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "reloaded"
+        assert body["loaded_from_yaml"] is False
+        assert body["providers"] == []
+        # After reload, get_pricing must still serve the hard-coded rate
+        # for pre-Z.3 models — this is the "退回硬寫 dict" contract.
+        assert get_pricing(None, "claude-opus-4-7") == (5.0, 25.0)
+        assert get_pricing(None, "deepseek-chat") == (0.14, 0.28)
+
+
+class TestCrossWorkerReloadIntegration:
+    """Z.3 checkbox 6, part 3.
+
+    POST /runtime/pricing/reload must fan out to peer workers via
+    Redis pub/sub. We verify three surfaces:
+        - the endpoint calls `publish_cross_worker(PRICING_RELOAD_EVENT,
+          {"origin_worker": str(pid)})`;
+        - the response's `broadcast` field reflects publish success;
+        - the shared_state listener dispatch path (JSON-decode →
+          `_pubsub_callbacks` fan-out) delivers the event to
+          `_on_pricing_reload_event` and clears the peer worker's cache.
+    """
+
+    @pytest.mark.asyncio
+    async def test_post_reload_invokes_publish_with_documented_payload(
+        self, client, monkeypatch,
+    ):
+        # Capture the args that the endpoint passes to publish_cross_worker
+        # so a contract regression (wrong event name, missing origin
+        # worker field) would surface immediately.
+        calls: list[tuple[str, dict]] = []
+
+        def fake_publish(event, data):
+            calls.append((event, dict(data)))
+            return True  # pretend Redis accepted the publish
+
+        from backend.routers import system as _system
+        monkeypatch.setattr(_system, "publish_cross_worker", fake_publish, raising=False)
+        # The endpoint imports `publish_cross_worker` locally inside the
+        # handler (`from backend.shared_state import publish_cross_worker`)
+        # so we also patch the source module for the import to find.
+        from backend import shared_state as _sst
+        monkeypatch.setattr(_sst, "publish_cross_worker", fake_publish)
+
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["broadcast"] == "redis_pubsub"
+
+        assert len(calls) == 1, "endpoint should publish exactly once per POST"
+        event, data = calls[0]
+        assert event == pricing.PRICING_RELOAD_EVENT == "pricing_reload"
+        # origin_worker is documented as str(os.getpid()) so peer
+        # workers can correlate reload events with log lines.
+        assert "origin_worker" in data
+        assert data["origin_worker"].isdigit(), (
+            f"origin_worker should be str(pid); got {data['origin_worker']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_post_reload_reports_local_only_when_publish_fails(
+        self, client, monkeypatch,
+    ):
+        # If Redis is unavailable / publish fails, the endpoint must
+        # still return 200 (the local worker reloaded fine) but the
+        # `broadcast` field must surface "local_only" so operators
+        # know peer workers did NOT invalidate and a rolling restart
+        # may be required to complete the rollout.
+        from backend import shared_state as _sst
+        monkeypatch.setattr(_sst, "publish_cross_worker", lambda e, d: False)
+
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["broadcast"] == "local_only"
+
+    def test_listener_dispatch_path_clears_peer_cache_end_to_end(self):
+        # End-to-end simulation of shared_state.start_pubsub_listener:
+        # (1) worker A publishes JSON payload → (2) listener on worker B
+        # decodes and fans out to _pubsub_callbacks → (3) pricing's
+        # registered callback invalidates B's local cache.
+        import json as _json
+
+        from backend import shared_state
+
+        # Prime peer-worker cache.
+        get_pricing("anthropic", "claude-opus-4-7")
+        assert pricing._PRICING_CACHE is not None
+
+        # Build the exact payload shape that `publish_cross_worker`
+        # writes to Redis (see shared_state.publish_cross_worker: body
+        # is `json.dumps({"event": event, "data": data})`).
+        wire_payload = _json.dumps({
+            "event": pricing.PRICING_RELOAD_EVENT,
+            "data": {"origin_worker": "99999"},
+        })
+
+        # Replay the listener's decode-and-dispatch block verbatim.
+        # (shared_state.start_pubsub_listener lines ~554-563.)
+        decoded = _json.loads(wire_payload)
+        for cb in shared_state._pubsub_callbacks:
+            cb(decoded["event"], decoded["data"])
+
+        # Peer worker's cache is invalidated; next lookup re-reads.
+        assert pricing._PRICING_CACHE is None
+
+    def test_listener_dispatch_ignores_other_event_types(self):
+        # Confirm the listener fan-out path itself does not clear the
+        # pricing cache for unrelated events (e.g. "sse" events used by
+        # the events bus). Guards against accidentally widening the
+        # trigger if a future contributor removes the event-name check
+        # in `_on_pricing_reload_event`.
+        import json as _json
+
+        from backend import shared_state
+
+        get_pricing("anthropic", "claude-opus-4-7")
+        before = pricing._PRICING_CACHE
+        assert before is not None
+
+        wire_payload = _json.dumps({
+            "event": "sse",
+            "data": {"type": "heartbeat"},
+        })
+        decoded = _json.loads(wire_payload)
+        for cb in shared_state._pubsub_callbacks:
+            cb(decoded["event"], decoded["data"])
+
+        assert pricing._PRICING_CACHE is before
+
+    @pytest.mark.asyncio
+    async def test_round_trip_post_reload_then_listener_dispatch(
+        self, client, tmp_path, monkeypatch,
+    ):
+        # Full two-worker simulation: POST hits worker A, publish is
+        # intercepted (no real Redis in tests), payload is fed through
+        # the listener dispatch on "worker B" (same process, same
+        # callback list). B's cache must be invalidated AND its next
+        # get_pricing() call must read from the temp YAML that A
+        # reloaded from.
+        import json as _json
+
+        from backend import shared_state
+
+        published: list[str] = []
+
+        def capturing_publish(event, data):
+            published.append(_json.dumps({"event": event, "data": data}))
+            return True
+
+        monkeypatch.setattr(shared_state, "publish_cross_worker", capturing_publish)
+
+        # Point both "workers" at a new YAML with a recognisable rate.
+        new_yaml = tmp_path / "new_rates.yaml"
+        new_yaml.write_text(
+            "providers:\n"
+            "  roundtripvendor:\n"
+            "    rt-model-v1:\n"
+            "      input: 123.0\n"
+            "      output: 456.0\n"
+            "defaults:\n"
+            "  input: 1.0\n"
+            "  output: 3.0\n"
+            "metadata:\n"
+            "  schema_version: 1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing, "_PRICING_PATH", new_yaml)
+
+        # Pre-populate "worker B" cache with an old state.
+        get_pricing("anthropic", "claude-opus-4-7")  # cached under old path
+        # Worker A posts reload.
+        resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert resp.status_code == 200, resp.text
+        assert len(published) == 1, "exactly one broadcast per POST"
+
+        # Simulate listener on "worker B": decode + fan out.
+        decoded = _json.loads(published[0])
+        assert decoded["event"] == pricing.PRICING_RELOAD_EVENT
+        for cb in shared_state._pubsub_callbacks:
+            cb(decoded["event"], decoded["data"])
+
+        # Worker B's cache was invalidated; next lookup re-reads the
+        # new YAML and sees the rt-model-v1 rate. This is the
+        # operator-visible contract: edit YAML → POST reload → all
+        # workers bill at new rate without a rolling restart.
+        assert get_pricing("roundtripvendor", "rt-model-v1") == (123.0, 456.0)

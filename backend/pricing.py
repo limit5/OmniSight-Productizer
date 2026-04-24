@@ -187,7 +187,33 @@ def _load_pricing() -> dict[str, Any]:
                 if isinstance(meta, dict):
                     parsed["metadata"] = meta
 
-                parsed["_loaded_from_yaml"] = True
+                # Z.3 checkbox 6: only flip `_loaded_from_yaml=True` when
+                # we extracted at least one usable rate — either a
+                # populated provider table or an explicit defaults
+                # override. A YAML that parses but yields no usable
+                # content (truncated file, wrong-shape providers list,
+                # string rate values that failed coercion) is
+                # effectively unusable; leaving the flag False routes
+                # `get_pricing` through `_HARD_CODED_FALLBACK` so the 8
+                # pre-Z.3 models keep billing at historical rates
+                # instead of silently collapsing to global defaults.
+                has_provider_rate = any(
+                    bool(tbl) for tbl in parsed["providers"].values()
+                )
+                if has_provider_rate or defaults_pair is not None:
+                    parsed["_loaded_from_yaml"] = True
+                else:
+                    logger.warning(
+                        "llm_pricing.yaml at %s parsed but yielded no "
+                        "usable rates — falling back to hard-coded dict",
+                        _PRICING_PATH,
+                    )
+            else:
+                logger.warning(
+                    "llm_pricing.yaml at %s did not parse as a mapping "
+                    "(got %s) — falling back to hard-coded dict",
+                    _PRICING_PATH, type(data).__name__,
+                )
         else:
             logger.warning(
                 "llm_pricing.yaml not found at %s — billing falls back to "
