@@ -30,6 +30,7 @@ changing caller code.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -37,6 +38,29 @@ import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# ZZ.C1 #305-1 checkbox 2 (2026-04-24): slug fence for auto-captured
+# prompt-version rows. Mirrors ``_AGENT_TYPE_RE`` in routers/system.py
+# so a capture produces a path that the matching read API
+# (``GET /runtime/prompts?agent_type=…``) can retrieve. Values that
+# fail this regex cause a silent skip — capture is best-effort and a
+# malformed agent_type must never break prompt assembly.
+_PROMPT_SNAPSHOT_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Strong-ref store for fire-and-forget capture tasks. Without this the
+# loop's only reference is the internal task list; in CPython ≥ 3.11
+# dropping all user references can race the task's own scheduling and
+# trigger "Task was destroyed but it is pending!" warnings. We
+# discard the reference from ``add_done_callback`` once the task
+# finishes, so the set stays bounded to the in-flight count.
+#
+# Module-global audit (SOP Step 1): this set is PER-WORKER by design
+# (SOP answer #3 "故意每 worker 獨立"). Each uvicorn worker schedules
+# its own capture tasks; cross-worker coordination is handled by the
+# PG advisory lock inside ``capture_prompt_snapshot``, not by this
+# set. The set never exceeds the in-flight count per worker so
+# unbounded growth is impossible even under pathological load.
+_CAPTURE_TASKS: set[asyncio.Task] = set()
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIGS_ROOT = _PROJECT_ROOT / "configs"
@@ -760,6 +784,73 @@ _BUILTIN_PROMPTS = {
 }
 
 
+def _snapshot_path_for(agent_type: str, sub_type: str = "") -> str | None:
+    """Resolve ``(agent_type, sub_type)`` to the canonical
+    ``prompt_versions.path`` used by ZZ.C1 capture + read.
+
+    Returns ``None`` when either slug fails the
+    :data:`_PROMPT_SNAPSHOT_SLUG_RE` fence so the caller skips capture
+    instead of writing a malformed path.
+    """
+    slug = (agent_type or "").strip()
+    if not slug or not _PROMPT_SNAPSHOT_SLUG_RE.match(slug):
+        return None
+    if sub_type:
+        st = sub_type.strip()
+        if not st or not _PROMPT_SNAPSHOT_SLUG_RE.match(st):
+            return None
+        return f"backend/agents/prompts/{slug}__{st}.md"
+    return f"backend/agents/prompts/{slug}.md"
+
+
+def _schedule_prompt_snapshot(
+    assembled: str, agent_type: str, sub_type: str = "",
+) -> None:
+    """Fire-and-forget wrapper around
+    :func:`backend.prompt_registry.capture_prompt_snapshot`.
+
+    ZZ.C1 #305-1 checkbox 2: ``build_system_prompt`` is synchronous but
+    the registry helpers are ``async`` (asyncpg pool). Schedule the
+    capture on the running event loop when one is available; silently
+    skip when called from a sync context (unit tests, offline scripts)
+    — the capture guarantee is "every runtime assembly lands a row",
+    and tests that need to exercise the write path call
+    :func:`backend.prompt_registry.capture_prompt_snapshot` directly.
+
+    Failures in the scheduled task are swallowed at DEBUG — a missing
+    DB pool during CLI imports, a DSN outage, a closed loop during
+    shutdown: none of those should propagate through prompt assembly
+    and poison every agent turn. The register path itself has its own
+    advisory-lock + tx semantics so a crashed capture cannot leave
+    ``prompt_versions`` in a half-written state.
+    """
+    path = _snapshot_path_for(agent_type, sub_type)
+    if path is None:
+        return
+    if not assembled:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run() -> None:
+        try:
+            from backend.prompt_registry import capture_prompt_snapshot
+            await capture_prompt_snapshot(path, assembled)
+        except Exception:
+            logger.debug("prompt snapshot capture failed", exc_info=True)
+
+    try:
+        task = loop.create_task(_run())
+    except RuntimeError:
+        # Loop is closing/closed — drop the capture rather than raise.
+        return
+    _CAPTURE_TASKS.add(task)
+    task.add_done_callback(_CAPTURE_TASKS.discard)
+
+
 def build_system_prompt(
     model_name: str = "",
     agent_type: str = "general",
@@ -934,4 +1025,15 @@ def build_system_prompt(
             handoff_context = handoff_context[:_MAX_HANDOFF] + "\n... [handoff truncated]"
         sections.append(f"# Previous Task Handoff\n\n{handoff_context}")
 
-    return "\n\n---\n\n".join(sections)
+    assembled = "\n\n---\n\n".join(sections)
+
+    # ZZ.C1 #305-1 checkbox 2: auto-accumulate a versioned row for this
+    # exact runtime composition. Dedupes by content hash + advisory
+    # lock so repeated identical builds (the common case) become a
+    # single SELECT; concurrent workers serialise on the per-path lock
+    # inside ``capture_prompt_snapshot``. Never raises — capture is
+    # best-effort and sync contexts (tests, scripts with no event
+    # loop) are skipped silently.
+    _schedule_prompt_snapshot(assembled, agent_type, sub_type)
+
+    return assembled

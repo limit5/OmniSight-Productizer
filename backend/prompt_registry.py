@@ -700,6 +700,101 @@ async def evaluate_canary(
     )
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  ZZ.C1 #305-1 checkbox 2 — runtime snapshot capture
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Role label for rows written by :func:`capture_prompt_snapshot`. Kept
+# distinct from ``active`` / ``canary`` / ``archive`` so the auto-
+# captured runtime trail does not interfere with active-row promotion
+# or canary routing — the read API (GET /runtime/prompts) does not
+# filter by role, so snapshots still surface in the timeline.
+SNAPSHOT_ROLE = "snapshot"
+
+
+async def _capture_snapshot_impl(
+    conn, rel: str, body: str,
+) -> Optional[int]:
+    sha = _sha(body)
+    # Fast path (no lock): if the hash is already known for this path,
+    # nothing to do. Hits the ``idx_prompt_versions_path_role`` prefix
+    # scan + body_sha256 filter — cheap compared to acquiring the
+    # advisory lock on every prompt build.
+    existing = await conn.fetchrow(
+        "SELECT id FROM prompt_versions "
+        "WHERE path = $1 AND body_sha256 = $2 LIMIT 1",
+        rel, sha,
+    )
+    if existing:
+        return None
+
+    # Advisory lock shares the same key as ``register_active`` /
+    # ``promote_canary`` so a concurrent deploy and a runtime snapshot
+    # cannot both pick the same ``version`` (UNIQUE(path, version)).
+    # Tx-scoped → released on COMMIT / ROLLBACK.
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"prompt-register-active-{rel}",
+    )
+
+    # Re-check under the lock — another worker may have inserted the
+    # same hash between our fast-path SELECT and the lock grant.
+    existing = await conn.fetchrow(
+        "SELECT id FROM prompt_versions "
+        "WHERE path = $1 AND body_sha256 = $2 LIMIT 1",
+        rel, sha,
+    )
+    if existing:
+        return None
+
+    last = await conn.fetchrow(
+        "SELECT MAX(version) AS m FROM prompt_versions WHERE path = $1",
+        rel,
+    )
+    next_v = (last["m"] or 0) + 1
+
+    row = await conn.fetchrow(
+        "INSERT INTO prompt_versions "
+        "(path, version, role, body, body_sha256, created_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        rel, next_v, SNAPSHOT_ROLE, body, sha, time.time(),
+    )
+    return int(row["id"])
+
+
+async def capture_prompt_snapshot(
+    path: str, body: str, conn=None,
+) -> Optional[int]:
+    """Best-effort auto-capture of an assembled system prompt.
+
+    ZZ.C1 #305-1 checkbox 2: ``build_system_prompt()`` calls this after
+    composing the per-turn prompt so the version-timeline API
+    (``GET /runtime/prompts``) surfaces the exact strings agents saw at
+    runtime — no operator deploy action required.
+
+    Semantics:
+      * Deduped by ``body_sha256`` — identical content is never written
+        twice for the same ``path``. Returns ``None`` when the hash is
+        already present.
+      * Advisory lock (shared key with ``register_active``) serialises
+        concurrent workers so two INSERTs cannot collide on
+        ``UNIQUE(path, version)``.
+      * Writes ``role='snapshot'`` — a new role reserved for this path.
+        Does NOT touch the existing active/canary rows. Timeline reads
+        (no role filter) still surface snapshots alongside deploys.
+
+    Returns the new row id, or ``None`` when the hash already existed.
+    """
+    rel = _normalise_path(path)
+    if conn is None:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                return await _capture_snapshot_impl(owned, rel, body)
+    async with conn.transaction():
+        return await _capture_snapshot_impl(conn, rel, body)
+
+
 async def bootstrap_from_disk(
     *, paths: list[Path] | None = None, conn=None,
 ) -> list[tuple[str, str]]:
