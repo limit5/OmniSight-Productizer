@@ -28,6 +28,7 @@ import { AGENT_TYPES, getModelInfo } from "./agent-matrix-wall"
 import { HandoffTimeline } from "./handoff-timeline"
 import { matchCommands as slashMatchCommands, CATEGORY_COLORS as slashCategoryColors, type SlashCommand } from "@/lib/slash-commands"
 import { TokenUsageStats } from "./token-usage-stats"
+import { TurnTimeline } from "./turn-timeline"
 
 // Orchestrator message types
 export interface OrchestratorMessage {
@@ -474,7 +475,16 @@ export function OrchestratorAI({
       
       {/* Scrollable Content Area */}
       <div className="flex-1 min-h-0 overflow-y-auto">
-      
+
+      {/* ZZ.B1 #304-1 (2026-04-24): per-turn timeline cards — the
+          "ccxray" signature UI. Mounted at the very top of the
+          scrollable content area, above the Agent Status Grid /
+          TokenUsageStats / LLM MODEL provider selector so it's the
+          first thing the operator sees when the panel opens. The
+          component self-subscribes to ``turn_metrics`` + ``turn_tool_stats``
+          SSE (shared EventSource), so no wiring needed here. */}
+      <TurnTimeline />
+
       {/* Agent Status Grid */}
       <div className="border-b border-[var(--border)]">
         <button
