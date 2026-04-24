@@ -3712,6 +3712,27 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 <SettingField label="URL" value={getVal("jira", "url")} onChange={v => setVal("notification_jira_url", v)} />
                 <SettingField label="Token" value={getVal("jira", "token")} type="password" onChange={v => setVal("notification_jira_token", v)} />
                 <SettingField label="Project Key" value={getVal("jira", "project")} onChange={v => setVal("notification_jira_project", v)} />
+                {/* Y-prep.3 (#289) — JIRA inbound automation routing knobs.
+                    Both are routing config (not credentials) so we render
+                    plaintext + show the built-in default in a footnote so
+                    operators know what's running when the input is blank.
+                    Settings keys are the bare field names (``jira_intake_label``
+                    / ``jira_done_statuses``) — they live on Settings directly,
+                    not under the ``notification_jira_*`` family, because the
+                    inbound dispatcher reads them by their canonical name. */}
+                <SettingField
+                  label="Intake Label"
+                  value={getVal("jira", "intake_label", "jira_intake_label")}
+                  onChange={v => setVal("jira_intake_label", v)}
+                />
+                <SettingField
+                  label="Done Statuses"
+                  value={getVal("jira", "done_statuses", "jira_done_statuses")}
+                  onChange={v => setVal("jira_done_statuses", v)}
+                />
+                <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
+                  Intake label fires <code>intent_bridge.on_intake_queued</code> on <code>jira:issue_created</code> (default <code>omnisight-intake</code>). Done statuses are CSV; transitions into any listed value trigger artifact packaging (default <code>Done,Closed</code>).
+                </div>
                 {/* Y-prep.2 #288 — inbound webhook HMAC secret rotate.
                     Mirrors the Gerrit Wizard Step 5 one-time-reveal UX: the
                     plain value is shown exactly once in the confirm→reveal

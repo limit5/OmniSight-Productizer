@@ -111,6 +111,13 @@ _SHARED_KV_STR_FIELDS: frozenset[str] = frozenset({
     # ── JIRA / Slack / PagerDuty ──
     "notification_jira_url", "notification_jira_token",
     "notification_jira_project",
+    # Y-prep.3 (#289) — JIRA inbound automation routing knobs. Same
+    # cross-worker-coherence reason as the rest of this set: a wizard
+    # edit on worker-A must show up in jira_event_router decisions on
+    # workers B/C/D without restart, otherwise the artifact-packaging
+    # pipeline silently runs the OLD whitelist on 3 of 4 workers and
+    # operators see "fired sometimes" intermittency.
+    "jira_intake_label", "jira_done_statuses",
     "notification_slack_webhook", "notification_slack_mention",
     "notification_pagerduty_key",
     # ── Inbound webhook HMAC secrets ──
@@ -330,6 +337,13 @@ async def get_settings(_user=Depends(_au.require_operator)):
             "url": settings.notification_jira_url,
             "token": _mask(settings.notification_jira_token),
             "project": settings.notification_jira_project,
+            # Y-prep.3 (#289) — surfaced unmasked: these are routing knobs,
+            # not credentials. Empty string = router uses built-in default
+            # (``omnisight-intake`` / ``Done,Closed``); the UI labels the
+            # placeholder with the default so an operator immediately knows
+            # what's running without having to read source.
+            "intake_label": settings.jira_intake_label,
+            "done_statuses": settings.jira_done_statuses,
         },
         "slack": {
             "webhook": _mask(settings.notification_slack_webhook),
@@ -382,6 +396,7 @@ _UPDATABLE_FIELDS = frozenset({
     "gerrit_enabled", "gerrit_url", "gerrit_ssh_host", "gerrit_ssh_port",
     "gerrit_project", "gerrit_replication_targets",
     "notification_jira_url", "notification_jira_token", "notification_jira_project",
+    "jira_intake_label", "jira_done_statuses",
     "notification_slack_webhook", "notification_slack_mention",
     "notification_pagerduty_key",
     "github_webhook_secret", "gitlab_webhook_secret", "jira_webhook_secret",

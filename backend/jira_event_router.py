@@ -43,15 +43,20 @@ the same request, so there is no ordering hazard between this router and
 two paths sequentially inside the same request handler — no parallelism
 introduced.)
 
-Configuration knobs (the next Y-prep.3 bullet promotes these to
-``_SHARED_KV_STR_FIELDS`` so the Notifications UI can edit them; today
-they fall back to environment variables so this commit is self-contained
-and reviewable):
+Configuration knobs — resolved per-call with this precedence:
+``settings.<field>`` → ``OMNISIGHT_*`` env var → built-in default. The
+two routing fields are mirrored into Redis via ``_SHARED_KV_STR_FIELDS``
+in ``backend/routers/integration.py`` so a Notifications-tab edit on
+worker-A is picked up by workers B/C/D on their next overlay (the same
+cross-worker-coherence shape that ``jira_webhook_secret`` uses):
 
-  * ``OMNISIGHT_JIRA_INTAKE_LABEL`` (default ``omnisight-intake``)
-  * ``OMNISIGHT_JIRA_DONE_STATUSES`` (CSV, default ``Done,Closed``)
-  * ``OMNISIGHT_JIRA_COMMAND_PREFIX`` (default ``/`` — only commands whose
-    first non-whitespace char matches this prefix dispatch)
+  * ``settings.jira_intake_label`` / ``OMNISIGHT_JIRA_INTAKE_LABEL``
+    (default ``omnisight-intake``)
+  * ``settings.jira_done_statuses`` / ``OMNISIGHT_JIRA_DONE_STATUSES``
+    (CSV, default ``Done,Closed``)
+  * ``OMNISIGHT_JIRA_COMMAND_PREFIX`` (env-only, default ``/`` — the
+    command-prefix knob is intentionally NOT in the wizard UI; it's a
+    deploy-time concern, not an operator-rotated field)
 """
 
 from __future__ import annotations
@@ -74,20 +79,52 @@ _DEFAULT_COMMAND_PREFIX = "/"
 _DEFAULT_TENANT_ID = "t-default"
 
 
+def _settings_str(attr: str) -> str:
+    """Best-effort read of ``backend.config.settings.<attr>`` as a string.
+
+    Returns ``""`` if anything goes wrong (settings module not importable,
+    attribute missing, value not stringifiable). Used as the highest-priority
+    source for the two routing knobs so a Notifications-tab edit is picked
+    up on the same request — peer workers see the value via the
+    ``_overlay_runtime_settings()`` SharedKV mirror enabled by promoting
+    these keys into ``_SHARED_KV_STR_FIELDS`` (the previous bullet of this
+    Y-prep.3 task).
+    """
+    try:
+        from backend.config import settings as _s
+        v = getattr(_s, attr, "")
+        return str(v).strip() if v is not None else ""
+    except Exception:
+        return ""
+
+
 def _intake_label() -> str:
     """Resolve the JIRA label that flags an issue for OmniSight intake.
 
-    Reads the env first so operators can override without a settings
-    write; falls back to the canonical default. The next Y-prep.3 bullet
-    will register a ``jira_intake_label`` field on ``Settings`` and
-    promote it into ``_SHARED_KV_STR_FIELDS`` so the UI can edit it.
+    Resolution order (first non-empty wins):
+      1. ``settings.jira_intake_label`` — Notifications-tab UI / wizard /
+         shared-KV-mirrored runtime override (Y-prep.3 final bullet).
+      2. ``OMNISIGHT_JIRA_INTAKE_LABEL`` env var — kept for headless
+         deployments and the existing operator-tested path.
+      3. ``omnisight-intake`` built-in default.
     """
+    s = _settings_str("jira_intake_label")
+    if s:
+        return s
     env = os.environ.get("OMNISIGHT_JIRA_INTAKE_LABEL", "").strip()
     return env or _DEFAULT_INTAKE_LABEL
 
 
 def _done_statuses() -> set[str]:
-    raw = os.environ.get("OMNISIGHT_JIRA_DONE_STATUSES", "").strip()
+    """CSV → ``set[str]``. Settings overlay → env → built-in default.
+
+    Same precedence order as ``_intake_label()`` so a single Notifications-tab
+    save reconfigures both knobs identically; operators don't have to
+    reason about a split UI/env source-of-truth.
+    """
+    raw = _settings_str("jira_done_statuses")
+    if not raw:
+        raw = os.environ.get("OMNISIGHT_JIRA_DONE_STATUSES", "").strip()
     if not raw:
         return set(_DEFAULT_DONE_STATUSES)
     return {p.strip() for p in raw.split(",") if p.strip()}

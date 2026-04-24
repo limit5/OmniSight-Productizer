@@ -117,6 +117,20 @@ class Settings(BaseSettings):
     notification_jira_url: str = ""  # Jira base URL (e.g. https://jira.company.com)
     notification_jira_token: str = ""  # Jira API token
     notification_jira_project: str = ""  # Jira project key (e.g. OMNI)
+    # Y-prep.3 (#289) — JIRA inbound automation routing knobs. Promoted
+    # out of pure ``OMNISIGHT_*`` env vars so the Notifications-tab UI
+    # can edit them and ``_SHARED_KV_STR_FIELDS`` mirrors them across
+    # uvicorn workers (otherwise a wizard-side edit on worker-A would
+    # leave workers B/C/D treating events on the old whitelist until
+    # restart). Both are CSV-friendly: ``jira_intake_label`` accepts a
+    # single label today (``omnisight-intake`` default) but the router
+    # is forward-compatible if we widen to multi-label OR; ``jira_done_statuses``
+    # is a CSV list of "consider this status terminal" values that fire
+    # the artifact-packaging pipeline (default ``Done,Closed`` matches
+    # vanilla JIRA workflows). Empty string ⇒ router falls back to the
+    # built-in defaults — same precedence as the env-var path.
+    jira_intake_label: str = ""           # Default ``omnisight-intake`` if empty
+    jira_done_statuses: str = ""          # CSV; default ``Done,Closed`` if empty
     notification_pagerduty_key: str = ""  # PagerDuty Events API v2 routing key
     notification_max_retries: int = 3     # Max retry attempts for failed dispatches
     notification_retry_backoff: int = 30  # Seconds between retry attempts (exponential)
