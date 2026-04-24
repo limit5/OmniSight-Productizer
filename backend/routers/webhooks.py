@@ -745,15 +745,39 @@ async def jira_webhook(request: Request):
     provides the write side; the read side needs this overlay call to close
     the loop). Cheap: a single Redis HGETALL round-trip per webhook, which
     is already guarded by try/except inside the overlay helper.
+
+    Phase 5-8 (#multi-account-forge): per-instance secret read goes through
+    :func:`backend.git_credentials.get_webhook_secret_for_host_async` so
+    operator-added ``git_accounts(platform='jira')`` rows are honoured
+    (including the auto-migrated ``ga-legacy-jira-*`` row from row 5-5).
+    The helper's platform-scoped scalar tail falls back to
+    ``settings.jira_webhook_secret`` so single-instance deployments with
+    only the legacy scalar configured keep authenticating.
+
+    Tenant isolation: the resolver scopes by ``current_tenant_id()``,
+    defaulting to ``t-default`` at webhook time (no user session yet). A
+    tenant-A JIRA account's ``webhook_secret`` sits in a ``tenant_id='t-A'``
+    row and is not visible to this default-tenant lookup — so tenant A's
+    credential can't leak out via the shared webhook endpoint.
     """
     import hmac as _hmac
     from backend.routers.integration import _overlay_runtime_settings
     _overlay_runtime_settings()
-    if not settings.jira_webhook_secret:
+
+    try:
+        from backend.git_credentials import get_webhook_secret_for_host_async
+        # JIRA has no pre-verify host signal (bearer token auth, no
+        # HMAC-over-body). Use an empty host so the resolver skips the
+        # per-host loop and goes straight to ``pick_default('jira')``
+        # then scalar fallback.
+        secret = await get_webhook_secret_for_host_async("", "jira")
+    except Exception:
+        secret = settings.jira_webhook_secret
+    if not secret:
         return JSONResponse(status_code=503, content={"detail": "Jira webhooks not configured"})
 
     auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer ") or not _hmac.compare_digest(auth[7:], settings.jira_webhook_secret):
+    if not auth.startswith("Bearer ") or not _hmac.compare_digest(auth[7:], secret):
         return JSONResponse(status_code=401, content={"detail": "Invalid token"})
 
     event = await request.json()

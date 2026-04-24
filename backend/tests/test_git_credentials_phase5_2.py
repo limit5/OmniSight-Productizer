@@ -93,6 +93,14 @@ def _empty_settings_mock():
         mock.gerrit_instances = ""
         mock.github_webhook_secret = ""
         mock.gitlab_webhook_secret = ""
+        # Phase 5-8 (#multi-account-forge): shim now reads JIRA scalars
+        # too. Empty them here so the fixture stays an "empty settings"
+        # baseline and tests explicitly opt-in to synthesising a
+        # default-jira row via per-test overrides.
+        mock.notification_jira_url = ""
+        mock.notification_jira_token = ""
+        mock.notification_jira_project = ""
+        mock.jira_webhook_secret = ""
         yield mock
 
 

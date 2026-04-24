@@ -479,6 +479,10 @@ async def test_require_raises_when_no_default_and_no_match(
             "git_ssh_key_map", "github_token_map", "gitlab_token_map",
             "gerrit_instances", "github_webhook_secret",
             "gitlab_webhook_secret",
+            # Phase 5-8: shim also reads JIRA scalars — empty them
+            # so the "no-match" path stays truly empty.
+            "notification_jira_url", "notification_jira_token",
+            "notification_jira_project", "jira_webhook_secret",
         ):
             setattr(mock_settings, attr, "")
         mock_settings.gerrit_enabled = False
@@ -614,6 +618,10 @@ async def test_no_touch_when_resolve_returns_none(_pool_with):
             "git_ssh_key_map", "github_token_map", "gitlab_token_map",
             "gerrit_instances", "github_webhook_secret",
             "gitlab_webhook_secret",
+            # Phase 5-8: shim also reads JIRA scalars — empty them
+            # so the "no-match" path stays truly empty.
+            "notification_jira_url", "notification_jira_token",
+            "notification_jira_project", "jira_webhook_secret",
         ):
             setattr(mock_settings, attr, "")
         mock_settings.gerrit_enabled = False

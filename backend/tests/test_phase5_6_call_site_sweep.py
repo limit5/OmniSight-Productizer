@@ -335,6 +335,13 @@ class TestSyncGetTokenNoLongerLeaksAcrossHosts:
             mock.github_token_map = ""
             mock.gitlab_token_map = ""
             mock.gerrit_instances = ""
+            # Phase 5-8: clear JIRA scalars too so the shim doesn't
+            # synthesise a default-jira row whose host accidentally
+            # substring-matches the GHE enterprise URL in this test.
+            mock.notification_jira_url = ""
+            mock.notification_jira_token = ""
+            mock.notification_jira_project = ""
+            mock.jira_webhook_secret = ""
             # An unrelated GitHub Enterprise host should NOT receive the
             # github.com token just because `detect_platform` says "this
             # looks like a github URL".
@@ -368,6 +375,12 @@ class TestSyncGetTokenNoLongerLeaksAcrossHosts:
             mock.github_token_map = ""
             mock.gitlab_token_map = ""
             mock.gerrit_instances = ""
+            # Phase 5-8: clear JIRA scalars (same reason as the adjacent
+            # GHE enterprise test).
+            mock.notification_jira_url = ""
+            mock.notification_jira_token = ""
+            mock.notification_jira_project = ""
+            mock.jira_webhook_secret = ""
             token = get_token_for_url("https://github.com/acme/app")
         assert token == "ghp_legit"
         clear_credential_cache()

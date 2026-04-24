@@ -295,16 +295,35 @@ def _parse_jira_issue_url(url: str) -> tuple[str, str]:
 
 
 async def _sync_jira(issue_url: str, status: str, comment: str) -> dict:
+    from backend.git_credentials import pick_account_for_url, pick_default
     base, issue_key = _parse_jira_issue_url(issue_url)
     if not issue_key:
         return {"status": "error", "message": f"Cannot parse Jira issue URL: {issue_url}"}
 
-    token = settings.notification_jira_token
+    # Phase 5-8 (#multi-account-forge): resolve the JIRA account via the
+    # multi-account registry so per-tenant / multi-instance deployments
+    # use the matching credential instead of the process-global
+    # ``settings.notification_jira_token``. Platform post-filter guards
+    # against accidental cross-platform matches on catch-all url_patterns
+    # (JIRA URL hosts aren't recognised by ``detect_platform`` so step 4
+    # of the resolver would otherwise not kick in, but the first three
+    # steps are registry-wide).
+    account = await pick_account_for_url(issue_url)
+    if account is None or account.get("platform") != "jira":
+        account = await pick_default("jira")
+    token = (account or {}).get("token") or ""
     if not token:
         return {"status": "error", "message": "No Jira token configured"}
 
+    # Prefer the resolved account's ``instance_url`` so multi-instance
+    # JIRA deploys target the per-account base URL. Fall back to the
+    # host parsed from ``issue_url`` (which is what the pre-5-8 path
+    # implicitly used — ``base = f"{scheme}://{hostname}"``).
+    resolved_base = ((account or {}).get("instance_url") or "").rstrip("/")
+    api_base = resolved_base or base
+
     # Jira requires transition IDs — we need to query available transitions first
-    transitions_url = f"{base}/rest/api/2/issue/{issue_key}/transitions"
+    transitions_url = f"{api_base}/rest/api/2/issue/{issue_key}/transitions"
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", transitions_url,
         "-H", f"Authorization: Bearer {token}",
@@ -331,7 +350,7 @@ async def _sync_jira(issue_url: str, status: str, comment: str) -> dict:
         logger.warning("Jira: no transition found for '%s' on %s. Available: %s", target_name, issue_key, available)
         return {"status": "error", "message": f"No Jira transition for '{target_name}'. Available: {available}"}
 
-    do_url = f"{base}/rest/api/2/issue/{issue_key}/transitions"
+    do_url = f"{api_base}/rest/api/2/issue/{issue_key}/transitions"
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", "-w", "\n%{http_code}", "-X", "POST", do_url,
         "-H", f"Authorization: Bearer {token}",
@@ -356,15 +375,26 @@ async def _sync_jira(issue_url: str, status: str, comment: str) -> dict:
 
 
 async def _comment_jira(issue_url: str, comment: str) -> dict:
+    from backend.git_credentials import pick_account_for_url, pick_default
     base, issue_key = _parse_jira_issue_url(issue_url)
     if not issue_key:
         return {"status": "error"}
 
-    token = settings.notification_jira_token
+    # Phase 5-8: same resolver path as ``_sync_jira`` — URL-match first,
+    # then platform default. Platform post-filter prevents catch-all
+    # url_patterns on non-jira accounts from routing a JIRA comment to
+    # the wrong platform's credential.
+    account = await pick_account_for_url(issue_url)
+    if account is None or account.get("platform") != "jira":
+        account = await pick_default("jira")
+    token = (account or {}).get("token") or ""
     if not token:
         return {"status": "error", "message": "No Jira token"}
 
-    api_url = f"{base}/rest/api/2/issue/{issue_key}/comment"
+    resolved_base = ((account or {}).get("instance_url") or "").rstrip("/")
+    api_base = resolved_base or base
+
+    api_url = f"{api_base}/rest/api/2/issue/{issue_key}/comment"
     proc = await asyncio.create_subprocess_exec(
         "curl", "-s", "-X", "POST", api_url,
         "-H", f"Authorization: Bearer {token}",

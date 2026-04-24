@@ -557,6 +557,27 @@ def _build_registry() -> list[dict]:
             is_default=True,
         ))
 
+    # Phase 5-8 (#multi-account-forge): synthesise a virtual ``default-jira``
+    # row from ``notification_jira_*`` so ``pick_default("jira")`` and
+    # ``pick_account_for_url`` work in shim mode (SQLite dev / pool-not-up)
+    # without each JIRA call site needing its own scalar fallback branch.
+    # Pool-mode deployments get the real row from ``git_accounts`` via the
+    # row 5-5 auto-migration instead.
+    if (
+        settings.notification_jira_token
+        and not any(r["platform"] == "jira" for r in registry)
+    ):
+        registry.append(_virtual_account_row(
+            entry_id="default-jira",
+            platform="jira",
+            instance_url=settings.notification_jira_url or "",
+            token=settings.notification_jira_token,
+            project=settings.notification_jira_project or "",
+            webhook_secret=settings.jira_webhook_secret or "",
+            label="default-jira (legacy scalar)",
+            is_default=True,
+        ))
+
     return registry
 
 
@@ -1085,6 +1106,12 @@ async def get_webhook_secret_for_host_async(
         return settings.github_webhook_secret
     if platform == "gitlab":
         return settings.gitlab_webhook_secret
+    # Phase 5-8 (#multi-account-forge): JIRA webhook secret joins the
+    # per-platform scalar fallback chain so ``jira_webhook`` can call
+    # this helper uniformly instead of carrying its own
+    # ``settings.jira_webhook_secret`` read.
+    if platform == "jira":
+        return settings.jira_webhook_secret
     return ""
 
 
