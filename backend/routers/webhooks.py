@@ -805,40 +805,23 @@ async def _on_jira_event(event: dict) -> None:
 
 
 async def _on_jira_comment_created(event: dict) -> None:
-    """Stub — filled in by the Y-prep.3 `jira_event_router.py` bullet.
+    """Route a JIRA ``comment_created`` event via ``jira_event_router``.
 
-    Planned behaviour: when the comment body starts with ``/<command>``,
-    emit a ``jira_command`` CATC event that the O5 IntentSource consumes to
-    trigger an agent. Non-command comments are ignored.
+    The real handler lives in ``backend.jira_event_router`` so dispatcher
+    and action logic stay in separate files (eases test isolation and
+    keeps ``webhooks.py`` focused on transport concerns).
     """
-    logger.debug(
-        "JIRA comment_created stub: issue=%s (handler pending Y-prep.3 router)",
-        (event.get("issue") or {}).get("key", ""),
-    )
+    from backend import jira_event_router
+    await jira_event_router.handle_comment_created(event)
 
 
 async def _on_jira_issue_updated(event: dict) -> None:
-    """Stub — filled in by the Y-prep.3 `jira_event_router.py` bullet.
-
-    Planned behaviour: when the changelog shows a status transition whose
-    ``toString`` is in the configured whitelist (default ``Done``/``Closed``),
-    trigger the artifact packaging pipeline (reusing the Gerrit
-    change-merged artifact path).
-    """
-    logger.debug(
-        "JIRA issue_updated stub: issue=%s (handler pending Y-prep.3 router)",
-        (event.get("issue") or {}).get("key", ""),
-    )
+    """Route a JIRA ``jira:issue_updated`` event via ``jira_event_router``."""
+    from backend import jira_event_router
+    await jira_event_router.handle_issue_updated(event)
 
 
 async def _on_jira_issue_created(event: dict) -> None:
-    """Stub — filled in by the Y-prep.3 `jira_event_router.py` bullet.
-
-    Planned behaviour: when the created issue carries the configured intake
-    label (default ``omnisight-intake``), call ``intent_bridge`` to create
-    a CATC task.
-    """
-    logger.debug(
-        "JIRA issue_created stub: issue=%s (handler pending Y-prep.3 router)",
-        (event.get("issue") or {}).get("key", ""),
-    )
+    """Route a JIRA ``jira:issue_created`` event via ``jira_event_router``."""
+    from backend import jira_event_router
+    await jira_event_router.handle_issue_created(event)
