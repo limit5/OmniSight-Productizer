@@ -27,7 +27,7 @@ that post-mortem's "security follow-ups" section.
 | 2 | SSL/TLS | Full (strict) + HSTS 6mo | Browser → CF TLS locked down |
 | 3 | Security Settings | Medium + Bot Fight Mode on | Bot baseline |
 | 4 | WAF Managed Rules | Cloudflare Managed Ruleset | OWASP-ish coverage |
-| 5 | WAF Custom Rules | Block `/api/v1/system/`, challenge empty UA | Defence-in-depth for the unauth-by-default admin API + basic script-kid filter |
+| 5 | WAF Custom Rules | Challenge empty UA (script-kid filter) | Was 2 rules; Rule 5.1 `Block-direct-system-endpoints` removed 2026-04-24 as redundant (§9 Access is the authoritative admin-path gate) |
 | 6 | Rate Limiting | `/auth/login` throttle | Brute-force deterrent |
 | 7 | Scrape Shield | Email obfuscation + hotlink protection | Small content-protection wins |
 | 8 | Tunnel | `ai.sora-dev.app → http://frontend:3000` | Origin is Next.js, NOT Caddy |
@@ -175,31 +175,48 @@ curl -sI --tls-max 1.1 https://ai.sora-dev.app/ 2>&1 | head -3
 
 **Path**: `Security` → `WAF` → `Custom rules`
 
-Free tier allows 5 custom rules total. We use 2.
+Free tier allows 5 custom rules total. We use **1** (was 2 until 2026-04-24; Rule 5.1 removed as redundant — see below).
 
-### Rule 5.1 — `Block-direct-system-endpoints`
+### Rule 5.1 — `Block-direct-system-endpoints` ⚠️ **REMOVED 2026-04-24**
+
+> **Status**: Rule deleted from CF dashboard on 2026-04-24 as part of A3 row 58
+> follow-up. Kept here for historical context only — **do not re-create**
+> without first reviewing the §9 Access overlap discussion below.
+
+**Why removed**: After Phase-3 P6 (commit `0e0bcd46`, 2026-04-20) atomically
+renamed all `/api/v1/system/*` backend routes to `/api/v1/runtime/*`, the
+`/api/v1/system/*` path has **no live backend handler** — both the WAF
+block (§5.1) and the Zero Trust Access gate (§9) were shadowing a dead
+path. During P7 cleanup, the WAF Managed Challenge was actively harming
+logged-in operator flows (diagnostic trail in `HANDOFF.md` 2026-04-20 P5/P6
+entries) — each dashboard load that still linked to the old path got a
+CF Challenge HTML response that the frontend mis-parsed as a 403,
+triggering the "ERR 發生錯誤" ErrorBoundary cascade. Post-P6 the cascade
+symptom was solved by path rename, but Rule 5.1 kept firing silently on
+stale bookmarks and external link-tests — pure cost with zero benefit
+because §9 Zero Trust Access already covers the same path with a
+cleaner UX (SSO 302 instead of JS Managed Challenge).
+
+**Single authoritative gate now**: §9 Zero Trust Access (email-OTP SSO)
+is the one path-level gate on `/api/v1/system/*`. Backend admin endpoints
+live at `/api/v1/runtime/*` and are gated by `Depends(auth.require_role("admin"))`
++ the `auth_baseline` middleware (401 for non-authenticated).
+
+**Verification (2026-04-24)**:
+```
+$ curl -sI https://ai.sora-dev.app/api/v1/system/info
+HTTP/2 302
+location: https://omnisight-dev.cloudflareaccess.com/cdn-cgi/access/login/...
+cf-mitigated: (empty)
+# NO "Just a moment..." Managed Challenge HTML — confirmed grep match = 0
+```
+
+**Prior rule (for history only)**:
 
 | Field | Value |
 |---|---|
-| When incoming requests match | `URI Path` `starts with` `/api/v1/system/` |
-| Then take action | **Managed Challenge** |
-
-**Why**: The `/api/v1/system/*` routes are backend admin operations
-(deploy to hardware, force-advance pipelines, reset tokens). We added
-`Depends(auth.require_role("admin"))` at the backend in commit
-`e2d981ff`, but until the operator completes the bootstrap wizard the
-bootstrap-503 middleware is the only gate. This rule is the edge-layer
-defence-in-depth: even if every application-layer gate fails (bug,
-regression, misconfiguration) an attacker must first pass a CF
-Managed Challenge before reaching the FastAPI handler.
-
-**Operator note**: This rule WILL challenge you too when you (as admin)
-try to hit `/api/v1/system/*` from a browser. Solve the challenge once
-and the passage cookie lasts 30 min (§3 Challenge Passage). For
-automation / scripts, either:
-- Use Zero Trust Access (§9 below) — preferable, gives you an email-OTP
-  token that lets CLI tools through
-- Temporarily disable this rule for the duration of the automation
+| ~~When incoming requests match~~ | ~~`URI Path` `starts with` `/api/v1/system/`~~ |
+| ~~Then take action~~ | ~~**Managed Challenge**~~ |
 
 ### Rule 5.2 — `Challenge-empty-ua-on-api`
 
@@ -397,7 +414,7 @@ DNS                  § 1   1 line
 SSL/TLS              § 2   3 subsections (encryption / edge cert / HSTS)
 Security baseline    § 3   3 sliders + Bot Fight Mode
 WAF Managed          § 4   1 toggle (enabled default)
-WAF Custom Rules     § 5   2 rules
+WAF Custom Rules     § 5   1 rule (was 2; Rule 5.1 removed 2026-04-24)
 Rate Limiting        § 6   1 rule (Free) / 2 rules (Pro)
 Scrape Shield        § 7   2 toggles
 Tunnel Public Hostname   § 8   1 entry
