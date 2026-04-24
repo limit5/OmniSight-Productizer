@@ -210,6 +210,108 @@ next sequential free number (0027) — Alembic linearises by
 "0019" in the TODO row was descriptive ("an alembic migration named
 git_accounts") not load-bearing.
 
+### 3.10 URL-pattern resolver contract (row 5-3, 2026-04-24)
+
+Row 5-3 locks the pattern grammar and resolution semantics that
+`backend/git_credentials.py::pick_account_for_url` /
+`pick_default` / `pick_by_id` / `require_account_for_url` honour.
+
+**Pattern syntax — glob via `fnmatch`.** Patterns in
+`url_patterns` are plain shell-style globs (Python `fnmatch.fnmatch`,
+which is anchored to the full string by construction):
+
+| Token        | Meaning                                  |
+| ------------ | ---------------------------------------- |
+| `*`          | match any sequence (including `/`)       |
+| `?`          | match any single character               |
+| `[seq]`      | match any character in *seq*             |
+| `[!seq]`     | match any character not in *seq*         |
+| anything else | literal — including `.`, `-`, `_`, `/`  |
+
+This is deliberately the most boring grammar that solves the use
+case. It is NOT regex — `.` is literal, not a wildcard — which
+matches operator intuition for "the same syntax I use in
+`.gitignore` / `.dockerignore`".
+
+**Comparison form — scheme-stripped, lowercased.** Before matching,
+the URL is normalised so a single pattern covers both HTTPS and
+SSH transports:
+
+| Input URL                              | Normalised form              |
+| -------------------------------------- | ---------------------------- |
+| `https://github.com/acme/app`          | `github.com/acme/app`        |
+| `git@github.com:acme/app.git`          | `github.com/acme/app.git`    |
+| `ssh://git@github.com/acme/app`        | `github.com/acme/app`        |
+| `https://GitHub.com/AcMe/App`          | `github.com/acme/app`        |
+
+So one pattern entry like `github.com/acme/*` is enough; the
+operator does not need to write a separate SSH pattern.
+
+**Anchored, not substring.** Patterns must cover the full
+normalised URL. `acme/*` does NOT match `github.com/acme/app` —
+the pattern would need to be `*acme/*` or `github.com/acme/*` to
+match that URL.
+
+**First-match-wins is deterministic.** `_fetch_git_accounts_rows`
+SELECTs `ORDER BY is_default DESC, last_used_at DESC NULLS LAST,
+platform, id` so the Python `for entry in registry` loop iterates
+in that exact order. Two accounts with overlapping patterns
+resolve as follows:
+
+1. The `is_default=TRUE` row wins.
+2. Among non-defaults, the more-recently-used (newer
+   `last_used_at`) wins.
+3. NULL `last_used_at` (never used) sorts last.
+4. Ultimate tie-break: `platform` then `id`.
+
+The deterministic ordering matters because two operators editing
+`git_accounts` independently must converge on the same
+resolution behaviour without "it works on my replica" surprise.
+
+**Touch-on-resolve as the LRU primitive.** Every successful
+`pick_*` call best-effort UPDATEs `git_accounts.last_used_at =
+time.time()` for the matched row. This is what makes the
+"more-recently-used wins" tie-break self-maintaining without a
+cron job. Touch is best-effort: if the pool isn't initialised,
+if the id isn't in the table (legacy shim row), or if the UPDATE
+raises, the resolve still returns the row. Pass `touch=False`
+to introspection / debug callers (CRUD list, "which account
+would resolve this URL" probe) so they don't perturb the LRU.
+
+**Explicit-raise variant — `require_account_for_url`.** Same
+contract as `pick_account_for_url` but raises
+`MissingCredentialError` (subclass of `LookupError`) instead of
+returning `None` when nothing matches. Call sites that cannot
+proceed without a credential (clone / fetch / push / webhook
+verify) use `require_*`; sites that have a fallthrough path
+(anonymous public read) use `pick_*`. The exception message
+names the URL and tenant for grep-friendly logs.
+
+**Resolution chain (steps 1-4).** Applied in order; first
+successful step returns:
+
+1. **`url_patterns` glob match** against the scheme-stripped
+   URL (this section's contract).
+2. **Exact host match** against the account's `instance_url`
+   or `ssh_host`.
+3. **Substring host match** (legacy fallback for shim rows whose
+   `url_patterns` is empty).
+4. **Platform default** via `pick_default(detect_platform(url))` —
+   the `is_default=TRUE` row for the URL's platform, or first
+   enabled row if no default is flagged.
+
+Step 4 fires only when steps 1-3 all miss; explicitly *not* a
+"fall-through after every loop" — so a specific pattern match
+in step 1 always wins over the platform default.
+
+**Special chars in org names.** GitHub forbids `[`, `]`, `*`, `?`
+in org / user names — so the only glob metacharacter that could
+collide with a real org name is `?` (rare in repos, none seen
+in practice). Operators who somehow have a literal `*` in a
+URL component should escape it via `[*]` (fnmatch character
+class), but this is a hypothetical concern and not implemented
+specially.
+
 ## 4. What is NOT in this row
 
 Phase 5-1 deliberately ships ONLY the schema + drift guards. The

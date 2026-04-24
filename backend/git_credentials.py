@@ -51,6 +51,46 @@ No write path is added or changed by this row. Row 5-4 will add the
 CRUD endpoints that write to ``git_accounts``. Until then, the table
 is empty in practice and the async read falls through to the shim
 (same values every caller was already seeing).
+
+Phase 5-3 (#multi-account-forge) additions (2026-04-24)
+───────────────────────────────────────────────────────
+Builds on 5-2 to lock the URL-pattern resolver contract:
+
+* **Pattern syntax — glob, `fnmatch`-compatible.** Patterns are
+  compared against a scheme-stripped lowercased URL form so the
+  same pattern matches both ``https://github.com/acme-corp/app``
+  and ``git@github.com:acme-corp/app`` — both normalise to
+  ``github.com/acme-corp/app``. Glob metacharacters (``*``, ``?``,
+  ``[seq]``) behave per :mod:`fnmatch`; everything else — including
+  dots, dashes, underscores — is literal. See
+  ``docs/phase-5-multi-account/01-design.md`` §3.4 + §3.10.
+
+* **Deterministic first-match-wins.** The async registry is SELECTed
+  with ``ORDER BY is_default DESC, last_used_at DESC NULLS LAST,
+  platform, id``. The Python loop in :func:`pick_account_for_url`
+  iterates in that same order; the first row whose ``url_patterns``
+  entry glob-matches wins. Two accounts with overlapping patterns
+  → the ``is_default=TRUE`` one wins; if neither is default, the
+  more-recently-used one wins (LRU touched on every successful
+  resolve).
+
+* **Touch-on-resolve.** After :func:`pick_account_for_url`,
+  :func:`pick_default`, or :func:`pick_by_id` returns a row, the
+  resolver best-effort UPDATEs ``git_accounts.last_used_at =
+  time.time()`` for that ``(id, tenant_id)``. Best-effort means:
+  if the pool isn't initialised, if the id doesn't match a real
+  row (shim fallback), or if the UPDATE raises, the touch silently
+  no-ops and the resolve still returns the row. This lets the
+  SELECT ordering above act as a true LRU without a cron job.
+
+* **Explicit-raise variant.** :func:`require_account_for_url` is
+  the same as :func:`pick_account_for_url` but raises
+  :class:`MissingCredentialError` instead of returning ``None``
+  when nothing matches AND no platform default exists. Call sites
+  that cannot proceed without a credential (clone / push / webhook
+  verify) should use this; call sites that have a fall-through
+  path (e.g. anonymous public GitHub read) should use the
+  returning-None variant.
 """
 
 from __future__ import annotations
@@ -727,27 +767,171 @@ async def get_credential_registry_async(
     return _build_registry()
 
 
+class MissingCredentialError(LookupError):
+    """No credential could be resolved for the requested URL.
+
+    Raised by :func:`require_account_for_url` when neither a
+    ``url_patterns`` glob match nor a platform default is found for
+    the given URL. Distinct from a generic ``LookupError`` so call
+    sites can catch this specifically (e.g. surface a "configure a
+    GitHub account first" toast in the UI) without swallowing
+    unrelated key errors.
+    """
+
+
+def _normalize_url_for_pattern_match(url: str) -> str:
+    """Strip scheme + ``git@`` form so a single glob pattern matches
+    both HTTPS and SSH URLs for the same repo.
+
+    Examples
+    --------
+    >>> _normalize_url_for_pattern_match("https://github.com/acme/app")
+    'github.com/acme/app'
+    >>> _normalize_url_for_pattern_match("git@github.com:acme/app.git")
+    'github.com/acme/app.git'
+    >>> _normalize_url_for_pattern_match("ssh://git@github.com/acme/app")
+    'github.com/acme/app'
+
+    Lowercased so case-insensitive comparison against
+    lowercased patterns Just Works (URLs and forge org/repo names
+    are conventionally case-insensitive on the wire even when
+    GitHub displays mixed case).
+    """
+    s = url.lower().lstrip()
+    if s.startswith("git@"):
+        after_at = s.split("@", 1)[1]
+        if ":" in after_at:
+            h, _, rest = after_at.partition(":")
+            return f"{h}/{rest}"
+        return after_at
+    if "://" in s:
+        _, _, tail = s.partition("://")
+        # ``ssh://git@github.com/...`` — strip embedded user@ if present.
+        if "@" in tail and "/" in tail and tail.index("@") < tail.index("/"):
+            tail = tail.split("@", 1)[1]
+        return tail
+    return s
+
+
+def _matches_pattern(scheme_stripped_url: str, pattern: str) -> bool:
+    """Glob match, anchored to the full normalised URL.
+
+    :mod:`fnmatch` is anchored by construction (``fnmatch.fnmatch``
+    requires the entire string to match the pattern, not a substring).
+    Pattern is lowercased for case-insensitive comparison; everything
+    that isn't ``*`` / ``?`` / ``[seq]`` / ``[!seq]`` is a literal
+    character — including dots, dashes, underscores, slashes — which
+    matches operator intuition for glob patterns like
+    ``github.com/acme-corp/*``.
+
+    Returns False on any non-string / empty input rather than raising
+    so a malformed ``url_patterns`` entry doesn't break the resolver
+    for the rest of the registry.
+    """
+    import fnmatch
+    if not isinstance(pattern, str) or not pattern:
+        return False
+    if not scheme_stripped_url:
+        return False
+    return fnmatch.fnmatch(scheme_stripped_url, pattern.lower())
+
+
+async def _touch_last_used_at(
+    account_id: str | None,
+    tenant_id: str,
+) -> None:
+    """Best-effort UPDATE of ``git_accounts.last_used_at`` for the
+    just-resolved account.
+
+    Why best-effort
+    ───────────────
+    The resolver should never fail a clone / push / webhook verify
+    just because the LRU bookkeeping write hit a transient PG hiccup.
+    Three silent-skip cases:
+
+    1. ``account_id`` is empty / ``None`` (defensive — pick_* never
+       returns a row without an id, but we don't want to crash if a
+       future caller passes one).
+    2. The pool isn't initialised yet (dev / unit-test path with no
+       PG, or pre-lifespan startup).
+    3. The UPDATE raises (network blip, statement_timeout, etc.) —
+       we ``logger.debug`` it and move on; the resolve call still
+       returns the row.
+
+    A no-op UPDATE (zero rows affected, e.g. when a shim virtual
+    row's id like ``default-github`` doesn't exist in the real
+    ``git_accounts`` table) is also fine — PG just reports 0 rows
+    and we return. This is the expected behaviour during the Phase 5
+    rollout ramp before row 5-5's auto-migration moves legacy
+    Settings into the table.
+
+    Module-global / read-after-write audit
+    ──────────────────────────────────────
+    No new module-globals introduced. The UPDATE is a single-statement
+    auto-commit (no explicit transaction needed) so each call is
+    atomic; concurrent touches against the same row are PG-serialised
+    via the row lock and the LWW semantic is correct (most-recent
+    timestamp wins, which matches LRU intent).
+    """
+    if not account_id:
+        return
+    try:
+        from backend.db_pool import get_pool
+        pool = get_pool()
+    except RuntimeError:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE git_accounts SET last_used_at = $1 "
+                "WHERE id = $2 AND tenant_id = $3",
+                time.time(), account_id, tenant_id,
+            )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug(
+            "git_credentials._touch_last_used_at(%s/%s): %s — "
+            "best-effort, ignoring",
+            tenant_id, account_id, type(exc).__name__,
+        )
+
+
 async def pick_account_for_url(
     url: str,
     *,
     tenant_id: str | None = None,
+    touch: bool = True,
 ) -> dict | None:
     """Resolve the best ``git_accounts`` row for *url* (async).
 
-    Strategy:
-      1. Match each row's ``url_patterns`` list via :mod:`fnmatch`
-         (e.g. ``github.com/acme-corp/*``). First match wins; rows
-         are ordered with defaults first, then LRU.
-      2. Exact host match against ``instance_url`` / ``ssh_host``.
-      3. Substring host match (legacy fallback).
-      4. Platform default via :func:`pick_default` (e.g. any
-         ``github.com/*`` URL without a specific pattern match gets
-         the platform's ``is_default=TRUE`` account).
+    Strategy
+    ────────
+    1. Glob-match each row's ``url_patterns`` list via :mod:`fnmatch`
+       against the scheme-stripped lowercased URL (so
+       ``github.com/acme-corp/*`` matches both
+       ``https://github.com/acme-corp/x`` and
+       ``git@github.com:acme-corp/x``). First match wins; rows are
+       SELECTed with ``ORDER BY is_default DESC, last_used_at DESC
+       NULLS LAST, platform, id`` so multi-match resolves
+       deterministically — the default row beats non-defaults, and
+       among non-defaults the most-recently-used wins.
+    2. Exact host match against ``instance_url`` / ``ssh_host``.
+    3. Substring host match (legacy fallback for shim rows whose
+       ``url_patterns`` is empty).
+    4. Platform default via :func:`pick_default` (e.g. any
+       ``github.com/*`` URL without a specific pattern match gets
+       the platform's ``is_default=TRUE`` account).
 
-    Returns None if nothing matches.
+    Returns ``None`` when nothing matches. Use
+    :func:`require_account_for_url` instead at call sites that
+    cannot proceed without a credential — it raises
+    :class:`MissingCredentialError`.
 
-    Row 5-3 will refine the pattern grammar + touch ``last_used_at``
-    after a successful resolve; this row establishes the API surface.
+    On a successful resolve, ``last_used_at`` is best-effort
+    updated for the matched ``git_accounts`` row (no-op if the
+    pool isn't up or the id doesn't correspond to a real row).
+    Pass ``touch=False`` to suppress the LRU update — useful for
+    debug / introspection endpoints that shouldn't disturb the
+    LRU ordering.
     """
     if not url:
         return None
@@ -756,30 +940,18 @@ async def pick_account_for_url(
         return None
 
     host = _extract_host(url)
-    normalized = url.lower().lstrip()
-    # Strip scheme so patterns like ``github.com/acme/*`` work against
-    # both ``https://github.com/acme/x`` and ``git@github.com:acme/x``.
-    scheme_stripped = normalized
-    if scheme_stripped.startswith("git@"):
-        # ``git@host:org/repo`` → ``host/org/repo``
-        after_at = scheme_stripped.split("@", 1)[1]
-        if ":" in after_at:
-            h, _, rest = after_at.partition(":")
-            scheme_stripped = f"{h}/{rest}"
-    elif "://" in scheme_stripped:
-        _, _, tail = scheme_stripped.partition("://")
-        scheme_stripped = tail
+    scheme_stripped = _normalize_url_for_pattern_match(url)
+    tid_for_touch = _resolve_tenant(tenant_id)
 
-    # 1. url_patterns match
-    import fnmatch
+    # 1. url_patterns match (glob via fnmatch, anchored)
     for entry in registry:
         patterns = entry.get("url_patterns") or []
         if not isinstance(patterns, list):
             continue
         for pat in patterns:
-            if not isinstance(pat, str) or not pat:
-                continue
-            if fnmatch.fnmatch(scheme_stripped, pat.lower()):
+            if _matches_pattern(scheme_stripped, pat):
+                if touch:
+                    await _touch_last_used_at(entry.get("id"), tid_for_touch)
                 return entry
 
     if not host:
@@ -792,26 +964,60 @@ async def pick_account_for_url(
         )
         ssh_host = (entry.get("ssh_host") or "").lower()
         if host == entry_host or host == ssh_host:
+            if touch:
+                await _touch_last_used_at(entry.get("id"), tid_for_touch)
             return entry
 
     # 3. Substring match (legacy fallback)
     for entry in registry:
         entry_url = (entry.get("instance_url") or entry.get("url") or "").lower()
         if entry_url and (host in entry_url or entry_url.rstrip("/").endswith(host)):
+            if touch:
+                await _touch_last_used_at(entry.get("id"), tid_for_touch)
             return entry
 
-    # 4. Platform default fallback
+    # 4. Platform default fallback (pick_default touches its own row).
     from backend.git_auth import detect_platform
     platform = detect_platform(url)
     if platform and platform != "unknown":
-        return await pick_default(platform, tenant_id=tenant_id)
+        return await pick_default(platform, tenant_id=tenant_id, touch=touch)
     return None
+
+
+async def require_account_for_url(
+    url: str,
+    *,
+    tenant_id: str | None = None,
+    touch: bool = True,
+) -> dict:
+    """Same contract as :func:`pick_account_for_url` but raises
+    :class:`MissingCredentialError` instead of returning ``None``
+    when no row matches AND no platform default exists.
+
+    Intended for call sites that cannot proceed without a credential
+    (clone / fetch / push / webhook verify). The raised exception
+    carries the requested URL in its message so operators reading
+    logs can immediately tell which call was unsatisfied.
+    """
+    entry = await pick_account_for_url(
+        url, tenant_id=tenant_id, touch=touch,
+    )
+    if entry is None:
+        tid = _resolve_tenant(tenant_id)
+        raise MissingCredentialError(
+            f"No git_accounts row matches url={url!r} for tenant={tid!r} "
+            "and no platform default is configured. Configure a "
+            "matching account (with url_patterns) or mark a default "
+            "account for this platform."
+        )
+    return entry
 
 
 async def pick_default(
     platform: str,
     *,
     tenant_id: str | None = None,
+    touch: bool = True,
 ) -> dict | None:
     """Return the default ``git_accounts`` row for *platform* (async).
 
@@ -820,23 +1026,36 @@ async def pick_default(
     default is flagged, returns the first enabled row of that platform
     (LRU order) so a single-account deploy Just Works without the
     operator having to mark it default.
+
+    Touches ``last_used_at`` on the returned row by default; pass
+    ``touch=False`` to suppress (debug / introspection callers).
     """
     if not platform:
         return None
     registry = await get_credential_registry_async(tenant_id)
+    matched: dict | None = None
     for entry in registry:
         if entry.get("platform") == platform and entry.get("is_default"):
-            return entry
-    for entry in registry:
-        if entry.get("platform") == platform:
-            return entry
-    return None
+            matched = entry
+            break
+    if matched is None:
+        for entry in registry:
+            if entry.get("platform") == platform:
+                matched = entry
+                break
+    if matched is None:
+        return None
+    if touch:
+        tid = _resolve_tenant(tenant_id)
+        await _touch_last_used_at(matched.get("id"), tid)
+    return matched
 
 
 async def pick_by_id(
     account_id: str,
     *,
     tenant_id: str | None = None,
+    touch: bool = True,
 ) -> dict | None:
     """Return the ``git_accounts`` row with primary key *account_id*
     (async), scoped to the current tenant.
@@ -844,6 +1063,9 @@ async def pick_by_id(
     Returns None if the id doesn't exist in this tenant's scope, even
     if it exists in a different tenant's — that's the tenant-isolation
     guarantee (pool query ``WHERE tenant_id = $1 AND id = $2``).
+
+    Touches ``last_used_at`` on the returned row by default; pass
+    ``touch=False`` to suppress.
     """
     if not account_id:
         return None
@@ -853,6 +1075,7 @@ async def pick_by_id(
         pool = get_pool()
     except RuntimeError:
         # No pool → search the legacy shim registry for a matching id.
+        # Don't touch (no real row to update).
         for entry in _build_registry():
             if entry.get("id") == account_id:
                 return entry
@@ -866,7 +1089,10 @@ async def pick_by_id(
         row = await conn.fetchrow(sql, tid, account_id)
     if row is None:
         return None
-    return _row_to_dict(row)
+    out = _row_to_dict(row)
+    if touch:
+        await _touch_last_used_at(out.get("id"), tid)
+    return out
 
 
 def _reset_deprecation_warn_for_tests() -> None:
