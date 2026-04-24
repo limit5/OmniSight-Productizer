@@ -174,6 +174,9 @@ _EXPECTED_SQLITE_COLUMNS: frozenset[str] = frozenset({
     "created_at",
     "updated_at",
     "version",
+    # Phase 5-12 (alembic 0028) — OAuth prep; see
+    # docs/phase-5-multi-account/01-design.md §10 for rationale.
+    "code_verifier",
 })
 
 _EXPECTED_SQLITE_INDEXES: frozenset[str] = frozenset({

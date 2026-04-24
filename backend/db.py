@@ -973,7 +973,12 @@ CREATE TABLE IF NOT EXISTS git_accounts (
     last_used_at             REAL,
     created_at               REAL NOT NULL,
     updated_at               REAL NOT NULL,
-    version                  INTEGER NOT NULL DEFAULT 0
+    version                  INTEGER NOT NULL DEFAULT 0,
+    -- Phase 5-12 (#multi-account-forge, alembic 0028): OAuth prep.
+    -- JSONB on PG; TEXT-of-JSON here for dev parity. Reserved for
+    -- future PKCE ``code_verifier`` + refresh-token metadata;
+    -- unread + unwritten by PAT-only MVP.
+    code_verifier            TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_git_accounts_tenant
     ON git_accounts(tenant_id);

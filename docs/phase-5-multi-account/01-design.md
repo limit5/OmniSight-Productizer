@@ -383,3 +383,153 @@ ships, downgrade is destructive and operators must back up
 - **Next gate:** dev-only stays the appropriate state until
   row 5-2 lands. Phase 5 won't move to `deployed-active` until
   row 5-9 (UI) ships AND row 5-11 (soak test) passes.
+
+## 10. OAuth prep columns (row 5-12, 2026-04-24)
+
+Row 5-12's TODO header is explicit: **"PAT is MVP, OAuth 2.0 is a
+follow-up — for now don't build OAuth, but reserve
+`auth_type TEXT DEFAULT 'pat'` + `code_verifier JSON` columns so
+the eventual OAuth row doesn't need another data-model
+migration."** This section records what shipped on row 5-12, why
+both columns are in the schema before anyone writes OAuth code,
+and what is deliberately NOT happening yet.
+
+### 10.1 What shipped on row 5-12
+
+Schema-only additions (no CRUD surface, no resolver change, no
+UI, no validator extension):
+
+| Column          | Type              | Default    | Landed in                     |
+| --------------- | ----------------- | ---------- | ----------------------------- |
+| `auth_type`     | `TEXT`            | `'pat'`    | alembic 0027 (row 5-1)        |
+| `code_verifier` | `JSONB` (PG) / `TEXT` (SQLite) | `'{}'` | alembic 0028 (row 5-12)       |
+
+`auth_type` shipped on day-1 (row 5-1) because it is a cheap
+one-token discriminator every row carries anyway — even PAT rows
+explicitly say `auth_type='pat'`. `code_verifier` was held back
+to row 5-12 because it is OAuth-specific container state — no
+PAT row has any reason to populate it.
+
+### 10.2 Why `code_verifier` is JSONB not TEXT
+
+PKCE (RFC 7636) uses a single `code_verifier` value during the
+authorization hop, but the full OAuth lifecycle persists more
+state alongside it:
+
+* `code_verifier` — the high-entropy random string generated
+  pre-redirect, validated at the token-exchange step.
+* `state` — opaque nonce to tie the redirect back to this account
+  row.
+* `pkce_method` — `S256` or `plain` (almost always `S256`).
+* `scopes_requested` — `["repo", "workflow"]` for GitHub,
+  `["api", "read_repository"]` for GitLab, etc.
+* `expires_at` — TTL on the pending authorization so the row
+  doesn't accumulate stale code_verifiers forever.
+* `refresh_token_metadata` — for the refresh-rotation path
+  (fingerprint / last-rotated / rotation count).
+
+A single JSONB column absorbs all of the above without needing
+another `ALTER TABLE` per OAuth variant (PKCE-only vs
+client-credentials vs device-code). It is deliberately NOT one
+column per OAuth field — future OAuth shapes we haven't designed
+yet (WebAuthn-style attestation, DPoP proof-of-possession,
+mTLS-bound tokens) can all coexist inside the JSONB as long as
+the containing row is `auth_type='oauth'`.
+
+Shape contract — the future OAuth handler writes a dict like:
+
+```json
+{
+  "verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r...",
+  "state": "xyz123",
+  "method": "S256",
+  "scopes": ["repo"],
+  "expires_at": 1745512345.67,
+  "client_id": "Iv1.abc123..."
+}
+```
+
+Plaintext IS acceptable here because:
+
+1. The `verifier` is ephemeral — lifetime is the OAuth roundtrip
+   (seconds to minutes). It has no value after the
+   `authorization_code` → `access_token` exchange.
+2. The persisted long-lived OAuth tokens (access / refresh) still
+   go through `secret_store.encrypt` into
+   `encrypted_token` — same column as PAT rows. `code_verifier`
+   is transport state, not the credential.
+3. The row is tenant-scoped (FK + RLS) so a stolen
+   `code_verifier` can only be exchanged by an attacker who
+   already has tenant-admin access — at which point the blast
+   radius dominates whatever the verifier could unlock.
+
+### 10.3 What row 5-12 deliberately does NOT do
+
+* **No OAuth handler.** `auth_type='oauth'` is accepted by
+  `_VALID_AUTH_TYPES` / the Pydantic pattern on
+  `GitAccountCreate.auth_type` since row 5-4, but no code path
+  exchanges an authorization code for a token. Setting
+  `auth_type='oauth'` today writes the string and nothing else.
+* **No `code_verifier` mutation API.** `allowed_direct` /
+  `allowed_json` in `backend/git_accounts.py::update_account`
+  does NOT list `code_verifier`, so a PATCH attempt
+  raises `ValueError("Unknown update fields: ['code_verifier']")`.
+  This is intentional — the first writer of `code_verifier` will
+  be the OAuth handler, not the generic CRUD UI.
+* **No `code_verifier` in API responses.** The column is NOT in
+  `_GIT_ACCOUNTS_COLS` in either `backend/git_accounts.py` or
+  `backend/git_credentials.py`, so `_row_to_public_dict` / the
+  resolver both skip it. Fresh SELECTs continue to return the
+  exact same 21-column shape row 5-4 through 5-11 consumers
+  depend on — zero breakage.
+* **No migration from any existing OAuth infra.** There is none
+  to migrate from; the PAT-only resolver (rows 5-2 / 5-3)
+  is the sole credential source today.
+* **No UI change.** `AccountManagerSection` (row 5-9) still shows
+  only PAT inputs. An "OAuth" tab is a future UI row, not this
+  one.
+
+### 10.4 Drift guards
+
+Layer 1 (pure unit): `test_git_accounts_oauth_prep.py::test_migration_0028_chains_after_0027`
+locks the alembic revision chain so inserting another migration
+between 0027 and 0028 forces an explicit update.
+
+Layer 2 (SQLite live): `_EXPECTED_SQLITE_COLUMNS` in
+`test_git_accounts_schema.py` grows the `code_verifier` entry so
+any accidental column-drop fails at CI time. The existing
+`test_sqlite_git_accounts_default_column_values` test also
+asserts the default `'{}'` fires on a minimal INSERT.
+
+Layer 3 (PG live): same frozen-set drift guard against
+`information_schema.columns`. A new PG-live test asserts the
+JSONB column-type specifically (not TEXT) so future `ALTER TYPE`
+regressions fail loud.
+
+### 10.5 Rollback posture
+
+`alembic downgrade -1` drops the `code_verifier` column only.
+Since the column is unread + unwritten until OAuth lands, the
+rollback is non-destructive — PAT-only operators see no change.
+The previous row (0027) remains intact; the `auth_type` column
+is not touched by 0028's downgrade because it was never owned
+by this migration.
+
+### 10.6 Production-readiness gate (row 5-12)
+
+- **Production status: dev-only** — column lands on
+  `alembic upgrade head` during the next backend boot. Empty +
+  unread by all code paths. Operator needs zero manual action.
+- **Next gate:** stays `dev-only` until the future OAuth
+  implementation lands. At that point the relevant row (a new
+  Phase or a 5-12 follow-up) must add:
+  * an OAuth callback handler that POSTs the tenant-scoped
+    `code_verifier` + `state` at authorization start;
+  * a token-exchange handler that reads `code_verifier` at the
+    callback and clears it after a successful exchange;
+  * `_GIT_ACCOUNTS_COLS` extension (both `git_accounts.py` and
+    `git_credentials.py`) when + only when the column is needed
+    in the reader path;
+  * an `allowed_json` entry in `update_account` for operator-
+    facing OAuth rotation flows.
+  Until then, row 5-12's job is done.
