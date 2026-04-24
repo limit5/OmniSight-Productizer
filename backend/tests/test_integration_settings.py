@@ -1638,6 +1638,189 @@ class TestGerritWebhookInfo:
         assert "api.internal.example.com" in url
 
 
+class TestJiraWebhookSecretRotate:
+    """Y-prep.2 #288 — JIRA counterpart to the Gerrit rotate endpoint.
+
+    ``POST /api/v1/runtime/git-forge/jira/webhook-secret/generate`` mints a
+    fresh ``settings.jira_webhook_secret`` and returns the plain value
+    **exactly once** so the operator can paste it into JIRA's webhook
+    ``Authorization: Bearer <token>`` config. Structural parity with the
+    Gerrit rotate response (``TestGerritWebhookInfo`` above): same 7-field
+    shape, same "save-now-no-re-reveal" UX invariant — with the transport
+    metadata tuned to JIRA's Bearer-token auth instead of Gerrit's
+    HMAC-SHA256 body signing.
+
+    Tests cover (a) the one-time-reveal contract end-to-end: the plain
+    secret surfaces in the rotate response, persists into settings, and
+    never re-appears in subsequent reads; (b) rotate is a rotate primitive,
+    never a no-op — the second call invalidates the first; (c) the endpoint
+    is admin-gated so a compromised non-admin session cannot mint a new
+    inbound credential.
+    """
+
+    @pytest.mark.asyncio
+    async def test_jira_webhook_secret_rotate_one_time_reveal(
+        self, client, monkeypatch
+    ):
+        """One-time reveal contract (the load-bearing UX invariant):
+
+        1. POST /generate returns a high-entropy plain ``secret`` in the
+           response body exactly once, alongside the paste-ready metadata
+           the UI modal needs (webhook_url + signature_header + algorithm
+           + note) so no second round-trip is required before closing.
+        2. The secret persists into ``settings.jira_webhook_secret`` so the
+           inbound ``POST /api/v1/webhooks/jira`` verifier (on this worker
+           and on peers via the SharedKV mirror) accepts events signed
+           with the new value.
+        3. Subsequent ``GET /settings`` surfaces only the status bit
+           (``webhooks.jira_secret == "configured"``) — the plaintext is
+           never re-revealed. Operators who close the one-time dialog
+           without saving must rotate again; re-reading the plain value
+           would defeat the whole rotation surface.
+        4. A second rotate produces a different secret and invalidates
+           the first — generate is the rotate primitive, never a no-op.
+
+        The response's ``signature_header`` / ``signature_algorithm`` are
+        JIRA-accurate (``Authorization`` / ``bearer-token``), not blindly
+        copied from the Gerrit response — JIRA Cloud webhooks auth via a
+        shared token in the ``Authorization: Bearer <value>`` header, not
+        HMAC body signing. Structural parity with Gerrit, accurate values
+        for the JIRA transport.
+        """
+        from backend.config import settings as _s
+        from backend.routers import integration as _i
+        monkeypatch.setattr(_s, "jira_webhook_secret", "")
+
+        # Isolate the SharedKV mirror to a test-local dict: the rotate
+        # handler calls ``_apply_runtime_setting`` which normally writes
+        # to process-wide (Redis-backed) SharedKV and would leak the
+        # rotated secret into subsequent tests via the overlay on their
+        # GET /settings. Stubbing ``.set`` / ``.get_all`` routes writes
+        # into ``captured`` — the overlay in later handler calls still
+        # sees the write for within-test cross-worker coherence, but the
+        # test tear-down drops ``captured`` so no real KV pollution.
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "set",
+            lambda key, value: captured.__setitem__(key, value),
+        )
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "get_all", lambda: dict(captured),
+        )
+
+        resp = await client.post(
+            "/api/v1/runtime/git-forge/jira/webhook-secret/generate",
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "omnisight.example.com",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+
+        secret = data["secret"]
+        # token_urlsafe(32) → ~43-char URL-safe base64 (~256 bits entropy),
+        # well above the 128-bit floor for shared-secret auth tokens.
+        assert isinstance(secret, str)
+        assert len(secret) >= 32
+        # Persisted into settings — the inbound JIRA webhook verifier at
+        # backend/routers/webhooks.py reads from here.
+        assert _s.jira_webhook_secret == secret
+        # Mirrored into SharedKV so peer workers see it on next overlay —
+        # the cross-worker coherence guarantee that lets a rotate on
+        # worker-A be picked up by the verifier on worker-B without a
+        # backend restart (``jira_webhook_secret`` is in
+        # ``_SHARED_KV_STR_FIELDS`` specifically for this).
+        assert captured.get("jira_webhook_secret") == secret
+
+        # Externally-routable URL honours X-Forwarded-* (cloudflared
+        # terminates HTTPS upstream); without these the operator would
+        # paste ``http://test/...`` into JIRA, which JIRA Cloud cannot reach.
+        assert (
+            data["webhook_url"]
+            == "https://omnisight.example.com/api/v1/webhooks/jira"
+        )
+
+        # Transport metadata reflects JIRA's real auth scheme (Bearer token
+        # in the Authorization header) — structural parity with Gerrit's
+        # response shape, accurate values for JIRA's transport.
+        assert data["signature_header"] == "Authorization"
+        assert data["signature_algorithm"] == "bearer-token"
+
+        # Masked preview for the UI post-close status indicator — must not
+        # equal the plain value (the whole point of a mask).
+        assert "secret_masked" in data
+        assert data["secret_masked"] != secret
+
+        # Note must reinforce "save now, no re-reveal" — operators
+        # routinely close wizards before pasting, so this copy is
+        # load-bearing UX (verified separately in the frontend tests).
+        assert (
+            "not be shown again" in data["note"].lower()
+            or "save this value" in data["note"].lower()
+        )
+
+        # Status bit (and nothing more) surfaces on subsequent reads. The
+        # plaintext secret must not appear anywhere in the response body —
+        # re-revealing on GET defeats the rotation surface entirely.
+        info = await client.get("/api/v1/runtime/settings")
+        assert info.status_code == 200
+        webhooks = info.json()["webhooks"]
+        assert webhooks["jira_secret"] == "configured"
+        assert secret not in info.text
+
+        # Rotate is the rotate primitive — two back-to-back calls must
+        # yield two different secrets, and settings holds the *latest*
+        # (the older value is invalidated for inbound verification).
+        second = await client.post(
+            "/api/v1/runtime/git-forge/jira/webhook-secret/generate"
+        )
+        assert second.status_code == 200
+        second_secret = second.json()["secret"]
+        assert second_secret != secret
+        assert _s.jira_webhook_secret == second_secret
+
+    @pytest.mark.asyncio
+    async def test_jira_webhook_secret_requires_admin(
+        self, client, monkeypatch
+    ):
+        """Admin-only gating: the rotate endpoint mints a new inbound
+        credential and invalidates whatever secret JIRA currently holds.
+        A non-admin caller must not be able to trigger that — it would
+        let a compromised viewer/operator session silently knock the
+        JIRA → OmniSight integration offline until an admin re-pastes
+        the new value into JIRA's webhook config.
+
+        Enforcement lives on the ``Depends(_au.require_admin)`` annotation
+        at the endpoint. Under ``OMNISIGHT_AUTH_MODE=strict`` with no
+        session cookie on the request, ``current_user`` raises HTTP 401
+        before the handler body runs — we assert the endpoint refuses the
+        request AND that ``settings.jira_webhook_secret`` was not mutated
+        (belt-and-braces: if a future refactor accidentally runs the body
+        before the auth check, the persisted-secret assertion catches it
+        even if the status code regresses).
+        """
+        from backend.config import settings as _s
+        monkeypatch.setenv("OMNISIGHT_AUTH_MODE", "strict")
+        # Pre-existing secret so the "not mutated" assertion below is
+        # meaningful — if the handler ran, it would overwrite this with a
+        # fresh token_urlsafe(32).
+        monkeypatch.setattr(_s, "jira_webhook_secret", "pre-existing-secret")
+
+        resp = await client.post(
+            "/api/v1/runtime/git-forge/jira/webhook-secret/generate"
+        )
+
+        # strict + no cookie → 401 from current_user's "Authentication
+        # required" branch; if a future code path returns 403 from the
+        # role check before the cookie check, that is still "admin-gated"
+        # so either is acceptable. The critical assertion is that the
+        # handler body did NOT run.
+        assert resp.status_code in (401, 403)
+        assert _s.jira_webhook_secret == "pre-existing-secret"
+
+
 @pytest.fixture
 def reset_rate_limiter():
     """Reset the in-process rate-limit bucket before the test.
