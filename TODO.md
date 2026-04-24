@@ -222,7 +222,8 @@ rows from 2026-04-20 onwards should use the layered convention:
 
 ### BP.W3 — Backlog 收尾（Blueprint 完成後，~30-50 週）
 > 等 Phase B 完成後按 Guild 歸屬批次重做
-- [ ] BP.W3.1 D2-D29 28 個 embedded skill packs（per pack 省 30% 工時）
+- [ ] BP.W3.1 D3-D29 27 個 embedded skill packs（rework ~5-10% per pack；修訂 2026-04-24：原估 30% 過度保守）
+  > **Pilot 豁免**：D1 SKILL-UVC（#218）+ **D2 SKILL-IPCAM（#219）** 雙 pilot 可在 Blueprint 主線期間就地推進、不受暫緩約束；豁免 source-of-truth = ADR R9。D3+ 嚴格等 Phase B 完成後才啟動。
 - [ ] BP.W3.2 E1-E15 15 個 software track
 - [ ] BP.W3.3 Y 系列 Tenant Ops（76 項）
 - [ ] BP.W3.4 T 系列 Billing（85 項）
@@ -3645,7 +3646,7 @@ BP.A 4 Templates → BP.I SecOps Intel → BP.B Guild 重組 → BP.F Model Mapp
 BP.C T-shirt Gateway + S/M/XL → BP.D 4 Compliance Matrices auxiliary（並行第三方 legal review）→ BP.G TDD Dual-Patchset → BP.J Self-healing Docs → BP.K Frontend 6 component → BP.L Test 分級聚合
 
 ### Phase 33 — Blueprint V2 Window 3 backlog（~30-50 週）
-等 BP.B 完後按 Guild 歸屬批次重做：D2-D29 / E1-E15 / Y / T / V 剩餘 / F META / S2 剩餘 / R4-R9 / H4 / P9-P12 / ZZ
+等 BP.B 完後按 Guild 歸屬批次重做：D3-D29（D1 + D2 pilot 豁免見 ADR R9）/ E1-E15 / Y / T / V 剩餘 / F META / S2 剩餘 / R4-R9 / H4 / P9-P12 / ZZ
 
 ### Phase 34 — 延後 v1.0 後
 BP.E GraphRAG / Neo4j

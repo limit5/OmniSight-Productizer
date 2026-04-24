@@ -471,9 +471,10 @@
 | **B16** Role Skill 強化 — Cherry-pick Agency-Agents + Pattern Upgrade | 未確認 | Phase B Guild 重組全重寫 | ⏸️ 取消，Phase B 會從頭設計 |
 | **C0** L4-CORE-00 ProjectClass enum + multi-planner routing | ⚪ 未完成 | Phase C T-shirt Gateway 正交並存 | 🔄 不淘汰但要協調：ProjectClass = 業務領域 / Target_Triple = 編譯目標 / T-shirt = 規模，三維並存 |
 | **V 系列部分** Visual Design Loop 剩餘 12 項（V3 / V6-V9 等）| 🟡 79% 完成 | Phase B 後重組（agent type 變）| ⏸️ 暫緩剩餘，等 Phase B 落地 |
-| **D2-D29** Skill packs（除 D1 + D29 pilot 外）| ⚪ 5% 完成 | Phase B Guild 歸屬重定義 | ⏸️ **批次暫緩**，Phase B 後按 Guild 歸屬重新規劃 |
+| **D3-D29** Skill packs（**D1 + D2 pilot 豁免**）| ⚪ 未開工 | Phase B Guild 歸屬重定義 | ⏸️ **批次暫緩**，Phase B 後重啟 |
+| ~~**D2-D29**~~ | — | — | **修訂 2026-04-24**：原估「per pack 省 30% 工時」過度保守；實測 skill pack 是 per-product vertical 產物（類似 X5/W6），Guild 為 agent topology，兩者正交；rework 實際 ~5-10%（只改 `SKILL_HOOK_TARGETS` dict key + test parametrize）。D2 SKILL-IPCAM 已 ship 兩 sub-item（D2.1 RTSP scaffold + D2.2 ONVIF Profile S，108 test + live smoke 過）、追認 pilot 身份與 D1 對稱 |
 
-**總節省工時**：~30-40 週（D2-D29 獨大）
+**總節省工時**：~25-35 週（D3-D29 暫緩；D2 已 pilot 豁免，工時花費計入當下而非 Window 3）
 
 ---
 
@@ -483,7 +484,8 @@
 
 | TODO 項目 | 狀態 | 被 Blueprint 哪個 phase 阻塞 | 最早可動時點 |
 |---|---|---|---|
-| **D2-D29** 28 個 embedded skill packs | ⚪ 未開工 | Phase B（Guild 歸屬決定要哪個 Guild 負責）| Phase B 完 |
+| **D3-D29** 27 個 embedded skill packs | ⚪ 未開工 | Phase B（SKILL_HOOK_TARGETS dict key 對齊新 Guild ID）| Phase B 完 |
+| **D2 SKILL-IPCAM** | 🟡 部分完成（D2.1 + D2.2 pilot 已 ship 2026-04-24）| 不阻塞（pilot 豁免，與 D1 對稱）| **可繼續推進**；Phase B 時走一般 dual-write 遷移路徑（A2 衝突決議覆蓋）|
 | **E1-E15** 15 個 software track | ⚪ 未開工 | Phase B（`algo-cv` / `isp` / `optical` Guild 歸屬）+ Phase D（合規矩陣決定 track 的 audit profile）| Phase B + D 完 |
 | **F1-F3** META bundles | ⚪ 未開工 | Phase B + D 完成後才能 meta | Phase B + D 完 |
 | **V3 / V6-V9** Visual Design Loop 剩餘 | 🟡 79% | Phase B + K Frontend（UI designer agent 要 Guild-aware）| Phase B 完 |
@@ -580,7 +582,8 @@ Window 2 — Blueprint 深度整合 (~8-12 週)
 └── Phase L: Test 分級聚合 (2-3 週)
 
 Window 3 — Backlog 收尾（Blueprint 完成後）
-├── D2-D29: 28 個 skill packs（按 Guild 歸屬批次重做，per pack 省 30% 工時）
+├── D3-D29: 27 個 skill packs（Phase B 完後對齊新 Guild ID，rework ~5-10% per pack）
+│        （D2 SKILL-IPCAM 已 pilot 與 D1 對稱，sub-items 可在主線期間就地推進）
 ├── E1-E15: 15 個 software track
 ├── Y 系列: Tenant Ops (~5.5 週)
 ├── T 系列: Billing (~5 週)
@@ -644,6 +647,7 @@ OMNISIGHT_GUILD_ALIAS_MODE=dual-write|guild-only  # Phase B 遷移期
 | R6 | Blueprint 4-6 月窗期間 hotfix 難合併 | 🟡 低 | 🟢 低 | `feat/blueprint-v2` branch 每週 rebase on master |
 | R7 | Test suite 時間暴漲拖慢 CI | 🟢 低 | 🟡 中 | CI shard 4→8-way + pytest marker 分級 |
 | R8 | Neo4j 延後後重啟技術債 | 🟢 低 | 🟢 低 | v1.0 後開 ADR-002 重啟議題 |
+| R9 | D1/D2 pilot 豁免後 D3-D29 陸續有人「跟進 pilot」推進造成範圍失控 | 🟡 低 | 🟡 中 | **明確 gate**：僅 D1 (SKILL-UVC) + D2 (SKILL-IPCAM) 享豁免（source_of_truth 在此 ADR R9 + TODO BP.W3.1 註腳）；D3+ 須 Phase B 完後才啟動；任何 agent session 若欲繞過須先提交 ADR 修訂 PR |
 
 ---
 
@@ -668,7 +672,8 @@ ADR 狀態：**Proposed → Accepted**（2026-04-24）
 ### 9.3 阻塞但可排程
 
 - Window 0 完成後觸發 Blueprint 主線（Phase A → B → C → ...）
-- D2-D29 / E / Y 系列建議 Phase B 完成後批次重啟（每個 skill pack 工時省 30%+）
+- D3-D29 / E / Y 系列建議 Phase B 完成後批次重啟（rework ~5-10% per pack）
+- D1 + D2 pilot 豁免：可在 Blueprint 主線期間就地推進（已 ship 部分會吃 Phase B 雙寫遷移，零額外 rework）
 
 ### 9.4 運營動作
 
