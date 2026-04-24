@@ -2669,6 +2669,258 @@ type SaveFeedback =
   | { kind: "error"; message: string }
   | null
 
+// ─── Y-prep.2 #288 — JIRA webhook secret rotation dialog ───
+//
+// Aligned with the Gerrit Wizard Step 5 one-time-reveal UX pattern:
+// confirm → rotate API call → one-time modal showing the plain secret
+// with copy-to-clipboard → close drops the plain value and only the
+// masked preview survives.
+//
+// The rotate endpoint (`POST /runtime/git-forge/jira/webhook-secret/generate`)
+// returns the plain `secret` exactly once; if the operator dismisses
+// this dialog without copying, the secret is unrecoverable and must
+// be re-rotated. That's why both phases force a deliberate click —
+// no backdrop-click auto-close while the plain value is on screen.
+function JiraWebhookSecretRotateDialog({
+  open,
+  onClose,
+  onRotated,
+}: {
+  open: boolean
+  onClose: () => void
+  onRotated: (maskedPreview: string) => void
+}) {
+  const [phase, setPhase] = useState<"confirm" | "rotating" | "revealed" | "error">("confirm")
+  const [plainSecret, setPlainSecret] = useState("")
+  const [maskedSecret, setMaskedSecret] = useState("")
+  const [webhookUrl, setWebhookUrl] = useState("")
+  const [signatureHeader, setSignatureHeader] = useState("")
+  const [note, setNote] = useState("")
+  const [errorMsg, setErrorMsg] = useState("")
+  const [secretCopied, setSecretCopied] = useState(false)
+
+  useEffect(() => {
+    if (open) {
+      setPhase("confirm")
+      setPlainSecret("")
+      setMaskedSecret("")
+      setWebhookUrl("")
+      setSignatureHeader("")
+      setNote("")
+      setErrorMsg("")
+      setSecretCopied(false)
+    }
+  }, [open])
+
+  const onConfirmRotate = useCallback(async () => {
+    setPhase("rotating")
+    setErrorMsg("")
+    try {
+      const res = await api.generateJiraWebhookSecret()
+      if (res.status === "ok" && res.secret) {
+        setPlainSecret(res.secret)
+        setMaskedSecret(res.secret_masked ?? "")
+        setWebhookUrl(res.webhook_url ?? "")
+        setSignatureHeader(res.signature_header ?? "Authorization")
+        setNote(res.note ?? "")
+        setPhase("revealed")
+      } else {
+        setErrorMsg(res.message || "Failed to rotate JIRA webhook secret")
+        setPhase("error")
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to rotate JIRA webhook secret")
+      setPhase("error")
+    }
+  }, [])
+
+  const onCopySecret = useCallback(async () => {
+    if (!plainSecret) return
+    try {
+      await navigator.clipboard.writeText(plainSecret)
+      setSecretCopied(true)
+    } catch {
+      /* clipboard unavailable (non-secure context) — operator can still select+copy */
+    }
+  }, [plainSecret])
+
+  const onCloseRevealed = useCallback(() => {
+    // Bubble the masked preview up to the parent so it can keep showing
+    // the "••••abc4 (rotated)" strip after this dialog unmounts.
+    if (maskedSecret) onRotated(maskedSecret)
+    onClose()
+  }, [maskedSecret, onRotated, onClose])
+
+  if (!open || typeof document === "undefined") return null
+
+  return createPortal(
+    <div className="fixed inset-0 z-[120] flex items-center justify-center" data-testid="jira-webhook-rotate-dialog">
+      <div
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        // While the plain secret is on screen, a stray backdrop click
+        // would nuke an unrecoverable value — disable it in the
+        // "revealed" phase. Other phases keep the normal dismiss UX.
+        onClick={phase === "revealed" ? undefined : onClose}
+      />
+      <div className="relative z-10 w-full max-w-md m-4 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-2xl flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)] bg-[var(--secondary)]">
+          <div className="flex items-center gap-2">
+            <Key size={14} className="text-[var(--neural-blue)]" />
+            <h2 className="font-sans text-sm font-semibold tracking-fui text-[var(--neural-blue)]">
+              JIRA WEBHOOK SECRET — ROTATE
+            </h2>
+          </div>
+          <button
+            onClick={phase === "revealed" ? onCloseRevealed : onClose}
+            className="p-1 rounded hover:bg-[var(--background)] transition-colors"
+            aria-label="Close rotate dialog"
+            data-testid="jira-webhook-rotate-close"
+          >
+            <X size={14} className="text-[var(--muted-foreground)]" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3">
+          {phase === "confirm" && (
+            <div className="space-y-3" data-testid="jira-webhook-rotate-confirm">
+              <div className="flex items-start gap-2 p-2 rounded border border-[var(--hardware-orange)]/40 bg-[var(--hardware-orange)]/10 text-[var(--hardware-orange)]">
+                <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+                <div className="font-mono text-[10px] leading-relaxed">
+                  旋轉將立即作廢目前的 JIRA webhook secret。舊 secret 會失效，
+                  在你把新值貼進 JIRA webhook 的 <code>Authorization: Bearer …</code> header 之前，
+                  inbound 事件將無法通過驗證。
+                </div>
+              </div>
+              <div className="font-mono text-[10px] text-[var(--muted-foreground)] leading-relaxed">
+                新 secret 只會顯示一次，關閉視窗後僅保留遮罩預覽。請準備好 JIRA 那邊的
+                webhook 設定頁，旋轉後立刻複製貼上。
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  data-testid="jira-webhook-rotate-cancel"
+                  className="px-3 py-1 rounded font-mono text-[10px] border border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--background)] transition-colors"
+                >
+                  CANCEL
+                </button>
+                <button
+                  type="button"
+                  onClick={onConfirmRotate}
+                  data-testid="jira-webhook-rotate-confirm-button"
+                  className="flex items-center gap-1.5 px-3 py-1 rounded font-mono text-[10px] bg-[var(--critical-red)]/15 text-[var(--critical-red)] hover:bg-[var(--critical-red)]/25 transition-colors font-semibold"
+                >
+                  <RefreshCw size={10} />
+                  ROTATE NOW
+                </button>
+              </div>
+            </div>
+          )}
+
+          {phase === "rotating" && (
+            <div
+              className="flex items-center gap-2 p-4 justify-center"
+              data-testid="jira-webhook-rotate-loading"
+            >
+              <Loader size={14} className="animate-spin text-[var(--neural-blue)]" />
+              <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                Minting new secret…
+              </span>
+            </div>
+          )}
+
+          {phase === "revealed" && (
+            <div className="space-y-2" data-testid="jira-webhook-rotate-revealed">
+              <div className="p-2 rounded border border-[var(--validation-emerald)]/40 bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] font-mono text-[10px] font-semibold">
+                NEW SECRET — 僅顯示一次，請立即複製
+              </div>
+              <div className="space-y-0.5">
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)]">
+                  Secret（貼到 JIRA webhook 的 <code>{signatureHeader || "Authorization"}: Bearer …</code>）
+                </div>
+                <div className="flex items-center gap-2">
+                  <code
+                    data-testid="jira-webhook-rotate-secret-plain"
+                    className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] break-all select-all"
+                  >
+                    {plainSecret}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={onCopySecret}
+                    data-testid="jira-webhook-rotate-copy-secret"
+                    className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--validation-emerald)]/10 text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/20 transition-colors shrink-0"
+                  >
+                    <Copy size={10} />
+                    {secretCopied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+              {webhookUrl && (
+                <div className="space-y-0.5 pt-1">
+                  <div className="font-mono text-[9px] text-[var(--muted-foreground)]">Webhook URL</div>
+                  <code
+                    data-testid="jira-webhook-rotate-webhook-url"
+                    className="block font-mono text-[9px] px-2 py-1 rounded bg-[var(--secondary)] text-[var(--foreground)] break-all"
+                  >
+                    {webhookUrl}
+                  </code>
+                </div>
+              )}
+              {note && (
+                <div className="font-mono text-[9px] text-[var(--muted-foreground)] leading-relaxed pt-1">
+                  {note}
+                </div>
+              )}
+              <div className="flex items-center justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={onCloseRevealed}
+                  data-testid="jira-webhook-rotate-close-revealed"
+                  className="flex items-center gap-1.5 px-3 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)] text-black font-semibold hover:opacity-90 transition-colors"
+                >
+                  <Check size={10} />
+                  SAVED & CLOSE
+                </button>
+              </div>
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div className="space-y-2" data-testid="jira-webhook-rotate-error">
+              <div className="flex items-start gap-2 p-2 rounded border border-[var(--critical-red)]/40 bg-[var(--critical-red)]/10 text-[var(--critical-red)]">
+                <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
+                <div className="font-mono text-[10px] leading-relaxed break-all">
+                  {errorMsg}
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-1 rounded font-mono text-[10px] border border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--background)] transition-colors"
+                >
+                  CLOSE
+                </button>
+                <button
+                  type="button"
+                  onClick={onConfirmRotate}
+                  data-testid="jira-webhook-rotate-retry"
+                  className="flex items-center gap-1.5 px-3 py-1 rounded font-mono text-[10px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors"
+                >
+                  <RefreshCw size={10} />
+                  RETRY
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps) {
   const [settingsData, setSettingsData] = useState<Record<string, Record<string, unknown>>>({})
   const [dirty, setDirty] = useState<Record<string, string | number | boolean>>({})
@@ -2676,6 +2928,14 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
   const [saveFeedback, setSaveFeedback] = useState<SaveFeedback>(null)
   const [providers, setProviders] = useState<api.ProviderConfig[]>([])
   const [gerritWizardOpen, setGerritWizardOpen] = useState(false)
+  // Y-prep.2 #288 — JIRA webhook secret rotate one-time-reveal dialog +
+  // a local cache of the post-rotate masked preview. The settings GET
+  // only returns `jira_secret: "configured"` / `""` (no real mask),
+  // so after a rotate we remember the returned `secret_masked` here to
+  // surface it inline next to the ROTATE button until the modal is
+  // re-opened from a cold state.
+  const [jiraRotateDialogOpen, setJiraRotateDialogOpen] = useState(false)
+  const [jiraLastRotatedMasked, setJiraLastRotatedMasked] = useState<string>("")
 
   // Pulled out of the open-only effect so the SSE listener below can
   // reuse it without re-declaring the fetch pair inline.
@@ -3452,6 +3712,41 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 <SettingField label="URL" value={getVal("jira", "url")} onChange={v => setVal("notification_jira_url", v)} />
                 <SettingField label="Token" value={getVal("jira", "token")} type="password" onChange={v => setVal("notification_jira_token", v)} />
                 <SettingField label="Project Key" value={getVal("jira", "project")} onChange={v => setVal("notification_jira_project", v)} />
+                {/* Y-prep.2 #288 — inbound webhook HMAC secret rotate.
+                    Mirrors the Gerrit Wizard Step 5 one-time-reveal UX: the
+                    plain value is shown exactly once in the confirm→reveal
+                    modal; after close only a masked preview survives. The
+                    plain `jira_webhook_secret` field above in INBOUND
+                    WEBHOOK SECRETS still accepts manual entry for operators
+                    who pre-generate the value out-of-band, but the rotate
+                    button is the ergonomic default. */}
+                <div className="flex items-center gap-2 pt-1" data-testid="jira-webhook-secret-rotate-row">
+                  <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">
+                    Webhook Secret
+                  </label>
+                  <div className="flex-1 flex items-center gap-2">
+                    <span
+                      className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)]/50 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] select-none"
+                      data-testid="jira-webhook-secret-status"
+                    >
+                      {jiraLastRotatedMasked
+                        ? `••• rotated • ${jiraLastRotatedMasked}`
+                        : hasValue("webhooks", "jira_secret", "jira_webhook_secret")
+                          ? "••• configured •••"
+                          : "not configured"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setJiraRotateDialogOpen(true)}
+                      className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 transition-colors shrink-0"
+                      title="Mint a fresh JIRA webhook secret (one-time reveal)"
+                      data-testid="jira-webhook-secret-rotate-button"
+                    >
+                      <RefreshCw size={10} />
+                      ROTATE WEBHOOK SECRET
+                    </button>
+                  </div>
+                </div>
               </SettingsSection>
 
               <SettingsSection title="SLACK NOTIFICATIONS" integration="slack" onTestResult={recordProbeResult}>
@@ -3576,6 +3871,11 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
         </div>
       </div>
       <GerritSetupWizardDialog open={gerritWizardOpen} onClose={() => setGerritWizardOpen(false)} />
+      <JiraWebhookSecretRotateDialog
+        open={jiraRotateDialogOpen}
+        onClose={() => setJiraRotateDialogOpen(false)}
+        onRotated={(masked) => setJiraLastRotatedMasked(masked)}
+      />
     </div>,
     document.body
   )

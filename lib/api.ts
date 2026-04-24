@@ -1834,6 +1834,24 @@ export async function generateGerritWebhookSecret(): Promise<GerritWebhookSecret
   )
 }
 
+// ─── Y-prep.2 #288 — JIRA webhook secret rotation ───
+//
+// Structural parity with the Gerrit rotate endpoint (one-time reveal
+// contract — plain secret is returned once in the response body and
+// is never re-readable). Transport differs: JIRA Cloud webhooks use
+// `Authorization: Bearer <token>`, not HMAC body signing, so the
+// `signature_header` / `signature_algorithm` fields surface the real
+// transport shape (`"Authorization"` / `"bearer-token"`) — field names
+// mirror Gerrit, values reflect JIRA semantics.
+export type JiraWebhookSecretRotateResult = GerritWebhookSecretRotateResult
+
+export async function generateJiraWebhookSecret(): Promise<JiraWebhookSecretRotateResult> {
+  return request<JiraWebhookSecretRotateResult>(
+    "/runtime/git-forge/jira/webhook-secret/generate",
+    { method: "POST" },
+  )
+}
+
 // ─── B14 Part C row 227: Gerrit Setup Wizard finalize (write config + enable) ───
 //
 // After Steps 1–5 all surface DONE the wizard pipes the collected SSH
