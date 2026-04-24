@@ -764,21 +764,34 @@ async def _on_jira_event(event: dict) -> None:
     JIRA Cloud sends a top-level ``webhookEvent`` string identifying the
     event kind (`jira:issue_created` / `jira:issue_updated` /
     `comment_created` / `comment_updated` / …). This dispatcher normalises
-    that string, routes to the matching ``_on_jira_*`` handler, and returns.
+    that string, scopes the request to a tenant context (``t-default``
+    today, real tenant after Y4), and routes to the matching
+    ``_on_jira_*`` handler.
 
-    The three handler stubs below are intentionally minimal — they log the
-    event and return without side-effects. The follow-up Y-prep.3 bullet
-    (``backend/jira_event_router.py``) will replace each stub body with the
-    real action: `/command` comment → CATC ``jira_command`` emit, status →
-    Done → artifact packaging, intake-label → ``intent_bridge`` CATC task
-    creation. Keeping the dispatcher and the action logic in separate
-    commits matches Y-prep.3's bullet ordering and keeps the blast radius of
-    each step small.
+    Tenant context (Y-prep.3 / Y4 seam): the inbound JIRA webhook is
+    authenticated via a shared secret — there is no user session, hence
+    no ``require_tenant`` dependency. We explicitly set
+    ``set_tenant_id("t-default")`` here so the downstream ``audit.log``
+    (and any other tenant-scoped DB write) inherits a well-defined
+    tenant id instead of silently falling through to the library
+    default. Y4 will swap this one line for
+    ``set_tenant_id(derive_tenant_from_event(event))`` once per-tenant
+    JIRA instances land. We capture+restore the prior tenant in a
+    ``finally`` so this dispatcher stays reentrancy-safe if it ever runs
+    inside a request that DID set a tenant first (e.g. an admin replay
+    endpoint).
 
-    Module-global state audit: this dispatcher is a pure function taking
-    ``event`` as input. No module-level caches or singletons; each worker
-    processes events independently (qualified answer #1: "not shared — each
-    worker derives the same routing from the same payload").
+    Module-global state audit (SOP Step 1, qualified answer #3): the
+    tenant is a ``contextvars.ContextVar`` — task-local by design.
+    Each request/task gets its own copy, so cross-worker AND
+    cross-request interference is impossible. No module-level cache
+    introduced.
+
+    Read-after-write timing audit: no new parallelism. The dispatcher
+    awaits each handler in-order, the handlers' side effects
+    (``bus.publish``, ``audit.log``, ``_package_merged_artifacts`` spawn,
+    ``intent_bridge.on_intake_queued``) are each self-serialised and
+    independent of the subsequent status-sync path in ``jira_webhook``.
     """
     webhook_event = (event.get("webhookEvent") or "").strip()
     if not webhook_event:
@@ -789,19 +802,25 @@ async def _on_jira_event(event: dict) -> None:
     # some JIRA versions; prefer the top-level string when present.
     logger.info("JIRA webhook event: %s", webhook_event)
 
-    if webhook_event == "comment_created":
-        await _on_jira_comment_created(event)
-    elif webhook_event == "comment_updated":
-        # Same shape as `comment_created`; route to the same handler so that
-        # edited commands are re-evaluated. Negative-path filters (e.g.
-        # "only `/command` lines trigger") live inside the handler.
-        await _on_jira_comment_created(event)
-    elif webhook_event == "jira:issue_updated":
-        await _on_jira_issue_updated(event)
-    elif webhook_event == "jira:issue_created":
-        await _on_jira_issue_created(event)
-    else:
-        logger.debug("JIRA webhook: unhandled event type %r", webhook_event)
+    from backend.db_context import set_tenant_id, current_tenant_id
+    prior_tenant = current_tenant_id()
+    try:
+        set_tenant_id(prior_tenant or "t-default")
+        if webhook_event == "comment_created":
+            await _on_jira_comment_created(event)
+        elif webhook_event == "comment_updated":
+            # Same shape as `comment_created`; route to the same handler so
+            # that edited commands are re-evaluated. Negative-path filters
+            # (e.g. "only `/command` lines trigger") live inside the handler.
+            await _on_jira_comment_created(event)
+        elif webhook_event == "jira:issue_updated":
+            await _on_jira_issue_updated(event)
+        elif webhook_event == "jira:issue_created":
+            await _on_jira_issue_created(event)
+        else:
+            logger.debug("JIRA webhook: unhandled event type %r", webhook_event)
+    finally:
+        set_tenant_id(prior_tenant)
 
 
 async def _on_jira_comment_created(event: dict) -> None:

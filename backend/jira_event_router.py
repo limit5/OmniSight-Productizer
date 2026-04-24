@@ -107,20 +107,33 @@ async def _audit(action: str, entity_id: str, before: dict[str, Any] | None,
                  after: dict[str, Any] | None) -> None:
     """Write a ``jira.*`` audit row. Swallows all failures.
 
-    The current Y-prep.3 milestone runs single-tenant under ``t-default``
-    (see Y4 for real per-tenant routing); ``audit.log`` itself reads the
-    tenant via context vars, so we set nothing here and let the audit
-    layer's own default kick in.
+    Tenant inheritance: the underlying ``audit.log`` reads the tenant via
+    ``db_context.current_tenant_id()`` (``tenant_insert_value()`` falls
+    back to ``t-default``), so the chain row automatically lands on
+    whichever tenant the caller's contextvar is scoped to. The dispatcher
+    in ``backend/routers/webhooks.py::_on_jira_event`` explicitly scopes
+    the request to ``t-default`` for Y-prep.3; Y4 will swap that seam
+    for a real ``derive_tenant_from_event(...)`` call.
+
+    We additionally stamp ``tenant_id`` into ``after`` and into the
+    ``actor`` string using the live contextvar (not a hardcoded constant)
+    so the audit row self-documents which tenant routed the event — that
+    makes the Y4 transition observable by audit log alone (operators can
+    see ``actor=jira_event_router/<tenant-id>``) without a schema change.
     """
     try:
         from backend import audit
+        from backend.db_context import current_tenant_id
+        tid = current_tenant_id() or _DEFAULT_TENANT_ID
+        after_with_tenant = dict(after or {})
+        after_with_tenant.setdefault("tenant_id", tid)
         await audit.log(
             action=action,
             entity_kind="jira_event",
             entity_id=entity_id,
             before=before,
-            after=after,
-            actor=f"jira_event_router/{_DEFAULT_TENANT_ID}",
+            after=after_with_tenant,
+            actor=f"jira_event_router/{tid}",
         )
     except Exception as exc:
         logger.debug("jira_event_router audit (%s) failed: %s", action, exc)
