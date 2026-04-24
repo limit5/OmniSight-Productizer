@@ -1,0 +1,11 @@
+{
+  "_doc": "OmniSight MCP server registry (P12 #352). Local + remote MCP servers that the agent runtime, Claude Code projects, and downstream tooling can register with. Each entry follows the Claude Code/Anthropic MCP convention so the same JSON can be re-used as a project-level `.mcp.json` (copy or symlink) or imported by `backend/agents/tools.py` MCP loader (P12 checkbox 2).",
+  "mcpServers": {
+    "android-skills": {
+      "_doc": "android-skills-mcp (skydoves/android-skills-mcp, P12 #352 checkbox 1). Exposes `list_skills` / `search_skills` / `get_skill` tools — wraps the Google Android official Skills catalogue (Navigation 3 setup, AGP 9 migration, R8 config, etc.) so OmniSight android-kotlin / mobile agents can pull authoritative best-practice guidance into context. stdio mode (local subprocess); `-y` keeps `npx` non-interactive so the runtime never blocks waiting for an `Ok to proceed?` prompt.",
+      "command": "npx",
+      "args": ["-y", "android-skills-mcp"],
+      "env": {}
+    }
+  }
+}
