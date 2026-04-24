@@ -345,6 +345,14 @@ class Settings(BaseSettings):
     # Declared without OMNISIGHT_ prefix so pydantic-settings finds it
     # in the raw .env line ``next_public_api_url=...``.
     next_public_api_url: str = ""
+    # Phase 5-5 (#multi-account-forge) kill-switch. Read via
+    # ``os.environ`` in :mod:`backend.legacy_credential_migration`
+    # so the migration hook can be disabled without code change.
+    # Declared here only to satisfy the SP-3.1 pattern (operator
+    # `.env` lines must map to a Settings field). Value of ``skip``
+    # bypasses the legacy → ``git_accounts`` migration entirely;
+    # any other value (including empty) leaves it active.
+    credential_migrate: str = ""
 
     # Test harness sets OMNISIGHT_DOTENV_FILE=".env.test" (see
     # backend/tests/conftest.py) so pytest runs get the safe-default

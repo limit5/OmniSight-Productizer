@@ -147,6 +147,40 @@ async def lifespan(app: FastAPI):
                 "Create per-service keys and remove OMNISIGHT_DECISION_BEARER.",
                 legacy_key.id,
             )
+        # Phase 5-5 (#multi-account-forge): one-shot move of legacy
+        # ``Settings.{github,gitlab}_token{,_map}`` / ``gerrit_instances``
+        # / ``notification_jira_*`` into the canonical ``git_accounts``
+        # table. Idempotent (skipped if the table already has any row);
+        # operator escape hatch is ``OMNISIGHT_CREDENTIAL_MIGRATE=skip``.
+        # PG-gated like the K6 hook above — SQLite dev mode lacks the
+        # pool that the migration writes through.
+        if _pg_dsn:
+            try:
+                from backend import (
+                    legacy_credential_migration as _cred_migrate,
+                )
+                summary = await _cred_migrate.migrate_legacy_credentials_once()
+                if summary["migrated"]:
+                    _log.warning(
+                        "[CRED-MIGRATE] migrated %d legacy credential(s) "
+                        "into git_accounts (sources=%s). Plan to remove "
+                        "the corresponding env knobs once UI parity ships.",
+                        summary["migrated"], summary["sources"],
+                    )
+                elif summary["skipped_reason"]:
+                    _log.info(
+                        "[CRED-MIGRATE] no migration this boot "
+                        "(reason=%s, candidates=%d).",
+                        summary["skipped_reason"],
+                        summary.get("candidates", 0),
+                    )
+            except Exception as exc:
+                # Migration is best-effort — never block startup on it.
+                _log.warning(
+                    "[CRED-MIGRATE] hook raised %s; legacy shim still "
+                    "covers credential reads.",
+                    type(exc).__name__,
+                )
         # Trim expired sessions on every cold start.
         try:
             removed = await _auth.cleanup_expired_sessions()
