@@ -1820,6 +1820,161 @@ class TestJiraWebhookSecretRotate:
         assert resp.status_code in (401, 403)
         assert _s.jira_webhook_secret == "pre-existing-secret"
 
+    @pytest.mark.asyncio
+    async def test_jira_webhook_secret_cross_worker_propagation(
+        self, client, monkeypatch
+    ):
+        """Cross-worker coherence end-to-end (Y-prep.2 #288 final bullet):
+        a rotate on worker-A must immediately allow the inbound JIRA
+        webhook verifier on worker-B to accept events signed with the
+        NEW secret, without worker-B having been the target of the
+        rotate POST.
+
+        Prod topology is 2 replicas × ``OMNISIGHT_WORKERS=2`` = 4 uvicorn
+        workers behind Caddy round-robin LB. Each worker holds its own
+        in-memory ``backend.config.settings`` singleton — a raw
+        ``setattr(settings, "jira_webhook_secret", ...)`` on worker-A
+        would leave the other 3 stale until their ``.env`` is reloaded
+        (i.e. next restart). The mechanism that closes this gap is:
+
+            1. Write side — the rotate handler calls
+               ``_apply_runtime_setting("jira_webhook_secret", new)``
+               which mirrors into the Redis-backed SharedKV
+               (``jira_webhook_secret`` is registered in
+               ``_SHARED_KV_STR_FIELDS``).
+            2. Read side — every inbound
+               ``POST /api/v1/webhooks/jira`` starts with
+               ``_overlay_runtime_settings()``, which HGETALLs the
+               SharedKV hash and ``setattr``s each value onto the
+               local ``settings`` singleton. The verifier then reads
+               the refreshed value.
+
+        Without (2), cross-worker propagation is eventually-consistent
+        (only refreshes when a GET /runtime/settings or /runtime/providers
+        happens to land on worker-B), and the rotate silently invalidates
+        inbound JIRA events for an arbitrary delay window — the exact
+        class of multi-worker bug the 2026-04-22 "GitHub/GitLab token 消失了"
+        incident surfaced. This test pins the end-to-end contract so a
+        future refactor that drops the overlay call from the webhook
+        handler fails CI instead of regressing a production integration.
+
+        Simulation strategy: the process singleton
+        ``_runtime_settings_kv`` IS the Redis-backed mirror shared by
+        all workers in prod. Monkeypatching its ``.set`` / ``.get_all``
+        to route through a single ``captured`` dict means both simulated
+        "workers" read/write through the same logical source of truth
+        (Redis stand-in), while independent manipulation of the local
+        ``settings.jira_webhook_secret`` attribute simulates the
+        per-worker in-memory divergence.
+        """
+        from backend.config import settings as _s
+        from backend.routers import integration as _i
+
+        # Single shared SharedKV mirror (the "Redis" stand-in) — both
+        # simulated workers read through the same ``captured`` dict.
+        captured: dict[str, str] = {}
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "set",
+            lambda key, value: captured.__setitem__(key, value),
+        )
+        monkeypatch.setattr(
+            _i._runtime_settings_kv, "get_all", lambda: dict(captured),
+        )
+
+        # ── Phase 1: Worker A receives rotate POST ──
+        # Boot state: empty secret (fresh .env, never rotated before).
+        monkeypatch.setattr(_s, "jira_webhook_secret", "")
+        rotate = await client.post(
+            "/api/v1/runtime/git-forge/jira/webhook-secret/generate",
+        )
+        assert rotate.status_code == 200
+        new_secret = rotate.json()["secret"]
+        # Worker-A's local settings + the shared mirror both hold the
+        # new secret; this is the baseline the peer workers must catch
+        # up to.
+        assert _s.jira_webhook_secret == new_secret
+        assert captured.get("jira_webhook_secret") == new_secret
+
+        # ── Phase 2: Simulate worker-B's divergent local state ──
+        # Worker-B booted from a stale ``.env`` (or received the previous
+        # rotate, not this one). Its in-memory ``settings`` has the old
+        # value while the SharedKV mirror holds the new one. Without the
+        # overlay call in the webhook handler this stale local value
+        # would drive the verifier and inbound events would 401.
+        monkeypatch.setattr(
+            _s, "jira_webhook_secret", "stale-from-env-boot",
+        )
+        # Sanity: the captured dict (SharedKV) still has the new secret
+        # — it's the local singleton that's stale.
+        assert captured.get("jira_webhook_secret") == new_secret
+
+        # ── Phase 3: Worker-B receives an inbound JIRA webhook ──
+        # JIRA signs with the NEW secret (the one the operator pasted
+        # into JIRA's webhook config after rotating). Worker-B's handler
+        # must overlay SharedKV BEFORE verifying — otherwise it compares
+        # against the stale local value and returns 401.
+        accept = await client.post(
+            "/api/v1/webhooks/jira",
+            headers={"Authorization": f"Bearer {new_secret}"},
+            json={"issue": {"key": "OMNI-NO-MATCH"}},
+        )
+        # 200 with the no-matching-task branch is the expected accept
+        # path — the issue key doesn't match any internal task, so the
+        # verifier passed but ``_find_task_by_issue_url`` returned None.
+        # The critical assertion is "not 401" — the verifier accepted
+        # the Bearer token, which proves the overlay picked up the
+        # rotated secret from the SharedKV mirror.
+        assert accept.status_code == 200, (
+            f"cross-worker rotate not propagated: expected 200, got "
+            f"{accept.status_code} {accept.text!r}"
+        )
+
+        # After overlay, worker-B's local settings now reflects the
+        # rotated value — the handler's implicit side-effect of the
+        # overlay is how the value "sticks" for subsequent reads on
+        # this worker until the next rotate.
+        assert _s.jira_webhook_secret == new_secret
+
+        # ── Phase 4: Old secret must be rejected post-rotate ──
+        # A replay attack or a stale JIRA configuration pushing with
+        # the OLD secret must 401 — proves the overlay isn't just
+        # additive (the stale local value was fully replaced, not
+        # layered as "both acceptable").
+        reject_old = await client.post(
+            "/api/v1/webhooks/jira",
+            headers={"Authorization": "Bearer stale-from-env-boot"},
+            json={"issue": {"key": "OMNI-NO-MATCH"}},
+        )
+        assert reject_old.status_code == 401
+
+        # ── Phase 5: A second rotate on "worker-A" propagates too ──
+        # Locks the rotate-primitive semantics end-to-end: rotating
+        # again must invalidate the previous NEW secret across workers
+        # too, not just on the rotate-receiving worker.
+        rotate2 = await client.post(
+            "/api/v1/runtime/git-forge/jira/webhook-secret/generate",
+        )
+        assert rotate2.status_code == 200
+        newer_secret = rotate2.json()["secret"]
+        assert newer_secret != new_secret
+        # Simulate worker-B stale again (rotate landed on worker-A).
+        monkeypatch.setattr(_s, "jira_webhook_secret", new_secret)
+        # Now worker-B must accept the NEWER secret and reject the one
+        # it received a moment ago — both guarantees hinge on overlay
+        # pulling the latest SharedKV state per-request.
+        accept2 = await client.post(
+            "/api/v1/webhooks/jira",
+            headers={"Authorization": f"Bearer {newer_secret}"},
+            json={"issue": {"key": "OMNI-NO-MATCH"}},
+        )
+        assert accept2.status_code == 200
+        reject_prev = await client.post(
+            "/api/v1/webhooks/jira",
+            headers={"Authorization": f"Bearer {new_secret}"},
+            json={"issue": {"key": "OMNI-NO-MATCH"}},
+        )
+        assert reject_prev.status_code == 401
+
 
 @pytest.fixture
 def reset_rate_limiter():

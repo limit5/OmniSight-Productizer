@@ -703,8 +703,20 @@ async def gitlab_webhook(request: Request):
 
 @router.post("/jira")
 async def jira_webhook(request: Request):
-    """Receive Jira issue webhooks — sync status to internal tasks."""
+    """Receive Jira issue webhooks — sync status to internal tasks.
+
+    Cross-worker coherence: the rotate endpoint in ``integration.py`` mirrors
+    ``jira_webhook_secret`` into the Redis-backed SharedKV, but the local
+    ``settings`` singleton is per-worker. Overlay SharedKV on each inbound
+    webhook so a rotate on worker-A is immediately visible to the verifier
+    on worker-B (the ``_SHARED_KV_STR_FIELDS`` registration alone only
+    provides the write side; the read side needs this overlay call to close
+    the loop). Cheap: a single Redis HGETALL round-trip per webhook, which
+    is already guarded by try/except inside the overlay helper.
+    """
     import hmac as _hmac
+    from backend.routers.integration import _overlay_runtime_settings
+    _overlay_runtime_settings()
     if not settings.jira_webhook_secret:
         return JSONResponse(status_code=503, content={"detail": "Jira webhooks not configured"})
 
