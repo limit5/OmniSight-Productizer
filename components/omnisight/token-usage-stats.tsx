@@ -11,7 +11,8 @@ import {
   DollarSign,
   Clock,
   ArrowUpRight,
-  ArrowDownRight
+  ArrowDownRight,
+  AlertTriangle
 } from "lucide-react"
 import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
 import { subscribeEvents } from "@/lib/api"
@@ -199,6 +200,21 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
     ...placeholderRows,
   ]
 
+  // ZZ.A2 (#303-2, 2026-04-24): card-top warning icon. If ANY recent
+  // ``turn_metrics`` snapshot has ``context_usage_pct >= 90`` we surface
+  // an AlertTriangle next to the "TOKEN USAGE" header so the operator
+  // sees the signal even when the panel is collapsed. The per-card Row
+  // 3a bar already pulses red at >=90 — the header icon is the
+  // always-visible analogue for when the panel has been folded up.
+  // NULL degradation: ``contextUsagePct === null`` (unknown limit /
+  // Ollama without env override / no SSE yet) is explicitly excluded
+  // so "no data" never fires the alarm — same NULL-vs-genuine-zero
+  // contract ZZ.A1 established for cache fields.
+  const criticalContextModels = Object.entries(contextByModel)
+    .filter(([, snap]) => snap.contextUsagePct !== null && snap.contextUsagePct !== undefined && snap.contextUsagePct >= 90)
+    .map(([model]) => model)
+  const hasCriticalContext = criticalContextModels.length > 0
+
   return (
     <div className={`border-b border-[var(--border)] ${className}`}>
       {/* Header */}
@@ -209,6 +225,19 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
         <div className="flex items-center gap-2">
           <Coins size={12} className="text-[var(--hardware-orange)]" />
           <span>TOKEN USAGE</span>
+          {hasCriticalContext && (
+            <span
+              className="inline-flex items-center"
+              title={`Context 接近上限，agent 可能 truncate — ${criticalContextModels.join(", ")}`}
+              aria-label="Context window approaching limit — agent may be truncated"
+              data-testid="context-critical-warning"
+            >
+              <AlertTriangle
+                size={12}
+                className="text-[var(--critical-red)] animate-pulse"
+              />
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[var(--validation-emerald)]">{formatTokens(totals.totalTokens)} tokens</span>
