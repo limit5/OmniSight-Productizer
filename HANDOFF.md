@@ -13207,3 +13207,37 @@ Part C TODO 字面把 row 221（entry button）跟 row 222-226（Step 1-5 互動
 
 **Production status:** dev-only
 **Next gate:** deployed-inactive — 需要 (1) 建 production image 時把 `OMNISIGHT_IPCAM_RTSP_BACKEND` 寫進 `.env`（預設不啟 RTSP server，等 hw_codec_binding 合進 main 再啟），(2) 若要 real backend 需 apt-install `gir1.2-gst-rtsp-server-1.0` 或 pip-install `pylive555` 後重 build backend image，(3) Docker compose 外開 TCP 8554（或走 Caddy stream-reverse-proxy）。預估 45 min，不需 maintenance window。
+
+---
+
+## 2026-04-24 — Phase 5-11.1 status flip `[ ] → [O]` (Operator-executed soak — explicit operator-action gate)
+
+> 本 row 不是「做了什麼」而是「**承認該做什麼不由 AI 做**」——TODO.md row 5-11.1 的 scope label 本身寫明「AI cannot run — blocked on 3 GH + 2 GL + 2 Gerrit + 1 JIRA real credentials」。上一 row 5-11 的 HANDOFF entry（2026-04-24 shipped、commit `b73f45b8`）已把 4 個 sub-phase 的 automation 全交付（`test_phase5_11_tenant_isolation.py` 9 tests + `test_phase5_11_rotation_drill.py` 9 tests + `scripts/migrate_legacy_credentials_dryrun.py` + `test_phase5_11_dryrun_script.py` 13 tests + `docs/phase-5-multi-account/03-soak-runbook.md` 440 行 operator runbook，合計 `225/225 passed 0 regression`）。5-11.1 在 TODO.md 裡嚴格存在只是為了把「需 operator 實機跑 soak 才過 gate」這件事從 5-11 entry 拆出、在 TODO.md 上以可 grep 方式表達——沒有這個 sub-row，未來讀者會把 5-11 的 `[O]` 誤讀成「AI 沒做完就停在那」而不是「AI 做完了、在等 operator 跑 soak」。
+
+### 交付
+- **`TODO.md`** A3 Phase 5 block row 5-11.1 (line 83)：`- [ ]` → `- [O]`，inline comment 記錄為何此 row 定義上就不能由 AI 完成、operator 需跑什麼（3 GH + 2 GL + 2 Gerrit + 1 JIRA real credentials × `docs/phase-5-multi-account/03-soak-runbook.md` 的 S1-S5 soak matrix + 9-step rotation drill + 5-step per-tenant isolation drill + 3-stage staging dry-run ≈ 55 checkbox，24h 觀察窗）、`[O] → [D] → [V]` 的 gate 定義。
+- **本 HANDOFF 條目**。
+
+### 為什麼這不是「跳過工作」
+- **AI 做不了的部分精確列舉**：(1) 真實 GitHub/GitLab/Gerrit/JIRA PAT 要從 operator 的 account（AI 無法代為申請）、(2) real `git clone/push/PR/issue/webhook HMAC` 要從 operator 的 IP 出去打到各 platform 的 production API（CF Zero Trust 的 Access gate 是 operator 的 session）、(3) 24 h 觀察窗本來就是時間性驗證。
+- **AI 做得了的部分全部已經做完**：automation tests 是 pure simulation (`_FakePool` stub / `InMemoryLimiter` / virtual-clock / `asyncio.gather` 20 worker concurrency) 已 ship、dry-run CLI `--probe-db --strict-idempotency --json` 三組合 exit code 契約已鎖 (exit 0 / 2 / 3)、plaintext-leak 反向 grep 在 stdout/stderr/JSON 三路出口全封、runbook 9 節 operator-facing SOP 可直接照跑。
+- **不是開新 work item、不是重算 estimation**：`[O]` 是 2026-04-20 引入的 TODO 狀態分層已定義的合法終點狀態之一（`docs/sop/implement_phase_step.md` §Production Readiness Gate），跟 `[ ]/[~]/[x]/[D]/[V]` 並列；本 row 從 `[ ]` 直接跳到 `[O]` 是因為它定義上就是 operator-action-only、沒有 `[~]`/`[x]` 中間態。
+
+### 驗證 (SOP step 3 的 zero-code equivalent)
+- `grep -n "5-11.1" TODO.md` → 命中 line 83，狀態符號確實從 `- [ ]` 變為 `- [O]`。
+- 無 code 變更：`git diff --stat` 預期只命中 `TODO.md` + `HANDOFF.md` 兩檔。
+- **Pre-commit fingerprint grep**（SOP Step 3 強制項、本 row 形式上不觸發 code path 但為了 discipline 驗一次）：對本次改動的兩檔 `grep -nE "_conn\(\)|await conn\.commit\(\)|datetime\('now'\)|VALUES.*\?[,)]"` 0 命中（兩檔都是 Markdown，無 Python 語法）。
+- **鄰居 Phase 5 automation regression** (快速 sanity check)：Phase 5 相關 test 檔自 5-11 entry (commit `b73f45b8`) 以來未改動、Phase 5-11 的 `225/225 passed 0 regression` 保持；本 row 無 test 變動故不重跑。
+- **Module-global audit (SOP Step 1, qualified answer N/A — status-flip only)**：零 code 變動，僅 TODO.md 狀態符號 + HANDOFF.md entry 兩檔；無 runtime state / 無 singleton / 無 in-memory cache、無 serialisation 行為、無 read/write timing 影響。
+- **Read-after-write audit**：零 write path 變動。
+
+### 風險 / 已知問題
+- **零**——狀態標記的 operator contract flip、無 runtime / schema / data / endpoint / config 變化，rollback 是單 `git revert`。
+- 真正的風險在 operator 執行 soak 的環節：若某 platform 的 PAT scope 不足（e.g. GitHub PAT 沒有 `workflow` scope 會讓 CI trigger 測試失敗、GitLab PAT 沒有 `api` scope 會讓 MR create 失敗），屬 soak runbook 本身的預期 troubleshoot 項、runbook §Prerequisites 已列最小 scope 集；這類問題由 operator 在執行時發現，不是本 row 的 blast radius。
+
+### 下一步
+- **由 operator 執行**：打開 `docs/phase-5-multi-account/03-soak-runbook.md`，依 S1-S5 soak matrix (31 checkbox) + 9-step rotation drill + 5-step per-tenant isolation drill + 3-stage staging dry-run 全綠後把 TODO.md row 5-11.1 從 `[O]` 翻 `[D]`；觀察 24 h 無 401/403/`MissingCredentialError` 後翻 `[V]`。
+- **AI 側收尾**：Phase 5 整體除 5-11.1 + 5-12 (OAuth, optional) 外已全 `[x]`；待 5-11.1 翻 `[V]` 後，Phase 5 整體可視為 closed、進入 Phase 5b LLM API key persistence 的 5b-1 row。
+
+**Production status:** operator-blocked (automation-side already shipped in 5-11; this row IS the operator-action gate).  
+**Next gate:** `[O]` → `[D]` by operator executing `docs/phase-5-multi-account/03-soak-runbook.md` end-to-end with real credentials; `[D]` → `[V]` after the 24 h observation window.
