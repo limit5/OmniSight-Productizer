@@ -846,3 +846,390 @@ class TestCrossWorkerReloadIntegration:
         # operator-visible contract: edit YAML → POST reload → all
         # workers bill at new rate without a rolling restart.
         assert get_pricing("roundtripvendor", "rt-model-v1") == (123.0, 456.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Z.3 checkbox 7 (#292) — Migration / historical cost preservation contract
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Contract: "既有 token usage 紀錄不重算成本（保留當時計費），只影響
+# 未來 token 計價." — existing token_usage records keep their cost exactly
+# as billed at the time of tracking; a YAML pricing change only affects
+# tokens tracked AFTER the reload. Equivalently: cost is computed from
+# THIS call's tokens × the rate in effect at THIS call, and accumulated;
+# it is NEVER re-derived by multiplying lifetime tokens × current rate.
+#
+# Pre-Z.3-checkbox-7 behaviour recomputed cost from lifetime totals on
+# every call, so the first track_tokens() after a YAML reload silently
+# re-billed every historical token at the new rate. The fix in
+# backend/routers/system.py::track_tokens uses a delta-at-current-rate
+# accumulation; these tests lock that behaviour against regression.
+
+
+class TestHistoricalCostPreservation:
+    """Lock the Z.3 checkbox 7 contract: no retroactive cost re-billing.
+
+    These tests exercise `track_tokens()` directly rather than through the
+    HTTP layer — the contract is at the arithmetic level, so an isolated
+    check keeps the test fast and deterministic. The pricing YAML is
+    swapped by monkeypatching `pricing._PRICING_PATH` and calling
+    `pricing.reload()`, the same mechanism operators use via
+    `POST /runtime/pricing/reload`.
+    """
+
+    def setup_method(self):
+        # Mirror the clean-room setup used by test_token_budget.py so
+        # these tests do not inherit state from prior cases. The autouse
+        # `_reset_cache` fixture already clears `_PRICING_CACHE` and
+        # `_FALLBACK_WARN_TS`; we additionally reset `_token_usage`, the
+        # hourly ledger, and the shared-state accumulator because
+        # track_tokens() writes to all three. The shared accumulator is
+        # reset too so `get_daily_cost()` — which prefers the shared
+        # total when non-zero — does not leak an inflated value into the
+        # neighbouring `test_token_budget.py::test_get_daily_cost_empty`
+        # (it clears `_token_usage` but not `_token_usage_shared`).
+        import backend.routers.system as sys_mod
+        sys_mod._token_usage.clear()
+        sys_mod._hourly_ledger.clear()
+        sys_mod._token_usage_shared._local.clear()
+        sys_mod._hourly_ledger_shared.clear()
+        sys_mod.token_frozen = False
+        sys_mod._last_budget_level = ""
+
+    def teardown_method(self):
+        # Symmetric cleanup — prevents leakage into any test class that
+        # runs after this one in the same pytest process.
+        import backend.routers.system as sys_mod
+        sys_mod._token_usage.clear()
+        sys_mod._hourly_ledger.clear()
+        sys_mod._token_usage_shared._local.clear()
+        sys_mod._hourly_ledger_shared.clear()
+
+    def _write_pricing_yaml(self, tmp_path, rates: dict) -> None:
+        """Helper: write a minimal pricing YAML and point pricing at it."""
+        import yaml as _yaml
+        fake = tmp_path / "pricing.yaml"
+        fake.write_text(_yaml.safe_dump({"providers": rates}))
+        return fake
+
+    def test_steady_rate_delta_equals_legacy_lifetime_recompute(self, monkeypatch, tmp_path):
+        """Under a steady rate the new delta formulation is price-neutral.
+
+        Under unchanged pricing the lifetime-recompute and delta-accumulation
+        formulations are algebraically identical — this is the price-neutral
+        guarantee the Z.3 rollout has relied on. We assert it explicitly so
+        a future regression that silently re-introduces a rate-change path
+        doesn't drift steady-state billing.
+        """
+        from backend.routers.system import track_tokens, _token_usage
+
+        fake = self._write_pricing_yaml(tmp_path, {
+            "anthropic": {"claude-opus-4-7": {"input": 5, "output": 25}},
+        })
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+        pricing.reload()
+
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+        first_cost = _token_usage["claude-opus-4-7"]["cost"]
+        track_tokens("claude-opus-4-7", 500_000, 500_000, 100)
+        second_cost = _token_usage["claude-opus-4-7"]["cost"]
+
+        # Hand-computed: call 1 = 1×5 + 1×25 = 30; call 2 = 0.5×5 + 0.5×25 = 15.
+        assert first_cost == 30.0
+        assert second_cost == 45.0
+
+    def test_rate_change_does_not_rebill_historical_tokens(self, monkeypatch, tmp_path):
+        """The canonical Z.3 checkbox 7 scenario.
+
+        Track at rate A, reload the YAML to rate B, and assert the stored
+        cost for the PREVIOUS call does not change. Before the fix, the
+        cost field was rewritten on every call via `lifetime_tokens ×
+        current_rate`, so simply reading `_token_usage[...]['cost']` after
+        a reload still showed the old number — the divergence only
+        surfaced when the NEXT track_tokens() call ran and the cost
+        jumped by the full lifetime amount re-billed at the new rate.
+        This test catches that by asserting the next call's delta is
+        computed from THIS CALL's tokens × new rate, not lifetime × new.
+        """
+        from backend.routers.system import track_tokens, _token_usage
+
+        fake = tmp_path / "pricing.yaml"
+        import yaml as _yaml
+
+        # Rate A: $5 / $25 per MTok.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {
+                "anthropic": {"claude-opus-4-7": {"input": 5, "output": 25}},
+            },
+        }))
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+        pricing.reload()
+
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+        cost_before_reload = _token_usage["claude-opus-4-7"]["cost"]
+        assert cost_before_reload == 30.0  # 1×5 + 1×25
+
+        # Operator edits YAML to double the rate and hot-reloads.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {
+                "anthropic": {"claude-opus-4-7": {"input": 10, "output": 50}},
+            },
+        }))
+        pricing.reload()
+
+        # Contract: the stored cost is unchanged by the reload itself —
+        # reload is a pure cache invalidation, not a ledger rewrite.
+        assert _token_usage["claude-opus-4-7"]["cost"] == cost_before_reload
+
+        # Next track_tokens call: 500K input + 500K output at NEW rate.
+        # Expected delta = 0.5×10 + 0.5×50 = 30. New total = 30 + 30 = 60.
+        # BUG behaviour (pre-fix): u["cost"] = lifetime × new_rate
+        #   = 1.5M×10 + 1.5M×50 = 15 + 75 = 90. This test would catch
+        #   that by asserting the post-call cost is NOT 90.
+        track_tokens("claude-opus-4-7", 500_000, 500_000, 100)
+        cost_after_second_call = _token_usage["claude-opus-4-7"]["cost"]
+        assert cost_after_second_call == 60.0, (
+            f"Expected historical 1M+1M at $5/$25 ($30) + new 0.5M+0.5M at "
+            f"$10/$50 ($30) = $60; got ${cost_after_second_call}. The "
+            f"lifetime-recompute bug would yield $90 here."
+        )
+
+    def test_rate_change_downward_also_preserves_historical_billing(self, monkeypatch, tmp_path):
+        """Symmetric case: a price cut must not retroactively refund.
+
+        If the operator drops the rate (e.g. provider announced a discount),
+        the tokens already billed at the old higher rate must keep their
+        historical cost. Historical billing is immutable — it can't be
+        retroactively rewritten in either direction. This complements the
+        "rate increase" test above by covering the downward axis.
+        """
+        from backend.routers.system import track_tokens, _token_usage
+        import yaml as _yaml
+
+        fake = tmp_path / "pricing.yaml"
+        fake.write_text(_yaml.safe_dump({
+            "providers": {
+                "anthropic": {"claude-opus-4-7": {"input": 10, "output": 50}},
+            },
+        }))
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+        pricing.reload()
+
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+        assert _token_usage["claude-opus-4-7"]["cost"] == 60.0  # at old rate
+
+        fake.write_text(_yaml.safe_dump({
+            "providers": {
+                "anthropic": {"claude-opus-4-7": {"input": 1, "output": 5}},
+            },
+        }))
+        pricing.reload()
+
+        # Bug behaviour would retroactively refund: lifetime × new rate
+        #   = 1×1 + 1×5 = 6. Correct behaviour keeps the $60 historical
+        # billing; the next tracked call at the new rate adds on top.
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+        assert _token_usage["claude-opus-4-7"]["cost"] == 66.0, (
+            "Historical $60 billing must survive a price cut; only the "
+            "new 1M+1M at $1/$5 = $6 is added."
+        )
+
+    def test_three_rate_epochs_accumulate_independently(self, monkeypatch, tmp_path):
+        """Three consecutive rate changes — cost is the sum of per-epoch charges.
+
+        A longer round-trip locks the contract against the full history:
+        epoch 1 at rate A, reload to B, epoch 2 at B, reload to C, epoch 3
+        at C. The final cost must equal the arithmetic sum of each epoch's
+        charges at its own rate. A lifetime-recompute regression would
+        collapse everything to `total_tokens × final_rate` and miss the
+        earlier epoch rates entirely.
+        """
+        from backend.routers.system import track_tokens, _token_usage
+        import yaml as _yaml
+
+        fake = tmp_path / "pricing.yaml"
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+
+        # Epoch A: $2 / $6 per MTok. Track 1M + 1M.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 2, "output": 6}}},
+        }))
+        pricing.reload()
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+        # epoch A charge = 1×2 + 1×6 = 8
+
+        # Epoch B: $4 / $12. Track 2M + 2M.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 4, "output": 12}}},
+        }))
+        pricing.reload()
+        track_tokens("claude-opus-4-7", 2_000_000, 2_000_000, 100)
+        # epoch B charge = 2×4 + 2×12 = 32
+
+        # Epoch C: $1 / $3. Track 500K + 500K.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 1, "output": 3}}},
+        }))
+        pricing.reload()
+        track_tokens("claude-opus-4-7", 500_000, 500_000, 100)
+        # epoch C charge = 0.5×1 + 0.5×3 = 2
+
+        # Total = 8 + 32 + 2 = 42.
+        # Lifetime-recompute (bug) would give: 3.5M×1 + 3.5M×3 = 14.
+        assert _token_usage["claude-opus-4-7"]["cost"] == 42.0
+
+    def test_cost_delta_to_shared_state_matches_this_call(self, monkeypatch, tmp_path):
+        """`_token_usage_shared.track` must receive delta = this-call cost.
+
+        The shared-state accumulator at `backend/shared_state.py:742`
+        does `entry["cost"] += cost`, so it trusts the caller to supply
+        the correct per-call delta. If track_tokens() passes a delta
+        computed from lifetime × current_rate − prior_cost (the old
+        broken formulation), shared state ends up with the same
+        historical re-billing the in-memory dict had. This test
+        captures the argument the shared tracker receives and asserts
+        it equals `this_call_input × current_rate + this_call_output ×
+        current_rate` (the delta-at-current-rate value).
+        """
+        from backend.routers.system import track_tokens
+        import backend.routers.system as sys_mod
+        import yaml as _yaml
+
+        fake = tmp_path / "pricing.yaml"
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 5, "output": 25}}},
+        }))
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+        pricing.reload()
+
+        # Populate history at the old rate.
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+
+        # Flip the rate.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 10, "output": 50}}},
+        }))
+        pricing.reload()
+
+        # Capture the cost argument that the next track_tokens() passes
+        # to shared state.
+        captured = {}
+        original_track = sys_mod._token_usage_shared.track
+
+        def _spy(model, inp, out, latency, cost, **kwargs):
+            captured["cost"] = cost
+            captured["input"] = inp
+            captured["output"] = out
+            return original_track(model, inp, out, latency, cost, **kwargs)
+
+        monkeypatch.setattr(sys_mod._token_usage_shared, "track", _spy)
+
+        track_tokens("claude-opus-4-7", 500_000, 500_000, 100)
+
+        # Delta sent to shared state = this-call tokens × CURRENT rate.
+        # Expected = 0.5 × 10 + 0.5 × 50 = 30. The old bug would send
+        # u["cost"] − prev_cost = (lifetime × new_rate) − 30 = 90 − 30 = 60.
+        assert captured["input"] == 500_000
+        assert captured["output"] == 500_000
+        assert captured["cost"] == 30.0, (
+            f"Expected delta=$30 (this-call tokens at new rate); got "
+            f"${captured['cost']}. A delta derived from lifetime-recompute "
+            f"would be $60 here."
+        )
+
+    def test_hourly_ledger_records_only_this_call_charge(self, monkeypatch, tmp_path):
+        """`_record_hourly` must receive this-call cost, not lifetime-recompute delta.
+
+        The hourly ledger feeds the burn-rate dashboard. A lifetime-recompute
+        delta after a rate increase would spike burn-rate by the full
+        "re-bill every historical token at new rate" amount — a phantom
+        spike that doesn't reflect actual new spend. This test confirms
+        the sample appended to the ledger equals this-call cost.
+        """
+        from backend.routers.system import track_tokens, _hourly_ledger
+        import yaml as _yaml
+
+        fake = tmp_path / "pricing.yaml"
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 5, "output": 25}}},
+        }))
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+        pricing.reload()
+
+        # Accumulate historical usage at old rate.
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+        ledger_after_first = list(_hourly_ledger)
+        assert len(ledger_after_first) == 1
+        assert ledger_after_first[0][1] == 30.0  # first call's own cost
+
+        # Flip rate, then track more.
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 10, "output": 50}}},
+        }))
+        pricing.reload()
+
+        track_tokens("claude-opus-4-7", 500_000, 500_000, 100)
+        ledger_after_second = list(_hourly_ledger)
+
+        # The second sample is THIS call's cost at the NEW rate: 0.5×10 +
+        # 0.5×50 = $30. The bug would emit $60 here (lifetime × new_rate
+        # minus prev_cost = 90 − 30).
+        assert len(ledger_after_second) == 2
+        assert ledger_after_second[1][1] == 30.0, (
+            f"Hourly ledger second sample should be $30 (this-call at new "
+            f"rate); got ${ledger_after_second[1][1]}. Lifetime-recompute "
+            f"delta would yield $60."
+        )
+
+    def test_db_loaded_row_preserves_historical_cost_across_new_track(self, monkeypatch, tmp_path):
+        """Cold-boot scenario: DB-loaded row keeps its cost under new rates.
+
+        When a worker restarts, `load_token_usage_from_db()` repopulates
+        `_token_usage[model]` from the persisted row. That row's `cost`
+        is the cumulative historical billing at whatever rates were in
+        effect when each call was made. A subsequent track_tokens() call
+        under a new rate must ADD to that historical cost, not overwrite
+        it with `lifetime × current_rate`. This is the canonical
+        "restart preserves billing" guarantee — the one an operator
+        cares about when redeploying the YAML and bouncing workers.
+        """
+        from backend.routers.system import track_tokens, _token_usage
+        import yaml as _yaml
+
+        fake = tmp_path / "pricing.yaml"
+        fake.write_text(_yaml.safe_dump({
+            "providers": {"anthropic": {"claude-opus-4-7": {"input": 10, "output": 50}}},
+        }))
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+        pricing.reload()
+
+        # Simulate a DB row being loaded at boot: lifetime 2M input + 2M
+        # output, historical cost $87.50 (say the history included calls
+        # at varying rates — the point is the stored cost is what it is,
+        # NOT derivable from lifetime × any single rate).
+        _token_usage["claude-opus-4-7"] = {
+            "model": "claude-opus-4-7",
+            "input_tokens": 2_000_000,
+            "output_tokens": 2_000_000,
+            "total_tokens": 4_000_000,
+            "cost": 87.50,  # historical, rate-mix, not derivable
+            "request_count": 5,
+            "avg_latency": 200,
+            "last_used": "09:00:00",
+            "cache_read_tokens": 0,
+            "cache_create_tokens": 0,
+            "cache_hit_ratio": 0.0,
+            "turn_started_at": "",
+            "turn_ended_at": "",
+        }
+
+        # Next track call under a known current rate ($10 / $50): 1M + 1M
+        # should add 1×10 + 1×50 = $60. Final = 87.50 + 60 = 147.50.
+        track_tokens("claude-opus-4-7", 1_000_000, 1_000_000, 100)
+
+        assert _token_usage["claude-opus-4-7"]["cost"] == 147.50, (
+            f"Expected historical $87.50 + new $60 = $147.50; got "
+            f"${_token_usage['claude-opus-4-7']['cost']}. The lifetime-"
+            f"recompute bug would give 3M×10 + 3M×50 = $180, losing the "
+            f"historical rate-mix entirely."
+        )

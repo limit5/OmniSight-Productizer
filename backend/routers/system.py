@@ -1164,9 +1164,24 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int,
     u["request_count"] += 1
     u["avg_latency"] = int((u["avg_latency"] * (u["request_count"] - 1) + latency_ms) / u["request_count"])
     u["last_used"] = datetime.now().strftime("%H:%M:%S")
+    # Z.3 checkbox 7 (#292): bill only THIS call's tokens at the current
+    # rate and accumulate onto the prior cost. The previous formulation
+    # (`u["cost"] = lifetime_input × current_rate + lifetime_output ×
+    # current_rate`) silently re-billed every historical token at the new
+    # rate on the first track_tokens() call after a YAML reload — which
+    # violates "既有 token usage 紀錄不重算成本，保留當時計費，只影響
+    # 未來計價". Under a steady rate the two formulations are
+    # algebraically equivalent so this change is price-neutral for
+    # unchanged pricing; only price changes between calls diverge, and
+    # the new behaviour is the one the spec mandates.
     inp_rate, out_rate = _get_pricing(None, model)
-    u["cost"] = round(u["input_tokens"] / 1_000_000 * inp_rate + u["output_tokens"] / 1_000_000 * out_rate, 4)
-    cost_delta = u["cost"] - prev_cost
+    this_call_cost = round(
+        input_tokens / 1_000_000 * inp_rate
+        + output_tokens / 1_000_000 * out_rate,
+        4,
+    )
+    u["cost"] = round(prev_cost + this_call_cost, 4)
+    cost_delta = this_call_cost
     _record_hourly(cost_delta)
 
     # ZZ.A1 (#303-1): accumulate cache counters + recompute hit ratio.
