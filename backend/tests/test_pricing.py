@@ -1233,3 +1233,158 @@ class TestHistoricalCostPreservation:
             f"recompute bug would give 3M×10 + 3M×50 = $180, losing the "
             f"historical rate-mix entirely."
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Z.5 (#294) — Slim regression net for backend/pricing.py
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The Z.5 checkbox spells the matrix as "YAML load / reload / fallback /
+# cross-worker sync 各一條" — one canonical lock per dimension that stays
+# tight against drift even as the comprehensive Z.3 suites above expand.
+# These four cases are intentionally dependency-free (no client fixture,
+# no real Redis, no HTTP) so they remain runnable as a sub-second
+# smoke subset via ``pytest -k TestZ5PricingRegressionNet``.
+
+
+class TestZ5PricingRegressionNet:
+    """One canonical lock per dimension of the Z.3 pricing contract.
+
+    The richer per-branch matrices already live above (TestFallbackStrategy,
+    TestReloadPricingEndpoint, TestYamlCorruptBootResilience,
+    TestCrossWorkerReloadIntegration). This class is the Z.5 regression
+    *net* — tripping any of the four cases flags a load-bearing invariant
+    break and signals where to look in the wider suite.
+    """
+
+    def test_yaml_load_parses_live_config(self):
+        """Dimension 1: YAML load.
+
+        The live ``config/llm_pricing.yaml`` must parse into a populated
+        cache: 9 registered providers, at least one exact rate per
+        provider, global ``defaults`` fixed at the hard-coded fallback
+        ($1 / $3), ``_loaded_from_yaml=True`` flag set. Drifting the
+        YAML schema (removing ``providers:``, breaking indentation) or
+        silently routing through ``_HARD_CODED_FALLBACK`` would flip
+        this assertion.
+        """
+        cache = pricing._load_pricing()
+        assert cache["_loaded_from_yaml"] is True, (
+            "live config/llm_pricing.yaml must load cleanly; "
+            "_loaded_from_yaml=False means YAML parse failed and "
+            "billing silently fell back to the hard-coded dict"
+        )
+        assert set(cache["providers"].keys()) == {
+            "anthropic", "openai", "google", "xai", "groq",
+            "deepseek", "together", "openrouter", "ollama",
+        }
+        # Spot-check the price-neutral carryover: Opus 4.7 at $5 / $25
+        # is bit-identical to the pre-Z.3 hard-coded dict.
+        assert cache["providers"]["anthropic"]["claude-opus-4-7"] == (5.0, 25.0)
+        assert cache["defaults"] == (1.0, 3.0)
+
+    def test_reload_picks_up_yaml_edits(self, tmp_path, monkeypatch):
+        """Dimension 2: reload.
+
+        ``reload()`` must clear the per-worker cache and re-read the
+        YAML on the next lookup. Point pricing at a temp YAML with a
+        novel rate, call ``reload()``, observe the new rate surface
+        via ``get_pricing()``. A regression that forgot to null the
+        cache (or that cached the parsed dict behind a second layer)
+        would keep returning the old rate.
+        """
+        # Prime the cache with the live YAML so there is something to invalidate.
+        assert get_pricing("anthropic", "claude-opus-4-7") == (5.0, 25.0)
+
+        fake = tmp_path / "fake_pricing.yaml"
+        fake.write_text(
+            "providers:\n"
+            "  zvendor:\n"
+            "    z-model-v1:\n"
+            "      input: 7.5\n"
+            "      output: 33.0\n"
+            "defaults:\n"
+            "  input: 2.0\n"
+            "  output: 5.0\n"
+            "metadata:\n"
+            "  schema_version: 1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+
+        status = pricing.reload()
+        assert status["loaded_from_yaml"] is True
+        assert status["providers"] == ["zvendor"]
+        assert get_pricing("zvendor", "z-model-v1") == (7.5, 33.0)
+        # And the old rate is gone — anthropic no longer known under
+        # the new YAML, so provider+model unknown arm returns the new
+        # global defaults, not the previously cached Opus 4.7 rate.
+        assert get_pricing("anthropic", "claude-opus-4-7") == (2.0, 5.0)
+
+    def test_fallback_to_hardcoded_when_yaml_unavailable(self, tmp_path, monkeypatch):
+        """Dimension 3: fallback.
+
+        A missing/unreadable YAML must not crash billing. The 8 pre-Z.3
+        models continue billing at their historical rates via
+        ``_HARD_CODED_FALLBACK``; unknown model/provider pairs fall
+        through to ``_HARD_CODED_GLOBAL_DEFAULT`` ($1 / $3) rather
+        than zero. A regression that let a FileNotFoundError propagate,
+        or one that silently collapsed pre-Z.3 models to the global
+        default, would trip both halves of this test.
+        """
+        missing = tmp_path / "nope_this_does_not_exist.yaml"
+        monkeypatch.setattr(pricing, "_PRICING_PATH", missing)
+        reset_cache_for_tests()
+
+        # Loader does not raise — returns the degraded cache.
+        cache = pricing._load_pricing()
+        assert cache["_loaded_from_yaml"] is False
+        assert cache["providers"] == {}
+
+        # Pre-Z.3 canonical model keeps its historical rate.
+        assert get_pricing(None, "claude-opus-4-7") == (5.0, 25.0)
+        assert get_pricing(None, "deepseek-chat") == (0.14, 0.28)
+
+        # Unknown provider + unknown model → hard-coded global default,
+        # never zero (dashboards surface "expensive unknown").
+        assert get_pricing("no-such-vendor", "no-such-model") == (1.0, 3.0)
+
+    def test_cross_worker_sync_invalidates_peer_cache(self):
+        """Dimension 4: cross-worker sync.
+
+        ``_on_pricing_reload_event`` is registered at import time with
+        ``shared_state._pubsub_callbacks``; delivering a
+        ``pricing_reload`` event through that list must null a peer
+        worker's ``_PRICING_CACHE`` so the next lookup re-reads the
+        YAML. Removing the registration, renaming the event string,
+        or letting the callback skip cache invalidation would all
+        trip this test. Unrelated events (e.g. ``sse``) must not
+        disturb the cache — the paired assertion locks that filter.
+        """
+        from backend import shared_state
+
+        # 1. Import-time registration must survive.
+        assert pricing._on_pricing_reload_event in shared_state._pubsub_callbacks
+        assert pricing.PRICING_RELOAD_EVENT == "pricing_reload"
+
+        # 2. Prime peer cache, deliver the event via the full callback
+        #    list (what start_pubsub_listener actually does), verify
+        #    the cache is cleared.
+        get_pricing("anthropic", "claude-opus-4-7")
+        assert pricing._PRICING_CACHE is not None
+        for cb in shared_state._pubsub_callbacks:
+            cb(pricing.PRICING_RELOAD_EVENT, {"origin_worker": "99999"})
+        assert pricing._PRICING_CACHE is None, (
+            "cross-worker pricing_reload event must invalidate the "
+            "peer worker's _PRICING_CACHE so the next get_pricing() "
+            "re-reads the YAML"
+        )
+
+        # 3. Unrelated events (e.g. the bus also carries "sse" /
+        #    "_halt" / "_resume") must not disturb the cache.
+        get_pricing("anthropic", "claude-opus-4-7")
+        before = pricing._PRICING_CACHE
+        assert before is not None
+        for cb in shared_state._pubsub_callbacks:
+            cb("sse", {"type": "heartbeat"})
+        assert pricing._PRICING_CACHE is before
