@@ -210,10 +210,8 @@ def _path_allowed(path: str) -> bool:
     return False
 
 
-async def _has_valid_session(request: Request) -> bool:
-    """Return True if the incoming request carries a valid session
-    cookie. Imported lazily because backend.auth pulls in the whole
-    DB layer which is slower than we want in module load.
+async def _has_valid_cookie_session(request: Request) -> bool:
+    """Return True if the request carries a valid session cookie.
 
     Under the Path B HA topology (2 backend replicas on one SQLite
     WAL + dashboard loads firing ~20 concurrent XHRs) the initial
@@ -268,6 +266,88 @@ async def _has_valid_session(request: Request) -> bool:
             "auth_baseline: session lookup still failed after retry: %s", exc,
         )
         return False
+
+
+async def _has_valid_bearer_token(request: Request) -> bool:
+    """Return True if the request carries a valid ``Authorization:
+    Bearer <omni_...>`` API-key token.
+
+    Added 2026-04-24 to close the A2 smoke-test gap: API-key-only
+    integrations (operator scripts, CI jobs, CLI tools) previously got
+    401'd at the baseline even though per-handler ``current_user``
+    would have accepted them — forcing callers to send BOTH a cookie
+    AND a Bearer as a workaround. The baseline now delegates bearer
+    validation to ``backend.api_keys.validate_bearer`` so Bearer-only
+    callers pass the floor.
+
+    On match we cache the validated ``ApiKey`` onto
+    ``request.state.api_key`` so the downstream ``current_user``
+    dependency skips re-validation (otherwise each request would hit
+    ``api_keys.validate_bearer`` twice and UPDATE ``last_used_at``
+    twice).
+
+    Multi-worker note (SOP Step 1): ``validate_bearer`` reads and
+    writes the shared ``api_keys`` table via the asyncpg pool —
+    answer (2) "coordinated through PG", identical across workers.
+    """
+    authz = request.headers.get("authorization") or ""
+    if not authz.startswith("Bearer "):
+        return False
+    raw = authz[len("Bearer "):].strip()
+    if not raw:
+        return False
+
+    try:
+        from backend import api_keys
+    except Exception as exc:
+        logger.warning(
+            "auth_baseline: import of backend.api_keys failed: %s", exc,
+        )
+        return False
+
+    try:
+        ip = request.client.host if request.client else ""
+        key = await api_keys.validate_bearer(raw, ip=ip)
+    except Exception as exc:
+        logger.warning(
+            "auth_baseline: bearer validation raised: %s", exc,
+        )
+        return False
+
+    if key is not None:
+        try:
+            request.state.api_key = key
+        except Exception:
+            pass
+        return True
+
+    # Legacy fallback: OMNISIGHT_DECISION_BEARER env (pre-K6 single
+    # shared secret). Mirror backend.auth._legacy_bearer_matches so
+    # baseline acceptance matches what current_user would accept.
+    import secrets as _secrets
+    expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
+    if expected and _secrets.compare_digest(raw, expected):
+        return True
+    return False
+
+
+async def _has_valid_session(request: Request) -> bool:
+    """Return True if the request is authenticated — via either a
+    session cookie OR a valid API-key Bearer token. Kept as an
+    umbrella so the middleware has one gate to call and tests that
+    monkeypatch the name keep working unchanged.
+
+    Cookie is tried first (cheaper; no DB UPDATE on hit). Bearer is
+    tried only when the cookie path fails, which covers: (a) no
+    cookie at all (Bearer-only scripts), (b) cookie present but
+    expired/invalid while Bearer is fresh (operator with stale
+    browser session who also set an API token).
+    """
+    if await _has_valid_cookie_session(request):
+        return True
+    if await _has_valid_bearer_token(request):
+        return True
+    return False
 
 
 def install(app: ASGIApp) -> Callable:

@@ -354,6 +354,195 @@ async def test_has_valid_session_no_cookie_returns_false():
     assert await auth_baseline._has_valid_session(req) is False
 
 
+# ─── Bearer-token recognition (2026-04-24 follow-up) ──────────────
+#
+# Before this fix, auth_baseline only recognised cookie sessions, so
+# API-key-only integrations (operator scripts like prod_smoke_test.py)
+# got 401'd at the baseline even though per-handler ``current_user``
+# would have accepted the Bearer token. Tests below pin the new
+# contract: a valid ``Authorization: Bearer <omni_...>`` header alone
+# is enough to pass the baseline.
+
+
+class _FakeApiKey:
+    """Minimal stand-in for ``backend.api_keys.ApiKey`` — avoids
+    pulling the full dataclass (and its transitive DB imports) into
+    these unit tests."""
+
+    def __init__(self, id_: str = "ak-test", name: str = "test-key"):
+        self.id = id_
+        self.name = name
+
+
+def _scope_with_headers(headers: list[tuple[bytes, bytes]]) -> dict:
+    return {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/agents",
+        "headers": headers,
+        "client": ("1.2.3.4", 0),
+    }
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_accepts_valid_bearer(monkeypatch):
+    """Valid Bearer token → baseline says authenticated, no cookie
+    needed. Caches the ApiKey on request.state.api_key so downstream
+    current_user skips re-validation."""
+    from backend import api_keys as _api_keys
+    from starlette.requests import Request
+
+    captured = {"raw": None, "ip": None}
+    fake = _FakeApiKey(id_="ak-smoke", name="smoke-test")
+
+    async def _fake_validate(raw, ip=""):
+        captured["raw"] = raw
+        captured["ip"] = ip
+        return fake
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _fake_validate)
+
+    scope = _scope_with_headers([(b"authorization", b"Bearer omni_abc123")])
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is True
+    assert captured["raw"] == "omni_abc123"
+    assert captured["ip"] == "1.2.3.4"
+    # api_key cached so current_user doesn't re-UPDATE last_used_at.
+    assert getattr(req.state, "api_key", None) is fake
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_rejects_invalid_bearer(monkeypatch):
+    from backend import api_keys as _api_keys
+    from starlette.requests import Request
+
+    async def _no_match(raw, ip=""):
+        return None
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _no_match)
+    monkeypatch.delenv("OMNISIGHT_DECISION_BEARER", raising=False)
+
+    scope = _scope_with_headers([(b"authorization", b"Bearer omni_bogus")])
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is False
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_accepts_legacy_bearer_env(monkeypatch):
+    """Pre-K6 single-shared-secret env var still satisfies the baseline
+    — mirrors what ``backend.auth._legacy_bearer_matches`` accepts in
+    ``current_user`` so the floor and the handler agree."""
+    from backend import api_keys as _api_keys
+    from starlette.requests import Request
+
+    async def _no_match(raw, ip=""):
+        return None
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _no_match)
+    monkeypatch.setenv("OMNISIGHT_DECISION_BEARER", "legacy-secret-42")
+
+    scope = _scope_with_headers(
+        [(b"authorization", b"Bearer legacy-secret-42")]
+    )
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is True
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_bearer_validation_failure_fails_closed(monkeypatch):
+    """If ``validate_bearer`` raises (DB blip), baseline must NOT
+    treat the request as authenticated — fail closed, same posture
+    as the cookie path's non-lock-exception branch."""
+    from backend import api_keys as _api_keys
+    from starlette.requests import Request
+
+    async def _boom(raw, ip=""):
+        raise RuntimeError("pg pool exhausted")
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _boom)
+    monkeypatch.delenv("OMNISIGHT_DECISION_BEARER", raising=False)
+
+    scope = _scope_with_headers([(b"authorization", b"Bearer omni_x")])
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is False
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_ignores_non_bearer_authorization(monkeypatch):
+    """Authorization header that isn't ``Bearer ...`` (e.g. Basic)
+    must NOT trigger validate_bearer — avoid DB calls for schemes we
+    don't handle."""
+    from backend import api_keys as _api_keys
+    from starlette.requests import Request
+
+    called = {"n": 0}
+
+    async def _counter(raw, ip=""):
+        called["n"] += 1
+        return None
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _counter)
+
+    scope = _scope_with_headers([(b"authorization", b"Basic dXNlcjpwYXNz")])
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is False
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_has_valid_session_empty_bearer_token_false(monkeypatch):
+    """``Authorization: Bearer `` with no token value must not pass
+    and must not hit the DB."""
+    from backend import api_keys as _api_keys
+    from starlette.requests import Request
+
+    called = {"n": 0}
+
+    async def _counter(raw, ip=""):
+        called["n"] += 1
+        return None
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _counter)
+
+    scope = _scope_with_headers([(b"authorization", b"Bearer   ")])
+    req = Request(scope)
+    assert await auth_baseline._has_valid_session(req) is False
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_allows_bearer_only_request(monkeypatch):
+    """End-to-end: in enforce mode, a Bearer-only request (no cookie)
+    against a non-allowlisted path should pass the middleware and
+    reach the handler. This is the A2 smoke-test scenario."""
+    monkeypatch.setenv("OMNISIGHT_AUTH_BASELINE_MODE", "enforce")
+
+    from backend import api_keys as _api_keys
+
+    async def _accept_any(raw, ip=""):
+        return _FakeApiKey(id_="ak-e2e", name="e2e")
+
+    monkeypatch.setattr(_api_keys, "validate_bearer", _accept_any)
+
+    # Isolate the cookie path — don't depend on backend.auth being
+    # importable / wired up in this test harness.
+    async def _no_cookie_session(req):
+        return False
+
+    monkeypatch.setattr(
+        auth_baseline, "_has_valid_cookie_session", _no_cookie_session,
+    )
+
+    app = _make_app()
+    async with await _client(app) as c:
+        r = await c.get(
+            "/api/v1/agents",
+            headers={"authorization": "Bearer omni_smoketest"},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"data": "secret"}
+
+
 # ─── allowlist integrity ────────────────────────────────────────────
 
 

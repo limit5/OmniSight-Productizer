@@ -167,13 +167,13 @@ def _headers() -> dict[str, str]:
     }
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
-    # Session cookie fallback for the auth_baseline middleware, which
-    # currently only recognises session cookies — Bearer alone is
-    # accepted by per-handler `current_user` but gets 401'd at the
-    # baseline layer first. Set OMNISIGHT_SESSION_COOKIE to the raw
-    # `omnisight_session` cookie value (post-login) to satisfy both
-    # gates. Tracked as an auth_baseline bug (Bearer-only integrations
-    # hit this).
+    # Optional session cookie for callers that already have one; no
+    # longer required since auth_baseline now recognises Bearer tokens
+    # directly (fixed 2026-04-24, see backend/auth_baseline.py
+    # _has_valid_bearer_token). Retained so an operator who wants to
+    # hit the smoke script from a logged-in browser context can still
+    # pass OMNISIGHT_SESSION_COOKIE without also provisioning an API
+    # token.
     session = os.environ.get("OMNISIGHT_SESSION_COOKIE", "").strip()
     if session:
         h["Cookie"] = f"omnisight_session={session}"
