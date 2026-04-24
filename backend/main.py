@@ -868,6 +868,8 @@ from backend.routers import bootstrap as _bootstrap_router  # L1 Bootstrap wizar
 app.include_router(_bootstrap_router.router, prefix=settings.api_prefix)
 from backend.routers import dashboard as _dashboard_router  # Phase 4-1 aggregator
 app.include_router(_dashboard_router.router, prefix=settings.api_prefix)
+from backend.routers import git_accounts as _git_accounts_router  # Phase 5-4 multi-account forge CRUD
+app.include_router(_git_accounts_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
