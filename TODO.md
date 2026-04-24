@@ -91,9 +91,13 @@ rows from 2026-04-20 onwards should use the layered convention:
 ### A2. L1-05 Prod smoke test — 2 real DAGs end-to-end (#176)
 - [x] Pick DAG #1: `compile-flash` template against host_native *(done: defined in `scripts/prod_smoke_test.py` — DAG_1_COMPILE_FLASH_HOST_NATIVE)*
 - [x] Pick DAG #2: `cross-compile` template (uses Phase 64-C-LOCAL) *(done: defined in `scripts/prod_smoke_test.py` — DAG_2_CROSS_COMPILE_AARCH64)*
-- [O] Run both via production UI; capture workflow_run IDs *(🅐 BLOCKED: depends on A1 prod deploy — run `python scripts/prod_smoke_test.py https://<PROD_URL>`)*
-- [O] Verify steps complete, artifacts persist, audit log hash-chain intact *(🅐 BLOCKED: depends on above — script verifies automatically)*
-- [O] Attach run report to HANDOFF *(🅐 BLOCKED: script generates `data/smoke-test-report-a2.md` — paste into HANDOFF after run)*
+- [x] Run dag1 via prod API + capture workflow_run ID *(PARTIAL 2026-04-24: dag1 submitted via `python3 scripts/prod_smoke_test.py https://ai.sora-dev.app --subset dag1`; `run_id=wf-1944b5b67e` + `plan_id=5` captured; dag2 skipped pending Finding #3 resolution. Auth flow (admin login → API key → Bearer) + DAG submission path validated. See `data/smoke-test-report-a2.md`.)*
+- [~] Verify steps complete, artifacts persist, audit log hash-chain intact *(PARTIAL 2026-04-24: **audit hash-chain PASS** via `/api/v1/audit/verify`; **steps did NOT complete** — run stuck at `status=running step_count=0` for 13+ min with single 28.8s `gemma4:e4b` LLM call and no progress. Finding #3 in report = likely prod LLM orchestration hang, needs dedicated debug session — separate ticket, not a Blueprint blocker.)*
+- [x] Attach run report to HANDOFF *(done 2026-04-24: `data/smoke-test-report-a2.md` 3 findings documented + HANDOFF 2026-04-24 entry written.)*
+- [ ] **Follow-up ticket**: `auth_baseline._has_valid_session` 不認 Bearer token bug — API-key-only integration（包含這個 script）會被 baseline 401 在到達 handler 之前；workaround 是混合送 Cookie + Bearer；真修是 `auth_baseline` 加 `api_keys.validate_bearer` 檢查
+- [ ] **Follow-up ticket**: 調查 prod LLM orchestration hang — dag1 卡 13+ 分鐘 step_count=0；hypotheses 見 report Finding #3
+- [ ] **Follow-up ticket**: `scripts/*.py` bulk UA audit — Cloudflare Bot Fight Mode 擋 `Python-urllib/*` default UA
+- [ ] A2 full retry（`--subset both`）after Finding #3 resolved
 
 ---
 

@@ -150,9 +150,33 @@ DAGS = _select_dags(SUBSET)
 # ── HTTP helpers ────────────────────────────────────────────────
 
 def _headers() -> dict[str, str]:
-    h = {"Content-Type": "application/json", "Accept": "application/json"}
+    # User-Agent is mandatory against CF-fronted prod — the default
+    # `Python-urllib/3.x` signature is flagged by Cloudflare Bot Fight
+    # Mode (Error 1010 "browser_signature_banned"). Ship an explicit
+    # named-tool UA so the smoke test is attributable in edge logs
+    # and passes reputation gates. Override via OMNISIGHT_SMOKE_UA if
+    # the operator ever needs to impersonate a specific client.
+    ua = os.environ.get(
+        "OMNISIGHT_SMOKE_UA",
+        "OmniSight-SmokeTest/1.0 (+https://github.com/limit5/OmniSight-Productizer)",
+    )
+    h = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": ua,
+    }
     if TOKEN:
         h["Authorization"] = f"Bearer {TOKEN}"
+    # Session cookie fallback for the auth_baseline middleware, which
+    # currently only recognises session cookies — Bearer alone is
+    # accepted by per-handler `current_user` but gets 401'd at the
+    # baseline layer first. Set OMNISIGHT_SESSION_COOKIE to the raw
+    # `omnisight_session` cookie value (post-login) to satisfy both
+    # gates. Tracked as an auth_baseline bug (Bearer-only integrations
+    # hit this).
+    session = os.environ.get("OMNISIGHT_SESSION_COOKIE", "").strip()
+    if session:
+        h["Cookie"] = f"omnisight_session={session}"
     return h
 
 
