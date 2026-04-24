@@ -12097,6 +12097,30 @@
         ]
       }
     },
+    "/api/v1/dashboard/summary": {
+      "get": {
+        "description": "Aggregate the 11 dashboard fan-out endpoints into one response.\n\nReplaces the frontend's per-5-second ``Promise.allSettled`` loop\nover 11 ``/runtime/*`` endpoints (see\n``hooks/use-engine.ts::fetchSystemData``). Concurrency via\n``asyncio.gather`` + per-subquery ``_wrap`` means one slow or\nfailing sub-query does not serialise or take down the happy path.\n\nResponse shape: each of the 11 keys carries an\n``{\"ok\": bool, \"data\": ...}`` or ``{\"ok\": false, \"error\": \"...\"}``\nenvelope. Partial failures stay HTTP 200 so the frontend can\nrender stale UI for the failed panel while keeping the rest live.",
+        "operationId": "get_dashboard_summary_api_v1_dashboard_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Dashboard Summary Api V1 Dashboard Summary Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Dashboard Summary",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
     "/api/v1/decision-rules": {
       "get": {
         "description": "Return the ordered rule list + available severity/mode vocab.",
@@ -24883,6 +24907,26 @@
           }
         },
         "summary": "Generate Gerrit Webhook Secret",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/jira/webhook-secret/generate": {
+      "post": {
+        "description": "Mint + persist a fresh ``jira_webhook_secret`` and return it once.\n\nMirrors the Gerrit rotate endpoint (Y-prep.2 #288). 32 bytes of\n``secrets.token_urlsafe`` → ~43-char URL-safe string with ~256 bits\nof entropy. The plain value is returned **only** in this response —\nthe operator must capture it and paste it into JIRA's webhook\n``Authorization`` header configuration before closing the modal;\nsubsequent reads (``GET /settings``) surface only the\n``configured``/``\"\"`` status via the webhooks block.\n\nCross-worker coherence: ``_apply_runtime_setting`` writes through\nthe Redis-backed SharedKV mirror (``jira_webhook_secret`` is in\n``_SHARED_KV_STR_FIELDS``), so peer workers pick up the rotated\nsecret on their next overlay — the inbound\n``POST /api/v1/webhooks/jira`` verifier on any worker compares\nagainst the new value, not the one in this worker's .env-loaded\n``settings`` from boot.\n\nJIRA webhooks use a shared token in the ``Authorization: Bearer\n<token>`` header (not HMAC body signing like Gerrit), so the\n``signature_header`` / ``signature_algorithm`` fields in the\nresponse reflect that — structural parity with the Gerrit response\nshape, accurate semantics for the JIRA transport.",
+        "operationId": "generate_jira_webhook_secret_api_v1_runtime_git_forge_jira_webhook_secret_generate_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Generate Jira Webhook Secret",
         "tags": [
           "integration"
         ]

@@ -2229,6 +2229,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dashboard/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Dashboard Summary
+         * @description Aggregate the 11 dashboard fan-out endpoints into one response.
+         *
+         *     Replaces the frontend's per-5-second ``Promise.allSettled`` loop
+         *     over 11 ``/runtime/*`` endpoints (see
+         *     ``hooks/use-engine.ts::fetchSystemData``). Concurrency via
+         *     ``asyncio.gather`` + per-subquery ``_wrap`` means one slow or
+         *     failing sub-query does not serialise or take down the happy path.
+         *
+         *     Response shape: each of the 11 keys carries an
+         *     ``{"ok": bool, "data": ...}`` or ``{"ok": false, "error": "..."}``
+         *     envelope. Partial failures stay HTTP 200 so the frontend can
+         *     render stale UI for the failed panel while keeping the rest live.
+         */
+        get: operations["get_dashboard_summary_api_v1_dashboard_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/decision-rules": {
         parameters: {
             query?: never;
@@ -8577,6 +8608,48 @@ export interface paths {
          *     ``webhooks.config`` for events to keep verifying.
          */
         post: operations["generate_gerrit_webhook_secret_api_v1_runtime_git_forge_gerrit_webhook_secret_generate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/jira/webhook-secret/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Jira Webhook Secret
+         * @description Mint + persist a fresh ``jira_webhook_secret`` and return it once.
+         *
+         *     Mirrors the Gerrit rotate endpoint (Y-prep.2 #288). 32 bytes of
+         *     ``secrets.token_urlsafe`` → ~43-char URL-safe string with ~256 bits
+         *     of entropy. The plain value is returned **only** in this response —
+         *     the operator must capture it and paste it into JIRA's webhook
+         *     ``Authorization`` header configuration before closing the modal;
+         *     subsequent reads (``GET /settings``) surface only the
+         *     ``configured``/``""`` status via the webhooks block.
+         *
+         *     Cross-worker coherence: ``_apply_runtime_setting`` writes through
+         *     the Redis-backed SharedKV mirror (``jira_webhook_secret`` is in
+         *     ``_SHARED_KV_STR_FIELDS``), so peer workers pick up the rotated
+         *     secret on their next overlay — the inbound
+         *     ``POST /api/v1/webhooks/jira`` verifier on any worker compares
+         *     against the new value, not the one in this worker's .env-loaded
+         *     ``settings`` from boot.
+         *
+         *     JIRA webhooks use a shared token in the ``Authorization: Bearer
+         *     <token>`` header (not HMAC body signing like Gerrit), so the
+         *     ``signature_header`` / ``signature_algorithm`` fields in the
+         *     response reflect that — structural parity with the Gerrit response
+         *     shape, accurate semantics for the JIRA transport.
+         */
+        post: operations["generate_jira_webhook_secret_api_v1_runtime_git_forge_jira_webhook_secret_generate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -20750,6 +20823,28 @@ export interface operations {
             };
         };
     };
+    get_dashboard_summary_api_v1_dashboard_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     get_decision_rules_api_v1_decision_rules_get: {
         parameters: {
             query?: never;
@@ -31021,6 +31116,26 @@ export interface operations {
         };
     };
     generate_gerrit_webhook_secret_api_v1_runtime_git_forge_gerrit_webhook_secret_generate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    generate_jira_webhook_secret_api_v1_runtime_git_forge_jira_webhook_secret_generate_post: {
         parameters: {
             query?: never;
             header?: never;

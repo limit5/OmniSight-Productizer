@@ -866,6 +866,8 @@ from backend.routers import scratchpad as _scratchpad_router  # R3 (#309) Scratc
 app.include_router(_scratchpad_router.router, prefix=settings.api_prefix)
 from backend.routers import bootstrap as _bootstrap_router  # L1 Bootstrap wizard REST
 app.include_router(_bootstrap_router.router, prefix=settings.api_prefix)
+from backend.routers import dashboard as _dashboard_router  # Phase 4-1 aggregator
+app.include_router(_dashboard_router.router, prefix=settings.api_prefix)
 
 # O5 (#268) — register JIRA / GitHub / GitLab IntentSource factories.
 # Done as a one-shot side-effect here so unit tests that don't import
