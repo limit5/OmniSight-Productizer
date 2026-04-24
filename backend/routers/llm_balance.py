@@ -1,4 +1,4 @@
-"""Z.2 (#291) — ``/runtime/providers/*/balance`` endpoint.
+"""Z.2 (#291) — ``/runtime/providers/*/balance`` endpoints.
 
 Surface
 ───────
@@ -9,6 +9,16 @@ Surface
   slot is empty we trigger **one** live fetch, write the result, and
   return it so the first dashboard load after a cold start does not
   render "unknown" for 10 minutes.
+* ``GET /runtime/providers/balance`` — batch variant that returns one
+  envelope per provider in ``_VALID_PROVIDER_NAMES`` (both supported
+  and unsupported) so the dashboard can render a 9-row status panel in
+  a single request instead of N round-trips. Each per-provider
+  envelope is identical to the single-provider endpoint's output; the
+  batch only adds a top-level ``{providers: [...]}`` wrapper. No path
+  collision with the single-provider route — one takes two segments
+  after the prefix (``{provider}/balance``), the other takes zero
+  (``balance``) — so FastAPI's routing table disambiguates them
+  structurally.
 
 Response envelope
 ─────────────────
@@ -55,6 +65,7 @@ the new one, never a torn write.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable
@@ -264,9 +275,81 @@ async def resolve_balance(
     return _ok_envelope(provider, info, source="live")
 
 
+async def resolve_all_balances(
+    *,
+    kv: SharedKV | None = None,
+    fetchers: dict[str, Callable[..., Awaitable[BalanceInfo | None]]] | None = None,
+    key_resolver: Callable[[str], str | None] | None = None,
+) -> dict[str, Any]:
+    """Return every provider's balance envelope in one payload.
+
+    Iterates the full provider registry (``_VALID_PROVIDER_NAMES`` —
+    both supported and unsupported) and delegates each to
+    :func:`resolve_balance`. Per-provider calls run concurrently via
+    ``asyncio.gather`` because they are independent — different vendors,
+    different ``SharedKV`` slots, no shared mutable state between them.
+    On a warm cache every call short-circuits at the cache-hit branch
+    and no HTTP is issued; on a cold start at most two vendor calls
+    happen in parallel (DeepSeek + OpenRouter) because the other seven
+    providers are unsupported and exit before any fetch attempt.
+
+    A single ``SharedKV`` handle is constructed up-front and threaded
+    through all nine calls so we avoid nine redundant
+    ``SharedKV(BALANCE_NAMESPACE)`` constructions per request.
+
+    Envelope ordering is deterministic (``sorted(_VALID_PROVIDER_NAMES)``)
+    so the dashboard can render rows in a stable order without having
+    to sort client-side. If one provider's :func:`resolve_balance` call
+    raises unexpectedly (defence-in-depth — ``resolve_balance`` already
+    catches inner exceptions, but ``asyncio.gather`` with
+    ``return_exceptions=True`` keeps a future abstraction leak from
+    nuking the whole batch), we surface it as an ``error`` envelope for
+    that single provider and let the other eight through.
+    """
+    _store = kv if kv is not None else SharedKV(BALANCE_NAMESPACE)
+    provider_names = sorted(_VALID_PROVIDER_NAMES)
+
+    coros = [
+        resolve_balance(
+            p, kv=_store, fetchers=fetchers, key_resolver=key_resolver,
+        )
+        for p in provider_names
+    ]
+    results = await asyncio.gather(*coros, return_exceptions=True)
+
+    envelopes: list[dict[str, Any]] = []
+    for name, result in zip(provider_names, results):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "llm_balance batch: resolve_balance(%s) raised %s: %s",
+                name, type(result).__name__, result,
+            )
+            envelopes.append(_error_envelope(
+                name, f"unexpected error: {type(result).__name__}",
+            ))
+        else:
+            envelopes.append(result)
+    return {"providers": envelopes}
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  HTTP surface
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@router.get("/balance")
+async def get_providers_balance_batch() -> dict[str, Any]:
+    """Return a single-request snapshot of every LLM provider's
+    balance envelope.
+
+    Shape: ``{"providers": [<envelope>, <envelope>, ...]}`` where each
+    inner envelope is identical to what
+    ``GET /runtime/providers/{provider}/balance`` would return for that
+    provider (``ok`` / ``unsupported`` / ``error``). Ordering is
+    alphabetical across the nine-provider registry so the dashboard has
+    a stable render order without client-side sorting.
+    """
+    return await resolve_all_balances()
 
 
 @router.get("/{provider}/balance")

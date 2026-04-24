@@ -181,6 +181,47 @@ async def lifespan(app: FastAPI):
                     "covers credential reads.",
                     type(exc).__name__,
                 )
+        # Phase 5b-5 (#llm-credentials): one-shot move of legacy
+        # ``Settings.{anthropic,google,openai,xai,groq,deepseek,together,
+        # openrouter}_api_key`` + non-default ``ollama_base_url`` into
+        # the canonical ``llm_credentials`` table. Idempotent (skipped
+        # if the table already has any row); operator escape hatch is
+        # ``OMNISIGHT_LLM_CREDENTIAL_MIGRATE=skip``. PG-gated like the
+        # Phase-5-5 forge-credential hook above — SQLite dev mode lacks
+        # the pool that the migration writes through.
+        if _pg_dsn:
+            try:
+                from backend import (
+                    legacy_llm_credential_migration as _llm_migrate,
+                )
+                llm_summary = (
+                    await _llm_migrate
+                    .migrate_legacy_llm_credentials_once()
+                )
+                if llm_summary["migrated"]:
+                    _log.warning(
+                        "[LLM-CRED-MIGRATE] migrated %d legacy LLM "
+                        "credential(s) into llm_credentials "
+                        "(sources=%s). .env keys are left in place "
+                        "for operator review.",
+                        llm_summary["migrated"],
+                        llm_summary["sources"],
+                    )
+                elif llm_summary["skipped_reason"]:
+                    _log.info(
+                        "[LLM-CRED-MIGRATE] no migration this boot "
+                        "(reason=%s, candidates=%d).",
+                        llm_summary["skipped_reason"],
+                        llm_summary.get("candidates", 0),
+                    )
+            except Exception as exc:
+                # Migration is best-effort — never block startup on it.
+                _log.warning(
+                    "[LLM-CRED-MIGRATE] hook raised %s; legacy "
+                    "Settings read path still covers LLM credential "
+                    "reads.",
+                    type(exc).__name__,
+                )
         # Trim expired sessions on every cold start.
         try:
             removed = await _auth.cleanup_expired_sessions()

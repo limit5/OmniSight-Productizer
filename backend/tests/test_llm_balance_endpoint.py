@@ -507,3 +507,286 @@ class TestEnvelopeShape:
             key_resolver=lambda p: "sk",
         )
         assert set(out.keys()) == {"status", "provider", "message"}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Batch endpoint — GET /runtime/providers/balance
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# The nine-provider registry the batch endpoint iterates. Locked here
+# so a silent drop from ``_VALID_PROVIDER_NAMES`` (e.g. someone removes
+# ``ollama`` when we add a real ollama balance API) fails loudly at
+# test-time rather than shrinking the dashboard response.
+_EXPECTED_PROVIDERS = {
+    "anthropic", "deepseek", "google", "groq",
+    "ollama", "openai", "openrouter", "together", "xai",
+}
+
+
+class TestBatchEndpoint:
+    """Z.2 checkbox 4 — batch endpoint contract.
+
+    All nine providers must appear in every response regardless of
+    support / key / cache state. Each envelope is the same shape as the
+    single-provider endpoint; the batch only wraps them in
+    ``{providers: [...]}``.
+    """
+
+    async def test_batch_covers_all_valid_providers(self):
+        """Every name in ``_VALID_PROVIDER_NAMES`` appears exactly once."""
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(),
+            fetchers={
+                "deepseek": _make_fetcher_ok(amount=1.0),
+                "openrouter": _make_fetcher_ok(amount=2.0),
+            },
+            key_resolver=lambda p: "sk",
+        )
+        assert set(out.keys()) == {"providers"}
+        assert isinstance(out["providers"], list)
+        returned = [e["provider"] for e in out["providers"]]
+        assert set(returned) == _EXPECTED_PROVIDERS
+        assert len(returned) == len(_EXPECTED_PROVIDERS), (
+            "No provider should appear twice"
+        )
+
+    async def test_batch_ordering_is_alphabetical(self):
+        """Locks the stable render order the dashboard relies on."""
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(),
+            fetchers={
+                "deepseek": _make_fetcher_ok(),
+                "openrouter": _make_fetcher_ok(),
+            },
+            key_resolver=lambda p: "sk",
+        )
+        returned = [e["provider"] for e in out["providers"]]
+        assert returned == sorted(_EXPECTED_PROVIDERS)
+
+    async def test_batch_mixes_supported_and_unsupported_envelopes(self):
+        """Supported providers surface ok/error, unsupported surface
+        the static envelope in the same response."""
+        kv = _kv()
+        from backend.llm_balance_refresher import _serialise_balance
+        kv.set("deepseek", _serialise_balance(_balance(amount=33.0)))
+
+        out = await endpoint.resolve_all_balances(
+            kv=kv,
+            fetchers={
+                "deepseek": _make_fetcher_ok(),
+                "openrouter": _make_fetcher_ok(amount=4.0),
+            },
+            key_resolver=lambda p: "sk",
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        # Supported + cached → ok/cache
+        assert envelopes["deepseek"]["status"] == "ok"
+        assert envelopes["deepseek"]["source"] == "cache"
+        assert envelopes["deepseek"]["balance_remaining"] == 33.0
+        # Supported + live fetch → ok/live
+        assert envelopes["openrouter"]["status"] == "ok"
+        assert envelopes["openrouter"]["source"] == "live"
+        assert envelopes["openrouter"]["balance_remaining"] == 4.0
+        # Unsupported providers
+        for name in _EXPECTED_PROVIDERS - {"deepseek", "openrouter"}:
+            assert envelopes[name]["status"] == "unsupported"
+            assert envelopes[name]["reason"] == (
+                "provider does not expose a public balance API "
+                "with API-key authentication"
+            )
+
+    async def test_batch_supported_no_key_returns_error_envelope(self):
+        """Missing keys surface as per-provider error; unsupported
+        providers still render unsupported in the same payload."""
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(),
+            fetchers={
+                "deepseek": _make_fetcher_ok(),
+                "openrouter": _make_fetcher_ok(),
+            },
+            key_resolver=lambda p: None,
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        assert envelopes["deepseek"]["status"] == "error"
+        assert "no API key configured" in envelopes["deepseek"]["message"]
+        assert envelopes["openrouter"]["status"] == "error"
+        # Unsupported providers still render unsupported (no key lookup).
+        assert envelopes["anthropic"]["status"] == "unsupported"
+
+    async def test_batch_partial_failure_does_not_poison_others(self):
+        """One provider's fetcher raising must not collapse the batch —
+        the other provider's envelope still comes back healthy."""
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(),
+            fetchers={
+                "deepseek": _make_fetcher_raises("upstream 502"),
+                "openrouter": _make_fetcher_ok(amount=9.0),
+            },
+            key_resolver=lambda p: "sk",
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        assert envelopes["deepseek"]["status"] == "error"
+        assert envelopes["deepseek"]["message"] == (
+            "fetch failed: upstream 502"
+        )
+        assert envelopes["openrouter"]["status"] == "ok"
+        assert envelopes["openrouter"]["balance_remaining"] == 9.0
+
+    async def test_batch_shares_single_kv_handle_across_providers(self):
+        """Live-fetched values for one provider must be readable by
+        subsequent requests (writes landed in the shared KV, not in an
+        ephemeral per-call handle)."""
+        kv = _kv()
+        await endpoint.resolve_all_balances(
+            kv=kv,
+            fetchers={
+                "deepseek": _make_fetcher_ok(amount=11.0),
+                "openrouter": _make_fetcher_ok(amount=22.0),
+            },
+            key_resolver=lambda p: "sk",
+        )
+        # Both supported providers' slots must be populated.
+        deepseek_raw = kv.get("deepseek")
+        openrouter_raw = kv.get("openrouter")
+        assert deepseek_raw and json.loads(
+            deepseek_raw
+        )["balance_remaining"] == 11.0
+        assert openrouter_raw and json.loads(
+            openrouter_raw
+        )["balance_remaining"] == 22.0
+
+    async def test_batch_second_call_is_all_cache(self):
+        """After one warm-up round, every supported provider should
+        serve from cache on the second batch call (fetcher counters
+        stay at their first-round totals)."""
+        kv = _kv()
+        call_counters = {"deepseek": 0, "openrouter": 0}
+
+        async def ds_fetch(api_key: str, **_: Any):
+            call_counters["deepseek"] += 1
+            return _balance(amount=1.0)
+
+        async def or_fetch(api_key: str, **_: Any):
+            call_counters["openrouter"] += 1
+            return _balance(amount=2.0)
+
+        await endpoint.resolve_all_balances(
+            kv=kv,
+            fetchers={"deepseek": ds_fetch, "openrouter": or_fetch},
+            key_resolver=lambda p: "sk",
+        )
+        assert call_counters == {"deepseek": 1, "openrouter": 1}
+
+        out2 = await endpoint.resolve_all_balances(
+            kv=kv,
+            fetchers={"deepseek": ds_fetch, "openrouter": or_fetch},
+            key_resolver=lambda p: "sk",
+        )
+        assert call_counters == {"deepseek": 1, "openrouter": 1}, (
+            "Second batch round must hit cache, not re-fetch"
+        )
+        envelopes = {e["provider"]: e for e in out2["providers"]}
+        assert envelopes["deepseek"]["source"] == "cache"
+        assert envelopes["openrouter"]["source"] == "cache"
+
+    async def test_batch_unexpected_resolve_balance_exception_is_isolated(
+        self, monkeypatch,
+    ):
+        """Defence-in-depth: if ``resolve_balance`` itself raised
+        (hypothetical abstraction leak past its inner except blocks),
+        ``asyncio.gather(return_exceptions=True)`` must still surface
+        the remaining providers normally and convert the crasher to an
+        error envelope — not 500 the whole batch."""
+
+        original = endpoint.resolve_balance
+
+        async def flaky(provider: str, **kwargs: Any):
+            if provider == "deepseek":
+                raise ValueError("contrived failure")
+            return await original(provider, **kwargs)
+
+        monkeypatch.setattr(endpoint, "resolve_balance", flaky)
+
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(),
+            fetchers={"openrouter": _make_fetcher_ok(amount=5.0)},
+            key_resolver=lambda p: "sk",
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        assert envelopes["deepseek"]["status"] == "error"
+        assert "ValueError" in envelopes["deepseek"]["message"]
+        assert envelopes["openrouter"]["status"] == "ok"
+        assert envelopes["openrouter"]["balance_remaining"] == 5.0
+        # Unsupported providers pass through unharmed.
+        assert envelopes["anthropic"]["status"] == "unsupported"
+
+
+class TestBatchRouterSurface:
+
+    async def test_batch_route_registered_on_router(self):
+        paths = [r.path for r in endpoint.router.routes]
+        assert "/runtime/providers/balance" in paths
+
+    async def test_batch_route_registered_on_app(self):
+        import backend.main as _main
+        paths = [r.path for r in _main.app.routes]
+        assert "/api/v1/runtime/providers/balance" in paths
+
+    async def test_batch_route_does_not_shadow_single_route(self):
+        """Both routes must coexist — structural segment-count difference
+        disambiguates them. Regression guard in case a future refactor
+        accidentally consolidates them."""
+        paths = [r.path for r in endpoint.router.routes]
+        assert "/runtime/providers/balance" in paths
+        assert "/runtime/providers/{provider}/balance" in paths
+
+    async def test_batch_route_requires_admin_auth(self):
+        """Router-level dependency stays on require_admin — balances are
+        billing-sensitive, batch must not accidentally downgrade to
+        current_user."""
+        from backend import auth as _auth
+        dep_callables = [d.dependency for d in endpoint.router.dependencies]
+        assert _auth.require_admin in dep_callables
+
+
+class TestBatchEnvelopeShape:
+
+    async def test_batch_top_level_shape(self):
+        out = await endpoint.resolve_all_balances(
+            kv=_kv(),
+            fetchers={},
+            key_resolver=lambda p: None,
+        )
+        assert set(out.keys()) == {"providers"}
+        assert isinstance(out["providers"], list)
+        assert all(isinstance(e, dict) for e in out["providers"])
+
+    async def test_batch_each_envelope_matches_single_endpoint_shape(self):
+        """Every inner envelope matches the corresponding
+        single-provider shape: ok / unsupported / error key-sets."""
+        kv = _kv()
+        from backend.llm_balance_refresher import _serialise_balance
+        kv.set("deepseek", _serialise_balance(_balance()))
+
+        out = await endpoint.resolve_all_balances(
+            kv=kv,
+            fetchers={
+                "openrouter": _make_fetcher_raises(),
+            },
+            key_resolver=lambda p: "sk",
+        )
+        envelopes = {e["provider"]: e for e in out["providers"]}
+        # ok shape (cache hit)
+        assert set(envelopes["deepseek"].keys()) == {
+            "status", "provider", "currency",
+            "balance_remaining", "granted_total", "usage_total",
+            "last_refreshed_at", "source", "raw",
+        }
+        # error shape
+        assert set(envelopes["openrouter"].keys()) == {
+            "status", "provider", "message",
+        }
+        # unsupported shape
+        assert set(envelopes["anthropic"].keys()) == {
+            "status", "provider", "reason",
+        }
