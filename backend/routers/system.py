@@ -26,7 +26,7 @@ from backend.db_pool import get_conn as _get_conn
 from backend.routers import _pagination as _pg
 
 from backend.models import (
-    SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse,
+    SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse, TokenUsageEntry,
     DeployRequest,
 )
 
@@ -1352,9 +1352,18 @@ async def load_token_usage_from_db(conn) -> None:
         _token_usage_shared.set_all(_token_usage)
 
 
-@router.get("/tokens")
+@router.get("/tokens", response_model=list[TokenUsageEntry])
 async def get_token_usage():
-    """Return token usage stats per model."""
+    """Return token usage stats per model.
+
+    ZZ.A1 (#303-2, 2026-04-24): response schema formalised as
+    ``list[TokenUsageEntry]`` so the openapi.json advertises the
+    prompt-cache fields (``cache_read_tokens`` / ``cache_create_tokens``
+    / ``cache_hit_ratio``) introduced in ZZ.A1-1 / ZZ.A1-2. Values are
+    ``None`` on pre-ZZ legacy rows (distinguishes "no data" from zero
+    hits) and populated on ZZ-era rows — see ``TokenUsageEntry`` and
+    ``backend/shared_state.py::_normalize_token_entry``.
+    """
     shared = _token_usage_shared.get_all()
     if shared:
         return list(shared.values())

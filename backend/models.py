@@ -463,6 +463,30 @@ class TokenBudgetResponse(BaseModel):
     fallback_model: str = ""
 
 
+class TokenUsageEntry(BaseModel):
+    """Per-model lifetime token counters returned by ``GET /runtime/tokens``.
+
+    ZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens`` /
+    ``cache_hit_ratio`` are ``None`` on pre-ZZ rows (legacy payloads
+    loaded from Redis or SQLite predating the prompt-cache columns) so
+    the UI can distinguish "no data" from "genuine zero hits"; on ZZ-era
+    rows they carry lifetime totals (``cache_hit_ratio = cache_read /
+    (input + cache_read)``).
+    """
+
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cost: float = 0.0
+    request_count: int = 0
+    avg_latency: int = 0
+    last_used: str = ""
+    cache_read_tokens: Optional[int] = None
+    cache_create_tokens: Optional[int] = None
+    cache_hit_ratio: Optional[float] = None
+
+
 class ProviderInfo(BaseModel):
     id: str
     name: str

@@ -1411,6 +1411,13 @@ export interface TokenUsage {
   request_count: number
   avg_latency: number
   last_used: string
+  // ZZ.A1 (#303-2, 2026-04-24): prompt-cache observability fields.
+  // ``null`` on pre-ZZ rows (legacy payloads before the cache columns
+  // existed) — distinguishes "no data" from "genuine zero hits". The
+  // UI maps null → "—" so operators see the gap explicitly.
+  cache_read_tokens: number | null
+  cache_create_tokens: number | null
+  cache_hit_ratio: number | null
 }
 
 export async function getTokenUsage() {

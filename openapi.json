@@ -1726,6 +1726,18 @@
         "title": "DocSuiteRequest",
         "type": "object"
       },
+      "DraftBody": {
+        "properties": {
+          "content": {
+            "default": "",
+            "maxLength": 65536,
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "title": "DraftBody",
+        "type": "object"
+      },
       "EKFRunRequest": {
         "properties": {
           "initial_orientation": {
@@ -4957,11 +4969,11 @@
         "type": "object"
       },
       "SmokeSubsetRequest": {
-        "description": "Body for ``POST /bootstrap/smoke-subset``.\n\n``subset`` selects which DAG(s) to invoke:\n  * ``dag1`` (default) — the compile-flash host_native DAG, ~60s;\n    matches what L6 Step 5 locked in for the fast-path wizard run.\n  * ``dag2`` — the aarch64 cross-compile DAG, validation + plan\n    persistence only (no physical cross-compile runs in-process).\n  * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5 UI\n    can render a run summary for each DAG shipped in\n    ``scripts/prod_smoke_test.py``.\n\nThe wizard drives ``subset=\"both\"`` so the operator sees the\n\"兩個 DAG 的 run summary\" (Step 5 TODO); external callers / CLI\nusers can still pin to ``dag1`` for the 60-second fast path.",
+        "description": "Body for ``POST /bootstrap/smoke-subset``.\n\n``subset`` selects which DAG(s) to invoke. Both DAGs are\nvalidation + persistence only — no compile, no flash, no\ncross-compile actually executes. Wall time is dominated by\nthe per-tenant audit-chain walk and clocks in at ~1-3s on a\nhealthy stack; see the section comment above for the full\nscope breakdown.\n\n  * ``dag1`` (default) — the compile-flash host_native DAG.\n  * ``dag2`` — the aarch64 cross-compile DAG.\n  * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5\n    UI can render a run summary for each DAG shipped in\n    ``scripts/prod_smoke_test.py``.\n\nThe wizard drives ``subset=\"both\"`` so the operator sees a run\nsummary per DAG; external callers / CLI users can still pin to\n``dag1`` for a slightly quicker single-DAG signal.",
         "properties": {
           "subset": {
             "default": "dag1",
-            "description": "Which DAG subset to run — ``dag1`` (compile-flash host_native, ~60s fast path), ``dag2`` (aarch64 cross-compile), or ``both`` (wizard default on Step 5).",
+            "description": "Which DAG subset to run — ``dag1`` (compile-flash host_native), ``dag2`` (aarch64 cross-compile), or ``both`` (wizard default on Step 5). All paths are validate + persist only; no physical build runs in-process.",
             "enum": [
               "dag1",
               "dag2",
@@ -5727,6 +5739,11 @@
           "title": {
             "title": "Title",
             "type": "string"
+          },
+          "version": {
+            "default": 0,
+            "title": "Version",
+            "type": "integer"
           }
         },
         "required": [
@@ -6212,6 +6229,86 @@
           }
         },
         "title": "TokenMapUpdate",
+        "type": "object"
+      },
+      "TokenUsageEntry": {
+        "description": "Per-model lifetime token counters returned by ``GET /runtime/tokens``.\n\nZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens`` /\n``cache_hit_ratio`` are ``None`` on pre-ZZ rows (legacy payloads\nloaded from Redis or SQLite predating the prompt-cache columns) so\nthe UI can distinguish \"no data\" from \"genuine zero hits\"; on ZZ-era\nrows they carry lifetime totals (``cache_hit_ratio = cache_read /\n(input + cache_read)``).",
+        "properties": {
+          "avg_latency": {
+            "default": 0,
+            "title": "Avg Latency",
+            "type": "integer"
+          },
+          "cache_create_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Create Tokens"
+          },
+          "cache_hit_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit Ratio"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "cost": {
+            "default": 0.0,
+            "title": "Cost",
+            "type": "number"
+          },
+          "input_tokens": {
+            "default": 0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "last_used": {
+            "default": "",
+            "title": "Last Used",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "output_tokens": {
+            "default": 0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "request_count": {
+            "default": 0,
+            "title": "Request Count",
+            "type": "integer"
+          },
+          "total_tokens": {
+            "default": 0,
+            "title": "Total Tokens",
+            "type": "integer"
+          }
+        },
+        "title": "TokenUsageEntry",
         "type": "object"
       },
       "TraceCaptureRequest": {
@@ -6892,6 +6989,24 @@
           "metadata"
         ],
         "title": "_MetadataUpdate",
+        "type": "object"
+      },
+      "_ProjectRunPatch": {
+        "description": "Q.7 #301 body for ``PATCH /projects/runs/{run_id}``.\n\n``label`` is the operator-editable display name for a project run\n(rendered in the RunHistory collapsed parent). Both fields are\noptional — an empty body still bumps the version so cross-device\necho still lands.",
+        "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "title": "_ProjectRunPatch",
         "type": "object"
       },
       "backend__routers__cloudflare_tunnel__ProvisionRequest": {
@@ -9097,8 +9212,33 @@
         ]
       }
     },
+    "/api/v1/auth/sessions/presence": {
+      "get": {
+        "description": "Return the count + brief metadata for the caller's active devices.\n\nActive = heartbeat recorded by the SSE stream within the last\n``_PRESENCE_WINDOW_S`` seconds. Devices inside the window but quieter\nthan ``_PRESENCE_IDLE_THRESHOLD_S`` are flagged ``status=\"idle\"``;\nfresher ones ``status=\"active\"``.",
+        "operationId": "sessions_presence_api_v1_auth_sessions_presence_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Sessions Presence Api V1 Auth Sessions Presence Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sessions Presence",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/v1/auth/sessions/{token_hint}": {
       "delete": {
+        "description": "Revoke a single session by opaque token hint.\n\nDefault (no ``cascade`` query param): delete the matching session\nrow only. Unchanged legacy behaviour — used by the ``/settings/\nsecurity`` panel and `/auth/sessions` UI.\n\nQ.2 (#296) 「這不是我」 cascade: ``?cascade=not_me`` escalates the\noperation into a full account-compromise response. When the new-\ndevice toast renders and the user decides the login wasn't them:\n\n  1. Revoke the flagged session (same as default path).\n  2. Rotate every OTHER session belonging to the user via the\n     Q.1 path (``auth.rotate_user_sessions`` with reason=\n     ``user_security_event``, trigger=``not_me_cascade``) — this\n     kicks the calling device too, so on the next request it\n     401s and lib/api.ts redirects to ``/login?reason=...``.\n  3. Flip ``users.must_change_password = 1`` so the K1 428 gate\n     forces a password change before any other API call succeeds\n     after re-login.\n  4. Clear the caller's own session + CSRF cookies so the browser\n     doesn't hold onto a dead token.\n\nThe cascade is idempotent-safe: if the target session was already\ngone (double-click race) we still run steps 2-4, because the\ncaller's intent is \"kick everyone, force password change\" — not\n\"just delete this one row\". A 404 on the target session returns\nan empty cascade result rather than silently succeeding.",
         "operationId": "revoke_session_api_v1_auth_sessions__token_hint__delete",
         "parameters": [
           {
@@ -9108,6 +9248,22 @@
             "schema": {
               "title": "Token Hint",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cascade",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cascade"
             }
           }
         ],
@@ -9826,7 +9982,7 @@
     },
     "/api/v1/bootstrap/finalize": {
       "post": {
-        "description": "Close out the wizard — admin only, requires every gate green.\n\n409 conditions (the wizard should keep the operator on the current\nstep):\n  * any live gate is still red (password default, no LLM key,\n    CF tunnel unprovisioned, smoke not green)\n  * any required step row is missing from ``bootstrap_state``\nOn success, writes a ``finalized`` audit row into\n``bootstrap_state`` and flips the persisted\n``bootstrap_finalized=true`` app-setting flag.",
+        "description": "Close out the wizard. No session is required — matches every\nother ``/bootstrap/*`` endpoint's pre-login posture.\n\nAuth posture history: an earlier revision required\n``Depends(require_admin)`` here, on the assumption the operator\nhad logged in by Step 7. In practice the wizard never surfaces\na login step — Step 1 just rotates the admin password without\ncreating a session — so finalize was permanently unreachable\nfrom the UI flow (401 → global api-client redirect to ``/login``\n→ bootstrap_gate bounces back to ``/bootstrap`` → operator loop).\nThe bootstrap_gate middleware itself is the security boundary\nfor this whole family of endpoints:\n\n  * Pre-finalize: only the wizard and the wizard-exempt static\n    paths can reach ``/bootstrap/*`` (every other path returns\n    503 ``bootstrap_required``). External attackers have no\n    reachable non-wizard surface.\n  * Post-finalize: the gate stops mattering (finalized goes\n    sticky-green) but re-calling finalize is idempotent —\n    ``mark_bootstrap_finalized`` writes the same\n    ``bootstrap_finalized=true`` marker that already exists\n    and no new audit row carries privileged state.\n\nWe still try to identify the actor: if a session cookie is\npresent (admin logged in manually before running the wizard,\nor a returning operator re-finalizing after a reset), we thread\ntheir user id into ``bootstrap_state.actor_user_id`` + the audit\n``actor``. Otherwise we record ``wizard`` so the audit row isn't\nanonymous.\n\n409 conditions (the wizard should keep the operator on the current\nstep):\n  * any live gate is still red (password default, no LLM key,\n    CF tunnel unprovisioned, smoke not green)\n  * any required step row is missing from ``bootstrap_state``\nOn success, writes a ``finalized`` audit row into\n``bootstrap_state`` and flips the persisted\n``bootstrap_finalized=true`` app-setting flag.",
         "operationId": "bootstrap_finalize_api_v1_bootstrap_finalize_post",
         "requestBody": {
           "content": {
@@ -10425,6 +10581,7 @@
     },
     "/api/v1/chat/history": {
       "delete": {
+        "description": "Wipe the current admin's chat history.\n\nTenant-scoped — even an admin can only clear their own tenant's\nrows for their own user_id. Cross-tenant or cross-user deletes\nare explicitly out of scope for this endpoint.",
         "operationId": "clear_history_api_v1_chat_history_delete",
         "responses": {
           "204": {
@@ -10437,6 +10594,7 @@
         ]
       },
       "get": {
+        "description": "Return the current user's chat history, oldest-first.\n\nBounded to the most recent ``_HISTORY_LIMIT`` messages. The PG\nretention sweep keeps the table itself bounded to 30 days per\nuser; this LIMIT is a second line of defence against pathological\nsingle-day chat volumes.",
         "operationId": "get_history_api_v1_chat_history_get",
         "responses": {
           "200": {
@@ -10462,7 +10620,7 @@
     },
     "/api/v1/chat/stream": {
       "post": {
-        "description": "SSE streaming — pipeline runs with real-time events pushed via event bus,\nthen the final answer is streamed token-by-token here.",
+        "description": "SSE streaming — pipeline runs with real-time events pushed via event bus,\nthen the final answer is streamed token-by-token here.\n\nThe token-by-token chunks ride this HTTP response body only and\nstay bound to the originator session — we never ``bus.publish``\nintermediate chunks (would flood other devices with unreadable\npartial state). The finalised user + orchestrator messages are\npersisted + fanned out via ``chat.message`` once before the stream\nstarts, so a second device sees them appear atomically.",
         "operationId": "chat_stream_api_v1_chat_stream_post",
         "requestBody": {
           "content": {
@@ -14507,7 +14665,7 @@
     },
     "/api/v1/events": {
       "get": {
-        "description": "Persistent SSE connection. Pushes all real-time events to the frontend.",
+        "description": "Persistent SSE connection. Pushes all real-time events to the frontend.\n\nPhase-3 follow-up (2026-04-20): emit an immediate ``open`` event as\nthe very first yield. Without it, CF edge + CF Tunnel buffer the SSE\nresponse until the first body byte arrives (up to several seconds\neven though the backend starts producing ~1 Hz host.metrics.tick\nevents within ~1 s). Browsers treat the initial silence as a dead\nconnection and EventSource closes + reconnects in a rapid loop,\nwhich burns per-IP rate-limit tokens and eventually 429s the next\nlogin attempt — recreating the same cascade the SQLite WAL storm\nfix was written to avoid. A 2-byte first event is enough to push\nCF past its buffer threshold; subsequent events flow through\nwithout buffering.",
         "operationId": "event_stream_api_v1_events_get",
         "responses": {
           "200": {
@@ -22322,6 +22480,77 @@
         ]
       }
     },
+    "/api/v1/projects/runs/{project_run_id}": {
+      "patch": {
+        "description": "Update a project run's label (operator rename flow).\n\nQ.7 #301 — requires ``If-Match: <version>`` header. Two operators\nrenaming the same project run on different devices produce exactly\none winner (post-bump version echoed) and one 409 (shaped body\nthe frontend ``use409Conflict`` hook consumes).\n\nThe ``PATCH /projects/{id}`` slot in the TODO mapped onto\n``project_runs`` here because that is the only DB-backed\n\"projects\" entity today — the ``projects`` top-level table\nis a future item (see TODO Y4-era work). The endpoint shape\n(``PATCH /projects/runs/{id}``) leaves room for a future\n``PATCH /projects/{project_id}`` without colliding.",
+        "operationId": "patch_project_run_api_v1_projects_runs__project_run_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_run_id",
+            "required": true,
+            "schema": {
+              "title": "Project Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_ProjectRunPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Patch Project Run Api V1 Projects Runs  Project Run Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Project Run",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
     "/api/v1/projects/{project_id}/report": {
       "get": {
         "operationId": "get_report_api_v1_projects__project_id__report_get",
@@ -22492,7 +22721,7 @@
     },
     "/api/v1/projects/{project_id}/runs": {
       "get": {
-        "description": "B7 (#207): parent project_runs with materialised child workflow_runs.",
+        "description": "B7 (#207): parent project_runs with materialised child workflow_runs.\n\nQ.7 #301: each item now carries ``version`` so the frontend can\necho it back in ``If-Match`` when PATCHing the run's label /\nmetadata.",
         "operationId": "list_project_runs_api_v1_projects__project_id__runs_get",
         "parameters": [
           {
@@ -24146,6 +24375,2052 @@
         ]
       }
     },
+    "/api/v1/runtime/compression": {
+      "get": {
+        "description": "Return RTK output compression statistics.",
+        "operationId": "get_compression_stats_api_v1_runtime_compression_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Compression Stats",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/debug": {
+      "get": {
+        "description": "Comprehensive debug state: agent errors, blocked tasks, debug findings.",
+        "operationId": "get_debug_state_api_v1_runtime_debug_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Debug State",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/deploy": {
+      "post": {
+        "description": "Trigger deployment to an EVK board. Admin only.",
+        "operationId": "trigger_deploy_api_v1_runtime_deploy_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Deploy",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/devices": {
+      "get": {
+        "operationId": "get_devices_api_v1_runtime_devices_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Devices",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/evk": {
+      "get": {
+        "description": "Check EVK board reachability for all platforms with deploy config.",
+        "operationId": "get_evk_status_api_v1_runtime_evk_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Evk Status",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/forecast": {
+      "get": {
+        "description": "Phase 60: project-level estimates (tasks / agents / hours /\ntokens / USD / confidence) computed from the active\nhardware_manifest.yaml. Template-based v0 — see backend/forecast.py\nfor the model evolution roadmap.",
+        "operationId": "get_project_forecast_api_v1_runtime_forecast_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Project Forecast Api V1 Runtime Forecast Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Project Forecast",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/forecast/recompute": {
+      "post": {
+        "description": "Bust the 5-min cache and re-read the manifest.",
+        "operationId": "recompute_project_forecast_api_v1_runtime_forecast_recompute_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Recompute Project Forecast Api V1 Runtime Forecast Recompute Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recompute Project Forecast",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/gerrit/finalize": {
+      "post": {
+        "description": "Persist the wizard's collected Gerrit settings and flip\n``gerrit_enabled`` on — the closing act of the Setup Wizard.\n\nSteps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).\nWithout this finalize step the operator would have to re-enter every\nStep 1 value into the Settings form by hand to actually turn the\nintegration on, defeating the wizard. This endpoint is the single\natomic write that promotes wizard inputs into ``settings.gerrit_*``\nand reports success so the UI can render the「Gerrit 整合已啟用」\nconfirmation banner.\n\nValidation is intentionally narrow:\n  * ``ssh_host`` must be non-empty (Step 1 cannot have passed\n    otherwise; we double-check here so a hand-rolled curl can't\n    write garbage).\n  * ``ssh_port`` must be in [1, 65535].\n  * ``url`` and ``project`` are normalised (trim) but not\n    round-tripped to Gerrit again — Step 1 + Step 4 already proved\n    they work.\n\nThe webhook secret is *not* echoed back even masked — the Step 5\ngenerate response was the one-and-only reveal.",
+        "operationId": "finalize_gerrit_integration_api_v1_runtime_git_forge_gerrit_finalize_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GerritFinalizeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Finalize Gerrit Integration",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/gerrit/verify-bot": {
+      "post": {
+        "description": "Verify the ``merger-agent-bot`` Gerrit group exists and has members.\n\nB14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH\ntransport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit\nls-members`` instead of ``gerrit version`` so the probe only succeeds\nwhen the O7 dual-+2 group is properly seated. Never mutates Gerrit —\ngroup creation + member-add stay manual (they require admin rights\nper the runbook in docs/ops/gerrit_dual_two_rule.md §1).",
+        "operationId": "verify_gerrit_merger_bot_api_v1_runtime_git_forge_gerrit_verify_bot_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GerritBotVerify"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Gerrit Merger Bot",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/gerrit/verify-submit-rule": {
+      "post": {
+        "description": "Verify the target Gerrit project carries the O7 dual-+2 submit rule.\n\nB14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:\nreads ``refs/meta/config:project.config`` over the Gerrit SSH\ntransport and pattern-matches the three ACL lines that encode the\ndual-+2 gate. Installation of the rule stays manual (it requires\n``Push`` on ``refs/meta/config`` which is an admin-only ref) per\ndocs/ops/gerrit_dual_two_rule.md §2.",
+        "operationId": "verify_gerrit_submit_rule_api_v1_runtime_git_forge_gerrit_verify_submit_rule_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GerritSubmitRuleVerify"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Gerrit Submit Rule",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/gerrit/webhook-info": {
+      "get": {
+        "description": "Return the inbound webhook URL + secret status the operator must\npaste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).\n\nNever returns the plain secret — only ``secret_configured`` plus a\n``secret_masked`` preview so the operator can confirm what's wired\nwithout re-revealing it. Use ``POST .../webhook-secret/generate`` to\nrotate (which returns the new plain value exactly once).",
+        "operationId": "get_gerrit_webhook_info_api_v1_runtime_git_forge_gerrit_webhook_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Gerrit Webhook Info",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate": {
+      "post": {
+        "description": "Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.\n\n32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with\n~256 bits of entropy, well above the 128-bit floor recommended for\nHMAC-SHA256 keys. The plain value is returned **only** in this\nresponse — the operator must capture it before closing the wizard;\nsubsequent ``webhook-info`` calls will surface only the masked\npreview. Rotating here invalidates whatever secret Gerrit currently\nholds, so the operator must re-paste the new value into Gerrit's\n``webhooks.config`` for events to keep verifying.",
+        "operationId": "generate_gerrit_webhook_secret_api_v1_runtime_git_forge_gerrit_webhook_secret_generate_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Generate Gerrit Webhook Secret",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/ssh-pubkey": {
+      "get": {
+        "description": "Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.\n\nRead-only — never mutates settings, never exposes the private key.\nDrives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-\nGerrit flow) and is safe to surface to any operator-role session\nsince the public half of an SSH keypair is non-secret by design.",
+        "operationId": "get_git_forge_ssh_pubkey_api_v1_runtime_git_forge_ssh_pubkey_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Git Forge Ssh Pubkey",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/git-forge/test-token": {
+      "post": {
+        "description": "Validate a candidate Git forge credential WITHOUT persisting it.\n\nUsed by the Bootstrap Step 3.5 Git Forge setup to let the operator\nsanity-check their credential before they commit it to settings.\n``github`` / ``gitlab`` run a token probe against the respective\nREST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since\nGerrit's first-class transport is SSH, not HTTP.",
+        "operationId": "test_git_forge_token_api_v1_runtime_git_forge_test_token_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitForgeTokenTest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Git Forge Token",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/info": {
+      "get": {
+        "operationId": "get_system_info_api_v1_runtime_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get System Info",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/logs": {
+      "get": {
+        "description": "Return recent system logs.",
+        "operationId": "get_logs_api_v1_runtime_logs_get",
+        "parameters": [
+          {
+            "description": "Max rows per page (1..500)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Max rows per page (1..500)",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Logs",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/model-rules": {
+      "get": {
+        "description": "List all available model rule definitions from configs/models/.",
+        "operationId": "get_available_model_rules_api_v1_runtime_model_rules_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Available Model Rules",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/notifications": {
+      "get": {
+        "description": "List notifications, optionally filtered by level.",
+        "operationId": "get_notifications_api_v1_runtime_notifications_get",
+        "parameters": [
+          {
+            "description": "Max rows per page (1..200)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Max rows per page (1..200)",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Level",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Notifications",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/notifications/unread-count": {
+      "get": {
+        "description": "Count unread notifications (L2+).",
+        "operationId": "unread_count_api_v1_runtime_notifications_unread_count_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Unread Count",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/notifications/{notification_id}/read": {
+      "post": {
+        "description": "Mark a notification as read.\n\nQ.3-SUB-3 (#297): on a successful flip, emit ``notification.read``\non the event bus so other devices owned by the same user can\ndecrement their bell badge and drop the row from their local list\nwithout waiting for the next ``/notifications/unread-count`` poll.\nEmit is best-effort (``broadcast_scope='user'``, advisory until\nQ.4 #298) and is swallowed on failure — the PG row is the\nsource of truth, the SSE push is latency-optimisation only.",
+        "operationId": "mark_read_api_v1_runtime_notifications__notification_id__read_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notification_id",
+            "required": true,
+            "schema": {
+              "title": "Notification Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mark Read",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/npi": {
+      "get": {
+        "description": "Return the current NPI lifecycle state.\n\nQ.7 #301: response now carries ``version`` so the frontend can\necho it back in ``If-Match`` on the PUT.",
+        "operationId": "get_npi_state_api_v1_runtime_npi_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Npi State",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "put": {
+        "description": "Update NPI project-level settings.\n\nQ.7 #301 — requires ``If-Match: <version>`` header. Runtime\nsettings are a singleton row (``id = 'current'``) so the lock\nguards a different race than workflow_runs — two admins on\nseparate devices toggling ``business_model`` at the same time.\nLoser receives 409 with ``{current_version, your_version,\nhint}`` and the frontend hook offers 重載 / 覆蓋 / 合併.",
+        "operationId": "update_npi_state_api_v1_runtime_npi_put",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "business_model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Business Model"
+            }
+          },
+          {
+            "in": "query",
+            "name": "current_phase_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Current Phase Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Npi State",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/npi/milestones/{milestone_id}": {
+      "patch": {
+        "description": "Update a specific NPI milestone.",
+        "operationId": "update_npi_milestone_api_v1_runtime_npi_milestones__milestone_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "milestone_id",
+            "required": true,
+            "schema": {
+              "title": "Milestone Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "due_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Due Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Npi Milestone",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/npi/phases/{phase_id}": {
+      "patch": {
+        "description": "Update a specific NPI phase.",
+        "operationId": "update_npi_phase_api_v1_runtime_npi_phases__phase_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "phase_id",
+            "required": true,
+            "schema": {
+              "title": "Phase Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Npi Phase",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/pipeline/advance": {
+      "post": {
+        "description": "Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed). Admin only.",
+        "operationId": "advance_pipeline_endpoint_api_v1_runtime_pipeline_advance_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Advance Pipeline Endpoint",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/pipeline/start": {
+      "post": {
+        "description": "Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs. Admin only.",
+        "operationId": "start_pipeline_api_v1_runtime_pipeline_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Pipeline",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/pipeline/status": {
+      "get": {
+        "description": "Get the current E2E pipeline run status.",
+        "operationId": "get_pipeline_status_endpoint_api_v1_runtime_pipeline_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Pipeline Status Endpoint",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/pipeline/timeline": {
+      "get": {
+        "description": "Phase 50A — timeline with per-step timing + velocity rollup.\n\nReturns:\n  steps: [{ id, name, npi_phase, auto_advance, human_checkpoint,\n           planned_at, started_at, completed_at, deadline_at,\n           status: idle|active|done|overdue }]\n  velocity:\n    avg_step_seconds:  mean observed duration across completed steps\n    eta_completion:    ISO timestamp estimate for pipeline finish, or null\n    tasks_completed_7d: tasks the invoke-layer marked done in the last 7 d",
+        "operationId": "get_pipeline_timeline_api_v1_runtime_pipeline_timeline_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Pipeline Timeline",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/platform-status": {
+      "get": {
+        "description": "H1: surface host arch + active target arch + toolchain readiness so\nthe operator chip in the dashboard header can warn about\ncross-compile mismatch *before* a build starts.\n\nStatus values:\n  * `no_target`         — hardware_manifest.target_platform is empty\n  * `native`            — host arch == target arch (Phase 59 fast-path)\n  * `cross_ready`       — different arch + cross-compiler installed\n  * `toolchain_missing` — different arch + cross-compiler NOT on PATH\n  * `unknown_target`    — target_platform set but no matching profile yaml",
+        "operationId": "get_platform_status_api_v1_runtime_platform_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Platform Status Api V1 Runtime Platform Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Platform Status",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/platforms/toolchains": {
+      "get": {
+        "description": "Return every known toolchain name, grouped by platform and tier.\n\nResponse shape:\n  all:          sorted unique list of all toolchain strings\n  by_platform:  { platform_name: default_toolchain }\n  by_tier:      { tier_id: [allowed_toolchains] }",
+        "operationId": "list_toolchains_api_v1_runtime_platforms_toolchains_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Toolchains Api V1 Runtime Platforms Toolchains Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Toolchains",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/release": {
+      "post": {
+        "description": "Create a release bundle and optionally upload to GitHub/GitLab.\n\nReturns bundle metadata, manifest, and upload results.",
+        "operationId": "create_release_api_v1_runtime_release_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Release",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/release/manifest": {
+      "get": {
+        "description": "Generate a release manifest (JSON) listing all artifacts.",
+        "operationId": "get_release_manifest_api_v1_runtime_release_manifest_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Version",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Release Manifest",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/release/version": {
+      "get": {
+        "description": "Get the current resolved version.",
+        "operationId": "get_release_version_api_v1_runtime_release_version_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Release Version",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/repos": {
+      "get": {
+        "description": "List git repositories: main repo + credential registry + agent worktrees.",
+        "operationId": "get_repos_api_v1_runtime_repos_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Repos",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/roles": {
+      "get": {
+        "description": "List all available agent roles from configs/roles/.",
+        "operationId": "get_available_roles_api_v1_runtime_roles_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Available Roles",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/sandbox/capacity": {
+      "get": {
+        "description": "I6: DRF per-tenant sandbox capacity snapshot.",
+        "operationId": "get_sandbox_capacity_api_v1_runtime_sandbox_capacity_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Sandbox Capacity",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/sandbox/capacity/{tenant_id}": {
+      "get": {
+        "description": "I6: Per-tenant sandbox capacity usage.",
+        "operationId": "get_tenant_capacity_api_v1_runtime_sandbox_capacity__tenant_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Tenant Capacity",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/settings": {
+      "get": {
+        "description": "Return all integration settings grouped by category. Tokens are masked.",
+        "operationId": "get_settings_api_v1_runtime_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Settings",
+        "tags": [
+          "integration"
+        ]
+      },
+      "put": {
+        "description": "Update integration settings at runtime.\n\nValues land on this worker's in-memory ``settings`` singleton AND\n(for the subset listed in ``_SHARED_KV_FIELDS``) are mirrored into\nRedis-backed ``SharedKV`` so the other 3 workers overlay them on\ntheir next request. This fixes the 2026-04-22 operator report\nwhere saving Google then OpenAI caused Google's green light to\ndisappear — each save was landing on a different worker and the\nUI was round-robin reading from workers that hadn't seen the\nprior save. Full DB-persistent per-tenant solution lands in\nPhase 5b.",
+        "operationId": "update_settings_api_v1_runtime_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Settings",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/settings/git/token-map": {
+      "get": {
+        "description": "Return the configured per-host token maps with tokens masked.\n\nShape::\n\n    {\n      \"github\": [{\"platform\": \"github\", \"host\": \"...\", \"token_masked\": \"...\"}],\n      \"gitlab\": [...],\n    }\n\nEmpty platforms surface as empty lists — never ``null`` — so the UI\ncan render \"no additional instances configured\" without branching on\npresence.",
+        "operationId": "get_git_token_map_api_v1_runtime_settings_git_token_map_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Git Token Map",
+        "tags": [
+          "integration"
+        ]
+      },
+      "put": {
+        "description": "Replace the per-host token maps.\n\nA blank ``token`` for a given host preserves the existing secret so the\nUI can round-trip the masked list without re-prompting every token.\nRemoving a host just means omitting it from the PUT body — this\nendpoint is a replace, not a patch.\n\nDuplicate hosts in the payload are merged last-write-wins (the final\nentry in the list). Empty host strings are ignored.",
+        "operationId": "update_git_token_map_api_v1_runtime_settings_git_token_map_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenMapUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Git Token Map",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/simulations": {
+      "get": {
+        "description": "List recent simulation runs with optional filters.",
+        "operationId": "list_simulations_api_v1_runtime_simulations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "task_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max rows per page (1..200)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Max rows per page (1..200)",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Simulations",
+        "tags": [
+          "simulations"
+        ]
+      },
+      "post": {
+        "description": "Manually trigger a simulation run (from UI or external API).",
+        "operationId": "trigger_simulation_api_v1_runtime_simulations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Simulation",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/runtime/simulations/{sim_id}": {
+      "get": {
+        "description": "Get a specific simulation result with full report.",
+        "operationId": "get_simulation_api_v1_runtime_simulations__sim_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sim_id",
+            "required": true,
+            "schema": {
+              "title": "Sim Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Simulation",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/runtime/spec": {
+      "get": {
+        "description": "Load spec from hardware_manifest.yaml (or return empty if not found).",
+        "operationId": "get_spec_api_v1_runtime_spec_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Spec",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "put": {
+        "description": "Update a single field in hardware_manifest.yaml.",
+        "operationId": "update_spec_field_api_v1_runtime_spec_put",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "value",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ],
+              "title": "Value"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "string"
+                },
+                "title": "Path",
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Spec Field",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/sse-schema": {
+      "get": {
+        "description": "A4/C7: return JSON-Schema for every SSE event type keyed by event\nname, so the frontend can detect drift between the hand-maintained\nTS union in lib/api.ts and the backend Pydantic models. Shape matches\nthe `get_sse_schema_export()` helper — i.e. flat `{ event_name:\n{ description, schema } }` map.",
+        "operationId": "get_sse_schema_api_v1_runtime_sse_schema_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Sse Schema",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/status": {
+      "get": {
+        "operationId": "get_system_status_api_v1_runtime_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get System Status",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/test/{integration}": {
+      "post": {
+        "description": "Test connectivity for an external integration.",
+        "operationId": "test_integration_api_v1_runtime_test__integration__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "integration",
+            "required": true,
+            "schema": {
+              "title": "Integration",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Integration",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/token-budget": {
+      "get": {
+        "description": "Return current budget settings, daily usage, and freeze status.",
+        "operationId": "get_token_budget_api_v1_runtime_token_budget_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenBudgetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Token Budget",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "put": {
+        "description": "Update token budget settings at runtime.",
+        "operationId": "update_token_budget_api_v1_runtime_token_budget_put",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "budget",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Budget"
+            }
+          },
+          {
+            "in": "query",
+            "name": "warn_threshold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Warn Threshold"
+            }
+          },
+          {
+            "in": "query",
+            "name": "downgrade_threshold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Downgrade Threshold"
+            }
+          },
+          {
+            "in": "query",
+            "name": "freeze_threshold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Freeze Threshold"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fallback_provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fallback Provider"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fallback_model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fallback Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Token Budget",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/token-budget/reset": {
+      "post": {
+        "description": "Reset the token freeze state (human intervention).",
+        "operationId": "reset_token_freeze_api_v1_runtime_token_budget_reset_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reset Token Freeze",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/tokens": {
+      "delete": {
+        "description": "Reset all token usage counters.",
+        "operationId": "reset_token_usage_api_v1_runtime_tokens_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reset Token Usage",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "get": {
+        "description": "Return token usage stats per model.\n\nZZ.A1 (#303-2, 2026-04-24): response schema formalised as\n``list[TokenUsageEntry]`` so the openapi.json advertises the\nprompt-cache fields (``cache_read_tokens`` / ``cache_create_tokens``\n/ ``cache_hit_ratio``) introduced in ZZ.A1-1 / ZZ.A1-2. Values are\n``None`` on pre-ZZ legacy rows (distinguishes \"no data\" from zero\nhits) and populated on ZZ-era rows — see ``TokenUsageEntry`` and\n``backend/shared_state.py::_normalize_token_entry``.",
+        "operationId": "get_token_usage_api_v1_runtime_tokens_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TokenUsageEntry"
+                  },
+                  "title": "Response Get Token Usage Api V1 Runtime Tokens Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Token Usage",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/vendor/sdks": {
+      "get": {
+        "description": "List available vendor SDK platform profiles and their mount status.",
+        "operationId": "list_vendor_sdks_api_v1_runtime_vendor_sdks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Vendor Sdks",
+        "tags": [
+          "runtime"
+        ]
+      },
+      "post": {
+        "description": "Create a new vendor SDK platform profile.",
+        "operationId": "create_vendor_sdk_api_v1_runtime_vendor_sdks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VendorSDKCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Vendor Sdk",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/vendor/sdks/{platform}": {
+      "delete": {
+        "description": "Delete a vendor SDK platform profile.",
+        "operationId": "delete_vendor_sdk_api_v1_runtime_vendor_sdks__platform__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "platform",
+            "required": true,
+            "schema": {
+              "title": "Platform",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Vendor Sdk",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/vendor/sdks/{platform}/install": {
+      "post": {
+        "description": "Clone and provision the vendor SDK for a platform.\n\nReads sdk_git_url from the platform YAML, clones the repo,\nscans for toolchain/sysroot, and updates the platform profile.",
+        "operationId": "install_vendor_sdk_api_v1_runtime_vendor_sdks__platform__install_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "platform",
+            "required": true,
+            "schema": {
+              "title": "Platform",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Vendor Sdk",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
+    "/api/v1/runtime/vendor/sdks/{platform}/validate": {
+      "get": {
+        "description": "Validate that SDK paths in a platform profile exist on disk.",
+        "operationId": "validate_vendor_sdk_api_v1_runtime_vendor_sdks__platform__validate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "platform",
+            "required": true,
+            "schema": {
+              "title": "Platform",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Vendor Sdk",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
     "/api/v1/safety/artifacts": {
       "get": {
         "operationId": "list_artifacts_api_v1_safety_artifacts_get",
@@ -24613,6 +26888,7 @@
         ]
       },
       "put": {
+        "description": "Rotate a secret value and/or its metadata.\n\nQ.7 #301 — requires ``If-Match: <version>`` header. Two admins\nrotating the same provider key from laptop + phone concurrently\nproduce exactly one winner (post-bump version echoed in the\nresponse) and one 409 (body carries ``current_version`` /\n``your_version`` / ``hint`` for the frontend ``use409Conflict``\nhook).",
         "operationId": "update_secret_api_v1_secrets__secret_id__put",
         "parameters": [
           {
@@ -24622,6 +26898,22 @@
             "schema": {
               "title": "Secret Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
             }
           }
         ],
@@ -26932,2030 +29224,6 @@
         ]
       }
     },
-    "/api/v1/runtime/compression": {
-      "get": {
-        "description": "Return RTK output compression statistics.",
-        "operationId": "get_compression_stats_api_v1_system_compression_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Compression Stats",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/debug": {
-      "get": {
-        "description": "Comprehensive debug state: agent errors, blocked tasks, debug findings.",
-        "operationId": "get_debug_state_api_v1_system_debug_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Debug State",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/deploy": {
-      "post": {
-        "description": "Trigger deployment to an EVK board.",
-        "operationId": "trigger_deploy_api_v1_system_deploy_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeployRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Trigger Deploy",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/devices": {
-      "get": {
-        "operationId": "get_devices_api_v1_system_devices_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Devices",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/evk": {
-      "get": {
-        "description": "Check EVK board reachability for all platforms with deploy config.",
-        "operationId": "get_evk_status_api_v1_system_evk_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Evk Status",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/forecast": {
-      "get": {
-        "description": "Phase 60: project-level estimates (tasks / agents / hours /\ntokens / USD / confidence) computed from the active\nhardware_manifest.yaml. Template-based v0 — see backend/forecast.py\nfor the model evolution roadmap.",
-        "operationId": "get_project_forecast_api_v1_system_forecast_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "provider",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Provider"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Project Forecast Api V1 System Forecast Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Project Forecast",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/forecast/recompute": {
-      "post": {
-        "description": "Bust the 5-min cache and re-read the manifest.",
-        "operationId": "recompute_project_forecast_api_v1_system_forecast_recompute_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Recompute Project Forecast Api V1 System Forecast Recompute Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Recompute Project Forecast",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/gerrit/finalize": {
-      "post": {
-        "description": "Persist the wizard's collected Gerrit settings and flip\n``gerrit_enabled`` on — the closing act of the Setup Wizard.\n\nSteps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).\nWithout this finalize step the operator would have to re-enter every\nStep 1 value into the Settings form by hand to actually turn the\nintegration on, defeating the wizard. This endpoint is the single\natomic write that promotes wizard inputs into ``settings.gerrit_*``\nand reports success so the UI can render the「Gerrit 整合已啟用」\nconfirmation banner.\n\nValidation is intentionally narrow:\n  * ``ssh_host`` must be non-empty (Step 1 cannot have passed\n    otherwise; we double-check here so a hand-rolled curl can't\n    write garbage).\n  * ``ssh_port`` must be in [1, 65535].\n  * ``url`` and ``project`` are normalised (trim) but not\n    round-tripped to Gerrit again — Step 1 + Step 4 already proved\n    they work.\n\nThe webhook secret is *not* echoed back even masked — the Step 5\ngenerate response was the one-and-only reveal.",
-        "operationId": "finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GerritFinalizeBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Finalize Gerrit Integration",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/gerrit/verify-bot": {
-      "post": {
-        "description": "Verify the ``merger-agent-bot`` Gerrit group exists and has members.\n\nB14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH\ntransport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit\nls-members`` instead of ``gerrit version`` so the probe only succeeds\nwhen the O7 dual-+2 group is properly seated. Never mutates Gerrit —\ngroup creation + member-add stay manual (they require admin rights\nper the runbook in docs/ops/gerrit_dual_two_rule.md §1).",
-        "operationId": "verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GerritBotVerify"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Verify Gerrit Merger Bot",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/gerrit/verify-submit-rule": {
-      "post": {
-        "description": "Verify the target Gerrit project carries the O7 dual-+2 submit rule.\n\nB14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:\nreads ``refs/meta/config:project.config`` over the Gerrit SSH\ntransport and pattern-matches the three ACL lines that encode the\ndual-+2 gate. Installation of the rule stays manual (it requires\n``Push`` on ``refs/meta/config`` which is an admin-only ref) per\ndocs/ops/gerrit_dual_two_rule.md §2.",
-        "operationId": "verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GerritSubmitRuleVerify"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Verify Gerrit Submit Rule",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/gerrit/webhook-info": {
-      "get": {
-        "description": "Return the inbound webhook URL + secret status the operator must\npaste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).\n\nNever returns the plain secret — only ``secret_configured`` plus a\n``secret_masked`` preview so the operator can confirm what's wired\nwithout re-revealing it. Use ``POST .../webhook-secret/generate`` to\nrotate (which returns the new plain value exactly once).",
-        "operationId": "get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Gerrit Webhook Info",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate": {
-      "post": {
-        "description": "Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.\n\n32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with\n~256 bits of entropy, well above the 128-bit floor recommended for\nHMAC-SHA256 keys. The plain value is returned **only** in this\nresponse — the operator must capture it before closing the wizard;\nsubsequent ``webhook-info`` calls will surface only the masked\npreview. Rotating here invalidates whatever secret Gerrit currently\nholds, so the operator must re-paste the new value into Gerrit's\n``webhooks.config`` for events to keep verifying.",
-        "operationId": "generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Generate Gerrit Webhook Secret",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/ssh-pubkey": {
-      "get": {
-        "description": "Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.\n\nRead-only — never mutates settings, never exposes the private key.\nDrives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-\nGerrit flow) and is safe to surface to any operator-role session\nsince the public half of an SSH keypair is non-secret by design.",
-        "operationId": "get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Git Forge Ssh Pubkey",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/git-forge/test-token": {
-      "post": {
-        "description": "Validate a candidate Git forge credential WITHOUT persisting it.\n\nUsed by the Bootstrap Step 3.5 Git Forge setup to let the operator\nsanity-check their credential before they commit it to settings.\n``github`` / ``gitlab`` run a token probe against the respective\nREST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since\nGerrit's first-class transport is SSH, not HTTP.",
-        "operationId": "test_git_forge_token_api_v1_system_git_forge_test_token_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GitForgeTokenTest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Test Git Forge Token",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/info": {
-      "get": {
-        "operationId": "get_system_info_api_v1_system_info_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SystemInfoResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get System Info",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/logs": {
-      "get": {
-        "description": "Return recent system logs.",
-        "operationId": "get_logs_api_v1_system_logs_get",
-        "parameters": [
-          {
-            "description": "Max rows per page (1..500)",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "description": "Max rows per page (1..500)",
-              "maximum": 500,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Logs",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/model-rules": {
-      "get": {
-        "description": "List all available model rule definitions from configs/models/.",
-        "operationId": "get_available_model_rules_api_v1_system_model_rules_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Available Model Rules",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/notifications": {
-      "get": {
-        "description": "List notifications, optionally filtered by level.",
-        "operationId": "get_notifications_api_v1_system_notifications_get",
-        "parameters": [
-          {
-            "description": "Max rows per page (1..200)",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "description": "Max rows per page (1..200)",
-              "maximum": 200,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "level",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Level",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Notifications",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/notifications/unread-count": {
-      "get": {
-        "description": "Count unread notifications (L2+).",
-        "operationId": "unread_count_api_v1_system_notifications_unread_count_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Unread Count",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/notifications/{notification_id}/read": {
-      "post": {
-        "description": "Mark a notification as read.",
-        "operationId": "mark_read_api_v1_system_notifications__notification_id__read_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "notification_id",
-            "required": true,
-            "schema": {
-              "title": "Notification Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Mark Read",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/npi": {
-      "get": {
-        "description": "Return the current NPI lifecycle state.",
-        "operationId": "get_npi_state_api_v1_system_npi_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Npi State",
-        "tags": [
-          "system"
-        ]
-      },
-      "put": {
-        "description": "Update NPI project-level settings.",
-        "operationId": "update_npi_state_api_v1_system_npi_put",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "business_model",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Business Model"
-            }
-          },
-          {
-            "in": "query",
-            "name": "current_phase_id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Current Phase Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Npi State",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/npi/milestones/{milestone_id}": {
-      "patch": {
-        "description": "Update a specific NPI milestone.",
-        "operationId": "update_npi_milestone_api_v1_system_npi_milestones__milestone_id__patch",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "milestone_id",
-            "required": true,
-            "schema": {
-              "title": "Milestone Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "status",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Status"
-            }
-          },
-          {
-            "in": "query",
-            "name": "due_date",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Due Date"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Npi Milestone",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/npi/phases/{phase_id}": {
-      "patch": {
-        "description": "Update a specific NPI phase.",
-        "operationId": "update_npi_phase_api_v1_system_npi_phases__phase_id__patch",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "phase_id",
-            "required": true,
-            "schema": {
-              "title": "Phase Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "status",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Status"
-            }
-          },
-          {
-            "in": "query",
-            "name": "target_date",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Target Date"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Npi Phase",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/pipeline/advance": {
-      "post": {
-        "description": "Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed).",
-        "operationId": "advance_pipeline_endpoint_api_v1_system_pipeline_advance_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Advance Pipeline Endpoint",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/pipeline/start": {
-      "post": {
-        "description": "Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs.",
-        "operationId": "start_pipeline_api_v1_system_pipeline_start_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PipelineStartRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Start Pipeline",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/pipeline/status": {
-      "get": {
-        "description": "Get the current E2E pipeline run status.",
-        "operationId": "get_pipeline_status_endpoint_api_v1_system_pipeline_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Pipeline Status Endpoint",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/pipeline/timeline": {
-      "get": {
-        "description": "Phase 50A — timeline with per-step timing + velocity rollup.\n\nReturns:\n  steps: [{ id, name, npi_phase, auto_advance, human_checkpoint,\n           planned_at, started_at, completed_at, deadline_at,\n           status: idle|active|done|overdue }]\n  velocity:\n    avg_step_seconds:  mean observed duration across completed steps\n    eta_completion:    ISO timestamp estimate for pipeline finish, or null\n    tasks_completed_7d: tasks the invoke-layer marked done in the last 7 d",
-        "operationId": "get_pipeline_timeline_api_v1_system_pipeline_timeline_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Pipeline Timeline",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/platform-status": {
-      "get": {
-        "description": "H1: surface host arch + active target arch + toolchain readiness so\nthe operator chip in the dashboard header can warn about\ncross-compile mismatch *before* a build starts.\n\nStatus values:\n  * `no_target`         — hardware_manifest.target_platform is empty\n  * `native`            — host arch == target arch (Phase 59 fast-path)\n  * `cross_ready`       — different arch + cross-compiler installed\n  * `toolchain_missing` — different arch + cross-compiler NOT on PATH\n  * `unknown_target`    — target_platform set but no matching profile yaml",
-        "operationId": "get_platform_status_api_v1_system_platform_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Platform Status Api V1 System Platform Status Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Platform Status",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/platforms/toolchains": {
-      "get": {
-        "description": "Return every known toolchain name, grouped by platform and tier.\n\nResponse shape:\n  all:          sorted unique list of all toolchain strings\n  by_platform:  { platform_name: default_toolchain }\n  by_tier:      { tier_id: [allowed_toolchains] }",
-        "operationId": "list_toolchains_api_v1_system_platforms_toolchains_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Toolchains Api V1 System Platforms Toolchains Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Toolchains",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/release": {
-      "post": {
-        "description": "Create a release bundle and optionally upload to GitHub/GitLab.\n\nReturns bundle metadata, manifest, and upload results.",
-        "operationId": "create_release_api_v1_system_release_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ReleaseRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Release",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/release/manifest": {
-      "get": {
-        "description": "Generate a release manifest (JSON) listing all artifacts.",
-        "operationId": "get_release_manifest_api_v1_system_release_manifest_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "version",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Version",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Release Manifest",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/release/version": {
-      "get": {
-        "description": "Get the current resolved version.",
-        "operationId": "get_release_version_api_v1_system_release_version_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Release Version",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/repos": {
-      "get": {
-        "description": "List git repositories: main repo + credential registry + agent worktrees.",
-        "operationId": "get_repos_api_v1_system_repos_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Repos",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/roles": {
-      "get": {
-        "description": "List all available agent roles from configs/roles/.",
-        "operationId": "get_available_roles_api_v1_system_roles_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Available Roles",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/sandbox/capacity": {
-      "get": {
-        "description": "I6: DRF per-tenant sandbox capacity snapshot.",
-        "operationId": "get_sandbox_capacity_api_v1_system_sandbox_capacity_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Sandbox Capacity",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/sandbox/capacity/{tenant_id}": {
-      "get": {
-        "description": "I6: Per-tenant sandbox capacity usage.",
-        "operationId": "get_tenant_capacity_api_v1_system_sandbox_capacity__tenant_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "tenant_id",
-            "required": true,
-            "schema": {
-              "title": "Tenant Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Tenant Capacity",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/settings": {
-      "get": {
-        "description": "Return all integration settings grouped by category. Tokens are masked.",
-        "operationId": "get_settings_api_v1_system_settings_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Settings",
-        "tags": [
-          "integration"
-        ]
-      },
-      "put": {
-        "description": "Update integration settings at runtime (not persisted to .env).",
-        "operationId": "update_settings_api_v1_system_settings_put",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SettingsUpdate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Settings",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/settings/git/token-map": {
-      "get": {
-        "description": "Return the configured per-host token maps with tokens masked.\n\nShape::\n\n    {\n      \"github\": [{\"platform\": \"github\", \"host\": \"...\", \"token_masked\": \"...\"}],\n      \"gitlab\": [...],\n    }\n\nEmpty platforms surface as empty lists — never ``null`` — so the UI\ncan render \"no additional instances configured\" without branching on\npresence.",
-        "operationId": "get_git_token_map_api_v1_system_settings_git_token_map_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Git Token Map",
-        "tags": [
-          "integration"
-        ]
-      },
-      "put": {
-        "description": "Replace the per-host token maps.\n\nA blank ``token`` for a given host preserves the existing secret so the\nUI can round-trip the masked list without re-prompting every token.\nRemoving a host just means omitting it from the PUT body — this\nendpoint is a replace, not a patch.\n\nDuplicate hosts in the payload are merged last-write-wins (the final\nentry in the list). Empty host strings are ignored.",
-        "operationId": "update_git_token_map_api_v1_system_settings_git_token_map_put",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TokenMapUpdate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Git Token Map",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/simulations": {
-      "get": {
-        "description": "List recent simulation runs with optional filters.",
-        "operationId": "list_simulations_api_v1_system_simulations_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "task_id",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Task Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "agent_id",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Agent Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "status",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Status",
-              "type": "string"
-            }
-          },
-          {
-            "description": "Max rows per page (1..200)",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "description": "Max rows per page (1..200)",
-              "maximum": 200,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Simulations",
-        "tags": [
-          "simulations"
-        ]
-      },
-      "post": {
-        "description": "Manually trigger a simulation run (from UI or external API).",
-        "operationId": "trigger_simulation_api_v1_system_simulations_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SimulationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Trigger Simulation",
-        "tags": [
-          "simulations"
-        ]
-      }
-    },
-    "/api/v1/runtime/simulations/{sim_id}": {
-      "get": {
-        "description": "Get a specific simulation result with full report.",
-        "operationId": "get_simulation_api_v1_system_simulations__sim_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "sim_id",
-            "required": true,
-            "schema": {
-              "title": "Sim Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Simulation",
-        "tags": [
-          "simulations"
-        ]
-      }
-    },
-    "/api/v1/runtime/spec": {
-      "get": {
-        "description": "Load spec from hardware_manifest.yaml (or return empty if not found).",
-        "operationId": "get_spec_api_v1_system_spec_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Spec",
-        "tags": [
-          "system"
-        ]
-      },
-      "put": {
-        "description": "Update a single field in hardware_manifest.yaml.",
-        "operationId": "update_spec_field_api_v1_system_spec_put",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "value",
-            "required": true,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ],
-              "title": "Value"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "items": {
-                  "type": "string"
-                },
-                "title": "Path",
-                "type": "array"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Spec Field",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/sse-schema": {
-      "get": {
-        "description": "A4/C7: return JSON-Schema for every SSE event type keyed by event\nname, so the frontend can detect drift between the hand-maintained\nTS union in lib/api.ts and the backend Pydantic models. Shape matches\nthe `get_sse_schema_export()` helper — i.e. flat `{ event_name:\n{ description, schema } }` map.",
-        "operationId": "get_sse_schema_api_v1_system_sse_schema_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Sse Schema",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/status": {
-      "get": {
-        "operationId": "get_system_status_api_v1_system_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SystemStatusResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get System Status",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/test/{integration}": {
-      "post": {
-        "description": "Test connectivity for an external integration.",
-        "operationId": "test_integration_api_v1_system_test__integration__post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "integration",
-            "required": true,
-            "schema": {
-              "title": "Integration",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Test Integration",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/token-budget": {
-      "get": {
-        "description": "Return current budget settings, daily usage, and freeze status.",
-        "operationId": "get_token_budget_api_v1_system_token_budget_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TokenBudgetResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Token Budget",
-        "tags": [
-          "system"
-        ]
-      },
-      "put": {
-        "description": "Update token budget settings at runtime.",
-        "operationId": "update_token_budget_api_v1_system_token_budget_put",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "budget",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Budget"
-            }
-          },
-          {
-            "in": "query",
-            "name": "warn_threshold",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Warn Threshold"
-            }
-          },
-          {
-            "in": "query",
-            "name": "downgrade_threshold",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Downgrade Threshold"
-            }
-          },
-          {
-            "in": "query",
-            "name": "freeze_threshold",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Freeze Threshold"
-            }
-          },
-          {
-            "in": "query",
-            "name": "fallback_provider",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Fallback Provider"
-            }
-          },
-          {
-            "in": "query",
-            "name": "fallback_model",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Fallback Model"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Token Budget",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/token-budget/reset": {
-      "post": {
-        "description": "Reset the token freeze state (human intervention).",
-        "operationId": "reset_token_freeze_api_v1_system_token_budget_reset_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Reset Token Freeze",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/tokens": {
-      "delete": {
-        "description": "Reset all token usage counters.",
-        "operationId": "reset_token_usage_api_v1_system_tokens_delete",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Reset Token Usage",
-        "tags": [
-          "system"
-        ]
-      },
-      "get": {
-        "description": "Return token usage stats per model.",
-        "operationId": "get_token_usage_api_v1_system_tokens_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Token Usage",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/runtime/vendor/sdks": {
-      "get": {
-        "description": "List available vendor SDK platform profiles and their mount status.",
-        "operationId": "list_vendor_sdks_api_v1_system_vendor_sdks_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Vendor Sdks",
-        "tags": [
-          "system"
-        ]
-      },
-      "post": {
-        "description": "Create a new vendor SDK platform profile.",
-        "operationId": "create_vendor_sdk_api_v1_system_vendor_sdks_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/VendorSDKCreate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Vendor Sdk",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/vendor/sdks/{platform}": {
-      "delete": {
-        "description": "Delete a vendor SDK platform profile.",
-        "operationId": "delete_vendor_sdk_api_v1_system_vendor_sdks__platform__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "platform",
-            "required": true,
-            "schema": {
-              "title": "Platform",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Vendor Sdk",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/vendor/sdks/{platform}/install": {
-      "post": {
-        "description": "Clone and provision the vendor SDK for a platform.\n\nReads sdk_git_url from the platform YAML, clones the repo,\nscans for toolchain/sysroot, and updates the platform profile.",
-        "operationId": "install_vendor_sdk_api_v1_system_vendor_sdks__platform__install_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "platform",
-            "required": true,
-            "schema": {
-              "title": "Platform",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Install Vendor Sdk",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
-    "/api/v1/runtime/vendor/sdks/{platform}/validate": {
-      "get": {
-        "description": "Validate that SDK paths in a platform profile exist on disk.",
-        "operationId": "validate_vendor_sdk_api_v1_system_vendor_sdks__platform__validate_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "platform",
-            "required": true,
-            "schema": {
-              "title": "Platform",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Validate Vendor Sdk",
-        "tags": [
-          "integration"
-        ]
-      }
-    },
     "/api/v1/tasks": {
       "get": {
         "operationId": "list_tasks_api_v1_tasks_get",
@@ -29141,7 +29409,7 @@
         ]
       },
       "patch": {
-        "description": "Update a task. Status changes are validated against the state machine.\n\nPass ``force=true`` to bypass transition validation (for system/human use).",
+        "description": "Update a task. Status changes are validated against the state machine.\n\nPass ``force=true`` to bypass transition validation (for system/human use).\n\nQ.7 #301 — requires ``If-Match: <version>`` header. Two devices\nracing on the same task produce exactly one winner (version bump\nlands) and one 409 (body carries ``current_version`` /\n``your_version`` / ``hint`` so the frontend ``use409Conflict``\nhook can surface the toast + 3-button choice).",
         "operationId": "update_task_api_v1_tasks__task_id__patch",
         "parameters": [
           {
@@ -29161,6 +29429,22 @@
               "default": false,
               "title": "Force",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
             }
           }
         ],
@@ -30959,6 +31243,104 @@
         ]
       }
     },
+    "/api/v1/user/drafts/{slot_key}": {
+      "get": {
+        "description": "Q.6 #300 checkbox 2 — restore on new device.\n\nFetch the server-stored draft for ``(current_user, slot_key)``.\nReturns ``{slot_key, content, updated_at}`` when the row exists,\nor a shaped empty response (``content=\"\"``, ``updated_at=None``)\nwhen no row has ever been written so the caller can skip a\n\"is it null?\" branch in JS.\n\nReturning 200 + empty over 404 is deliberate: the frontend calls\nthis on every page mount and a 404 on a fresh slot would just\npollute the DevTools network tab. The empty-shape contract also\nkeeps the TS type a single ``DraftResponse`` on the happy path\ninstead of forcing a ``DraftResponse | null`` union.",
+        "operationId": "get_user_draft_api_v1_user_drafts__slot_key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slot_key",
+            "required": true,
+            "schema": {
+              "title": "Slot Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get User Draft Api V1 User Drafts  Slot Key  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get User Draft",
+        "tags": [
+          "drafts"
+        ]
+      },
+      "put": {
+        "description": "Upsert ``content`` into the (user_id, slot_key) row. Always\nreturns 200 with the server-committed ``updated_at`` timestamp.\n\nBest-effort opportunistic GC: after the upsert lands, sweep rows\nolder than 24 h. Failures in the GC do NOT fail the PUT — the\ndraft itself is the only correctness-critical write here, and the\nsweep is purely a table-bound housekeeping nicety.",
+        "operationId": "put_user_draft_api_v1_user_drafts__slot_key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slot_key",
+            "required": true,
+            "schema": {
+              "title": "Slot Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put User Draft Api V1 User Drafts  Slot Key  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put User Draft",
+        "tags": [
+          "drafts"
+        ]
+      }
+    },
     "/api/v1/users": {
       "get": {
         "operationId": "list_users_api_v1_users_get",
@@ -32369,7 +32751,7 @@
     },
     "/api/v1/webhooks/gerrit": {
       "post": {
-        "description": "Receive Gerrit events and trigger appropriate actions.\n\nGerrit sends JSON events via its webhook plugin or stream-events.\nSupports optional HMAC-SHA256 signature via X-Gerrit-Signature header.",
+        "description": "Receive Gerrit events and trigger appropriate actions.\n\nGerrit sends JSON events via its webhook plugin or stream-events.\nSupports optional HMAC-SHA256 signature via X-Gerrit-Signature header.\n\nPhase-3-Runtime-v2 SP-3.1: handler takes a pool-backed\n``asyncpg.Connection`` so the agent-spawn code path inside\n``_on_patchset_created`` can persist the spawned reviewer via\nthe ported ``db.upsert_agent`` API. Background tasks started from\nhere (``_run_review``) acquire their OWN conn since the request\nscope ends before they run.",
         "operationId": "gerrit_webhook_api_v1_webhooks_gerrit_post",
         "responses": {
           "200": {

@@ -619,6 +619,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/sessions/presence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Sessions Presence
+         * @description Return the count + brief metadata for the caller's active devices.
+         *
+         *     Active = heartbeat recorded by the SSE stream within the last
+         *     ``_PRESENCE_WINDOW_S`` seconds. Devices inside the window but quieter
+         *     than ``_PRESENCE_IDLE_THRESHOLD_S`` are flagged ``status="idle"``;
+         *     fresher ones ``status="active"``.
+         */
+        get: operations["sessions_presence_api_v1_auth_sessions_presence_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/sessions/{token_hint}": {
         parameters: {
             query?: never;
@@ -629,7 +654,36 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Session */
+        /**
+         * Revoke Session
+         * @description Revoke a single session by opaque token hint.
+         *
+         *     Default (no ``cascade`` query param): delete the matching session
+         *     row only. Unchanged legacy behaviour — used by the ``/settings/
+         *     security`` panel and `/auth/sessions` UI.
+         *
+         *     Q.2 (#296) 「這不是我」 cascade: ``?cascade=not_me`` escalates the
+         *     operation into a full account-compromise response. When the new-
+         *     device toast renders and the user decides the login wasn't them:
+         *
+         *       1. Revoke the flagged session (same as default path).
+         *       2. Rotate every OTHER session belonging to the user via the
+         *          Q.1 path (``auth.rotate_user_sessions`` with reason=
+         *          ``user_security_event``, trigger=``not_me_cascade``) — this
+         *          kicks the calling device too, so on the next request it
+         *          401s and lib/api.ts redirects to ``/login?reason=...``.
+         *       3. Flip ``users.must_change_password = 1`` so the K1 428 gate
+         *          forces a password change before any other API call succeeds
+         *          after re-login.
+         *       4. Clear the caller's own session + CSRF cookies so the browser
+         *          doesn't hold onto a dead token.
+         *
+         *     The cascade is idempotent-safe: if the target session was already
+         *     gone (double-click race) we still run steps 2-4, because the
+         *     caller's intent is "kick everyone, force password change" — not
+         *     "just delete this one row". A 404 on the target session returns
+         *     an empty cascade result rather than silently succeeding.
+         */
         delete: operations["revoke_session_api_v1_auth_sessions__token_hint__delete"];
         options?: never;
         head?: never;
@@ -1003,7 +1057,35 @@ export interface paths {
         put?: never;
         /**
          * Bootstrap Finalize
-         * @description Close out the wizard — admin only, requires every gate green.
+         * @description Close out the wizard. No session is required — matches every
+         *     other ``/bootstrap/*`` endpoint's pre-login posture.
+         *
+         *     Auth posture history: an earlier revision required
+         *     ``Depends(require_admin)`` here, on the assumption the operator
+         *     had logged in by Step 7. In practice the wizard never surfaces
+         *     a login step — Step 1 just rotates the admin password without
+         *     creating a session — so finalize was permanently unreachable
+         *     from the UI flow (401 → global api-client redirect to ``/login``
+         *     → bootstrap_gate bounces back to ``/bootstrap`` → operator loop).
+         *     The bootstrap_gate middleware itself is the security boundary
+         *     for this whole family of endpoints:
+         *
+         *       * Pre-finalize: only the wizard and the wizard-exempt static
+         *         paths can reach ``/bootstrap/*`` (every other path returns
+         *         503 ``bootstrap_required``). External attackers have no
+         *         reachable non-wizard surface.
+         *       * Post-finalize: the gate stops mattering (finalized goes
+         *         sticky-green) but re-calling finalize is idempotent —
+         *         ``mark_bootstrap_finalized`` writes the same
+         *         ``bootstrap_finalized=true`` marker that already exists
+         *         and no new audit row carries privileged state.
+         *
+         *     We still try to identify the actor: if a session cookie is
+         *     present (admin logged in manually before running the wizard,
+         *     or a returning operator re-finalizing after a reset), we thread
+         *     their user id into ``bootstrap_state.actor_user_id`` + the audit
+         *     ``actor``. Otherwise we record ``wizard`` so the audit row isn't
+         *     anonymous.
          *
          *     409 conditions (the wizard should keep the operator on the current
          *     step):
@@ -1412,11 +1494,26 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get History */
+        /**
+         * Get History
+         * @description Return the current user's chat history, oldest-first.
+         *
+         *     Bounded to the most recent ``_HISTORY_LIMIT`` messages. The PG
+         *     retention sweep keeps the table itself bounded to 30 days per
+         *     user; this LIMIT is a second line of defence against pathological
+         *     single-day chat volumes.
+         */
         get: operations["get_history_api_v1_chat_history_get"];
         put?: never;
         post?: never;
-        /** Clear History */
+        /**
+         * Clear History
+         * @description Wipe the current admin's chat history.
+         *
+         *     Tenant-scoped — even an admin can only clear their own tenant's
+         *     rows for their own user_id. Cross-tenant or cross-user deletes
+         *     are explicitly out of scope for this endpoint.
+         */
         delete: operations["clear_history_api_v1_chat_history_delete"];
         options?: never;
         head?: never;
@@ -1436,6 +1533,13 @@ export interface paths {
          * Chat Stream
          * @description SSE streaming — pipeline runs with real-time events pushed via event bus,
          *     then the final answer is streamed token-by-token here.
+         *
+         *     The token-by-token chunks ride this HTTP response body only and
+         *     stay bound to the originator session — we never ``bus.publish``
+         *     intermediate chunks (would flood other devices with unreadable
+         *     partial state). The finalised user + orchestrator messages are
+         *     persisted + fanned out via ``chat.message`` once before the stream
+         *     starts, so a second device sees them appear atomically.
          */
         post: operations["chat_stream_api_v1_chat_stream_post"];
         delete?: never;
@@ -3288,6 +3392,18 @@ export interface paths {
         /**
          * Event Stream
          * @description Persistent SSE connection. Pushes all real-time events to the frontend.
+         *
+         *     Phase-3 follow-up (2026-04-20): emit an immediate ``open`` event as
+         *     the very first yield. Without it, CF edge + CF Tunnel buffer the SSE
+         *     response until the first body byte arrives (up to several seconds
+         *     even though the backend starts producing ~1 Hz host.metrics.tick
+         *     events within ~1 s). Browsers treat the initial silence as a dead
+         *     connection and EventSource closes + reconnects in a rapid loop,
+         *     which burns per-IP rate-limit tokens and eventually 429s the next
+         *     login attempt — recreating the same cascade the SQLite WAL storm
+         *     fix was written to avoid. A 2-byte first event is enough to push
+         *     CF past its buffer threshold; subsequent events flow through
+         *     without buffering.
          */
         get: operations["event_stream_api_v1_events_get"];
         put?: never;
@@ -7188,6 +7304,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/runs/{project_run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Project Run
+         * @description Update a project run's label (operator rename flow).
+         *
+         *     Q.7 #301 — requires ``If-Match: <version>`` header. Two operators
+         *     renaming the same project run on different devices produce exactly
+         *     one winner (post-bump version echoed) and one 409 (shaped body
+         *     the frontend ``use409Conflict`` hook consumes).
+         *
+         *     The ``PATCH /projects/{id}`` slot in the TODO mapped onto
+         *     ``project_runs`` here because that is the only DB-backed
+         *     "projects" entity today — the ``projects`` top-level table
+         *     is a future item (see TODO Y4-era work). The endpoint shape
+         *     (``PATCH /projects/runs/{id}``) leaves room for a future
+         *     ``PATCH /projects/{project_id}`` without colliding.
+         */
+        patch: operations["patch_project_run_api_v1_projects_runs__project_run_id__patch"];
+        trace?: never;
+    };
     "/api/v1/projects/{project_id}/report": {
         parameters: {
             query?: never;
@@ -7250,6 +7398,10 @@ export interface paths {
         /**
          * List Project Runs
          * @description B7 (#207): parent project_runs with materialised child workflow_runs.
+         *
+         *     Q.7 #301: each item now carries ``version`` so the frontend can
+         *     echo it back in ``If-Match`` when PATCHing the run's label /
+         *     metadata.
          */
         get: operations["list_project_runs_api_v1_projects__project_id__runs_get"];
         put?: never;
@@ -8075,6 +8227,1200 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runtime/compression": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Compression Stats
+         * @description Return RTK output compression statistics.
+         */
+        get: operations["get_compression_stats_api_v1_runtime_compression_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/debug": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Debug State
+         * @description Comprehensive debug state: agent errors, blocked tasks, debug findings.
+         */
+        get: operations["get_debug_state_api_v1_runtime_debug_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/deploy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Deploy
+         * @description Trigger deployment to an EVK board. Admin only.
+         */
+        post: operations["trigger_deploy_api_v1_runtime_deploy_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Devices */
+        get: operations["get_devices_api_v1_runtime_devices_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/evk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Evk Status
+         * @description Check EVK board reachability for all platforms with deploy config.
+         */
+        get: operations["get_evk_status_api_v1_runtime_evk_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/forecast": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Project Forecast
+         * @description Phase 60: project-level estimates (tasks / agents / hours /
+         *     tokens / USD / confidence) computed from the active
+         *     hardware_manifest.yaml. Template-based v0 — see backend/forecast.py
+         *     for the model evolution roadmap.
+         */
+        get: operations["get_project_forecast_api_v1_runtime_forecast_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/forecast/recompute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Recompute Project Forecast
+         * @description Bust the 5-min cache and re-read the manifest.
+         */
+        post: operations["recompute_project_forecast_api_v1_runtime_forecast_recompute_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/gerrit/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finalize Gerrit Integration
+         * @description Persist the wizard's collected Gerrit settings and flip
+         *     ``gerrit_enabled`` on — the closing act of the Setup Wizard.
+         *
+         *     Steps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).
+         *     Without this finalize step the operator would have to re-enter every
+         *     Step 1 value into the Settings form by hand to actually turn the
+         *     integration on, defeating the wizard. This endpoint is the single
+         *     atomic write that promotes wizard inputs into ``settings.gerrit_*``
+         *     and reports success so the UI can render the「Gerrit 整合已啟用」
+         *     confirmation banner.
+         *
+         *     Validation is intentionally narrow:
+         *       * ``ssh_host`` must be non-empty (Step 1 cannot have passed
+         *         otherwise; we double-check here so a hand-rolled curl can't
+         *         write garbage).
+         *       * ``ssh_port`` must be in [1, 65535].
+         *       * ``url`` and ``project`` are normalised (trim) but not
+         *         round-tripped to Gerrit again — Step 1 + Step 4 already proved
+         *         they work.
+         *
+         *     The webhook secret is *not* echoed back even masked — the Step 5
+         *     generate response was the one-and-only reveal.
+         */
+        post: operations["finalize_gerrit_integration_api_v1_runtime_git_forge_gerrit_finalize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/gerrit/verify-bot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Gerrit Merger Bot
+         * @description Verify the ``merger-agent-bot`` Gerrit group exists and has members.
+         *
+         *     B14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH
+         *     transport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit
+         *     ls-members`` instead of ``gerrit version`` so the probe only succeeds
+         *     when the O7 dual-+2 group is properly seated. Never mutates Gerrit —
+         *     group creation + member-add stay manual (they require admin rights
+         *     per the runbook in docs/ops/gerrit_dual_two_rule.md §1).
+         */
+        post: operations["verify_gerrit_merger_bot_api_v1_runtime_git_forge_gerrit_verify_bot_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/gerrit/verify-submit-rule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify Gerrit Submit Rule
+         * @description Verify the target Gerrit project carries the O7 dual-+2 submit rule.
+         *
+         *     B14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:
+         *     reads ``refs/meta/config:project.config`` over the Gerrit SSH
+         *     transport and pattern-matches the three ACL lines that encode the
+         *     dual-+2 gate. Installation of the rule stays manual (it requires
+         *     ``Push`` on ``refs/meta/config`` which is an admin-only ref) per
+         *     docs/ops/gerrit_dual_two_rule.md §2.
+         */
+        post: operations["verify_gerrit_submit_rule_api_v1_runtime_git_forge_gerrit_verify_submit_rule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/gerrit/webhook-info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Gerrit Webhook Info
+         * @description Return the inbound webhook URL + secret status the operator must
+         *     paste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).
+         *
+         *     Never returns the plain secret — only ``secret_configured`` plus a
+         *     ``secret_masked`` preview so the operator can confirm what's wired
+         *     without re-revealing it. Use ``POST .../webhook-secret/generate`` to
+         *     rotate (which returns the new plain value exactly once).
+         */
+        get: operations["get_gerrit_webhook_info_api_v1_runtime_git_forge_gerrit_webhook_info_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Gerrit Webhook Secret
+         * @description Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.
+         *
+         *     32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with
+         *     ~256 bits of entropy, well above the 128-bit floor recommended for
+         *     HMAC-SHA256 keys. The plain value is returned **only** in this
+         *     response — the operator must capture it before closing the wizard;
+         *     subsequent ``webhook-info`` calls will surface only the masked
+         *     preview. Rotating here invalidates whatever secret Gerrit currently
+         *     holds, so the operator must re-paste the new value into Gerrit's
+         *     ``webhooks.config`` for events to keep verifying.
+         */
+        post: operations["generate_gerrit_webhook_secret_api_v1_runtime_git_forge_gerrit_webhook_secret_generate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/ssh-pubkey": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Git Forge Ssh Pubkey
+         * @description Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.
+         *
+         *     Read-only — never mutates settings, never exposes the private key.
+         *     Drives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-
+         *     Gerrit flow) and is safe to surface to any operator-role session
+         *     since the public half of an SSH keypair is non-secret by design.
+         */
+        get: operations["get_git_forge_ssh_pubkey_api_v1_runtime_git_forge_ssh_pubkey_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/git-forge/test-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Git Forge Token
+         * @description Validate a candidate Git forge credential WITHOUT persisting it.
+         *
+         *     Used by the Bootstrap Step 3.5 Git Forge setup to let the operator
+         *     sanity-check their credential before they commit it to settings.
+         *     ``github`` / ``gitlab`` run a token probe against the respective
+         *     REST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since
+         *     Gerrit's first-class transport is SSH, not HTTP.
+         */
+        post: operations["test_git_forge_token_api_v1_runtime_git_forge_test_token_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get System Info */
+        get: operations["get_system_info_api_v1_runtime_info_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Logs
+         * @description Return recent system logs.
+         */
+        get: operations["get_logs_api_v1_runtime_logs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/model-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Available Model Rules
+         * @description List all available model rule definitions from configs/models/.
+         */
+        get: operations["get_available_model_rules_api_v1_runtime_model_rules_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Notifications
+         * @description List notifications, optionally filtered by level.
+         */
+        get: operations["get_notifications_api_v1_runtime_notifications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/notifications/unread-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unread Count
+         * @description Count unread notifications (L2+).
+         */
+        get: operations["unread_count_api_v1_runtime_notifications_unread_count_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/notifications/{notification_id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Read
+         * @description Mark a notification as read.
+         *
+         *     Q.3-SUB-3 (#297): on a successful flip, emit ``notification.read``
+         *     on the event bus so other devices owned by the same user can
+         *     decrement their bell badge and drop the row from their local list
+         *     without waiting for the next ``/notifications/unread-count`` poll.
+         *     Emit is best-effort (``broadcast_scope='user'``, advisory until
+         *     Q.4 #298) and is swallowed on failure — the PG row is the
+         *     source of truth, the SSE push is latency-optimisation only.
+         */
+        post: operations["mark_read_api_v1_runtime_notifications__notification_id__read_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/npi": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Npi State
+         * @description Return the current NPI lifecycle state.
+         *
+         *     Q.7 #301: response now carries ``version`` so the frontend can
+         *     echo it back in ``If-Match`` on the PUT.
+         */
+        get: operations["get_npi_state_api_v1_runtime_npi_get"];
+        /**
+         * Update Npi State
+         * @description Update NPI project-level settings.
+         *
+         *     Q.7 #301 — requires ``If-Match: <version>`` header. Runtime
+         *     settings are a singleton row (``id = 'current'``) so the lock
+         *     guards a different race than workflow_runs — two admins on
+         *     separate devices toggling ``business_model`` at the same time.
+         *     Loser receives 409 with ``{current_version, your_version,
+         *     hint}`` and the frontend hook offers 重載 / 覆蓋 / 合併.
+         */
+        put: operations["update_npi_state_api_v1_runtime_npi_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/npi/milestones/{milestone_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Npi Milestone
+         * @description Update a specific NPI milestone.
+         */
+        patch: operations["update_npi_milestone_api_v1_runtime_npi_milestones__milestone_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/runtime/npi/phases/{phase_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Npi Phase
+         * @description Update a specific NPI phase.
+         */
+        patch: operations["update_npi_phase_api_v1_runtime_npi_phases__phase_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/runtime/pipeline/advance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Advance Pipeline Endpoint
+         * @description Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed). Admin only.
+         */
+        post: operations["advance_pipeline_endpoint_api_v1_runtime_pipeline_advance_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/pipeline/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Pipeline
+         * @description Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs. Admin only.
+         */
+        post: operations["start_pipeline_api_v1_runtime_pipeline_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/pipeline/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pipeline Status Endpoint
+         * @description Get the current E2E pipeline run status.
+         */
+        get: operations["get_pipeline_status_endpoint_api_v1_runtime_pipeline_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/pipeline/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pipeline Timeline
+         * @description Phase 50A — timeline with per-step timing + velocity rollup.
+         *
+         *     Returns:
+         *       steps: [{ id, name, npi_phase, auto_advance, human_checkpoint,
+         *                planned_at, started_at, completed_at, deadline_at,
+         *                status: idle|active|done|overdue }]
+         *       velocity:
+         *         avg_step_seconds:  mean observed duration across completed steps
+         *         eta_completion:    ISO timestamp estimate for pipeline finish, or null
+         *         tasks_completed_7d: tasks the invoke-layer marked done in the last 7 d
+         */
+        get: operations["get_pipeline_timeline_api_v1_runtime_pipeline_timeline_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/platform-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Platform Status
+         * @description H1: surface host arch + active target arch + toolchain readiness so
+         *     the operator chip in the dashboard header can warn about
+         *     cross-compile mismatch *before* a build starts.
+         *
+         *     Status values:
+         *       * `no_target`         — hardware_manifest.target_platform is empty
+         *       * `native`            — host arch == target arch (Phase 59 fast-path)
+         *       * `cross_ready`       — different arch + cross-compiler installed
+         *       * `toolchain_missing` — different arch + cross-compiler NOT on PATH
+         *       * `unknown_target`    — target_platform set but no matching profile yaml
+         */
+        get: operations["get_platform_status_api_v1_runtime_platform_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/platforms/toolchains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Toolchains
+         * @description Return every known toolchain name, grouped by platform and tier.
+         *
+         *     Response shape:
+         *       all:          sorted unique list of all toolchain strings
+         *       by_platform:  { platform_name: default_toolchain }
+         *       by_tier:      { tier_id: [allowed_toolchains] }
+         */
+        get: operations["list_toolchains_api_v1_runtime_platforms_toolchains_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Release
+         * @description Create a release bundle and optionally upload to GitHub/GitLab.
+         *
+         *     Returns bundle metadata, manifest, and upload results.
+         */
+        post: operations["create_release_api_v1_runtime_release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/release/manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Release Manifest
+         * @description Generate a release manifest (JSON) listing all artifacts.
+         */
+        get: operations["get_release_manifest_api_v1_runtime_release_manifest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/release/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Release Version
+         * @description Get the current resolved version.
+         */
+        get: operations["get_release_version_api_v1_runtime_release_version_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/repos": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Repos
+         * @description List git repositories: main repo + credential registry + agent worktrees.
+         */
+        get: operations["get_repos_api_v1_runtime_repos_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Available Roles
+         * @description List all available agent roles from configs/roles/.
+         */
+        get: operations["get_available_roles_api_v1_runtime_roles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/sandbox/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sandbox Capacity
+         * @description I6: DRF per-tenant sandbox capacity snapshot.
+         */
+        get: operations["get_sandbox_capacity_api_v1_runtime_sandbox_capacity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/sandbox/capacity/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Tenant Capacity
+         * @description I6: Per-tenant sandbox capacity usage.
+         */
+        get: operations["get_tenant_capacity_api_v1_runtime_sandbox_capacity__tenant_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Settings
+         * @description Return all integration settings grouped by category. Tokens are masked.
+         */
+        get: operations["get_settings_api_v1_runtime_settings_get"];
+        /**
+         * Update Settings
+         * @description Update integration settings at runtime.
+         *
+         *     Values land on this worker's in-memory ``settings`` singleton AND
+         *     (for the subset listed in ``_SHARED_KV_FIELDS``) are mirrored into
+         *     Redis-backed ``SharedKV`` so the other 3 workers overlay them on
+         *     their next request. This fixes the 2026-04-22 operator report
+         *     where saving Google then OpenAI caused Google's green light to
+         *     disappear — each save was landing on a different worker and the
+         *     UI was round-robin reading from workers that hadn't seen the
+         *     prior save. Full DB-persistent per-tenant solution lands in
+         *     Phase 5b.
+         */
+        put: operations["update_settings_api_v1_runtime_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/settings/git/token-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Git Token Map
+         * @description Return the configured per-host token maps with tokens masked.
+         *
+         *     Shape::
+         *
+         *         {
+         *           "github": [{"platform": "github", "host": "...", "token_masked": "..."}],
+         *           "gitlab": [...],
+         *         }
+         *
+         *     Empty platforms surface as empty lists — never ``null`` — so the UI
+         *     can render "no additional instances configured" without branching on
+         *     presence.
+         */
+        get: operations["get_git_token_map_api_v1_runtime_settings_git_token_map_get"];
+        /**
+         * Update Git Token Map
+         * @description Replace the per-host token maps.
+         *
+         *     A blank ``token`` for a given host preserves the existing secret so the
+         *     UI can round-trip the masked list without re-prompting every token.
+         *     Removing a host just means omitting it from the PUT body — this
+         *     endpoint is a replace, not a patch.
+         *
+         *     Duplicate hosts in the payload are merged last-write-wins (the final
+         *     entry in the list). Empty host strings are ignored.
+         */
+        put: operations["update_git_token_map_api_v1_runtime_settings_git_token_map_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/simulations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Simulations
+         * @description List recent simulation runs with optional filters.
+         */
+        get: operations["list_simulations_api_v1_runtime_simulations_get"];
+        put?: never;
+        /**
+         * Trigger Simulation
+         * @description Manually trigger a simulation run (from UI or external API).
+         */
+        post: operations["trigger_simulation_api_v1_runtime_simulations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/simulations/{sim_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Simulation
+         * @description Get a specific simulation result with full report.
+         */
+        get: operations["get_simulation_api_v1_runtime_simulations__sim_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/spec": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Spec
+         * @description Load spec from hardware_manifest.yaml (or return empty if not found).
+         */
+        get: operations["get_spec_api_v1_runtime_spec_get"];
+        /**
+         * Update Spec Field
+         * @description Update a single field in hardware_manifest.yaml.
+         */
+        put: operations["update_spec_field_api_v1_runtime_spec_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/sse-schema": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sse Schema
+         * @description A4/C7: return JSON-Schema for every SSE event type keyed by event
+         *     name, so the frontend can detect drift between the hand-maintained
+         *     TS union in lib/api.ts and the backend Pydantic models. Shape matches
+         *     the `get_sse_schema_export()` helper — i.e. flat `{ event_name:
+         *     { description, schema } }` map.
+         */
+        get: operations["get_sse_schema_api_v1_runtime_sse_schema_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get System Status */
+        get: operations["get_system_status_api_v1_runtime_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/test/{integration}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Integration
+         * @description Test connectivity for an external integration.
+         */
+        post: operations["test_integration_api_v1_runtime_test__integration__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/token-budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Token Budget
+         * @description Return current budget settings, daily usage, and freeze status.
+         */
+        get: operations["get_token_budget_api_v1_runtime_token_budget_get"];
+        /**
+         * Update Token Budget
+         * @description Update token budget settings at runtime.
+         */
+        put: operations["update_token_budget_api_v1_runtime_token_budget_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/token-budget/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Token Freeze
+         * @description Reset the token freeze state (human intervention).
+         */
+        post: operations["reset_token_freeze_api_v1_runtime_token_budget_reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Token Usage
+         * @description Return token usage stats per model.
+         *
+         *     ZZ.A1 (#303-2, 2026-04-24): response schema formalised as
+         *     ``list[TokenUsageEntry]`` so the openapi.json advertises the
+         *     prompt-cache fields (``cache_read_tokens`` / ``cache_create_tokens``
+         *     / ``cache_hit_ratio``) introduced in ZZ.A1-1 / ZZ.A1-2. Values are
+         *     ``None`` on pre-ZZ legacy rows (distinguishes "no data" from zero
+         *     hits) and populated on ZZ-era rows — see ``TokenUsageEntry`` and
+         *     ``backend/shared_state.py::_normalize_token_entry``.
+         */
+        get: operations["get_token_usage_api_v1_runtime_tokens_get"];
+        put?: never;
+        post?: never;
+        /**
+         * Reset Token Usage
+         * @description Reset all token usage counters.
+         */
+        delete: operations["reset_token_usage_api_v1_runtime_tokens_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/vendor/sdks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Vendor Sdks
+         * @description List available vendor SDK platform profiles and their mount status.
+         */
+        get: operations["list_vendor_sdks_api_v1_runtime_vendor_sdks_get"];
+        put?: never;
+        /**
+         * Create Vendor Sdk
+         * @description Create a new vendor SDK platform profile.
+         */
+        post: operations["create_vendor_sdk_api_v1_runtime_vendor_sdks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/vendor/sdks/{platform}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Vendor Sdk
+         * @description Delete a vendor SDK platform profile.
+         */
+        delete: operations["delete_vendor_sdk_api_v1_runtime_vendor_sdks__platform__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/vendor/sdks/{platform}/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Install Vendor Sdk
+         * @description Clone and provision the vendor SDK for a platform.
+         *
+         *     Reads sdk_git_url from the platform YAML, clones the repo,
+         *     scans for toolchain/sysroot, and updates the platform profile.
+         */
+        post: operations["install_vendor_sdk_api_v1_runtime_vendor_sdks__platform__install_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/vendor/sdks/{platform}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Validate Vendor Sdk
+         * @description Validate that SDK paths in a platform profile exist on disk.
+         */
+        get: operations["validate_vendor_sdk_api_v1_runtime_vendor_sdks__platform__validate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/safety/artifacts": {
         parameters: {
             query?: never;
@@ -8266,7 +9612,17 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update Secret */
+        /**
+         * Update Secret
+         * @description Rotate a secret value and/or its metadata.
+         *
+         *     Q.7 #301 — requires ``If-Match: <version>`` header. Two admins
+         *     rotating the same provider key from laptop + phone concurrently
+         *     produce exactly one winner (post-bump version echoed in the
+         *     response) and one 409 (body carries ``current_version`` /
+         *     ``your_version`` / ``hint`` for the frontend ``use409Conflict``
+         *     hook).
+         */
         put: operations["update_secret_api_v1_secrets__secret_id__put"];
         post?: never;
         /** Delete Secret Endpoint */
@@ -9293,1164 +10649,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runtime/compression": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Compression Stats
-         * @description Return RTK output compression statistics.
-         */
-        get: operations["get_compression_stats_api_v1_system_compression_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/debug": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Debug State
-         * @description Comprehensive debug state: agent errors, blocked tasks, debug findings.
-         */
-        get: operations["get_debug_state_api_v1_system_debug_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/deploy": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Trigger Deploy
-         * @description Trigger deployment to an EVK board.
-         */
-        post: operations["trigger_deploy_api_v1_system_deploy_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/devices": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Devices */
-        get: operations["get_devices_api_v1_system_devices_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/evk": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Evk Status
-         * @description Check EVK board reachability for all platforms with deploy config.
-         */
-        get: operations["get_evk_status_api_v1_system_evk_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/forecast": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Project Forecast
-         * @description Phase 60: project-level estimates (tasks / agents / hours /
-         *     tokens / USD / confidence) computed from the active
-         *     hardware_manifest.yaml. Template-based v0 — see backend/forecast.py
-         *     for the model evolution roadmap.
-         */
-        get: operations["get_project_forecast_api_v1_system_forecast_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/forecast/recompute": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Recompute Project Forecast
-         * @description Bust the 5-min cache and re-read the manifest.
-         */
-        post: operations["recompute_project_forecast_api_v1_system_forecast_recompute_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/gerrit/finalize": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Finalize Gerrit Integration
-         * @description Persist the wizard's collected Gerrit settings and flip
-         *     ``gerrit_enabled`` on — the closing act of the Setup Wizard.
-         *
-         *     Steps 1-5 only mutate ``gerrit_webhook_secret`` (Step 5 generate).
-         *     Without this finalize step the operator would have to re-enter every
-         *     Step 1 value into the Settings form by hand to actually turn the
-         *     integration on, defeating the wizard. This endpoint is the single
-         *     atomic write that promotes wizard inputs into ``settings.gerrit_*``
-         *     and reports success so the UI can render the「Gerrit 整合已啟用」
-         *     confirmation banner.
-         *
-         *     Validation is intentionally narrow:
-         *       * ``ssh_host`` must be non-empty (Step 1 cannot have passed
-         *         otherwise; we double-check here so a hand-rolled curl can't
-         *         write garbage).
-         *       * ``ssh_port`` must be in [1, 65535].
-         *       * ``url`` and ``project`` are normalised (trim) but not
-         *         round-tripped to Gerrit again — Step 1 + Step 4 already proved
-         *         they work.
-         *
-         *     The webhook secret is *not* echoed back even masked — the Step 5
-         *     generate response was the one-and-only reveal.
-         */
-        post: operations["finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/gerrit/verify-bot": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Verify Gerrit Merger Bot
-         * @description Verify the ``merger-agent-bot`` Gerrit group exists and has members.
-         *
-         *     B14 Part C row 224 — Step 3 of the Gerrit Setup Wizard. Shares the SSH
-         *     transport with Step 1's ``_probe_gerrit_ssh`` but calls ``gerrit
-         *     ls-members`` instead of ``gerrit version`` so the probe only succeeds
-         *     when the O7 dual-+2 group is properly seated. Never mutates Gerrit —
-         *     group creation + member-add stay manual (they require admin rights
-         *     per the runbook in docs/ops/gerrit_dual_two_rule.md §1).
-         */
-        post: operations["verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/gerrit/verify-submit-rule": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Verify Gerrit Submit Rule
-         * @description Verify the target Gerrit project carries the O7 dual-+2 submit rule.
-         *
-         *     B14 Part C row 225 — Step 4 of the Gerrit Setup Wizard. Non-mutating:
-         *     reads ``refs/meta/config:project.config`` over the Gerrit SSH
-         *     transport and pattern-matches the three ACL lines that encode the
-         *     dual-+2 gate. Installation of the rule stays manual (it requires
-         *     ``Push`` on ``refs/meta/config`` which is an admin-only ref) per
-         *     docs/ops/gerrit_dual_two_rule.md §2.
-         */
-        post: operations["verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/gerrit/webhook-info": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Gerrit Webhook Info
-         * @description Return the inbound webhook URL + secret status the operator must
-         *     paste into Gerrit's ``webhooks.config`` (Step 5 of the Setup Wizard).
-         *
-         *     Never returns the plain secret — only ``secret_configured`` plus a
-         *     ``secret_masked`` preview so the operator can confirm what's wired
-         *     without re-revealing it. Use ``POST .../webhook-secret/generate`` to
-         *     rotate (which returns the new plain value exactly once).
-         */
-        get: operations["get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/gerrit/webhook-secret/generate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Generate Gerrit Webhook Secret
-         * @description Mint + persist a fresh ``gerrit_webhook_secret`` and return it once.
-         *
-         *     32 bytes of ``secrets.token_urlsafe`` → ~43-char URL-safe string with
-         *     ~256 bits of entropy, well above the 128-bit floor recommended for
-         *     HMAC-SHA256 keys. The plain value is returned **only** in this
-         *     response — the operator must capture it before closing the wizard;
-         *     subsequent ``webhook-info`` calls will surface only the masked
-         *     preview. Rotating here invalidates whatever secret Gerrit currently
-         *     holds, so the operator must re-paste the new value into Gerrit's
-         *     ``webhooks.config`` for events to keep verifying.
-         */
-        post: operations["generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/ssh-pubkey": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Git Forge Ssh Pubkey
-         * @description Return the OmniSight SSH public key for Gerrit ``Settings → SSH Keys``.
-         *
-         *     Read-only — never mutates settings, never exposes the private key.
-         *     Drives Step 2 of the Gerrit Setup Wizard (display-pubkey + paste-into-
-         *     Gerrit flow) and is safe to surface to any operator-role session
-         *     since the public half of an SSH keypair is non-secret by design.
-         */
-        get: operations["get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/git-forge/test-token": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Test Git Forge Token
-         * @description Validate a candidate Git forge credential WITHOUT persisting it.
-         *
-         *     Used by the Bootstrap Step 3.5 Git Forge setup to let the operator
-         *     sanity-check their credential before they commit it to settings.
-         *     ``github`` / ``gitlab`` run a token probe against the respective
-         *     REST APIs; ``gerrit`` runs an SSH probe (``gerrit version``) since
-         *     Gerrit's first-class transport is SSH, not HTTP.
-         */
-        post: operations["test_git_forge_token_api_v1_system_git_forge_test_token_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/info": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get System Info */
-        get: operations["get_system_info_api_v1_system_info_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/logs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Logs
-         * @description Return recent system logs.
-         */
-        get: operations["get_logs_api_v1_system_logs_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/model-rules": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Available Model Rules
-         * @description List all available model rule definitions from configs/models/.
-         */
-        get: operations["get_available_model_rules_api_v1_system_model_rules_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/notifications": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Notifications
-         * @description List notifications, optionally filtered by level.
-         */
-        get: operations["get_notifications_api_v1_system_notifications_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/notifications/unread-count": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Unread Count
-         * @description Count unread notifications (L2+).
-         */
-        get: operations["unread_count_api_v1_system_notifications_unread_count_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/notifications/{notification_id}/read": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Mark Read
-         * @description Mark a notification as read.
-         */
-        post: operations["mark_read_api_v1_system_notifications__notification_id__read_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/npi": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Npi State
-         * @description Return the current NPI lifecycle state.
-         */
-        get: operations["get_npi_state_api_v1_system_npi_get"];
-        /**
-         * Update Npi State
-         * @description Update NPI project-level settings.
-         */
-        put: operations["update_npi_state_api_v1_system_npi_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/npi/milestones/{milestone_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /**
-         * Update Npi Milestone
-         * @description Update a specific NPI milestone.
-         */
-        patch: operations["update_npi_milestone_api_v1_system_npi_milestones__milestone_id__patch"];
-        trace?: never;
-    };
-    "/api/v1/runtime/npi/phases/{phase_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /**
-         * Update Npi Phase
-         * @description Update a specific NPI phase.
-         */
-        patch: operations["update_npi_phase_api_v1_system_npi_phases__phase_id__patch"];
-        trace?: never;
-    };
-    "/api/v1/runtime/pipeline/advance": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Advance Pipeline Endpoint
-         * @description Force-advance past a human checkpoint (Gerrit +2 or HVT confirmed).
-         */
-        post: operations["advance_pipeline_endpoint_api_v1_system_pipeline_advance_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/pipeline/start": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Start Pipeline
-         * @description Start a full E2E pipeline: SPEC → develop → review → test → deploy → package → docs.
-         */
-        post: operations["start_pipeline_api_v1_system_pipeline_start_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/pipeline/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Pipeline Status Endpoint
-         * @description Get the current E2E pipeline run status.
-         */
-        get: operations["get_pipeline_status_endpoint_api_v1_system_pipeline_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/pipeline/timeline": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Pipeline Timeline
-         * @description Phase 50A — timeline with per-step timing + velocity rollup.
-         *
-         *     Returns:
-         *       steps: [{ id, name, npi_phase, auto_advance, human_checkpoint,
-         *                planned_at, started_at, completed_at, deadline_at,
-         *                status: idle|active|done|overdue }]
-         *       velocity:
-         *         avg_step_seconds:  mean observed duration across completed steps
-         *         eta_completion:    ISO timestamp estimate for pipeline finish, or null
-         *         tasks_completed_7d: tasks the invoke-layer marked done in the last 7 d
-         */
-        get: operations["get_pipeline_timeline_api_v1_system_pipeline_timeline_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/platform-status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Platform Status
-         * @description H1: surface host arch + active target arch + toolchain readiness so
-         *     the operator chip in the dashboard header can warn about
-         *     cross-compile mismatch *before* a build starts.
-         *
-         *     Status values:
-         *       * `no_target`         — hardware_manifest.target_platform is empty
-         *       * `native`            — host arch == target arch (Phase 59 fast-path)
-         *       * `cross_ready`       — different arch + cross-compiler installed
-         *       * `toolchain_missing` — different arch + cross-compiler NOT on PATH
-         *       * `unknown_target`    — target_platform set but no matching profile yaml
-         */
-        get: operations["get_platform_status_api_v1_system_platform_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/platforms/toolchains": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Toolchains
-         * @description Return every known toolchain name, grouped by platform and tier.
-         *
-         *     Response shape:
-         *       all:          sorted unique list of all toolchain strings
-         *       by_platform:  { platform_name: default_toolchain }
-         *       by_tier:      { tier_id: [allowed_toolchains] }
-         */
-        get: operations["list_toolchains_api_v1_system_platforms_toolchains_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/release": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Create Release
-         * @description Create a release bundle and optionally upload to GitHub/GitLab.
-         *
-         *     Returns bundle metadata, manifest, and upload results.
-         */
-        post: operations["create_release_api_v1_system_release_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/release/manifest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Release Manifest
-         * @description Generate a release manifest (JSON) listing all artifacts.
-         */
-        get: operations["get_release_manifest_api_v1_system_release_manifest_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/release/version": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Release Version
-         * @description Get the current resolved version.
-         */
-        get: operations["get_release_version_api_v1_system_release_version_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/repos": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Repos
-         * @description List git repositories: main repo + credential registry + agent worktrees.
-         */
-        get: operations["get_repos_api_v1_system_repos_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/roles": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Available Roles
-         * @description List all available agent roles from configs/roles/.
-         */
-        get: operations["get_available_roles_api_v1_system_roles_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/sandbox/capacity": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Sandbox Capacity
-         * @description I6: DRF per-tenant sandbox capacity snapshot.
-         */
-        get: operations["get_sandbox_capacity_api_v1_system_sandbox_capacity_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/sandbox/capacity/{tenant_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Tenant Capacity
-         * @description I6: Per-tenant sandbox capacity usage.
-         */
-        get: operations["get_tenant_capacity_api_v1_system_sandbox_capacity__tenant_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Settings
-         * @description Return all integration settings grouped by category. Tokens are masked.
-         */
-        get: operations["get_settings_api_v1_system_settings_get"];
-        /**
-         * Update Settings
-         * @description Update integration settings at runtime (not persisted to .env).
-         */
-        put: operations["update_settings_api_v1_system_settings_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/settings/git/token-map": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Git Token Map
-         * @description Return the configured per-host token maps with tokens masked.
-         *
-         *     Shape::
-         *
-         *         {
-         *           "github": [{"platform": "github", "host": "...", "token_masked": "..."}],
-         *           "gitlab": [...],
-         *         }
-         *
-         *     Empty platforms surface as empty lists — never ``null`` — so the UI
-         *     can render "no additional instances configured" without branching on
-         *     presence.
-         */
-        get: operations["get_git_token_map_api_v1_system_settings_git_token_map_get"];
-        /**
-         * Update Git Token Map
-         * @description Replace the per-host token maps.
-         *
-         *     A blank ``token`` for a given host preserves the existing secret so the
-         *     UI can round-trip the masked list without re-prompting every token.
-         *     Removing a host just means omitting it from the PUT body — this
-         *     endpoint is a replace, not a patch.
-         *
-         *     Duplicate hosts in the payload are merged last-write-wins (the final
-         *     entry in the list). Empty host strings are ignored.
-         */
-        put: operations["update_git_token_map_api_v1_system_settings_git_token_map_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/simulations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Simulations
-         * @description List recent simulation runs with optional filters.
-         */
-        get: operations["list_simulations_api_v1_system_simulations_get"];
-        put?: never;
-        /**
-         * Trigger Simulation
-         * @description Manually trigger a simulation run (from UI or external API).
-         */
-        post: operations["trigger_simulation_api_v1_system_simulations_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/simulations/{sim_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Simulation
-         * @description Get a specific simulation result with full report.
-         */
-        get: operations["get_simulation_api_v1_system_simulations__sim_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/spec": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Spec
-         * @description Load spec from hardware_manifest.yaml (or return empty if not found).
-         */
-        get: operations["get_spec_api_v1_system_spec_get"];
-        /**
-         * Update Spec Field
-         * @description Update a single field in hardware_manifest.yaml.
-         */
-        put: operations["update_spec_field_api_v1_system_spec_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/sse-schema": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Sse Schema
-         * @description A4/C7: return JSON-Schema for every SSE event type keyed by event
-         *     name, so the frontend can detect drift between the hand-maintained
-         *     TS union in lib/api.ts and the backend Pydantic models. Shape matches
-         *     the `get_sse_schema_export()` helper — i.e. flat `{ event_name:
-         *     { description, schema } }` map.
-         */
-        get: operations["get_sse_schema_api_v1_system_sse_schema_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get System Status */
-        get: operations["get_system_status_api_v1_system_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/test/{integration}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Test Integration
-         * @description Test connectivity for an external integration.
-         */
-        post: operations["test_integration_api_v1_system_test__integration__post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/token-budget": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Token Budget
-         * @description Return current budget settings, daily usage, and freeze status.
-         */
-        get: operations["get_token_budget_api_v1_system_token_budget_get"];
-        /**
-         * Update Token Budget
-         * @description Update token budget settings at runtime.
-         */
-        put: operations["update_token_budget_api_v1_system_token_budget_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/token-budget/reset": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reset Token Freeze
-         * @description Reset the token freeze state (human intervention).
-         */
-        post: operations["reset_token_freeze_api_v1_system_token_budget_reset_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/tokens": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Token Usage
-         * @description Return token usage stats per model.
-         */
-        get: operations["get_token_usage_api_v1_system_tokens_get"];
-        put?: never;
-        post?: never;
-        /**
-         * Reset Token Usage
-         * @description Reset all token usage counters.
-         */
-        delete: operations["reset_token_usage_api_v1_system_tokens_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/vendor/sdks": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Vendor Sdks
-         * @description List available vendor SDK platform profiles and their mount status.
-         */
-        get: operations["list_vendor_sdks_api_v1_system_vendor_sdks_get"];
-        put?: never;
-        /**
-         * Create Vendor Sdk
-         * @description Create a new vendor SDK platform profile.
-         */
-        post: operations["create_vendor_sdk_api_v1_system_vendor_sdks_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/vendor/sdks/{platform}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Delete Vendor Sdk
-         * @description Delete a vendor SDK platform profile.
-         */
-        delete: operations["delete_vendor_sdk_api_v1_system_vendor_sdks__platform__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/vendor/sdks/{platform}/install": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Install Vendor Sdk
-         * @description Clone and provision the vendor SDK for a platform.
-         *
-         *     Reads sdk_git_url from the platform YAML, clones the repo,
-         *     scans for toolchain/sysroot, and updates the platform profile.
-         */
-        post: operations["install_vendor_sdk_api_v1_system_vendor_sdks__platform__install_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/runtime/vendor/sdks/{platform}/validate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Validate Vendor Sdk
-         * @description Validate that SDK paths in a platform profile exist on disk.
-         */
-        get: operations["validate_vendor_sdk_api_v1_system_vendor_sdks__platform__validate_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/tasks": {
         parameters: {
             query?: never;
@@ -10509,6 +10707,12 @@ export interface paths {
          * @description Update a task. Status changes are validated against the state machine.
          *
          *     Pass ``force=true`` to bypass transition validation (for system/human use).
+         *
+         *     Q.7 #301 — requires ``If-Match: <version>`` header. Two devices
+         *     racing on the same task produce exactly one winner (version bump
+         *     lands) and one 409 (body carries ``current_version`` /
+         *     ``your_version`` / ``hint`` so the frontend ``use409Conflict``
+         *     hook can surface the toast + 3-button choice).
          */
         patch: operations["update_task_api_v1_tasks__task_id__patch"];
         trace?: never;
@@ -11275,6 +11479,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/user/drafts/{slot_key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get User Draft
+         * @description Q.6 #300 checkbox 2 — restore on new device.
+         *
+         *     Fetch the server-stored draft for ``(current_user, slot_key)``.
+         *     Returns ``{slot_key, content, updated_at}`` when the row exists,
+         *     or a shaped empty response (``content=""``, ``updated_at=None``)
+         *     when no row has ever been written so the caller can skip a
+         *     "is it null?" branch in JS.
+         *
+         *     Returning 200 + empty over 404 is deliberate: the frontend calls
+         *     this on every page mount and a 404 on a fresh slot would just
+         *     pollute the DevTools network tab. The empty-shape contract also
+         *     keeps the TS type a single ``DraftResponse`` on the happy path
+         *     instead of forcing a ``DraftResponse | null`` union.
+         */
+        get: operations["get_user_draft_api_v1_user_drafts__slot_key__get"];
+        /**
+         * Put User Draft
+         * @description Upsert ``content`` into the (user_id, slot_key) row. Always
+         *     returns 200 with the server-committed ``updated_at`` timestamp.
+         *
+         *     Best-effort opportunistic GC: after the upsert lands, sweep rows
+         *     older than 24 h. Failures in the GC do NOT fail the PUT — the
+         *     draft itself is the only correctness-critical write here, and the
+         *     sweep is purely a table-bound housekeeping nicety.
+         */
+        put: operations["put_user_draft_api_v1_user_drafts__slot_key__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users": {
         parameters: {
             query?: never;
@@ -11954,6 +12200,13 @@ export interface paths {
          *
          *     Gerrit sends JSON events via its webhook plugin or stream-events.
          *     Supports optional HMAC-SHA256 signature via X-Gerrit-Signature header.
+         *
+         *     Phase-3-Runtime-v2 SP-3.1: handler takes a pool-backed
+         *     ``asyncpg.Connection`` so the agent-spawn code path inside
+         *     ``_on_patchset_created`` can persist the spawned reviewer via
+         *     the ported ``db.upsert_agent`` API. Background tasks started from
+         *     here (``_run_review``) acquire their OWN conn since the request
+         *     scope ends before they run.
          */
         post: operations["gerrit_webhook_api_v1_webhooks_gerrit_post"];
         delete?: never;
@@ -13452,6 +13705,14 @@ export interface components {
             project_class: string;
             /** Templates */
             templates?: string[] | null;
+        };
+        /** DraftBody */
+        DraftBody: {
+            /**
+             * Content
+             * @default
+             */
+            content: string;
         };
         /** EKFRunRequest */
         EKFRunRequest: {
@@ -15451,23 +15712,27 @@ export interface components {
          * SmokeSubsetRequest
          * @description Body for ``POST /bootstrap/smoke-subset``.
          *
-         *     ``subset`` selects which DAG(s) to invoke:
-         *       * ``dag1`` (default) — the compile-flash host_native DAG, ~60s;
-         *         matches what L6 Step 5 locked in for the fast-path wizard run.
-         *       * ``dag2`` — the aarch64 cross-compile DAG, validation + plan
-         *         persistence only (no physical cross-compile runs in-process).
-         *       * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5 UI
-         *         can render a run summary for each DAG shipped in
+         *     ``subset`` selects which DAG(s) to invoke. Both DAGs are
+         *     validation + persistence only — no compile, no flash, no
+         *     cross-compile actually executes. Wall time is dominated by
+         *     the per-tenant audit-chain walk and clocks in at ~1-3s on a
+         *     healthy stack; see the section comment above for the full
+         *     scope breakdown.
+         *
+         *       * ``dag1`` (default) — the compile-flash host_native DAG.
+         *       * ``dag2`` — the aarch64 cross-compile DAG.
+         *       * ``both`` — run ``dag1`` + ``dag2`` sequentially so the Step-5
+         *         UI can render a run summary for each DAG shipped in
          *         ``scripts/prod_smoke_test.py``.
          *
-         *     The wizard drives ``subset="both"`` so the operator sees the
-         *     "兩個 DAG 的 run summary" (Step 5 TODO); external callers / CLI
-         *     users can still pin to ``dag1`` for the 60-second fast path.
+         *     The wizard drives ``subset="both"`` so the operator sees a run
+         *     summary per DAG; external callers / CLI users can still pin to
+         *     ``dag1`` for a slightly quicker single-DAG signal.
          */
         SmokeSubsetRequest: {
             /**
              * Subset
-             * @description Which DAG subset to run — ``dag1`` (compile-flash host_native, ~60s fast path), ``dag2`` (aarch64 cross-compile), or ``both`` (wizard default on Step 5).
+             * @description Which DAG subset to run — ``dag1`` (compile-flash host_native), ``dag2`` (aarch64 cross-compile), or ``both`` (wizard default on Step 5). All paths are validate + persist only; no physical build runs in-process.
              * @default dag1
              * @enum {string}
              */
@@ -15888,6 +16153,11 @@ export interface components {
             suggested_sub_type?: string | null;
             /** Title */
             title: string;
+            /**
+             * Version
+             * @default 0
+             */
+            version: number;
         };
         /** TaskCreate */
         TaskCreate: {
@@ -16097,6 +16367,65 @@ export interface components {
              * @default []
              */
             gitlab: components["schemas"]["TokenMapInstance"][];
+        };
+        /**
+         * TokenUsageEntry
+         * @description Per-model lifetime token counters returned by ``GET /runtime/tokens``.
+         *
+         *     ZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens`` /
+         *     ``cache_hit_ratio`` are ``None`` on pre-ZZ rows (legacy payloads
+         *     loaded from Redis or SQLite predating the prompt-cache columns) so
+         *     the UI can distinguish "no data" from "genuine zero hits"; on ZZ-era
+         *     rows they carry lifetime totals (``cache_hit_ratio = cache_read /
+         *     (input + cache_read)``).
+         */
+        TokenUsageEntry: {
+            /**
+             * Avg Latency
+             * @default 0
+             */
+            avg_latency: number;
+            /** Cache Create Tokens */
+            cache_create_tokens?: number | null;
+            /** Cache Hit Ratio */
+            cache_hit_ratio?: number | null;
+            /** Cache Read Tokens */
+            cache_read_tokens?: number | null;
+            /**
+             * Cost
+             * @default 0
+             */
+            cost: number;
+            /**
+             * Input Tokens
+             * @default 0
+             */
+            input_tokens: number;
+            /**
+             * Last Used
+             * @default
+             */
+            last_used: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Output Tokens
+             * @default 0
+             */
+            output_tokens: number;
+            /**
+             * Request Count
+             * @default 0
+             */
+            request_count: number;
+            /**
+             * Total Tokens
+             * @default 0
+             */
+            total_tokens: number;
         };
         /** TraceCaptureRequest */
         TraceCaptureRequest: {
@@ -16493,6 +16822,19 @@ export interface components {
             metadata: {
                 [key: string]: unknown;
             };
+        };
+        /**
+         * _ProjectRunPatch
+         * @description Q.7 #301 body for ``PATCH /projects/runs/{run_id}``.
+         *
+         *     ``label`` is the operator-editable display name for a project run
+         *     (rendered in the RunHistory collapsed parent). Both fields are
+         *     optional — an empty body still bumps the version so cross-device
+         *     echo still lands.
+         */
+        _ProjectRunPatch: {
+            /** Label */
+            label?: string | null;
         };
         /** ProvisionRequest */
         backend__routers__cloudflare_tunnel__ProvisionRequest: {
@@ -18038,9 +18380,33 @@ export interface operations {
             };
         };
     };
-    revoke_session_api_v1_auth_sessions__token_hint__delete: {
+    sessions_presence_api_v1_auth_sessions_presence_get: {
         parameters: {
             query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    revoke_session_api_v1_auth_sessions__token_hint__delete: {
+        parameters: {
+            query?: {
+                cascade?: string | null;
+            };
             header?: never;
             path: {
                 token_hint: string;
@@ -28608,6 +28974,45 @@ export interface operations {
             };
         };
     };
+    patch_project_run_api_v1_projects_runs__project_run_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "If-Match"?: string | null;
+            };
+            path: {
+                project_run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_ProjectRunPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_report_api_v1_projects__project_id__report_get: {
         parameters: {
             query?: never;
@@ -30030,6 +30435,1549 @@ export interface operations {
             };
         };
     };
+    get_compression_stats_api_v1_runtime_compression_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_debug_state_api_v1_runtime_debug_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    trigger_deploy_api_v1_runtime_deploy_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeployRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_devices_api_v1_runtime_devices_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_evk_status_api_v1_runtime_evk_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_project_forecast_api_v1_runtime_forecast_get: {
+        parameters: {
+            query?: {
+                provider?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recompute_project_forecast_api_v1_runtime_forecast_recompute_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    finalize_gerrit_integration_api_v1_runtime_git_forge_gerrit_finalize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GerritFinalizeBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_gerrit_merger_bot_api_v1_runtime_git_forge_gerrit_verify_bot_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GerritBotVerify"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_gerrit_submit_rule_api_v1_runtime_git_forge_gerrit_verify_submit_rule_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GerritSubmitRuleVerify"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_gerrit_webhook_info_api_v1_runtime_git_forge_gerrit_webhook_info_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    generate_gerrit_webhook_secret_api_v1_runtime_git_forge_gerrit_webhook_secret_generate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_git_forge_ssh_pubkey_api_v1_runtime_git_forge_ssh_pubkey_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    test_git_forge_token_api_v1_runtime_git_forge_test_token_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GitForgeTokenTest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_system_info_api_v1_runtime_info_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemInfoResponse"];
+                };
+            };
+        };
+    };
+    get_logs_api_v1_runtime_logs_get: {
+        parameters: {
+            query?: {
+                /** @description Max rows per page (1..500) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_available_model_rules_api_v1_runtime_model_rules_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_notifications_api_v1_runtime_notifications_get: {
+        parameters: {
+            query?: {
+                /** @description Max rows per page (1..200) */
+                limit?: number;
+                level?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unread_count_api_v1_runtime_notifications_unread_count_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    mark_read_api_v1_runtime_notifications__notification_id__read_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                notification_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_npi_state_api_v1_runtime_npi_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    update_npi_state_api_v1_runtime_npi_put: {
+        parameters: {
+            query?: {
+                business_model?: string | null;
+                current_phase_id?: string | null;
+            };
+            header?: {
+                "If-Match"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_npi_milestone_api_v1_runtime_npi_milestones__milestone_id__patch: {
+        parameters: {
+            query?: {
+                status?: string | null;
+                due_date?: string | null;
+            };
+            header?: never;
+            path: {
+                milestone_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_npi_phase_api_v1_runtime_npi_phases__phase_id__patch: {
+        parameters: {
+            query?: {
+                status?: string | null;
+                target_date?: string | null;
+            };
+            header?: never;
+            path: {
+                phase_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    advance_pipeline_endpoint_api_v1_runtime_pipeline_advance_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    start_pipeline_api_v1_runtime_pipeline_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PipelineStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_pipeline_status_endpoint_api_v1_runtime_pipeline_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_pipeline_timeline_api_v1_runtime_pipeline_timeline_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_platform_status_api_v1_runtime_platform_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    list_toolchains_api_v1_runtime_platforms_toolchains_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    create_release_api_v1_runtime_release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_release_manifest_api_v1_runtime_release_manifest_get: {
+        parameters: {
+            query?: {
+                version?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_release_version_api_v1_runtime_release_version_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_repos_api_v1_runtime_repos_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_available_roles_api_v1_runtime_roles_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_sandbox_capacity_api_v1_runtime_sandbox_capacity_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_tenant_capacity_api_v1_runtime_sandbox_capacity__tenant_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_settings_api_v1_runtime_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    update_settings_api_v1_runtime_settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_git_token_map_api_v1_runtime_settings_git_token_map_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    update_git_token_map_api_v1_runtime_settings_git_token_map_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenMapUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_simulations_api_v1_runtime_simulations_get: {
+        parameters: {
+            query?: {
+                task_id?: string;
+                agent_id?: string;
+                status?: string;
+                /** @description Max rows per page (1..200) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_simulation_api_v1_runtime_simulations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SimulationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_simulation_api_v1_runtime_simulations__sim_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sim_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_spec_api_v1_runtime_spec_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    update_spec_field_api_v1_runtime_spec_put: {
+        parameters: {
+            query: {
+                value: string | number | boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": string[];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sse_schema_api_v1_runtime_sse_schema_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_system_status_api_v1_runtime_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemStatusResponse"];
+                };
+            };
+        };
+    };
+    test_integration_api_v1_runtime_test__integration__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                integration: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_token_budget_api_v1_runtime_token_budget_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenBudgetResponse"];
+                };
+            };
+        };
+    };
+    update_token_budget_api_v1_runtime_token_budget_put: {
+        parameters: {
+            query?: {
+                budget?: number | null;
+                warn_threshold?: number | null;
+                downgrade_threshold?: number | null;
+                freeze_threshold?: number | null;
+                fallback_provider?: string | null;
+                fallback_model?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reset_token_freeze_api_v1_runtime_token_budget_reset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_token_usage_api_v1_runtime_tokens_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenUsageEntry"][];
+                };
+            };
+        };
+    };
+    reset_token_usage_api_v1_runtime_tokens_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_vendor_sdks_api_v1_runtime_vendor_sdks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    create_vendor_sdk_api_v1_runtime_vendor_sdks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VendorSDKCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_vendor_sdk_api_v1_runtime_vendor_sdks__platform__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                platform: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    install_vendor_sdk_api_v1_runtime_vendor_sdks__platform__install_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                platform: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_vendor_sdk_api_v1_runtime_vendor_sdks__platform__validate_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                platform: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_artifacts_api_v1_safety_artifacts_get: {
         parameters: {
             query?: never;
@@ -30367,7 +32315,9 @@ export interface operations {
     update_secret_api_v1_secrets__secret_id__put: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "If-Match"?: string | null;
+            };
             path: {
                 secret_id: string;
             };
@@ -32200,1547 +34150,6 @@ export interface operations {
             };
         };
     };
-    get_compression_stats_api_v1_system_compression_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_debug_state_api_v1_system_debug_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    trigger_deploy_api_v1_system_deploy_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DeployRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_devices_api_v1_system_devices_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_evk_status_api_v1_system_evk_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_project_forecast_api_v1_system_forecast_get: {
-        parameters: {
-            query?: {
-                provider?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    recompute_project_forecast_api_v1_system_forecast_recompute_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    finalize_gerrit_integration_api_v1_system_git_forge_gerrit_finalize_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["GerritFinalizeBody"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    verify_gerrit_merger_bot_api_v1_system_git_forge_gerrit_verify_bot_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["GerritBotVerify"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    verify_gerrit_submit_rule_api_v1_system_git_forge_gerrit_verify_submit_rule_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["GerritSubmitRuleVerify"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_gerrit_webhook_info_api_v1_system_git_forge_gerrit_webhook_info_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    generate_gerrit_webhook_secret_api_v1_system_git_forge_gerrit_webhook_secret_generate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_git_forge_ssh_pubkey_api_v1_system_git_forge_ssh_pubkey_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    test_git_forge_token_api_v1_system_git_forge_test_token_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["GitForgeTokenTest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_system_info_api_v1_system_info_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SystemInfoResponse"];
-                };
-            };
-        };
-    };
-    get_logs_api_v1_system_logs_get: {
-        parameters: {
-            query?: {
-                /** @description Max rows per page (1..500) */
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_available_model_rules_api_v1_system_model_rules_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_notifications_api_v1_system_notifications_get: {
-        parameters: {
-            query?: {
-                /** @description Max rows per page (1..200) */
-                limit?: number;
-                level?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    unread_count_api_v1_system_notifications_unread_count_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    mark_read_api_v1_system_notifications__notification_id__read_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                notification_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_npi_state_api_v1_system_npi_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    update_npi_state_api_v1_system_npi_put: {
-        parameters: {
-            query?: {
-                business_model?: string | null;
-                current_phase_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    update_npi_milestone_api_v1_system_npi_milestones__milestone_id__patch: {
-        parameters: {
-            query?: {
-                status?: string | null;
-                due_date?: string | null;
-            };
-            header?: never;
-            path: {
-                milestone_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    update_npi_phase_api_v1_system_npi_phases__phase_id__patch: {
-        parameters: {
-            query?: {
-                status?: string | null;
-                target_date?: string | null;
-            };
-            header?: never;
-            path: {
-                phase_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    advance_pipeline_endpoint_api_v1_system_pipeline_advance_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    start_pipeline_api_v1_system_pipeline_start_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PipelineStartRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_pipeline_status_endpoint_api_v1_system_pipeline_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_pipeline_timeline_api_v1_system_pipeline_timeline_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_platform_status_api_v1_system_platform_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    list_toolchains_api_v1_system_platforms_toolchains_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    create_release_api_v1_system_release_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReleaseRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_release_manifest_api_v1_system_release_manifest_get: {
-        parameters: {
-            query?: {
-                version?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_release_version_api_v1_system_release_version_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_repos_api_v1_system_repos_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_available_roles_api_v1_system_roles_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_sandbox_capacity_api_v1_system_sandbox_capacity_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_tenant_capacity_api_v1_system_sandbox_capacity__tenant_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tenant_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_settings_api_v1_system_settings_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    update_settings_api_v1_system_settings_put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SettingsUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_git_token_map_api_v1_system_settings_git_token_map_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    update_git_token_map_api_v1_system_settings_git_token_map_put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TokenMapUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_simulations_api_v1_system_simulations_get: {
-        parameters: {
-            query?: {
-                task_id?: string;
-                agent_id?: string;
-                status?: string;
-                /** @description Max rows per page (1..200) */
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    trigger_simulation_api_v1_system_simulations_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SimulationRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_simulation_api_v1_system_simulations__sim_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                sim_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_spec_api_v1_system_spec_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    update_spec_field_api_v1_system_spec_put: {
-        parameters: {
-            query: {
-                value: string | number | boolean;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": string[];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_sse_schema_api_v1_system_sse_schema_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_system_status_api_v1_system_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SystemStatusResponse"];
-                };
-            };
-        };
-    };
-    test_integration_api_v1_system_test__integration__post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                integration: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_token_budget_api_v1_system_token_budget_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TokenBudgetResponse"];
-                };
-            };
-        };
-    };
-    update_token_budget_api_v1_system_token_budget_put: {
-        parameters: {
-            query?: {
-                budget?: number | null;
-                warn_threshold?: number | null;
-                downgrade_threshold?: number | null;
-                freeze_threshold?: number | null;
-                fallback_provider?: string | null;
-                fallback_model?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reset_token_freeze_api_v1_system_token_budget_reset_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get_token_usage_api_v1_system_tokens_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    reset_token_usage_api_v1_system_tokens_delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    list_vendor_sdks_api_v1_system_vendor_sdks_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    create_vendor_sdk_api_v1_system_vendor_sdks_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["VendorSDKCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_vendor_sdk_api_v1_system_vendor_sdks__platform__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                platform: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    install_vendor_sdk_api_v1_system_vendor_sdks__platform__install_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                platform: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    validate_vendor_sdk_api_v1_system_vendor_sdks__platform__validate_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                platform: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     list_tasks_api_v1_tasks_get: {
         parameters: {
             query?: never;
@@ -33891,7 +34300,9 @@ export interface operations {
             query?: {
                 force?: boolean;
             };
-            header?: never;
+            header?: {
+                "If-Match"?: string | null;
+            };
             path: {
                 task_id: string;
             };
@@ -35267,6 +35678,76 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["PrefBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_user_draft_api_v1_user_drafts__slot_key__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slot_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_user_draft_api_v1_user_drafts__slot_key__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slot_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftBody"];
             };
         };
         responses: {

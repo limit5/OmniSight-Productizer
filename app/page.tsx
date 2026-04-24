@@ -479,6 +479,9 @@ export default function Home() {
               requestCount: t.request_count,
               avgLatency: t.avg_latency,
               lastUsed: t.last_used,
+              cacheReadTokens: t.cache_read_tokens,
+              cacheCreateTokens: t.cache_create_tokens,
+              cacheHitRatio: t.cache_hit_ratio,
             })) : undefined}
             tokenBudget={engine.tokenBudget}
             onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
@@ -725,6 +728,9 @@ export default function Home() {
                 requestCount: t.request_count,
                 avgLatency: t.avg_latency,
                 lastUsed: t.last_used,
+                cacheReadTokens: t.cache_read_tokens,
+                cacheCreateTokens: t.cache_create_tokens,
+                cacheHitRatio: t.cache_hit_ratio,
               })) : undefined}
               tokenBudget={engine.tokenBudget}
               onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}

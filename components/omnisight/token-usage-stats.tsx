@@ -25,6 +25,13 @@ export interface ModelTokenUsage {
   requestCount: number
   avgLatency: number // ms
   lastUsed: string
+  // ZZ.A1 (#303-2, 2026-04-24): prompt-cache observability. ``null``
+  // on pre-ZZ rows (backend legacy payloads that predate the cache
+  // columns) so the UI can render "—" to distinguish "no data" from
+  // a real zero hit-rate. ZZ.A2 renders the CACHE HIT % + tooltip.
+  cacheReadTokens: number | null
+  cacheCreateTokens: number | null
+  cacheHitRatio: number | null
 }
 
 // Empty state — no LLM calls made yet
@@ -135,6 +142,12 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
           requestCount: 0,
           avgLatency: 0,
           lastUsed: "",
+          // Synthesised placeholder: no backend row, treat as pre-ZZ
+          // "no data" (null) so the cache UI renders "—" instead of
+          // a misleading 0% hit rate.
+          cacheReadTokens: null,
+          cacheCreateTokens: null,
+          cacheHitRatio: null,
         })
       }
     }
