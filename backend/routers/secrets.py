@@ -9,10 +9,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from backend import auth as _au
+from backend import optimistic_lock as _ol
 from backend import tenant_secrets as sec
 from backend.db_context import require_current_tenant, set_tenant_id
 
@@ -68,48 +69,65 @@ async def update_secret(
     secret_id: str,
     body: SecretUpdate,
     user: dict = Depends(_au.require_admin),
+    if_match: str | None = Header(None, alias="If-Match"),
 ):
+    """Rotate a secret value and/or its metadata.
+
+    Q.7 #301 — requires ``If-Match: <version>`` header. Two admins
+    rotating the same provider key from laptop + phone concurrently
+    produce exactly one winner (post-bump version echoed in the
+    response) and one 409 (body carries ``current_version`` /
+    ``your_version`` / ``hint`` for the frontend ``use409Conflict``
+    hook).
+    """
     _ensure_tenant(user)
+    expected_version = _ol.parse_if_match(if_match)
     existing = await sec.get_secret_value(secret_id)
     if existing is None:
         raise HTTPException(404, "Secret not found")
 
+    from backend.db_pool import get_pool
+    import json
+    updates: dict[str, object] = {}
     if body.value is not None:
         from backend.secret_store import encrypt
-        from backend.db_pool import get_pool
-        import json
-        enc = encrypt(body.value)
-        if body.metadata is not None:
-            sql = (
-                "UPDATE tenant_secrets SET encrypted_value = $1, "
-                "updated_at = to_char(clock_timestamp(), "
-                "                       'YYYY-MM-DD HH24:MI:SS'), "
-                "metadata = $2 WHERE id = $3"
+        updates["encrypted_value"] = encrypt(body.value)
+        updates["updated_at"] = _pg_now_str()
+    if body.metadata is not None:
+        updates["metadata"] = json.dumps(body.metadata)
+        if "updated_at" not in updates:
+            updates["updated_at"] = _pg_now_str()
+
+    async with get_pool().acquire() as conn:
+        try:
+            new_version = await _ol.bump_version_pg(
+                conn,
+                "tenant_secrets",
+                pk_col="id",
+                pk_value=secret_id,
+                expected_version=expected_version,
+                updates=updates,
             )
-            params = (enc, json.dumps(body.metadata), secret_id)
-        else:
-            sql = (
-                "UPDATE tenant_secrets SET encrypted_value = $1, "
-                "updated_at = to_char(clock_timestamp(), "
-                "                       'YYYY-MM-DD HH24:MI:SS') "
-                "WHERE id = $2"
-            )
-            params = (enc, secret_id)
-        async with get_pool().acquire() as conn:
-            await conn.execute(sql, *params)
-    elif body.metadata is not None:
-        import json
-        from backend.db_pool import get_pool
-        async with get_pool().acquire() as conn:
-            await conn.execute(
-                "UPDATE tenant_secrets SET metadata = $1, "
-                "updated_at = to_char(clock_timestamp(), "
-                "                       'YYYY-MM-DD HH24:MI:SS') "
-                "WHERE id = $2",
-                json.dumps(body.metadata), secret_id,
+        except _ol.VersionConflict as conflict:
+            if conflict.current_version is None:
+                raise HTTPException(404, "Secret not found")
+            _ol.raise_conflict(
+                conflict.current_version,
+                conflict.your_version,
+                resource="tenant_secret",
             )
 
-    return {"id": secret_id, "status": "updated"}
+    return {"id": secret_id, "status": "updated", "version": new_version}
+
+
+def _pg_now_str() -> str:
+    """Mirror the ``to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS')``
+    timestamp format the pre-Q.7 code used for ``updated_at``. Computing
+    it application-side (vs. SQL) keeps ``_ol.bump_version_pg``'s
+    column-agnostic signature usable here.
+    """
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @router.delete("/{secret_id}")

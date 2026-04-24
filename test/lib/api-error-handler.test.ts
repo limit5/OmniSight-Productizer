@@ -124,6 +124,37 @@ describe("B13 Part C — global API error handler", () => {
       expect(loc.assign).not.toHaveBeenCalled()
     })
 
+    it("emits kind=conflict for 409 (Q.7 optimistic-lock path)", async () => {
+      const errs: ApiError[] = []
+      unsubscribers.push(onApiError((e) => errs.push(e)))
+
+      const loc = window.location as unknown as LocationStub
+      mockFetchOnce(409, {
+        detail: {
+          current_version: 3,
+          your_version: 1,
+          hint: "另一裝置已修改，請重載",
+          resource: "task",
+        },
+      })
+      await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+
+      expect(errs[0].kind).toBe("conflict")
+      expect(errs[0].status).toBe(409)
+      expect(loc.assign).not.toHaveBeenCalled()
+    })
+
+    it("emits kind=precondition_required for 428 (If-Match missing)", async () => {
+      const errs: ApiError[] = []
+      unsubscribers.push(onApiError((e) => errs.push(e)))
+
+      mockFetchOnce(428, { detail: "If-Match header required" })
+      await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+
+      expect(errs[0].kind).toBe("precondition_required")
+      expect(errs[0].status).toBe(428)
+    })
+
     it("emits kind=bad_gateway for 502 and exposes it on the bus", async () => {
       vi.useFakeTimers()
       const errs: ApiError[] = []

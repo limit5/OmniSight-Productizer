@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 _SECRET_COLS = (
     "id, tenant_id, secret_type, key_name, encrypted_value, "
-    "metadata, created_at, updated_at"
+    "metadata, created_at, updated_at, version"
 )
 
 
@@ -86,6 +86,8 @@ async def _list_secrets_impl(
             "metadata": meta,
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
+            # Q.7 #301 — echoed to the client so PUTs can send If-Match.
+            "version": int(r["version"]) if r["version"] is not None else 0,
         })
     return results
 

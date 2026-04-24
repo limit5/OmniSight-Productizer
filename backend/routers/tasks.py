@@ -19,12 +19,18 @@ import uuid
 from datetime import datetime
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from backend.models import Task, TaskCreate, TaskStatus, TaskUpdate
 from backend.events import emit_task_update
 from backend import db
 from backend.db_pool import get_conn, get_pool
+from backend.optimistic_lock import (
+    VersionConflict,
+    bump_version_pg,
+    parse_if_match,
+    raise_conflict,
+)
 from backend.routers import _pagination as _pg
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -154,12 +160,20 @@ async def update_task(
     task_id: str,
     body: TaskUpdate,
     force: bool = False,
+    if_match: str | None = Header(None, alias="If-Match"),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     """Update a task. Status changes are validated against the state machine.
 
     Pass ``force=true`` to bypass transition validation (for system/human use).
+
+    Q.7 #301 — requires ``If-Match: <version>`` header. Two devices
+    racing on the same task produce exactly one winner (version bump
+    lands) and one 409 (body carries ``current_version`` /
+    ``your_version`` / ``hint`` so the frontend ``use409Conflict``
+    hook can surface the toast + 3-button choice).
     """
+    expected_version = parse_if_match(if_match)
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = _tasks[task_id]
@@ -194,9 +208,58 @@ async def update_task(
         if s_str == "completed":
             update_data["completed_at"] = datetime.now().isoformat()
 
+    # Q.7 #301 — map pydantic field → DB column + coerce enums / JSON.
+    _JSON_COLS = {"child_task_ids", "labels"}
+    db_updates: dict[str, object] = {}
     for field, value in update_data.items():
-        setattr(task, field, value)
-    await _persist(task, conn)
+        if hasattr(value, "value"):  # Enum → string
+            db_updates[field] = value.value
+        elif field in _JSON_COLS and isinstance(value, list):
+            import json as _json
+            db_updates[field] = _json.dumps(value)
+        else:
+            db_updates[field] = value
+
+    # Optimistic lock — atomic UPDATE with version guard. On miss we
+    # re-read current_version via bump_version_pg's fetchrow and
+    # surface 409 with the shaped body the frontend hook consumes.
+    try:
+        new_version = await bump_version_pg(
+            conn,
+            "tasks",
+            pk_col="id",
+            pk_value=task_id,
+            expected_version=expected_version,
+            updates=db_updates,
+        )
+    except VersionConflict as conflict:
+        if conflict.current_version is None:
+            # Row vanished between the memory check and the UPDATE
+            # (rare — DELETE landed concurrently). Memory mirror goes
+            # stale here; trust PG and surface 404.
+            _tasks.pop(task_id, None)
+            raise HTTPException(status_code=404, detail="Task not found")
+        raise_conflict(
+            conflict.current_version,
+            conflict.your_version,
+            resource="task",
+        )
+
+    # Success — refresh memory mirror from the authoritative PG row so
+    # subsequent reads see the new version.
+    row = await db.get_task(conn, task_id)
+    if row is not None:
+        try:
+            task = Task(**{k: v for k, v in row.items() if k in Task.model_fields})
+        except Exception:  # pragma: no cover — shouldn't happen
+            for field, value in update_data.items():
+                setattr(task, field, value)
+            task.version = new_version
+        _tasks[task_id] = task
+    else:
+        # Row vanished post-UPDATE — clear mirror and fall through.
+        _tasks.pop(task_id, None)
+
     emit_task_update(task_id, task.status, task.assigned_agent_id)
 
     # Sync to external issue tracker (non-blocking, capture URL before async dispatch)

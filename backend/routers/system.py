@@ -18,7 +18,7 @@ from backend.config import settings as _settings
 logger = logging.getLogger(__name__)
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from backend import auth as _auth
@@ -1499,31 +1499,51 @@ _NPI_CONFIG = Path(__file__).resolve().parent.parent.parent / "configs" / "npi_l
 async def get_npi_state(
     conn=Depends(_get_conn),
 ):
-    """Return the current NPI lifecycle state."""
+    """Return the current NPI lifecycle state.
+
+    Q.7 #301: response now carries ``version`` so the frontend can
+    echo it back in ``If-Match`` on the PUT.
+    """
     from backend import db
     state = await db.get_npi_state(conn)
+    version = await db.get_npi_state_version(conn)
     if state:
-        return state
+        return {**state, "version": version}
     # First load: read from SSOT config file
     if _NPI_CONFIG.exists():
         import json as _json
         try:
             data = _json.loads(_NPI_CONFIG.read_text(encoding="utf-8"))
             await db.save_npi_state(conn, data)
-            return data
+            version = await db.get_npi_state_version(conn)
+            return {**data, "version": version}
         except (ValueError, OSError) as exc:
             import logging
             logging.getLogger(__name__).error("Failed to load NPI config %s: %s", _NPI_CONFIG, exc)
-    return {"business_model": "odm", "phases": [], "current_phase_id": None}
+    return {
+        "business_model": "odm", "phases": [],
+        "current_phase_id": None, "version": 0,
+    }
 
 
 @router.put("/npi")
 async def update_npi_state(
     business_model: str | None = None,
     current_phase_id: str | None = None,
+    if_match: str | None = Header(None, alias="If-Match"),
     conn=Depends(_get_conn),
 ):
-    """Update NPI project-level settings."""
+    """Update NPI project-level settings.
+
+    Q.7 #301 — requires ``If-Match: <version>`` header. Runtime
+    settings are a singleton row (``id = 'current'``) so the lock
+    guards a different race than workflow_runs — two admins on
+    separate devices toggling ``business_model`` at the same time.
+    Loser receives 409 with ``{current_version, your_version,
+    hint}`` and the frontend hook offers 重載 / 覆蓋 / 合併.
+    """
+    from backend import optimistic_lock as _ol
+    expected_version = _ol.parse_if_match(if_match)
     from backend import db
     state = await db.get_npi_state(conn)
     if not state:
@@ -1532,8 +1552,17 @@ async def update_npi_state(
         state["business_model"] = business_model
     if current_phase_id is not None:
         state["current_phase_id"] = current_phase_id
-    await db.save_npi_state(conn, state)
-    return state
+    try:
+        new_version = await db.save_npi_state_versioned(
+            conn, state, expected_version=expected_version,
+        )
+    except _ol.VersionConflict as conflict:
+        _ol.raise_conflict(
+            conflict.current_version,
+            conflict.your_version,
+            resource="runtime_settings",
+        )
+    return {**state, "version": new_version}
 
 
 _VALID_PHASE_STATUSES = {"pending", "active", "completed", "blocked"}

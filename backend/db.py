@@ -190,6 +190,12 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("user_preferences", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
         # I4: tenant_id on api_keys
         ("api_keys", "tenant_id", "TEXT NOT NULL DEFAULT 't-default'"),
+        # Q.7 #301 — optimistic-lock version column expansion (mirrors
+        # alembic 0023_optimistic_lock_expansion for SQLite bootstrap).
+        ("tasks", "version", "INTEGER NOT NULL DEFAULT 0"),
+        ("npi_state", "version", "INTEGER NOT NULL DEFAULT 0"),
+        ("tenant_secrets", "version", "INTEGER NOT NULL DEFAULT 0"),
+        ("project_runs", "version", "INTEGER NOT NULL DEFAULT 0"),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -1135,6 +1141,13 @@ async def upsert_task(conn, data: dict) -> None:
     # placeholders ($1..$21), ON CONFLICT DO UPDATE using EXCLUDED.*.
     # Pool auto-commits each statement outside an explicit transaction
     # block — no explicit commit needed.
+    #
+    # Q.7 #301 — ``version`` is intentionally NOT written from upsert.
+    # The column's schema DEFAULT 0 fires on initial INSERT and the
+    # optimistic-lock ``bump_version_pg`` owns every subsequent write.
+    # Legacy non-HTTP writers (worker watchdogs, pipeline, seed defaults)
+    # therefore keep writing through ``_persist`` without accidentally
+    # clobbering the version a concurrent HTTP PATCH may have bumped.
     await conn.execute(
         """INSERT INTO tasks (id, title, description, priority, status, assigned_agent_id,
              created_at, completed_at, ai_analysis, suggested_agent_type, suggested_sub_type,
@@ -1521,6 +1534,86 @@ async def save_npi_state(conn, data: dict) -> None:
         """INSERT INTO npi_state (id, data) VALUES ('current', $1)
            ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data""",
         json.dumps(data),
+    )
+
+
+async def get_npi_state_version(conn) -> int:
+    """Q.7 #301 — current optimistic-lock version for the singleton row.
+
+    Returns 0 if the row does not exist yet (same default the schema
+    gives on first write).
+    """
+    row = await conn.fetchrow(
+        "SELECT version FROM npi_state WHERE id = 'current'",
+    )
+    if row is None:
+        return 0
+    return int(row["version"])
+
+
+async def save_npi_state_versioned(
+    conn, data: dict, *, expected_version: int,
+) -> int:
+    """Q.7 #301 — PUT /runtime/npi optimistic-lock write path.
+
+    On first-ever write the row is absent; we INSERT with version=1
+    only when the client honestly sent ``If-Match: 0`` (so two
+    first-PUTs race → one wins with version=1, the other's INSERT
+    fails the UNIQUE pk and we re-read to report 409 with
+    current_version=1).
+
+    On subsequent writes we UPDATE with the ``version = $expected``
+    guard; miss → raise ``VersionConflict`` carrying the live
+    post-commit version the frontend hook will show in the toast.
+    """
+    from backend.optimistic_lock import VersionConflict
+    payload = json.dumps(data)
+    row = await conn.fetchrow(
+        "UPDATE npi_state SET data = $1, version = version + 1 "
+        "WHERE id = 'current' AND version = $2 RETURNING version",
+        payload, expected_version,
+    )
+    if row is not None:
+        return int(row["version"])
+    # UPDATE missed — either the row doesn't exist yet (first write)
+    # or the version drifted. Distinguish by probing the pk.
+    probe = await conn.fetchrow(
+        "SELECT version FROM npi_state WHERE id = 'current'",
+    )
+    if probe is None:
+        # First write — only accept If-Match: 0 (otherwise the client
+        # claims to have seen a version we never produced).
+        if expected_version != 0:
+            raise VersionConflict(
+                current_version=0,
+                your_version=expected_version,
+                resource="npi_state",
+            )
+        try:
+            inserted = await conn.fetchrow(
+                "INSERT INTO npi_state (id, data, version) "
+                "VALUES ('current', $1, 1) "
+                "ON CONFLICT (id) DO NOTHING RETURNING version",
+                payload,
+            )
+        except Exception:
+            inserted = None
+        if inserted is not None:
+            return int(inserted["version"])
+        # Another writer inserted between our UPDATE and INSERT →
+        # race loss, re-read to populate 409 body.
+        probe2 = await conn.fetchrow(
+            "SELECT version FROM npi_state WHERE id = 'current'",
+        )
+        raise VersionConflict(
+            current_version=int(probe2["version"]) if probe2 else None,
+            your_version=expected_version,
+            resource="npi_state",
+        )
+    raise VersionConflict(
+        current_version=int(probe["version"]),
+        your_version=expected_version,
+        resource="npi_state",
     )
 
 

@@ -472,8 +472,10 @@ export type ApiErrorKind =
   | "unauthorized"         // 401
   | "forbidden"            // 403
   | "not_found"            // 404
+  | "conflict"             // 409 — Q.7 #301 optimistic-lock version conflict
   | "validation"           // 422
   | "rate_limited"         // 429
+  | "precondition_required" // 428 — If-Match header missing
   | "bootstrap_required"   // 503 + {error: "bootstrap_required"}
   | "server_error"         // 500
   | "bad_gateway"          // 502
@@ -596,7 +598,9 @@ function _classifyStatus(
   if (status === 401) return "unauthorized"
   if (status === 403) return "forbidden"
   if (status === 404) return "not_found"
+  if (status === 409) return "conflict"
   if (status === 422) return "validation"
+  if (status === 428) return "precondition_required"
   if (status === 429) return "rate_limited"
   if (status === 500) return "server_error"
   if (status === 502) return "bad_gateway"

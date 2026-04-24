@@ -155,6 +155,10 @@ class Task(BaseModel):
     labels: list[str] = Field(default_factory=list)
     # Pipeline linkage (Phase 46)
     npi_phase_id: Optional[str] = None  # Links task to an NPI phase for pipeline tracking
+    # Q.7 #301 — optimistic-lock version. Incremented on every successful
+    # PATCH; clients echo via ``If-Match`` so two devices racing on the
+    # same task produce exactly one winner + one 409 loser.
+    version: int = 0
 
 
 class TaskCreate(BaseModel):

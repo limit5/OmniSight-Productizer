@@ -28,9 +28,11 @@ class ProjectRun:
     label: str
     created_at: float
     workflow_run_ids: list[str] = field(default_factory=list)
+    # Q.7 #301 — optimistic-lock version for PATCH /projects/runs/{id}.
+    version: int = 0
 
 
-_PR_COLS = "id, project_id, label, created_at, workflow_run_ids"
+_PR_COLS = "id, project_id, label, created_at, workflow_run_ids, version"
 _WF_COLS = (
     "id, kind, started_at, completed_at, status, last_step_id, metadata"
 )
@@ -127,6 +129,9 @@ async def list_by_project_with_children(
                 "workflow_run_ids": pr.workflow_run_ids,
                 "children": children,
                 "summary": summary,
+                # Q.7 #301 — surface version so the frontend can echo
+                # it back in ``If-Match`` on the label-rename PATCH.
+                "version": pr.version,
             })
     return results
 
@@ -142,12 +147,17 @@ def _tally(children: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _row_to_pr(row) -> ProjectRun:
+    try:
+        ver = int(row["version"]) if row["version"] is not None else 0
+    except (KeyError, TypeError):
+        ver = 0
     return ProjectRun(
         id=row["id"],
         project_id=row["project_id"],
         label=row["label"],
         created_at=row["created_at"],
         workflow_run_ids=json.loads(row["workflow_run_ids"] or "[]"),
+        version=ver,
     )
 
 
