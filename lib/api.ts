@@ -1621,6 +1621,36 @@ export async function triggerSimulation(body: { track: string; module: string; i
   })
 }
 
+// ─── Dashboard aggregator (Phase 4-2) ───
+//
+// Server-side fan-out that collapses the 11 `/runtime/*` calls useEngine
+// used to make every 5 s into a single composite response. Each subkey
+// carries its own `{ok, data|error}` envelope so one failing sub-query
+// does not take down the rest — matches the old `Promise.allSettled`
+// semantics, pushed to the server. See `backend/routers/dashboard.py`.
+
+export type DashboardSubResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string }
+
+export interface DashboardSummary {
+  systemStatus: DashboardSubResult<SystemStatus>
+  systemInfo: DashboardSubResult<SystemInfo>
+  devices: DashboardSubResult<SystemDevice[]>
+  spec: DashboardSubResult<SpecValue[]>
+  repos: DashboardSubResult<RepoInfo[]>
+  logs: DashboardSubResult<LogEntry[]>
+  tokenUsage: DashboardSubResult<TokenUsage[]>
+  tokenBudget: DashboardSubResult<TokenBudgetInfo>
+  notificationsUnread: DashboardSubResult<{ count: number }>
+  compression: DashboardSubResult<CompressionStats>
+  simulations: DashboardSubResult<SimulationItem[]>
+}
+
+export async function getDashboardSummary() {
+  return request<DashboardSummary>("/dashboard/summary")
+}
+
 // ─── Integration Settings ───
 
 export async function getSettings(): Promise<Record<string, Record<string, unknown>>> {

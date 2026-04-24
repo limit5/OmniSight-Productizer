@@ -121,38 +121,36 @@ export function useEngine() {
     let sysInterval: ReturnType<typeof setInterval> | null = null
 
     async function fetchSystemData() {
+      // Phase 4-2 (#dashboard-summary): single aggregator call replaces
+      // the old 11-endpoint ``Promise.allSettled`` fan-out. The server
+      // wraps each sub-query in ``{ok, data|error}`` so partial
+      // failures don't take down the rest — demux per-subkey here and
+      // only write state when ``ok === true`` so stale panel state is
+      // preserved through a sub-query blip.
       try {
-        const [rStatus, rInfo, rDevices, rSpec, rRepos, rLogs, rTokens, rBudget, rUnread, rCompress, rSims] = await Promise.allSettled([
-          api.getSystemStatus(),
-          api.getSystemInfo(),
-          api.getDevices(),
-          api.getSpec(),
-          api.getRepos(),
-          api.getLogs(),
-          api.getTokenUsage(),
-          api.getTokenBudget(),
-          api.getUnreadCount(),
-          api.getCompressionStats(),
-          api.listSimulations(),
-        ])
-        // Only update state for successful fetches — stale data is better than no data
+        const summary = await api.getDashboardSummary()
         if (cancelled) return
-        if (rStatus.status === "fulfilled") setSystemStatus(rStatus.value)
-        if (rInfo.status === "fulfilled") setSystemInfo(rInfo.value)
-        if (rDevices.status === "fulfilled") setDevices(rDevices.value)
-        if (rSpec.status === "fulfilled") setSpec(rSpec.value)
-        if (rRepos.status === "fulfilled") setRepos(rRepos.value)
-        if (rLogs.status === "fulfilled") setLogs(rLogs.value)
-        if (rTokens.status === "fulfilled") setTokenUsage(rTokens.value)
-        if (rBudget.status === "fulfilled") setTokenBudget(rBudget.value)
-        if (rUnread.status === "fulfilled") setUnreadCount(rUnread.value.count)
-        if (rCompress.status === "fulfilled") setCompressionStats(rCompress.value)
-        if (rSims.status === "fulfilled") setSimulations(rSims.value)
-        const all = [rStatus, rInfo, rDevices, rSpec, rRepos, rLogs, rTokens, rBudget, rUnread, rCompress, rSims]
-        const failCount = all.filter(r => r.status === "rejected").length
-        if (failCount > 0) console.warn(`[Engine] ${failCount}/${all.length} system data fetches failed`)
+        if (summary.systemStatus.ok) setSystemStatus(summary.systemStatus.data)
+        if (summary.systemInfo.ok) setSystemInfo(summary.systemInfo.data)
+        if (summary.devices.ok) setDevices(summary.devices.data)
+        if (summary.spec.ok) setSpec(summary.spec.data)
+        if (summary.repos.ok) setRepos(summary.repos.data)
+        if (summary.logs.ok) setLogs(summary.logs.data)
+        if (summary.tokenUsage.ok) setTokenUsage(summary.tokenUsage.data)
+        if (summary.tokenBudget.ok) setTokenBudget(summary.tokenBudget.data)
+        if (summary.notificationsUnread.ok) setUnreadCount(summary.notificationsUnread.data.count)
+        if (summary.compression.ok) setCompressionStats(summary.compression.data)
+        if (summary.simulations.ok) setSimulations(summary.simulations.data)
+        const subs = [
+          summary.systemStatus, summary.systemInfo, summary.devices,
+          summary.spec, summary.repos, summary.logs, summary.tokenUsage,
+          summary.tokenBudget, summary.notificationsUnread,
+          summary.compression, summary.simulations,
+        ]
+        const failCount = subs.filter(s => !s.ok).length
+        if (failCount > 0) console.warn(`[Engine] ${failCount}/${subs.length} dashboard subqueries failed`)
       } catch (e) {
-        console.warn("[Engine] System data fetch failed:", e)
+        console.warn("[Engine] Dashboard summary fetch failed:", e)
       }
     }
 
