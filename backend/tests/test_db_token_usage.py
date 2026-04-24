@@ -130,6 +130,46 @@ class TestTokenUsageTypeCoercion:
         assert rows[0]["request_count"] == 0
         assert rows[0]["avg_latency"] == 0
         assert rows[0]["last_used"] == ""
+        # ZZ.A1 (#303-1): cache_* fields default to NULL on partial
+        # dicts → preserves the pre-ZZ data semantics.
+        assert rows[0]["cache_read_tokens"] is None
+        assert rows[0]["cache_create_tokens"] is None
+        assert rows[0]["cache_hit_ratio"] is None
+
+    @pytest.mark.asyncio
+    async def test_cache_columns_round_trip(self, pg_test_conn) -> None:
+        # ZZ.A1 (#303-1): when SharedTokenUsage hands us ZZ-era payload
+        # with cache_read_tokens / cache_create_tokens / cache_hit_ratio,
+        # they round-trip through upsert_token_usage → list_token_usage
+        # unchanged. Numeric ints stay ints, ratio stays a float.
+        await db.upsert_token_usage(pg_test_conn, _usage_fixture(
+            model="zz-cache-model",
+            cache_read_tokens=800,
+            cache_create_tokens=120,
+            cache_hit_ratio=0.8,
+        ))
+        rows = await db.list_token_usage(pg_test_conn)
+        row = next(r for r in rows if r["model"] == "zz-cache-model")
+        assert row["cache_read_tokens"] == 800
+        assert row["cache_create_tokens"] == 120
+        assert row["cache_hit_ratio"] == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_cache_columns_null_preserved(self, pg_test_conn) -> None:
+        # ZZ.A1 (#303-1): a pre-ZZ caller that never populates the
+        # cache_* keys must land NULL (not 0) in PG so the dashboard
+        # can distinguish "no data" from "genuine zero hits".
+        await db.upsert_token_usage(pg_test_conn, _usage_fixture(
+            model="pre-zz-model",
+            cache_read_tokens=None,
+            cache_create_tokens=None,
+            cache_hit_ratio=None,
+        ))
+        rows = await db.list_token_usage(pg_test_conn)
+        row = next(r for r in rows if r["model"] == "pre-zz-model")
+        assert row["cache_read_tokens"] is None
+        assert row["cache_create_tokens"] is None
+        assert row["cache_hit_ratio"] is None
 
     @pytest.mark.asyncio
     async def test_numeric_types_round_trip(self, pg_test_conn) -> None:

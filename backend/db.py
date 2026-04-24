@@ -460,14 +460,21 @@ CREATE TABLE IF NOT EXISTS handoffs (
 );
 
 CREATE TABLE IF NOT EXISTS token_usage (
-    model           TEXT PRIMARY KEY,
-    input_tokens    INTEGER NOT NULL DEFAULT 0,
-    output_tokens   INTEGER NOT NULL DEFAULT 0,
-    total_tokens    INTEGER NOT NULL DEFAULT 0,
-    cost            REAL NOT NULL DEFAULT 0.0,
-    request_count   INTEGER NOT NULL DEFAULT 0,
-    avg_latency     INTEGER NOT NULL DEFAULT 0,
-    last_used       TEXT NOT NULL DEFAULT ''
+    model               TEXT PRIMARY KEY,
+    input_tokens        INTEGER NOT NULL DEFAULT 0,
+    output_tokens       INTEGER NOT NULL DEFAULT 0,
+    total_tokens        INTEGER NOT NULL DEFAULT 0,
+    cost                REAL NOT NULL DEFAULT 0.0,
+    request_count       INTEGER NOT NULL DEFAULT 0,
+    avg_latency         INTEGER NOT NULL DEFAULT 0,
+    last_used           TEXT NOT NULL DEFAULT '',
+    -- ZZ.A1 (#303-1): prompt-cache observability. NULLable by design —
+    -- rows that predate ZZ.A1 leave these as NULL and the dashboard
+    -- renders an em-dash rather than misleading zeros. New rows
+    -- always populate them via SharedTokenUsage.track().
+    cache_read_tokens   INTEGER,
+    cache_create_tokens INTEGER,
+    cache_hit_ratio     REAL
 );
 
 CREATE TABLE IF NOT EXISTS simulations (
@@ -1242,15 +1249,30 @@ async def list_token_usage(conn) -> list[dict]:
 
 async def upsert_token_usage(conn, data: dict) -> None:
     # Phase-3-Runtime-v2 SP-3.5 (2026-04-20): ported to native asyncpg.
-    # 8 positional placeholders; ON CONFLICT (model) DO UPDATE uses
+    # ZZ.A1 (#303-1, 2026-04-24): extended to persist prompt-cache
+    # observability columns. The three cache_* fields are intentionally
+    # NULLABLE — a caller that never observed cache activity (pre-ZZ
+    # legacy worker, or a provider that doesn't report cache fields)
+    # passes None through and the NULL is preserved end-to-end so the
+    # UI can distinguish "no data" from "genuine 0".
+    # 11 positional placeholders; ON CONFLICT (model) DO UPDATE uses
     # EXCLUDED.* per PG convention. Caller (routers/system.py
     # _persist_token_usage) is fire-and-forget from the LLM callback —
     # asyncpg auto-commits each statement outside a tx block, matching
     # the prior compat-wrapper's explicit .commit().
+    def _int_or_none(key: str):
+        val = data.get(key)
+        return None if val is None else int(val)
+
+    def _float_or_none(key: str):
+        val = data.get(key)
+        return None if val is None else float(val)
+
     await conn.execute(
         """INSERT INTO token_usage (model, input_tokens, output_tokens,
-             total_tokens, cost, request_count, avg_latency, last_used)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             total_tokens, cost, request_count, avg_latency, last_used,
+             cache_read_tokens, cache_create_tokens, cache_hit_ratio)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT (model) DO UPDATE SET
              input_tokens = EXCLUDED.input_tokens,
              output_tokens = EXCLUDED.output_tokens,
@@ -1258,7 +1280,10 @@ async def upsert_token_usage(conn, data: dict) -> None:
              cost = EXCLUDED.cost,
              request_count = EXCLUDED.request_count,
              avg_latency = EXCLUDED.avg_latency,
-             last_used = EXCLUDED.last_used
+             last_used = EXCLUDED.last_used,
+             cache_read_tokens = EXCLUDED.cache_read_tokens,
+             cache_create_tokens = EXCLUDED.cache_create_tokens,
+             cache_hit_ratio = EXCLUDED.cache_hit_ratio
         """,
         data["model"],
         int(data.get("input_tokens", 0)),
@@ -1268,6 +1293,9 @@ async def upsert_token_usage(conn, data: dict) -> None:
         int(data.get("request_count", 0)),
         int(data.get("avg_latency", 0)),
         data.get("last_used", ""),
+        _int_or_none("cache_read_tokens"),
+        _int_or_none("cache_create_tokens"),
+        _float_or_none("cache_hit_ratio"),
     )
 
 

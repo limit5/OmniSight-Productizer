@@ -240,6 +240,144 @@ class TestSharedTokenUsage:
         assert "requests" not in stored
         assert "avg_latency_ms" not in stored
 
+    # ─── ZZ.A1 (#303-1) regression guards ───────────────────────
+    # Prompt-cache observability: three new fields on every entry
+    # — ``cache_read_tokens`` / ``cache_create_tokens`` /
+    # ``cache_hit_ratio`` — and NULL is the canonical marker for
+    # "pre-ZZ legacy row, no cache data" so a dashboard can render
+    # an em-dash instead of misleading zeros.
+
+    def test_track_records_cache_tokens_and_ratio(self):
+        """A ZZ-era track() call records cache_read / cache_create and
+        derives ``cache_hit_ratio = cache_read / (input + cache_read)``.
+        """
+        usage = SharedTokenUsage()
+        usage.clear()
+        # 800 cache-read + 200 fresh input ⇒ hit ratio 0.8.
+        entry = usage.track(
+            "zz-cache-model", 200, 50, 100.0, 0.001,
+            cache_read_tokens=800, cache_create_tokens=120,
+        )
+        assert entry["cache_read_tokens"] == 800
+        assert entry["cache_create_tokens"] == 120
+        assert entry["cache_hit_ratio"] == pytest.approx(0.8, abs=1e-6)
+
+    def test_track_cache_tokens_accumulate(self):
+        """Second call adds to the lifetime total and recomputes ratio
+        from the running sums rather than the last-turn snapshot."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        usage.track(
+            "zz-accum", 100, 0, 100.0, 0.0,
+            cache_read_tokens=100, cache_create_tokens=20,
+        )
+        entry = usage.track(
+            "zz-accum", 100, 0, 100.0, 0.0,
+            cache_read_tokens=300, cache_create_tokens=30,
+        )
+        # Lifetime totals: 200 input, 400 cache_read, 50 cache_create.
+        assert entry["cache_read_tokens"] == 400
+        assert entry["cache_create_tokens"] == 50
+        assert entry["cache_hit_ratio"] == pytest.approx(
+            400 / (200 + 400), abs=1e-6,
+        )
+
+    def test_track_zero_cache_defaults_to_zero_ratio(self):
+        """When no cache tokens are seen (legacy caller, or provider
+        with no cache signal), the ratio is 0.0 — not NaN, not None."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        entry = usage.track("zz-no-cache", 100, 50, 100.0, 0.001)
+        assert entry["cache_read_tokens"] == 0
+        assert entry["cache_create_tokens"] == 0
+        assert entry["cache_hit_ratio"] == 0.0
+
+    def test_track_cache_only_no_input_guards_division(self):
+        """Defensive: if a provider reports cache_read with zero fresh
+        input on a first call (hypothetical — wouldn't happen in prod
+        since prompt_tokens always includes the cache-hit count), the
+        ratio is still a sane float, never a ZeroDivisionError."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        entry = usage.track(
+            "zz-cache-only", 0, 0, 100.0, 0.0,
+            cache_read_tokens=500, cache_create_tokens=0,
+        )
+        # denominator = 0 input + 500 cache_read = 500 > 0 → 1.0 ratio.
+        assert entry["cache_hit_ratio"] == pytest.approx(1.0)
+        # And with neither input nor cache_read, the ratio is 0.0.
+        entry2 = usage.track("zz-all-zero", 0, 100, 100.0, 0.0)
+        assert entry2["cache_hit_ratio"] == 0.0
+
+    def test_get_all_preserves_null_on_pre_zz_payload(self):
+        """A Redis payload written by a pre-ZZ worker has no cache
+        fields at all. ``get_all()`` must surface ``None`` (not 0)
+        so the dashboard can distinguish "no data" from "zero hits".
+        """
+        usage = SharedTokenUsage()
+        usage.clear()
+        usage._local["pre-zz-model"] = {
+            "model": "pre-zz-model",
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "total_tokens": 1500,
+            "cost": 0.123,
+            "request_count": 3,
+            "avg_latency": 180,
+            "last_used": "10:20:30",
+            # no cache_* fields whatsoever
+        }
+        result = usage.get_all()["pre-zz-model"]
+        assert result["cache_read_tokens"] is None
+        assert result["cache_create_tokens"] is None
+        assert result["cache_hit_ratio"] is None
+
+    def test_track_upgrades_pre_zz_null_to_numeric(self):
+        """First ZZ-era track() on a pre-ZZ row must upgrade the NULL
+        cache counters to numeric so subsequent reads see the canonical
+        shape. NULL is a one-way marker — once a worker observes cache
+        data the row is committed to ZZ-era semantics."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        usage._local["upgrading"] = {
+            "model": "upgrading",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+            "cost": 0.01,
+            "request_count": 1,
+            "avg_latency": 100,
+            "last_used": "10:00:00",
+            # no cache_* fields → NULL
+        }
+        entry = usage.track(
+            "upgrading", 100, 50, 100.0, 0.01,
+            cache_read_tokens=400, cache_create_tokens=40,
+        )
+        # After upgrade, NULL → numeric; cache_read is the ZZ-turn value.
+        assert entry["cache_read_tokens"] == 400
+        assert entry["cache_create_tokens"] == 40
+        assert entry["cache_hit_ratio"] == pytest.approx(
+            400 / (200 + 400), abs=1e-6,
+        )
+        # Stored copy also upgraded.
+        stored = usage._local["upgrading"]
+        assert stored["cache_read_tokens"] == 400
+        assert stored["cache_create_tokens"] == 40
+
+    def test_fresh_entry_starts_at_zero_not_null(self):
+        """A brand-new model goes through _fresh_token_entry — cache
+        fields start at 0 (not NULL) because a fresh track() call
+        means ZZ-era semantics are authoritative from turn 1."""
+        usage = SharedTokenUsage()
+        usage.clear()
+        entry = usage.track("fresh-zz", 100, 50, 100.0, 0.001)
+        # No cache tokens reported by this call, but the fields are
+        # numeric zero — "genuine zero hits", not "no data".
+        assert entry["cache_read_tokens"] == 0
+        assert entry["cache_create_tokens"] == 0
+        assert entry["cache_hit_ratio"] == 0.0
+
 
 class TestSharedHourlyLedger:
     def test_record_and_total(self):

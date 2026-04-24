@@ -1100,8 +1100,20 @@ _PRICING = {
 }
 
 
-def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: int) -> None:
-    """Track token usage for a model (called synchronously from LLM callback)."""
+def track_tokens(model: str, input_tokens: int, output_tokens: int,
+                 latency_ms: int, cache_read_tokens: int = 0,
+                 cache_create_tokens: int = 0) -> None:
+    """Track token usage for a model (called synchronously from LLM callback).
+
+    ZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens``
+    are accepted positionally-backward-compat (defaulting to 0) so
+    pre-ZZ callers keep working; the LLM callback plumbs real values
+    from the provider response. ``cache_hit_ratio`` is derived, not
+    accepted — it's always ``cache_read / (input + cache_read)`` on
+    the lifetime running totals (source of truth is the dict here;
+    SharedTokenUsage recomputes independently from its own lifetime
+    totals and the two should match).
+    """
     _maybe_reset_daily_budget()
     if model not in _token_usage:
         _token_usage[model] = {
@@ -1113,6 +1125,13 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
             "request_count": 0,
             "avg_latency": 0,
             "last_used": "",
+            # ZZ.A1 (#303-1): cache observability fields. Fresh rows
+            # start at 0 (not NULL) — a brand-new entry implies at
+            # least one ZZ-era track() call, so the counters are
+            # authoritative from the first sample.
+            "cache_read_tokens": 0,
+            "cache_create_tokens": 0,
+            "cache_hit_ratio": 0.0,
         }
     u = _token_usage[model]
     prev_cost = u["cost"]
@@ -1127,8 +1146,25 @@ def track_tokens(model: str, input_tokens: int, output_tokens: int, latency_ms: 
     cost_delta = u["cost"] - prev_cost
     _record_hourly(cost_delta)
 
+    # ZZ.A1 (#303-1): accumulate cache counters + recompute hit ratio.
+    # "Upgrade" any pre-ZZ NULL to 0 on the first ZZ-era write so
+    # downstream callers see a consistent shape; after this line the
+    # in-memory dict always has numeric cache fields.
+    prev_read = u.get("cache_read_tokens") or 0
+    prev_create = u.get("cache_create_tokens") or 0
+    u["cache_read_tokens"] = prev_read + int(cache_read_tokens)
+    u["cache_create_tokens"] = prev_create + int(cache_create_tokens)
+    denom = u["input_tokens"] + u["cache_read_tokens"]
+    u["cache_hit_ratio"] = (
+        round(u["cache_read_tokens"] / denom, 6) if denom > 0 else 0.0
+    )
+
     # I10: track in shared state for cross-worker visibility
-    _token_usage_shared.track(model, input_tokens, output_tokens, latency_ms, cost_delta)
+    _token_usage_shared.track(
+        model, input_tokens, output_tokens, latency_ms, cost_delta,
+        cache_read_tokens=cache_read_tokens,
+        cache_create_tokens=cache_create_tokens,
+    )
     if cost_delta > 0:
         _hourly_ledger_shared.record(cost_delta)
 

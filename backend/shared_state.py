@@ -549,6 +549,15 @@ def _fresh_token_entry(model: str) -> dict:
         "request_count": 0,
         "avg_latency": 0,
         "last_used": "",
+        # ZZ.A1 (#303-1, 2026-04-24): prompt-cache observability.
+        # NULL-by-default on pre-ZZ Redis payloads (see
+        # _normalize_token_entry); fresh entries start at 0 because
+        # once a worker on the ZZ-capable code path writes an entry
+        # its cache counters are authoritative (absent cache data
+        # from the provider is normalised to 0 in the LLM callback).
+        "cache_read_tokens": 0,
+        "cache_create_tokens": 0,
+        "cache_hit_ratio": 0.0,
         # Internal: sum of all observed latencies, used to recompute
         # the avg on each track(). Stripped from the dict returned to
         # callers by _strip_internal — see get_all().
@@ -572,13 +581,24 @@ def _normalize_token_entry(entry: dict) -> dict:
     entry.setdefault("request_count", 0)
     entry.setdefault("avg_latency", 0)
     entry.setdefault("last_used", "")
+    # ZZ.A1 (#303-1): cache fields are absent on pre-ZZ payloads.
+    # Preserve ``None`` explicitly rather than setdefault-ing to 0 so
+    # the DB/UI can distinguish "legacy row, no data" from "ZZ-era row
+    # that saw zero cache hits". Only fresh entries (via
+    # _fresh_token_entry) start at 0.
+    if "cache_read_tokens" not in entry:
+        entry["cache_read_tokens"] = None
+    if "cache_create_tokens" not in entry:
+        entry["cache_create_tokens"] = None
+    if "cache_hit_ratio" not in entry:
+        entry["cache_hit_ratio"] = None
     entry.setdefault("_total_latency", 0.0)
     return entry
 
 
 def _apply_token_delta(
     entry: dict, inp: int, out: int, latency_ms: float, cost: float,
-    now_hms: str,
+    now_hms: str, cache_read: int = 0, cache_create: int = 0,
 ) -> None:
     entry["input_tokens"] += inp
     entry["output_tokens"] += out
@@ -591,6 +611,21 @@ def _apply_token_delta(
         if entry["request_count"] else 0
     )
     entry["last_used"] = now_hms
+    # ZZ.A1 (#303-1): accumulate cache counters. Whenever track() is
+    # invoked on the ZZ code path the cache_* fields become non-NULL
+    # regardless of whether the prior stored value was NULL (legacy
+    # row) — the first track() call "upgrades" the row to ZZ-era
+    # semantics. Hit ratio is recomputed from lifetime totals so it
+    # stays stable under concurrent increments (would drift if we
+    # kept only the last-turn snapshot).
+    prev_read = entry.get("cache_read_tokens") or 0
+    prev_create = entry.get("cache_create_tokens") or 0
+    entry["cache_read_tokens"] = prev_read + int(cache_read)
+    entry["cache_create_tokens"] = prev_create + int(cache_create)
+    denom = entry["input_tokens"] + entry["cache_read_tokens"]
+    entry["cache_hit_ratio"] = (
+        round(entry["cache_read_tokens"] / denom, 6) if denom > 0 else 0.0
+    )
 
 
 def _strip_internal(entry: dict) -> dict:
@@ -609,8 +644,21 @@ class SharedTokenUsage:
         return _key("token_usage")
 
     def track(self, model: str, input_tokens: int, output_tokens: int,
-              latency_ms: float, cost: float) -> dict:
-        """Atomically update usage for a model. Returns new totals."""
+              latency_ms: float, cost: float,
+              cache_read_tokens: int = 0,
+              cache_create_tokens: int = 0) -> dict:
+        """Atomically update usage for a model. Returns new totals.
+
+        ZZ.A1 (#303-1): ``cache_read_tokens`` / ``cache_create_tokens``
+        are additive counters accumulated across all calls; the
+        resulting entry carries lifetime totals plus a recomputed
+        ``cache_hit_ratio = cache_read / (input + cache_read)`` (0.0
+        when the denominator is zero — avoids ZeroDivisionError on
+        the first call of a fresh model that saw no cache). Both
+        default to 0 so existing callers keep compiling without
+        change; the ZZ code path plumbs real values through the LLM
+        callback.
+        """
         now_hms = datetime.now().strftime("%H:%M:%S")
         r = get_sync_redis()
         if r:
@@ -623,7 +671,7 @@ class SharedTokenUsage:
                 )
                 _apply_token_delta(
                     entry, input_tokens, output_tokens, latency_ms, cost,
-                    now_hms,
+                    now_hms, cache_read_tokens, cache_create_tokens,
                 )
                 r.hset(field_key, model, json.dumps(entry))
                 return _strip_internal(dict(entry))
@@ -637,6 +685,7 @@ class SharedTokenUsage:
             )
             _apply_token_delta(
                 entry, input_tokens, output_tokens, latency_ms, cost, now_hms,
+                cache_read_tokens, cache_create_tokens,
             )
             self._local[model] = entry
             return _strip_internal(dict(entry))

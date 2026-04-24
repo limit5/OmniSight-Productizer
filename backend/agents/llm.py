@@ -41,9 +41,10 @@ class TokenTrackingCallback(BaseCallbackHandler):
     and has no equivalent of cache creation — we normalise creation to 0
     for OpenAI rather than leaving it ``None`` so callers don't branch.
     The normalised pair is stashed on the instance
-    (``last_cache_read`` / ``last_cache_create``) for the follow-up
-    tracker-schema checkbox to consume; ``track_tokens`` itself is left
-    untouched in this checkbox.
+    (``last_cache_read`` / ``last_cache_create``) and plumbed through
+    ``track_tokens`` → ``SharedTokenUsage.track`` so the lifetime
+    cache counters + hit ratio land in both the in-memory dict and
+    the ``token_usage`` Postgres row.
     """
 
     def __init__(self, model_name: str) -> None:
@@ -117,11 +118,17 @@ class TokenTrackingCallback(BaseCallbackHandler):
             self.last_cache_read = cache_read
             self.last_cache_create = cache_create
 
+            # ZZ.A1 (#303-1, 2026-04-24): propagate normalised cache
+            # counters into ``track_tokens`` so ``SharedTokenUsage``
+            # and the ``token_usage`` row both accumulate the lifetime
+            # totals + recomputed hit ratio.
             track_tokens(
                 self.model_name,
                 usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
                 usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
                 latency_ms,
+                cache_read_tokens=cache_read,
+                cache_create_tokens=cache_create,
             )
         except Exception as exc:
             logger.warning("Token tracking failed for %s: %s", self.model_name, exc)
