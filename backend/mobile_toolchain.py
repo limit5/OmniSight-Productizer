@@ -104,6 +104,29 @@ SUPPORTED_MACOS_BUILDERS: frozenset[str] = frozenset({
 raises ``UnknownMacOSBuilderError``."""
 
 
+SUPPORTED_ANDROID_CLI_ACTIONS: frozenset[str] = frozenset({
+    "create",
+    "run",
+    "sdk-install",
+})
+"""P11 #351 — recognized ``action`` values for
+``android_cli_command``. Maps 1:1 to Google's Android CLI
+sub-commands shipped 2026-04-18:
+
+* ``create``      → ``android create <project_path>`` (replaces hand-rolled
+  template scaffolding from P1).
+* ``run``         → ``android run <project_path>`` (replaces
+  ``gradle_wrapper_command("installDebug")`` + follow-up
+  ``adb shell am start``).
+* ``sdk-install`` → ``android sdk install <package>`` (replaces the
+  manual ``sdkmanager`` invocations baked into
+  ``backend/docker/Dockerfile.mobile-build``).
+
+``sdk-install`` uses a hyphen so the action token is a single,
+unambiguous identifier — the emitted argv still splits it into
+``android sdk install`` at the CLI boundary."""
+
+
 # ── Error hierarchy ────────────────────────────────────────────────
 
 class MobileToolchainError(Exception):
@@ -130,6 +153,11 @@ class MissingDockerImageError(MobileToolchainError):
 
 class UnsupportedPlatformError(MobileToolchainError):
     """Profile's ``mobile_platform`` is neither ``ios`` nor ``android``."""
+
+
+class UnknownAndroidCliActionError(MobileToolchainError):
+    """``android_cli_command`` called with an action outside
+    ``SUPPORTED_ANDROID_CLI_ACTIONS`` (P11 #351)."""
 
 
 # ── Delegator dataclasses ──────────────────────────────────────────
@@ -430,6 +458,106 @@ def gradle_wrapper_command(
     argv: list[str] = [str(wrapper), task]
     if abi:
         argv.append(f"-PtargetAbi={abi}")
+    argv.extend(extra_args)
+    return argv
+
+
+def android_cli_available() -> bool:
+    """True when Google's Android CLI (P11 #351, ``android`` binary
+    distributed from ``d.android.com/tools/agents``) is on PATH.
+
+    Callers use this to choose between the fast path
+    (``android_cli_command(...)``) and the legacy Gradle-wrapper
+    fallback (``gradle_wrapper_command(...)``). The detection is the
+    P11 fallback contract documented in
+    ``backend/docker/Dockerfile.mobile-build`` and
+    ``scripts/install_android_cli.sh`` — if either install step was
+    skipped, ``False`` here keeps P1/P2 running on the existing
+    ``./gradlew`` path without further code changes."""
+    return shutil.which("android") is not None
+
+
+def android_cli_command(
+    action: str,
+    project_path: Path,
+    *,
+    sdk_package: Optional[str] = None,
+    extra_args: Sequence[str] = (),
+) -> list[str]:
+    """Emit the ``android <action> …`` argv for P11 #351 replacement
+    of the hand-rolled Gradle-wrapper + sdkmanager invocations.
+
+    Google's Android CLI (released 2026-04-18, see
+    ``d.android.com/tools/agents``) collapses the three P1/P2 code
+    paths below into one binary:
+
+    =====================  ==============================================
+    action                 emitted argv
+    =====================  ==============================================
+    ``"create"``           ``android create <project_path> [extra_args]``
+    ``"run"``              ``android run <project_path> [extra_args]``
+    ``"sdk-install"``      ``android sdk install <sdk_package> [extra_args]``
+    =====================  ==============================================
+
+    Action tokens are case-insensitive; ``"sdk_install"`` and
+    ``"SDK-Install"`` are normalised to the canonical ``sdk-install``.
+
+    This is a **pure command builder** — it does not probe the host,
+    invoke subprocess, or fall back. Callers are expected to check
+    ``android_cli_available()`` first and, when ``False``, route to
+    the legacy helper (``gradle_wrapper_command`` for ``run``;
+    scaffolding / sdkmanager have no P1 helper because the Docker
+    image already bakes them in).
+
+    Parameters
+    ----------
+    action
+        One of ``SUPPORTED_ANDROID_CLI_ACTIONS``. Case-insensitive;
+        hyphens and underscores are interchangeable.
+    project_path
+        Android project root. For ``sdk-install`` this argument is
+        accepted for call-site symmetry but not placed in the emitted
+        argv — ``android sdk install`` operates on the shared SDK
+        root, not a specific project.
+    sdk_package
+        Required when ``action == "sdk-install"``. Example values:
+        ``"platform-tools"``, ``"platforms;android-35"``,
+        ``"ndk;27.0.12077973"``. Passed verbatim to the CLI.
+    extra_args
+        Extra CLI args appended verbatim after the action's required
+        positional(s). Useful for ``--template`` (create),
+        ``--device <id>`` (run), ``--channel beta`` (sdk install).
+
+    Returns
+    -------
+    list[str]
+        argv suitable for ``subprocess.run``. Does NOT invoke.
+
+    Raises
+    ------
+    UnknownAndroidCliActionError
+        ``action`` is not in ``SUPPORTED_ANDROID_CLI_ACTIONS``.
+    ValueError
+        ``action == "sdk-install"`` without ``sdk_package``.
+    """
+    norm = action.strip().lower().replace("_", "-")
+    if norm not in SUPPORTED_ANDROID_CLI_ACTIONS:
+        raise UnknownAndroidCliActionError(
+            f"android_cli_command: action={action!r} is not supported; "
+            f"valid values: {sorted(SUPPORTED_ANDROID_CLI_ACTIONS)}"
+        )
+    if norm == "create":
+        argv: list[str] = ["android", "create", str(project_path)]
+    elif norm == "run":
+        argv = ["android", "run", str(project_path)]
+    else:  # "sdk-install"
+        if not sdk_package:
+            raise ValueError(
+                "android_cli_command(action='sdk-install', ...) requires "
+                "sdk_package (e.g. 'platform-tools', "
+                "'platforms;android-35', 'ndk;27.0.12077973')"
+            )
+        argv = ["android", "sdk", "install", sdk_package]
     argv.extend(extra_args)
     return argv
 

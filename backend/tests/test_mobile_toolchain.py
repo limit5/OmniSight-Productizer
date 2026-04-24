@@ -513,3 +513,141 @@ def test_host_install_android_cli_uses_same_url_as_dockerfile():
         "install_android_cli.sh should reference the P11 fallback "
         "contract so operators know why the script is optional"
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P11 #351 — android_cli_command argv builder
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_supported_android_cli_actions_are_the_three_from_todo():
+    """TODO.md P11 checkbox 2 enumerates exactly these three
+    actions — create / run / sdk install. Lock the set so a typo
+    like ``sdk_install`` vs ``sdk-install`` at a call site is caught
+    by the action allowlist instead of silently producing a bad argv."""
+    assert mt.SUPPORTED_ANDROID_CLI_ACTIONS == frozenset({
+        "create",
+        "run",
+        "sdk-install",
+    })
+
+
+def test_android_cli_available_proxies_shutil_which(monkeypatch):
+    """``android_cli_available`` must reflect PATH at call time —
+    operators may install the CLI via ``scripts/install_android_cli.sh``
+    mid-session, so caching the value would give a stale answer."""
+    monkeypatch.setattr(mt.shutil, "which", lambda name: None)
+    assert mt.android_cli_available() is False
+    monkeypatch.setattr(
+        mt.shutil,
+        "which",
+        lambda name: "/usr/local/bin/android" if name == "android" else None,
+    )
+    assert mt.android_cli_available() is True
+
+
+def test_android_cli_command_create_emits_expected_argv(tmp_path):
+    """P11 #351 checkbox 2 — ``create`` action replaces the hand-rolled
+    template scaffolding. Argv must start with ``android create`` and
+    carry the project_path as the positional."""
+    argv = mt.android_cli_command("create", tmp_path)
+    assert argv == ["android", "create", str(tmp_path)]
+
+
+def test_android_cli_command_run_emits_expected_argv(tmp_path):
+    """P11 #351 checkbox 2 — ``run`` action replaces
+    ``gradle_wrapper_command('installDebug')``. Argv must be
+    ``android run <project_path>``; anything else breaks the
+    fallback contract at the call site."""
+    argv = mt.android_cli_command("run", tmp_path)
+    assert argv == ["android", "run", str(tmp_path)]
+
+
+def test_android_cli_command_sdk_install_requires_package(tmp_path):
+    """``sdk-install`` without a package is a call-site bug — surface
+    it as ValueError rather than emitting ``android sdk install``
+    with a missing positional (which would print CLI usage and the
+    caller would see a cryptic exit code)."""
+    with pytest.raises(ValueError):
+        mt.android_cli_command("sdk-install", tmp_path)
+
+
+def test_android_cli_command_sdk_install_emits_package(tmp_path):
+    """P11 #351 checkbox 2 — ``sdk install`` replaces the manual
+    sdkmanager invocations baked into the Docker image. Argv is
+    ``android sdk install <package>``; project_path is accepted for
+    call-site symmetry but not embedded in the argv because
+    ``android sdk install`` operates on the shared SDK root."""
+    argv = mt.android_cli_command(
+        "sdk-install",
+        tmp_path,
+        sdk_package="platforms;android-35",
+    )
+    assert argv == ["android", "sdk", "install", "platforms;android-35"]
+
+
+def test_android_cli_command_action_is_case_and_separator_insensitive(tmp_path):
+    """Operators / agents may type ``SDK_Install`` / ``Sdk-Install``
+    / ``sdk install`` interchangeably. Normalise all three to the
+    canonical ``sdk-install`` — a typo-rejecting allowlist is more
+    annoying than helpful when the surface is this small."""
+    for raw in ("SDK-INSTALL", "Sdk_Install", "sdk_install"):
+        argv = mt.android_cli_command(
+            raw, tmp_path, sdk_package="platform-tools"
+        )
+        assert argv == ["android", "sdk", "install", "platform-tools"]
+
+
+def test_android_cli_command_unknown_action_raises(tmp_path):
+    """Reject typos / future-actions-we-dont-support loudly so the
+    caller can pick up an alternative path rather than emitting
+    ``android emulator`` (handled by mobile_simulator, not here)."""
+    with pytest.raises(mt.UnknownAndroidCliActionError):
+        mt.android_cli_command("emulator", tmp_path)
+    with pytest.raises(mt.UnknownAndroidCliActionError):
+        mt.android_cli_command("deploy", tmp_path)
+
+
+def test_android_cli_command_appends_extra_args(tmp_path):
+    """``extra_args`` is forwarded verbatim after the action's
+    required positional(s), mirroring the gradle_wrapper_command
+    convention. Supports ``--template kotlin``, ``--device emu-5554``,
+    ``--channel beta`` etc. without each needing a kwarg."""
+    argv = mt.android_cli_command(
+        "create",
+        tmp_path,
+        extra_args=["--template", "kotlin"],
+    )
+    assert argv == [
+        "android", "create", str(tmp_path), "--template", "kotlin",
+    ]
+    argv = mt.android_cli_command(
+        "run",
+        tmp_path,
+        extra_args=["--device", "emu-5554"],
+    )
+    assert argv[-2:] == ["--device", "emu-5554"]
+
+
+def test_android_cli_command_is_pure_and_does_not_probe_host(tmp_path, monkeypatch):
+    """``android_cli_command`` is a pure argv builder — it must NOT
+    probe PATH, spawn subprocess, or fall back. Callers compose
+    ``android_cli_available()`` + this helper + ``gradle_wrapper_command``
+    at their own layer, which keeps this function unit-testable
+    without any environment setup. Lock the invariant by asserting
+    that shutil.which is never called during argv emission."""
+    calls: list[str] = []
+
+    def spy(name: str):
+        calls.append(name)
+        return None
+
+    monkeypatch.setattr(mt.shutil, "which", spy)
+    mt.android_cli_command("create", tmp_path)
+    mt.android_cli_command("run", tmp_path)
+    mt.android_cli_command(
+        "sdk-install", tmp_path, sdk_package="platform-tools"
+    )
+    assert calls == [], (
+        "android_cli_command must be a pure argv builder; it called "
+        f"shutil.which({calls!r}) — move the detection to the caller"
+    )
