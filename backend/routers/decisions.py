@@ -292,3 +292,140 @@ async def test_decision_rules(payload: RulesTestPayload) -> dict[str, Any]:
     the current (or requested) mode."""
     mode = payload.mode or de.get_mode().value
     return {"mode": mode, "hits": _dr.test_against(payload.kinds, mode)}
+
+
+# ─── H3 row 1527: Force Turbo manual override ───────────────────────
+#
+# Operators can override the H2 auto-derate state machine + the DRF
+# sandbox capacity derate to restore full turbo budget immediately,
+# bypassing the 120-s cooldown. Useful when an operator knows the CPU
+# spike was caused by an external process (e.g. a one-shot benchmark)
+# and wants to resume at turbo budget without waiting for the cooldown.
+#
+# Safety layers (required, NOT optional):
+#   1. Request body `confirm=true` is mandatory — the frontend confirm
+#      dialog surfaces the OOM warning; the server enforces the boolean
+#      so a CLI / curl caller can't skip the human-in-the-loop step.
+#   2. Admin role is required (matches the existing `PUT /operation-mode`
+#      gate for turbo — an operator without admin can't flip the mode
+#      switch directly, so they can't escape the same gate here).
+#   3. Phase-53 hash-chain audit row is written with action
+#      `coordinator.force_turbo_override`, entity_kind `force_turbo_override`,
+#      entity_id `applied` so post-hoc inspection can reconstruct who
+#      overrode a derate and when. The `before` dict captures the
+#      pre-override state (derate_active, derate_ratio, derate_reason);
+#      `after` captures the result (restored_to_budget, manual_override=true).
+#   4. SSE event `coordinator.force_turbo_override` broadcasts to the
+#      UI so every open dashboard shows the override immediately.
+
+
+_PARALLEL_BUDGET_TURBO = de._PARALLEL_BUDGET[de.OperationMode.turbo]
+
+
+class ForceTurboRequest(BaseModel):
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "Must be true. Frontend confirm dialog must warn about "
+            "possible OOM under sustained load before setting this flag."
+        ),
+    )
+    reason: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Optional operator rationale — persisted to the audit row.",
+    )
+
+
+@router.post("/coordinator/force-turbo")
+async def force_turbo(
+    req: ForceTurboRequest,
+    _auth: None = Depends(_require_decision_token),
+    _user=Depends(_au.require_operator),
+) -> dict[str, Any]:
+    if not _au.role_at_least(_user.role, "admin"):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "force turbo requires admin role"},
+        )
+    if not req.confirm:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    "confirm=true is required — force turbo bypasses the "
+                    "OOM safety net and MUST be acknowledged by an operator"
+                ),
+                "code": "force_turbo_confirm_required",
+            },
+        )
+
+    from backend import sandbox_capacity as _sc
+    from backend import audit as _audit
+    from backend.events import bus as _bus
+
+    # Capture before-state so the audit row describes what was overridden.
+    turbo_before = de.turbo_derate_snapshot()
+    cap_before = _sc.snapshot()
+    before = {
+        "turbo_derate_active": bool(turbo_before.get("derate_active", False)),
+        "capacity_derate_ratio": cap_before.get("derate_ratio", 1.0),
+        "capacity_derate_reason": cap_before.get("derate_reason"),
+        "effective_capacity_max": cap_before.get("effective_capacity_max"),
+        "capacity_max": cap_before.get("capacity_max"),
+    }
+
+    # Clear H2 turbo auto-derate (returns True iff it was active).
+    cleared_turbo_derate = de.clear_turbo_derate()
+    # Reset the DRF sandbox capacity derate ratio back to 1.0 so the
+    # effective budget returns to CAPACITY_MAX.
+    reset_capacity_derate = bool(before["capacity_derate_ratio"] < 1.0)
+    if reset_capacity_derate:
+        _sc.set_derate(1.0, reason=None)
+
+    after_snap = _sc.snapshot()
+    after = {
+        "turbo_derate_active": de.is_turbo_derated(),
+        "capacity_derate_ratio": after_snap.get("derate_ratio", 1.0),
+        "effective_capacity_max": after_snap.get("effective_capacity_max"),
+        "restored_to_budget": _PARALLEL_BUDGET_TURBO,
+        "manual_override": True,
+        "operator_reason": (req.reason or "").strip() or None,
+        "at": time.time(),
+    }
+
+    # SSE broadcast — every open dashboard sees the override instantly.
+    try:
+        _bus.publish(
+            "coordinator.force_turbo_override",
+            {
+                "cleared_turbo_derate": cleared_turbo_derate,
+                "reset_capacity_derate": reset_capacity_derate,
+                "actor": getattr(_user, "email", None) or getattr(_user, "id", None) or "operator",
+                "reason": after["operator_reason"],
+                **after,
+            },
+        )
+    except Exception:
+        pass
+
+    # Phase-53 hash-chain audit row.
+    try:
+        _audit.log_sync(
+            action="coordinator.force_turbo_override",
+            entity_kind="force_turbo_override",
+            entity_id="applied",
+            before=before,
+            after=after,
+            actor=getattr(_user, "email", None) or getattr(_user, "id", None) or "operator",
+        )
+    except Exception:
+        pass
+
+    return {
+        "applied": True,
+        "cleared_turbo_derate": cleared_turbo_derate,
+        "reset_capacity_derate": reset_capacity_derate,
+        "before": before,
+        "after": after,
+    }

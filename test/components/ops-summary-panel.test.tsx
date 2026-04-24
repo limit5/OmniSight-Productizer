@@ -11,10 +11,11 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 vi.mock("@/lib/api", () => ({
   getOpsSummary: vi.fn(),
+  forceTurboOverride: vi.fn(),
 }))
 
 import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
@@ -234,5 +235,150 @@ describe("OpsSummaryPanel — H3 row 1526 derate badge", () => {
     expect(badge.getAttribute("data-derate-target")).toBe("manual")
     expect(badge.textContent).toContain("Coordinator auto-derated to manual")
     expect(badge.getAttribute("title")).toContain("MEM 96%")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// H3 row 1527 — Force turbo manual override button.
+// Button sits under the COORDINATOR row, pops a native window.confirm with
+// the OOM warning, then POSTs /coordinator/force-turbo on acceptance. The
+// backend writes a Phase-53 audit row and SSE-broadcasts the override.
+// ─────────────────────────────────────────────────────────────────────────
+describe("OpsSummaryPanel — H3 row 1527 force turbo override", () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it("renders the Force turbo button inside the coordinator section", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 12,
+        queue_depth: 0,
+        deferred_5m: 0,
+        derated: false,
+        derate_reason: null,
+      },
+    })
+    render(<OpsSummaryPanel />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-force-turbo-btn")).toBeInTheDocument()
+    })
+    const btn = screen.getByTestId("ops-force-turbo-btn")
+    expect(btn.textContent).toContain("Force turbo")
+    // Title carries the OOM warning — a11y: aria-label also mentions OOM.
+    expect(btn.getAttribute("title")).toContain("OOM")
+    expect(btn.getAttribute("aria-label")).toContain("OOM")
+  })
+
+  it("cancelling the confirm dialog does NOT call the backend", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 4,
+        queue_depth: 0,
+        deferred_5m: 0,
+        derated: true,
+        derate_reason: "CPU 87% > threshold",
+      },
+    })
+    const force = api.forceTurboOverride as ReturnType<typeof vi.fn>
+    force.mockResolvedValue({
+      applied: true, cleared_turbo_derate: true, reset_capacity_derate: true,
+      before: { turbo_derate_active: true, capacity_derate_ratio: 0.25 },
+      after: {
+        turbo_derate_active: false, capacity_derate_ratio: 1.0,
+        restored_to_budget: 8, manual_override: true, at: 1,
+      },
+    })
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false)
+
+    render(<OpsSummaryPanel />)
+    await waitFor(() => expect(screen.getByTestId("ops-force-turbo-btn")).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId("ops-force-turbo-btn"))
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // OOM warning must be in the dialog body.
+    const warn = confirmSpy.mock.calls[0][0] as string
+    expect(warn).toContain("OOM")
+    // Backend NOT called when operator declines.
+    expect(force).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it("accepting the confirm dialog POSTs the override and shows a success message", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 4,
+        queue_depth: 0,
+        deferred_5m: 0,
+        derated: true,
+        derate_reason: "CPU 87% > threshold",
+      },
+    })
+    const force = api.forceTurboOverride as ReturnType<typeof vi.fn>
+    force.mockResolvedValue({
+      applied: true,
+      cleared_turbo_derate: true,
+      reset_capacity_derate: true,
+      before: { turbo_derate_active: true, capacity_derate_ratio: 0.25 },
+      after: {
+        turbo_derate_active: false,
+        capacity_derate_ratio: 1.0,
+        restored_to_budget: 8,
+        manual_override: true,
+        at: 1,
+      },
+    })
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true)
+
+    render(<OpsSummaryPanel />)
+    await waitFor(() => expect(screen.getByTestId("ops-force-turbo-btn")).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId("ops-force-turbo-btn"))
+
+    await waitFor(() => expect(force).toHaveBeenCalledTimes(1))
+    // Confirm=true is the flag the backend requires.
+    expect(force).toHaveBeenCalledWith({ confirm: true })
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-force-turbo-msg")).toBeInTheDocument()
+    })
+    const msg = screen.getByTestId("ops-force-turbo-msg")
+    expect(msg.textContent).toContain("Force turbo applied")
+    expect(msg.textContent).toContain("turbo-derate cleared")
+    expect(msg.textContent).toContain("capacity-derate reset")
+    confirmSpy.mockRestore()
+  })
+
+  it("surfaces a failure message when the backend returns an error", async () => {
+    ;(api.getOpsSummary as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...baseOps,
+      coordinator: {
+        capacity_max: 12,
+        effective_budget: 12,
+        queue_depth: 0,
+        deferred_5m: 0,
+        derated: false,
+        derate_reason: null,
+      },
+    })
+    const force = api.forceTurboOverride as ReturnType<typeof vi.fn>
+    force.mockRejectedValue(new Error("403 forbidden"))
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true)
+
+    render(<OpsSummaryPanel />)
+    await waitFor(() => expect(screen.getByTestId("ops-force-turbo-btn")).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId("ops-force-turbo-btn"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ops-force-turbo-msg")).toBeInTheDocument()
+    })
+    const msg = screen.getByTestId("ops-force-turbo-msg")
+    expect(msg.textContent).toContain("Force turbo failed")
+    expect(msg.textContent).toContain("403 forbidden")
+    confirmSpy.mockRestore()
   })
 })

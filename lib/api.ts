@@ -2941,6 +2941,48 @@ export async function getOpsSummary(): Promise<OpsSummary> {
   return request<OpsSummary>("/ops/summary")
 }
 
+/** H3 row 1527 — operator force-turbo override.
+ *
+ * Clears the H2 auto-derate state machine and resets the DRF sandbox
+ * capacity derate ratio back to 1.0 so the effective budget returns
+ * to CAPACITY_MAX. Requires `confirm=true` (server enforces it) so
+ * the frontend confirm dialog's OOM warning can't be silently skipped
+ * by a curl / CLI caller. Backend writes a Phase-53 hash-chain audit
+ * row and broadcasts a `coordinator.force_turbo_override` SSE event. */
+export interface ForceTurboResult {
+  applied: boolean
+  cleared_turbo_derate: boolean
+  reset_capacity_derate: boolean
+  before: {
+    turbo_derate_active: boolean
+    capacity_derate_ratio: number
+    capacity_derate_reason?: string | null
+    effective_capacity_max?: number
+    capacity_max?: number
+  }
+  after: {
+    turbo_derate_active: boolean
+    capacity_derate_ratio: number
+    effective_capacity_max?: number
+    restored_to_budget: number
+    manual_override: boolean
+    operator_reason?: string | null
+    at: number
+  }
+}
+
+export async function forceTurboOverride(
+  opts: { confirm: boolean; reason?: string } = { confirm: true },
+): Promise<ForceTurboResult> {
+  return request<ForceTurboResult>("/coordinator/force-turbo", {
+    method: "POST",
+    body: JSON.stringify({
+      confirm: opts.confirm,
+      ...(opts.reason ? { reason: opts.reason } : {}),
+    }),
+  })
+}
+
 // ─── R2 (#308) Semantic Entropy Monitor ──────────────────────
 
 export interface AgentEntropySnapshot {

@@ -15,9 +15,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   Activity, AlertTriangle, DollarSign, Flame, Radio, Shield, Clock3, Cpu, Brain,
-  Layers, TimerReset, Gauge,
+  Layers, TimerReset, Gauge, Zap,
 } from "lucide-react"
-import { getOpsSummary, type OpsSummary } from "@/lib/api"
+import { getOpsSummary, forceTurboOverride, type OpsSummary } from "@/lib/api"
 
 const POLL_MS = 10_000
 
@@ -117,6 +117,10 @@ export function OpsSummaryPanel() {
             )}
           </div>
           <CoordinatorRow entry={data.coordinator} />
+          <ForceTurboControl
+            entry={data.coordinator}
+            onApplied={() => void refresh()}
+          />
         </div>
       )}
 
@@ -338,6 +342,106 @@ function DerateBadge({ entry }: {
       <AlertTriangle size={9} aria-hidden />
       <span>{label}</span>
     </span>
+  )
+}
+
+
+/**
+ * H3 row 1527 — manual `Force turbo` override button.
+ *
+ * Sits under the COORDINATOR KPI row. On click it pops a native
+ * `window.confirm` dialog warning the operator that bypassing the
+ * H2 auto-derate safety net may cause OOM under sustained load, and
+ * — only if the operator accepts — POSTs to `/coordinator/force-turbo`
+ * which writes a Phase-53 hash-chain audit row and broadcasts a
+ * `coordinator.force_turbo_override` SSE event.
+ *
+ * The button stays visible even when the coordinator isn't derated
+ * (ratio=1.0) — it's the single operator escape hatch, and rendering
+ * it always lets operators also clear a *capacity* derate they spot
+ * creeping in before the turbo-derate state machine engages. When
+ * nothing is actually derated the click is a no-op from the backend's
+ * point of view (audit row still written with before==after so the
+ * trail of "someone pressed the button" survives).
+ */
+function ForceTurboControl({
+  entry, onApplied,
+}: {
+  entry: NonNullable<OpsSummary["coordinator"]>
+  onApplied: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<{ tone: "ok" | "bad"; text: string } | null>(null)
+
+  const onClick = useCallback(async () => {
+    if (busy) return
+    const warnBody = entry.derated
+      ? `Coordinator is currently auto-derated${entry.derate_reason ? ` (${entry.derate_reason})` : ""}.`
+      : "Coordinator is NOT derated — forcing turbo now bypasses the safety net."
+    const ok = typeof window !== "undefined" && window.confirm(
+      `⚠ Force turbo override\n\n${warnBody}\n\n` +
+      "Forcing turbo lifts the H2 auto-derate and the DRF capacity " +
+      "derate. Under sustained high CPU / memory pressure this may " +
+      "cause the host to OOM and kill running sandboxes.\n\n" +
+      "An audit trail row will be written under " +
+      "`coordinator.force_turbo_override` with your operator identity.\n\n" +
+      "Proceed?",
+    )
+    if (!ok) {
+      return
+    }
+    setBusy(true)
+    setMessage(null)
+    try {
+      const result = await forceTurboOverride({ confirm: true })
+      const summary = [
+        result.cleared_turbo_derate ? "turbo-derate cleared" : null,
+        result.reset_capacity_derate ? "capacity-derate reset" : null,
+      ].filter(Boolean).join(", ") || "no-op (nothing was derated)"
+      setMessage({ tone: "ok", text: `Force turbo applied — ${summary}` })
+      onApplied()
+    } catch (exc) {
+      const text = exc instanceof Error ? exc.message : String(exc)
+      setMessage({ tone: "bad", text: `Force turbo failed: ${text}` })
+    } finally {
+      setBusy(false)
+    }
+  }, [busy, entry.derated, entry.derate_reason, onApplied])
+
+  return (
+    <div className="mt-2 flex items-center gap-2 flex-wrap" data-testid="ops-force-turbo-row">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={busy}
+        data-testid="ops-force-turbo-btn"
+        aria-label="Force turbo override — bypasses auto-derate (may OOM)"
+        title="Force turbo override — bypasses auto-derate (may OOM). Confirm dialog + audit row required."
+        className={
+          "inline-flex items-center gap-1 px-2 py-0.5 rounded-sm font-mono text-[10px] uppercase tracking-[0.12em] border transition-colors " +
+          (busy
+            ? "text-[var(--muted-foreground,#94a3b8)] border-[var(--neural-border,rgba(148,163,184,0.35))] cursor-wait"
+            : "text-[var(--critical-red,#ef4444)] border-[var(--critical-red,#ef4444)]/40 bg-[color-mix(in_srgb,var(--critical-red,#ef4444)_12%,transparent)] hover:bg-[color-mix(in_srgb,var(--critical-red,#ef4444)_20%,transparent)]")
+        }
+      >
+        <Zap size={10} aria-hidden />
+        <span>{busy ? "Applying…" : "Force turbo"}</span>
+      </button>
+      {message && (
+        <span
+          data-testid="ops-force-turbo-msg"
+          className={
+            "font-mono text-[10px] truncate max-w-[18rem] " +
+            (message.tone === "ok"
+              ? "text-[var(--validation-emerald,#10b981)]"
+              : "text-[var(--critical-red,#ef4444)]")
+          }
+          title={message.text}
+        >
+          {message.text}
+        </span>
+      )}
+    </div>
   )
 }
 
