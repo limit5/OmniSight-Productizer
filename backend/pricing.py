@@ -6,10 +6,12 @@ context_limits.py) and exposes a single `get_pricing(provider, model)`
 entry-point used by `backend/routers/system.py::track_tokens` to convert
 token counts into USD without hard-coding rates in Python.
 
-Lookup chain (this checkbox: basic; checkbox 3 layers throttled warnings):
+Lookup chain (checkbox 3 layers throttled warnings onto the fallback arms):
     1. Exact `providers[<provider>][<model>]` hit.
-    2. Provider known, model unknown → `providers[<provider>]._default`.
-    3. Provider unknown OR not provided → global `defaults`.
+    2. Provider known, model unknown → `providers[<provider>]._default`
+       (emits `WARNING` once per provider per 24h within this worker).
+    3. Provider unknown OR not provided → global `defaults` (emits
+       `WARNING` once per provider-key per 24h within this worker).
     4. YAML missing / unreadable → `_HARD_CODED_FALLBACK` per-model dict
        (bit-identical to the pre-Z.3 dict at system.py:1094-1103) so a
        corrupt/missing YAML at boot never crashes billing — Z.3 checkbox 6
@@ -30,11 +32,24 @@ Module-global state audit (per SOP Step 1):
       fan-out (SharedKV broadcast) is Z.3 checkbox 4's responsibility, not
       this checkbox — `reload()` is callable but the broadcast wiring lands
       with the `/runtime/pricing/reload` endpoint.
+    - `_FALLBACK_WARN_TS` (Z.3 checkbox 3) is a module-level dict mapping
+      a throttle key (`fallback_arm:<provider_key>`) to the unix timestamp
+      of its last `WARNING` emit. **Intentionally per-worker** — answer 3
+      of the three valid audit answers ("故意每 worker 獨立"). Routing
+      log-throttle through Redis/SharedKV would add an RTT to every price
+      lookup for zero observability benefit: at 2 workers × 2 replicas =
+      4 aggregate workers, the ceiling is 4 warning lines per day per
+      fallback arm per provider — still far below "log spam" by any
+      operational standard, and rolling restarts reset cleanly per worker.
+      A lock guards the dict so concurrent async callers in the same
+      worker do not race on check-then-update.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +79,30 @@ _HARD_CODED_GLOBAL_DEFAULT: tuple[float, float] = (1.0, 3.0)
 _DEFAULT_KEY = "_default"
 
 _PRICING_CACHE: dict[str, Any] | None = None
+
+# Z.3 checkbox 3 (#292): per-worker log throttle for fallback arm hits.
+# Map `fallback_arm:<provider_key>` → unix ts of last WARNING emit. See
+# module docstring "Module-global state audit" for the per-worker rationale.
+_WARN_THROTTLE_SECONDS = 86400.0  # 1 warning per key per 24 h per worker
+_FALLBACK_WARN_TS: dict[str, float] = {}
+_FALLBACK_WARN_LOCK = threading.Lock()
+
+
+def _maybe_warn_fallback(throttle_key: str, fmt: str, *args: Any) -> None:
+    """Emit a fallback `WARNING` once per `throttle_key` per 24 h.
+
+    `throttle_key` conventionally encodes both the fallback arm and the
+    provider, e.g. `provider_default:anthropic` or `global_default:openai`,
+    so two different arms on the same provider — and the same arm on two
+    different providers — each get their own 24 h clock.
+    """
+    now = time.time()
+    with _FALLBACK_WARN_LOCK:
+        last = _FALLBACK_WARN_TS.get(throttle_key, 0.0)
+        if now - last < _WARN_THROTTLE_SECONDS:
+            return
+        _FALLBACK_WARN_TS[throttle_key] = now
+    logger.warning(fmt, *args)
 
 
 def _coerce_rate_pair(raw: object) -> tuple[float, float] | None:
@@ -170,6 +209,11 @@ def get_pricing(provider: str | None, model: str) -> tuple[float, float]:
         → hard-coded boot fallback. `provider=None` triggers a model-only
         scan across providers, then falls through to global defaults.
 
+    Each fallback arm emits a `WARNING` the first time it is hit for a
+    given provider-key within a 24 h window (per-worker throttle, see
+    module docstring). Exact hits and `provider=None` scan hits are not
+    considered fallbacks and never log.
+
     Returns a tuple of floats — never raises. Unknown inputs always resolve
     to the global default rather than 0.0/0.0 so dashboards surface
     "expensive unknown" rather than silently mis-billing as free.
@@ -187,13 +231,31 @@ def get_pricing(provider: str | None, model: str) -> tuple[float, float]:
                     return exact
                 provider_default = table.get(_DEFAULT_KEY)
                 if provider_default is not None:
+                    _maybe_warn_fallback(
+                        f"provider_default:{provider_key}",
+                        "llm_pricing fallback: provider=%r known but model=%r "
+                        "unknown; billing at providers[%s]._default=%s "
+                        "(throttled 1/day/provider per worker)",
+                        provider_key, model, provider_key, provider_default,
+                    )
                     return provider_default
         else:
             scanned = _scan_providers_for_model(model)
             if scanned is not None:
                 return scanned
 
+    # Both-unknown arm: either provider was None and the model-scan missed,
+    # or provider is not in the YAML, or provider is in the YAML but has no
+    # _default and no exact match. All three collapse to global defaults.
+    provider_label = (provider or "").strip().lower() or "<unknown>"
     if cache["_loaded_from_yaml"]:
+        _maybe_warn_fallback(
+            f"global_default:{provider_label}",
+            "llm_pricing fallback: no provider/model match for "
+            "provider=%r model=%r; billing at global defaults=%s "
+            "(throttled 1/day/provider per worker)",
+            provider, model, cache["defaults"],
+        )
         return cache["defaults"]
 
     # YAML never loaded — try the per-model hard-coded fallback before
@@ -201,6 +263,13 @@ def get_pricing(provider: str | None, model: str) -> tuple[float, float]:
     # billing at exactly their historical rate when the YAML is broken.
     if model and model in _HARD_CODED_FALLBACK:
         return _HARD_CODED_FALLBACK[model]
+    _maybe_warn_fallback(
+        f"hardcoded_global:{provider_label}",
+        "llm_pricing fallback: YAML unavailable and model=%r has no "
+        "hard-coded rate for provider=%r; billing at boot-safety "
+        "default=%s (throttled 1/day/provider per worker)",
+        model, provider, _HARD_CODED_GLOBAL_DEFAULT,
+    )
     return _HARD_CODED_GLOBAL_DEFAULT
 
 
@@ -228,10 +297,14 @@ def get_metadata() -> dict[str, Any]:
 
 
 def reset_cache_for_tests() -> None:
-    """Clear the YAML cache so tests can rewrite the file and re-load.
+    """Clear the YAML cache + fallback-warn throttle so tests start fresh.
 
     Production code path is `reload()`; this exists strictly for the test
-    suite, mirroring the same hook in `backend/context_limits.py`.
+    suite, mirroring the same hook in `backend/context_limits.py`. The
+    throttle map is cleared too so each test gets a pristine "first emit"
+    window regardless of what earlier tests in the same process did.
     """
     global _PRICING_CACHE
     _PRICING_CACHE = None
+    with _FALLBACK_WARN_LOCK:
+        _FALLBACK_WARN_TS.clear()
