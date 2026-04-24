@@ -126,6 +126,14 @@ class TokenTrackingCallback(BaseCallbackHandler):
         # so emit_turn_complete doesn't have to know about LangChain
         # message classes (the adapter firewall).
         self._prompt_messages: list[dict] = []
+        # Z.1 (#290) checkbox 1 (2026-04-24): raw HTTP response headers
+        # snapshotted from the underlying SDK on each on_llm_end. The
+        # dict is kept unnormalised here — later Z.1 checkboxes own the
+        # per-provider name mapping (``anthropic-ratelimit-*`` vs
+        # ``x-ratelimit-remaining-requests`` vs …) and the SharedKV
+        # write. Empty dict (not ``None``) when headers can't be
+        # located so readers branch on truthiness rather than identity.
+        self.last_response_headers: dict = {}
 
     def on_chat_model_start(  # noqa: ANN001
         self,
@@ -192,11 +200,110 @@ class TokenTrackingCallback(BaseCallbackHandler):
 
         return 0, 0
 
+    @staticmethod
+    def _extract_response_headers(response: LLMResult) -> dict:
+        """Fish the raw rate-limit / response header dict out of a
+        LangChain ``LLMResult``.
+
+        Z.1 (#290) checkbox 1 (2026-04-24). LangChain does not expose a
+        single stable path for the underlying SDK's ``.response.headers``
+        dict — different ``langchain-<provider>`` versions stash it in
+        different places, and a LangChain minor-version bump routinely
+        moves it. Rather than binding to one path and silently breaking
+        on the next upgrade, we walk every location observed to date
+        and return the first non-empty hit. Order is most-authoritative
+        first:
+
+        1. ``llm_output['headers']`` — langchain-openai ≥ 0.2 mirror of
+           ``openai.AsyncOpenAI`` ``.response.headers``.
+        2. ``llm_output['response_headers']`` — alternate name some
+           adapters use.
+        3. ``generations[0][0].message.response_metadata['headers']`` —
+           langchain-anthropic ≥ 0.3 path (raw response metadata).
+        4. ``generations[0][0].message.response_metadata`` flattened —
+           some adapters inline the ``x-ratelimit-*`` /
+           ``anthropic-ratelimit-*`` keys directly into
+           ``response_metadata`` without a ``headers`` wrapper.
+        5. ``generations[0][0].generation_info['headers']`` — older
+           adapters kept raw headers here.
+
+        Returns ``{}`` (not ``None``) when no headers can be located —
+        matches the downstream expectation that "absent" and "empty"
+        are indistinguishable (Ollama emits no rate-limit headers at
+        all and is a legitimate empty-dict case). Never raises: a
+        malformed provider response or a LangChain-upgrade drift
+        must degrade to ``{}`` so the LLM turn completes cleanly.
+        """
+        if not isinstance(response, LLMResult):
+            return {}
+
+        llm_out = getattr(response, "llm_output", None)
+        if isinstance(llm_out, dict):
+            for key in ("headers", "response_headers"):
+                cand = llm_out.get(key)
+                if isinstance(cand, dict) and cand:
+                    return dict(cand)
+
+        try:
+            gen = response.generations[0][0]
+        except (AttributeError, IndexError, TypeError):
+            return {}
+
+        msg = getattr(gen, "message", None)
+        meta = getattr(msg, "response_metadata", None) if msg else None
+        if isinstance(meta, dict):
+            wrapped = meta.get("headers")
+            if isinstance(wrapped, dict) and wrapped:
+                return dict(wrapped)
+            # Flattened rate-limit metadata — detect by the characteristic
+            # header-name prefixes any of the four supported providers
+            # emit. Pattern matches both vendor-specific
+            # ``anthropic-ratelimit-*`` + the generic ``x-ratelimit-*``
+            # that OpenAI / xAI / Groq / DeepSeek all share, plus the
+            # bare ``retry-after`` the 429 path sets.
+            rl_prefixes = ("x-ratelimit", "anthropic-ratelimit")
+            rl_exact = {"retry-after"}
+            if any(
+                isinstance(k, str)
+                and (k.lower().startswith(rl_prefixes) or k.lower() in rl_exact)
+                for k in meta.keys()
+            ):
+                return dict(meta)
+
+        gen_info = getattr(gen, "generation_info", None)
+        if isinstance(gen_info, dict):
+            cand = gen_info.get("headers")
+            if isinstance(cand, dict) and cand:
+                return dict(cand)
+
+        return {}
+
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:  # noqa: ANN003
         try:
             from backend.routers.system import track_tokens
 
             latency_ms = int((time.time() - self._start) * 1000)
+            # Z.1 (#290) checkbox 1: snapshot the raw response headers
+            # onto the callback instance before token-usage processing
+            # so a later exception in the token/metrics pipeline does
+            # not silently drop the rate-limit snapshot. Downstream Z.1
+            # checkboxes (name mapping + SharedKV write) read from
+            # ``self.last_response_headers``; empty dict is the
+            # "no headers / unknown provider / Ollama" case and is
+            # expected — debug log only, never raise.
+            try:
+                self.last_response_headers = self._extract_response_headers(response)
+                if not self.last_response_headers:
+                    logger.debug(
+                        "No rate-limit headers on %s response (empty dict)",
+                        self.model_name,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "rate-limit header extraction skipped for %s: %s",
+                    self.model_name, exc,
+                )
+                self.last_response_headers = {}
             usage: dict = {}
             if response.llm_output:
                 usage = response.llm_output.get("token_usage", {})
