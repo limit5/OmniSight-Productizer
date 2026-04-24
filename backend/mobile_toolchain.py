@@ -160,6 +160,21 @@ class UnknownAndroidCliActionError(MobileToolchainError):
     ``SUPPORTED_ANDROID_CLI_ACTIONS`` (P11 #351)."""
 
 
+class NoGradleFallbackError(MobileToolchainError):
+    """``resolve_android_invocation`` was asked for an action that has
+    no Gradle wrapper equivalent (``create`` / ``sdk-install``) on a
+    host where Google's Android CLI is not on PATH (P11 #351 checkbox 4).
+
+    The two actions that surface this error don't have a Gradle helper
+    by design — template scaffolding and SDK manager invocations are
+    baked into ``ghcr.io/omnisight/mobile-build`` and only become
+    callable from the host once an operator runs
+    ``scripts/install_android_cli.sh`` (or the build moves into the
+    Docker image, where the CLI ships pre-installed). Surfacing this
+    as a typed error rather than silently emitting ``./gradlew create``
+    keeps the failure mode honest for the caller."""
+
+
 # ── Delegator dataclasses ──────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -560,6 +575,149 @@ def android_cli_command(
         argv = ["android", "sdk", "install", sdk_package]
     argv.extend(extra_args)
     return argv
+
+
+@dataclass(frozen=True)
+class AndroidInvocation:
+    """Result of ``resolve_android_invocation`` (P11 #351 checkbox 4).
+
+    Attributes
+    ----------
+    argv
+        Concrete argv ready for ``subprocess.run``. Whichever path the
+        dispatcher picked, the shape is uniform so callers don't need
+        a second branch around the result.
+    path_kind
+        ``"android-cli"`` when Google's Android CLI was on PATH and the
+        fast path was chosen; ``"gradle-wrapper"`` when the dispatcher
+        fell back to ``./gradlew``. Surface this in logs / debug
+        findings so operators can tell from the audit trail which
+        toolchain actually ran a build — the two paths produce
+        identical artifacts but differ in latency (Google's 2026-04-18
+        benchmark: 3× faster, 70% less token through the CLI).
+    detail
+        Human-readable single line describing the resolution decision —
+        "android CLI on PATH" / "android CLI absent → ./gradlew installDebug".
+        Safe to log; never echoes secret material.
+    """
+
+    argv: list[str]
+    path_kind: str
+    detail: str = ""
+
+
+# Action → ``./gradlew`` task fallback mapping. Only ``run`` has a
+# meaningful Gradle equivalent at the toolchain layer — ``create``
+# (template scaffolding) and ``sdk-install`` (SDK manager) live in the
+# Docker image, not in the host helper, so their fallback is "use the
+# Docker image" rather than a different argv.
+_ANDROID_CLI_GRADLE_FALLBACK: dict[str, Optional[str]] = {
+    "create": None,         # No host Gradle equivalent — Docker image only.
+    "run": "installDebug",  # ``android run`` ≈ ``./gradlew installDebug`` + adb am start.
+    "sdk-install": None,    # No host Gradle equivalent — sdkmanager in Docker.
+}
+
+
+def resolve_android_invocation(
+    action: str,
+    project_root: Path,
+    *,
+    sdk_package: Optional[str] = None,
+    abi: Optional[str] = None,
+    extra_args: Sequence[str] = (),
+) -> AndroidInvocation:
+    """Pick Android CLI fast path if available, else fall back to ``./gradlew``.
+
+    This is the **fallback dispatcher** P11 #351 checkbox 4 calls for —
+    the single helper that ties ``android_cli_available()`` +
+    ``android_cli_command()`` + ``gradle_wrapper_command()`` together so
+    P1/P2 call sites don't each repeat the if/else themselves. Callers
+    pass the abstract action; the dispatcher decides which physical
+    toolchain to invoke based on PATH at call time.
+
+    Resolution order:
+
+    1. ``android_cli_available()`` ⇒ emit ``android <action> …`` argv
+       (delegates to ``android_cli_command``).
+    2. Else, look up ``_ANDROID_CLI_GRADLE_FALLBACK[action]``:
+
+       * Non-``None`` Gradle task ⇒ emit ``./gradlew <task> …`` argv
+         (delegates to ``gradle_wrapper_command``).
+       * ``None`` (action has no host-side Gradle equivalent) ⇒ raise
+         ``NoGradleFallbackError`` so the caller can either gate on the
+         Docker image being available or fail fast.
+
+    Parameters
+    ----------
+    action
+        One of ``SUPPORTED_ANDROID_CLI_ACTIONS``. Case- and
+        separator-insensitive — the same normalisation rules
+        ``android_cli_command`` uses apply here.
+    project_root
+        Android project root. Forwarded to both branches:
+        ``android <action> <project_root>`` for the CLI path,
+        ``<project_root>/gradlew`` for the Gradle path.
+    sdk_package
+        Required when ``action == "sdk-install"`` and the CLI is on
+        PATH (forwarded to ``android sdk install <package>``). Ignored
+        otherwise; the Gradle fallback for ``sdk-install`` is
+        ``NoGradleFallbackError`` regardless.
+    abi
+        Optional ABI filter (``armeabi-v7a`` / ``arm64-v8a`` etc.).
+        Only consumed by the Gradle fallback (it becomes
+        ``-PtargetAbi=<abi>``); ``android run`` picks the ABI from the
+        target device, so the kwarg is ignored on the CLI path.
+    extra_args
+        Forwarded verbatim to whichever underlying argv builder runs.
+
+    Raises
+    ------
+    UnknownAndroidCliActionError
+        ``action`` is not in ``SUPPORTED_ANDROID_CLI_ACTIONS``.
+    ValueError
+        ``action == "sdk-install"`` with the CLI on PATH but no
+        ``sdk_package`` (re-raised from ``android_cli_command``).
+    NoGradleFallbackError
+        CLI absent and the action has no Gradle wrapper equivalent
+        (``create`` / ``sdk-install``).
+    """
+    norm = action.strip().lower().replace("_", "-")
+    if norm not in SUPPORTED_ANDROID_CLI_ACTIONS:
+        raise UnknownAndroidCliActionError(
+            f"resolve_android_invocation: action={action!r} is not supported; "
+            f"valid values: {sorted(SUPPORTED_ANDROID_CLI_ACTIONS)}"
+        )
+    if android_cli_available():
+        argv = android_cli_command(
+            norm,
+            project_root,
+            sdk_package=sdk_package,
+            extra_args=extra_args,
+        )
+        return AndroidInvocation(
+            argv=argv,
+            path_kind="android-cli",
+            detail=f"android CLI on PATH → android {norm}",
+        )
+    gradle_task = _ANDROID_CLI_GRADLE_FALLBACK[norm]
+    if gradle_task is None:
+        raise NoGradleFallbackError(
+            f"action={norm!r} has no ./gradlew equivalent and the "
+            "`android` CLI is not on PATH; install Google's Android CLI "
+            "(scripts/install_android_cli.sh) or run inside the "
+            f"{MOBILE_BUILD_IMAGE} image where the CLI ships baked in"
+        )
+    argv = gradle_wrapper_command(
+        project_root,
+        gradle_task,
+        extra_args=extra_args,
+        abi=abi,
+    )
+    return AndroidInvocation(
+        argv=argv,
+        path_kind="gradle-wrapper",
+        detail=f"android CLI absent → ./gradlew {gradle_task}",
+    )
 
 
 def fastlane_gym_command(

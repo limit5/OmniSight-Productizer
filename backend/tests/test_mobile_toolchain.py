@@ -651,3 +651,200 @@ def test_android_cli_command_is_pure_and_does_not_probe_host(tmp_path, monkeypat
         "android_cli_command must be a pure argv builder; it called "
         f"shutil.which({calls!r}) — move the detection to the caller"
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P11 #351 checkbox 4 — resolve_android_invocation fallback dispatcher
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _patch_android_cli_present(monkeypatch, present: bool) -> None:
+    """Make ``shutil.which`` answer as if the Android CLI is / isn't on
+    PATH. We patch the symbol the toolchain module imported (``mt.shutil``)
+    so the override is local to the module under test."""
+    fake_path = "/usr/local/bin/android"
+
+    def fake_which(name: str):
+        if name == "android" and present:
+            return fake_path
+        return None
+
+    monkeypatch.setattr(mt.shutil, "which", fake_which)
+
+
+def test_resolve_android_invocation_run_picks_cli_when_present(tmp_path, monkeypatch):
+    """P11 #351 checkbox 4 — ``run`` action with ``android`` on PATH
+    routes through ``android run <project_root>`` (the CLI fast path)
+    rather than the ``./gradlew installDebug`` fallback."""
+    _patch_android_cli_present(monkeypatch, True)
+    inv = mt.resolve_android_invocation("run", tmp_path)
+    assert inv.path_kind == "android-cli"
+    assert inv.argv == ["android", "run", str(tmp_path)]
+    assert "android CLI on PATH" in inv.detail
+
+
+def test_resolve_android_invocation_run_falls_back_to_gradle_when_cli_absent(
+    tmp_path, monkeypatch,
+):
+    """P11 #351 checkbox 4 — ``run`` without the CLI must fall back
+    to ``./gradlew installDebug`` so existing P1/P2 hosts that haven't
+    yet run ``scripts/install_android_cli.sh`` keep building. The
+    Gradle task name is the load-bearing pin: anything other than
+    ``installDebug`` would break the install + launch contract that
+    ``android run`` replaced."""
+    _patch_android_cli_present(monkeypatch, False)
+    inv = mt.resolve_android_invocation("run", tmp_path)
+    assert inv.path_kind == "gradle-wrapper"
+    assert inv.argv[0] == str(tmp_path / "gradlew")
+    assert "installDebug" in inv.argv
+    assert "android CLI absent" in inv.detail
+    assert "installDebug" in inv.detail
+
+
+def test_resolve_android_invocation_run_fallback_forwards_abi_and_extra_args(
+    tmp_path, monkeypatch,
+):
+    """The Gradle fallback must accept the same ``abi`` /
+    ``extra_args`` ergonomics as a direct ``gradle_wrapper_command``
+    call — otherwise the dispatcher silently drops the ABI filter on
+    fallback hosts and produces a fat APK instead of a per-ABI build."""
+    _patch_android_cli_present(monkeypatch, False)
+    inv = mt.resolve_android_invocation(
+        "run",
+        tmp_path,
+        abi="arm64-v8a",
+        extra_args=["--stacktrace"],
+    )
+    assert inv.path_kind == "gradle-wrapper"
+    assert "-PtargetAbi=arm64-v8a" in inv.argv
+    assert "--stacktrace" in inv.argv
+
+
+def test_resolve_android_invocation_create_picks_cli_when_present(tmp_path, monkeypatch):
+    """``create`` with the CLI present emits ``android create
+    <project_root>`` — the hand-rolled template scaffolding code path
+    from P1 is gone."""
+    _patch_android_cli_present(monkeypatch, True)
+    inv = mt.resolve_android_invocation(
+        "create", tmp_path, extra_args=["--template", "kotlin"],
+    )
+    assert inv.path_kind == "android-cli"
+    assert inv.argv == [
+        "android", "create", str(tmp_path), "--template", "kotlin",
+    ]
+
+
+def test_resolve_android_invocation_create_without_cli_raises_no_fallback(
+    tmp_path, monkeypatch,
+):
+    """``create`` has no ``./gradlew`` equivalent — template
+    scaffolding lives in the Docker image. Surface this as a typed
+    error rather than silently emitting ``./gradlew create``, which
+    would fail with a confusing "Task 'create' not found" instead."""
+    _patch_android_cli_present(monkeypatch, False)
+    with pytest.raises(mt.NoGradleFallbackError) as exc_info:
+        mt.resolve_android_invocation("create", tmp_path)
+    msg = str(exc_info.value)
+    assert "create" in msg
+    # Operator hint must point at the install script + Docker image so
+    # the next step is actionable from the error message alone.
+    assert "install_android_cli.sh" in msg
+    assert mt.MOBILE_BUILD_IMAGE in msg
+
+
+def test_resolve_android_invocation_sdk_install_picks_cli_when_present(
+    tmp_path, monkeypatch,
+):
+    """``sdk-install`` with the CLI present emits ``android sdk install
+    <package>`` — replaces the manual ``sdkmanager`` invocations baked
+    into the Dockerfile."""
+    _patch_android_cli_present(monkeypatch, True)
+    inv = mt.resolve_android_invocation(
+        "sdk-install", tmp_path, sdk_package="platforms;android-35",
+    )
+    assert inv.path_kind == "android-cli"
+    assert inv.argv == [
+        "android", "sdk", "install", "platforms;android-35",
+    ]
+
+
+def test_resolve_android_invocation_sdk_install_without_cli_raises_no_fallback(
+    tmp_path, monkeypatch,
+):
+    """``sdk-install`` has no ``./gradlew`` equivalent — the SDK
+    manager is baked into the Docker image, not the host helpers.
+    Same NoGradleFallbackError treatment as ``create``."""
+    _patch_android_cli_present(monkeypatch, False)
+    with pytest.raises(mt.NoGradleFallbackError):
+        mt.resolve_android_invocation(
+            "sdk-install", tmp_path, sdk_package="platform-tools",
+        )
+
+
+def test_resolve_android_invocation_unknown_action_raises(tmp_path, monkeypatch):
+    """Unknown action surfaces as ``UnknownAndroidCliActionError`` —
+    the same error type ``android_cli_command`` raises so callers can
+    catch a single exception type for both layers."""
+    _patch_android_cli_present(monkeypatch, True)
+    with pytest.raises(mt.UnknownAndroidCliActionError):
+        mt.resolve_android_invocation("emulator", tmp_path)
+    _patch_android_cli_present(monkeypatch, False)
+    with pytest.raises(mt.UnknownAndroidCliActionError):
+        mt.resolve_android_invocation("emulator", tmp_path)
+
+
+def test_resolve_android_invocation_action_normalisation(tmp_path, monkeypatch):
+    """Same case- / separator-insensitivity contract as the underlying
+    ``android_cli_command`` — locking it at the dispatcher layer too
+    so a typo in P1/P2 call sites can't sneak past."""
+    _patch_android_cli_present(monkeypatch, True)
+    for raw in ("RUN", "Run", "run"):
+        inv = mt.resolve_android_invocation(raw, tmp_path)
+        assert inv.path_kind == "android-cli"
+        assert inv.argv == ["android", "run", str(tmp_path)]
+    for raw in ("SDK_Install", "sdk-INSTALL", "Sdk_Install"):
+        inv = mt.resolve_android_invocation(
+            raw, tmp_path, sdk_package="platform-tools",
+        )
+        assert inv.argv == ["android", "sdk", "install", "platform-tools"]
+
+
+def test_resolve_android_invocation_probes_path_at_call_time(tmp_path, monkeypatch):
+    """Decision must be made at call time, not memoised — operators
+    may run ``scripts/install_android_cli.sh`` mid-session and the
+    next ``resolve_android_invocation("run", …)`` should immediately
+    pick up the new fast path. Counter-example: a cached probe would
+    keep returning the gradle fallback until the process restarts.
+
+    We assert by toggling the fake PATH between two calls and checking
+    each call's ``path_kind`` reflects the toggle."""
+    _patch_android_cli_present(monkeypatch, False)
+    first = mt.resolve_android_invocation("run", tmp_path)
+    assert first.path_kind == "gradle-wrapper"
+
+    _patch_android_cli_present(monkeypatch, True)
+    second = mt.resolve_android_invocation("run", tmp_path)
+    assert second.path_kind == "android-cli"
+
+
+def test_resolve_android_invocation_fallback_table_covers_every_action():
+    """Drift guard — every action in ``SUPPORTED_ANDROID_CLI_ACTIONS``
+    must have an entry in ``_ANDROID_CLI_GRADLE_FALLBACK`` so a future
+    new action (e.g. ``test``) doesn't silently route to KeyError when
+    the CLI is absent."""
+    assert (
+        set(mt._ANDROID_CLI_GRADLE_FALLBACK.keys())
+        == set(mt.SUPPORTED_ANDROID_CLI_ACTIONS)
+    ), (
+        "_ANDROID_CLI_GRADLE_FALLBACK and SUPPORTED_ANDROID_CLI_ACTIONS "
+        "drifted — adding a new action without an explicit fallback "
+        "decision would KeyError on hosts without the Android CLI"
+    )
+
+
+def test_resolve_android_invocation_fallback_table_pins_run_to_install_debug():
+    """``android run`` ≈ build + install + launch on a connected
+    device. The Gradle equivalent is ``installDebug`` (NOT
+    ``assembleDebug`` — that only builds, doesn't install). Pin the
+    mapping so a refactor doesn't silently break the install step at
+    fallback hosts."""
+    assert mt._ANDROID_CLI_GRADLE_FALLBACK["run"] == "installDebug"
