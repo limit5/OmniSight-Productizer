@@ -1,0 +1,84 @@
+name: Q.8 multi-device parity (nightly)
+
+# Q.8 (#302) — two-context Playwright sweep covering six cross-device
+# parity scenarios (Q.1 password-change kick, Q.2 new-device toast,
+# Q.3 provider convergence, Q.4 task SSE broadcast, Q.6 draft restore,
+# Q.7 optimistic-lock 409). The main PR pipeline's `frontend-e2e` job
+# stays lean; this workflow runs the parity sweep once a day + on
+# demand + on changes to the spec or its runtime config.
+#
+# Artifact contract: on failure, the Playwright HTML report
+# (`playwright-report-nightly/`) and any trace / screenshot / video
+# captured per-spec (`test-results/`) are uploaded so the operator can
+# open the PR / nightly run "Artifacts" tab and step through the
+# two-context timeline without reproducing locally. `trace:
+# retain-on-failure` is set in `playwright.nightly.config.ts`.
+#
+# Schedule pick: 18:00 UTC = 02:00 Asia/Taipei. Off-peak, after the DR
+# drill (17:00 UTC) so concurrent CI load stays spread.
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/e2e-multi-device-nightly.yml"
+      - "playwright.nightly.config.ts"
+      - "test/e2e/**"
+
+permissions:
+  contents: read
+
+jobs:
+  multi-device-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Q.8 scenarios 1/3/4/5/6 all assume a real session-mode auth
+      # surface. `open` would short-circuit every login-gated scenario
+      # into `test.skip()`.
+      OMNISIGHT_AUTH_MODE: session
+      # Seed an admin password that bypasses the `must_change_password`
+      # gate so `/auth/login` can round-trip directly.
+      OMNISIGHT_ADMIN_EMAIL: admin@omnisight.local
+      OMNISIGHT_ADMIN_PASSWORD: "changeme123!"
+      # Keep the LLM provider surface pointed at the zero-credential
+      # fallback so scenario 1 (provider switch) can exercise at least
+      # one non-default provider without pulling secrets.
+      OMNISIGHT_LLM_PROVIDER: ollama
+      # Same CI-mode relaxation the main `frontend-e2e` job uses — only
+      # touches `validate_startup_config`, not feature paths.
+      OMNISIGHT_CI_MODE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install --require-hashes -r backend/requirements.txt
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: ".nvmrc", cache: pnpm }
+      - run: pnpm install --frozen-lockfile --prefer-offline
+      # Mirror the `frontend-e2e` rolldown workaround — vitest 4.x pulls
+      # rolldown which can skip its platform binding under frozen-lockfile.
+      - name: ensure rolldown linux-x64 binding (vitest 4.x workaround)
+        run: pnpm install --no-save @rolldown/binding-linux-x64-gnu@1.0.0-rc.15
+      - name: install playwright + system libs
+        run: pnpm exec playwright install --with-deps chromium
+      - name: run playwright multi-device parity
+        run: pnpm exec playwright test --config=playwright.nightly.config.ts --reporter=list,html
+      - name: upload html report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-nightly-html
+          path: playwright-report-nightly/
+          retention-days: 14
+      - name: upload traces + screenshots + videos
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-nightly-traces
+          path: test-results/
+          retention-days: 14
