@@ -55,19 +55,41 @@
 **Follow-up recommendation**: **file a dedicated ticket** to fix `auth_baseline._has_valid_session` to accept either a session cookie OR a valid Bearer via `api_keys.validate_bearer()`. Test coverage: add `test_auth_baseline_accepts_bearer_token` mirroring existing `test_auth_baseline::session_valid` path.
 
 ### Finding #3 — DAG execution stuck; LLM routing shows only slow `gemma4:e4b` fallback
-**Severity**: 🔴 High — end-to-end orchestration path is broken or severely degraded in prod
-**Root cause**: unclear; needs investigation. Observed symptoms:
-- `/api/v1/runtime/tokens` shows only one entry: `{"model":"gemma4:e4b","request_count":1,"avg_latency":28795,"input_tokens":0,"output_tokens":0}`. Anthropic (primary per `.env::OMNISIGHT_LLM_FALLBACK_CHAIN=anthropic,ollama`) appears NOT to have been called, OR its stats are not being recorded.
-- Single LLM call completed 28.8s after run start; nothing progressed for 13+ minutes afterwards. `step_count` stayed at 0 → no task step ever got persisted.
-- `/workflow/runs/{id}/halt` returned 404; `/cancel` requires `If-Match` ETag which the endpoint doesn't expose via HEAD — run was abandoned to natural timeout.
+**Severity**: ~~🔴 High — end-to-end orchestration path is broken~~ → **🟢 RESOLVED (credit-exhaustion) + 🟠 Medium residual (silent-fallback design flaw)**
 
-**Hypotheses to investigate** (operator domain):
-- (a) Anthropic API key invalid / rate-limited / stale; fallback triggered silently.
-- (b) `input_tokens=0, output_tokens=0` + `total_tokens=0` suggests the single gemma4 call may have returned an empty / malformed response — orchestrator might be waiting for retry that never fires.
-- (c) Async task that should transition run `planning → running-steps` is hung; possibly related to a Ollama client bug or a `asyncio.gather` deadlock.
-- (d) The `smoke-compile-flash-host-native` DAG payload may trigger a code path that was only smoke-tested in dev (pre-Phase-2 Ollama wiring), never in prod.
+**ROOT CAUSE CONFIRMED (2026-04-24 post-smoke-test follow-up)**:
+Anthropic API billing credit was exhausted. Direct `x-api-key` probe against `api.anthropic.com/v1/messages`:
+```
+HTTP 400
+{"type":"error","error":{"type":"invalid_request_error",
+ "message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},
+ "request_id":"req_011CaNDNHWWmoXyxSFpT6nF6"}
+```
+The key itself was never invalid — it passed auth but failed at the billing gate. OmniSight's LLM fallback chain (`OMNISIGHT_LLM_FALLBACK_CHAIN=anthropic,ollama`) caught the 400 and silently degraded to `gemma4:e4b`, which then either returned malformed output or hung.
 
-**Follow-up recommendation**: **dedicated prod debug session** needed. Check backend logs for `wf-1944b5b67e`, verify `list_providers()` return value in prod, check LLM provider circuit-breaker state for anthropic key fingerprint.
+**Post-topup verification (2026-04-24)**: operator topped up Anthropic billing; re-probed with `claude-haiku-4-5`:
+```
+HTTP 200
+model=claude-haiku-4-5-20251001
+stop_reason=max_tokens
+usage.input_tokens=8  usage.output_tokens=10
+content="Pong! 🏓"
+```
+→ **Anthropic primary path restored**.
+
+**Original hypotheses, now with verdicts**:
+- ~~(a) Anthropic API key invalid / rate-limited / stale; fallback triggered silently.~~ ✅ **CONFIRMED** (credit exhausted, not invalid/stale)
+- ~~(b) empty/malformed gemma4 response~~ → probably accurate but secondary; moot now that primary works
+- ~~(c) asyncio.gather deadlock~~ → refuted; the hang was downstream of the silent fallback
+- ~~(d) DAG-payload-specific codepath~~ → refuted
+
+**Residual design flaw** (separate from the resolved billing issue):
+Silent fallback on a `credit_low` / `quota_exceeded` / `auth_failed` error is the wrong default — those are **hard errors** (operator must intervene, not transient), but the current chain treats them the same as `rate_limited` or `network_timeout` (which are correctly soft-fallback). This mis-classification lets credit exhaustion degrade the whole orchestrator to a slow local model without alerting. Tracked as a new Blueprint ticket — folded into **Phase F BP.F.8–F.10** of the ADR (hard-error vs soft-fallback classification + notification integration + tests).
+
+**Follow-up recommendation**:
+1. ~~dedicated prod debug session~~ → **not needed** (root cause found).
+2. **NEW** Design hard-error vs soft-fallback classification in Phase F — routes `credit_low` / `quota_exceeded` / `auth_failed` to L3 Jira + L4 PagerDuty + **refuse new DAG submit**, not silent fallback.
+3. **NEW** Operator-side: set Anthropic billing spend alert at `console.anthropic.com/settings/billing` to avoid next surprise.
 
 ---
 

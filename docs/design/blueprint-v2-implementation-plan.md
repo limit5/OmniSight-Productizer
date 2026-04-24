@@ -258,9 +258,9 @@
 
 ---
 
-### Phase F — 混合三態 Model Mapping（1 週）
+### Phase F — 混合三態 Model Mapping + Hard-error / Soft-fallback 分類（1.5 週）
 
-**範圍**：`OMNISIGHT_MODEL_MAPPING_MODE=enforce|warn|advisory` 三態；per-Guild 預設 model；違反時依 mode 拒絕/告警/僅日誌。
+**範圍**：`OMNISIGHT_MODEL_MAPPING_MODE=enforce|warn|advisory` 三態；per-Guild 預設 model；違反時依 mode 拒絕/告警/僅日誌。**2026-04-24 擴充範圍**（緣於 A2 smoke test Finding #3 — Anthropic credit 耗盡時 fallback chain 靜默降到 gemma4:e4b 卡死 13 分鐘）：LLM provider 錯誤分類為 **hard-error**（credit_low / quota_exceeded / auth_failed / permission_denied）vs **soft-fallback**（rate_limited / network_timeout / 503）；hard-error 絕不 silent fallback。
 
 **前置**：Phase B（Guild exists）
 
@@ -270,10 +270,13 @@
 - `configs/model_mapping.yaml` — operator 可改寫
 - Prometheus metric `omnisight_model_mapping_violation_total{guild_id,mode}`
 - `backend/tests/test_model_mapping.py` — ~40 test
+- **BP.F.8** `backend/llm_error_classifier.py` — LLM provider error → `{hard, soft}` 分類器（Anthropic credit_low / OpenAI insufficient_quota / Google billing_disabled / Grok auth_failed 等 per-provider 對照）
+- **BP.F.9** Notification 整合：hard-error → L3 Jira（open bug ticket `LLM-HARD-ERROR-{provider}-{ts}`）+ L4 PagerDuty（severity P2）+ **refuse new DAG submit until resolved**（orchestrator gateway pre-check）
+- **BP.F.10** Tests ~25 新增：`backend/tests/test_llm_error_classifier.py` 每 provider 至少 2 hard + 2 soft 對照 + fallback chain happy path + hard-error refuse-submit path
 
-**工時**：1 週 / 3-4 commits
+**工時**：1.5 週 / 5-6 commits（原 1 週 + hard-error 分類 ~3 day）
 
-**風險**：🟢 低 — 純新增 + 旗標控制
+**風險**：🟢 低 — 純新增 + 旗標控制；hard-error 分類是可疊加新 module，不動既有 fallback chain 邏輯
 
 ---
 

@@ -95,9 +95,10 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [~] Verify steps complete, artifacts persist, audit log hash-chain intact *(PARTIAL 2026-04-24: **audit hash-chain PASS** via `/api/v1/audit/verify`; **steps did NOT complete** — run stuck at `status=running step_count=0` for 13+ min with single 28.8s `gemma4:e4b` LLM call and no progress. Finding #3 in report = likely prod LLM orchestration hang, needs dedicated debug session — separate ticket, not a Blueprint blocker.)*
 - [x] Attach run report to HANDOFF *(done 2026-04-24: `data/smoke-test-report-a2.md` 3 findings documented + HANDOFF 2026-04-24 entry written.)*
 - [ ] **Follow-up ticket**: `auth_baseline._has_valid_session` 不認 Bearer token bug — API-key-only integration（包含這個 script）會被 baseline 401 在到達 handler 之前；workaround 是混合送 Cookie + Bearer；真修是 `auth_baseline` 加 `api_keys.validate_bearer` 檢查
-- [ ] **Follow-up ticket**: 調查 prod LLM orchestration hang — dag1 卡 13+ 分鐘 step_count=0；hypotheses 見 report Finding #3
+- [x] ~~Follow-up ticket: 調查 prod LLM orchestration hang~~ *(ROOT CAUSE FOUND + RESOLVED 2026-04-24: Anthropic API credit balance 耗盡 → HTTP 400 `credit_low` → fallback silently 降到 gemma4:e4b 卡死。Operator 已充值 → Haiku 4.5 ping 回 HTTP 200 "Pong! 🏓" 8+10 tokens，primary path 恢復。詳見 `docs/ops/smoke-test-a2-2026-04-24.md` Finding #3 updated section.)*
 - [ ] **Follow-up ticket**: `scripts/*.py` bulk UA audit — Cloudflare Bot Fight Mode 擋 `Python-urllib/*` default UA
-- [ ] A2 full retry（`--subset both`）after Finding #3 resolved
+- [ ] A2 full retry（`--subset both`）after all follow-ups 收尾（auth_baseline Bearer fix 完 + Phase F hard-error classification 完）— 低優先，下次 DAG submit 自然會走 Anthropic happy path
+- [ ] **NEW Follow-up**: LLM fallback hard-error vs soft-fallback 區分（Finding #3 residual design flaw）→ **已 fold 到 Phase F BP.F.8-F.10**（見 ADR §Phase F）；operator 也建議在 Anthropic console 設 spend alert 避免再撞牆
 
 ---
 
@@ -151,8 +152,8 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] BP.B.9 R0/R1/R2/R3/R4 五個 module 加 `guild_id` label（non-breaking additive）
 - [ ] BP.B.10 `backend/tests/test_guild_loadout.py` 等 — ~180 unit test
 
-### BP.F — Mixed-mode Model Mapping（~1 週）
-> 前置 BP.B；混合三態旗標 enforce/warn/advisory
+### BP.F — Mixed-mode Model Mapping + Hard-error / Soft-fallback 分類（~1.5 週）
+> 前置 BP.B；混合三態旗標 enforce/warn/advisory。**2026-04-24 擴充**：加入 hard-error vs soft-fallback 分類（緣於 A2 smoke test Finding #3）
 - [ ] BP.F.1 `backend/agents/llm.py::get_llm()` 加 mapping guardrail（~50 LOC）
 - [ ] BP.F.2 `backend/guild_model_map.py` — 21 Guild 預設 model 對照表
 - [ ] BP.F.3 `configs/model_mapping.yaml` — operator 可改寫
@@ -160,6 +161,12 @@ rows from 2026-04-20 onwards should use the layered convention:
 - [ ] BP.F.5 Prometheus metric `omnisight_model_mapping_violation_total{guild_id,mode}`
 - [ ] BP.F.6 fallback chain per Guild（避免 provider outage 整條停擺）
 - [ ] BP.F.7 `backend/tests/test_model_mapping.py` — ~40 test
+- [ ] **BP.F.8** `backend/llm_error_classifier.py` — LLM error → `{hard, soft}` 分類器
+  - **hard**：`credit_low` / `quota_exceeded` / `auth_failed` / `permission_denied`（需 operator 介入）
+  - **soft**：`rate_limited` / `network_timeout` / `503 service_unavailable`（自動 fallback OK）
+  - 每 provider 獨立對照表（Anthropic / OpenAI / Google / xAI / Groq / DeepSeek / Together / Ollama）
+- [ ] **BP.F.9** Notification 整合：hard-error 觸發 L3 Jira (`LLM-HARD-ERROR-{provider}-{ts}`) + L4 PagerDuty (P2) + **orchestrator gateway refuse new DAG submit**（避免 silent degrade 到 slow fallback）
+- [ ] **BP.F.10** `backend/tests/test_llm_error_classifier.py` — ~25 test：每 provider 至少 2 hard + 2 soft 對照 + fallback chain happy path + hard-error refuse-submit path
 
 ### BP.H — 3-tier Penalty + Red Card（~1 週）
 > 前置 R0 / R2 / Watchdog（已完）；BP.B 完後加 guild_id label
