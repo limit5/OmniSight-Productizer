@@ -18,6 +18,10 @@ import { render, fireEvent } from "@testing-library/react"
 import {
   ProviderRollup,
   groupByProvider,
+  isOpenRouterModel,
+  openRouterAwareResolver,
+  OPENROUTER_PROVIDER_LABEL,
+  OPENROUTER_PROVIDER_COLOR,
   type ProviderRollupRow,
   type ProviderGroup,
 } from "@/components/omnisight/provider-rollup"
@@ -541,5 +545,272 @@ describe("<ProviderRollup />", () => {
     )
     expect(getByTestId("provider-rollup")).toBeTruthy()
     expect(queryByTestId(/^provider-rollup-group-/)).toBeNull()
+  })
+})
+
+/* -----------------------------------------------------------------
+ * Z.4 (#293) checkbox 4 — OpenRouter special case.
+ *
+ *  Locks the contract that slash-namespaced model names route the
+ *  group bucketing through the synthetic "OpenRouter" provider while
+ *  leaving the row-level model string untouched (so the per-model
+ *  card still surfaces the base model's shortLabel via `getModelInfo`).
+ * ----------------------------------------------------------------- */
+
+describe("isOpenRouterModel()", () => {
+  it("returns true for <namespace>/<model> strings", () => {
+    expect(isOpenRouterModel("anthropic/claude-sonnet-4")).toBe(true)
+    expect(isOpenRouterModel("google/gemini-1.5-pro")).toBe(true)
+    expect(isOpenRouterModel("qwen/qwen3-235b-a22b")).toBe(true)
+    expect(isOpenRouterModel("nvidia/llama-3.1-nemotron-ultra-253b")).toBe(true)
+  })
+
+  it("returns false for non-namespaced model strings", () => {
+    expect(isOpenRouterModel("claude-sonnet-4")).toBe(false)
+    expect(isOpenRouterModel("gpt-4o")).toBe(false)
+    expect(isOpenRouterModel("gemma3:e4b")).toBe(false)
+    expect(isOpenRouterModel("deepseek-chat")).toBe(false)
+  })
+
+  it("returns false for malformed slashes (leading / trailing / empty)", () => {
+    expect(isOpenRouterModel("")).toBe(false)
+    expect(isOpenRouterModel("/foo")).toBe(false)
+    expect(isOpenRouterModel("foo/")).toBe(false)
+    expect(isOpenRouterModel("/")).toBe(false)
+  })
+
+  it("returns true when the model has multiple slashes (treated as namespaced)", () => {
+    // OpenRouter itself only uses one-level namespaces, but be liberal —
+    // any prefix-before-slash-prefix-after pattern is close enough to
+    // an OpenRouter-style id to route under the aggregator bucket.
+    expect(isOpenRouterModel("a/b/c")).toBe(true)
+  })
+})
+
+describe("openRouterAwareResolver()", () => {
+  const base: (model: string) => { provider: string; color: string } = (model) => {
+    if (model.startsWith("claude")) return { provider: "Anthropic", color: "#f59e0b" }
+    if (model.startsWith("gemini") || model.startsWith("gemma"))
+      return { provider: "Google", color: "#3b82f6" }
+    if (model.startsWith("gpt")) return { provider: "OpenAI", color: "#10b981" }
+    if (model.startsWith("deepseek")) return { provider: "DeepSeek", color: "#06b6d4" }
+    return { provider: "", color: "" }
+  }
+
+  it("routes slash-namespaced models to the OpenRouter provider + color", () => {
+    const resolver = openRouterAwareResolver(base)
+    const result = resolver("anthropic/claude-sonnet-4")
+    expect(result.provider).toBe(OPENROUTER_PROVIDER_LABEL)
+    expect(result.color).toBe(OPENROUTER_PROVIDER_COLOR)
+  })
+
+  it("overrides ALL namespaced vendors, not just Anthropic", () => {
+    const resolver = openRouterAwareResolver(base)
+    expect(resolver("google/gemini-1.5-pro").provider).toBe("OpenRouter")
+    expect(resolver("qwen/qwen3-235b").provider).toBe("OpenRouter")
+    expect(resolver("openai/gpt-4o").provider).toBe("OpenRouter")
+    // Unknown inner vendor still buckets under OpenRouter — the base
+    // resolver would have returned ``""`` (→ "Unknown" group) but the
+    // wrapper intercepts first.
+    expect(resolver("nvidia/llama-3.1-nemotron").provider).toBe("OpenRouter")
+  })
+
+  it("delegates non-namespaced models to the base resolver unchanged", () => {
+    const resolver = openRouterAwareResolver(base)
+    expect(resolver("claude-opus-4-7")).toEqual({
+      provider: "Anthropic",
+      color: "#f59e0b",
+    })
+    expect(resolver("gpt-4o")).toEqual({ provider: "OpenAI", color: "#10b981" })
+    expect(resolver("deepseek-chat")).toEqual({
+      provider: "DeepSeek",
+      color: "#06b6d4",
+    })
+  })
+
+  it("delegates malformed slash strings to the base resolver", () => {
+    const resolver = openRouterAwareResolver(base)
+    // ``foo/`` has a trailing slash — not a valid namespace, so we fall
+    // through to the base which returns unknown for this string.
+    expect(resolver("foo/").provider).toBe("")
+    expect(resolver("/foo").provider).toBe("")
+  })
+
+  it("preserves OpenRouter color constant across invocations", () => {
+    const resolver = openRouterAwareResolver(base)
+    expect(resolver("a/b").color).toBe(OPENROUTER_PROVIDER_COLOR)
+    expect(resolver("c/d").color).toBe(OPENROUTER_PROVIDER_COLOR)
+    // And the exported color matches the PROVIDER_COLORS entry in
+    // agent-matrix-wall so the swatch visually matches the rest of the
+    // UI's OpenRouter chips.
+    expect(OPENROUTER_PROVIDER_COLOR).toBe("#a855f7")
+  })
+})
+
+describe("groupByProvider + openRouterAwareResolver integration", () => {
+  interface Row extends ProviderRollupRow {
+    model: string
+    inputTokens: number
+    outputTokens: number
+    totalTokens: number
+    cost: number
+    requestCount: number
+  }
+
+  const baseResolver = (model: string): { provider: string; color: string } => {
+    if (model.startsWith("claude")) return { provider: "Anthropic", color: "#f59e0b" }
+    if (model.startsWith("gemini")) return { provider: "Google", color: "#3b82f6" }
+    if (model.startsWith("gpt")) return { provider: "OpenAI", color: "#10b981" }
+    return { provider: "", color: "" }
+  }
+
+  function mkRow(model: string, totalTokens: number, cost = 0, requestCount = 1): Row {
+    return {
+      model,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens,
+      cost,
+      requestCount,
+    }
+  }
+
+  it("groups all slash-namespaced models under 'OpenRouter' regardless of inner vendor", () => {
+    const rows: Row[] = [
+      mkRow("anthropic/claude-sonnet-4", 100),
+      mkRow("google/gemini-1.5-pro", 200),
+      mkRow("qwen/qwen3-235b", 50),
+      // A non-namespaced Anthropic call stays under Anthropic (not
+      // OpenRouter) — the user has a direct Anthropic key wired AND an
+      // OpenRouter key, and we must not co-mingle their billing.
+      mkRow("claude-opus-4-7", 1_000),
+      mkRow("gpt-4o", 75),
+    ]
+    const groups = groupByProvider(rows, openRouterAwareResolver(baseResolver))
+    const byLabel = Object.fromEntries(groups.map((g) => [g.providerLabel, g]))
+    expect(Object.keys(byLabel).sort()).toEqual(
+      ["Anthropic", "OpenAI", "OpenRouter"].sort(),
+    )
+    const or = byLabel["OpenRouter"]
+    expect(or.rows.map((r) => r.model)).toEqual([
+      "anthropic/claude-sonnet-4",
+      "google/gemini-1.5-pro",
+      "qwen/qwen3-235b",
+    ])
+    expect(or.totals.totalTokens).toBe(350)
+    expect(or.providerKey).toBe("openrouter")
+    expect(or.color).toBe(OPENROUTER_PROVIDER_COLOR)
+  })
+
+  it("keeps direct-vendor calls separate from OpenRouter (billing dedup)", () => {
+    const rows: Row[] = [
+      mkRow("anthropic/claude-sonnet-4", 50),
+      mkRow("claude-opus-4-7", 500),
+    ]
+    const groups = groupByProvider(rows, openRouterAwareResolver(baseResolver))
+    expect(groups).toHaveLength(2)
+    const byLabel = Object.fromEntries(groups.map((g) => [g.providerLabel, g]))
+    expect(byLabel["OpenRouter"].totals.totalTokens).toBe(50)
+    expect(byLabel["Anthropic"].totals.totalTokens).toBe(500)
+  })
+
+  it("preserves the untouched model string in row.model — sub-label path via renderRow", () => {
+    // The checkbox spec says "sub-label 顯示實際 base model". We don't
+    // rewrite ``row.model`` inside the resolver, so the caller's
+    // ``renderRow`` receives the full namespaced identifier
+    // (``anthropic/claude-sonnet-4``) and can use its own ``getModelInfo``
+    // pipeline to produce the base-model shortLabel (``Sonnet``) + full
+    // namespaced tooltip — no translation layer needed inside the rollup.
+    const rows: Row[] = [mkRow("anthropic/claude-sonnet-4", 10)]
+    const groups = groupByProvider(rows, openRouterAwareResolver(baseResolver))
+    expect(groups[0].rows[0].model).toBe("anthropic/claude-sonnet-4")
+  })
+
+  it("sorts OpenRouter alongside other providers by aggregate totalTokens DESC", () => {
+    const rows: Row[] = [
+      mkRow("anthropic/claude-sonnet-4", 900),
+      mkRow("google/gemini-1.5-pro", 100),
+      mkRow("claude-opus-4-7", 500),
+    ]
+    const groups = groupByProvider(rows, openRouterAwareResolver(baseResolver))
+    // OpenRouter aggregate = 1000 > Anthropic 500
+    expect(groups.map((g) => g.providerLabel)).toEqual([
+      "OpenRouter",
+      "Anthropic",
+    ])
+  })
+})
+
+describe("<ProviderRollup /> + OpenRouter resolver integration", () => {
+  interface Row extends ProviderRollupRow {
+    model: string
+    inputTokens: number
+    outputTokens: number
+    totalTokens: number
+    cost: number
+    requestCount: number
+  }
+
+  const baseResolver = (model: string): { provider: string; color: string } => {
+    if (model.startsWith("claude")) return { provider: "Anthropic", color: "#f59e0b" }
+    if (model.startsWith("gemini")) return { provider: "Google", color: "#3b82f6" }
+    return { provider: "", color: "" }
+  }
+
+  function mkRow(model: string, totalTokens: number): Row {
+    return {
+      model,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens,
+      cost: 0,
+      requestCount: 1,
+    }
+  }
+
+  it("renders an 'OpenRouter' summary row when namespaced models are present", () => {
+    const groups = groupByProvider(
+      [
+        mkRow("anthropic/claude-sonnet-4", 100),
+        mkRow("google/gemini-1.5-pro", 50),
+      ],
+      openRouterAwareResolver(baseResolver),
+    )
+    const { getByTestId } = render(
+      <ProviderRollup
+        groups={groups}
+        grandTotalTokens={150}
+        renderRow={(r) => <div>{r.model}</div>}
+      />,
+    )
+    expect(
+      getByTestId("provider-rollup-label-openrouter").textContent,
+    ).toBe("OpenRouter")
+    expect(
+      getByTestId("provider-rollup-model-count-openrouter").textContent,
+    ).toBe("2 models")
+  })
+
+  it("surfaces the full namespaced model string inside the expanded group (sub-label visibility)", () => {
+    const groups = groupByProvider(
+      [
+        mkRow("anthropic/claude-sonnet-4", 100),
+        mkRow("google/gemini-1.5-pro", 50),
+      ],
+      openRouterAwareResolver(baseResolver),
+    )
+    const { getByTestId } = render(
+      <ProviderRollup
+        groups={groups}
+        grandTotalTokens={150}
+        defaultExpanded
+        renderRow={(r) => <div data-testid={`row-${r.model}`}>{r.model}</div>}
+      />,
+    )
+    // Both base models are visible inside the OpenRouter group —
+    // caller-side renderRow preserved the full namespaced identifier so
+    // a downstream getModelInfo(...) can still produce the shortLabel.
+    expect(getByTestId("row-anthropic/claude-sonnet-4")).toBeTruthy()
+    expect(getByTestId("row-google/gemini-1.5-pro")).toBeTruthy()
   })
 })

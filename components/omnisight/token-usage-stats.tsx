@@ -17,7 +17,11 @@ import {
 import { AI_MODEL_INFO, getModelInfo, type AIModel } from "./agent-matrix-wall"
 import { MetricSparkline } from "./host-device-panel"
 import { SessionHeatmap } from "./session-heatmap"
-import { ProviderRollup, groupByProvider } from "./provider-rollup"
+import {
+  ProviderRollup,
+  groupByProvider,
+  openRouterAwareResolver,
+} from "./provider-rollup"
 import {
   subscribeEvents,
   fetchTokenBurnRate,
@@ -630,21 +634,30 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
             </div>
           </div>
           
-          {/* Per-Model Usage — grouped by provider (Z.4 #293 checkbox 3).
-              The flat per-model list was hitting 9+ rows once every
-              configured provider wired credentials; we now collapse one
-              layer by provider so the summary shows aggregated tokens +
-              cost, and the per-model cards reveal on click. Grouping
-              uses `getModelInfo(...).provider` so OpenRouter pass-through
-              models (`anthropic/claude-*`) currently bucket under their
-              resolved vendor ("Anthropic") — the OpenRouter namespace
-              special-case that puts them under "OpenRouter" is checkbox 4
-              and ships separately. */}
+          {/* Per-Model Usage — grouped by provider (Z.4 #293 checkbox 3
+              + checkbox 4). The flat per-model list was hitting 9+ rows
+              once every configured provider wired credentials; we now
+              collapse one layer by provider so the summary shows
+              aggregated tokens + cost, and the per-model cards reveal
+              on click. Grouping wraps `getModelInfo(...).provider` in
+              `openRouterAwareResolver` (checkbox 4) so slash-namespaced
+              models (`anthropic/claude-sonnet-4`, `google/gemini-1.5-
+              pro`, `qwen/qwen3-235b`, etc.) bucket under the synthetic
+              OpenRouter provider — routing a call through OpenRouter
+              means the credentials + rate limits + balance live on the
+              OpenRouter account, not the upstream vendor. The per-row
+              cards still receive the untouched model string, so the
+              base model ("Sonnet" / "Gemini", plus the full namespaced
+              label) stays visible inside the group — satisfying the
+              spec's "sub-label 顯示實際 base model". */}
           <ProviderRollup
-            groups={groupByProvider(sortedData, (model) => {
-              const info = getModelInfo(model)
-              return { provider: info.provider, color: info.color }
-            })}
+            groups={groupByProvider(
+              sortedData,
+              openRouterAwareResolver((model) => {
+                const info = getModelInfo(model)
+                return { provider: info.provider, color: info.color }
+              }),
+            )}
             grandTotalTokens={totals.totalTokens}
             // Default the per-provider groups to expanded so the per-model
             // cards (context bar, cache bar, turn stats, etc.) stay visible

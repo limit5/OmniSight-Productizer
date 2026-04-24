@@ -70,6 +70,65 @@ export interface ProviderResolver {
 
 const UNKNOWN_PROVIDER_LABEL = "Unknown"
 
+/** Z.4 (#293) checkbox 4 — OpenRouter special case.
+ *
+ *  OpenRouter routes requests to upstream vendors using the
+ *  ``<namespace>/<model>`` convention (``anthropic/claude-sonnet-4``,
+ *  ``google/gemini-1.5-pro``, ``qwen/qwen3-235b``,
+ *  ``nvidia/llama-3.1-nemotron-ultra-253b``). The base resolver
+ *  (``getModelInfo``) strips the namespace for display and looks up the
+ *  inner vendor, so `anthropic/claude-sonnet-4` resolves to
+ *  ``provider: "Anthropic"`` — which is correct for the *upstream*
+ *  model but wrong for *billing/quota tracking*: the credentials + rate
+ *  limits + balance belong to the OpenRouter account, not Anthropic.
+ *
+ *  This wrapper detects slash-namespaced model names and overrides
+ *  the resolved provider to ``OpenRouter`` with the canonical purple
+ *  swatch (matches ``agent-matrix-wall.tsx::PROVIDER_COLORS``), so the
+ *  roll-up summary groups every routed call under OpenRouter. Per-row
+ *  cards inside the group still surface the base model — ``renderRow``
+ *  receives the untouched row (``row.model === "anthropic/claude-
+ *  sonnet-4"``) and ``getModelInfo`` keeps its namespace-strip logic,
+ *  so the chip reads ``Sonnet`` / full ``anthropic/claude-sonnet-4``
+ *  label — satisfying the spec's "sub-label 顯示實際 base model".
+ */
+export const OPENROUTER_PROVIDER_LABEL = "OpenRouter"
+export const OPENROUTER_PROVIDER_COLOR = "#a855f7"
+
+/** `true` iff the model string follows the OpenRouter-style
+ *  ``<namespace>/<model>`` convention: a slash that is neither the
+ *  first nor the last character. Matches the exact predicate used by
+ *  `getModelInfo` when it strips namespaces for display, so the two
+ *  stay consistent — a string treated as namespaced for display is
+ *  also treated as namespaced for bucketing.
+ *
+ *  Examples: `"anthropic/claude-sonnet-4"` → true;
+ *            `"claude-sonnet-4"`            → false;
+ *            `"/foo"` / `"foo/"` / `""`     → false (malformed). */
+export function isOpenRouterModel(model: string): boolean {
+  if (!model) return false
+  const slashIdx = model.indexOf("/")
+  return slashIdx > 0 && slashIdx < model.length - 1
+}
+
+/** Wraps a base resolver so slash-namespaced models bucket under the
+ *  synthetic ``OpenRouter`` provider. Exported so `TokenUsageStats`
+ *  can share the exact resolver contract with the Z.5 regression
+ *  matrix + future callers. */
+export function openRouterAwareResolver(
+  base: ProviderResolver,
+): ProviderResolver {
+  return (model) => {
+    if (isOpenRouterModel(model)) {
+      return {
+        provider: OPENROUTER_PROVIDER_LABEL,
+        color: OPENROUTER_PROVIDER_COLOR,
+      }
+    }
+    return base(model)
+  }
+}
+
 /**
  * Pure helper — groups per-model rows by their resolved provider name.
  * Exported so contract tests + Z.5 regression matrix can lock the
