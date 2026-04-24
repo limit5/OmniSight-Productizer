@@ -57,28 +57,29 @@ async def gerrit_webhook(
     if len(raw_body) > 1_048_576:
         return JSONResponse(status_code=413, content={"detail": "Payload too large"})
 
-    # First pass: verify against scalar secret if configured. We re-check
-    # against per-host secret after parsing, in case the host has its own.
     import hashlib
     import hmac as _hmac
-    scalar_secret = settings.gerrit_webhook_secret
     signature = request.headers.get("X-Gerrit-Signature", "")
+    scalar_secret = settings.gerrit_webhook_secret
+    scalar_ok = False
     if scalar_secret:
-        expected = _hmac.new(scalar_secret.encode(), raw_body, hashlib.sha256).hexdigest()
-        if not _hmac.compare_digest(signature, expected):
-            # Allow per-host secret to override only if scalar fails
-            scalar_ok = False
-        else:
-            scalar_ok = True
-    else:
-        scalar_ok = False
+        expected = _hmac.new(
+            scalar_secret.encode(), raw_body, hashlib.sha256,
+        ).hexdigest()
+        scalar_ok = _hmac.compare_digest(signature, expected)
 
     try:
         body = json.loads(raw_body)
     except Exception:
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
 
-    # Now safely derive Gerrit host from parsed body
+    # Phase 5-7 (#multi-account-forge): per-instance secret check is now
+    # routed through ``get_webhook_secret_for_host_async`` so operator-
+    # added ``git_accounts(platform='gerrit')`` rows are honoured. The
+    # async path reads the canonical PG table; the legacy shim continues
+    # to synthesise a virtual ``default-gerrit`` row from
+    # ``settings.gerrit_*`` scalars so single-instance deployments stay
+    # working with no operator action required.
     gerrit_host = ""
     try:
         change_url = (body.get("change") or {}).get("url", "") or ""
@@ -88,16 +89,21 @@ async def gerrit_webhook(
     except Exception:
         gerrit_host = ""
 
-    # Per-host secret check (preferred when configured)
     host_ok = False
     if gerrit_host:
         try:
-            from backend.git_credentials import get_webhook_secret_for_host
-            host_secret = get_webhook_secret_for_host(gerrit_host, "gerrit")
+            from backend.git_credentials import (
+                get_webhook_secret_for_host_async,
+            )
+            host_secret = await get_webhook_secret_for_host_async(
+                gerrit_host, "gerrit",
+            )
         except Exception:
             host_secret = ""
         if host_secret:
-            expected_h = _hmac.new(host_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+            expected_h = _hmac.new(
+                host_secret.encode(), raw_body, hashlib.sha256,
+            ).hexdigest()
             host_ok = _hmac.compare_digest(signature, expected_h)
 
     if (scalar_secret or gerrit_host) and not (scalar_ok or host_ok):
@@ -648,13 +654,18 @@ async def _sync_external_to_task(task, new_status: str, platform: str) -> dict:
 
 @router.post("/github")
 async def github_webhook(request: Request):
-    """Receive GitHub issue/PR webhooks — sync status to internal tasks."""
+    """Receive GitHub issue/PR webhooks — sync status to internal tasks.
+
+    Phase 5-7 (#multi-account-forge): per-instance secret read goes
+    through the async resolver so operator-added ``git_accounts`` rows
+    are honoured. Falls back to the legacy ``settings.github_webhook_secret``
+    via :func:`get_webhook_secret_for_host_async`'s scalar tail.
+    """
     import hashlib
     import hmac as _hmac
-    # Per-instance secret from credential registry with scalar fallback
     try:
-        from backend.git_credentials import get_webhook_secret_for_host
-        secret = get_webhook_secret_for_host("github.com", "github") or settings.github_webhook_secret
+        from backend.git_credentials import get_webhook_secret_for_host_async
+        secret = await get_webhook_secret_for_host_async("github.com", "github")
     except Exception:
         secret = settings.github_webhook_secret
     if not secret:
@@ -685,16 +696,21 @@ async def github_webhook(request: Request):
 
 @router.post("/gitlab")
 async def gitlab_webhook(request: Request):
-    """Receive GitLab issue webhooks — sync status to internal tasks."""
+    """Receive GitLab issue webhooks — sync status to internal tasks.
+
+    Phase 5-7 (#multi-account-forge): per-instance secret read goes
+    through the async resolver so operator-added ``git_accounts`` rows
+    are honoured (e.g. multiple self-hosted GitLab instances each with
+    its own webhook secret).
+    """
     import hmac as _hmac
-    # Per-instance secret from credential registry with scalar fallback
     try:
-        from backend.git_credentials import get_webhook_secret_for_host
+        from backend.git_credentials import get_webhook_secret_for_host_async
         # Try to identify GitLab instance from header (GitLab 15.x+) or fallback
         gl_instance = request.headers.get("X-Gitlab-Instance", "gitlab.com")
         from urllib.parse import urlparse
         gl_host = urlparse(gl_instance).hostname or gl_instance
-        secret = get_webhook_secret_for_host(gl_host, "gitlab") or settings.gitlab_webhook_secret
+        secret = await get_webhook_secret_for_host_async(gl_host, "gitlab")
     except Exception:
         secret = settings.gitlab_webhook_secret
     if not secret:

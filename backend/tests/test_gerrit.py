@@ -36,21 +36,36 @@ class TestGerritPlatformDetection:
 
 class TestGerritClient:
 
-    def test_ssh_args(self):
-        from backend.config import settings
-        orig_host = settings.gerrit_ssh_host
-        orig_port = settings.gerrit_ssh_port
-        try:
-            settings.gerrit_ssh_host = "review.example.com"
-            settings.gerrit_ssh_port = 29418
-            client = GerritClient()
-            args = client._ssh_args
-            assert "review.example.com" in args
-            assert "29418" in args
-            assert "BatchMode=yes" in args
-        finally:
-            settings.gerrit_ssh_host = orig_host
-            settings.gerrit_ssh_port = orig_port
+    def test_ssh_args_for_account(self):
+        """Phase 5-7: ``_ssh_args_for`` builds argv from a resolved
+        ``git_accounts`` row, not ``settings.gerrit_*`` scalars."""
+        client = GerritClient()
+        account = {
+            "ssh_host": "review.example.com",
+            "ssh_port": 29418,
+            "ssh_key": "",
+            "project": "core",
+        }
+        args = client._ssh_args_for(account)
+        assert "review.example.com" in args
+        assert "29418" in args
+        assert "BatchMode=yes" in args
+        assert args[0] == "ssh"
+
+    def test_ssh_args_for_account_uses_per_account_key(self):
+        """Per-account ``ssh_key`` wins over the global
+        ``settings.git_ssh_key_path`` (multi-account credential
+        isolation)."""
+        client = GerritClient()
+        account = {
+            "ssh_host": "review.example.com",
+            "ssh_port": 29418,
+            "ssh_key": "/tmp/per-account-key",
+        }
+        args = client._ssh_args_for(account)
+        assert "-i" in args
+        idx = args.index("-i")
+        assert args[idx + 1].endswith("per-account-key")
 
 
 class TestGerritToolRestrictions:

@@ -1013,6 +1013,81 @@ async def require_account_for_url(
     return entry
 
 
+async def get_webhook_secret_for_host_async(
+    host: str,
+    platform: str = "",
+    *,
+    tenant_id: str | None = None,
+) -> str:
+    """Async sibling of :func:`get_webhook_secret_for_host` that reads
+    the canonical ``git_accounts`` table via the asyncpg pool.
+
+    Phase 5-7 (#multi-account-forge) — webhook handlers (``/webhooks/
+    gerrit`` first; ``/github`` / ``/gitlab`` will follow in future
+    rows once their HTTP-bound HMAC paths fully port to async) need
+    per-instance webhook secrets sourced from the operator-edited
+    ``git_accounts`` table, not just the legacy Settings shim.
+    Resolution chain:
+
+    1. Exact host match against ``ssh_host`` or ``instance_url``'s
+       hostname in any enabled gerrit/github/gitlab row for the
+       current tenant.
+    2. Platform default via :func:`pick_default` (covers operator-
+       marked ``is_default=TRUE`` rows AND the auto-migrated
+       ``ga-legacy-{platform}-*`` row).
+    3. Legacy scalar fallback (``settings.{platform}_webhook_secret``)
+       — only kicks in when (1) and (2) yield no row at all, e.g. on
+       a fresh install before row 5-5 has anything to migrate.
+
+    Returns ``""`` when no secret is configured anywhere — the caller
+    must then refuse the webhook (the existing ``503 not configured``
+    branch in the handler).
+
+    No LRU touch — webhook traffic shouldn't disturb interactive
+    accounts' ``last_used_at`` ordering.
+    """
+    if not host:
+        # Without a host we can't even attempt a registry lookup; jump
+        # straight to platform default + scalar fallback.
+        account = None
+    else:
+        needle = host.strip().lower()
+        registry = await get_credential_registry_async(tenant_id)
+        account = None
+        for entry in registry:
+            if platform and entry.get("platform") != platform:
+                continue
+            entry_ssh = (entry.get("ssh_host") or "").strip().lower()
+            entry_url = (
+                entry.get("instance_url") or entry.get("url") or ""
+            )
+            entry_url_host = ""
+            if entry_url:
+                entry_url_host = (
+                    urlparse(entry_url).hostname or ""
+                ).lower()
+            if needle == entry_ssh or needle == entry_url_host:
+                account = entry
+                break
+
+    if account is None and platform:
+        account = await pick_default(platform, tenant_id=tenant_id, touch=False)
+
+    if account:
+        secret = (account.get("webhook_secret") or "").strip()
+        if secret:
+            return secret
+
+    # Final scalar fallback for the empty-registry / fresh-install case.
+    if platform == "gerrit":
+        return settings.gerrit_webhook_secret
+    if platform == "github":
+        return settings.github_webhook_secret
+    if platform == "gitlab":
+        return settings.gitlab_webhook_secret
+    return ""
+
+
 async def pick_default(
     platform: str,
     *,

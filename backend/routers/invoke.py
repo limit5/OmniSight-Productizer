@@ -570,21 +570,41 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 if ws_info and ws_info.status == "active":
                     await finalize(agent.id)
                     logger.info("Auto-finalized workspace for %s", agent.id)
-                    # Auto-push to Gerrit if enabled
+                    # Auto-push to Gerrit if enabled.
+                    #
+                    # Phase 5-7 (#multi-account-forge): the SSH host /
+                    # port / project come from the resolved
+                    # ``git_accounts(platform='gerrit')`` row instead of
+                    # ``settings.gerrit_*`` scalars, so operator-added
+                    # accounts are honoured. Falls back to the legacy
+                    # shim's ``default-gerrit`` virtual row when the
+                    # table is empty (preserves single-instance
+                    # behaviour pre-5-5 auto-migration).
                     from backend.config import settings as _cfg
-                    if _cfg.gerrit_enabled and _cfg.gerrit_ssh_host:
+                    if _cfg.gerrit_enabled:
                         try:
-                            from backend.workspace import _run
-                            from pathlib import Path
-                            gerrit_url = f"ssh://{_cfg.gerrit_ssh_host}:{_cfg.gerrit_ssh_port}/{_cfg.gerrit_project}"
-                            rc, out, err = await _run(
-                                f'git push "{gerrit_url}" HEAD:refs/for/main',
-                                cwd=Path(workspace_path),
-                            )
-                            if rc == 0:
-                                emit_invoke("gerrit_push", f"Agent {agent.id} pushed to Gerrit for review")
+                            from backend.git_credentials import pick_default
+                            account = await pick_default("gerrit")
+                            ssh_host = (account or {}).get("ssh_host") or ""
+                            ssh_port = int((account or {}).get("ssh_port") or 0) or 29418
+                            project = ((account or {}).get("project") or "").strip()
+                            if ssh_host and project:
+                                from backend.workspace import _run
+                                from pathlib import Path
+                                gerrit_url = f"ssh://{ssh_host}:{ssh_port}/{project}"
+                                rc, out, err = await _run(
+                                    f'git push "{gerrit_url}" HEAD:refs/for/main',
+                                    cwd=Path(workspace_path),
+                                )
+                                if rc == 0:
+                                    emit_invoke("gerrit_push", f"Agent {agent.id} pushed to Gerrit for review")
+                                else:
+                                    logger.warning("Gerrit push failed for %s: %s", agent.id, err[:100])
                             else:
-                                logger.warning("Gerrit push failed for %s: %s", agent.id, err[:100])
+                                logger.debug(
+                                    "Gerrit auto-push skipped for %s: no ssh_host/project on default account",
+                                    agent.id,
+                                )
                         except Exception as exc:
                             logger.warning("Gerrit push error: %s", exc)
             except Exception as exc:

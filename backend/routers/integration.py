@@ -1660,15 +1660,28 @@ async def _test_ssh() -> dict:
 
 
 async def _test_gerrit() -> dict:
+    """Probe Gerrit SSH connectivity using the resolved default account.
+
+    Phase 5-7 (#multi-account-forge): the host / port come from the
+    ``pick_default("gerrit")`` row so the probe button tests what the
+    resolver would actually use, not stale ``settings.gerrit_*``
+    scalars. Falls back to the legacy shim's ``default-gerrit``
+    virtual row when ``git_accounts`` is empty so single-instance
+    deployments need no operator action.
+    """
     if not settings.gerrit_enabled:
         return {"status": "not_configured", "message": "Gerrit is disabled"}
-    if not settings.gerrit_ssh_host:
+    from backend.git_credentials import pick_default
+    account = await pick_default("gerrit", touch=False)
+    ssh_host = (account or {}).get("ssh_host") or ""
+    ssh_port = int((account or {}).get("ssh_port") or 0) or 29418
+    if not ssh_host:
         return {"status": "not_configured", "message": "Gerrit SSH host not set"}
     proc = await asyncio.create_subprocess_exec(
-        "ssh", "-p", str(settings.gerrit_ssh_port),
+        "ssh", "-p", str(ssh_port),
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=5",
-        f"{settings.gerrit_ssh_host}",
+        f"{ssh_host}",
         "gerrit", "version",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
