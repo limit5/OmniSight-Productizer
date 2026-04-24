@@ -1393,7 +1393,7 @@ Gerrit 有 `POST /runtime/git-forge/gerrit/webhook-secret/generate`（`integrati
 
 收尾階段：regression test + operator 文件。
 
-- [ ] `backend/tests/test_llm_balance.py`：DeepSeek + OpenRouter 各 3 test（ok / auth fail / 5xx），unsupported provider 1 test，SharedKV cache hit / miss 邏輯。
+- [x] `backend/tests/test_llm_balance.py`：DeepSeek + OpenRouter 各 3 test（ok / auth fail / 5xx），unsupported provider 1 test，SharedKV cache hit / miss 邏輯。
 - [ ] `backend/tests/test_pricing.py`：YAML load / reload / fallback / cross-worker sync 各一條。
 - [ ] `backend/tests/test_ratelimit_capture.py`：四家 provider 的 header 解析、TTL 過期、unknown provider 跳過。
 - [ ] 新 `docs/integrations/llm-observability.md`，列出**支援度矩陣**：
