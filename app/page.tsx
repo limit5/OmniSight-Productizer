@@ -27,6 +27,7 @@ import { PresenceBadge } from "@/components/omnisight/presence-badge"
 import { useAuth } from "@/lib/auth-context"
 import { useRouter } from "next/navigation"
 import { ToastCenter } from "@/components/omnisight/toast-center"
+import { BurnRateFreezeToastCenter } from "@/components/omnisight/burn-rate-freeze-toast-center"
 import { SecurityAlertsCenter } from "@/components/omnisight/security-alerts-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
 import { NewProjectWizard } from "@/components/omnisight/new-project-wizard"
@@ -605,6 +606,8 @@ export default function Home() {
 
       {/* Phase 50C: overlay toasts for risky/destructive decisions. */}
       <ToastCenter />
+      {/* ZZ.B3 #304-3 checkbox 3: burn-rate freeze ETA warning toast. */}
+      <BurnRateFreezeToastCenter />
       {/* Q.2 (#296): overlay toast for new-device login alerts. */}
       <SecurityAlertsCenter />
       <FirstRunTour />
