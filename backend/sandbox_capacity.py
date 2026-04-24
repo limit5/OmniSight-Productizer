@@ -31,7 +31,59 @@ logger = logging.getLogger(__name__)
 #  Constants
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-CAPACITY_MAX: int = int(os.environ.get("OMNISIGHT_CAPACITY_MAX", "12"))
+
+def _detect_cpu_cores() -> int:
+    """Logical CPU cores visible to this process (defaults to 1 if unknown)."""
+    return os.cpu_count() or 1
+
+
+def _detect_mem_gb() -> float:
+    """Total system memory in GiB (0.0 if undetectable)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except (OSError, ValueError):
+        pass
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return (pages * page_size) / (1024 ** 3)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _compute_capacity_max(
+    cpu_cores: int | None = None,
+    mem_gb: float | None = None,
+) -> int:
+    """H4a derived global token budget.
+
+    ``CAPACITY_MAX = floor(min(cpu_cores * 0.8, mem_gb / 2))``
+
+    Reference rig 16c / 64 GiB → ``min(12.8, 32) = 12`` tokens. The 0.8
+    CPU factor leaves ~20% headroom for the host (kernel, frontend,
+    coordinator); the ``mem_gb / 2`` factor assumes the heaviest single
+    sandbox class peaks at ~512 MiB per token (matches
+    :class:`SandboxCostWeight` lightweight envelope and worst-case
+    compile bursts).
+
+    Falls back to a floor of 1 so even a tiny dev VM (1c/1GB) can run
+    one sandbox; the env var ``OMNISIGHT_CAPACITY_MAX`` overrides the
+    formula entirely (operator opt-out for known-tuned hosts).
+    """
+    cores = cpu_cores if cpu_cores is not None else _detect_cpu_cores()
+    mem = mem_gb if mem_gb is not None else _detect_mem_gb()
+    cpu_budget = cores * 0.8
+    mem_budget = mem / 2.0
+    return max(1, int(min(cpu_budget, mem_budget)))
+
+
+_env_capacity = os.environ.get("OMNISIGHT_CAPACITY_MAX")
+CAPACITY_MAX: int = (
+    int(_env_capacity) if _env_capacity else _compute_capacity_max()
+)
 
 GRACE_PERIOD_S: float = float(os.environ.get("OMNISIGHT_DRF_GRACE_S", "30.0"))
 

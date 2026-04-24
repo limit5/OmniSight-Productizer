@@ -60,6 +60,17 @@ for _leaky in (
 ):
     os.environ.pop(_leaky, None)
 
+# H4a row 2574 (2026-04-25): pin sandbox_capacity.CAPACITY_MAX to the
+# legacy reference-rig value (16c/64GB → 12) so existing test
+# expectations remain deterministic. Without this pin the new
+# host-derived default (`min(cpu*0.8, mem/2)`) yields different values
+# on dev / CI hosts (e.g. a 32-core box derives 25), and tests that
+# hardcode 12 — `test_weighted_cost`, `test_derate_caps_try_acquire_*`,
+# the snapshot fairness checks etc. — would fail. Tests that explicitly
+# exercise the formula call ``_compute_capacity_max(cpu_cores=…, mem_gb=…)``
+# directly and bypass this pin.
+os.environ.setdefault("OMNISIGHT_CAPACITY_MAX", "12")
+
 # Ensure workspace root points to a temp directory for all tool tests
 _tmp = tempfile.mkdtemp(prefix="omnisight_test_")
 os.environ["OMNISIGHT_WORKSPACE"] = _tmp

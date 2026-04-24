@@ -432,6 +432,62 @@ class TestCostWeights:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  H4a row 2574 — CAPACITY_MAX derivation formula
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestCapacityMaxFormula:
+    """Pin the H4a derivation: ``min(cpu_cores * 0.8, mem_gb / 2)``.
+
+    The conftest pins ``OMNISIGHT_CAPACITY_MAX=12`` so the module-level
+    constant stays deterministic for the rest of the suite; these tests
+    therefore call ``_compute_capacity_max`` directly with explicit
+    arguments to exercise the formula in isolation.
+    """
+
+    def test_reference_rig_yields_12(self):
+        """TODO.md row 2574 spec — 16c / 64 GiB → 12 tokens."""
+        assert sc._compute_capacity_max(cpu_cores=16, mem_gb=64.0) == 12
+
+    def test_floors_fractional_to_int(self):
+        """``min(13.6, 32) = 13.6`` → floored to 13."""
+        assert sc._compute_capacity_max(cpu_cores=17, mem_gb=64.0) == 13
+
+    def test_cpu_bound_when_cpu_is_constraint(self):
+        """4c / 64 GiB → cpu*0.8=3.2 wins over mem/2=32 → 3."""
+        assert sc._compute_capacity_max(cpu_cores=4, mem_gb=64.0) == 3
+
+    def test_mem_bound_when_mem_is_constraint(self):
+        """100c / 8 GiB → mem/2=4 wins over cpu*0.8=80 → 4."""
+        assert sc._compute_capacity_max(cpu_cores=100, mem_gb=8.0) == 4
+
+    def test_floor_is_one_for_tiny_hosts(self):
+        """1c / 1 GiB → min(0.8, 0.5)=0.5 → floored to 1 (anti-deadlock)."""
+        assert sc._compute_capacity_max(cpu_cores=1, mem_gb=1.0) == 1
+
+    def test_zero_inputs_clamp_to_one(self):
+        """Defensive: undetectable host → still returns at least 1."""
+        assert sc._compute_capacity_max(cpu_cores=0, mem_gb=0.0) == 1
+
+    def test_detect_helpers_return_positive(self):
+        """``_detect_cpu_cores`` always returns ≥1; ``_detect_mem_gb``
+        returns a non-negative float on a Linux host (this CI env)."""
+        assert sc._detect_cpu_cores() >= 1
+        assert sc._detect_mem_gb() >= 0.0
+
+    def test_module_capacity_pinned_in_tests(self):
+        """The conftest pin keeps CAPACITY_MAX at 12 for the legacy
+        suite. If this assert fires the pin was lost and the rest of
+        the suite will start producing flaky env-dependent values.
+        """
+        assert sc.CAPACITY_MAX == 12
+
+    def test_32c_128gb_scales_up(self):
+        """Bigger production rig (32c / 128 GiB) → 25 tokens; verifies
+        the formula isn't accidentally clamped to the reference rig."""
+        assert sc._compute_capacity_max(cpu_cores=32, mem_gb=128.0) == 25
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Reset
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
