@@ -68,6 +68,19 @@ ndk_root: "/opt/android/sdk/ndk/27.0.12077973"
 # exact binary gradle + CMake invoke when ABI=arm64-v8a.
 toolchain_path: "/opt/android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
 
+# P11 #351 — Google Android CLI (`android create/run/emulator/sdk`,
+# released 2026-04-18, d.android.com/tools/agents) covers this ABI.
+# `true` means the build path may use the CLI fast path (3× faster /
+# ~70% less token vs `./gradlew`, per Google's 2026-04-18 benchmark);
+# runtime still gates on `shutil.which("android")` via
+# `backend/mobile_toolchain.py::resolve_android_invocation` so that a
+# host without the CLI baked in transparently falls back to the
+# Gradle wrapper — this flag is the *profile-level intent*, not a
+# runtime presence check. Set to `false` on air-gap hosts or policy-
+# locked environments that must stay on Gradle even when `android`
+# happens to be on PATH.
+android_cli_available: true
+
 # Keystore material injected at build time from P3 secret_store.
 signing_identity: ""
 

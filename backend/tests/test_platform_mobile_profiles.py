@@ -223,3 +223,82 @@ def test_android_profiles_include_emulator_spec():
         assert spec["avd_name"]
         assert spec["api_level"]
         assert "system-images;" in spec["system_image"]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P11 #351 checkbox 5 — android_cli_available profile flag
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_ANDROID_PROFILES = ("android-arm64-v8a", "android-armeabi-v7a")
+
+
+@pytest.mark.parametrize("profile_id", _ANDROID_PROFILES)
+def test_android_profile_declares_android_cli_available(profile_id):
+    """P11 #351 checkbox 5 — every Android profile must declare
+    ``android_cli_available`` so downstream resolvers can distinguish
+    "CLI not wanted here" from "profile was written pre-P11 and didn't
+    know to declare". Missing key on an Android profile trips loud."""
+    data = load_raw_profile(profile_id)
+    assert "android_cli_available" in data, (
+        f"{profile_id}: Android profiles must declare android_cli_available "
+        "(P11 #351 checkbox 5)"
+    )
+    assert isinstance(data["android_cli_available"], bool), (
+        f"{profile_id}: android_cli_available must be a YAML bool, got "
+        f"{type(data['android_cli_available']).__name__}"
+    )
+
+
+def test_android_profiles_agree_on_cli_availability():
+    """Drift guard: both ABI profiles must flip the flag together.
+    Splitting them would mean one ABI slice builds via CLI fast path
+    while the other silently falls back to ``./gradlew`` — a subtle
+    class of bug where your arm64 APK is 3× faster to produce than
+    your v7a slice with no explanation in the build log."""
+    v8a = load_raw_profile("android-arm64-v8a")
+    v7a = load_raw_profile("android-armeabi-v7a")
+    assert v8a["android_cli_available"] == v7a["android_cli_available"], (
+        "android-arm64-v8a and android-armeabi-v7a must agree on "
+        "android_cli_available — the `android` binary is a single "
+        "install that covers both ABIs (per-ABI selection is per-call, "
+        "not per-install). Drift here means the two slices take "
+        "different build paths for no ABI-specific reason."
+    )
+
+
+@pytest.mark.parametrize("profile_id", _ANDROID_PROFILES)
+def test_android_profile_cli_available_flag_is_true_post_p11(profile_id):
+    """P11 #351 ships with CLI fast path enabled for both profiles
+    (Google's `android` CLI, released 2026-04-18, covers both ABIs).
+    If a future operator needs to flip this to ``false`` (air-gap host
+    / policy lock), this assertion is the place to document the why."""
+    data = load_raw_profile(profile_id)
+    assert data["android_cli_available"] is True, (
+        f"{profile_id}: post-P11 default is android_cli_available=true; "
+        "if flipping to false, record the reason in the profile comment."
+    )
+
+
+@pytest.mark.parametrize("profile_id", _ANDROID_PROFILES)
+def test_android_profile_cli_flag_surfaces_in_build_toolchain(profile_id):
+    """The resolver must echo ``android_cli_available`` into the
+    ``build_toolchain`` block so consumers can read it without
+    re-parsing the raw profile YAML."""
+    cfg = get_platform_config(profile_id)
+    assert "android_cli_available" in cfg["build_toolchain"]
+    assert cfg["build_toolchain"]["android_cli_available"] is True
+
+
+@pytest.mark.parametrize("profile_id", ("ios-arm64", "ios-simulator"))
+def test_ios_profiles_omit_android_cli_flag(profile_id):
+    """iOS profiles deliberately omit ``android_cli_available``. The
+    resolver surfaces it as ``None`` (not-declared sentinel) so a
+    consumer that mistakenly reads the flag on an iOS profile gets a
+    three-state signal (True / False / None) instead of silently
+    assuming False."""
+    data = load_raw_profile(profile_id)
+    assert "android_cli_available" not in data, (
+        f"{profile_id}: iOS profile should not carry android_cli_available"
+    )
+    cfg = get_platform_config(profile_id)
+    assert cfg["build_toolchain"]["android_cli_available"] is None

@@ -93,6 +93,17 @@ optional:
   - ndk_root             # Android NDK path (unused for iOS, keep empty)
   - toolchain_path       # clang / c++ / llvm-ar etc resolved path for the ABI
   - emulator_spec        # mapping: device model + os_version + avd/simulator runtime id
+  - android_cli_available  # bool (P11 #351): declares that Google's
+                           # `android` CLI (d.android.com/tools/agents,
+                           # released 2026-04-18) covers this ABI, so
+                           # backend/mobile_toolchain.py::
+                           # resolve_android_invocation may take the
+                           # CLI fast path when `shutil.which("android")`
+                           # is also truthy. `false` pins the profile
+                           # to the `./gradlew` legacy path regardless
+                           # of runtime PATH — set on air-gap hosts or
+                           # policy-locked environments. Only meaningful
+                           # when mobile_platform == android.
   # Software-specific (X-series)
   - software_runtime     # python | node | jvm | native
   - packaging            # pip | npm | jar | deb | rpm

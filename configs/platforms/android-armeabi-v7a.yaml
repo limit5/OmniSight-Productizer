@@ -63,6 +63,15 @@ ndk_root: "/opt/android/sdk/ndk/27.0.12077973"
 # hard-float ABIs, though Android mandates soft-float hard-fp-abi).
 toolchain_path: "/opt/android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
 
+# P11 #351 — Google Android CLI covers armeabi-v7a via the same
+# `android` binary (ABI is selected per-invocation, not per-install).
+# Kept in lockstep with android-arm64-v8a.yaml: drift between the two
+# Android profiles would mean one ABI slice builds via CLI fast path
+# and the other silently falls back to `./gradlew` — profile-level
+# flag mismatch is loud at resolver time rather than silent at build
+# time. See android-arm64-v8a.yaml for the full rationale.
+android_cli_available: true
+
 signing_identity: ""
 
 build_cmd: "./gradlew bundleRelease -PtargetAbi=armeabi-v7a"

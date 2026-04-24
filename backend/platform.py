@@ -202,7 +202,18 @@ def _resolve_mobile(data: dict[str, Any]) -> dict[str, Any]:
     these are required — partial profiles still resolve so the P2
     simulate-track gate can run against a profile that hasn't finished
     plumbing signing yet.
+
+    ``android_cli_available`` (P11 #351) is surfaced as ``Optional[bool]``
+    — ``None`` means the profile did not declare one (iOS + legacy
+    Android profiles pre-P11 checkbox 5). Callers that want to enforce
+    the CLI fast path should treat ``None`` as "don't know, fall back to
+    PATH probe"; ``False`` is a positive opt-out signal that overrides
+    the PATH probe.
     """
+    raw_cli_flag = data.get("android_cli_available")
+    android_cli_available: bool | None = (
+        bool(raw_cli_flag) if raw_cli_flag is not None else None
+    )
     return {
         "kind": "mobile",
         "mobile_platform": data.get("mobile_platform", ""),
@@ -216,6 +227,7 @@ def _resolve_mobile(data: dict[str, Any]) -> dict[str, Any]:
         "toolchain_path": data.get("toolchain_path", ""),
         "emulator_spec": dict(data.get("emulator_spec") or {}),
         "build_cmd": data.get("build_cmd", ""),
+        "android_cli_available": android_cli_available,
     }
 
 
