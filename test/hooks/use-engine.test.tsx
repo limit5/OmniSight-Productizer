@@ -47,6 +47,12 @@ vi.mock("@/lib/api", () => {
     // keeps its empty-messages invariant; the chat.message tests
     // override this via mockImplementation.
     getChatHistory: vi.fn(() => Promise.reject(new Error("offline-mock"))),
+    // Z.4 #293 checkbox 5: useEngine now runs a dedicated 60 s poll
+    // for ``GET /runtime/providers/balance``. Reject by default so
+    // the offline test suite keeps its ``providerBalances === null``
+    // invariant; the poll-contract suite below overrides via
+    // mockImplementation to exercise the happy path + interval tick.
+    getProvidersBalance: vi.fn(() => Promise.reject(new Error("offline-mock"))),
   }
 })
 

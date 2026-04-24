@@ -105,6 +105,16 @@ export function useEngine() {
   const [artifacts, setArtifacts] = useState<api.ArtifactItem[]>([])
   const [simulations, setSimulations] = useState<api.SimulationItem[]>([])
   const [npiData, setNpiData] = useState<api.NPIData | null>(null)
+  // Z.4 #293 checkbox 5: nine-provider balance envelopes polled on a
+  // dedicated 60 s cadence (decoupled from the 10 s dashboard-summary
+  // tick — balance is low-frequency data refreshed by the background
+  // ``llm_balance_refresher`` every 10 min; poll oftener than that
+  // just to pick up operator-side events like cold-start live-fetch
+  // or a key rotation, but much less often than the 10 s host-state
+  // sweep). Null until the first successful fetch; stays at the last
+  // known value on transient endpoint blips so a single 500 doesn't
+  // blank the UI.
+  const [providerBalances, setProviderBalances] = useState<api.ProviderBalanceEnvelope[] | null>(null)
   const providerSwitchCallbackRef = useRef<(() => void) | null>(null)
   // Track resources for cleanup (supports StrictMode double-mount)
   const eventSourceRef = useRef<{ close: () => void; readyState: number } | null>(null)
@@ -716,6 +726,48 @@ export function useEngine() {
     }
   }, [])
 
+  // Z.4 #293 checkbox 5: dedicated 60 s poll for
+  // ``GET /runtime/providers/balance``. Separate from the 10 s
+  // dashboard-summary tick on purpose — provider balance is low-
+  // frequency data (``llm_balance_refresher`` writes the cache every
+  // 10 min) so jamming it into the 10 s sweep would waste six out of
+  // seven requests per minute. A dedicated interval also keeps the
+  // endpoint's optional cold-start live-fetch (see
+  // ``resolve_balance`` cache-miss branch) from amplifying under the
+  // shorter dashboard cadence. On transient endpoint errors we keep
+  // the last known value rather than wiping — a flicker to "no data"
+  // would regress every ``<ProviderStatusBadge>`` + card expansion
+  // every minute instead of smoothing over a single blip.
+  //
+  // Module-global audit (SOP Step 1): pure per-instance ``useState``
+  // + interval, no module-globals touched. Each mount owns its own
+  // timer; under React StrictMode double-mount the cleanup guards
+  // via ``cancelled`` + ``clearInterval`` so no double-fetch survives.
+  // Answer #3 of the three valid audit answers — this state is
+  // deliberately per-tab, not cross-worker (no such thing as a
+  // "cross-browser-tab provider balance" that needs coordinating;
+  // the source of truth is the backend SharedKV which this poll
+  // reads from).
+  useEffect(() => {
+    let cancelled = false
+    async function fetchBalances() {
+      try {
+        const batch = await api.getProvidersBalance()
+        if (cancelled) return
+        setProviderBalances(batch.providers)
+      } catch (e) {
+        // Transient blip — keep last-known state, log once per tick.
+        console.warn("[Engine] Provider balance fetch failed:", e)
+      }
+    }
+    fetchBalances()
+    const interval = setInterval(fetchBalances, 60_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
   // ── Agent operations ──
 
   const addAgent = useCallback(async (type: Agent["type"], name?: string, subType?: string, aiModel?: string) => {
@@ -992,6 +1044,7 @@ export function useEngine() {
     notifications,
     unreadCount,
     setUnreadCount,
+    providerBalances,
     // Setters (for local-only operations like emergency stop)
     setAgents,
     setTasks,

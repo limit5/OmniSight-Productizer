@@ -22,11 +22,14 @@ import {
   groupByProvider,
   openRouterAwareResolver,
 } from "./provider-rollup"
+import { ProviderStatusBadge } from "./provider-status-badge"
+import { ProviderCardExpansion } from "./provider-card-expansion"
 import {
   subscribeEvents,
   fetchTokenBurnRate,
   type TokenBurnRatePoint,
   type TokenBurnRateWindow,
+  type ProviderBalanceEnvelope,
 } from "@/lib/api"
 
 // ZZ.A2 (#303-2, 2026-04-24): per-model snapshot of the *latest* turn's
@@ -115,11 +118,21 @@ interface TokenUsageStatsProps {
   // placeholder is replaced by the real usage row.
   configuredProviders?: { id: string; name: string; models: string[]; configured: boolean }[]
   budgetInfo?: TokenBudgetInfo | null
+  // Z.4 #293 checkbox 5: nine-provider balance envelopes polled on a
+  // dedicated 60 s cadence by ``useEngine``. Each envelope drives a
+  // ``<ProviderStatusBadge>`` in the summary row + a
+  // ``<ProviderCardExpansion>`` block above the per-model rows when the
+  // group is expanded. ``null`` until the first poll lands — the badge
+  // shows a gray "loading" state and the expansion falls back to
+  // "never synced" rather than claiming healthy data. Each envelope
+  // carries ``provider`` as lowercase ("anthropic", "openrouter",
+  // etc.), matching ``groupByProvider``'s lowercased ``providerKey``.
+  providerBalances?: ProviderBalanceEnvelope[] | null
   onResetFreeze?: () => void
   onUpdateBudget?: (updates: Record<string, number | string>) => void
 }
 
-export function TokenUsageStats({ className = "", externalUsage, configuredProviders, budgetInfo, onResetFreeze, onUpdateBudget }: TokenUsageStatsProps) {
+export function TokenUsageStats({ className = "", externalUsage, configuredProviders, budgetInfo, providerBalances, onResetFreeze, onUpdateBudget }: TokenUsageStatsProps) {
   const [expanded, setExpanded] = useState(true)
   const [usageData, setUsageData] = useState<ModelTokenUsage[]>(externalUsage ?? emptyUsage())
   const [selectedModel, setSelectedModel] = useState<AIModel | null>(null)
@@ -668,6 +681,57 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
             // provider-rollup.tsx) remembers their choice for the life of
             // the panel mount.
             defaultExpanded
+            // Z.4 #293 checkbox 5: mount <ProviderStatusBadge> inside each
+            // summary row + <ProviderCardExpansion> above the per-model
+            // rows inside each expanded panel. Both slots look up the
+            // envelope by lowercased providerKey — matches the backend's
+            // alphabetical 9-provider registry
+            // (``backend/routers/llm_balance.py::_VALID_PROVIDER_NAMES``)
+            // and the `groupByProvider` key convention. Missing envelope
+            // (provider not yet polled / non-registry key like "local"
+            // from ``AI_MODEL_INFO`` Ollama entry) → badge falls through
+            // to loading state, expansion omitted.
+            renderStatusBadge={(providerKey) => {
+              const env = (providerBalances ?? []).find(
+                (e) => e.provider === providerKey,
+              )
+              if (!env) {
+                return (
+                  <ProviderStatusBadge
+                    provider={providerKey}
+                    loading={providerBalances === null || providerBalances === undefined}
+                  />
+                )
+              }
+              return (
+                <ProviderStatusBadge
+                  provider={providerKey}
+                  status={env.status}
+                  reason={env.reason}
+                  balanceRemaining={env.balance_remaining ?? null}
+                  grantedTotal={env.granted_total ?? null}
+                  currency={env.currency ?? null}
+                />
+              )
+            }}
+            renderExpansion={(providerKey) => {
+              const env = (providerBalances ?? []).find(
+                (e) => e.provider === providerKey,
+              )
+              if (!env) return null
+              return (
+                <ProviderCardExpansion
+                  provider={providerKey}
+                  status={env.status}
+                  reason={env.reason}
+                  balanceRemaining={env.balance_remaining ?? null}
+                  grantedTotal={env.granted_total ?? null}
+                  currency={env.currency ?? null}
+                  lastRefreshedAt={env.last_refreshed_at ?? null}
+                  errorMessage={env.message}
+                />
+              )
+            }}
             renderRow={(item) => {
               const modelInfo = AI_MODEL_INFO[item.model]
               const isSelected = selectedModel === item.model

@@ -1768,6 +1768,44 @@ export async function getDashboardSummary() {
   return request<DashboardSummary>("/dashboard/summary")
 }
 
+// ─── LLM provider balance (Z.2 #291 + Z.4 #293 checkbox 5) ───
+//
+// Mirrors the three-envelope shape emitted by
+// ``backend/routers/llm_balance.py::resolve_balance`` — ``ok`` (cached
+// or freshly fetched), ``unsupported`` (vendor has no public balance
+// API with API-key auth), or ``error`` (auth failure / 5xx / missing
+// key). The dashboard's 60 s poll in ``useEngine`` hits the batch
+// ``/runtime/providers/balance`` route so the nine-provider panel
+// lands in one round-trip.
+
+export type ProviderBalanceStatus = "ok" | "unsupported" | "error"
+
+export interface ProviderBalanceEnvelope {
+  status: ProviderBalanceStatus
+  provider: string
+  // ok envelope
+  currency?: string
+  balance_remaining?: number | null
+  granted_total?: number | null
+  usage_total?: number | null
+  last_refreshed_at?: number | null
+  source?: "cache" | "live"
+  raw?: Record<string, unknown>
+  stale_since?: number | null
+  // unsupported envelope
+  reason?: string
+  // error envelope
+  message?: string
+}
+
+export interface ProviderBalanceBatch {
+  providers: ProviderBalanceEnvelope[]
+}
+
+export async function getProvidersBalance(): Promise<ProviderBalanceBatch> {
+  return request<ProviderBalanceBatch>("/runtime/providers/balance")
+}
+
 // ─── Integration Settings ───
 
 export async function getSettings(): Promise<Record<string, Record<string, unknown>>> {

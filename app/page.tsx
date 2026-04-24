@@ -485,6 +485,7 @@ export default function Home() {
               cacheHitRatio: t.cache_hit_ratio,
             })) : undefined}
             tokenBudget={engine.tokenBudget}
+            providerBalances={engine.providerBalances}
             onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
             onUpdateBudget={async (updates) => { await api.updateTokenBudget(updates as Record<string, number>); engine.refresh() }}
             onRefresh={() => engine.refresh()}
@@ -736,6 +737,7 @@ export default function Home() {
                 cacheHitRatio: t.cache_hit_ratio,
               })) : undefined}
               tokenBudget={engine.tokenBudget}
+              providerBalances={engine.providerBalances}
               onResetFreeze={async () => { await api.resetTokenFreeze(); engine.refresh() }}
               onUpdateBudget={async (updates) => { await api.updateTokenBudget(updates as Record<string, number>); engine.refresh() }}
               onRefresh={() => engine.refresh()}

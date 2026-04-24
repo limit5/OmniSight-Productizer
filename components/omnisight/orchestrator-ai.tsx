@@ -74,6 +74,10 @@ interface OrchestratorAIProps {
   onSendCommand?: (command: string) => void
   tokenUsage?: import("./token-usage-stats").ModelTokenUsage[]
   tokenBudget?: import("./token-usage-stats").TokenBudgetInfo | null
+  /** Z.4 #293 checkbox 5 — per-provider balance envelopes polled on a
+   *  dedicated 60 s cadence by ``useEngine``. Forwarded verbatim to
+   *  ``<TokenUsageStats>`` which mounts the badge + expansion slots. */
+  providerBalances?: import("@/lib/api").ProviderBalanceEnvelope[] | null
   onResetFreeze?: () => void
   onUpdateBudget?: (updates: Record<string, number | string>) => void
   onRefresh?: () => void
@@ -139,6 +143,7 @@ export function OrchestratorAI({
   onSendCommand,
   tokenUsage,
   tokenBudget,
+  providerBalances,
   onResetFreeze,
   onUpdateBudget,
   onRefresh,
@@ -607,6 +612,7 @@ export function OrchestratorAI({
         externalUsage={tokenUsage}
         configuredProviders={providers}
         budgetInfo={tokenBudget}
+        providerBalances={providerBalances}
         onResetFreeze={onResetFreeze}
         onUpdateBudget={onUpdateBudget}
       />
