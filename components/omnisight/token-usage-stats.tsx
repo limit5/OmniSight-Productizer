@@ -439,15 +439,127 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   
                   {/* Row 3: Usage Bar */}
                   <div className="h-2 rounded-full bg-[var(--border)] overflow-hidden mb-3">
-                    <div 
+                    <div
                       className="h-full rounded-full transition-all duration-500"
-                      style={{ 
+                      style={{
                         width: `${usagePercent}%`,
                         backgroundColor: modelInfo.color
                       }}
                     />
                   </div>
-                  
+
+                  {/* Row 3b (cache): CACHE HIT ratio + CACHE WRITE bars.
+                      ZZ.A1 #303-1 (2026-04-24): prompt-cache observability.
+                      Hit ratio band: green > 50 / yellow 20-50 / red < 20.
+                      NULL on pre-ZZ rows (legacy payloads) or synthesised
+                      placeholder cards → render "—" with an empty rail so
+                      "no data" stays visually distinct from a real 0% hit
+                      rate. Tooltip on each bar shows the raw read/write
+                      counts so operators can tell apart "0% because nothing
+                      cached" from "0% because this turn was all writes". */}
+                  {(() => {
+                    const ratio = item.cacheHitRatio
+                    const read = item.cacheReadTokens
+                    const write = item.cacheCreateTokens
+                    const hasRatio = ratio !== null && ratio !== undefined
+                    const hasRead = read !== null && read !== undefined
+                    const hasWrite = write !== null && write !== undefined
+                    const hasAny = hasRatio || hasRead || hasWrite
+                    const ratioPct = hasRatio ? (ratio as number) * 100 : 0
+                    // Band thresholds per ZZ.A1 spec (#303-1): > 50 green,
+                    // 20-50 yellow, < 20 red. Boundary semantics: 50.0 is
+                    // yellow (strict >), 20.0 is yellow (>= 20 inclusive),
+                    // matches "green > 50 / yellow 20-50 / red < 20".
+                    const ratioColor = !hasRatio
+                      ? "var(--muted-foreground)"
+                      : ratioPct > 50
+                        ? "var(--validation-emerald)"
+                        : ratioPct >= 20
+                          ? "#eab308"
+                          : "var(--critical-red)"
+                    // CACHE WRITE bar: % of total prompt traffic that was
+                    // new cache-creation (i.e. "overhead paid today so a
+                    // future turn can hit"). Denominator is input + read +
+                    // write so the bar caps at 100 and degrades cleanly
+                    // when the provider response had no cache fields.
+                    const writeDenom =
+                      (item.inputTokens || 0) +
+                      (hasRead ? (read as number) : 0) +
+                      (hasWrite ? (write as number) : 0)
+                    const writePct =
+                      hasWrite && writeDenom > 0
+                        ? ((write as number) / writeDenom) * 100
+                        : 0
+                    const tooltipText = hasAny
+                      ? `read: ${hasRead ? formatTokens(read as number) : "—"} / write: ${hasWrite ? formatTokens(write as number) : "—"}`
+                      : "no cache data"
+                    // Raw numbers go on the container `title` so a hover
+                    // anywhere on the block surfaces the exact counts
+                    // ("raw 數字放 hover" per spec). Per-bar `title` adds
+                    // the K-formatted summary so quick scans don't need
+                    // to parse 7-digit integers.
+                    const rawTitle = hasAny
+                      ? `cache_read_tokens=${hasRead ? (read as number).toLocaleString() : "null"} cache_create_tokens=${hasWrite ? (write as number).toLocaleString() : "null"} cache_hit_ratio=${hasRatio ? (ratio as number).toFixed(4) : "null"}`
+                      : "no cache data (pre-ZZ row or placeholder)"
+                    return (
+                      <div
+                        className="mb-3"
+                        title={rawTitle}
+                        data-testid="cache-hit-section"
+                      >
+                        {/* CACHE HIT bar (primary, colour-coded) */}
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-mono text-[10px] text-[var(--muted-foreground)] tracking-wider">
+                            CACHE HIT
+                          </span>
+                          <span
+                            className="font-mono text-[10px] font-semibold"
+                            style={{ color: ratioColor }}
+                            data-testid="cache-hit-pct"
+                          >
+                            {hasRatio ? `${ratioPct.toFixed(0)}%` : "—"}
+                          </span>
+                        </div>
+                        <div
+                          className="h-1.5 rounded-full bg-[var(--border)] overflow-hidden"
+                          title={tooltipText}
+                          data-testid="cache-hit-bar-rail"
+                        >
+                          <div
+                            className="h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: hasRatio ? `${ratioPct}%` : "0%",
+                              backgroundColor: ratioColor,
+                            }}
+                            data-testid="cache-hit-bar"
+                          />
+                        </div>
+                        {/* CACHE WRITE bar (secondary, neutral) */}
+                        <div className="flex items-center justify-between mt-1.5 mb-1">
+                          <span className="font-mono text-[10px] text-[var(--muted-foreground)] tracking-wider">
+                            CACHE WRITE
+                          </span>
+                          <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                            {hasWrite ? formatTokens(write as number) : "—"}
+                          </span>
+                        </div>
+                        <div
+                          className="h-1.5 rounded-full bg-[var(--border)] overflow-hidden"
+                          title={tooltipText}
+                          data-testid="cache-write-bar-rail"
+                        >
+                          <div
+                            className="h-full rounded-full bg-[var(--hardware-orange)]/70 transition-all duration-500"
+                            style={{
+                              width: hasWrite ? `${Math.min(writePct, 100)}%` : "0%",
+                            }}
+                            data-testid="cache-write-bar"
+                          />
+                        </div>
+                      </div>
+                    )
+                  })()}
+
                   {/* Row 4: Input/Output Tokens — flex-wrap so the
                       output cluster drops to a second line on
                       narrow cards when token counts are big
