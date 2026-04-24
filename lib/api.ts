@@ -1565,6 +1565,41 @@ export async function fetchTokenBurnRate(
   )
 }
 
+/**
+ * ZZ.C2 (#305-2, 2026-04-24) checkbox 1: one sparse cell in the
+ * session-heatmap matrix. Mirrors ``backend/models.py::TokenHeatmapCell``
+ * — ``day`` is a UTC ``YYYY-MM-DD`` string, ``hour`` is 0–23 in UTC; the
+ * frontend grid shifts both into the browser's local timezone at render
+ * time (checkbox 5 of the TODO spec locks that contract).
+ */
+export interface TokenHeatmapCell {
+  day: string
+  hour: number
+  token_total: number
+  cost_total: number
+}
+
+export interface TokenHeatmapResponse {
+  window: TokenHeatmapWindow
+  cells: TokenHeatmapCell[]
+}
+
+export type TokenHeatmapWindow = "7d" | "30d"
+
+/**
+ * ZZ.C2 #305-2 checkbox 2: fetch the ``(day, hour)`` token + cost matrix
+ * that feeds the calendar-style heatmap under ``<TokenUsageStats>``.
+ * ``window`` whitelist is enforced server-side (400 on anything outside
+ * ``7d|30d``).
+ */
+export async function fetchTokenHeatmap(
+  window: TokenHeatmapWindow = "7d",
+): Promise<TokenHeatmapResponse> {
+  return request<TokenHeatmapResponse>(
+    `/runtime/tokens/heatmap?window=${encodeURIComponent(window)}`,
+  )
+}
+
 export interface CompressionStats {
   total_original_bytes: number
   total_compressed_bytes: number
@@ -1795,6 +1830,164 @@ export interface GitForgeSshPubkey {
 
 export async function getGitForgeSshPubkey(): Promise<GitForgeSshPubkey> {
   return request<GitForgeSshPubkey>("/runtime/git-forge/ssh-pubkey")
+}
+
+// ─── Phase 5-9 (#multi-account-forge) — git_accounts CRUD client ───
+//
+// Wraps the `/git-accounts` REST surface (backend/routers/git_accounts.py).
+// Plaintext token / ssh_key / webhook_secret never round-trip through these
+// reads — only the masked `…last4` fingerprints land in the response. Mutations
+// accept plaintext and the backend encrypts before persisting.
+export type GitAccountPlatform = "github" | "gitlab" | "gerrit" | "jira"
+export type GitAccountAuthType = "pat" | "oauth" | "ssh"
+
+export interface GitAccount {
+  id: string
+  tenant_id: string
+  platform: GitAccountPlatform
+  instance_url: string
+  label: string
+  username: string
+  // Masked fingerprints — `""` when the corresponding secret is unset.
+  token_fingerprint: string
+  ssh_key_fingerprint: string
+  webhook_secret_fingerprint: string
+  ssh_host: string
+  ssh_port: number
+  project: string
+  url_patterns: string[]
+  auth_type: GitAccountAuthType
+  is_default: boolean
+  enabled: boolean
+  metadata: Record<string, unknown>
+  last_used_at: string | null
+  created_at: string | null
+  updated_at: string | null
+  version: number
+}
+
+export interface GitAccountCreate {
+  platform: GitAccountPlatform
+  instance_url?: string
+  label?: string
+  username?: string
+  token?: string
+  ssh_key?: string
+  ssh_host?: string
+  ssh_port?: number
+  project?: string
+  webhook_secret?: string
+  url_patterns?: string[]
+  auth_type?: GitAccountAuthType
+  is_default?: boolean
+  enabled?: boolean
+  metadata?: Record<string, unknown>
+}
+
+// PATCH body — all optional; for secret rotation, omit (or `undefined`) means
+// "leave it alone" and explicit empty string `""` means "clear it".
+export interface GitAccountUpdate {
+  label?: string
+  username?: string
+  instance_url?: string
+  ssh_host?: string
+  ssh_port?: number
+  project?: string
+  url_patterns?: string[]
+  auth_type?: GitAccountAuthType
+  is_default?: boolean
+  enabled?: boolean
+  metadata?: Record<string, unknown>
+  token?: string
+  ssh_key?: string
+  webhook_secret?: string
+}
+
+export interface GitAccountListResponse {
+  items: GitAccount[]
+  count: number
+}
+
+export interface GitAccountTestResult {
+  account_id: string
+  platform: GitAccountPlatform
+  status: "ok" | "error" | "not_configured"
+  message?: string
+  user?: string
+  username?: string
+  email?: string
+  displayName?: string
+  accountId?: string
+  version?: string
+  ssh_host?: string
+  ssh_port?: number
+  [key: string]: unknown
+}
+
+export interface GitAccountResolveResponse {
+  url: string
+  matched: boolean
+  matched_via: "url_pattern" | "exact_host" | "platform_default" | "fallback" | null
+  account: GitAccount | null
+}
+
+export async function listGitAccounts(opts?: {
+  platform?: GitAccountPlatform
+  enabled_only?: boolean
+}): Promise<GitAccountListResponse> {
+  const qs = new URLSearchParams()
+  if (opts?.platform) qs.set("platform", opts.platform)
+  if (opts?.enabled_only) qs.set("enabled_only", "true")
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  return request<GitAccountListResponse>(`/git-accounts${suffix}`)
+}
+
+export async function getGitAccount(id: string): Promise<GitAccount> {
+  return request<GitAccount>(`/git-accounts/${encodeURIComponent(id)}`)
+}
+
+export async function createGitAccount(body: GitAccountCreate): Promise<GitAccount> {
+  return request<GitAccount>("/git-accounts", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function updateGitAccount(
+  id: string,
+  body: GitAccountUpdate,
+): Promise<GitAccount> {
+  return request<GitAccount>(`/git-accounts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteGitAccount(
+  id: string,
+  opts?: { auto_elect_new_default?: boolean },
+): Promise<{ status: string; [key: string]: unknown }> {
+  // Default to true to match backend; pass `false` to refuse-without-replacement.
+  const elect = opts?.auto_elect_new_default ?? true
+  const qs = `?auto_elect_new_default=${elect ? "true" : "false"}`
+  return request<{ status: string; [key: string]: unknown }>(
+    `/git-accounts/${encodeURIComponent(id)}${qs}`,
+    { method: "DELETE" },
+  )
+}
+
+export async function testGitAccountById(id: string): Promise<GitAccountTestResult> {
+  return request<GitAccountTestResult>(
+    `/git-accounts/${encodeURIComponent(id)}/test`,
+    { method: "POST" },
+  )
+}
+
+export async function resolveGitAccountForUrl(url: string): Promise<GitAccountResolveResponse> {
+  const qs = `?url=${encodeURIComponent(url)}`
+  return request<GitAccountResolveResponse>(`/git-accounts/resolve${qs}`, {
+    method: "POST",
+  })
 }
 
 // ─── B14 Part C row 224: Verify the merger-agent-bot Gerrit group ───

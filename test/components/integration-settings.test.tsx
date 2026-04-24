@@ -1333,7 +1333,7 @@ describe("IntegrationSettings — Part D tab split", () => {
    * new section-title brand + the simplified "Token" / "URL" field labels
    * that live inside each section.
    */
-  it("Git tab exposes GitHub token, GitLab token/URL, SSH key, and Multiple Instances (row 232)", async () => {
+  it("Git tab exposes GitHub token, GitLab token/URL, SSH key, and the Account Manager (row 232 → Phase 5-9)", async () => {
     render(<IntegrationSettings open={true} onClose={() => {}} />)
     // Git tab is the default — no user.click needed.
     await screen.findByRole("tab", { name: /GIT\b/ })
@@ -1349,8 +1349,11 @@ describe("IntegrationSettings — Part D tab split", () => {
     // GITLAB contributes a URL + Token.
     expect(screen.getAllByText("Token").length).toBeGreaterThanOrEqual(2)
     expect(screen.getAllByText("URL").length).toBeGreaterThanOrEqual(1)
-    // MultipleInstancesSection header — the multi-repo token-map UI from Part B.
-    expect(screen.getByText(/Multiple Instances/i)).toBeTruthy()
+    // Phase 5-9 (#multi-account-forge) — AccountManagerSection replaces the
+    // old MultipleInstancesSection. The new section is identified by its
+    // GIT ACCOUNTS heading and account-manager-section testid.
+    expect(screen.getByTestId("account-manager-section")).toBeTruthy()
+    expect(screen.getByText("GIT ACCOUNTS")).toBeTruthy()
   })
 
   /**

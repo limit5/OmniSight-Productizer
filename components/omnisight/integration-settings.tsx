@@ -314,321 +314,556 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
   )
 }
 
-/** B14 Part B rows 1-5 — collapsible "Multiple Instances" sub-area inside
- *  the GIT REPOSITORIES block. Row 1 delivered the expandable scaffold;
- *  row 2 added "Add GitHub Instance" (hostname + token); row 3 added the
- *  parallel "Add GitLab Instance" (URL + token); row 4 wired the instance
- *  list + per-row TEST / REMOVE buttons; row 5 (this revision) pipes
- *  mutations into the parent's `dirty` state so SAVE & APPLY serialises
- *  the list into `github_token_map` / `gitlab_token_map` JSON (the
- *  in-memory settings fields whose env-var form is
- *  `OMNISIGHT_GITHUB_TOKEN_MAP` / `OMNISIGHT_GITLAB_TOKEN_MAP`). The
- *  dedicated masked `/runtime/settings/git/token-map` endpoint lands in
- *  row 217 — until then, TEST short-circuits to a stub "not wired"
- *  probe. */
-interface TokenMapInstance {
-  id: string
-  platform: "github" | "gitlab"
-  host: string
+// ─── Phase 5-9 (#multi-account-forge) — AccountManagerSection ─────────────
+//
+// Replaces the legacy `MultipleInstancesSection` (deleted in Phase 5-9).
+// The legacy `github_token_map` / `gitlab_token_map` JSON blobs surface
+// here as a deprecation banner only; once lifespan startup runs
+// `migrate_legacy_credentials_once` they appear as `ga-legacy-*`
+// `git_accounts` rows and the banner disappears. Each row in `git_accounts`
+// surfaces here with platform icon + label + username + host + url_patterns
+// + default ⭐ + last test status. New entries support all four platforms
+// (github / gitlab / gerrit / jira) via a platform tab. Token input has a
+// "TEST BEFORE SAVE" affordance: for an existing account it calls
+// `POST /git-accounts/{id}/test` (probes the saved token); for a new
+// candidate it calls `testGitForgeToken` (probes the body without
+// persisting). Default toggle is one-click — backend's partial unique
+// index serialises the cross-account demotion atomically. Delete shows a
+// confirm dialog and surfaces a "this account has url_patterns — repos
+// may resolve to it" warning before the destructive call.
+
+const PLATFORMS: Array<{
+  id: api.GitAccountPlatform
+  label: string
+  color: string
+  hint: string
+}> = [
+  { id: "github", label: "GitHub", color: "var(--neural-blue)", hint: "github.com or GitHub Enterprise" },
+  { id: "gitlab", label: "GitLab", color: "var(--hardware-orange)", hint: "gitlab.com or self-hosted GitLab" },
+  { id: "gerrit", label: "Gerrit", color: "var(--validation-emerald)", hint: "Gerrit Code Review (SSH)" },
+  { id: "jira", label: "JIRA", color: "var(--neural-purple)", hint: "Atlassian JIRA Cloud / Server" },
+]
+
+interface NewAccountForm {
+  label: string
+  instance_url: string
+  username: string
   token: string
-  testStatus?: "idle" | "testing" | "ok" | "error"
-  testMessage?: string
+  ssh_key: string
+  ssh_host: string
+  ssh_port: string
+  project: string
+  webhook_secret: string
+  url_patterns: string  // newline-separated; converted to string[] on submit
+  is_default: boolean
 }
 
-// Serialize instances → JSON map shape consumed by
-// `settings.github_token_map` / `settings.gitlab_token_map`
-// (env-var name: OMNISIGHT_GITHUB_TOKEN_MAP / OMNISIGHT_GITLAB_TOKEN_MAP).
-// Empty list → empty string so the backend treats it as "no map
-// configured" rather than `"{}"` (both parse to {} in _load_json_map
-// but empty string is the idiomatic "unset" value).
-function serializeTokenMap(
-  instances: TokenMapInstance[],
-  platform: "github" | "gitlab",
-): string {
-  const entries = instances
-    .filter(i => i.platform === platform)
-    .map(i => [i.host, i.token] as const)
-  if (entries.length === 0) return ""
-  return JSON.stringify(Object.fromEntries(entries))
+const EMPTY_NEW_FORM: NewAccountForm = {
+  label: "",
+  instance_url: "",
+  username: "",
+  token: "",
+  ssh_key: "",
+  ssh_host: "",
+  ssh_port: "",
+  project: "",
+  webhook_secret: "",
+  url_patterns: "",
+  is_default: false,
 }
 
-function MultipleInstancesSection({
-  setVal,
+function parsePatterns(raw: string): string[] {
+  return raw
+    .split(/\r?\n|,/)
+    .map(s => s.trim())
+    .filter(Boolean)
+}
+
+function platformMeta(p: api.GitAccountPlatform) {
+  return PLATFORMS.find(x => x.id === p) ?? PLATFORMS[0]
+}
+
+function AccountManagerSection({
+  legacyGithubMap,
+  legacyGitlabMap,
 }: {
-  setVal: (configKey: string, value: string | boolean) => void
+  legacyGithubMap: string
+  legacyGitlabMap: string
 }) {
-  const [expanded, setExpanded] = useState(false)
-  const [addingGithub, setAddingGithub] = useState(false)
-  const [ghHost, setGhHost] = useState("")
-  const [ghToken, setGhToken] = useState("")
-  const [addingGitlab, setAddingGitlab] = useState(false)
-  const [glUrl, setGlUrl] = useState("")
-  const [glToken, setGlToken] = useState("")
-  const [instances, setInstances] = useState<TokenMapInstance[]>([])
+  const [accounts, setAccounts] = useState<api.GitAccount[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [activePlatform, setActivePlatform] = useState<api.GitAccountPlatform>("github")
+  const [adding, setAdding] = useState(false)
+  const [form, setForm] = useState<NewAccountForm>(EMPTY_NEW_FORM)
+  const [submitting, setSubmitting] = useState(false)
+  const [pendingTest, setPendingTest] = useState(false)
+  const [pendingTestResult, setPendingTestResult] = useState<TestResult | null>(null)
+  const [perAccountTest, setPerAccountTest] = useState<Record<string, TestResult & { running?: boolean }>>({})
+  const [confirmDelete, setConfirmDelete] = useState<api.GitAccount | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
-  const resetGithubForm = () => {
-    setAddingGithub(false)
-    setGhHost("")
-    setGhToken("")
-  }
-
-  const resetGitlabForm = () => {
-    setAddingGitlab(false)
-    setGlUrl("")
-    setGlToken("")
-  }
-
-  // Row 216: every mutation recomputes the two JSON maps and pushes them
-  // into the parent's `dirty` reducer via `setVal`, so that the SAVE &
-  // APPLY button serialises the instance list into `github_token_map` /
-  // `gitlab_token_map`. We compute from the *next* state (inside the
-  // setter's updater) so we don't double-render or race React 18 batching.
-  const pushTokenMapsFromNext = (next: TokenMapInstance[]) => {
-    setVal("github_token_map", serializeTokenMap(next, "github"))
-    setVal("gitlab_token_map", serializeTokenMap(next, "gitlab"))
-  }
-
-  const handleAddGithub = () => {
-    if (!ghHost || !ghToken) return
-    const id = `gh-${ghHost}-${Date.now()}`
-    setInstances(prev => {
-      const next = [...prev, { id, platform: "github" as const, host: ghHost, token: ghToken, testStatus: "idle" as const }]
-      pushTokenMapsFromNext(next)
-      return next
-    })
-    resetGithubForm()
-  }
-
-  const handleAddGitlab = () => {
-    if (!glUrl || !glToken) return
-    const id = `gl-${glUrl}-${Date.now()}`
-    setInstances(prev => {
-      const next = [...prev, { id, platform: "gitlab" as const, host: glUrl, token: glToken, testStatus: "idle" as const }]
-      pushTokenMapsFromNext(next)
-      return next
-    })
-    resetGitlabForm()
-  }
-
-  const handleRemove = (id: string) => {
-    setInstances(prev => {
-      const next = prev.filter(i => i.id !== id)
-      pushTokenMapsFromNext(next)
-      return next
-    })
-  }
-
-  // Row 215 delivers the button wiring; row 217's backend probe is not
-  // reachable yet, so TEST flips into a deterministic stub result so the
-  // result-surface codepath is exercised end-to-end at build time.
-  const handleTest = async (id: string) => {
-    setInstances(prev => prev.map(i =>
-      i.id === id ? { ...i, testStatus: "testing", testMessage: undefined } : i
-    ))
-    await new Promise(r => setTimeout(r, 400))
-    setInstances(prev => prev.map(i =>
-      i.id === id
-        ? { ...i, testStatus: "error", testMessage: "probe endpoint lands in row 217" }
-        : i
-    ))
-  }
-
-  const renderStatusBadge = (inst: TokenMapInstance) => {
-    if (inst.testStatus === "testing") {
-      return (
-        <span className="inline-flex items-center gap-0.5 font-mono text-[8px] text-[var(--neural-blue)]">
-          <Loader size={9} className="animate-spin" /> TESTING
-        </span>
-      )
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const resp = await api.listGitAccounts()
+      setAccounts(resp.items)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
     }
-    if (inst.testStatus === "ok") {
-      return (
-        <span className="inline-flex items-center gap-0.5 font-mono text-[8px] text-[var(--validation-emerald)]">
-          <Check size={9} /> OK
-        </span>
-      )
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const filtered = accounts.filter(a => a.platform === activePlatform)
+
+  const handleSubmitNew = async () => {
+    setSubmitting(true)
+    setError(null)
+    try {
+      const body: api.GitAccountCreate = {
+        platform: activePlatform,
+        label: form.label.trim(),
+        instance_url: form.instance_url.trim(),
+        username: form.username.trim(),
+        token: form.token,
+        ssh_key: form.ssh_key,
+        ssh_host: form.ssh_host.trim(),
+        ssh_port: form.ssh_port ? Number(form.ssh_port) : 0,
+        project: form.project.trim(),
+        webhook_secret: form.webhook_secret,
+        url_patterns: parsePatterns(form.url_patterns),
+        is_default: form.is_default,
+      }
+      await api.createGitAccount(body)
+      setAdding(false)
+      setForm(EMPTY_NEW_FORM)
+      setPendingTestResult(null)
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSubmitting(false)
     }
-    if (inst.testStatus === "error") {
-      return (
+  }
+
+  // Probe the *unsaved* candidate via the existing `testGitForgeToken`
+  // endpoint (which accepts the body without touching settings).
+  // JIRA is not covered by `testGitForgeToken` — for JIRA candidates we
+  // surface a hint that the operator must save and use the per-row TEST
+  // (which calls `POST /git-accounts/{id}/test`).
+  const handleTestPending = async () => {
+    setPendingTest(true)
+    setPendingTestResult(null)
+    try {
+      if (activePlatform === "jira") {
+        setPendingTestResult({
+          status: "not_configured",
+          message: "JIRA candidates can be probed only after SAVE — use the per-row TEST button.",
+        })
+        return
+      }
+      const r = await api.testGitForgeToken({
+        provider: activePlatform,
+        token: form.token,
+        url: form.instance_url,
+        ssh_host: form.ssh_host,
+        ssh_port: form.ssh_port ? Number(form.ssh_port) : undefined,
+      })
+      setPendingTestResult({ ...r, status: r.status, message: r.message })
+    } catch (e) {
+      setPendingTestResult({ status: "error", message: String(e) })
+    } finally {
+      setPendingTest(false)
+    }
+  }
+
+  const handleTestRow = async (acc: api.GitAccount) => {
+    setPerAccountTest(prev => ({ ...prev, [acc.id]: { status: "testing", running: true } }))
+    try {
+      const r = await api.testGitAccountById(acc.id)
+      setPerAccountTest(prev => ({ ...prev, [acc.id]: { ...r, running: false } as TestResult }))
+    } catch (e) {
+      setPerAccountTest(prev => ({
+        ...prev,
+        [acc.id]: { status: "error", message: String(e), running: false },
+      }))
+    }
+  }
+
+  const handleSetDefault = async (acc: api.GitAccount) => {
+    if (acc.is_default) return
+    setError(null)
+    try {
+      await api.updateGitAccount(acc.id, { is_default: true })
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const handleConfirmDelete = async () => {
+    if (!confirmDelete) return
+    setDeleting(true)
+    setError(null)
+    try {
+      await api.deleteGitAccount(confirmDelete.id, { auto_elect_new_default: true })
+      setConfirmDelete(null)
+      setPerAccountTest(prev => {
+        const next = { ...prev }
+        delete next[confirmDelete.id]
+        return next
+      })
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const renderRow = (acc: api.GitAccount) => {
+    const meta = platformMeta(acc.platform)
+    const test = perAccountTest[acc.id]
+    return (
+      <div
+        key={acc.id}
+        data-testid={`git-account-row-${acc.id}`}
+        className="flex items-start gap-2 p-1.5 rounded border border-[var(--border)] bg-[var(--background)]"
+      >
         <span
-          title={inst.testMessage}
-          className="inline-flex items-center gap-0.5 font-mono text-[8px] text-[var(--critical-red)]"
+          className="font-mono text-[8px] px-1 py-0.5 rounded uppercase shrink-0 mt-0.5"
+          style={{ backgroundColor: `${meta.color}22`, color: meta.color }}
         >
-          <AlertTriangle size={9} /> ERR
+          {acc.platform}
         </span>
-      )
-    }
-    return null
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[10px] text-[var(--foreground)] truncate" title={acc.label || acc.id}>
+              {acc.label || acc.id}
+            </span>
+            {acc.is_default && (
+              <span
+                title="Platform default — used as fallback when no url_pattern matches"
+                className="font-mono text-[8px] px-1 py-0.5 rounded bg-[var(--validation-emerald)]/15 text-[var(--validation-emerald)]"
+                data-testid={`git-account-default-badge-${acc.id}`}
+              >
+                ★ DEFAULT
+              </span>
+            )}
+            {!acc.enabled && (
+              <span className="font-mono text-[8px] px-1 py-0.5 rounded bg-[var(--muted-foreground)]/15 text-[var(--muted-foreground)]">
+                DISABLED
+              </span>
+            )}
+          </div>
+          <div className="font-mono text-[8px] text-[var(--muted-foreground)] truncate">
+            {acc.username && <span>{acc.username} · </span>}
+            {acc.instance_url || acc.ssh_host || "(no host)"}
+            {acc.ssh_port ? `:${acc.ssh_port}` : ""}
+            {acc.token_fingerprint && <span> · token {acc.token_fingerprint}</span>}
+          </div>
+          {acc.url_patterns.length > 0 && (
+            <div className="font-mono text-[8px] text-[var(--muted-foreground)]/80 truncate" title={acc.url_patterns.join(", ")}>
+              patterns: {acc.url_patterns.join(", ")}
+            </div>
+          )}
+          {test && (
+            <div
+              data-testid={`git-account-test-result-${acc.id}`}
+              className={`font-mono text-[8px] mt-0.5 ${
+                test.status === "ok" ? "text-[var(--validation-emerald)]"
+                : test.status === "testing" ? "text-[var(--neural-blue)]"
+                : "text-[var(--critical-red)]"
+              }`}
+            >
+              {test.status === "testing" ? "TESTING…" : `${(test.status as string).toUpperCase()}: ${test.message ?? "see details"}`}
+            </div>
+          )}
+        </div>
+        {!acc.is_default && (
+          <button
+            onClick={() => handleSetDefault(acc)}
+            title="Set as platform default"
+            data-testid={`git-account-set-default-${acc.id}`}
+            className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--validation-emerald)] hover:bg-[var(--validation-emerald)]/10 shrink-0"
+          >
+            ★ SET
+          </button>
+        )}
+        <button
+          onClick={() => handleTestRow(acc)}
+          disabled={test?.running}
+          title="Probe this account's saved credential against the live API"
+          data-testid={`git-account-test-${acc.id}`}
+          className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-30 shrink-0"
+        >
+          TEST
+        </button>
+        <button
+          onClick={() => setConfirmDelete(acc)}
+          title="Delete this account"
+          data-testid={`git-account-delete-${acc.id}`}
+          className="p-0.5 rounded hover:bg-[var(--critical-red)]/10 shrink-0"
+        >
+          <Trash2 size={10} className="text-[var(--muted-foreground)] hover:text-[var(--critical-red)]" />
+        </button>
+      </div>
+    )
   }
+
+  const hasLegacy =
+    (legacyGithubMap && legacyGithubMap !== "{}" && legacyGithubMap !== "") ||
+    (legacyGitlabMap && legacyGitlabMap !== "{}" && legacyGitlabMap !== "")
 
   return (
-    <div className="pt-2 border-t border-[var(--border)]/50 mt-1">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-1 py-1 rounded hover:bg-[var(--background)] transition-colors"
-      >
-        <span className="font-mono text-[8px] text-[var(--muted-foreground)] uppercase tracking-wider flex-1 text-left">
-          Multiple Instances
-          {instances.length > 0 && (
-            <span className="ml-1 px-1 py-0.5 rounded bg-[var(--neural-blue)]/15 text-[var(--neural-blue)] normal-case">
-              {instances.length}
-            </span>
-          )}
+    <div className="space-y-2" data-testid="account-manager-section">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] font-bold text-[var(--neural-blue)]">
+          GIT ACCOUNTS
         </span>
-        <span className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60">
-          GitHub Enterprise · self-hosted GitLab
-        </span>
-        {expanded
-          ? <ChevronUp size={10} className="text-[var(--muted-foreground)]" />
-          : <ChevronDown size={10} className="text-[var(--muted-foreground)]" />}
-      </button>
-      {expanded && (
-        <div className="mt-1 px-1 py-1.5 space-y-1">
-          {instances.length === 0 ? (
-            <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60">
-              No additional instances configured.
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {instances.map(inst => {
-                const platformColor = inst.platform === "github"
-                  ? "var(--neural-blue)"
-                  : "var(--hardware-orange)"
-                return (
-                  <div
-                    key={inst.id}
-                    className="flex items-center gap-2 p-1.5 rounded border border-[var(--border)] bg-[var(--background)]"
-                  >
-                    <span
-                      className="font-mono text-[8px] px-1 py-0.5 rounded uppercase shrink-0"
-                      style={{ backgroundColor: `${platformColor}22`, color: platformColor }}
-                    >
-                      {inst.platform}
-                    </span>
-                    <span className="font-mono text-[10px] text-[var(--foreground)] flex-1 truncate" title={inst.host}>
-                      {inst.host}
-                    </span>
-                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] shrink-0" title="Token is masked — full value held only in local state">
-                      •••{inst.token.slice(-4)}
-                    </span>
-                    {renderStatusBadge(inst)}
-                    <button
-                      onClick={() => handleTest(inst.id)}
-                      disabled={inst.testStatus === "testing"}
-                      title="Probe this instance's API (row 217 delivers the backend)"
-                      className="px-1.5 py-0.5 rounded font-mono text-[8px] bg-[var(--neural-blue)]/10 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/20 disabled:opacity-30 transition-colors shrink-0"
-                    >
-                      TEST
-                    </button>
-                    <button
-                      onClick={() => handleRemove(inst.id)}
-                      title="Remove this instance from the map"
-                      className="p-0.5 rounded hover:bg-[var(--critical-red)]/10 transition-colors shrink-0"
-                    >
-                      <Trash2 size={10} className="text-[var(--muted-foreground)] hover:text-[var(--critical-red)]" />
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-50 leading-relaxed">
-            Map per-host tokens via OMNISIGHT_GITHUB_TOKEN_MAP /
-            OMNISIGHT_GITLAB_TOKEN_MAP. SAVE & APPLY serialises this list
-            into JSON; masked read-back lands in row 217.
+        <button
+          onClick={refresh}
+          disabled={loading}
+          className="font-mono text-[8px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:opacity-30"
+          title="Reload from /git-accounts"
+        >
+          {loading ? "…" : "REFRESH"}
+        </button>
+      </div>
+      <div className="font-mono text-[8px] text-[var(--muted-foreground)]/80 leading-relaxed">
+        Manage per-platform credentials. Each row is one account; URL patterns
+        route repository operations to the matching account, with the ⭐ default
+        as fallback. Plaintext tokens never leave the server — list shows
+        masked fingerprints only.
+      </div>
+
+      {/* Platform tabs */}
+      <div className="flex items-center gap-1 border-b border-[var(--border)] overflow-x-auto">
+        {PLATFORMS.map(p => (
+          <button
+            key={p.id}
+            data-testid={`git-account-platform-tab-${p.id}`}
+            onClick={() => { setActivePlatform(p.id); setAdding(false); setPendingTestResult(null) }}
+            className={`px-2 py-1 font-mono text-[9px] uppercase tracking-wider transition-colors ${
+              activePlatform === p.id
+                ? "text-[var(--foreground)] border-b-2"
+                : "text-[var(--muted-foreground)] border-b-2 border-transparent"
+            }`}
+            style={activePlatform === p.id ? { borderBottomColor: p.color } : undefined}
+          >
+            {p.label}
+            {accounts.filter(a => a.platform === p.id).length > 0 && (
+              <span
+                className="ml-1 px-1 py-0.5 rounded text-[7px] normal-case"
+                style={{ backgroundColor: `${p.color}22`, color: p.color }}
+              >
+                {accounts.filter(a => a.platform === p.id).length}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <div
+          data-testid="account-manager-error"
+          className="font-mono text-[9px] text-[var(--critical-red)] bg-[var(--critical-red)]/10 px-2 py-1 rounded"
+        >
+          {error}
+        </div>
+      )}
+
+      {/* Account list */}
+      {loading ? (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] py-2">Loading…</div>
+      ) : filtered.length === 0 ? (
+        <div className="font-mono text-[9px] text-[var(--muted-foreground)] opacity-60 py-1">
+          No {platformMeta(activePlatform).label} accounts yet — use ADD to create one.
+        </div>
+      ) : (
+        <div className="space-y-1">{filtered.map(renderRow)}</div>
+      )}
+
+      {/* Add form */}
+      {adding ? (
+        <div
+          className="mt-1 p-2 rounded border space-y-1.5"
+          style={{ borderColor: `${platformMeta(activePlatform).color}55` }}
+          data-testid="git-account-add-form"
+        >
+          <div className="font-mono text-[8px] uppercase tracking-wider" style={{ color: platformMeta(activePlatform).color }}>
+            Add {platformMeta(activePlatform).label} account · {platformMeta(activePlatform).hint}
           </div>
-
-          {addingGithub ? (
-            <div className="mt-2 p-2 rounded border border-[var(--neural-blue)]/30 bg-[var(--secondary)] space-y-1.5">
-              <div className="font-mono text-[8px] text-[var(--neural-blue)] uppercase tracking-wider">
-                Add GitHub Instance
-              </div>
-              <SettingField
-                label="Hostname"
-                value={ghHost}
-                onChange={setGhHost}
-              />
-              <SettingField
-                label="Token"
-                value={ghToken}
-                type="password"
-                onChange={setGhToken}
-              />
-              <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60 leading-relaxed">
-                e.g. github.enterprise.com — used as the key in
-                OMNISIGHT_GITHUB_TOKEN_MAP. SAVE & APPLY serialises the list.
-              </div>
-              <div className="flex gap-2 justify-end">
-                <button
-                  onClick={resetGithubForm}
-                  className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
-                >
-                  CANCEL
-                </button>
-                <button
-                  disabled={!ghHost || !ghToken}
-                  onClick={handleAddGithub}
-                  className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
-                  title="Adds this host→token pair to the pending github_token_map JSON; SAVE & APPLY persists it"
-                >
-                  ADD
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setAddingGithub(true)}
-              className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/10 transition-colors"
-            >
-              <Plus size={10} /> Add GitHub Instance
-            </button>
+          <SettingField label="Label" value={form.label} onChange={v => setForm(f => ({ ...f, label: v }))} />
+          <SettingField label="Username" value={form.username} onChange={v => setForm(f => ({ ...f, username: v }))} />
+          {activePlatform !== "gerrit" && (
+            <SettingField
+              label={activePlatform === "jira" ? "JIRA URL" : "Instance URL"}
+              value={form.instance_url}
+              onChange={v => setForm(f => ({ ...f, instance_url: v }))}
+            />
           )}
-
-          {addingGitlab ? (
-            <div className="mt-2 p-2 rounded border border-[var(--hardware-orange)]/30 bg-[var(--secondary)] space-y-1.5">
-              <div className="font-mono text-[8px] text-[var(--hardware-orange)] uppercase tracking-wider">
-                Add GitLab Instance
-              </div>
-              <SettingField
-                label="URL"
-                value={glUrl}
-                onChange={setGlUrl}
-              />
-              <SettingField
-                label="Token"
-                value={glToken}
-                type="password"
-                onChange={setGlToken}
-              />
-              <div className="font-mono text-[8px] text-[var(--muted-foreground)] opacity-60 leading-relaxed">
-                e.g. https://gitlab.example.com — used as the key in
-                OMNISIGHT_GITLAB_TOKEN_MAP. SAVE & APPLY serialises the list.
-              </div>
-              <div className="flex gap-2 justify-end">
-                <button
-                  onClick={resetGitlabForm}
-                  className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
-                >
-                  CANCEL
-                </button>
-                <button
-                  disabled={!glUrl || !glToken}
-                  onClick={handleAddGitlab}
-                  className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--hardware-orange)] text-black font-semibold disabled:opacity-30"
-                  title="Adds this URL→token pair to the pending gitlab_token_map JSON; SAVE & APPLY persists it"
-                >
-                  ADD
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setAddingGitlab(true)}
-              className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] text-[var(--hardware-orange)] hover:bg-[var(--hardware-orange)]/10 transition-colors"
-            >
-              <Plus size={10} /> Add GitLab Instance
-            </button>
+          {activePlatform === "gerrit" && (
+            <>
+              <SettingField label="SSH Host" value={form.ssh_host} onChange={v => setForm(f => ({ ...f, ssh_host: v }))} />
+              <SettingField label="SSH Port" value={form.ssh_port} onChange={v => setForm(f => ({ ...f, ssh_port: v }))} />
+              <SettingField label="Project" value={form.project} onChange={v => setForm(f => ({ ...f, project: v }))} />
+            </>
           )}
+          <SettingField label="Token" value={form.token} type="password" onChange={v => setForm(f => ({ ...f, token: v }))} />
+          {activePlatform === "gerrit" && (
+            <SettingField label="SSH Key" value={form.ssh_key} type="password" onChange={v => setForm(f => ({ ...f, ssh_key: v }))} />
+          )}
+          {activePlatform !== "jira" && (
+            <SettingField label="Webhook Secret" value={form.webhook_secret} type="password" onChange={v => setForm(f => ({ ...f, webhook_secret: v }))} />
+          )}
+          <div className="flex items-start gap-2">
+            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 pt-1">URL Patterns</label>
+            <textarea
+              value={form.url_patterns}
+              onChange={e => setForm(f => ({ ...f, url_patterns: e.target.value }))}
+              rows={2}
+              placeholder="github.com/acme-corp/*&#10;github.com/acme-corp/repo-x"
+              className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus:border-[var(--neural-blue)] resize-none"
+              data-testid="git-account-form-url-patterns"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Default ⭐</label>
+            <button
+              onClick={() => setForm(f => ({ ...f, is_default: !f.is_default }))}
+              className={`px-2 py-0.5 rounded font-mono text-[9px] transition-colors ${
+                form.is_default
+                  ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
+                  : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+              }`}
+              data-testid="git-account-form-default-toggle"
+            >
+              {form.is_default ? "ON" : "OFF"}
+            </button>
+          </div>
+          {pendingTestResult && (
+            <div
+              data-testid="git-account-form-test-result"
+              className={`font-mono text-[8px] px-2 py-1 rounded ${
+                pendingTestResult.status === "ok" ? "text-[var(--validation-emerald)] bg-[var(--validation-emerald)]/10"
+                : pendingTestResult.status === "not_configured" ? "text-[var(--muted-foreground)] bg-[var(--secondary)]"
+                : "text-[var(--critical-red)] bg-[var(--critical-red)]/10"
+              }`}
+            >
+              {pendingTestResult.status.toUpperCase()}: {pendingTestResult.message ?? "(no message)"}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => { setAdding(false); setForm(EMPTY_NEW_FORM); setPendingTestResult(null) }}
+              className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+              data-testid="git-account-form-cancel"
+            >
+              CANCEL
+            </button>
+            <button
+              onClick={handleTestPending}
+              disabled={pendingTest}
+              data-testid="git-account-form-test"
+              title="Probe this candidate token without persisting (uses /runtime/git-forge/test-token)"
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)]/15 text-[var(--neural-blue)] hover:bg-[var(--neural-blue)]/25 disabled:opacity-30"
+            >
+              {pendingTest ? "TESTING…" : "TEST BEFORE SAVE"}
+            </button>
+            <button
+              onClick={handleSubmitNew}
+              disabled={submitting}
+              data-testid="git-account-form-save"
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--neural-blue)] text-black font-semibold disabled:opacity-30"
+            >
+              {submitting ? "SAVING…" : "SAVE"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => { setAdding(true); setPendingTestResult(null) }}
+          data-testid="git-account-add-button"
+          className="mt-1 flex items-center gap-1 px-2 py-1 rounded font-mono text-[9px] hover:bg-[var(--background)] transition-colors"
+          style={{ color: platformMeta(activePlatform).color }}
+        >
+          <Plus size={10} /> Add {platformMeta(activePlatform).label} Account
+        </button>
+      )}
+
+      {/* Delete confirm */}
+      {confirmDelete && (
+        <div
+          data-testid="git-account-delete-confirm"
+          className="mt-1 p-2 rounded border border-[var(--critical-red)]/40 bg-[var(--critical-red)]/5 space-y-1.5"
+        >
+          <div className="font-mono text-[9px] text-[var(--critical-red)] uppercase tracking-wider">
+            Delete {confirmDelete.label || confirmDelete.id}?
+          </div>
+          {confirmDelete.url_patterns.length > 0 && (
+            <div className="font-mono text-[8px] text-[var(--hardware-orange)]">
+              ⚠ This account has {confirmDelete.url_patterns.length} URL pattern(s) — repos matching{" "}
+              <code>{confirmDelete.url_patterns.join(", ")}</code>{" "}
+              may be left without a credential.
+            </div>
+          )}
+          {confirmDelete.is_default && (
+            <div className="font-mono text-[8px] text-[var(--hardware-orange)]">
+              ⚠ This is the platform default. Backend will auto-elect the next
+              available {confirmDelete.platform} account if any exists.
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => setConfirmDelete(null)}
+              className="px-2 py-0.5 rounded font-mono text-[9px] text-[var(--muted-foreground)] hover:bg-[var(--background)]"
+              data-testid="git-account-delete-cancel"
+            >
+              CANCEL
+            </button>
+            <button
+              onClick={handleConfirmDelete}
+              disabled={deleting}
+              data-testid="git-account-delete-confirm-button"
+              className="px-2 py-0.5 rounded font-mono text-[9px] bg-[var(--critical-red)] text-black font-semibold disabled:opacity-30"
+            >
+              {deleting ? "DELETING…" : "DELETE"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Legacy token-map deprecation banner */}
+      {hasLegacy && (
+        <div
+          data-testid="account-manager-legacy-banner"
+          className="mt-2 p-2 rounded border border-[var(--hardware-orange)]/30 bg-[var(--hardware-orange)]/5 space-y-1"
+        >
+          <div className="font-mono text-[8px] text-[var(--hardware-orange)] uppercase tracking-wider">
+            Legacy (will auto-migrate on next login)
+          </div>
+          {legacyGithubMap && legacyGithubMap !== "{}" && legacyGithubMap !== "" && (
+            <div className="font-mono text-[8px] text-[var(--muted-foreground)] break-all">
+              github_token_map: <code>{legacyGithubMap}</code>
+            </div>
+          )}
+          {legacyGitlabMap && legacyGitlabMap !== "{}" && legacyGitlabMap !== "" && (
+            <div className="font-mono text-[8px] text-[var(--muted-foreground)] break-all">
+              gitlab_token_map: <code>{legacyGitlabMap}</code>
+            </div>
+          )}
+          <div className="font-mono text-[7px] text-[var(--muted-foreground)]/70 leading-relaxed">
+            These map entries persist in the legacy
+            OMNISIGHT_*_TOKEN_MAP settings until backend lifespan
+            startup runs `migrate_legacy_credentials_once`. After
+            migration, the rows above appear as `ga-legacy-*` accounts
+            and this banner disappears.
+          </div>
         </div>
       )}
     </div>
@@ -3516,16 +3751,18 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 </div>
               </SettingsSection>
 
-              {/* B14 Part B rows 1-5: collapsible Multiple Instances sub-area
-                  — child pipes JSON token-maps into parent `dirty` on each
-                  mutation so SAVE & APPLY persists OMNISIGHT_*_TOKEN_MAP.
-                  Lives below the per-forge sections because it spans both
-                  GitHub Enterprise and self-hosted GitLab; not wrapped in a
-                  SettingsSection because the multi-instance map already
-                  carries per-row TEST buttons and shouldn't masquerade as a
-                  single-probe section. */}
+              {/* Phase 5-9 (#multi-account-forge): replaces the legacy
+                  MultipleInstancesSection. AccountManagerSection talks to
+                  the `/git-accounts` REST surface (per-tenant, encrypted at
+                  rest, audit-logged), supports all four platforms, and
+                  surfaces the legacy `*_token_map` blobs as a deprecation
+                  banner until lifespan startup auto-migrates them into
+                  `git_accounts` rows. */}
               <div className="border border-[var(--border)] rounded-md px-3 py-2 -mt-1">
-                <MultipleInstancesSection setVal={setVal} />
+                <AccountManagerSection
+                  legacyGithubMap={String(settingsData["git"]?.["github_token_map"] ?? "")}
+                  legacyGitlabMap={String(settingsData["git"]?.["gitlab_token_map"] ?? "")}
+                />
               </div>
             </TabsContent>
 
