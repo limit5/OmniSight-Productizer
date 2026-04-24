@@ -308,6 +308,49 @@ def get_metadata() -> dict[str, Any]:
     return dict(_load_pricing().get("metadata", {}))
 
 
+def get_pricing_table() -> dict[str, Any]:
+    """Return the full current pricing table for `GET /runtime/pricing`.
+
+    Z.3 checkbox 5 (#292). Read-only snapshot of the in-memory cache so a
+    dashboard / operator can render the live rates without parsing the
+    YAML themselves. Tuples are converted to ``{"input", "output"}`` dicts
+    to mirror the on-disk YAML shape and to keep the JSON wire format
+    self-documenting (a bare 2-element list would lose the labelling).
+
+    Shape::
+
+        {
+            "providers": {
+                "anthropic": {
+                    "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+                    ...
+                    "_default": {"input": 3.0, "output": 15.0},
+                },
+                ...
+            },
+            "defaults": {"input": 1.0, "output": 3.0},
+            "metadata": {"updated_at": ..., "source": ..., ...},
+            "loaded_from_yaml": True,  # False when YAML missing / corrupt
+        }
+    """
+    cache = _load_pricing()
+
+    providers_out: dict[str, dict[str, dict[str, float]]] = {}
+    for provider, table in cache["providers"].items():
+        providers_out[provider] = {
+            model: {"input": pair[0], "output": pair[1]}
+            for model, pair in table.items()
+        }
+
+    defaults_pair = cache["defaults"]
+    return {
+        "providers": providers_out,
+        "defaults": {"input": defaults_pair[0], "output": defaults_pair[1]},
+        "metadata": dict(cache.get("metadata", {})),
+        "loaded_from_yaml": bool(cache.get("_loaded_from_yaml", False)),
+    }
+
+
 def reset_cache_for_tests() -> None:
     """Clear the YAML cache + fallback-warn throttle so tests start fresh.
 

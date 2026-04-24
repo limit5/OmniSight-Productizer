@@ -329,3 +329,174 @@ class TestReloadPricingEndpoint:
         # baseline. Both must be present.
         assert "current_user" in dep_names
         assert "_dep" in dep_names
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Z.3 checkbox 5 (#292) — GET /runtime/pricing snapshot
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestPricingTableHelper:
+    """The `get_pricing_table()` helper that backs the GET endpoint."""
+
+    def test_returns_full_provider_map(self):
+        table = pricing.get_pricing_table()
+        # Live YAML ships 9 providers (anthropic / openai / google / xai
+        # / groq / deepseek / together / openrouter / ollama).
+        assert "providers" in table
+        assert "anthropic" in table["providers"]
+        assert "openai" in table["providers"]
+        assert "ollama" in table["providers"]
+
+    def test_rate_pairs_serialize_as_input_output_dicts(self):
+        # Tuples in the cache must surface as labelled dicts so the JSON
+        # wire format is self-documenting (a bare 2-element list would
+        # lose the in/out distinction).
+        opus = pricing.get_pricing_table()["providers"]["anthropic"]["claude-opus-4-7"]
+        assert opus == {"input": 5.0, "output": 25.0}
+
+    def test_provider_default_row_included(self):
+        # `_default` rows are part of the lookup chain (provider known +
+        # model unknown), so the snapshot must surface them too.
+        anthropic = pricing.get_pricing_table()["providers"]["anthropic"]
+        assert "_default" in anthropic
+        assert anthropic["_default"] == {"input": 3.0, "output": 15.0}
+
+    def test_global_defaults_present(self):
+        defaults = pricing.get_pricing_table()["defaults"]
+        assert defaults == {"input": 1.0, "output": 3.0}
+
+    def test_metadata_carries_updated_at_and_source(self):
+        meta = pricing.get_pricing_table()["metadata"]
+        assert "updated_at" in meta
+        assert "source" in meta
+        # source is documented as a URL pointing at the upstream issue
+        # / vendor page; locking the issue URL specifically would be too
+        # tight, but the substring is a reasonable smoke check.
+        assert "github.com" in str(meta["source"]) or "http" in str(meta["source"])
+
+    def test_loaded_from_yaml_true_under_normal_boot(self):
+        assert pricing.get_pricing_table()["loaded_from_yaml"] is True
+
+    def test_loaded_from_yaml_false_when_yaml_missing(self, tmp_path, monkeypatch):
+        missing = tmp_path / "nope.yaml"
+        monkeypatch.setattr(pricing, "_PRICING_PATH", missing)
+        reset_cache_for_tests()
+        table = pricing.get_pricing_table()
+        assert table["loaded_from_yaml"] is False
+        # YAML failed → providers map is empty (the hard-coded fallback
+        # is reachable via get_pricing(), but the snapshot intentionally
+        # surfaces the empty cache so a dashboard can flag the degraded
+        # state instead of silently showing only 8 pre-Z.3 models).
+        assert table["providers"] == {}
+        # Boot-safety global default still present.
+        assert table["defaults"] == {"input": 1.0, "output": 3.0}
+
+
+class TestPricingSnapshotEndpoint:
+    """`GET /runtime/pricing` — read-only snapshot for dashboards / operator."""
+
+    @pytest.mark.asyncio
+    async def test_endpoint_returns_table_and_metadata(self, client):
+        resp = await client.get("/api/v1/runtime/pricing")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # All four top-level keys present.
+        assert set(body.keys()) >= {
+            "providers", "defaults", "metadata", "loaded_from_yaml",
+        }
+        # Live YAML loaded successfully under the test fixture.
+        assert body["loaded_from_yaml"] is True
+
+        # Spot-check that the live table is in the response.
+        assert "anthropic" in body["providers"]
+        assert body["providers"]["anthropic"]["claude-opus-4-7"] == {
+            "input": 5.0, "output": 25.0,
+        }
+
+        # The headline `updated_at` + `source` fields the spec calls out.
+        assert "updated_at" in body["metadata"]
+        assert "source" in body["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_endpoint_reflects_post_reload_changes(
+        self, client, tmp_path, monkeypatch,
+    ):
+        # GET-after-POST: edit the YAML behind the scenes, POST the
+        # reload endpoint, then GET must return the new table — locks
+        # the operator workflow ("edit YAML → POST reload → GET to
+        # verify") end-to-end.
+        fake = tmp_path / "fake_pricing.yaml"
+        fake.write_text(
+            "providers:\n"
+            "  testvendor:\n"
+            "    test-model-v2:\n"
+            "      input: 42.0\n"
+            "      output: 84.0\n"
+            "defaults:\n"
+            "  input: 2.0\n"
+            "  output: 4.0\n"
+            "metadata:\n"
+            "  updated_at: 2099-01-01\n"
+            "  source: https://example.invalid/pricing\n"
+            "  schema_version: 1\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pricing, "_PRICING_PATH", fake)
+
+        reload_resp = await client.post("/api/v1/runtime/pricing/reload")
+        assert reload_resp.status_code == 200, reload_resp.text
+
+        get_resp = await client.get("/api/v1/runtime/pricing")
+        assert get_resp.status_code == 200, get_resp.text
+        body = get_resp.json()
+        assert body["providers"] == {
+            "testvendor": {"test-model-v2": {"input": 42.0, "output": 84.0}},
+        }
+        assert body["defaults"] == {"input": 2.0, "output": 4.0}
+        assert body["metadata"]["updated_at"] == "2099-01-01"
+        assert body["metadata"]["source"] == "https://example.invalid/pricing"
+
+    @pytest.mark.asyncio
+    async def test_endpoint_surfaces_degraded_state_when_yaml_missing(
+        self, client, tmp_path, monkeypatch,
+    ):
+        # If the YAML disappears (operator typo, deploy slipping a file
+        # out from under the worker), the snapshot must still return 200
+        # and surface `loaded_from_yaml: False` so a dashboard can render
+        # a banner instead of silently showing the boot-safety fallback.
+        missing = tmp_path / "definitely_not_there.yaml"
+        monkeypatch.setattr(pricing, "_PRICING_PATH", missing)
+        reset_cache_for_tests()
+
+        resp = await client.get("/api/v1/runtime/pricing")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["loaded_from_yaml"] is False
+        assert body["providers"] == {}
+        # Boot-safety global default still rendered so the dashboard
+        # has something to display in the "global" row.
+        assert body["defaults"] == {"input": 1.0, "output": 3.0}
+
+    def test_endpoint_route_does_not_require_admin(self):
+        # Lock the dependency wiring directly — pricing is non-sensitive
+        # informational data; the GET endpoint must NOT stack the admin
+        # gate (matches peer GETs like /runtime/info, /runtime/status).
+        # The router-level current_user dep must still be attached.
+        from backend.routers.system import router
+        match = [
+            r for r in router.routes
+            if getattr(r, "path", None) == "/runtime/pricing"
+        ]
+        assert len(match) == 1, "endpoint not registered exactly once"
+        assert "GET" in match[0].methods
+        dep_names = [
+            getattr(d.dependency, "__name__", str(d.dependency))
+            for d in match[0].dependencies
+        ]
+        # `current_user` is the router-level baseline (every route gets
+        # it). `_dep` is the closure produced by `require_role("admin")`
+        # in `_REQUIRE_ADMIN`; the GET endpoint must NOT carry it.
+        assert "current_user" in dep_names
+        assert "_dep" not in dep_names

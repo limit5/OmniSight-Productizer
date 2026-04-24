@@ -2167,6 +2167,28 @@ async def reset_token_freeze():
     return {"status": "unfrozen"}
 
 
+@router.get("/pricing")
+async def get_pricing_snapshot():
+    """Return the current LLM pricing table + metadata.
+
+    Z.3 checkbox 5 (#292). Read-only view onto `config/llm_pricing.yaml`
+    so a dashboard / operator can render the live rates without parsing
+    the YAML themselves and so an operator can verify the table state
+    after `POST /runtime/pricing/reload`. Authenticated users only —
+    no admin gate, since pricing is non-sensitive informational data
+    (matches peer GETs like `/runtime/info` and `/runtime/status`).
+
+    Response shape: see `backend.pricing.get_pricing_table` — `providers`
+    map (per-provider, per-model `{input, output}` USD per 1M tokens),
+    a global `defaults` pair, the YAML's `metadata` block (notably
+    `updated_at` + `source` URL), and `loaded_from_yaml` so a dashboard
+    can flag the degraded "YAML missing/corrupt → hard-coded fallback"
+    state instead of silently rendering the boot-safety table.
+    """
+    from backend import pricing as _pricing
+    return _pricing.get_pricing_table()
+
+
 @router.post("/pricing/reload", dependencies=_REQUIRE_ADMIN)
 async def reload_pricing_table():
     """Hot-reload `config/llm_pricing.yaml` and broadcast to all workers.
