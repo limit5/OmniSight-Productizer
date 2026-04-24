@@ -72,7 +72,16 @@ export function primeSSE(
   )
   // ZZ.B1 checkbox 3: stub history endpoint so TurnTimeline's mount
   // fetch resolves to an empty buffer by default.
-  const fth = api.fetchTurnHistory as ReturnType<typeof vi.fn> | undefined
+  // H3 row 1528 (2026-04-25): defensive lookup. Vitest's strict mock
+  // mode throws on direct access for tests whose ``vi.mock("@/lib/api")``
+  // factory omits these exports (e.g. host-device-panel and
+  // use-host-metrics-tick predate ZZ.B1/B3). Wrap the access so the
+  // helper silently skips the stub when the export isn't on the mock —
+  // tests that need it can still add it explicitly.
+  const safeGet = <T,>(key: string): T | undefined => {
+    try { return (api as unknown as Record<string, T>)[key] } catch { return undefined }
+  }
+  const fth = safeGet<ReturnType<typeof vi.fn>>("fetchTurnHistory")
   if (fth && typeof fth.mockImplementation === "function") {
     fth.mockResolvedValue({
       turns: opts.history ?? [],
@@ -81,7 +90,7 @@ export function primeSSE(
   }
   // ZZ.B3 #304-3 checkbox 2: stub burn-rate endpoint so
   // TokenUsageStats' Row 1 sparkline mount fetch resolves offline.
-  const fbr = api.fetchTokenBurnRate as ReturnType<typeof vi.fn> | undefined
+  const fbr = safeGet<ReturnType<typeof vi.fn>>("fetchTokenBurnRate")
   if (fbr && typeof fbr.mockImplementation === "function") {
     fbr.mockResolvedValue({
       window: opts.burnRateWindow ?? "1h",

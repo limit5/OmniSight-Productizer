@@ -288,6 +288,47 @@ interface LiveTickFields {
   containerCount: number
 }
 
+// H3 row 1528: high-pressure threshold visual marking.
+// Below 70% the metric is healthy (green); 70-85% is warn (amber);
+// ≥ 85% is critical (red). Threshold 85 matches the H2 backend
+// `host_cpu_high` precondition (cpu_pct < 85 to acquire a sandbox slot)
+// so the UI flips red at the same point the coordinator starts deferring
+// new sandbox launches. 70 is the early-warning band that lets operators
+// notice load building up before deferral kicks in.
+export const PRESSURE_WARN_PCT = 70
+export const PRESSURE_CRITICAL_PCT = 85
+
+export type PressureLevel = "normal" | "warn" | "critical"
+
+export function pressureLevel(percent: number): PressureLevel {
+  if (!Number.isFinite(percent)) return "normal"
+  if (percent >= PRESSURE_CRITICAL_PCT) return "critical"
+  if (percent >= PRESSURE_WARN_PCT) return "warn"
+  return "normal"
+}
+
+const PRESSURE_COLOR_VAR: Record<PressureLevel, string> = {
+  normal: "var(--validation-emerald)",
+  warn: "var(--hardware-orange)",
+  critical: "var(--critical-red)",
+}
+
+export function pressureColorVar(percent: number): string {
+  return PRESSURE_COLOR_VAR[pressureLevel(percent)]
+}
+
+function pressureTitle(label: string, percent: number | null): string {
+  const lvl = percent === null ? "normal" : pressureLevel(percent)
+  const value = percent === null ? "—" : `${percent.toFixed(1)}%`
+  if (lvl === "critical") {
+    return `${label} ${value} — CRITICAL (≥ ${PRESSURE_CRITICAL_PCT}%): coordinator is deferring new sandbox launches`
+  }
+  if (lvl === "warn") {
+    return `${label} ${value} — WARN (${PRESSURE_WARN_PCT}-${PRESSURE_CRITICAL_PCT}%): pressure building, no derate yet`
+  }
+  return `${label} ${value} — normal (< ${PRESSURE_WARN_PCT}%)`
+}
+
 // Memory available is total - used (cgroup-style; the SSE tick reports
 // the same `mem_total_gb − mem_used_gb` semantics the backend computes).
 const memAvailable = (t: LiveTickFields) =>
@@ -312,6 +353,18 @@ function LiveMetricsSection({
   const loadValues = history.map((p) => p.loadavg_1m)
   const containerValues = history.map((p) => p.container_count)
   const fmt = (v: number, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : "—")
+  // H3 row 1528: pressure level + dynamic color per percent metric. CPU
+  // uses the spec-mandated 70/85 thresholds; mem/disk reuse the same
+  // helper for visual consistency since they share the 0..100% scale.
+  const cpuPctRaw = tick?.cpuUsage ?? null
+  const memPctRaw = tick?.memPercent ?? null
+  const diskPctRaw = tick?.diskPercent ?? null
+  const cpuLvl = cpuPctRaw === null ? "normal" : pressureLevel(cpuPctRaw)
+  const memLvl = memPctRaw === null ? "normal" : pressureLevel(memPctRaw)
+  const diskLvl = diskPctRaw === null ? "normal" : pressureLevel(diskPctRaw)
+  const cpuColor = cpuPctRaw === null ? "var(--hardware-orange)" : pressureColorVar(cpuPctRaw)
+  const memColor = memPctRaw === null ? "var(--artifact-purple)" : pressureColorVar(memPctRaw)
+  const diskColor = diskPctRaw === null ? "var(--validation-emerald)" : pressureColorVar(diskPctRaw)
   return (
     <div className="space-y-2">
       {/* SP-8.1d (2026-04-21): each metric card restructured from
@@ -325,20 +378,32 @@ function LiveMetricsSection({
           stays readable on the right of the header. */}
 
       {/* CPU */}
-      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-cpu">
+      <div
+        className="p-2 rounded bg-[var(--secondary)]"
+        data-testid="metric-cpu"
+        data-pressure={cpuLvl}
+        title={pressureTitle("CPU", cpuPctRaw)}
+      >
         <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-1.5 min-w-0">
             <Cpu size={12} className="text-[var(--hardware-orange)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">CPU</span>
           </div>
-          <span className="font-mono text-xs font-medium text-[var(--hardware-orange)] tabular-nums">
+          <span
+            className={`font-mono text-xs font-medium tabular-nums flex items-center gap-1 ${cpuLvl === "critical" ? "animate-pulse" : ""}`}
+            style={{ color: cpuColor }}
+            data-testid="metric-cpu-value"
+          >
+            {cpuLvl === "critical" && (
+              <AlertCircle size={10} aria-label="critical" />
+            )}
             {tick ? `${fmt(tick.cpuUsage)}%` : "—"}
           </span>
         </div>
         <div className="mb-1">
           <MetricSparkline
             values={cpuValues}
-            color="var(--hardware-orange)"
+            color={cpuColor}
             domainMax={100}
             fluid
             testId="sparkline-cpu"
@@ -349,20 +414,32 @@ function LiveMetricsSection({
       </div>
 
       {/* Memory — % + used/total + available */}
-      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-mem">
+      <div
+        className="p-2 rounded bg-[var(--secondary)]"
+        data-testid="metric-mem"
+        data-pressure={memLvl}
+        title={pressureTitle("Memory", memPctRaw)}
+      >
         <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-1.5 min-w-0">
             <MemoryStick size={12} className="text-[var(--artifact-purple)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Memory</span>
           </div>
-          <span className="font-mono text-xs font-medium text-[var(--artifact-purple)] tabular-nums">
+          <span
+            className={`font-mono text-xs font-medium tabular-nums flex items-center gap-1 ${memLvl === "critical" ? "animate-pulse" : ""}`}
+            style={{ color: memColor }}
+            data-testid="metric-mem-value"
+          >
+            {memLvl === "critical" && (
+              <AlertCircle size={10} aria-label="critical" />
+            )}
             {tick ? `${fmt(tick.memPercent, 0)}%` : "—"}
           </span>
         </div>
         <div className="mb-1">
           <MetricSparkline
             values={memValues}
-            color="var(--artifact-purple)"
+            color={memColor}
             domainMax={100}
             fluid
             testId="sparkline-mem"
@@ -377,20 +454,32 @@ function LiveMetricsSection({
       </div>
 
       {/* Disk */}
-      <div className="p-2 rounded bg-[var(--secondary)]" data-testid="metric-disk">
+      <div
+        className="p-2 rounded bg-[var(--secondary)]"
+        data-testid="metric-disk"
+        data-pressure={diskLvl}
+        title={pressureTitle("Disk", diskPctRaw)}
+      >
         <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-1.5 min-w-0">
             <HardDrive size={12} className="text-[var(--validation-emerald)] shrink-0" />
             <span className="font-mono text-[10px] text-[var(--muted-foreground)] uppercase tracking-wider">Disk</span>
           </div>
-          <span className="font-mono text-xs font-medium text-[var(--validation-emerald)] tabular-nums">
+          <span
+            className={`font-mono text-xs font-medium tabular-nums flex items-center gap-1 ${diskLvl === "critical" ? "animate-pulse" : ""}`}
+            style={{ color: diskColor }}
+            data-testid="metric-disk-value"
+          >
+            {diskLvl === "critical" && (
+              <AlertCircle size={10} aria-label="critical" />
+            )}
             {tick ? `${fmt(tick.diskPercent, 0)}%` : "—"}
           </span>
         </div>
         <div className="mb-1">
           <MetricSparkline
             values={diskValues}
-            color="var(--validation-emerald)"
+            color={diskColor}
             domainMax={100}
             fluid
             testId="sparkline-disk"
