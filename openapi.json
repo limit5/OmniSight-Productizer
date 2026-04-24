@@ -4675,6 +4675,25 @@
         "title": "SensorTestRequest",
         "type": "object"
       },
+      "SessionTitleBody": {
+        "description": "Body for ``PATCH /chat/sessions/{session_id}/title``.\n\n``title`` is the operator-authored override. ``None`` or empty/\nwhitespace clears the override (reverts to ``auto_title`` or hash\nper the frontend fallback chain). 120-char defensive cap mirrors\nthe one ``set_session_auto_title`` applies to LLM output so the\nsidebar never has to truncate on render.",
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "SessionTitleBody",
+        "type": "object"
+      },
       "SessionTokenRequest": {
         "properties": {
           "token": {
@@ -6189,6 +6208,52 @@
           }
         },
         "title": "TokenBudgetResponse",
+        "type": "object"
+      },
+      "TokenBurnRatePoint": {
+        "description": "One 60-second bucket in the burn-rate time series.\n\nZZ.B3 #304-3 checkbox 1 (2026-04-24): the spec phrases the source as\n\"aggregate ``token_usage`` 表的 ``created_at``\", but ``token_usage`` is\na per-model UPSERTed state table — the only time-series source of\nper-turn spend is ``event_log`` rows with ``event_type='turn.complete'``\n(persisted via ``_PERSIST_EVENT_TYPES``). Each row's ``data_json``\ncarries ``tokens_used`` + ``cost_usd`` and ``created_at`` is the\nauthoritative bucket key.\n\nRates are normalised to per-hour so the sparkline can render the\nsame y-axis regardless of which window the operator picked:\n``tokens_per_hour = sum(bucket_tokens) / 60 * 3600``. Since buckets\nare exactly 60 s wide, the derivation collapses to\n``sum(bucket_tokens) * 60``.",
+        "properties": {
+          "cost_per_hour": {
+            "default": 0.0,
+            "title": "Cost Per Hour",
+            "type": "number"
+          },
+          "timestamp": {
+            "default": "",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "tokens_per_hour": {
+            "default": 0,
+            "title": "Tokens Per Hour",
+            "type": "integer"
+          }
+        },
+        "title": "TokenBurnRatePoint",
+        "type": "object"
+      },
+      "TokenBurnRateResponse": {
+        "description": "ZZ.B3 #304-3 checkbox 1: burn-rate time-series envelope.\n\n``window`` echoes the query parameter the client sent (``15m`` /\n``1h`` / ``24h``) so the frontend sparkline can title the panel\nwithout parsing the URL again. ``bucket_seconds`` is the fixed\n60-second bucket width documented in the row spec — surfaced on\nthe response so a future widening (e.g. ``24h`` → 5-min buckets)\nis discoverable client-side.",
+        "properties": {
+          "bucket_seconds": {
+            "default": 60,
+            "title": "Bucket Seconds",
+            "type": "integer"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/TokenBurnRatePoint"
+            },
+            "title": "Points",
+            "type": "array"
+          },
+          "window": {
+            "default": "",
+            "title": "Window",
+            "type": "string"
+          }
+        },
+        "title": "TokenBurnRateResponse",
         "type": "object"
       },
       "TokenMapInstance": {
@@ -10613,6 +10678,99 @@
           }
         },
         "summary": "Get History",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/v1/chat/sessions": {
+      "get": {
+        "description": "ZZ.B2 #304-2 checkbox 1: list the user's recent chat sessions.\n\nDrives the left-sidebar workflow/chat list. Each row returns the\nsession hash + ``metadata`` so the UI can pick between\n``user_title`` / ``auto_title`` / hash per the checkbox-2 fallback\nchain (implemented on the frontend, not here — this endpoint is\npurely a projection).\n\nTenant-scoped via the request's tenant contextvar. ``limit`` is\nclamped to [1, 200] so a malicious caller can't OOM by asking\nfor a huge page.",
+        "operationId": "list_sessions_api_v1_chat_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Sessions",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/v1/chat/sessions/{session_id}/title": {
+      "patch": {
+        "description": "ZZ.B2 #304-2 checkbox 2: operator-authored session rename.\n\nSets (or clears when ``title`` is empty/``None``) the\n``metadata.user_title`` field on ``chat_sessions`` for the current\nuser + tenant. When set, the frontend fallback chain prefers the\n``user_title`` over ``auto_title`` / hash. When cleared, the row\ndrops back to whichever auto/hash label the rest of the chain\nyields.\n\nEmits ``session.titled`` with ``source=\"user\"`` so other devices\nof the same operator relabel the sidebar row in-place; the SSE\npath mirrors the auto-title path (checkbox 1) so the frontend\nreducer branch doesn't need a new event type.\n\nA 404 is returned when no row matched — typically means the\nsession was never persisted (no chat_messages write yet) or it\nbelongs to a different tenant.",
+        "operationId": "rename_session_api_v1_chat_sessions__session_id__title_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionTitleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Session",
         "tags": [
           "chat"
         ]
@@ -26235,6 +26393,108 @@
           }
         },
         "summary": "Get Token Usage",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/tokens/burn-rate": {
+      "get": {
+        "description": "Return a 60-second-bucketed token + cost time series.\n\nZZ.B3 #304-3 checkbox 1: feeds the dashboard sparkline + per-hour\nburn-rate badge next to ``TokenUsageStats`` Row 1 (checkbox 2) and\nthe daily-budget extrapolation toast (checkbox 3).\n\n**Source**: The TODO row's spec phrases the source as \"aggregate\n``token_usage`` 表的 ``created_at``\", but ``token_usage`` is an\nUPSERTed per-model aggregate — it has no ``created_at`` column and\ncan't be bucketed over time. The only authoritative per-turn\ntime-series source is ``event_log`` rows with ``event_type =\n'turn.complete'`` (persisted via ``_PERSIST_EVENT_TYPES``; see\n``emit_turn_complete`` for payload shape). Each row carries\n``tokens_used`` and ``cost_usd`` in ``data_json`` and the column\n``created_at`` (TEXT, ``YYYY-MM-DD HH24:MI:SS`` format — set by\n``alembic_pg_compat``'s ``datetime('now')`` rewrite to ``to_char(\nnow(), …)``) is the authoritative bucket key.\n\n**Rate normalisation**: ``tokens_per_hour`` = ``SUM(bucket_tokens) /\n60 * 3600`` = ``SUM(bucket_tokens) * 60`` for the fixed 60 s bucket\nwidth. Same shape for ``cost_per_hour``. This lets the UI render a\nsingle y-axis regardless of which window the operator picks.\n\n**NULL-vs-genuine-zero contract**: ``cost_usd`` on a ``turn.complete``\npayload is ``null`` for unknown models (see ``_estimate_turn_cost_usd``\n— preserves the frontend ``$—`` rendering). ``COALESCE(…::numeric, 0)``\nmaps that to zero in the aggregate so a single unknown-model turn\ndoesn't drop the whole bucket's cost. Tokens are always authoritative\nintegers so no NULL path is needed there.\n\n**Tenant isolation**: ``tenant_where_pg`` narrows to the caller's\ntenant so dashboard readings don't leak cross-tenant spend.\n\nModule-global audit (SOP Step 1): ``_BURN_RATE_WINDOWS`` and\n``_BURN_RATE_BUCKET_SECONDS`` are module-const literals — each\nuvicorn worker derives the same dict/int from the same source\ncode, matching SOP acceptable answer #1 (\"不共享,因為每 worker\n從同樣來源推導出同樣的值\").",
+        "operationId": "get_token_burn_rate_api_v1_runtime_tokens_burn_rate_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "default": "1h",
+              "title": "Window",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenBurnRateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Token Burn Rate",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/v1/runtime/turns": {
+      "get": {
+        "description": "Return the most recent ``turn.complete`` records, newest first.\n\nZZ.B1 #304-1 checkbox 3 (2026-04-24): frontends mount\n``<TurnTimeline>`` with an empty ring buffer and depend on live\n``turn.complete`` SSE events to populate it. When a session\nreconnects (page reload, worker restart, operator switching tabs),\nthe SSE stream carries only *future* events — history is lost.\nThis endpoint backfills by reading persisted rows from\n``event_log`` (see ``_PERSIST_EVENT_TYPES`` for the allow-list)\nand handing the frontend the last ``limit`` turns (capped to 100\nto match the ring-buffer size).\n\n``session_id`` filters the result in-memory on the payload's\n``_session_id`` field — a full jsonb index would be premature;\nturn volume is low (< a few hundred per session) and the natural\nORDER BY id DESC LIMIT N already caps the scan.",
+        "operationId": "get_turn_history_api_v1_runtime_turns_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "session_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Turn History",
         "tags": [
           "runtime"
         ]

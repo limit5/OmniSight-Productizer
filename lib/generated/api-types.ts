@@ -1520,6 +1520,72 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/chat/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sessions
+         * @description ZZ.B2 #304-2 checkbox 1: list the user's recent chat sessions.
+         *
+         *     Drives the left-sidebar workflow/chat list. Each row returns the
+         *     session hash + ``metadata`` so the UI can pick between
+         *     ``user_title`` / ``auto_title`` / hash per the checkbox-2 fallback
+         *     chain (implemented on the frontend, not here — this endpoint is
+         *     purely a projection).
+         *
+         *     Tenant-scoped via the request's tenant contextvar. ``limit`` is
+         *     clamped to [1, 200] so a malicious caller can't OOM by asking
+         *     for a huge page.
+         */
+        get: operations["list_sessions_api_v1_chat_sessions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/sessions/{session_id}/title": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Rename Session
+         * @description ZZ.B2 #304-2 checkbox 2: operator-authored session rename.
+         *
+         *     Sets (or clears when ``title`` is empty/``None``) the
+         *     ``metadata.user_title`` field on ``chat_sessions`` for the current
+         *     user + tenant. When set, the frontend fallback chain prefers the
+         *     ``user_title`` over ``auto_title`` / hash. When cleared, the row
+         *     drops back to whichever auto/hash label the rest of the chain
+         *     yields.
+         *
+         *     Emits ``session.titled`` with ``source="user"`` so other devices
+         *     of the same operator relabel the sidebar row in-place; the SSE
+         *     path mirrors the auto-title path (checkbox 1) so the frontend
+         *     reducer branch doesn't need a new event type.
+         *
+         *     A 404 is returned when no row matched — typically means the
+         *     session was never persisted (no chat_messages write yet) or it
+         *     belongs to a different tenant.
+         */
+        patch: operations["rename_session_api_v1_chat_sessions__session_id__title_patch"];
+        trace?: never;
+    };
     "/api/v1/chat/stream": {
         parameters: {
             query?: never;
@@ -9334,6 +9400,98 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runtime/tokens/burn-rate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Token Burn Rate
+         * @description Return a 60-second-bucketed token + cost time series.
+         *
+         *     ZZ.B3 #304-3 checkbox 1: feeds the dashboard sparkline + per-hour
+         *     burn-rate badge next to ``TokenUsageStats`` Row 1 (checkbox 2) and
+         *     the daily-budget extrapolation toast (checkbox 3).
+         *
+         *     **Source**: The TODO row's spec phrases the source as "aggregate
+         *     ``token_usage`` 表的 ``created_at``", but ``token_usage`` is an
+         *     UPSERTed per-model aggregate — it has no ``created_at`` column and
+         *     can't be bucketed over time. The only authoritative per-turn
+         *     time-series source is ``event_log`` rows with ``event_type =
+         *     'turn.complete'`` (persisted via ``_PERSIST_EVENT_TYPES``; see
+         *     ``emit_turn_complete`` for payload shape). Each row carries
+         *     ``tokens_used`` and ``cost_usd`` in ``data_json`` and the column
+         *     ``created_at`` (TEXT, ``YYYY-MM-DD HH24:MI:SS`` format — set by
+         *     ``alembic_pg_compat``'s ``datetime('now')`` rewrite to ``to_char(
+         *     now(), …)``) is the authoritative bucket key.
+         *
+         *     **Rate normalisation**: ``tokens_per_hour`` = ``SUM(bucket_tokens) /
+         *     60 * 3600`` = ``SUM(bucket_tokens) * 60`` for the fixed 60 s bucket
+         *     width. Same shape for ``cost_per_hour``. This lets the UI render a
+         *     single y-axis regardless of which window the operator picks.
+         *
+         *     **NULL-vs-genuine-zero contract**: ``cost_usd`` on a ``turn.complete``
+         *     payload is ``null`` for unknown models (see ``_estimate_turn_cost_usd``
+         *     — preserves the frontend ``$—`` rendering). ``COALESCE(…::numeric, 0)``
+         *     maps that to zero in the aggregate so a single unknown-model turn
+         *     doesn't drop the whole bucket's cost. Tokens are always authoritative
+         *     integers so no NULL path is needed there.
+         *
+         *     **Tenant isolation**: ``tenant_where_pg`` narrows to the caller's
+         *     tenant so dashboard readings don't leak cross-tenant spend.
+         *
+         *     Module-global audit (SOP Step 1): ``_BURN_RATE_WINDOWS`` and
+         *     ``_BURN_RATE_BUCKET_SECONDS`` are module-const literals — each
+         *     uvicorn worker derives the same dict/int from the same source
+         *     code, matching SOP acceptable answer #1 ("不共享,因為每 worker
+         *     從同樣來源推導出同樣的值").
+         */
+        get: operations["get_token_burn_rate_api_v1_runtime_tokens_burn_rate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/turns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Turn History
+         * @description Return the most recent ``turn.complete`` records, newest first.
+         *
+         *     ZZ.B1 #304-1 checkbox 3 (2026-04-24): frontends mount
+         *     ``<TurnTimeline>`` with an empty ring buffer and depend on live
+         *     ``turn.complete`` SSE events to populate it. When a session
+         *     reconnects (page reload, worker restart, operator switching tabs),
+         *     the SSE stream carries only *future* events — history is lost.
+         *     This endpoint backfills by reading persisted rows from
+         *     ``event_log`` (see ``_PERSIST_EVENT_TYPES`` for the allow-list)
+         *     and handing the frontend the last ``limit`` turns (capped to 100
+         *     to match the ring-buffer size).
+         *
+         *     ``session_id`` filters the result in-memory on the payload's
+         *     ``_session_id`` field — a full jsonb index would be premature;
+         *     turn volume is low (< a few hundred per session) and the natural
+         *     ORDER BY id DESC LIMIT N already caps the scan.
+         */
+        get: operations["get_turn_history_api_v1_runtime_turns_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime/vendor/sdks": {
         parameters: {
             query?: never;
@@ -15568,6 +15726,20 @@ export interface components {
              */
             timeout_s: number;
         };
+        /**
+         * SessionTitleBody
+         * @description Body for ``PATCH /chat/sessions/{session_id}/title``.
+         *
+         *     ``title`` is the operator-authored override. ``None`` or empty/
+         *     whitespace clears the override (reverts to ``auto_title`` or hash
+         *     per the frontend fallback chain). 120-char defensive cap mirrors
+         *     the one ``set_session_auto_title`` applies to LLM output so the
+         *     sidebar never has to truncate on render.
+         */
+        SessionTitleBody: {
+            /** Title */
+            title?: string | null;
+        };
         /** SessionTokenRequest */
         SessionTokenRequest: {
             /**
@@ -16344,6 +16516,66 @@ export interface components {
              * @default 0.8
              */
             warn_threshold: number;
+        };
+        /**
+         * TokenBurnRatePoint
+         * @description One 60-second bucket in the burn-rate time series.
+         *
+         *     ZZ.B3 #304-3 checkbox 1 (2026-04-24): the spec phrases the source as
+         *     "aggregate ``token_usage`` 表的 ``created_at``", but ``token_usage`` is
+         *     a per-model UPSERTed state table — the only time-series source of
+         *     per-turn spend is ``event_log`` rows with ``event_type='turn.complete'``
+         *     (persisted via ``_PERSIST_EVENT_TYPES``). Each row's ``data_json``
+         *     carries ``tokens_used`` + ``cost_usd`` and ``created_at`` is the
+         *     authoritative bucket key.
+         *
+         *     Rates are normalised to per-hour so the sparkline can render the
+         *     same y-axis regardless of which window the operator picked:
+         *     ``tokens_per_hour = sum(bucket_tokens) / 60 * 3600``. Since buckets
+         *     are exactly 60 s wide, the derivation collapses to
+         *     ``sum(bucket_tokens) * 60``.
+         */
+        TokenBurnRatePoint: {
+            /**
+             * Cost Per Hour
+             * @default 0
+             */
+            cost_per_hour: number;
+            /**
+             * Timestamp
+             * @default
+             */
+            timestamp: string;
+            /**
+             * Tokens Per Hour
+             * @default 0
+             */
+            tokens_per_hour: number;
+        };
+        /**
+         * TokenBurnRateResponse
+         * @description ZZ.B3 #304-3 checkbox 1: burn-rate time-series envelope.
+         *
+         *     ``window`` echoes the query parameter the client sent (``15m`` /
+         *     ``1h`` / ``24h``) so the frontend sparkline can title the panel
+         *     without parsing the URL again. ``bucket_seconds`` is the fixed
+         *     60-second bucket width documented in the row spec — surfaced on
+         *     the response so a future widening (e.g. ``24h`` → 5-min buckets)
+         *     is discoverable client-side.
+         */
+        TokenBurnRateResponse: {
+            /**
+             * Bucket Seconds
+             * @default 60
+             */
+            bucket_seconds: number;
+            /** Points */
+            points?: components["schemas"]["TokenBurnRatePoint"][];
+            /**
+             * Window
+             * @default
+             */
+            window: string;
         };
         /** TokenMapInstance */
         TokenMapInstance: {
@@ -19399,6 +19631,72 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_sessions_api_v1_chat_sessions_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_session_api_v1_chat_sessions__session_id__title_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionTitleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };
@@ -31828,6 +32126,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_token_burn_rate_api_v1_runtime_tokens_burn_rate_get: {
+        parameters: {
+            query?: {
+                window?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenBurnRateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_turn_history_api_v1_runtime_turns_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                session_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

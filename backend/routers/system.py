@@ -27,6 +27,7 @@ from backend.routers import _pagination as _pg
 
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse, TokenUsageEntry,
+    TokenBurnRatePoint, TokenBurnRateResponse,
     DeployRequest,
 )
 
@@ -1404,6 +1405,134 @@ async def get_token_usage():
     if shared:
         return list(shared.values())
     return list(_token_usage.values())
+
+
+# ZZ.B3 #304-3 checkbox 1 (2026-04-24): burn-rate time series.
+# Window keyword → seconds. 60 s bucket width is fixed per the row spec
+# (``bucket 60 秒``); if a future checkbox widens 24 h to 5-min buckets
+# the map changes shape and ``bucket_seconds`` in the response tells
+# clients the new width.
+_BURN_RATE_WINDOWS: dict[str, int] = {
+    "15m": 15 * 60,
+    "1h": 60 * 60,
+    "24h": 24 * 60 * 60,
+}
+_BURN_RATE_BUCKET_SECONDS = 60
+
+
+@router.get("/tokens/burn-rate", response_model=TokenBurnRateResponse)
+async def get_token_burn_rate(
+    window: str = "1h",
+    conn=Depends(_get_conn),
+):
+    """Return a 60-second-bucketed token + cost time series.
+
+    ZZ.B3 #304-3 checkbox 1: feeds the dashboard sparkline + per-hour
+    burn-rate badge next to ``TokenUsageStats`` Row 1 (checkbox 2) and
+    the daily-budget extrapolation toast (checkbox 3).
+
+    **Source**: The TODO row's spec phrases the source as "aggregate
+    ``token_usage`` 表的 ``created_at``", but ``token_usage`` is an
+    UPSERTed per-model aggregate — it has no ``created_at`` column and
+    can't be bucketed over time. The only authoritative per-turn
+    time-series source is ``event_log`` rows with ``event_type =
+    'turn.complete'`` (persisted via ``_PERSIST_EVENT_TYPES``; see
+    ``emit_turn_complete`` for payload shape). Each row carries
+    ``tokens_used`` and ``cost_usd`` in ``data_json`` and the column
+    ``created_at`` (TEXT, ``YYYY-MM-DD HH24:MI:SS`` format — set by
+    ``alembic_pg_compat``'s ``datetime('now')`` rewrite to ``to_char(
+    now(), …)``) is the authoritative bucket key.
+
+    **Rate normalisation**: ``tokens_per_hour`` = ``SUM(bucket_tokens) /
+    60 * 3600`` = ``SUM(bucket_tokens) * 60`` for the fixed 60 s bucket
+    width. Same shape for ``cost_per_hour``. This lets the UI render a
+    single y-axis regardless of which window the operator picks.
+
+    **NULL-vs-genuine-zero contract**: ``cost_usd`` on a ``turn.complete``
+    payload is ``null`` for unknown models (see ``_estimate_turn_cost_usd``
+    — preserves the frontend ``$—`` rendering). ``COALESCE(…::numeric, 0)``
+    maps that to zero in the aggregate so a single unknown-model turn
+    doesn't drop the whole bucket's cost. Tokens are always authoritative
+    integers so no NULL path is needed there.
+
+    **Tenant isolation**: ``tenant_where_pg`` narrows to the caller's
+    tenant so dashboard readings don't leak cross-tenant spend.
+
+    Module-global audit (SOP Step 1): ``_BURN_RATE_WINDOWS`` and
+    ``_BURN_RATE_BUCKET_SECONDS`` are module-const literals — each
+    uvicorn worker derives the same dict/int from the same source
+    code, matching SOP acceptable answer #1 ("不共享,因為每 worker
+    從同樣來源推導出同樣的值").
+    """
+    from backend.db_context import tenant_where_pg
+
+    window_seconds = _BURN_RATE_WINDOWS.get(window)
+    if window_seconds is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported window '{window}'. "
+                f"Expected one of: {sorted(_BURN_RATE_WINDOWS.keys())}"
+            ),
+        )
+
+    # Caller-side tenant filter: ``event_log`` has ``tenant_id`` and
+    # the ported helper returns a ``tenant_id = $N`` clause when a
+    # tenant is active in the context. Placeholders are allocated in
+    # the order they're appended — we reserve $1 for window_seconds
+    # BEFORE calling tenant_where_pg so the indices stay stable
+    # regardless of whether a tenant is set.
+    conditions: list[str] = ["event_type = 'turn.complete'"]
+    params: list = [window_seconds]
+    conditions.append(
+        "to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS') "
+        ">= NOW() - make_interval(secs => $1)"
+    )
+    tenant_where_pg(conditions, params)
+
+    where_sql = " AND ".join(conditions)
+    sql = f"""
+        WITH buckets AS (
+          SELECT
+            date_trunc(
+              'minute',
+              to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS')
+            ) AS bucket_ts,
+            COALESCE((data_json::jsonb->>'tokens_used')::bigint, 0) AS tokens,
+            COALESCE((data_json::jsonb->>'cost_usd')::numeric, 0) AS cost
+          FROM event_log
+          WHERE {where_sql}
+        )
+        SELECT
+          to_char(bucket_ts, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ts,
+          SUM(tokens) AS bucket_tokens,
+          SUM(cost) AS bucket_cost
+        FROM buckets
+        GROUP BY bucket_ts
+        ORDER BY bucket_ts ASC
+    """
+
+    rows = await conn.fetch(sql, *params)
+
+    points: list[dict] = []
+    for row in rows:
+        bucket_tokens = int(row["bucket_tokens"] or 0)
+        bucket_cost = float(row["bucket_cost"] or 0.0)
+        # 60 s bucket → multiply by 60 to project to tokens/hour.
+        points.append({
+            "timestamp": row["ts"],
+            "tokens_per_hour": bucket_tokens * (3600 // _BURN_RATE_BUCKET_SECONDS),
+            "cost_per_hour": round(
+                bucket_cost * (3600 / _BURN_RATE_BUCKET_SECONDS),
+                6,
+            ),
+        })
+
+    return {
+        "window": window,
+        "bucket_seconds": _BURN_RATE_BUCKET_SECONDS,
+        "points": points,
+    }
 
 
 @router.get("/turns")

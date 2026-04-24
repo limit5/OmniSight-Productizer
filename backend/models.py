@@ -487,6 +487,45 @@ class TokenUsageEntry(BaseModel):
     cache_hit_ratio: Optional[float] = None
 
 
+class TokenBurnRatePoint(BaseModel):
+    """One 60-second bucket in the burn-rate time series.
+
+    ZZ.B3 #304-3 checkbox 1 (2026-04-24): the spec phrases the source as
+    "aggregate ``token_usage`` 表的 ``created_at``", but ``token_usage`` is
+    a per-model UPSERTed state table — the only time-series source of
+    per-turn spend is ``event_log`` rows with ``event_type='turn.complete'``
+    (persisted via ``_PERSIST_EVENT_TYPES``). Each row's ``data_json``
+    carries ``tokens_used`` + ``cost_usd`` and ``created_at`` is the
+    authoritative bucket key.
+
+    Rates are normalised to per-hour so the sparkline can render the
+    same y-axis regardless of which window the operator picked:
+    ``tokens_per_hour = sum(bucket_tokens) / 60 * 3600``. Since buckets
+    are exactly 60 s wide, the derivation collapses to
+    ``sum(bucket_tokens) * 60``.
+    """
+
+    timestamp: str = ""
+    tokens_per_hour: int = 0
+    cost_per_hour: float = 0.0
+
+
+class TokenBurnRateResponse(BaseModel):
+    """ZZ.B3 #304-3 checkbox 1: burn-rate time-series envelope.
+
+    ``window`` echoes the query parameter the client sent (``15m`` /
+    ``1h`` / ``24h``) so the frontend sparkline can title the panel
+    without parsing the URL again. ``bucket_seconds`` is the fixed
+    60-second bucket width documented in the row spec — surfaced on
+    the response so a future widening (e.g. ``24h`` → 5-min buckets)
+    is discoverable client-side.
+    """
+
+    window: str = ""
+    bucket_seconds: int = 60
+    points: list[TokenBurnRatePoint] = Field(default_factory=list)
+
+
 class ProviderInfo(BaseModel):
     id: str
     name: str
