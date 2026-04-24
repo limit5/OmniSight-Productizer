@@ -113,6 +113,34 @@ RUN curl -fsSLo /tmp/gradle.zip \
  && rm -f /tmp/gradle.zip
 ENV GRADLE_HOME=/opt/gradle-${GRADLE_VERSION}
 
+# ── Android CLI (P11 #351, Google agent tooling 2026-04-18) ───────
+# Google's Android CLI (`android create / run / emulator / sdk`) is
+# the official agent-facing replacement for the self-built Gradle
+# wrapper path. Distributed from https://d.android.com/tools/agents.
+#
+# Fallback semantics: if the tarball is transiently unavailable at
+# build time the image still builds — backend/mobile_toolchain.py
+# detects the binary via `shutil.which("android")` and falls back
+# to the existing `./gradlew` Gradle-wrapper invocation path. This
+# keeps the Docker build hermetic-ish while the CLI distribution
+# channel stabilises.
+#
+# Installed to /opt/android-cli with a symlink at /usr/local/bin
+# so both the `builder` uid (1000) and root can invoke it.
+ENV ANDROID_CLI_VERSION=1.0.0
+ENV ANDROID_CLI_URL="https://d.android.com/tools/agents/android-cli-${ANDROID_CLI_VERSION}-linux.tar.gz"
+RUN set -e; \
+    if curl -fsSLo /tmp/android-cli.tar.gz "${ANDROID_CLI_URL}" 2>/dev/null; then \
+        mkdir -p /opt/android-cli && \
+        tar -xzf /tmp/android-cli.tar.gz -C /opt/android-cli --strip-components=1 && \
+        ln -sf /opt/android-cli/bin/android /usr/local/bin/android && \
+        rm -f /tmp/android-cli.tar.gz && \
+        echo "[omnisight/mobile-build] Android CLI ${ANDROID_CLI_VERSION} installed: $(android --version 2>&1 | head -n1)"; \
+    else \
+        echo "[omnisight/mobile-build] WARN: Android CLI tarball unavailable at ${ANDROID_CLI_URL} — backend/mobile_toolchain.py will fall back to \./gradlew per P11 #351 shutil.which('android') detection"; \
+        rm -f /tmp/android-cli.tar.gz || true; \
+    fi
+
 # ── Ruby gems: Fastlane + CocoaPods ───────────────────────────────
 # `fastlane supply` (Play) works entirely on Linux. `fastlane gym`
 # (iOS) is installed here so the same Fastfile loads without missing
@@ -145,7 +173,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN groupadd --gid 1000 builder \
  && useradd --uid 1000 --gid builder --create-home --shell /bin/bash builder \
  && mkdir -p /workspace \
- && chown -R builder:builder /workspace ${ANDROID_SDK_ROOT} /opt/gradle-${GRADLE_VERSION}
+ && chown -R builder:builder /workspace ${ANDROID_SDK_ROOT} /opt/gradle-${GRADLE_VERSION} \
+ && if [ -d /opt/android-cli ]; then chown -R builder:builder /opt/android-cli; fi
 
 # Git configuration — prevent "detected dubious ownership" when
 # workspaces are bind-mounted from the host with a different uid.

@@ -442,3 +442,74 @@ def test_dockerfile_uses_non_root_builder_user():
     txt = _DOCKERFILE.read_text()
     assert "useradd" in txt or "USER " in txt
     assert "USER builder" in txt
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P11 #351 — Android CLI install drift guard
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_INSTALL_ANDROID_CLI = (
+    Path(__file__).resolve().parent.parent.parent
+    / "scripts" / "install_android_cli.sh"
+)
+
+
+def test_dockerfile_installs_android_cli_from_google_agents_url():
+    """P11 #351 checkbox 1 — the mobile-build image must pull the
+    Android CLI tarball from the Google agents distribution URL so
+    backend/mobile_toolchain.py can take the `android` fast path
+    instead of falling back to `./gradlew`. Operators reading the
+    Dockerfile should also see the fallback contract called out
+    inline so it doesn't look like an accidental `|| true`."""
+    txt = _DOCKERFILE.read_text()
+    assert "ANDROID_CLI_VERSION=" in txt, (
+        "Android CLI version pin missing from Dockerfile — P11 #351 "
+        "requires a versioned install so image rebuilds are reproducible"
+    )
+    assert "d.android.com/tools/agents" in txt, (
+        "Android CLI tarball URL drift — P11 #351 pins to Google's "
+        "official distribution at d.android.com/tools/agents"
+    )
+    assert "/opt/android-cli" in txt and "/usr/local/bin/android" in txt, (
+        "Android CLI install path drift — binary must land at "
+        "/opt/android-cli and symlink into /usr/local/bin/android"
+    )
+    assert "shutil.which" in txt or "fall back" in txt or "Gradle" in txt, (
+        "Dockerfile must document the shutil.which('android') fallback "
+        "contract inline so the `|| true`-style tolerance isn't silent"
+    )
+
+
+def test_host_install_android_cli_script_exists_and_is_executable():
+    """P11 #351 checkbox 1 — host install script operator can run
+    with ``sudo scripts/install_android_cli.sh``. Must be executable
+    so the command line doesn't need to be prefixed with ``bash``."""
+    assert _INSTALL_ANDROID_CLI.is_file(), (
+        "scripts/install_android_cli.sh missing — P11 #351 requires a "
+        "host install path mirroring the Docker image install"
+    )
+    import os
+    mode = _INSTALL_ANDROID_CLI.stat().st_mode
+    assert mode & 0o111, (
+        "scripts/install_android_cli.sh must be chmod +x so operators "
+        "can run it directly"
+    )
+
+
+def test_host_install_android_cli_uses_same_url_as_dockerfile():
+    """Drift guard — if the Dockerfile URL changes, the host install
+    script must follow. Otherwise hosts get one version and Docker
+    images another, and the Python backend's fast-path vs fallback
+    decision differs depending on whether it runs in a container."""
+    dockerfile_txt = _DOCKERFILE.read_text()
+    script_txt = _INSTALL_ANDROID_CLI.read_text()
+    assert "d.android.com/tools/agents" in dockerfile_txt
+    assert "d.android.com/tools/agents" in script_txt, (
+        "install_android_cli.sh must pull from the same Google agents "
+        "URL as the Dockerfile — otherwise host / Docker installs "
+        "diverge"
+    )
+    assert "shutil.which" in script_txt or "mobile_toolchain" in script_txt, (
+        "install_android_cli.sh should reference the P11 fallback "
+        "contract so operators know why the script is optional"
+    )
