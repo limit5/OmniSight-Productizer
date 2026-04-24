@@ -28,6 +28,7 @@ from backend.routers import _pagination as _pg
 from backend.models import (
     SystemInfoResponse, SystemStatusResponse, TokenBudgetResponse, TokenUsageEntry,
     TokenBurnRatePoint, TokenBurnRateResponse,
+    TokenHeatmapCell, TokenHeatmapResponse,
     PromptVersionEntry, PromptVersionsListResponse, PromptDiffResponse,
     DeployRequest,
 )
@@ -1533,6 +1534,149 @@ async def get_token_burn_rate(
         "window": window,
         "bucket_seconds": _BURN_RATE_BUCKET_SECONDS,
         "points": points,
+    }
+
+
+# ZZ.C2 #305-2 checkbox 1 (2026-04-24): session-heatmap windows.
+# ``7d`` and ``30d`` are the two operator-facing views locked by the
+# TODO spec; the matrix is ``N × 24`` (N = 7 or 30). Adding a third
+# window (e.g. ``90d``) is a dict entry here plus a frontend
+# grid-height branch — the endpoint shape doesn't need to change.
+_HEATMAP_WINDOWS: dict[str, int] = {
+    "7d": 7 * 24 * 60 * 60,
+    "30d": 30 * 24 * 60 * 60,
+}
+
+
+@router.get("/tokens/heatmap", response_model=TokenHeatmapResponse)
+async def get_token_heatmap(
+    window: str = "7d",
+    conn=Depends(_get_conn),
+):
+    """Return a ``(day, hour)``-bucketed token + cost matrix.
+
+    ZZ.C2 #305-2 checkbox 1: feeds the Calendar-style heatmap
+    beneath ``<TokenUsageStats>`` (checkbox 2) — x-axis is hour-of-
+    day, y-axis is calendar date, cell shade scales with
+    ``token_total``.
+
+    **Source**: ``event_log`` rows with ``event_type='turn.complete'``
+    — the same authoritative per-turn time series that
+    ``/runtime/tokens/burn-rate`` consumes. Each row carries
+    ``tokens_used`` + ``cost_usd`` in ``data_json`` and the TEXT
+    ``created_at`` column (``YYYY-MM-DD HH24:MI:SS``) is the bucket
+    key, parsed via ``to_timestamp(created_at, …)`` to align with
+    PG's session timezone.
+
+    **Bucket keys**: ``day`` is ``to_char(…, 'YYYY-MM-DD')`` in UTC
+    (we call ``to_timestamp(…) AT TIME ZONE 'UTC'`` to pin the
+    bucket boundary independently of the PG session timezone) and
+    ``hour`` is ``EXTRACT(HOUR FROM …)::int`` in the same UTC
+    frame. Operators see local time because the frontend (checkbox
+    2) shifts the grid by the browser offset at render time — the
+    backend is authoritative UTC so two operators in different
+    regions see the same cells just painted at different grid
+    positions.
+
+    **Sparse payload**: the ``GROUP BY`` emits only ``(day, hour)``
+    pairs that actually had at least one ``turn.complete`` row.
+    The frontend treats a missing cell as genuine zero activity;
+    this keeps the payload bounded by real traffic rather than
+    always paying 168 (7 × 24) or 720 (30 × 24) cells.
+
+    **NULL-vs-genuine-zero contract**: mirrors burn-rate —
+    ``COALESCE((data_json::jsonb->>'cost_usd')::numeric, 0)`` maps
+    unknown-model ``null`` to 0 so the bucket's tokens still
+    contribute even if one row had no pricing coverage.
+
+    **Tenant isolation**: ``tenant_where_pg`` narrows to the
+    caller's tenant so one tenant's nightly-batch burst doesn't
+    light up a neighbour's heatmap.
+
+    Module-global audit (SOP Step 1): ``_HEATMAP_WINDOWS`` is a
+    module-const literal dict — every uvicorn worker derives the
+    same mapping from the same source code, matching SOP
+    acceptable answer #1 ("不共享,因為每 worker 從同樣來源推導
+    出同樣的值"). The endpoint handler is pure-read request-scoped
+    — no caches, queues, or counters are mutated.
+
+    Read-after-write timing audit (SOP Step 1): pure-read path
+    over ``event_log``; writers are ``emit_turn_complete`` via
+    ``_PERSIST_EVENT_TYPES`` which commit on each event. Heatmap
+    reads are eventually-consistent vs. in-flight turns — the
+    dashboard refreshes on SSE events anyway, so a ~second lag
+    between ``turn.complete`` emit and GET-heatmap visibility is
+    invisible to the operator.
+    """
+    from backend.db_context import tenant_where_pg
+
+    window_seconds = _HEATMAP_WINDOWS.get(window)
+    if window_seconds is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported window '{window}'. "
+                f"Expected one of: {sorted(_HEATMAP_WINDOWS.keys())}"
+            ),
+        )
+
+    # Reserve $1 for window_seconds BEFORE calling tenant_where_pg so
+    # placeholder indices stay stable regardless of whether a tenant
+    # is set — same ordering discipline as burn-rate.
+    conditions: list[str] = ["event_type = 'turn.complete'"]
+    params: list = [window_seconds]
+    conditions.append(
+        "to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS') "
+        ">= NOW() - make_interval(secs => $1)"
+    )
+    tenant_where_pg(conditions, params)
+
+    where_sql = " AND ".join(conditions)
+    # UTC-anchored bucket keys: ``AT TIME ZONE 'UTC'`` pins the
+    # date/hour boundary regardless of the PG session timezone so
+    # two replicas in different regions produce identical cells.
+    sql = f"""
+        WITH buckets AS (
+          SELECT
+            to_char(
+              to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS')
+                AT TIME ZONE 'UTC',
+              'YYYY-MM-DD'
+            ) AS day,
+            EXTRACT(
+              HOUR FROM
+                to_timestamp(created_at, 'YYYY-MM-DD HH24:MI:SS')
+                  AT TIME ZONE 'UTC'
+            )::int AS hour,
+            COALESCE((data_json::jsonb->>'tokens_used')::bigint, 0) AS tokens,
+            COALESCE((data_json::jsonb->>'cost_usd')::numeric, 0) AS cost
+          FROM event_log
+          WHERE {where_sql}
+        )
+        SELECT
+          day,
+          hour,
+          SUM(tokens) AS token_total,
+          SUM(cost) AS cost_total
+        FROM buckets
+        GROUP BY day, hour
+        ORDER BY day ASC, hour ASC
+    """
+
+    rows = await conn.fetch(sql, *params)
+
+    cells: list[dict] = []
+    for row in rows:
+        cells.append({
+            "day": row["day"],
+            "hour": int(row["hour"]),
+            "token_total": int(row["token_total"] or 0),
+            "cost_total": round(float(row["cost_total"] or 0.0), 6),
+        })
+
+    return {
+        "window": window,
+        "cells": cells,
     }
 
 

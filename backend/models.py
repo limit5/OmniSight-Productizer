@@ -526,6 +526,63 @@ class TokenBurnRateResponse(BaseModel):
     points: list[TokenBurnRatePoint] = Field(default_factory=list)
 
 
+class TokenHeatmapCell(BaseModel):
+    """ZZ.C2 #305-2 checkbox 1: one cell in the token-usage heatmap.
+
+    The TODO spec phrases the schema as
+    ``[{day, hour, token_total, cost_total}]`` (7 × 24 or 30 × 24
+    matrix). Source of truth is the same ``event_log`` rows with
+    ``event_type='turn.complete'`` that feed ``/runtime/tokens/
+    burn-rate`` — each row carries ``tokens_used`` + ``cost_usd`` in
+    ``data_json`` and a ``created_at`` in ``YYYY-MM-DD HH24:MI:SS``
+    TEXT format.
+
+      * ``day``: ``YYYY-MM-DD`` date string in UTC. A date string
+        (rather than a relative ``0..N-1`` index) makes it trivial
+        for the frontend to label each heatmap row with an operator-
+        recognisable calendar date; the client still converts to
+        its local timezone in the render pass (checkbox 5 of ZZ.C2
+        locks that contract).
+      * ``hour``: 0–23 integer, hour-of-day in UTC. The frontend
+        shifts by the local offset when painting the grid.
+      * ``token_total``: ``SUM(tokens_used)`` across all
+        ``turn.complete`` rows whose UTC (day, hour) bucket matches.
+      * ``cost_total``: ``SUM(COALESCE(cost_usd, 0))`` across the
+        same bucket — the NULL-vs-genuine-zero contract from
+        ``_estimate_turn_cost_usd`` maps unknown-model turns to 0
+        cost without dropping the bucket's tokens (same
+        COALESCE-to-zero policy as burn-rate).
+
+    The endpoint emits only non-empty cells (sparse list). The
+    heatmap UI fills in zeros for the ``(day, hour)`` slots the
+    response omits; this keeps the payload proportional to real
+    activity instead of always paying 168 / 720 cells on every GET.
+    """
+
+    day: str = ""
+    hour: int = 0
+    token_total: int = 0
+    cost_total: float = 0.0
+
+
+class TokenHeatmapResponse(BaseModel):
+    """ZZ.C2 #305-2 checkbox 1: session-heatmap envelope.
+
+    ``window`` echoes ``7d`` or ``30d`` so the frontend Calendar-
+    style heatmap (checkbox 2) can title its panel and decide the
+    grid height (7 vs 30 rows) without re-parsing the URL.
+
+    Cells are sparse: only ``(day, hour)`` buckets with at least one
+    ``turn.complete`` row appear. The frontend treats missing cells
+    as genuine zero activity — this matches operator intuition
+    (empty slot = no work happened) and keeps the payload bounded
+    by real traffic rather than by window size.
+    """
+
+    window: str = ""
+    cells: list[TokenHeatmapCell] = Field(default_factory=list)
+
+
 class PromptVersionEntry(BaseModel):
     """ZZ.C1 #305-1 checkbox 1: one row in the prompt-version timeline.
 
