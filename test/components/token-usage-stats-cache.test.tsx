@@ -17,13 +17,36 @@
  *    stays visually distinct from a real 0% hit rate.
  */
 
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi, beforeEach } from "vitest"
 import { render } from "@testing-library/react"
 
+// ZZ.B3 #304-3 checkbox 2: TokenUsageStats now calls
+// ``fetchTokenBurnRate`` on mount for the Row 1 burn-rate sparkline.
+// These tests render the component without going through ``primeSSE``;
+// stub the fetch directly so we don't hit the real ``request`` retry
+// ladder inside jsdom.
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>()
+  return {
+    ...actual,
+    subscribeEvents: vi.fn(() => ({ close: () => undefined, readyState: 1 })),
+    fetchTokenBurnRate: vi.fn().mockResolvedValue({
+      window: "1h",
+      bucket_seconds: 60,
+      points: [],
+    }),
+  }
+})
+
+import * as api from "@/lib/api"
 import {
   TokenUsageStats,
   type ModelTokenUsage,
 } from "@/components/omnisight/token-usage-stats"
+
+beforeEach(() => {
+  ;(api.fetchTokenBurnRate as ReturnType<typeof vi.fn>).mockClear()
+})
 
 const baseUsage: Omit<
   ModelTokenUsage,

@@ -1530,6 +1530,41 @@ export async function getTokenUsage() {
   return request<TokenUsage[]>("/runtime/tokens")
 }
 
+/**
+ * ZZ.B3 #304-3 checkbox 1 shape: single 60 s bucket of aggregated
+ * ``turn.complete`` events. Backend docstring in
+ * ``backend/routers/system.py::get_token_burn_rate`` owns the source-of-
+ * truth description. ``timestamp`` is ISO-8601 UTC (``…Z`` suffix);
+ * ``cost_per_hour`` is already projected from the 60 s bucket so the
+ * sparkline consumer just plots the series as-is.
+ */
+export interface TokenBurnRatePoint {
+  timestamp: string
+  tokens_per_hour: number
+  cost_per_hour: number
+}
+
+export interface TokenBurnRateResponse {
+  window: "15m" | "1h" | "24h"
+  bucket_seconds: number
+  points: TokenBurnRatePoint[]
+}
+
+export type TokenBurnRateWindow = "15m" | "1h" | "24h"
+
+/**
+ * ZZ.B3 #304-3 checkbox 2: fetch the 60 s-bucketed burn-rate series for
+ * the TokenUsageStats header sparkline. Window whitelist is enforced
+ * server-side (400 on anything outside ``15m|1h|24h``).
+ */
+export async function fetchTokenBurnRate(
+  window: TokenBurnRateWindow = "1h",
+): Promise<TokenBurnRateResponse> {
+  return request<TokenBurnRateResponse>(
+    `/runtime/tokens/burn-rate?window=${encodeURIComponent(window)}`,
+  )
+}
+
 export interface CompressionStats {
   total_original_bytes: number
   total_compressed_bytes: number

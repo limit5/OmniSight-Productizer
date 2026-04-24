@@ -40,12 +40,24 @@ export interface PrimeSSEOptions {
   /** Pre-seeded ``turn.complete`` rows the component will read from
    *  ``fetchTurnHistory`` on mount. Defaults to empty. */
   history?: unknown[]
+  /** ZZ.B3 #304-3 checkbox 2: pre-seeded burn-rate series for the
+   *  TokenUsageStats Row 1 sparkline. Defaults to an empty series →
+   *  the sparkline degrades to its <2-point empty state and the
+   *  badge renders "$—/hr" per the component's NULL-vs-genuine-zero
+   *  contract. */
+  burnRatePoints?: Array<{
+    timestamp: string
+    tokens_per_hour: number
+    cost_per_hour: number
+  }>
+  burnRateWindow?: "15m" | "1h" | "24h"
 }
 
 export function primeSSE(
   api: {
     subscribeEvents: unknown
     fetchTurnHistory?: unknown
+    fetchTokenBurnRate?: unknown
   },
   opts: PrimeSSEOptions = {},
 ): SSEPrime {
@@ -65,6 +77,16 @@ export function primeSSE(
     fth.mockResolvedValue({
       turns: opts.history ?? [],
       count: (opts.history ?? []).length,
+    })
+  }
+  // ZZ.B3 #304-3 checkbox 2: stub burn-rate endpoint so
+  // TokenUsageStats' Row 1 sparkline mount fetch resolves offline.
+  const fbr = api.fetchTokenBurnRate as ReturnType<typeof vi.fn> | undefined
+  if (fbr && typeof fbr.mockImplementation === "function") {
+    fbr.mockResolvedValue({
+      window: opts.burnRateWindow ?? "1h",
+      bucket_seconds: 60,
+      points: opts.burnRatePoints ?? [],
     })
   }
   return {

@@ -35,6 +35,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     subscribeEvents: vi.fn(),
+    // ZZ.B3 #304-3 checkbox 2: TokenUsageStats now calls this on
+    // mount for the Row 1 burn-rate sparkline. primeSSE() default-
+    // resolves it to an empty series so these tests stay deterministic.
+    fetchTokenBurnRate: vi.fn(),
   }
 })
 

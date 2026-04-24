@@ -15,7 +15,13 @@ import {
   AlertTriangle
 } from "lucide-react"
 import { AI_MODEL_INFO, type AIModel } from "./agent-matrix-wall"
-import { subscribeEvents } from "@/lib/api"
+import { MetricSparkline } from "./host-device-panel"
+import {
+  subscribeEvents,
+  fetchTokenBurnRate,
+  type TokenBurnRatePoint,
+  type TokenBurnRateWindow,
+} from "@/lib/api"
 
 // ZZ.A2 (#303-2, 2026-04-24): per-model snapshot of the *latest* turn's
 // context-window usage. Backend emits ``turn_metrics`` SSE at the end of
@@ -162,6 +168,16 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
   const [turnHistoryByModel, setTurnHistoryByModel] = useState<Record<string, { ts: number; latency: number }[]>>({})
   const [toolStatsByModel, setToolStatsByModel] = useState<Record<string, { callCount: number; failureCount: number; failedTools: string[] }>>({})
   const lastMetricsModelRef = useRef<string | null>(null)
+  // ZZ.B3 #304-3 checkbox 2 (2026-04-24): burn-rate sparkline + current-
+  // rate badge on the Row 1 right side. ``burnWindow`` drives the fetch
+  // and the "which tab is selected" highlight; ``burnPoints`` is the
+  // 60 s-bucketed series from ``GET /runtime/tokens/burn-rate``. Hover
+  // over the sparkline reveals the 15m / 1h / 24h tab row — click a tab
+  // to re-fetch for that window. Empty points → badge renders "$—/hr",
+  // sparkline degrades to MetricSparkline's <2-point empty state.
+  const [burnWindow, setBurnWindow] = useState<TokenBurnRateWindow>("1h")
+  const [burnPoints, setBurnPoints] = useState<TokenBurnRatePoint[]>([])
+  const [burnHover, setBurnHover] = useState(false)
   useEffect(() => {
     const handle = subscribeEvents((event) => {
       if (event.event === "turn_metrics") {
@@ -200,7 +216,36 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
     })
     return () => handle.close()
   }, [])
-  
+
+  // ZZ.B3 #304-3 checkbox 2: fetch the burn-rate series for the current
+  // ``burnWindow`` on mount and whenever the operator flips tabs. Poll
+  // every 30 s so the sparkline + ``$/hr`` badge track the bucket stream
+  // without hammering the endpoint (one 60 s bucket → 2 refresh chances
+  // before it's stale). ``cancelled`` guards against the component
+  // unmounting mid-fetch — same pattern ``<TurnTimeline>`` uses for
+  // ``fetchTurnHistory``.
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const resp = await fetchTokenBurnRate(burnWindow)
+        if (!cancelled) setBurnPoints(resp.points ?? [])
+      } catch {
+        // Endpoint down or tenant has zero turns — treat as empty
+        // series so the sparkline falls back to its <2-point empty
+        // state and the badge renders "$—/hr". Core chat flow is
+        // unaffected, so a silent degrade is the right policy here.
+        if (!cancelled) setBurnPoints([])
+      }
+    }
+    load()
+    const interval = setInterval(load, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [burnWindow])
+
   // Calculate totals FROM REAL USAGE ONLY (exclude placeholder cards).
   const totals = usageData.reduce((acc, item) => ({
     inputTokens: acc.inputTokens + item.inputTokens,
@@ -263,13 +308,24 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
 
   return (
     <div className={`border-b border-[var(--border)] ${className}`}>
-      {/* Header */}
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-4 py-2 flex items-center justify-between text-xs font-mono text-[var(--muted-foreground)] hover:bg-[var(--secondary)]/50 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <Coins size={12} className="text-[var(--hardware-orange)]" />
+      {/* Header (ZZ.B3 #304-3 checkbox 2 (2026-04-24): the outer wrapper
+          is a <div> — NOT a <button> — because the Row 1 right side now
+          hosts a nested <BurnRateBadge> with its own click-capable tabs
+          (15m / 1h / 24h). Nesting <button> inside <button> is invalid
+          HTML and gets flattened by the browser, which would make the
+          sparkline group collapse/expand the whole card on every click.
+          The expand toggle moved into a child <button> covering only the
+          left block (icon + title + totals); the burn-rate group sits as
+          a sibling so its hover/click state never bubbles up. */}
+      <div className="w-full px-4 py-2 flex items-center justify-between text-xs font-mono text-[var(--muted-foreground)] hover:bg-[var(--secondary)]/50 transition-colors">
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          aria-expanded={expanded}
+          data-testid="token-usage-expand-toggle"
+        >
+          <Coins size={12} className="text-[var(--hardware-orange)] shrink-0" />
           <span>TOKEN USAGE</span>
           {hasCriticalContext && (
             <span
@@ -284,13 +340,106 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
               />
             </span>
           )}
+          <span className="ml-auto flex items-center gap-3 shrink-0">
+            <span className="text-[var(--validation-emerald)]">{formatTokens(totals.totalTokens)} tokens</span>
+            <span className="text-[var(--hardware-orange)]">{formatCost(totals.cost)}</span>
+          </span>
+        </button>
+        {/* Burn-rate sparkline + current-rate badge (ZZ.B3 #304-3
+            checkbox 2, 2026-04-24). Hover surfaces the 15m / 1h / 24h
+            tab row so the operator can flip windows without leaving
+            Row 1. The outer group stops click propagation so tab clicks
+            don't bubble into the expand toggle above it. */}
+        <div
+          className="ml-3 flex items-center gap-2 shrink-0 relative"
+          onMouseEnter={() => setBurnHover(true)}
+          onMouseLeave={() => setBurnHover(false)}
+          onFocus={() => setBurnHover(true)}
+          onBlur={(e) => {
+            // Keep tabs visible while focus stays inside the group —
+            // only collapse when focus leaves it entirely.
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              setBurnHover(false)
+            }
+          }}
+          data-testid="burn-rate-group"
+          data-burn-hover={burnHover ? "true" : "false"}
+        >
+          {(() => {
+            // Latest bucket drives the "current rate" badge; MetricSparkline
+            // renders the full series. Empty series → badge "$—/hr" and
+            // sparkline's <2-point empty state takes over.
+            const hasPoints = burnPoints.length > 0
+            const latest = hasPoints ? burnPoints[burnPoints.length - 1] : null
+            const currentRate = latest?.cost_per_hour ?? 0
+            // Format: < $1 → 3 decimal places (so "$0.12/hr" is readable);
+            // >= $1 → 2 decimal places ("$12.50/hr"). Matches the
+            // ``formatCost`` helper's reasoning for readability.
+            const rateLabel = latest === null
+              ? "$—/hr"
+              : currentRate >= 1
+                ? `$${currentRate.toFixed(2)}/hr`
+                : `$${currentRate.toFixed(3)}/hr`
+            const rateTooltip = latest === null
+              ? `No burn-rate data for ${burnWindow} yet`
+              : `Current burn rate over the latest 60 s bucket (window: ${burnWindow})`
+            return (
+              <>
+                <MetricSparkline
+                  values={burnPoints.map((p) => p.cost_per_hour)}
+                  color="var(--hardware-orange)"
+                  domainMax={null}
+                  width={64}
+                  height={14}
+                  testId="burn-rate-sparkline"
+                />
+                <span
+                  className="font-mono text-[10px] font-semibold text-[var(--hardware-orange)] px-1.5 py-0.5 rounded bg-[var(--hardware-orange)]/10"
+                  title={rateTooltip}
+                  data-testid="burn-rate-badge"
+                >
+                  {rateLabel}
+                </span>
+              </>
+            )
+          })()}
+          {burnHover && (
+            <div
+              className="absolute top-full right-0 mt-1 flex items-center gap-1 p-1 rounded bg-[var(--secondary)] border border-[var(--border)] shadow-lg z-10"
+              data-testid="burn-rate-tabs"
+            >
+              {(["15m", "1h", "24h"] as TokenBurnRateWindow[]).map((w) => (
+                <button
+                  key={w}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setBurnWindow(w)
+                  }}
+                  className={`px-1.5 py-0.5 rounded font-mono text-[10px] transition-colors ${
+                    burnWindow === w
+                      ? "bg-[var(--hardware-orange)]/20 text-[var(--hardware-orange)]"
+                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                  }`}
+                  data-testid={`burn-rate-tab-${w}`}
+                  aria-pressed={burnWindow === w}
+                >
+                  {w}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-[var(--validation-emerald)]">{formatTokens(totals.totalTokens)} tokens</span>
-          <span className="text-[var(--hardware-orange)]">{formatCost(totals.cost)}</span>
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="ml-2 shrink-0 text-[var(--muted-foreground)]"
+          aria-label={expanded ? "Collapse token usage" : "Expand token usage"}
+          data-testid="token-usage-expand-chevron"
+        >
           {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        </div>
-      </button>
+        </button>
+      </div>
       
       {expanded && (
         <div className="px-3 pb-3">
