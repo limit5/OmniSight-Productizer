@@ -1,0 +1,54 @@
+# SKILL-IPCAM — DAG task definitions (#219)
+schema_version: "1"
+skill_id: ipcam
+
+tasks:
+  - id: rtsp_server_scaffold
+    name: "RTSP Server Scaffold (live555 / gstreamer dual-backend)"
+    description: "Abstract RTSP server manager with swappable backend (live555 RTSPServer vs GStreamer rtsp-server). Covers config, mount points, session lifecycle, transport negotiation (RTP/AVP UDP + RTP/AVP/TCP interleaved + RTP/AVPF for low-latency), RTSP method dispatch (OPTIONS/DESCRIBE/SETUP/PLAY/PAUSE/TEARDOWN/GET_PARAMETER), Basic/Digest auth, and SDP generation for H.264/H.265 elementary streams."
+    depends_on: []
+    artifacts:
+      - backend/ipcam_rtsp_server.py
+
+  - id: onvif_endpoints
+    name: "ONVIF Device / Media / Events / PTZ Endpoints"
+    description: "SOAP 1.2 endpoints implementing ONVIF Profile S services: Device (GetDeviceInformation / GetSystemDateAndTime / GetNetworkInterfaces / GetCapabilities), Media (GetProfiles / GetStreamUri / GetSnapshotUri), Events (CreatePullPointSubscription / PullMessages) and PTZ (GetConfigurations / ContinuousMove / Stop / AbsoluteMove)."
+    depends_on: [rtsp_server_scaffold]
+    artifacts:
+      - backend/onvif_device.py
+
+  - id: ws_discovery
+    name: "WS-Discovery Multicast Responder"
+    description: "SOAP-over-UDP 3702 multicast listener answering Probe / Resolve messages with NetworkVideoTransmitter / tdn:NetworkVideoTransmitter device types so NVR discovery tools (ONVIF Device Manager / happytimesoft / Milestone / Synology Surveillance Station) auto-detect the camera."
+    depends_on: [onvif_endpoints]
+    artifacts:
+      - backend/ws_discovery.py
+
+  - id: hw_codec_binding
+    name: "H.264 / H.265 Hardware Codec Binding per SoC"
+    description: "Per-SoC V4L2 / MPP / VPU binding — Rockchip RKMPP, NXP i.MX Hantro, STM32MP1 (sw fallback), Ambarella iOne, Hi3516 HiEncoder — exposed as a uniform encode pipeline that the RTSP scaffold can pull Annex-B NALs from."
+    depends_on: [rtsp_server_scaffold]
+    artifacts:
+      - backend/ipcam_hw_codec.py
+
+  - id: odtt_test_recipe
+    name: "ONVIF Device Test Tool (ODTT) Profile S Recipe"
+    description: "HIL recipe driving ODTT 20.06 against the device under test: Device Discovery / Device Management / Media / PTZ / Event / Streaming test suites, plus a parsed-pass-criteria YAML so CI can grade the XML test report."
+    depends_on: [onvif_endpoints, ws_discovery]
+    artifacts:
+      - configs/skills/ipcam/hil/ipcam_hil_recipes.yaml
+
+  - id: datasheet_templates
+    name: "IPCam Datasheet + ONVIF Conformance Statement Templates"
+    description: "Jinja templates for IP camera datasheet (resolution × FPS matrix / codec support / network specs / power) and ONVIF Conformance Statement document (profile claims / feature matrix / optional feature declarations) — generated per-product during L4 skill-pack build."
+    depends_on: [odtt_test_recipe]
+    artifacts:
+      - configs/skills/ipcam/docs/ipcam_datasheet.md.j2
+      - configs/skills/ipcam/docs/ipcam_onvif_conformance.md.j2
+
+  - id: unit_tests
+    name: "Unit Test Suite"
+    description: "Offline pytest covering RTSP scaffold (config, mount points, session FSM, transport parsing, SDP, auth, method dispatch), ONVIF SOAP envelope construction, WS-Discovery message parsing, and per-SoC codec selection."
+    depends_on: [rtsp_server_scaffold, onvif_endpoints, ws_discovery, hw_codec_binding]
+    artifacts:
+      - backend/tests/test_ipcam_rtsp_server.py

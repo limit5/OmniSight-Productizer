@@ -1,0 +1,47 @@
+# {{ product_name | default("OmniSight IPCam") }} — Datasheet
+
+**Part number:** {{ part_number | default("TBD") }}
+**Revision:** {{ revision | default("A1") }}
+**Date:** {{ build_date | default("{{ build_date }}") }}
+
+## 1. Overview
+{{ overview | default("IP-based network camera built on the OmniSight SKILL-IPCAM pack — RTSP over TCP/UDP, ONVIF Profile S, H.264/H.265 hardware codec, ODTT-verified.") }}
+
+## 2. Video Specifications
+
+| Stream | Resolution | Max FPS | Codec | Bitrate (kbps) | Mount path |
+|--------|-----------|---------|-------|----------------|------------|
+{% for stream in streams | default([{"name": "main", "resolution": "1920x1080", "fps": 30, "codec": "H.264", "bitrate": 4096, "mount": "live/main"}]) -%}
+| {{ stream.name }} | {{ stream.resolution }} | {{ stream.fps }} | {{ stream.codec }} | {{ stream.bitrate }} | `rtsp://<ip>:{{ rtsp_port | default(8554) }}/{{ stream.mount }}` |
+{% endfor %}
+
+## 3. Network
+- RTSP port: **{{ rtsp_port | default(8554) }}** (TCP)
+- ONVIF port: **{{ onvif_port | default(80) }}** (HTTP SOAP 1.2)
+- WS-Discovery: UDP multicast **239.255.255.250:3702**
+- Profile support: **ONVIF Profile S**
+
+## 4. Codec & Hardware Matrix
+
+| SoC | H.264 encode | H.265 encode | Max simultaneous encoders |
+|-----|-------------|-------------|--------------------------|
+{% for entry in codec_matrix | default([
+  {"soc": "rk3566", "h264": "1080p60", "h265": "1080p30", "simultaneous": 2},
+  {"soc": "rk3568", "h264": "1080p60", "h265": "4K30", "simultaneous": 3},
+  {"soc": "imx8mp", "h264": "1080p60", "h265": "1080p60", "simultaneous": 2},
+  {"soc": "hi3516", "h264": "1080p30", "h265": "1080p30", "simultaneous": 2},
+]) -%}
+| {{ entry.soc }} | {{ entry.h264 }} | {{ entry.h265 }} | {{ entry.simultaneous }} |
+{% endfor %}
+
+## 5. Authentication
+- RTSP: Digest (RFC 7616, MD5)
+- ONVIF: WS-UsernameToken (Digest password)
+- Default admin account: **must be changed on first boot** (enforced by ODTT conformance check)
+
+## 6. Power
+{{ power_spec | default("PoE 802.3af Class 2 / DC 12 V 1 A") }}
+
+## 7. Compliance
+- ONVIF Profile S — ODTT {{ odtt_version | default("20.06") }} tested
+- Conformance statement: see `ipcam_onvif_conformance.md`

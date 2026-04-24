@@ -1,0 +1,55 @@
+schema_version: 1
+name: ipcam
+description: "IP Camera skill pack — RTSP (live555/gstreamer dual-backend) server scaffold, ONVIF Profile S Device/Media/Events/PTZ endpoints, WS-Discovery multicast responder, H.264/H.265 hardware codec binding per SoC, ODTT Profile S conformance recipes"
+version: "0.1.0"
+author: "OmniSight"
+license: "Proprietary"
+compatible_socs:
+  - rk3566
+  - rk3568
+  - rk3588
+  - imx8m
+  - imx8mp
+  - stm32mp1
+  - ambarella_cv25
+  - ambarella_cv5
+  - hi3516
+  - x86_64
+depends_on_skills: []
+depends_on_core:
+  - CORE-05
+  - CORE-07
+  - CORE-24
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+  - kind: tests
+    path: tests/test_definitions.yaml
+  - kind: hil
+    path: hil/ipcam_hil_recipes.yaml
+  - kind: docs
+    path: docs/ipcam_datasheet.md.j2
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+keywords:
+  - ipcam
+  - rtsp
+  - rtp
+  - rtcp
+  - onvif
+  - profile-s
+  - ws-discovery
+  - live555
+  - gstreamer
+  - rtsp-simple-server
+  - h264
+  - h265
+  - hevc
+  - ptz
+  - odtt
+  - network-camera
+  - surveillance

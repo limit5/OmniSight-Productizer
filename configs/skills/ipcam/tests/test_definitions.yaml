@@ -1,0 +1,58 @@
+# SKILL-IPCAM — test suite definitions
+schema_version: "1"
+skill_id: ipcam
+
+test_suites:
+  - id: rtsp_backend_detection
+    name: "RTSP Backend Detection Tests"
+    description: "Verify backend enum, auto-selection precedence (GStreamer > live555 > stub), and per-backend feature flags"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_backend"]
+
+  - id: rtsp_config_validation
+    name: "RTSP Config Validation Tests"
+    description: "Verify RTSPServerConfig — port ranges, bind address, session timeout, max_sessions, auth realm"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_config"]
+
+  - id: rtsp_mount_management
+    name: "RTSP Mount Point Management Tests"
+    description: "Verify add_mount / remove_mount / get_mount / list_mounts, duplicate-path rejection, and mount-path normalisation"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_mount"]
+
+  - id: rtsp_session_fsm
+    name: "RTSP Session State-Machine Tests"
+    description: "Verify INIT → READY → PLAYING → PAUSED lifecycle, keep-alive, teardown, and session timeout"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_session"]
+
+  - id: rtsp_transport
+    name: "RTSP Transport Negotiation Tests"
+    description: "Verify parsing of Transport header: RTP/AVP;unicast;client_port=..., RTP/AVP/TCP;interleaved=..., multicast variant"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_transport"]
+
+  - id: rtsp_method_dispatch
+    name: "RTSP Method Dispatch Tests"
+    description: "Verify OPTIONS / DESCRIBE / SETUP / PLAY / PAUSE / TEARDOWN / GET_PARAMETER response codes + headers, unknown method 501, bad CSeq 400"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_method"]
+
+  - id: rtsp_auth
+    name: "RTSP Authentication Tests"
+    description: "Verify Digest MD5 challenge/response per RFC 7616, Basic base64 decode, nonce reuse rejection, realm match"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_auth"]
+
+  - id: rtsp_sdp
+    name: "RTSP SDP Generation Tests"
+    description: "Verify SDP output for H.264 / H.265 — m=video line, fmtp profile-level-id, sprop-parameter-sets, rtpmap dynamic PT 96/97"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_sdp"]
+
+  - id: rtsp_error_handling
+    name: "RTSP Error Handling Tests"
+    description: "Verify graceful fallback when live555 and gstreamer are unavailable, invalid mount paths, session not found, malformed requests"
+    test_file: backend/tests/test_ipcam_rtsp_server.py
+    markers: ["rtsp_error"]

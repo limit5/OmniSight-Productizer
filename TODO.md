@@ -2991,7 +2991,7 @@ tests / HIL recipes / doc templates) per framework contract.
 - [x] **First skill done — validates CORE-05 framework**
 
 ### D2. SKILL-IPCAM (#219)
-- [ ] live555 or gstreamer RTSP server scaffold
+- [x] live555 or gstreamer RTSP server scaffold
 - [ ] ONVIF Device / Media / Events / PTZ endpoints
 - [ ] WS-Discovery multicast responder
 - [ ] H.264/H.265 hardware codec binding per SoC

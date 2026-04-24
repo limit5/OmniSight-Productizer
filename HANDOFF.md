@@ -12669,3 +12669,70 @@ Part C TODO 字面把 row 221（entry button）跟 row 222-226（Step 1-5 互動
 ### 下一步
 - V7 row 1733（mobile iteration timeline）：每次 annotation-driven agent iteration 存（emulator 截圖 + code diff + annotation bundle）→ 版本歷史。可以 reuse `components/omnisight/ui-iteration-timeline.tsx` 的既有 store shape，只加 `mobile_annotations` column + 多機型截圖 grid hook。
 - V7 row 1734（`app/workspace/mobile/page.tsx`）：把 `<MobileVisualAnnotator />` + `<DeviceGrid />` + workspace chat 組進三欄 layout（跟 `app/workspace/web/page.tsx` 同骨架）。那時才需要決定 API route 名稱與 SSE topic，把 `MobileAnnotationContextBuilder` 接進 agent loop。
+
+---
+
+## 2026-04-24 — D2 SKILL-IPCAM 第 1 顆 checkbox：RTSP server scaffold (live555 / gstreamer / stub 三後端) (#219)
+
+### 範圍（嚴格 row-level）
+- **僅** TODO D2.SKILL-IPCAM 的第 1 row：`live555 or gstreamer RTSP server scaffold`。同 section 其他 5 row（ONVIF endpoints / WS-Discovery / HW codec / ODTT recipe / datasheet templates）全部保留 `- [ ]`，**沒**動。
+- 新 skill pack `configs/skills/ipcam/` 的骨架（skill.yaml / tasks.yaml / scaffolds / tests / hil / docs 六件套）**一次**建立完成——tasks.yaml 把整個 SKILL-IPCAM DAG（7 個 task）都列進去了，但本 row 只 port 了 `rtsp_server_scaffold` 的 prod + test + HIL recipe。後續 row 未實作。
+- 沒動 `backend/uvc_gadget.py` / `configs/skills/uvc/`（D1 pilot 的 UVC skill 當 reference，零 diff，零 regression）。
+
+### 做了什麼（檔案 × 變更）
+1. **`backend/ipcam_rtsp_server.py`**（+805 行，新檔案）
+   - 公開 API surface（28 symbol，見模組 docstring + `__all__`）：`RTSPBackend` 三選一 enum、`RTSPServerConfig` / `StreamMount` / `VideoCodec` / `TransportSpec` dataclass、`RTSPServerManager` 主 orchestrator、`SessionState` FSM enum、`Credential`、`parse_transport` / `parse_rtsp_request` / `build_sdp` / `build_digest_challenge` / `compute_digest_response` / `detect_available_backends` / `select_backend` / `generate_nonce` / `generate_session_id`。
+   - **三後端抽象**：`GSTREAMER > LIVE555 > STUB` 優先序。真正的 C/C++ RTSP 服務（`gst-rtsp-server`, `liveMedia`）沒裝時自動 fallback 到 `STUB` —— 全進程內 in-memory、不 bind socket、跑 unit test 不需要 root + CAP_NET_BIND_SERVICE。偵測走 `importlib.util.find_spec`，結果 cache 在 module-level（`_BACKEND_CACHE`）；env override `OMNISIGHT_IPCAM_RTSP_BACKEND` 強制選定後端。
+   - **RTSP method dispatcher**：OPTIONS / DESCRIBE / SETUP / PLAY / PAUSE / TEARDOWN / GET_PARAMETER / SET_PARAMETER 八個 method 的 request → response map——回傳結構化 `{status, reason, headers, body}` dict（wire-format 組裝交給 backend），unknown method 統一 501。
+   - **Session FSM**：RFC 2326 §1.3 定義的 `INIT → READY → PLAYING ↔ PAUSED → TEARDOWN` 五狀態；非法 transition 走 `RTSPSessionStateError` 直接 raise（455 Method Not Valid In This State）。max_sessions 預設 32，硬上限 256；timeout 預設 60s，`purge_expired_sessions()` 掃老 session（無 keep-alive 就轉 TEARDOWN）。
+   - **Transport parser**：RFC 2326 §12.39 Transport header 完整 attribute 支援——`RTP/AVP` / `RTP/AVP/TCP` / `RTP/AVPF` / `RTP/AVPF/TCP` 四 protocol、`unicast` / `multicast`、`client_port` / `server_port` / `interleaved` port range、`ssrc` hex、`destination` / `ttl`、`mode`。未知 attribute 依 spec silently ignore。
+   - **SDP generator**（RFC 4566）：H.264 走 payload type 96 + `packetization-mode=1` + `profile-level-id` + `sprop-parameter-sets`；H.265（RFC 7798）走 payload type 97 + `sprop-vps` / `sprop-sps` / `sprop-pps`。output CRLF-terminated 每行，ffprobe / VLC / GStreamer 都能直接 parse。
+   - **Auth**：RFC 7616 Digest（MD5, qop=auth, nonce anti-replay 透過 `_NonceStore` per-process cache + monotonic `nc` counter、`nonce_lifetime_s` 預設 300s 逾期發 401 + `stale=true`）+ RFC 7617 Basic。Realm 必須對得上（mismatch → `RTSPAuthError`）。
+   - **Module-global state audit**（SOP Step 1 強制問題）：`_BACKEND_CACHE` 是 derived（每 worker 自己算出同樣結果）——category 1；`_NonceStore` per-manager、per-process——category 3（RTSP TCP control channel 本來就 pin 單 worker，跨 worker 共享 nonce 沒意義）。這兩點在 docstring top-of-file 區塊內明文記錄。
+   - **Data-plane stub**：`push_access_unit(mount, nals, pts)` / `drain_access_units(mount)` pair——上游 `hw_codec_binding` task（D2 後續 row）會把 H.264/H.265 Annex-B NAL unit 推進來，STUB 後端暫存在 per-mount `deque(maxlen=256)`，real backend 會轉給 `appsrc` / `OnDemandServerMediaSubsession`。
+2. **`backend/tests/test_ipcam_rtsp_server.py`**（+960 行，新檔案，103 個 test，9 個 marker 分組）
+   - `TestBackendDetection` (9)：STUB 永遠最後、cache reuse、refresh reprobe、preference / auto / env override / env invalid / preference unavailable。
+   - `TestConfigValidation` (8)：default valid + 4 port boundary parametrise + max_sessions 上下界 + session_timeout + realm empty。
+   - `TestMountManagement` (14)：add / list / get / leading-slash normalise / duplicate / remove / invalid-path parametrise（7 case）+ fps range + payload_type / encoding_name accessor。
+   - `TestSessionLifecycle` (8)：new=READY / 合法 transition chain / 非法 transition raise / TEARDOWN terminal / max_sessions enforce / timeout detect / purge / mount_not_found。
+   - `TestTransportParsing` (11)：UDP / TCP interleaved / AVPF / multicast / ssrc hex / mode=RECORD / unknown protocol reject / empty reject / to_header UDP+TCP roundtrip / unknown attribute ignored。
+   - `TestMethodDispatch` (10)：OPTIONS Public header / DESCRIBE SDP / DESCRIBE 404 / SETUP session create / PLAY transition / PAUSE from playing / TEARDOWN drop / GET_PARAMETER keepalive / unknown method 501 / TEARDOWN 454。
+   - `TestAuthentication` (15)：no_auth pass / Digest challenge format + stale / response 確定性 / manager roundtrip / 5 個 error path（missing / wrong-pw / unknown-user / realm-mismatch / invalid-nonce）+ Basic success + wrong-pw + credential empty / remove_credential / nc monotonic 防 replay。
+   - `TestSDPGeneration` (6)：H.264 shape + framerate + cliprect / H.265 shape / H.265 沒 H.264 欄位 / 所有行 CRLF。
+   - `TestErrorHandling` (14)：parse 空 / 亂碼 / missing CSeq / invalid CSeq / malformed header / stopped manager / SETUP no transport / PLAY no Session / Basic 亂 base64 / Basic no colon / double start idempotent / stop before start / push unknown mount / push & drain / status shape。
+3. **`configs/skills/ipcam/`**（6 檔，新目錄）
+   - `skill.yaml` — schema_version=1、version=0.1.0、兼容 10 種 SoC（rk3566/3568/3588、imx8m/8mp、stm32mp1、ambarella cv25/cv5、hi3516、x86_64）、depends_on_core = CORE-05 / CORE-07 / CORE-24、16 個 keyword。
+   - `tasks.yaml` — DAG 7 task（rtsp_server_scaffold / onvif_endpoints / ws_discovery / hw_codec_binding / odtt_test_recipe / datasheet_templates / unit_tests），本回合僅 rtsp_server_scaffold + unit_tests 有真 artifact。
+   - `scaffolds/rtsp_server_scaffold.py` — 9-step usage example（config → mount → credential → start → SDP → push NALs → status → stop），docstring-only (no runtime code, scaffolds 目錄本來就是 usage reference)。
+   - `tests/test_definitions.yaml` — 9 個 test suite 對應 9 個 marker。
+   - `hil/ipcam_hil_recipes.yaml` — 6 個 HIL recipe（hil_rtsp_describe / hil_rtsp_play_h264 / hil_rtsp_play_h265 / hil_rtsp_auth_digest / hil_rtsp_multisession / hil_backend_fallback），每個含 equipment / steps / pass_criteria 三段。
+   - `docs/ipcam_datasheet.md.j2` — Jinja2 datasheet 模板（overview / video spec matrix / network / codec × SoC matrix / auth / power / ONVIF compliance）。
+4. **`backend/pytest.ini`** — registers 9 個新 marker（`rtsp_backend` / `rtsp_config` / `rtsp_mount` / `rtsp_session` / `rtsp_transport` / `rtsp_method` / `rtsp_auth` / `rtsp_sdp` / `rtsp_error`），順便解決 PytestUnknownMarkWarning。D1 的 marker 區塊留在原處未動。
+5. **`TODO.md`** row 2994：`- [ ]` → `- [x]`（只改本 row）。
+6. **本 HANDOFF 條目**。
+
+### 設計刻意保守
+- **沒把 FastAPI router 掛進 `app.py`**：本 row 只 ship scaffold primitives（class / function / enum），REST-API 暴露在 D2 後續 row（ONVIF endpoints）或 monitoring surface 才決定 URL shape。過早 wiring 會綁死 auth / CORS / SSE topic。
+- **沒動 `backend/requirements.in`**：三後端都是 optional runtime lib（gst-rtsp-server 是系統 .so、live555 是 Python binding）——scaffold 走 `importlib.util.find_spec` 軟性偵測，STUB 後端保證永遠可啟。把它們加進 requirements 會逼 CI 重 build production image，這在 row-level scope 之外。後續 row（hw_codec / ODTT recipe）若需要真 backend 再走 Production Readiness Gate。
+- **沒 port ONVIF / WS-Discovery / HW codec**：這三個在 tasks.yaml 裡已列 DAG 但 scaffold 沒實作——本 row 就是 RTSP server scaffold，嚴格照 TODO 逐 row 推進。每 row 獨立 commit 比一次塞 5 row 易 review、易回滾。
+- **沒動 D1 SKILL-UVC**：115 個 UVC unit test 零 regression（Step 4 sibling-check 跑了 `pytest backend/tests/test_uvc_gadget.py -q` → `115 passed`），確認 skill packs 之間真的是 parallel module、沒共享 global state。
+- **STUB backend 不跑真 RTP loop**：只實現 RTSP control plane（OPTIONS/DESCRIBE/SETUP/PLAY/…），PLAY 之後沒有 RTP packetiser 在 UDP / interleaved TCP 上送 frame——real data plane 要等 hw_codec_binding row，屆時 STUB 也會 gain 一個 `ssnrc` generator + `send_rtp_packet()` 供測試模擬。
+- **Digest parse deliberately permissive**：用 regex `(\w+)\s*=\s*(?:"([^"]*)"|([^,]+))` 抓 key=value，兼容「全 quoted」「全 bare」「混合」三種真實 client 寫法（ffmpeg 4.x / 5.x / 6.x 個別不同）。`Authorization` header 的 `username=, uri=` 等等 key 用 `.lower()` 統一比對。
+
+### 驗證
+- `python3 -m pytest backend/tests/test_ipcam_rtsp_server.py -q` → **103 passed in 0.17s**（全綠，0 warning）。
+- Sibling-regression：`python3 -m pytest backend/tests/test_uvc_gadget.py -q` → **115 passed**（D1 SKILL-UVC 零 diff 驗證）。
+- Smoke test：手動跑了 `RTSPServerManager.start() → OPTIONS / DESCRIBE / SETUP` 三 request round-trip，正確回 200 OK + SDP（316 bytes）+ session_id，`status()` 回「running, backend=stub|gstreamer, mounts, sessions」dict（取決於 host 有沒有 `gi` 套件）。
+- Pre-commit compat-fingerprint grep（SOP Step 3）：`grep -nE "_conn\(\)|await conn\.commit\(\)|datetime\('now'\)|VALUES.*\?[,)]" backend/ipcam_rtsp_server.py backend/tests/test_ipcam_rtsp_server.py` → no matches（無舊 SQLite/compat 殘留）。
+
+### 風險 / 已知問題
+- 本 row 未跑 `docker run --rm <image> python3 -c "import backend.ipcam_rtsp_server"`——module 完全純 stdlib（只用 `base64 / enum / hashlib / importlib.util / logging / os / re / secrets / threading / time / collections / dataclasses`），沒新外部依賴、production image 不需要重 build。若未來 enable GStreamer / live555 backend 作為預設，Production Readiness Gate 必須跑（Step 3 加裝依賴驗收 + docker import check）。
+- `_NonceStore.purge_expired()` 目前沒有背景 thread 定期呼叫——TCP control channel 本來就有 session timeout 會清掉，但長壽 worker 的 nonce_store 會慢慢長大。量化上每 session 一個 entry × `_NonceRecord` 約 80 bytes，10000 session 累積約 800KB，可接受；若嫌多可以在 `RTSPServerManager.purge_expired_sessions()` 內順手呼叫。等 D2 後續 row port 進 production 再評估。
+- STUB backend 的 `handle_request` 不是 async——future ONVIF Events row（長連接 pull messages）會需要 async 分支。目前 request dispatch 是 sync CPU-bound（parse + state transition + dict build），不會 block event loop 超過 ms，但 PLAY loop 要走 asyncio 時 architecture 要擴 sync→async bridge。
+
+### 下一步
+- **D2 row 2**（`ONVIF Device / Media / Events / PTZ endpoints`）：SOAP 1.2 WSDL → FastAPI / starlette router；用現在 scaffold 的 `RTSPServerManager.list_mounts()` + `get_mount()` 填 ONVIF `GetProfiles` / `GetStreamUri`。建議獨立 commit，因為 SOAP envelope + ONVIF schema（`http://www.onvif.org/ver10/schema`）體積不小，跟本 row 混在一起 blast radius 會爆。
+- **D2 row 4**（`H.264/H.265 hardware codec binding per SoC`）：用 `RTSPServerManager.push_access_unit()` 當 downstream sink，per-SoC 上游透過 V4L2 (`/dev/video11` RKMPP encoder) / Hantro / Ambarella SDK 吐 Annex-B NAL。RKMPP 的 Python binding (`python3-rkmppi`) 在 Debian trixie 有 apt package。
+
+**Production status:** dev-only
+**Next gate:** deployed-inactive — 需要 (1) 建 production image 時把 `OMNISIGHT_IPCAM_RTSP_BACKEND` 寫進 `.env`（預設不啟 RTSP server，等 hw_codec_binding 合進 main 再啟），(2) 若要 real backend 需 apt-install `gir1.2-gst-rtsp-server-1.0` 或 pip-install `pylive555` 後重 build backend image，(3) Docker compose 外開 TCP 8554（或走 Caddy stream-reverse-proxy）。預估 45 min，不需 maintenance window。

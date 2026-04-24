@@ -1,0 +1,103 @@
+schema_version: 1
+hil_recipes:
+  - id: hil_rtsp_describe
+    name: "RTSP DESCRIBE Round-Trip"
+    description: "HIL test: issue RTSP DESCRIBE against the device and validate SDP"
+    equipment:
+      - "Target board running ipcam_rtsp_server"
+      - "Host PC with ffmpeg / ffprobe / gst-launch-1.0"
+      - "Wired LAN (ideally isolated VLAN to avoid multicast cross-talk)"
+    steps:
+      - "Flash image with OMNISIGHT_IPCAM_ENABLED=1"
+      - "Wait for rtsp_server_scaffold to log 'RTSP server listening on 0.0.0.0:8554'"
+      - "From host: ffprobe -rtsp_transport tcp rtsp://<device>:8554/live/main"
+      - "Capture returned SDP"
+      - "Verify m=video line with H264 (payload 96) or H265 (payload 97)"
+      - "Verify fmtp line contains profile-level-id + sprop-parameter-sets"
+    pass_criteria:
+      - "DESCRIBE returns 200 OK within 500 ms"
+      - "SDP parses without warning (ffprobe shows correct resolution + fps)"
+      - "profile-level-id matches mount-declared level"
+      - "No 401 when Digest credentials are supplied"
+
+  - id: hil_rtsp_play_h264
+    name: "H.264 RTSP PLAY — 60s continuous"
+    description: "HIL test: PLAY an H.264 mount and validate continuous RTP delivery for 60 seconds"
+    equipment:
+      - "Target board running ipcam_rtsp_server + hw codec"
+      - "Host PC with ffmpeg + Wireshark"
+    steps:
+      - "Start mount live/main at 1920x1080@30 H.264"
+      - "From host: ffmpeg -rtsp_transport tcp -i rtsp://<device>:8554/live/main -c copy -t 60 out.mp4"
+      - "Wireshark capture on the same run (rtsp port 8554 + RTP dynamic ports)"
+      - "Decode out.mp4 and count frames"
+    pass_criteria:
+      - "Delivered frames in [1790, 1810] for a 60 s 30 fps run (±0.5% jitter)"
+      - "No RTP sequence gaps (Wireshark 'Lost Packets' == 0)"
+      - "No RTCP Sender Report >1 s gap"
+      - "CPU usage on target < 40% (if hw codec engaged)"
+
+  - id: hil_rtsp_play_h265
+    name: "H.265 RTSP PLAY — 60s continuous"
+    description: "HIL test: PLAY an H.265 mount (tests payload 97 + sprop-vps/sps/pps)"
+    equipment:
+      - "Target board with H.265-capable codec (RKMPP / Ambarella / Hi3516)"
+      - "Host PC with ffmpeg 6.x (H.265 RTP depacketiser)"
+    steps:
+      - "Start mount live/hevc at 3840x2160@15 H.265"
+      - "From host: ffmpeg -rtsp_transport tcp -i rtsp://<device>:8554/live/hevc -c copy -t 60 out.mp4"
+      - "Decode out.mp4 and validate HEVC NAL structure (sps/pps/vps present)"
+    pass_criteria:
+      - "DESCRIBE SDP carries sprop-vps + sprop-sps + sprop-pps"
+      - "Delivered frames in [895, 905] for a 60 s 15 fps run"
+      - "HEVC decoder reports no missing reference frames"
+
+  - id: hil_rtsp_auth_digest
+    name: "RTSP Digest Authentication"
+    description: "HIL test: verify 401 challenge / valid retry / stale-nonce rotation per RFC 7616"
+    equipment:
+      - "Target board running ipcam_rtsp_server with admin/hunter2 credential"
+      - "Host PC with curl + openssl"
+    steps:
+      - "DESCRIBE with no Authorization header → expect 401 + WWW-Authenticate: Digest"
+      - "Parse realm + nonce + qauth from challenge"
+      - "Compute MD5(HA1:nonce:nc:cnonce:qop:HA2) and retry"
+      - "Leave idle 60 s then replay same nonce — expect 401 with stale=true"
+    pass_criteria:
+      - "First DESCRIBE returns 401 with well-formed Digest challenge"
+      - "Correctly computed response returns 200 OK"
+      - "Replay attack rejected with stale=true"
+      - "Bogus username/password returns 401 (not 200)"
+
+  - id: hil_rtsp_multisession
+    name: "RTSP Multi-Session Concurrency"
+    description: "HIL test: N simultaneous PLAY sessions against the same mount (NVR 'main + sub + recording pull' pattern)"
+    equipment:
+      - "Target board"
+      - "Host PC able to spawn 8 parallel ffmpeg readers"
+    steps:
+      - "Launch 4 ffmpeg readers on live/main + 4 on live/sub in parallel"
+      - "Hold for 120 s"
+      - "Verify all streams receive steady RTP"
+      - "Stop all + verify manager.status()['active_sessions'] drops to 0"
+    pass_criteria:
+      - "All 8 sessions get 200 OK on PLAY"
+      - "Per-session frame drop rate < 0.2%"
+      - "No session TEARDOWN 500 during cleanup"
+      - "Memory growth < 50 MB during 120 s window"
+
+  - id: hil_backend_fallback
+    name: "Backend Auto-Fallback (gstreamer → live555 → stub)"
+    description: "HIL test: remove gstreamer RTSP plugin on target and verify server still comes up on live555"
+    equipment:
+      - "Target board with both gstreamer-rtsp-server AND liveMedia libs installed"
+    steps:
+      - "Start server — verify backend==gstreamer (log line)"
+      - "Apt-remove gst-rtsp-server-1.0 (or `mv` the .so out of path)"
+      - "Restart — verify backend==live555"
+      - "Apt-remove liveMedia too"
+      - "Restart — verify backend==STUB (dry-run, warns that only SDP generation works)"
+    pass_criteria:
+      - "Server always starts (never crashes) even with no backend"
+      - "STUB backend serves DESCRIBE (SDP only) but rejects PLAY with 503"
+      - "No dangling sockets after any restart"
