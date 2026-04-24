@@ -1,0 +1,154 @@
+# Provider / model context-window limits (max total tokens — input + output —
+# a single request can carry). Used by `backend/context_limits.py` (ZZ.A2) to
+# compute the "context usage %" progress bar rendered on the TokenUsageStats
+# card and to drive the >90%-warning icon.
+#
+# Lives next to `configs/provider_pricing.yaml` on purpose: both map
+# provider+tier/model to a vendor-documented scalar, both are reload-on-edit,
+# both are authored by hand from public price / docs pages.
+#
+# Lookup contract (used by `get_context_limit(provider, model) -> int | None`):
+#   1. Match the exact model id under the provider (e.g. "claude-opus-4-7").
+#   2. If not found, fall back to the provider's `default` entry.
+#   3. If `default` is `null` (Ollama / OpenRouter unknown route), the callee
+#      returns `None` and the UI must render "—" instead of a fake percentage.
+#
+# Covers the nine providers that appear in provider_pricing.yaml so the two
+# files stay aligned: anthropic, openai, google, xai, groq, deepseek,
+# together, ollama, openrouter.
+#
+# Values authoritative as of 2026-04 per each vendor's public model card /
+# pricing page. Update when a vendor announces a new context tier.
+
+anthropic:
+  # Claude 4 family — 1M context window (Opus 4.7 released 2026-04-15,
+  # Sonnet 4.6 / Haiku 4.5 share the 1M tier).
+  claude-opus-4-7: 1000000
+  claude-sonnet-4-6: 1000000
+  claude-haiku-4-5: 1000000
+  # Earlier Claude 4 models — 200k standard window.
+  claude-opus-4: 200000
+  claude-sonnet-4: 200000
+  # Claude 3.x family.
+  claude-3-7-sonnet: 200000
+  claude-3-5-sonnet: 200000
+  claude-3-5-haiku: 200000
+  claude-3-opus: 200000
+  claude-3-sonnet: 200000
+  claude-3-haiku: 200000
+  default: 200000
+
+openai:
+  # GPT-5 generation — 256k context window.
+  gpt-5: 256000
+  gpt-5-mini: 256000
+  gpt-5-nano: 256000
+  # GPT-4o generation — 128k context.
+  gpt-4o: 128000
+  gpt-4o-mini: 128000
+  gpt-4-turbo: 128000
+  gpt-4: 8192
+  gpt-3.5-turbo: 16385
+  # o-series reasoning models.
+  o1: 200000
+  o1-mini: 128000
+  o3: 200000
+  o3-mini: 200000
+  default: 128000
+
+google:
+  # Gemini 2.5 — 2M flagship, 1M flash.
+  gemini-2.5-pro: 2000000
+  gemini-2.5-flash: 1000000
+  gemini-2.5-flash-lite: 1000000
+  # Gemini 2.0.
+  gemini-2.0-pro: 2000000
+  gemini-2.0-flash: 1000000
+  # Gemini 1.5.
+  gemini-1.5-pro: 2000000
+  gemini-1.5-flash: 1000000
+  default: 1000000
+
+xai:
+  grok-4: 256000
+  grok-3: 131072
+  grok-3-mini: 131072
+  grok-2: 131072
+  grok-2-mini: 131072
+  grok-beta: 131072
+  default: 131072
+
+groq:
+  # Groq hosts other-vendor OSS models — context varies per model.
+  llama-3.3-70b-versatile: 131072
+  llama-3.1-70b-versatile: 131072
+  llama-3.1-8b-instant: 131072
+  llama-3-70b-8192: 8192
+  llama-3-8b-8192: 8192
+  mixtral-8x7b-32768: 32768
+  gemma2-9b-it: 8192
+  gemma-7b-it: 8192
+  default: 32768
+
+deepseek:
+  # DeepSeek V3 / R1 series — 64k standard.
+  deepseek-chat: 65536
+  deepseek-reasoner: 65536
+  deepseek-v3: 65536
+  deepseek-r1: 65536
+  deepseek-coder: 65536
+  default: 65536
+
+together:
+  # Together AI hosts a large catalogue; list the common routes and let the
+  # rest fall back to `default`.
+  "meta-llama/Llama-3.3-70B-Instruct-Turbo": 131072
+  "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo": 131072
+  "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": 131072
+  "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": 131072
+  "Qwen/Qwen2.5-72B-Instruct-Turbo": 32768
+  "Qwen/Qwen2.5-Coder-32B-Instruct": 32768
+  "deepseek-ai/DeepSeek-V3": 65536
+  "mistralai/Mixtral-8x7B-Instruct-v0.1": 32768
+  default: 32768
+
+ollama:
+  # Local inference — context is set by whatever the operator pulled and the
+  # `num_ctx` they configured. Values below are each model's upstream maximum;
+  # deployments running a tighter `num_ctx` should override via env var
+  # `OMNISIGHT_OLLAMA_CONTEXT_LIMIT` (handled in backend/context_limits.py).
+  # `default: null` means "unknown" — UI renders "—" rather than a fake %.
+  llama3.3: 131072
+  llama3.2: 131072
+  llama3.1: 131072
+  llama3: 8192
+  llama2: 4096
+  mistral: 32768
+  mixtral: 32768
+  codellama: 16384
+  qwen2.5: 32768
+  qwen2.5-coder: 32768
+  deepseek-coder-v2: 131072
+  phi3: 131072
+  gemma2: 8192
+  default: null
+
+openrouter:
+  # OpenRouter proxies upstream providers — the context limit is whatever the
+  # routed-to model advertises. We list the common routes we actually use;
+  # unknown routes fall back to `default: null` so the UI degrades to "—"
+  # rather than showing a misleading percentage against the wrong limit.
+  "anthropic/claude-opus-4-7": 1000000
+  "anthropic/claude-sonnet-4-6": 1000000
+  "anthropic/claude-haiku-4-5": 1000000
+  "anthropic/claude-3-5-sonnet": 200000
+  "openai/gpt-5": 256000
+  "openai/gpt-5-mini": 256000
+  "openai/gpt-4o": 128000
+  "openai/gpt-4o-mini": 128000
+  "google/gemini-2.5-pro": 2000000
+  "google/gemini-2.5-flash": 1000000
+  "meta-llama/llama-3.3-70b-instruct": 131072
+  "deepseek/deepseek-chat": 65536
+  "x-ai/grok-4": 256000
+  default: null
