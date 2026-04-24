@@ -150,6 +150,16 @@ class SharedCounter:
 class SharedKV:
     """Simple key-value store backed by Redis hash."""
 
+    # Per-field TTL is implemented by wrapping the user's payload in a
+    # small envelope ``{_TTL_DATA_KEY: <value>, _TTL_EXPIRY_KEY: epoch}``
+    # and lazy-pruning on read. This mirrors ``SessionPresence``'s
+    # housekeeping rather than relying on Redis 7.4 ``HEXPIRE`` (which
+    # production may not have) or ``r.expire`` on the whole hash (which
+    # would cross-contaminate TTLs between fields — touching one
+    # provider entry would refresh every other provider's expiry).
+    _TTL_DATA_KEY = "_data"
+    _TTL_EXPIRY_KEY = "_expires_at"
+
     def __init__(self, namespace: str) -> None:
         self._ns = namespace
         self._local: dict[str, str] = {}
@@ -200,6 +210,106 @@ class SharedKV:
                 pass
         with self._lock:
             self._local.pop(field, None)
+
+    def set_with_ttl(
+        self, field: str, value: Any, ttl_seconds: float,
+        *, now: float | None = None,
+    ) -> None:
+        """Store ``value`` with a per-field lazy-prune TTL.
+
+        ``value`` may be any JSON-serialisable type (dict, list, str,
+        int, float, bool, None). The stored payload is
+        ``{_data: value, _expires_at: <epoch>}`` serialised to JSON;
+        :meth:`get_with_ttl` / :meth:`get_all_with_ttl` unwrap and prune
+        on read.
+
+        ``ttl_seconds`` must be > 0. ``now`` is injectable for tests so
+        the expiry clock can be frozen without monkey-patching
+        ``time.time`` globally — default resolves lazily to ``time.time``
+        so a ``monkeypatch.setattr(time, "time", ...)`` at the call site
+        still takes effect.
+        """
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be > 0")
+        _now = now if now is not None else time.time()
+        envelope = {
+            self._TTL_DATA_KEY: value,
+            self._TTL_EXPIRY_KEY: _now + float(ttl_seconds),
+        }
+        self.set(field, json.dumps(envelope))
+
+    def get_with_ttl(
+        self, field: str, *, now: float | None = None,
+    ) -> Any:
+        """Return the unwrapped payload, or ``None`` if absent / expired.
+
+        Expired entries are deleted in-place (lazy prune) so the hash
+        does not grow without bound when callers rotate through
+        provider names faster than they re-read them.
+
+        Malformed entries (missing envelope, non-JSON, non-dict,
+        missing expiry) are treated as absent and also pruned — keeps
+        the store self-healing if a prior writer used a different
+        encoding.
+        """
+        raw = self.get(field, default="")
+        if not raw:
+            return None
+        try:
+            envelope = json.loads(raw)
+        except (TypeError, ValueError):
+            self.delete(field)
+            return None
+        if (
+            not isinstance(envelope, dict)
+            or self._TTL_EXPIRY_KEY not in envelope
+        ):
+            self.delete(field)
+            return None
+        expires_at = envelope.get(self._TTL_EXPIRY_KEY)
+        try:
+            expires_at_f = float(expires_at)
+        except (TypeError, ValueError):
+            self.delete(field)
+            return None
+        _now = now if now is not None else time.time()
+        if _now >= expires_at_f:
+            self.delete(field)
+            return None
+        return envelope.get(self._TTL_DATA_KEY)
+
+    def get_all_with_ttl(
+        self, *, now: float | None = None,
+    ) -> dict[str, Any]:
+        """Return ``{field: unwrapped_value}`` for all non-expired
+        entries. Expired + malformed entries are lazy-pruned."""
+        _now = now if now is not None else time.time()
+        out: dict[str, Any] = {}
+        for field, raw in list(self.get_all().items()):
+            if not raw:
+                self.delete(field)
+                continue
+            try:
+                envelope = json.loads(raw)
+            except (TypeError, ValueError):
+                self.delete(field)
+                continue
+            if (
+                not isinstance(envelope, dict)
+                or self._TTL_EXPIRY_KEY not in envelope
+            ):
+                self.delete(field)
+                continue
+            try:
+                expires_at_f = float(envelope.get(self._TTL_EXPIRY_KEY))
+            except (TypeError, ValueError):
+                self.delete(field)
+                continue
+            if _now >= expires_at_f:
+                self.delete(field)
+                continue
+            out[field] = envelope.get(self._TTL_DATA_KEY)
+        return out
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

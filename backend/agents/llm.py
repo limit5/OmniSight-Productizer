@@ -1019,41 +1019,77 @@ def _create_llm(provider: str, model: str | None) -> BaseChatModel | None:
 
     All provider-specific instantiation logic (class imports, argument
     shapes, base URLs) lives in `backend.llm_adapter.build_chat_model`.
-    This function is now just a settings-lookup + credential-gate shim.
+    This function is now just a resolver-lookup + credential-gate shim.
+
+    Phase 5b-2 (#llm-credentials) — credential read goes through
+    :func:`backend.llm_credential_resolver.get_llm_credential_sync`
+    instead of ``getattr(settings, f"{provider}_api_key")`` directly.
+    The sync resolver reads ``Settings`` (populated from ``.env`` +
+    ``backend.llm_secrets.load_into_settings``); row 5b-5's lifespan
+    auto-migration will mirror ``llm_credentials`` DB rows into the
+    same Settings fields so the sync path stays in lock-step with the
+    authoritative table. An unconfigured provider raises
+    :class:`LLMCredentialMissingError` which we catch and translate to
+    ``None`` so the existing failover cascade in :func:`get_llm`
+    continues to work unchanged (primary init → chain walk).
     """
+    from backend.llm_credential_resolver import (
+        LLMCredentialMissingError,
+        get_llm_credential_sync,
+    )
+
     temp = settings.llm_temperature
 
-    # Provider → (api_key_attr, extra kwargs) — the adapter knows the
-    # default model name, base_url, and class to use for each provider.
-    _PROVIDER_CREDS: dict[str, tuple[str | None, dict]] = {
-        "anthropic": ("anthropic_api_key", {}),
-        "google": ("google_api_key", {}),
-        "openai": ("openai_api_key", {}),
-        "xai": ("xai_api_key", {}),
-        "groq": ("groq_api_key", {}),
-        "deepseek": ("deepseek_api_key", {}),
-        "together": ("together_api_key", {}),
-        "openrouter": ("openrouter_api_key", {
+    # Provider-specific ``build_chat_model`` kwargs that aren't covered
+    # by the credential resolver. ``base_url`` for ollama still comes
+    # from ``settings.ollama_base_url`` (mirrored into ``metadata.base_url``
+    # by the resolver for keyless providers so the adapter has a
+    # single shape); OpenRouter ships aggregator-routing headers.
+    _PROVIDER_EXTRA_KWARGS: dict[str, dict] = {
+        "anthropic": {},
+        "google": {},
+        "openai": {},
+        "xai": {},
+        "groq": {},
+        "deepseek": {},
+        "together": {},
+        "openrouter": {
             "default_headers": {
                 "HTTP-Referer": "https://omnisight.local",
                 "X-Title": "OmniSight Productizer",
             },
-        }),
-        # Ollama is keyless but needs base_url threaded through
-        "ollama": (None, {"base_url": settings.ollama_base_url}),
+        },
+        "ollama": {},
     }
 
-    if provider not in _PROVIDER_CREDS:
+    if provider not in _PROVIDER_EXTRA_KWARGS:
         logger.warning("Unknown LLM provider: %s", provider)
         return None
 
-    key_attr, extra_kwargs = _PROVIDER_CREDS[provider]
-    api_key: str | None = None
-    if key_attr is not None:
-        api_key = getattr(settings, key_attr, None)
-        if not api_key:
-            logger.info("No OMNISIGHT_%s_API_KEY set", provider.upper())
-            return None
+    try:
+        cred = get_llm_credential_sync(provider)
+    except LLMCredentialMissingError as exc:
+        # Keep the historical log shape so operators grepping for
+        # "No OMNISIGHT_*_API_KEY set" still hit these lines. The
+        # detailed resolver message goes to debug so the failover
+        # path's cascade log stays readable at INFO level.
+        logger.info("No OMNISIGHT_%s_API_KEY set", provider.upper())
+        logger.debug("llm_credential_resolver: %s", exc)
+        return None
+
+    # Keyless providers (Ollama) carry an empty api_key; the adapter's
+    # ``build_chat_model`` contract accepts ``None`` for those, so swap
+    # the empty string back to ``None`` at the boundary.
+    api_key = cred.api_key if cred.api_key else None
+
+    extra_kwargs = dict(_PROVIDER_EXTRA_KWARGS[provider])
+    if provider == "ollama":
+        # ``metadata.base_url`` wins when set (e.g. a future
+        # llm_credentials row with a per-tenant ollama endpoint);
+        # fallback to the legacy Settings scalar for empty-table
+        # deployments where the resolver synthesises a keyless record.
+        base_url = cred.metadata.get("base_url") or settings.ollama_base_url
+        extra_kwargs["base_url"] = base_url
 
     try:
         return build_chat_model(
