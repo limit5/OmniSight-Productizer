@@ -175,6 +175,11 @@ class TestSSESchemaExport:
             "agent.token_continuation",
             # H1 whole-host 5s sampling push
             "host.metrics.tick",
+            # Q.3-SUB (#297) cross-device state sync
+            "workflow_updated", "notification.read", "preferences.updated",
+            "integration.settings.updated", "chat.message",
+            # ZZ.A2 (#303-2) per-turn context-usage snapshot
+            "turn_metrics",
         }
         assert set(SSE_EVENT_SCHEMAS.keys()) == expected_events
 

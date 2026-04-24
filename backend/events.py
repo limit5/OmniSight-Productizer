@@ -427,6 +427,60 @@ def emit_token_warning(level: str, message: str, usage: float = 0, budget: float
     _log(f"[TOKEN] {level.upper()}: {message}", level=level_label)
 
 
+def emit_turn_metrics(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: int,
+    *,
+    provider: str | None = None,
+    context_limit: int | None = None,
+    cache_read_tokens: int = 0,
+    cache_create_tokens: int = 0,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """ZZ.A2 #303-2: per-turn LLM context-usage snapshot.
+
+    Fired once per LLM turn from :class:`backend.agents.llm.TokenTrackingCallback`
+    with the just-completed turn's token counts. ``context_limit`` is the
+    provider/model's advertised context-window size from
+    :func:`backend.context_limits.get_context_limit`; ``None`` means the
+    YAML has no entry (Ollama local models / OpenRouter pass-through /
+    unknown providers) and ``context_usage_pct`` degrades to ``None`` too
+    so the UI renders ``—`` instead of a fabricated zero. ``tokens_used``
+    is the convenience sum ``input + output`` exposed for the frontend
+    progress-bar numerator.
+    """
+    broadcast_scope = _resolve_scope("emit_turn_metrics", broadcast_scope, "global")
+    tokens_used = int(input_tokens) + int(output_tokens)
+    context_usage_pct: float | None = None
+    if context_limit is not None and context_limit > 0:
+        context_usage_pct = round(tokens_used / context_limit * 100, 2)
+    bus.publish("turn_metrics", {
+        "provider": provider,
+        "model": model,
+        "input_tokens": int(input_tokens),
+        "output_tokens": int(output_tokens),
+        "tokens_used": tokens_used,
+        "context_limit": context_limit,
+        "context_usage_pct": context_usage_pct,
+        "latency_ms": int(latency_ms),
+        "cache_read_tokens": int(cache_read_tokens),
+        "cache_create_tokens": int(cache_create_tokens),
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    pct_label = f"{context_usage_pct:.1f}%" if context_usage_pct is not None else "—"
+    limit_label = f"{context_limit}" if context_limit is not None else "—"
+    _log(
+        f"[TURN] {model} tokens={tokens_used} ({pct_label} of {limit_label}) "
+        f"latency={latency_ms}ms",
+    )
+
+
 def emit_simulation(sim_id: str, action: str, detail: str = "",
                     session_id: str | None = None,
                     broadcast_scope: str | None = None,

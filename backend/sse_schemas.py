@@ -438,6 +438,35 @@ class SSEIntegrationSettingsUpdated(BaseModel):
     timestamp: str = ""
 
 
+class SSETurnMetrics(BaseModel):
+    """turn_metrics — ZZ.A2 #303-2 per-turn LLM context-usage snapshot.
+
+    Emitted by :class:`backend.agents.llm.TokenTrackingCallback` at the end
+    of every LLM turn. The payload is a *per-turn* snapshot (this turn's
+    tokens only, not lifetime totals) so the frontend can render a live
+    progress bar + warning-icon strip against the provider's advertised
+    context window. ``context_limit`` comes from
+    :func:`backend.context_limits.get_context_limit` — ``None`` means the
+    YAML has no entry for the provider/model pair (Ollama local models,
+    OpenRouter pass-through routes, unknown providers). When
+    ``context_limit`` is ``None`` the ``context_usage_pct`` degrades to
+    ``None`` too; the UI must render ``—`` rather than a fake 0%
+    (preserves the NULL-vs-genuine-zero contract ZZ.A1 established for
+    prompt-cache fields).
+    """
+    provider: Optional[str] = None
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_used: int = 0
+    context_limit: Optional[int] = None
+    context_usage_pct: Optional[float] = None
+    latency_ms: int = 0
+    cache_read_tokens: int = 0
+    cache_create_tokens: int = 0
+    timestamp: str = ""
+
+
 class SSEHostMetricsTick(BaseModel):
     """host.metrics.tick — H1 5s whole-host sampling push.
 
@@ -488,6 +517,8 @@ SSE_EVENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "agent.token_continuation": SSEAgentTokenContinuation,
     # H1: whole-host metrics sampling tick (5 s cadence)
     "host.metrics.tick": SSEHostMetricsTick,
+    # ZZ.A2 #303-2: per-turn context-usage snapshot for TokenUsageStats card
+    "turn_metrics": SSETurnMetrics,
     # Q.3-SUB-1 (#297): cross-device workflow_run state push
     "workflow_updated": SSEWorkflowUpdated,
     # Q.3-SUB-3 (#297): cross-device notification read-state push

@@ -47,8 +47,16 @@ class TokenTrackingCallback(BaseCallbackHandler):
     the ``token_usage`` Postgres row.
     """
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, provider: str | None = None) -> None:
         self.model_name = model_name
+        # ZZ.A2 #303-2: ``provider`` threads the resolved provider id into
+        # ``on_llm_end`` so the turn_metrics SSE event can look up the
+        # context-window limit via ``get_context_limit(provider, model)``.
+        # Kept as an optional kwarg for backward compatibility with test
+        # fixtures that instantiate the callback directly without a
+        # provider — lookups then return ``None`` and the UI degrades to
+        # "—" per the NULL-vs-genuine-zero contract.
+        self.provider = provider
         self._start: float = 0
         self.last_cache_read: int = 0
         self.last_cache_create: int = 0
@@ -122,14 +130,44 @@ class TokenTrackingCallback(BaseCallbackHandler):
             # counters into ``track_tokens`` so ``SharedTokenUsage``
             # and the ``token_usage`` row both accumulate the lifetime
             # totals + recomputed hit ratio.
+            input_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
             track_tokens(
                 self.model_name,
-                usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0),
-                usage.get("completion_tokens", 0) or usage.get("output_tokens", 0),
+                input_tokens,
+                output_tokens,
                 latency_ms,
                 cache_read_tokens=cache_read,
                 cache_create_tokens=cache_create,
             )
+
+            # ZZ.A2 #303-2: emit per-turn context-usage snapshot so the
+            # TokenUsageStats card can render a live progress bar + warning
+            # icon against the provider's advertised context window. The
+            # limit lookup honours the NULL-vs-genuine-zero contract —
+            # ``None`` (unknown provider/model / Ollama without override /
+            # OpenRouter pass-through) propagates through as
+            # ``context_usage_pct=None`` so the UI renders "—" rather than
+            # a fabricated zero. Best-effort: an emit failure must not
+            # abort the LLM turn.
+            try:
+                from backend.context_limits import get_context_limit
+                from backend.events import emit_turn_metrics
+
+                context_limit = get_context_limit(self.provider, self.model_name)
+                emit_turn_metrics(
+                    self.model_name,
+                    int(input_tokens or 0),
+                    int(output_tokens or 0),
+                    latency_ms,
+                    provider=self.provider,
+                    context_limit=context_limit,
+                    cache_read_tokens=cache_read,
+                    cache_create_tokens=cache_create,
+                    broadcast_scope="global",
+                )
+            except Exception as exc:
+                logger.debug("turn_metrics emit skipped: %s", exc)
         except Exception as exc:
             logger.warning("Token tracking failed for %s: %s", self.model_name, exc)
 
@@ -302,7 +340,7 @@ def get_llm(
         # Inject token tracking callback (graceful if provider doesn't support it)
         model_name = model or (llm.model_name if hasattr(llm, "model_name") else f"{provider}:default")
         try:
-            llm = llm.with_config(callbacks=[TokenTrackingCallback(model_name)])
+            llm = llm.with_config(callbacks=[TokenTrackingCallback(model_name, provider=provider)])
         except (AttributeError, NotImplementedError):
             logger.warning("Provider %s does not support with_config — token tracking disabled", provider)
         if bind_tools:
